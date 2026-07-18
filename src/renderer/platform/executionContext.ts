@@ -10,6 +10,7 @@ export interface DesktopHandoffResult {
 const DESKTOP_STAGE_TYPES = new Set<TaskStageType>([
   'OpenApplication',
   'FocusWindow',
+  'ExecuteDesktopTask',
   'CreateOrEditArtifact',
   'DrawArtifact',
   'CaptureArtifact',
@@ -28,6 +29,7 @@ const DESKTOP_STAGE_TYPES = new Set<TaskStageType>([
 ]);
 
 const DESKTOP_CAPABILITY_PREFIXES = [
+  'desktop.',
   'app.',
   'artifact.',
   'communication.',

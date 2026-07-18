@@ -638,6 +638,19 @@ _NUMERIC_KEYPAD_LABELS = {
     "=": ("Equals", ["=", "Equal", "\u7b49于"], "bottom-right"),
 }
 
+_NUMERIC_DIGIT_FALLBACKS = {
+    "0": ["Zero", "零"],
+    "1": ["One", "一"],
+    "2": ["Two", "二"],
+    "3": ["Three", "三"],
+    "4": ["Four", "四"],
+    "5": ["Five", "五"],
+    "6": ["Six", "六"],
+    "7": ["Seven", "七"],
+    "8": ["Eight", "八"],
+    "9": ["Nine", "九"],
+}
+
 
 def _numeric_keypad_click_actions(
     expression: str,
@@ -686,7 +699,7 @@ def _numeric_keypad_click_actions(
     for index, key in enumerate(keys):
         original = by_key.get(key, {})
         if key.isdigit():
-            label, fallbacks, region = key, [], "bottom"
+            label, fallbacks, region = key, _NUMERIC_DIGIT_FALLBACKS.get(key, []), "bottom"
         else:
             label, fallbacks, region = _NUMERIC_KEYPAD_LABELS[key]
         action = {

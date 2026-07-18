@@ -1796,39 +1796,112 @@ def _budget_result(report: dict[str, Any], budgets: dict[str, float | None]) -> 
     }
 
 
-def _frontend_goal_graph(task: str, max_steps: int = 40) -> dict[str, Any]:
-    """Mirror renderer ``createGoalGraph`` exactly for parity evaluations."""
-    timestamp = int(time.time() * 1000)
-    retry = {"max_attempts": 1, "delay_ms": 0, "backoff": 1}
+_DESKTOP_STAGE_TYPES = {
+    "OpenApplication", "FocusWindow", "ExecuteDesktopTask",
+    "CreateOrEditArtifact", "DrawArtifact", "CaptureArtifact", "SaveArtifact",
+    "OpenConversation", "ResolveRecipient", "SendText", "SendArtifact",
+    "VerifyArtifact", "VerifyDelivery", "ObserveScene", "InferInteraction",
+    "PerformTurn", "VerifyLocalEffect", "WaitForExternalChange",
+}
+_DESKTOP_CAPABILITY_PREFIXES = (
+    "desktop.", "app.", "artifact.", "communication.", "controller.",
+    "delivery.", "drawing.", "interaction.", "visual.", "window.",
+)
+
+
+def _frontend_compile_payload(
+    task: str,
+    max_steps: int,
+    cold_start: bool,
+) -> dict[str, Any]:
+    """Return the exact request body used by ``ControlPlaneClient.compileTask``."""
+
     return {
-        "format": "arp/1",
-        "id": f"goal-{timestamp}",
-        "name": task[:80] or "Agent goal",
-        "description": "Memory-first goal run created by the Agent Cockpit.",
-        "nodes": [
-            {"id": "start", "kind": "start", "name": "Start", "config": {}, "retry": retry, "disabled": False, "x": 0, "y": 0},
-            {"id": "skill", "kind": "skill_replay", "name": "Reuse verified skill", "config": {"task": task}, "retry": retry, "disabled": False, "x": 0, "y": 120},
-            {"id": "goal", "kind": "agent_goal", "name": "Agent exception handler", "config": {"goal": task, "max_steps": int(max_steps)}, "retry": retry, "disabled": False, "x": 180, "y": 240},
-            {"id": "end", "kind": "end", "name": "Done", "config": {}, "retry": retry, "disabled": False, "x": 0, "y": 360},
-        ],
-        "edges": [
-            {"id": "start-skill", "source": "start", "target": "skill", "branch": "next", "label": ""},
-            {"id": "skill-end", "source": "skill", "target": "end", "branch": "next", "label": "reused"},
-            {"id": "skill-miss-goal", "source": "skill", "target": "goal", "branch": "miss", "label": "explore"},
-            {"id": "skill-fail-goal", "source": "skill", "target": "goal", "branch": "fail", "label": "recover"},
-            {"id": "goal-end", "source": "goal", "target": "end", "branch": "next", "label": ""},
-        ],
-        "variables": {},
-        "policy": {
-            "max_node_visits": 20,
-            "fail_fast": True,
-            "require_evidence_on_done": True,
-            "allow_shell": False,
-            "allow_desktop_mutation": True,
-        },
-        "metadata": {
-            "source": "agent-cockpit",
-            "routing": "verified-skill-first-agent-on-miss-or-failure",
+        "task": task,
+        "max_steps": int(max_steps),
+        "cold_start": bool(cold_start),
+    }
+
+
+def _compile_frontend_task(
+    base_url: str,
+    task: str,
+    max_steps: int,
+    *,
+    cold_start: bool,
+    token: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    compiled = _request_json(
+        "POST",
+        f"{base_url}/api/v2/task-contracts/compile",
+        _frontend_compile_payload(task, max_steps, cold_start),
+        token=token,
+    )
+    if not isinstance(compiled, dict):
+        raise RuntimeError("frontend compiler response was not an object")
+    questions = compiled.get("clarification_questions")
+    questions = [str(item) for item in questions] if isinstance(questions, list) else []
+    if compiled.get("needs_input") is True or questions:
+        raise RuntimeError(
+            "frontend compiler requires clarification: "
+            + ("; ".join(questions) or "unspecified required input")
+        )
+    contract = compiled.get("contract")
+    graph = compiled.get("graph")
+    if not isinstance(contract, dict) or not isinstance(graph, dict):
+        raise RuntimeError("frontend compiler omitted contract or graph")
+    if contract.get("satisfiable") is not True:
+        missing = contract.get("missing_capabilities") or []
+        raise RuntimeError(f"frontend compiler returned an unsatisfiable contract: {missing}")
+    return contract, graph
+
+
+def _frontend_eval_inputs(contract: dict[str, Any]) -> dict[str, Any]:
+    """Mirror renderer inputs when no native Electron bridge owns foreground.
+
+    The eval harness is a terminal client, so it cannot truthfully claim that
+    Electron yielded its own HWND. Explicitly recording the web-workbench
+    branch preserves auditability while the contract and graph remain exactly
+    those used by the native Agent Cockpit.
+    """
+
+    desktop_required = bool(contract.get("session"))
+    for stage in contract.get("stages") or []:
+        if not isinstance(stage, dict):
+            continue
+        if str(stage.get("type") or "") in _DESKTOP_STAGE_TYPES:
+            desktop_required = True
+        execution = stage.get("execution")
+        execution = execution if isinstance(execution, dict) else {}
+        capabilities = [
+            *(stage.get("required_capabilities") or []),
+            *(execution.get("required_capabilities") or []),
+            *(execution.get("verifier_requirements") or []),
+        ]
+        if any(
+            str(capability).startswith(_DESKTOP_CAPABILITY_PREFIXES)
+            for capability in capabilities
+        ):
+            desktop_required = True
+    submitted_at = int(time.time() * 1000)
+    return {
+        "execution_context": {
+            "format": "execution-context/1",
+            "entrypoint": "web_workbench",
+            "task_id": str(contract.get("task_id") or ""),
+            "submitted_at": submitted_at,
+            "desktop_handoff": {
+                "required": desktop_required,
+                "strategy": (
+                    "foreground_after_control_surface_yield"
+                    if desktop_required else "not_required"
+                ),
+                "yielded": False,
+                "control_surface_pid": 0,
+                "prepared_at": 0,
+                "reason": "native_bridge_unavailable",
+            },
+            "target_window": None,
         },
     }
 
@@ -1843,6 +1916,7 @@ def run_eval(
     max_steps: int | None = None,
     token: str = "",
     entrypoint: str = "frontend",
+    cold_start: bool = False,
 ) -> Path:
     started_at = time.time()
     try:
@@ -1854,10 +1928,21 @@ def run_eval(
         token,
         initial_status if isinstance(initial_status, dict) else {},
     )
+    compiled_contract: dict[str, Any] = {}
+    submitted_graph: dict[str, Any] = {}
+    submitted_inputs: dict[str, Any] = {}
     if entrypoint == "frontend":
+        compiled_contract, submitted_graph = _compile_frontend_task(
+            base_url,
+            task,
+            int(max_steps or 40),
+            cold_start=cold_start,
+            token=token,
+        )
+        submitted_inputs = _frontend_eval_inputs(compiled_contract)
         payload = {
-            "graph": _frontend_goal_graph(task, int(max_steps or 40)),
-            "inputs": {},
+            "graph": submitted_graph,
+            "inputs": submitted_inputs,
         }
         started = _request_json(
             "POST", f"{base_url}/api/v2/arp/runs", payload, token=token,
@@ -1917,6 +2002,10 @@ def run_eval(
         "task": task,
         "base_url": base_url,
         "entrypoint": entrypoint,
+        "cold_start": bool(cold_start),
+        "task_contract": compiled_contract,
+        "submitted_graph_metadata": submitted_graph.get("metadata") or {},
+        "submitted_execution_context": submitted_inputs.get("execution_context") or {},
         "timed_out": timed_out,
         "status": summary.get("status", ""),
         "result": summary.get("result", ""),
@@ -1954,7 +2043,8 @@ def run_eval(
 
 def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
               budgets: dict[str, float], case_ids: set[str] | None = None,
-              token: str = "", entrypoint: str = "frontend") -> Path:
+              token: str = "", entrypoint: str = "frontend",
+              cold_start: bool = False) -> Path:
     cases = SUITES.get(suite_name)
     if not cases:
         raise SystemExit(f"Unknown suite {suite_name!r}. Available: {', '.join(sorted(SUITES))}")
@@ -1982,6 +2072,7 @@ def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
                 max_steps=int(case.get("max_steps") or 0) or None,
                 token=token,
                 entrypoint=entrypoint,
+                cold_start=cold_start,
             )
             report = json.loads(path.read_text(encoding="utf-8"))
             report_run_id = str(report.get("run_id") or "")
@@ -2080,6 +2171,11 @@ def main() -> int:
         default="frontend",
         help="Runtime entrypoint. Default frontend mirrors Agent Cockpit; chat is legacy.",
     )
+    parser.add_argument(
+        "--cold-start",
+        action="store_true",
+        help="Compile through the same cold-start contract path as the Agent Cockpit toggle.",
+    )
     parser.add_argument("--suite", choices=sorted(SUITES),
                         help="Run a built-in GUI eval suite through the frontend-equivalent ARP graph.")
     parser.add_argument("--case", action="append", default=[],
@@ -2112,13 +2208,14 @@ def main() -> int:
         if args.suite:
             path = run_suite(args.base_url.rstrip("/"), args.suite, args.out_dir,
                              args.timeout, budgets, case_ids=set(args.case) or None,
-                             token=args.token, entrypoint=args.entrypoint)
+                             token=args.token, entrypoint=args.entrypoint,
+                             cold_start=args.cold_start)
         else:
             if not args.task:
                 raise SystemExit("task is required unless --suite is used")
             path = run_eval(args.base_url.rstrip("/"), args.task, args.out_dir,
                             args.timeout, budgets=budgets, token=args.token,
-                            entrypoint=args.entrypoint)
+                            entrypoint=args.entrypoint, cold_start=args.cold_start)
     except urllib.error.URLError as exc:
         raise SystemExit(f"WinPilot server request failed: {exc}") from exc
     print(path)

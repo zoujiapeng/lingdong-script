@@ -196,6 +196,25 @@ def test_scope_guard_fails_closed_for_spatial_mutation_without_target(monkeypatc
     assert session.hwnd is None
 
 
+def test_scope_guard_rebinds_a_previously_proven_app_after_hwnd_replacement(monkeypatch):
+    session = _Session()
+    session.hwnd = 100
+    session.fg = 300
+    rebound_calls = []
+
+    def recover_bound_target():
+        rebound_calls.append(100)
+        session.hwnd = 300
+        return 300
+
+    session._recover_bound_target_window = recover_bound_target
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: hwnd == 300)
+
+    assert scope_guard.ensure_scope(session, "click", {"x": 1, "y": 2}) is None
+    assert rebound_calls == [100]
+    assert session.hwnd == 300
+
+
 def test_scope_guard_batch_must_bind_target_before_first_spatial_action(monkeypatch):
     session = _Session()
     session.hwnd = None
@@ -213,3 +232,16 @@ def test_scope_guard_batch_must_bind_target_before_first_spatial_action(monkeypa
 
     assert json.loads(unsafe.text)["missing_live_target"] is True
     assert safe is None
+
+
+def test_scope_guard_requires_target_for_execute_subgoal_drag(monkeypatch):
+    session = _Session()
+    session.hwnd = None
+    session.fg = 55
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+
+    result = scope_guard.ensure_scope(session, "execute_subgoal", {
+        "drag": {"x1": 10, "y1": 20, "x2": 30, "y2": 40},
+    })
+
+    assert json.loads(result.text)["missing_live_target"] is True

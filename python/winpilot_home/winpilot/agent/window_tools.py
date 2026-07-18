@@ -238,8 +238,11 @@ class WindowToolMixin:
             try:
                 title = win32gui.GetWindowText(hwnd) or str(item.get("title", ""))
                 class_name = win32gui.GetClassName(hwnd)
-                if query and query not in title.lower() and query not in class_name.lower():
-                    continue
+                # ``app_state`` was already filtered by the requested process
+                # identity.  Hidden main windows often have an empty/localized
+                # title and a generic framework class, so filtering them again
+                # by title/class would discard the exact tray-resident app we
+                # are trying to recover.
                 matches.append({
                     "hwnd": hwnd,
                     "title": title,

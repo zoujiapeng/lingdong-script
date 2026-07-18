@@ -480,7 +480,8 @@ def test_main_model_frame_declares_scope_region_and_coordinate_space(monkeypatch
     text = runner.messages[-1]["content"][0]["text"]
     assert "Frame scope=target_window" in text
     assert "left=-1600, top=40, width=900, height=700" in text
-    assert "frame_x/frame_y（0..1000" in text
+    assert "image_* tool fields copied directly from this displayed image" in text
+    assert "frame_* 0..1000 fields are an alternative" in text
     event = events[-1][1]
     assert event["capture_scope"] == "target_window"
     assert event["capture_region"] == [-1600, 40, 900, 700]

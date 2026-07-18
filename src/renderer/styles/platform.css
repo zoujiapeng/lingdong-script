@@ -301,6 +301,11 @@
 .arp-gate-banner > div > div { display: flex; flex-direction: column; gap: 2px; }
 .arp-gate-banner strong { font-size: 11px; }
 .arp-gate-banner span { font-size: 10px; color: var(--arp-text-soft); }
+.arp-clarification { margin-top: 9px; padding: 9px 11px; display: flex; align-items: flex-start; gap: 8px; border: 1px solid #d89d45; border-radius: 5px; background: var(--arp-amber-soft); color: var(--arp-text); }
+.arp-clarification > svg { flex: 0 0 auto; margin-top: 1px; color: #b7791f; }
+.arp-clarification > div { display: flex; flex-direction: column; gap: 3px; }
+.arp-clarification strong { font-size: 11px; }
+.arp-clarification span, .arp-clarification small { font-size: 10px; color: var(--arp-text-soft); }
 
 .arp-live-strip { min-height: 57px; margin-top: 10px; padding: 8px 13px; display: grid; grid-template-columns: minmax(180px, 0.7fr) minmax(400px, 1.5fr) minmax(220px, 0.8fr); align-items: center; gap: 14px; border: 1px solid var(--arp-line); background: var(--arp-surface); border-radius: 7px; }
 .arp-live-title { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--arp-accent); }

@@ -10,9 +10,12 @@ from .contracts import (
     CompletionObligation,
     EvidenceProviderSpec,
     InteractionSessionContract,
+    RequirementCoverage,
     StateBinding,
     StageType,
     TaskContract,
+    TaskIntent,
+    TaskRequirement,
     TaskStage,
 )
 from .intent import TaskIntentParser
@@ -32,15 +35,135 @@ class TaskContractCompiler:
         slug = re.sub(r"(?<!^)(?=[A-Z])", "_", stage_type.value).casefold()
         return f"stage-{index:02d}-{slug}"
 
+    @staticmethod
+    def _normalize_session_context(entries: list | None) -> list[dict]:
+        normalized: list[dict] = []
+        for entry in entries or []:
+            if isinstance(entry, dict):
+                payload = dict(entry)
+            else:
+                payload = {
+                    key: getattr(entry, key)
+                    for key in (
+                        "task", "status", "result", "run_id", "intent",
+                        "artifacts",
+                    )
+                    if hasattr(entry, key)
+                }
+            normalized.append({
+                "task": str(payload.get("task") or "")[:400],
+                "status": str(payload.get("status") or ""),
+                "result": str(payload.get("result") or "")[:500],
+                "run_id": str(payload.get("run_id") or ""),
+                "intent": (
+                    dict(payload.get("intent"))
+                    if isinstance(payload.get("intent"), dict)
+                    else {}
+                ),
+                "artifacts": [
+                    dict(item) for item in (payload.get("artifacts") or [])
+                    if isinstance(item, dict)
+                ][:20],
+            })
+        return normalized[-8:]
+
+    @staticmethod
+    def _apply_session_context(
+        task: str,
+        intent: TaskIntent,
+        entries: list[dict],
+    ) -> TaskIntent:
+        """Resolve short-lived references without enabling long-term memory.
+
+        This is execution context, not experience replay.  It therefore stays
+        available during cold-start evaluation and never proves current GUI
+        state by itself.
+        """
+
+        if not entries:
+            return intent
+        text = str(task or "")
+        reference = bool(re.search(
+            r"刚刚|刚才|之前|上次|上一(?:个|次)|那个|它|继续|再来|"
+            r"previous|last|just|that|it|continue|again",
+            text,
+            re.IGNORECASE,
+        ))
+        if not reference:
+            return intent
+        previous = entries[-1]
+        prior_intent = (
+            previous.get("intent")
+            if isinstance(previous.get("intent"), dict)
+            else {}
+        )
+        payload = intent.model_dump(mode="json")
+        provenance = dict(payload.get("provenance") or {})
+        resolved: list[str] = []
+        if not str(payload.get("source") or "").strip():
+            source = str(
+                prior_intent.get("source")
+                or prior_intent.get("destination")
+                or ""
+            ).strip()
+            if source:
+                payload["source"] = source
+                resolved.append("source")
+        if not str(payload.get("channel") or "").strip():
+            channel = str(prior_intent.get("channel") or "").strip()
+            if channel:
+                payload["channel"] = channel
+                payload["destination"] = payload.get("destination") or channel
+                resolved.append("channel")
+        if not str(payload.get("recipient") or "").strip():
+            recipient = str(prior_intent.get("recipient") or "").strip()
+            if recipient:
+                payload["recipient"] = recipient
+                resolved.append("recipient")
+
+        operations = list(payload.get("operation") or [])
+        # In "把刚刚画的画截图/发送", the drawing verb describes the
+        # antecedent artifact; it is not a request to draw a second artifact.
+        if (
+            "draw" in operations
+            and any(item in operations for item in ("capture", "send"))
+            and re.search(r"刚刚|刚才|之前|上次|previous|last|just", text, re.IGNORECASE)
+            and not re.search(r"再画|重画|重新画|draw\s+again|redraw", text, re.IGNORECASE)
+        ):
+            operations = [item for item in operations if item != "draw"]
+            payload["operation"] = operations
+            resolved.append("antecedent_artifact")
+
+        ambiguous = list(payload.get("ambiguous_fields") or [])
+        if "draw" not in operations:
+            ambiguous = [item for item in ambiguous if item != "subject"]
+        ambiguous = [
+            item for item in ambiguous
+            if not str(payload.get(item) or "").strip()
+        ]
+        payload["ambiguous_fields"] = ambiguous
+        if resolved:
+            provenance["session_reference"] = ",".join(resolved)
+            provenance["session_run_id"] = str(previous.get("run_id") or "")
+            payload["provenance"] = provenance
+        return TaskIntent.model_validate(payload)
+
     def compile(
         self,
         task: str,
         *,
         max_steps: int = 40,
         cold_start: bool = False,
+        session_context: list | None = None,
+        require_gui: bool = False,
     ) -> TaskContract:
         step_budget = max(1, min(400, int(max_steps)))
-        intent = self.parser.parse(task)
+        normalized_context = self._normalize_session_context(session_context)
+        intent = self._apply_session_context(
+            task,
+            self.parser.parse(task),
+            normalized_context,
+        )
         task_id = f"task-{uuid.uuid4().hex[:16]}"
         stages: list[TaskStage] = []
         obligations: list[CompletionObligation] = []
@@ -80,7 +203,113 @@ class TaskContractCompiler:
             stages.append(stage)
             return stage
 
-        if intent.interaction.active:
+        def add_desktop_goal(
+            *,
+            goal: str | None = None,
+            app: str | None = None,
+            verification_policy: str = "full_goal_coverage",
+            runtime_resolution_fields: list[str] | None = None,
+            surface_output_requested: bool = False,
+            lifecycle: str = "bounded",
+            preserve_original_intent: bool = True,
+        ) -> TaskStage:
+            """Keep an open-ended GUI request lossless and visually verifiable.
+
+            Structural intent fields are hints for application discovery only.
+            They must not decide whether an otherwise unknown request receives
+            the desktop controller, fresh pixels, or root-goal verification.
+            """
+
+            resolution_fields = list(runtime_resolution_fields or [])
+            stage_goal = str(goal or task)
+            stage_app = (
+                intent.source or intent.channel or intent.destination
+                if app is None
+                else str(app or "")
+            )
+            named_applications = (
+                list(intent.applications or [])
+                if app is None
+                else ([stage_app] if stage_app else [])
+            )
+            stage = add(
+                StageType.EXECUTE_DESKTOP_TASK,
+                "执行完整桌面任务",
+                {
+                    "goal": stage_goal,
+                    "original_task": task,
+                    "app": stage_app,
+                    "named_applications": named_applications,
+                    "source": stage_app or "active_window",
+                    "verification_policy": verification_policy,
+                    "minimum_effect_categories": (
+                        2 if verification_policy == "capability_demonstration" else 1
+                    ),
+                    "forbid_open_only": True,
+                    "provider_policy": "gui_primary_optional_external_provider",
+                    "preserve_original_intent": preserve_original_intent,
+                    "runtime_resolution_fields": resolution_fields,
+                    "surface_output_mode": (
+                        "continuous_pointer" if surface_output_requested else ""
+                    ),
+                    "surface_output_subject": (
+                        intent.subject if surface_output_requested else ""
+                    ),
+                    "surface_output_quality": (
+                        intent.quality if surface_output_requested else ""
+                    ),
+                    "subject": intent.subject if surface_output_requested else "",
+                    "quality": intent.quality if surface_output_requested else "",
+                    "lifecycle": lifecycle,
+                },
+                allow_skill_replay=True,
+            )
+            stage.required_capabilities.append("visual.adaptive_interaction")
+            if surface_output_requested:
+                stage.required_capabilities.append("visual.surface_manipulation")
+            obligation = CompletionObligation(
+                id="desktop.full_goal_verified",
+                predicate="desktop.full_goal_verified",
+                description=(
+                    "Fresh target-bound visual evidence and the executed action trace jointly prove every "
+                    "user-visible clause in the original desktop request; merely opening an app or typing "
+                    "a description of the requested result is insufficient."
+                    if preserve_original_intent
+                    else
+                    "Fresh target-bound visual evidence and the executed action trace prove that the "
+                    "requested visible surface output exists before later artifact or delivery stages run."
+                ),
+                stage_id=stage.id,
+                evidence_providers=[
+                    _provider(
+                        "desktop_closed_loop_verifier",
+                        "desktop.execute", "visual.semantic_verify", "visual.observe",
+                    ),
+                ],
+            )
+            stage.obligations.append(obligation)
+            obligations.append(obligation)
+            return stage
+
+        response_only = bool(
+            "respond" in intent.operation
+            and not any(
+                operation in intent.operation
+                for operation in (
+                    "open", "draw", "capture", "save", "send", "operate",
+                    "interact", "demonstrate",
+                )
+            )
+        )
+        client_gui_goal = bool(
+            require_gui
+            and not response_only
+            and intent.domain not in {
+                "workspace", "web_research", "data", "automation",
+            }
+        )
+
+        if intent.interaction.active and not client_gui_goal:
             interaction = intent.interaction
             target = interaction.target or intent.source or "active_window"
             typed_direct_manipulation_verifier = bool(
@@ -384,33 +613,94 @@ class TaskContractCompiler:
                 # run-scoped external-change evidence for traceability, while
                 # its required capabilities remain enforced by _STAGE_BASE.
 
-        # Interactive drawing is a state-dependent turn, not a request to
-        # complete an entire drawing artifact before observing the other actor.
-        if "draw" in intent.operation and not intent.interaction.active:
-            stage = add(
-                StageType.DRAW_ARTIFACT,
-                "创建绘图内容",
-                {"app": intent.source or "Paint", "subject": intent.subject, "quality": intent.quality, "original_task": task},
-                outputs=[ArtifactBinding(name="visual_content", media_type="image/*", source=intent.source or "Paint")],
-                allow_skill_replay=True,
+        # Unknown in-app workflows stay as one lossless desktop goal.  The GUI
+        # runner receives the original request plus an explicit application
+        # constraint and must provide fresh visual/action evidence for the
+        # entire goal.  This prevents a composite command from degrading into
+        # an OpenApplication-only contract merely because a downstream verb is
+        # not part of the small structural grammar.
+        # Values such as the active application, destination surface, file, or
+        # recipient can often be discovered only after observing the live
+        # desktop.  Keep those tasks lossless and defer unresolved facts to the
+        # same general GUI agent instead of rejecting them before it has seen
+        # the machine.  This is a field-resolution policy, not a task-specific
+        # workflow: the original goal remains the source of truth.
+        runtime_resolution_fields = [
+            field
+            for field in intent.ambiguous_fields
+            if field in {"channel", "recipient"}
+        ]
+        deferred_desktop_resolution = bool(
+            "send" in intent.operation
+            and (
+                runtime_resolution_fields
+                or intent.send_mode == "continuous_chat"
             )
-            obligation = CompletionObligation(
-                id="artifact.semantic_visible",
-                predicate="artifact.semantic_visible",
-                description="The latest application frame visibly satisfies the requested drawing/content semantics.",
-                stage_id=stage.id,
-                evidence_providers=[
-                    _provider("semantic_visual_judge", "visual.semantic_verify"),
-                    _provider("verified_stage_skill", "visual.semantic_verify"),
-                ],
+        )
+        surface_output_requested = bool(
+            "draw" in intent.operation and not intent.interaction.active
+        )
+        communication_app = str(intent.channel or "").strip().casefold()
+        surface_applications = [
+            app
+            for app in (intent.applications or [])
+            if str(app or "").strip().casefold() != communication_app
+        ]
+        multi_application_surface_workflow = bool(
+            surface_output_requested and len(surface_applications) > 1
+        )
+        full_desktop_execution = bool(
+            client_gui_goal
+            or (
+                any(item in intent.operation for item in ("operate", "demonstrate"))
+                and not intent.interaction.active
             )
-            stage.obligations.append(obligation)
-            obligations.append(obligation)
+            or deferred_desktop_resolution
+            or multi_application_surface_workflow
+        )
+        surface_stage_only = bool(
+            surface_output_requested and not full_desktop_execution
+        )
+        if full_desktop_execution or surface_stage_only:
+            preserve_original_intent = bool(
+                full_desktop_execution
+                or set(intent.operation) <= {"draw"}
+            )
+            stage_goal = task
+            if not preserve_original_intent:
+                stage_goal = (
+                    "Create the requested visible surface output of "
+                    f"{intent.subject or 'the requested subject'} in the user-selected application."
+                )
+            add_desktop_goal(
+                goal=stage_goal,
+                app=None if full_desktop_execution else intent.source,
+                verification_policy=(
+                    "capability_demonstration"
+                    if "demonstrate" in intent.operation
+                    else (
+                        "full_goal_coverage"
+                        if preserve_original_intent
+                        else "surface_output"
+                    )
+                ),
+                runtime_resolution_fields=(
+                    runtime_resolution_fields if full_desktop_execution else []
+                ),
+                surface_output_requested=surface_output_requested,
+                lifecycle=(
+                    "persistent"
+                    if full_desktop_execution
+                    and intent.send_mode == "continuous_chat"
+                    else "bounded"
+                ),
+                preserve_original_intent=preserve_original_intent,
+            )
 
         needs_capture = "capture" in intent.operation or (
             "send" in intent.operation and intent.media_type in {"image", "file"}
         )
-        if needs_capture:
+        if needs_capture and not full_desktop_execution:
             stage = add(
                 StageType.CAPTURE_ARTIFACT,
                 "创建受管理工件",
@@ -428,7 +718,12 @@ class TaskContractCompiler:
             stage.obligations.append(obligation)
             obligations.append(obligation)
 
-        if "save" in intent.operation and not needs_capture:
+        if (
+            "save" in intent.operation
+            and not needs_capture
+            and "operate" not in intent.operation
+            and not full_desktop_execution
+        ):
             stage = add(StageType.SAVE_ARTIFACT, "保存工件", {"source": intent.source or "active_window"})
             obligation = CompletionObligation(
                 id="artifact.saved",
@@ -440,7 +735,7 @@ class TaskContractCompiler:
             stage.obligations.append(obligation)
             obligations.append(obligation)
 
-        if "send" in intent.operation:
+        if "send" in intent.operation and not full_desktop_execution:
             text_payload = str(intent.message_text or "").strip()
             authorized_message = StateBinding(
                 name="authorized_outbound_message",
@@ -615,6 +910,14 @@ class TaskContractCompiler:
                 )
                 stage.obligations.append(obligation)
                 obligations.append(obligation)
+            elif (
+                client_gui_goal
+                and "respond" not in intent.operation
+            ):
+                # The visible-client product is a GUI agent.  A small parser
+                # vocabulary may enrich an unknown command, but an empty parse
+                # must not strip the GUI controller from that command.
+                add_desktop_goal()
             else:
                 stage_type, stage_name, required = {
                     "desktop": (
@@ -656,6 +959,11 @@ class TaskContractCompiler:
                     {
                         "goal": task,
                         "original_task": task,
+                        "response_mode": (
+                            "conversation"
+                            if "respond" in intent.operation
+                            else "task"
+                        ),
                         "domain": intent.domain,
                         "resource_types": list(intent.resource_types),
                         "app": intent.source if intent.domain == "desktop" else "",
@@ -676,6 +984,86 @@ class TaskContractCompiler:
                 stage.obligations.append(obligation)
                 obligations.append(obligation)
 
+        requirements: list[TaskRequirement] = []
+        desktop_stage = next((
+            item for item in stages
+            if item.type == StageType.EXECUTE_DESKTOP_TASK
+        ), None)
+        if desktop_stage is not None:
+            predicates = [item.evidence_predicate for item in desktop_stage.obligations]
+            requirements.append(TaskRequirement(
+                id="requirement-01-full-desktop-goal",
+                text=task,
+                kind=(
+                    "capability_demonstration"
+                    if "demonstrate" in intent.operation
+                    else "desktop_workflow"
+                ),
+                stage_ids=[desktop_stage.id],
+                completion_predicates=predicates,
+                source_span=[0, len(task)],
+                metadata={
+                    "application_constraint": str(
+                        desktop_stage.parameters.get("app") or ""
+                    ),
+                    "coverage": "original_text_lossless",
+                },
+            ))
+        else:
+            for index, stage in enumerate(stages, start=1):
+                if not stage.obligations:
+                    continue
+                requirements.append(TaskRequirement(
+                    id=f"requirement-{index:02d}-{stage.id}",
+                    text=stage.name,
+                    kind=stage.type.value,
+                    stage_ids=[stage.id],
+                    completion_predicates=[
+                        item.evidence_predicate for item in stage.obligations
+                    ],
+                    source_span=[0, len(task)],
+                    metadata={
+                        "original_task": task,
+                        "operation": list(intent.operation),
+                    },
+                ))
+
+        stage_ids = {item.id for item in stages}
+        final_predicates = {item.evidence_predicate for item in obligations}
+        covered_requirement_ids = [
+            item.id for item in requirements
+            if item.stage_ids
+            and set(item.stage_ids) <= stage_ids
+            and item.completion_predicates
+            and set(item.completion_predicates) <= final_predicates
+        ]
+        uncovered_requirement_ids = [
+            item.id for item in requirements
+            if item.id not in covered_requirement_ids and item.required
+        ]
+        requirement_coverage = RequirementCoverage(
+            complete=bool(requirements) and not uncovered_requirement_ids,
+            strategy=(
+                "original_text_semantic_stage"
+                if desktop_stage is not None
+                else "typed_stage_obligations"
+            ),
+            covered_requirement_ids=covered_requirement_ids,
+            uncovered_requirement_ids=uncovered_requirement_ids,
+            notes=(
+                ["Every user-visible clause remains in one full-goal desktop stage."]
+                if desktop_stage is not None
+                else ["Structural operations are bound to typed stage obligations."]
+            ),
+        )
+
+        clarification_questions: list[str] = []
+        # Channel/recipient ambiguity is intentionally resolved against the
+        # live desktop by ExecuteDesktopTask.  Compile-time clarification is
+        # reserved for information that observation cannot supply.
+        if "subject" in intent.ambiguous_fields:
+            clarification_questions.append("请说明要绘制的具体内容。")
+
         contract = TaskContract(
             task_id=task_id,
             task=task,
@@ -683,9 +1071,13 @@ class TaskContractCompiler:
             stages=stages,
             obligations=obligations,
             final_conditions=[item.id for item in obligations],
+            requirements=requirements,
+            requirement_coverage=requirement_coverage,
+            clarification_questions=clarification_questions,
+            session_context=normalized_context,
             session=session,
             experience_policy="disabled" if cold_start else "allow",
-            compiler_version="typed-stage-4",
+            compiler_version="typed-stage-5",
         )
         return self.planner.plan_contract(contract)
 
@@ -695,8 +1087,18 @@ class TaskContractCompiler:
         *,
         max_steps: int = 40,
         cold_start: bool = False,
+        session_context: list | None = None,
+        require_gui: bool = False,
+        allow_unsatisfied: bool = False,
     ):
         from ..orchestrator.graph_compiler import task_contract_to_arp
-        contract = self.compile(task, max_steps=max_steps, cold_start=cold_start)
-        self.planner.assert_satisfiable(contract)
+        contract = self.compile(
+            task,
+            max_steps=max_steps,
+            cold_start=cold_start,
+            session_context=session_context,
+            require_gui=require_gui,
+        )
+        if not allow_unsatisfied:
+            self.planner.assert_satisfiable(contract)
         return contract, task_contract_to_arp(contract)

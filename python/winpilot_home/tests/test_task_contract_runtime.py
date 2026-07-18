@@ -254,8 +254,9 @@ def test_cross_application_artifact_tasks_compile_to_typed_stages():
         assert contract.intent.media_type == "image"
         assert contract.satisfiable is True
     assert [stage.type.value for stage in contracts[0].stages] == [
-        "DrawArtifact", "CaptureArtifact", "OpenConversation", "SendArtifact", "VerifyDelivery",
+        "ExecuteDesktopTask", "CaptureArtifact", "OpenConversation", "SendArtifact", "VerifyDelivery",
     ]
+    assert contracts[0].stages[0].parameters["surface_output_mode"] == "continuous_pointer"
     assert "DrawArtifact" not in [stage.type.value for stage in contracts[1].stages]
 
 
@@ -321,10 +322,18 @@ def test_cold_start_contract_disables_stage_skills_and_experience():
     assert all(stage.allow_skill_replay is False for stage in contract.stages)
     assert all(node.kind.value != "skill_replay" for node in graph.nodes)
     assert graph.metadata["experience_policy"] == "disabled"
-    draw = next(stage for stage in contract.stages if stage.type.value == "DrawArtifact")
-    profile = build_runtime_profile("Draw the requested subject", task_contract=contract, stage=draw)
+    surface = next(
+        stage for stage in contract.stages
+        if stage.type.value == "ExecuteDesktopTask"
+        and stage.parameters.get("surface_output_mode")
+    )
+    profile = build_runtime_profile(
+        "Draw the requested subject", task_contract=contract, stage=surface,
+    )
     assert profile.experience_enabled is False
     assert profile.replay is False
+    assert profile.adaptive_visual_interaction is True
+    assert profile.surface_output_mode is True
 
 
 def test_every_verifier_requirement_is_exposed_before_execution():
@@ -353,23 +362,27 @@ def test_delivery_selects_deterministic_evidence_without_semantic_model():
     assert selection.model_role == "none"
 
 
-def test_draw_stage_exposes_controller_transaction_and_bounded_timeout():
+def test_surface_stage_exposes_generic_spatial_tools_and_auditable_budget_timeout():
     contract, graph = _compile(TASKS[0])
-    stage = next(item for item in contract.stages if item.type.value == "DrawArtifact")
+    stage = next(item for item in contract.stages if item.type.value == "ExecuteDesktopTask")
     assert stage.execution is not None
-    assert {"execute_subgoal", "run_action_batch", "draw_strokes"} <= set(stage.execution.tools)
+    assert {
+        "click", "drag", "execute_subgoal", "run_action_batch", "draw_strokes",
+    } <= set(stage.execution.tools)
     assert "draw_strokes" in stage.execution.controller_tools
-    assert "draw_strokes" not in stage.execution.model_tools
-    assert "execute_subgoal" in stage.execution.model_tools
+    assert {
+        "click", "drag", "draw_strokes", "execute_subgoal", "run_action_batch",
+    } <= set(stage.execution.model_tools)
+    assert "visual.adaptive_interaction" in stage.execution.required_capabilities
     node = next(item for item in graph.nodes if item.id == stage.id)
-    assert node.timeout_s == 180
+    assert node.timeout_s == min(1800, stage.parameters["max_steps"] * 30)
 
 
 def test_semantic_child_intent_is_scoped_to_its_typed_stage():
     from winpilot.tasking.stage_runtime import StageRuntime
 
     contract, _graph = _compile(TASKS[0], cold_start=True)
-    stage = next(item for item in contract.stages if item.type.value == "DrawArtifact")
+    stage = next(item for item in contract.stages if item.type.value == "ExecuteDesktopTask")
     goal = "In the already opened Paint, draw the compiler-resolved subject."
 
     intent = StageRuntime._stage_scoped_intent(contract, stage, goal)
@@ -402,7 +415,7 @@ def test_semantic_child_runner_never_uses_raw_intent_parser_fallback(monkeypatch
     from winpilot.tasking.stage_runtime import StageRuntime
 
     contract, _graph = _compile(TASKS[0], cold_start=True)
-    stage = next(item for item in contract.stages if item.type.value == "DrawArtifact")
+    stage = next(item for item in contract.stages if item.type.value == "ExecuteDesktopTask")
     stage = stage.model_copy(deep=True)
     # This test exercises only semantic-child construction; application launch
     # is a separate deterministic stage concern.
@@ -419,6 +432,7 @@ def test_semantic_child_runner_never_uses_raw_intent_parser_fallback(monkeypatch
         runner._done_verified = True
         runner._inline_stage_semantic_attempted = True
         runner._inline_stage_semantic_passed = True
+        runner._surface_output_semantic_passed = True
         runner._tool_history = [
             ("draw_strokes", {"normalized_strokes": [[[10, 10], [20, 20]]]}, '{"ok": true}'),
         ]
@@ -542,17 +556,16 @@ def test_typed_stage_guidance_is_not_part_of_visible_completion_task():
     )
 
 
-def test_draw_stage_model_schema_requires_structured_scene_plan():
+def test_surface_stage_schema_keeps_generic_actions_and_structured_scene_plan():
     from winpilot.agent.runtime_profile import build_runtime_profile
     from winpilot.agent.tool_schemas import tool_schemas
 
     contract, _graph = _compile(TASKS[0])
-    stage = next(item for item in contract.stages if item.type.value == "DrawArtifact")
+    stage = next(item for item in contract.stages if item.type.value == "ExecuteDesktopTask")
     profile = build_runtime_profile(
         "Draw the requested subject",
         task_contract=contract,
         stage=stage,
-        model_tool_allowlist=("execute_subgoal", "vlm_verify", "done", "blocked", "fail"),
     )
     schemas = tool_schemas(
         planning=False,
@@ -563,17 +576,20 @@ def test_draw_stage_model_schema_requires_structured_scene_plan():
         required_capabilities=profile.required_capabilities,
         stage_tools=profile.stage_tools,
         stage_type=profile.stage_type,
+        surface_output_mode=profile.surface_output_mode,
     )
     execute = next(item for item in schemas if item["function"]["name"] == "execute_subgoal")
     parameters = execute["function"]["parameters"]
-    assert parameters["required"] == ["subgoal", "draws"]
-    assert "draw" not in parameters["properties"]
+    assert parameters["required"] == ["subgoal"]
+    assert {"input", "click", "clicks", "draw", "draws"} <= set(parameters["properties"])
     draw_item = parameters["properties"]["draws"]["items"]
     assert "shared silhouette" in parameters["properties"]["draws"]["description"]
     assert draw_item["required"] == ["part"]
     assert draw_item["anyOf"][0]["required"] == ["part", "shape", "box", "box_mode"]
     assert draw_item["properties"]["box_mode"]["enum"] == ["endpoints"]
-    assert "draw_strokes" not in profile.model_tool_allowlist
+    assert parameters["properties"]["draws"]["maxItems"] == 16
+    assert profile.adaptive_visual_interaction is True
+    assert profile.model_tool_allowlist == ()
 
 
 def test_inline_stage_semantic_gate_requires_executed_draw_and_fresh_verdict(monkeypatch):
@@ -661,6 +677,7 @@ def test_typed_draw_repair_rejects_whole_scene_overlay_without_executing_it():
         runtime_profile=RuntimeProfile(
             inline_semantic_verification=True,
             stage_type="DrawArtifact",
+            surface_output_mode=True,
         ),
         max_steps_override=3,
     )
@@ -687,6 +704,23 @@ def test_typed_draw_repair_rejects_whole_scene_overlay_without_executing_it():
         assert blocked["max_repair_draws"] == 4
         assert blocked["proposed_draw_count"] == 12
 
+        repair_tools = runner._model_tools_for_step(
+            [{
+                "type": "function",
+                "function": {
+                    "name": "execute_subgoal",
+                    "description": "base",
+                    "parameters": {
+                        "properties": {"draws": {"type": "array"}},
+                    },
+                },
+            }],
+            2,
+        )
+        repair_schema = repair_tools[0]["function"]
+        assert repair_schema["parameters"]["properties"]["draws"]["maxItems"] == 4
+        assert "whole subject" in repair_schema["description"]
+
         localized = runner._inline_stage_forward_repair_guard(
             "execute_subgoal",
             {"draws": list(base["draws"][:3])},
@@ -699,6 +733,83 @@ def test_typed_draw_repair_rejects_whole_scene_overlay_without_executing_it():
             {"semantic_visual_verified": True},
         )
         assert runner._inline_stage_repair_pending is False
+    finally:
+        runner.session.close()
+
+
+def test_inline_stage_semantic_gate_treats_partial_visual_mutation_as_committed(monkeypatch):
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.runtime_profile import RuntimeProfile
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner(
+        "Draw a bird",
+        runtime_profile=RuntimeProfile(
+            inline_semantic_verification=True,
+            stage_type="DrawArtifact",
+            surface_output_mode=True,
+        ),
+        max_steps_override=2,
+    )
+    try:
+        monkeypatch.setattr(runner.session, "dispatch", lambda name, args: ToolResult(json.dumps({
+            "ok": True,
+            "verified": False,
+            "semantic_visual_verified": False,
+            "verify_method": "semantic-vlm",
+            "verdict": {"issues": ["missing one contour"]},
+        })))
+        verdict = runner._inline_stage_semantic_verdict(
+            "execute_subgoal",
+            {
+                "ok": False,
+                "input_applied": True,
+                "evidence_packet": {
+                    "scene_structure": {"executed_draw_count": 7},
+                },
+                "actions_executed": [{
+                    "action": "draw_strokes",
+                    "draw_region": {"x": 10, "y": 20, "width": 100, "height": 80},
+                }],
+            },
+        )
+        assert verdict is not None
+        assert verdict["partial_visual_commit"] is True
+        assert runner._inline_stage_semantic_attempted is True
+    finally:
+        runner.session.close()
+
+
+def test_typed_draw_repair_contract_eventually_forces_honest_stop_tool():
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.runtime_profile import RuntimeProfile
+
+    runner = AgentRunner(
+        "Draw the requested visible subject",
+        runtime_profile=RuntimeProfile(
+            inline_semantic_verification=True,
+            stage_type="DrawArtifact",
+            surface_output_mode=True,
+        ),
+        max_steps_override=5,
+    )
+    try:
+        runner._inline_stage_repair_pending = True
+        runner._inline_stage_base_draw_count = 12
+        proposal = {"draws": [{"part": str(index)} for index in range(12)]}
+        for _ in range(3):
+            blocked = runner._inline_stage_forward_repair_guard(
+                "execute_subgoal", proposal,
+            )
+        assert blocked and blocked["completion_decision_required"] is True
+        selected = runner._model_tools_for_step([
+            {"function": {"name": "execute_subgoal"}},
+            {"function": {"name": "done"}},
+            {"function": {"name": "blocked"}},
+        ], 4)
+        assert [item["function"]["name"] for item in selected] == ["blocked"]
     finally:
         runner.session.close()
 
@@ -1741,12 +1852,20 @@ def test_capture_scope_distinguishes_canvas_from_explicit_window():
 
 def test_stage_skill_graph_resumes_at_failed_stage_instead_of_whole_task():
     _contract, graph = _compile(TASKS[0])
-    draw = next(node for node in graph.nodes if node.kind.value == "task_stage" and node.config["stage"]["type"] == "DrawArtifact")
-    skill = next(node for node in graph.nodes if node.kind.value == "skill_replay" and node.config.get("stage_id") == draw.id)
+    surface = next(
+        node for node in graph.nodes
+        if node.kind.value == "task_stage"
+        and node.config["stage"]["type"] == "ExecuteDesktopTask"
+    )
+    skill = next(
+        node for node in graph.nodes
+        if node.kind.value == "skill_replay"
+        and node.config.get("stage_id") == surface.id
+    )
     routes = {(edge.branch, edge.target) for edge in graph.edges if edge.source == skill.id}
-    assert ("miss", draw.id) in routes
-    assert ("fail", draw.id) in routes
-    assert skill.config["resume_on_failure"] == draw.id
+    assert ("miss", surface.id) in routes
+    assert ("fail", surface.id) in routes
+    assert skill.config["resume_on_failure"] == surface.id
     assert skill.config["parameters"]["subject"]
 
 

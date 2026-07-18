@@ -190,7 +190,7 @@ export interface ArpExecutionSnapshot {
 }
 
 export type TaskStageType =
-  | 'OpenApplication' | 'FocusWindow' | 'CreateOrEditArtifact' | 'DrawArtifact'
+  | 'OpenApplication' | 'FocusWindow' | 'ExecuteDesktopTask' | 'CreateOrEditArtifact' | 'DrawArtifact'
   | 'CaptureArtifact' | 'SaveArtifact' | 'OpenConversation' | 'ResolveRecipient'
   | 'GenerateMessageContent' | 'ReviewOrAuthorize'
   | 'SendText' | 'SendArtifact' | 'VerifyArtifact' | 'VerifyDelivery'
@@ -316,6 +316,25 @@ export interface TaskStage {
   allow_skill_replay: boolean;
 }
 
+export interface TaskRequirement {
+  id: string;
+  text: string;
+  kind: string;
+  stage_ids: string[];
+  completion_predicates: string[];
+  required: boolean;
+  source_span: number[];
+  metadata: Record<string, unknown>;
+}
+
+export interface RequirementCoverage {
+  complete: boolean;
+  strategy: string;
+  covered_requirement_ids: string[];
+  uncovered_requirement_ids: string[];
+  notes: string[];
+}
+
 export interface TaskContract {
   format: 'task-contract/1';
   task_id: string;
@@ -324,6 +343,10 @@ export interface TaskContract {
   stages: TaskStage[];
   obligations: Array<Record<string, unknown>>;
   final_conditions: string[];
+  requirements?: TaskRequirement[];
+  requirement_coverage?: RequirementCoverage;
+  clarification_questions?: string[];
+  session_context?: Array<Record<string, unknown>>;
   session?: InteractionSessionContract | null;
   satisfiable: boolean;
   missing_capabilities: string[];

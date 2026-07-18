@@ -347,6 +347,30 @@ def test_prepositioned_click_keeps_physical_servo_path(monkeypatch):
     assert calls == [("raw", 30, 40, "left", False, 456, True)]
 
 
+def test_force_physical_click_bypasses_background_window_message(monkeypatch):
+    calls = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
+    monkeypatch.setattr(
+        executor,
+        "_post_click",
+        lambda *_args, **_kwargs: calls.append(("post",)) or True,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_raw_click",
+        lambda x, y, button, double, hwnd, prepositioned=False: calls.append((
+            "raw", x, y, button, double, hwnd, prepositioned,
+        )),
+    )
+
+    out = executor.click(30, 40, hwnd=456, force_physical=True)
+
+    assert out["ok"] is True
+    assert out["via"] == "physical_sendinput"
+    assert calls == [("raw", 30, 40, "left", False, 456, False)]
+
+
 def test_raw_prepositioned_click_does_not_refocus_or_repeat_slow_move(monkeypatch):
     calls = []
     sleeps = []
@@ -375,6 +399,78 @@ def test_raw_prepositioned_click_does_not_refocus_or_repeat_slow_move(monkeypatc
     assert all(call[0] not in {"focus", "move"} for call in calls)
     assert [call[0] for call in calls] == ["send", "send"]
     assert sleeps == [0.008]
+
+
+def test_raw_focus_continues_when_set_foreground_raises(monkeypatch):
+    state = {"foreground": 12}
+    monkeypatch.setattr(executor.win32gui, "IsWindow", lambda _hwnd: True)
+    monkeypatch.setattr(executor.win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(
+        executor.win32gui,
+        "GetForegroundWindow",
+        lambda: state["foreground"],
+    )
+    monkeypatch.setattr(executor, "_send_inputs", lambda _inputs: None)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    def denied(_hwnd):
+        raise RuntimeError("foreground lock denied")
+
+    monkeypatch.setattr(executor.win32gui, "SetForegroundWindow", denied)
+    monkeypatch.setattr(
+        executor.win32gui,
+        "BringWindowToTop",
+        lambda hwnd: state.__setitem__("foreground", hwnd),
+    )
+
+    result = executor._raw_focus_window(91)
+
+    assert result["ok"] is True
+    assert result["route"] == "bring_to_top"
+    assert any(
+        item["route"] == "set_foreground"
+        and item["called"] is False
+        and "foreground lock denied" in item["error"]
+        for item in result["attempts"]
+    )
+
+
+def test_raw_focus_dismisses_transient_shell_before_activation(monkeypatch):
+    state = {"foreground": 12}
+    sends = []
+    monkeypatch.setattr(executor.win32gui, "IsWindow", lambda _hwnd: True)
+    monkeypatch.setattr(executor.win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(
+        executor.win32gui,
+        "GetForegroundWindow",
+        lambda: state["foreground"],
+    )
+    monkeypatch.setattr(
+        executor.win32gui,
+        "GetClassName",
+        lambda hwnd: "Windows.UI.Core.CoreWindow" if hwnd == 12 else "AppWindow",
+    )
+
+    def send(inputs):
+        sends.append(inputs)
+        if len(sends) == 1:
+            state["foreground"] = 0
+
+    monkeypatch.setattr(executor, "_send_inputs", send)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        executor.win32gui,
+        "SetForegroundWindow",
+        lambda hwnd: state.__setitem__("foreground", hwnd),
+    )
+    monkeypatch.setattr(executor.win32gui, "BringWindowToTop", lambda _hwnd: None)
+
+    result = executor._raw_focus_window(91)
+
+    assert result["ok"] is True
+    assert result["route"] == "set_foreground"
+    assert len(sends) == 2
+    assert result["attempts"][0]["route"] == "dismiss_transient_shell"
 
 
 def test_public_scroll_uses_one_outer_queue_event(monkeypatch):

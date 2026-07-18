@@ -1,6 +1,22 @@
+import json
 from types import SimpleNamespace
 
 import pytest
+
+
+@pytest.fixture
+def coordinate_semantic_snap_enabled(monkeypatch):
+    """Opt into coordinate refinement only in tests that exercise it."""
+    from winpilot.agent import interaction_tools
+
+    original_get = interaction_tools.CONFIG.get
+
+    def configured(*path, default=None):
+        if path == ("controller", "coordinate_semantic_snap"):
+            return True
+        return original_get(*path, default=default)
+
+    monkeypatch.setattr(interaction_tools.CONFIG, "get", configured)
 
 
 @pytest.fixture
@@ -2089,6 +2105,334 @@ def test_coordinate_click_refuses_power_element_under_point():
     assert "Refused to click a system power" in result.text
 
 
+def test_coordinate_click_keeps_pixel_authored_point_by_default(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    fake_executor = SimpleNamespace(
+        uia_invoke=lambda element: calls.append(("invoke", element.elem_id)) or True,
+        click=lambda x, y, **_kwargs: calls.append(("click", x, y)) or {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+    session = ToolSession(task="activate the visible control")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="Arbitrary application",
+        region=Region(0, 0, 800, 600),
+        elements=[UIElement(
+            elem_id=12,
+            role="link",
+            text="provider-only target",
+            cx=110,
+            cy=100,
+            left=90,
+            top=90,
+            width=40,
+            height=20,
+            source="uia",
+        )],
+    )
+
+    result = session._t_click({"x": 93, "y": 92})
+
+    assert calls == [("click", 93, 92)]
+    assert result.replay["coords"] == [93, 92]
+    assert "semantic_hit_snap" not in result.replay
+
+
+def test_coordinate_click_snaps_to_fresh_actionable_semantic_hit(
+    monkeypatch,
+    coordinate_semantic_snap_enabled,
+):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    fake_executor = SimpleNamespace(
+        uia_invoke=lambda element: calls.append(("invoke", element.elem_id)) or True,
+        click=lambda *args, **kwargs: calls.append(("click", args, kwargs)) or {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+    session = ToolSession(task="activate the visible control")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="Arbitrary application",
+        region=Region(0, 0, 800, 600),
+        elements=[UIElement(
+            elem_id=12,
+            role="link",
+            text="javascript:;",
+            cx=110,
+            cy=100,
+            left=90,
+            top=90,
+            width=40,
+            height=20,
+            source="uia",
+        )],
+    )
+
+    result = session._t_click({"x": 93, "y": 92})
+    payload = json.loads(result.text)
+
+    assert calls == [("invoke", 12)]
+    assert payload["via"] == "semantic_hit_uia_invoke"
+    assert payload["semantic_hit_snap"]["authored_coords"] == [93, 92]
+    assert payload["semantic_hit_snap"]["snapped_coords"] == [110, 100]
+    assert result.replay["coords"] == [110, 100]
+
+
+def test_coordinate_click_does_not_snap_to_broad_blank_container(
+    monkeypatch,
+    coordinate_semantic_snap_enabled,
+):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    fake_executor = SimpleNamespace(
+        uia_invoke=lambda element: calls.append(("invoke", element.elem_id)) or True,
+        click=lambda x, y, **_kwargs: calls.append(("click", x, y)) or {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+    session = ToolSession(task="activate the small visible affordance under the pointer")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="Arbitrary feed",
+        region=Region(0, 0, 800, 600),
+        elements=[UIElement(
+            elem_id=50,
+            role="listitem",
+            text="",
+            cx=200,
+            cy=150,
+            left=0,
+            top=0,
+            width=400,
+            height=300,
+            source="uia",
+        )],
+    )
+
+    result = session._t_click({"x": 350, "y": 250})
+
+    assert calls == [("click", 350, 250)]
+    assert result.replay["coords"] == [350, 250]
+    assert "semantic_hit_snap" not in result.replay
+
+
+def test_coordinate_click_can_locally_refine_high_confidence_ocr_text(
+    monkeypatch,
+    coordinate_semantic_snap_enabled,
+):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    fake_executor = SimpleNamespace(
+        uia_invoke=lambda _element: False,
+        click=lambda x, y, **_kwargs: calls.append((x, y)) or {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+    session = ToolSession(task="activate the compact visible text control")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="Owner-drawn application chrome",
+        region=Region(0, 0, 800, 600),
+        elements=[UIElement(
+            elem_id=17,
+            role="text",
+            text="Visible action",
+            cx=120,
+            cy=100,
+            left=100,
+            top=90,
+            width=40,
+            height=20,
+            source="ocr",
+            confidence=0.92,
+        )],
+    )
+
+    result = session._t_click({"x": 96, "y": 100})
+
+    assert calls == [(120, 100)]
+    assert result.replay["semantic_hit_snap"]["source"] == "ocr"
+    assert result.replay["semantic_hit_snap"]["authored_coords"] == [96, 100]
+    assert result.replay["coords"] == [120, 100]
+
+
+def test_coordinate_click_preserves_subtarget_inside_plain_ocr_row(
+    monkeypatch,
+    coordinate_semantic_snap_enabled,
+):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    fake_executor = SimpleNamespace(
+        uia_invoke=lambda _element: False,
+        click=lambda x, y, **_kwargs: calls.append((x, y)) or {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+    session = ToolSession(task="activate one visible action in a compact action row")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="Arbitrary owner-drawn feed",
+        region=Region(0, 0, 800, 600),
+        elements=[UIElement(
+            elem_id=18,
+            role="text",
+            text="First action   Second action   Third action",
+            cx=190,
+            cy=100,
+            left=100,
+            top=90,
+            width=180,
+            height=20,
+            source="ocr",
+            confidence=0.94,
+        )],
+    )
+
+    result = session._t_click({"x": 112, "y": 100})
+
+    assert calls == [(112, 100)]
+    assert result.replay["coords"] == [112, 100]
+    assert "semantic_hit_snap" not in result.replay
+
+
+def test_coordinate_click_projects_near_broad_ocr_row_without_recentering(
+    monkeypatch,
+    coordinate_semantic_snap_enabled,
+):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    fake_executor = SimpleNamespace(
+        uia_invoke=lambda _element: False,
+        click=lambda x, y, **_kwargs: calls.append((x, y)) or {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+    session = ToolSession(task="activate the first visible action in a merged row")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="Arbitrary owner-drawn feed",
+        region=Region(0, 0, 800, 600),
+        elements=[UIElement(
+            elem_id=19,
+            role="text",
+            text="First action   Second action   Third action",
+            cx=190,
+            cy=100,
+            left=100,
+            top=90,
+            width=180,
+            height=20,
+            source="ocr",
+            confidence=0.94,
+        )],
+    )
+
+    result = session._t_click({"x": 96, "y": 100})
+
+    assert calls == [(103, 100)]
+    assert result.replay["coords"] == [103, 100]
+    assert result.replay["semantic_hit_snap"]["mode"] == (
+        "nearest_plain_ocr_subtarget"
+    )
+
+
+def test_coordinate_click_keeps_owner_drawn_scene_at_authored_point(
+    monkeypatch,
+    coordinate_semantic_snap_enabled,
+):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    fake_executor = SimpleNamespace(
+        uia_invoke=lambda element: calls.append(("invoke", element.elem_id)) or True,
+        click=lambda x, y, **kwargs: calls.append(("click", x, y)) or {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+    session = ToolSession(task="interact with the visible game board")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="Owner-drawn scene",
+        region=Region(0, 0, 800, 600),
+        elements=[UIElement(
+            elem_id=7,
+            role="image",
+            text="game surface",
+            cx=400,
+            cy=300,
+            left=0,
+            top=0,
+            width=800,
+            height=600,
+            source="cv",
+        )],
+    )
+
+    result = session._t_click({"x": 123, "y": 234})
+
+    assert calls == [("click", 123, 234)]
+    assert result.replay["coords"] == [123, 234]
+    assert "semantic_hit_snap" not in result.replay
+
+
 def test_power_task_allows_power_labeled_click(monkeypatch):
     import winpilot.agent.tools as tools_mod
     from winpilot.agent.tools import ToolSession
@@ -2141,9 +2485,12 @@ def test_physical_click_bypasses_uia_invoke(monkeypatch):
     from winpilot.utils.screenshot import Region
 
     calls = []
+    click_kwargs = []
     fake_executor = SimpleNamespace(
         uia_invoke=lambda element: calls.append("uia") or True,
-        click=lambda *args, **kwargs: calls.append("mouse") or {"ok": True},
+        click=lambda *args, **kwargs: (
+            calls.append("mouse"), click_kwargs.append(kwargs), {"ok": True}
+        )[-1],
     )
     fake_verify = SimpleNamespace(
         run_with_verify=lambda name, action, **kwargs: action(),
@@ -2166,6 +2513,7 @@ def test_physical_click_bypasses_uia_invoke(monkeypatch):
     session._t_click({"element_id": 4, "physical": True})
 
     assert calls == ["mouse"]
+    assert click_kwargs[0]["force_physical"] is True
 
 
 def test_type_text_reuses_last_clicked_input(monkeypatch):
@@ -3275,6 +3623,34 @@ def test_top_level_semantic_click_reports_anchor_source_action():
     assert payload["source_action"] == "click_element"
     assert payload["source_action_verified"] is True
     assert payload["verified"] is True
+
+
+def test_fast_visual_wrapper_preserves_scope_failure_instead_of_hiding_it():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    raw = ToolResult(json.dumps({
+        "ok": False,
+        "verified": False,
+        "blocked": True,
+        "failure_type": "TARGET_WINDOW_REPLACED",
+        "missing_live_target": True,
+        "error": "The remembered target HWND is no longer live.",
+        "scope_guard": {"before": {"target_hwnd": None}},
+    }))
+
+    payload = json.loads(AgentRunner._fast_wrapped_result(
+        "click", {"x": 10, "y": 20}, raw,
+    ).text)
+
+    assert payload["ok"] is False
+    assert payload["blocked"] is True
+    assert payload["failure_type"] == "TARGET_WINDOW_REPLACED"
+    assert payload["missing_live_target"] is True
+    assert "no longer live" in payload["error"]
+    assert payload["scope_guard"]["before"]["target_hwnd"] is None
 
 
 def test_top_level_file_dialog_path_input_submits_and_verifies_file():

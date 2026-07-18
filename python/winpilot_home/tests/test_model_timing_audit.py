@@ -293,7 +293,12 @@ def test_draw_stage_adds_independent_boundary_verifier_to_model_time(monkeypatch
 
         def dispatch(self, name, _args):
             assert name == "open_app"
-            return ToolResult(json.dumps({"ok": True}))
+            return ToolResult(json.dumps({
+                "ok": True,
+                "verified": True,
+                "target_hwnd": 42,
+                "focus": {"ok": True},
+            }))
 
         def close(self):
             return None

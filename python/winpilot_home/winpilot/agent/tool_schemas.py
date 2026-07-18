@@ -57,6 +57,16 @@ def _batch_frame_region_schema(description: str) -> dict:
     }
 
 
+def _frame_constraint_bounds_schema() -> dict:
+    return {
+        "type": "array",
+        "description": "Optional hard [left,top,right,bottom] bounds in current-frame 0..1000 coordinates.",
+        "items": {"type": "number", "minimum": 0, "maximum": 1000},
+        "minItems": 4,
+        "maxItems": 4,
+    }
+
+
 def _batch_action_schema(*, native_frame: bool = False) -> dict:
     """Return the typed controller operator union used by run_action_batch.
 
@@ -91,8 +101,13 @@ def _batch_action_schema(*, native_frame: bool = False) -> dict:
         ),
     }
 
-    def variant(name: str, properties: dict | None = None, required: tuple[str, ...] = ()) -> dict:
-        return {
+    def variant(
+        name: str,
+        properties: dict | None = None,
+        required: tuple[str, ...] = (),
+        one_of: list[dict] | None = None,
+    ) -> dict:
+        schema = {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "const": name},
@@ -102,6 +117,9 @@ def _batch_action_schema(*, native_frame: bool = False) -> dict:
             "required": ["action", *required],
             "additionalProperties": False,
         }
+        if one_of:
+            schema["oneOf"] = one_of
+        return schema
 
     anchor = {
         "label": text, "text_query": text, "expected_region": text,
@@ -114,9 +132,20 @@ def _batch_action_schema(*, native_frame: bool = False) -> dict:
         "visual_servo": boolean,
     }
     if native_frame:
+        image_coordinate = {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 4096,
+            "description": (
+                "Pixel coordinate in the exact submitted image. The current frame message "
+                "states that image's width and height; never mix image_* and frame_* fields."
+            ),
+        }
         direct_click = {
             "frame_x": {"type": "number", "minimum": 0, "maximum": 1000},
             "frame_y": {"type": "number", "minimum": 0, "maximum": 1000},
+            "image_x": image_coordinate,
+            "image_y": image_coordinate,
             "element_id": integer,
             **anchor,
             **click_options,
@@ -124,12 +153,21 @@ def _batch_action_schema(*, native_frame: bool = False) -> dict:
         scroll_fields = {
             "frame_x": {"type": "number", "minimum": 0, "maximum": 1000},
             "frame_y": {"type": "number", "minimum": 0, "maximum": 1000},
-            "amount": integer,
+            "image_x": image_coordinate,
+            "image_y": image_coordinate,
+            "amount": {
+                "type": "integer",
+                "description": "Wheel notches: negative scrolls down; positive scrolls up.",
+            },
+            "constraint_frame_region": _frame_constraint_bounds_schema(),
         }
         pointer_transition_fields = {
             "frame_x": {"type": "number", "minimum": 0, "maximum": 1000},
             "frame_y": {"type": "number", "minimum": 0, "maximum": 1000},
+            "image_x": image_coordinate,
+            "image_y": image_coordinate,
             "button": {"type": "string", "enum": ["left", "right", "middle"]},
+            "constraint_frame_region": _frame_constraint_bounds_schema(),
         }
         drag_fields = {
             "frame_x1": {"type": "number", "minimum": 0, "maximum": 1000},
@@ -137,20 +175,46 @@ def _batch_action_schema(*, native_frame: bool = False) -> dict:
             "frame_x2": {"type": "number", "minimum": 0, "maximum": 1000},
             "frame_y2": {"type": "number", "minimum": 0, "maximum": 1000},
             "frame_points": points,
+            "image_x1": image_coordinate,
+            "image_y1": image_coordinate,
+            "image_x2": image_coordinate,
+            "image_y2": image_coordinate,
+            "image_points": points,
             "duration": number,
+            "constraint_frame_region": _frame_constraint_bounds_schema(),
         }
-        draw_fields = {"frame_strokes": strokes, "duration": number}
+        draw_fields = {
+            "frame_strokes": strokes,
+            "duration": number,
+            "constraint_frame_region": _frame_constraint_bounds_schema(),
+        }
     else:
         direct_click = {"x": integer, "y": integer, "element_id": integer, **anchor, **click_options}
-        scroll_fields = {"x": integer, "y": integer, "amount": integer}
+        scroll_fields = {
+            "x": integer,
+            "y": integer,
+            "amount": {
+                "type": "integer",
+                "description": "Wheel notches: negative scrolls down; positive scrolls up.",
+            },
+            "constraint_region": _batch_region_schema(
+                "Optional hard physical-screen boundary for the scroll point."
+            ),
+        }
         pointer_transition_fields = {
             "x": integer,
             "y": integer,
             "button": {"type": "string", "enum": ["left", "right", "middle"]},
+            "constraint_region": _batch_region_schema(
+                "Optional hard boundary inherited across one held-pointer session."
+            ),
         }
         drag_fields = {
             "x1": integer, "y1": integer, "x2": integer, "y2": integer,
             "points": points, "duration": number,
+            "constraint_region": _batch_region_schema(
+                "Optional hard physical-screen boundary for the complete drag path."
+            ),
         }
         draw_fields = {
             "strokes": strokes,
@@ -165,6 +229,9 @@ def _batch_action_schema(*, native_frame: bool = False) -> dict:
                 },
             },
             "duration": number,
+            "constraint_region": _batch_region_schema(
+                "Optional hard physical-screen boundary for every path point."
+            ),
         }
 
     roi_wait = {
@@ -188,21 +255,47 @@ def _batch_action_schema(*, native_frame: bool = False) -> dict:
         variant("type_into_element", {
             **anchor, "text": text, "clear": boolean, "expect_text": {"oneOf": [boolean, text]},
         }, ("text",)),
-        variant("type_text", {"text": text, "element_id": integer}, ("text",)),
+        variant("type_text", {
+            "text": text,
+            "element_id": integer,
+            "keyboard_mode": {
+                "type": "string",
+                "enum": ["default", "calculation", "numeric_keypad"],
+            },
+        }, ("text",)),
         variant("hotkey", {"keys": string_array, "value": string_array}, ("keys",)),
-        variant("scroll", scroll_fields, (("frame_x", "frame_y", "amount") if native_frame else ("x", "y", "amount"))),
+        variant(
+            "scroll",
+            scroll_fields,
+            (("amount",) if native_frame else ("x", "y", "amount")),
+            ([
+                {"required": ["frame_x", "frame_y"]},
+                {"required": ["image_x", "image_y"]},
+            ] if native_frame else None),
+        ),
         variant("move_mouse", {
             key: value for key, value in scroll_fields.items() if key != "amount"
-        }, (("frame_x", "frame_y") if native_frame else ("x", "y"))),
+        }, (() if native_frame else ("x", "y")), ([
+            {"required": ["frame_x", "frame_y"]},
+            {"required": ["image_x", "image_y"]},
+        ] if native_frame else None)),
         variant(
             "mouse_down",
             pointer_transition_fields,
-            (("frame_x", "frame_y") if native_frame else ("x", "y")),
+            (() if native_frame else ("x", "y")),
+            ([
+                {"required": ["frame_x", "frame_y"]},
+                {"required": ["image_x", "image_y"]},
+            ] if native_frame else None),
         ),
         variant(
             "mouse_up",
             pointer_transition_fields,
-            (("frame_x", "frame_y") if native_frame else ("x", "y")),
+            (() if native_frame else ("x", "y")),
+            ([
+                {"required": ["frame_x", "frame_y"]},
+                {"required": ["image_x", "image_y"]},
+            ] if native_frame else None),
         ),
         variant(
             "hold_key",
@@ -212,7 +305,15 @@ def _batch_action_schema(*, native_frame: bool = False) -> dict:
             },
             ("keys", "duration_ms"),
         ),
-        variant("drag", drag_fields, (("frame_x1", "frame_y1", "frame_x2", "frame_y2") if native_frame else ("x1", "y1", "x2", "y2"))),
+        variant(
+            "drag",
+            drag_fields,
+            (() if native_frame else ("x1", "y1", "x2", "y2")),
+            ([
+                {"required": ["frame_x1", "frame_y1", "frame_x2", "frame_y2"]},
+                {"required": ["image_x1", "image_y1", "image_x2", "image_y2"]},
+            ] if native_frame else None),
+        ),
         variant("draw_strokes", draw_fields, (("frame_strokes",) if native_frame else ())),
         variant("ensure_input_mode", {
             "mode": {"type": "string", "enum": ["continuous_freehand"]},
@@ -329,6 +430,9 @@ _LEAN_GUI_TOOLS = {
     "type_text",
     "hotkey",
     "scroll",
+    "move_mouse",
+    "mouse_down",
+    "mouse_up",
     "drag",
     "draw_strokes",
     "wait",
@@ -367,6 +471,9 @@ _NATIVE_VISION_LEAN_TOOLS = {
     "type_text",
     "hotkey",
     "scroll",
+    "move_mouse",
+    "mouse_down",
+    "mouse_up",
     "drag",
     "draw_strokes",
     "wait",
@@ -398,7 +505,10 @@ _LEAN_TOOL_DESCRIPTIONS = {
     "click": "Click element_id or x/y.",
     "type_text": "Type literal text into the focused control.",
     "hotkey": "Press shortcut keys.",
-    "scroll": "Scroll at x/y.",
+    "scroll": "Scroll at x/y; amount<0 scrolls down and amount>0 scrolls up.",
+    "move_mouse": "Move a currently held pointer to x/y, or hover without clicking.",
+    "mouse_down": "Press and keep a mouse button held across fresh visual frames.",
+    "mouse_up": "Move to x/y and release the agent-held mouse button.",
     "drag": "Drag from x1/y1 to x2/y2.",
     "draw_strokes": (
         "Draw exactly one of strokes (grounded physical px) or normalized_strokes "
@@ -409,15 +519,16 @@ _LEAN_TOOL_DESCRIPTIONS = {
     "wait": "Wait for a condition.",
     "screenshot": "Capture screen with compact nonvisual summary.",
     "paste_image_file": "Paste a PNG/JPEG into the focused app as an image.",
+    "open_conversation": (
+        "Bind an exact recipient and composer; omit app to discover a locally grounded registered route."
+    ),
+    "send_text": "Send text through the bound verified communication route.",
+    "send_artifact": "Send a managed artifact_id through the bound verified route.",
+    "verify_delivery": "Verify visible post-send evidence in the bound conversation.",
     "zoom": "Capture a screen rectangle with compact nonvisual summary.",
     "coordinate_diagnostics": "Report physical screen/capture/window/DPI geometry.",
     "coordinate_click_test": "Click physical screen x/y once and report coordinate evidence.",
-    "revise_plan": (
-        "Change the live todo at any time: steps replaces it; operations accepts "
-        "{op:add,goal,index?}, {op:update,index,goal}, {op:remove,index}, or "
-        "{op:move,index,to_index}, {op:reopen,index,reason?}. Indices are "
-        "current and 1-based; steps may be [] to clear the list."
-    ),
+    "revise_plan": "Replace the live todo with the complete ordered steps; [] clears it.",
     "complete_subgoal": "Mark a todo item complete.",
     "record_facts": "Bind visible facts to one subject and source in the per-run working set.",
     "vlm_describe": "Ask VLM about a screen/window region.",
@@ -425,6 +536,8 @@ _LEAN_TOOL_DESCRIPTIONS = {
     "done": "Finish only after verified evidence.",
     "blocked": "Pause safely when the real UI cannot be grounded without guessing.",
     "fail": "Finish with an honest failure reason.",
+    "discover_mcp_tools": "Find exact tools from explicitly configured MCP servers; GUI remains available.",
+    "call_mcp_tool": "Call one previously discovered MCP tool, then verify its real result.",
 }
 
 def _strip_nested_descriptions(node: object) -> None:
@@ -447,6 +560,11 @@ def _compact_tool_descriptions(tool: dict, descriptions: dict[str, str] | None =
     parameters = fn.get("parameters")
     if isinstance(parameters, dict):
         _strip_nested_descriptions(parameters)
+        if name == "revise_plan":
+            steps = (parameters.get("properties") or {}).get("steps")
+            parameters["properties"] = {"steps": steps}
+            parameters["required"] = ["steps"]
+            parameters.pop("oneOf", None)
     return compact
 
 
@@ -487,6 +605,9 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
     def coord(description: str) -> dict:
         return _prop("number", description, minimum=0, maximum=1000)
 
+    def image_coord(description: str) -> dict:
+        return _prop("number", description, minimum=0, maximum=4096)
+
     def point_schema(description: str) -> dict:
         return {
             "type": "array",
@@ -508,30 +629,73 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
         if name == "click":
             props.pop("x", None)
             props.pop("y", None)
+            props.pop("constraint_region", None)
             props["frame_x"] = coord("Horizontal position in the current whole frame: 0=left, 1000=right edge.")
             props["frame_y"] = coord("Vertical position in the current whole frame: 0=top, 1000=bottom edge.")
+            props["image_x"] = image_coord("Horizontal pixel in the exact submitted image; use its stated width.")
+            props["image_y"] = image_coord("Vertical pixel in the exact submitted image; use its stated height.")
+            props["constraint_frame_region"] = _frame_constraint_bounds_schema()
             parameters["required"] = [item for item in required if item not in {"x", "y"}]
             fn["description"] = (
-                "Click an observed element_id or a point in the current authoritative frame using "
-                "frame_x/frame_y in 0..1000. For visual targets prefer frame coordinates; do not "
-                "manually scale image pixels into physical screen x/y."
+                "Click a stable visible label/anchor or element_id when available. For a purely visual "
+                "point, prefer image_x/image_y copied from the exact submitted image dimensions stated "
+                "in the current frame message; frame_x/frame_y in 0..1000 remain supported. Optional "
+                "constraint_frame_region keeps it inside one visible area. Never mix image_*, frame_*, "
+                "or physical x/y coordinate sources."
             )
-        elif name in {"scroll", "move_mouse"}:
+        elif name in {"scroll", "move_mouse", "mouse_down", "mouse_up"}:
             props.pop("x", None)
             props.pop("y", None)
+            props.pop("constraint_region", None)
             props["frame_x"] = coord("Horizontal position in the current whole frame, 0..1000.")
             props["frame_y"] = coord("Vertical position in the current whole frame, 0..1000.")
+            props["image_x"] = image_coord("Horizontal pixel in the exact submitted image.")
+            props["image_y"] = image_coord("Vertical pixel in the exact submitted image.")
+            props["constraint_frame_region"] = _frame_constraint_bounds_schema()
             parameters["required"] = [
                 *(item for item in required if item not in {"x", "y"}),
-                "frame_x",
-                "frame_y",
             ]
+            if name == "mouse_up":
+                parameters.pop("oneOf", None)
+            else:
+                parameters["oneOf"] = [
+                    {"required": ["frame_x", "frame_y"]},
+                    {"required": ["image_x", "image_y"]},
+                ]
+            action_text = {
+                "scroll": "Scroll at",
+                "move_mouse": "Move the mouse to",
+                "mouse_down": "Move to and press/hold at",
+                "mouse_up": "Move to and release the agent-held button at",
+            }[name]
             fn["description"] = (
-                ("Scroll at" if name == "scroll" else "Move the mouse to")
-                + " frame_x/frame_y in the current authoritative frame (0..1000)."
+                action_text
+                + " image_x/image_y in the exact submitted image, or frame_x/frame_y in "
+                "the current authoritative frame (0..1000); never mix them."
+                + (
+                    " For scroll, amount<0 moves down and amount>0 moves up."
+                    if name == "scroll" else ""
+                )
+                + (
+                    " Use this only to begin a dynamic gesture whose next useful point becomes "
+                    "clear after the press; inspect the automatically returned fresh frame next. "
+                    "An optional constraint_frame_region becomes the hard boundary inherited by "
+                    "every continuation and release in this held-pointer session."
+                    if name == "mouse_down" else ""
+                )
+                + (
+                    " While a pointer is held, use one move per fresh frame, then mouse_up."
+                    if name == "move_mouse" else ""
+                )
+                + (
+                    " If the current pointer is already at the intended final target, omit all "
+                    "coordinates and release immediately; include a coordinate pair only when one "
+                    "last move is still necessary."
+                    if name == "mouse_up" else ""
+                )
             )
         elif name == "drag":
-            for key in ("x1", "y1", "x2", "y2", "points"):
+            for key in ("x1", "y1", "x2", "y2", "points", "constraint_region"):
                 props.pop(key, None)
             props.update({
                 "frame_x1": coord("Drag start x in the current whole frame, 0..1000."),
@@ -543,18 +707,38 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                     "description": "Optional intermediate [x,y] points, each relative to the current whole frame in 0..1000.",
                     "items": point_schema("One normalized intermediate point."),
                 },
+                "image_x1": image_coord("Drag-start horizontal pixel in the exact submitted image."),
+                "image_y1": image_coord("Drag-start vertical pixel in the exact submitted image."),
+                "image_x2": image_coord("Drag-end horizontal pixel in the exact submitted image."),
+                "image_y2": image_coord("Drag-end vertical pixel in the exact submitted image."),
+                "image_points": {
+                    "type": "array",
+                    "description": "Optional intermediate [x,y] pixels in the exact submitted image.",
+                    "items": {
+                        "type": "array", "minItems": 2, "maxItems": 2,
+                        "items": {"type": "number", "minimum": 0, "maximum": 4096},
+                    },
+                },
+                "constraint_frame_region": _frame_constraint_bounds_schema(),
             })
             parameters["required"] = [
                 *(item for item in required if item not in {"x1", "y1", "x2", "y2"}),
-                "frame_x1", "frame_y1", "frame_x2", "frame_y2",
+            ]
+            parameters["oneOf"] = [
+                {"required": ["frame_x1", "frame_y1", "frame_x2", "frame_y2"]},
+                {"required": ["image_x1", "image_y1", "image_x2", "image_y2"]},
             ]
             fn["description"] = (
-                "Drag between frame_x1/frame_y1 and frame_x2/frame_y2 in the current "
-                "authoritative frame (0..1000), optionally through frame_points."
+                "Perform one continuous press-move-release gesture. Prefer image_x1/image_y1 "
+                "through image_x2/image_y2 from the exact submitted image and optional image_points; "
+                "frame_* 0..1000 coordinates remain supported. Never mix the two sources. Optional "
+                "constraint_frame_region keeps the complete path inside one visible area. This same "
+                "operator handles sliders, drag-and-drop, game pieces, cards, handles and timelines."
             )
         elif name == "draw_strokes":
             props.pop("strokes", None)
             props.pop("normalized_strokes", None)
+            props.pop("constraint_region", None)
             parameters.pop("oneOf", None)
             props["frame_strokes"] = {
                 "type": "array",
@@ -574,6 +758,7 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                     "items": point_schema("One normalized stroke point."),
                 },
             }
+            props["constraint_frame_region"] = _frame_constraint_bounds_schema()
             parameters["required"] = [
                 *(item for item in required if item != "strokes"),
                 "frame_strokes",
@@ -590,7 +775,8 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                 "composition comfortably inside them; each stroke must start and keep every authored "
                 "point inside those whole-frame bounds. The bounds do not create "
                 "another coordinate space. Prefer one coherent complete base composition over several "
-                "successive whole-layout alternatives."
+                "successive whole-layout alternatives. An optional constraint_frame_region is a hard "
+                "boundary for every authored path point in any application."
             )
         elif name == "run_action_batch":
             actions = props.get("actions")
@@ -609,9 +795,11 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                     "Semantic targets may use element_id or Controller-resolved labels/anchors. "
                     "Do not chain two raw frame-coordinate gestures after the first mutation because the "
                     "frame may be stale; defer that gesture until the next real post-action frame. Coordinate actions use "
-                    "the current whole-frame 0..1000 contract: click/scroll/move_mouse use "
-                    "frame_x/frame_y; drag uses frame_x1/frame_y1/frame_x2/frame_y2 and optional "
-                    "frame_points; draw_strokes uses frame_strokes. Never send physical x/y, "
+                    "the current image/frame contract: click/scroll/move_mouse/mouse_down/mouse_up "
+                    "prefer image_x/image_y copied from the exact submitted image, while drag prefers "
+                    "image_x1/image_y1/image_x2/image_y2 and optional image_points. The equivalent "
+                    "frame_* 0..1000 fields remain supported; draw_strokes uses frame_strokes. Never "
+                    "mix image_* with frame_* or send physical x/y, "
                     "x1/y1/x2/y2, points, strokes, or normalized_strokes. Non-coordinate "
                     "actions keep their normal fields."
                 )
@@ -619,9 +807,9 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                 "Execute a short controller-managed multi-step transaction grounded in the current "
                 "authoritative frame. Every child must include its canonical action field and typed inputs. "
                 "Use this when deterministic Controller steps, keyboard input and ROI-scoped visual waits "
-                "belong to one verified transaction. Every nested coordinate action must use frame_* values in "
-                "0..1000; the runtime maps them through that exact frame and rejects mixed/physical "
-                "coordinates."
+                "belong to one verified transaction. Nested coordinate actions may use image_* values from "
+                "the stated exact submitted-image dimensions or frame_* values in 0..1000; the runtime maps "
+                "them through that exact frame and rejects mixed/physical coordinates."
             )
     return adapted
 
@@ -640,14 +828,20 @@ def _native_vision_lean_tools(
     ]
 
 
-def _specialize_stage_tools(tools: list[dict], stage_type: str) -> list[dict]:
+def _specialize_stage_tools(
+    tools: list[dict],
+    stage_type: str,
+    *,
+    surface_output_mode: bool = False,
+) -> list[dict]:
     """Tighten model-facing schemas for a typed stage.
 
     The direct pointer renderer remains a Controller capability. DrawArtifact
     asks the model for a compact semantic scene plan instead of permitting a
     one-primitive shorthand that invites long corrective pixel paths.
     """
-    if str(stage_type or "") != "DrawArtifact":
+    dedicated_draw_stage = str(stage_type or "") == "DrawArtifact"
+    if not dedicated_draw_stage and not surface_output_mode:
         return tools
     specialized = deepcopy(tools)
     for tool in specialized:
@@ -656,7 +850,8 @@ def _specialize_stage_tools(tools: list[dict], stage_type: str) -> list[dict]:
             continue
         parameters = function.get("parameters") or {}
         properties = parameters.get("properties") or {}
-        properties.pop("draw", None)
+        if dedicated_draw_stage:
+            properties.pop("draw", None)
         draws = properties.get("draws")
         if isinstance(draws, dict):
             draws["minItems"] = 1
@@ -694,13 +889,22 @@ def _specialize_stage_tools(tools: list[dict], stage_type: str) -> list[dict]:
                     {"required": ["part", "shape", "box", "box_mode"]},
                     {"required": ["part", "normalized_strokes"]},
                 ]
-        parameters["required"] = ["subgoal", "draws"]
-        function["description"] = (
-            "DrawArtifact scene planner and local renderer. Submit one ordered draws list with "
-            "the subject's major recognizable parts; the Controller maps it to the bound canvas, "
-            "executes continuous pointer paths, and returns a fresh frame. Do not submit a singular "
-            "draw shorthand or dense frame-coordinate paths."
-        )
+        if dedicated_draw_stage:
+            parameters["required"] = ["subgoal", "draws"]
+            function["description"] = (
+                "Legacy DrawArtifact scene planner and local renderer. Submit one ordered draws list with "
+                "the subject's major recognizable parts; the Controller maps it to the bound canvas, "
+                "executes continuous pointer paths, and returns a fresh frame. Do not submit a singular "
+                "draw shorthand or dense frame-coordinate paths."
+            )
+        else:
+            function["description"] = (
+                "Application-agnostic Controller GUI routine. For a requested continuous surface output, "
+                "submit one ordered draws list after the named app/window is bound; the Controller discovers "
+                "the current work surface, maps canvas-relative geometry, enforces ROI containment, executes "
+                "the paths, and returns a fresh frame. The same routine remains available for ordinary "
+                "input/click/format/verify work before or after that surface mutation."
+            )
     return specialized
 
 
@@ -714,6 +918,7 @@ def tool_schemas(
     required_capabilities: tuple[str, ...] | list[str] = (),
     stage_tools: tuple[str, ...] | list[str] = (),
     stage_type: str = "",
+    surface_output_mode: bool = False,
 ) -> list[dict]:
     """Return the OpenAI tools array for the unified Agent.
 
@@ -828,6 +1033,29 @@ def tool_schemas(
             ["query"],
         ),
         _tool(
+            "discover_mcp_tools",
+            "Discover tools from MCP servers explicitly configured by the user. Use only when an exact provider may complete part of the task more reliably (for example structured office/document work); absence or failure means continue with the GUI Controller.",
+            {
+                "query": _prop("string", "Capability keywords used to filter tool names and descriptions."),
+                "server": _prop("string", "Optional configured server name."),
+            },
+        ),
+        _tool(
+            "call_mcp_tool",
+            "Call one tool returned by discover_mcp_tools. Preserve the user's application/output constraints and independently verify any resulting file or GUI state. Never guess server or tool names.",
+            {
+                "server": _prop("string", "Configured MCP server name from discovery."),
+                "tool": _prop("string", "Exact MCP tool name from discovery."),
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments matching the discovered input_schema.",
+                    "additionalProperties": True,
+                },
+                "allow_destructive": _prop("boolean", "True only when the user's current request explicitly authorizes a tool annotated as destructive."),
+            },
+            ["server", "tool", "arguments"],
+        ),
+        _tool(
             "tray_click",
             "Click a system tray icon by name; useful for apps minimized to tray.",
             {
@@ -841,28 +1069,43 @@ def tool_schemas(
               _expectable({"command": _prop("string", "Launch command or app name.")}), ["command"]),
         _tool(
             "click",
-            "Click an observed element_id, or absolute screen coordinates x/y.",
+            "Click an observed element_id, a visible semantic label/anchor, or absolute screen coordinates x/y. Optionally constrain the resolved point to a physical screen region.",
             _expectable({
                 "element_id": _prop("integer", "Element id from observe."),
                 "x": _prop("integer", "Screen x coordinate."),
                 "y": _prop("integer", "Screen y coordinate."),
+                "label": _prop("string", "Exact or distinctive visible text label."),
+                "text_query": _prop("string", "Visible text to ground with UIA/OCR."),
+                "role": _prop("string", "Optional accessibility role hint."),
+                "expected_region": _prop("string", "Optional rough region such as top or bottom-right."),
+                "visual_anchor": _prop("string", "Optional concise visual identity when text is unavailable."),
+                "fallback_text": {"type": "array", "items": {"type": "string"}},
+                "visual_servo": _prop("boolean", "Re-estimate the target immediately before mouse-down."),
                 "button": _prop("string", "Mouse button.", enum=["left", "right", "middle"]),
                 "double": _prop("boolean", "Whether to double-click."),
                 "physical": _prop("boolean", "Bypass UIA Invoke and send a real mouse press/release. Use for press-state or coordinate tests."),
+                "constraint_region": _batch_region_schema(
+                    "Optional hard physical-screen boundary; the resolved click must remain inside it."
+                ),
             }),
         ),
         _tool(
             "type_text",
-            "Type literal text into an already-focused keyboard-first control. For labeled/search/message inputs that still need locating or an Apply/Search/Send click, prefer execute_subgoal or run_action_batch/type_into_element.",
+            "Type literal text into an already-focused editable control. A visible keypad is not an editable control: for calculators or other keypads prefer execute_subgoal with semantic button labels. If arithmetic keyboard injection has no visible effect, the runtime automatically retries through grounded keypad buttons.",
             _expectable({
                 "text": _prop("string", "Literal text."),
                 "element_id": _prop("integer", "Optional input element id."),
+                "keyboard_mode": _prop(
+                    "string",
+                    "Optional keyboard hint; calculation/numeric_keypad still requires visible-effect verification.",
+                    enum=["default", "calculation", "numeric_keypad"],
+                ),
             }),
             ["text"],
         ),
         _tool(
             "hotkey",
-            "Press a keyboard shortcut, e.g. ['ctrl','s'], ['enter'], ['alt','f4']. Use type_text for printable text like 6+7=. In GUI-only tasks, do not use browser refresh or DevTools shortcuts unless the user explicitly asks.",
+            "Press a keyboard shortcut, e.g. ['ctrl','s'], ['enter'], ['alt','f4']. Use type_text only for printable text in an editable control; use semantic button clicks for a visible keypad. In GUI-only tasks, do not use browser refresh or DevTools shortcuts unless the user explicitly asks.",
             _expectable({"keys": {"type": "array", "items": {"type": "string"}}}),
             ["keys"],
         ),
@@ -873,17 +1116,23 @@ def tool_schemas(
                 "x": _prop("integer", "Screen x coordinate."),
                 "y": _prop("integer", "Screen y coordinate."),
                 "amount": _prop("integer", "Wheel amount."),
+                "constraint_region": _batch_region_schema(
+                    "Optional hard physical-screen boundary for the scroll point."
+                ),
             },
             ["x", "y", "amount"],
         ),
         _tool(
             "drag",
-            "Drag from x1/y1 to x2/y2, optionally through intermediate points.",
+            "Drag from x1/y1 to x2/y2, optionally through intermediate points. A constraint_region makes the whole path fail closed if any point leaves it.",
             {
                 "x1": _prop("integer"), "y1": _prop("integer"),
                 "x2": _prop("integer"), "y2": _prop("integer"),
                 "points": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
                 "duration": _prop("number", "Total duration in seconds."),
+                "constraint_region": _batch_region_schema(
+                    "Optional hard physical-screen boundary for the complete drag path."
+                ),
             },
             ["x1", "y1", "x2", "y2"],
         ),
@@ -937,6 +1186,9 @@ def tool_schemas(
                     },
                 },
                 "duration": _prop("number", "Duration per stroke in seconds."),
+                "constraint_region": _batch_region_schema(
+                    "Optional hard physical-screen boundary for every path point."
+                ),
             },
             parameter_schema={
                 "oneOf": [
@@ -949,7 +1201,7 @@ def tool_schemas(
               {"condition": _EXPECT_SCHEMA, "timeout_s": _prop("number", "Default 10 seconds.")}, ["condition"]),
         _tool(
             "execute_subgoal",
-            "Controller-first GUI routine: locate/type/click/format/draw/wait/verify inside the local controller. Must include input, click/clicks, draw/draws, or verify_texts; format/formats is also supported for rich text. The subgoal alone is only a label and is invalid. Use formats instead of one hotkey per LLM round. For printable keyboard sequences such as 12*34=, prefer input.text or type_text. If ambiguous or needs_llm_reason, use normal tools. Verify-only execute_subgoal requires an existing target window/session hwnd.",
+            "Controller-first GUI routine: locate/type/click/format/draw/wait/verify inside the local controller. Must include input, click/clicks, draw/draws, or verify_texts; format/formats is also supported for rich text. The subgoal alone is only a label and is invalid. Use formats instead of one hotkey per LLM round. For visible keypads, provide semantic click labels (digits/operators/Equals) instead of assuming printable keyboard input works. If ambiguous or needs_llm_reason, use normal tools. Verify-only execute_subgoal requires an existing target window/session hwnd.",
             {
                 "subgoal": _prop("string", "Short label for the routine; this is not executable by itself."),
                 "target_window": {
@@ -1118,6 +1370,25 @@ def tool_schemas(
                         "Optional cheap post-batch screen sync. Omit for default stable sync "
                         "after mutating batches; set false to disable. Fields: mode='stable' "
                         "or 'change', stable_ms, timeout_s, required."
+                    ),
+                },
+                "pointer_session": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "before": {
+                            "type": "string",
+                            "enum": ["", "left", "right", "middle"],
+                        },
+                        "after": {
+                            "type": "string",
+                            "enum": ["", "left", "right", "middle"],
+                        },
+                    },
+                    "description": (
+                        "Explicit Controller-owned held-pointer transition for a "
+                        "gesture that spans authoritative frames. Ordinary batches "
+                        "must omit this and balance mouse_down/mouse_up locally."
                     ),
                 },
             },
@@ -1412,10 +1683,38 @@ def tool_schemas(
         _tool("clipboard_paste", "Paste the current clipboard content via Ctrl+V."),
         _tool("cursor_position", "Return the current mouse cursor position."),
         _tool("move_mouse", "Move the mouse cursor without clicking.",
-              {"x": _prop("integer"), "y": _prop("integer")}, ["x", "y"]),
+              {
+                  "x": _prop("integer"), "y": _prop("integer"),
+                  "constraint_region": _batch_region_schema(
+                      "Optional hard boundary, inherited while a pointer button is held."
+                  ),
+              }, ["x", "y"]),
+        _tool(
+            "mouse_down",
+            "Begin a dynamic pointer gesture: move to x/y, press, keep the button held, and return a fresh visual frame. Use atomic drag for a fully visible static route; use this when later movement must be chosen from post-press frames.",
+            {
+                "x": _prop("integer"), "y": _prop("integer"),
+                "button": _prop("string", enum=["left", "right", "middle"]),
+                "constraint_region": _batch_region_schema(
+                    "Optional hard boundary inherited by later moves and release."
+                ),
+            },
+            ["x", "y"],
+        ),
+        _tool(
+            "mouse_up",
+            "End the current dynamic pointer gesture. Omit x/y to release immediately at the current cursor; include both only for one final move before release. The active agent-held button is used when button is omitted.",
+            {
+                "x": _prop("integer"), "y": _prop("integer"),
+                "button": _prop("string", enum=["left", "right", "middle"]),
+                "constraint_region": _batch_region_schema(
+                    "Optional hard boundary; otherwise the active session boundary is inherited."
+                ),
+            },
+        ),
         _tool(
             "screenshot",
-            "Capture the screen. Give path to save a real PNG/JPEG for a later GUI upload; use window=true to save only the active target window instead of using shell commands.",
+            "Capture the screen. Give path to save a real PNG/JPEG; use window=true to capture only the active target window. For an artifact that will be handed to another app, prefer capture_artifact and pass its returned artifact_id instead of opening Save/Export menus in the source app.",
             {
                 "quality": _prop("integer", "JPEG quality 1-100."),
                 "path": _prop("string", "Optional absolute .png/.jpg/.jpeg destination."),
@@ -1439,18 +1738,25 @@ def tool_schemas(
         ),
         _tool(
             "capture_artifact",
-            "Capture a user-task artifact into the current run's managed store and return artifact_id. This is distinct from a transient model observation frame.",
+            "Capture a user-task artifact into the current run's managed store and return artifact_id. Use it for cross-app handoff or delivery, then pass artifact_id to send_artifact. This is distinct from a transient model observation frame and does not require the source app's Save/Export UI.",
             {
-                "scope": _prop("string", "window, screen, canvas, or region."),
+                "scope": _prop(
+                    "string",
+                    "Capture scope; do not invent semantic names.",
+                    enum=["window", "screen", "canvas", "region"],
+                ),
                 "source_hwnd": _prop("integer", "Optional source window; defaults to the bound target."),
                 "region": {"type": "object"},
             },
         ),
         _tool(
             "open_conversation",
-            "Open and bind a recipient conversation through the registered domain adapter.",
-            {"app": _prop("string"), "recipient": _prop("string")},
-            ["app", "recipient"],
+            "Open and bind a recipient conversation through a registered domain adapter. Pass app when the user specified a channel. If the channel is unresolved, omit app: the runtime discovers registered clients grounded by the live process/window or installed-app index and accepts a route only after the exact recipient and composer are visibly verified.",
+            {
+                "app": _prop("string", "Optional known app/channel; omit when unresolved."),
+                "recipient": _prop("string", "Exact requested recipient identity."),
+            },
+            ["recipient"],
         ),
         _tool(
             "send_text",
@@ -1460,9 +1766,8 @@ def tool_schemas(
         ),
         _tool(
             "send_artifact",
-            "Send a current-run managed artifact_id through the bound communication adapter. Never invent a path.",
-            {"artifact_id": _prop("string"), "app": _prop("string"), "recipient": _prop("string")},
-            ["artifact_id"],
+            "Send a current-run managed artifact through the bound communication adapter. Pass the exact artifact_id returned by capture_artifact. If context compaction removed the opaque handle, omit it only when there is exactly one sendable current-run artifact; the runtime will resolve that unambiguous artifact. Never invent an id or path.",
+            {"artifact_id": _prop("string", "Exact capture_artifact handle; omit only for an unambiguous sole current-run artifact."), "app": _prop("string"), "recipient": _prop("string")},
         ),
         _tool(
             "verify_delivery",
@@ -1524,7 +1829,11 @@ def tool_schemas(
         always = {"done", "blocked", "fail", "observe", "focus_window", "list_windows", "revise_plan", "complete_subgoal"}
         allowed = required_tool_names | always
         profiled = [tool for tool in profiled if _tool_name(tool) in allowed]
-    profiled = _specialize_stage_tools(profiled, stage_type)
+    profiled = _specialize_stage_tools(
+        profiled,
+        stage_type,
+        surface_output_mode=surface_output_mode,
+    )
     if native_vision:
         return _native_frame_coordinate_tools(
             _native_vision_lean_tools(profiled, profile, required_tool_names)

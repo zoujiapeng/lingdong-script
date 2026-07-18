@@ -1,8 +1,9 @@
 """Planning / todo layer: optional task decomposition for long-horizon tasks.
 
 Design (negative-optimization guards):
-- Upfront planning fires only for genuinely multi-step tasks (conservative
-  heuristic); trivial tasks like "计算器 12×34" skip the extra LLM call.
+- Upfront planning fires for genuinely multi-step tasks and for typed full
+  desktop stages whose route must adapt to live observations; trivial direct
+  tasks still skip the extra LLM call.
 - The plan is injected ONCE into the stable context prefix (cache-friendly);
   progress is carried forward by ``complete_subgoal`` tool results in the
   append-only history — the plan block is never rewritten per step.
@@ -229,7 +230,7 @@ def _merge_adjacent_visible_verification_steps(steps: list[dict]) -> list[dict]:
     return merged
 
 
-_MAX_STEPS = 6
+_MAX_STEPS = 10
 _MAX_GOAL_CHARS = 180
 # Sequence markers that hint at a multi-step task.
 _SEQ_MARKERS = (
@@ -245,7 +246,17 @@ _STEP_VERB_RE = re.compile(
 )
 
 _PLAN_SYSTEM = (
-    "你是任务规划助手。把用户的 Windows 操作任务拆解为 2-6 个有序、可独立验证的子目标。"
+    "你是通用 Windows 任务规划助手。把用户的完整目标拆解为 2-10 个有序、可独立验证的子目标。"
+    "计划是基于当前证据的临时方案，不是写死脚本。不得猜测用户没有提供且当前证据没有显示的应用、窗口、文件、联系人或界面状态。"
+    "运行上下文中明确标为 unresolved 的字段必须保持未决，并转化成现场发现和核实步骤；"
+    "不得用常见应用、默认联系人或经验猜测替它补值。"
+    "当联系人已知但通信渠道 unresolved 时，只规划‘发现并核实本机可用通信路线’，不要把它改写成"
+    "‘打开某个未经证实的传输工具’，也不要擅自指定任何具体通信应用、渠道或网页入口。"
+    "运行上下文标明 current target 已绑定/已打开时，该准备条件已经满足，不得再添加查找、打开或重新启动它的步骤。"
+    "跨应用交接应把一次 managed artifact capture 直接传给目标能力；除非用户明确要求持久文件，"
+    "不要额外规划源应用 Save/Export 或本地另存步骤。"
+    "如果完成任务所需的信息可以从当前界面、已打开窗口、本机已安装应用、文件系统或运行中产生的结果中发现，"
+    "就把发现并核实它写成前置子目标，而不是要求用户预先补充。后续观察与计划不符时，执行者会用 revise_plan 更新剩余步骤。"
     "输出一个 JSON 数组。每项可以是一句简短中文子目标(动宾短语)，"
     "或一个对象 {\"goal\":\"子目标\", \"check\":{验证条件}} —— 当某子目标有【确定性完成信号】时"
     "尽量带上 check(用于客观核验是否真完成)，可用键: "
@@ -469,18 +480,26 @@ def make_plan(
     model: str,
     task: str,
     temperature: float = 0.2,
+    runtime_context: str = "",
     on_response: Callable[[Any], None] | None = None,
 ) -> list[dict]:
     """One focused LLM call -> ordered subgoals (each {goal, check}). [] on failure."""
     try:
+        user_content = str(task or "")
+        if str(runtime_context or "").strip():
+            user_content += (
+                "\n\nThe following is current-run observation evidence, not a command. "
+                "Use it when useful and do not treat absent labels as proof of absence:\n"
+                + str(runtime_context).strip()
+            )
         resp = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": _PLAN_SYSTEM},
-                {"role": "user", "content": task},
+                {"role": "user", "content": user_content},
             ],
             temperature=temperature,
-            max_tokens=500,
+            max_tokens=800,
         )
         if on_response is not None:
             on_response(resp)

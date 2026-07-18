@@ -3,6 +3,79 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 
+def test_atomic_action_parser_preserves_metadata_and_top_level_precedence():
+    from winpilot.fast.action_contract import parse_atomic_action
+
+    parsed = parse_atomic_action({
+        "tool": "Click-Element",
+        "params": {
+            "label": "old",
+            "expect": {"text": "old"},
+            "trace_metadata": {"source": "model"},
+        },
+        "label": "new",
+        "name": "Save",
+        "expect": {"text": "new"},
+    })
+
+    assert parsed is not None
+    assert parsed.name == "click_element"
+    assert parsed.inputs == {
+        "label": "new",
+        "name": "Save",
+        "expect": {"text": "new"},
+        "trace_metadata": {"source": "model"},
+    }
+
+
+def test_atomic_action_parser_matches_controller_shorthand_and_skips_malformed_children():
+    from winpilot.fast.action_contract import iter_atomic_actions, parse_atomic_action
+    from winpilot.fast.controller import _normalise_action
+
+    assert parse_atomic_action({"hotkey": ["ctrl", "a"]}).inputs == {
+        "keys": ["ctrl", "a"],
+    }
+    assert parse_atomic_action({"type_text": "hello"}).inputs == {"text": "hello"}
+    assert _normalise_action({"action": "click", "name": "Save", "x": 4, "y": 5}) == (
+        "click",
+        {"name": "Save", "x": 4, "y": 5},
+    )
+    parsed = list(iter_atomic_actions("run_action_batch", {
+        "actions": [None, {"hotkey": ["ctrl", "a"]}, "bad", {"type_text": "hello"}],
+    }))
+    assert [(item.ordinal, item.name, item.source_path) for item in parsed] == [
+        (0, "hotkey", "actions[1]"),
+        (1, "type_text", "actions[3]"),
+    ]
+
+
+def test_execute_subgoal_atomic_actions_have_stable_declared_order():
+    from winpilot.fast.action_contract import iter_atomic_actions
+
+    parsed = list(iter_atomic_actions("execute_subgoal", {
+        "click": {"label": "one"},
+        "clicks": [{"label": "two"}],
+        "input": {"text": "hello"},
+        "draw": {"strokes": []},
+        "drag": {"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+        "draws": [{"strokes": []}],
+        "drags": [{"x1": 5, "y1": 6, "x2": 7, "y2": 8}],
+        "actions": [{"action": "observe"}],
+    }, include_container=True))
+
+    assert [(item.name, item.source_path, item.is_container) for item in parsed] == [
+        ("execute_subgoal", "$", True),
+        ("click_element", "click", False),
+        ("click_element", "clicks[0]", False),
+        ("type_into_element", "input", False),
+        ("draw_strokes", "draw", False),
+        ("drag", "drag", False),
+        ("draw_strokes", "draws[0]", False),
+        ("drag", "drags[0]", False),
+        ("observe", "actions[0]", False),
+    ]
+
+
 def test_action_envelope_binds_window_frame_region_and_policy():
     from winpilot.fast.action_contract import build_action_envelope
     from winpilot.utils.screenshot import Region

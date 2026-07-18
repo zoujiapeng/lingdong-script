@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Documentation and branch consolidation (2026-07-18)
+
+- Re-audited the repository documentation against the current Electron entrypoint, Task Contract/ARP runtime, native-vision loop, Controller primitives, memory policy, MCP boundary, legacy Flow/Browser compatibility code, and known architectural debt.
+- Replaced volatile run-by-run prose with durable architecture invariants: authoritative pixels, one client path, one action transaction, evidence-gated completion, generic pointer primitives, compiler limits, and memory as acceleration rather than capability.
+- Added `docs/testing.md` as the canonical definition of real Electron-client E2E, cold-start isolation, multi-turn context, the 11 black-box probes, mixed long tasks, external oracles, focus interference, reporting, and release gates.
+- Updated the architecture audit to distinguish reusable generic mechanisms from remaining duplication and application-specific debt. The old browser-based visual guide is intentionally not merged because it is a parallel presentation artifact rather than a runtime fact source.
+- Re-ran the current WinPilot suite after replacing the client harness's undeclared `pywinauto` dependency with the repository-supported `uiautomation + Win32`: `1985 passed, 13 skipped`. The visible Electron cold-start `dynamic-hold` rerun passed trusted external pointer ground truth, and both GitHub Actions jobs passed. These are mechanism checks, not a claim that all 11 real tasks pass.
+
+### Cross-frame pointer control and native-client stress matrix (2026-07-18)
+
+- Generalized continuous pointer execution beyond drawing. Typed direct manipulation now supports a Controller-owned `pointer_hold_before/after` session across authoritative frames, allowing a target or route to be revealed only after the button is already down. Held sessions accept only movement and the matching release, have bounded timeout/cleanup, and are released on cancellation, mismatch, failure, or terminal transitions.
+- Made a fresh frame a hard spatial-plan boundary while a pointer is held. Deferred coordinates authored against the old frame are discarded and replanned from current pixels; destination actions no longer inherit stale source regions, and candidate/anchor mapping uses current frame geometry.
+- Preserved authored subtarget coordinates inside broad plain-OCR boxes, added one bounded current-frame UIA/Win32 semantic recovery for first no-progress clicks, and hardened exact-window focus with isolated Windows fallbacks plus transient `Windows.UI.Core.CoreWindow` dismissal.
+- Added real Electron-client E2E harnesses: `client_visual_e2e_run.py` covers ordinary drag, slider, dynamic target reveal, constrained corridors, and game-like dragging with trusted external pointer ground truth; `client_e2e_run.py` contains the exact 11 user cases plus mixed and all-11 long tasks, resets session context by default, and verifies cold-start experience isolation.
+- The 2026-07-18 visible-client visual suite passed `7/7` with `experience_policy=disabled`; the dynamic case used one trusted pointerdown, revealed its goal only after the checkpoint, read a new frame, and released inside the goal. WinPilot regression was `1929 passed, 13 skipped, 2 warnings`, and all four TypeScript typecheck targets passed.
+- Kept the real-software result explicit: the latest QQ Space case exhausted 80 steps after a Windows Shell Experience focus takeover and is still failed; its trace is `arp-20260718-075223-92a997`. The subsequent generic focus fix has unit and manual reproduction evidence but the QQ case was not rerun after it, so this changelog does not claim it passed.
+
 ### General visual interaction reachability and control loop (2026-07-17)
 
 - Added a renderer-to-runtime execution-context handoff so a task submitted from the native client preserves the intended foreground window instead of losing it when Electron focuses its own UI.

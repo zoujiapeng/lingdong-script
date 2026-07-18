@@ -480,6 +480,7 @@ def click(
     double: bool = False,
     hwnd: int | None = None,
     prepositioned: bool = False,
+    force_physical: bool = False,
 ) -> dict:
     """Click at screen coords. Brings target window forward first if given.
 
@@ -493,7 +494,7 @@ def click(
     # confirmation is only valid for the cursor position it just measured.
     # Replacing that mouse-down with a background window message would break
     # the move -> confirm -> click atomicity and can target a stale child HWND.
-    if _no_mouse_steal() and not prepositioned:
+    if _no_mouse_steal() and not prepositioned and not force_physical:
         if multi_input_cooperation_enabled() and not hwnd:
             return cooperative_input_guard("click", hwnd) or {
                 "ok": False,
@@ -547,7 +548,13 @@ def click(
             "error": "click stopped because the user took foreground/cursor ownership",
         }
     BUS.publish("action", action="click", x=x, y=y, button=button, double=double)
-    return {"ok": True, "x": x, "y": y, "prepositioned": bool(prepositioned)}
+    return {
+        "ok": True,
+        "x": x,
+        "y": y,
+        "prepositioned": bool(prepositioned),
+        "via": "physical_sendinput" if force_physical else "sendinput",
+    }
 
 
 def _raw_click(
@@ -1191,28 +1198,211 @@ def press_keys(keys: list[str], hwnd: int | None = None) -> dict:
 
 # --------------------------------------------------------------- window API
 def _raw_focus_window(hwnd: int) -> dict:
-    """Robust foreground switch (works around SetForegroundWindow locks)."""
+    """Bring one live window forward through bounded Windows fallbacks.
+
+    ``SetForegroundWindow`` can raise while a shell surface temporarily owns
+    the foreground lock.  Every activation route is therefore isolated: one
+    failed API cannot prevent the remaining exact-window fallbacks.
+    """
+    attempts: list[dict[str, Any]] = []
+
+    def foreground_matches() -> bool:
+        try:
+            return int(win32gui.GetForegroundWindow() or 0) == int(hwnd)
+        except Exception:
+            return False
+
+    def attempt(
+        route: str,
+        operation: Callable[[], Any],
+        settle: float = 0.08,
+    ) -> bool:
+        try:
+            operation()
+            attempts.append({"route": route, "called": True})
+        except Exception as exc:
+            attempts.append({
+                "route": route,
+                "called": False,
+                "error": str(exc)[:240],
+            })
+        if settle:
+            time.sleep(settle)
+        return foreground_matches()
+
+    try:
+        if not win32gui.IsWindow(int(hwnd)):
+            return {
+                "ok": False,
+                "error": "focus target hwnd is no longer a live window",
+                "hwnd": int(hwnd),
+                "attempts": attempts,
+            }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"could not validate focus target hwnd: {exc}",
+            "hwnd": int(hwnd),
+            "attempts": attempts,
+        }
+
     try:
         if win32gui.IsIconic(hwnd):
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-            time.sleep(0.15)
-        if win32gui.GetForegroundWindow() == hwnd:
-            return {"ok": True}
-        # ALT tap trick: unlocks SetForegroundWindow for our process
-        _send_inputs([
-            _key_input(vk=0x12), _key_input(vk=0x12, flags=_KEYEVENTF_KEYUP),
-        ])
-        win32gui.SetForegroundWindow(hwnd)
-        time.sleep(0.12)
-        ok = win32gui.GetForegroundWindow() == hwnd
-        if not ok:
-            win32gui.BringWindowToTop(hwnd)
-            time.sleep(0.1)
-            ok = win32gui.GetForegroundWindow() == hwnd
-        return {"ok": ok}
+            attempt(
+                "restore_minimized",
+                lambda: win32gui.ShowWindow(hwnd, win32con.SW_RESTORE),
+                settle=0.15,
+            )
     except Exception as exc:
-        logger.warning("focus_window 失败 hwnd=%s: %s", hwnd, exc)
-        return {"ok": False, "error": str(exc)}
+        attempts.append({
+            "route": "inspect_minimized",
+            "called": False,
+            "error": str(exc)[:240],
+        })
+    if foreground_matches():
+        return {"ok": True, "route": "already_foreground", "attempts": attempts}
+
+    # Start/search/notification flyouts are hosted by a CoreWindow that can
+    # retain the foreground lock while rejecting every activation API.  A
+    # single Escape is the normal, reversible way to dismiss that transient
+    # shell surface.  Restrict it to this system window class; ordinary app
+    # dialogs and windows never receive the key.
+    try:
+        foreground_hwnd = int(win32gui.GetForegroundWindow() or 0)
+        foreground_class = str(
+            win32gui.GetClassName(foreground_hwnd) if foreground_hwnd else ""
+        ).strip().casefold()
+    except Exception:
+        foreground_class = ""
+    if foreground_class == "windows.ui.core.corewindow":
+        attempt(
+            "dismiss_transient_shell",
+            lambda: _send_inputs([
+                _key_input(vk=0x1B),
+                _key_input(vk=0x1B, flags=_KEYEVENTF_KEYUP),
+            ]),
+            settle=0.15,
+        )
+        if foreground_matches():
+            return {
+                "ok": True,
+                "route": "dismiss_transient_shell",
+                "attempts": attempts,
+            }
+
+    try:
+        _send_inputs([
+            _key_input(vk=0x12),
+            _key_input(vk=0x12, flags=_KEYEVENTF_KEYUP),
+        ])
+        attempts.append({"route": "alt_unlock", "called": True})
+    except Exception as exc:
+        attempts.append({
+            "route": "alt_unlock",
+            "called": False,
+            "error": str(exc)[:240],
+        })
+    if attempt("set_foreground", lambda: win32gui.SetForegroundWindow(hwnd), 0.1):
+        return {"ok": True, "route": "set_foreground", "attempts": attempts}
+    if attempt("bring_to_top", lambda: win32gui.BringWindowToTop(hwnd), 0.08):
+        return {"ok": True, "route": "bring_to_top", "attempts": attempts}
+
+    # Join input queues only for this activation attempt, then detach every
+    # successful attachment in reverse order even if a Win32 call raises.
+    attached_threads: list[int] = []
+    try:
+        current_thread = int(ctypes.windll.kernel32.GetCurrentThreadId() or 0)
+        foreground_hwnd = int(win32gui.GetForegroundWindow() or 0)
+        thread_ids = {
+            int(user32.GetWindowThreadProcessId(int(hwnd), None) or 0),
+            int(user32.GetWindowThreadProcessId(foreground_hwnd, None) or 0)
+            if foreground_hwnd else 0,
+        }
+        for thread_id in sorted(thread_ids):
+            if not thread_id or thread_id == current_thread:
+                continue
+            if bool(user32.AttachThreadInput(current_thread, thread_id, True)):
+                attached_threads.append(thread_id)
+
+        def attached_activation() -> None:
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            win32gui.BringWindowToTop(hwnd)
+            win32gui.SetActiveWindow(hwnd)
+            win32gui.SetForegroundWindow(hwnd)
+            try:
+                win32gui.SetFocus(hwnd)
+            except Exception:
+                pass
+
+        if attempt("attach_thread_input", attached_activation, 0.1):
+            return {
+                "ok": True,
+                "route": "attach_thread_input",
+                "attempts": attempts,
+            }
+    except Exception as exc:
+        attempts.append({
+            "route": "attach_thread_input_setup",
+            "called": False,
+            "error": str(exc)[:240],
+        })
+    finally:
+        try:
+            current_thread = int(ctypes.windll.kernel32.GetCurrentThreadId() or 0)
+            for thread_id in reversed(attached_threads):
+                try:
+                    user32.AttachThreadInput(
+                        current_thread, int(thread_id), False,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if attempt(
+        "switch_to_this_window",
+        lambda: user32.SwitchToThisWindow(int(hwnd), True),
+        0.1,
+    ):
+        return {
+            "ok": True,
+            "route": "switch_to_this_window",
+            "attempts": attempts,
+        }
+
+    def topmost_pulse() -> None:
+        flags = (
+            win32con.SWP_NOMOVE
+            | win32con.SWP_NOSIZE
+            | win32con.SWP_SHOWWINDOW
+        )
+        win32gui.SetWindowPos(
+            hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags,
+        )
+        win32gui.SetWindowPos(
+            hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, flags,
+        )
+        win32gui.SetForegroundWindow(hwnd)
+
+    if attempt("topmost_pulse", topmost_pulse, 0.1):
+        return {"ok": True, "route": "topmost_pulse", "attempts": attempts}
+
+    error = next(
+        (
+            str(item.get("error") or "")
+            for item in reversed(attempts)
+            if str(item.get("error") or "")
+        ),
+        "Windows did not grant foreground ownership",
+    )
+    logger.warning("focus_window failed hwnd=%s: %s", hwnd, error)
+    return {
+        "ok": False,
+        "error": error,
+        "hwnd": int(hwnd),
+        "foreground_hwnd": int(win32gui.GetForegroundWindow() or 0),
+        "attempts": attempts,
+    }
 
 
 @queued_desktop_action("focus_window")

@@ -7,6 +7,7 @@ import {
   resolveControlPlaneConnection,
   resolveControlPlaneUrl,
   runtimeCompatibilityError,
+  TaskClarificationRequired,
   websocketUrl,
 } from '../platform/client';
 import { edgeBranch, flowToArpGraph, RUNNABLE_FLOW_NODE_TYPES } from '../platform/flowToArpGraph';
@@ -248,7 +249,45 @@ describe('control plane client contracts', () => {
       expect(compiled.contract.satisfiable).toBe(true);
       const calls = fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
       expect(calls[0]?.[0].toString()).toContain('/api/v2/task-contracts/compile');
-      expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({ task: 'Export the current report', max_steps: 24, cold_start: false });
+      expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({ task: 'Export the current report', max_steps: 24, cold_start: false, require_gui: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('surfaces compiler clarification questions instead of starting an incomplete task', async () => {
+    const contract = {
+      format: 'task-contract/1', task_id: 'task-needs-input', task: 'send it to my phone',
+      intent: { original_text: 'send it to my phone', operation: ['send'], media_type: 'file', channel: '', recipient: '', source: '', destination: '', send_mode: 'send', subject: '', quality: 'normal', confidence: 0.4, ambiguous_fields: ['channel'], provenance: {} },
+      stages: [], obligations: [], final_conditions: [], clarification_questions: ['Which phone channel should I use?'],
+      satisfiable: false, missing_capabilities: [], compiler_version: 'typed-stage-5',
+    } as any;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      ok: false,
+      needs_input: true,
+      clarification_questions: ['Which phone channel should I use?'],
+      contract,
+      graph: { format: 'arp/1', nodes: [], edges: [] },
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const result = new ControlPlaneClient('http://127.0.0.1:8765').compileTask(
+        'send it to my phone', 24, true,
+      );
+      await expect(result).rejects.toThrow('Which phone channel should I use?');
+      await result.catch((error) => {
+        expect(error).toBeInstanceOf(TaskClarificationRequired);
+        expect((error as TaskClarificationRequired).questions).toEqual([
+          'Which phone channel should I use?',
+        ]);
+      });
+      const calls = fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
+      expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({
+        task: 'send it to my phone',
+        max_steps: 24,
+        cold_start: true,
+        require_gui: true,
+      });
     } finally {
       vi.unstubAllGlobals();
     }

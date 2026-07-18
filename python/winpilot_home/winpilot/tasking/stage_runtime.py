@@ -11,14 +11,17 @@ from ..agent.runtime_profile import RuntimeProfile, build_runtime_profile
 from ..agent.tools import ToolSession
 from ..orchestrator.contracts import ArpNode
 from ..orchestrator.runtime import NodeResult
-from ..perception import win32
+from ..perception import apps, win32
+from ..perception.app_aliases import expand as expand_app_aliases
 from ..utils.log import BUS
 from .adapters import CommunicationAdapter, DomainAdapterRegistry
 from .artifacts import ArtifactStore
 from .capability import CapabilityPlanner
 from .completion import CompletionContractVerifier
+from .conversation import generate_conversation_response
 from .contracts import StageType, TaskContract, TaskIntent, TaskStage
 from .evidence import EvidenceRegistry
+from .execution_context import normalize_execution_context, validated_handoff_target
 from .interaction_stage_runtime import (
     INTERACTION_STAGE_TYPES,
     InteractionStageEngine,
@@ -32,6 +35,7 @@ from .recovery import RecoveryPolicy
 
 
 SEMANTIC_EXECUTION_STAGE_TYPES = frozenset({
+    StageType.EXECUTE_DESKTOP_TASK,
     StageType.DRAW_ARTIFACT,
     StageType.CREATE_OR_EDIT_ARTIFACT,
     StageType.EXECUTE_WORKSPACE_TASK,
@@ -131,6 +135,7 @@ class StageRuntime:
         operation_by_stage = {
             StageType.OPEN_APPLICATION: "open",
             StageType.FOCUS_WINDOW: "focus",
+            StageType.EXECUTE_DESKTOP_TASK: "operate",
             StageType.CREATE_OR_EDIT_ARTIFACT: "edit",
             StageType.DRAW_ARTIFACT: "draw",
             StageType.CAPTURE_ARTIFACT: "capture",
@@ -176,21 +181,56 @@ class StageRuntime:
             "stage_scope": f"{contract.task_id}:{stage.id}",
             "stage_operation": "task_contract_stage",
         })
+        preserve_original_intent = bool(
+            stage.type == StageType.EXECUTE_DESKTOP_TASK
+            and parameters.get("preserve_original_intent") is True
+        )
+        surface_output_stage = bool(
+            stage.type == StageType.EXECUTE_DESKTOP_TASK
+            and str(parameters.get("surface_output_mode") or "").strip()
+            and not preserve_original_intent
+        )
         payload.update({
             "original_text": str(goal or ""),
-            "operation": [operation_by_stage.get(stage.type, "execute")],
+            "operation": (
+                list(payload.get("operation") or [])
+                if preserve_original_intent
+                else [
+                    "draw"
+                    if surface_output_stage
+                    else operation_by_stage.get(stage.type, "execute")
+                ]
+            ),
             "source": str(
                 parameters.get("source")
                 or parameters.get("app")
                 or payload.get("source")
                 or ""
             ),
-            "subject": str(parameters.get("subject") or payload.get("subject") or ""),
-            "quality": str(parameters.get("quality") or payload.get("quality") or "normal"),
-            "ambiguous_fields": [],
+            "subject": str(
+                parameters.get("surface_output_subject")
+                or parameters.get("subject")
+                or payload.get("subject")
+                or ""
+            ),
+            "quality": str(
+                parameters.get("surface_output_quality")
+                or parameters.get("quality")
+                or payload.get("quality")
+                or "normal"
+            ),
+            "ambiguous_fields": (
+                list(payload.get("ambiguous_fields") or [])
+                if preserve_original_intent
+                else []
+            ),
             "provenance": provenance,
         })
-        if stage.type not in communication_stages:
+        preserves_communication = bool(
+            stage.type in communication_stages
+            or preserve_original_intent
+        )
+        if not preserves_communication:
             payload.update({
                 "channel": "",
                 "recipient": "",
@@ -213,7 +253,14 @@ class StageRuntime:
             StageType.SEND_ARTIFACT,
             StageType.VERIFY_DELIVERY,
         }
-        active = stage.type in communication_stages
+        active = bool(
+            stage.type in communication_stages
+            or (
+                stage.type == StageType.EXECUTE_DESKTOP_TASK
+                and stage.parameters.get("preserve_original_intent") is True
+                and "send" in intent.operation
+            )
+        )
         return {
             "active": active,
             "recipient": intent.recipient if active else "",
@@ -225,9 +272,19 @@ class StageRuntime:
     def _resolve_hwnd(source: str) -> int:
         source = str(source or "").strip()
         if source and source not in {"active_window", "foreground", "current"}:
-            match = win32.find_window(source)
-            if match:
-                return int(match.get("hwnd") or 0)
+            queries = list(dict.fromkeys(expand_app_aliases(source) or [source]))
+            try:
+                for candidate in apps.resolve(source, max_results=3):
+                    queries.append(str(candidate.get("name") or ""))
+                    queries.extend(
+                        str(item) for item in (candidate.get("aliases") or [])
+                    )
+            except Exception:
+                pass
+            for query in dict.fromkeys(item.strip() for item in queries if item.strip()):
+                match = win32.find_window(query)
+                if match:
+                    return int(match.get("hwnd") or 0)
             # An explicit artifact source must never silently degrade to an
             # unrelated foreground application.
             return 0
@@ -281,6 +338,112 @@ class StageRuntime:
             if executed(payload):
                 return True
         return False
+
+    @staticmethod
+    def _desktop_effect_summary(history: list | tuple) -> dict[str, Any]:
+        """Summarize successful, non-observational work from a child runner.
+
+        This is intentionally capability-shaped rather than application-
+        shaped.  It prevents an open-only run (and a capability list typed into
+        Notepad) from satisfying a larger desktop workflow while still
+        allowing arbitrary future applications to use the same GUI controls.
+        """
+
+        category_by_tool = {
+            "click": "gui_control",
+            "hotkey": "gui_control",
+            "scroll": "gui_control",
+            "drag": "gui_control",
+            "type_text": "gui_control",
+            "run_action_batch": "gui_control",
+            "execute_subgoal": "gui_control",
+            "draw_strokes": "drawing",
+            "capture_artifact": "artifact",
+            "screenshot": "artifact",
+            "send_text": "communication",
+            "send_artifact": "communication",
+            "paste_image_file": "communication",
+            "web_search": "research",
+            "run_shell": "workspace",
+            "write_file": "workspace",
+            "apply_patch": "workspace",
+            "schedule_task": "automation",
+            "call_mcp_tool": "external_provider",
+        }
+        ignored = {
+            "open_app", "launch", "focus_window", "find_app",
+            "find_program", "list_windows", "scan_windows", "observe",
+            "read_text", "vlm_describe", "vlm_verify", "done", "blocked",
+            "fail", "revise_plan", "complete_subgoal",
+            "discover_mcp_tools",
+        }
+        successful_tools: list[str] = []
+        categories: set[str] = set()
+        evidence_packets: list[dict[str, Any]] = []
+        for item in history or []:
+            if not isinstance(item, (list, tuple)) or len(item) < 3:
+                continue
+            name = str(item[0] or "").strip().casefold()
+            raw = item[2]
+            payload = raw if isinstance(raw, dict) else _json(str(raw or ""))
+            if name in ignored or not isinstance(payload, dict):
+                continue
+            if payload.get("blocked") is True or payload.get("ok") is not True:
+                continue
+            successful_tools.append(name)
+            categories.add(category_by_tool.get(name, "gui_control"))
+            packet = payload.get("evidence_packet")
+            if isinstance(packet, dict):
+                evidence_packets.append(packet)
+        return {
+            "successful_effect_count": len(successful_tools),
+            "successful_effect_tools": successful_tools,
+            "effect_categories": sorted(categories),
+            "effect_category_count": len(categories),
+            "evidence_packets": evidence_packets[-8:],
+            "open_only": not successful_tools,
+        }
+
+    @staticmethod
+    def _validated_open_result(data: dict[str, Any], app: str) -> dict[str, Any]:
+        """Fail closed unless the controller proved a concrete target window."""
+
+        hwnd = int(data.get("target_hwnd") or 0)
+        focus = data.get("focus") if isinstance(data.get("focus"), dict) else {}
+        launch = data.get("launch") if isinstance(data.get("launch"), dict) else {}
+        launch_focus = (
+            launch.get("focus_after_launch")
+            if isinstance(launch.get("focus_after_launch"), dict)
+            else {}
+        )
+        focused = bool(
+            focus.get("ok") is True
+            or launch_focus.get("ok") is True
+            or launch.get("foreground_matches_target") is True
+            or data.get("foreground_matches_target") is True
+        )
+        verified = bool(
+            data.get("ok") is True
+            and data.get("verified") is True
+            and hwnd > 0
+            and focused
+        )
+        return {
+            "ok": verified,
+            "verified": verified,
+            "app": app,
+            "target_hwnd": hwnd,
+            "title": str(data.get("title") or ""),
+            "focused": focused,
+            "controller_result": data,
+            **({
+                "failure_type": "application_target_unverified",
+                "error": (
+                    "controller did not prove that the requested application "
+                    "owns a focused target window"
+                ),
+            } if not verified else {}),
+        }
 
     @staticmethod
     def _draw_boundary_criteria(subject: str, quality: str) -> str:
@@ -679,17 +842,87 @@ class StageRuntime:
             )
             session.run_id = context["run_id"]
             try:
-                data = _json(session.dispatch("open_app", {"name": app}).text)
+                data = _json(session.dispatch(
+                    "open_app", {"name": app, "strict_resolution": True},
+                ).text)
             finally:
                 session.close()
-            if data.get("ok") is not True:
-                raise RuntimeError(data.get("error") or f"could not open {app}")
-            record = registry.record("application.open", provider="local_controller", verified=True, stage_id=stage.id, value=app, metadata=data)
+            verdict = self._validated_open_result(data, app)
+            if verdict.get("ok") is not True:
+                failure = RuntimeError(
+                    verdict.get("error") or data.get("error") or f"could not open {app}"
+                )
+                failure.failure_type = str(
+                    verdict.get("failure_type") or "application_target_unverified"
+                )
+                failure.stage_details = {"open_verification": verdict}
+                raise failure
+            record = registry.record(
+                "application.open",
+                provider="local_controller",
+                verified=True,
+                stage_id=stage.id,
+                value=app,
+                metadata=verdict,
+            )
             return NodeResult(output=self._stage_output(stage, started, evidence=record))
 
         if stage.type in SEMANTIC_EXECUTION_STAGE_TYPES:
+            surface_output_required = bool(
+                stage.type == StageType.DRAW_ARTIFACT
+                or str(params.get("surface_output_mode") or "").strip()
+            )
+            if (
+                stage.type == StageType.EXECUTE_SEMANTIC_TASK
+                and str(params.get("response_mode") or "") == "conversation"
+            ):
+                response = generate_conversation_response(
+                    contract.task,
+                    list(contract.session_context or []),
+                )
+                record = registry.record(
+                    "stage.verified_outcome",
+                    provider="semantic_stage_done",
+                    verified=True,
+                    stage_id=stage.id,
+                    value=response.text,
+                    metadata={
+                        "response_mode": "conversation",
+                        "text_only": True,
+                        "model_calls": response.model_calls,
+                    },
+                )
+                return NodeResult(output=self._stage_output(
+                    stage,
+                    started,
+                    result=response.text,
+                    response_text=response.text,
+                    model_calls=response.model_calls,
+                    model_elapsed_ms=response.model_elapsed_ms,
+                    controller_elapsed_ms=0,
+                    evidence=record,
+                ))
             app = str(params.get("app") or "").strip()
+            if app.casefold() in {"active_window", "foreground", "current"}:
+                app = ""
             bound_hwnd = 0
+            bound_target_hint = app
+            if not app:
+                execution_context = normalize_execution_context(context.get("inputs"))
+                handoff_hwnd, handoff_error = validated_handoff_target(execution_context)
+                if handoff_error is not None:
+                    failure = RuntimeError(str(
+                        handoff_error.get("reason") or "desktop target handoff failed"
+                    ))
+                    failure.failure_type = str(
+                        handoff_error.get("failure_type") or "target_binding_failed"
+                    )
+                    failure.stage_details = {"desktop_handoff": handoff_error}
+                    raise failure
+                bound_hwnd = int(handoff_hwnd or 0)
+                target_window = execution_context.get("target_window")
+                if isinstance(target_window, dict):
+                    bound_target_hint = str(target_window.get("title") or "")
             if app:
                 session = ToolSession(
                     stop_event=stop_event,
@@ -702,17 +935,33 @@ class StageRuntime:
                 )
                 session.run_id = context["run_id"]
                 try:
-                    opened = _json(session.dispatch("open_app", {"name": app}).text)
+                    opened = _json(session.dispatch(
+                        "open_app", {"name": app, "strict_resolution": True},
+                    ).text)
                 finally:
                     session.close()
-                if opened.get("ok") is not True:
-                    raise RuntimeError(opened.get("error") or f"could not open {app}")
-                bound_hwnd = self._resolve_hwnd(app)
-                if not bound_hwnd:
-                    raise RuntimeError(f"opened application did not expose a bindable target window: {app}")
+                open_verdict = self._validated_open_result(opened, app)
+                if open_verdict.get("ok") is not True:
+                    failure = RuntimeError(
+                        open_verdict.get("error")
+                        or opened.get("error")
+                        or f"could not open {app}"
+                    )
+                    failure.failure_type = "application_target_unverified"
+                    failure.stage_details = {"open_verification": open_verdict}
+                    raise failure
+                bound_hwnd = int(open_verdict.get("target_hwnd") or 0)
+            subject = str(
+                params.get("surface_output_subject")
+                or params.get("subject")
+                or "the requested subject"
+            )
+            quality = str(
+                params.get("surface_output_quality")
+                or params.get("quality")
+                or "normal"
+            )
             if stage.type == StageType.DRAW_ARTIFACT:
-                subject = str(params.get("subject") or "the requested subject")
-                quality = str(params.get("quality") or "normal")
                 goal = (
                     f"In the already opened {app or 'drawing application'}, draw {subject}. "
                     + (
@@ -736,6 +985,40 @@ class StageRuntime:
             else:
                 goal = str(params.get("goal") or contract.task)
                 stage_guidance = {
+                    StageType.EXECUTE_DESKTOP_TASK: (
+                        "Execute the complete original desktop request from the bound or currently visible context. "
+                        "Treat every clause as mandatory and keep every user-named desktop application as a hard "
+                        "constraint. Any explicitly named or initially bound app must be used, while cross-application handoffs that "
+                        "the original goal explicitly requires are allowed and must be verified on both sides. "
+                        "Treat the initial plan as provisional. Before asking the user for a value that can be found "
+                        "on this machine, inspect the current frame, visible windows, installed applications, and "
+                        "current-run working facts. Record newly grounded facts and revise the remaining plan when "
+                        "an observation changes the route; never invent a missing app, recipient, file, or UI state. "
+                        "For a cross-application handoff, create a managed artifact and pass its returned identity "
+                        "to the destination capability. Do not open the source application's Save or Export UI merely "
+                        "to transfer an already visible artifact unless the user explicitly requested a saved file. "
+                        "When a recipient is known but the communication channel is unresolved, call open_conversation "
+                        "with the exact recipient and omit app. The runtime will try only locally grounded registered "
+                        "clients and bind a route only after proving the recipient and composer; use the resulting bound "
+                        "route directly instead of repeatedly searching MCP or guessing a default client. "
+                        "Prefer target-bound UI Automation and fresh visual observations; use raw "
+                        "coordinates only from the latest authoritative frame. For clicks, drags, or paths that "
+                        "must stay inside one visible board, pane, lane, canvas, or work area, declare a "
+                        "constraint_frame_region (or constraint_region for physical-coordinate tools) so the runtime "
+                        "rejects any point outside that current-frame ROI. "
+                        "Opening or focusing the app is "
+                        "preparation, never completion. Prefer one compound semantic Controller transaction over "
+                        "one model round per repeated key, button, or drawing primitive. If a complete printable "
+                        "sequence has no visible effect, use the Controller's visible-affordance recovery instead "
+                        "of guessing coordinates. For structured office/document work you may first discover "
+                        "an exact explicitly configured MCP tool; if none matches or it fails, continue through "
+                        "the GUI, and always verify the resulting file or visible state independently. Do not "
+                        "replace a requested installed client with a web "
+                        "site unless the user explicitly allowed that fallback. After each meaningful action, "
+                        "check the visible effect; if the same action makes no progress, change strategy or "
+                        "report the blocker instead of repeating it. Call done only after the current frame and "
+                        "action trace jointly prove the whole request."
+                    ),
                     StageType.EXECUTE_WORKSPACE_TASK: (
                         "Operate on the configured workspace with deterministic file and shell tools. "
                         "Inspect before changing anything, keep edits scoped to the request, and run "
@@ -758,8 +1041,25 @@ class StageRuntime:
                         "satisfies the request. Do not invent a desktop artifact or GUI target."
                     ),
                 }.get(stage.type, "")
-                provider = "semantic_stage_done"
-                predicate = "stage.verified_outcome"
+                if (
+                    stage.type == StageType.EXECUTE_DESKTOP_TASK
+                    and surface_output_required
+                ):
+                    stage_guidance += (
+                        " The request includes continuous visible surface output. This is a general "
+                        "desktop capability, not a Paint-specific route: keep every user-named app "
+                        "constraint, bind that real app first, then use execute_subgoal draws, direct "
+                        "draw_strokes, or drag from the latest frame. Let the Controller discover the "
+                        "current work surface and enforce constraint_frame_region containment. Treat "
+                        "the independent surface semantic verdict as evidence for that clause only; "
+                        "continue all remaining cross-app, save, send, or verification clauses before done."
+                    )
+                if stage.type == StageType.EXECUTE_DESKTOP_TASK:
+                    provider = "desktop_closed_loop_verifier"
+                    predicate = "desktop.full_goal_verified"
+                else:
+                    provider = "semantic_stage_done"
+                    predicate = "stage.verified_outcome"
             profile = build_runtime_profile(
                 goal,
                 task_contract=contract,
@@ -770,25 +1070,22 @@ class StageRuntime:
                     if stage.type == StageType.DRAW_ARTIFACT and stage.execution
                     else ()
                 ),
-                inline_semantic_verification=stage.type == StageType.DRAW_ARTIFACT,
+                inline_semantic_verification=surface_output_required,
             )
             stage_intent = self._stage_scoped_intent(contract, stage, goal)
             runner = build_runner(
                 goal,
                 stop_event=stop_event,
-                max_steps_override=(
-                    3
-                    if stage.type == StageType.DRAW_ARTIFACT
-                    else min(24, max(4, int(params.get("max_steps") or 40)))
-                ),
+                max_steps_override=max(1, int(params.get("max_steps") or 40)),
                 runtime_profile=profile,
                 task_intent=stage_intent,
                 communication_context=self._stage_communication_context(
                     stage, stage_intent,
                 ),
+                session_context=list(contract.session_context or []),
             )
             if bound_hwnd:
-                runner.bind_target_window(bound_hwnd, app)
+                runner.bind_target_window(bound_hwnd, bound_target_hint)
             try:
                 result = runner.run()
             except Exception as exc:
@@ -810,18 +1107,31 @@ class StageRuntime:
             )
             runner_verified = bool(
                 runner.status == "done" and getattr(runner, "_done_verified", False)
-                and (stage.type != StageType.DRAW_ARTIFACT or successful_draw_mutation)
+                and (not surface_output_required or successful_draw_mutation)
                 and (
-                    stage.type != StageType.DRAW_ARTIFACT
-                    or bool(getattr(runner, "_inline_stage_semantic_passed", False))
+                    not surface_output_required
+                    or bool(getattr(runner, "_surface_output_semantic_passed", False))
                 )
             )
+            desktop_effects: dict[str, Any] = {}
+            if stage.type == StageType.EXECUTE_DESKTOP_TASK:
+                desktop_effects = self._desktop_effect_summary(
+                    list(getattr(runner, "_tool_history", []) or [])
+                )
+                minimum_categories = max(
+                    1,
+                    int(params.get("minimum_effect_categories") or 1),
+                )
+                if params.get("forbid_open_only") is True and desktop_effects.get("open_only"):
+                    runner_verified = False
+                if int(desktop_effects.get("effect_category_count") or 0) < minimum_categories:
+                    runner_verified = False
             boundary_verdict: dict[str, Any] = {}
             boundary_calls = 0
             boundary_elapsed_ms = 0
             if (
                 not runner_verified
-                and stage.type == StageType.DRAW_ARTIFACT
+                and surface_output_required
                 and successful_draw_mutation
                 and not bool(getattr(runner, "_inline_stage_semantic_attempted", False))
             ):
@@ -901,6 +1211,7 @@ class StageRuntime:
                         getattr(runner, "_inline_stage_semantic_last_verdict", {}) or {}
                     ),
                     "successful_draw_mutation": successful_draw_mutation,
+                    "desktop_effects": desktop_effects,
                     "boundary_verification": boundary_verdict,
                     **metrics,
                 }
@@ -919,6 +1230,7 @@ class StageRuntime:
                         getattr(runner, "_inline_stage_semantic_last_verdict", {}) or {}
                     ),
                     "successful_draw_mutation": successful_draw_mutation,
+                    "desktop_effects": desktop_effects,
                     "boundary_verification": boundary_verdict,
                 },
             )
@@ -955,7 +1267,9 @@ class StageRuntime:
             return NodeResult(output=self._stage_output(
                 stage, started, child_run_id=runner.run_id, result=result,
                 usage=dict(runner.usage_total), model_calls=model_calls,
-                boundary_verification=boundary_verdict, evidence=record,
+                boundary_verification=boundary_verdict,
+                desktop_effects=desktop_effects,
+                evidence=record,
                 **metrics,
             ))
 

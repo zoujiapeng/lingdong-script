@@ -5,8 +5,10 @@ vi.mock('electron', () => ({
 }));
 
 import {
+  findFreePort,
   isRendererSafePort,
   MIN_RENDERER_SAFE_PORT,
+  rendererSafePortCandidates,
   runtimeCompatibilityProblem,
 } from '../../main/winpilotServer';
 
@@ -27,6 +29,17 @@ describe('WinPilot 托管服务兼容性提示', () => {
     expect(isRendererSafePort(MIN_RENDERER_SAFE_PORT)).toBe(true);
     expect(isRendererSafePort(49152)).toBe(true);
     expect(isRendererSafePort(65536)).toBe(false);
+  });
+
+  it('不依赖操作系统的低位动态端口范围', async () => {
+    const candidates = rendererSafePortCandidates(7, 32);
+    expect(candidates).toHaveLength(32);
+    expect(new Set(candidates).size).toBe(32);
+    expect(candidates.every(isRendererSafePort)).toBe(true);
+    expect(candidates.every((port) => port >= 49152)).toBe(true);
+
+    const port = await findFreePort();
+    expect(isRendererSafePort(port)).toBe(true);
   });
 
   it('使用中文说明运行时协议过期', () => {
