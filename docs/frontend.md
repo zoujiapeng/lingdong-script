@@ -160,16 +160,15 @@ TypeScript 的 renderer、Electron main、CLI 和 AI 配置都启用
 - Windows E2E：必须走 `/api/v2/task-contracts/compile → /api/v2/arp/runs`，使用外部
   ground truth 或真实目标应用证据，不能用 mock 命名为 E2E。
 
-2026-07-16 的本轮浏览器验收读取真实冷启动 Paint→QQ run
-`arp-20260716-215314-7f98cd`：重启运行时后恢复 5 个 stage、4 个图片工件、10 条
-合同证据、发送预览与真实送达义务，控制台无 error。它证明历史审计前端链路，不是
-重新执行 QQ，也不是跨软件成功率统计。
+浏览器组件验收可以读取持久化 run，核对 stage、artifact、evidence 和 completion
+展示，但它只证明前端审计链路，不是重新执行真实 GUI，也不能替代 Electron 客户端
+E2E。
 
 持续交互的前端状态与终态分离：只有 Task Contract 声明需要真人继续时，运行卡才显示
 `waiting_external`、“等待外部参与者”和“持续会话尚未终结”。Agent 当前回合已通过会
 单独显示，用户未继续时显示“外部参与者未响应”，不会渲染为整个任务“已完成”，也不会
-把普通自主任务的失败改成等待。2026-07-17 的自主视觉矩阵从同一 API 入口完成
-`8 passed, 1 deselected in 155.79s`；共享回合因需要真人操作被有意排除在终态矩阵外。
+把普通自主任务的失败改成等待。共享回合需要外部参与者时应从自主终态矩阵排除，
+详细通过定义见 `testing.md`。
 
 ## 已知限制
 
