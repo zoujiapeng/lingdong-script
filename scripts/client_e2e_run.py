@@ -26,8 +26,8 @@ import psutil
 import win32api
 import win32con
 import win32gui
+import uiautomation as auto
 from PIL import ImageGrab
-from pywinauto import Desktop, keyboard
 
 
 WORKSPACE = Path(__file__).resolve().parents[1]
@@ -143,29 +143,66 @@ def _slug(value: str) -> str:
 
 
 def _visible_descendants(window: Any, control_type: str) -> list[Any]:
+    expected_type = f"{control_type}Control"
     items: list[Any] = []
-    for control in window.descendants(control_type=control_type):
+    for control, _depth in auto.WalkControl(window, includeTop=False):
         try:
-            if control.is_visible():
+            if control.ControlTypeName == expected_type and not control.IsOffscreen:
                 items.append(control)
         except Exception:
             continue
     return items
 
 
+def _control_value(control: Any) -> str:
+    pattern = control.GetPattern(auto.PatternId.ValuePattern)
+    if pattern is None:
+        raise RuntimeError(f"控件不支持 ValuePattern: {control.ControlTypeName}")
+    return str(pattern.Value or "")
+
+
+def _set_control_value(control: Any, value: str) -> None:
+    pattern = control.GetPattern(auto.PatternId.ValuePattern)
+    if pattern is None:
+        raise RuntimeError(f"控件不支持 ValuePattern: {control.ControlTypeName}")
+    pattern.SetValue(value)
+
+
+def _toggle_state(control: Any) -> int:
+    pattern = control.GetPattern(auto.PatternId.TogglePattern)
+    if pattern is None:
+        raise RuntimeError(f"控件不支持 TogglePattern: {control.ControlTypeName}")
+    return int(pattern.ToggleState)
+
+
+def _toggle(control: Any) -> None:
+    pattern = control.GetPattern(auto.PatternId.TogglePattern)
+    if pattern is None:
+        raise RuntimeError(f"控件不支持 TogglePattern: {control.ControlTypeName}")
+    pattern.Toggle()
+
+
 class ElectronClientDriver:
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        hwnds: list[int] = []
+
+        def collect(hwnd: int, _extra: Any) -> bool:
+            if win32gui.IsWindowVisible(hwnd) and win32gui.GetWindowText(hwnd) == CLIENT_TITLE:
+                hwnds.append(int(hwnd))
+            return True
+
+        win32gui.EnumWindows(collect, None)
         windows = [
-            window
-            for window in Desktop(backend="uia").windows()
-            if window.window_text() == CLIENT_TITLE
+            control
+            for hwnd in hwnds
+            if (control := auto.ControlFromHandle(hwnd)) is not None
         ]
         if not windows:
             raise RuntimeError("未找到正在运行的‘灵动脚本’ Electron 客户端")
-        self.window = max(windows, key=lambda item: psutil.Process(item.process_id()).create_time())
-        process = psutil.Process(self.window.process_id())
+        self.window = max(windows, key=lambda item: psutil.Process(item.ProcessId).create_time())
+        process = psutil.Process(self.window.ProcessId)
         command_line = process.cmdline()
         executable = process.exe()
         workspace_verified = any(
@@ -175,7 +212,7 @@ class ElectronClientDriver:
         )
         self.identity = ClientIdentity(
             pid=process.pid,
-            hwnd=int(self.window.handle),
+            hwnd=int(self.window.NativeWindowHandle),
             executable=executable,
             command_line=command_line,
             workspace_verified=workspace_verified,
@@ -268,7 +305,7 @@ class ElectronClientDriver:
             if focused:
                 break
             try:
-                self.window.set_focus()
+                self.window.SetFocus()
             except Exception as exc:
                 errors.append(f"{type(exc).__name__}: {exc}")
             time.sleep(0.1)
@@ -294,25 +331,21 @@ class ElectronClientDriver:
 
         def ready() -> bool:
             try:
-                # Chromium replaces its UIA document provider during Ctrl+R.
-                # A pywinauto wrapper created before that replacement can keep
-                # returning an empty/stale descendant tree even though the same
-                # HWND is visibly ready. Rebind the wrapper on every probe.
-                refreshed = Desktop(backend="uia").window(
-                    handle=self.identity.hwnd,
-                )
-                if refreshed.exists(timeout=0.2):
+                # Chromium replaces its UIA document provider during Ctrl+R;
+                # rebind the control from the verified HWND on every probe.
+                refreshed = auto.ControlFromHandle(self.identity.hwnd)
+                if refreshed is not None and refreshed.Exists(maxSearchSeconds=0.2):
                     self.window = refreshed
                 if NAV_AGENT in {
-                    item.window_text().strip() for item in self.buttons()
+                    item.Name.strip() for item in self.buttons()
                 }:
                     return True
                 # Chromium may expose the Document text before its descendant
                 # Button providers settle after a minimized window is restored.
                 # The task editor and run control together distinguish the
                 # actual agent page from a partial shell or a blank renderer.
-                for document in self.window.descendants(control_type="Document"):
-                    value = str(document.window_text() or "")
+                for document in _visible_descendants(self.window, "Document"):
+                    value = str(document.Name or "")
                     if NAV_AGENT in value and RUN_TASK in value:
                         return True
                 return False
@@ -333,7 +366,7 @@ class ElectronClientDriver:
         # that provider time to settle before issuing a destructive reload.
         if wait_ready(initial_timeout):
             return False
-        keyboard.send_keys("^r")
+        auto.SendKeys("{Ctrl}r")
         if wait_ready(timeout):
             return True
         try:
@@ -349,7 +382,7 @@ class ElectronClientDriver:
         values: list[str] = []
         for control in _visible_descendants(self.window, "Text"):
             try:
-                value = control.window_text().strip()
+                value = control.Name.strip()
                 if value:
                     values.append(value)
             except Exception:
@@ -359,7 +392,7 @@ class ElectronClientDriver:
     def button(self, title: str, *, prefix: bool = False) -> Any:
         matches = []
         for control in self.buttons():
-            name = control.window_text().strip()
+            name = control.Name.strip()
             if name == title or prefix and name.startswith(title):
                 matches.append(control)
         if not matches:
@@ -367,12 +400,16 @@ class ElectronClientDriver:
         return matches[0]
 
     def navigate(self, title: str) -> None:
-        self.button(title).click_input()
+        self.button(title).Click()
         time.sleep(0.8)
 
     def capture_window(self, name: str) -> str:
         path = self.output_dir / name
-        self.window.capture_as_image().save(path)
+        rect = self.window.BoundingRectangle
+        ImageGrab.grab(
+            bbox=(rect.left, rect.top, rect.right, rect.bottom),
+            all_screens=True,
+        ).save(path)
         return str(path)
 
     def capture_desktop(self, name: str) -> str:
@@ -384,29 +421,29 @@ class ElectronClientDriver:
         self.restore_and_focus()
         self.navigate(NAV_ASSETS)
         session_button = self.button("会话 ", prefix=True)
-        before_name = session_button.window_text().strip()
+        before_name = session_button.Name.strip()
         before_match = re.search(r"(\d+)$", before_name)
         before = int(before_match.group(1)) if before_match else -1
-        session_button.click_input()
+        session_button.Click()
         time.sleep(0.5)
         try:
-            self.button("清空会话记忆").click_input()
+            self.button("清空会话记忆").Click()
         except RuntimeError:
             # Chromium can omit title-only icon buttons from UIA names; reload
             # the tab once before treating it as a client defect.
-            session_button.click_input()
+            session_button.Click()
             time.sleep(0.3)
-            self.button("清空会话记忆").click_input()
+            self.button("清空会话记忆").Click()
         cleared = True
         deadline = time.time() + 15
         while time.time() < deadline:
             time.sleep(0.3)
-            now = self.button("会话 ", prefix=True).window_text().strip()
+            now = self.button("会话 ", prefix=True).Name.strip()
             if re.search(r"\b0$", now):
                 break
         else:
             raise RuntimeError("通过客户端清空会话后，会话计数未归零")
-        after_name = self.button("会话 ", prefix=True).window_text().strip()
+        after_name = self.button("会话 ", prefix=True).Name.strip()
         after_match = re.search(r"(\d+)$", after_name)
         after = int(after_match.group(1)) if after_match else -1
         if after != 0:
@@ -425,40 +462,40 @@ class ElectronClientDriver:
         if not edits:
             raise RuntimeError("客户端目标输入框不可见")
         goal = next(
-            (edit for edit in edits if "描述希望代理" in edit.window_text()),
+            (edit for edit in edits if "描述希望代理" in edit.Name),
             edits[0],
         )
-        goal.set_edit_text(task)
+        _set_control_value(goal, task)
 
         checkboxes = _visible_descendants(self.window, "CheckBox")
         checkbox = next(
-            (item for item in checkboxes if item.window_text() == COLD_START),
+            (item for item in checkboxes if item.Name == COLD_START),
             None,
         )
         if checkbox is None:
             raise RuntimeError("客户端冷启动开关不可见")
-        if checkbox.get_toggle_state() != 1:
-            checkbox.click_input()
+        if _toggle_state(checkbox) != 1:
+            _toggle(checkbox)
             time.sleep(0.2)
-        if checkbox.get_toggle_state() != 1:
+        if _toggle_state(checkbox) != 1:
             raise RuntimeError("无法通过客户端开启冷启动")
 
         spinners = _visible_descendants(self.window, "Spinner")
         if not spinners:
             raise RuntimeError("客户端步骤上限控件不可见")
         spinner = spinners[0]
-        spinner.click_input()
-        keyboard.send_keys("^a")
-        keyboard.send_keys(str(max_steps))
-        keyboard.send_keys("{TAB}")
+        spinner.Click()
+        auto.SendKeys("{Ctrl}a")
+        auto.SendKeys(str(max_steps))
+        auto.SendKeys("{Tab}")
         time.sleep(0.2)
 
-        value = goal.get_value()
+        value = _control_value(goal)
         if value != task:
             raise RuntimeError(f"客户端目标输入不一致: {value!r}")
         return {
             "task_input": value,
-            "cold_start_toggle": checkbox.get_toggle_state(),
+            "cold_start_toggle": _toggle_state(checkbox),
             "max_steps": max_steps,
         }
 
@@ -473,7 +510,7 @@ class ElectronClientDriver:
         self.restore_and_focus()
         requested = False
         try:
-            self.button(STOP_TASK).click_input()
+            self.button(STOP_TASK).Click()
             requested = True
         except RuntimeError:
             # The run may have become terminal between the status poll and
@@ -485,7 +522,7 @@ class ElectronClientDriver:
         while time.time() < deadline:
             try:
                 run_button_restored = RUN_TASK in {
-                    button.window_text().strip() for button in self.buttons()
+                    button.Name.strip() for button in self.buttons()
                 }
             except Exception:
                 run_button_restored = False
@@ -507,22 +544,22 @@ class ElectronClientDriver:
         task_controls = []
         for control in _visible_descendants(self.window, "Text"):
             try:
-                if control.window_text().strip() == task:
+                if control.Name.strip() == task:
                     task_controls.append(control)
             except Exception:
                 continue
         if not task_controls:
             return ""
-        window_top = self.window.rectangle().top
-        topbar_task = min(task_controls, key=lambda item: item.rectangle().top)
-        if topbar_task.rectangle().top > window_top + 150:
+        window_top = self.window.BoundingRectangle.top
+        topbar_task = min(task_controls, key=lambda item: item.BoundingRectangle.top)
+        if topbar_task.BoundingRectangle.top > window_top + 150:
             return ""
-        task_rect = topbar_task.rectangle()
+        task_rect = topbar_task.BoundingRectangle
         candidates: list[tuple[int, str]] = []
         for control in _visible_descendants(self.window, "Text"):
             try:
-                name = control.window_text().strip()
-                rect = control.rectangle()
+                name = control.Name.strip()
+                rect = control.BoundingRectangle
             except Exception:
                 continue
             if (
@@ -609,7 +646,7 @@ class ElectronClientDriver:
             # terminal signal.
             try:
                 button_names = {
-                    item.window_text().strip() for item in self.buttons()
+                    item.Name.strip() for item in self.buttons()
                 }
                 texts = self.texts()
             except Exception:
@@ -1056,7 +1093,7 @@ def run_case(
         result["screenshots"] = {
             "before_submit": driver.capture_window("before-submit.png")
         }
-        driver.button(RUN_TASK).click_input()
+        driver.button(RUN_TASK).Click()
         submitted_at = time.time()
         result["submitted_at"] = datetime.now().astimezone().isoformat()
         print(
