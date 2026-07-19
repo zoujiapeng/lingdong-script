@@ -35,9 +35,11 @@
 ```
 
 前端不会把整句目标直接转换成单个 `agent_goal`。跨应用、工件、通信和实时互动的
-阶段、能力、工具与 verifier 都来自同一个 Task Contract。停止按钮统一调用
-`POST /api/v2/runs/{run_id}/cancel`，因此 Agent 与 ARP 不再需要前端猜测两套取消
-端点。
+阶段、能力、工具与 verifier 都来自同一个 Task Contract。运行控制始终绑定父 ARP：
+“暂停/继续”分别调用 `POST /api/v2/runs/{run_id}/pause|resume`，“停止”调用
+`POST /api/v2/runs/{run_id}/cancel`。暂停是协作式安全边界：已经开始的单个点击、
+拖拽或工具动作先收尾，下一次模型决策或工具动作才冻结，避免留下按住的鼠标或
+半截拖拽；人工确认门仍使用独立的批准/拒绝流程。
 
 ## 刷新与延迟策略
 

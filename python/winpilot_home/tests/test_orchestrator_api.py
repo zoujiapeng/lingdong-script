@@ -224,6 +224,40 @@ def test_generic_run_cancel_route_cancels_arp_runtime_job(client):
     assert client.post(f"/api/v2/runs/{run_id}/cancel").status_code == 409
 
 
+def test_generic_run_pause_and_resume_routes_control_arp_run(client):
+    graph = {
+        "format": "arp/1",
+        "id": "pause-api-graph",
+        "name": "Pausable API graph",
+        "nodes": [
+            {"id": "start", "kind": "start"},
+            {"id": "delay", "kind": "delay", "config": {"duration_ms": 5000}},
+            {"id": "end", "kind": "end"},
+        ],
+        "edges": [
+            {"id": "e1", "source": "start", "target": "delay"},
+            {"id": "e2", "source": "delay", "target": "end"},
+        ],
+        "policy": {"require_evidence_on_done": False},
+    }
+    created = client.post("/api/v2/arp/runs", json={"graph": graph, "inputs": {}})
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+
+    paused = client.post(f"/api/v2/runs/{run_id}/pause")
+    assert paused.status_code == 200
+    assert paused.json()["arp"]["manual_paused"] is True
+    assert paused.json()["arp"]["status"] == "paused"
+    assert client.post(f"/api/v2/runs/{run_id}/pause").status_code == 409
+
+    resumed = client.post(f"/api/v2/runs/{run_id}/resume")
+    assert resumed.status_code == 200
+    assert resumed.json()["arp"]["manual_paused"] is False
+    assert resumed.json()["arp"]["status"] in {"queued", "running"}
+    assert client.post(f"/api/v2/runs/{run_id}/resume").status_code == 409
+    assert client.post(f"/api/v2/runs/{run_id}/cancel").status_code == 200
+
+
 def test_generic_run_cancel_route_also_cancels_agent_job(client):
     from winpilot import server
 

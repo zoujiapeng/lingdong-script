@@ -222,6 +222,18 @@ export function useControlPlane() {
     await refresh();
   }, [currentRun, refresh]);
 
+  const pauseCurrent = useCallback(async () => {
+    if (!currentRun) return;
+    await requireClient().pauseRun(currentRun.run_id);
+    await refresh();
+  }, [currentRun, refresh]);
+
+  const resumeCurrent = useCallback(async () => {
+    if (!currentRun) return;
+    await requireClient().resumeRun(currentRun.run_id);
+    await refresh();
+  }, [currentRun, refresh]);
+
   const decideGate = useCallback(async (approved: boolean, comment = '') => {
     const nodeId = String(arpSnapshot?.current_node_id || currentRun?.current_node_id || '');
     if (!currentRun || !nodeId) throw new Error('当前没有等待处理的人工确认。');
@@ -245,6 +257,8 @@ export function useControlPlane() {
     startAutomation,
     validateAutomation,
     cancelCurrent,
+    pauseCurrent,
+    resumeCurrent,
     decideGate,
     getClient: requireClient,
   };

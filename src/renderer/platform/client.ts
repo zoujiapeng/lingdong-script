@@ -447,6 +447,14 @@ export class ControlPlaneClient {
     return this.request(`api/v2/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
   }
 
+  pauseRun(runId: string): Promise<CurrentRunResponse> {
+    return this.request(`api/v2/runs/${encodeURIComponent(runId)}/pause`, { method: 'POST' });
+  }
+
+  resumeRun(runId: string): Promise<CurrentRunResponse> {
+    return this.request(`api/v2/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST' });
+  }
+
   gate(runId: string, nodeId: string, approved: boolean, comment = ''): Promise<{ ok: boolean }> {
     return this.request(`api/v2/arp/runs/${encodeURIComponent(runId)}/gate`, {
       method: 'POST',

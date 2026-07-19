@@ -716,6 +716,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     """One task execution. Designed to run on a background thread."""
 
     def __init__(self, task: str, stop_event: threading.Event | None = None,
+                 pause_controller: Any | None = None,
                  session_context: list | None = None,
                  max_steps_override: int | None = None,
                  runtime_profile: RuntimeProfile | None = None,
@@ -725,6 +726,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self.task = task
         self.run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.stop_event = stop_event or threading.Event()
+        self.pause_controller = pause_controller
         self.runtime_profile = runtime_profile or build_runtime_profile(task)
         native_intent_free = bool(
             not self.runtime_profile.coding
@@ -6100,6 +6102,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         )
         return True
 
+    def _wait_if_paused(self) -> bool:
+        controller = self.pause_controller
+        waiter = getattr(controller, "wait_if_paused", None)
+        if callable(waiter):
+            return bool(waiter(self.stop_event))
+        return not self.stop_event.is_set()
+
     def _handle_tool_calls(self, tool_calls) -> str | None:
         """Dispatch each tool call; returns terminal status if any."""
         post_tool_hints: list[str] = []
@@ -6118,6 +6127,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         deferred_terminal: str | None = None
         for tc in tool_calls:
             if self.stop_event.is_set():
+                return "stopped"
+            if not self._wait_if_paused():
                 return "stopped"
             self._tool_sequence += 1
             try:
@@ -7152,6 +7163,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self._maybe_plan_upfront(client)
             for step in range(1, max_steps + 1):
                 if self.stop_event.is_set():
+                    self.status = "stopped"
+                    break
+                if not self._wait_if_paused():
                     self.status = "stopped"
                     break
                 self._drain_interjections()

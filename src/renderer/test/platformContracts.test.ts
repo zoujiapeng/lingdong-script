@@ -115,7 +115,7 @@ describe('control plane client contracts', () => {
     ).toBe('https://example.test/runtime/api/v2/runs/run%201/artifacts/art%2F1?token=secret');
   });
 
-  it('uses generic run detail and cancel routes for both Agent and ARP runs', async () => {
+  it('uses generic run detail and control routes for both Agent and ARP runs', async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
       ok: true,
       run: null,
@@ -129,10 +129,14 @@ describe('control plane client contracts', () => {
       const client = new ControlPlaneClient('http://127.0.0.1:8765');
       await client.run('agent run/1');
       await client.cancelRun('agent run/1');
+      await client.pauseRun('agent run/1');
+      await client.resumeRun('agent run/1');
 
       expect(String(fetchMock.mock.calls[0][0])).toContain('/api/v2/runs/agent%20run%2F1');
       expect(String(fetchMock.mock.calls[1][0])).toContain('/api/v2/runs/agent%20run%2F1/cancel');
       expect(fetchMock.mock.calls[1][1]?.method).toBe('POST');
+      expect(String(fetchMock.mock.calls[2][0])).toContain('/api/v2/runs/agent%20run%2F1/pause');
+      expect(String(fetchMock.mock.calls[3][0])).toContain('/api/v2/runs/agent%20run%2F1/resume');
     } finally {
       vi.unstubAllGlobals();
     }
