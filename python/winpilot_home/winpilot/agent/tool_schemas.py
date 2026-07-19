@@ -648,9 +648,12 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
 
         if name == "observe":
             hwnd = props.get("hwnd")
+            image_region = props.get("image_region")
             props.clear()
             if isinstance(hwnd, dict):
                 props["hwnd"] = hwnd
+            if isinstance(image_region, dict):
+                props["image_region"] = image_region
             parameters["required"] = []
             parameters.pop("oneOf", None)
             fn["description"] = (
@@ -910,6 +913,18 @@ def tool_schemas(
                 "max_elements": _prop("integer", "Maximum elements to print after filtering. Default 160."),
                 "full": _prop("boolean", "Force full OCR/UIA observation; useful when text/menu grounding is needed."),
                 "changed_only": _prop("boolean", "Observe only the latest screen_watch changed ROI when available."),
+                **(
+                    {
+                        "image_region": _batch_image_region_schema(
+                            "Optional high-resolution crop in pixels of the current authoritative image. The crop becomes the next visual frame and its coordinates start at 0,0."
+                        ),
+                    }
+                    if native_vision else {
+                        "region": _batch_region_schema(
+                            "Optional physical-screen crop for the returned screenshot."
+                        ),
+                    }
+                ),
             },
         ),
         _tool(
@@ -1136,6 +1151,17 @@ def tool_schemas(
                 ),
                 "until_change": _prop(
                     "boolean", "Wait until pixels in the bound target change.",
+                ),
+                "persistent": _prop(
+                    "boolean",
+                    "Keep the watcher armed until a changed state settles; use for an external participant's turn.",
+                ),
+                ("image_region" if native_vision else "region"): (
+                    _batch_image_region_schema(
+                        "Optional ROI in pixels of the current authoritative image to watch."
+                    ) if native_vision else _batch_region_schema(
+                        "Optional physical-screen ROI to watch instead of the whole bound target window."
+                    )
                 ),
                 "min_change_ratio": _prop(
                     "number", "Optional minimum changed-pixel ratio.", minimum=0, maximum=1,

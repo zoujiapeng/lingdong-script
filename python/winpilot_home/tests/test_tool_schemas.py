@@ -621,7 +621,8 @@ def test_native_vision_exposes_one_exact_submitted_image_coordinate_system():
             }.isdisjoint(names)
 
         observe = by_name(native, "observe")["function"]
-        assert set(observe["parameters"]["properties"]) <= {"hwnd"}
+        assert set(observe["parameters"]["properties"]) <= {"hwnd", "image_region"}
+        assert "image_region" in observe["parameters"]["properties"]
         assert "query" not in observe["description"].casefold()
         assert "structured" not in observe["description"].casefold()
 

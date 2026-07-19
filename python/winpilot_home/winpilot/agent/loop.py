@@ -661,7 +661,15 @@ def _client():
     api = CONFIG.get("api", default={})
     if not api.get("api_key"):
         raise RuntimeError("config.json 缺少 api.api_key")
-    return OpenAI(base_url=api["base_url"], api_key=api["api_key"], timeout=120)
+    try:
+        timeout_s = float(api.get("request_timeout_s", 75) or 75)
+    except (TypeError, ValueError):
+        timeout_s = 75.0
+    # Keep one provider call bounded even when a stale config contains an
+    # invalid or unexpectedly large value.  AgentRunner owns the total
+    # request watchdog below and ignores late responses after a deadline.
+    timeout_s = max(5.0, min(180.0, timeout_s))
+    return OpenAI(base_url=api["base_url"], api_key=api["api_key"], timeout=timeout_s)
 
 
 def _main_model_has_vision() -> bool:
@@ -801,6 +809,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._model_adapter = None
         self._last_llm_model = ""
         self._last_llm_thinking_enabled = False
+        self._last_thinking_policy = ""
+        self._decision_step = 0
+        self._model_timeout_count = 0
         self._interjections: list[str] = []          # mid-run user hints
         self._interject_lock = threading.Lock()
         self._llm_trace_index = 0                    # local forensic trace files
@@ -4534,6 +4545,83 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self.model_elapsed_ms += elapsed_ms
         return elapsed_ms
 
+    def _native_visual_thinking_policy(
+        self,
+        *,
+        model_profile: Any,
+        configured_thinking_enabled: bool,
+        gui_tool_recovery_request: bool,
+    ) -> tuple[str | None, str]:
+        """Choose provider reasoning from live execution evidence.
+
+        This is intentionally independent of task words, application names,
+        or a precompiled workflow.  A first/uncertain/recovery decision gets
+        room to reason; a turn immediately following a visibly verified action
+        can use the provider's cheap path.  Explicit ``api.thinking=true`` is
+        always respected because it is an operator choice, not a hidden task
+        heuristic.
+        """
+        if gui_tool_recovery_request:
+            return "disabled", "structured_tool_recovery"
+        if configured_thinking_enabled:
+            return None, "provider_configured"
+        if not self._native_visual_context_enabled():
+            return None, "non_visual"
+        controller = CONFIG.get("controller", default={}) or {}
+        if not bool(controller.get("native_visual_thinking", True)):
+            return None, "disabled_by_config"
+        mode = str(controller.get("native_visual_thinking_mode", "adaptive") or "adaptive").strip().casefold()
+        if mode in {"off", "disabled", "false", "0"}:
+            return None, "disabled_by_config"
+        if mode in {"always", "on", "enabled", "true", "1"}:
+            return "enabled", "always_by_config"
+        # Models which already reason by default do not need an extra request
+        # override; this keeps the policy provider-neutral.
+        if not bool(getattr(model_profile, "disables_thinking_by_default", False)):
+            return None, "provider_default"
+
+        recent_tool = ""
+        recent_data: dict[str, Any] = {}
+        if self._tool_history:
+            recent_tool = str(self._tool_history[-1][0] or "")
+            try:
+                parsed = json.loads(self._tool_history[-1][2] or "{}")
+                if isinstance(parsed, dict):
+                    recent_data = parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                recent_data = {}
+        if self._decision_step <= 1 or not self._visual_frame_id:
+            return "enabled", "initial_grounding"
+        if (
+            self._done_rejects
+            or self._last_done_reject_reason
+            or self._consecutive_unverified >= 2
+            or self._last_verify_ok is False
+            or recent_data.get("blocked") is True
+            or recent_data.get("needs_replan") is True
+            or recent_data.get("no_visual_progress") is True
+            or recent_data.get("failure_classification")
+        ):
+            return "enabled", "recovery_or_uncertainty"
+        if (
+            self._last_visual_change_comparable
+            and self._last_visual_change_ratio is not None
+            and float(self._last_visual_change_ratio) <= self._native_no_progress_threshold()
+        ):
+            return "enabled", "unchanged_pixels"
+        # A verified mutation plus a changed same-region frame is the only
+        # condition that earns the lightweight path.  Observations alone do
+        # not count as progress: the model still has to understand the scene.
+        if (
+            self._last_verify_ok is True
+            and recent_tool in _LOW_LEVEL_VISUAL_TOOLS
+            and self._last_visual_change_comparable
+            and self._last_visual_change_ratio is not None
+            and float(self._last_visual_change_ratio) > self._native_no_progress_threshold()
+        ):
+            return "disabled", "verified_routine"
+        return "enabled", "default_deep"
+
     def _chat(self, client, tools: list[dict]):
         """Time one complete model decision, including retries and Stop."""
         self._roll_native_visual_context()
@@ -4558,12 +4646,31 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         *,
         decision_started: float,
     ):
-        """Run the (blocking) completion in a worker thread so a Stop can
-        abandon an in-flight LLM call immediately, instead of waiting up to the
-        120s request timeout. Returns the response, or None if stopped."""
+        """Run one completion with Stop and total-deadline cancellation.
+
+        A late provider response is abandoned before it can be converted into
+        a desktop action, which keeps retries safe for GUI tasks.
+        """
         api = CONFIG.get("api", default={})
         model = api.get("model", "deepseek-v4-flash")
         configured_max_tokens = int(api.get("max_tokens", 4096))
+        try:
+            request_timeout_s = max(5.0, min(180.0, float(
+                api.get("request_timeout_s", 75) or 75,
+            )))
+        except (TypeError, ValueError):
+            request_timeout_s = 75.0
+        try:
+            total_timeout_s = max(10.0, min(300.0, float(
+                api.get("request_total_timeout_s", 120) or 120,
+            )))
+        except (TypeError, ValueError):
+            total_timeout_s = 120.0
+        try:
+            configured_retries = int(api.get("max_retries", _API_RETRIES))
+        except (TypeError, ValueError):
+            configured_retries = _API_RETRIES
+        max_attempts = max(1, min(_API_RETRIES, configured_retries + 1))
         gui_tool_recovery_request = bool(
             not self._is_coding and self._gui_tool_call_retry_pending
         )
@@ -4602,25 +4709,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             else:
                 logger.warning("卡住需升级模型，但 agent.escalation_model 未配置，仍用 %s", model)
 
-        # Reasoning policy comes from the selected model/provider configuration.
-        # Do not infer it from task words or silently compile one visual task
-        # class into a different model mode.
-        thinking_mode = None
-        # A GUI truncation recovery must emit one complete real function call.
-        # Hidden reasoning competes with its structured argument budget, so
-        # recovery is explicitly non-thinking even though it keeps enough
-        # output room for a concise multi-path gesture.
-        if gui_tool_recovery_request:
-            thinking_mode = "disabled"
-        elif (
-            self._native_visual_context_enabled()
-            and CONFIG.get(
-                "controller", "native_visual_thinking", default=True,
-            )
-            and model_profile_from_config({**api, "model": model})
-            .disables_thinking_by_default
-        ):
-            thinking_mode = "enabled"
         configured_thinking = api.get("thinking")
         configured_thinking_enabled = bool(
             configured_thinking is True
@@ -4629,6 +4717,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 and str(configured_thinking.get("type") or "").casefold() == "enabled"
             )
         )
+        thinking_mode, thinking_policy = self._native_visual_thinking_policy(
+            model_profile=model_profile_from_config({**api, "model": model}),
+            configured_thinking_enabled=configured_thinking_enabled,
+            gui_tool_recovery_request=gui_tool_recovery_request,
+        )
         thinking_enabled = bool(
             thinking_mode == "enabled"
             or (thinking_mode is None and configured_thinking_enabled)
@@ -4636,6 +4729,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         box: dict[str, Any] = {}
         self._last_llm_model = model
         self._last_llm_thinking_enabled = thinking_enabled
+        self._last_thinking_policy = thinking_policy
         self._trace_debug("llm_request", {
             "run_id": self.run_id,
             "task": self.task,
@@ -4646,6 +4740,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 request_max_tokens if thinking_enabled else None
             ),
             "thinking_mode": thinking_mode,
+            "thinking_policy": thinking_policy,
+            "request_timeout_s": request_timeout_s,
+            "request_total_timeout_s": total_timeout_s,
+            "max_attempts": max_attempts,
             "gui_tool_call_recovery": gui_tool_recovery_request,
             "messages": self.messages,
             "tools": tools,
@@ -4655,12 +4753,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             text = str(exc).lower()
             return "429" in text or "too many requests" in text or "rate limit" in text
 
+        cancel_event = threading.Event()
+
         def _backoff_sleep(seconds: float) -> bool:
             """Sleep in small slices so a Stop interrupts the wait. Returns
             False if a Stop was requested mid-wait."""
             waited = 0.0
             while waited < seconds:
-                if self.stop_event.is_set():
+                if self.stop_event.is_set() or cancel_event.is_set():
                     return False
                 time.sleep(0.2)
                 waited += 0.2
@@ -4668,10 +4768,26 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
 
         def worker() -> None:
             last_exc: Exception | None = None
-            for attempt in range(1, _API_RETRIES + 1):
-                if self.stop_event.is_set():
+            for attempt in range(1, max_attempts + 1):
+                if self.stop_event.is_set() or cancel_event.is_set():
                     return
                 try:
+                    # A timed-out deep visual request may get one bounded
+                    # lightweight reconsideration. No GUI tool has run yet,
+                    # so this retry cannot duplicate a desktop action.
+                    attempt_thinking_enabled = bool(
+                        thinking_enabled and not (
+                            attempt > 1
+                            and thinking_mode == "enabled"
+                            and thinking_policy not in {"always_by_config", "provider_configured"}
+                        )
+                    )
+                    attempt_thinking_mode = (
+                        "enabled" if attempt_thinking_enabled
+                        else "disabled" if thinking_mode is not None
+                        and (attempt > 1 or thinking_mode == "disabled")
+                        else None
+                    )
                     request_params: dict[str, Any] = {
                         "model": model,
                         "messages": self.messages,
@@ -4679,21 +4795,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     }
                     if gui_tool_recovery_request and tools:
                         request_params["tool_choice"] = "required"
-                    if thinking_enabled:
+                    if attempt_thinking_enabled:
                         request_params["max_completion_tokens"] = request_max_tokens
                     else:
                         request_params["temperature"] = float(api.get("temperature", 0.3))
                         request_params["max_tokens"] = request_max_tokens
-                    if thinking_mode is not None:
+                    if attempt_thinking_mode is not None:
                         request_params["extra_body"] = {
-                            "thinking": {"type": thinking_mode},
+                            "thinking": {"type": attempt_thinking_mode},
                         }
                     box["resp"] = client.chat.completions.create(**request_params)
                     return
                 except Exception as exc:
                     last_exc = exc
                     logger.warning("API 调用失败 (第%d次): %s", attempt, exc)
-                    if attempt < _API_RETRIES:
+                    if attempt < max_attempts and not cancel_event.is_set():
                         # Rate limits (429) need a much longer wait than a
                         # transient network blip — back off exponentially
                         # (5s, 10s, 20s...) so a burst of drawing strokes
@@ -4708,8 +4824,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
 
         thread = threading.Thread(target=worker, daemon=True, name="llm-call")
         thread.start()
+        request_deadline = time.monotonic() + total_timeout_s
         while thread.is_alive():
             if self.stop_event.is_set():
+                cancel_event.set()
                 logger.info("Stop 请求：放弃进行中的 LLM 调用")
                 self._trace_debug("llm_abandoned", {
                     "run_id": self.run_id,
@@ -4725,6 +4843,31 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     elapsed_ms=int((time.monotonic() - decision_started) * 1000),
                 )
                 return None  # abandon the in-flight request (it finishes unused)
+            if time.monotonic() >= request_deadline:
+                cancel_event.set()
+                self._model_timeout_count += 1
+                message = (
+                    f"model request exceeded total timeout ({total_timeout_s:g}s); "
+                    "the in-flight response was abandoned before any tool call"
+                )
+                logger.warning(message)
+                self._trace_debug("llm_timeout", {
+                    "run_id": self.run_id,
+                    "model": model,
+                    "request_timeout_s": request_timeout_s,
+                    "request_total_timeout_s": total_timeout_s,
+                    "attempts": max_attempts,
+                    "thinking_policy": thinking_policy,
+                })
+                BUS.publish(
+                    "agent_decision",
+                    run_id=self.run_id,
+                    model=model,
+                    ok=False,
+                    timeout=True,
+                    elapsed_ms=int((time.monotonic() - decision_started) * 1000),
+                )
+                raise TimeoutError(message)
             thread.join(timeout=0.2)
         if "exc" in box:
             self._trace_debug("llm_error", {
@@ -7169,6 +7312,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     self.status = "stopped"
                     break
                 self._drain_interjections()
+                self._decision_step = step
                 resp = self._chat(client, self._model_tools_for_step(tools, step))
                 if resp is None:        # Stop requested mid LLM-call → abandon
                     self.status = "stopped"

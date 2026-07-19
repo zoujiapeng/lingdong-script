@@ -171,10 +171,12 @@ E2E harness 使用 `uiautomation + Win32` 操作客户端自身控件。这不�
 当前整改工作树已经从可见 Electron 客户端执行冷启动、空 session 的真实任务与视觉靶场，不再使用“只做了文档审计、没有跑 E2E”的旧基线：
 
 - 本地抖音客户端显示 `kimi k3` 搜索结果，终态经人工视觉核对；通用 report 没有独立业务 oracle，因此自动报告仍不能记为 grounded pass；
-- `game-drag-v2` 的客户端 run 与独立 trusted-browser pointer oracle 均通过，正式计为 E2E pass；
+- 最近一次 `game-drag-v2` 的客户端 run 已通过 Electron、冷启动、空 session 和可信真实鼠标事件链路，但模型误读弯曲通道，独立 trusted-browser pointer oracle 判定失败；只能记为“入口与输入链路有效、视觉策略失败”，不能计为 E2E pass；
 - 网易云任务达到请求歌曲播放和 Windows 音量 100%，用户明确确认成功；随后按用户要求停止声音与测试，harness 没有 terminal pass，因此只记“用户确认业务目标完成”，不改写成 formal terminal pass；
 - 11 个真实任务尚未全部通过，混合长任务也没有当前版本的全量通过证据；
 - 其他失败、`ungrounded`、超时和外部干扰 run 保留原分类，不能由文档改写为成功。
+
+本轮已落地的通用运行时改动包括：自适应 provider reasoning（首帧/恢复深思考，已验证例行回合轻量）、单次与总请求截止时间及安全重试、模型选择的 `observe.image_region` 高分辨率裁剪、以及带稳定变化结果的 `wait(persistent=true)`。这些能力没有引用 QQ、画板、WPS、浏览器或测试句子；后续应继续用未知任务验证，而不是新增样例分支。
 
 ## 下一轮整改顺序
 
@@ -203,7 +205,7 @@ E2E harness 使用 `uiautomation + Win32` 操作客户端自身控件。这不�
 
 ### D. 削减 compiler 与 adapter
 
-- 按生产关键词和应用名建立清单；
+- 先按生产关键词和应用名清查并删除专属分支，不得以清单继续扩写规则；
 - 区分合法领域合同与 GUI 剧本；
 - 每轮迁移一个调用面并净删代码；
 - 11 题只能留在 test fixture 和 oracle。

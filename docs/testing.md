@@ -1,20 +1,34 @@
 # GUI Agent 端到端测试规范
 
+Implementation note: the visual runtime now uses adaptive provider reasoning,
+bounded model-call deadlines/retries, model-selected high-resolution
+`observe.image_region` crops, and a generic persistent `wait` watcher.  These
+are runtime primitives only; the 11 sample tasks must not be converted into
+prompt or controller rules.  See [`visual-runtime-principles.md`](visual-runtime-principles.md)
+for the invariants and the client-entry evaluation contract.
+
+最近一次真实验证（2026-07-19）使用 `npm run dev` 启动的可见 Electron 客户端，
+`cold_start=1` 且 session 为空，运行 `game-drag-v2`。Agent 确实发出了可信的
+鼠标拖拽事件，但模型误读了弯曲通道，trusted-browser oracle 判定失败；这不是
+“入口成功”的伪通过。报告：
+`output/playwright/client-visual-e2e/20260719-213401-suite/`。后续整改应优先改进
+通用视觉判断、路径表达和失败后的重新观察，不得为该靶场添加路线规则。
+
 本文定义什么可以叫“真实客户端 E2E”、什么可以计为通过，以及如何使用 11 个真实任务和组合长任务而不把它们写进生产逻辑。
 
 ## 当前基线
 
-2026-07-18 的当前工作树已经通过可见 Electron 客户端执行了冷启动 E2E，但尚未完成 11 个真实任务和混合长任务的全量验收。每个结果按它实际拥有的 oracle 单独记账：
+2026-07-19 的当前工作树已经通过可见 Electron 客户端执行了冷启动 E2E，但尚未完成 11 个真实任务和混合长任务的全量验收。每个结果按它实际拥有的 oracle 单独记账：
 
 | 场景 | 当前证据 | 结论 |
 | --- | --- | --- |
 | 本地抖音搜索 `kimi k3` | 客户端入口、空 session、`experience_policy=disabled`、准确 trace 绑定；桌面终态可见本地抖音窗口和搜索结果 | 真实任务结果经人工视觉核对成功；该通用 report 未配置独立业务 oracle，因此自动报告本身不是 grounded pass |
-| `game-drag-v2` | 同一客户端入口与冷启动隔离；目标窗口外的 trusted browser pointer events 证明路径和落点 | 正式 E2E pass，独立 oracle 通过 |
+| `game-drag-v2` | 同一客户端入口、冷启动隔离和可信真实鼠标事件均成立；模型将弯曲通道误读成直角路径 | E2E 失败；独立 oracle 未通过，不能把入口成功记作任务成功 |
 | 网易云搜索梁静茹、播放第一首并调到最大音量 | 客户端入口与冷启动隔离；新鲜桌面帧可见歌曲处于播放状态、Windows 音量为 100%，用户明确确认任务成功 | 用户确认的业务结果；随后按用户要求停止声音和测试，harness 未产生 terminal pass，不能记为正式终态通过 |
 
 这些证据只覆盖三个具体样本。它们证明通用主线已经到达真实软件和游戏式拖拽场景，不证明 11 题、混合长任务、任意电脑或任意应用已经全部可用；失败、超时、`ungrounded` 与被干扰的其他 run 仍保留原状态。
 
-同一工作树的无声发布回归为：WinPilot `1881 passed, 13 skipped, 1 deprecation warning`；root Python `2508 passed`；Vitest `20 files / 215 tests passed`；renderer/main/CLI/AI TypeScript 检查全部通过；production renderer/Electron build 通过。13 个 skip 是未获显式授权的真实 Windows GUI 用例；本轮没有启动客户端、鼠标自动化或声音。这些回归证明代码合同没有破坏，不能替代上表的真实 GUI oracle。
+同一工作树的回归为：WinPilot `1884 passed, 13 skipped, 1 deprecation warning`；TypeScript 全量检查、production renderer/Electron build 均通过。本轮真实客户端靶场只运行了上表的 `game-drag-v2`，没有把其他任务的历史结果冒充本轮通过。这些回归证明代码合同没有破坏，不能替代上表的真实 GUI oracle。
 
 ## 测试分层
 

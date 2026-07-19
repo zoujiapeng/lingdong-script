@@ -121,8 +121,15 @@ class PerceptionToolMixin:
         """Legacy accessor - True when perception mode is 'visual'."""
         return self._perception_mode() != "normal"
 
-    def _capture_window_b64(self, hwnd: int) -> str:
-        """Capture the configured visual scope when the main model has vision."""
+    def _capture_window_b64(self, hwnd: int, args: dict | None = None) -> str:
+        """Capture the configured visual scope when the main model has vision.
+
+        ``observe(image_region=...)`` is a generic, model-selected zoom.  It
+        maps coordinates from the current authoritative submitted image back
+        to physical screen pixels, captures that crop atomically, and records
+        the exact crop so AgentRunner can make it the next authoritative frame.
+        No OCR/UIA result is used to choose the crop.
+        """
         from ..agent.loop import _main_model_has_vision
         if not _main_model_has_vision():
             return ""
@@ -132,6 +139,50 @@ class PerceptionToolMixin:
             related_window=getattr(self, "_window_related_to_target", None),
         )
         region = decision.region
+        args = args if isinstance(args, dict) else {}
+        image_region = args.get("image_region")
+        physical_region = args.get("region")
+        if isinstance(image_region, dict):
+            frame_region = getattr(self, "_visual_frame_region", None)
+            submitted = getattr(self, "_visual_submitted_size", None)
+            try:
+                frame_left = int(frame_region.get("left"))
+                frame_top = int(frame_region.get("top"))
+                frame_width = int(frame_region.get("width"))
+                frame_height = int(frame_region.get("height"))
+                submitted_width = int(submitted[0])
+                submitted_height = int(submitted[1])
+                x = float(image_region.get("x"))
+                y = float(image_region.get("y"))
+                width = float(image_region.get("width"))
+                height = float(image_region.get("height"))
+                if (
+                    frame_width > 0 and frame_height > 0
+                    and submitted_width > 0 and submitted_height > 0
+                    and width > 0 and height > 0
+                ):
+                    x1 = max(0.0, min(float(submitted_width), x))
+                    y1 = max(0.0, min(float(submitted_height), y))
+                    x2 = max(x1 + 1.0, min(float(submitted_width), x + width))
+                    y2 = max(y1 + 1.0, min(float(submitted_height), y + height))
+                    region = Region(
+                        frame_left + int(round(x1 * frame_width / submitted_width)),
+                        frame_top + int(round(y1 * frame_height / submitted_height)),
+                        max(1, int(round((x2 - x1) * frame_width / submitted_width))),
+                        max(1, int(round((y2 - y1) * frame_height / submitted_height))),
+                    )
+            except (TypeError, ValueError, AttributeError, IndexError, ZeroDivisionError):
+                logger.debug("invalid observe image_region; using normal capture scope")
+        elif isinstance(physical_region, dict):
+            try:
+                left = int(physical_region.get("x", physical_region.get("left")))
+                top = int(physical_region.get("y", physical_region.get("top")))
+                width = int(physical_region.get("width"))
+                height = int(physical_region.get("height"))
+                if width > 0 and height > 0:
+                    region = Region(left, top, width, height)
+            except (TypeError, ValueError):
+                logger.debug("invalid observe physical region; using normal capture scope")
         image_b64 = capture_window_jpeg_b64(hwnd, region=region)
         if not image_b64:
             logger.debug("窗口截图捕获失败或返回空图像")
@@ -144,7 +195,11 @@ class PerceptionToolMixin:
                 "hwnd": int(hwnd),
                 "region": region,
                 "scope": decision.scope,
-                "scope_reason": decision.reason,
+                "scope_reason": (
+                    "explicit_visual_roi"
+                    if isinstance(image_region, dict) or isinstance(physical_region, dict)
+                    else decision.reason
+                ),
             }
         return image_b64
 
@@ -901,7 +956,15 @@ class PerceptionToolMixin:
             f'[已折叠] observe "{self.snapshot.title}" '
             f"{len(self.snapshot.elements)}个元素"
         )
-        image_b64 = self._capture_window_b64(hwnd)
+        if isinstance(args, dict) and (
+            isinstance(args.get("image_region"), dict)
+            or isinstance(args.get("region"), dict)
+        ):
+            image_b64 = self._capture_window_b64(hwnd, args)
+        else:
+            # Keep the one-argument hook compatible with existing ToolSession
+            # doubles and integrations that replace the capture helper.
+            image_b64 = self._capture_window_b64(hwnd)
         return ToolResult(text, is_observe=True, summary=summary,
                           image_b64=image_b64 if image_b64 else "")
 
