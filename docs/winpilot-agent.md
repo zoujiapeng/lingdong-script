@@ -223,7 +223,7 @@ LLM history 中的工具结果可能经过 compact，完整结果以 trace artif
 - harness 使用 UI Automation 操作被测客户端控件，不代表 Agent 依赖 UIA 理解目标应用；
 - 单次 run 只证明当前环境下的一个样本，不是成功率。
 
-2026-07-18 的当前样本包括：本地抖音搜索结果经人工视觉核对；`game-drag-v2` 由独立浏览器 pointer oracle 正式判定通过；网易云播放与系统音量 100% 由用户确认，但 harness 随后按用户要求停止，未形成 terminal pass。更精确的状态边界见 [testing.md](testing.md)。
+2026-07-19 的当前样本包括：本地抖音搜索结果经人工视觉核对；最近一次 `game-drag-v2` 真实客户端 run 发出了可信鼠标事件，但模型误读弯曲通道，独立浏览器 pointer oracle 判定失败；网易云播放与系统音量 100% 由用户确认，但 harness 随后按用户要求停止，未形成 terminal pass。更精确的状态边界见 [testing.md](testing.md)。
 
 ## 当前限制
 

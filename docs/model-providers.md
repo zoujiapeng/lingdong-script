@@ -85,20 +85,22 @@ text-only 路径不会收到不可见的截图字节。它必须依赖 UIA、Win
 `reasoning_content`，造成不稳定或不完整输出，并建议在调用工具时关闭 thinking。
 这与 GUI 实测中的截断、伪工具文本和参数不完整问题一致。
 
-因此 WinPilot 的默认策略是：
+因此 WinPilot 现在把 provider 的 reasoning 和 GUI 运行状态分开处理：
 
-- `api.thinking=false`；MiMo / Reasonix 请求自动附加
-  `{"thinking":{"type":"disabled"}}`。
-- `api.thinking=true` 表示不再强制关闭，使用 provider 的默认 thinking 行为。
-- `api.thinking={"type":"enabled"}` 或 `{"type":"disabled"}` 会原样传递。
+- `api.thinking=true` 或显式 `{"type":"enabled"|"disabled"}` 是用户配置，优先级最高；
+- `api.thinking=false` 仍是默认值，但对本身默认关闭 thinking 的原生视觉 provider，
+  `controller.native_visual_thinking_mode="adaptive"` 会在首帧、画面未变、动作被阻止、
+  完成验收失败或恢复中的回合临时打开 reasoning；动作已经由新帧和因果证据确认后，
+  例行回合才走轻量路径；
+- `controller.native_visual_thinking_mode` 可设为 `off`、`adaptive` 或 `always`。它只读取
+  当前 frame/action/verification evidence，不匹配任务词、应用名或 11 个样例；
 - `api.extra_body` 可做显式高级覆盖；调用者需要自行承担兼容性、延迟和截断风险。
 
-`controller.native_visual_thinking` 是另一个独立的实验开关，默认关闭。打开后，
-它只在“MiMo + 原生视觉 + 尚未落下有效连续指针轨迹”的决策回合临时启用
-thinking；真实拖拽或笔画已经产生可比较的像素进展后，检查和完成回合会关闭
-thinking。该门适用于手写、签名、描摹、自由路径等通用连续指针任务，不是画图
-专属能力，也不会让 `mimo-v2.5-pro` 获得视觉能力。GUI 工具调用截断恢复始终
-强制关闭 thinking，以给完整函数参数保留输出预算。
+每次请求还受 `api.request_timeout_s`、`api.request_total_timeout_s` 和
+`api.max_retries` 约束。总截止时间到达时，late response 会在工具分发前被丢弃；
+因此重试不会重复已经执行的 GUI 动作。GUI 工具调用截断恢复仍会关闭 thinking，
+以给完整函数参数保留输出预算。该策略适用于所有原生视觉任务，不是画图或连续
+指针专属能力，也不会让 `mimo-v2.5-pro` 获得视觉能力。
 
 ## 缓存
 

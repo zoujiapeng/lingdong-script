@@ -1470,15 +1470,19 @@ class InteractionToolMixin:
         verify_mod = _tools_attr("verify", verify)
         if args.get("until_change") is True:
             try:
-                timeout_s = float(args.get("timeout_s", 30.0))
+                persistent = bool(args.get("persistent"))
+                timeout_s = float(args.get(
+                    "timeout_s", 300.0 if persistent else 30.0,
+                ))
                 min_ratio = float(args.get("min_change_ratio", 0.0005))
             except (TypeError, ValueError):
+                persistent = False
                 timeout_s = float("nan")
                 min_ratio = float("nan")
             if (
                 not math.isfinite(timeout_s)
                 or timeout_s <= 0
-                or timeout_s > 120
+                or timeout_s > (3600 if persistent else 120)
                 or not math.isfinite(min_ratio)
                 or min_ratio < 0
                 or min_ratio > 1
@@ -1488,15 +1492,94 @@ class InteractionToolMixin:
                     "blocked": True,
                     "action_executed": False,
                     "error": (
-                        "visual-change wait requires timeout_s in (0, 120] "
+                        "visual-change wait requires timeout_s in "
+                        f"(0, {3600 if persistent else 120}] "
                         "and min_change_ratio in [0, 1]"
                     ),
                 }))
-            result = self._fast_controller()._wait_for_visual_change({
+            wait_args = {
                 "timeout_s": timeout_s,
                 "min_ratio": min_ratio,
                 "required": True,
-            })
+                "require_persistent": persistent,
+            }
+            explicit_region = args.get("region")
+            if not isinstance(explicit_region, dict):
+                explicit_region = None
+            image_region = args.get("image_region")
+            if isinstance(image_region, dict):
+                frame = getattr(self, "_visual_frame_region", None)
+                submitted = getattr(self, "_visual_submitted_size", None)
+                try:
+                    left = int(frame["left"])
+                    top = int(frame["top"])
+                    width = int(frame["width"])
+                    height = int(frame["height"])
+                    submitted_width = int(submitted[0])
+                    submitted_height = int(submitted[1])
+                    x = max(0.0, min(float(submitted_width), float(image_region["x"])))
+                    y = max(0.0, min(float(submitted_height), float(image_region["y"])))
+                    x2 = max(x + 1.0, min(float(submitted_width), x + float(image_region["width"])))
+                    y2 = max(y + 1.0, min(float(submitted_height), y + float(image_region["height"])))
+                    explicit_region = {
+                        "x": left + int(round(x * width / submitted_width)),
+                        "y": top + int(round(y * height / submitted_height)),
+                        "width": max(1, int(round((x2 - x) * width / submitted_width))),
+                        "height": max(1, int(round((y2 - y) * height / submitted_height))),
+                    }
+                except (TypeError, ValueError, KeyError, IndexError, ZeroDivisionError):
+                    explicit_region = None
+            if explicit_region is not None:
+                wait_args["region"] = explicit_region
+            elif persistent and not isinstance(image_region, dict):
+                try:
+                    bound = window_region(int(self.hwnd or 0))
+                except Exception:
+                    bound = None
+                if bound is not None:
+                    wait_args["region"] = {
+                        "x": int(bound.left), "y": int(bound.top),
+                        "width": int(bound.width), "height": int(bound.height),
+                    }
+            if persistent:
+                BUS.publish(
+                    "interaction_wait_external_change",
+                    run_id=getattr(self, "run_id", None),
+                    waiting=True,
+                    armed=True,
+                    timeout_s=timeout_s,
+                    watch_scope="explicit_roi" if explicit_region else "bound_target_window",
+                )
+            controller = self._fast_controller()
+            wait_change = getattr(controller, "_wait_change", None)
+            if not callable(wait_change):
+                # Compatibility for controller doubles and older adapters.
+                wait_change = getattr(controller, "_wait_for_visual_change")
+                wait_args.pop("require_persistent", None)
+            result = wait_change(wait_args)
+            payload = {}
+            try:
+                payload = json.loads(result.text or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            if isinstance(payload, dict) and persistent:
+                payload.update({
+                    "continuation": "wait_external",
+                    "wait_outcome": (
+                        "external_change_settled" if payload.get("changed")
+                        else "external_change_not_observed"
+                    ),
+                })
+                result = ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+                BUS.publish(
+                    "interaction_wait_external_change",
+                    run_id=getattr(self, "run_id", None),
+                    waiting=False,
+                    armed=False,
+                    changed=bool(payload.get("changed")),
+                    timeout_s=timeout_s,
+                    wait_outcome=payload.get("wait_outcome"),
+                )
             return ToolResult(
                 result.text,
                 replay={
@@ -1504,6 +1587,7 @@ class InteractionToolMixin:
                     "until_change": True,
                     "timeout_s": timeout_s,
                     "min_change_ratio": min_ratio,
+                    "persistent": persistent,
                 },
             )
 

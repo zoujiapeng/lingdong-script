@@ -66,10 +66,10 @@ Electron「智能代理」
 
 原生视觉配置默认关闭 UIA、OCR 和 predictive OCR；这些结构化 provider 仍可在来源、当前帧和预期收益明确时显式启用，但动作失败不会自动触发它们。
 
-### 当前验证快照（2026-07-18）
+### 当前验证快照（2026-07-19）
 
 - 本地抖音客户端成功显示 `kimi k3` 搜索结果；这是冷启动、空 session 的真实客户端任务，终态由人工视觉核对，通用 report 没有独立业务 oracle。
-- `game-drag-v2` 通过真实客户端入口和独立 trusted-browser pointer oracle，正式计为 E2E pass。
+- 最近一次 `game-drag-v2` 已通过真实 Electron 客户端入口、冷启动和空 session 进入 Agent，并产生了可信的真实鼠标事件；但模型把弯曲通道误读成直角路径，独立 trusted-browser pointer oracle 判定失败。因此这次只能证明入口、记忆隔离和真实输入链路有效，不能记为任务成功。报告保存在 `output/playwright/client-visual-e2e/20260719-213401-suite/`。
 - 网易云任务已在真实客户端达到“播放请求歌曲、Windows 音量 100%”，并由用户确认成功；随后按用户要求停止声音与测试，因此不伪称 harness 已产生 formal terminal pass。
 
 单次样本不能换算为成功率；11 个真实任务和混合长任务仍需继续逐项验收。
@@ -142,6 +142,7 @@ npm run e2e:client:mixed
 
 - [文档索引](docs/README.md)
 - [架构与运行原理](docs/architecture.md)
+- [视觉运行时原则](docs/visual-runtime-principles.md)
 - [端到端测试规范](docs/testing.md)
 - [WinPilot Agent 细节](docs/winpilot-agent.md)
 - [原生前端](docs/frontend.md)

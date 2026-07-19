@@ -31,6 +31,12 @@ _DEFAULTS: dict[str, Any] = {
         "temperature": 0.3,
         "max_tokens": 4096,
         "thinking": False,
+        # Keep one provider request bounded.  The runner may retry a failed
+        # request, but a single stalled decision must not hold the desktop
+        # loop indefinitely.
+        "request_timeout_s": 75,
+        "request_total_timeout_s": 120,
+        "max_retries": 2,
         "pricing": {
             "provider": "deepseek",
             "currency": "CNY",
@@ -99,9 +105,11 @@ _DEFAULTS: dict[str, Any] = {
     "controller": {
         "physical_anchor_clicks": True,
         # Use provider-native reasoning for native visual decisions on known
-        # compatible providers. This is slower, but it gives the model space to
-        # understand unfamiliar layouts and recover instead of following rules.
+        # compatible providers.  ``adaptive`` spends that budget on the first
+        # visual read and on recovery/uncertainty, then leaves routine turns
+        # lightweight.  It is a runtime policy, not a task or app recipe.
         "native_visual_thinking": True,
+        "native_visual_thinking_mode": "adaptive",
         # Conservative auto mode.  A crop is used only for a validated,
         # foreground, single-window target; every ambiguous/global scene falls
         # back to the complete virtual desktop.  Disable to force full-screen
