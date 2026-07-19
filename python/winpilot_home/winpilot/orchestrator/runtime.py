@@ -25,6 +25,43 @@ class NodeResult:
 NodeHandler = Callable[[ArpNode, dict[str, Any], threading.Event], NodeResult]
 
 
+class PauseController:
+    """Cooperative pause gate shared by an ARP run and its child runner.
+
+    Pauses take effect only at explicit safe boundaries.  A currently running
+    atomic desktop action is allowed to finish before the next model/tool step
+    blocks, avoiding half-finished drags or held mouse buttons.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._paused = False
+
+    @property
+    def paused(self) -> bool:
+        with self._condition:
+            return self._paused
+
+    def pause(self) -> None:
+        with self._condition:
+            self._paused = True
+
+    def resume(self) -> None:
+        with self._condition:
+            self._paused = False
+            self._condition.notify_all()
+
+    def wake(self) -> None:
+        with self._condition:
+            self._condition.notify_all()
+
+    def wait_if_paused(self, stop_event: threading.Event) -> bool:
+        with self._condition:
+            while self._paused and not stop_event.is_set():
+                self._condition.wait(timeout=0.1)
+        return not stop_event.is_set()
+
+
 class _CombinedStopEvent:
     """Event-like view that stops for either run cancellation or node timeout."""
 
@@ -211,6 +248,8 @@ class ArpExecution:
         self.started_at: float | None = None
         self.finished_at: float | None = None
         self.stop_event = threading.Event()
+        self.pause_controller = PauseController()
+        self._manual_paused = False
         self._lock = threading.RLock()
         self._gate_condition = threading.Condition(self._lock)
         self._gate_decisions: dict[str, dict[str, Any]] = {}
@@ -282,6 +321,7 @@ class ArpExecution:
                 "graph_id": self.graph.id,
                 "graph_name": self.graph.name,
                 "status": self.status.value,
+                "manual_paused": self._manual_paused,
                 "current_node_id": self.current_node_id,
                 "variables": dict(self.variables),
                 "execution_context": _json_preview(
@@ -363,11 +403,39 @@ class ArpExecution:
 
     def cancel(self) -> None:
         self.stop_event.set()
+        self._manual_paused = False
+        self.pause_controller.resume()
         with self._gate_condition:
             if self.status == ArpRunStatus.QUEUED:
                 self.status = ArpRunStatus.CANCELED
                 self.finished_at = time.time()
             self._gate_condition.notify_all()
+
+    def pause(self) -> bool:
+        with self._lock:
+            if self.status not in {ArpRunStatus.QUEUED, ArpRunStatus.RUNNING}:
+                return False
+            self._manual_paused = True
+            self.pause_controller.pause()
+            self.status = ArpRunStatus.PAUSED
+        BUS.publish("arp_run_paused", run_id=self.run_id, status="paused")
+        return True
+
+    def resume(self) -> bool:
+        with self._lock:
+            if not self._manual_paused or self.status != ArpRunStatus.PAUSED:
+                return False
+            self._manual_paused = False
+            self.status = (
+                ArpRunStatus.RUNNING if self.started_at is not None else ArpRunStatus.QUEUED
+            )
+            status = self.status.value
+            self.pause_controller.resume()
+        BUS.publish("arp_run_resumed", run_id=self.run_id, status=status)
+        return True
+
+    def _wait_if_paused(self) -> bool:
+        return self.pause_controller.wait_if_paused(self.stop_event)
 
     def decide_gate(self, node_id: str, approved: bool, comment: str = "") -> bool:
         with self._gate_condition:
@@ -390,6 +458,7 @@ class ArpExecution:
             "outputs": self.outputs,
             "evidence": self.evidence,
             "runtime_state": self.runtime_state,
+            "pause_controller": self.pause_controller,
             "last": {
                 "ok": last.ok,
                 "branch": last.branch,
@@ -684,6 +753,12 @@ class ArpExecution:
         thread.start()
         deadline = time.monotonic() + timeout_s
         while thread.is_alive() and not self.stop_event.is_set():
+            if self.pause_controller.paused:
+                paused_at = time.monotonic()
+                if not self._wait_if_paused():
+                    break
+                deadline += time.monotonic() - paused_at
+                continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 local_stop.set()
@@ -738,7 +813,7 @@ class ArpExecution:
         visits: dict[str, int] = {}
         current = validation.entry_node
         last: NodeResult | None = None
-        self.status = ArpRunStatus.RUNNING
+        self.status = ArpRunStatus.PAUSED if self._manual_paused else ArpRunStatus.RUNNING
         self.started_at = time.time()
         BUS.publish(
             "arp_run_start",
@@ -756,6 +831,10 @@ class ArpExecution:
         try:
             while current:
                 if self.stop_event.is_set():
+                    self.status = ArpRunStatus.CANCELED
+                    self.error = "run canceled"
+                    break
+                if not self._wait_if_paused():
                     self.status = ArpRunStatus.CANCELED
                     self.error = "run canceled"
                     break
@@ -1002,6 +1081,14 @@ class ArpRunManager:
             return False
         execution.cancel()
         return True
+
+    def pause(self, run_id: str) -> bool:
+        execution = self.get(run_id)
+        return execution.pause() if execution else False
+
+    def resume(self, run_id: str) -> bool:
+        execution = self.get(run_id)
+        return execution.resume() if execution else False
 
     def decide_gate(self, run_id: str, node_id: str, approved: bool, comment: str = "") -> bool:
         execution = self.get(run_id)

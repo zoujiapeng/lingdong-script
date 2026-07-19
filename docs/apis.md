@@ -53,6 +53,8 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 | GET | `/api/v2/runs/current` | 当前运行投影与活跃/恢复的 ARP audit |
 | GET | `/api/v2/runs/{run_id}` | 单次完整运行投影与 ARP typed/historical audit |
 | POST | `/api/v2/runs/{run_id}/cancel` | 统一取消 Agent 或 ARP run；不存在返回 404，已终止返回 409 |
+| POST | `/api/v2/runs/{run_id}/pause` | 在当前原子动作完成后的安全边界暂停活跃 ARP 及其子 Agent |
+| POST | `/api/v2/runs/{run_id}/resume` | 继续由前端手动暂停的 ARP；人工确认门不走此端点 |
 | GET | `/api/v2/runs/{run_id}/artifacts/{artifact_id}` | 读取该 run 登记且重新通过大小/哈希/尺寸验证的受管理工件 |
 | GET | `/api/v2/jobs` | 统一 Agent/ARP/Replay/Schedule job 摘要列表；不内嵌 result |
 | GET | `/api/v2/jobs/{job_id}` | 单个 runtime job |

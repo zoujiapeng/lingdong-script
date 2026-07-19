@@ -18,6 +18,7 @@ from .runtime_profile import build_runtime_profile
 def build_runner(
     task: str,
     stop_event: threading.Event | None = None,
+    pause_controller: Any | None = None,
     session_context: list | None = None,
     max_steps_override: int | None = None,
     allow_shell_tools: bool | None = None,
@@ -36,6 +37,7 @@ def build_runner(
     return AgentRunner(
         task,
         stop_event=stop_event,
+        pause_controller=pause_controller,
         session_context=session_context,
         max_steps_override=max_steps_override,
         runtime_profile=profile,

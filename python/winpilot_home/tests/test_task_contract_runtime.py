@@ -718,6 +718,8 @@ def test_legacy_drawartifact_stage_executes_original_task_through_generic_runner
     )
     stage = contract.stages[0]
     captured = {}
+    pause_controller = object()
+    registered_runners = []
     registry = EvidenceRegistry("legacy-draw-run")
 
     class FakeRunner:
@@ -742,6 +744,7 @@ def test_legacy_drawartifact_stage_executes_original_task_through_generic_runner
         captured["task"] = task
         captured["profile"] = kwargs["runtime_profile"]
         captured["intent"] = kwargs["task_intent"]
+        captured["pause_controller"] = kwargs["pause_controller"]
         return FakeRunner()
 
     class UnexpectedPreOpen:
@@ -757,7 +760,12 @@ def test_legacy_drawartifact_stage_executes_original_task_through_generic_runner
     result = runtime._execute(
         stage,
         contract,
-        {"run_id": "legacy-draw-run", "runtime_state": {}},
+        {
+            "run_id": "legacy-draw-run",
+            "runtime_state": {},
+            "pause_controller": pause_controller,
+            "on_runner": registered_runners.append,
+        },
         threading.Event(),
         time.monotonic(),
     )
@@ -771,6 +779,9 @@ def test_legacy_drawartifact_stage_executes_original_task_through_generic_runner
     )
     assert "execute_subgoal" not in profile.model_tool_allowlist
     assert captured["intent"].original_text == contract.task
+    assert captured["pause_controller"] is pause_controller
+    assert len(registered_runners) == 1
+    assert isinstance(registered_runners[0], FakeRunner)
     record = registry.records()[-1]
     assert record["predicate"] == "artifact.semantic_visible"
     assert record["provider"] == "semantic_visual_judge"

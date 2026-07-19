@@ -24,6 +24,7 @@ import {
   Moon,
   Network,
   PanelLeft,
+  Pause,
   Play,
   Radio,
   RefreshCw,
@@ -872,11 +873,13 @@ function AgentCockpit({ plane }: { plane: Plane }) {
   const [maxSteps, setMaxSteps] = useState(40);
   const [coldStart, setColdStart] = useState(() => localStorage.getItem('arp-cold-start') === '1');
   const [submitting, setSubmitting] = useState(false);
+  const [controlling, setControlling] = useState(false);
   const [actionError, setActionError] = useState('');
   const [clarificationQuestions, setClarificationQuestions] = useState<string[]>([]);
   const run = plane.currentRun;
   const arp = plane.arpSnapshot;
   const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
+  const manuallyPaused = Boolean(arp?.manual_paused);
   const runtimeIssue = plane.runtimeIssue;
   const modelProfile = plane.overview?.status.model_profile;
   const metrics = run?.metrics;
@@ -914,7 +917,25 @@ function AgentCockpit({ plane }: { plane: Plane }) {
   };
 
   const stop = async () => {
+    if (controlling) return;
+    setControlling(true);
+    setActionError('');
     try { await plane.cancelCurrent(); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); }
+    finally { setControlling(false); }
+  };
+
+  const togglePause = async () => {
+    if (controlling) return;
+    setControlling(true);
+    setActionError('');
+    try {
+      if (manuallyPaused) await plane.resumeCurrent();
+      else await plane.pauseCurrent();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setControlling(false);
+    }
   };
 
   return (
@@ -943,7 +964,17 @@ function AgentCockpit({ plane }: { plane: Plane }) {
           </label>
           <div className="arp-action-spacer" />
           {active ? (
-          <button className="arp-button arp-button-danger" onClick={stop}><CircleStop size={15} />停止</button>
+            <>
+              {run?.phase !== 'awaiting_human' && (
+                <button className="arp-button" onClick={togglePause} disabled={controlling}>
+                  {manuallyPaused ? <Play size={15} fill="currentColor" /> : <Pause size={15} />}
+                  {manuallyPaused ? '继续' : '暂停'}
+                </button>
+              )}
+              <button className="arp-button arp-button-danger" onClick={stop} disabled={controlling}>
+                {controlling ? <Loader2 size={15} className="arp-spin" /> : <CircleStop size={15} />}停止
+              </button>
+            </>
           ) : (
             <button className="arp-button arp-button-primary" onClick={execute} disabled={!goal.trim() || submitting || Boolean(runtimeIssue)}>
               {submitting ? <Loader2 size={15} className="arp-spin" /> : <Play size={15} fill="currentColor" />}运行任务

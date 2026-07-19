@@ -63,6 +63,7 @@ class RunProjectionStore:
             "run_id": run_id,
             "kind": "arp" if str(event.get("type", "")).startswith("arp_") else "agent",
             "status": "running",
+            "manual_paused": False,
             "phase": "starting",
             "goal": str(event.get("task") or event.get("graph_name") or ""),
             "graph_id": event.get("graph_id"),
@@ -151,6 +152,10 @@ class RunProjectionStore:
             return "verifying"
         if event_type == "arp_human_gate" and event.get("status") == "waiting":
             return "awaiting_human"
+        if event_type == "arp_run_paused":
+            return "paused"
+        if event_type == "arp_run_resumed":
+            return "deciding"
         if event_type in {"agent_done", "agent_error", "arp_run_done"}:
             return "terminal"
         if event_type == "schedule" and event.get("action") == "finished":
@@ -190,6 +195,10 @@ class RunProjectionStore:
                 phase
                 and not (terminal_before_event and phase != "terminal")
                 and not (is_child_event and phase == "terminal")
+                and not (
+                    run.get("manual_paused")
+                    and event_type not in {"arp_run_resumed", "arp_run_done"}
+                )
             ):
                 run["phase"] = phase
             if event.get("task") and not run.get("goal"):
@@ -559,6 +568,7 @@ class RunProjectionStore:
                 run["error"] = str(event.get("error") or "")
                 run["finished_at"] = run["updated_at"]
             elif event_type == "arp_run_done":
+                run["manual_paused"] = False
                 run["status"] = str(event.get("status") or "done")
                 run["result"] = _compact(event.get("result"))
                 run["error"] = str(event.get("error") or "")
@@ -571,8 +581,16 @@ class RunProjectionStore:
                 run["error"] = str(event.get("error") or "")
                 run["current_tool"] = None
                 run["finished_at"] = run["updated_at"]
+            elif event_type == "arp_run_paused":
+                run["manual_paused"] = True
+                run["status"] = "paused"
+            elif event_type == "arp_run_resumed":
+                run["manual_paused"] = False
+                run["status"] = "running"
             elif run.get("status") in _TERMINAL:
                 pass
+            elif run.get("manual_paused"):
+                run["status"] = "paused"
             else:
                 run["status"] = "running" if run["phase"] != "awaiting_human" else "paused"
 

@@ -173,6 +173,7 @@ export interface ArpExecutionSnapshot {
   graph_id: string;
   graph_name: string;
   status: string;
+  manual_paused?: boolean;
   current_node_id?: string | null;
   error?: string;
   task_contract?: TaskContract | null;

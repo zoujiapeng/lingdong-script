@@ -691,6 +691,32 @@ def test_run_projection_unifies_agent_metrics_and_done_evidence():
     assert run["evidence"][0]["reason"] == "target visible"
 
 
+def test_run_projection_preserves_manual_pause_across_child_events():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    store.on_event({
+        "type": "arp_run_start", "ts": 1.0, "run_id": "parent-pause",
+        "graph_id": "graph", "graph_name": "Pausable workflow",
+    })
+    store.on_event({
+        "type": "arp_child_run", "ts": 2.0, "run_id": "parent-pause",
+        "child_run_id": "child-pause", "child_kind": "agent", "task": "work",
+    })
+    store.on_event({"type": "arp_run_paused", "ts": 3.0, "run_id": "parent-pause"})
+    store.on_event({"type": "agent_tool", "ts": 4.0, "run_id": "child-pause", "tool": "click"})
+
+    paused = store.get("parent-pause")
+    assert paused["status"] == "paused"
+    assert paused["phase"] == "paused"
+    assert paused["manual_paused"] is True
+
+    store.on_event({"type": "arp_run_resumed", "ts": 5.0, "run_id": "parent-pause"})
+    resumed = store.get("parent-pause")
+    assert resumed["status"] == "running"
+    assert resumed["manual_paused"] is False
+
+
 def test_run_projection_folds_agent_child_into_parent_arp_run():
     from winpilot.orchestrator.projection import RunProjectionStore
 
@@ -1251,6 +1277,63 @@ def test_handler_node_timeout_cancels_local_work_without_waiting_for_completion(
     assert stopped.wait(0.5)
     assert execution.status == ArpRunStatus.FAILED
     assert "timed out" in result["error"]
+
+
+def test_manual_pause_blocks_the_next_node_until_resume():
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
+    from winpilot.orchestrator.runtime import ArpExecution, ArpRunStatus, NodeResult
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+
+    def handler(node, _context, stop_event):
+        if node.id == "first":
+            first_started.set()
+            while not release_first.wait(0.01):
+                if stop_event.is_set():
+                    return NodeResult(ok=False, branch="canceled", error="canceled")
+        else:
+            second_started.set()
+        return NodeResult(ok=True)
+
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="first",
+                kind=ArpNodeKind.ACTION_BATCH,
+                config={"actions": [{"action": "wait", "duration_ms": 0}]},
+            ),
+            ArpNode(
+                id="second",
+                kind=ArpNodeKind.ACTION_BATCH,
+                config={"actions": [{"action": "wait", "duration_ms": 0}]},
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="a", source="start", target="first"),
+            ArpEdge(id="b", source="first", target="second"),
+            ArpEdge(id="c", source="second", target="end"),
+        ],
+    )
+    execution = ArpExecution(graph, {ArpNodeKind.ACTION_BATCH: handler})
+    thread = threading.Thread(target=execution.run)
+    thread.start()
+
+    assert first_started.wait(1), execution.to_dict()
+    assert execution.pause() is True
+    assert execution.status == ArpRunStatus.PAUSED
+    assert execution.to_dict()["manual_paused"] is True
+    release_first.set()
+    assert not second_started.wait(0.1)
+
+    assert execution.resume() is True
+    assert second_started.wait(1)
+    thread.join(1)
+    assert not thread.is_alive()
+    assert execution.status == ArpRunStatus.DONE
 
 
 def test_run_manager_prunes_old_terminal_runs():

@@ -575,6 +575,16 @@ class AutomationIrRunRequest(BaseModel):
 
 
 # ----------------------------------------------------------------- endpoints
+def _current_run_projection() -> dict[str, Any] | None:
+    """Prefer the active parent ARP over an unbound child event projection."""
+    execution = ARP_RUNS.current()
+    if execution and execution.status.value in {"queued", "running", "paused"}:
+        parent = RUN_PROJECTIONS.get(execution.run_id)
+        if parent is not None:
+            return parent
+    return RUN_PROJECTIONS.current()
+
+
 @app.post("/api/chat")
 def start_chat(req: ChatRequest) -> dict[str, Any]:
     task = req.task.strip()
@@ -676,7 +686,7 @@ def status() -> dict[str, Any]:
         # has dedicated endpoints.
         "runtime_jobs": RUNTIME_JOBS.list(20, include_result=False),
         "perception_daemon": PERCEPTION_DAEMON.status(),
-        "current_run": RUN_PROJECTIONS.current(),
+        "current_run": _current_run_projection(),
     }
 
 
@@ -687,7 +697,7 @@ def platform_overview() -> dict[str, Any]:
         "api_version": "2",
         "product": "WinPilot ARP",
         "status": status(),
-        "current_run": RUN_PROJECTIONS.current(),
+        "current_run": _current_run_projection(),
         "capabilities": [item.model_dump(mode="json") for item in capability_catalog()],
         "contracts": {
             "arp": "arp/1",
@@ -786,7 +796,7 @@ def cancel_platform_job(job_id: str) -> dict[str, Any]:
 
 @app.get("/api/v2/runs/current")
 def platform_current_run() -> dict[str, Any]:
-    projection = RUN_PROJECTIONS.current()
+    projection = _current_run_projection()
     execution = ARP_RUNS.current()
     run_id = str((projection or {}).get("run_id") or "")
     if execution is not None and execution.run_id != run_id:
@@ -840,6 +850,36 @@ def cancel_platform_run(run_id: str) -> dict[str, Any]:
     if runner_stop_event:
         runner_stop_event.set()
 
+    return {
+        "ok": True,
+        "run": RUN_PROJECTIONS.get(run_id),
+        "arp": _arp_detail_snapshot(run_id, execution),
+    }
+
+
+@app.post("/api/v2/runs/{run_id}/pause")
+def pause_platform_run(run_id: str) -> dict[str, Any]:
+    """Cooperatively pause an active ARP run at its next safe boundary."""
+    execution = ARP_RUNS.get(run_id)
+    if execution is None:
+        raise HTTPException(404, "run not found")
+    if not execution.pause():
+        raise HTTPException(409, "run cannot be paused")
+    return {
+        "ok": True,
+        "run": RUN_PROJECTIONS.get(run_id),
+        "arp": _arp_detail_snapshot(run_id, execution),
+    }
+
+
+@app.post("/api/v2/runs/{run_id}/resume")
+def resume_platform_run(run_id: str) -> dict[str, Any]:
+    """Resume a run paused manually by the frontend."""
+    execution = ARP_RUNS.get(run_id)
+    if execution is None:
+        raise HTTPException(404, "run not found")
+    if not execution.resume():
+        raise HTTPException(409, "run is not manually paused")
     return {
         "ok": True,
         "run": RUN_PROJECTIONS.get(run_id),

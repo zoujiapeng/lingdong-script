@@ -912,6 +912,7 @@ class StageRuntime:
             runner = build_runner(
                 goal,
                 stop_event=stop_event,
+                pause_controller=context.get("pause_controller"),
                 max_steps_override=max(1, int(params.get("max_steps") or 40)),
                 runtime_profile=profile,
                 task_intent=stage_intent,
@@ -919,6 +920,17 @@ class StageRuntime:
                     runtime_stage, stage_intent,
                 ),
                 session_context=list(contract.session_context or []),
+            )
+            on_runner = context.get("on_runner")
+            if callable(on_runner):
+                on_runner(runner)
+            BUS.publish(
+                "arp_child_run",
+                run_id=context["run_id"],
+                node_id=stage.id,
+                child_run_id=runner.run_id,
+                child_kind="agent",
+                task=goal,
             )
             if bound_hwnd:
                 runner.bind_target_window(bound_hwnd, bound_target_hint)

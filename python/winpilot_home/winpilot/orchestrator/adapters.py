@@ -61,6 +61,7 @@ def _agent_handler(on_runner: RunnerCallback | None = None) -> NodeHandler:
         runner = build_runner(
             goal,
             stop_event=stop_event,
+            pause_controller=context.get("pause_controller"),
             max_steps_override=max_steps_override,
             # ARP's allow_shell flag is a replay safety boundary. It must not
             # silently remove the Coding Runtime's own deterministic shell
@@ -460,12 +461,17 @@ def _legacy_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeR
 def default_handlers(on_runner: RunnerCallback | None = None) -> dict[ArpNodeKind, NodeHandler]:
     from ..tasking.stage_runtime import task_stage_handler
 
+    def run_task_stage(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
+        stage_context = dict(context)
+        stage_context["on_runner"] = on_runner
+        return task_stage_handler(node, stage_context, stop_event)
+
     return {
         ArpNodeKind.AGENT_GOAL: _agent_handler(on_runner),
         ArpNodeKind.ACTION_BATCH: _batch_handler,
         ArpNodeKind.REPLAY_STEP: _replay_step_handler,
         ArpNodeKind.SKILL_REPLAY: _skill_handler,
-        ArpNodeKind.TASK_STAGE: task_stage_handler,
+        ArpNodeKind.TASK_STAGE: run_task_stage,
         ArpNodeKind.LEGACY_FLOW: _legacy_handler,
     }
 
