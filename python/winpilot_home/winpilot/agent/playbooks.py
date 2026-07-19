@@ -143,11 +143,11 @@ def for_task(task: str) -> list[Playbook]:
         return []
     books = load_all()
     task_lower = (task or "").lower()
-    upload_publish = any(k in task_lower for k in (
-        "upload", "publish", "post", "creator", "draft",
-        "\u4e0a\u4f20", "\u53d1\u5e03", "\u6295\u7a3f", "\u4f5c\u54c1",
-        "\u6807\u9898", "\u8349\u7a3f",
-    ))
+    # Task semantics have one owner.  Reuse the structured publication rule
+    # instead of maintaining another keyword list in the prompt layer.
+    from .task_rules import _is_upload_publish_task
+
+    upload_publish = _is_upload_publish_task(task)
     matched = [b for b in books if any(k in task_lower for k in b.keywords)]
     if upload_publish:
         matched = [b for b in matched if b.name != "media-playback"]

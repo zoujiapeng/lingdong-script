@@ -86,25 +86,14 @@ def test_draft_communication_rejects_any_successful_send_action():
     assert runner._communication_native_mutation_ready() is False
 
 
-def test_draft_runtime_hard_blocks_send_click_and_enter():
+def test_draft_goal_does_not_install_a_task_keyword_action_interceptor():
     from winpilot.agent.tools import ToolSession
 
     session = ToolSession(
         task='\u5728QQ\u8f93\u5165"HELLO_0712"\uff0c\u505c\u5728\u53d1\u9001\u524d\uff0c\u4e0d\u8981\u53d1\u9001'
     )
 
-    assert session._draft_communication_block(
-        "execute_subgoal",
-        {"input": {"text": "HELLO_0712"}, "click": {"label": "Send"}},
-    )
-    assert session._draft_communication_block(
-        "run_action_batch",
-        {"actions": [{"action": "hotkey", "keys": ["Enter"]}]},
-    )
-    assert session._draft_communication_block(
-        "execute_subgoal",
-        {"input": {"text": "HELLO_0712"}},
-    ) == ""
+    assert not hasattr(session, "_draft_communication_block")
 
 
 # ---- Helpers -----------------------------------------------------------
@@ -281,7 +270,7 @@ def test_unconsumed_press_enter_fields_do_not_count_as_send_actions():
     assert runner._causally_visible_outbound_payloads() == []
 
 
-def test_one_enter_consumes_at_most_one_recent_typed_turn():
+def test_one_enter_proves_only_the_latest_typed_turn_without_deciding_completion():
     runner = _make_runner("用QQ和我的手机聊天")
     runner._tool_history = [
         ("type_text", {"text": "FIRST_MESSAGE"}, '{"ok": true}'),
@@ -290,11 +279,11 @@ def test_one_enter_consumes_at_most_one_recent_typed_turn():
         ("read_text", {}, "FIRST_MESSAGE SECOND_MESSAGE"),
     ]
 
-    assert runner._communication_native_mutation_ready() is False
+    # Mutation readiness is only a causal fact: one real send happened.  It
+    # must not become a hard-coded semantic completion verdict for the task.
+    assert runner._communication_native_mutation_ready() is True
     assert runner._causally_visible_outbound_payloads() == ["SECOND_MESSAGE"]
-    verdict = runner._deterministic_communication_verdict()
-    assert verdict is not None
-    assert verdict[0] is False
+    assert runner._deterministic_communication_verdict() is None
 
 
 @pytest.mark.parametrize(
@@ -359,7 +348,7 @@ def test_execute_subgoal_counts_only_successful_executed_send_child():
     assert runner._communication_native_mutation_ready() is True
 
 
-def test_bounded_chat_requires_a_reply_turn_before_done():
+def test_bounded_chat_does_not_invent_a_fixed_reply_count():
     runner = _make_runner("用QQ和我的手机聊天")
     runner._tool_history = [
         ("type_text", {"text": "你好，这是一条测试消息"}, "{\"ok\": true}"),
@@ -369,9 +358,8 @@ def test_bounded_chat_requires_a_reply_turn_before_done():
 
     verdict = runner._deterministic_communication_verdict()
 
-    assert verdict is not None
-    assert verdict[0] is False
-    assert "一轮往返" in verdict[1]
+    assert runner._communication_native_mutation_ready() is True
+    assert verdict is None
 
 
 def test_chat_history_evidence_phrase_does_not_turn_one_shot_send_into_chat():
@@ -382,7 +370,7 @@ def test_chat_history_evidence_phrase_does_not_turn_one_shot_send_into_chat():
     assert _communication_mode(task) == "send"
 
 
-def test_bounded_chat_accepts_two_visible_outbound_turns():
+def test_bounded_chat_leaves_two_visible_turns_to_goal_conditioned_judge():
     runner = _make_runner("用QQ和我的手机聊天")
     chat = (
         "我的手机\n17:20\n你好，这是一条测试消息\n好的\n"
@@ -400,7 +388,7 @@ def test_bounded_chat_accepts_two_visible_outbound_turns():
     verdict = runner._deterministic_communication_verdict()
 
     assert runner._communication_native_mutation_ready() is True
-    assert verdict == (True, "普通聊天已完成一轮往返，且两条实际发送内容均在聊天记录中可见。")
+    assert verdict is None
 
 
 def test_continuous_chat_waits_for_user_stop():
@@ -578,3 +566,15 @@ def test_reflect_not_injected_too_soon():
     reflect_msgs = [m for m in runner.messages
                     if "[反思检查点" in (m.get("content") or "")]
     assert len(reflect_msgs) == 0
+
+
+def test_native_visual_loop_does_not_inject_reflection_tactics():
+    runner = _make_runner("operate the current visible application")
+    runner.messages = [{"role": "system", "content": "visual contract"}]
+    runner._last_reflect_step = 0
+    runner._consecutive_unverified = 9
+
+    with patch.object(runner, "_native_visual_context_enabled", return_value=True):
+        runner._maybe_reflect(step=16)
+
+    assert runner.messages == [{"role": "system", "content": "visual contract"}]

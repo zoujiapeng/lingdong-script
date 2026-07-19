@@ -42,13 +42,16 @@ _DEFAULTS: dict[str, Any] = {
     "vlm": {"enabled": False, "base_url": "", "api_key": "", "model": "",
             "thinking": False},
     "perception": {
-        "uia": {"enabled": True, "priority": 1},
+        # Accessibility and OCR are optional semantic probes.  Native visual
+        # execution must opt into them instead of inheriting them as ambient
+        # truth for every task.
+        "uia": {"enabled": False, "priority": 1},
         "win32": {"enabled": True, "priority": 2},
-        "ocr": {"enabled": True, "priority": 3},
+        "ocr": {"enabled": False, "priority": 3},
         "cv": {"enabled": True, "priority": 4},
         "vlm": {"enabled": False, "priority": 5},
     },
-    "fusion": {"escalate_on_empty": True, "ocr_skip_when_uia_rich": True,
+    "fusion": {"escalate_on_empty": False, "ocr_skip_when_uia_rich": True,
                "vlm_skip_when_uia_rich": True, "uia_rich_threshold": 20,
                "vlm_assist_threshold": 60, "observe_cache_ttl_s": 2.0,
                # When the main model can consume images, the screenshot is the
@@ -57,7 +60,7 @@ _DEFAULTS: dict[str, Any] = {
                # UIA/OCR/VLM unless a query explicitly asks for text grounding.
                "native_vision_direct": True,
                "screen_watch_autostart": True,
-               "predictive_ocr_enabled": True,
+               "predictive_ocr_enabled": False,
                "predictive_ocr_prefer_cache": True,
                "incremental_perception_enabled": True,
                "incremental_perception_debounce_ms": 80,
@@ -95,11 +98,10 @@ _DEFAULTS: dict[str, Any] = {
     },
     "controller": {
         "physical_anchor_clicks": True,
-        # Experimental: use MiMo reasoning only while an image-capable native
-        # loop is still grounding unresolved continuous pointer geometry.
-        # Disabled by default because reasoning + function calling is less
-        # stable and substantially slower on current MiMo endpoints.
-        "native_visual_thinking": False,
+        # Use provider-native reasoning for native visual decisions on known
+        # compatible providers. This is slower, but it gives the model space to
+        # understand unfamiliar layouts and recover instead of following rules.
+        "native_visual_thinking": True,
         # Conservative auto mode.  A crop is used only for a validated,
         # foreground, single-window target; every ambiguous/global scene falls
         # back to the complete virtual desktop.  Disable to force full-screen
@@ -129,7 +131,11 @@ _DEFAULTS: dict[str, Any] = {
         "semantic_grounding_assist": False,
         "coordinate_semantic_snap": False,
     },
-    "ocr": {"use_gpu": True, "min_confidence": 0.55},
+    "ocr": {
+        "use_gpu": True,
+        "min_confidence": 0.55,
+        "warm_on_startup": False,
+    },
     "search": {"everything_es_path": "", "everything_exe_path": ""},
     "coding": {"enabled": True, "workspace": "", "max_steps": 30},
     "integrations": {

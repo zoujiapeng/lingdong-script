@@ -195,7 +195,6 @@ def test_recover_bound_target_window_uses_process_identity_when_title_changes(mo
         }],
     )
     monkeypatch.setattr(session, "_bind_perception_target", lambda _hwnd: None)
-    monkeypatch.setattr(session, "_ensure_screen_watch", lambda _reason: None)
 
     assert session._recover_bound_target_window() == 300
     assert session.hwnd == 300
@@ -231,7 +230,6 @@ def test_refresh_bound_target_follows_matching_foreground_successor(monkeypatch)
         lambda hwnd: "Example App" if hwnd == 300 else "Starting...",
     )
     monkeypatch.setattr(session, "_bind_perception_target", lambda _hwnd: None)
-    monkeypatch.setattr(session, "_ensure_screen_watch", lambda _reason: None)
     monkeypatch.setattr(
         "winpilot.agent.tools.win32process.GetWindowThreadProcessId",
         lambda hwnd: (1, hwnd),

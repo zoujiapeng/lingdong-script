@@ -9,12 +9,10 @@ from .contracts import (
     ArtifactBinding,
     CompletionObligation,
     EvidenceProviderSpec,
-    InteractionSessionContract,
     RequirementCoverage,
     StateBinding,
     StageType,
     TaskContract,
-    TaskIntent,
     TaskRequirement,
     TaskStage,
 )
@@ -67,87 +65,6 @@ class TaskContractCompiler:
             })
         return normalized[-8:]
 
-    @staticmethod
-    def _apply_session_context(
-        task: str,
-        intent: TaskIntent,
-        entries: list[dict],
-    ) -> TaskIntent:
-        """Resolve short-lived references without enabling long-term memory.
-
-        This is execution context, not experience replay.  It therefore stays
-        available during cold-start evaluation and never proves current GUI
-        state by itself.
-        """
-
-        if not entries:
-            return intent
-        text = str(task or "")
-        reference = bool(re.search(
-            r"刚刚|刚才|之前|上次|上一(?:个|次)|那个|它|继续|再来|"
-            r"previous|last|just|that|it|continue|again",
-            text,
-            re.IGNORECASE,
-        ))
-        if not reference:
-            return intent
-        previous = entries[-1]
-        prior_intent = (
-            previous.get("intent")
-            if isinstance(previous.get("intent"), dict)
-            else {}
-        )
-        payload = intent.model_dump(mode="json")
-        provenance = dict(payload.get("provenance") or {})
-        resolved: list[str] = []
-        if not str(payload.get("source") or "").strip():
-            source = str(
-                prior_intent.get("source")
-                or prior_intent.get("destination")
-                or ""
-            ).strip()
-            if source:
-                payload["source"] = source
-                resolved.append("source")
-        if not str(payload.get("channel") or "").strip():
-            channel = str(prior_intent.get("channel") or "").strip()
-            if channel:
-                payload["channel"] = channel
-                payload["destination"] = payload.get("destination") or channel
-                resolved.append("channel")
-        if not str(payload.get("recipient") or "").strip():
-            recipient = str(prior_intent.get("recipient") or "").strip()
-            if recipient:
-                payload["recipient"] = recipient
-                resolved.append("recipient")
-
-        operations = list(payload.get("operation") or [])
-        # In "把刚刚画的画截图/发送", the drawing verb describes the
-        # antecedent artifact; it is not a request to draw a second artifact.
-        if (
-            "draw" in operations
-            and any(item in operations for item in ("capture", "send"))
-            and re.search(r"刚刚|刚才|之前|上次|previous|last|just", text, re.IGNORECASE)
-            and not re.search(r"再画|重画|重新画|draw\s+again|redraw", text, re.IGNORECASE)
-        ):
-            operations = [item for item in operations if item != "draw"]
-            payload["operation"] = operations
-            resolved.append("antecedent_artifact")
-
-        ambiguous = list(payload.get("ambiguous_fields") or [])
-        if "draw" not in operations:
-            ambiguous = [item for item in ambiguous if item != "subject"]
-        ambiguous = [
-            item for item in ambiguous
-            if not str(payload.get(item) or "").strip()
-        ]
-        payload["ambiguous_fields"] = ambiguous
-        if resolved:
-            provenance["session_reference"] = ",".join(resolved)
-            provenance["session_run_id"] = str(previous.get("run_id") or "")
-            payload["provenance"] = provenance
-        return TaskIntent.model_validate(payload)
-
     def compile(
         self,
         task: str,
@@ -159,15 +76,15 @@ class TaskContractCompiler:
     ) -> TaskContract:
         step_budget = max(1, min(400, int(max_steps)))
         normalized_context = self._normalize_session_context(session_context)
-        intent = self._apply_session_context(
-            task,
-            self.parser.parse(task),
-            normalized_context,
-        )
+        # Same-client context is carried as bounded source facts, including in
+        # cold-start runs.  The compiler never resolves pronouns, inherits an
+        # application/recipient, or rewrites operations from those facts; the
+        # visual model interprets the original task and context together.
+        intent = self.parser.parse(task)
         task_id = f"task-{uuid.uuid4().hex[:16]}"
         stages: list[TaskStage] = []
         obligations: list[CompletionObligation] = []
-        session: InteractionSessionContract | None = None
+        session = None
 
         def add(
             stage_type: StageType,
@@ -207,11 +124,7 @@ class TaskContractCompiler:
             *,
             goal: str | None = None,
             app: str | None = None,
-            verification_policy: str = "full_goal_coverage",
             runtime_resolution_fields: list[str] | None = None,
-            surface_output_requested: bool = False,
-            lifecycle: str = "bounded",
-            preserve_original_intent: bool = True,
         ) -> TaskStage:
             """Keep an open-ended GUI request lossless and visually verifiable.
 
@@ -241,43 +154,26 @@ class TaskContractCompiler:
                     "app": stage_app,
                     "named_applications": named_applications,
                     "source": stage_app or "active_window",
-                    "verification_policy": verification_policy,
-                    "minimum_effect_categories": (
-                        2 if verification_policy == "capability_demonstration" else 1
-                    ),
-                    "forbid_open_only": True,
+                    "verification_policy": "full_goal_coverage",
                     "provider_policy": "gui_primary_optional_external_provider",
-                    "preserve_original_intent": preserve_original_intent,
+                    # ExecuteDesktopTask is deliberately lossless.  Parsed
+                    # nouns and verbs may help discover an application, but
+                    # they must never switch the visual Agent into a drawing,
+                    # game, board, or other compiler-authored task mode.
+                    "preserve_original_intent": True,
                     "runtime_resolution_fields": resolution_fields,
-                    "surface_output_mode": (
-                        "continuous_pointer" if surface_output_requested else ""
-                    ),
-                    "surface_output_subject": (
-                        intent.subject if surface_output_requested else ""
-                    ),
-                    "surface_output_quality": (
-                        intent.quality if surface_output_requested else ""
-                    ),
-                    "subject": intent.subject if surface_output_requested else "",
-                    "quality": intent.quality if surface_output_requested else "",
-                    "lifecycle": lifecycle,
                 },
                 allow_skill_replay=True,
             )
             stage.required_capabilities.append("visual.adaptive_interaction")
-            if surface_output_requested:
-                stage.required_capabilities.append("visual.surface_manipulation")
             obligation = CompletionObligation(
                 id="desktop.full_goal_verified",
                 predicate="desktop.full_goal_verified",
                 description=(
-                    "Fresh target-bound visual evidence and the executed action trace jointly prove every "
-                    "user-visible clause in the original desktop request; merely opening an app or typing "
-                    "a description of the requested result is insufficient."
-                    if preserve_original_intent
-                    else
-                    "Fresh target-bound visual evidence and the executed action trace prove that the "
-                    "requested visible surface output exists before later artifact or delivery stages run."
+                    "The delivered result must satisfy every clause in the original desktop request in the "
+                    "modality the user requested. GUI mutations require fresh target-bound visual and causal "
+                    "action evidence; a prose claim that a GUI mutation succeeded is not evidence. A requested "
+                    "answer or explanation must instead be verified for correctness against the current frame."
                 ),
                 stage_id=stage.id,
                 evidence_providers=[
@@ -291,327 +187,13 @@ class TaskContractCompiler:
             obligations.append(obligation)
             return stage
 
-        response_only = bool(
-            "respond" in intent.operation
-            and not any(
-                operation in intent.operation
-                for operation in (
-                    "open", "draw", "capture", "save", "send", "operate",
-                    "interact", "demonstrate",
-                )
-            )
-        )
-        client_gui_goal = bool(
-            require_gui
-            and not response_only
-            and intent.domain not in {
-                "workspace", "web_research", "data", "automation",
-            }
-        )
-
-        if intent.interaction.active and not client_gui_goal:
-            interaction = intent.interaction
-            target = interaction.target or intent.source or "active_window"
-            typed_direct_manipulation_verifier = bool(
-                interaction.mode == "direct_visual_manipulation"
-                and interaction.session_mode == "bounded"
-                and interaction.primary_action_modality == "drag"
-            )
-            session = InteractionSessionContract(
-                session_id=f"session-{task_id.removeprefix('task-')}",
-                mode=interaction.mode,
-                lifecycle=interaction.session_mode,
-                actors=interaction.actors,
-                role_assignments=interaction.role_assignments,
-                initial_turn_owner=interaction.turn_owner,
-                primary_action_modality=interaction.primary_action_modality,
-                target=target,
-                continuation_policy=interaction.continuation_policy,
-                max_agent_turns_per_activation=1,
-                wait_for_external_change=interaction.expected_external_change,
-                requested_max_steps=step_budget,
-                # One verified semantic turn normally consumes a planner and a
-                # verifier call.  Derive the live-loop budgets from the API's
-                # requested max_steps instead of silently ignoring it.
-                max_semantic_turns=max(1, (step_budget + 1) // 2),
-                max_replans=step_budget // 4,
-                max_model_calls=max(2, step_budget),
-                external_change_timeout_s=300.0,
-            )
-            scene = StateBinding(
-                name=session.authoritative_state_ref,
-                state_type="authoritative_visual_frame",
-                source=target,
-                scope="target_window",
-            )
-            surface = StateBinding(
-                name=session.surface_region_ref,
-                state_type="bound_interaction_surface",
-                source=target,
-                scope=interaction.region_hint or "infer_from_scene",
-            )
-            region = StateBinding(
-                name=session.interaction_region_ref,
-                state_type="per_turn_interaction_region",
-                source=target,
-                scope=interaction.region_hint or "infer_from_scene",
-            )
-            protocol = StateBinding(
-                name="interaction_protocol",
-                state_type="interaction_protocol",
-                source=target,
-            )
-            turn_effect = StateBinding(
-                name="turn_effect",
-                state_type="verified_local_effect_candidate",
-                source=target,
-            )
-
-            observe_stage = add(
-                StageType.OBSERVE_SCENE,
-                "绑定并观察实时界面",
-                {
-                    "app": intent.source,
-                    "source": target,
-                    "authoritative_state_ref": scene.name,
-                    "surface_region_ref": surface.name,
-                    "interaction_region_ref": region.name,
-                    "region_hint": interaction.region_hint,
-                    "intent_signals": interaction.signals,
-                    "intent_confidence": interaction.confidence,
-                    "original_task": task,
-                },
-                state_outputs=[scene, surface],
-                stage_max_steps=2,
-            )
-            observe_obligation = CompletionObligation(
-                id="interaction.scene_bound",
-                predicate="interaction.scene_bound",
-                description=(
-                    "A fresh authoritative frame is bound to the intended target window and a stable "
-                    "interaction surface authority; a full-desktop or unrelated frame is insufficient."
-                ),
-                stage_id=observe_stage.id,
-                evidence_providers=[
-                    _provider(
-                        "bound_scene_observer",
-                        "window.focus", "visual.observe", "visual.bind_target", "visual.region_bind",
-                    ),
-                ],
-            )
-            observe_stage.obligations.append(observe_obligation)
-            obligations.append(observe_obligation)
-
-            infer_stage = add(
-                StageType.INFER_INTERACTION,
-                "推断交互规则和当前轮次",
-                {
-                    "session_id": session.session_id,
-                    "mode_candidate": interaction.mode,
-                    "actors": [actor.model_dump(mode="json") for actor in interaction.actors],
-                    "role_assignments": interaction.role_assignments,
-                    "turn_owner_candidate": interaction.turn_owner,
-                    "action_modalities": interaction.action_modalities,
-                    "primary_action_modality": interaction.primary_action_modality,
-                    "intent_signals": interaction.signals,
-                    "original_task": task,
-                },
-                state_inputs=[scene, surface],
-                state_outputs=[protocol, region],
-                stage_max_steps=3,
-            )
-            infer_obligation = CompletionObligation(
-                id="interaction.protocol_inferred",
-                predicate="interaction.protocol_inferred",
-                description=(
-                    "Participants, role constraints, legal interaction region, action semantics, and current "
-                    "turn are inferred from both the task and the authoritative scene."
-                ),
-                stage_id=infer_stage.id,
-                evidence_providers=[
-                    _provider("interaction_protocol_inference", "interaction.infer", "visual.observe"),
-                ],
-            )
-            infer_stage.obligations.append(infer_obligation)
-            obligations.append(infer_obligation)
-
-            perform_stage = add(
-                StageType.PERFORM_TURN,
-                "执行一个语义交互回合",
-                {
-                    "session_id": session.session_id,
-                    "turn_scope": "one_semantic_turn",
-                    "turn_guard": "only_when_agent_owns_turn",
-                    "on_external_turn": "defer_without_mutation",
-                    "max_agent_turns": session.max_agent_turns_per_activation,
-                    "allow_controller_transaction": True,
-                    "action_modalities": interaction.action_modalities,
-                    "primary_action_modality": interaction.primary_action_modality,
-                    "original_task": task,
-                },
-                state_inputs=[scene, surface, region, protocol],
-                state_outputs=[turn_effect],
-                stage_max_steps=4,
-            )
-            perform_obligation = CompletionObligation(
-                id="interaction.turn_resolved",
-                predicate="interaction.turn_resolved",
-                description=(
-                    "The current semantic turn is safely resolved: the agent commits exactly one legal turn "
-                    "when action is required, or makes no mutation when an external actor owns the turn or "
-                    "the latest frame is awaiting independent terminal proof.  An agent turn may contain "
-                    "multiple controller pointer events."
-                ),
-                stage_id=perform_stage.id,
-                evidence_providers=[
-                    _provider(
-                        "bound_interaction_transaction",
-                        "interaction.perform", "interaction.prepare_input_mode",
-                        "controller.transaction",
-                    ),
-                ],
-            )
-            perform_stage.obligations.append(perform_obligation)
-            obligations.append(perform_obligation)
-
-            verify_stage = add(
-                StageType.VERIFY_LOCAL_EFFECT,
-                "验证本回合局部结果",
-                {
-                    "session_id": session.session_id,
-                    "verification_scope": "declared_effect_regions_within_bound_surface",
-                    "reject_unrelated_desktop_change": True,
-                    "accept_verified_defer": True,
-                    "verification_policy": (
-                        "typed_direct_manipulation_completion"
-                        if typed_direct_manipulation_verifier
-                        else "semantic_visual_effect"
-                    ),
-                    "original_task": task,
-                },
-                state_inputs=[surface, region, protocol, turn_effect],
-                state_outputs=[StateBinding(
-                    name="verified_turn_effect",
-                    state_type="verified_local_effect",
-                    source=target,
-                )],
-                stage_max_steps=2,
-            )
-            verify_obligation = CompletionObligation(
-                id="interaction.local_effect_verified",
-                predicate="interaction.local_effect_verified",
-                description=(
-                    "A fresh post-action frame confirms the intended semantic effect in a declared effect "
-                    "region inside the stable interaction surface, confirms an authorized no-mutation defer "
-                    "for an external turn, or "
-                    "independently confirms that no action is needed because the task is already terminal; "
-                    "unrelated desktop pixel changes do not count."
-                ),
-                stage_id=verify_stage.id,
-                evidence_providers=(
-                    [
-                        _provider(
-                            "typed_direct_manipulation_completion",
-                            "interaction.verify_transition", "visual.observe",
-                        ),
-                        _provider(
-                            "grounded_transaction_progress",
-                            "interaction.verify_local_effect",
-                            "interaction.verify_transition",
-                            "controller.transaction", "visual.observe",
-                        ),
-                        _provider(
-                            "local_semantic_effect_verifier",
-                            "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
-                        ),
-                    ]
-                    if typed_direct_manipulation_verifier
-                    else [
-                        _provider(
-                            "grounded_transaction_progress",
-                            "interaction.verify_local_effect",
-                            "interaction.verify_transition",
-                            "controller.transaction", "visual.observe",
-                        ),
-                        _provider(
-                            "local_semantic_effect_verifier",
-                            "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
-                        ),
-                        *(
-                            [_provider(
-                                "typed_freehand_turn_completion",
-                                "interaction.verify_transition",
-                                "interaction.prepare_input_mode",
-                                "visual.observe",
-                            )]
-                            if session.lifecycle == "persistent" else []
-                        ),
-                    ]
-                ),
-            )
-            verify_stage.obligations.append(verify_obligation)
-            obligations.append(verify_obligation)
-
-            terminal_obligation = CompletionObligation(
-                id="interaction.task_completed",
-                predicate="interaction.task_completed",
-                description=(
-                    "An independent semantic check on the latest authoritative frame proves that the "
-                    "original bounded interaction is terminally complete, or the activation's contracted "
-                    "number of agent turns has a verified semantic effect and control is explicitly yielded. "
-                    "An armed external-change watcher alone is not task completion."
-                ),
-                stage_id=verify_stage.id,
-                evidence_providers=(
-                    [
-                        _provider(
-                            "typed_direct_manipulation_completion",
-                            "interaction.verify_transition", "visual.observe",
-                        ),
-                        _provider(
-                            "interaction_terminal_verifier",
-                            "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
-                        ),
-                    ]
-                    if typed_direct_manipulation_verifier
-                    else [
-                        _provider(
-                            "interaction_terminal_verifier",
-                            "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
-                        ),
-                    ]
-                ),
-            )
-            verify_stage.obligations.append(terminal_obligation)
-            obligations.append(terminal_obligation)
-
-            if session.wait_for_external_change:
-                wait_stage = add(
-                    StageType.WAIT_FOR_EXTERNAL_CHANGE,
-                    "等待外部参与者更新界面",
-                    {
-                        "session_id": session.session_id,
-                        "continuation_policy": session.continuation_policy,
-                        "watch_scope": session.surface_region_ref,
-                        "wait_mode": "block_until_verified_change",
-                        "timeout_s": session.external_change_timeout_s,
-                        "original_task": task,
-                    },
-                    state_inputs=[surface, protocol],
-                    state_outputs=[StateBinding(
-                        name="external_change_event",
-                        state_type="verified_external_change",
-                        source=target,
-                        scope="bound_interaction_surface",
-                    )],
-                    stage_max_steps=1,
-                )
-                # Waiting is a continuation mechanism, not a final condition.
-                # A persistent session may prove a visible terminal state on
-                # its first turn and route directly from VerifyLocalEffect to
-                # END without ever entering this stage.  The stage still emits
-                # run-scoped external-change evidence for traceability, while
-                # its required capabilities remain enforced by _STAGE_BASE.
+        # `require_gui` is an entrypoint contract, not a hint for the intent
+        # parser.  The same visible client must not silently change runtime
+        # because the text happened to contain words such as draw, game, teach,
+        # board, explain, or demonstrate.  The model sees the complete request
+        # and the live frame, then decides whether the next step is an action or
+        # an explanation.
+        client_gui_goal = bool(require_gui)
 
         # Unknown in-app workflows stay as one lossless desktop goal.  The GUI
         # runner receives the original request plus an explicit application
@@ -632,69 +214,26 @@ class TaskContractCompiler:
         ]
         deferred_desktop_resolution = bool(
             "send" in intent.operation
-            and (
-                runtime_resolution_fields
-                or intent.send_mode == "continuous_chat"
-            )
+            and runtime_resolution_fields
         )
-        surface_output_requested = bool(
+        visual_output_request = bool(
             "draw" in intent.operation and not intent.interaction.active
-        )
-        communication_app = str(intent.channel or "").strip().casefold()
-        surface_applications = [
-            app
-            for app in (intent.applications or [])
-            if str(app or "").strip().casefold() != communication_app
-        ]
-        multi_application_surface_workflow = bool(
-            surface_output_requested and len(surface_applications) > 1
         )
         full_desktop_execution = bool(
             client_gui_goal
-            or (
-                any(item in intent.operation for item in ("operate", "demonstrate"))
-                and not intent.interaction.active
-            )
+            or intent.interaction.active
+            or any(item in intent.operation for item in ("operate", "demonstrate"))
             or deferred_desktop_resolution
-            or multi_application_surface_workflow
+            # A pure visual-output request still needs the desktop Agent, but
+            # it receives no special mode, schema, verifier, subject, or
+            # quality contract.  It is just another lossless GUI goal.
+            or visual_output_request
         )
-        surface_stage_only = bool(
-            surface_output_requested and not full_desktop_execution
-        )
-        if full_desktop_execution or surface_stage_only:
-            preserve_original_intent = bool(
-                full_desktop_execution
-                or set(intent.operation) <= {"draw"}
-            )
-            stage_goal = task
-            if not preserve_original_intent:
-                stage_goal = (
-                    "Create the requested visible surface output of "
-                    f"{intent.subject or 'the requested subject'} in the user-selected application."
-                )
+        if full_desktop_execution:
             add_desktop_goal(
-                goal=stage_goal,
-                app=None if full_desktop_execution else intent.source,
-                verification_policy=(
-                    "capability_demonstration"
-                    if "demonstrate" in intent.operation
-                    else (
-                        "full_goal_coverage"
-                        if preserve_original_intent
-                        else "surface_output"
-                    )
-                ),
-                runtime_resolution_fields=(
-                    runtime_resolution_fields if full_desktop_execution else []
-                ),
-                surface_output_requested=surface_output_requested,
-                lifecycle=(
-                    "persistent"
-                    if full_desktop_execution
-                    and intent.send_mode == "continuous_chat"
-                    else "bounded"
-                ),
-                preserve_original_intent=preserve_original_intent,
+                goal=task,
+                app=None,
+                runtime_resolution_fields=runtime_resolution_fields,
             )
 
         needs_capture = "capture" in intent.operation or (
@@ -994,11 +533,7 @@ class TaskContractCompiler:
             requirements.append(TaskRequirement(
                 id="requirement-01-full-desktop-goal",
                 text=task,
-                kind=(
-                    "capability_demonstration"
-                    if "demonstrate" in intent.operation
-                    else "desktop_workflow"
-                ),
+                kind="desktop_workflow",
                 stage_ids=[desktop_stage.id],
                 completion_predicates=predicates,
                 source_span=[0, len(task)],
@@ -1058,10 +593,14 @@ class TaskContractCompiler:
         )
 
         clarification_questions: list[str] = []
-        # Channel/recipient ambiguity is intentionally resolved against the
-        # live desktop by ExecuteDesktopTask.  Compile-time clarification is
-        # reserved for information that observation cannot supply.
-        if "subject" in intent.ambiguous_fields:
+        # A real GUI request must reach its first frame before asking for facts
+        # that the visible application may already answer.  Non-GUI typed
+        # workflows retain their compile-time clarification contract.
+        if (
+            desktop_stage is None
+            and not intent.interaction.active
+            and "subject" in intent.ambiguous_fields
+        ):
             clarification_questions.append("请说明要绘制的具体内容。")
 
         contract = TaskContract(

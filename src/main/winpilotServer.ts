@@ -71,35 +71,60 @@ function pushStderr(line: string): void {
   while (_stderrTail.length > 25) _stderrTail.shift();
 }
 
-function requestEphemeralPort(): Promise<number> {
+function requestPort(port: number): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
-    server.unref();
-    server.once('error', reject);
-    server.listen(0, HOST, () => {
-      const address = server.address();
-      const port = typeof address === 'object' && address ? address.port : 0;
-      server.close((error) => {
-        if (error) reject(error);
-        else if (port) resolve(port);
-        else reject(new Error('未找到可用端口'));
+    let closing = false;
+    let settled = false;
+    let selectedPort = 0;
+    let pendingError: unknown = null;
+
+    const settle = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      server.removeListener('error', onError);
+      if (error) reject(error);
+      else if (selectedPort) resolve(selectedPort);
+      else reject(new Error('未找到可用端口'));
+    };
+
+    const closeAndSettle = (error?: unknown) => {
+      if (error && !pendingError) pendingError = error;
+      if (closing) return;
+      closing = true;
+      if (!server.listening) {
+        settle(pendingError);
+        return;
+      }
+      server.close((closeError) => settle(pendingError || closeError));
+    };
+
+    const onError = (error: Error) => {
+      if (!pendingError) pendingError = error;
+      // When close is already in progress, wait for its callback so the
+      // promise never settles while the listening handle is still live.
+      if (!closing) closeAndSettle(error);
+    };
+
+    server.once('error', onError);
+    try {
+      server.listen(port, HOST, () => {
+        const address = server.address();
+        selectedPort = typeof address === 'object' && address ? address.port : 0;
+        closeAndSettle(selectedPort ? undefined : new Error('未找到可用端口'));
       });
-    });
+    } catch (error) {
+      settle(error);
+    }
   });
 }
 
+function requestEphemeralPort(): Promise<number> {
+  return requestPort(0);
+}
+
 function requestSpecificPort(port: number): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.once('error', reject);
-    server.listen(port, HOST, () => {
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(port);
-      });
-    });
-  });
+  return requestPort(port);
 }
 
 /**
@@ -111,10 +136,15 @@ function requestSpecificPort(port: number): Promise<number> {
 export function rendererSafePortCandidates(seed: number, count = 256): number[] {
   const preferredStart = 49_152;
   const span = 65_535 - preferredStart + 1;
-  const normalizedSeed = Math.abs(Math.trunc(seed || 0)) % span;
+  const finiteSeed = Number.isFinite(seed) ? Math.trunc(seed) : 0;
+  const normalizedSeed = ((finiteSeed % span) + span) % span;
   const limit = Math.max(1, Math.min(Math.trunc(count || 1), span));
+  // The span is 2^14, so every odd stride visits every candidate exactly once.
+  // A wide stride avoids getting trapped in one contiguous Windows excluded
+  // port range while remaining deterministic and cheap to test.
+  const stride = 10_127;
   return Array.from({ length: limit }, (_, index) => (
-    preferredStart + ((normalizedSeed + index) % span)
+    preferredStart + ((normalizedSeed + (index * stride)) % span)
   ));
 }
 
@@ -125,7 +155,11 @@ export async function findFreePort(): Promise<number> {
     if (isRendererSafePort(port)) return port;
   }
   const seed = Date.now() + process.pid;
-  for (const port of rendererSafePortCandidates(seed)) {
+  // Inspect the complete preferred high-port range in a dispersed order.
+  // Windows can reserve contiguous blocks larger than the old 256-port retry
+  // window; stopping after one such block incorrectly reported exhaustion.
+  const preferredSpan = 65_535 - 49_152 + 1;
+  for (const port of rendererSafePortCandidates(seed, preferredSpan)) {
     try {
       return await requestSpecificPort(port);
     } catch (error: any) {

@@ -73,13 +73,13 @@ GET /api/v2/integrations/chatgpt
 当前 MCP 工具分为四层：
 
 - 状态与目标：`get_gui_agent_state`、`begin_gui_task`、`list_desktop_windows`、`focus_desktop_window`、`launch_app`、`reset_gui_context`。
-- 感知：`observe_desktop` 走低成本 UIA/OCR/CV；`capture_visual_fallback` 只在复杂或未知像素状态下返回 JPEG。
+- 感知：`capture_visual_fallback` 返回权威 JPEG，是视觉任务的默认语义依据；`observe_desktop` 仅在高层模型明确需要且能与当前窗口/当前帧核对时，提供 UIA/OCR/CV 结构化辅助。
 - Controller：`execute_gui_subgoal`、`execute_action_batch` 执行短、具体、有作用域的 routine；`execute_visual_transaction` 执行一个 typed 本地事务，并在同一 MCP 往返中返回真实动作后画面。typed action 覆盖 click/double-click、hover/move、drag/draw、scroll、text/hotkey、bounded hold 和 wait；原始 mouse down/up 只能在一个平衡校验后的 batch 内组成连续事务，不是两个可随意悬空的工具调用。
 - 编排与复用：`validate_arp_graph`、`run_arp_graph`、`get_gui_run`、`cancel_gui_run`、`decide_human_gate`、`list_gui_skills`、`replay_gui_skill`。
 
 这个 MCP 面刻意不暴露任意 shell/file 工具。`run_arp_graph` 拒绝包含 `agent_goal` 的图：当前 ChatGPT/Codex 会话已经是高层规划器，再嵌套 API-backed `AgentRunner` 会重复规划、增加延迟并意外要求另一套模型凭据。
 
-在这种模式下，高层任务列表属于连接的模型会话；它可随时改变自己的计划、取消 run、重建 ARP 图或决定人工门。WinPilot 本地 Agent 的 `revise_plan` 动态 todo 只适用于真正运行 `AgentRunner` 的 `/api/chat` / 前端 `agent_goal` 路径，MCP 不伪造一份第二计划。
+在这种模式下，高层任务列表属于连接的模型会话；它可随时改变自己的计划、取消 run、重建 ARP 图或决定人工门。真正运行 `AgentRunner` 时，工作计划也是模型的内部可变状态，不通过另一个公开计划工具形成第二套执行语言；MCP 同样不伪造第二份计划。
 
 推荐的视觉事务顺序是：
 
@@ -109,7 +109,7 @@ begin_gui_task(完整原始任务)
 
 `controller.multi_input_cooperation` 默认关闭。开启后，MCP 动作与前端 Agent 使用同一套人机仲裁：
 
-- 优先不会移动系统光标或抢键盘焦点的窗口消息/UIA 动作。
+- 只有高层模型显式选择、目标唯一且与当前帧一致时，才使用不移动系统光标的窗口消息/UIA 动作；它不会因为一次视觉动作失败而自动升级。
 - 不从另一个前台窗口强抢物理键盘焦点。
 - 拖拽、绘图等长物理动作期间，如果用户移动鼠标或切换前台，用户取得控制权，当前 Agent 动作安全停止。
 - Windows 仍只有一个系统光标和一个键盘焦点；该选项不是“第二鼠标/第二键盘”，真实物理输入继续 single-writer。

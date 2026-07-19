@@ -5,7 +5,6 @@ import json
 import hashlib
 import inspect
 import math
-import re
 import sys
 import time
 from typing import Any
@@ -17,64 +16,15 @@ from ..config import CONFIG
 from ..perception import vision_cv
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
-from .task_rules import _is_desktop_icon_drag_task
 from .tool_result import ToolResult
 
 
-_CANCEL_TEXTS = {"cancel", "\u53d6\u6d88"}
 _INPUT_ROLES = {"edit", "combobox", "\u7f16\u8f91", "\u7ec4\u5408\u6846"}
 _ACTIONABLE_HIT_ROLES = (
     "button", "link", "hyperlink", "menuitem", "menu item", "tabitem",
     "tab item", "checkbox", "radio", "listitem", "treeitem", "splitbutton",
     "\u6309\u94ae", "\u94fe\u63a5", "\u83dc\u5355\u9879", "\u9009\u9879\u5361", "\u590d\u9009", "\u5355\u9009",
 )
-_DANGEROUS_POWER_TERMS = (
-    "shutdown", "shut down", "restart", "sign out", "log off", "sleep", "hibernate",
-    "\u5173\u673a", "\u91cd\u542f", "\u91cd\u65b0\u542f\u52a8", "\u6ce8\u9500",
-    "\u7761\u7720", "\u4f11\u7720", "\u7535\u6e90",
-)
-_POWER_TASK_ALLOW_TERMS = (
-    "shutdown", "shut down", "restart", "sign out", "log off", "sleep", "hibernate",
-    "power setting", "power settings", "battery",
-    "\u5173\u673a", "\u91cd\u542f", "\u91cd\u65b0\u542f\u52a8", "\u6ce8\u9500",
-    "\u7761\u7720", "\u4f11\u7720", "\u7535\u6e90", "\u7535\u6c60",
-)
-
-_TYPED_ARITHMETIC_SEQUENCE_RE = re.compile(
-    r"^\s*(\d+(?:\.\d+)?(?:\s*(?:[+*/xX\u00d7\u00f7-])\s*"
-    r"\d+(?:\.\d+)?){1,10})\s*=\s*$"
-)
-_KEYPAD_OPERATOR_LABELS = {
-    "+": "Plus",
-    "-": "Minus",
-    "*": "Multiply by",
-    "/": "Divide by",
-    ".": "Decimal separator",
-}
-
-
-def _typed_arithmetic_expression(value: Any) -> str:
-    """Return a restricted expression only for a complete ``...=`` sequence."""
-    match = _TYPED_ARITHMETIC_SEQUENCE_RE.fullmatch(str(value or ""))
-    if not match:
-        return ""
-    return (
-        re.sub(r"\s+", "", match.group(1))
-        .replace("\u00d7", "*")
-        .replace("\u00f7", "/")
-        .replace("X", "*")
-        .replace("x", "*")
-    )
-
-
-def _semantic_keypad_click_specs(expression: str) -> list[dict[str, Any]]:
-    clicks: list[dict[str, Any]] = [{"label": "Clear"}]
-    for char in expression:
-        clicks.append({"label": char if char.isdigit() else _KEYPAD_OPERATOR_LABELS[char]})
-    clicks.append({"label": "Equals"})
-    return clicks
-
-
 def _call_with_optional_hwnd(fn, *args, hwnd: int | None = None):
     """Keep test/adaptor compatibility while passing scope to new executors."""
     try:
@@ -101,20 +51,6 @@ def _clipboard_sequence_number() -> int | None:
         return int(ctypes.windll.user32.GetClipboardSequenceNumber())
     except (AttributeError, OSError, ValueError):
         return None
-
-
-def _looks_like_save_task(task: str) -> bool:
-    text = (task or "").casefold()
-    return any(marker in text for marker in (
-        "save", "save as", "export",
-        "\u4fdd\u5b58", "\u53e6\u5b58", "\u53e6\u5b58\u4e3a", "\u5bfc\u51fa",
-    ))
-
-
-def _looks_like_cancel_element(text: str, role: str) -> bool:
-    label = (text or "").strip().casefold()
-    role_text = (role or "").casefold()
-    return label in _CANCEL_TEXTS and ("button" in role_text or "\u6309\u94ae" in role_text or not role_text)
 
 
 def _looks_like_input_element(role: str) -> bool:
@@ -193,46 +129,16 @@ def _actionable_semantic_hit(
     return True
 
 
-def _prefer_physical_text_input(element: Any, text: str, task: str) -> bool:
+def _prefer_physical_text_input(element: Any) -> bool:
     """Use real keyboard input where UIA SetValue is not a reliable commit.
 
     Composite controls frequently expose a writable wrapper even though changing
-    that wrapper does not update the focused child editor.  Native and custom
-    file dialogs are a common example.  Treat this as a control-shape rule, not
-    an application rule: composite inputs and explicit file paths in save/open
-    workflows must go through the focused keyboard surface.
+    that wrapper does not update the focused child editor.  This is a fixed
+    control-shape property; task text and the value being entered never alter
+    the execution path.
     """
     role = str(getattr(element, "role", "") or "").strip().casefold()
-    if "combo" in role or "\u7ec4\u5408\u6846" in role:
-        return True
-    value = str(text or "").strip().strip('"')
-    absolute_path = (
-        len(value) >= 3
-        and value[0].isalpha()
-        and value[1] == ":"
-        and value[2] in {"\\", "/"}
-    )
-    return bool(absolute_path and _looks_like_save_task(task))
-
-
-def _task_allows_power_action(task: str) -> bool:
-    text = (task or "").casefold()
-    return any(term in text for term in _POWER_TASK_ALLOW_TERMS)
-
-
-def _looks_like_dangerous_power_element(text: str, role: str) -> bool:
-    label = (text or "").strip().casefold()
-    if not label:
-        return False
-    role_text = (role or "").casefold()
-    clickable = (
-        "button" in role_text
-        or "\u6309\u94ae" in role_text
-        or "menu" in role_text
-        or "\u83dc\u5355" in role_text
-        or not role_text
-    )
-    return clickable and any(term in label for term in _DANGEROUS_POWER_TERMS)
+    return "combo" in role or "\u7ec4\u5408\u6846" in role
 
 
 def _normalize_draw_strokes(raw: object) -> list[list[list[int]]]:
@@ -497,31 +403,6 @@ class InteractionToolMixin:
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         return candidates[0][3]
 
-    def _blocked_power_click_result(self, element) -> ToolResult | None:
-        if _task_allows_power_action(getattr(self, "task", "")):
-            return None
-        text = str(getattr(element, "text", "") or "")
-        role = str(getattr(element, "role", "") or "")
-        if not _looks_like_dangerous_power_element(text, role):
-            return None
-        result = {
-            "ok": False,
-            "verified": False,
-            "blocked": True,
-            "error": (
-                "Refused to click a system power/session control outside an explicit "
-                "power-management task. Re-observe the intended app/window and choose a "
-                "non-destructive target."
-            ),
-            "blocked_element": {
-                "text": text,
-                "role": role,
-                "source": str(getattr(element, "source", "") or ""),
-                "coords": [int(getattr(element, "cx", 0) or 0), int(getattr(element, "cy", 0) or 0)],
-            },
-        }
-        return ToolResult(self._fmt(result))
-
     def _action_hwnd(self) -> int | None:
         # Action dispatch must not resolve/adopt a new foreground window.  The
         # remembered target is established by launch/focus/observe workflows;
@@ -626,6 +507,16 @@ class InteractionToolMixin:
         except Exception:
             return None
 
+    def _t_double_click(self, args: dict) -> ToolResult:
+        """Execute the explicit model primitive through the proven click path."""
+        click_args = dict(args)
+        click_args["double"] = True
+        result = self._t_click(click_args)
+        if isinstance(result.replay, dict):
+            result.replay["tool"] = "double_click"
+            result.replay["double"] = True
+        return result
+
     def _t_click(self, args: dict) -> ToolResult:
         semantic_keys = (
             "label", "text_query", "fallback_text", "role",
@@ -684,28 +575,6 @@ class InteractionToolMixin:
             })
             if _looks_like_input_element(element.role):
                 self._last_input_element = element
-            if (
-                button == "left"
-                and not double
-                and _looks_like_save_task(getattr(self, "task", ""))
-                and _looks_like_cancel_element(element.text, element.role)
-            ):
-                result = {
-                    "ok": False,
-                    "verified": False,
-                    "blocked": True,
-                    "error": (
-                        "Refused to click a Cancel/取消 button during a save/export task. "
-                        "Re-observe the active dialog, query for Save/保存, and click the "
-                        "actual confirm button or press Enter only after the filename field is correct."
-                    ),
-                    "post_state": verify_mod.post_state_summary(),
-                }
-                return ToolResult(self._fmt(result), replay=replay)
-            blocked = self._blocked_power_click_result(element)
-            if blocked is not None:
-                return blocked
-
             def action() -> dict:
                 if button == "left" and not double and not physical and executor_mod.uia_invoke(element):
                     BUS.publish("action", action="uia_invoke", elem_id=element.elem_id,
@@ -725,11 +594,6 @@ class InteractionToolMixin:
         elif "x" in args and "y" in args:
             x, y = int(args["x"]), int(args["y"])
             authored_x, authored_y = x, y
-            hit = self._element_at_point(x, y)
-            if hit is not None:
-                blocked = self._blocked_power_click_result(hit)
-                if blocked is not None:
-                    return blocked
             semantic_hit = None
             semantic_candidate = self._semantic_element_near_point(x, y)
             if (
@@ -852,12 +716,10 @@ class InteractionToolMixin:
         verify_mod = _tools_attr("verify", verify)
         win32gui_mod = _tools_attr("win32gui", win32gui)
         text = str(args["text"])
-        keyboard_mode = str(args.get("keyboard_mode") or "").strip().casefold()
-        numeric_keypad = keyboard_mode in {"numeric", "numeric_keypad", "calculation"}
         element_id = args.get("element_id")
+        native_visual = bool(getattr(self, "native_visual_runtime", False))
         replay: dict[str, Any] = {
             "tool": "type_text", "text_input": text, "expect": args.get("expect"),
-            "keyboard_mode": keyboard_mode,
         }
         if element_id is not None:
             element, err = self._resolve_element(int(element_id))
@@ -866,7 +728,7 @@ class InteractionToolMixin:
             replay.update({
                 "element_text": element.text, "coords": [element.cx, element.cy],
             })
-        else:
+        elif not native_visual:
             element = getattr(self, "_last_input_element", None)
             if element is not None:
                 replay.update({
@@ -874,33 +736,13 @@ class InteractionToolMixin:
                     "coords": [getattr(element, "cx", 0), getattr(element, "cy", 0)],
                     "source": "last_clicked_input",
                 })
-
-        arithmetic_expression = (
-            _typed_arithmetic_expression(text)
-            if element is None
-            else ""
-        )
-        arithmetic_probe_before = None
-        arithmetic_probe_region = None
-        if arithmetic_expression:
-            target = self._action_hwnd()
-            if target:
-                try:
-                    arithmetic_probe_region = window_region(target)
-                    arithmetic_probe_before = _tools_attr("capture", capture)(
-                        arithmetic_probe_region
-                    )
-                except Exception as exc:
-                    logger.debug("arithmetic input pre-capture failed: %s", exc)
+        else:
+            element = None
 
         def action() -> dict:
             target = self._action_hwnd()
-            if element is not None:
-                prefer_physical = _prefer_physical_text_input(
-                    element,
-                    text,
-                    str(getattr(self, "task", "") or ""),
-                )
+            if element is not None and not native_visual:
+                prefer_physical = _prefer_physical_text_input(element)
                 if not prefer_physical and executor_mod.uia_set_value(element, text):
                     return {"ok": True, "via": "uia_set_value"}
             cooperative_guard = getattr(
@@ -917,13 +759,15 @@ class InteractionToolMixin:
                     return click_result
                 time.sleep(0.15)
             if target and win32gui_mod.GetForegroundWindow() != target:
-                cooperative_block = cooperative_guard("type_text", target)
-                if cooperative_block is not None:
-                    return cooperative_block
-                executor_mod.focus_window(target)
-                time.sleep(0.12)
-            if numeric_keypad:
-                return executor_mod.type_text(text, hwnd=target, numeric_keypad=True)
+                return {
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "action_executed": False,
+                    "error": "foreground window no longer matches the bound input target",
+                    "target_hwnd": int(target),
+                    "foreground_hwnd": int(win32gui_mod.GetForegroundWindow() or 0),
+                }
             return executor_mod.type_text(text, hwnd=target)
 
         result = verify_mod.run_with_verify(
@@ -931,81 +775,6 @@ class InteractionToolMixin:
             hwnd=self.hwnd, retryable=False, timeout_s=_expect_timeout(args),
             stop_event=self.stop_event, watcher=self._verification_watcher(),
             run_id=getattr(self, "run_id", None))
-        arithmetic_visual_ratio: float | None = None
-        if arithmetic_probe_before is not None and arithmetic_probe_region is not None:
-            try:
-                time.sleep(0.12)
-                arithmetic_probe_after = _tools_attr("capture", capture)(
-                    arithmetic_probe_region
-                )
-                arithmetic_visual_ratio = float(
-                    vision_cv.diff_ratio(arithmetic_probe_before, arithmetic_probe_after)
-                )
-                result["input_visual_change_ratio"] = round(arithmetic_visual_ratio, 6)
-                result["input_visual_change_detected"] = bool(
-                    arithmetic_visual_ratio >= 0.0008
-                )
-            except Exception as exc:
-                logger.debug("arithmetic input post-capture failed: %s", exc)
-        if (
-            arithmetic_expression
-            and arithmetic_visual_ratio is not None
-            and arithmetic_visual_ratio < 0.0008
-            and result.get("ok") is True
-            and not result.get("blocked")
-        ):
-            # Calculator-style and kiosk keypads often ignore injected text
-            # even while SendInput itself reports success.  Recover through
-            # the same visible semantic-anchor controller used for arbitrary
-            # GUIs, then require the deterministic result on the target UI.
-            try:
-                from ..fast.subgoal import SubgoalExecutor
-                from .done_verifier import _safe_arithmetic_value
-
-                expected_value = _safe_arithmetic_value(arithmetic_expression)
-                expected_text = (
-                    str(expected_value)
-                    if isinstance(expected_value, int)
-                    else format(expected_value, ".12g")
-                )
-                self.snapshot = None
-                self._observe_cache = None
-                fallback = SubgoalExecutor(
-                    self,
-                    self._fast_controller(),
-                ).execute({
-                    "subgoal": f"Calculate {arithmetic_expression}",
-                    "clicks": _semantic_keypad_click_specs(arithmetic_expression),
-                    "verify_texts": [expected_text],
-                })
-                try:
-                    fallback_payload = json.loads(fallback.text or "{}")
-                except (json.JSONDecodeError, TypeError):
-                    fallback_payload = {"result_preview": fallback.text[:800]}
-                if not isinstance(fallback_payload, dict):
-                    fallback_payload = {"result": fallback_payload}
-                fallback_payload["input_fallback"] = {
-                    "used": True,
-                    "reason": "keyboard_input_had_no_visible_effect",
-                    "expression": arithmetic_expression,
-                    "expected_text": expected_text,
-                    "initial_visual_change_ratio": round(arithmetic_visual_ratio, 6),
-                    "strategy": "semantic_visible_keypad_buttons",
-                }
-                fallback_payload["initial_keyboard_result"] = result
-                fallback.text = self._fmt(fallback_payload)
-                fallback.replay = {
-                    **(fallback.replay or {}),
-                    "fallback_from": "type_text",
-                    "expression": arithmetic_expression,
-                }
-                return fallback
-            except Exception as exc:
-                result["input_fallback"] = {
-                    "used": False,
-                    "reason": "semantic_keypad_fallback_failed",
-                    "error": str(exc)[:500],
-                }
         if not args.get("expect"):
             result.setdefault("verified", False)
             result.setdefault("verify_detail", "未提供 expect；ok 只表示输入动作已执行，必须 observe/read_text 确认文本位置")
@@ -1051,11 +820,15 @@ class InteractionToolMixin:
             if cooperative_block is not None:
                 return cooperative_block
             if target and win32gui_mod.GetForegroundWindow() != target:
-                cooperative_block = cooperative_guard("hotkey", target)
-                if cooperative_block is not None:
-                    return cooperative_block
-                executor_mod.focus_window(target)
-                time.sleep(0.12)
+                return {
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "action_executed": False,
+                    "error": "foreground window no longer matches the bound input target",
+                    "target_hwnd": int(target),
+                    "foreground_hwnd": int(win32gui_mod.GetForegroundWindow() or 0),
+                }
             result = _call_with_optional_hwnd(
                 executor_mod.press_keys, keys, hwnd=target,
             )
@@ -1122,17 +895,6 @@ class InteractionToolMixin:
         capture_fn = _tools_attr("capture", capture)
         x1, y1 = int(args["x1"]), int(args["y1"])
         x2, y2 = int(args["x2"]), int(args["y2"])
-        adjusted_drop = self._desktop_icon_safe_drop_target(x1, y1, x2, y2)
-        if adjusted_drop and not adjusted_drop.get("adjusted", True):
-            return ToolResult(self._fmt({
-                "ok": False,
-                "blocked": True,
-                "stage": "drop_target",
-                "error": adjusted_drop.get("reason", "unsafe desktop icon drop target"),
-                "adjusted_drop_target": adjusted_drop,
-            }))
-        if adjusted_drop:
-            x2, y2 = adjusted_drop["x"], adjusted_drop["y"]
         points = args.get("points") if isinstance(args.get("points"), list) else None
         duration = float(args.get("duration", 0.4))
         constraint_points = [(x1, y1)]
@@ -1157,8 +919,6 @@ class InteractionToolMixin:
             logger.debug("drag pre-capture failed: %s", exc)
         result = executor_mod.drag(x1, y1, x2, y2, duration_s=duration,
                                    points=points, hwnd=self.hwnd)
-        if adjusted_drop:
-            result["adjusted_drop_target"] = adjusted_drop
         if before is not None:
             try:
                 time.sleep(0.12)
@@ -1167,24 +927,6 @@ class InteractionToolMixin:
                 result["visual_change_ratio"] = round(float(ratio), 5)
                 changed = bool(ratio >= 0.0008)
                 result["visual_change_detected"] = changed
-                if changed:
-                    result["verified"] = True
-                    result["verify_method"] = "cv-diff"
-                    result["verify_detail"] = (
-                        "visible pixels changed across the requested action region"
-                    )
-                if ratio < 0.0008:
-                    result["visual_feedback"] = (
-                        "drag completed but the local screen region barely changed; "
-                        "re-observe and re-ground the source, path, and target before "
-                        "retrying; do not repeat identical pointer geometry without "
-                        "new visual evidence."
-                    )
-                else:
-                    result["visual_feedback"] = (
-                        "local screen pixels changed after drag; this is useful evidence "
-                        "that the action affected the visible surface."
-                    )
             except Exception as exc:
                 logger.debug("drag post-capture/diff failed: %s", exc)
         return ToolResult(
@@ -1215,104 +957,6 @@ class InteractionToolMixin:
         right = max(xs) + pad
         bottom = max(ys) + pad
         return Region(left, top, max(1, right - left), max(1, bottom - top)).clamp_to_screen()
-
-    def _desktop_icon_safe_drop_target(
-        self,
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
-    ) -> dict[str, Any] | None:
-        if not _is_desktop_icon_drag_task(getattr(self, "task", "")):
-            return None
-        snapshot = getattr(self, "snapshot", None)
-        if snapshot is None:
-            return None
-        title = str(getattr(snapshot, "title", "") or "")
-        elements = list(getattr(snapshot, "elements", []) or [])
-        is_desktop = title == "Program Manager" or any(
-            "list" in str(getattr(elem, "role", "") or "").casefold()
-            and str(getattr(elem, "text", "") or "") in {"桌面", "Desktop"}
-            for elem in elements
-        )
-        if not is_desktop:
-            return None
-        icons = [
-            elem for elem in elements
-            if "listitem" in str(getattr(elem, "role", "") or "").casefold()
-            and int(getattr(elem, "width", 0) or 0) >= 32
-            and int(getattr(elem, "height", 0) or 0) >= 32
-        ]
-        if not icons:
-            return None
-
-        def hits_icon(px: int, py: int, pad: int = 12) -> bool:
-            for elem in icons:
-                left = int(getattr(elem, "left", 0) or 0) - pad
-                top = int(getattr(elem, "top", 0) or 0) - pad
-                right = left + int(getattr(elem, "width", 0) or 0) + pad * 2
-                bottom = top + int(getattr(elem, "height", 0) or 0) + pad * 2
-                if left <= px <= right and top <= py <= bottom:
-                    return True
-            return False
-
-        if not hits_icon(x2, y2):
-            return None
-
-        region = getattr(snapshot, "region", None)
-        left = int(getattr(region, "left", 0) or 0)
-        top = int(getattr(region, "top", 0) or 0)
-        width = int(getattr(region, "width", 1920) or 1920)
-        height = int(getattr(region, "height", 1080) or 1080)
-        right = left + width
-        bottom = top + height
-        task_text = str(getattr(self, "task", "") or "")
-        wants_top_right = (
-            "top-right" in task_text.casefold()
-            or "top right" in task_text.casefold()
-            or "右上" in task_text
-        )
-        x_start = min(right - 36, max(left + 36, x2))
-        y_start = min(bottom - 96, max(top + 36, y2))
-        candidates: list[tuple[int, int]] = []
-        if wants_top_right:
-            for y in range(top + 40, min(bottom - 96, top + int(height * 0.42)), 42):
-                for x in range(right - 40, max(left + int(width * 0.62), left + 40), -42):
-                    candidates.append((x, y))
-        for dy in (0, 42, -42, 84, -84, 126, 168, 210):
-            for dx in (0, -42, 42, -84, 84, -126, 126, -168, 168, -210, 210):
-                candidates.append((x_start + dx, y_start + dy))
-
-        seen: set[tuple[int, int]] = set()
-        safe: list[tuple[int, int]] = []
-        for px, py in candidates:
-            px = min(right - 24, max(left + 24, int(px)))
-            py = min(bottom - 96, max(top + 24, int(py)))
-            key = (px, py)
-            if key in seen:
-                continue
-            seen.add(key)
-            if hits_icon(px, py):
-                continue
-            if abs(px - x1) < 48 and abs(py - y1) < 48:
-                continue
-            safe.append(key)
-        if not safe:
-            return {
-                "x": x2,
-                "y": y2,
-                "adjusted": False,
-                "reason": "drop target overlaps another desktop icon and no nearby empty point was found",
-            }
-        safe.sort(key=lambda p: (abs(p[0] - x2) + abs(p[1] - y2), abs(p[0] - (right - 40)), p[1]))
-        nx, ny = safe[0]
-        return {
-            "x": nx,
-            "y": ny,
-            "adjusted": True,
-            "from": [x2, y2],
-            "reason": "desktop icon drop target overlapped another icon; adjusted to nearby empty desktop space",
-        }
 
     @staticmethod
     def _draw_region_payload(region: Region) -> dict[str, int]:
@@ -1824,13 +1468,105 @@ class InteractionToolMixin:
 
     def _t_wait(self, args: dict) -> ToolResult:
         verify_mod = _tools_attr("verify", verify)
-        condition = args.get("condition") or {}
-        if not isinstance(condition, dict) or not condition:
-            return ToolResult("wait 需要 condition 验证条件对象")
-        timeout_s = float(args.get("timeout_s", 10.0))
-        outcome = verify_mod.check(condition, hwnd=self.hwnd, timeout_s=timeout_s,
-                                   stop_event=self.stop_event)
+        if args.get("until_change") is True:
+            try:
+                timeout_s = float(args.get("timeout_s", 30.0))
+                min_ratio = float(args.get("min_change_ratio", 0.0005))
+            except (TypeError, ValueError):
+                timeout_s = float("nan")
+                min_ratio = float("nan")
+            if (
+                not math.isfinite(timeout_s)
+                or timeout_s <= 0
+                or timeout_s > 120
+                or not math.isfinite(min_ratio)
+                or min_ratio < 0
+                or min_ratio > 1
+            ):
+                return ToolResult(self._fmt({
+                    "ok": False,
+                    "blocked": True,
+                    "action_executed": False,
+                    "error": (
+                        "visual-change wait requires timeout_s in (0, 120] "
+                        "and min_change_ratio in [0, 1]"
+                    ),
+                }))
+            result = self._fast_controller()._wait_for_visual_change({
+                "timeout_s": timeout_s,
+                "min_ratio": min_ratio,
+                "required": True,
+            })
+            return ToolResult(
+                result.text,
+                replay={
+                    "tool": "wait",
+                    "until_change": True,
+                    "timeout_s": timeout_s,
+                    "min_change_ratio": min_ratio,
+                },
+            )
+
+        condition = args.get("condition")
+        if condition not in (None, {}):
+            if not isinstance(condition, dict):
+                return ToolResult(self._fmt({
+                    "ok": False,
+                    "blocked": True,
+                    "action_executed": False,
+                    "error": "wait condition must be an object",
+                }))
+            try:
+                timeout_s = float(args.get("timeout_s", 10.0))
+            except (TypeError, ValueError):
+                timeout_s = float("nan")
+            if not math.isfinite(timeout_s) or timeout_s <= 0 or timeout_s > 120:
+                return ToolResult(self._fmt({
+                    "ok": False,
+                    "blocked": True,
+                    "action_executed": False,
+                    "error": "wait timeout_s must be a finite number in (0, 120]",
+                }))
+            outcome = verify_mod.check(
+                condition,
+                hwnd=self.hwnd,
+                timeout_s=timeout_s,
+                stop_event=self.stop_event,
+            )
+            return ToolResult(
+                self._fmt(outcome.to_dict()),
+                replay={"tool": "wait", "condition": condition, "timeout_s": timeout_s},
+            )
+
+        if "duration_s" not in args:
+            return ToolResult(self._fmt({
+                "ok": False,
+                "blocked": True,
+                "action_executed": False,
+                "error": "wait requires duration_s or condition",
+            }))
+        try:
+            duration_s = float(args.get("duration_s"))
+        except (TypeError, ValueError):
+            duration_s = float("nan")
+        if not math.isfinite(duration_s) or duration_s < 0 or duration_s > 120:
+            return ToolResult(self._fmt({
+                "ok": False,
+                "blocked": True,
+                "action_executed": False,
+                "error": "wait duration_s must be a finite number in [0, 120]",
+            }))
+
+        started = time.monotonic()
+        interrupted = bool(self.stop_event.wait(duration_s))
+        waited_s = max(0.0, time.monotonic() - started)
         return ToolResult(
-            self._fmt(outcome.to_dict()),
-            replay={"tool": "wait", "condition": condition, "timeout_s": timeout_s},
+            self._fmt({
+                "ok": not interrupted,
+                "interrupted": interrupted,
+                "action_executed": not interrupted,
+                "requested_duration_s": duration_s,
+                "waited_s": round(waited_s, 3),
+            }),
+            replay={"tool": "wait", "duration_s": duration_s},
         )

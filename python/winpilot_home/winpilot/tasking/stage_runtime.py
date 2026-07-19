@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from ..agent.router import build_runner
-from ..agent.runtime_profile import RuntimeProfile, build_runtime_profile
+from ..agent.runtime_profile import build_runtime_profile
 from ..agent.tools import ToolSession
 from ..orchestrator.contracts import ArpNode
 from ..orchestrator.runtime import NodeResult
@@ -129,15 +129,17 @@ class StageRuntime:
         Semantic child runners must not parse their generated stage prompt as a
         second source of task truth.  They also must not inherit unrelated
         communication or live-interaction state from a larger cross-application
-        contract.  This projection keeps semantic fields already resolved by
-        the compiler while deriving the active operation from the typed stage.
+        contract.  ExecuteDesktopTask is intentionally opaque: the original
+        goal plus fresh pixels belong to the visual model, while compiler
+        guesses about communication, drawing, games, or pointer tactics must
+        not become runtime policy.
         """
         operation_by_stage = {
             StageType.OPEN_APPLICATION: "open",
             StageType.FOCUS_WINDOW: "focus",
             StageType.EXECUTE_DESKTOP_TASK: "operate",
             StageType.CREATE_OR_EDIT_ARTIFACT: "edit",
-            StageType.DRAW_ARTIFACT: "draw",
+            StageType.DRAW_ARTIFACT: "operate",
             StageType.CAPTURE_ARTIFACT: "capture",
             StageType.SAVE_ARTIFACT: "save",
             StageType.OPEN_CONVERSATION: "send",
@@ -174,32 +176,40 @@ class StageRuntime:
             StageType.WAIT_FOR_EXTERNAL_CHANGE,
         }
 
-        payload = contract.intent.model_dump(mode="json")
         parameters = stage.parameters or {}
+        if stage.type == StageType.EXECUTE_DESKTOP_TASK:
+            return TaskIntent(
+                original_text=str(
+                    goal
+                    or parameters.get("original_task")
+                    or parameters.get("goal")
+                    or contract.task
+                ),
+                operation=["operate"],
+                domain="desktop",
+                provenance={
+                    "stage_scope": f"{contract.task_id}:{stage.id}",
+                    "semantic_owner": "visual_model",
+                    "intent_policy": "opaque_original_goal",
+                },
+            )
+
+        payload = contract.intent.model_dump(mode="json")
         provenance = dict(payload.get("provenance") or {})
         provenance.update({
             "stage_scope": f"{contract.task_id}:{stage.id}",
             "stage_operation": "task_contract_stage",
         })
-        preserve_original_intent = bool(
-            stage.type == StageType.EXECUTE_DESKTOP_TASK
-            and parameters.get("preserve_original_intent") is True
-        )
-        surface_output_stage = bool(
-            stage.type == StageType.EXECUTE_DESKTOP_TASK
-            and str(parameters.get("surface_output_mode") or "").strip()
-            and not preserve_original_intent
-        )
+        preserve_original_intent = stage.type in {
+            StageType.EXECUTE_DESKTOP_TASK,
+            StageType.DRAW_ARTIFACT,
+        }
         payload.update({
             "original_text": str(goal or ""),
             "operation": (
                 list(payload.get("operation") or [])
                 if preserve_original_intent
-                else [
-                    "draw"
-                    if surface_output_stage
-                    else operation_by_stage.get(stage.type, "execute")
-                ]
+                else [operation_by_stage.get(stage.type, "execute")]
             ),
             "source": str(
                 parameters.get("source")
@@ -208,14 +218,12 @@ class StageRuntime:
                 or ""
             ),
             "subject": str(
-                parameters.get("surface_output_subject")
-                or parameters.get("subject")
+                parameters.get("subject")
                 or payload.get("subject")
                 or ""
             ),
             "quality": str(
-                parameters.get("surface_output_quality")
-                or parameters.get("quality")
+                parameters.get("quality")
                 or payload.get("quality")
                 or "normal"
             ),
@@ -228,7 +236,10 @@ class StageRuntime:
         })
         preserves_communication = bool(
             stage.type in communication_stages
-            or preserve_original_intent
+            or stage.type in {
+                StageType.EXECUTE_DESKTOP_TASK,
+                StageType.DRAW_ARTIFACT,
+            }
         )
         if not preserves_communication:
             payload.update({
@@ -237,7 +248,18 @@ class StageRuntime:
                 "destination": "",
                 "send_mode": "send",
             })
-        if stage.type not in interaction_stages:
+        # ExecuteDesktopTask is the general visual-agent stage.  It may carry a
+        # drag/hold/path interaction discovered by the compiler even though it
+        # is not one of the legacy typed interaction stages.  Clearing that
+        # state here made named-app games, sliders and other direct manipulation
+        # tasks lose capabilities before AgentRunner saw them.
+        if (
+            stage.type not in interaction_stages
+            and stage.type not in {
+                StageType.EXECUTE_DESKTOP_TASK,
+                StageType.DRAW_ARTIFACT,
+            }
+        ):
             payload["interaction"] = {"active": False}
         return TaskIntent.model_validate(payload)
 
@@ -256,8 +278,10 @@ class StageRuntime:
         active = bool(
             stage.type in communication_stages
             or (
-                stage.type == StageType.EXECUTE_DESKTOP_TASK
-                and stage.parameters.get("preserve_original_intent") is True
+                stage.type in {
+                    StageType.EXECUTE_DESKTOP_TASK,
+                    StageType.DRAW_ARTIFACT,
+                }
                 and "send" in intent.operation
             )
         )
@@ -297,47 +321,6 @@ class StageRuntime:
     def _artifact_ref(context: dict[str, Any], ref: str) -> str:
         refs = context["runtime_state"].setdefault("artifact_refs", {})
         return str(refs.get(ref) or ref or "")
-
-    @staticmethod
-    def _has_successful_draw_mutation(
-        history: list[tuple[str, dict[str, Any], str]] | tuple[tuple[str, dict[str, Any], str], ...],
-    ) -> bool:
-        """Require controller evidence that pixels were actually authored.
-
-        A semantic judge is not allowed to turn an untouched/previous canvas
-        into success.  This deliberately accepts controller transactions and
-        direct draw tools as equivalent implementation paths.
-        """
-
-        def executed(value: Any) -> bool:
-            if isinstance(value, list):
-                return any(executed(item) for item in value)
-            if not isinstance(value, dict):
-                return False
-            try:
-                if int(value.get("executed_draw_count") or 0) > 0:
-                    return True
-            except (TypeError, ValueError):
-                pass
-            action = str(
-                value.get("action") or value.get("tool") or value.get("name") or ""
-            ).strip().casefold()
-            if (
-                action == "draw_strokes"
-                and value.get("blocked") is not True
-                and any(value.get(key) is True for key in ("ok", "verified", "applied", "action_applied"))
-            ):
-                return True
-            return any(executed(item) for item in value.values())
-
-        for name, _args, result_text in history:
-            payload = _json(result_text)
-            if str(name or "").strip().casefold() == "draw_strokes":
-                if payload.get("ok") is True and payload.get("blocked") is not True:
-                    return True
-            if executed(payload):
-                return True
-        return False
 
     @staticmethod
     def _desktop_effect_summary(history: list | tuple) -> dict[str, Any]:
@@ -445,96 +428,6 @@ class StageRuntime:
             } if not verified else {}),
         }
 
-    @staticmethod
-    def _draw_boundary_criteria(subject: str, quality: str) -> str:
-        base = (
-            f"Judge only the current drawing canvas. It must visibly contain a clearly "
-            f"recognizable {subject}, not merely unrelated geometry, guide marks, or an "
-            "unfinished fragment. The drawing stage does not need to show later capture or "
-            "communication steps."
-        )
-        if quality == "detailed":
-            return base + " The user requested polished or detailed work, so require visibly coherent high detail."
-        return base + " Normal quality only requires a coherent recognizable subject; do not require decorative detail."
-
-    def _verify_draw_boundary(
-        self,
-        *,
-        goal: str,
-        subject: str,
-        quality: str,
-        app: str,
-        hwnd: int,
-        run_id: str,
-        stop_event: Any,
-        stage_id: str,
-        region: dict[str, int] | None = None,
-    ) -> dict[str, Any]:
-        if not hwnd:
-            return {
-                "ok": False,
-                "verified": False,
-                "semantic_visual_verified": False,
-                "error": "draw stage has no bound target window for boundary verification",
-            }
-        session = ToolSession(
-            stop_event=stop_event,
-            task=goal,
-            runtime_profile=RuntimeProfile(desktop=True, coding=False),
-            task_intent={
-                "original_text": goal,
-                "operation": ["verify"],
-                "send_mode": "send",
-            },
-            communication_context={"active": False},
-        )
-        session.run_id = run_id
-        elapsed_ms = 0
-        try:
-            session._remember_target(hwnd, app)
-            verify_args: dict[str, Any] = {
-                "criteria": self._draw_boundary_criteria(subject, quality),
-            }
-            if isinstance(region, dict) and all(
-                key in region for key in ("left", "top", "width", "height")
-            ):
-                verify_args.update({key: int(region[key]) for key in ("left", "top", "width", "height")})
-            model_started = time.monotonic()
-            try:
-                try:
-                    verdict = _json(session.dispatch("vlm_verify", verify_args).text)
-                finally:
-                    elapsed_ms = max(
-                        0,
-                        int((time.monotonic() - model_started) * 1000),
-                    )
-            except BaseException as exc:
-                # Preserve failed/cancelled verifier time for the stage-level
-                # failure trace without converting the original exception.
-                try:
-                    exc.model_elapsed_ms = elapsed_ms
-                except Exception:
-                    pass
-                raise
-        finally:
-            session.close()
-        verdict["elapsed_ms"] = elapsed_ms
-        BUS.publish(
-            "task_stage_boundary_verify",
-            run_id=run_id,
-            stage_id=stage_id,
-            stage_type=StageType.DRAW_ARTIFACT.value,
-            provider="semantic_visual_judge",
-            verified=bool(
-                verdict.get("ok") is True
-                and verdict.get("verified") is True
-                and verdict.get("semantic_visual_verified") is True
-            ),
-            elapsed_ms=elapsed_ms,
-            verdict=verdict,
-        )
-        return verdict
-
     def _adapter(
         self,
         context: dict[str, Any],
@@ -585,20 +478,12 @@ class StageRuntime:
     def _semantic_stage_metrics(
         started: float,
         runner: Any,
-        *,
-        boundary_elapsed_ms: int = 0,
     ) -> dict[str, int]:
-        """Split semantic-stage wall time into model wait and local work.
-
-        ``runner.model_elapsed_ms`` already contains both main-model turns and
-        inline semantic VLM calls.  Only the independent boundary verifier is
-        added here; reading its verdict again must never double-charge an
-        inline verdict.
-        """
+        """Split semantic-stage wall time into model wait and local work."""
         model_elapsed_ms = max(
             0,
             int(getattr(runner, "model_elapsed_ms", 0) or 0),
-        ) + max(0, int(boundary_elapsed_ms or 0))
+        )
         total_elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
         return {
             "model_elapsed_ms": model_elapsed_ms,
@@ -627,12 +512,15 @@ class StageRuntime:
             result = self._execute(stage, contract, context, stop_event, started)
         except Exception as exc:
             failure_type = getattr(exc, "failure_type", "stage_exception")
-            recovery_attempt = self._recovery_attempt(
-                context, stage, str(failure_type),
-            )
-            decision = self.recovery.decide(
-                stage.type.value, failure_type, attempt=recovery_attempt,
-            )
+            recovery_attempt = None
+            decision = None
+            if stage.type in INTERACTION_STAGE_TYPES:
+                recovery_attempt = self._recovery_attempt(
+                    context, stage, str(failure_type),
+                )
+                decision = self.recovery.decide(
+                    stage.type.value, failure_type, attempt=recovery_attempt,
+                )
             stage_details = getattr(exc, "stage_details", {})
             stage_details = (
                 dict(stage_details)
@@ -654,6 +542,7 @@ class StageRuntime:
                     ),
                 })
             if stage.type in INTERACTION_STAGE_TYPES:
+                assert decision is not None and recovery_attempt is not None
                 try:
                     recovered = self.interactions.recover_failure(
                         stage,
@@ -733,17 +622,22 @@ class StageRuntime:
                     "failure_type": failure_type,
                     "error": str(exc),
                 })
-            BUS.publish(
-                "task_stage_failed",
-                run_id=context["run_id"],
-                node_id=node.id,
-                stage_id=stage.id,
-                stage_type=stage.type.value,
-                failure_type=failure_type,
-                recovery=decision.__dict__,
-                recovery_attempt=recovery_attempt,
-                error=str(exc),
-            )
+            failure_event = {
+                "run_id": context["run_id"],
+                "node_id": node.id,
+                "stage_id": stage.id,
+                "stage_type": stage.type.value,
+                "failure_type": failure_type,
+                "error": str(exc),
+            }
+            recovery_output = {}
+            if decision is not None and recovery_attempt is not None:
+                recovery_output = {
+                    "recovery": decision.__dict__,
+                    "recovery_attempt": recovery_attempt,
+                }
+                failure_event.update(recovery_output)
+            BUS.publish("task_stage_failed", **failure_event)
             output_details = dict(stage_details)
             for reserved_key in (
                 "status", "failure_type", "recovery", "recovery_attempt", "error",
@@ -754,9 +648,8 @@ class StageRuntime:
                 branch="fail",
                 output=self._stage_output(
                     stage, started, status="failed", failure_type=failure_type,
-                    recovery=decision.__dict__,
-                    recovery_attempt=recovery_attempt,
                     error=str(exc),
+                    **recovery_output,
                     **output_details,
                 ),
                 error=f"{stage.id} ({stage.type.value}) failed: {exc}",
@@ -766,27 +659,29 @@ class StageRuntime:
         if not result.ok:
             output = result.output if isinstance(result.output, dict) else {}
             failure_type = str(output.get("failure_type") or "stage_failed")
-            recovery_attempt = self._recovery_attempt(
-                context, stage, failure_type,
-            )
-            decision = self.recovery.decide(
-                stage.type.value, failure_type, attempt=recovery_attempt,
-            )
-            output["recovery"] = decision.__dict__
-            output["recovery_attempt"] = recovery_attempt
+            failure_event = {
+                "run_id": context["run_id"],
+                "node_id": node.id,
+                "stage_id": stage.id,
+                "stage_type": stage.type.value,
+                "failure_type": failure_type,
+                "error": result.error,
+            }
+            if stage.type in INTERACTION_STAGE_TYPES:
+                recovery_attempt = self._recovery_attempt(
+                    context, stage, failure_type,
+                )
+                decision = self.recovery.decide(
+                    stage.type.value, failure_type, attempt=recovery_attempt,
+                )
+                output["recovery"] = decision.__dict__
+                output["recovery_attempt"] = recovery_attempt
+                failure_event["recovery"] = decision.__dict__
             result.output = output
-            BUS.publish(
-                "task_stage_failed",
-                run_id=context["run_id"],
-                node_id=node.id,
-                stage_id=stage.id,
-                stage_type=stage.type.value,
-                failure_type=failure_type,
-                recovery=decision.__dict__,
-                error=result.error,
-            )
+            BUS.publish("task_stage_failed", **failure_event)
             return result
-        self._clear_recovery_attempts(context, stage)
+        if stage.type in INTERACTION_STAGE_TYPES:
+            self._clear_recovery_attempts(context, stage)
         BUS.publish(
             "task_stage_done",
             run_id=context["run_id"],
@@ -868,10 +763,13 @@ class StageRuntime:
             return NodeResult(output=self._stage_output(stage, started, evidence=record))
 
         if stage.type in SEMANTIC_EXECUTION_STAGE_TYPES:
-            surface_output_required = bool(
-                stage.type == StageType.DRAW_ARTIFACT
-                or str(params.get("surface_output_mode") or "").strip()
-            )
+            # New GUI contracts use ExecuteDesktopTask.  DrawArtifact remains
+            # readable only as a task-contract/1 alias and is normalized before
+            # any runtime policy, prompt, tool, or verification decision.
+            general_desktop_stage = stage.type in {
+                StageType.EXECUTE_DESKTOP_TASK,
+                StageType.DRAW_ARTIFACT,
+            }
             if (
                 stage.type == StageType.EXECUTE_SEMANTIC_TASK
                 and str(params.get("response_mode") or "") == "conversation"
@@ -923,7 +821,15 @@ class StageRuntime:
                 target_window = execution_context.get("target_window")
                 if isinstance(target_window, dict):
                     bound_target_hint = str(target_window.get("title") or "")
-            if app:
+            # A semantic desktop runner owns application discovery, launch,
+            # focus, observation, and every later GUI action as one closed
+            # loop.  Pre-opening here created a second action owner: a launch
+            # failure could terminate the stage before the runner made even
+            # one model call, and the runner could not recover from a delayed
+            # or initially ambiguous window.  Deterministic OpenApplication
+            # stages still use the stage-level adapter elsewhere; only the
+            # complete desktop task enters through the semantic action loop.
+            if app and not general_desktop_stage:
                 session = ToolSession(
                     stop_event=stop_event,
                     task=contract.task,
@@ -951,128 +857,58 @@ class StageRuntime:
                     failure.stage_details = {"open_verification": open_verdict}
                     raise failure
                 bound_hwnd = int(open_verdict.get("target_hwnd") or 0)
-            subject = str(
-                params.get("surface_output_subject")
-                or params.get("subject")
-                or "the requested subject"
-            )
-            quality = str(
-                params.get("surface_output_quality")
-                or params.get("quality")
-                or "normal"
-            )
-            if stage.type == StageType.DRAW_ARTIFACT:
-                goal = (
-                    f"In the already opened {app or 'drawing application'}, draw {subject}. "
-                    + (
-                        "The visible result must be polished and detailed."
-                        if quality == "detailed"
-                        else "The visible result must be a clearly recognizable subject."
-                    )
+            if general_desktop_stage:
+                goal = str(
+                    params.get("original_task")
+                    or params.get("goal")
+                    or contract.task
                 )
-                stage_guidance = (
-                    "Create one base composition in one local Controller transaction. Prefer execute_subgoal with one ordered draws list: "
-                    "use simple outline primitives or explicit normalized_strokes, semantic part labels, and canvas-relative 0..1000 geometry. "
-                    "Choose one conventional coherent view. Multipart subjects must share a readable silhouette and connected spatial relationships; do not stack detached symbol-like primitives. "
-                    "Do not use screenshot pixels or physical coordinates as normalized geometry. Then inspect the automatically attached fresh canvas frame. "
-                    "Make only forward-only localized repairs for visible defects; do not redraw the whole composition or add unrequested detail. "
-                    "Respect the requested subject scope: a complete object or creature must not be replaced by only a head, icon, or fragment unless the user explicitly asked for that partial view. "
-                    "As soon as the subject is clearly recognizable, call done so the independent fresh-frame judge can verify it. "
-                    + ("Apply a stricter polished/detail standard." if quality == "detailed" else "Require a clearly recognizable subject; do not demand decorative detail that was not requested.")
+                # Evidence names belong to the serialized contract, while the
+                # behavior that proves them is always the same general desktop
+                # done judge.  Reading an older contract therefore does not
+                # require a second drawing verifier or a misleading duplicate
+                # model call.
+                obligation = next(iter(stage.obligations), None)
+                predicate = (
+                    obligation.evidence_predicate
+                    if obligation is not None
+                    else "desktop.full_goal_verified"
                 )
-                provider = "semantic_visual_judge"
-                predicate = "artifact.semantic_visible"
+                provider = (
+                    str(obligation.evidence_providers[0].id)
+                    if obligation is not None and obligation.evidence_providers
+                    else "desktop_closed_loop_verifier"
+                )
             else:
                 goal = str(params.get("goal") or contract.task)
-                stage_guidance = {
-                    StageType.EXECUTE_DESKTOP_TASK: (
-                        "Execute the complete original desktop request from the bound or currently visible context. "
-                        "Treat every clause as mandatory and keep every user-named desktop application as a hard "
-                        "constraint. Any explicitly named or initially bound app must be used, while cross-application handoffs that "
-                        "the original goal explicitly requires are allowed and must be verified on both sides. "
-                        "Treat the initial plan as provisional. Before asking the user for a value that can be found "
-                        "on this machine, inspect the current frame, visible windows, installed applications, and "
-                        "current-run working facts. Record newly grounded facts and revise the remaining plan when "
-                        "an observation changes the route; never invent a missing app, recipient, file, or UI state. "
-                        "For a cross-application handoff, create a managed artifact and pass its returned identity "
-                        "to the destination capability. Do not open the source application's Save or Export UI merely "
-                        "to transfer an already visible artifact unless the user explicitly requested a saved file. "
-                        "When a recipient is known but the communication channel is unresolved, call open_conversation "
-                        "with the exact recipient and omit app. The runtime will try only locally grounded registered "
-                        "clients and bind a route only after proving the recipient and composer; use the resulting bound "
-                        "route directly instead of repeatedly searching MCP or guessing a default client. "
-                        "Prefer target-bound UI Automation and fresh visual observations; use raw "
-                        "coordinates only from the latest authoritative frame. For clicks, drags, or paths that "
-                        "must stay inside one visible board, pane, lane, canvas, or work area, declare a "
-                        "constraint_frame_region (or constraint_region for physical-coordinate tools) so the runtime "
-                        "rejects any point outside that current-frame ROI. "
-                        "Opening or focusing the app is "
-                        "preparation, never completion. Prefer one compound semantic Controller transaction over "
-                        "one model round per repeated key, button, or drawing primitive. If a complete printable "
-                        "sequence has no visible effect, use the Controller's visible-affordance recovery instead "
-                        "of guessing coordinates. For structured office/document work you may first discover "
-                        "an exact explicitly configured MCP tool; if none matches or it fails, continue through "
-                        "the GUI, and always verify the resulting file or visible state independently. Do not "
-                        "replace a requested installed client with a web "
-                        "site unless the user explicitly allowed that fallback. After each meaningful action, "
-                        "check the visible effect; if the same action makes no progress, change strategy or "
-                        "report the blocker instead of repeating it. Call done only after the current frame and "
-                        "action trace jointly prove the whole request."
-                    ),
-                    StageType.EXECUTE_WORKSPACE_TASK: (
-                        "Operate on the configured workspace with deterministic file and shell tools. "
-                        "Inspect before changing anything, keep edits scoped to the request, and run "
-                        "the smallest real verification that proves the result."
-                    ),
-                    StageType.RESEARCH_INFORMATION: (
-                        "Use public web retrieval for claims that can change. Compare relevant sources, "
-                        "retain URLs in the result, and do not substitute a desktop browser guess for retrieval."
-                    ),
-                    StageType.TRANSFORM_DATA: (
-                        "Inspect the actual input data, preserve its source, write outputs deliberately, "
-                        "and verify shape/content with deterministic file or shell evidence."
-                    ),
-                    StageType.MANAGE_AUTOMATION: (
-                        "Use the typed scheduler tools. Confirm the returned schedule identity and timing; "
-                        "do not claim success from a prose plan."
-                    ),
-                    StageType.EXECUTE_SEMANTIC_TASK: (
-                        "Answer the bounded user request directly and call done only when the result itself "
-                        "satisfies the request. Do not invent a desktop artifact or GUI target."
-                    ),
-                }.get(stage.type, "")
-                if (
-                    stage.type == StageType.EXECUTE_DESKTOP_TASK
-                    and surface_output_required
-                ):
-                    stage_guidance += (
-                        " The request includes continuous visible surface output. This is a general "
-                        "desktop capability, not a Paint-specific route: keep every user-named app "
-                        "constraint, bind that real app first, then use execute_subgoal draws, direct "
-                        "draw_strokes, or drag from the latest frame. Let the Controller discover the "
-                        "current work surface and enforce constraint_frame_region containment. Treat "
-                        "the independent surface semantic verdict as evidence for that clause only; "
-                        "continue all remaining cross-app, save, send, or verification clauses before done."
-                    )
-                if stage.type == StageType.EXECUTE_DESKTOP_TASK:
-                    provider = "desktop_closed_loop_verifier"
-                    predicate = "desktop.full_goal_verified"
-                else:
-                    provider = "semantic_stage_done"
-                    predicate = "stage.verified_outcome"
+                provider = "semantic_stage_done"
+                predicate = "stage.verified_outcome"
+            runtime_stage = stage
+            if stage.type == StageType.DRAW_ARTIFACT:
+                runtime_stage = stage.model_copy(
+                    update={"type": StageType.EXECUTE_DESKTOP_TASK},
+                    deep=True,
+                )
+                runtime_stage = runtime_stage.model_copy(
+                    update={
+                        "execution": self.capabilities.plan_stage(
+                            runtime_stage,
+                            channel=contract.intent.channel,
+                        ),
+                    },
+                    deep=True,
+                )
             profile = build_runtime_profile(
                 goal,
                 task_contract=contract,
-                stage=stage,
-                stage_guidance=stage_guidance,
+                stage=runtime_stage,
                 model_tool_allowlist=(
-                    tuple(stage.execution.model_tools)
-                    if stage.type == StageType.DRAW_ARTIFACT and stage.execution
+                    tuple(runtime_stage.execution.model_tools)
+                    if general_desktop_stage and runtime_stage.execution
                     else ()
                 ),
-                inline_semantic_verification=surface_output_required,
             )
-            stage_intent = self._stage_scoped_intent(contract, stage, goal)
+            stage_intent = self._stage_scoped_intent(contract, runtime_stage, goal)
             runner = build_runner(
                 goal,
                 stop_event=stop_event,
@@ -1080,7 +916,7 @@ class StageRuntime:
                 runtime_profile=profile,
                 task_intent=stage_intent,
                 communication_context=self._stage_communication_context(
-                    stage, stage_intent,
+                    runtime_stage, stage_intent,
                 ),
                 session_context=list(contract.session_context or []),
             )
@@ -1102,117 +938,27 @@ class StageRuntime:
                     **metrics,
                 }
                 raise
-            successful_draw_mutation = self._has_successful_draw_mutation(
-                list(getattr(runner, "_tool_history", []) or [])
-            )
             runner_verified = bool(
                 runner.status == "done" and getattr(runner, "_done_verified", False)
-                and (not surface_output_required or successful_draw_mutation)
-                and (
-                    not surface_output_required
-                    or bool(getattr(runner, "_surface_output_semantic_passed", False))
-                )
             )
             desktop_effects: dict[str, Any] = {}
-            if stage.type == StageType.EXECUTE_DESKTOP_TASK:
+            if general_desktop_stage:
                 desktop_effects = self._desktop_effect_summary(
                     list(getattr(runner, "_tool_history", []) or [])
                 )
-                minimum_categories = max(
-                    1,
-                    int(params.get("minimum_effect_categories") or 1),
-                )
                 if params.get("forbid_open_only") is True and desktop_effects.get("open_only"):
                     runner_verified = False
-                if int(desktop_effects.get("effect_category_count") or 0) < minimum_categories:
-                    runner_verified = False
-            boundary_verdict: dict[str, Any] = {}
-            boundary_calls = 0
-            boundary_elapsed_ms = 0
-            if (
-                not runner_verified
-                and surface_output_required
-                and successful_draw_mutation
-                and not bool(getattr(runner, "_inline_stage_semantic_attempted", False))
-            ):
-                boundary_calls = 1
-                try:
-                    boundary_verdict = self._verify_draw_boundary(
-                        goal=goal,
-                        subject=subject,
-                        quality=quality,
-                        app=app,
-                        hwnd=bound_hwnd,
-                        run_id=context["run_id"],
-                        stop_event=stop_event,
-                        stage_id=stage.id,
-                        region=(
-                            getattr(runner.session, "_last_canvas_region", None)
-                            if isinstance(getattr(runner.session, "_last_canvas_region", None), dict)
-                            else None
-                        ),
-                    )
-                except Exception as exc:
-                    boundary_elapsed_ms = max(
-                        0,
-                        int(getattr(exc, "model_elapsed_ms", 0) or 0),
-                    )
-                    metrics = self._semantic_stage_metrics(
-                        started,
-                        runner,
-                        boundary_elapsed_ms=boundary_elapsed_ms,
-                    )
-                    details = getattr(exc, "stage_details", {})
-                    exc.failure_type = getattr(
-                        exc,
-                        "failure_type",
-                        "semantic_boundary_verification_failed",
-                    )
-                    exc.stage_details = {
-                        **(details if isinstance(details, dict) else {}),
-                        "child_run_id": runner.run_id,
-                        "child_status": runner.status,
-                        "usage": dict(runner.usage_total),
-                        "model_calls": int(
-                            getattr(runner, "model_request_count", 0) or 0
-                        ) + boundary_calls,
-                        "boundary_verification": {
-                            "ok": False,
-                            "error": str(exc),
-                            "elapsed_ms": boundary_elapsed_ms,
-                        },
-                        **metrics,
-                    }
-                    raise
-                boundary_elapsed_ms = max(
-                    0,
-                    int(boundary_verdict.get("elapsed_ms") or 0),
-                )
-                runner_verified = bool(
-                    boundary_verdict.get("ok") is True
-                    and boundary_verdict.get("verified") is True
-                    and boundary_verdict.get("semantic_visual_verified") is True
-                )
             if not runner_verified:
-                metrics = self._semantic_stage_metrics(
-                    started,
-                    runner,
-                    boundary_elapsed_ms=boundary_elapsed_ms,
-                )
+                metrics = self._semantic_stage_metrics(started, runner)
                 failure = RuntimeError(runner.result_text or f"semantic stage ended with {runner.status}")
                 failure.failure_type = "semantic_stage_failed"
                 failure.stage_details = {
                     "child_run_id": runner.run_id,
                     "child_status": runner.status,
                     "usage": dict(runner.usage_total),
-                    "model_calls": int(getattr(runner, "model_request_count", 0) or 0) + boundary_calls,
+                    "model_calls": int(getattr(runner, "model_request_count", 0) or 0),
                     "done_verified": bool(getattr(runner, "_done_verified", False)),
-                    "inline_semantic_verification": dict(
-                        getattr(runner, "_inline_stage_semantic_last_verdict", {}) or {}
-                    ),
-                    "successful_draw_mutation": successful_draw_mutation,
                     "desktop_effects": desktop_effects,
-                    "boundary_verification": boundary_verdict,
                     **metrics,
                 }
                 raise failure
@@ -1226,12 +972,8 @@ class StageRuntime:
                     "child_run_id": runner.run_id,
                     "usage": dict(runner.usage_total),
                     "agent_done_verified": bool(getattr(runner, "_done_verified", False)),
-                    "inline_semantic_verification": dict(
-                        getattr(runner, "_inline_stage_semantic_last_verdict", {}) or {}
-                    ),
-                    "successful_draw_mutation": successful_draw_mutation,
                     "desktop_effects": desktop_effects,
-                    "boundary_verification": boundary_verdict,
+                    "runtime_stage_type": profile.stage_type,
                 },
             )
             try:
@@ -1258,16 +1000,12 @@ class StageRuntime:
             except Exception:
                 # Memory enrichment must not change the stage result.
                 pass
-            model_calls = int(getattr(runner, "model_request_count", 0) or 0) + boundary_calls
-            metrics = self._semantic_stage_metrics(
-                started,
-                runner,
-                boundary_elapsed_ms=boundary_elapsed_ms,
-            )
+            model_calls = int(getattr(runner, "model_request_count", 0) or 0)
+            metrics = self._semantic_stage_metrics(started, runner)
             return NodeResult(output=self._stage_output(
                 stage, started, child_run_id=runner.run_id, result=result,
                 usage=dict(runner.usage_total), model_calls=model_calls,
-                boundary_verification=boundary_verdict,
+                runtime_stage_type=profile.stage_type,
                 desktop_effects=desktop_effects,
                 evidence=record,
                 **metrics,

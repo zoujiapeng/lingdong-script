@@ -1112,49 +1112,113 @@ def test_type_into_element_defers_postcondition_without_retyping_literal():
     assert calls[-1] == ("read_text", {})
 
 
-def test_stable_batch_actions_anchor_first_line_formatting_and_split_key_sequence():
-    from winpilot.fast.controller import _stable_batch_actions
 
-    actions = _stable_batch_actions(
+
+
+
+def test_fast_controller_executes_type_text_and_hotkey_without_semantic_rewrite(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    calls = []
+
+    class Session:
+        hwnd = 0
+        snapshot = None
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true, "verified": false}')
+
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scope_guard, "take_scope_recovery", lambda *_args, **_kwargs: None)
+
+    type_args = {
+        "text": "梁静茹",
+        "label": "Search",
+        "role": "edit",
+        "clear": False,
+    }
+    hotkey_args = {"keys": ["Home"]}
+    out = FastGuiController(Session()).execute(
         [
-            {"action": "click", "x": 500, "y": 300},
-            {"action": "hotkey", "keys": ["Home"]},
-            {"action": "hotkey", "keys": ["Shift", "End"]},
-            {"action": "hotkey", "keys": ["Ctrl", "B"]},
-            {"action": "hotkey", "keys": ["Ctrl", "E"]},
-            {"action": "hotkey", "keys": ["Down", "Home"]},
-            {"action": "hotkey", "keys": ["Shift", "Ctrl", "End"]},
-            {"action": "hotkey", "keys": ["Ctrl", "L"]},
+            {"action": "type_text", **type_args},
+            {"action": "hotkey", **hotkey_args},
         ],
-        "将第一行标题加粗并居中，其余正文左对齐",
+        subgoal="Format the first line only after the submitted input actions",
     )
 
-    assert actions[1] == {"action": "hotkey", "keys": ["Ctrl", "Home"]}
-    assert actions[5:7] == [
-        {"action": "hotkey", "keys": ["Down"]},
-        {"action": "hotkey", "keys": ["Home"]},
+    assert out["ok"] is True
+    assert calls == [
+        ("type_text", type_args),
+        ("hotkey", hotkey_args),
     ]
+    assert [item["action"] for item in out["results"]] == ["type_text", "hotkey"]
+    assert all("upgraded_from" not in item for item in out["results"])
 
 
-def test_stable_batch_actions_flattens_model_params_keys():
-    from winpilot.fast.controller import _stable_batch_actions
+def test_runner_file_dialog_type_text_remains_one_explicit_action():
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
 
-    actions = _stable_batch_actions(
-        [
-            {"action": "hotkey", "params": {"keys": ["home"]}},
-            {"action": "hotkey", "params": {"keys": ["shift", "end"]}},
-            {"action": "hotkey", "params": {"keys": ["ctrl", "b"]}},
-            {"action": "hotkey", "params": {"keys": ["ctrl", "e"]}},
-            {"action": "hotkey", "params": {"keys": ["down", "home"]}},
-        ],
-        "Select first line title, bold it and center it",
-    )
+    runner = AgentRunner(r"Save As C:\Users\zou\Desktop\report.docx")
+    calls = []
 
-    assert actions[0] == {"action": "hotkey", "keys": ["Ctrl", "Home"]}
-    assert actions[-2:] == [
-        {"action": "hotkey", "keys": ["down"]},
-        {"action": "hotkey", "keys": ["home"]},
-    ]
+    def dispatch(name, args):
+        calls.append((name, args))
+        return ToolResult(json.dumps({
+            "ok": True,
+            "verified": False,
+            "results": [{
+                "action": "type_text",
+                "ok": True,
+                "data": {"ok": True, "verified": False},
+            }],
+        }))
+
+    runner.session.dispatch = dispatch
+    submitted = {
+        "text": r"C:\Users\zou\Desktop\report.docx",
+        "clear": False,
+    }
+    runner._dispatch_with_fast_visual_wrap("type_text", submitted)
+
+    assert calls == [("run_action_batch", {
+        "actions": [{"action": "type_text", **submitted}],
+    })]
+
+
+def test_controller_canonicalizes_each_declared_action_once(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import action_contract
+    from winpilot.fast.controller import FastGuiController
+
+    original_parse = action_contract.parse_atomic_action
+    parsed_paths = []
+
+    def counted_parse(value, *, ordinal=0, source_path="$"):
+        parsed_paths.append(source_path)
+        return original_parse(value, ordinal=ordinal, source_path=source_path)
+
+    monkeypatch.setattr(action_contract, "parse_atomic_action", counted_parse)
+
+    class Session:
+        hwnd = None
+        run_id = "canonical-once"
+        snapshot = None
+        _screen_epoch = 0
+
+        def dispatch(self, _name, _args):
+            return ToolResult('{"ok": true, "verified": true}')
+
+    result = FastGuiController(Session()).execute([
+        {"action": "observe"},
+        {"read_text": {}},
+    ], sync=False)
+
+    assert result["ok"] is True
+    assert parsed_paths == ["actions[0]", "actions[1]"]
 
 
 def test_fast_controller_wait_accepts_time_seconds_alias(monkeypatch):
@@ -1802,75 +1866,8 @@ def test_type_into_element_does_not_use_generic_edit_for_missing_filename_label(
     assert calls == [("observe", {"full": True, "force_full": True})]
 
 
-def test_fast_controller_upgrades_semantic_click_to_anchor_click():
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    calls = []
-
-    class Session:
-        snapshot = Snapshot(
-            hwnd=1,
-            title="Demo",
-            region=Region(0, 0, 1000, 600),
-            elements=[UIElement(elem_id=9, role="button", text="Export", cx=920, cy=50)],
-        )
-
-        def dispatch(self, name, args):
-            calls.append((name, args))
-            return ToolResult('{"ok": true, "verified": true}')
-
-    out = FastGuiController(Session()).execute([
-        {"click": {"label": "Export", "expected_region": "top-right", "role": "button"}}
-    ])
-
-    assert out["ok"]
-    assert calls == [("click", {"element_id": 9, "button": "left", "double": False})]
-    assert out["results"][0]["action"] == "click_element"
-    assert out["results"][0]["upgraded_from"] == "click"
-    assert out["results"][0]["data"]["via"] == "click_element"
-    assert out["results"][0]["data"]["resolved_element"]["elem_id"] == 9
 
 
-def test_fast_controller_upgrades_semantic_type_text_to_type_into_element():
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    calls = []
-
-    class Session:
-        snapshot = Snapshot(
-            hwnd=1,
-            title="Demo",
-            region=Region(0, 0, 1000, 600),
-            elements=[UIElement(elem_id=11, role="edit", text="Search", cx=300, cy=80)],
-        )
-
-        def dispatch(self, name, args):
-            calls.append((name, args))
-            return ToolResult('{"ok": true, "verified": true}')
-
-    out = FastGuiController(Session()).execute([
-        {"action": "type_text", "label": "Search", "role": "edit", "text": "hello", "clear": True}
-    ])
-
-    assert out["ok"]
-    assert calls[0] == ("click", {"x": 270, "y": 80, "button": "left", "double": False})
-    assert calls[1:] == [
-        ("hotkey", {"keys": ["ctrl", "a"]}),
-        ("hotkey", {"keys": ["backspace"]}),
-        ("type_text", {"text": "hello"}),
-    ]
-    assert out["results"][0]["action"] == "type_into_element"
-    assert out["results"][0]["upgraded_from"] == "type_text"
-    assert out["results"][0]["data"]["via"] == "type_into_element"
-    assert out["metrics"]["compound_round_trips_saved"] == 3
 
 
 def test_fast_controller_accepts_single_key_shorthand():
@@ -2868,9 +2865,7 @@ def test_batch_scope_recovery_rebinds_and_continues_only_uncommitted_action(monk
     assert out["results"][1]["scope_recovery"]["tool"] == "draw_strokes"
 
 
-def test_raw_controller_dispatch_consumes_inner_scope_recovery(monkeypatch):
-    import json
-
+def test_committed_raw_child_checks_scope_once_and_attaches_recovery(monkeypatch):
     from winpilot.agent import scope_guard
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
@@ -2880,17 +2875,22 @@ def test_raw_controller_dispatch_consumes_inner_scope_recovery(monkeypatch):
         snapshot = object()
         _observe_cache = object()
         _draw_surface_cache = {"stale": True}
+        _screen_epoch = 0
+        run_id = "single-scope-owner"
+
+        def _t_click(self, _args):
+            return ToolResult('{"ok": true, "verified": true}')
+
+        def dispatch(self, name, _args):
+            assert name == "observe"
+            return ToolResult('{"ok": true, "verified": true}')
 
     session = Session()
     controller = FastGuiController(session)
-    monkeypatch.setattr(controller.raw_device, "supports", lambda name: name == "click")
-    monkeypatch.setattr(
-        controller.raw_device,
-        "execute",
-        lambda _name, _args: ToolResult('{"ok": true, "verified": true}'),
-    )
+    guard_calls = []
 
     def recovered(current, name, _args):
+        guard_calls.append(name)
         current._last_scope_recovery = {
             "tool": name,
             "attempts": 1,
@@ -2900,9 +2900,14 @@ def test_raw_controller_dispatch_consumes_inner_scope_recovery(monkeypatch):
 
     monkeypatch.setattr(scope_guard, "ensure_scope", recovered)
 
-    payload = json.loads(controller._dispatch("click", {"x": 1, "y": 2}).text)
+    payload = controller.execute([
+        {"action": "click", "x": 1, "y": 2},
+        {"action": "observe"},
+    ], sync=False)
 
-    assert payload["scope_recovery"]["tool"] == "click"
+    assert payload["ok"] is True
+    assert guard_calls == ["click"]
+    assert payload["results"][0]["scope_recovery"]["tool"] == "click"
     assert session.snapshot is None
     assert session._draw_surface_cache is None
     assert scope_guard.take_scope_recovery(session) is None
@@ -3503,11 +3508,11 @@ def test_open_spreadsheet_subgoal_does_not_launch_blank_as_an_app():
     from winpilot.fast.subgoal import _app_launch_target, parse_subgoal_request
 
     request = parse_subgoal_request({
-        "subgoal": "Open WPS Spreadsheets and create a brand-new blank workbook",
+        "subgoal": "Open Northstar Grid and create a brand-new blank workbook",
         "click": {"label": "Blank"},
     })
 
-    assert _app_launch_target(request) == "WPS Spreadsheets"
+    assert _app_launch_target(request) == "Northstar Grid"
 
 
 def test_execute_subgoal_format_is_an_executable_routine():
@@ -3614,7 +3619,7 @@ def test_natural_execute_subgoal_open_app_routes_without_a_failed_llm_round_trip
     assert payload["subgoal_route"] == "open_app_capability"
 
 
-def test_execute_subgoal_open_app_accepts_shared_product_family_name():
+def test_execute_subgoal_open_app_preserves_unknown_app_display_name():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor
@@ -3622,7 +3627,7 @@ def test_execute_subgoal_open_app_accepts_shared_product_family_name():
     calls = []
 
     class Session:
-        task = "打开WPS文字"
+        task = "Open Northstar Work Surface"
         hwnd = None
         snapshot = None
 
@@ -3633,23 +3638,23 @@ def test_execute_subgoal_open_app_accepts_shared_product_family_name():
 
     session = Session()
     result = SubgoalExecutor(session, FastGuiController(session)).execute({
-        "subgoal": "Open WPS Writer",
-        "click": {"label": "WPS Office"},
+        "subgoal": "Open Northstar Work Surface",
+        "click": {"label": "Northstar Work Surface"},
     })
 
-    assert calls == [("open_app", {"name": "WPS Writer"})]
+    assert calls == [("open_app", {"name": "Northstar Work Surface"})]
     assert json.loads(result.text)["ok"] is True
 
 
-def test_execute_subgoal_routes_wps_product_family_to_requested_spreadsheet_component():
+def test_execute_subgoal_does_not_rewrite_unknown_suite_to_task_component():
     from winpilot.fast.subgoal import _app_launch_target, parse_subgoal_request
 
     request = parse_subgoal_request({
-        "subgoal": "Open WPS Office and create a new blank spreadsheet workbook",
-        "click": {"label": "WPS Office"},
+        "subgoal": "Open Northstar Suite and create a new blank spreadsheet workbook",
+        "click": {"label": "Northstar Suite"},
     })
 
-    assert _app_launch_target(request) == "WPS Spreadsheets"
+    assert _app_launch_target(request) == "Northstar Suite"
 
 
 def test_initial_task_app_target_extracts_first_explicit_app_without_workflow_rules():
@@ -3824,7 +3829,7 @@ def test_run_action_batch_open_app_recovers_hallucinated_preobserve_element_id()
     calls = []
 
     class Session(FastToolMixin):
-        task = "打开WPS文字并新建文档"
+        task = "Open Northstar Editor and create a new document"
         hwnd = None
         snapshot = None
         run_id = "run-batch-open-app"
@@ -3837,17 +3842,17 @@ def test_run_action_batch_open_app_recovers_hallucinated_preobserve_element_id()
                 "ok": True,
                 "verified": True,
                 "target_hwnd": 88,
-                "title": "WPS Office",
+                "title": "Northstar Editor",
             }, ensure_ascii=False))
 
     session = Session()
     result = session._t_run_action_batch({
-        "subgoal": "打开WPS文字",
+        "subgoal": "Open Northstar Editor",
         "actions": [{"action": "click", "element_id": 22}],
     })
     payload = json.loads(result.text)
 
-    assert calls == [("open_app", {"name": "WPS Writer"})]
+    assert calls == [("open_app", {"name": "Northstar Editor"})]
     assert payload["ok"] is True
     assert payload["subgoal_route"] == "open_app_capability"
 
@@ -4336,859 +4341,67 @@ def test_subgoal_formats_heading_and_body_in_one_local_sequence():
     ]
 
 
-def test_subgoal_pastes_literal_spreadsheet_block_in_one_controller_batch():
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    class Session:
-        hwnd = 10
-        task = (
-            "Enter this exact table into cells A1:D3:\n"
-            "Name\tQty\tPrice\tTotal\n"
-            "Keyboard\t2\t199\t=B2*C2\n"
-            "Marker\tSHEET_BATCH_42\t\t\n"
-            "Make row 1 bold."
-        )
-        snapshot = Snapshot(
-            hwnd=10,
-            title="Workbook1",
-            region=Region(100, 50, 1000, 800),
-            elements=[
-                UIElement(source="ocr", role="text", text="A", cx=180, cy=280, left=170, top=270, width=20, height=20),
-                UIElement(source="ocr", role="text", text="1", cx=120, cy=310, left=112, top=300, width=16, height=20),
-                UIElement(source="ocr", role="text", text="2", cx=120, cy=338, left=112, top=328, width=16, height=20),
-            ],
-        )
-
-    session = Session()
-    request = parse_subgoal_request({
-        "subgoal": "Enter the complete table data into cells A1:D3",
-        "input": {"label": "A1", "text": "Name", "clear": False},
-        "verify_texts": ["Name"],
-    }, task=session.task)
-
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
-
-    assert [action["action"] for action in actions] == [
-        "hotkey", "click", "hotkey", "clipboard_write", "clipboard_paste", "wait_stable", "read_text",
-        "hotkey", "click", "hotkey", "wait_stable", "read_text",
-    ]
-    assert actions[1]["x"] == 180
-    assert actions[1]["y"] == 310
-    assert actions[3]["text"] == (
-        "Name\tQty\tPrice\tTotal\r\n"
-        "Keyboard\t2\t199\t=B2*C2\r\n"
-        "Marker\tSHEET_BATCH_42\t\t"
-    )
-    assert actions[8]["context"] == "select spreadsheet row 1"
-    assert actions[9]["keys"] == ["ctrl", "b"]
-
-    row_by_row_request = parse_subgoal_request({
-        "subgoal": "Click cell A1 and enter the table data row by row",
-        "click": {"label": "cell A1", "expected_region": "spreadsheet grid area"},
-        "verify_texts": ["Name"],
-    }, task=session.task)
-    row_by_row_actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(row_by_row_request)
-    assert any(action["action"] == "clipboard_paste" for action in row_by_row_actions)
-
-    start_entry_request = parse_subgoal_request({
-        "subgoal": "Click cell A1 to start data entry",
-        "click": {"label": "A1 cell", "expected_region": "top-left of the spreadsheet grid"},
-    }, task=session.task)
-    start_entry_actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(start_entry_request)
-    assert any(action["action"] == "clipboard_paste" for action in start_entry_actions)
-
-    focus_grid_request = parse_subgoal_request({
-        "subgoal": "Click cell A1 to focus the spreadsheet grid",
-        "click": {"label": "A1", "visual_servo": True},
-        "verify_texts": ["A1"],
-    }, task=session.task)
-    focus_grid_actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(focus_grid_request)
-    assert any(action["action"] == "clipboard_paste" for action in focus_grid_actions)
-
-    header_request = parse_subgoal_request({
-        "subgoal": "Type the header row into cell A1 separated by tabs",
-        "input": {"label": "cell A1", "text": "Name\tQty\tPrice\tTotal"},
-    }, task=session.task)
-    header_actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(header_request)
-    assert any(action["action"] == "clipboard_paste" for action in header_actions)
-
-    session._spreadsheet_blocks_applied = {"A1:D3"}
-    repeated_actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(focus_grid_request)
-    assert not any(action["action"] == "clipboard_paste" for action in repeated_actions)
-
-
-def test_spreadsheet_table_batch_fuses_requested_formatting_and_exact_save():
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    target = r"C:\Users\zou\Desktop\spreadsheet-compound-batch.xlsx"
-
-    class Session:
-        hwnd = 10
-        task = (
-            "Enter this exact table into cells A1:B2:\n"
-            "Name\tValue\nMarker\tCOMPOUND_42\n"
-            f"Make row 1 bold and row 5 bold. Save As exactly {target}"
-        )
-        snapshot = Snapshot(
-            hwnd=10,
-            title="Workbook1",
-            region=Region(0, 0, 1920, 1020),
-            elements=[
-                UIElement(source="ocr", role="text", text="A", cx=67, cy=250),
-                UIElement(source="ocr", role="text", text="10", cx=22, cy=490),
-                UIElement(source="ocr", role="text", text="12", cx=22, cy=538),
-                UIElement(source="ocr", role="text", text="14", cx=22, cy=586),
-            ],
-        )
-
-    session = Session()
-    request = parse_subgoal_request(
-        {"subgoal": "Enter the complete table data into cells A1:B2"},
-        task=session.task,
-    )
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
-
-    assert sum(action["action"] == "clipboard_paste" for action in actions) == 1
-    assert [action.get("context") for action in actions if action["action"] == "click"][-2:] == [
-        "select spreadsheet row 1",
-        "select spreadsheet row 5",
-    ]
-    assert sum(action.get("keys") == ["ctrl", "b"] for action in actions) == 2
-    assert any(action.get("keys") == ["f12"] for action in actions)
-    final_enter = next(
-        action for action in actions
-        if action.get("keys") == ["enter"] and isinstance(action.get("expect"), dict)
-    )
-    assert final_enter["expect"]["file_exists"] == target
-    assert request.constraints["save_path"] == target
-
-def test_subgoal_formats_multiple_spreadsheet_rows_in_one_batch():
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    class Session:
-        hwnd = 10
-        task = "Make row 1 bold and row 5 bold in the workbook"
-        snapshot = Snapshot(
-            hwnd=10,
-            title="Workbook1",
-            region=Region(100, 50, 1000, 800),
-            elements=[
-                UIElement(source="ocr", role="text", text="A", cx=180, cy=280, left=170, top=270, width=20, height=20),
-                UIElement(source="ocr", role="text", text="1", cx=120, cy=310, left=112, top=300, width=16, height=20),
-                UIElement(source="ocr", role="text", text="2", cx=120, cy=338, left=112, top=328, width=16, height=20),
-                UIElement(source="ocr", role="text", text="5", cx=120, cy=422, left=112, top=412, width=16, height=20),
-            ],
-        )
-
-    session = Session()
-    request = parse_subgoal_request({"subgoal": session.task}, task=session.task)
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
-
-    assert [action["action"] for action in actions] == [
-        "hotkey", "click", "hotkey", "click", "hotkey", "wait_stable", "read_text",
-    ]
-    assert (actions[1]["x"], actions[1]["y"]) == (120, 310)
-    assert (actions[3]["x"], actions[3]["y"]) == (120, 422)
-    assert actions[2]["keys"] == ["ctrl", "b"]
-    assert actions[4]["keys"] == ["ctrl", "b"]
-
-    only_first_request = parse_subgoal_request({
-        "subgoal": "Make row 1 bold",
-    }, task=session.task)
-    combined_actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(only_first_request)
-    assert [action.get("context") for action in combined_actions if action["action"] == "click"] == [
-        "select spreadsheet row 1",
-        "select spreadsheet row 5",
-    ]
-
-
-def test_spreadsheet_geometry_infers_single_digit_rows_from_visible_later_rows():
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    class Session:
-        hwnd = 10
-        task = "Make row 1 bold and row 5 bold in the workbook"
-        snapshot = Snapshot(
-            hwnd=10,
-            title="Workbook1",
-            region=Region(0, 0, 1920, 1020),
-            elements=[
-                UIElement(source="ocr", role="text", text="A", cx=67, cy=250),
-                UIElement(source="ocr", role="text", text="10", cx=22, cy=490),
-                UIElement(source="ocr", role="text", text="12", cx=22, cy=538),
-                UIElement(source="ocr", role="text", text="14", cx=22, cy=586),
-            ],
-        )
-
-    request = parse_subgoal_request({"subgoal": Session.task}, task=Session.task)
-    actions = SubgoalExecutor(Session(), FastGuiController(Session()))._build_actions(request)
-    clicks = [action for action in actions if action["action"] == "click"]
-
-    assert [(action["x"], action["y"]) for action in clicks] == [(22, 274), (22, 370)]
-
-
-def test_execute_subgoal_remembers_spreadsheet_bold_rows_and_skips_toggle_repeat():
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.fast.subgoal import SubgoalExecutor
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    class Session:
-        task = "Make row 1 bold and row 5 bold"
-        hwnd = 10
-        run_id = "spreadsheet-format-test"
-        snapshot = Snapshot(
-            hwnd=10,
-            title="Workbook1",
-            region=Region(100, 50, 1000, 800),
-            elements=[
-                UIElement(source="ocr", role="text", text="A", cx=180, cy=280, left=170, top=270, width=20, height=20),
-                UIElement(source="ocr", role="text", text="1", cx=120, cy=310, left=112, top=300, width=16, height=20),
-                UIElement(source="ocr", role="text", text="2", cx=120, cy=338, left=112, top=328, width=16, height=20),
-                UIElement(source="ocr", role="text", text="5", cx=120, cy=422, left=112, top=412, width=16, height=20),
-            ],
-        )
-
-        @staticmethod
-        def dispatch(name, _args):
-            assert name == "focus_window"
-            return ToolResult('{"ok": true}')
-
-    class Watcher:
-        @staticmethod
-        def status():
-            return {}
-
-    class Controller:
-        watcher = Watcher()
-
-        @staticmethod
-        def execute(actions, **_kwargs):
-            return {
-                "ok": True,
-                "verified": False,
-                "controller_state": {"phase": "executed"},
-                "metrics": {"action_count": len(actions)},
-                "results": [
-                    {
-                        "action": action["action"],
-                        "ok": True,
-                        "verified": False,
-                        "data": {"ok": True},
-                    }
-                    for action in actions
-                ],
-            }
-
-    session = Session()
-    executor = SubgoalExecutor(session, Controller())
-    first = json.loads(executor.execute({
-        "subgoal": "Make row 1 bold",
-        "target_window": {"hwnd": 10},
-    }).text)
-    repeated = json.loads(executor.execute({
-        "subgoal": "Make row 1 bold and row 5 bold",
-        "target_window": {"hwnd": 10},
-    }).text)
-    save_request = executor.execute({
-        "subgoal": "Click File menu to access Save As",
-        "click": {"label": "File"},
-        "target_window": {"hwnd": 10},
-    })
-
-    assert first["spreadsheet_row_format_applied"] == [1, 5]
-    assert session._spreadsheet_bold_rows_applied == {1, 5}
-    assert repeated["mutation_skipped"] is True
-    assert "Do not press Ctrl+B again" in repeated["fast_path_advice"]
-    assert json.loads(save_request.text).get("mutation_skipped") is not True
-
-
-def test_execute_subgoal_reports_spreadsheet_clipboard_batch_without_exception():
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.fast.subgoal import SubgoalExecutor
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    snapshot = Snapshot(
-        hwnd=10,
-        title="Workbook1",
-        region=Region(100, 50, 1000, 800),
-        elements=[
-            UIElement(elem_id=1, source="ocr", role="text", text="A", cx=180, cy=280, left=170, top=270, width=20, height=20),
-            UIElement(elem_id=2, source="ocr", role="text", text="1", cx=120, cy=310, left=112, top=300, width=16, height=20),
-            UIElement(elem_id=3, source="ocr", role="text", text="2", cx=120, cy=338, left=112, top=328, width=16, height=20),
-        ],
-    )
-
-    class Session:
-        hwnd = 10
-        run_id = "spreadsheet-batch-test"
-        task = (
-            "Enter this exact table into cells A1:D3:\n"
-            "Name\tQty\tPrice\tTotal\n"
-            "Keyboard\t2\t199\t=B2*C2\n"
-            "Marker\tSHEET_BATCH_42\t\t\n"
-        )
-        snapshot = None
-
-        @staticmethod
-        def dispatch(name, args):
-            assert name == "focus_window"
-            return ToolResult('{"ok": true}')
-
-    class Watcher:
-        @staticmethod
-        def status():
-            return {}
-
-    class Controller:
-        watcher = Watcher()
-
-        @staticmethod
-        def execute(actions, **_kwargs):
-            results = []
-            for action in actions:
-                data = {"ok": True, "verified": True}
-                if action["action"] == "read_text":
-                    data["text"] = "Name Qty Price Total Keyboard SHEET_BATCH_42"
-                results.append({
-                    "action": action["action"],
-                    "ok": True,
-                    "verified": True,
-                    "data": data,
-                })
-            return {
-                "ok": True,
-                "verified": True,
-                "controller_state": {"phase": "verified"},
-                "metrics": {"action_count": len(actions)},
-                "results": results,
-            }
-
-    session = Session()
-    session.snapshot = snapshot
-    result = SubgoalExecutor(session, Controller()).execute({
-        "subgoal": "Click cell A1 to focus the spreadsheet grid",
-        "click": {"label": "A1"},
-        "verify_texts": ["A1"],
-        "target_window": {"hwnd": 10},
-    })
-    payload = json.loads(result.text)
-
-    assert payload["ok"] is True
-    assert payload["verified"] is True
-    assert payload["spreadsheet_table_applied"] is True
-    assert payload["evidence_packet"]["spreadsheet_table"] == {
-        "range": "A1:D3",
-        "row_count": 3,
-        "column_count": 4,
-        "clipboard_batch": True,
-        "applied": True,
-    }
-    assert session._spreadsheet_blocks_applied == {"A1:D3"}
-
-
-def test_spreadsheet_paste_remains_success_when_ocr_splits_final_marker():
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.fast.subgoal import SubgoalExecutor
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    class Session:
-        hwnd = 10
-        run_id = "spreadsheet-split-marker"
-        task = (
-            "Enter this exact table into cells A1:B2:\n"
-            "Name\tValue\nMarker\tSHEET_GUI_0929\n"
-        )
-        snapshot = Snapshot(
-            hwnd=10,
-            title="Workbook1",
-            region=Region(0, 0, 1000, 800),
-            elements=[
-                UIElement(source="ocr", role="text", text="A", cx=70, cy=190),
-                UIElement(source="ocr", role="text", text="1", cx=20, cy=220),
-                UIElement(source="ocr", role="text", text="2", cx=20, cy=244),
-            ],
-        )
-
-        @staticmethod
-        def dispatch(name, _args):
-            assert name == "focus_window"
-            return ToolResult('{"ok": true}')
-
-    class Watcher:
-        @staticmethod
-        def status():
-            return {}
-
-    class Controller:
-        watcher = Watcher()
-
-        @staticmethod
-        def execute(actions, **_kwargs):
-            results = []
-            for action in actions:
-                ok = action["action"] != "read_text"
-                data = {"ok": ok}
-                if action["action"] == "read_text":
-                    data["text"] = "Name Value Marker SHEET_GUI_C 0929"
-                results.append({"action": action["action"], "ok": ok, "verified": False, "data": data})
-            return {
-                "ok": False,
-                "verified": False,
-                "controller_state": {"phase": "executed", "needs_llm_reason": True},
-                "metrics": {"action_count": len(actions)},
-                "results": results,
-            }
-
-    payload = json.loads(SubgoalExecutor(Session(), Controller()).execute({
-        "subgoal": "Enter the complete table data into the requested range",
-        "click": {"label": "A1"},
-        # Models occasionally misuse draw.box as a visual target-region hint.
-        # A spreadsheet semantic routine must not turn that hint into a color
-        # postcondition for a draw action that it never executes.
-        "draw": {"box": [100, 180, 800, 600], "shape": "rectangle", "color": "white"},
-        "target_window": {"hwnd": 10},
-    }).text)
-
-    assert payload["ok"] is True
-    assert payload["verified"] is False
-    assert payload["mutation_applied"] is True
-    assert payload["needs_llm_reason"] is False
-    assert payload["evidence_packet"]["missing_texts"] == []
-    assert payload["evidence_packet"]["missing_visual_colors"] == []
-    assert "SHEET_GUI_0929" in payload["evidence_packet"]["pending_artifact_texts"]
-
-
-def test_spreadsheet_verify_request_advances_pending_format_then_save():
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.fast.subgoal import SubgoalExecutor
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    target = r"C:\Users\zou\Desktop\spreadsheet-state-machine.xlsx"
-
-    class Session:
-        hwnd = 10
-        run_id = "spreadsheet-state-machine"
-        task = (
-            "Enter this exact table into cells A1:B2:\nName\tValue\nMarker\tSTATE_42\n"
-            f"Make row 1 bold and row 5 bold. Save As exactly {target}"
-        )
-        _spreadsheet_blocks_applied = {"A1:B2"}
-        snapshot = Snapshot(
-            hwnd=10,
-            title="Workbook1",
-            region=Region(0, 0, 1920, 1020),
-            elements=[
-                UIElement(source="ocr", role="text", text="A", cx=67, cy=250),
-                UIElement(source="ocr", role="text", text="10", cx=22, cy=490),
-                UIElement(source="ocr", role="text", text="12", cx=22, cy=538),
-                UIElement(source="ocr", role="text", text="14", cx=22, cy=586),
-            ],
-        )
-
-        @staticmethod
-        def dispatch(name, _args):
-            assert name == "focus_window"
-            return ToolResult('{"ok": true}')
-
-    class Watcher:
-        @staticmethod
-        def status():
-            return {}
-
-    class Controller:
-        watcher = Watcher()
-        batches = []
-
-        @classmethod
-        def execute(cls, actions, **_kwargs):
-            cls.batches.append(actions)
-            results = [
-                {
-                    "action": action["action"],
-                    "ok": True,
-                    "verified": True,
-                    "data": {"ok": True, "text": "Name Value Marker STATE_42"},
-                }
-                for action in actions
-            ]
-            return {
-                "ok": True,
-                "verified": True,
-                "controller_state": {"phase": "verified"},
-                "metrics": {"action_count": len(actions)},
-                "results": results,
-            }
-
-    session = Session()
-    executor = SubgoalExecutor(session, Controller())
-    verify_request = {
-        "subgoal": "Verify the spreadsheet table",
-        "verify_texts": ["Name", "STATE_42"],
-        "target_window": {"hwnd": 10},
-    }
-
-    formatted_and_saved = json.loads(executor.execute(verify_request).text)
-    repeated_verify = json.loads(executor.execute(verify_request).text)
-
-    assert formatted_and_saved["spreadsheet_row_format_applied"] == [1, 5]
-    assert formatted_and_saved["exact_save_as_applied"] is True
-    assert session._spreadsheet_bold_rows_applied == {1, 5}
-    assert [(a["x"], a["y"]) for a in Controller.batches[0] if a["action"] == "click"] == [
-        (22, 274),
-        (22, 370),
-    ]
-    assert any(
-        action.get("action") == "hotkey" and action.get("keys") == ["f12"]
-        for action in Controller.batches[0]
-    )
-    assert repeated_verify["mutation_skipped"] is True
-    assert len(Controller.batches) == 1
-
-
-def test_subgoal_formats_can_dispatch_save_in_the_same_local_sequence():
+def test_task_words_and_save_constraints_do_not_append_save_actions():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
     class Session:
         task = "Format the first line bold and centered, then save with Ctrl+S"
 
-    session = Session()
-    executor = SubgoalExecutor(session, FastGuiController(session))
     request = parse_subgoal_request({
         "subgoal": "Format and save the document",
         "formats": [{"range": "first_line", "bold": True, "alignment": "center"}],
-        "constraints": {"save_after": True, "wait": True},
-    }, task=session.task)
+        "constraints": {
+            "save_after": True,
+            "save_path": r"C:\\Users\\zou\\Desktop\\report.docx",
+            "wait": True,
+        },
+    }, task=Session.task)
 
-    actions = executor._build_actions(request)
+    actions = SubgoalExecutor(Session(), FastGuiController(Session()))._build_actions(request)
 
-    assert actions[-3:] == [
-        {"action": "hotkey", "keys": ["ctrl", "end"]},
-        {"action": "hotkey", "keys": ["ctrl", "s"]},
-        {"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0},
-    ]
-
-
-def test_shortcut_label_runs_as_hotkey_instead_of_searching_for_button():
+    assert any(action.get("keys") == ["ctrl", "b"] for action in actions)
+    assert not any(action.get("keys") in (["ctrl", "s"], ["f12"]) for action in actions)
+    assert not any(action.get("expect", {}).get("file_exists") for action in actions)
+def test_explicit_shortcut_label_translates_directly_without_task_strategy():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
     class Session:
         task = "Press Ctrl+N to create a new document"
 
-    session = Session()
     request = parse_subgoal_request({
         "subgoal": "Press Ctrl+N and verify the new document",
         "click": {"label": "Ctrl+N"},
         "verify_texts": ["Untitled"],
         "constraints": {"wait": True},
-    }, task=session.task)
+    }, task=Session.task)
 
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
+    actions = SubgoalExecutor(Session(), FastGuiController(Session()))._build_actions(request)
 
-    assert actions[0] == {"action": "hotkey", "keys": ["ctrl", "n"]}
-    assert actions[1] == {
-        "action": "wait_change", "timeout_s": 6.0, "min_ratio": 0.0002,
-        "required": False,
-    }
-    assert actions[2] == {"action": "wait_stable", "stable_ms": 300, "timeout_s": 5.0, "required": True}
-    assert actions[3] == {"action": "read_text"}
-
-
-def test_new_document_shortcut_reads_state_even_without_verify_texts():
+    assert actions == [
+        {"action": "hotkey", "keys": ["ctrl", "n"]},
+        {"action": "wait_stable", "stable_ms": 250, "timeout_s": 3.0},
+        {"action": "read_text"},
+    ]
+def test_explicit_shortcut_without_verification_does_not_invent_state_read():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
     class Session:
         task = "Create a new blank document"
 
-    session = Session()
     request = parse_subgoal_request({
         "subgoal": "Press Ctrl+N to create a new blank document",
         "click": {"label": "Ctrl+N"},
-    }, task=session.task)
+    }, task=Session.task)
 
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
+    actions = SubgoalExecutor(Session(), FastGuiController(Session()))._build_actions(request)
 
-    assert actions[-1] == {"action": "read_text"}
-
-
-def test_new_blank_workbook_button_compiles_to_ctrl_n_controller_routine():
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-
-    class Session:
-        task = "Create a new blank spreadsheet workbook"
-
-    session = Session()
-    request = parse_subgoal_request({
-        "subgoal": "Create a new blank spreadsheet workbook",
-        "click": {"label": "新建", "fallback_text": ["New", "Blank Workbook"]},
-    }, task=session.task)
-
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
-
-    assert actions[0] == {"action": "hotkey", "keys": ["ctrl", "n"]}
-    assert actions[1]["action"] == "wait_change"
-    assert actions[-1] == {"action": "read_text"}
-
-
-def test_verbose_new_blank_workbook_label_still_compiles_to_ctrl_n():
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-
-    class Session:
-        task = "Create a brand-new blank workbook"
-
-    session = Session()
-    request = parse_subgoal_request({
-        "subgoal": "Create a brand-new blank workbook in WPS Spreadsheets",
-        "click": {
-            "label": "New tab or plus button to create blank workbook",
-            "expected_region": "top tab bar area",
-        },
-    }, task=session.task)
-
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
-
-    assert actions[0] == {"action": "hotkey", "keys": ["ctrl", "n"]}
-    assert actions[1]["action"] == "wait_change"
-
-
-def test_repeated_new_workbook_request_advances_to_pending_spreadsheet_table():
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.fast.subgoal import SubgoalExecutor
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    class Session:
-        hwnd = 10
-        run_id = "new-then-table"
-        task = (
-            "Create a new blank workbook and enter this exact table into cells A1:B2:\n"
-            "Name\tValue\nMarker\tNEW_TABLE_42\n"
-        )
-        snapshot = Snapshot(
-            hwnd=10,
-            title="Workbook1",
-            region=Region(0, 0, 1000, 800),
-            elements=[
-                UIElement(source="ocr", role="text", text="A", cx=70, cy=190),
-                UIElement(source="ocr", role="text", text="1", cx=20, cy=220),
-                UIElement(source="ocr", role="text", text="2", cx=20, cy=244),
-            ],
-        )
-
-        @staticmethod
-        def dispatch(name, _args):
-            assert name == "focus_window"
-            return ToolResult('{"ok": true}')
-
-    class Watcher:
-        @staticmethod
-        def status():
-            return {}
-
-    class Controller:
-        watcher = Watcher()
-        batches = []
-
-        @classmethod
-        def execute(cls, actions, **_kwargs):
-            cls.batches.append(actions)
-            results = []
-            for action in actions:
-                data = {"ok": True}
-                if action["action"] == "wait_change":
-                    data["changed"] = True
-                    data["delta"] = {"changed": True}
-                if action["action"] == "read_text":
-                    data["text"] = "Name Value Marker NEW_TABLE_42"
-                results.append({"action": action["action"], "ok": True, "verified": True, "data": data})
-            return {
-                "ok": True,
-                "verified": True,
-                "controller_state": {"phase": "verified"},
-                "metrics": {"action_count": len(actions)},
-                "results": results,
-            }
-
-    session = Session()
-    executor = SubgoalExecutor(session, Controller())
-    request = {
-        "subgoal": "Create a new blank workbook",
-        "click": {"label": "New"},
-        "target_window": {"hwnd": 10},
-    }
-
-    first = json.loads(executor.execute(request).text)
-    second = json.loads(executor.execute(request).text)
-
-    assert first["new_blank_applied"] is True
-    assert first["spreadsheet_table_applied"] is True
-    assert session._new_blank_applied is True
-    assert second["mutation_skipped"] is True
-    assert sum(
-        action.get("action") == "hotkey" and action.get("keys") == ["ctrl", "n"]
-        for batch in Controller.batches
-        for action in batch
-    ) == 1
-    assert len(Controller.batches) == 1
-    assert any(action.get("action") == "clipboard_paste" for action in Controller.batches[0])
-
-
-def test_new_blank_document_fuses_exact_text_format_and_save():
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.utils.screenshot import Region
-
-    output = r"C:\Users\zou\Desktop\Writer_Fused_E2E.docx"
-    body = "Heading\nMarker: WRITER_FUSED_42\nBody line\nConclusion"
-
-    class Session:
-        hwnd = 10
-        run_id = "writer-fused"
-        task = (
-            "Open WPS Writer and create a brand-new blank document. "
-            "Type these four lines exactly into the document body:\n"
-            f"{body}\n"
-            "Make the first line bold and centered. Keep the remaining three lines left aligned "
-            f"and not bold. Save As exactly {output} through the visible GUI."
-        )
-        snapshot = Snapshot(
-            hwnd=10,
-            title="Document1 - WPS Office",
-            region=Region(0, 0, 1200, 800),
-            elements=[],
-        )
-
-    session = Session()
-    request = parse_subgoal_request({
-        "subgoal": "Create a brand-new blank document",
-        "click": {"label": "New"},
-        "target_window": {"hwnd": 10},
-    }, task=session.task)
-
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
-
-    assert sum(
-        action.get("action") == "hotkey" and action.get("keys") == ["ctrl", "n"]
-        for action in actions
-    ) == 1
-    typed_parts = [
-        action.get("text")
-        for action in actions
-        if action.get("action") == "type_text"
+    assert actions == [
+        {"action": "hotkey", "keys": ["ctrl", "n"]},
+        {"action": "wait_stable", "stable_ms": 250, "timeout_s": 3.0},
     ]
-    assert typed_parts == ["Heading", "Marker: WRITER_FUSED_42\nBody line\nConclusion"]
-    assert any(action.get("action") == "hotkey" and action.get("keys") == ["ctrl", "b"] for action in actions)
-    assert any(action.get("action") == "hotkey" and action.get("keys") == ["ctrl", "e"] for action in actions)
-    assert any(action.get("action") == "hotkey" and action.get("keys") == ["ctrl", "l"] for action in actions)
-    assert any(action.get("action") == "hotkey" and action.get("keys") == ["f12"] for action in actions)
-    assert any(
-        action.get("action") == "type_into_element" and action.get("text") == output
-        for action in actions
-    )
-    assert any(
-        action.get("action") == "hotkey"
-        and action.get("keys") == ["enter"]
-        and action.get("expect", {}).get("file_exists") == output
-        for action in actions
-    )
-    assert request.input["text"] == body
-    assert request.formats == [
-        {"range": "first_line", "bold": True, "alignment": "center"},
-        {"range": "body_after_first_line", "alignment": "left"},
-    ]
-    assert request.constraints["save_path"] == output
-
-
-def test_new_blank_is_not_recorded_when_shortcut_has_no_window_or_screen_evidence():
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.fast.subgoal import SubgoalExecutor
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    class Session:
-        hwnd = 10
-        run_id = "new-no-evidence"
-        task = "Create a new blank workbook"
-        snapshot = Snapshot(
-            hwnd=10,
-            title="Workbook1",
-            region=Region(0, 0, 1000, 800),
-            elements=[UIElement(source="ocr", role="text", text="A1", cx=70, cy=190)],
-        )
-
-        @staticmethod
-        def dispatch(name, _args):
-            assert name == "focus_window"
-            return ToolResult('{"ok": true}')
-
-    class Watcher:
-        @staticmethod
-        def status():
-            return {}
-
-    class Controller:
-        watcher = Watcher()
-
-        @staticmethod
-        def execute(actions, **_kwargs):
-            return {
-                "ok": False,
-                "verified": False,
-                "controller_state": {"phase": "blocked"},
-                "metrics": {"action_count": len(actions)},
-                "results": [
-                    {
-                        "action": action["action"],
-                        "ok": action["action"] == "hotkey",
-                        "verified": False,
-                        "data": {"ok": action["action"] == "hotkey"},
-                    }
-                    for action in actions[:2]
-                ],
-            }
-
-    session = Session()
-    payload = json.loads(SubgoalExecutor(session, Controller()).execute({
-        "subgoal": "Create a new blank workbook",
-        "click": {"label": "New"},
-        "target_window": {"hwnd": 10},
-    }).text)
-
-    assert payload["new_blank_applied"] is False
-    assert not hasattr(session, "_new_blank_applied")
-
-
 def test_ctrl_n_adopts_same_process_sibling_window(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast import controller as controller_module
@@ -5229,108 +4442,48 @@ def test_ctrl_n_adopts_same_process_sibling_window(monkeypatch):
     assert result["results"][0]["data"]["controller_adopted_foreground_hwnd"] == 20
 
 
-def test_shortcut_in_subgoal_overrides_non_shortcut_click_label():
+def test_shortcut_words_do_not_override_explicit_click_label():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
     class Session:
         task = "Create a new blank document"
 
-    session = Session()
     request = parse_subgoal_request({
         "subgoal": "Create a new blank document by pressing Ctrl+N and verify it",
         "click": {"label": "New Blank Document"},
-    }, task=session.task)
+    }, task=Session.task)
 
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
+    actions = SubgoalExecutor(Session(), FastGuiController(Session()))._build_actions(request)
 
-    assert actions[0] == {"action": "hotkey", "keys": ["ctrl", "n"]}
-    assert actions[-1] == {"action": "read_text"}
-
-
-def test_subgoal_formats_save_as_exact_path_inside_controller_batch():
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-
-    target = r"C:\Users\zou\Desktop\report.docx"
-
-    class Session:
-        task = f"Format the heading and Save As exactly {target}"
-
-    session = Session()
-    executor = SubgoalExecutor(session, FastGuiController(session))
-    request = parse_subgoal_request({
-        "subgoal": "Format and save the document",
-        "formats": [{"range": "first_line", "bold": True, "alignment": "center"}],
-        "constraints": {"save_after": True, "save_path": target, "wait": True},
-    }, task=session.task)
-
-    actions = executor._build_actions(request)
-    names = [action["action"] for action in actions]
-
-    assert names[-8:] == [
-        "hotkey", "wait_stable", "observe", "type_into_element",
-        "hotkey", "wait_stable", "read_text", "wait_stable",
-    ]
-    assert actions[-8]["keys"] == ["ctrl", "s"]
-    assert actions[-5]["text"] == target
-    assert "文件名称(N)" in actions[-5]["fallback_text"]
-    assert actions[-5]["verify_after_submit"] is True
-    assert actions[-4]["expect"] == {"file_exists": target, "timeout_s": 8.0}
-
-
-def test_exact_save_as_subgoal_opens_dialog_and_verifies_exact_path_in_one_batch():
+    assert actions[0]["action"] == "click_element"
+    assert actions[0]["label"] == "New Blank Document"
+    assert not any(action.get("action") == "hotkey" for action in actions)
+def test_save_words_do_not_open_a_dialog_before_explicit_file_field_actions():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
     target = r"C:\Users\zou\Desktop\sheet.xlsx"
 
     class Session:
-        task = f"Save the WPS spreadsheet As exactly {target}"
+        task = f"Save the spreadsheet As exactly {target}"
 
-    session = Session()
     request = parse_subgoal_request({
         "subgoal": f"Save As the exact requested path: {target}",
         "input": {"label": "File name", "text": target, "clear": True},
         "click": {"label": "Save"},
         "verify_texts": ["sheet.xlsx"],
         "constraints": {"open_save_as": True, "save_path": target},
-    }, task=session.task)
+    }, task=Session.task)
 
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
+    actions = SubgoalExecutor(Session(), FastGuiController(Session()))._build_actions(request)
 
     assert [action["action"] for action in actions] == [
-        "hotkey", "wait", "observe",
         "type_into_element", "hotkey", "wait_stable", "read_text",
     ]
-    assert actions[0]["keys"] == ["f12"]
-    assert actions[3]["text"] == target
-    assert actions[4]["expect"] == {"file_exists": target, "timeout_s": 10.0}
-
-
-def test_runner_upgrades_file_menu_click_to_exact_save_as_controller_routine():
-    from winpilot.agent.loop import AgentRunner
-
-    target = r"C:\Users\zou\Desktop\sheet.xlsx"
-    runner = AgentRunner(f"Save As exactly {target} through the GUI")
-    upgraded = runner._maybe_upgrade_exact_save_as(
-        "execute_subgoal",
-        {
-            "subgoal": "Click File menu to access Save As",
-            "click": {"label": "文件"},
-            "target_window": {"hwnd": 42},
-        },
-    )
-
-    assert upgraded["constraints"] == {
-        "open_save_as": True,
-        "save_path": target,
-        "wait": True,
-    }
-    assert upgraded["target_window"] == {"hwnd": 42}
-    assert upgraded["verify_texts"] == ["sheet.xlsx"]
-
-
+    assert actions[0]["text"] == target
+    assert actions[1]["keys"] == ["enter"]
+    assert not any(action.get("keys") == ["f12"] for action in actions)
 def test_type_into_element_can_defer_file_path_verification_until_submit(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
@@ -5439,147 +4592,16 @@ def test_subgoal_formats_focus_central_document_surface_before_shortcuts(monkeyp
     ]
 
 
-def test_runner_upgrades_low_level_title_click_to_full_format_routine():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Make the first line bold and centered and the remaining body left aligned"
-    )
-    upgraded = runner._maybe_upgrade_execute_subgoal_formats(
-        "execute_subgoal",
-        {
-            "subgoal": "Select the first line of text",
-            "click": {"label": "title line"},
-            "target_window": {"hwnd": 42},
-        },
-    )
-
-    assert upgraded["target_window"] == {"hwnd": 42}
-    assert upgraded["formats"] == [
-        {"range": "first_line", "bold": True, "alignment": "center"},
-        {"range": "body_after_first_line", "alignment": "left"},
-    ]
-    assert "click" not in upgraded
 
 
-def test_runner_upgrades_chinese_first_paragraph_click_to_full_format_routine():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "将第一段加粗并居中，将后三段左对齐且不加粗，然后保存"
-    )
-    upgraded = runner._maybe_upgrade_execute_subgoal_formats(
-        "execute_subgoal",
-        {
-            "subgoal": "点击第一段文字以定位光标",
-            "click": {"label": "办公自动化验收报告"},
-            "target_window": {"hwnd": 42},
-        },
-    )
-
-    assert upgraded["formats"] == [
-        {"range": "first_line", "bold": True, "alignment": "center"},
-        {"range": "body_after_first_line", "alignment": "left"},
-    ]
-    assert upgraded["constraints"] == {"wait": True, "save_after": True}
 
 
-def test_runner_replaces_model_format_batch_with_semantic_document_routine():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Make the first paragraph bold and centered. Make the remaining paragraphs left aligned. Save it."
-    )
-    original_actions = [
-        {"action": "click", "params": {"x": 1273, "y": 457}},
-        {"action": "hotkey", "params": {"keys": ["control", "b"]}},
-    ]
-    upgraded = runner._maybe_upgrade_execute_subgoal_formats(
-        "run_action_batch",
-        {"subgoal": "格式化第一段文字：加粗并居中", "actions": original_actions},
-    )
-
-    assert upgraded["semantic_override"] == "document_format"
-    assert upgraded["actions"] == original_actions
-    assert upgraded["formats"] == [
-        {"range": "first_line", "bold": True, "alignment": "center"},
-        {"range": "body_after_first_line", "alignment": "left"},
-    ]
 
 
-def test_runner_never_rewrites_spreadsheet_row_formatting_as_rich_text_document_formatting():
-    from winpilot.agent.loop import AgentRunner
-
-    task = (
-        "Enter a table into cells A1:D7. Make row 1 bold and row 5 bold. "
-        "Finally verify the workbook title contains report.xlsx."
-    )
-    runner = AgentRunner(task)
-    original = {
-        "subgoal": "Click cell A1 to focus the spreadsheet grid",
-        "click": {"label": "A1", "expected_region": "center"},
-        "target_window": {"hwnd": 42},
-    }
-
-    assert runner._document_format_specs(task) == []
-    assert runner._maybe_upgrade_execute_subgoal_formats("execute_subgoal", original) == original
 
 
-def test_runner_collapses_cell_by_cell_spreadsheet_batch_to_semantic_table_override():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Enter this exact table into cells A1:D2:\nName\tQty\tPrice\tTotal\nKeyboard\t2\t199\t=B2*C2"
-    )
-    actions = [
-        {"action": "click", "x": 100, "y": 200},
-        {"action": "type_text", "text": "Name"},
-        {"action": "hotkey", "keys": ["Tab"]},
-        {"action": "type_text", "text": "Qty"},
-        {"action": "hotkey", "keys": ["Tab"]},
-        {"action": "type_text", "text": "Price"},
-        {"action": "hotkey", "keys": ["Tab"]},
-        {"action": "type_text", "text": "Total"},
-    ]
-
-    upgraded = runner._maybe_upgrade_spreadsheet_action_batch(
-        "run_action_batch",
-        {"subgoal": "enter all table data row by row", "actions": actions},
-    )
-
-    assert upgraded["semantic_override"] == "spreadsheet_table"
-    assert upgraded["actions"] == actions
-
-    format_upgraded = runner._maybe_upgrade_spreadsheet_action_batch(
-        "run_action_batch",
-        {
-            "subgoal": "Make row 1 bold and row 5 bold",
-            "actions": [{"action": "hotkey", "keys": ["ctrl", "b"]}],
-        },
-    )
-    assert format_upgraded["semantic_override"] == "spreadsheet_row_format"
 
 
-def test_runner_advances_repeated_spreadsheet_format_request_to_exact_save():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Make row 1 bold and row 5 bold. Save As exactly "
-        r"C:\Users\zou\Desktop\spreadsheet-runtime-test.xlsx"
-    )
-    runner.session._spreadsheet_bold_rows_applied = {1, 5}
-
-    upgraded = runner._maybe_upgrade_spreadsheet_action_batch(
-        "run_action_batch",
-        {
-            "subgoal": "Make row 1 bold and row 5 bold",
-            "actions": [{"action": "hotkey", "keys": ["ctrl", "b"]}],
-        },
-    )
-
-    assert upgraded["semantic_override"] == "exact_save_as"
-    assert upgraded["constraints"]["open_save_as"] is True
-    assert upgraded["constraints"]["save_path"].endswith("spreadsheet-runtime-test.xlsx")
 
 
 def test_run_action_batch_semantic_format_override_uses_subgoal_executor(monkeypatch):
@@ -5623,347 +4645,49 @@ def test_run_action_batch_semantic_format_override_uses_subgoal_executor(monkeyp
     }
 
 
-def test_run_action_batch_semantic_spreadsheet_override_uses_subgoal_executor(monkeypatch):
+def test_run_action_batch_ignores_spreadsheet_semantic_override_and_executes_declared_actions(monkeypatch):
     from winpilot.agent import fast_tools
     from winpilot.agent.fast_tools import FastToolMixin
-    from winpilot.agent.tools import ToolResult
 
-    captured = {}
+    class ForbiddenExecutor:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("semantic spreadsheet compiler must not run")
 
-    class FakeExecutor:
-        def __init__(self, session, controller):
-            captured["session"] = session
-            captured["controller"] = controller
+    class Controller:
+        calls = []
 
-        def execute(self, request):
-            captured["request"] = request
-            return ToolResult('{"ok": true, "spreadsheet_table_applied": true}')
+        @classmethod
+        def execute(cls, actions, **kwargs):
+            cls.calls.append((actions, kwargs))
+            return {
+                "ok": True,
+                "verified": True,
+                "results": [],
+                "controller_state": {"phase": "verified"},
+            }
 
     class Session(FastToolMixin):
         task = "enter table into cells A1:D2"
 
         def _fast_controller(self):
-            return "controller"
+            return Controller()
 
-    monkeypatch.setattr(fast_tools, "SubgoalExecutor", FakeExecutor)
-    result = Session()._t_run_action_batch({
-        "actions": [{"action": "type_text", "text": "Name"}],
+        @staticmethod
+        def _fmt(value):
+            return json.dumps(value)
+
+    monkeypatch.setattr(fast_tools, "SubgoalExecutor", ForbiddenExecutor)
+    declared = [{"action": "type_text", "text": "Name"}]
+    payload = json.loads(Session()._t_run_action_batch({
+        "actions": declared,
         "subgoal": "enter all table data row by row",
         "semantic_override": "spreadsheet_table",
         "target_window": {"hwnd": 42},
-    })
-
-    assert '"spreadsheet_table_applied": true' in result.text
-    assert captured["request"]["click"] == {
-        "label": "A1",
-        "expected_region": "spreadsheet grid",
-    }
-    assert captured["request"]["target_window"] == {"hwnd": 42}
-
-
-def test_runner_does_not_rewrite_new_document_navigation_as_formatting():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Create a blank document, type a report, then make the first line bold and centered"
-    )
-    original = {
-        "subgoal": "Click the New document tab to create a blank document",
-        "click": {"label": "New document", "expected_region": "top"},
-        "target_window": {"hwnd": 42},
-    }
-
-    upgraded = runner._maybe_upgrade_execute_subgoal_formats("execute_subgoal", original)
-
-    assert upgraded == original
-
-
-def test_runner_does_not_rewrite_plain_document_focus_as_formatting():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Type four exact lines, then make the first line bold and centered and save the document"
-    )
-    original = {
-        "subgoal": "Click the document body to place the insertion caret",
-        "click": {"label": "Document", "expected_region": "center"},
-        "target_window": {"hwnd": 42},
-    }
-
-    assert runner._maybe_upgrade_execute_subgoal_formats("execute_subgoal", original) == original
-
-
-def test_runner_rewrites_formatting_tab_navigation_to_semantic_routine():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Make the first paragraph bold and centered and the remaining paragraphs left aligned"
-    )
-    upgraded = runner._maybe_upgrade_execute_subgoal_formats(
-        "execute_subgoal",
-        {
-            "subgoal": "Click the Home tab to access formatting tools",
-            "click": {"label": "开始", "role": "tab"},
-            "target_window": {"hwnd": 42},
-        },
-    )
-
-    assert upgraded["formats"] == [
-        {"range": "first_line", "bold": True, "alignment": "center"},
-        {"range": "body_after_first_line", "alignment": "left"},
-    ]
-
-
-def test_runner_does_not_treat_literal_input_word_format_as_format_command():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Type a report containing the literal 已完成：输入、格式化与状态核验, then format the heading"
-    )
-    original = {
-        "subgoal": "点击文档编辑区并输入四段文字：已完成：输入、格式化与状态核验",
-        "click": {"label": "文档编辑区"},
-        "target_window": {"hwnd": 42},
-    }
-
-    upgraded = runner._maybe_upgrade_execute_subgoal_formats("execute_subgoal", original)
-
-    assert upgraded == original
-
-
-def test_runner_upgrades_natural_language_document_input_to_exact_batch():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        """Use WPS and type exactly these four paragraphs, one paragraph per line:
-办公自动化验收报告
-测试标识：OFFICE_GUI_712
-已完成：输入、格式化与状态核验
-结论：真实文件保存成功
-Make the first paragraph bold and centered. Save the file."""
-    )
-    upgraded = runner._maybe_upgrade_execute_subgoal_document_input(
-        "execute_subgoal",
-        {
-            "subgoal": "点击文档编辑区并输入四段文字",
-            "click": {"label": "文档编辑区"},
-            "target_window": {"hwnd": 42},
-        },
-    )
-
-    assert upgraded["input"] == {
-        "text": "办公自动化验收报告\n测试标识：OFFICE_GUI_712\n已完成：输入、格式化与状态核验\n结论：真实文件保存成功",
-        "document_surface": True,
-        "clear": True,
-    }
-    assert upgraded["target_window"] == {"hwnd": 42}
-    assert "OFFICE_GUI_712" in "\n".join(upgraded["verify_texts"])
-
-
-def test_runner_rewrites_new_click_when_blank_document_is_already_ready():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        """Use WPS Writer and type exactly these paragraphs:
-Research report
-SOURCE_TOKEN_712
-Make the first paragraph bold and centered. Save the file."""
-    )
-    runner.session._new_blank_applied = True
-
-    upgraded = runner._maybe_upgrade_execute_subgoal_document_input(
-        "execute_subgoal",
-        {
-            "subgoal": "Click New or the document title to create a blank document",
-            "click": {"label": "New"},
-            "target_window": {"hwnd": 42},
-        },
-    )
-
-    assert upgraded["input"]["text"] == "Research report\nSOURCE_TOKEN_712"
-    assert upgraded["input"]["document_surface"] is True
-    assert "click" not in upgraded
-    assert upgraded["target_window"] == {"hwnd": 42}
-
-
-def test_document_routine_creates_surface_first_when_writer_home_is_known():
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-
-    class Session:
-        task = """Type exactly these paragraphs:
-Heading
-Body TOKEN_712
-Make the first paragraph bold and centered."""
-        hwnd = 42
-        snapshot = None
-        _document_surface_ready = False
-
-    session = Session()
-    request = parse_subgoal_request({
-        "subgoal": "Enter the exact content into the document",
-        "input": {"text": "Heading\nBody TOKEN_712", "document_surface": True},
-        "target_window": {"hwnd": 42},
-    }, task=session.task)
-
-    actions = SubgoalExecutor(session, FastGuiController(session))._document_task_actions(request)
-
-    assert actions[0] == {"action": "ensure_document_surface", "max_attempts": 3}
-    assert any(action.get("action") == "type_text" for action in actions)
-
-
-def test_runner_rewrites_model_document_body_input_and_strips_premature_format():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        """Type exactly these two paragraphs:
-Heading
-Body TOKEN_712
-Make the first paragraph bold and centered. Save the file."""
-    )
-    upgraded = runner._maybe_upgrade_execute_subgoal_document_input(
-        "execute_subgoal",
-        {
-            "subgoal": "Type the paragraphs and format them",
-            "input": {"text": "Heading\nBody TOKEN_712", "label": "Document body"},
-            "format": {"range": "all", "alignment": "left"},
-            "target_window": {"hwnd": 42},
-        },
-    )
-
-    assert upgraded["input"]["document_surface"] is True
-    assert upgraded["input"]["text"] == "Heading\nBody TOKEN_712"
-    assert "format" not in upgraded
-    assert "formats" not in upgraded
-
-
-def test_runner_preserves_explicit_document_append_instead_of_auto_replacing():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("""Type exactly these paragraphs:
-Heading
-Body TOKEN_KEEP_712""")
-    original = {
-        "subgoal": "Append one note without replacing existing content",
-        "input": {
-            "label": "Document body",
-            "text": "one extra note",
-            "document_surface": True,
-            "clear": False,
-        },
-    }
-
-    upgraded = runner._maybe_upgrade_execute_subgoal_document_input(
-        "execute_subgoal", original,
-    )
-
-    assert upgraded == original
-    assert upgraded["input"]["clear"] is False
-
-
-def test_runner_upgrades_multiline_document_input_despite_terminal_punctuation_drift():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        """Type exactly these paragraphs:
-WPS controller report
-TOKEN_20260712
-GUI save completed.
-Make the first paragraph bold and centered."""
-    )
-    runner.session._document_surface_ready = False
-
-    upgraded = runner._maybe_upgrade_execute_subgoal_document_input(
-        "execute_subgoal",
-        {
-            "subgoal": "Type the three paragraphs into the document",
-            "input": {
-                "text": "WPS controller report\nTOKEN_20260712\nGUI save completed",
-            },
-        },
-    )
-
-    assert upgraded["input"]["document_surface"] is True
-    assert upgraded["input"]["text"].endswith("GUI save completed.")
-
-
-def test_runner_extracts_document_body_when_first_paragraph_follows_colon_inline():
-    from winpilot.agent.loop import AgentRunner
-
-    task = """Open Writer. Type exactly these three paragraphs, one per line: Heading
-TOKEN_INLINE_712
-Final sentence. Make only the first paragraph bold and centered. Save As C:\\tmp\\x.docx."""
-    runner = AgentRunner(task)
-
-    assert runner._exact_document_text_block(task) == (
-        "Heading\nTOKEN_INLINE_712\nFinal sentence."
-    )
-
-
-def test_document_routine_refreshes_stale_ready_state_from_current_home_title(monkeypatch):
-    from winpilot.fast import subgoal as subgoal_mod
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-
-    class Session:
-        task = """Type exactly these paragraphs:
-Heading
-Body TOKEN_712"""
-        hwnd = 42
-        snapshot = None
-        _document_surface_ready = True
-
-    monkeypatch.setattr(subgoal_mod.win32, "_window_text", lambda _hwnd: "文档 - WPS Office")
-    session = Session()
-    request = parse_subgoal_request({
-        "subgoal": "Type the exact paragraphs",
-        "input": {"text": "Heading\nBody TOKEN_712", "document_surface": True},
-    }, task=session.task)
-
-    actions = SubgoalExecutor(session, FastGuiController(session))._document_task_actions(request)
-
-    assert actions[0] == {"action": "ensure_document_surface", "max_attempts": 3}
-    assert session._document_surface_ready is False
-
-
-def test_document_surface_input_routes_to_full_document_task_batch(monkeypatch):
-    from winpilot.fast import subgoal as subgoal_mod
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-
-    class Session:
-        task = """Type exactly these paragraphs: Heading
-Body TOKEN_FULL_712. Make only the first paragraph bold and centered; keep body left aligned. Save As C:\\Users\\zou\\Desktop\\full.docx."""
-        hwnd = 42
-        snapshot = None
-        _document_surface_ready = True
-        _exact_save_paths_applied = set()
-
-    monkeypatch.setattr(subgoal_mod.win32, "_window_text", lambda _hwnd: "文档 - WPS Office")
-    session = Session()
-    request = parse_subgoal_request({
-        "subgoal": "Enter the exact document text",
-        "input": {
-            "text": "Heading\nBody TOKEN_FULL_712.",
-            "document_surface": True,
-            "clear": True,
-        },
-    }, task=session.task)
-
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
-
-    assert actions[0] == {"action": "ensure_document_surface", "max_attempts": 3}
-    assert any(action.get("keys") == ["ctrl", "b"] for action in actions)
-    assert any(action.get("action") == "type_text" and "TOKEN_FULL_712" in action.get("text", "") for action in actions)
-    assert any(
-        action.get("action") == "hotkey"
-        and action.get("keys") == ["enter"]
-        and action.get("expect", {}).get("file_exists", "").endswith("full.docx")
-        for action in actions
-    )
-
-
-def test_exact_document_controller_respects_explicit_append_semantics(monkeypatch):
+    }).text)
+
+    assert payload["ok"] is True
+    assert Controller.calls[0][0] == declared
+def test_explicit_document_append_does_not_clear_or_parse_task_text(monkeypatch):
     from winpilot.fast import subgoal as subgoal_mod
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
@@ -5975,14 +4699,12 @@ Heading
 Body TOKEN_KEEP_712"""
         hwnd = 42
         snapshot = None
-        _document_surface_ready = True
 
     monkeypatch.setattr(
         subgoal_mod,
         "window_region",
         lambda _hwnd: Region(left=100, top=200, width=1000, height=800),
     )
-    session = Session()
     request = parse_subgoal_request({
         "subgoal": "Append one note without replacing the existing document",
         "input": {
@@ -5990,15 +4712,12 @@ Body TOKEN_KEEP_712"""
             "document_surface": True,
             "clear": False,
         },
-    }, task=session.task)
-    executor = SubgoalExecutor(session, FastGuiController(session))
+    }, task=Session.task)
 
-    assert executor._document_task_actions(request) == []
-    actions = executor._build_actions(request)
+    actions = SubgoalExecutor(Session(), FastGuiController(Session()))._build_actions(request)
 
     assert any(
-        action.get("action") == "type_text"
-        and action.get("text") == "one extra note"
+        action.get("action") == "type_text" and action.get("text") == "one extra note"
         for action in actions
     )
     assert not any(
@@ -6006,55 +4725,34 @@ Body TOKEN_KEEP_712"""
         and set(action.get("keys") or ()) & {"a", "backspace", "delete"}
         for action in actions
     )
+    assert not any("TOKEN_KEEP_712" in str(action.get("text") or "") for action in actions)
 
 
-def test_ensure_document_surface_retries_locally_until_editor_chrome_is_visible(monkeypatch):
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.fast import controller as controller_mod
+def test_office_task_words_do_not_synthesize_undeclared_gui_actions():
     from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor, SubgoalRequest
 
     class Session:
-        hwnd = 42
+        task = (
+            "Enter A1:B2 table data, make row 1 bold, replace [[URL]] from the "
+            "clipboard, then Save As C:\\tmp\\report.xlsx"
+        )
 
-    session = Session()
-    controller = FastGuiController(session)
-    reads = iter([
-        "新建\n最近\n打开",
-        "正在新建文档",
-        "开始\n插入\n页面：1/1\n字数：0",
-    ])
-    hotkeys = []
-    clicks = []
+    executor = SubgoalExecutor(Session(), FastGuiController(Session()))
 
-    def dispatch(name, args):
-        if name == "read_text":
-            return ToolResult(next(reads))
-        if name == "hotkey":
-            hotkeys.append(args["keys"])
-            return ToolResult('{"ok": true}')
-        raise AssertionError(name)
-
-    monkeypatch.setattr(controller, "_dispatch", dispatch)
-    monkeypatch.setattr(
-        controller,
-        "_click_element",
-        lambda args: clicks.append(args) or ToolResult('{"ok": true}'),
+    assert executor._build_actions(SubgoalRequest(subgoal=Session.task)) == []
+    declared_click = executor._build_actions(SubgoalRequest(
+        subgoal=Session.task,
+        click={"label": "A1"},
+    ))
+    assert [action["action"] for action in declared_click] == [
+        "click_element", "wait_stable",
+    ]
+    assert not any(
+        action.get("action") in {"clipboard_write", "clipboard_paste", "type_text"}
+        or action.get("keys") in (["ctrl", "b"], ["ctrl", "h"], ["ctrl", "s"], ["f12"])
+        for action in declared_click
     )
-    monkeypatch.setattr(controller, "_wait_change", lambda _args: ToolResult('{"ok": true}'))
-    monkeypatch.setattr(controller, "_wait_stable", lambda _args: ToolResult('{"ok": true}'))
-    titles = iter(["文档 - WPS Office", "新标签页 - WPS Office", "文字文稿2 - WPS Office"])
-    monkeypatch.setattr(controller_mod.win32gui, "GetWindowText", lambda _hwnd: next(titles))
-
-    payload = json.loads(controller._ensure_document_surface({"max_attempts": 3}).text)
-
-    assert payload["verified"] is True
-    assert payload["attempts"] == 3
-    assert len(clicks) == 1
-    assert clicks[0]["label"] == "新建"
-    assert hotkeys == [["ctrl", "n"]]
-    assert session._document_surface_ready is True
-
-
 def test_execute_subgoal_blocks_clicking_grounded_nonblocking_notice():
     from winpilot.agent.fast_tools import FastToolMixin
     from winpilot.perception.fusion import Snapshot
@@ -6083,8 +4781,7 @@ def test_execute_subgoal_blocks_clicking_grounded_nonblocking_notice():
     assert payload["needs_llm_reason"] is False
 
 
-def test_clipboard_placeholder_replace_compiles_to_one_controller_batch(monkeypatch):
-    from winpilot.fast import subgoal as subgoal_mod
+def test_clipboard_words_do_not_replace_explicit_click_with_find_replace_strategy():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
@@ -6093,302 +4790,18 @@ def test_clipboard_placeholder_replace_compiles_to_one_controller_batch(monkeypa
         hwnd = 42
         snapshot = None
 
-    monkeypatch.setattr(subgoal_mod.win32, "_window_text", lambda _hwnd: "report.docx - Writer")
-    session = Session()
     request = parse_subgoal_request({
         "subgoal": "Use Find and Replace to replace [[MASTER_URL]] with the clipboard content",
         "click": {"label": "File"},
         "target_window": {"hwnd": 42},
-    }, task=session.task)
+    }, task=Session.task)
 
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
-    names = [action["action"] for action in actions]
+    actions = SubgoalExecutor(Session(), FastGuiController(Session()))._build_actions(request)
 
-    assert names[:3] == ["hotkey", "wait_stable", "observe"]
-    assert names.count("type_into_element") == 1
-    assert any(action.get("keys") == ["ctrl", "v"] for action in actions)
-    assert any(action.get("label") == "全部替换" for action in actions)
-    assert all(action.get("label") != "File" for action in actions)
-    assert request.constraints["clipboard_replace_token"] == "[[MASTER_URL]]"
-
-
-def test_find_replace_subgoal_inherits_clipboard_constraint_from_task():
-    from winpilot.fast.controller import FastGuiController
-    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
-
-    class Session:
-        task = "Copy the browser URL and replace only [[MASTER_URL]] with the copied clipboard text"
-        hwnd = 42
-        snapshot = None
-
-    session = Session()
-    request = parse_subgoal_request({
-        "subgoal": "Open Find and Replace to locate [[MASTER_URL]]",
-        "click": {"label": "Find and Replace"},
-    }, task=session.task)
-
-    actions = SubgoalExecutor(session, FastGuiController(session))._build_actions(request)
-
-    assert actions[0]["action"] == "hotkey"
-    assert actions[0]["keys"] == ["ctrl", "h"]
-    assert any(action.get("keys") == ["ctrl", "v"] for action in actions)
-
-
-def test_runner_upgrades_repeated_editor_focus_from_pending_clipboard_replace_plan():
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.planner import Plan
-
-    runner = AgentRunner("copy a browser URL into the matching document placeholder")
-    runner.session.plan = Plan([
-        "Copy the current source URL from the browser",
-        "Paste and replace [[MASTER_URL]] with the copied URL",
-        "Save the document",
-    ])
-    runner.session.plan.complete(1)
-    original = {
-        "subgoal": "Click into the document editing area",
-        "actions": [{"action": "click", "x": 960, "y": 600}],
-        "target_window": {"hwnd": 42},
-    }
-
-    upgraded = runner._maybe_upgrade_pending_clipboard_replace(
-        "run_action_batch",
-        original,
-    )
-
-    assert upgraded["semantic_override"] == "clipboard_replace"
-    assert "[[MASTER_URL]]" in upgraded["subgoal"]
-    assert upgraded["target_window"] == {"hwnd": 42}
-
-
-def test_runner_recovers_clipboard_delivery_without_an_explicit_plan():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Copy browser values into [[FIRST_VALUE]] and [[SECOND_VALUE]] in the document"
-    )
-    runner._tool_history.extend([
-        ("hotkey", {"keys": ["c", "ctrl"]}, '{"ok": true}'),
-        (
-            "execute_subgoal",
-            {"subgoal": "replace [[FIRST_VALUE]]"},
-            '{"ok": true, "clipboard_replace_applied": true}',
-        ),
-        ("hotkey", {"keys": ["ctrl", "c"]}, '{"ok": true}'),
-    ])
-
-    upgraded = runner._maybe_upgrade_pending_clipboard_replace(
-        "execute_subgoal",
-        {
-            "subgoal": "Click Find and Replace in the document editor",
-            "click": {"label": "Find and Replace"},
-            "target_window": {"hwnd": 77},
-        },
-    )
-
-    assert "[[SECOND_VALUE]]" in upgraded["subgoal"]
-    assert "current clipboard content" in upgraded["subgoal"]
-    assert upgraded["target_window"] == {"hwnd": 77}
-
-
-def test_runner_recovers_clipboard_delivery_from_a_batch_copy_action():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("Copy browser text into [[TARGET_SLOT]] in the document")
-    runner._tool_history.append((
-        "run_action_batch",
-        {
-            "subgoal": "select and copy the browser address",
-            "actions": [
-                {"action": "hotkey", "params": {"keys": ["l", "ctrl"]}},
-                {"action": "hotkey", "keys": ["c", "control"]},
-            ],
-        },
-        '{"ok": true}',
-    ))
-
-    upgraded = runner._maybe_upgrade_pending_clipboard_replace(
-        "run_action_batch",
-        {
-            "subgoal": "Find TARGET_SLOT in the document",
-            "actions": [{"action": "click", "element_id": 11}],
-        },
-    )
-
-    assert upgraded["semantic_override"] == "clipboard_replace"
-    assert "[[TARGET_SLOT]]" in upgraded["subgoal"]
-
-
-def test_runner_triggers_pending_clipboard_delivery_after_destination_focus(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tools import ToolResult
-
-    runner = AgentRunner(
-        "Copy the browser value into [[TARGET_SLOT]] in Report_Target_42.docx"
-    )
-    runner._tool_history.append((
-        "hotkey",
-        {"keys": ["c", "ctrl"]},
-        '{"ok": true}',
-    ))
-    dispatched = []
-
-    def fake_dispatch(tool_name, args):
-        dispatched.append((tool_name, args))
-        return ToolResult('{"ok": true, "clipboard_replace_applied": true}')
-
-    monkeypatch.setattr(runner, "_dispatch_with_fast_visual_wrap", fake_dispatch)
-
-    result = runner._maybe_deliver_clipboard_after_focus(
-        "focus_window",
-        {"hwnd": 99},
-        ToolResult(json.dumps({
-            "ok": True,
-            "wrapped_by_fast_controller": True,
-            "results": [{
-                "action": "focus_window",
-                "data": {
-                    "ok": True,
-                    "hwnd": 99,
-                    "title": "Report_Target_42.docx - Editor",
-                },
-            }],
-        })),
-    )
-
-    assert dispatched[0][0] == "run_action_batch"
-    assert "[[TARGET_SLOT]]" in dispatched[0][1]["subgoal"]
-    assert dispatched[0][1]["semantic_override"] == "clipboard_replace"
-    assert json.loads(result.text)["auto_triggered_after_focus"] is True
-
-
-def test_runner_blocks_repeating_applied_clipboard_delivery_without_a_new_copy():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("Copy browser text into [[TARGET_SLOT]] in Report.docx")
-    runner._tool_history.extend([
-        ("hotkey", {"keys": ["ctrl", "c"]}, '{"ok": true, "verified": true}'),
-        (
-            "focus_window",
-            {"hwnd": 99},
-            '{"ok": true, "clipboard_replace_applied": true, "mutation_applied": true}',
-        ),
-    ])
-
-    blocked = runner._duplicate_clipboard_delivery_result(
-        "run_action_batch",
-        {
-            "subgoal": "Replace [[TARGET_SLOT]] with clipboard content again",
-            "actions": [{"action": "hotkey", "keys": ["ctrl", "v"]}],
-        },
-    )
-
-    assert blocked is not None
-    payload = json.loads(blocked.text)
-    assert payload["duplicate_clipboard_delivery"] is True
-    assert payload["mutation_applied"] is True
-
-
-def test_verified_clipboard_delivery_completes_matching_plan_item_across_languages():
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.planner import Plan
-    from winpilot.agent.tools import ToolResult
-
-    runner = AgentRunner("Replace [[MASTER_URL]] in Report.docx")
-    runner.session.plan = Plan([
-        "在浏览器中复制实际地址",
-        "切换到 Report.docx",
-        "将 [[MASTER_URL]] 替换为剪贴板内容",
-        "保存文档",
-    ])
-    runner.session.plan.complete(1)
-    runner.session.plan.complete(2)
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": True,
-        "auto_triggered_after_focus": True,
-        "clipboard_replace_applied": True,
-        "clipboard_replace_token": "[[MASTER_URL]]",
-        "replacement_count": 1,
-        "subgoal": "Use GUI Find and Replace",
-    }))
-
-    updated = runner._maybe_auto_complete_verified_subgoal_plan_items(
-        "focus_window",
-        {"hwnd": 99},
-        result,
-    )
-
-    assert runner.session.plan.steps[2]["done"] is True
-    assert json.loads(updated.text)["auto_completed_plan_items"][0]["source"] == (
-        "verified_clipboard_delivery"
-    )
-
-
-def test_clipboard_targets_exclude_literals_explicitly_kept_unchanged():
-    from winpilot.agent.loop import _clipboard_target_tokens
-
-    task = (
-        "Replace only [[MASTER_URL]] with the copied value. "
-        "Keep [[ANYWHERE_URL]] and [[AUDIT_TOKEN]] unchanged."
-    )
-
-    assert _clipboard_target_tokens(task) == ["[[MASTER_URL]]"]
-
-
-def test_repeated_copy_of_same_clipboard_value_does_not_open_another_delivery():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("Replace [[TARGET_SLOT]] in Report.docx; keep [[PROTECTED]] unchanged")
-    copy_result = json.dumps({
-        "ok": True,
-        "verified": True,
-        "clipboard_text_fingerprint": "same-value-fingerprint",
-    })
-    runner._tool_history.extend([
-        ("hotkey", {"keys": ["ctrl", "c"]}, copy_result),
-        ("hotkey", {"keys": ["ctrl", "c"]}, copy_result),
-        (
-            "focus_window",
-            {"hwnd": 99},
-            json.dumps({
-                "ok": True,
-                "verified": True,
-                "clipboard_replace_applied": True,
-                "clipboard_replace_token": "[[TARGET_SLOT]]",
-            }),
-        ),
-    ])
-    original = {
-        "subgoal": "Click the document body",
-        "click": {"label": "document body"},
-    }
-
-    assert runner._maybe_upgrade_pending_clipboard_replace(
-        "execute_subgoal", original
-    ) == original
-
-
-def test_batch_action_params_wrapper_and_reversed_hotkey_are_normalized():
-    from winpilot.fast.action_contract import validate_batch_actions
-    from winpilot.fast.controller import _normalise_action, _stable_batch_actions
-
-    actions = [
-        {"action": "click", "params": {"x": 911, "y": 79, "button": "left"}},
-        {"action": "hotkey", "params": {"keys": ["l", "ctrl"]}},
-    ]
-
-    assert validate_batch_actions(actions) == []
-    assert _normalise_action(actions[0]) == (
-        "click",
-        {"x": 911, "y": 79, "button": "left"},
-    )
-    assert _stable_batch_actions(actions, "copy address")[-1] == {
-        "action": "hotkey",
-        "keys": ["ctrl", "l"],
-    }
-
-
+    assert actions[0]["action"] == "click_element"
+    assert actions[0]["label"] == "File"
+    assert not any(action.get("keys") in (["ctrl", "h"], ["ctrl", "v"]) for action in actions)
+    assert "clipboard_replace_token" not in request.constraints
 def test_standalone_hotkey_canonicalizes_reversed_modifier_order():
     from winpilot.agent.interaction_tools import canonical_hotkey_order
 
@@ -6397,31 +4810,6 @@ def test_standalone_hotkey_canonicalizes_reversed_modifier_order():
     assert canonical_hotkey_order(["down", "home"]) == ["down", "home"]
 
 
-def test_verify_only_literals_do_not_trigger_document_input_or_format_rewrite():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        """Type exactly these two paragraphs:
-Heading
-已完成：输入、格式化与状态核验
-Make the heading bold and centered. Save the file."""
-    )
-    original = {
-        "subgoal": "Verify file content, formatting, and window title",
-        "verify_texts": ["Heading", "已完成：输入、格式化与状态核验", "report.docx"],
-    }
-
-    after_input = runner._maybe_upgrade_execute_subgoal_document_input(
-        "execute_subgoal",
-        original,
-    )
-    after_format = runner._maybe_upgrade_execute_subgoal_formats(
-        "execute_subgoal",
-        after_input,
-    )
-
-    assert after_input == original
-    assert after_format == original
 
 
 def test_input_locator_rejects_focused_top_level_window_as_text_field():
@@ -6730,61 +5118,10 @@ def test_click_only_browser_address_bar_subgoal_compiles_to_ctrl_l():
     assert all(action.get("action") != "click_element" for action in actions)
 
 
-def test_runner_format_upgrade_fuses_explicit_save_request():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Make the first line bold and centered, make the body left aligned, and save with Ctrl+S"
-    )
-    upgraded = runner._maybe_upgrade_execute_subgoal_formats(
-        "execute_subgoal",
-        {"subgoal": "Select and format the title", "target_window": {"hwnd": 42}},
-    )
-
-    assert upgraded["constraints"] == {"wait": True, "save_after": True}
 
 
-def test_runner_format_upgrade_fuses_exact_save_as_path():
-    from winpilot.agent.loop import AgentRunner
-
-    target = r"C:\Users\zou\Desktop\report.docx"
-    runner = AgentRunner(
-        f"Make the first paragraph bold and centered, then Save As exactly {target}"
-    )
-    upgraded = runner._maybe_upgrade_execute_subgoal_formats(
-        "execute_subgoal",
-        {"subgoal": "Click the first paragraph", "click": {"label": "Heading"}},
-    )
-
-    assert upgraded["constraints"] == {
-        "wait": True,
-        "save_after": True,
-        "save_path": target,
-    }
 
 
-def test_runner_format_upgrade_does_not_toggle_existing_bold_off(monkeypatch, tmp_path):
-    from winpilot.agent import loop
-    from winpilot.agent.loop import AgentRunner
-
-    target = tmp_path / "existing.docx"
-    target.write_bytes(b"placeholder")
-    monkeypatch.setattr(loop, "_explicit_saved_paths", lambda _task: [target])
-    monkeypatch.setattr(
-        loop,
-        "_docx_document_evidence",
-        lambda _path: ("Heading", [{"text": "Heading", "bold_all": True, "alignment": "left"}], ""),
-    )
-    runner = AgentRunner(
-        "Make the first line bold and centered in the existing document, then save"
-    )
-
-    upgraded = runner._maybe_upgrade_execute_subgoal_formats(
-        "execute_subgoal",
-        {"subgoal": "Select and format the title"},
-    )
-
-    assert upgraded["formats"][0] == {"range": "first_line", "alignment": "center"}
 
 
 def test_file_dialog_navigation_runs_before_filename_input_and_refreshes_snapshot():
@@ -6823,7 +5160,7 @@ def test_file_dialog_navigation_runs_before_filename_input_and_refreshes_snapsho
     assert actions[4]["keys"] == ["enter"]
 
 
-def test_subgoal_printable_click_sequence_prefers_keyboard_text():
+def test_subgoal_declared_clicks_are_not_recompiled_as_keyboard_text():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
@@ -6846,16 +5183,16 @@ def test_subgoal_printable_click_sequence_prefers_keyboard_text():
 
     actions = executor._build_actions(request)
 
-    assert actions[0] == {
-        "action": "type_text",
-        "text": "12*34=",
-        "keyboard_sequence_from_clicks": True,
-        "expect": {"text_appears": "408"},
-    }
-    assert [action["action"] for action in actions] == ["type_text", "wait_stable"]
+    assert [
+        action.get("label")
+        for action in actions
+        if action.get("action") == "click_element"
+    ] == ["1", "2", "Multiply by", "3", "4", "Equals"]
+    assert not any(action.get("action") == "type_text" for action in actions)
+    assert not any(action.get("keyboard_sequence_from_clicks") for action in actions)
 
 
-def test_subgoal_explicit_expression_compiles_to_semantic_numeric_keypad_sequence():
+def test_subgoal_explicit_expression_preserves_declared_visible_actions():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
@@ -6883,19 +5220,14 @@ def test_subgoal_explicit_expression_compiles_to_semantic_numeric_keypad_sequenc
         if action.get("action") == "click_element"
     ]
     assert click_labels == [
-        "Clear", "2", "0", "2", "6", "Multiply by", "7",
+        "Clear", "2", "0", "2", "6", "Multiply by", "7", "Equals",
         "Multiply by", "1", "2", "Equals",
     ]
-    assert all(
-        action.get("numeric_keypad_sequence") is True
-        for action in actions
-        if action.get("action") == "click_element"
-    )
-    assert [action["action"] for action in actions[-2:]] == ["wait_stable", "read_text"]
+    assert not any(action.get("numeric_keypad_sequence") for action in actions)
     assert not any(action.get("action") == "type_text" for action in actions)
 
 
-def test_subgoal_printable_click_sequence_normalizes_chinese_operators():
+def test_subgoal_declared_chinese_labels_are_not_normalized_into_keyboard_text():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
@@ -6918,12 +5250,15 @@ def test_subgoal_printable_click_sequence_normalizes_chinese_operators():
 
     actions = executor._build_actions(request)
 
-    assert actions[0]["action"] == "type_text"
-    assert actions[0]["text"] == "12*34="
-    assert actions[0]["keyboard_sequence_from_clicks"] is True
+    assert [
+        action.get("label")
+        for action in actions
+        if action.get("action") == "click_element"
+    ] == ["1", "2", "乘", "3", "4", "等于"]
+    assert not any(action.get("action") == "type_text" for action in actions)
 
 
-def test_subgoal_printable_click_sequence_maps_x_only_in_arithmetic_context():
+def test_subgoal_does_not_rewrite_x_in_declared_visible_actions():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
@@ -6944,7 +5279,7 @@ def test_subgoal_printable_click_sequence_maps_x_only_in_arithmetic_context():
         action.get("label")
         for action in math_actions
         if action.get("action") == "click_element"
-    ] == ["Clear", "1", "2", "Multiply by", "3", "4", "="]
+    ] == ["1", "2", "x", "3", "4", "="]
 
     plain_request = parse_subgoal_request({
         "subgoal": "enter code xabc",
@@ -6956,7 +5291,7 @@ def test_subgoal_printable_click_sequence_maps_x_only_in_arithmetic_context():
     assert executor._build_actions(plain_request)[0]["text"] == "xabc"
 
 
-def test_subgoal_executable_keyboard_input_reads_output_not_raw_echo():
+def test_subgoal_keyboard_input_uses_generic_text_contract():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
 
@@ -6971,9 +5306,10 @@ def test_subgoal_executable_keyboard_input_reads_output_not_raw_echo():
 
     actions = executor._build_actions(request)
 
-    assert request.verify_texts == []
+    assert request.verify_texts == ["12*34="]
     assert actions[0]["action"] == "type_into_element"
-    assert "expect" not in actions[0]
+    assert actions[0]["expect"] == {"text_appears": "12*34="}
+    assert "keyboard_mode" not in actions[0]
     assert [action["action"] for action in actions] == [
         "type_into_element",
         "wait_stable",
@@ -7044,7 +5380,7 @@ def test_subgoal_input_locator_failure_falls_back_to_keyboard_text():
     )
 
 
-def test_subgoal_arithmetic_fallback_refreshes_full_window_before_keypad_clicks():
+def test_subgoal_keyboard_fallback_does_not_rescan_or_compile_visible_controls():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
@@ -7102,20 +5438,16 @@ def test_subgoal_arithmetic_fallback_refreshes_full_window_before_keypad_clicks(
 
     actions = executor._keyboard_fallback_actions(request)
 
-    assert observe_args == [{
-        "full": True,
-        "force_full": True,
-        "include_icons": True,
-        "max_elements": 240,
-    }]
-    assert actions[0]["action"] == "click_element"
-    assert actions[0]["label"] == "Clear"
-    assert any(
-        action.get("action") == "click_element"
-        and action.get("label") == "Multiply by"
-        for action in actions
-    )
-    assert actions[-1]["action"] == "read_text"
+    assert observe_args == []
+    assert actions == [
+        {
+            "action": "type_text",
+            "text": "12*34=",
+            "keyboard_fallback_from_type_into_element": True,
+            "expect": {"text_appears": "408"},
+        },
+        {"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0},
+    ]
 
 
 def test_subgoal_target_hwnd_prefers_matching_foreground_over_stale_session(monkeypatch):
@@ -7220,7 +5552,7 @@ def test_subgoal_draw_raises_visible_low_opacity_slider_for_solid_color():
     assert action["y"] == 212
 
 
-def test_subgoal_verify_scope_does_not_inherit_unrelated_task_targets():
+def test_subgoal_verify_scope_preserves_only_explicit_targets():
     from winpilot.fast.subgoal import parse_subgoal_request
 
     task = "Type FAST_WRAP_OK_099 into the input, then verify LOCAL_COUNTER before done."
@@ -7233,7 +5565,8 @@ def test_subgoal_verify_scope_does_not_inherit_unrelated_task_targets():
     assert input_request.verify_texts == ["FAST_WRAP_OK_099"]
 
     verify_request = parse_subgoal_request({
-        "subgoal": "verify LOCAL_COUNTER is visible",
+        "subgoal": "verify the explicitly supplied local target",
+        "verify_texts": ["LOCAL_COUNTER"],
     }, task=task)
     assert verify_request.verify_texts == ["LOCAL_COUNTER"]
 
@@ -7268,13 +5601,13 @@ def test_subgoal_parser_does_not_execute_partial_input_and_click_prose():
     assert request.verify_texts == ["APPLIED_TEXT_1"]
 
 
-def test_subgoal_parser_expands_short_numeric_verify_to_task_literal():
+def test_subgoal_parser_preserves_explicit_full_verify_literal():
     from winpilot.fast.subgoal import parse_subgoal_request
 
     request = parse_subgoal_request({
         "subgoal": "点击局部计数按钮四次",
         "click": {"label": "只改局部状态"},
-        "verify_texts": ["4"],
+        "verify_texts": ["LOCAL_COUNTER_4"],
     }, task="最后确认页面能看到 APPLIED_TEXT_1: DEMO、LOCAL_COUNTER_4。")
 
     assert request.verify_texts == ["LOCAL_COUNTER_4"]
@@ -7353,7 +5686,7 @@ def test_subgoal_build_actions_honors_click_count_constraint():
     request = parse_subgoal_request({
         "subgoal": "点击局部计数按钮四次",
         "click": {"label": "只改局部状态", "expected_region": "left"},
-        "verify_texts": ["4"],
+        "verify_texts": ["LOCAL_COUNTER_4"],
         "constraints": {"click_count": 4},
     }, task=Session.task)
 
@@ -9162,21 +7495,6 @@ def test_legacy_drawing_profile_is_general_and_keeps_plan_mutators():
     assert "dog" not in description.casefold()
 
 
-def test_drawing_quantity_range_is_not_treated_as_arithmetic_expression():
-    from winpilot.fast.subgoal import _request_arithmetic_keyboard_text, parse_subgoal_request
-
-    drawing = parse_subgoal_request({
-        "subgoal": "Draw a colorful cat using 20-30 primitives",
-        "draws": [{"shape": "ellipse", "part": "body", "color": "orange"}],
-    }, task="draw a detailed colorful cat")
-    arithmetic = parse_subgoal_request({
-        "subgoal": "calculate 2026*7*12",
-    }, task="open a numeric tool and calculate 2026*7*12")
-
-    assert _request_arithmetic_keyboard_text(drawing, "draw a detailed colorful cat") == ""
-    assert _request_arithmetic_keyboard_text(arithmetic, arithmetic.subgoal) == "2026*7*12"
-
-
 def test_partial_draw_specs_merge_without_anatomy_threshold():
     from winpilot.fast.subgoal import (
         _merge_draw_scene_specs,
@@ -9726,59 +8044,14 @@ def test_local_transaction_reuses_preceding_action_roi_for_visual_wait(monkeypat
     }
 
 
-def test_desktop_icon_drag_adjusts_drop_away_from_existing_icon():
+def test_desktop_icon_drag_has_no_hidden_drop_target_rewriter():
     from winpilot.agent.tools import ToolSession
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
 
-    session = ToolSession(
-        task=(
-            "\u628a\u684c\u9762\u4e0a\u7684 WinPilotPerfDrag_Eval "
-            "\u6587\u4ef6\u5939\u56fe\u6807\u62d6\u52a8\u5230\u684c\u9762\u53f3\u4e0a\u89d2\u9644\u8fd1"
-        )
-    )
-    session.snapshot = Snapshot(
-        hwnd=1,
-        title="Program Manager",
-        region=Region(0, 0, 1920, 1080),
-        elements=[
-            UIElement(
-                elem_id=1,
-                source="uia",
-                role="listitem",
-                text="WinPilotPerfDrag_Eval",
-                cx=1757,
-                cy=144,
-                left=1710,
-                top=111,
-                width=94,
-                height=67,
-            ),
-            UIElement(
-                elem_id=2,
-                source="uia",
-                role="listitem",
-                text="\u671f\u672b\u590d\u4e60",
-                cx=1850,
-                cy=50,
-                left=1805,
-                top=5,
-                width=94,
-                height=67,
-            ),
-        ],
-    )
-
-    out = session._desktop_icon_safe_drop_target(1757, 144, 1850, 50)
-
-    assert out is not None
-    assert out["adjusted"] is True
-    assert (out["x"], out["y"]) != (1850, 50)
-    assert not (1793 <= out["x"] <= 1911 and -7 <= out["y"] <= 84)
+    session = ToolSession(task="move the visible object to the requested region")
+    assert not hasattr(session, "_desktop_icon_safe_drop_target")
 
 
-def test_raw_batch_child_rechecks_scope_before_device_action(monkeypatch):
+def test_raw_dispatch_does_not_repeat_controller_commit_scope_guard(monkeypatch):
     from winpilot.agent import scope_guard
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
@@ -9792,14 +8065,19 @@ def test_raw_batch_child_rechecks_scope_before_device_action(monkeypatch):
             called.append(args)
             return ToolResult('{"ok": true}')
 
-    blocked = ToolResult('{"ok": false, "blocked": true, "verified": false}')
-    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: blocked)
+    monkeypatch.setattr(
+        scope_guard,
+        "ensure_scope",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("raw dispatch must not own scope admission")
+        ),
+    )
     controller = FastGuiController(Session())
 
     result = controller._dispatch("click", {"x": 12, "y": 34})
 
-    assert json.loads(result.text)["blocked"] is True
-    assert called == []
+    assert json.loads(result.text)["ok"] is True
+    assert called == [{"x": 12, "y": 34}]
 
 
 def test_batch_rejects_self_fulfilling_text_wait(monkeypatch):
@@ -9888,25 +8166,28 @@ def test_direct_subgoal_refreshes_same_hwnd_snapshot_before_grounding():
     assert payload["ok"] is True
 
 
-def test_controller_arithmetic_batch_uses_verified_tool_session_path():
+def test_controller_single_type_uses_one_generic_device_action():
     from types import SimpleNamespace
 
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
 
-    calls = []
+    session_calls = []
+    device_calls = []
 
     class Session:
         def dispatch(self, name, args):
-            calls.append((name, dict(args)))
-            return ToolResult('{"ok": true, "verified": true, "input_fallback": {"used": true}}')
+            session_calls.append((name, dict(args)))
+            raise AssertionError("type_text must not enter a hidden recovery route")
+
+    def execute_device(name, args):
+        device_calls.append((name, dict(args)))
+        return ToolResult('{"ok": true}')
 
     controller = FastGuiController(Session())
     controller.raw_device = SimpleNamespace(
         supports=lambda _name: True,
-        execute=lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("arithmetic input must not bypass ToolSession")
-        ),
+        execute=execute_device,
     )
 
     result = controller.execute(
@@ -9914,7 +8195,9 @@ def test_controller_arithmetic_batch_uses_verified_tool_session_path():
         subgoal="Calculate 86 + 79",
     )
 
-    assert calls == [("type_text", {"text": "86+79="})]
-    assert result["verified"] is True
-    assert result["arithmetic_input_route"] == "verified_tool_session"
-    assert result["results"][0]["data"]["input_fallback"]["used"] is True
+    assert session_calls == []
+    assert device_calls == [("type_text", {"text": "86+79="})]
+    assert result["ok"] is True
+    assert result["controller_state"]["verified"] is False
+    assert result["needs_observe"] is True
+    assert "arithmetic_input_route" not in result

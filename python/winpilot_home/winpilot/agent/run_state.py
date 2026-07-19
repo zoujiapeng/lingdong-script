@@ -1,9 +1,9 @@
-"""Small execution-state machine for the unified Agent loop.
+"""Single task-progress ledger for the unified Agent loop.
 
-This is deliberately state tracking, not planning. It watches GUI, file, shell,
-and Coding Runtime tool flow and surfaces compact phase information so the main
-model can spend less effort reconstructing whether the last action still needs
-verification.
+ToolSession and action handlers report raw execution evidence; they do not own
+task-progress budgets or duplicate-action policy. This state machine consumes
+those results and exposes the one compact phase/debt view used by the runner and
+completion gate. It is deliberately state tracking, not planning.
 """
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ ACTION_TOOLS = {
     "open_app",
     "launch",
     "click",
+    "double_click",
     "type_text",
     "hotkey",
     "scroll",
@@ -113,7 +114,13 @@ class RunStateMachine:
     updated_ms: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
     _last_guidance_key: tuple[str, str, int] | None = None
-
+    _strategy_block_counts: dict[str, int] = field(default_factory=dict)
+    _last_strategy_signature: str = ""
+    _visual_no_progress_streaks: dict[str, int] = field(default_factory=dict)
+    _last_visual_no_progress_signature: str = ""
+    _last_visual_no_progress_streak: int = 0
+    _constraint_rejection_category: str = ""
+    _constraint_rejection_streak: int = 0
     def _transition(self, phase: str, tool: str, issue: str = "") -> None:
         self.phase = phase
         self.last_tool = tool
@@ -257,26 +264,121 @@ class RunStateMachine:
         self.unverified_actions = 0
         self._transition("ready", name, str(reason or "deterministic verification passed")[:240])
 
+    def register_no_progress_block(
+        self,
+        signature: str,
+    ) -> int:
+        """Record one proven no-progress retry for termination accounting.
+
+        FailureRecoveryLayer owns any corrective strategy directive.  RunState
+        deliberately records only evidence/counts and decides whether the
+        bounded run has reached its termination threshold.
+        """
+
+        key = str(signature or "unknown:no-progress")
+        count = self._strategy_block_counts.get(key, 0) + 1
+        self._strategy_block_counts[key] = count
+        self._last_strategy_signature = key
+        return count
+
+    def strategy_block_limit_reached(self, signature: str, limit: int) -> bool:
+        key = str(signature or self._last_strategy_signature)
+        return bool(key) and self._strategy_block_counts.get(key, 0) >= max(1, int(limit))
+
+    def clear_no_progress_strategy(self) -> None:
+        """Discard spatial retry debt after the authoritative scene changes."""
+
+        self._strategy_block_counts.clear()
+        self._last_strategy_signature = ""
+
+    def record_visual_change(
+        self,
+        signature: str,
+        change_ratio: float | None,
+        *,
+        comparable: bool,
+        threshold: float,
+    ) -> int:
+        """Own the factual low-change streak for authoritative visual frames."""
+
+        if not comparable or change_ratio is None:
+            self._visual_no_progress_streaks.clear()
+            self._last_visual_no_progress_signature = ""
+            self._last_visual_no_progress_streak = 0
+            self.clear_no_progress_strategy()
+            return 0
+        if not signature:
+            self._last_visual_no_progress_signature = ""
+            self._last_visual_no_progress_streak = 0
+            if float(change_ratio) > float(threshold):
+                self._visual_no_progress_streaks.clear()
+                self.clear_no_progress_strategy()
+            return 0
+        if float(change_ratio) <= float(threshold):
+            streak = self._visual_no_progress_streaks.get(signature, 0) + 1
+            self._visual_no_progress_streaks[signature] = streak
+            self._last_visual_no_progress_signature = signature
+            self._last_visual_no_progress_streak = streak
+            return streak
+        self._visual_no_progress_streaks.clear()
+        self._last_visual_no_progress_signature = ""
+        self._last_visual_no_progress_streak = 0
+        self.clear_no_progress_strategy()
+        return 0
+
+    def visual_no_progress_streak(self, signature: str) -> int:
+        return self._visual_no_progress_streaks.get(str(signature or ""), 0)
+
+    def record_constraint_rejection(self, category: str) -> int:
+        """Record an unexecuted controller rejection without prescribing recovery."""
+
+        key = str(category or "")
+        if not key:
+            return self._constraint_rejection_streak
+        if key == self._constraint_rejection_category:
+            self._constraint_rejection_streak += 1
+        else:
+            self._constraint_rejection_category = key
+            self._constraint_rejection_streak = 1
+        return self._constraint_rejection_streak
+
+    def clear_constraint_rejections(self) -> None:
+        self._constraint_rejection_category = ""
+        self._constraint_rejection_streak = 0
+
+    @property
+    def constraint_rejection_category(self) -> str:
+        return self._constraint_rejection_category
+
+    @property
+    def constraint_rejection_streak(self) -> int:
+        return self._constraint_rejection_streak
+
+    @property
+    def last_visual_no_progress_streak(self) -> int:
+        return self._last_visual_no_progress_streak
+
+    @property
+    def last_visual_no_progress_signature(self) -> str:
+        return self._last_visual_no_progress_signature
+
     def guidance(self) -> str:
+        """Return a compact factual state transition, never a next-step tactic."""
         key = (self.phase, self.last_tool, self.unverified_actions)
         if key == self._last_guidance_key:
             return ""
         self._last_guidance_key = key
         if self.phase == "need_observe":
             return (
-                f"phase=need_observe after {self.last_tool}: {self.last_issue}. "
-                "Use observe/read_text/VLM or deterministic checks before done."
+                f"phase=need_observe after {self.last_tool}: {self.last_issue}."
             )
         if self.phase == "recovering":
             return (
-                f"phase=recovering after {self.last_tool}: {self.last_issue}. "
-                "Do not repeat the same action blindly; re-observe or choose a different route."
+                f"phase=recovering after {self.last_tool}: {self.last_issue}."
             )
         if self.phase == "visually_grounded":
             return (
-                f"phase=visually_grounded after {self.last_tool}: {self.last_issue}. "
-                "The frame may guide the next decision, but it is not completion evidence; "
-                "use a targeted predicate or the independent visual done judge."
+                f"phase=visually_grounded after {self.last_tool}: {self.last_issue}."
             )
         return ""
 
@@ -289,4 +391,10 @@ class RunStateMachine:
             "transition_count": self.transition_count,
             "updated_ms": self.updated_ms,
             "history": list(self.history),
+            "strategy_block_count": sum(self._strategy_block_counts.values()),
+            "last_strategy_signature": self._last_strategy_signature,
+            "visual_no_progress_streak": self._last_visual_no_progress_streak,
+            "visual_no_progress_signature": self._last_visual_no_progress_signature,
+            "constraint_rejection_category": self._constraint_rejection_category,
+            "constraint_rejection_streak": self._constraint_rejection_streak,
         }

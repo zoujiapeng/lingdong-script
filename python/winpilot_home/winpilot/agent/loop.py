@@ -14,7 +14,6 @@ import re
 import threading
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 import win32gui
@@ -28,7 +27,6 @@ from ..model_adapter import (
     model_profile_from_config,
 )
 from ..perception import fusion, intent, reducer, vlm
-from ..perception.surface_binding import InteractionRegion, SurfaceBinding
 from ..runtime_info import runtime_fingerprint
 from ..fast.action_contract import (
     build_action_envelope,
@@ -37,12 +35,10 @@ from ..fast.action_contract import (
 )
 from ..utils.image_capture import (
     capture_window_jpeg_b64,
-    credible_work_surface_frame_bounds,
     jpeg_diff_ratio,
     jpeg_diff_ratio_in_normalized_roi,
-    region_frame_bounds,
+    normalized_detail_crop_jpeg_b64,
     select_visual_capture_scope,
-    window_client_region,
 )
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, virtual_screen_region, window_region
@@ -51,50 +47,33 @@ from . import playbooks, prompts, session as session_mod
 from .context_guidance import ContextGuidanceMixin
 from .done_verifier import (
     DoneVerifierMixin,
-    _deterministic_arithmetic_verdict,
-    _docx_document_evidence,
-    _docx_task_format_errors,
     _explicit_saved_paths,
 )
-from .failure_recovery import FailureRecoveryLayer, attach_recovery_metadata
+from .failure_recovery import (
+    FailureRecoveryLayer,
+    attach_recovery_metadata,
+)
+from .frame_authority import FrameAuthority, FrameState
 from .gui_plan_helpers import (
-    _looks_like_pure_open_plan_goal,
     _schema_profile_for_task,
 )
 from .graphical_affordances import detect_graphical_affordances
 from .planner import planning_enabled
-from .partial_output_guard import PartialOutputDestructiveGuard
 from .reflection import ReflectionMixin
 from .run_state import ACTION_TOOLS as _RUN_ACTION_TOOLS, RunStateMachine
 from .runtime_profile import RuntimeProfile, build_runtime_profile
 from .scene_coverage import SceneCoverageLedger
-from .semantic_progress import (
-    ContinuousSemanticProgress,
-    GeometryFingerprint,
-    TargetKey,
-    fingerprint_geometry,
-    structured_primitive_paths,
-    structured_effect_applied,
-)
 from .task_rules import (
     _communication_mode,
-    _document_format_specs as _task_document_format_specs,
-    _exact_document_text_block as _task_exact_document_text_block,
-    _blocks_store_search_action,
-    _blocks_upload_media_analysis,
     _gui_only_forbids_shell,
     _gui_only_launch_uses_shell,
     _gui_only_shell_allowed,
     _is_coding_task,
     _is_communication_task,
-    _is_desktop_icon_drag_task,
-    _is_arithmetic_task,
     _is_gui_only_task,
     _is_multi_source_research_task,
     _is_upload_publish_task,
     _quoted_payloads,
-    _required_image_paths,
-    _required_literal_tokens,
     _required_visible_payloads,
     _visible_state_targets,
 )
@@ -117,13 +96,13 @@ _CONTEXT_FOLD_THRESHOLD_CHARS = 32000
 _MAX_ASSISTANT_HISTORY_CHARS = 900
 _ACTION_TOOLS = set(_RUN_ACTION_TOOLS)
 _VISUAL_MUTATION_TOOLS = {
-    "open_app", "launch", "focus_window", "click", "type_text", "hotkey",
+    "open_app", "launch", "focus_window", "click", "double_click", "type_text", "hotkey",
     "scroll", "drag", "draw_strokes", "tray_click", "clipboard_paste",
     "paste_image_file", "mouse_down", "mouse_up", "move_mouse", "hold_key",
-    "run_action_batch", "execute_subgoal", "coordinate_click_test",
+    "run_action_batch", "execute_subgoal", "coordinate_click_test", "wait",
 }
 _LOW_LEVEL_VISUAL_TOOLS = {
-    "click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
+    "click", "double_click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
     "tray_click", "clipboard_paste", "paste_image_file", "mouse_down",
     "mouse_up", "move_mouse", "hold_key", "coordinate_click_test",
     "run_action_batch", "execute_subgoal",
@@ -134,6 +113,7 @@ _LOW_LEVEL_VISUAL_TOOLS = {
 # single spatial mutation because it does not select another pixel target.
 _NATIVE_BATCH_SPATIAL_MUTATIONS = {
     "click",
+    "double_click",
     "click_element",
     "type_into_element",  # locates/focuses the field with a click before typing
     "scroll",
@@ -143,7 +123,69 @@ _NATIVE_BATCH_SPATIAL_MUTATIONS = {
     "drag",
     "draw_strokes",
     "select_color",
-    "ensure_document_surface",  # may click through document-creation surfaces
+}
+
+# Tiny controls, hover affordances, sliders and gesture endpoints can be hard to
+# judge in a downscaled full-desktop frame.  Reuse pixels from that same
+# authoritative frame for a magnified detail after every spatial primitive;
+# this adds no second perception owner and never creates crop-local actions.
+_NATIVE_DETAIL_CROP_ACTIONS = {
+    "click",
+    "double_click",
+    "scroll",
+    "move_mouse",
+    "mouse_down",
+    "mouse_up",
+    "drag",
+    "draw_strokes",
+}
+
+# Native visual decisions receive controller facts, never controller tactics.
+# These fields may remain in raw traces for diagnostics and legacy runtimes,
+# but exposing them to the visual model recreates a second planner beside it.
+_NATIVE_MODEL_TACTIC_KEYS = frozenset({
+    "advice",
+    "advisory",
+    "fast_path_advice",
+    "feedback",
+    "guidance",
+    "hint",
+    "local_actions",
+    "needs_observe",
+    "needs_replan",
+    "next_action",
+    "next_tool",
+    "patch_hint",
+    "post_tool_hints",
+    "recommendation",
+    "recommended_tool",
+    "recovery_directives",
+    "strategy",
+    "strategy_change_required",
+    "suggested_action",
+    "suggested_tool",
+})
+
+# Pixel drift can invalidate a point selected from a submitted image, but it
+# cannot invalidate keyboard input by itself.  Keep this classification about
+# physical targeting only: foreground ownership is enforced by Controller's
+# scope guard immediately before dispatch, while FrameAuthority owns the
+# immutable frame/epoch identity checked by AgentRunner.
+_VISUAL_PREFLIGHT_SPATIAL_ACTIONS = {
+    "click",
+    "double_click",
+    "click_element",
+    "type_into_element",
+    "scroll",
+    "move_mouse",
+    "mouse_down",
+    "mouse_up",
+    "drag",
+    "draw_strokes",
+    "ensure_input_mode",
+    "select_color",
+    "tray_click",
+    "coordinate_click_test",
 }
 
 # Native visual turns are transactions, not a chat transcript.  Re-sending
@@ -153,35 +195,16 @@ _NATIVE_BATCH_SPATIAL_MUTATIONS = {
 _NATIVE_CONTEXT_RECENT_ACTIONS = 8
 _NATIVE_CONTEXT_RECENT_GUIDANCE = 4
 _NATIVE_CONTEXT_MAX_DIRECTIVE_CHARS = 4000
-_NATIVE_CONTEXT_MAX_SUMMARY_CHARS = 3200
+_NATIVE_CONTEXT_MAX_SUMMARY_CHARS = 4200
+_NATIVE_DRAG_MAX_POINTS = 32
 _NATIVE_NO_PROGRESS_RATIO = 0.0005
 _NATIVE_NO_PROGRESS_STREAK = 2
 _NATIVE_NO_PROGRESS_MAX_BLOCKS = 4
 _NATIVE_STAGNATION_SPATIAL_TOOLS = {
-    "click", "scroll", "drag", "draw_strokes", "move_mouse",
+    "click", "double_click", "scroll", "drag", "draw_strokes", "move_mouse",
     "tray_click", "coordinate_click_test", "run_action_batch",
 }
-_CONTINUOUS_POINTER_SETUP_CLICKS = 3
-_CONTINUOUS_POINTER_LOW_CHANGE_CLICKS = 2
-_CONTINUOUS_POINTER_MAX_BLOCKS = 2
-_TEXT_CONTINUOUS_POINTER_SETUP_MUTATIONS = 2
-_NATIVE_DRAW_SURFACE_MIN_POINT_RATIO = 1.0
-_NATIVE_DRAW_SURFACE_SOFT_MIN_POINT_RATIO = 0.80
-_NATIVE_DRAW_SURFACE_SOFT_MARGIN = 8.0
-_NATIVE_DRAW_SURFACE_SOFT_MIN_POINTS = 12
 _NATIVE_DRAW_MAX_STROKES = 24
-_NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_RATIO = 0.20
-_NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_POINTS = 3
-_NATIVE_DRAW_COMPOSITION_FIT_MIN_BOUNDED_OUTSIDE_RATIO = 0.05
-_NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_STROKES = 2
-_NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO = 0.20
-_NATIVE_DRAW_COMPOSITION_FIT_MIN_STROKES = 2
-_NATIVE_DRAW_COMPOSITION_FIT_MIN_POINTS = 8
-_NATIVE_DRAW_COMPOSITION_FIT_INSET = 8.0
-_NATIVE_DRAW_COMPOSITION_TRANSLATE_MAX_OVERFLOW = 16.0
-_NATIVE_DRAW_DENSE_PATH_MIN_POINTS = 24
-_NATIVE_DRAW_SIMPLIFY_TOLERANCE = 1.5
-_UNEXECUTED_CONSTRAINT_MAX_REJECTIONS = 3
 _INITIAL_FRAME_SETTLE_INTERVAL_S = 0.12
 _INITIAL_FRAME_SETTLE_MIN_S = 0.48
 _INITIAL_FRAME_SETTLE_MAX_S = 1.20
@@ -195,15 +218,6 @@ class NativeFrameCoordinateError(ValueError):
     def __init__(self, message: str, **metadata: Any) -> None:
         super().__init__(message)
         self.metadata = metadata
-
-
-def _frame_strokes_bbox(
-    strokes: list[list[tuple[float, float]]],
-) -> tuple[float, float, float, float]:
-    points = [point for stroke in strokes for point in stroke]
-    xs = [point[0] for point in points]
-    ys = [point[1] for point in points]
-    return min(xs), min(ys), max(xs), max(ys)
 
 
 def _normalize_stringified_frame_strokes(
@@ -415,282 +429,6 @@ def _normalize_frame_stroke_list_structure(
     }
 
 
-def _simplify_dense_frame_stroke(
-    points: list[tuple[float, float]],
-    *,
-    tolerance: float = _NATIVE_DRAW_SIMPLIFY_TOLERANCE,
-) -> list[tuple[float, float]]:
-    """Remove only dense, near-collinear samples while preserving endpoints.
-
-    The desktop executor already connects successive anchors continuously.  A
-    small Ramer-Douglas-Peucker tolerance therefore removes model-authored
-    pixel/step enumeration without replacing a short or deliberately precise
-    path.  Coordinates remain in authoritative-frame units (0..1000).
-    """
-    if len(points) < _NATIVE_DRAW_DENSE_PATH_MIN_POINTS:
-        return list(points)
-
-    def distance_to_segment(
-        point: tuple[float, float],
-        start: tuple[float, float],
-        end: tuple[float, float],
-    ) -> float:
-        px, py = point
-        x1, y1 = start
-        x2, y2 = end
-        dx = x2 - x1
-        dy = y2 - y1
-        length_squared = dx * dx + dy * dy
-        if length_squared <= 1e-12:
-            return ((px - x1) ** 2 + (py - y1) ** 2) ** 0.5
-        projection = max(
-            0.0,
-            min(1.0, ((px - x1) * dx + (py - y1) * dy) / length_squared),
-        )
-        nearest_x = x1 + projection * dx
-        nearest_y = y1 + projection * dy
-        return ((px - nearest_x) ** 2 + (py - nearest_y) ** 2) ** 0.5
-
-    keep = {0, len(points) - 1}
-    pending: list[tuple[int, int]] = [(0, len(points) - 1)]
-    while pending:
-        start_index, end_index = pending.pop()
-        if end_index - start_index <= 1:
-            continue
-        start = points[start_index]
-        end = points[end_index]
-        farthest_index = -1
-        farthest_distance = -1.0
-        for index in range(start_index + 1, end_index):
-            distance = distance_to_segment(points[index], start, end)
-            if distance > farthest_distance:
-                farthest_distance = distance
-                farthest_index = index
-        if farthest_index >= 0 and farthest_distance > tolerance:
-            keep.add(farthest_index)
-            pending.append((start_index, farthest_index))
-            pending.append((farthest_index, end_index))
-    return [points[index] for index in sorted(keep)]
-
-
-def _fit_frame_stroke_composition_to_surface(
-    strokes: list[list[tuple[float, float]]],
-    surface_bounds: tuple[int, int, int, int],
-) -> tuple[list[list[tuple[float, float]]] | None, dict[str, Any]]:
-    """Conservatively fit one misframed multi-path composition to one surface.
-
-    This is deliberately not a generic clamp.  A small edge miss may receive
-    one rigid translation when the complete multi-path bounding box still fits
-    the sole grounded work surface.  A substantially misframed composition may
-    receive one uniform scale/translation.  Every point moves together, so the
-    authored geometry is preserved and no individual coordinate is clipped.
-    """
-    left, top, right, bottom = [float(value) for value in surface_bounds]
-    points = [point for stroke in strokes for point in stroke]
-    source_bbox = _frame_strokes_bbox(strokes)
-
-    def inside(point: tuple[float, float]) -> bool:
-        x, y = point
-        return left <= x <= right and top <= y <= bottom
-
-    inside_count = sum(1 for point in points if inside(point))
-    outside_count = len(points) - inside_count
-    outside_ratio = outside_count / max(1, len(points))
-    outside_stroke_count = sum(
-        1 for stroke in strokes if any(not inside(point) for point in stroke)
-    )
-    source_left, source_top, source_right, source_bottom = source_bbox
-    source_width = source_right - source_left
-    source_height = source_bottom - source_top
-    intersects_surface = not (
-        source_right < left
-        or source_left > right
-        or source_bottom < top
-        or source_top > bottom
-    )
-    edge_overflow = {
-        "left": max(0.0, left - source_left),
-        "top": max(0.0, top - source_top),
-        "right": max(0.0, source_right - right),
-        "bottom": max(0.0, source_bottom - bottom),
-    }
-    max_edge_overflow = max(edge_overflow.values())
-    substantial_outside = (
-        outside_count >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_POINTS
-        and outside_ratio >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_RATIO
-    )
-    surface_width = right - left
-    surface_height = bottom - top
-    bounded_axis_overflow = bool(
-        edge_overflow["left"]
-        <= surface_width * _NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO
-        and edge_overflow["right"]
-        <= surface_width * _NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO
-        and edge_overflow["top"]
-        <= surface_height * _NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO
-        and edge_overflow["bottom"]
-        <= surface_height * _NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO
-    )
-    bounded_multi_stroke_overflow = bool(
-        outside_count >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_POINTS
-        and outside_ratio
-        >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_BOUNDED_OUTSIDE_RATIO
-        and outside_stroke_count
-        >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_STROKES
-        and bounded_axis_overflow
-    )
-    small_rigid_translation = bool(
-        outside_count > 0
-        and max_edge_overflow <= _NATIVE_DRAW_COMPOSITION_TRANSLATE_MAX_OVERFLOW
-        and source_width <= right - left
-        and source_height <= bottom - top
-    )
-    eligibility = {
-        "unique_current_work_surface": True,
-        "multi_path_composition": len(strokes) >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_STROKES,
-        "minimum_total_points": len(points) >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_POINTS,
-        "substantial_outside_points": substantial_outside,
-        "bounded_multi_stroke_overflow": bounded_multi_stroke_overflow,
-        "bounded_axis_overflow": bounded_axis_overflow,
-        "small_rigid_translation": small_rigid_translation,
-        "repairable_overflow": (
-            substantial_outside
-            or bounded_multi_stroke_overflow
-            or small_rigid_translation
-        ),
-        "has_surface_grounded_point": inside_count > 0,
-        "composition_bbox_intersects_surface": intersects_surface,
-    }
-    evidence: dict[str, Any] = {
-        "policy": "whole_composition_uniform_affine_fit",
-        "applied": False,
-        "source_coordinate_space": "current_frame_normalized_0_1000",
-        "destination": "unique_current_work_surface",
-        "work_surface_frame_bounds": [int(value) for value in surface_bounds],
-        "source_bbox": [round(value, 3) for value in source_bbox],
-        "stroke_count": len(strokes),
-        "input_point_count": len(points),
-        "inside_point_count": inside_count,
-        "outside_point_count": outside_count,
-        "outside_point_ratio": round(outside_ratio, 6),
-        "outside_stroke_count": outside_stroke_count,
-        "edge_overflow": {
-            key: round(value, 3) for key, value in edge_overflow.items()
-        },
-        "maximum_edge_overflow": round(max_edge_overflow, 3),
-        "maximum_axis_overflow_ratio": (
-            _NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO
-        ),
-        "eligibility": eligibility,
-        "shape_preserving": True,
-        "point_clipping_used": False,
-    }
-    required_conditions = (
-        "unique_current_work_surface",
-        "multi_path_composition",
-        "minimum_total_points",
-        "repairable_overflow",
-        "has_surface_grounded_point",
-        "composition_bbox_intersects_surface",
-    )
-    failed_conditions = [
-        name for name in required_conditions if not eligibility[name]
-    ]
-    if failed_conditions:
-        evidence["rejected_reason"] = "failed_conditions: " + ", ".join(failed_conditions)
-        return None, evidence
-
-    max_inset_x = max(0.0, (right - left - 2.0) / 4.0)
-    max_inset_y = max(0.0, (bottom - top - 2.0) / 4.0)
-    inset = (
-        0.0
-        if small_rigid_translation
-        else min(
-            _NATIVE_DRAW_COMPOSITION_FIT_INSET,
-            max_inset_x,
-            max_inset_y,
-        )
-    )
-    destination_left = left + inset
-    destination_top = top + inset
-    destination_right = right - inset
-    destination_bottom = bottom - inset
-    destination_width = destination_right - destination_left
-    destination_height = destination_bottom - destination_top
-    if destination_width <= 0.0 or destination_height <= 0.0:
-        evidence["rejected_reason"] = "the inset work surface had no usable area"
-        return None, evidence
-    if source_width <= 0.0 and source_height <= 0.0:
-        evidence["rejected_reason"] = "the composition had no spatial extent"
-        return None, evidence
-
-    if small_rigid_translation:
-        scale = 1.0
-    else:
-        scales = [1.0]
-        if source_width > 0.0:
-            scales.append(destination_width / source_width)
-        if source_height > 0.0:
-            scales.append(destination_height / source_height)
-        scale = min(scales)
-    center_x = (source_left + source_right) / 2.0
-    center_y = (source_top + source_bottom) / 2.0
-    scaled_left = center_x + (source_left - center_x) * scale
-    scaled_right = center_x + (source_right - center_x) * scale
-    scaled_top = center_y + (source_top - center_y) * scale
-    scaled_bottom = center_y + (source_bottom - center_y) * scale
-    translate_x = 0.0
-    translate_y = 0.0
-    if scaled_left < destination_left:
-        translate_x = destination_left - scaled_left
-    elif scaled_right > destination_right:
-        translate_x = destination_right - scaled_right
-    if scaled_top < destination_top:
-        translate_y = destination_top - scaled_top
-    elif scaled_bottom > destination_bottom:
-        translate_y = destination_bottom - scaled_bottom
-
-    fitted = [
-        [
-            (
-                center_x + (x - center_x) * scale + translate_x,
-                center_y + (y - center_y) * scale + translate_y,
-            )
-            for x, y in stroke
-        ]
-        for stroke in strokes
-    ]
-    fitted_bbox = _frame_strokes_bbox(fitted)
-    if any(not inside(point) for stroke in fitted for point in stroke):
-        evidence["rejected_reason"] = "the computed affine fit did not remain inside the work surface"
-        return None, evidence
-    evidence.update({
-        "policy": (
-            "whole_composition_rigid_translation"
-            if small_rigid_translation
-            else "whole_composition_uniform_affine_fit"
-        ),
-        "applied": True,
-        "reason": (
-            "small multi-path edge overflow translated into one grounded work surface"
-            if small_rigid_translation
-            else (
-                "substantial multi-path composition overflow on one grounded work surface"
-                if substantial_outside
-                else "bounded multi-stroke composition overflow on one grounded work surface"
-            )
-        ),
-        "surface_inset_bounds": [
-            round(destination_left, 3), round(destination_top, 3),
-            round(destination_right, 3), round(destination_bottom, 3),
-        ],
-        "mapped_bbox": [round(value, 3) for value in fitted_bbox],
-        "uniform_scale": round(scale, 8),
-        "translation": [round(translate_x, 3), round(translate_y, 3)],
-    })
-    return fitted, evidence
-
-
 def _result_explicitly_blocked_before_execution(result_text: str) -> bool:
     """Recognize controller-internal barriers that provably touched no GUI.
 
@@ -867,7 +605,6 @@ def _unexecuted_constraint_category(result_text: str) -> str:
         "visual_grounding_required",
         "partial_output_destructive_guard",
         "semantic_progress_guard",
-        "continuous_pointer_guard",
         "native_no_progress_guard",
         "scene_coverage_guard",
         "constraint_rejection_guard",
@@ -916,124 +653,6 @@ def _unexecuted_constraint_category(result_text: str) -> str:
     if marker_candidates:
         return sorted(marker_candidates)[0]
     return "unexecuted_policy_constraint"
-
-
-def _requests_continuous_pointer_output(task: str) -> bool:
-    """Return whether the user explicitly asks for freehand surface output.
-
-    ``write`` by itself intentionally does not match because ordinary editor
-    input should use the keyboard.  App/control names such as Paint, 画板, 画笔,
-    and Sign in are also excluded: merely opening or clicking them is not a
-    request to produce pointer strokes.
-    """
-    text = re.sub(r"\s+", " ", str(task or "")).strip().casefold()
-    if not text:
-        return False
-
-    # Remove common negations and UI-label activations before looking for an
-    # output verb.  This keeps "click Sign in" and "open Paint" out of a guard
-    # that is deliberately narrower than general visual-task detection.
-    text = re.sub(
-        r"\b(?:do\s+not|don't|dont|never|without)\s+"
-        r"(?:draw|sketch|doodle|trace|hand[ -]?write|write\s+by\s+hand|sign)\b",
-        " ",
-        text,
-    )
-    text = re.sub(
-        r"\b(?:click|press|tap|select)\s+(?:the\s+)?"
-        r"(?:(?:draw|sketch|trace|sign)\s+)?(?:button|menu|tab|tool)\b",
-        " ",
-        text,
-    )
-    text = re.sub(r"\bsign\s+(?:in|into|on|up|out)\b", " ", text)
-    text = re.sub(
-        r"\b(?:open|launch|start|run)\s+(?:microsoft\s+)?"
-        r"(?:paint|a\s+drawing\s+app|the\s+drawing\s+app)\b",
-        " ",
-        text,
-    )
-    text = re.sub(
-        r"(?:不要|别|无需|不用|停止)\s*"
-        r"(?:画|绘制|绘画|涂鸦|手写|签名|签字|描线|描摹|临摹|勾勒)",
-        " ",
-        text,
-    )
-    text = re.sub(
-        r"(?:打开|启动|运行|进入|切换到)\s*(?:画图|画板|绘图)(?:应用|程序)?",
-        " ",
-        text,
-    )
-
-    if re.search(r"\b(?:draw|sketch|doodle)(?:ing|n|ed)?\b", text):
-        return True
-    if re.search(
-        r"\b(?:hand[ -]?write|write(?:\s+\w+){0,3}\s+by\s+hand|free[ -]?hand)\b",
-        text,
-    ):
-        return True
-    if re.search(
-        r"\btrace\s+(?:over\s+)?"
-        r"(?:(?:a|an|the|this|that|visible|shown|current)\s+){0,3}"
-        r"(?:line|path|shape|outline|image|picture|letter|word|signature)\b",
-        text,
-    ):
-        return True
-    if re.search(
-        r"\b(?:sign\s+(?:(?:my|your|the|this|that|a)\s+)?"
-        r"(?:name|document|form|page|contract)|add\s+(?:my|your|a|the)\s+signature)\b",
-        text,
-    ):
-        return True
-    if re.search(r"(?:绘制|绘画|涂鸦|手写|签名|签字|描线|描摹|临摹|勾勒)", text):
-        return True
-    return bool(re.search(r"画(?!板|笔|面|布|家|廊|框|风|质|作)[\u4e00-\u9fff]", text))
-
-
-
-
-def _clipboard_target_tokens(task: str) -> list[str]:
-    """Return placeholder tokens requested as destinations, not protected literals."""
-    text = str(task or "")
-    targets: list[str] = []
-    all_tokens = list(dict.fromkeys(re.findall(r"\[\[[^\]\r\n]{1,100}\]\]", text)))
-    for token in all_tokens:
-        position = text.find(token)
-        left_boundary = max(
-            text.rfind(marker, 0, position) for marker in (".", "。", ";", "；", "\n")
-        )
-        right_candidates = [
-            index for marker in (".", "。", ";", "；", "\n")
-            if (index := text.find(marker, position + len(token))) >= 0
-        ]
-        right_boundary = min(right_candidates) if right_candidates else len(text)
-        clause = text[left_boundary + 1:right_boundary]
-        mutates = bool(re.search(
-            r"replace|paste|insert|fill|write|替换|粘贴|填入|写入",
-            clause,
-            re.IGNORECASE,
-        ))
-        protects = bool(re.search(
-            r"keep|preserve|unchanged|do not (?:change|replace)|保留|保持|不变|不要(?:修改|替换)",
-            clause,
-            re.IGNORECASE,
-        ))
-        if mutates and not protects:
-            targets.append(token)
-    return targets or all_tokens
-
-
-def _clipboard_fingerprints(value: Any) -> set[str]:
-    found: set[str] = set()
-    if isinstance(value, dict):
-        fingerprint = value.get("clipboard_text_fingerprint")
-        if isinstance(fingerprint, str) and fingerprint:
-            found.add(fingerprint)
-        for nested in value.values():
-            found.update(_clipboard_fingerprints(nested))
-    elif isinstance(value, list):
-        for nested in value:
-            found.update(_clipboard_fingerprints(nested))
-    return found
 
 
 def _client():
@@ -1107,7 +726,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self.run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.stop_event = stop_event or threading.Event()
         self.runtime_profile = runtime_profile or build_runtime_profile(task)
-        if task_intent is None:
+        native_intent_free = bool(
+            not self.runtime_profile.coding
+            and str(self.runtime_profile.stage_type or "") == "ExecuteDesktopTask"
+            and _main_model_has_vision()
+        )
+        if native_intent_free:
+            self.task_intent = {"original_text": task}
+        elif task_intent is None:
             from ..tasking.intent import TaskIntentParser
 
             parsed_task_intent = TaskIntentParser().parse(task)
@@ -1125,6 +751,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             task_intent=self.task_intent,
             communication_context=communication_context,
         )
+        self._frame_authority = FrameAuthority()
+        # FastGuiController and the runner consume the same authoritative
+        # reference.  The legacy scalar fields below remain compatibility
+        # mirrors until ToolSession's public action envelope accepts FrameState.
+        self.session._frame_authority = self._frame_authority
         self.session.run_id = self.run_id
         # Prior finished tasks this session (list[SessionEntry]) for continuity.
         self.session_context = session_context or []
@@ -1139,22 +770,17 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._done_reject_terminal = False           # repeated claim with no new evidence
         self._done_unverified = False                # forced-accept after max rejects
         self._done_verified = False                  # done-gate judge genuinely passed
+        self._candidate_reply_pending = False        # native no-tool answer awaiting the same judge
         self._fresh_done_image_b64 = ""              # authoritative frame for final judge
         self._fresh_done_capture_scope = ""
         self._fresh_done_capture_region = None
         self._fresh_done_capture_reason = ""
-        self._pending_visual_literal_tokens: list[str] = []
         self._pending_visual_payloads: list[str] = []
-        self._pending_visual_spatial_check = ""
-        self._pending_visual_arithmetic_check = ""
         self._pending_visual_communication_check = ""
         self._saved_artifact_verified = False
         self._recent_results: list[tuple[str, str]] = []  # tool outputs as done-gate evidence
         self._visible_evidence_ledger: list[dict[str, Any]] = []
         self.session.visible_evidence_ledger = self._visible_evidence_ledger
-        self._partial_output_guard = PartialOutputDestructiveGuard(task)
-        self._mutation_ledger = self._partial_output_guard.ledger
-        self.session.mutation_ledger = self._mutation_ledger
         self._last_done_reject_reason = ""
         self._last_done_reject_generation: tuple[int, int, int] | None = None
         self._escalate_next = False                  # use stronger model on next _chat
@@ -1170,15 +796,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # but its elapsed wait still belongs to model time rather than local
         # Controller time.
         self.model_elapsed_ms = 0
-        self._inline_stage_semantic_attempted = False
-        self._inline_stage_semantic_passed = False
-        self._inline_stage_semantic_last_verdict: dict[str, Any] = {}
-        self._surface_output_semantic_passed = False
-        self._inline_stage_semantic_region: dict[str, int] = {}
-        self._inline_stage_repair_pending = False
-        self._inline_stage_base_draw_count = 0
-        self._inline_stage_forward_repair_rejections = 0
-        self._inline_stage_completion_decision_required = False
         self._model_adapter = None
         self._last_llm_model = ""
         self._last_llm_thinking_enabled = False
@@ -1192,16 +809,25 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # Coding is now an in-process runtime capability of this AgentRunner,
         # not a separate sub-agent / runner loop.
         self._is_coding = self.runtime_profile.coding
+        self.session.native_visual_runtime = native_intent_free
+        if self.session.native_visual_runtime:
+            # The compiler may retain typed metadata for tracing, but native
+            # action handlers receive no inferred app/recipient/task mode.
+            # Explicit model tool arguments and current pixels are the only
+            # execution inputs.
+            self.session.task_intent = {"original_text": self.task}
+            self.session.communication_context = {
+                "active": False,
+                "recipient": "",
+                "channel": "",
+                "send_mode": "send",
+            }
         self._tool_history: list[tuple[str, dict[str, Any], str]] = []
         self._completion_rejects = 0
         self._truncated_response_retries = 0
         self._gui_truncated_tool_retries = 0
         self._gui_tool_call_retry_pending = False
         self._failure_recovery_layer = FailureRecoveryLayer()
-        self._started_wall_time = time.time()
-        self._new_document_plan_state: dict[int, dict[str, Any]] = {}
-        self._delivered_text_mutations: list[dict[str, Any]] = []
-        self._applied_format_mutations: list[dict[str, Any]] = []
         self._tool_sequence = 0
         # Native-vision closed loop.  It is activated only by run(), so helper
         # unit tests and direct ToolSession callers keep their existing API.
@@ -1213,37 +839,26 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._visual_frame_scope = ""
         self._visual_frame_scope_reason = ""
         self._visual_submitted_size: tuple[int, int] | None = None
-        self._visual_work_surface_frame_bounds: tuple[int, int, int, int] | None = None
-        self._visual_work_surface_frame_id = 0
-        self._visual_work_surface_anchor_bounds: tuple[int, int, int, int] | None = None
-        self._visual_work_surface_anchor_hwnd = 0
-        self._visual_work_surface_anchor_region: tuple[int, int, int, int] | None = None
-        self._visual_work_surface_anchor_scope = ""
-        self._visual_work_surface_pending_bounds: tuple[int, int, int, int] | None = None
-        self._visual_work_surface_pending_count = 0
-        self._visual_surface_binding = SurfaceBinding()
-        self._visual_surface_observation_id = 0
-        self._visual_work_surface_blocked_reason = ""
-        self._visual_work_surface_blocked_frame_id = 0
         self._last_visual_feedback_b64 = ""
         self._last_visual_feedback_action = ""
+        # A spatial action rejected only because its pixels moved receives one
+        # fresh authoritative frame.  If the model then chooses an action from
+        # that exact frame, continuous animation must not create an infinite
+        # preflight loop; identity/foreground/geometry gates still apply.
+        self._visual_preflight_refresh_frame_id = 0
         # Bounded, immutable post-action frames retained across app switches.
         # A multi-window task cannot be verified from the final foreground
         # window alone (for example, type in Notepad and then draw in Paint).
         self._historical_visual_checkpoints: list[dict[str, Any]] = []
-        self._visual_grounding_block_count = 0
+        # Also retain one recent changed frame per low-level action kind. This
+        # is bounded temporal evidence for ordered tasks in animated apps; it
+        # lets the independent done judge inspect an earlier transient effect
+        # without treating stale pixels as the current state.
+        self._visual_effect_checkpoints: list[dict[str, Any]] = []
         self._native_visual_static_messages: list[dict[str, Any]] = []
         self._native_visual_user_directives: list[str] = []
         self._last_visual_change_ratio: float | None = None
         self._last_visual_change_comparable = False
-        self._native_no_progress_signature = ""
-        self._native_no_progress_streak = 0
-        self._native_no_progress_block_count = 0
-        # Keep stagnation debt per spatial action signature. Alternating two
-        # ineffective clicks/scrolls must not erase the evidence that each one
-        # already failed on unchanged pixels.
-        self._native_no_progress_streaks: dict[str, int] = {}
-        self._native_no_progress_block_counts: dict[str, int] = {}
         self._pixel_graphical_candidates: list[dict[str, Any]] = []
         self._pixel_graphical_frame_id = 0
         self._scene_coverage = SceneCoverageLedger(
@@ -1255,19 +870,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             ) or 0.0012),
         )
         self._visual_semantic_assist_count = 0
-        self._continuous_pointer_setup_clicks = 0
-        self._continuous_pointer_low_change_clicks = 0
-        self._continuous_pointer_guard_blocks = 0
-        self._continuous_pointer_gesture_progress = False
-        self._continuous_pointer_last_change_ratio: float | None = None
-        self._continuous_pointer_forward_only_correction = False
-        self._continuous_pointer_done_repair_required = False
-        self._continuous_pointer_text_setup_mutations = 0
-        self._continuous_semantic_progress = ContinuousSemanticProgress()
-        self._continuous_semantic_surface_region: tuple[float, float, float, float] | None = None
-        self._continuous_semantic_surface_hwnd = 0
-        self._constraint_rejection_category = ""
-        self._constraint_rejection_streak = 0
 
     def bind_target_window(self, hwnd: int, hint: str = "") -> None:
         """Carry a controller-resolved window into a bounded semantic stage.
@@ -1281,302 +883,46 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self.session._target_binding_verified = True
         self.session._remember_target(int(hwnd), str(hint or ""))
 
-    @staticmethod
-    def _inline_semantic_region(payload: dict[str, Any]) -> dict[str, int]:
-        """Derive a fresh-pixel semantic ROI from executed controller geometry.
+    def _mirror_authoritative_frame(self, state: FrameState) -> None:
+        """Keep the old scalar API as a read-compatible view of one state.
 
-        The region is subject-agnostic: it is the padded union of actual draw
-        actions, clamped to the controller-resolved canvas.  Model-provided
-        screenshot coordinates are never consulted.
+        New code must read ``_frame_authority.current``.  These assignments are
+        deliberately centralized because older Controller/event code still
+        accepts scalar frame fields and is being migrated independently.
         """
 
-        def rect(value: Any) -> tuple[int, int, int, int] | None:
-            if not isinstance(value, dict):
-                return None
-            try:
-                left = int(value.get("left", value.get("x", 0)))
-                top = int(value.get("top", value.get("y", 0)))
-                width = int(value.get("width", 0))
-                height = int(value.get("height", 0))
-            except (TypeError, ValueError):
-                return None
-            if width <= 0 or height <= 0:
-                return None
-            return left, top, left + width, top + height
-
-        draws: list[tuple[int, int, int, int]] = []
-        canvases: list[tuple[int, int, int, int]] = []
-        for action in payload.get("actions_executed") or []:
-            if not isinstance(action, dict):
-                continue
-            if str(action.get("action") or "").casefold() != "draw_strokes":
-                continue
-            draw = rect(action.get("draw_region"))
-            canvas = rect(action.get("canvas_region"))
-            if draw is not None:
-                draws.append(draw)
-            if canvas is not None:
-                canvases.append(canvas)
-        if not draws:
-            return {}
-
-        left = min(item[0] for item in draws)
-        top = min(item[1] for item in draws)
-        right = max(item[2] for item in draws)
-        bottom = max(item[3] for item in draws)
-        width = right - left
-        height = bottom - top
-        pad_x = max(12, int(round(width * 0.12)))
-        pad_y = max(12, int(round(height * 0.12)))
-        left, top, right, bottom = (
-            left - pad_x,
-            top - pad_y,
-            right + pad_x,
-            bottom + pad_y,
-        )
-        if canvases:
-            canvas_left = max(item[0] for item in canvases)
-            canvas_top = max(item[1] for item in canvases)
-            canvas_right = min(item[2] for item in canvases)
-            canvas_bottom = min(item[3] for item in canvases)
-            if canvas_right > canvas_left and canvas_bottom > canvas_top:
-                left = max(left, canvas_left)
-                top = max(top, canvas_top)
-                right = min(right, canvas_right)
-                bottom = min(bottom, canvas_bottom)
-        if right <= left or bottom <= top:
-            return {}
-        return {
-            "left": left,
-            "top": top,
-            "width": right - left,
-            "height": bottom - top,
+        self._visual_frame_id = state.frame_id
+        self._visual_frame_epoch = state.epoch
+        self._visual_frame_hwnd = state.hwnd
+        self._visual_frame_region = state.region
+        self._visual_frame_scope = state.scope
+        self._visual_frame_scope_reason = state.reason
+        self._visual_submitted_size = state.submitted_size
+        self._last_visual_feedback_b64 = state.image_b64
+        self.session._visual_frame_id = state.frame_id
+        self.session._visual_frame_epoch = state.epoch
+        self.session._visual_frame_scope = state.scope
+        self.session._visual_frame_region = {
+            "left": state.region[0],
+            "top": state.region[1],
+            "width": state.region[2],
+            "height": state.region[3],
         }
+        self.session._visual_submitted_size = list(state.submitted_size)
 
-    @staticmethod
-    def _merge_inline_semantic_regions(
-        previous: dict[str, int],
-        current: dict[str, int],
-    ) -> dict[str, int]:
-        if not previous:
-            return dict(current)
-        if not current:
-            return dict(previous)
-        left = min(int(previous["left"]), int(current["left"]))
-        top = min(int(previous["top"]), int(current["top"]))
-        right = max(
-            int(previous["left"]) + int(previous["width"]),
-            int(current["left"]) + int(current["width"]),
-        )
-        bottom = max(
-            int(previous["top"]) + int(previous["height"]),
-            int(current["top"]) + int(current["height"]),
-        )
-        return {"left": left, "top": top, "width": right - left, "height": bottom - top}
+    def _structured_grounding_is_current(self) -> bool:
+        """Allow UIA/OCR annotations only for the current pixel identity."""
 
-    def _inline_stage_semantic_verdict(
-        self,
-        tool_name: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Run a typed-stage semantic gate immediately after a real transaction.
-
-        This is profile-driven rather than task-keyword driven. It lets a local
-        Controller transaction advance the stage without another main-model
-        turn, while still requiring fresh-pixel semantic evidence.
-        """
-        if not self.runtime_profile.inline_semantic_verification:
-            return None
-        if str(tool_name or "") not in {
-            "execute_subgoal", "run_action_batch", "draw_strokes", "drag",
-        }:
-            return None
-        if payload.get("blocked") is True:
-            return None
-        packet = payload.get("evidence_packet")
-        scene = packet.get("scene_structure") if isinstance(packet, dict) else None
-        direct_surface_action = str(tool_name or "") in {"draw_strokes", "drag"}
         try:
-            executed_draw_count = int((scene or {}).get("executed_draw_count") or 0)
+            frame_id = int(getattr(
+                self.session, "_semantic_grounding_frame_id", 0,
+            ) or 0)
+            epoch = int(getattr(
+                self.session, "_semantic_grounding_epoch", -1,
+            ))
         except (TypeError, ValueError):
-            executed_draw_count = 0
-        if direct_surface_action and payload.get("ok") is True:
-            executed_draw_count = max(1, executed_draw_count)
-        if executed_draw_count <= 0:
-            return None
-        if payload.get("ok") is not True and payload.get("input_applied") is not True:
-            return None
-        # A compound visual transaction can commit most of its paths and then
-        # fail on one late primitive.  Those pixels are not rolled back.  Treat
-        # that result as a committed base for semantic verification and repair
-        # budgeting; otherwise a retry overlays a second complete scene on top
-        # of the first and destroys both.  Fresh pixels still decide success.
-        partial_visual_commit = bool(
-            payload.get("ok") is not True
-            and payload.get("input_applied") is True
-        )
-        current_region = self._inline_semantic_region(payload)
-        self._inline_stage_semantic_region = self._merge_inline_semantic_regions(
-            self._inline_stage_semantic_region,
-            current_region,
-        )
-        verify_args: dict[str, Any] = {
-            "criteria": (
-                str(self.runtime_profile.surface_output_criteria or "").strip()
-                or self.task
-            )
-        }
-        verify_args.update(self._inline_stage_semantic_region)
-        self.model_request_count += 1
-        started = time.monotonic()
-        try:
-            verify_result = self.session.dispatch("vlm_verify", verify_args)
-        finally:
-            elapsed_ms = self._accumulate_model_elapsed(started)
-        try:
-            verdict = json.loads(verify_result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            verdict = {}
-        if not isinstance(verdict, dict):
-            verdict = {}
-        verdict["elapsed_ms"] = elapsed_ms
-        verdict["inline_stage_verifier"] = True
-        verdict["partial_visual_commit"] = partial_visual_commit
-        args = {**verify_args, "inline_stage_verifier": True}
-        self._record_step("vlm_verify", args, verify_result.replay)
-        self._track_verification("vlm_verify", verify_result.text)
-        self._track_visible_evidence("vlm_verify", args, verify_result.text)
-        self._tool_history.append(("vlm_verify", args, verify_result.text or ""))
-        self._tool_history = self._tool_history[-40:]
-        self._recent_results.append(("vlm_verify", (verify_result.text or "")[:1600]))
-        self._recent_results = self._recent_results[-20:]
-        passed = bool(
-            verdict.get("ok") is True
-            and verdict.get("verified") is True
-            and verdict.get("semantic_visual_verified") is True
-        )
-        self._inline_stage_semantic_attempted = True
-        self._inline_stage_semantic_passed = passed
-        self._surface_output_semantic_passed = passed
-        self._inline_stage_semantic_last_verdict = dict(verdict)
-        BUS.publish(
-            "task_stage_inline_verify",
-            run_id=self.run_id,
-            stage_type=self.runtime_profile.stage_type,
-            provider="semantic_visual_judge",
-            verified=passed,
-            verdict=verdict,
-        )
-        if passed:
-            self._had_verified_action = True
-            # Legacy single-purpose DrawArtifact runs may terminate directly.
-            # A general desktop stage can still have later application,
-            # communication, save, or verification clauses, so a successful
-            # surface subgoal is evidence rather than whole-task completion.
-            if str(self.runtime_profile.stage_type or "") == "DrawArtifact":
-                self._done_verified = True
-        return verdict
-
-    @staticmethod
-    def _inline_stage_repair_hint(verdict: dict[str, Any]) -> str:
-        """Turn a failed fresh-frame verdict into one bounded repair action."""
-        if not isinstance(verdict, dict):
-            return ""
-        if verdict.get("semantic_visual_verified") is True:
-            return ""
-        detail = verdict.get("verdict")
-        issues = detail.get("issues") if isinstance(detail, dict) else []
-        issue_text = "; ".join(
-            str(item).strip() for item in (issues or []) if str(item).strip()
-        )[:700]
-        if not issue_text:
-            issue_text = str(verdict.get("reason") or "the requested subject is not yet recognizable")[:700]
-        return (
-            "[typed-stage semantic repair required] The independent fresh-frame verifier rejected "
-            f"the current result: {issue_text}. Do not call done, and do not spend the next turn "
-            "calling observe because the authoritative post-action frame is already attached. "
-            "Call execute_subgoal once with only the missing parts or contour repairs needed to "
-            "satisfy those issues. If existing named parts still look abstract or unrecognizable, repair "
-            "their shared outer silhouette and spatial attachment instead of drawing another complete "
-            "copy of the subject. Preserve existing correct work; do not clear or redraw the whole canvas."
-        )
-
-    def _remember_inline_stage_repair_state(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        verdict: dict[str, Any],
-    ) -> None:
-        """Bind a failed semantic judge to a bounded forward-only repair.
-
-        Prompt guidance alone is not an execution contract.  Once a typed draw
-        stage has already committed a base composition, a second full scene
-        would merely overlay duplicate parts.  Persist only the generic size
-        of the committed scene; the runtime never interprets subject names.
-        """
-        if not self.runtime_profile.inline_semantic_verification:
-            return
-        if not self.runtime_profile.surface_output_mode:
-            return
-        if verdict.get("semantic_visual_verified") is True:
-            self._inline_stage_repair_pending = False
-            self._inline_stage_forward_repair_rejections = 0
-            self._inline_stage_completion_decision_required = False
-            return
-        if str(tool_name or "") != "execute_subgoal":
-            return
-        draws = args.get("draws")
-        if (
-            not self._inline_stage_repair_pending
-            and isinstance(draws, list)
-            and draws
-        ):
-            self._inline_stage_base_draw_count = len(draws)
-        self._inline_stage_repair_pending = True
-
-    def _inline_stage_max_repair_draws(self) -> int:
-        base_count = max(1, int(self._inline_stage_base_draw_count or 1))
-        return max(1, min(4, (base_count + 2) // 3))
-
-    def _inline_stage_forward_repair_guard(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Reject a whole-scene overlay after a verified base draw attempt."""
-        if not self._inline_stage_repair_pending:
-            return None
-        if str(tool_name or "") != "execute_subgoal":
-            return None
-        draws = args.get("draws")
-        base_count = max(1, int(self._inline_stage_base_draw_count or 1))
-        max_repair_draws = self._inline_stage_max_repair_draws()
-        draw_count = len(draws) if isinstance(draws, list) else 0
-        if 0 < draw_count <= max_repair_draws:
-            self._inline_stage_forward_repair_rejections = 0
-            self._inline_stage_completion_decision_required = False
-            return None
-        self._inline_stage_forward_repair_rejections += 1
-        if self._inline_stage_forward_repair_rejections >= 3:
-            self._inline_stage_completion_decision_required = True
-        return {
-            "ok": False,
-            "verified": False,
-            "blocked": True,
-            "forward_only_repair_required": True,
-            "base_draw_count": base_count,
-            "proposed_draw_count": draw_count,
-            "max_repair_draws": max_repair_draws,
-            "repair_contract_rejections": self._inline_stage_forward_repair_rejections,
-            "completion_decision_required": self._inline_stage_completion_decision_required,
-            "error": (
-                "The base composition already exists. This repair transaction was not "
-                "executed because it would redraw too much of the scene. Submit one "
-                f"execute_subgoal with 1..{max_repair_draws} missing parts or localized "
-                "contour repairs grounded in the current frame; preserve all existing work."
-            ),
-            "needs_replan": True,
-        }
+            return False
+        return self._frame_authority.matches(frame_id, epoch)
 
     def interject(self, text: str) -> None:
         """Queue a user hint to inject before the agent's next decision."""
@@ -1596,8 +942,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             # It may authorize a different route, so old controller-constraint
             # debt must not force-stop the newly directed attempt.
             self._reset_constraint_rejection_guard()
-            self._continuous_pointer_forward_only_correction = False
-            self._continuous_pointer_done_repair_required = False
         for text in pending:
             self._native_visual_user_directives.append(text)
             while (
@@ -1701,12 +1045,39 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     @staticmethod
     def _native_action_args_preview(name: str, args: dict[str, Any]) -> str:
         useful = (
+            "image_x", "image_y", "image_x1", "image_y1", "image_x2", "image_y2",
             "frame_x", "frame_y", "frame_x1", "frame_y1", "frame_x2", "frame_y2",
             "element_id", "label", "fallback_text", "direction", "amount", "keys",
             "name", "title", "subgoal", "index", "operation", "artifact_id",
             "app", "recipient", "scope", "source_hwnd",
         )
-        compact = {key: args[key] for key in useful if key in args}
+        image_source = args.get("source_image_coordinates")
+        frame_source = args.get("source_frame_coordinates")
+        if isinstance(image_source, dict):
+            coordinate_args = {**args, **image_source}
+            # The model-side contract is image pixels only. Do not reintroduce
+            # internal normalized coordinates into its rolling action ledger.
+            for key in (
+                "frame_x", "frame_y", "frame_x1", "frame_y1", "frame_x2", "frame_y2",
+                "frame_points", "frame_strokes", "constraint_frame_region",
+            ):
+                coordinate_args.pop(key, None)
+        elif isinstance(frame_source, dict):
+            coordinate_args = {**args, **frame_source}
+        else:
+            coordinate_args = args
+        compact = {
+            key: coordinate_args[key]
+            for key in useful
+            if key in coordinate_args
+        }
+        path_points = coordinate_args.get("image_points") or coordinate_args.get("frame_points")
+        if isinstance(path_points, list) and path_points:
+            compact["path"] = {
+                "first": path_points[0],
+                "last": path_points[-1],
+                "points": len(path_points),
+            }
         if "text" in args:
             text = str(args.get("text") or "")
             compact["text"] = text[:80]
@@ -1715,7 +1086,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         if name == "draw_strokes":
             source = args.get("source_frame_coordinates")
             strokes = (
-                args.get("frame_strokes")
+                args.get("image_strokes")
+                or (
+                    image_source.get("image_strokes")
+                    if isinstance(image_source, dict)
+                    else None
+                )
+                or args.get("frame_strokes")
                 or args.get("normalized_strokes")
                 or (
                     source.get("frame_strokes")
@@ -1754,7 +1131,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "ok", "verified", "blocked", "native_action_executed",
             "visual_change_detected", "visual_change_ratio", "no_visual_progress",
             "error", "failure_type", "artifact_id", "requested_artifact_id",
-            "artifact_resolution", "fast_path_advice",
+            "artifact_resolution",
         )
         compact = {key: payload[key] for key in keys if key in payload}
         auto = payload.get("auto_visual_verify")
@@ -1764,9 +1141,18 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             and auto.get("semantic_verified") is False
             and auto.get("completion_evidence") is False
         ):
+            dispatch_ok = bool(
+                payload.get("native_action_executed") is True
+                or payload.get("action_executed") is True
+                or (
+                    payload.get("ok") is True
+                    and payload.get("action_executed") is not False
+                )
+            )
+            compact.pop("ok", None)
             compact.pop("verified", None)
             compact.update({
-                "action_verified": payload.get("verified"),
+                "device_action_dispatched": dispatch_ok,
                 "semantic_verified": False,
                 "completion_evidence": False,
                 "summary_kind": "pixel_effect_only",
@@ -1810,17 +1196,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     def _native_transaction_summary(self) -> str:
         lines = [
             "[Native visual rolling transaction context]",
-            "Old assistant tool calls and tool results were intentionally discarded. "
-            "Use the newest authoritative frame below plus this bounded state summary.",
+            "Earlier assistant/tool exchanges were compacted. The immediately preceding "
+            "complete exchange may be retained for continuity; use its result together "
+            "with the newest authoritative frame below.",
         ]
-        plan = getattr(self.session, "plan", None)
-        if plan is not None:
-            try:
-                rendered = re.sub(r"\s+", " ", str(plan.render() or "")).strip()
-            except Exception:
-                rendered = ""
-            if rendered:
-                lines.append(f"Current mutable plan: {rendered[:1200]}")
         pointer_status_fn = getattr(self.session, "_pointer_hold_status", None)
         pointer_status = (
             pointer_status_fn() if callable(pointer_status_fn) else {"active": False}
@@ -1841,70 +1220,19 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 if gesture_start_found:
                     break
             lines.append(
-                "Dynamic pointer state: the agent is still holding the "
-                f"{pointer_status.get('button') or 'left'} mouse button after "
-                f"{held_move_count} continuation move(s). Decide release first from the newest "
-                "frame: if the held object or pointer has reached the intended final release "
-                "target, call mouse_up at that target now. Only when the release condition is "
-                "not yet visible may you call exactly one move_mouse. Do not repeatedly "
-                "micro-adjust inside a valid target, start another action, or claim completion "
-                "while the button remains held."
+                "Pointer lease state: "
+                f"button={pointer_status.get('button') or 'left'}, "
+                f"continuation_moves={held_move_count}, active=true."
             )
             pointer_constraint = pointer_status.get("constraint_frame_region")
             if isinstance(pointer_constraint, dict):
                 lines.append(
-                    "Held-pointer hard boundary (inherited automatically on every move/release, "
-                    "current-frame 0..1000): "
-                    f"{pointer_constraint}. Never leave it."
+                    "Pointer lease retains the hard boundary established by the original press."
                 )
-        # Count only the latest uninterrupted draw sequence. A later click,
-        # hotkey, app switch, or other visual mutation may have opened a new
-        # document/surface even when the HWND stayed the same; older drawings
-        # must not constrain the current pixels.
-        committed_compositions = 0
-        for name, _args, result_text in reversed(self._tool_history):
-            if name != "draw_strokes":
-                if name in _VISUAL_MUTATION_TOOLS:
-                    break
-                continue
-            try:
-                payload = json.loads(result_text or "{}")
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if (
-                isinstance(payload, dict)
-                and payload.get("ok") is True
-                and payload.get("native_action_executed") is True
-                and payload.get("visual_change_detected") is True
-            ):
-                committed_compositions += 1
-        if committed_compositions:
-            lines.append(
-                "Continuous-output state: "
-                f"{committed_compositions} pixel-changing draw transaction(s) are already "
-                "committed in the latest uninterrupted surface sequence. Judge the whole visible "
-                "result now. If it satisfies the request, call done; otherwise change only what "
-                "the current pixels justify and require measurable progress after each mutation. "
-                "Do not add an alternative whole layout, unsolicited scaffolding, edge-reaching "
-                "strokes, or unrelated menu actions."
-            )
-        if self._continuous_pointer_forward_only_correction:
-            lines.append(
-                "Forward-correction mode: an autonomous destructive rollback was already "
-                "blocked after visible output. Do not request another undo/reset/clear. "
-                "Use a compact local draw/drag correction grounded in the newest frame, or "
-                "call done if the visible result now meets the task."
-            )
-        if self._continuous_pointer_done_repair_required:
-            lines.append(
-                "Completion repair required: the visual done gate rejected the current "
-                "result. Do not repeat done or spend turns on setup clicks/undo. Make one "
-                "measurable forward draw/drag correction grounded in the newest frame; "
-                "done becomes available again after its pixels visibly change."
-            )
-        scene_coverage_summary = self._scene_coverage.context_summary()
-        if scene_coverage_summary:
-            lines.append(scene_coverage_summary)
+        # Scene fingerprints remain diagnostic telemetry only. Animated cards,
+        # clocks, media and other incidental pixels can look like new scenes;
+        # presenting that heuristic to a native-vision model as progress would
+        # compete with the authoritative frame and the RunState owner.
         recent = self._tool_history[-_NATIVE_CONTEXT_RECENT_ACTIONS:]
         if recent:
             lines.append("Recent transactions (oldest to newest):")
@@ -1916,21 +1244,75 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         if self._last_visual_change_comparable:
             ratio = float(self._last_visual_change_ratio or 0.0)
             lines.append(f"Latest same-region post-action pixel change ratio: {ratio:.6f}.")
-        if self._native_no_progress_streak:
+        if self.run_state.last_visual_no_progress_streak:
             lines.append(
                 "Runtime no-progress state: "
-                f"same spatial action low-change streak={self._native_no_progress_streak}; "
-                "do not claim success from execution alone."
+                "same spatial action low-change streak="
+                f"{self.run_state.last_visual_no_progress_streak}."
             )
-        if self._constraint_rejection_streak:
+        if self.run_state.constraint_rejection_streak:
             lines.append(
                 "Runtime unexecuted-constraint state: "
-                f"category={self._constraint_rejection_category}, "
-                f"consecutive_rejections={self._constraint_rejection_streak}/"
-                f"{_UNEXECUTED_CONSTRAINT_MAX_REJECTIONS}; choose a materially different "
-                "grounded strategy instead of changing only the rejected arguments."
+                f"category={self.run_state.constraint_rejection_category}, "
+                f"consecutive_rejections={self.run_state.constraint_rejection_streak}."
             )
         return "\n".join(lines)[:_NATIVE_CONTEXT_MAX_SUMMARY_CHARS]
+
+    def _latest_compact_tool_exchange(self) -> list[dict[str, Any]]:
+        """Retain one valid assistant/tool pair across native context rolling.
+
+        Dropping every pair made each visual decision look like the first turn:
+        after a field-opening click, weaker models repeatedly planned the same
+        click because their own immediately preceding intent was gone. Keeping
+        exactly one protocol-valid exchange restores continuity without
+        carrying an unbounded transcript or stale images.
+        """
+
+        for index in range(len(self.messages) - 1, -1, -1):
+            assistant = self.messages[index]
+            tool_calls = (
+                assistant.get("tool_calls")
+                if assistant.get("role") == "assistant"
+                else None
+            )
+            if not isinstance(tool_calls, list) or not tool_calls:
+                continue
+            call_ids = {
+                str(item.get("id") or "")
+                for item in tool_calls if isinstance(item, dict)
+            }
+            call_ids.discard("")
+            if not call_ids:
+                continue
+            tool_messages: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for candidate in self.messages[index + 1:]:
+                if candidate.get("role") == "assistant":
+                    break
+                if candidate.get("role") != "tool":
+                    continue
+                call_id = str(candidate.get("tool_call_id") or "")
+                if call_id not in call_ids:
+                    continue
+                seen.add(call_id)
+                tool_messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": self._native_action_result_preview(
+                        str(candidate.get("content") or "")
+                    ),
+                })
+            if seen != call_ids:
+                continue
+            compact_assistant = {
+                "role": "assistant",
+                "content": re.sub(
+                    r"\s+", " ", str(assistant.get("content") or "")
+                ).strip()[:360],
+                "tool_calls": tool_calls,
+            }
+            return [compact_assistant, *tool_messages]
+        return []
 
     def _capture_settled_initial_frame(self, hwnd: int, region: Any) -> str:
         """Take the newest of a short, stability-bounded startup sample.
@@ -2010,6 +1392,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         """
         if not self._native_visual_context_enabled():
             return
+        latest_exchange = self._latest_compact_tool_exchange()
         self._freeze_native_visual_static_context()
         static = [dict(message) for message in self._native_visual_static_messages]
         if not static:
@@ -2066,6 +1449,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 ),
             })
         rolled.append({"role": "user", "content": self._native_transaction_summary()})
+        rolled.extend(latest_exchange)
         if latest_frame is not None:
             rolled.append(latest_frame)
         self.messages = rolled
@@ -2080,15 +1464,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         step: int,
     ) -> list[dict[str, Any]]:
         """Avoid a duplicate structured observe on the first native frame."""
-        selected = self._project_bound_visual_tools(tools)
-        if self._inline_stage_completion_decision_required:
-            # Three schema-invalid whole-scene proposals after a failed fresh
-            # semantic verdict are not progress.  End honestly instead of
-            # burning the remaining step budget on parameter variations.
-            return [
-                item for item in selected
-                if str(item.get("function", {}).get("name") or "") == "blocked"
-            ]
+        # StageRuntime has already supplied one fixed, task-independent model
+        # tool contract for ExecuteDesktopTask.  Do not reinterpret the request
+        # here to hide or add providers; only real runtime state (for example a
+        # held pointer lease below) may temporarily constrain the next action.
+        selected = tools
         pointer_status_fn = getattr(self.session, "_pointer_hold_status", None)
         pointer_status = (
             pointer_status_fn() if callable(pointer_status_fn) else {"active": False}
@@ -2107,144 +1487,43 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             selected = [
                 held_by_name[name] for name in held_order if name in held_by_name
             ]
-        if self._inline_stage_repair_pending:
-            # Prompt prose is not an execution contract.  Reflect the current
-            # forward-only budget in the actual function schema seen by the
-            # model so every provider gets the same bounded repair affordance.
-            selected = copy.deepcopy(selected)
-            max_repair_draws = self._inline_stage_max_repair_draws()
-            for item in selected:
-                function = item.get("function", {}) if isinstance(item, dict) else {}
-                if str(function.get("name") or "") != "execute_subgoal":
-                    continue
-                parameters = function.get("parameters") or {}
-                properties = parameters.get("properties") or {}
-                draws = properties.get("draws")
-                if isinstance(draws, dict):
-                    draws["minItems"] = 1
-                    draws["maxItems"] = max_repair_draws
-                    draws["description"] = (
-                        "Forward-only repair only. Include 1.."
-                        f"{max_repair_draws} missing parts or localized contour repairs "
-                        "grounded in the current frame; never repeat the complete scene."
-                    )
-                function["description"] = (
-                    "A base composition already exists. Submit exactly one bounded "
-                    f"forward-only repair containing at most {max_repair_draws} draws. "
-                    "Preserve all existing correct pixels and do not redraw the whole subject."
-                )
-                break
-        if (
-            step == 1
-            and self._native_visual_context_enabled()
-            and self._has_fresh_visual_grounding()
-        ):
-            selected = [
-                item for item in selected
-                if str(item.get("function", {}).get("name") or "") != "observe"
-            ]
-        if (
-            self._continuous_pointer_forward_only_correction
-            and self._continuous_pointer_output_requested()
-        ):
-            selected = [
-                item for item in selected
-                if str(item.get("function", {}).get("name") or "") != "hotkey"
-            ]
-        if (
-            self._continuous_pointer_done_repair_required
-            and self._continuous_pointer_output_requested()
-        ):
-            forward_names = {
-                "draw_strokes", "drag", "observe", "focus_window", "list_windows",
-                "blocked", "revise_plan", "complete_subgoal",
-            }
-            selected = [
-                item for item in selected
-                if str(item.get("function", {}).get("name") or "") in forward_names
-            ]
         return selected
 
-    def _project_bound_visual_tools(
-        self,
-        tools: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Keep a bound visual decision small without precompiling its actions.
+    def _is_native_execute_desktop_task(self) -> bool:
+        """Whether the visual model owns intent and the first desktop decision."""
 
-        The root task remains lossless.  Structured intent only decides which
-        provider families must be visible; pixels and the model still decide
-        the actual interaction.  An unbound/stale target retains the complete
-        compatibility tool set.
-        """
-        if not (
-            str(self.runtime_profile.stage_type or "") == "ExecuteDesktopTask"
-            and self._native_visual_context_enabled()
-            and self._has_fresh_visual_grounding()
-            and self.session._window_alive(self.session.hwnd)
-        ):
-            return tools
-
-        allowed = {
-            "observe", "click", "type_text", "hotkey", "scroll",
-            "move_mouse", "mouse_down", "mouse_up", "drag", "draw_strokes",
-            "wait", "done", "blocked", "fail",
-        }
-        operations = {
-            str(item or "").strip().casefold()
-            for item in (self.task_intent.get("operation") or [])
-        }
-        applications = {
-            str(item or "").strip()
-            for item in (self.task_intent.get("applications") or [])
-            if str(item or "").strip()
-        }
-        resource_types = {
-            str(item or "").strip().casefold()
-            for item in (self.task_intent.get("resource_types") or [])
-            if str(item or "").strip()
-        }
-        target_verified = bool(
-            getattr(self.session, "_target_binding_verified", False)
-        )
-        needs_app_provider = not target_verified or len(applications) > 1
-        needs_communication = _is_communication_task(self.task_intent)
-        needs_artifact = bool(
-            operations.intersection({"capture", "save", "send", "export"})
-            or str(self.task_intent.get("media_type") or "").casefold()
-            not in {"", "none", "text"}
-        )
-        needs_controller_provider = bool(
-            resource_types
-            or operations.intersection({
-                "create", "edit", "convert", "format", "save", "export",
-            })
-            or self.runtime_profile.surface_output_mode
+        return bool(
+            not self._is_coding
+            and str(self.runtime_profile.stage_type or "") == "ExecuteDesktopTask"
+            and _main_model_has_vision()
         )
 
-        if needs_app_provider:
-            allowed.update({
-                "open_app", "focus_window", "list_windows", "find_app",
-                "find_program", "list_installed_apps", "launch",
-            })
-        if needs_artifact:
-            allowed.update({"capture_artifact", "screenshot", "paste_image_file"})
-        if needs_communication:
-            allowed.update({
-                "open_conversation", "send_text", "send_artifact",
-                "verify_delivery", "read_text",
-            })
-        if needs_controller_provider:
-            allowed.update({
-                "run_action_batch", "execute_subgoal",
-                "discover_mcp_tools", "call_mcp_tool",
-            })
-        if needs_app_provider or needs_communication or needs_controller_provider:
-            allowed.update({"revise_plan", "complete_subgoal", "record_facts"})
+    @staticmethod
+    def _native_fact_result(result_text: str) -> str:
+        """Project a raw tool result to facts without prescribing a next move."""
 
-        return [
-            item for item in tools
-            if str(item.get("function", {}).get("name") or "") in allowed
-        ]
+        try:
+            payload = json.loads(result_text or "{}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return str(result_text or "")
+
+        def factual(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    str(key): factual(item)
+                    for key, item in value.items()
+                    if str(key).casefold() not in _NATIVE_MODEL_TACTIC_KEYS
+                }
+            if isinstance(value, list):
+                return [factual(item) for item in value]
+            return value
+
+        try:
+            return json.dumps(
+                factual(payload), ensure_ascii=False, default=str,
+            )
+        except (TypeError, ValueError):
+            return "{}"
 
     def _append_tool_result(self, tool_call_id: str, result_text: str,
                             summary: str = "",
@@ -2253,9 +1532,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # NOTE: mime API does not support multipart tool results (image_url in tool role).
         # Always use plain text; screenshot is injected as a separate user message via
         # _inject_observe_screenshot when image_b64 is empty (fallback path).
-        content = result_text
+        content = (
+            self._native_fact_result(result_text)
+            if self._is_native_execute_desktop_task()
+            else result_text
+        )
         if tool_name and tool_name not in {"observe", "read_text"}:
-            content = self._compact_tool_evidence(tool_name, result_text)
+            content = self._compact_tool_evidence(tool_name, content)
         self.messages.append(
             {"role": "tool", "tool_call_id": tool_call_id, "content": content})
         if summary:
@@ -2298,7 +1581,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "visible_colors",
             "error",
             "warning",
-            "fast_path_advice",
             "action_executed",
             "native_point_scope_guard",
             "scope_reason",
@@ -2463,6 +1745,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         """Stable coarse identity for one model-grounded spatial mutation."""
         name = str(tool_name or "").strip().casefold()
         payload = dict(args or {})
+        if name == "double_click":
+            # Keep the explicit primitive and click(double=true) equivalent,
+            # while still distinguishing both from an ordinary single click.
+            name = "click"
+            payload["double"] = True
+        if name == "click":
+            payload["button"] = str(payload.get("button") or "left").casefold()
+            payload["double"] = bool(payload.get("double", False))
         if name == "run_action_batch":
             spatial: list[tuple[str, dict[str, Any]]] = []
             for item in payload.get("actions") or []:
@@ -2557,6 +1847,28 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                             continue
                     if frame_points:
                         payload["frame_points"] = frame_points
+                if "frame_strokes" not in payload and isinstance(
+                    payload.get("image_strokes"), list,
+                ):
+                    frame_strokes: list[list[list[float]]] = []
+                    for stroke in payload["image_strokes"]:
+                        if not isinstance(stroke, list):
+                            continue
+                        frame_stroke: list[list[float]] = []
+                        for point in stroke:
+                            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                                continue
+                            try:
+                                frame_stroke.append([
+                                    image_to_frame(point[0], image_width),
+                                    image_to_frame(point[1], image_height),
+                                ])
+                            except (TypeError, ValueError):
+                                continue
+                        if frame_stroke:
+                            frame_strokes.append(frame_stroke)
+                    if frame_strokes:
+                        payload["frame_strokes"] = frame_strokes
 
         def normalize(value: Any, key: str = "") -> Any:
             if isinstance(value, dict):
@@ -2586,9 +1898,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "frame_x", "frame_y", "frame_x1", "frame_y1", "frame_x2", "frame_y2",
             "frame_points", "frame_strokes", "constraint_frame_region",
             "image_x", "image_y", "image_x1", "image_y1", "image_x2", "image_y2",
-            "image_points",
+            "image_points", "image_strokes", "constraint_image_region",
             "normalized_strokes", "element_id", "label",
             "fallback_text", "role", "expected_region", "direction", "amount", "name",
+            "button", "double",
         )
         canonical = {
             "tool": name,
@@ -2613,692 +1926,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         ) or _NATIVE_NO_PROGRESS_RATIO)
         return max(0.0, min(0.05, value))
 
-    def _continuous_pointer_output_requested(self) -> bool:
-        directives = "\n".join(
-            getattr(self, "_native_visual_user_directives", [])[-4:]
-        )
-        # Fresh user directives may legitimately change the active task while
-        # it is running.  Otherwise a typed desktop stage must trust the
-        # compiler-owned intent instead of reclassifying an antecedent in the
-        # original prose (for example, an existing drawing that is now only an
-        # input to capture/send).
-        if directives and _requests_continuous_pointer_output(directives):
-            return True
-        if str(self.runtime_profile.stage_type or "") == "ExecuteDesktopTask":
-            operations = {
-                str(item or "").strip().casefold()
-                for item in (self.task_intent.get("operation") or [])
-            }
-            interaction = self.task_intent.get("interaction") or {}
-            interaction_active = bool(
-                interaction.get("active")
-                if isinstance(interaction, dict)
-                else getattr(interaction, "active", False)
-            )
-            if "draw" not in operations and not interaction_active:
-                return False
-        return _requests_continuous_pointer_output(
-            f"{self.task}\n{directives}" if directives else self.task
-        )
-
-    def _native_visual_thinking_mode_for_decision(
-        self,
-        model: str,
-    ) -> str | None:
-        """Select MiMo reasoning only for unresolved continuous geometry.
-
-        This is task-shape routing, not an application or drawing special case:
-        freehand writing, signatures, tracing, canvas paths, and similar
-        continuous pointer output all use the same gate. A rejected proposal
-        keeps reasoning enabled because no gesture progress was recorded. Once
-        a real drag/stroke changes comparable pixels, later inspection and
-        completion turns switch it off.
-        """
-        if not bool(CONFIG.get(
-            "controller", "native_visual_thinking", default=False,
-        )):
-            return None
-        api = dict(CONFIG.get("api", default={}) or {})
-        api["model"] = str(model or api.get("model") or "")
-        profile = model_profile_from_config(api)
-        if not (
-            profile.provider == "mimo"
-            and profile.supports_vision
-            and self._native_visual_context_enabled()
-            and self._continuous_pointer_output_requested()
-        ):
-            return None
-        return (
-            "disabled"
-            if self._continuous_pointer_gesture_progress
-            else "enabled"
-        )
-
-    def _continuous_semantic_progress_active(self) -> bool:
-        return bool(
-            not _main_model_has_vision()
-            and self._continuous_pointer_output_requested()
-        )
-
-    @staticmethod
-    def _continuous_semantic_action_payloads(
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> list[tuple[str, dict[str, Any]]]:
-        """Return direct and controller-nested continuous path actions."""
-        root = str(tool_name or "").strip().casefold().replace("-", "_")
-        found: list[tuple[str, dict[str, Any]]] = []
-        if root in {"drag", "draw_strokes"}:
-            found.append((root, dict(args or {})))
-
-        if root in {"run_action_batch", "execute_subgoal"}:
-            for child in (args or {}).get("actions") or []:
-                if not isinstance(child, dict):
-                    continue
-                name = str(
-                    child.get("action") or child.get("tool") or child.get("name") or ""
-                ).strip().casefold().replace("-", "_")
-                payload: dict[str, Any]
-                if not name and len(child) == 1:
-                    name = str(next(iter(child))).strip().casefold().replace("-", "_")
-                    nested = next(iter(child.values()))
-                    payload = dict(nested) if isinstance(nested, dict) else {}
-                else:
-                    payload = (
-                        dict(child.get("params") or {})
-                        if isinstance(child.get("params"), dict)
-                        else {}
-                    )
-                    payload.update({
-                        key: value for key, value in child.items()
-                        if key not in {"action", "tool", "name", "params"}
-                    })
-                if name in {"drag", "draw_strokes"}:
-                    found.append((name, payload))
-
-        if root == "execute_subgoal":
-            for key, name in (("draw", "draw_strokes"), ("drag", "drag")):
-                value = (args or {}).get(key)
-                if isinstance(value, dict):
-                    found.append((name, dict(value)))
-            for key, name in (("draws", "draw_strokes"), ("drags", "drag")):
-                for value in (args or {}).get(key) or []:
-                    if isinstance(value, dict):
-                        found.append((name, dict(value)))
-        return found
-
-    def _continuous_semantic_physical_surface(
-        self,
-    ) -> tuple[float, float, float, float]:
-        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
-        if (
-            self._continuous_semantic_surface_region is not None
-            and self._continuous_semantic_surface_hwnd == hwnd
-        ):
-            return self._continuous_semantic_surface_region
-        if hwnd:
-            try:
-                region = window_region(hwnd)
-                return (
-                    float(region.left), float(region.top),
-                    float(region.width), float(region.height),
-                )
-            except Exception:
-                pass
-        try:
-            region = virtual_screen_region()
-            return (
-                float(region.left), float(region.top),
-                float(region.width), float(region.height),
-            )
-        except Exception:
-            return 0.0, 0.0, 1000.0, 1000.0
-
-    @staticmethod
-    def _continuous_semantic_normalize_physical_paths(
-        paths: list[list[list[float]]],
-        surface: tuple[float, float, float, float],
-    ) -> list[list[list[float]]]:
-        left, top, width, height = surface
-        if width <= 0 or height <= 0:
-            return []
-        return [
-            [
-                [
-                    (float(point[0]) - left) * 1000.0 / width,
-                    (float(point[1]) - top) * 1000.0 / height,
-                ]
-                for point in path
-            ]
-            for path in paths
-        ]
-
-    def _continuous_semantic_geometry(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> GeometryFingerprint | None:
-        if not self._continuous_semantic_progress_active():
-            return None
-        normalized: list[list[list[float]]] = []
-        physical: list[list[list[float]]] = []
-        for name, payload in self._continuous_semantic_action_payloads(tool_name, args):
-            if name == "draw_strokes":
-                raw = payload.get("normalized_strokes")
-                if raw is None:
-                    raw = payload.get("frame_strokes")
-                destination = normalized
-                if raw is None:
-                    raw = payload.get("strokes")
-                    destination = physical
-                if isinstance(raw, list) and raw:
-                    if not all(isinstance(path, list) for path in raw):
-                        return None
-                    destination.extend(raw)
-                elif payload.get("shape") and payload.get("box") is not None:
-                    normalized.extend(structured_primitive_paths(payload))
-                continue
-
-            frame_values = (
-                payload.get("frame_x1"), payload.get("frame_y1"),
-                payload.get("frame_x2"), payload.get("frame_y2"),
-            )
-            physical_values = (
-                payload.get("x1"), payload.get("y1"),
-                payload.get("x2"), payload.get("y2"),
-            )
-            if all(isinstance(value, (int, float)) and not isinstance(value, bool)
-                   for value in frame_values):
-                x1, y1, x2, y2 = frame_values
-                points = payload.get("frame_points") or []
-                normalized.append([[x1, y1], *points, [x2, y2]])
-            elif all(isinstance(value, (int, float)) and not isinstance(value, bool)
-                     for value in physical_values):
-                x1, y1, x2, y2 = physical_values
-                points = payload.get("points") or []
-                physical.append([[x1, y1], *points, [x2, y2]])
-
-        if physical:
-            try:
-                normalized.extend(self._continuous_semantic_normalize_physical_paths(
-                    physical,
-                    self._continuous_semantic_physical_surface(),
-                ))
-            except (IndexError, TypeError, ValueError):
-                return None
-        if not normalized:
-            return None
-        try:
-            return fingerprint_geometry(normalized)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _continuous_semantic_surface_from_payload(
-        value: Any,
-    ) -> tuple[float, float, float, float] | None:
-        if isinstance(value, dict):
-            raw = value.get("surface_region")
-            if isinstance(raw, dict):
-                try:
-                    left = float(raw.get("x", raw.get("left")))
-                    top = float(raw.get("y", raw.get("top")))
-                    width = float(raw.get("width"))
-                    height = float(raw.get("height"))
-                    if width > 0 and height > 0:
-                        return left, top, width, height
-                except (TypeError, ValueError):
-                    pass
-            for child in value.values():
-                found = AgentRunner._continuous_semantic_surface_from_payload(child)
-                if found is not None:
-                    return found
-        elif isinstance(value, list):
-            for child in value:
-                found = AgentRunner._continuous_semantic_surface_from_payload(child)
-                if found is not None:
-                    return found
-        return None
-
-    def _continuous_semantic_target(
-        self,
-        surface: tuple[float, float, float, float] | None = None,
-    ) -> TargetKey:
-        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
-        if self._continuous_semantic_surface_hwnd != hwnd:
-            self._continuous_semantic_surface_region = None
-            self._continuous_semantic_surface_hwnd = hwnd
-        if surface is not None:
-            self._continuous_semantic_surface_region = surface
-        return TargetKey(
-            identity=f"hwnd:{hwnd}" if hwnd else "unbound-target",
-            region=self._continuous_semantic_surface_region,
-        )
-
-    def _continuous_semantic_progress_guard(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        geometry: GeometryFingerprint | None,
-    ) -> dict[str, Any] | None:
-        if geometry is None or not self._continuous_semantic_progress_active():
-            return None
-        decision = self._continuous_semantic_progress.evaluate_candidate(
-            target=self._continuous_semantic_target(),
-            geometry=geometry,
-        )
-        if decision.allowed:
-            return None
-        payload = decision.to_dict()
-        fresh_required = decision.reason == "fresh_semantic_required"
-        payload.update({
-            "ok": False,
-            "verified": False,
-            "blocked": True,
-            "pixel_effect_only": True,
-            "materially_different_geometry_required": not fresh_required,
-            "fresh_semantic_required": fresh_required,
-            "strategy_change_required": True,
-            "needs_replan": not fresh_required,
-            "error": (
-                "A materially different continuous surface mutation changed pixels, but no "
-                "fresh semantic observation followed it. This mutation was not executed. "
-                "Use vlm_describe or vlm_verify on the current target before another mutation."
-                if fresh_required else
-                "Fresh semantic observations remained materially unchanged across successful "
-                "pixel-changing continuous mutations, and this candidate repeats prior path "
-                "geometry. It was not executed. Use materially different geometry or a genuinely "
-                "different controller route, then obtain fresh semantic evidence."
-            ),
-        })
-        return payload
-
-    @staticmethod
-    def _continuous_semantic_description_ok(text: str) -> bool:
-        normalized = str(text or "").strip().casefold()
-        if not normalized:
-            return False
-        return not (
-            "vlm" in normalized
-            and any(marker in normalized for marker in (
-                "failed", "failure", "error", "not configured", "unavailable",
-                "未配置", "失败", "不可用",
-            ))
-        )
-
-    def _record_continuous_semantic_result(
-        self,
-        tool_name: str,
-        result_text: str,
-        *,
-        geometry: GeometryFingerprint | None,
-        dispatched: bool,
-        terminal: str | None,
-    ) -> None:
-        if not self._continuous_semantic_progress_active():
-            return
-        name = str(tool_name or "").strip().casefold()
-        if name == "vlm_describe":
-            self._continuous_semantic_progress.record_description(
-                result_text,
-                target=self._continuous_semantic_target(),
-                ok=bool(
-                    dispatched
-                    and terminal not in {"fail", "error", "stopped"}
-                    and self._continuous_semantic_description_ok(result_text)
-                ),
-            )
-            return
-
-        try:
-            payload = json.loads(result_text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        if name == "vlm_verify":
-            method = str(payload.get("verify_method") or "").casefold()
-            self._continuous_semantic_progress.record_verification(
-                target=self._continuous_semantic_target(),
-                ok=bool(dispatched and payload.get("ok") is True and method == "semantic-vlm"),
-                passed=bool(
-                    payload.get("verified") is True
-                    and payload.get("semantic_visual_verified") is True
-                ),
-                confidence=payload.get("verify_confidence"),
-                minimum_confidence=payload.get("verify_min_confidence", 0.8),
-                details=payload.get("verdict") or {},
-            )
-            return
-
-        if geometry is None:
-            return
-        surface = self._continuous_semantic_surface_from_payload(payload)
-        target = self._continuous_semantic_target(surface)
-        self._continuous_semantic_progress.record_effect(
-            target=target,
-            geometry=geometry,
-            applied=bool(dispatched and structured_effect_applied(payload)),
-        )
-
-    @staticmethod
-    def _native_single_spatial_action_kind(
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> str:
-        """Return the one spatial child relevant to pointer-output guarding."""
-        name = str(tool_name or "").strip().casefold()
-        if name != "run_action_batch":
-            return name
-        spatial: list[str] = []
-        for item in (args or {}).get("actions") or []:
-            if not isinstance(item, dict):
-                continue
-            child = str(item.get("action") or item.get("tool") or "").strip().casefold()
-            if not child and len(item) == 1:
-                child = str(next(iter(item))).strip().casefold()
-            if child in _NATIVE_STAGNATION_SPATIAL_TOOLS - {"run_action_batch"}:
-                spatial.append(child)
-        return spatial[0] if len(spatial) == 1 else ""
-
-    def _record_continuous_pointer_progress(
-        self,
-        action_signature: str,
-        change_ratio: float | None,
-        *,
-        comparable: bool,
-    ) -> None:
-        """Track setup clicks separately from visible continuous gestures.
-
-        Whole-frame changes caused by a toolbar, menu, or brush picker are not
-        trusted as subject progress.  Consequently a click always consumes the
-        small setup allowance.  A drag/stroke only releases the tool-choice
-        guard when the same capture region shows measurable pixel change; this
-        is runtime routing evidence, never semantic task-completion evidence.
-        """
-        if not self._continuous_pointer_output_requested() or not action_signature:
-            return
-        action = str(action_signature).partition(":")[0].casefold()
-        if action in {"drag", "draw_strokes"}:
-            if (
-                comparable
-                and change_ratio is not None
-                and float(change_ratio) > self._native_no_progress_threshold()
-            ):
-                self._continuous_pointer_gesture_progress = True
-                self._continuous_pointer_forward_only_correction = False
-                self._continuous_pointer_done_repair_required = False
-                self._continuous_pointer_setup_clicks = 0
-                self._continuous_pointer_low_change_clicks = 0
-                self._continuous_pointer_guard_blocks = 0
-                self._continuous_pointer_last_change_ratio = float(change_ratio)
-            return
-        if action not in {"click", "click_element"}:
-            return
-        if self._continuous_pointer_gesture_progress:
-            return
-
-        self._continuous_pointer_setup_clicks += 1
-        self._continuous_pointer_last_change_ratio = (
-            float(change_ratio) if comparable and change_ratio is not None else None
-        )
-        if (
-            comparable
-            and change_ratio is not None
-            and float(change_ratio) <= self._native_no_progress_threshold()
-        ):
-            self._continuous_pointer_low_change_clicks += 1
-        elif comparable:
-            self._continuous_pointer_low_change_clicks = 0
-
-    def _continuous_pointer_click_guard(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        if (
-            not self._continuous_pointer_output_requested()
-            or self._continuous_pointer_gesture_progress
-            or self._native_single_spatial_action_kind(tool_name, args)
-            not in {"click", "click_element"}
-        ):
-            return None
-        setup_limit_reached = (
-            self._continuous_pointer_setup_clicks >= _CONTINUOUS_POINTER_SETUP_CLICKS
-        )
-        low_change_limit_reached = (
-            self._continuous_pointer_low_change_clicks
-            >= _CONTINUOUS_POINTER_LOW_CHANGE_CLICKS
-        )
-        if not (setup_limit_reached or low_change_limit_reached):
-            return None
-
-        self._continuous_pointer_guard_blocks += 1
-        return {
-            "ok": False,
-            "verified": False,
-            "blocked": True,
-            "continuous_pointer_guard": True,
-            "continuous_gesture_required": True,
-            "strategy_change_required": True,
-            "setup_clicks_observed": self._continuous_pointer_setup_clicks,
-            "low_change_click_streak": self._continuous_pointer_low_change_clicks,
-            "observed_change_ratio": (
-                round(self._continuous_pointer_last_change_ratio, 6)
-                if self._continuous_pointer_last_change_ratio is not None
-                else None
-            ),
-            "error": (
-                "This task explicitly requires continuous freehand surface output, but the "
-                "model kept choosing point clicks and has not produced measurable progress with "
-                "a matching continuous gesture. The click was not executed. Clicks may select "
-                "a tool, but toolbar/menu pixel changes are not subject progress. Use drag or "
-                "draw_strokes now from the authoritative frame; do not approximate a path, "
-                "handwriting, signature, or trace with more clicks, and do not treat tool "
-                "execution as semantic success."
-            ),
-            "needs_replan": True,
-            "repeated_guard_blocks": self._continuous_pointer_guard_blocks,
-        }
-
-    @staticmethod
-    def _contains_explicit_continuous_pointer_action(value: Any) -> bool:
-        if isinstance(value, dict):
-            name = str(value.get("action") or value.get("tool") or "").strip().casefold()
-            if name in {"drag", "draw_strokes"}:
-                return True
-            for key in (
-                "frame_strokes", "normalized_strokes", "strokes",
-                "draw", "draws", "drag", "drags",
-            ):
-                if value.get(key):
-                    return True
-            return any(
-                AgentRunner._contains_explicit_continuous_pointer_action(child)
-                for key, child in value.items()
-                if key not in {"subgoal", "description", "context", "label"}
-            )
-        if isinstance(value, (list, tuple)):
-            return any(
-                AgentRunner._contains_explicit_continuous_pointer_action(child)
-                for child in value
-            )
-        return False
-
-    def _text_continuous_pointer_preparation_candidate(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> bool:
-        name = str(tool_name or "").strip().casefold()
-        if name == "click":
-            return True
-        return bool(
-            name == "execute_subgoal"
-            and not self._contains_explicit_continuous_pointer_action(args)
-        )
-
-    @staticmethod
-    def _successful_tool_payload(result: ToolResult) -> dict[str, Any] | None:
-        if result.terminal in {"fail", "error", "stopped"}:
-            return None
-        try:
-            payload = json.loads(result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return None
-        if (
-            not isinstance(payload, dict)
-            or payload.get("ok") is not True
-            or payload.get("blocked") is True
-        ):
-            return None
-        return payload
-
-    @staticmethod
-    def _payload_has_successful_continuous_pointer_action(
-        tool_name: str,
-        payload: dict[str, Any],
-    ) -> bool:
-        gestures = {"drag", "draw_strokes"}
-        name = str(tool_name or "").strip().casefold()
-        if name in gestures:
-            return True
-        if str(payload.get("source_action") or "").casefold() in gestures:
-            return payload.get("source_action_ok") is not False
-        state = payload.get("controller_state")
-        if (
-            isinstance(state, dict)
-            and str(state.get("last_action") or "").casefold() in gestures
-            and state.get("blocked") is not True
-        ):
-            return True
-        for action in payload.get("actions_executed") or []:
-            if isinstance(action, dict):
-                action_name = str(action.get("action") or action.get("tool") or "").casefold()
-                if action_name in gestures and action.get("ok") is not False:
-                    return True
-            elif str(action or "").casefold() in gestures:
-                return True
-        for item in payload.get("results") or []:
-            if not isinstance(item, dict):
-                continue
-            action_name = str(item.get("action") or item.get("tool") or "").casefold()
-            if action_name not in gestures:
-                continue
-            data = item.get("data")
-            if isinstance(data, dict):
-                if data.get("blocked") is not True and any(
-                    data.get(key) is True
-                    for key in ("ok", "verified", "visual_change_detected")
-                ):
-                    return True
-            elif item.get("blocked") is not True and any(
-                item.get(key) is True
-                for key in ("ok", "verified", "visual_change_detected")
-            ):
-                return True
-        return False
-
-    @staticmethod
-    def _payload_has_preparation_mutation(
-        tool_name: str,
-        args: dict[str, Any],
-        payload: dict[str, Any],
-    ) -> bool:
-        name = str(tool_name or "").strip().casefold()
-        if name == "click":
-            return True
-        if name != "execute_subgoal":
-            return False
-        non_mutating = {
-            "observe", "read_text", "verify", "wait", "focus_window",
-            "open_app", "list_windows", "scan_windows",
-        }
-        actions = payload.get("actions_executed") or []
-        if isinstance(actions, list):
-            for action in actions:
-                if isinstance(action, dict):
-                    action_name = str(action.get("action") or action.get("tool") or "").casefold()
-                else:
-                    action_name = str(action or "").casefold()
-                if action_name and action_name not in non_mutating:
-                    return True
-        if payload.get("mutation_applied") is True or payload.get("input_applied") is True:
-            return True
-        return any(
-            args.get(key)
-            for key in (
-                "click", "clicks", "format", "formats", "input", "inputs",
-                "type_text", "hotkey", "select_color",
-            )
-        )
-
-    def _record_text_continuous_pointer_outcome(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        result: ToolResult,
-    ) -> None:
-        if _main_model_has_vision() or not self._continuous_pointer_output_requested():
-            return
-        payload = self._successful_tool_payload(result)
-        if payload is None:
-            return
-        if self._payload_has_successful_continuous_pointer_action(tool_name, payload):
-            # Routing state only. Semantic success remains the responsibility
-            # of the normal evidence ledger and done gate.
-            self._continuous_pointer_gesture_progress = True
-            self._continuous_pointer_text_setup_mutations = 0
-            self._continuous_pointer_guard_blocks = 0
-            return
-        if (
-            self._continuous_pointer_gesture_progress
-            or payload.get("verified") is True
-            or not self._payload_has_preparation_mutation(tool_name, args, payload)
-        ):
-            return
-        self._continuous_pointer_text_setup_mutations += 1
-
-    def _text_continuous_pointer_preparation_guard(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        if (
-            _main_model_has_vision()
-            or not self._continuous_pointer_output_requested()
-            or self._continuous_pointer_gesture_progress
-            or not self._text_continuous_pointer_preparation_candidate(tool_name, args)
-            or self._continuous_pointer_text_setup_mutations
-            < _TEXT_CONTINUOUS_POINTER_SETUP_MUTATIONS
-        ):
-            return None
-        self._continuous_pointer_guard_blocks += 1
-        return {
-            "ok": False,
-            "verified": False,
-            "blocked": True,
-            "continuous_pointer_guard": True,
-            "text_only_continuous_setup_guard": True,
-            "continuous_gesture_required": True,
-            "strategy_change_required": True,
-            "setup_mutations_observed": self._continuous_pointer_text_setup_mutations,
-            "error": (
-                "This continuous surface-output task already used the allowed unverified "
-                "click/execute_subgoal setup mutations without a successful drag or draw_strokes. "
-                "This preparation mutation was not executed. For a work surface without grounded "
-                "physical coordinates, call direct draw_strokes with normalized_strokes in 0..1000 "
-                "and include the currently known independent paths together. Otherwise use drag or "
-                "draw_strokes with a genuinely grounded physical path. Observe may clarify state, "
-                "but it does not create output or renew the preparation budget."
-            ),
-            "needs_replan": True,
-            "repeated_guard_blocks": self._continuous_pointer_guard_blocks,
-        }
-
     def _reset_constraint_rejection_guard(self) -> None:
-        self._constraint_rejection_category = ""
-        self._constraint_rejection_streak = 0
+        self.run_state.clear_constraint_rejections()
 
     def _apply_constraint_rejection_guard(
         self,
@@ -3307,23 +1936,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         *,
         dispatched: bool,
     ) -> None:
-        """Bound repeated fail-closed attempts that never touched the GUI.
-
-        Pixel/semantic no-progress guards necessarily start *after* execution.
-        Coordinate, scope, and controller-policy validation happens before
-        execution and therefore has no post-action frame for those guards to
-        count.  This independent budget closes that blind spot.
-        """
+        """Attach factual repetition counts for actions that never executed."""
         category = _unexecuted_constraint_category(result.text or "")
         if not category:
             try:
                 payload = json.loads(result.text or "{}")
             except (json.JSONDecodeError, TypeError, ValueError):
                 payload = {}
-            # Only real new evidence resets the debt.  A successful dispatched
-            # action changes controller state; an explicit successful observe
-            # gives the model a new authoritative basis.  Arbitrary failures,
-            # same-turn barriers, and recovery hints cannot launder the streak.
             observe_succeeded = bool(
                 dispatched
                 and result.is_observe
@@ -3340,12 +1959,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 self._reset_constraint_rejection_guard()
             return
 
-        if category == self._constraint_rejection_category:
-            self._constraint_rejection_streak += 1
-        else:
-            self._constraint_rejection_category = category
-            self._constraint_rejection_streak = 1
-
         try:
             payload = json.loads(result.text or "{}")
         except (json.JSONDecodeError, TypeError, ValueError):
@@ -3353,46 +1966,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         if not isinstance(payload, dict):
             return
 
-        streak = int(self._constraint_rejection_streak)
-        limit = int(CONFIG.get(
-            "controller",
-            "unexecuted_constraint_max_rejections",
-            default=_UNEXECUTED_CONSTRAINT_MAX_REJECTIONS,
-        ) or _UNEXECUTED_CONSTRAINT_MAX_REJECTIONS)
-        limit = max(2, min(5, limit))
+        streak = self.run_state.record_constraint_rejection(category)
         payload.update({
-            "constraint_rejection_guard": True,
             "constraint_category": category,
             "constraint_rejection_streak": streak,
-            "constraint_rejection_limit": limit,
             "action_executed": False,
-            "strategy_change_required": streak >= 2,
         })
-        if streak >= 2:
-            payload["needs_replan"] = True
-
-        error = str(payload.get("error") or "").rstrip()
-        if streak >= limit:
-            payload["safe_stop"] = True
-            payload["error"] = (
-                f"{error} Safety stop: the same unexecuted controller constraint "
-                f"({category}) rejected {streak} consecutive attempts. The model changed "
-                "arguments without obtaining new evidence or a successful execution, so the "
-                "run is stopping instead of continuing confidently."
-            ).strip()
-            result.terminal = "reply"
-        elif streak >= 2:
-            payload["error"] = (
-                f"{error} This is consecutive unexecuted rejection {streak}/{limit} for the "
-                f"same constraint category ({category}). Do not merely adjust the rejected "
-                "arguments again; inspect fresh evidence or choose a materially different "
-                "controller strategy."
-            ).strip()
-        else:
-            payload["error"] = (
-                f"{error} This unexecuted constraint incident is now tracked as "
-                f"{category} (1/{limit}); correct the controller contract before retrying."
-            ).strip()
         result.text = json.dumps(payload, ensure_ascii=False, default=str)
         BUS.publish(
             "constraint_rejection",
@@ -3400,8 +1979,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             tool=tool_name,
             category=category,
             streak=streak,
-            limit=limit,
-            safe_stop=bool(streak >= limit),
         )
 
     def _record_native_visual_progress(
@@ -3411,32 +1988,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         *,
         comparable: bool,
     ) -> None:
-        self._record_continuous_pointer_progress(
+        self.run_state.record_visual_change(
             action_signature,
             change_ratio,
             comparable=comparable,
+            threshold=self._native_no_progress_threshold(),
         )
-        if not comparable or change_ratio is None or not action_signature:
-            self._native_no_progress_signature = ""
-            self._native_no_progress_streak = 0
-            self._native_no_progress_block_count = 0
-            self._native_no_progress_streaks.clear()
-            self._native_no_progress_block_counts.clear()
-            return
-        if float(change_ratio) <= self._native_no_progress_threshold():
-            streak = self._native_no_progress_streaks.get(action_signature, 0) + 1
-            self._native_no_progress_streaks[action_signature] = streak
-            self._native_no_progress_signature = action_signature
-            self._native_no_progress_streak = streak
-            self._native_no_progress_block_count = self._native_no_progress_block_counts.get(
-                action_signature, 0,
-            )
-            return
-        self._native_no_progress_signature = ""
-        self._native_no_progress_streak = 0
-        self._native_no_progress_block_count = 0
-        self._native_no_progress_streaks.clear()
-        self._native_no_progress_block_counts.clear()
 
     def _native_no_progress_guard(
         self,
@@ -3449,15 +2006,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             frame_region=self._visual_frame_region,
             submitted_size=self._visual_submitted_size,
         )
-        legacy_streak = (
-            self._native_no_progress_streak
-            if signature and signature == self._native_no_progress_signature
-            else 0
-        )
-        streak = max(
-            legacy_streak,
-            self._native_no_progress_streaks.get(signature, 0) if signature else 0,
-        )
+        streak = self.run_state.visual_no_progress_streak(signature)
         if (
             not signature
             or streak < int(CONFIG.get(
@@ -3466,19 +2015,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             ) or _NATIVE_NO_PROGRESS_STREAK)
         ):
             return None
-        legacy_blocks = (
-            self._native_no_progress_block_count
-            if signature == self._native_no_progress_signature
-            else 0
-        )
-        block_count = max(
-            legacy_blocks,
-            self._native_no_progress_block_counts.get(signature, 0),
-        ) + 1
-        self._native_no_progress_block_counts[signature] = block_count
-        self._native_no_progress_signature = signature
-        self._native_no_progress_streak = streak
-        self._native_no_progress_block_count = block_count
         return {
             "ok": False,
             "verified": False,
@@ -3488,89 +2024,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "repeat_signature": signature,
             "no_progress_streak": streak,
             "observed_change_ratio": round(float(self._last_visual_change_ratio or 0.0), 6),
-            "strategy_change_required": True,
             "error": (
-                "This same spatial action already produced consecutive same-region frames with "
-                "negligible pixel change. It was not executed again. Re-read the authoritative "
-                "frame and choose a materially different target, tool, or plan; execution alone "
-                "is not evidence of success."
+                "This exact spatial action was not executed again because its preceding "
+                "executions produced consecutive same-region frames with negligible visible "
+                "change. The latest authoritative frame remains available for the next decision."
             ),
-            "needs_replan": True,
-            "repeated_guard_blocks": block_count,
         }
-
-    def _native_no_progress_semantic_recovery(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        block: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Upgrade one missed visual click with current-frame structure.
-
-        A no-progress frame triggers a fresh, locally focused semantic
-        observation.  That evidence used to arrive after the model's click,
-        while the repeat guard rejected the next attempt before ToolSession
-        could use it.  Permit exactly the first blocked retry to bind a nearby
-        actionable element from that same authoritative frame.  Further
-        failures remain blocked, so this cannot become an unbounded click
-        loop or consume stale accessibility geometry.
-        """
-        if (
-            str(tool_name or "").casefold() != "click"
-            or int(block.get("repeated_guard_blocks") or 0) != 1
-            or args.get("element_id") is not None
-            or bool(args.get("double"))
-            or str(args.get("button") or "left").casefold() != "left"
-        ):
-            return None
-        semantic_frame_id = int(getattr(
-            self.session, "_semantic_grounding_frame_id", 0,
-        ) or 0)
-        if not semantic_frame_id or semantic_frame_id != int(
-            getattr(self, "_visual_frame_id", 0) or 0
-        ):
-            return None
-        snapshot = getattr(self.session, "snapshot", None)
-        if (
-            snapshot is None
-            or int(getattr(snapshot, "hwnd", 0) or 0)
-            != int(getattr(self, "_visual_frame_hwnd", 0) or 0)
-        ):
-            return None
-        try:
-            mapped = self._map_normalized_frame_coordinates(
-                "click", dict(args),
-            )
-            x = int(mapped["x"])
-            y = int(mapped["y"])
-        except (KeyError, TypeError, ValueError):
-            return None
-        resolver = getattr(self.session, "_semantic_element_near_point", None)
-        candidate = resolver(x, y) if callable(resolver) else None
-        try:
-            element_id = int(getattr(candidate, "elem_id", -1) or -1)
-        except (TypeError, ValueError):
-            element_id = -1
-        if element_id <= 0:
-            return None
-        recovered = {"element_id": element_id}
-        if bool(args.get("physical")):
-            recovered["physical"] = True
-        BUS.publish(
-            "native_no_progress_semantic_recovery",
-            run_id=self.run_id,
-            frame_id=semantic_frame_id,
-            repeat_signature=str(block.get("repeat_signature") or ""),
-            element_id=element_id,
-            element_source=str(getattr(candidate, "source", "") or ""),
-            element_role=str(getattr(candidate, "role", "") or ""),
-            authored_coords=[x, y],
-            recovered_coords=[
-                int(getattr(candidate, "cx", x) or x),
-                int(getattr(candidate, "cy", y) or y),
-            ],
-        )
-        return recovered
 
     def _refresh_visual_target_binding(
         self,
@@ -3654,7 +2113,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             return points
 
         raw_points: list[tuple[Any, Any]] = []
-        if name in {"click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
+        if name in {"click", "double_click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
             raw_points.append((args.get("x"), args.get("y")))
         elif name == "drag":
             raw_points.extend([
@@ -3693,6 +2152,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         points = self._mapped_spatial_points(tool_name, args)
         if not points:
             return None
+        if self._visual_frame_scope == "full_desktop":
+            # The model selected a point from the authoritative complete
+            # desktop frame.  Do not reinterpret that visible choice through
+            # taskbar or application-membership heuristics.
+            return None
         target, target_rebound = self._refresh_visual_target_binding(
             reason="native_point_scope_guard",
         )
@@ -3720,7 +2184,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         related = getattr(self.session, "_window_related_to_target", None)
         same_process = getattr(self.session, "_same_window_process", None)
         strict_actions = {
-            "click", "scroll", "mouse_down", "draw_strokes",
+            "click", "double_click", "scroll", "mouse_down", "draw_strokes",
         }
         taskbar_classes = {"shell_traywnd", "shell_secondarytraywnd"}
         for action, x, y in points:
@@ -3776,117 +2240,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 ),
             }
         return None
-
-    def _explicit_repeated_click_requested(self) -> bool:
-        text = str(self.task or "").casefold()
-        return bool(re.search(
-            r"(?:\u8fde\u7eed|\u53cd\u590d|\u91cd\u590d|\u591a\u6b21|\u4e0d\u505c|\u4e00\u76f4|\u72c2\u70b9|\u8fde\u70b9)"
-            r"|(?:\u70b9\u51fb|\u70b9|\u6309)\s*\d+\s*\u6b21"
-            r"|\b(?:repeatedly|multiple\s+times|keep\s+clicking|rapid(?:ly)?\s+click)\b"
-            r"|\bclick\b[^.!?]{0,40}\b\d+\s+times\b",
-            text,
-        ))
-
-    def _scene_coverage_guard(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Reject one measured scroll-loop edge on the current real scene.
-
-        The ledger owns no application vocabulary.  It can intervene only
-        after authoritative pixels prove that the current viewport was seen
-        before and the identical scroll edge has already been traversed from
-        it.  Other spatial actions remain available, including arbitrary game
-        drags and explicit repeated-input tasks.
-        """
-        if not bool(CONFIG.get(
-            "controller", "scene_coverage_enabled", default=True,
-        )):
-            return None
-        signature = self._native_spatial_action_signature(
-            tool_name,
-            args,
-            frame_region=self._visual_frame_region,
-            submitted_size=self._visual_submitted_size,
-        )
-        block = self._scene_coverage.guard_repeated_edge(
-            action=tool_name,
-            action_args=args,
-            action_signature=signature,
-            explicit_repeat=self._explicit_repeated_click_requested(),
-        )
-        if block:
-            BUS.publish(
-                "scene_coverage_guard",
-                run_id=self.run_id,
-                tool=tool_name,
-                current_scene_id=block.get("current_scene_id"),
-                current_scene_visit_count=block.get(
-                    "current_scene_visit_count",
-                ),
-                proposed_edge=block.get("proposed_edge"),
-                proposed_scroll_direction=block.get(
-                    "proposed_scroll_direction",
-                ),
-                prior_edge_count=block.get("prior_edge_count"),
-                prior_target_scene_ids=block.get(
-                    "prior_target_scene_ids",
-                ),
-                cycle_scene_path=block.get("cycle_scene_path"),
-            )
-        return block
-
-    def _stable_visual_work_surface(
-        self,
-        candidate: tuple[int, int, int, int] | None,
-        *,
-        hwnd: int,
-        frame_region: tuple[int, int, int, int],
-        capture_scope: str = "",
-        initial: bool = False,
-        client_bounds: tuple[int, int, int, int] | None = None,
-        ambiguous: bool = False,
-    ) -> tuple[tuple[int, int, int, int] | None, str]:
-        """Bind the generic interaction surface through the shared contract."""
-        self._visual_surface_observation_id += 1
-        candidate_region = (
-            InteractionRegion(
-                candidate,
-                coordinate_space="frame_0_1000",
-                label="detected_interaction_surface",
-                source="authoritative_frame_pixels",
-            )
-            if candidate is not None else None
-        )
-        client_region = (
-            InteractionRegion(
-                client_bounds,
-                coordinate_space="frame_0_1000",
-                label="window_client_authority",
-                source="win32_client_rect",
-            )
-            if client_bounds is not None else None
-        )
-        result = self._visual_surface_binding.update(
-            candidate_region,
-            hwnd=int(hwnd),
-            frame_region=frame_region,
-            capture_scope=capture_scope,
-            client_region=client_region,
-            frame_id=self._visual_surface_observation_id,
-            ambiguous=bool(ambiguous),
-            initial=bool(initial),
-        )
-        anchor = self._visual_surface_binding.anchor
-        self._visual_work_surface_anchor_bounds = anchor.bounds if anchor else None
-        self._visual_work_surface_anchor_hwnd = int(hwnd)
-        self._visual_work_surface_anchor_region = frame_region
-        self._visual_work_surface_anchor_scope = capture_scope
-        return (
-            tuple(result.region.bounds) if result.region is not None else None,
-            result.policy,
-        )
 
     def _visual_semantic_grounding_assist(
         self,
@@ -4119,16 +2472,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             if len(candidates) >= 18:
                 break
 
-        # Keep the snapshot live after frame injection so label/element_id
-        # actions resolve against exactly this advisory. A visual preflight and
-        # controller servo still fail closed if the real pixels move meanwhile.
-        self.session.snapshot = snapshot
-        self.session._observe_cache = None
+        # Do not publish the snapshot here.  The caller first atomically commits
+        # the pixels and then promotes this annotation with that exact
+        # frame_id/epoch; a detached UIA/OCR result must never become current.
         line = (
             "Fresh text/structure anchors (advisory localization only; current pixels decide meaning and state): "
             + json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
-            + ". Prefer click(label=...) or click(element_id=...) for a stable text control; "
-            "use image_* coordinates for purely graphical targets. "
+            + ". Ground any native spatial action in exact pixels of the current full image. "
             + (
                 "Candidates marked near_failed_action are fresh structured affordances in or "
                 "beside the last ineffective target. Use an exact element_id if one matches the "
@@ -4149,25 +2499,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self,
         image_b64: str,
     ) -> tuple[str, list[dict[str, Any]]]:
-        """Expose pixel-only control hypotheses without inventing semantics."""
+        """Measure pixel-only hypotheses for diagnostics, never model policy.
+
+        These boxes have no application meaning.  Injecting them into every
+        visual turn previously ended with an imperative to click one of their
+        centres, which biased the model toward repeated clicks even after a
+        field was visibly focused.  Keep the measurements on the event bus for
+        debugging, while leaving the native frame itself as model authority.
+        """
         candidates = detect_graphical_affordances(
             image_b64,
             max_candidates=int(CONFIG.get(
                 "controller", "pixel_graphical_max_candidates", default=16,
             ) or 16),
         )
-        if not candidates:
-            return "", []
-        return (
-            "Pixel-native graphical affordance hypotheses from this exact frame: "
-            + json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
-            + ". These unlabeled boxes have no inferred application meaning and are "
-            "not completion evidence. Use the displayed pixels and root goal to choose "
-            "at most one plausible graphical target, click its center_frame, then inspect "
-            "the real post-action transition. Repeated layout_family values identify only "
-            "a measured visual column, not a hard-coded control type. ",
-            candidates,
-        )
+        return "", candidates
 
     def _inject_visual_frame(
         self,
@@ -4197,11 +2543,27 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             reason=f"{str(phase or 'visual')}_frame_capture",
         )
         hwnd = int(getattr(self.session, "hwnd", 0) or 0)
-        previous_frame_id = int(self._visual_frame_id or 0)
-        previous_b64 = self._last_visual_feedback_b64
-        previous_hwnd = int(self._visual_frame_hwnd or 0)
-        previous_region = self._visual_frame_region
-        previous_scope = self._visual_frame_scope
+        previous_state = self._frame_authority.current
+        previous_frame_id = (
+            previous_state.frame_id
+            if previous_state is not None else int(self._visual_frame_id or 0)
+        )
+        previous_b64 = (
+            previous_state.image_b64
+            if previous_state is not None else self._last_visual_feedback_b64
+        )
+        previous_hwnd = (
+            previous_state.hwnd
+            if previous_state is not None else int(self._visual_frame_hwnd or 0)
+        )
+        previous_region = (
+            previous_state.region
+            if previous_state is not None else self._visual_frame_region
+        )
+        previous_scope = (
+            previous_state.scope
+            if previous_state is not None else self._visual_frame_scope
+        )
         started = time.monotonic()
         try:
             cached = getattr(self.session, "_last_native_frame_capture", None)
@@ -4235,7 +2597,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             else:
                 decision = select_visual_capture_scope(
                     hwnd or None,
-                    task=self.task,
+                    enabled=None,
                     related_window=getattr(
                         self.session, "_window_related_to_target", None,
                     ),
@@ -4253,84 +2615,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 b64 = capture_window_jpeg_b64(hwnd, region=region)
             if not b64:
                 return False
+            captured_at = time.time()
             region_tuple = (
                 int(region.left), int(region.top), int(region.width), int(region.height),
             )
-            continuous_pointer_output = self._continuous_pointer_output_requested()
-            work_surface_bounds: tuple[int, int, int, int] | None = None
-            work_surface_policy = "not_requested"
-            surface_blocked_reason = ""
-            if continuous_pointer_output:
-                client_bounds: tuple[int, int, int, int] | None = None
-                if scope == "target_window" and hwnd:
-                    client_physical = window_client_region(hwnd)
-                    mapped_client = (
-                        region_frame_bounds(client_physical, region)
-                        if client_physical is not None else None
-                    )
-                    if isinstance(mapped_client, list) and len(mapped_client) == 4:
-                        client_bounds = tuple(int(value) for value in mapped_client)
-                surface_info = (
-                    credible_work_surface_frame_bounds(
-                        b64,
-                        client_frame_bounds=client_bounds,
-                    )
-                    if scope == "target_window"
-                    else {
-                        "ok": False,
-                        "reason": (
-                            "continuous pointer mutation requires a verified "
-                            "foreground target-window frame"
-                        ),
-                        "failure_kind": "unavailable",
-                    }
-                )
-                surface_failure_reason = (
-                    str(surface_info.get("reason") or "")
-                    if isinstance(surface_info, dict)
-                    else ""
-                )
-                surface_detection_ambiguous = bool(
-                    isinstance(surface_info, dict)
-                    and (
-                        surface_info.get("ambiguous") is True
-                        or surface_info.get("failure_kind") == "ambiguous"
-                    )
-                )
-                raw_surface_bounds = (
-                    surface_info.get("work_surface_frame_bounds")
-                    if isinstance(surface_info, dict)
-                    else None
-                )
-                detected_work_surface_bounds = (
-                    tuple(int(value) for value in raw_surface_bounds)
-                    if isinstance(raw_surface_bounds, (list, tuple))
-                    and len(raw_surface_bounds) == 4
-                    else None
-                )
-                work_surface_bounds, work_surface_policy = self._stable_visual_work_surface(
-                    detected_work_surface_bounds,
-                    hwnd=hwnd,
-                    frame_region=region_tuple,
-                    capture_scope=scope,
-                    initial=(phase == "initial"),
-                    client_bounds=client_bounds,
-                    ambiguous=surface_detection_ambiguous,
-                )
-                if work_surface_bounds is None:
-                    fail_closed_policies = {
-                        "current_detection_missing_fail_closed",
-                        "possible_nested_surface_fail_closed",
-                        "layout_displacement_pending_confirmation",
-                    }
-                    if (
-                        surface_detection_ambiguous
-                        or work_surface_policy in fail_closed_policies
-                    ):
-                        surface_blocked_reason = (
-                            surface_failure_reason
-                            or work_surface_policy.replace("_", " ")
-                        )
             change_comparable = bool(
                 phase == "post_action"
                 and previous_b64
@@ -4360,6 +2648,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             semantic_grounding_meta: dict[str, Any] = {}
             needs_semantic_reanchor = bool(
                 hwnd
+                and not self._is_native_execute_desktop_task()
                 and (
                     phase == "initial"
                     or no_visual_progress
@@ -4383,17 +2672,51 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     force_refresh=True,
                     focus_frame_roi=(action_roi if no_visual_progress else None),
                 )
-            (
-                graphical_grounding_line,
-                pixel_graphical_candidates,
-            ) = self._visual_graphical_grounding_assist(b64)
+            if self._is_native_execute_desktop_task():
+                graphical_grounding_line = ""
+                pixel_graphical_candidates = []
+            else:
+                (
+                    graphical_grounding_line,
+                    pixel_graphical_candidates,
+                ) = self._visual_graphical_grounding_assist(b64)
             max_side = 1120
             scale = min(1.0, max_side / max(1, region.width, region.height))
             submitted_width = max(1, int(region.width * scale))
             submitted_height = max(1, int(region.height * scale))
-            self._visual_submitted_size = (submitted_width, submitted_height)
-            self._visual_frame_id += 1
-            frame_id = self._visual_frame_id
+            epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
+            frame_state = self._frame_authority.commit(
+                epoch=epoch,
+                hwnd=hwnd,
+                region=region_tuple,
+                scope=scope,
+                reason=scope_reason,
+                submitted_size=(submitted_width, submitted_height),
+                image_b64=b64,
+                captured_at=captured_at,
+                expected_previous_frame_id=(
+                    previous_state.frame_id if previous_state is not None else 0
+                ),
+            )
+            frame_id = frame_state.frame_id
+            self._mirror_authoritative_frame(frame_state)
+            self._record_visual_effect_checkpoint(
+                phase=phase,
+                action=action,
+                action_executed=bool(action_executed),
+                image_b64=b64,
+                hwnd=hwnd,
+                frame_id=frame_id,
+                screen_epoch=epoch,
+                change_comparable=change_comparable,
+                change_ratio=change_ratio,
+            )
+            if semantic_grounding_snapshot is not None:
+                semantic_grounding_meta = {
+                    **semantic_grounding_meta,
+                    "frame_id": frame_id,
+                    "epoch": epoch,
+                }
             self._pixel_graphical_candidates = [
                 dict(item) for item in pixel_graphical_candidates
             ]
@@ -4406,13 +2729,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 candidate_count=len(pixel_graphical_candidates),
                 candidates=pixel_graphical_candidates,
             )
-            self._visual_work_surface_frame_bounds = work_surface_bounds
-            self._visual_work_surface_frame_id = frame_id if work_surface_bounds else 0
-            self._visual_work_surface_blocked_reason = surface_blocked_reason
-            self._visual_work_surface_blocked_frame_id = (
-                frame_id if surface_blocked_reason else 0
-            )
-            epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
             scene_coverage_state = self._scene_coverage.record_frame(
                 image_b64=b64,
                 hwnd=hwnd,
@@ -4431,11 +2747,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     **scene_coverage_state,
                 )
             action_line = f" after action {action!r}" if action else ""
-            preview_line = (
-                " Tool output preview is diagnostic only: "
-                + re.sub(r"\s+", " ", result_preview).strip()[:240]
-                if result_preview else ""
-            )
+            # Native rolling context already carries a compact executed/effect/
+            # semantic outcome.  Repeating the raw result beside the newest
+            # pixels used to expose an early ``ok:true`` prefix while truncating
+            # the later semantic=false fields, contradicting the real frame.
+            preview_line = ""
             scope_line = (
                 "This image is a verified foreground target-window crop. "
                 if scope == "target_window"
@@ -4444,136 +2760,96 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             if phase == "post_action" and change_comparable and change_ratio is not None:
                 progress_line = (
                     f"Same-region pixel change ratio since frame #{previous_frame_id}: "
-                    f"{float(change_ratio):.6f}. "
+                    f"{float(change_ratio):.6f}; this measurement is diagnostic, not a "
+                    "success or failure verdict. "
                 )
-                if no_visual_progress:
-                    progress_line += (
-                        "NO VISUAL PROGRESS DETECTED. Do not claim success and do not repeat "
-                        "the same spatial action; inspect the pixels and change strategy. "
-                    )
-                    if str(action or "").casefold() == "scroll":
-                        progress_line += (
-                            "For scroll recovery, remember that amount<0 moves down and amount>0 "
-                            "moves up; use the goal and visible scrollbar to choose the opposite "
-                            "sign or a different scrollable region instead of repeating this wheel input. "
-                        )
-                else:
-                    progress_line += "Visible pixels changed; judge whether that change serves the task. "
             elif phase == "post_action":
-                progress_line = (
-                    "No comparable same-region prior frame is available, so do not infer success "
-                    "from the action result alone. "
-                )
+                progress_line = "No comparable same-region prior frame is available. "
             else:
                 progress_line = ""
-            surface_line = (
-                "Runtime pixels uniquely ground one credible light work surface: "
-                f"work_surface_frame_bounds={list(work_surface_bounds)} in the same frame 0..1000 "
-                f"coordinate system (binding_policy={work_surface_policy}). "
-                "For draw_strokes, every stroke must start inside these bounds "
-                "and every authored point must remain inside; the runtime keeps only a tiny "
-                "internal tolerance for long paths at a detector edge. Do not reinterpret the "
-                "bounds as a second coordinate space or trace along their boundary. "
-                if continuous_pointer_output and work_surface_bounds is not None else
-                (
-                    "Runtime cannot uniquely ground a safe work surface in the current "
-                    "pixels, so continuous pointer mutation is fail-closed until a fresh "
-                    f"frame resolves it (reason={surface_blocked_reason[:180]}). "
-                    if continuous_pointer_output and surface_blocked_reason else ""
+            frame_content: list[dict[str, Any]] = [
+                {
+                    "type": "text",
+                    "text": (
+                        f"[Visual closed-loop frame #{frame_id}; phase={phase}{action_line}. "
+                        "This real image is the authoritative current state. "
+                        f"Frame scope={scope}; selection_reason={scope_reason}. "
+                        f"{scope_line}{progress_line}"
+                        f"{semantic_grounding_line}{graphical_grounding_line}"
+                        f"Exact authoritative full-image size={submitted_width}x{submitted_height} pixels. "
+                        "All native spatial tool coordinates use image_* pixel values in this "
+                        f"full image: x=0..{submitted_width - 1}, y=0..{submitted_height - 1}. "
+                        "Choose the next response from the original request and these pixels. "
+                        f"{preview_line}]"
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ]
+            if (
+                phase == "post_action"
+                and action in _NATIVE_DETAIL_CROP_ACTIONS
+                and action_roi is not None
+            ):
+                detail_b64, detail_bounds = normalized_detail_crop_jpeg_b64(
+                    b64, action_roi,
                 )
-            )
+                if detail_b64 and detail_bounds:
+                    detail_image_bounds = [
+                        int(round(float(detail_bounds[0]) * max(0, submitted_width - 1) / 1000.0)),
+                        int(round(float(detail_bounds[1]) * max(0, submitted_height - 1) / 1000.0)),
+                        int(round(float(detail_bounds[2]) * max(0, submitted_width - 1) / 1000.0)),
+                        int(round(float(detail_bounds[3]) * max(0, submitted_height - 1) / 1000.0)),
+                    ]
+                    frame_content.extend([
+                        {
+                            "type": "text",
+                            "text": (
+                                "[Same-frame magnified detail around the last spatial action; "
+                                f"source full-image pixel bounds={detail_image_bounds}. This crop is only "
+                                "for visual inspection. Do not use crop-local coordinates; "
+                                "all actions still use pixels of the full authoritative image.]"
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{detail_b64}",
+                            },
+                        },
+                    ])
             self.messages.append({
                 "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            f"[Visual closed-loop frame #{frame_id}; phase={phase}{action_line}. "
-                            "This real GUI image is the authoritative current state. "
-                            "Judge it as a whole before the next action; structured elements, "
-                            "rules, and controller summaries are only hints and must not "
-                            "override contradictory pixels. If the intended target/result is "
-                            "not visually clear, do not guess or continue blindly. "
-                            f"Frame scope={scope}; selection_reason={scope_reason}. "
-                            f"{scope_line}{progress_line}{surface_line}"
-                            f"{semantic_grounding_line}{graphical_grounding_line}"
-                            f"Exact submitted-image size={submitted_width}x{submitted_height} pixels. "
-                            "For a purely visual click, scroll, press, move or drag, prefer the image_* "
-                            "tool fields copied directly from this displayed image: x must be within "
-                            f"0..{submitted_width - 1} and y within 0..{submitted_height - 1}. "
-                            "The runtime maps those pixels back to the physical capture. The frame_* "
-                            "0..1000 fields are an alternative; never mix image_*, frame_* or physical "
-                            "coordinates. When the target has stable visible text, prefer a semantic "
-                            "click label/text_query over either coordinate form. "
-                            f"Physical capture region left={region.left}, top={region.top}, "
-                            f"width={region.width}, height={region.height}. "
-                            "Do not estimate physical x/y yourself; those coordinates are reserved "
-                            "for the controller after it maps the selected image_* or frame_* source. "
-                            f"{preview_line}]"
-                        ),
-                    },
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ],
+                "content": frame_content,
             })
             self._foldable.append((len(self.messages) - 1, "[已折叠 screenshot]"))
             self._fold_old()
-            self._visual_frame_epoch = epoch
-            self._visual_frame_hwnd = int(hwnd)
-            self._visual_frame_scope = scope
-            self._visual_frame_scope_reason = scope_reason
-            self._visual_frame_region = region_tuple
-            # FastGuiController owns child actions but shares ToolSession, not
-            # AgentRunner.  Mirror the exact submitted frame there so typed
-            # action events cannot silently fall back to a stale UIA snapshot
-            # region (especially when this is a full-desktop frame).
-            self.session._visual_frame_id = frame_id
-            self.session._visual_frame_epoch = epoch
-            self.session._visual_frame_scope = scope
-            self.session._visual_frame_region = {
-                "left": int(region.left),
-                "top": int(region.top),
-                "width": int(region.width),
-                "height": int(region.height),
-            }
-            self.session._visual_submitted_size = [submitted_width, submitted_height]
-            self.session._visual_work_surface_frame_bounds = (
-                list(work_surface_bounds) if work_surface_bounds is not None else None
-            )
-            self.session._visual_work_surface_frame_id = self._visual_work_surface_frame_id
-            self._last_visual_feedback_b64 = b64
             self._last_visual_feedback_action = str(action or phase)
+            if phase == "preflight" and action == "visual_preflight_changed":
+                self._visual_preflight_refresh_frame_id = frame_id
             self._last_visual_change_ratio = change_ratio
             self._last_visual_change_comparable = change_comparable
             if phase == "post_action":
-                self._partial_output_guard.record_post_action(
-                    action,
-                    hwnd=hwnd,
-                    screen_epoch=epoch,
-                    frame_id=frame_id,
-                    comparable=change_comparable,
-                    change_ratio=change_ratio,
-                    threshold=self._native_no_progress_threshold(),
-                )
                 self._record_native_visual_progress(
                     action_signature,
                     change_ratio,
                     comparable=change_comparable,
                 )
-            self._visual_grounding_block_count = 0
-            if phase in {"post_action", "preflight"}:
-                # Element ids/trees describe the pre-action frame.  Keeping
-                # them around lets a later execute_subgoal silently act on a
-                # stale UI.  Controller-local batches retain their snapshot
-                # only inside the transaction; the next model turn must
-                # re-ground structure if it chooses a structured action.
-                self._invalidate_structured_grounding()
-                if (
-                    semantic_grounding_snapshot is not None
-                    and int(getattr(semantic_grounding_snapshot, "hwnd", 0) or 0) == hwnd
-                ):
-                    self.session.snapshot = semantic_grounding_snapshot
-                    self.session._semantic_grounding_frame_id = frame_id
-                    self.session._semantic_grounding_epoch = epoch
+            # Every newly committed pixel frame invalidates older UIA/OCR.
+            # Promote a fresh annotation only when it binds to this exact
+            # immutable frame identity.
+            self._invalidate_structured_grounding()
+            semantic_grounding_promoted = bool(
+                semantic_grounding_snapshot is not None
+                and int(getattr(semantic_grounding_snapshot, "hwnd", 0) or 0) == hwnd
+                and self._frame_authority.matches(frame_id, epoch)
+            )
+            if semantic_grounding_promoted:
+                self.session.snapshot = semantic_grounding_snapshot
+                self.session._semantic_grounding_frame_id = frame_id
+                self.session._semantic_grounding_epoch = epoch
+                self.session._observe_cache = None
+            if semantic_grounding_snapshot is not None:
+                semantic_grounding_meta["promoted"] = semantic_grounding_promoted
             BUS.publish(
                 "visual_feedback",
                 run_id=self.run_id,
@@ -4605,16 +2881,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "action_target_roi" if roi_change_ratio is not None else "whole_frame"
                 ),
                 no_visual_progress=no_visual_progress,
-                no_progress_streak=int(self._native_no_progress_streak),
+                no_progress_streak=int(self.run_state.last_visual_no_progress_streak),
                 semantic_grounding=semantic_grounding_meta,
                 pixel_graphical_candidate_count=len(
                     pixel_graphical_candidates
                 ),
-                work_surface_frame_bounds=(
-                    list(work_surface_bounds) if work_surface_bounds is not None else None
-                ),
-                work_surface_binding_policy=work_surface_policy,
-                work_surface_blocked_reason=surface_blocked_reason or None,
                 capture_latency_ms=int((time.monotonic() - started) * 1000),
             )
             return True
@@ -4719,6 +2990,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )
 
         def add_element(element_id: Any) -> bool:
+            if not self._structured_grounding_is_current():
+                return False
             try:
                 wanted = int(element_id)
             except (TypeError, ValueError):
@@ -4852,7 +3125,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     add_element(input_spec.get("element_id")) or add_semantic_target(input_spec)
                     add_expected_region(input_spec.get("expected_region"))
                 return
-            if name in {"click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
+            if name in {"click", "double_click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
                 x = number(payload.get("frame_x"))
                 y = number(payload.get("frame_y"))
                 if x is not None and y is not None:
@@ -4917,6 +3190,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                             x, y = number(raw[0]), number(raw[1])
                             if x is not None and y is not None:
                                 points.append((x, y))
+                for stroke in payload.get("image_strokes") or []:
+                    for raw in stroke if isinstance(stroke, list) else []:
+                        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+                            image_point = submitted_image_point(
+                                {"image_x": raw[0], "image_y": raw[1]},
+                                "image_x",
+                                "image_y",
+                            )
+                            if image_point is not None:
+                                points.append(image_point)
                 if points:
                     add_points(points)
                     return
@@ -4936,9 +3219,69 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             max(roi[3] for roi in rois),
         )
 
+    @staticmethod
+    def _visual_preflight_requires_pixel_stability(
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> bool:
+        """Whether the action selects a physical target from submitted pixels.
+
+        Keyboard and clipboard actions depend on the bound foreground identity,
+        not on every pixel in that window remaining static.  Containers inherit
+        pixel sensitivity only from their declared atomic children; an opaque
+        container remains conservative because its local controller may still
+        select a visual target.
+        """
+
+        name = str(tool_name or "").strip().casefold()
+        if name == "type_text" and args.get("element_id") is not None:
+            # Compatibility calls with an explicit element resolve/focus that
+            # element and may click it before typing; they are spatial even
+            # though ordinary type_text is keyboard-only.
+            return True
+        actions = list(iter_atomic_actions(name, args if isinstance(args, dict) else {}))
+        if name in {"run_action_batch", "execute_subgoal"} and not actions:
+            return True
+        return any(action.name in _VISUAL_PREFLIGHT_SPATIAL_ACTIONS for action in actions)
+
+    def _has_fresh_visual_identity(self) -> bool:
+        """Check immutable frame/target identity without requiring static geometry.
+
+        This is the admission contract for non-spatial actions.  Controller's
+        scope guard separately proves foreground ownership immediately before
+        input; keeping that check out of FrameAuthority preserves the single
+        action-owner boundary.
+        """
+
+        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
+        epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
+        if not self._last_visual_feedback_b64:
+            return False
+        authoritative = self._frame_authority.current
+        if authoritative is None:
+            # Legacy synthetic/replay callers hydrate only the scalar mirrors.
+            return bool(
+                (
+                    self._visual_frame_hwnd == hwnd
+                    and self._visual_frame_epoch == epoch
+                )
+                or (
+                    self._visual_frame_hwnd == 0
+                    and self._visual_frame_epoch == -1
+                )
+            )
+        return bool(
+            self._visual_frame_hwnd == hwnd
+            and self._visual_frame_epoch == epoch
+            and authoritative.frame_id == int(self._visual_frame_id or 0)
+            and authoritative.hwnd == hwnd
+            and authoritative.is_fresh_for(epoch=epoch)
+        )
+
     def _has_fresh_visual_grounding(self) -> bool:
         hwnd = int(getattr(self.session, "hwnd", 0) or 0)
         epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
+        authoritative = self._frame_authority.current
         region_matches = False
         scope_matches = False
         try:
@@ -4957,7 +3300,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             else:
                 decision = select_visual_capture_scope(
                     hwnd or None,
-                    task=self.task,
+                    enabled=None,
                     related_window=getattr(
                         self.session, "_window_related_to_target", None,
                     ),
@@ -4979,12 +3322,26 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self._visual_frame_scope == "full_desktop"
             or self._visual_frame_hwnd == hwnd
         )
+        authority_matches = bool(
+            authoritative is None  # legacy synthetic/replay compatibility
+            or (
+                authoritative.frame_id == int(self._visual_frame_id or 0)
+                and authoritative.epoch == self._visual_frame_epoch
+                and authoritative.hwnd == int(self._visual_frame_hwnd or 0)
+                and authoritative.region == self._visual_frame_region
+                and authoritative.scope == self._visual_frame_scope
+                and authoritative.submitted_size == self._visual_submitted_size
+                and authoritative.image_b64 == self._last_visual_feedback_b64
+                and authoritative.is_fresh_for(epoch=epoch)
+            )
+        )
         return bool(
             hwnd_matches
             and self._visual_frame_epoch == epoch
             and self._last_visual_feedback_b64
             and region_matches
             and scope_matches
+            and authority_matches
         )
 
     def _preflight_visual_frame(
@@ -4992,13 +3349,18 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         tool_name: str = "",
         args: dict[str, Any] | None = None,
     ) -> tuple[str, float | None, str, Any | None]:
-        """Detect external pixel changes that happened during model inference.
+        """Validate action identity and, when spatial, its selected pixels.
 
         Internal screen epochs cannot see a webpage auto-refresh, popup, user
         occlusion, or animation. A cheap fresh capture before low-level input
-        closes that gap. Meaningful changes return the new frame and cancel the
-        pending action; tiny caret/antialiasing changes stay below the threshold.
+        closes that gap. Spatial target changes return a fresh frame once;
+        keyboard/clipboard actions ignore unrelated pixel motion and rely on
+        immutable target identity plus Controller's foreground scope guard.
         """
+        action_args = args if isinstance(args, dict) else {}
+        pixel_stability_required = self._visual_preflight_requires_pixel_stability(
+            tool_name, action_args,
+        )
         previous = self._last_visual_feedback_b64
         # Unit tests and legacy synthetic callers use short placeholders, not
         # real JPEGs. Production frames are substantially larger.
@@ -5010,19 +3372,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         )
         if (
             target_rebound
-            and self._visual_frame_scope != "full_desktop"
             and int(self._visual_frame_hwnd or 0) != int(hwnd or 0)
         ):
             started = time.monotonic()
             try:
-                decision = select_visual_capture_scope(
-                    hwnd or None,
-                    task=self.task,
-                    related_window=getattr(
-                        self.session, "_window_related_to_target", None,
-                    ),
-                )
-                region = decision.region
+                if self._visual_frame_scope == "full_desktop":
+                    region = virtual_screen_region()
+                else:
+                    decision = select_visual_capture_scope(
+                        hwnd or None,
+                        enabled=None,
+                        related_window=getattr(
+                            self.session, "_window_related_to_target", None,
+                        ),
+                    )
+                    region = decision.region
                 current = capture_window_jpeg_b64(hwnd, region=region)
                 error = "" if current else "fresh rebound target capture returned empty"
             except Exception as exc:
@@ -5046,17 +3410,22 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 error=error,
             )
             if current:
-                # A successor-window crop is not pixel-comparable with the old
-                # target crop.  Returning it as a changed frame cancels this
-                # action and attaches the new authoritative target in one turn.
+                # A successor target is a new identity even when a full-desktop
+                # capture has the same geometry. Returning its fresh pixels
+                # cancels this action and attaches the new binding in one turn.
                 return current, 1.0, "", region
             return "", None, error, region
-        if not self._has_fresh_visual_grounding():
+        identity_is_current = (
+            self._has_fresh_visual_grounding()
+            if pixel_stability_required
+            else self._has_fresh_visual_identity()
+        )
+        if not identity_is_current:
             # Freshness is checked once before entering preflight, but the
-            # foreground window, epoch, or capture scope can change in that
-            # small interval.  A real authoritative frame becoming stale is
-            # a hard barrier for every low-level action, including keyboard
-            # input that has no coordinates to reject later.
+            # target binding or epoch can change in that small interval.  A
+            # real authoritative frame becoming stale remains a hard barrier;
+            # pixel and geometry stability are intentionally excluded here for
+            # keyboard/clipboard input.
             return (
                 "",
                 None,
@@ -5080,7 +3449,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             else:
                 decision = select_visual_capture_scope(
                     hwnd or None,
-                    task=self.task,
+                    enabled=None,
                     related_window=getattr(
                         self.session, "_window_related_to_target", None,
                     ),
@@ -5111,7 +3480,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             else:
                 after_decision = select_visual_capture_scope(
                     hwnd or None,
-                    task=self.task,
+                    enabled=None,
                     related_window=getattr(
                         self.session, "_window_related_to_target", None,
                     ),
@@ -5146,7 +3515,38 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 error=error or "fresh visual capture returned empty",
             )
             return "", None, error or "fresh visual capture returned empty", region
+        # Close the epoch/HWND race across the capture itself. Geometry is
+        # deliberately not part of identity-only freshness.
+        if not self._has_fresh_visual_identity():
+            return (
+                "",
+                None,
+                "authoritative visual identity changed during preflight capture",
+                region,
+            )
         if geometry_changed_before_capture or geometry_changed_during_capture:
+            if not pixel_stability_required:
+                BUS.publish(
+                    "visual_preflight",
+                    run_id=self.run_id,
+                    ok=True,
+                    changed=False,
+                    geometry_changed=True,
+                    pixel_change_ignored=True,
+                    pixel_stability_evaluated=False,
+                    frame_identity_validated=True,
+                    foreground_validation_owner="controller_scope_guard",
+                    capture_region=list(capture_region_tuple or ()),
+                    post_capture_region=list(after_region_tuple or ()),
+                    capture_scope=capture_scope,
+                    change_ratio=None,
+                    decision_scope="identity_only",
+                    capture_latency_ms=latency_ms,
+                )
+                # Non-spatial input has no coordinate mapping to corrupt. The
+                # Controller will prove that this same target owns foreground
+                # immediately before dispatch.
+                return "", None, "", region
             BUS.publish(
                 "visual_preflight",
                 run_id=self.run_id,
@@ -5181,7 +3581,29 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         global_threshold = float(CONFIG.get(
             "controller", "visual_preflight_change_ratio", default=0.0025,
         ))
-        target_roi = self._visual_preflight_target_roi(tool_name, args or {})
+        if not pixel_stability_required:
+            BUS.publish(
+                "visual_preflight",
+                run_id=self.run_id,
+                ok=True,
+                changed=False,
+                change_ratio=round(float(global_ratio), 6),
+                global_change_ratio=round(float(global_ratio), 6),
+                target_change_ratio=None,
+                target_roi=None,
+                pixel_change_ignored=True,
+                pixel_stability_evaluated=False,
+                frame_identity_validated=True,
+                foreground_validation_owner="controller_scope_guard",
+                decision_scope="identity_only",
+                capture_scope=capture_scope,
+                capture_scope_reason=capture_scope_reason,
+                capture_region=list(capture_region_tuple or ()),
+                threshold=None,
+                capture_latency_ms=latency_ms,
+            )
+            return "", float(global_ratio), "", region
+        target_roi = self._visual_preflight_target_roi(tool_name, action_args)
         target_ratio: float | None = None
         decision_ratio = float(global_ratio)
         threshold = max(0.0, global_threshold)
@@ -5197,6 +3619,26 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )))
                 decision_scope = "action_target_roi"
         changed = bool(decision_ratio > threshold)
+        authoritative = self._frame_authority.current
+        current_frame_id = (
+            authoritative.frame_id
+            if authoritative is not None
+            else int(self._visual_frame_id or 0)
+        )
+        model_acknowledged_refresh = bool(
+            changed
+            and current_frame_id
+            and current_frame_id == self._visual_preflight_refresh_frame_id
+        )
+        if model_acknowledged_refresh:
+            # The preceding rejection already attached a fresh authoritative
+            # frame. This action is the model's decision from those pixels, so
+            # continuous motion must not reject it forever. This is a one-shot
+            # exemption from pixel stability only; identity and geometry have
+            # already passed above and Controller still owns foreground scope.
+            changed = False
+            self._visual_preflight_refresh_frame_id = 0
+            decision_scope = "model_acknowledged_dynamic_pixels"
         BUS.publish(
             "visual_preflight",
             run_id=self.run_id,
@@ -5212,6 +3654,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 if target_roi is not None else None
             ),
             decision_scope=decision_scope,
+            pixel_change_ignored=bool(model_acknowledged_refresh),
+            pixel_change_observed=bool(decision_ratio > threshold),
+            pixel_stability_evaluated=True,
+            model_acknowledged_refresh=bool(model_acknowledged_refresh),
             capture_scope=capture_scope,
             capture_scope_reason=capture_scope_reason,
             capture_region=list(capture_region_tuple or ()),
@@ -5225,12 +3671,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         tool_name: str,
         args: dict[str, Any],
     ) -> dict[str, Any]:
-        """Map explicit 0..1000 frame coordinates to physical screen pixels.
+        """Map submitted-image or legacy frame coordinates to physical pixels.
 
         Native multimodal models naturally ground within the submitted image.
         Asking them to also infer JPEG resize and DPI/window offsets caused
-        repeatable misses.  The schema exposes unambiguous ``frame_*`` fields;
-        physical ``x/y`` remain available for structured/controller callers.
+        repeatable misses.  The model schema therefore exposes only exact
+        ``image_*`` pixels.  Legacy ``frame_*`` values remain a non-model
+        compatibility input; physical ``x/y`` are controller-owned.
         """
         def contains_frame_coordinate(value: Any) -> bool:
             if isinstance(value, dict):
@@ -5259,7 +3706,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "frame_x", "frame_y", "frame_x1", "frame_y1",
                 "frame_x2", "frame_y2", "frame_points", "frame_strokes",
                 "image_x", "image_y", "image_x1", "image_y1",
-                "image_x2", "image_y2", "image_points",
+                "image_x2", "image_y2", "image_points", "image_strokes",
+                "constraint_image_region", "image_region", "effect_image_region",
             }
             physical_keys = {"x", "y", "x1", "y1", "x2", "y2", "points", "strokes"}
             depends = bool(
@@ -5267,7 +3715,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 or frame_keys.intersection(values)
                 or (
                     name in {
-                        "click", "scroll", "move_mouse", "mouse_down", "mouse_up",
+                        "click", "double_click", "scroll", "move_mouse", "mouse_down", "mouse_up",
                         "drag", "draw_strokes",
                     }
                     and physical_keys.intersection(values)
@@ -5306,7 +3754,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     params = action.get("params") if isinstance(action.get("params"), dict) else {}
                     return str(action.get("button") or params.get("button") or "left").casefold()
 
-                continuous_pointer_transaction = bool(
+                balanced_pointer_transaction = bool(
                     len(down_positions) == 1
                     and len(up_positions) == 1
                     and down_positions[0] < up_positions[0]
@@ -5322,7 +3770,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     and pointer_button(spatial[down_positions[0]][0])
                     == pointer_button(spatial[up_positions[0]][0])
                 )
-                if len(spatial) > 1 and not continuous_pointer_transaction:
+                if len(spatial) > 1 and not balanced_pointer_transaction:
                     locations = ", ".join(
                         f"actions[{index}]={name}" for index, name in spatial
                     )
@@ -5417,7 +3865,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             image_source[image_y_key] = image_y
             return True
 
-        if tool_name in {"click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
+        if tool_name in {"click", "double_click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
             convert_image_pair("image_x", "image_y", "frame_x", "frame_y")
         elif tool_name == "drag":
             image_endpoint_present = any(
@@ -5443,9 +3891,17 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     raw_image_points = mapped.pop("image_points")
                     if not isinstance(raw_image_points, list):
                         raise ValueError("image_points must be an array of [x,y] pixels")
+                    compact_image_points: list[Any] = []
+                    for raw_point in raw_image_points:
+                        if not compact_image_points or raw_point != compact_image_points[-1]:
+                            compact_image_points.append(raw_point)
+                    if len(compact_image_points) > _NATIVE_DRAG_MAX_POINTS:
+                        raise ValueError(
+                            f"image_points accepts at most {_NATIVE_DRAG_MAX_POINTS} meaningful points"
+                        )
                     converted_points: list[list[float]] = []
                     original_points: list[list[float]] = []
-                    for index, raw_point in enumerate(raw_image_points):
+                    for index, raw_point in enumerate(compact_image_points):
                         if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
                             raise ValueError(f"image_points[{index}] must be [x,y]")
                         temporary = {
@@ -5473,6 +3929,96 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 raise ValueError(
                     "image_points require drag endpoints in the same submitted-image coordinate source"
                 )
+        elif tool_name == "draw_strokes" and "image_strokes" in mapped:
+            if "frame_strokes" in mapped:
+                raise ValueError(
+                    "draw_strokes received mixed submitted-image and normalized-frame coordinates"
+                )
+            raw_image_strokes = mapped.pop("image_strokes")
+            if not isinstance(raw_image_strokes, list) or not raw_image_strokes:
+                raise ValueError("image_strokes must contain at least one stroke")
+            if len(raw_image_strokes) > 16:
+                raise ValueError("image_strokes accepts at most 16 strokes")
+            converted_strokes: list[list[list[float]]] = []
+            original_strokes: list[list[list[float]]] = []
+            for stroke_index, raw_stroke in enumerate(raw_image_strokes):
+                if not isinstance(raw_stroke, list) or not (2 <= len(raw_stroke) <= 16):
+                    raise ValueError(
+                        f"image_strokes[{stroke_index}] must contain 2..16 [x,y] points"
+                    )
+                converted_stroke: list[list[float]] = []
+                original_stroke: list[list[float]] = []
+                for point_index, raw_point in enumerate(raw_stroke):
+                    if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
+                        raise ValueError(
+                            f"image_strokes[{stroke_index}][{point_index}] must be [x,y]"
+                        )
+                    temporary = {"image_x": raw_point[0], "image_y": raw_point[1]}
+                    prior = mapped
+                    mapped = temporary
+                    try:
+                        convert_image_pair(
+                            "image_x", "image_y", "frame_x", "frame_y",
+                        )
+                        converted_stroke.append([
+                            float(mapped["frame_x"]), float(mapped["frame_y"]),
+                        ])
+                        original_stroke.append([
+                            float(image_source.pop("image_x")),
+                            float(image_source.pop("image_y")),
+                        ])
+                    finally:
+                        mapped = prior
+                converted_strokes.append(converted_stroke)
+                original_strokes.append(original_stroke)
+            mapped["frame_strokes"] = converted_strokes
+            image_source["image_strokes"] = original_strokes
+        elif tool_name == "draw_strokes" and "image_strokes" in image_source:
+            raise ValueError("invalid submitted-image stroke coordinates")
+
+        if "constraint_image_region" in mapped:
+            if "constraint_frame_region" in mapped:
+                raise ValueError(
+                    f"{tool_name} received both submitted-image and normalized-frame constraints"
+                )
+            submitted = self._visual_submitted_size
+            if not submitted or submitted[0] <= 0 or submitted[1] <= 0:
+                raise ValueError(
+                    f"{tool_name} submitted-image constraint requires the current image dimensions"
+                )
+            raw_image_constraint = mapped.pop("constraint_image_region")
+            if not isinstance(raw_image_constraint, (list, tuple)) or len(raw_image_constraint) != 4:
+                raise ValueError(
+                    "constraint_image_region requires [left,top,right,bottom] pixel bounds"
+                )
+            try:
+                image_left, image_top, image_right, image_bottom = (
+                    numeric_image_value(value, "constraint_image_region")
+                    for value in raw_image_constraint
+                )
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "constraint_image_region requires numeric [left,top,right,bottom] pixel bounds"
+                ) from None
+            image_width, image_height = submitted
+            if not (
+                0.0 <= image_left < image_right <= max(0, image_width - 1)
+                and 0.0 <= image_top < image_bottom <= max(0, image_height - 1)
+            ):
+                raise ValueError(
+                    "constraint_image_region must be a positive rectangle inside the exact "
+                    f"submitted image bounds 0..{max(0, image_width - 1)} by "
+                    f"0..{max(0, image_height - 1)}"
+                )
+            mapped["constraint_frame_region"] = [
+                image_left * 1000.0 / max(1, image_width - 1),
+                image_top * 1000.0 / max(1, image_height - 1),
+                image_right * 1000.0 / max(1, image_width - 1),
+                image_bottom * 1000.0 / max(1, image_height - 1),
+            ]
+            image_source["constraint_image_region"] = [
+                image_left, image_top, image_right, image_bottom,
+            ]
         constraint_frame_region: dict[str, float] | None = None
         if "constraint_frame_region" in mapped:
             if "constraint_region" in mapped or "_constraint_region" in mapped:
@@ -5570,7 +4116,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 return mapped
             mapped_actions: list[Any] = []
             coordinate_actions = {
-                "click", "scroll", "drag", "draw_strokes", "move_mouse",
+                "click", "double_click", "scroll", "drag", "draw_strokes", "move_mouse",
                 "mouse_down", "mouse_up",
             }
 
@@ -5602,6 +4148,49 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "height": max(1, physical_bottom - physical_top),
                 }
 
+            def map_image_region(value: Any, field: str) -> dict[str, int]:
+                if not isinstance(value, dict):
+                    raise ValueError(f"{field} must be an object with x/y/width/height")
+                submitted = self._visual_submitted_size
+                if not submitted or submitted[0] <= 0 or submitted[1] <= 0:
+                    raise ValueError(
+                        f"{field} requires the exact current submitted-image dimensions"
+                    )
+                try:
+                    image_x = float(value["x"])
+                    image_y = float(value["y"])
+                    image_region_width = float(value["width"])
+                    image_region_height = float(value["height"])
+                except (KeyError, TypeError, ValueError):
+                    raise ValueError(f"{field} requires numeric x/y/width/height") from None
+                image_width, image_height = submitted
+                if (
+                    image_x < 0
+                    or image_y < 0
+                    or image_region_width <= 0
+                    or image_region_height <= 0
+                    or image_x + image_region_width > image_width
+                    or image_y + image_region_height > image_height
+                ):
+                    raise ValueError(
+                        f"{field} must be a positive rectangle inside the exact submitted "
+                        f"image size {image_width}x{image_height}"
+                    )
+                physical_left = left + int(round(image_x * width / image_width))
+                physical_top = top + int(round(image_y * height / image_height))
+                physical_right = left + int(round(
+                    (image_x + image_region_width) * width / image_width
+                ))
+                physical_bottom = top + int(round(
+                    (image_y + image_region_height) * height / image_height
+                ))
+                return {
+                    "x": physical_left,
+                    "y": physical_top,
+                    "width": max(1, physical_right - physical_left),
+                    "height": max(1, physical_bottom - physical_top),
+                }
+
             local_mutation_seen = False
             for index, action in enumerate(actions):
                 parsed = parse_atomic_action(action)
@@ -5612,9 +4201,29 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 if local_mutation_seen and name in {"click_element", "type_into_element"}:
                     action_args["_rebind_after_mutation"] = True
                 try:
+                    if "image_region" in action_args:
+                        if "frame_region" in action_args or "region" in action_args:
+                            raise ValueError(
+                                "image_region cannot be mixed with frame/physical region"
+                            )
+                        action_args["region"] = map_image_region(
+                            action_args.pop("image_region"), "image_region",
+                        )
                     if "frame_region" in action_args:
                         action_args["region"] = map_frame_region(
                             action_args.pop("frame_region"), "frame_region",
+                        )
+                    if "effect_image_region" in action_args:
+                        if (
+                            "effect_frame_region" in action_args
+                            or "effect_region" in action_args
+                        ):
+                            raise ValueError(
+                                "effect_image_region cannot be mixed with frame/physical effect region"
+                            )
+                        action_args["effect_region"] = map_image_region(
+                            action_args.pop("effect_image_region"),
+                            "effect_image_region",
                         )
                     if "effect_frame_region" in action_args:
                         action_args["effect_region"] = map_frame_region(
@@ -5704,19 +4313,22 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 joined = "/".join(physical_keys)
                 raise ValueError(
                     f"native visual {tool_name} rejected model-supplied physical {joined}; "
-                    "use the frame_* 0..1000 fields from the current authoritative frame"
+                    "use image_* pixels from the exact current authoritative full image"
                 )
 
         used = False
         source: dict[str, Any] = {}
-        if tool_name in {"click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
+        if tool_name in {"click", "double_click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
             has_frame_point = "frame_x" in mapped or "frame_y" in mapped
             if has_frame_point and any(key in mapped for key in ("x", "y")):
                 raise ValueError(
                     f"{tool_name} received mixed frame and physical coordinate sources"
                 )
-            if tool_name == "click" and has_frame_point and mapped.get("element_id") is not None:
-                raise ValueError("click received both element_id and frame coordinates; choose one grounded target")
+            if tool_name in {"click", "double_click"} and has_frame_point and mapped.get("element_id") is not None:
+                raise ValueError(
+                    f"{tool_name} received both element_id and frame coordinates; "
+                    "choose one grounded target"
+                )
             mapped_point = point("frame_x", "frame_y")
             if mapped_point is not None:
                 mapped["x"], mapped["y"] = mapped_point
@@ -5741,14 +4353,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )
                 if tool_name == "mouse_up" and pointer_status.get("active"):
                     pass
-                elif tool_name != "click" or not (
+                elif tool_name not in {"click", "double_click"} or not (
                     mapped.get("element_id") is not None
                     or any(mapped.get(key) for key in (
                         "label", "fallback_text", "role", "expected_region", "visual_anchor",
                     ))
                 ):
                     raise ValueError(
-                        f"{tool_name} requires frame_x/frame_y from the current frame"
+                        f"{tool_name} requires image_x/image_y pixels from the exact current image"
                     )
         elif tool_name == "drag":
             if any(key in mapped for key in ("frame_x1", "frame_y1", "frame_x2", "frame_y2")) \
@@ -5769,8 +4381,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     raw_points = mapped.pop("frame_points")
                     if not isinstance(raw_points, list):
                         raise ValueError("frame_points must be an array of [x,y] points")
+                    compact_points: list[Any] = []
+                    for raw_point in raw_points:
+                        if not compact_points or raw_point != compact_points[-1]:
+                            compact_points.append(raw_point)
+                    if len(compact_points) > _NATIVE_DRAG_MAX_POINTS:
+                        raise ValueError(
+                            f"frame_points accepts at most {_NATIVE_DRAG_MAX_POINTS} meaningful points"
+                        )
                     physical_points: list[list[int]] = []
-                    for index, raw_point in enumerate(raw_points):
+                    for index, raw_point in enumerate(compact_points):
                         if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
                             raise ValueError(f"frame_points[{index}] must be [x,y]")
                         temp = {"frame_x": raw_point[0], "frame_y": raw_point[1]}
@@ -5783,7 +4403,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         assert physical is not None
                         physical_points.append([physical[0], physical[1]])
                     mapped["points"] = physical_points
-                    source["frame_points"] = raw_points
+                    source["frame_points"] = compact_points
                 constraint_points = [
                     (float(source["frame_x1"]), float(source["frame_y1"])),
                     *[
@@ -5799,12 +4419,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 used = True
             else:
                 require_normalized_instead_of_physical(("x1", "y1", "x2", "y2", "points"))
-                raise ValueError("drag requires frame_x1/frame_y1 and frame_x2/frame_y2")
+                raise ValueError(
+                    "drag requires image_x1/image_y1 and image_x2/image_y2 pixels "
+                    "from the exact current image"
+                )
         elif tool_name == "draw_strokes":
             if "normalized_strokes" in mapped:
                 raise ValueError(
-                    "native visual draw_strokes rejected normalized_strokes; use frame_strokes "
-                    "from the current authoritative frame"
+                    "native visual draw_strokes rejected normalized_strokes; use image_strokes "
+                    "pixels from the exact current authoritative image"
                 )
             if "frame_strokes" in mapped:
                 if "strokes" in mapped:
@@ -5822,29 +4445,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     raw_strokes,
                 )
                 normalized_strokes: list[list[tuple[float, float]]] = []
-                surface_bounds = (
-                    self._visual_work_surface_frame_bounds
-                    if self._visual_work_surface_frame_id == self._visual_frame_id
-                    else None
-                )
-                surface_blocked_reason = (
-                    self._visual_work_surface_blocked_reason
-                    if self._visual_work_surface_blocked_frame_id
-                    == self._visual_frame_id
-                    else ""
-                )
-                if surface_blocked_reason:
-                    raise NativeFrameCoordinateError(
-                        (
-                            "The current authoritative pixels do not uniquely ground a safe "
-                            "continuous-input work surface. The action was not executed; obtain "
-                            "a fresh frame or resolve the visible overlay/layout ambiguity "
-                            f"({surface_blocked_reason})."
-                        ),
-                        work_surface_fail_closed=True,
-                        work_surface_detection_failed=True,
-                        work_surface_blocked_reason=surface_blocked_reason,
-                    )
                 for stroke_index, raw_stroke in enumerate(raw_strokes):
                     if not isinstance(raw_stroke, list) or len(raw_stroke) < 2:
                         raise ValueError(
@@ -5876,142 +4476,19 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     **structure_repair,
                     **stringified_repair,
                 }
-                if surface_bounds is not None:
-                    bound_left, bound_top, bound_right, bound_bottom = surface_bounds
-
-                    def containment(stroke: list[tuple[float, float]]) -> tuple[list[bool], int, float, bool]:
-                        inside = [
-                            bound_left <= x <= bound_right
-                            and bound_top <= y <= bound_bottom
-                            for x, y in stroke
-                        ]
-                        inside_count = sum(inside)
-                        inside_ratio = inside_count / max(1, len(stroke))
-                        return inside, inside_count, inside_ratio, bool(inside and inside[0])
-
-                    failures: list[tuple[int, int, float, bool]] = []
-                    soft_edge_tolerance_strokes: list[int] = []
-                    for stroke_index, normalized_stroke in enumerate(normalized_strokes):
-                        _inside, inside_count, inside_ratio, start_inside = containment(
-                            normalized_stroke,
-                        )
-                        within_detector_margin = all(
-                            bound_left - _NATIVE_DRAW_SURFACE_SOFT_MARGIN <= x
-                            <= bound_right + _NATIVE_DRAW_SURFACE_SOFT_MARGIN
-                            and bound_top - _NATIVE_DRAW_SURFACE_SOFT_MARGIN <= y
-                            <= bound_bottom + _NATIVE_DRAW_SURFACE_SOFT_MARGIN
-                            for x, y in normalized_stroke
-                        )
-                        soft_edge_accept = bool(
-                            start_inside
-                            and len(normalized_stroke)
-                            >= _NATIVE_DRAW_SURFACE_SOFT_MIN_POINTS
-                            and inside_ratio
-                            >= _NATIVE_DRAW_SURFACE_SOFT_MIN_POINT_RATIO
-                            and within_detector_margin
-                        )
-                        if (
-                            inside_ratio < _NATIVE_DRAW_SURFACE_MIN_POINT_RATIO
-                            and soft_edge_accept
-                        ):
-                            soft_edge_tolerance_strokes.append(stroke_index)
-                        if (
-                            not start_inside
-                            or (
-                                inside_ratio < _NATIVE_DRAW_SURFACE_MIN_POINT_RATIO
-                                and not soft_edge_accept
-                            )
-                        ):
-                            failures.append(
-                                (stroke_index, inside_count, inside_ratio, start_inside),
-                            )
-
-                    frame_preparation.update({
-                        "soft_edge_tolerance_applied": bool(
-                            soft_edge_tolerance_strokes
-                        ),
-                        "soft_edge_tolerance_strokes": soft_edge_tolerance_strokes,
-                        "soft_edge_minimum_inside_point_ratio": (
-                            _NATIVE_DRAW_SURFACE_SOFT_MIN_POINT_RATIO
-                        ),
-                        "soft_edge_margin": _NATIVE_DRAW_SURFACE_SOFT_MARGIN,
-                        "soft_edge_minimum_point_count": (
-                            _NATIVE_DRAW_SURFACE_SOFT_MIN_POINTS
-                        ),
-                    })
-
-                    if failures:
-                        fitted, fit_evidence = _fit_frame_stroke_composition_to_surface(
-                            normalized_strokes,
-                            surface_bounds,
-                        )
-                        if fitted is not None:
-                            normalized_strokes = fitted
-                            # Keep provider-normalization evidence alongside
-                            # the later shape-preserving surface fit. Otherwise
-                            # a successful fit would erase why a non-canonical
-                            # but unambiguous function argument was accepted.
-                            frame_preparation = {
-                                **frame_preparation,
-                                **fit_evidence,
-                            }
-                        else:
-                            (
-                                stroke_index,
-                                inside_count,
-                                inside_ratio,
-                                start_inside,
-                            ) = failures[0]
-                            normalized_stroke = normalized_strokes[stroke_index]
-                            raise NativeFrameCoordinateError(
-                                (
-                                    f"frame_strokes[{stroke_index}] is not contained in the "
-                                    "uniquely grounded work surface: every stroke must start "
-                                    f"inside work_surface_frame_bounds={list(surface_bounds)} "
-                                    "and every point must remain inside (long paths receive only "
-                                    f"a tiny detector-edge tolerance; start_inside={start_inside}, "
-                                    f"inside={inside_count}/{len(normalized_stroke)}, "
-                                    f"ratio={inside_ratio:.3f}). The action was not executed."
-                                ),
-                                work_surface_containment_failed=True,
-                                work_surface_frame_bounds=list(surface_bounds),
-                                stroke_index=stroke_index,
-                                stroke_start=list(normalized_stroke[0]),
-                                stroke_point_count=len(normalized_stroke),
-                                inside_point_count=inside_count,
-                                inside_point_ratio=round(inside_ratio, 6),
-                                minimum_inside_point_ratio=_NATIVE_DRAW_SURFACE_MIN_POINT_RATIO,
-                                start_inside=start_inside,
-                                composition_affine_fit=fit_evidence,
-                            )
-
                 require_points_inside_constraint(
                     [point for stroke in normalized_strokes for point in stroke],
                     source_name="frame_strokes",
                 )
-                simplified_strokes = [
-                    _simplify_dense_frame_stroke(stroke)
-                    for stroke in normalized_strokes
-                ]
                 input_point_count = sum(len(stroke) for stroke in normalized_strokes)
-                execution_point_count = sum(len(stroke) for stroke in simplified_strokes)
                 frame_preparation.update({
                     "input_point_count": input_point_count,
-                    "execution_point_count": execution_point_count,
-                    "points_simplified": input_point_count - execution_point_count,
-                    "simplification": (
-                        "near_collinear_rdp"
-                        if execution_point_count < input_point_count
-                        else "not_needed"
-                    ),
-                    "simplification_tolerance_frame_units": (
-                        _NATIVE_DRAW_SIMPLIFY_TOLERANCE
-                        if execution_point_count < input_point_count
-                        else 0.0
-                    ),
+                    "execution_point_count": input_point_count,
+                    "points_simplified": 0,
+                    "simplification": "disabled_model_authored_path_preserved",
                 })
                 physical_strokes: list[list[list[int]]] = []
-                for normalized_stroke in simplified_strokes:
+                for normalized_stroke in normalized_strokes:
                     physical_stroke: list[list[int]] = []
                     for normalized_x, normalized_y in normalized_stroke:
                         temp = {"frame_x": normalized_x, "frame_y": normalized_y}
@@ -6030,7 +4507,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 used = True
             else:
                 require_normalized_instead_of_physical(("strokes",))
-                raise ValueError("draw_strokes requires frame_strokes from the current frame")
+                raise ValueError(
+                    "draw_strokes requires image_strokes pixels from the exact current image"
+                )
         if used:
             if constraint_frame_region is not None:
                 source["constraint_frame_region"] = dict(
@@ -6103,18 +4582,43 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self._escalate_next = False
             esc = CONFIG.get("agent", "escalation_model", default="")
             if esc:
-                logger.info("本步升级到更强模型: %s", esc)
-                model = esc
+                escalation_profile = model_profile_from_config({
+                    **api,
+                    "model": esc,
+                })
+                if (
+                    self._native_visual_context_enabled()
+                    and not escalation_profile.supports_vision
+                ):
+                    logger.warning(
+                        "跳过不支持视觉的升级模型 %s；当前决策包含权威 GUI 图像",
+                        esc,
+                    )
+                else:
+                    logger.info("本步升级到更强模型: %s", esc)
+                    model = esc
             else:
                 logger.warning("卡住需升级模型，但 agent.escalation_model 未配置，仍用 %s", model)
 
-        thinking_mode = self._native_visual_thinking_mode_for_decision(model)
+        # Reasoning policy comes from the selected model/provider configuration.
+        # Do not infer it from task words or silently compile one visual task
+        # class into a different model mode.
+        thinking_mode = None
         # A GUI truncation recovery must emit one complete real function call.
         # Hidden reasoning competes with its structured argument budget, so
         # recovery is explicitly non-thinking even though it keeps enough
         # output room for a concise multi-path gesture.
         if gui_tool_recovery_request:
             thinking_mode = "disabled"
+        elif (
+            self._native_visual_context_enabled()
+            and CONFIG.get(
+                "controller", "native_visual_thinking", default=True,
+            )
+            and model_profile_from_config({**api, "model": model})
+            .disables_thinking_by_default
+        ):
+            thinking_mode = "enabled"
         configured_thinking = api.get("thinking")
         configured_thinking_enabled = bool(
             configured_thinking is True
@@ -6171,6 +4675,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         "messages": self.messages,
                         "tools": tools,
                     }
+                    if gui_tool_recovery_request and tools:
+                        request_params["tool_choice"] = "required"
                     if thinking_enabled:
                         request_params["max_completion_tokens"] = request_max_tokens
                     else:
@@ -6268,13 +4774,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self.messages.append({
                 "role": "user",
                 "content": (
-                    "Your previous GUI response hit the output limit without issuing a real "
-                    "function tool call. Reply now with exactly one real tool call and no XML, "
-                    "pseudo-tool markup, or prose coordinate dump. If the call uses pointer "
-                    "paths, use at most 12 independent paths and at most 12 points per path; "
-                    "include only endpoints and meaningful turns, never regularly spaced "
-                    "samples. Submit one useful coherent part now and split later work across "
-                    "fresh verified turns."
+                    "The previous response was truncated before a valid action. "
+                    "Issue one available function call for the current frame."
                 ),
             })
             BUS.publish(
@@ -6308,6 +4809,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             reasoning="",
         )
         return False
+
+    @staticmethod
+    def _tool_calls_have_complete_arguments(tool_calls) -> bool:
+        """Whether every emitted function call has one complete JSON object."""
+
+        if not tool_calls:
+            return False
+        for tool_call in tool_calls:
+            try:
+                arguments = json.loads(tool_call.function.arguments or "{}")
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                return False
+            if not isinstance(arguments, dict):
+                return False
+        return True
 
     def _track_usage(self, resp) -> None:
         api = CONFIG.get("api", default={})
@@ -6401,7 +4917,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         targets = [
             *_visible_state_targets(self.task),
             *_required_visible_payloads(self.task),
-            *_required_literal_tokens(self.task),
         ]
         plan = getattr(self.session, "plan", None)
         for step in (getattr(plan, "steps", None) or []):
@@ -6596,277 +5111,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 value,
                 f"verified expect text appeared: {value}",
             )
-
-    @staticmethod
-    def _strong_auto_done_target(target: str) -> bool:
-        value = str(target or "").strip()
-        if len(value) < 4:
-            return False
-        return (
-            "_" in value
-            or any(ch.isdigit() for ch in value)
-            or (len(value) >= 6 and value.upper() == value and any(ch.isalpha() for ch in value))
-        )
-
-    def _auto_done_visible_targets(self) -> list[str]:
-        if _is_arithmetic_task(self.task):
-            return []
-        return [
-            target
-            for target in self._visible_evidence_targets()
-            if self._strong_auto_done_target(target)
-        ]
-
-    @staticmethod
-    def _auto_done_evidence_source(source: str) -> bool:
-        return source in {"observe", "read_text", "execute_subgoal:evidence_packet"} or source in {
-            "run_action_batch:observe",
-            "run_action_batch:read_text",
-        }
-
-    def _visible_targets_proven_by_controller_evidence(self, targets: list[str]) -> tuple[bool, list[str]]:
-        seen = {
-            self._normalize_visible_text(str(item.get("target") or ""))
-            for item in self._visible_evidence_ledger
-            if self._auto_done_evidence_source(str(item.get("source") or ""))
-        }
-        missing = [
-            target
-            for target in targets
-            if self._normalize_visible_text(target) not in seen
-        ]
-        return not missing, missing
-
-    @staticmethod
-    def _controller_observation_text(result_text: str) -> str:
-        """Extract only post-action observe/read_text evidence from a batch."""
-        try:
-            payload = json.loads(result_text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return ""
-        if not isinstance(payload, dict):
-            return ""
-        parts: list[str] = []
-        packet = payload.get("evidence_packet")
-        if isinstance(packet, dict):
-            visible = str(packet.get("visible_text_preview") or "").strip()
-            if visible:
-                parts.append(visible)
-        for item in payload.get("results") or []:
-            if not isinstance(item, dict) or item.get("action") not in {"observe", "read_text"}:
-                continue
-            text = str(item.get("full_text") or item.get("preview") or "").strip()
-            if text:
-                parts.append(text)
-        return "\n".join(parts)
-
-    @staticmethod
-    def _controller_has_successful_mutation(result_text: str) -> bool:
-        try:
-            payload = json.loads(result_text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return False
-        if not isinstance(payload, dict):
-            return False
-        mutation_actions = {
-            "click", "click_element", "type_text", "type_into_element", "hotkey",
-            "drag", "draw_strokes", "scroll", "clipboard_paste", "select_color",
-        }
-        return any(
-            isinstance(item, dict)
-            and item.get("action") in mutation_actions
-            and item.get("ok") is True
-            for item in (payload.get("results") or [])
-        )
-
-    def _maybe_auto_done_from_visible_evidence(
-        self,
-        tool_name: str,
-        result: ToolResult,
-        ledger_len_before: int,
-    ) -> ToolResult:
-        if self._is_coding or result.terminal:
-            return result
-        if tool_name not in {"observe", "read_text", "execute_subgoal", "run_action_batch"}:
-            return result
-        if _is_arithmetic_task(self.task):
-            if tool_name in {"execute_subgoal", "run_action_batch"}:
-                mutation_seen = self._controller_has_successful_mutation(result.text)
-            else:
-                mutation_seen = any(
-                    (
-                        history_tool in {"execute_subgoal", "run_action_batch"}
-                        and self._controller_has_successful_mutation(history_text)
-                    )
-                    or (
-                        history_tool in {"type_text", "hotkey", "click"}
-                        and '"ok": true' in str(history_text or "").casefold()
-                    )
-                    for history_tool, _history_args, history_text in self._tool_history
-                )
-            if mutation_seen:
-                # Observe/read_text already carry the newly sampled state.  A
-                # controller result needs an independent fresh sample because
-                # its compact packet may omit the display value.
-                if tool_name in {"observe", "read_text"}:
-                    screen = result.text
-                else:
-                    screen = self._controller_observation_text(result.text)
-                    if not screen:
-                        screen = self._fresh_done_screen()
-                arithmetic_verdict = _deterministic_arithmetic_verdict(
-                    self.task,
-                    screen,
-                )
-                if arithmetic_verdict is not None and arithmetic_verdict[0]:
-                    reason = arithmetic_verdict[1]
-                    self.run_state.accept_verification(tool_name, reason)
-                    BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
-                    try:
-                        arithmetic_payload = json.loads(result.text or "{}")
-                    except (json.JSONDecodeError, TypeError):
-                        arithmetic_payload = {}
-                    if not isinstance(arithmetic_payload, dict):
-                        arithmetic_payload = {}
-                    arithmetic_payload["auto_done"] = {
-                        "ok": True,
-                        "reason": reason,
-                        "source": "deterministic_fresh_arithmetic",
-                    }
-                    if tool_name in {"observe", "read_text"}:
-                        arithmetic_payload["fresh_evidence_preview"] = screen[:1000]
-                    BUS.publish(
-                        "agent_auto_done_candidate",
-                        run_id=self.run_id,
-                        tool=tool_name,
-                        reason=reason,
-                    )
-                    return ToolResult(
-                        json.dumps(arithmetic_payload, ensure_ascii=False, default=str),
-                        is_observe=result.is_observe,
-                        terminal="done",
-                        summary=result.summary,
-                        replay=result.replay,
-                        image_b64=result.image_b64,
-                    )
-        parsed_payload: dict[str, Any] = {}
-        if tool_name in {"execute_subgoal", "run_action_batch"}:
-            try:
-                parsed_payload = json.loads(result.text or "{}")
-            except (json.JSONDecodeError, TypeError):
-                parsed_payload = {}
-            if (
-                isinstance(parsed_payload, dict)
-                and parsed_payload.get("ok") is True
-                and parsed_payload.get("verified") is True
-                and parsed_payload.get("saved_paths")
-            ):
-                _recent, artifact_evidence = self._done_evidence()
-                artifact_screen = self._fresh_done_screen()
-                artifact_verdict = self._deterministic_saved_file_verdict(
-                    artifact_screen,
-                    artifact_evidence,
-                )
-                if artifact_verdict is not None and artifact_verdict[0]:
-                    reason = artifact_verdict[1]
-                    self.run_state.accept_verification(tool_name, reason)
-                    BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
-                    parsed_payload["auto_done"] = {
-                        "ok": True,
-                        "reason": reason,
-                        "source": "deterministic_saved_artifact",
-                    }
-                    BUS.publish(
-                        "agent_auto_done_candidate",
-                        run_id=self.run_id,
-                        tool=tool_name,
-                        reason=reason,
-                    )
-                    return ToolResult(
-                        json.dumps(parsed_payload, ensure_ascii=False, default=str),
-                        is_observe=result.is_observe,
-                        terminal="done",
-                        summary=result.summary,
-                        replay=result.replay,
-                        image_b64=result.image_b64,
-                    )
-            if (
-                not isinstance(parsed_payload, dict)
-                or parsed_payload.get("ok") is not True
-                or parsed_payload.get("verified") is not True
-            ):
-                return result
-        new_entries = self._visible_evidence_ledger[ledger_len_before:]
-        if not any(
-            self._auto_done_evidence_source(str(item.get("source") or ""))
-            for item in new_entries
-        ):
-            return result
-        targets = self._auto_done_visible_targets()
-        if not targets:
-            return result
-        proven, missing = self._visible_targets_proven_by_controller_evidence(targets)
-        if not proven:
-            self._trace_debug("auto_done_visible_evidence_wait", {
-                "run_id": self.run_id,
-                "tool": tool_name,
-                "targets": targets,
-                "missing": missing,
-            })
-            return result
-        explicit_paths = _explicit_saved_paths(self.task)
-        if explicit_paths:
-            missing_paths: list[str] = []
-            for path in explicit_paths:
-                try:
-                    if (
-                        not path.is_file()
-                        or path.stat().st_size <= 0
-                        or path.stat().st_mtime < self._started_wall_time - 2.0
-                    ):
-                        missing_paths.append(str(path))
-                except OSError:
-                    missing_paths.append(str(path))
-            if missing_paths:
-                self._trace_debug("auto_done_output_file_wait", {
-                    "run_id": self.run_id,
-                    "tool": tool_name,
-                    "targets": targets,
-                    "missing_paths": missing_paths,
-                })
-                return result
-        payload = {
-            "ok": True,
-            "auto_done": True,
-            "reason": "all strong task-visible targets were proven by real observe/read_text/controller evidence",
-            "targets": targets,
-        }
-        try:
-            original = json.loads(result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            original = {}
-        if isinstance(original, dict):
-            original["auto_done"] = payload
-            text = json.dumps(original, ensure_ascii=False, default=str)
-        else:
-            text = json.dumps(payload, ensure_ascii=False, default=str)
-        BUS.publish(
-            "agent_auto_done_candidate",
-            run_id=self.run_id,
-            tool=tool_name,
-            targets=targets,
-            reason=payload["reason"],
-        )
-        self.run_state.accept_verification(tool_name, payload["reason"])
-        BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
-        return ToolResult(
-            text,
-            is_observe=result.is_observe,
-            terminal="done",
-            summary=result.summary,
-            replay=result.replay,
-            image_b64=result.image_b64,
-        )
 
     @staticmethod
     def _compact_visual_summary(summary: Any) -> Any:
@@ -7118,10 +5362,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     (item for item in plan_items if not item["done"]),
                     None,
                 )
-            compact["guidance"] = (
-                "continue with next_unfinished; combine obvious adjacent drawing/click routines "
-                "in one execute_subgoal when possible; do not revise_plan just to restate the same todo"
-            )
             return json.dumps(compact, ensure_ascii=False, default=str)[:1000]
         visual_compaction_tools = {
             "execute_subgoal", "run_action_batch", "draw_strokes", "drag",
@@ -7503,22 +5743,36 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         screen-sync, anchor upgrades, and needs-observe feedback even when the
         model did not explicitly call run_action_batch.
         """
-        if tool_name not in {
+        # Every model-authored GUI mutation enters through the same Controller
+        # transaction, including actions that carry an explicit expectation.
+        # ToolSession remains the raw device adapter used *by* Controller; it
+        # must not be a second model-facing action path.
+        return tool_name in {
             "click",
+            "double_click",
+            "click_element",
             "type_text",
+            "type_into_element",
             "hotkey",
             "scroll",
+            "move_mouse",
+            "mouse_down",
+            "mouse_up",
+            "hold_key",
             "focus_window",
+            "clipboard_paste",
             "draw_strokes",
             "drag",
-        }:
-            return False
-        return not isinstance(args.get("expect"), dict)
+        }
 
     @staticmethod
     def _normalise_fast_wrapped_action(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         payload = dict(args)
-        payload["action"] = tool_name
+        if tool_name == "double_click":
+            payload["action"] = "click"
+            payload["double"] = True
+        else:
+            payload["action"] = tool_name
         return payload
 
     @staticmethod
@@ -7540,6 +5794,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         action_aliases = {tool_name}
         if tool_name == "click":
             action_aliases.add("click_element")
+        elif tool_name == "double_click":
+            action_aliases.add("click")
         if tool_name == "type_text":
             action_aliases.add("type_into_element")
         source_child = next((item for item in children if item.get("action") in action_aliases), {})
@@ -7611,1775 +5867,17 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     def _dispatch_with_fast_visual_wrap(self, tool_name: str, args: dict[str, Any]) -> ToolResult:
         if not self._should_fast_wrap_visual_action(tool_name, args):
             return self.session.dispatch(tool_name, args)
-        save_path = str(args.get("text") or "").strip()
-        file_dialog_path = bool(
-            tool_name == "type_text"
-            and self._looks_like_absolute_output_path(save_path)
-            and self._file_dialog_is_active()
-        )
-        if file_dialog_path:
-            actions = [{
-                "action": "type_into_element",
-                "text": save_path,
-                "clear": True,
-                "expected_region": "bottom",
-                "upgraded_from": "type_text",
-            }]
-            actions.extend([
-                {
-                    "action": "hotkey",
-                    "keys": ["Enter"],
-                    "expect": {"file_exists": save_path},
-                },
-                {"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0},
-            ])
-        else:
-            actions = [self._normalise_fast_wrapped_action(tool_name, args)]
         batch_args = {
-            "actions": actions,
+            "actions": [self._normalise_fast_wrapped_action(tool_name, args)],
         }
-        if len(actions) > 1:
-            batch_args["subgoal"] = f"Submit file dialog path and verify saved output: {save_path}"
         if tool_name in {"draw_strokes", "drag"}:
             batch_args["sync"] = False
         batch_result = self.session.dispatch("run_action_batch", batch_args)
         return self._fast_wrapped_result(tool_name, args, batch_result)
 
-    @staticmethod
-    def _looks_like_absolute_output_path(value: str) -> bool:
-        text = str(value or "").strip().strip('"')
-        return bool(
-            re.match(r"^[A-Za-z]:[\\/]", text)
-            and re.search(r"\.[A-Za-z0-9]{1,8}$", text)
-        )
 
-    def _file_dialog_is_active(self) -> bool:
-        snapshot = getattr(self.session, "snapshot", None)
-        if snapshot is None:
-            return False
-        title = str(getattr(snapshot, "title", "") or "").casefold()
-        texts = [
-            str(getattr(element, "text", "") or "").casefold()
-            for element in (getattr(snapshot, "elements", None) or [])
-            if str(getattr(element, "text", "") or "").strip()
-        ]
-        combined = "\n".join(texts)
-        title_match = any(marker in title for marker in (
-            "save as", "另存为", "保存为", "open file", "打开文件",
-        ))
-        filename_field = any(marker in combined for marker in (
-            "file name", "filename", "文件名称", "文件名",
-        ))
-        submit_control = any(marker in combined for marker in (
-            "save", "保存", "另存为",
-        ))
-        return title_match or (filename_field and submit_control)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    @staticmethod
-    def _looks_like_spreadsheet_task(task: str) -> bool:
-        text = str(task or "")
-        return bool(re.search(
-            r"\b(?:spreadsheet|workbook|worksheet|cells?|cell\s+range)\b|"
-            r"工作簿|工作表|表格|单元格|"
-            r"=[A-Z]{1,3}\d+\s*[*+\-/]|=SUM\s*\(",
-            text,
-            re.IGNORECASE,
-        ))
-
-    @staticmethod
-    def _document_format_specs(task: str) -> list[dict[str, Any]]:
-        return [dict(spec) for spec in _task_document_format_specs(task)]
-
-    @staticmethod
-    def _exact_document_text_block(task: str) -> str:
-        return _task_exact_document_text_block(task)
-
-    def _maybe_upgrade_execute_subgoal_document_input(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        if tool_name != "execute_subgoal":
-            return args
-        if self._looks_like_spreadsheet_task(self.task):
-            return args
-        input_spec = args.get("input") if isinstance(args.get("input"), dict) else {}
-        if (
-            input_spec
-            and input_spec.get("clear", input_spec.get("replace", True)) is False
-        ):
-            # Explicit append/preserve semantics are authoritative. Never
-            # rewrite them into the exact-document replacement routine, whose
-            # physical contract begins with Ctrl+A and Backspace.
-            return args
-        intent_scope = json.dumps({
-            "subgoal": args.get("subgoal"),
-            "click": args.get("click"),
-            "clicks": args.get("clicks"),
-            "input_label": input_spec.get("label") or input_spec.get("role"),
-        }, ensure_ascii=False, default=str).casefold()
-        blank_document_ready = bool(getattr(self.session, "_new_blank_applied", False))
-        mistaken_blank_navigation = bool(
-            blank_document_ready
-            and re.search(
-                r"\b(?:new|blank|create|document\s+title|title\s+field|template)\b|"
-                r"新建|空白|创建|文档标题|标题栏|模板",
-                intent_scope,
-                re.IGNORECASE,
-            )
-        )
-        if not input_spec and not mistaken_blank_navigation and not re.search(
-            r"\b(?:type|input|enter|write)\b|\u8f93\u5165|\u952e\u5165|\u5199\u5165|\u5f55\u5165",
-            intent_scope,
-        ):
-            return args
-        block = self._exact_document_text_block(self.task)
-        if not block:
-            return args
-        supplied_text = str(
-            input_spec.get("text")
-            or input_spec.get("value")
-            or input_spec.get("text_input")
-            or ""
-        )
-        input_label = str(input_spec.get("label") or input_spec.get("role") or "").casefold()
-        block_lines = [line for line in block.splitlines() if line.strip()]
-        supplied_lines = [line for line in supplied_text.splitlines() if line.strip()]
-        normalize_line = lambda value: re.sub(
-            r"[\s\.,;:!?。；：！？、]+$",
-            "",
-            str(value or "").strip().casefold(),
-        )
-        normalized_block_lines = {normalize_line(line) for line in block_lines if normalize_line(line)}
-        normalized_supplied_lines = {
-            normalize_line(line) for line in supplied_lines if normalize_line(line)
-        }
-        line_overlap = len(normalized_block_lines & normalized_supplied_lines)
-        supplied_matches_block = bool(
-            supplied_text
-            and block_lines
-            and (
-                (
-                    block_lines[0] in supplied_text
-                    and block_lines[-1] in supplied_text
-                )
-                or (
-                    len(block_lines) >= 2
-                    and line_overlap / len(block_lines) >= 0.6
-                )
-            )
-        )
-        document_label = bool(re.search(
-            r"\b(?:document|body|editor|page)\b|\u6587\u6863|\u6b63\u6587|\u7f16\u8f91\u533a|\u9875\u9762",
-            input_label,
-        ))
-        home_multiline_document_input = bool(
-            getattr(self.session, "_document_surface_ready", None) is False
-            and len(supplied_lines) >= 2
-            and block_lines
-            and normalize_line(block_lines[0]) == normalize_line(supplied_lines[0])
-        )
-        if input_spec and not (
-            supplied_matches_block or document_label or home_multiline_document_input
-        ):
-            return args
-        lines = block_lines
-        upgraded: dict[str, Any] = {
-            "subgoal": "Enter the user's exact paragraph block into the focused document surface.",
-            "input": {
-                "text": block,
-                "document_surface": True,
-                "clear": True,
-            },
-            "verify_texts": list(dict.fromkeys([
-                *lines[:1],
-                *[line for line in lines if re.search(r"[A-Za-z]+[_-][A-Za-z0-9_-]+|\d{3,}", line)],
-                *lines[-1:],
-            ]))[:4],
-            "constraints": {"wait": True},
-        }
-        if isinstance(args.get("target_window"), dict):
-            upgraded["target_window"] = dict(args["target_window"])
-        self._trace_debug("execute_subgoal_document_input_auto_upgraded", {
-            "run_id": self.run_id,
-            "original": args,
-            "upgraded": upgraded,
-            "line_count": len(lines),
-        })
-        return upgraded
-
-    def _maybe_upgrade_pending_clipboard_replace(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        if tool_name not in {"execute_subgoal", "run_action_batch"}:
-            return args
-
-        # Cheap models often arrive in the destination editor and then keep
-        # clicking its body or Find menu. Recover the pending cross-app
-        # delivery from observable GUI history: each successful Ctrl+C opens
-        # one delivery and each controller replacement consumes one. The
-        # target tokens still come from the user's task, not an app rule.
-        task_tokens = _clipboard_target_tokens(self.task)
-        successful_copy_events = 0
-        copied_fingerprints: set[str] = set()
-        completed_deliveries = 0
-        for history_tool, history_args, history_text in self._tool_history:
-            try:
-                history_payload = json.loads(history_text or "{}")
-            except (json.JSONDecodeError, TypeError):
-                history_payload = {}
-            history_ok = not isinstance(history_payload, dict) or history_payload.get("ok", True)
-            candidate_actions: list[dict[str, Any]] = []
-            if history_tool == "hotkey":
-                candidate_actions.append(history_args)
-            elif history_tool == "run_action_batch":
-                candidate_actions.extend(
-                    action for action in (history_args.get("actions") or [])
-                    if isinstance(action, dict) and action.get("action") == "hotkey"
-                )
-            for action in candidate_actions:
-                action_args = dict(action.get("params") or {})
-                action_args.update({key: value for key, value in action.items() if key != "params"})
-                keys = {
-                    str(key).strip().lower()
-                    for key in (action_args.get("keys") or [])
-                }
-                if (
-                    history_ok
-                    and "c" in keys
-                    and keys.intersection({"ctrl", "control", "ctl"})
-                ):
-                    successful_copy_events += 1
-                    copied_fingerprints.update(_clipboard_fingerprints(history_payload))
-            if "clipboard_replace_applied" in (history_text or ""):
-                if isinstance(history_payload, dict) and history_payload.get("clipboard_replace_applied"):
-                    completed_deliveries += 1
-        successful_copies = (
-            len(copied_fingerprints) if copied_fingerprints else successful_copy_events
-        )
-
-        semantic = json.dumps({
-            "subgoal": args.get("subgoal"),
-            "click": args.get("click"),
-            "actions": args.get("actions"),
-        }, ensure_ascii=False, default=str)
-        destination_interaction = bool(re.search(
-            r"document|editor|editing\s+area|body|find|replace|"
-            r"文档|编辑|正文|查找|替换|点击",
-            semantic,
-            re.IGNORECASE,
-        ))
-        source_interaction = bool(re.search(
-            r"address\s*bar|browser|navigate|url|copy|ctrl.?[lc]|"
-            r"地址栏|浏览器|导航|复制",
-            semantic,
-            re.IGNORECASE,
-        ))
-        history_pending = (
-            bool(task_tokens)
-            and successful_copies > completed_deliveries
-            and completed_deliveries < len(task_tokens)
-            and destination_interaction
-            and not source_interaction
-        )
-
-        plan = getattr(self.session, "plan", None)
-        steps = getattr(plan, "steps", None)
-        pending = next(
-            (step for step in steps if not step.get("done")),
-            None,
-        ) if isinstance(steps, list) else None
-        goal = str(pending.get("goal") or "") if isinstance(pending, dict) else ""
-        token_match = re.search(r"\[\[[^\]\r\n]{1,100}\]\]", goal)
-        plan_pending = bool(
-            token_match
-            and re.search(r"\breplac(?:e|ing)\b|\bpaste\b|替换|粘贴", goal, re.IGNORECASE)
-            and any(
-                bool(step.get("done"))
-                and re.search(r"\bcopy\b|复制", str(step.get("goal") or ""), re.IGNORECASE)
-                for step in (steps or [])
-            )
-        )
-        only_focuses_editor = bool(re.search(
-            r"document\s+(?:editing\s+)?(?:area|body|editor)|"
-            r"editing\s+area|focus.{0,30}document|"
-            r"文档编辑区|正文|聚焦.{0,20}文档|点击.{0,20}文档",
-            semantic,
-            re.IGNORECASE,
-        )) and not re.search(
-            r"\breplac(?:e|ing)\b|替换|\bclipboard\b|剪贴板",
-            semantic,
-            re.IGNORECASE,
-        )
-        if not history_pending and not (plan_pending and only_focuses_editor):
-            return args
-        token = task_tokens[completed_deliveries] if history_pending else token_match.group(0)
-        upgraded: dict[str, Any] = {
-            "subgoal": f"Use GUI Find and Replace to replace {token} with the current clipboard content",
-        }
-        if isinstance(args.get("target_window"), dict):
-            upgraded["target_window"] = dict(args["target_window"])
-        if tool_name == "run_action_batch":
-            upgraded["actions"] = list(args.get("actions") or [])
-            upgraded["semantic_override"] = "clipboard_replace"
-        self._trace_debug("pending_clipboard_replace_auto_upgraded", {
-            "run_id": self.run_id,
-            "original": args,
-            "pending_goal": goal,
-            "clipboard_copies": successful_copies,
-            "completed_deliveries": completed_deliveries,
-            "history_pending": history_pending,
-            "upgraded": upgraded,
-        })
-        return upgraded
-
-    def _maybe_upgrade_execute_subgoal_formats(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        if tool_name not in {"execute_subgoal", "run_action_batch"} or args.get("format") or args.get("formats"):
-            return args
-        if self._looks_like_spreadsheet_task(self.task):
-            return args
-        if any(args.get(key) for key in ("input", "draw", "draws")):
-            return args
-        if (
-            args.get("verify_texts")
-            and not any(args.get(key) for key in ("click", "clicks", "format", "formats"))
-            and re.search(
-                r"\b(?:verify|confirm|check)\b|\u9a8c\u8bc1|\u6838\u9a8c|\u786e\u8ba4|\u68c0\u67e5",
-                str(args.get("subgoal") or "").casefold(),
-            )
-        ):
-            return args
-        formats = self._document_format_specs(self.task)
-        if not formats:
-            return args
-        # Ctrl+B is a toggle, not an idempotent setter. When an existing DOCX
-        # is the explicit target, inspect its current direct formatting and do
-        # not flip bold off when the requested state is already satisfied.
-        for path in _explicit_saved_paths(self.task):
-            try:
-                if path.suffix.casefold() != ".docx" or not path.is_file():
-                    continue
-                _text, paragraphs, package_error = _docx_document_evidence(path)
-            except OSError:
-                continue
-            if package_error or not paragraphs or paragraphs[0].get("bold_all") is not True:
-                continue
-            for spec in formats:
-                if str(spec.get("range") or "").casefold() == "first_line":
-                    spec.pop("bold", None)
-            break
-        click_spec = args.get("click") if isinstance(args.get("click"), dict) else {}
-        click_specs = args.get("clicks") if isinstance(args.get("clicks"), list) else []
-        model_scope = json.dumps({
-            "subgoal": args.get("subgoal"),
-            "click_label": click_spec.get("label") or click_spec.get("text") or click_spec.get("name"),
-            "click_labels": [
-                item.get("label") or item.get("text") or item.get("name")
-                for item in click_specs
-                if isinstance(item, dict)
-            ],
-        }, ensure_ascii=False, default=str).casefold()
-        if not re.search(
-            r"\b(?:format(?:ting|ted)?|bold|italic|align|center|centre|justify|heading|title)\b|"
-            r"\bfirst\s+(?:line|paragraph)\b|"
-            r"\u683c\u5f0f|\u52a0\u7c97|\u659c\u4f53|\u5bf9\u9f50|\u5c45\u4e2d|\u4e24\u7aef\u5bf9\u9f50|"
-            r"\u6807\u9898|\u7b2c\u4e00(?:\u884c|\u6bb5)|\u9996(?:\u884c|\u6bb5)",
-            model_scope,
-            re.IGNORECASE,
-        ):
-            return args
-        navigation_without_format = bool(re.search(
-            r"\b(?:new|create|open|launch|blank|template|save\s+as)\b|"
-            r"\u65b0\u5efa|\u521b\u5efa|\u6253\u5f00|\u542f\u52a8|\u7a7a\u767d|\u6a21\u677f|\u53e6\u5b58\u4e3a",
-            model_scope,
-        ))
-        new_document_tab = bool(
-            re.search(r"\btab\b|\u9009\u9879\u5361", model_scope)
-            and re.search(
-                r"\b(?:new|blank|document|template)\b|\u65b0\u5efa|\u7a7a\u767d|\u6587\u6863|\u6a21\u677f",
-                model_scope,
-            )
-            and not re.search(
-                r"\b(?:format(?:ting)?|bold|center|align)\b|\u683c\u5f0f|\u52a0\u7c97|\u5c45\u4e2d|\u5bf9\u9f50",
-                model_scope,
-            )
-        )
-        if navigation_without_format or new_document_tab:
-            return args
-        if re.search(
-            r"\b(?:type|input|enter|write|insert|paste)\b|"
-            r"\u8f93\u5165|\u952e\u5165|\u5199\u5165|\u5f55\u5165|\u63d2\u5165|\u7c98\u8d34",
-            model_scope,
-        ):
-            return args
-        if not re.search(
-            r"\b(?:format(?:ting)?|bold|center|align|heading|title|first\s+(?:line|paragraph)|body)\b|"
-            r"\u683c\u5f0f|\u52a0\u7c97|\u5c45\u4e2d|\u5bf9\u9f50|"
-            r"\u7b2c\u4e00(?:\u884c|\u6bb5)|\u9996(?:\u884c|\u6bb5)|\u6b63\u6587|\u6807\u9898|"
-            r"\u540e(?:\u7eed|\u9762|\u4e09)?\u6bb5|\u5176\u4ed6\u6bb5\u843d",
-            model_scope,
-        ):
-            return args
-        save_after = bool(re.search(
-            r"\b(?:save|ctrl\s*\+\s*s)\b|\u4fdd\u5b58",
-            str(self.task or "").casefold(),
-        ))
-        save_as_requested = bool(re.search(
-            r"\bsave\s+as\b|\u53e6\u5b58\u4e3a|\u53e6\u5b58",
-            str(self.task or "").casefold(),
-        ))
-        save_path = ""
-        if save_as_requested:
-            explicit_paths = _explicit_saved_paths(self.task)
-            if explicit_paths:
-                save_path = str(explicit_paths[0])
-        upgraded = {
-            "subgoal": "Apply all explicitly requested document text formatting in one local routine.",
-            "formats": formats,
-            "constraints": {
-                "wait": bool(save_after),
-                "save_after": bool(save_after),
-            },
-        }
-        if save_path:
-            upgraded["constraints"]["save_path"] = save_path
-        if tool_name == "run_action_batch":
-            # Preserve a non-empty actions array for schema compatibility, but
-            # FastToolMixin will replace these fragile model-authored cursor
-            # movements with the semantic formats above before execution.
-            upgraded["actions"] = list(args.get("actions") or [])
-            upgraded["semantic_override"] = "document_format"
-        if isinstance(args.get("target_window"), dict):
-            upgraded["target_window"] = dict(args["target_window"])
-        self._trace_debug("execute_subgoal_format_auto_upgraded", {
-            "run_id": self.run_id,
-            "original": args,
-            "upgraded": upgraded,
-        })
-        return upgraded
-
-    def _maybe_deliver_clipboard_after_focus(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        result: ToolResult,
-    ) -> ToolResult:
-        """Continue a pending GUI copy into a named destination document.
-
-        This sits below planner/tool-choice quality. A model may choose a bare
-        focus_window followed by dozens of clicks instead of execute_subgoal;
-        once the requested destination document is foreground, the controller
-        can safely consume the already copied clipboard value itself.
-        """
-        if tool_name != "focus_window":
-            return result
-        try:
-            payload = json.loads(result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return result
-        if not isinstance(payload, dict) or not payload.get("ok"):
-            return result
-        focus_data = payload
-        title = str(payload.get("title") or payload.get("foreground_title") or "")
-        if not title:
-            for item in payload.get("results") or []:
-                if not isinstance(item, dict):
-                    continue
-                data = item.get("data")
-                if not isinstance(data, dict):
-                    continue
-                candidate_title = str(
-                    data.get("title")
-                    or data.get("foreground_title")
-                    or (data.get("post_state") or {}).get("foreground_title")
-                    or ""
-                )
-                if candidate_title:
-                    focus_data = data
-                    title = candidate_title
-                    break
-        named_targets = re.findall(
-            r"[A-Za-z0-9_.-]+\.(?:docx?|xlsx?|pptx?|odt|ods|rtf|txt|md|csv)",
-            self.task,
-            re.IGNORECASE,
-        )
-        if not title or not any(name.casefold() in title.casefold() for name in named_targets):
-            return result
-        hwnd = focus_data.get("hwnd") or payload.get("hwnd") or args.get("hwnd")
-        candidate = {
-            "subgoal": "Focus the destination document editor for the pending clipboard delivery",
-            "target_window": {"hwnd": hwnd} if hwnd else {},
-            # The semantic override replaces this placeholder action before
-            # controller execution; a non-empty batch satisfies the external
-            # tool contract without relying on natural-language-only routing.
-            "actions": [{"action": "observe"}],
-        }
-        upgraded = self._maybe_upgrade_pending_clipboard_replace("run_action_batch", candidate)
-        if upgraded is candidate or upgraded.get("subgoal") == candidate["subgoal"]:
-            return result
-        self._trace_debug("clipboard_delivery_triggered_after_focus", {
-            "run_id": self.run_id,
-            "focus_result": payload,
-            "delivery": upgraded,
-        })
-        delivery = self._dispatch_with_fast_visual_wrap("run_action_batch", upgraded)
-        try:
-            delivery_payload = json.loads(delivery.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return delivery
-        if isinstance(delivery_payload, dict):
-            delivery_payload["auto_triggered_after_focus"] = True
-            delivery_payload["focused_destination_title"] = title
-            delivery.text = json.dumps(delivery_payload, ensure_ascii=False)
-        return delivery
-
-    def _duplicate_clipboard_delivery_result(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> ToolResult | None:
-        if tool_name not in {"execute_subgoal", "run_action_batch"}:
-            return None
-        tokens = _clipboard_target_tokens(self.task)
-        if not tokens:
-            return None
-        semantic = json.dumps(args, ensure_ascii=False, default=str)
-        if not any(token in semantic for token in tokens):
-            return None
-        if not re.search(r"replace|paste|替换|粘贴", semantic, re.IGNORECASE):
-            return None
-        copy_events = 0
-        copied_fingerprints: set[str] = set()
-        deliveries = 0
-        verified_deliveries = 0
-        for history_tool, history_args, history_text in self._tool_history:
-            try:
-                payload = json.loads(history_text or "{}")
-            except (json.JSONDecodeError, TypeError):
-                payload = {}
-            if isinstance(payload, dict) and payload.get("clipboard_replace_applied"):
-                deliveries += 1
-                if payload.get("verified") is True:
-                    verified_deliveries += 1
-            candidate_actions = []
-            if history_tool == "hotkey":
-                candidate_actions = [history_args]
-            elif history_tool == "run_action_batch":
-                candidate_actions = list(history_args.get("actions") or [])
-            for action in candidate_actions:
-                if not isinstance(action, dict) or (
-                    history_tool == "run_action_batch" and action.get("action") != "hotkey"
-                ):
-                    continue
-                action_args = dict(action.get("params") or {})
-                action_args.update({key: value for key, value in action.items() if key != "params"})
-                keys = {str(key).strip().casefold() for key in action_args.get("keys") or []}
-                if "c" in keys and keys.intersection({"ctrl", "control", "ctl"}):
-                    if not isinstance(payload, dict) or payload.get("ok", True):
-                        copy_events += 1
-                        copied_fingerprints.update(_clipboard_fingerprints(payload))
-        copies = len(copied_fingerprints) if copied_fingerprints else copy_events
-        if deliveries <= 0 or copies > deliveries:
-            return None
-        return ToolResult(json.dumps({
-            "ok": verified_deliveries > 0,
-            "blocked": True,
-            "duplicate_clipboard_delivery": True,
-            "mutation_applied": True,
-            "verified": verified_deliveries > 0,
-            "fast_path_advice": (
-                "This clipboard delivery was already verified and no newer Ctrl+C copy exists. "
-                "Do not mutate the placeholder again. Save the destination and continue with "
-                "the next distinct transfer."
-                if verified_deliveries > 0
-                else "This clipboard delivery was already applied. Read/observe it before saving."
-            ),
-        }, ensure_ascii=False))
-
-    def _maybe_upgrade_spreadsheet_action_batch(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Collapse model-authored cell-by-cell batches into one table paste."""
-        if tool_name != "run_action_batch" or not self._looks_like_spreadsheet_task(self.task):
-            return args
-        if args.get("semantic_override"):
-            return args
-        actions = args.get("actions") if isinstance(args.get("actions"), list) else []
-        scope = f"{args.get('subgoal') or ''} {json.dumps(actions, ensure_ascii=False, default=str)}"
-        if re.search(
-            r"\bbold\b.{0,60}\brow\s*\d+|\brow\s*\d+.{0,60}\bbold\b|"
-            r"加粗.{0,40}第?\s*\d+\s*行|第?\s*\d+\s*行.{0,40}加粗",
-            scope,
-            re.IGNORECASE,
-        ):
-            applied_rows = getattr(self.session, "_spreadsheet_bold_rows_applied", set())
-            paths = _explicit_saved_paths(self.task)
-            saved_paths = getattr(self.session, "_exact_save_paths_applied", set())
-            if not isinstance(saved_paths, set):
-                saved_paths = set()
-            if (
-                isinstance(applied_rows, set)
-                and applied_rows
-                and paths
-                and str(paths[0]).casefold() not in saved_paths
-            ):
-                save_seed = dict(args)
-                save_seed["subgoal"] = f"Save As the exact requested path: {paths[0]}"
-                self._trace_debug("spreadsheet_format_repeat_advanced_to_save", {
-                    "run_id": self.run_id,
-                    "applied_rows": sorted(applied_rows),
-                    "save_path": str(paths[0]),
-                })
-                return self._maybe_upgrade_exact_save_as(tool_name, save_seed)
-            upgraded = dict(args)
-            upgraded["semantic_override"] = "spreadsheet_row_format"
-            self._trace_debug("spreadsheet_row_format_batch_auto_upgraded", {
-                "run_id": self.run_id,
-                "original_action_count": len(actions),
-                "subgoal": args.get("subgoal"),
-            })
-            return upgraded
-        type_count = sum(
-            1 for action in actions
-            if isinstance(action, dict)
-            and str(action.get("action") or action.get("tool") or "") in {"type_text", "type_into_element"}
-        )
-        table_intent = bool(re.search(
-            r"\b(?:all|complete|entire|whole)\s+table\b|"
-            r"\btable\s+(?:data|content)\b|\brow\s+by\s+row\b|"
-            r"全部(?:表格|数据)|整个表格|表格(?:数据|内容)|逐行",
-            scope,
-            re.IGNORECASE,
-        ))
-        if not table_intent and type_count < 4:
-            return args
-        upgraded = dict(args)
-        upgraded["semantic_override"] = "spreadsheet_table"
-        self._trace_debug("spreadsheet_action_batch_auto_upgraded", {
-            "run_id": self.run_id,
-            "original_action_count": len(actions),
-            "type_action_count": type_count,
-            "subgoal": args.get("subgoal"),
-        })
-        return upgraded
-
-    def _maybe_upgrade_exact_save_as(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        if tool_name not in {"execute_subgoal", "run_action_batch"}:
-            return args
-        paths = _explicit_saved_paths(self.task)
-        if not paths:
-            return args
-        click_spec = args.get("click") if isinstance(args.get("click"), dict) else {}
-        scope = " ".join([
-            str(args.get("subgoal") or ""),
-            str(click_spec.get("label") or click_spec.get("text") or click_spec.get("name") or ""),
-            json.dumps(args.get("actions") or [], ensure_ascii=False, default=str),
-        ])
-        if not re.search(
-            r"\bsave\s+as\b|\bsave\b|\bfile\s+menu\b|"
-            r"另存为|另存|保存|文件菜单|点击.{0,12}文件",
-            scope,
-            re.IGNORECASE,
-        ):
-            return args
-        save_path = str(paths[0])
-        upgraded: dict[str, Any] = {
-            "subgoal": f"Save As the exact requested path: {save_path}",
-            "input": {
-                "label": "File name",
-                "text": save_path,
-                "clear": True,
-            },
-            "click": {"label": "Save", "fallback_text": ["保存", "Save"]},
-            "verify_texts": [Path(save_path).name],
-            "constraints": {
-                "open_save_as": True,
-                "save_path": save_path,
-                "wait": True,
-            },
-        }
-        if isinstance(args.get("target_window"), dict):
-            upgraded["target_window"] = dict(args["target_window"])
-        if tool_name == "run_action_batch":
-            upgraded["actions"] = list(args.get("actions") or [])
-            upgraded["semantic_override"] = "exact_save_as"
-        self._trace_debug("exact_save_as_auto_upgraded", {
-            "run_id": self.run_id,
-            "original": args,
-            "upgraded": upgraded,
-        })
-        return upgraded
-
-    def _maybe_auto_complete_document_format_plan_items(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        result: ToolResult,
-    ) -> ToolResult:
-        if tool_name not in {"execute_subgoal", "run_action_batch"} or not args.get("formats"):
-            return result
-        try:
-            payload = json.loads(result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return result
-        if not isinstance(payload, dict) or payload.get("format_applied") is not True:
-            return result
-        plan = getattr(self.session, "plan", None)
-        steps = getattr(plan, "steps", None) or []
-        completed: list[dict[str, Any]] = []
-        fresh_paths = self._fresh_explicit_output_paths() if payload.get("save_dispatched") else []
-        format_errors: list[str] = []
-        format_verified = False
-        for path in fresh_paths:
-            if path.suffix.casefold() != ".docx":
-                continue
-            try:
-                _document_text, paragraphs, package_error = _docx_document_evidence(path)
-                if package_error:
-                    format_errors.append(package_error)
-                    continue
-                errors = _docx_task_format_errors(self.task, paragraphs)
-            except (OSError, ValueError, KeyError):
-                continue
-            if errors:
-                format_errors.extend(errors)
-                continue
-            format_verified = True
-            break
-        if fresh_paths:
-            payload["saved_paths"] = [str(path) for path in fresh_paths]
-        if format_errors:
-            payload["artifact_format_errors"] = list(dict.fromkeys(format_errors))[:8]
-            payload["verified"] = False
-            payload["needs_llm_reason"] = True
-            payload["postcondition_pending"] = False
-            controller_state = payload.get("controller_state")
-            if isinstance(controller_state, dict):
-                controller_state["needs_llm_reason"] = True
-                controller_state["verified"] = False
-            payload["fast_path_advice"] = (
-                "The document was saved, but deterministic DOCX inspection found formatting "
-                f"mismatches: {'; '.join(payload['artifact_format_errors'])}. Do not repeat the "
-                "identical toggle routine. Re-observe the current document state and use a corrective, "
-                "state-aware formatting action."
-            )
-            return ToolResult(
-                json.dumps(payload, ensure_ascii=False, default=str),
-                is_observe=result.is_observe,
-                terminal=result.terminal,
-                summary=result.summary,
-                replay=result.replay,
-                image_b64=result.image_b64,
-            )
-        if format_verified:
-            payload["format_verified"] = True
-            payload["verified"] = True
-            payload["postcondition_pending"] = False
-            packet = payload.get("evidence_packet")
-            if not isinstance(packet, dict):
-                packet = {}
-                payload["evidence_packet"] = packet
-            packet["format_verified"] = True
-            packet["saved_paths"] = [str(path) for path in fresh_paths]
-        for index, step in enumerate(steps, start=1):
-            if not isinstance(step, dict) or step.get("done"):
-                continue
-            goal = str(step.get("goal") or "")
-            folded = goal.casefold()
-            is_save_or_verify = bool(re.search(
-                r"\bsave\b|\bexport\b|\bverify\b|\u4fdd\u5b58|\u53e6\u5b58|\u5bfc\u51fa|\u9a8c\u8bc1|\u6838\u9a8c|\u786e\u8ba4",
-                folded,
-            ))
-            if is_save_or_verify:
-                if not (payload.get("save_dispatched") and fresh_paths and format_verified):
-                    break
-                if re.search(r"\b(?:window|title)\b|\u7a97\u53e3|\u6807\u9898", folded):
-                    current_title = str(
-                        getattr(getattr(self.session, "snapshot", None), "title", "") or ""
-                    )
-                    if not current_title or not any(path.name in current_title for path in fresh_paths):
-                        break
-                if plan.complete(index):
-                    completed.append({
-                        "index": index,
-                        "goal": goal[:160],
-                        "source": "saved_docx_artifact",
-                    })
-                continue
-            if not re.search(
-                r"\b(?:select|format|bold|center|align|heading|title|paragraph|body)\b|"
-                r"\u9009\u4e2d|\u683c\u5f0f|\u52a0\u7c97|\u5c45\u4e2d|\u5bf9\u9f50|\u7b2c\u4e00\u884c|\u6b63\u6587|\u6bb5\u843d|\u6807\u9898",
-                folded,
-            ):
-                break
-            if plan.complete(index):
-                completed.append({"index": index, "goal": goal[:160], "source": "format_routine"})
-        if not completed and not fresh_paths and not format_errors:
-            return result
-        payload["auto_completed_plan_items"] = completed
-        payload["plan_after_auto_complete"] = plan.render()
-        if format_verified and plan.all_done():
-            payload["plan_all_done"] = True
-            payload["auto_done"] = True
-            payload["auto_done_reason"] = (
-                "saved DOCX passed deterministic text-format checks and the target window title "
-                "still identifies the exact output file"
-            )
-        payload["fast_path_advice"] = (
-            str(payload.get("fast_path_advice") or "").strip()
-            + (
-                " Formatting and Save were applied in one controller batch and the saved DOCX "
-                "artifact passed deterministic formatting checks. Do not repeat formatting."
-                if format_verified else
-                " Formatting selection and shortcuts were applied in one controller batch. "
-                "Continue directly to Save, then rely on artifact verification instead of repeating formatting."
-            )
-        ).strip()
-        return ToolResult(
-            json.dumps(payload, ensure_ascii=False, default=str),
-            is_observe=result.is_observe,
-            terminal="done" if payload.get("auto_done") else result.terminal,
-            summary=result.summary,
-            replay=result.replay,
-            image_b64=result.image_b64,
-        )
-
-
-
-
-
-
-
-
-
-    @staticmethod
-    def _payload_has_verified_drag(payload: dict[str, Any]) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        if payload.get("verified") is not True:
-            return False
-        state = payload.get("controller_state")
-        if isinstance(state, dict) and state.get("last_action") == "drag":
-            return True
-        if payload.get("source_action") == "drag" and payload.get("visual_change_detected") is True:
-            return True
-        for item in payload.get("results") or []:
-            if not isinstance(item, dict) or item.get("action") != "drag":
-                continue
-            data = item.get("data")
-            if isinstance(data, dict) and (
-                data.get("verified") is True or data.get("visual_change_detected") is True
-            ):
-                return True
-            preview = str(item.get("preview") or "")
-            if '"visual_change_detected": true' in preview.casefold() or '"verified": true' in preview.casefold():
-                return True
-        return False
-
-    @staticmethod
-    def _looks_like_desktop_drag_plan_goal(goal: str) -> bool:
-        text = str(goal or "")
-        low = text.casefold()
-        has_drag = any(term in low for term in ("drag", "move", "icon", "folder"))
-        has_drag = has_drag or any(term in text for term in ("拖动", "移动", "图标", "文件夹", "整理", "排列"))
-        return has_drag
-
-    def _maybe_auto_complete_desktop_drag_plan_item(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        result: ToolResult,
-    ) -> ToolResult:
-        if tool_name not in {"run_action_batch", "drag"} or not _is_desktop_icon_drag_task(self.task):
-            return result
-        try:
-            payload = json.loads(result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return result
-        if not self._payload_has_verified_drag(payload):
-            return result
-
-        plan = getattr(self.session, "plan", None)
-        steps = getattr(plan, "steps", None) or []
-        completed: list[dict[str, Any]] = []
-        if steps:
-            for index, step in enumerate(steps, start=1):
-                if not isinstance(step, dict) or step.get("done"):
-                    continue
-                goal = str(step.get("goal") or "")
-                if not self._looks_like_desktop_drag_plan_goal(goal):
-                    continue
-                if plan.complete(index):
-                    item = {"index": index, "goal": goal[:160], "source": tool_name}
-                    completed.append(item)
-                    BUS.publish(
-                        "agent_plan",
-                        run_id=self.run_id,
-                        action="auto_complete",
-                        index=index,
-                        source=f"{tool_name}.verified_drag",
-                        plan=plan.snapshot(),
-                    )
-                break
-            if not completed:
-                return result
-            payload["auto_completed_plan_items"] = completed
-            payload["plan_after_auto_complete"] = plan.render()
-            if plan.all_done():
-                payload["plan_all_done"] = True
-        else:
-            payload["plan_all_done"] = True
-
-        existing_advice = str(payload.get("fast_path_advice") or "").strip()
-        auto_advice = (
-            "Auto-completed desktop drag plan item from verified controller drag "
-            "evidence; "
-            + ("plan is complete." if payload.get("plan_all_done") else "continue with next unfinished item.")
-        )
-        payload["fast_path_advice"] = (existing_advice + " " + auto_advice).strip()
-        self._trace_debug("desktop_drag_plan_auto_completed", {
-            "run_id": self.run_id,
-            "tool": tool_name,
-            "args": args,
-            "completed": completed,
-            "plan_all_done": payload.get("plan_all_done"),
-        })
-        return ToolResult(
-            json.dumps(payload, ensure_ascii=False, default=str),
-            is_observe=result.is_observe,
-            terminal="done" if payload.get("plan_all_done") else result.terminal,
-            summary=result.summary,
-            replay=result.replay,
-            image_b64=result.image_b64,
-        )
-
-    def _maybe_auto_complete_open_plan_item(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        result: ToolResult,
-    ) -> ToolResult:
-        if tool_name not in {
-            "open_app", "launch", "focus_window", "execute_subgoal", "run_action_batch",
-        }:
-            return result
-        plan = getattr(self.session, "plan", None)
-        steps = getattr(plan, "steps", None) or []
-        if not steps:
-            return result
-        try:
-            payload = json.loads(result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return result
-        if not isinstance(payload, dict) or not payload.get("ok"):
-            return result
-        if (
-            tool_name in {"execute_subgoal", "run_action_batch"}
-            and payload.get("subgoal_route") != "open_app_capability"
-        ):
-            return result
-        if not (payload.get("verified") or payload.get("target_hwnd")):
-            return result
-        completed: list[dict[str, Any]] = []
-        for index, step in enumerate(steps, start=1):
-            if not isinstance(step, dict) or step.get("done"):
-                continue
-            goal = str(step.get("goal") or "")
-            if not _looks_like_pure_open_plan_goal(goal):
-                break
-            if plan.complete(index):
-                item = {"index": index, "goal": goal[:160], "source": tool_name}
-                completed.append(item)
-                BUS.publish(
-                    "agent_plan",
-                    run_id=self.run_id,
-                    action="auto_complete",
-                    index=index,
-                    source=f"{tool_name}.verified_target",
-                    plan=plan.snapshot(),
-                )
-            break
-        if not completed:
-            return result
-        payload["auto_completed_plan_items"] = completed
-        payload["plan_after_auto_complete"] = plan.render()
-        payload["fast_path_advice"] = (
-            str(payload.get("fast_path_advice") or "").strip()
-            + " Verified launch/focus already completed the matching open-window "
-              "plan item; continue with the next unfinished item."
-        ).strip()
-        self._trace_debug("open_plan_auto_completed", {
-            "run_id": self.run_id,
-            "tool": tool_name,
-            "args": args,
-            "completed": completed,
-        })
-        return ToolResult(
-            json.dumps(payload, ensure_ascii=False, default=str),
-            is_observe=result.is_observe,
-            terminal=result.terminal,
-            summary=result.summary,
-            replay=result.replay,
-            image_b64=result.image_b64,
-        )
-
-    @staticmethod
-    def _plan_text_key(value: object) -> str:
-        text = re.sub(r"^\s*\d+[.)、]\s*", "", str(value or ""))
-        text = re.sub(r"(?:已完成|完成后|然后|接着|最后)", "", text)
-        return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", text).casefold()
-
-    @classmethod
-    def _subgoal_matches_plan_goal(cls, subgoal: str, goal: str) -> bool:
-        left = cls._plan_text_key(subgoal)
-        right = cls._plan_text_key(goal)
-        if min(len(left), len(right)) < 3:
-            return False
-        if left in right or right in left:
-            return True
-        left_pairs = {left[index:index + 2] for index in range(len(left) - 1)}
-        right_pairs = {right[index:index + 2] for index in range(len(right) - 1)}
-        if not left_pairs or not right_pairs:
-            return False
-        overlap = len(left_pairs & right_pairs) / max(1, min(len(left_pairs), len(right_pairs)))
-        return overlap >= 0.72
-
-    def _plan_check_satisfied_by_subgoal(
-        self,
-        check: dict[str, Any] | None,
-        payload: dict[str, Any],
-    ) -> bool:
-        if not check:
-            return True
-        if not isinstance(check, dict):
-            return False
-        file_path = check.get("file_exists")
-        if isinstance(file_path, str) and file_path.strip():
-            try:
-                path = Path(file_path)
-                if not path.is_file() or path.stat().st_size <= 0:
-                    return False
-                if path.stat().st_mtime < self._started_wall_time - 2.0:
-                    return False
-            except OSError:
-                return False
-        packet = payload.get("evidence_packet")
-        matched = {
-            self._plan_text_key(value)
-            for value in ((packet or {}).get("matched_texts") or [])
-            if isinstance(packet, dict)
-        }
-        for key in ("text_appears", "text_contains", "window_appears", "window_title"):
-            value = check.get(key)
-            if isinstance(value, str) and self._plan_text_key(value) not in matched:
-                title = str(getattr(getattr(self.session, "snapshot", None), "title", "") or "")
-                if self._plan_text_key(value) not in self._plan_text_key(title):
-                    return False
-        supported = {
-            "file_exists", "text_appears", "text_contains", "window_appears", "window_title",
-        }
-        return all(key in supported for key in check)
-
-    def _fresh_explicit_output_paths(self) -> list[Path]:
-        paths: list[Path] = []
-        for path in _explicit_saved_paths(self.task):
-            try:
-                if (
-                    path.is_file()
-                    and path.stat().st_size > 0
-                    and path.stat().st_mtime >= self._started_wall_time - 2.0
-                ):
-                    paths.append(path)
-            except OSError:
-                continue
-        return paths
-
-    def _maybe_auto_complete_verified_subgoal_plan_items(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        result: ToolResult,
-    ) -> ToolResult:
-        try:
-            payload = json.loads(result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return result
-        if tool_name != "execute_subgoal" and not (
-            isinstance(payload, dict) and payload.get("auto_triggered_after_focus")
-        ):
-            return result
-        plan = getattr(self.session, "plan", None)
-        steps = getattr(plan, "steps", None) or []
-        if not steps:
-            return result
-        if not isinstance(payload, dict) or payload.get("verified") is not True:
-            return result
-        subgoal = str(
-            payload.get("subgoal")
-            if payload.get("auto_triggered_after_focus")
-            else args.get("subgoal") or payload.get("subgoal") or ""
-        )
-        completed: list[dict[str, Any]] = []
-        clipboard_token = str(payload.get("clipboard_replace_token") or "").strip()
-        if payload.get("clipboard_replace_applied") and clipboard_token:
-            for index, step in enumerate(steps, start=1):
-                if not isinstance(step, dict) or step.get("done"):
-                    continue
-                goal = str(step.get("goal") or "")
-                if clipboard_token not in goal and not re.search(
-                    r"replace|paste|替换|粘贴",
-                    goal,
-                    re.IGNORECASE,
-                ):
-                    continue
-                if plan.complete(index):
-                    completed.append({
-                        "index": index,
-                        "goal": goal[:160],
-                        "source": "verified_clipboard_delivery",
-                    })
-                    BUS.publish(
-                        "agent_plan",
-                        run_id=self.run_id,
-                        action="auto_complete",
-                        index=index,
-                        source="controller.clipboard_replace_verified",
-                        plan=plan.snapshot(),
-                    )
-                break
-        for index, step in enumerate(steps, start=1):
-            if not isinstance(step, dict) or step.get("done"):
-                continue
-            goal = str(step.get("goal") or "")
-            if not self._subgoal_matches_plan_goal(subgoal, goal):
-                break
-            if not self._plan_check_satisfied_by_subgoal(step.get("check"), payload):
-                break
-            if plan.complete(index):
-                completed.append({"index": index, "goal": goal[:160], "source": "verified_subgoal"})
-                BUS.publish(
-                    "agent_plan",
-                    run_id=self.run_id,
-                    action="auto_complete",
-                    index=index,
-                    source="execute_subgoal.verified",
-                    plan=plan.snapshot(),
-                )
-            break
-
-        fresh_paths = self._fresh_explicit_output_paths()
-        if fresh_paths:
-            for index, step in enumerate(steps, start=1):
-                if not isinstance(step, dict) or step.get("done"):
-                    continue
-                goal = str(step.get("goal") or "")
-                key = self._plan_text_key(goal)
-                if not any(term in key for term in (
-                    "确认文件", "核验文件", "验证文件", "保存成功", "fileexists", "verifysaved",
-                )):
-                    continue
-                if step.get("check") and not self._plan_check_satisfied_by_subgoal(step.get("check"), payload):
-                    continue
-                if plan.complete(index):
-                    completed.append({
-                        "index": index,
-                        "goal": goal[:160],
-                        "source": "fresh_output_file",
-                        "path": str(fresh_paths[0]),
-                    })
-                    BUS.publish(
-                        "agent_plan",
-                        run_id=self.run_id,
-                        action="auto_complete",
-                        index=index,
-                        source="execute_subgoal.fresh_output_file",
-                        plan=plan.snapshot(),
-                    )
-        if not completed:
-            return result
-        payload["auto_completed_plan_items"] = completed
-        payload["plan_after_auto_complete"] = plan.render()
-        if plan.all_done():
-            payload["plan_all_done"] = True
-        payload["fast_path_advice"] = (
-            str(payload.get("fast_path_advice") or "").strip()
-            + " Verified controller evidence automatically advanced matching plan items; "
-            + ("the plan is complete." if plan.all_done() else "continue with the next unfinished item.")
-        ).strip()
-        return ToolResult(
-            json.dumps(payload, ensure_ascii=False, default=str),
-            is_observe=result.is_observe,
-            terminal="done" if plan.all_done() else result.terminal,
-            summary=result.summary,
-            replay=result.replay,
-            image_b64=result.image_b64,
-        )
-
-    @staticmethod
-    def _looks_like_artifact_capture_plan_goal(goal: str) -> bool:
-        return bool(re.search(
-            r"\b(?:capture|screenshot|screen\s*shot|snapshot)\b|"
-            r"截图|截屏|屏幕快照|(?:抓取|截取).{0,12}(?:图像|画面|作品|画作|窗口|内容|区域)|"
-            r"获取.{0,8}(?:截图|图像)",
-            str(goal or ""),
-            re.IGNORECASE,
-        ))
-
-    @staticmethod
-    def _looks_like_artifact_source_inspection_plan_goal(goal: str) -> bool:
-        text = str(goal or "")
-        if re.search(
-            r"\b(?:save|export|send|share|upload|edit|draw|open|launch)\b|"
-            r"(?<!未)保存|另存|导出|发送|分享|上传|编辑|绘制|画出|打开|启动",
-            text,
-            re.IGNORECASE,
-        ):
-            return False
-        return bool(
-            re.search(
-                r"\b(?:confirm|check|inspect|locate|find|verify|identify|determine)\b|"
-                r"确认|检查|查看|找到|定位|识别|判断|核实",
-                text,
-                re.IGNORECASE,
-            )
-            and re.search(
-                r"\b(?:current|source|content|work|artifact|drawing|image|window|"
-                r"document|canvas|unsaved)\b|当前|来源|内容|作品|画作|图像|窗口|"
-                r"文档|画布|未保存",
-                text,
-                re.IGNORECASE,
-            )
-        )
-
-    @staticmethod
-    def _looks_like_managed_artifact_storage_plan_goal(goal: str) -> bool:
-        text = str(goal or "")
-        if re.search(
-            r"\b(?:send|share|upload|attach|deliver)\b|发送|分享|上传|附加|交付",
-            text,
-            re.IGNORECASE,
-        ):
-            return False
-        return bool(
-            re.search(
-                r"\b(?:save|store|persist|write)\b|保存|另存|存储|写入",
-                text,
-                re.IGNORECASE,
-            )
-            and re.search(
-                r"\b(?:screenshot|image|artifact|file|capture)\b|截图|截屏|图像|"
-                r"产物|文件",
-                text,
-                re.IGNORECASE,
-            )
-        )
-
-    def _maybe_auto_complete_artifact_capture_plan_item(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        result: ToolResult,
-    ) -> ToolResult:
-        """Advance one capture todo only from a current-run managed artifact."""
-        if tool_name not in {"screenshot", "capture_artifact"}:
-            return result
-        try:
-            payload = json.loads(result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return result
-        if not isinstance(payload, dict) or payload.get("ok") is not True:
-            return result
-        artifact = payload.get("artifact")
-        artifact = artifact if isinstance(artifact, dict) else {}
-        artifact_id = str(
-            payload.get("artifact_id") or artifact.get("artifact_id") or ""
-        ).strip()
-        artifact_sha = str(
-            payload.get("sha256") or artifact.get("sha256") or ""
-        ).strip()
-        if not artifact_id or not artifact_sha:
-            return result
-
-        plan = getattr(self.session, "plan", None)
-        steps = getattr(plan, "steps", None) or []
-        if not steps:
-            return result
-        candidates: list[tuple[int, dict[str, Any], str]] = []
-        capture_seen = False
-        for index, step in enumerate(steps, start=1):
-            if not isinstance(step, dict) or step.get("done"):
-                continue
-            goal = str(step.get("goal") or "")
-            if not capture_seen and self._looks_like_artifact_source_inspection_plan_goal(goal):
-                candidates.append((index, step, "managed_artifact_source_evidence"))
-                continue
-            if not capture_seen and self._looks_like_artifact_capture_plan_goal(goal):
-                candidates.append((index, step, "managed_artifact_capture"))
-                capture_seen = True
-                continue
-            if (
-                capture_seen
-                and (payload.get("managed_path") or artifact.get("managed_path"))
-                and self._looks_like_managed_artifact_storage_plan_goal(goal)
-            ):
-                candidates.append((index, step, "managed_artifact_path"))
-                continue
-            break
-        if not capture_seen:
-            return result
-
-        completed = [
-            item
-            for item in (payload.get("auto_completed_plan_items") or [])
-            if isinstance(item, dict)
-        ]
-        newly_completed: list[dict[str, Any]] = []
-        for index, step, source in candidates:
-            if not self._plan_check_satisfied_by_subgoal(
-                step.get("check"), payload,
-            ):
-                break
-            if not plan.complete(index):
-                break
-            item = {
-                "index": index,
-                "goal": str(step.get("goal") or "")[:160],
-                "source": source,
-                "artifact_id": artifact_id,
-            }
-            completed.append(item)
-            newly_completed.append(item)
-            BUS.publish(
-                "agent_plan",
-                run_id=self.run_id,
-                action="auto_complete",
-                index=index,
-                source=f"{tool_name}.{source}",
-                plan=plan.snapshot(),
-            )
-        if not newly_completed:
-            return result
-        payload["auto_completed_plan_items"] = completed
-        payload["plan_after_auto_complete"] = plan.render()
-        if plan.all_done():
-            payload["plan_all_done"] = True
-        payload["fast_path_advice"] = (
-            str(payload.get("fast_path_advice") or "").strip()
-            + " A verified current-run artifact completed the capture plan item. "
-              f"Use exact artifact_id {artifact_id} for the next handoff; do not capture "
-              "or save it again, and do not rename the handle."
-        ).strip()
-        self._trace_debug("artifact_capture_plan_auto_completed", {
-            "run_id": self.run_id,
-            "tool": tool_name,
-            "args": args,
-            "completed": newly_completed,
-            "artifact_id": artifact_id,
-        })
-        return ToolResult(
-            json.dumps(payload, ensure_ascii=False, default=str),
-            is_observe=result.is_observe,
-            terminal=result.terminal,
-            summary=result.summary,
-            replay=result.replay,
-            image_b64=result.image_b64,
-        )
-
-    @classmethod
-    def _looks_like_new_blank_plan_goal(cls, goal: str) -> bool:
-        key = cls._plan_text_key(goal)
-        wants_new = any(term in key for term in (
-            "new", "create", "blank", "新建", "创建", "新增",
-        ))
-        document_kind = any(term in key for term in (
-            "document", "doc", "workbook", "spreadsheet", "presentation",
-            "文档", "文字", "工作簿", "表格", "演示文稿", "空白",
-        ))
-        return wants_new and document_kind
-
-    @staticmethod
-    def _looks_like_unsaved_document_title(title: str) -> bool:
-        text = re.sub(r"\s+", "", str(title or "").casefold())
-        if not text or any(term in text for term in (
-            "新建文档", "newdocument", "template", "模板", "homepage", "首页",
-        )):
-            return False
-        return bool(re.search(
-            r"(?:untitled|document|book|workbook|presentation|"
-            r"文字文稿|演示文稿|工作簿|无标题|未命名|文档)\s*\d*",
-            text,
-            re.IGNORECASE,
-        ))
-
-    def _current_new_document_plan_item(self) -> tuple[int, dict[str, Any]] | None:
-        plan = getattr(self.session, "plan", None)
-        for index, step in enumerate(getattr(plan, "steps", None) or [], start=1):
-            if not isinstance(step, dict) or step.get("done"):
-                continue
-            if self._looks_like_new_blank_plan_goal(str(step.get("goal") or "")):
-                return index, step
-            break
-        return None
-
-    @staticmethod
-    def _text_mutation_literals(tool_name: str, args: dict[str, Any]) -> list[str]:
-        values: list[str] = []
-        if tool_name in {"type_text", "type_into_element"}:
-            values.append(str(args.get("text") or args.get("text_input") or args.get("value") or ""))
-        elif tool_name == "execute_subgoal":
-            input_spec = args.get("input") if isinstance(args.get("input"), dict) else {}
-            values.append(str(
-                input_spec.get("text")
-                or input_spec.get("text_input")
-                or input_spec.get("value")
-                or ""
-            ))
-        elif tool_name == "run_action_batch":
-            for action in iter_atomic_actions(tool_name, args):
-                if action.name in {"type_text", "type_into_element"}:
-                    values.append(str(
-                        action.inputs.get("text")
-                        or action.inputs.get("text_input")
-                        or action.inputs.get("value")
-                        or ""
-                    ))
-        return [value for value in values if value]
-
-    def _task_allows_repeated_text_mutation(self) -> bool:
-        text = str(self.task or "").casefold()
-        return bool(re.search(
-            r"\b(?:twice|repeat|again|each|both|every)\b|"
-            r"重复|两次|二次|两遍|分别|各自|每个|每一|都输入|再输入一次",
-            text,
-        ))
-
-    def _duplicate_text_mutation_result(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> ToolResult | None:
-        if self._task_allows_repeated_text_mutation():
-            return None
-        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
-        for literal in self._text_mutation_literals(tool_name, args):
-            key = re.sub(r"\s+", " ", literal).strip()
-            if len(key) < 8:
-                continue
-            previous = next((
-                item
-                for item in reversed(self._delivered_text_mutations)
-                if item.get("text") == key
-                and int(item.get("hwnd") or 0) == hwnd
-                and self._tool_sequence - int(item.get("sequence") or 0) <= 12
-                and time.monotonic() - float(item.get("at") or 0.0) <= 120.0
-            ), None)
-            if previous is None:
-                continue
-            payload = {
-                "ok": True,
-                "verified": False,
-                "mutation_skipped": True,
-                "text_already_delivered": True,
-                "text_length": len(literal),
-                "target_hwnd": hwnd or None,
-                "original_tool": tool_name,
-                "needs_observe": True,
-                "controller_state": {
-                    "phase": "needs_observe",
-                    "verified": False,
-                    "needs_observe": True,
-                    "needs_llm_reason": False,
-                },
-                "fast_path_advice": (
-                    "The exact text was already delivered successfully to this target window "
-                    "during the current run. The duplicate mutation was skipped. Do not type it "
-                    "again; use read_text/observe or continue with formatting/save."
-                ),
-            }
-            return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
-        return None
-
-    @staticmethod
-    def _format_mutation_key(args: dict[str, Any]) -> str:
-        specs = args.get("formats")
-        if not isinstance(specs, list):
-            single = args.get("format")
-            specs = [single] if isinstance(single, dict) else []
-        normalized = [spec for spec in specs if isinstance(spec, dict)]
-        if not normalized:
-            return ""
-        return json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-    def _duplicate_format_mutation_result(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> ToolResult | None:
-        if tool_name not in {"execute_subgoal", "run_action_batch"}:
-            return None
-        key = self._format_mutation_key(args)
-        if not key:
-            return None
-        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
-        previous = next((
-            item
-            for item in reversed(self._applied_format_mutations)
-            if item.get("key") == key
-            and int(item.get("hwnd") or 0) == hwnd
-            and self._tool_sequence - int(item.get("sequence") or 0) <= 16
-            and time.monotonic() - float(item.get("at") or 0.0) <= 180.0
-        ), None)
-        if previous is None:
-            return None
-        save_dispatched = bool(previous.get("save_dispatched"))
-        payload = {
-            "ok": True,
-            "verified": False,
-            "format_applied": True,
-            "format_already_applied": True,
-            "mutation_skipped": True,
-            "save_dispatched": save_dispatched,
-            "postcondition_pending": True,
-            "needs_llm_reason": False,
-            "target_hwnd": hwnd or None,
-            "controller_state": {
-                "phase": "needs_observe",
-                "verified": False,
-                "needs_observe": True,
-                "needs_llm_reason": False,
-            },
-            "fast_path_advice": (
-                "The identical rich-text formatting routine already ran successfully in this target "
-                "window, so the duplicate toggle shortcuts were skipped. "
-                + (
-                    "Save was already dispatched; verify the saved artifact or call done."
-                    if save_dispatched else
-                    "Do not format again; issue only the requested Save action, then verify the artifact."
-                )
-            ),
-        }
-        return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
-
-    def _remember_applied_format_mutation(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        result_text: str,
-    ) -> None:
-        if tool_name not in {"execute_subgoal", "run_action_batch"}:
-            return
-        key = self._format_mutation_key(args)
-        if not key:
-            return
-        try:
-            payload = json.loads(result_text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return
-        if (
-            not isinstance(payload, dict)
-            or payload.get("format_applied") is not True
-            or payload.get("mutation_skipped") is True
-        ):
-            return
-        self._applied_format_mutations.append({
-            "key": key,
-            "hwnd": int(getattr(self.session, "hwnd", 0) or 0),
-            "sequence": self._tool_sequence,
-            "at": time.monotonic(),
-            "save_dispatched": bool(payload.get("save_dispatched")),
-        })
-        self._applied_format_mutations = self._applied_format_mutations[-12:]
-
-    def _remember_delivered_text_mutations(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        result_text: str,
-    ) -> None:
-        literals = self._text_mutation_literals(tool_name, args)
-        if not literals:
-            return
-        try:
-            payload = json.loads(result_text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            return
-        if not isinstance(payload, dict) or payload.get("ok") is not True or payload.get("blocked") is True:
-            return
-        delivered = True
-        if tool_name == "execute_subgoal":
-            delivered = payload.get("input_applied") is True
-        elif tool_name == "run_action_batch":
-            delivered = any(
-                isinstance(item, dict)
-                and item.get("action") in {"type_text", "type_into_element"}
-                and item.get("ok") is True
-                for item in (payload.get("results") or [])
-            )
-        if not delivered:
-            return
-        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
-        now = time.monotonic()
-        for literal in literals:
-            key = re.sub(r"\s+", " ", literal).strip()
-            if len(key) < 8:
-                continue
-            self._delivered_text_mutations.append({
-                "text": key,
-                "hwnd": hwnd,
-                "sequence": self._tool_sequence,
-                "at": now,
-                "tool": tool_name,
-            })
-        self._delivered_text_mutations = self._delivered_text_mutations[-16:]
-
-    def _track_new_document_plan_attempt(self, tool_name: str, args: dict[str, Any]) -> None:
-        current = self._current_new_document_plan_item()
-        if current is None:
-            return
-        index, step = current
-        state = self._new_document_plan_state.setdefault(index, {
-            "goal": str(step.get("goal") or ""),
-            "baseline_title": "",
-            "attempted": False,
-        })
-        snapshot = getattr(self.session, "snapshot", None)
-        current_title = str(getattr(snapshot, "title", "") or "")
-        if current_title and not state.get("baseline_title"):
-            state["baseline_title"] = current_title
-
-        if tool_name not in {"execute_subgoal", "run_action_batch", "click", "hotkey"}:
-            return
-        semantic = json.dumps(args, ensure_ascii=False, default=str)
-        key = self._plan_text_key(semantic)
-        explicit_new = any(term in key for term in (
-            "new", "create", "blank", "新建", "创建", "空白文档",
-        ))
-        if tool_name == "hotkey":
-            keys = {str(item).casefold() for item in (args.get("keys") or [])}
-            explicit_new = explicit_new or (
-                "n" in keys and bool(keys & {"ctrl", "control", "control_l", "control_r"})
-            )
-        if explicit_new:
-            state["attempted"] = True
-
-    def _maybe_auto_complete_new_document_plan_item(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-        result: ToolResult,
-    ) -> ToolResult:
-        current = self._current_new_document_plan_item()
-        if current is None:
-            return result
-        index, step = current
-        state = self._new_document_plan_state.setdefault(index, {
-            "goal": str(step.get("goal") or ""),
-            "baseline_title": "",
-            "attempted": False,
-        })
-        snapshot = getattr(self.session, "snapshot", None)
-        current_title = str(getattr(snapshot, "title", "") or "")
-        if current_title and not state.get("baseline_title"):
-            state["baseline_title"] = current_title
-            return result
-        baseline = str(state.get("baseline_title") or "")
-        if (
-            not state.get("attempted")
-            or not current_title
-            or self._plan_text_key(current_title) == self._plan_text_key(baseline)
-            or not self._looks_like_unsaved_document_title(current_title)
-        ):
-            return result
-
-        plan = getattr(self.session, "plan", None)
-        if plan is None or not plan.complete(index):
-            return result
-        completed = {
-            "index": index,
-            "goal": str(step.get("goal") or "")[:160],
-            "source": "observed_new_document_title",
-            "baseline_title": baseline,
-            "current_title": current_title,
-        }
-        BUS.publish(
-            "agent_plan",
-            run_id=self.run_id,
-            action="auto_complete",
-            index=index,
-            source="observed_new_document_title",
-            plan=plan.snapshot(),
-        )
-        self._new_document_plan_state.pop(index, None)
-        guidance = (
-            f"Observed a newly created editable document title change from {baseline!r} "
-            f"to {current_title!r}; plan item {index} is complete. Continue with the next "
-            "unfinished item and do not click New again."
-        )
-        try:
-            payload = json.loads(result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            payload = None
-        if isinstance(payload, dict):
-            prior = payload.get("auto_completed_plan_items")
-            completed_items = list(prior) if isinstance(prior, list) else []
-            completed_items.append(completed)
-            payload["auto_completed_plan_items"] = completed_items
-            payload["plan_after_auto_complete"] = plan.render()
-            payload["fast_path_advice"] = (
-                str(payload.get("fast_path_advice") or "").strip() + " " + guidance
-            ).strip()
-            text = json.dumps(payload, ensure_ascii=False, default=str)
-        else:
-            text = (
-                (result.text or "").rstrip()
-                + "\n\n[plan auto-complete] "
-                + guidance
-                + "\n"
-                + plan.render()
-            )
-        self._trace_debug("new_document_plan_auto_completed", {
-            "run_id": self.run_id,
-            "tool": tool_name,
-            "args": args,
-            "completed": completed,
-        })
-        return ToolResult(
-            text,
-            is_observe=result.is_observe,
-            terminal=result.terminal,
-            summary=result.summary,
-            replay=result.replay,
-            image_b64=result.image_b64,
-        )
 
     def _score_experience_feedback(self) -> None:
         """Score memory only when it was actually tried, not merely injected.
@@ -9527,6 +6025,61 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             frame_id=record["frame_id"],
         )
 
+    def _record_visual_effect_checkpoint(
+        self,
+        *,
+        phase: str,
+        action: str,
+        action_executed: bool,
+        image_b64: str,
+        hwnd: int,
+        frame_id: int,
+        screen_epoch: int,
+        change_comparable: bool,
+        change_ratio: float | None,
+    ) -> None:
+        """Retain bounded real pixels for transient/ordered GUI effects."""
+
+        action_name = str(action or "").strip()
+        if (
+            phase != "post_action"
+            or not action_executed
+            or not image_b64
+            or action_name not in _LOW_LEVEL_VISUAL_TOOLS
+        ):
+            return
+        if (
+            change_comparable
+            and change_ratio is not None
+            and float(change_ratio) <= self._native_no_progress_threshold()
+        ):
+            return
+        snapshot = getattr(self.session, "snapshot", None)
+        record = {
+            "image_b64": image_b64,
+            "hwnd": int(hwnd or 0),
+            "title": str(getattr(snapshot, "title", "") or ""),
+            "action": action_name,
+            "frame_id": int(frame_id or 0),
+            "screen_epoch": int(screen_epoch or 0),
+        }
+        checkpoints = [
+            item for item in self._visual_effect_checkpoints
+            if not (
+                int(item.get("hwnd", 0) or 0) == record["hwnd"]
+                and str(item.get("action") or "") == action_name
+            )
+        ]
+        checkpoints.append(record)
+        self._visual_effect_checkpoints = checkpoints[-8:]
+        BUS.publish(
+            "visual_effect_checkpoint",
+            run_id=self.run_id,
+            hwnd=record["hwnd"],
+            action=action_name,
+            frame_id=record["frame_id"],
+        )
+
     def _safe_stop_after_repeated_done_rejection(self) -> bool:
         """Fail honestly when another identical completion claim cannot help."""
         if not bool(getattr(self, "_done_reject_terminal", False)):
@@ -9557,9 +6110,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         visual_feedback_result = ""
         visual_feedback_signature = ""
         visual_feedback_roi: tuple[float, float, float, float] | None = None
+        visual_feedback_epoch: int | None = None
         deferred_observe_image = ""
         deferred_observe_phase = "observe"
         deferred_observe_region = None
+        refresh_authoritative_frame = False
         deferred_terminal: str | None = None
         for tc in tool_calls:
             if self.stop_event.is_set():
@@ -9614,11 +6169,18 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             )
             terminal_barrier = deferred_terminal is not None
             turn_barrier = bool(closed_loop and visual_transaction_seen)
+            preflight_pixel_stability = self._visual_preflight_requires_pixel_stability(
+                tc.function.name, args,
+            )
             needs_grounding = bool(
                 closed_loop
                 and _main_model_has_vision()
                 and tc.function.name in _LOW_LEVEL_VISUAL_TOOLS
-                and not self._has_fresh_visual_grounding()
+                and not (
+                    self._has_fresh_visual_grounding()
+                    if preflight_pixel_stability
+                    else self._has_fresh_visual_identity()
+                )
             )
             preflight_changed_image = ""
             preflight_change_ratio: float | None = 0.0
@@ -9636,80 +6198,19 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 pointer_status.get("active")
                 and tc.function.name in {"move_mouse", "mouse_up"}
             )
-            continuous_pointer_block = None
             no_progress_block = None
-            partial_output_block = None
-            semantic_progress_block = None
             native_point_scope_block = None
-            scene_coverage_block = None
-            forward_repair_block = self._inline_stage_forward_repair_guard(
-                tc.function.name,
-                args,
-            )
-            semantic_progress_geometry = self._continuous_semantic_geometry(
-                tc.function.name, args,
-            )
-            if not terminal_barrier and not turn_barrier:
-                partial_output_block = self._partial_output_guard.evaluate(
-                    tc.function.name,
-                    args,
-                    hwnd=int(getattr(self.session, "hwnd", 0) or 0),
-                    screen_epoch=tool_epoch_before,
-                    sequence=self._tool_sequence,
-                    frame_id=int(getattr(self, "_visual_frame_id", 0) or 0),
-                    frame_epoch=int(getattr(self, "_visual_frame_epoch", -1)),
-                    frame_hwnd=int(getattr(self, "_visual_frame_hwnd", 0) or 0),
-                    user_directives=tuple(self._native_visual_user_directives),
-                )
-                continuous_pointer_block = self._text_continuous_pointer_preparation_guard(
-                    tc.function.name, args,
-                )
-                if not partial_output_block and not continuous_pointer_block:
-                    semantic_progress_block = self._continuous_semantic_progress_guard(
-                        tc.function.name,
-                        args,
-                        semantic_progress_geometry,
-                    )
             if (
                 closed_loop
                 and _main_model_has_vision()
                 and not needs_grounding
                 and not turn_barrier
                 and not terminal_barrier
-                and not continuous_pointer_block
-                and not semantic_progress_block
             ):
-                continuous_pointer_block = self._continuous_pointer_click_guard(
+                no_progress_block = self._native_no_progress_guard(
                     tc.function.name, args,
                 )
-                if not continuous_pointer_block:
-                    no_progress_block = self._native_no_progress_guard(
-                        tc.function.name, args,
-                    )
-                    if no_progress_block:
-                        recovered_args = (
-                            self._native_no_progress_semantic_recovery(
-                                tc.function.name,
-                                args,
-                                no_progress_block,
-                            )
-                        )
-                        if recovered_args is not None:
-                            args = recovered_args
-                            no_progress_block = None
-                    if not no_progress_block:
-                        scene_coverage_block = self._scene_coverage_guard(
-                            tc.function.name,
-                            args,
-                        )
-            runtime_guard_block = (
-                partial_output_block
-                or continuous_pointer_block
-                or semantic_progress_block
-                or forward_repair_block
-                or no_progress_block
-                or scene_coverage_block
-            )
+            runtime_guard_block = no_progress_block
             if (
                 closed_loop
                 and _main_model_has_vision()
@@ -9786,32 +6287,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     or runtime_guard_block
                 )
 
-            args = self._maybe_upgrade_exact_save_as(tc.function.name, args)
-            args = self._maybe_upgrade_spreadsheet_action_batch(tc.function.name, args)
-            args = self._maybe_upgrade_pending_clipboard_replace(tc.function.name, args)
-            args = self._maybe_upgrade_execute_subgoal_document_input(tc.function.name, args)
-            args = self._maybe_upgrade_execute_subgoal_formats(tc.function.name, args)
-            # Some controller upgrades introduce a whole-document replacement
-            # after the model-authored args were inspected above.  Re-evaluate
-            # the final dispatch payload so document_surface clear cannot hide
-            # a Ctrl+A/Backspace behind an otherwise harmless subgoal.
-            if (
-                partial_output_block is None
-                and not terminal_barrier
-                and not turn_barrier
-            ):
-                partial_output_block = self._partial_output_guard.evaluate(
-                    tc.function.name,
-                    args,
-                    hwnd=int(getattr(self.session, "hwnd", 0) or 0),
-                    screen_epoch=tool_epoch_before,
-                    sequence=self._tool_sequence,
-                    frame_id=int(getattr(self, "_visual_frame_id", 0) or 0),
-                    frame_epoch=int(getattr(self, "_visual_frame_epoch", -1)),
-                    frame_hwnd=int(getattr(self, "_visual_frame_hwnd", 0) or 0),
-                    user_directives=tuple(self._native_visual_user_directives),
-                )
-            self._track_new_document_plan_attempt(tc.function.name, args)
             action_envelope = build_action_envelope(
                 tc.function.name,
                 args,
@@ -9830,10 +6305,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         action_id=tc.id, action_envelope=action_envelope,
                         tool=tc.function.name, args=args)
             started = time.monotonic()
-            blocked_store_action = _blocks_store_search_action(self.task, tc.function.name, args)
-            blocked_upload_action = _blocks_upload_media_analysis(self.task, tc.function.name, args)
             blocked_gui_only_action = ""
-            if _is_gui_only_task(self.task):
+            if (
+                not self._is_native_execute_desktop_task()
+                and _is_gui_only_task(self.task)
+            ):
                 strict_no_shell = _gui_only_forbids_shell(self.task)
                 command = str(args.get("command", ""))
                 condition = args.get("condition")
@@ -9895,114 +6371,43 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "needs_replan": False,
                 }, ensure_ascii=False))
             elif native_point_scope_block:
-                post_tool_hints.append(
-                    "[native target-scope invariant] The proposed physical point "
-                    "resolved to the taskbar or an unrelated top-level window and "
-                    "was not executed. Rebind/focus the intended target and keep the "
-                    "next point inside its visible client content; do not jitter near "
-                    "the system boundary."
-                )
                 result = ToolResult(json.dumps(
                     native_point_scope_block,
                     ensure_ascii=False,
                 ))
-            elif scene_coverage_block:
-                post_tool_hints.append(
-                    "[scene coverage invariant] Real pixels prove that the current "
-                    "viewport was visited before and this spatial edge was already "
-                    "traversed from it. The repeated input was not sent. Choose "
-                    "a different visual frontier, target, scrollable region, or "
-                    "navigation route; a return to an old scene is not progress."
-                )
-                result = ToolResult(json.dumps(
-                    scene_coverage_block,
-                    ensure_ascii=False,
-                ))
-            elif partial_output_block:
-                if (
-                    self._continuous_pointer_output_requested()
-                    and str(partial_output_block.get("destructive_action") or "")
-                    in {
-                        "single_undo", "bulk_undo", "reset_or_clear",
-                        "select_all_delete", "document_surface_clear",
-                    }
-                    and partial_output_block.get("safe_stop") is not True
-                ):
-                    self._continuous_pointer_forward_only_correction = True
-                result = ToolResult(
-                    json.dumps(partial_output_block, ensure_ascii=False),
-                    terminal=(
-                        "reply" if partial_output_block.get("safe_stop") is True else None
-                    ),
-                )
-            elif forward_repair_block:
-                result = ToolResult(
-                    json.dumps(forward_repair_block, ensure_ascii=False),
-                )
-            elif semantic_progress_block:
-                result = ToolResult(
-                    json.dumps(semantic_progress_block, ensure_ascii=False),
-                    terminal=(
-                        "reply" if semantic_progress_block.get("safe_stop") is True else None
-                    ),
-                )
             elif needs_grounding:
-                self._visual_grounding_block_count += 1
-                if self._visual_grounding_block_count >= 2:
-                    result = ToolResult(
-                        "任务已安全暂停：模型连续两次试图在没有当前真实画面依据时操作界面。\n"
-                        "需要用户确认：请确认目标窗口当前可见，或提供一张当前界面截图后再继续。",
-                        terminal="reply",
-                    )
-                else:
-                    result = ToolResult(json.dumps({
-                        "ok": False,
-                        "verified": False,
-                        "blocked": True,
-                        "visual_grounding_required": True,
-                        "error": (
-                            "Low-level GUI action blocked because no fresh real frame grounds "
-                            "the current capture scope/epoch. Call observe first, or use "
-                            "execute_subgoal/run_action_batch when the controller can ground "
-                            "the complete transaction locally."
-                        ),
-                        "needs_replan": False,
-                    }, ensure_ascii=False))
-            elif continuous_pointer_block:
-                stop_after_block = (
-                    self._continuous_pointer_guard_blocks
-                    >= _CONTINUOUS_POINTER_MAX_BLOCKS
-                )
-                if stop_after_block:
-                    continuous_pointer_block["safe_stop"] = True
-                    continuous_pointer_block["error"] += (
-                        " The model ignored the required gesture and proposed another preparation mutation, "
-                        "so the run is stopping instead of continuing without real output evidence."
-                    )
-                result = ToolResult(
-                    json.dumps(continuous_pointer_block, ensure_ascii=False),
-                    terminal="reply" if stop_after_block else None,
-                )
+                refresh_authoritative_frame = True
+                result = ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "action_executed": False,
+                    "visual_grounding_required": True,
+                    "error": (
+                        "The proposed GUI action had no current authoritative frame for "
+                        "the target window and screen epoch, so it was not executed."
+                    ),
+                    "needs_replan": False,
+                }, ensure_ascii=False))
             elif no_progress_block:
-                post_tool_hints.append(
-                    "[mandatory spatial replan] The last target region is now excluded until the "
-                    "visible state materially changes. On the next turn, do not call the same tool "
-                    "at that point or nearby jittered coordinates. Choose a genuinely different "
-                    "visible affordance/element_id, scroll or navigate to new content, use a keyboard "
-                    "route, or report that the requested effect cannot currently be verified."
+                block_count = self.run_state.register_no_progress_block(
+                    str(no_progress_block.get("repeat_signature") or ""),
                 )
-                stop_after_block = (
-                    self._native_no_progress_block_count
-                    >= int(CONFIG.get(
+                no_progress_block.update({
+                    "repeated_guard_blocks": block_count,
+                })
+                stop_after_block = self.run_state.strategy_block_limit_reached(
+                    str(no_progress_block.get("repeat_signature") or ""),
+                    int(CONFIG.get(
                         "controller", "native_no_progress_max_blocks",
                         default=_NATIVE_NO_PROGRESS_MAX_BLOCKS,
-                    ) or _NATIVE_NO_PROGRESS_MAX_BLOCKS)
+                    ) or _NATIVE_NO_PROGRESS_MAX_BLOCKS),
                 )
                 if stop_after_block:
                     no_progress_block["safe_stop"] = True
                     no_progress_block["error"] += (
-                        " The model repeated the blocked action instead of changing strategy, "
-                        "so the run is stopping rather than continuing confidently without evidence."
+                        " The identical no-effect action reached the bounded repeat limit, so the "
+                        "run is stopping rather than continuing without new evidence."
                     )
                 result = ToolResult(
                     json.dumps(no_progress_block, ensure_ascii=False),
@@ -10030,6 +6435,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "needs_replan": False,
                 }, ensure_ascii=False))
             elif preflight_error:
+                refresh_authoritative_frame = True
                 result = ToolResult(json.dumps({
                     "ok": False,
                     "verified": False,
@@ -10040,7 +6446,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         "The runtime could not confirm that the target pixels still match the "
                         f"authoritative frame ({preflight_error}). The action was not executed."
                     ),
-                    "fast_path_advice": "Call observe to obtain a new real frame before retrying.",
                     "needs_replan": False,
                 }, ensure_ascii=False))
             elif frame_coordinate_error:
@@ -10054,30 +6459,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "blocked": True,
                     "frame_coordinate_invalid": True,
                     "error": frame_coordinate_error,
-                    "fast_path_advice": (
-                        "Keep at most one raw frame/physical-coordinate or element-id spatial mutation "
-                        "in this batch. Controller-rebound labels/anchors, keyboard input, waits, and "
-                        "verification may stay with it. Move every later raw spatial action to a new "
-                        "turn after inspecting the next real post-action frame, which is attached automatically."
-                        if spatial_batch_limit else
-                        (
-                            "Keep frame_strokes in the existing whole-frame 0..1000 coordinate "
-                            "system, but place every stroke start and point comfortably inside "
-                            "the returned work_surface_frame_bounds. Do not trace the boundary "
-                            "or reinterpret frame_strokes as surface-relative coordinates."
-                        )
-                        if frame_coordinate_meta.get("work_surface_containment_failed") else
-                        "Inspect the attached authoritative frame and retry once with the "
-                        "tool's frame_* coordinates in 0..1000. The rejected action was not executed."
-                    ),
                     "needs_replan": False,
                 }
                 coordinate_payload.update(frame_coordinate_meta)
                 if spatial_batch_limit:
                     coordinate_payload["native_batch_spatial_limit"] = True
                 result = ToolResult(json.dumps(coordinate_payload, ensure_ascii=False))
-            elif blocked_store_action or blocked_upload_action:
-                result = ToolResult(blocked_store_action or blocked_upload_action)
             elif blocked_gui_only_action:
                 result = ToolResult(blocked_gui_only_action)
             else:
@@ -10091,26 +6478,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     # proves the pixels are still current; internal controller
                     # observe then rebuilds structured grounding explicitly.
                     self.session.snapshot = None
-                result = None
-                if result is None:
-                    result = self._duplicate_clipboard_delivery_result(tc.function.name, args)
-                if result is None:
-                    result = self._duplicate_text_mutation_result(tc.function.name, args)
-                if result is None:
-                    result = self._duplicate_format_mutation_result(tc.function.name, args)
-                if result is None:
-                    tool_dispatched = True
-                    result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
-            result = self._maybe_deliver_clipboard_after_focus(tc.function.name, args, result)
-            result = self._maybe_auto_complete_new_document_plan_item(tc.function.name, args, result)
-            result = self._maybe_auto_complete_open_plan_item(tc.function.name, args, result)
-            result = self._maybe_auto_complete_verified_subgoal_plan_items(tc.function.name, args, result)
-            result = self._maybe_auto_complete_artifact_capture_plan_item(tc.function.name, args, result)
-            result = self._maybe_auto_complete_document_format_plan_items(tc.function.name, args, result)
-            result = self._maybe_auto_complete_desktop_drag_plan_item(tc.function.name, args, result)
-            self._record_text_continuous_pointer_outcome(
-                tc.function.name, args, result,
-            )
+                tool_dispatched = True
+                result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
             if (
                 closed_loop
                 and tc.function.name in _VISUAL_MUTATION_TOOLS
@@ -10124,10 +6493,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     visual_result_data = {}
                 if not isinstance(visual_result_data, dict):
                     visual_result_data = {}
+                if visual_result_data.get("recovery_action_executed") is True:
+                    # The requested click/drag was withheld, but scope repair
+                    # changed foreground pixels. Give the model those pixels
+                    # immediately instead of making it spend another turn on
+                    # a now-stale FrameAuthority rejection.
+                    refresh_authoritative_frame = True
                 if (
                     not needs_grounding
-                    and visual_result_data.get("blocked") is not True
-                    and result.terminal not in {"fail", "error", "stopped"}
+                    and tool_dispatched
+                    and not _result_explicitly_blocked_before_execution(result.text or "")
+                    and (
+                        visual_result_data.get("blocked") is not True
+                        or _main_model_has_vision()
+                    )
+                    and result.terminal != "stopped"
                 ):
                     visual_feedback_action = tc.function.name
                     visual_feedback_args = dict(args)
@@ -10143,6 +6523,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         submitted_size=self._visual_submitted_size,
                     )
                     visual_feedback_roi = authored_target_roi
+                    visual_feedback_epoch = int(
+                        getattr(self.session, "_screen_epoch", 0) or 0
+                    )
                     if visual_result_data:
                         # The controller's text-mode contract asks callers to
                         # observe after an unverified mutation. Native vision
@@ -10153,19 +6536,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         visual_result_data["needs_observe"] = False
                         visual_result_data["native_post_action_frame_pending"] = True
                         if (
-                            visual_result_data.get("ok") is True
-                            and visual_result_data.get("action_executed") is not False
+                            visual_result_data.get("action_executed") is not False
                             and visual_result_data.get("state_transition_skipped") is not True
                             and visual_result_data.get("skipped") is not True
                         ):
                             # Execution provenance only: the fresh frame below
                             # still decides whether the input achieved the goal.
                             visual_result_data["native_action_executed"] = True
-                        visual_result_data["fast_path_advice"] = (
-                            "Inspect the automatically attached real post-action frame directly. "
-                            "Do not call observe merely to verify this action; call done when the "
-                            "requested result is visibly clear, otherwise act once on that frame."
-                        )
                         result.text = json.dumps(
                             visual_result_data, ensure_ascii=False, default=str,
                         )
@@ -10181,23 +6558,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             )
             failure_recovery = None
             raw_result_text = result.text
-            self._record_continuous_semantic_result(
-                tc.function.name,
-                raw_result_text,
-                geometry=semantic_progress_geometry,
-                dispatched=tool_dispatched,
-                terminal=result.terminal,
-            )
-            self._remember_delivered_text_mutations(
-                tc.function.name,
-                args,
-                raw_result_text,
-            )
-            self._remember_applied_format_mutation(
-                tc.function.name,
-                args,
-                raw_result_text,
-            )
             try:
                 # Recovery strategies are meaningful only after the operator
                 # actually received the action.  Validation, grounding, and
@@ -10213,15 +6573,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     tool_name=tc.function.name,
                     args=args,
                     result_text=result.text or "",
-                    task=self.task,
-                    session=self.session,
-                    recent_results=self._recent_results,
-                    visible_evidence_ledger=self._visible_evidence_ledger,
-                    tool_history=self._tool_history,
                 )
                 if failure_recovery is not None:
                     result.text = attach_recovery_metadata(result.text or "", failure_recovery)
-                    post_tool_hints.extend(failure_recovery.post_tool_hints)
                     BUS.publish(
                         "agent_recovery",
                         run_id=self.run_id,
@@ -10236,35 +6590,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "args": args,
                     "error": str(exc),
                 })
-            epoch_after_tool_and_recovery = int(
-                getattr(self.session, "_screen_epoch", 0) or 0
-            )
-            self._partial_output_guard.record_result(
-                tc.function.name,
-                args,
-                raw_result_text,
-                dispatched=tool_dispatched,
-                terminal=result.terminal,
-                hwnd=int(getattr(self.session, "hwnd", 0) or 0),
-                screen_epoch=epoch_after_tool_and_recovery,
-                sequence=self._tool_sequence,
-                frame_id=int(getattr(self, "_visual_frame_id", 0) or 0),
-                user_directives=tuple(self._native_visual_user_directives),
-            )
-            if (
-                closed_loop
-                and epoch_after_tool_and_recovery != tool_epoch_before
-                and not visual_feedback_action
-            ):
-                # The recovery layer may focus/re-observe through ToolSession
-                # after the original call was blocked.  That is still a visual
-                # transaction: expose its real resulting frame instead of
-                # silently invalidating grounding and forcing an observe loop.
-                visual_transaction_seen = True
-                visual_feedback_action = f"{tc.function.name}:local_recovery"
-                visual_feedback_args = dict(args)
-                visual_feedback_action_executed = True
-                visual_feedback_result = result.text or ""
             elapsed_ms = int((time.monotonic() - started) * 1000)
             state_terminal = None if result.terminal == "done" else result.terminal
             self.run_state.after_tool(tc.function.name, args, result.text, state_terminal)
@@ -10282,7 +6607,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "elapsed_ms": elapsed_ms,
                 "failure_recovery": failure_recovery.to_dict() if failure_recovery else None,
             })
-            ledger_len_before = len(self._visible_evidence_ledger)
             pending_controller_events = list(
                 getattr(self.session, "_pending_controller_events", []) or []
             )
@@ -10312,11 +6636,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self._record_step(tc.function.name, args, result.replay)
             self._track_verification(tc.function.name, result.text)
             self._track_visible_evidence(tc.function.name, args, result.text)
-            result = self._maybe_auto_done_from_visible_evidence(
-                tc.function.name,
-                result,
-                ledger_len_before,
-            )
             self._tool_history.append((tc.function.name, args, result.text or ""))
             self._tool_history = self._tool_history[-40:]
             # Keep recent tool outputs as evidence for the done-gate judge
@@ -10379,26 +6698,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             except (json.JSONDecodeError, TypeError):
                 parsed_result = {}
             if isinstance(parsed_result, dict):
-                inline_verdict = self._inline_stage_semantic_verdict(
-                    tc.function.name,
-                    parsed_result,
-                )
-                if inline_verdict is not None:
-                    self._remember_inline_stage_repair_state(
-                        tc.function.name,
-                        args,
-                        inline_verdict,
-                    )
-                    parsed_result["stage_semantic_verification"] = inline_verdict
-                    result.text = json.dumps(parsed_result, ensure_ascii=False)
-                    if self._done_verified:
-                        parsed_result["auto_completed_stage"] = True
-                        result.text = json.dumps(parsed_result, ensure_ascii=False)
-                        result.terminal = "done"
-                    else:
-                        repair_hint = self._inline_stage_repair_hint(inline_verdict)
-                        if repair_hint:
-                            post_tool_hints.append(repair_hint)
                 if tc.function.name == "execute_subgoal":
                     packet = parsed_result.get("evidence_packet")
                     if isinstance(packet, dict):
@@ -10438,7 +6737,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "plan_after_auto_complete",
                     "needs_llm_reason",
                     "element_cache",
-                    "auto_done",
                     "structured_scene_verified",
                     "format_applied",
                     "format_verified",
@@ -10450,21 +6748,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "failure_classification",
                     "failure_recovery",
                     "cooperative_input",
-                    "semantic_progress_guard",
-                    "pixel_effect_only",
-                    "materially_different_geometry_required",
-                    "fresh_semantic_required",
-                    "continuous_pointer_guard",
-                    "text_only_continuous_setup_guard",
-                    "continuous_gesture_required",
-                    "setup_clicks_observed",
-                    "setup_mutations_observed",
-                    "low_change_click_streak",
                     "native_no_progress_guard",
                     "no_visual_progress",
                     "no_progress_streak",
                     "observed_change_ratio",
-                    "strategy_change_required",
                     "repeated_guard_blocks",
                     "constraint_rejection_guard",
                     "constraint_category",
@@ -10475,6 +6762,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "native_point_scope_guard",
                     "scope_reason",
                     "scene_coverage_guard",
+                    "scene_coverage_advisory",
                     "current_scene_id",
                     "current_scene_visit_count",
                     "proposed_edge",
@@ -10496,10 +6784,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "failure_recovery",
                     {
                         "status": failure_recovery.status.value,
-                        "llm_required": failure_recovery.llm_required,
-                        "retryable": failure_recovery.retryable,
-                        "local_actions": failure_recovery.local_actions,
-                        "post_tool_hint_count": len(failure_recovery.post_tool_hints),
+                        "executed": False,
                         "result_meta": failure_recovery.result_meta,
                     },
                 )
@@ -10531,7 +6816,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 if deferred_terminal is None:
                     self.result_text = result.text
                     deferred_terminal = result.terminal
-        if visual_feedback_action:
+        if (
+            visual_feedback_action
+            and (
+                visual_feedback_epoch is None
+                or int(getattr(self.session, "_screen_epoch", 0) or 0)
+                == visual_feedback_epoch
+            )
+        ):
             self._inject_visual_frame(
                 phase="post_action",
                 action=visual_feedback_action,
@@ -10553,14 +6845,27 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )
             else:
                 self._inject_observe_screenshot(deferred_observe_image)
-        for hint in post_tool_hints[-2:]:
-            self.messages.append({"role": "user", "content": hint})
+        elif refresh_authoritative_frame:
+            self._inject_visual_frame(
+                phase="refresh",
+                action_executed=False,
+                result_preview="No action was executed because the prior frame identity was unavailable.",
+            )
+        if not self._is_native_execute_desktop_task():
+            for hint in post_tool_hints[-2:]:
+                self.messages.append({"role": "user", "content": hint})
         return deferred_terminal
 
     # ------------------------------------------------------------------ run
     def _prebind_initial_gui_target(self) -> None:
         """Open/focus a leading, explicit GUI application before LLM step 1."""
         if self._is_coding:
+            return
+        if self._is_native_execute_desktop_task():
+            # The initial authoritative frame must reach the model before any
+            # hidden launch/focus mutation.  The model can explicitly choose an
+            # exposed app/window tool when the complete request actually calls
+            # for a target change.
             return
         task = str(self.task or "").strip()
         if not re.match(
@@ -10659,12 +6964,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             playbook_text=playbooks.render_section(matched_books),
             style=str(CONFIG.get("agent", "prompt_style", default="compact")),
             main_model_has_vision=_main_model_has_vision(),
-            continuous_pointer_output=self._continuous_pointer_output_requested(),
             runtime_section=self.runtime_profile.prompt_section())
         self.messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": self.task},
         ]
+        native_desktop_stage = self._is_native_execute_desktop_task()
         if (
             _is_communication_task(self.task_intent)
             and str(self.runtime_profile.stage_type or "") != "ExecuteDesktopTask"
@@ -10714,7 +7019,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # Session continuity: let referential follow-ups ("再来一次" etc.) resolve
         # against prior tasks this session. Injected right after the task so it's
         # in the cache-friendly prefix; gated by config.
-        if _is_upload_publish_task(self.task):
+        if not native_desktop_stage and _is_upload_publish_task(self.task):
             self.messages.append({
                 "role": "user",
                 "content": (
@@ -10726,7 +7031,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "flow, report that exact blocker."
                 ),
             })
-        if _is_gui_only_task(self.task):
+        if not native_desktop_stage and _is_gui_only_task(self.task):
             self.messages.append({
                 "role": "user",
                 "content": (
@@ -10738,7 +7043,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "verification such as Test-Path/Get-Content/Select-String after the GUI work."
                 ),
             })
-        if _is_multi_source_research_task(self.task):
+        if not native_desktop_stage and _is_multi_source_research_task(self.task):
             self.messages.append({
                 "role": "user",
                 "content": (
@@ -10770,7 +7075,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         if (
             self.session_context
             and CONFIG.get("agent", "session_memory", default=True)
-            and session_mod.should_include_context(self.task)
         ):
             ctx = session_mod.render_context(self.session_context)
             if ctx:
@@ -10803,7 +7107,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             required_capabilities=self.runtime_profile.required_capabilities,
             stage_tools=self.runtime_profile.stage_tools,
             stage_type=self.runtime_profile.stage_type,
-            surface_output_mode=self.runtime_profile.surface_output_mode,
         )
         if self.runtime_profile.model_tool_allowlist:
             allowed_stage_tools = set(self.runtime_profile.model_tool_allowlist)
@@ -10867,8 +7170,20 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     ),
                 ))
 
+                finish_reason = str(
+                    getattr(resp.choices[0], "finish_reason", "") or ""
+                )
+                if (
+                    msg.tool_calls
+                    and finish_reason == "length"
+                    and not self._tool_calls_have_complete_arguments(msg.tool_calls)
+                    and not self._is_coding
+                ):
+                    if self._recover_truncated_gui_tool_call():
+                        continue
+                    break
+
                 if not msg.tool_calls:
-                    finish_reason = str(getattr(resp.choices[0], "finish_reason", "") or "")
                     if finish_reason == "length":
                         if not self._is_coding:
                             if self._recover_truncated_gui_tool_call():
@@ -10909,12 +7224,30 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         BUS.publish("chat", run_id=self.run_id, role="assistant",
                                     content=self.result_text[:500], reasoning=reasoning[:800])
                         continue
-                    if self._recent_results:
-                        if not self._verify_done(client, steps_left=max_steps - step):
-                            if self._continuous_pointer_output_requested():
-                                self._continuous_pointer_done_repair_required = True
+                    candidate_reply = self._is_native_execute_desktop_task()
+                    if self._recent_results or candidate_reply:
+                        self._candidate_reply_pending = candidate_reply
+                        try:
+                            reply_verified = self._verify_done(
+                                client,
+                                steps_left=max_steps - step,
+                            )
+                        finally:
+                            self._candidate_reply_pending = False
+                        if not reply_verified:
                             if self._safe_stop_after_repeated_done_rejection():
                                 break
+                            continue
+                        if candidate_reply and not self._done_verified:
+                            # A disabled/bypassed judge must not turn an
+                            # unverified plain reply into stage success.
+                            self.messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[completion check failed] The candidate final response was not "
+                                    "independently verified against the original request and latest frame."
+                                ),
+                            })
                             continue
                         self.status = "done"
                     else:
@@ -10953,8 +7286,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     and not self._done_verified
                     and not self._verify_done(client, steps_left=max_steps - step)
                 ):
-                    if self._continuous_pointer_output_requested():
-                        self._continuous_pointer_done_repair_required = True
                     if self._safe_stop_after_repeated_done_rejection():
                         break
                     self.run_state.terminal_rejected("done", self._last_done_reject_reason)

@@ -35,7 +35,7 @@ class RuntimeProfile:
     browser: bool = True
     safety: bool = True
     async_jobs: bool = True
-    perception_daemon: bool = True
+    perception_daemon: bool = False
     task_contract_id: str = ""
     stage_type: str = ""
     required_capabilities: tuple[str, ...] = ()
@@ -120,34 +120,9 @@ class RuntimeProfile:
 
     def prompt_section(self) -> str:
         sections: list[str] = []
-        if self.stage_guidance:
-            sections.append(
-                "# Typed stage execution guidance\n"
-                "This is controller strategy, not part of the user's visible completion "
-                "criteria. Do not require these implementation words or numbers to appear "
-                "in the output.\n"
-                + self.stage_guidance.strip()
-            )
-        if self.adaptive_visual_interaction:
-            sections.append(
-                "# Active runtime capability: adaptive visual interaction\n"
-                "Use the latest authoritative target-window frame as the only coordinate source. "
-                "Select the smallest goal-relevant click, press/hold, drag, guided path, stroke, "
-                "keyboard action, or short controller batch that the visible affordance supports. "
-                "Prefer semantic label/text grounding for stable visible controls. For purely visual "
-                "geometry, use the exact submitted-image pixel fields stated with the current frame; "
-                "the runtime maps them to the desktop without model-side resizing arithmetic. "
-                "Use one continuous drag when the whole static route is visible. If a useful next point "
-                "only becomes knowable after pressing or moving, call mouse_down, inspect the automatically "
-                "returned fresh frame, use one or more move_mouse turns grounded in each new frame, then "
-                "mouse_up. This is the same generic held-pointer loop for sliders, drag/drop, games, "
-                "timelines, remote surfaces, and other interactive scenes. "
-                "Bind spatial input to the current frame and a constraint_frame_region whenever "
-                "the action belongs inside a board, pane, lane, canvas, game area, or other ROI. "
-                "After every action whose effect can change later geometry, obtain a fresh frame, "
-                "verify the intended semantic effect, and replan from that new state. A dispatched "
-                "input or a changed pixel region is progress evidence, never whole-task completion."
-            )
+        # The task and typed contract already carry the requested outcome.
+        # Injecting compiler-authored stage tactics here competes with the live
+        # frame and makes the visual agent follow a speculative script.
         if not self.coding:
             return "\n\n".join(sections)
         workspace = self.coding_workspace or coding_workspace_dir()
@@ -192,7 +167,6 @@ def build_runtime_profile(
     """Decide which runtimes are active inside the single AgentRunner."""
     coding_enabled = bool(CONFIG.get("coding", "enabled", default=True))
     stage_execution = getattr(stage, "execution", None)
-    stage_parameters = dict(getattr(stage, "parameters", {}) or {})
     if task_contract is not None and stage is not None:
         # A typed stage has already been classified and capability-planned.  Do
         # not let a generated stage goal re-enable Coding Runtime through an
@@ -243,7 +217,18 @@ def build_runtime_profile(
     experience_enabled = str(
         getattr(task_contract, "experience_policy", "allow") or "allow"
     ).casefold() != "disabled"
-    stage_type = str(getattr(getattr(stage, "type", None), "value", "") or "")
+    serialized_stage_type = str(
+        getattr(getattr(stage, "type", None), "value", "") or ""
+    )
+    # ``DrawArtifact`` remains in task-contract/1 so historical documents can
+    # still be read.  It is not a runtime mode: old drawing stages enter the
+    # same native visual operator, tool surface, recovery loop, and completion
+    # judge as every other desktop task.
+    stage_type = (
+        "ExecuteDesktopTask"
+        if serialized_stage_type == "DrawArtifact"
+        else serialized_stage_type
+    )
     declared_capabilities = {
         str(item or "").strip().casefold()
         for item in (
@@ -255,31 +240,6 @@ def build_runtime_profile(
         stage_type == "ExecuteDesktopTask"
         or "visual.adaptive_interaction" in declared_capabilities
     )
-    surface_output_mode = bool(
-        stage_type == "DrawArtifact"
-        or str(stage_parameters.get("surface_output_mode") or "").strip()
-    )
-    surface_subject = str(
-        stage_parameters.get("surface_output_subject")
-        or stage_parameters.get("subject")
-        or ""
-    ).strip()
-    surface_quality = str(
-        stage_parameters.get("surface_output_quality")
-        or stage_parameters.get("quality")
-        or "normal"
-    ).strip().casefold()
-    surface_output_criteria = ""
-    if surface_output_mode:
-        subject = surface_subject or "the requested visible surface output"
-        surface_output_criteria = (
-            f"The current target application visibly contains {subject}. "
-            + (
-                "It must satisfy the explicitly requested polished and detailed quality."
-                if surface_quality == "detailed"
-                else "It must be clearly recognizable; do not require unrequested decoration."
-            )
-        )
     stage_values = {
         "task_contract_id": str(getattr(task_contract, "task_id", "") or ""),
         "stage_type": stage_type,
@@ -289,17 +249,21 @@ def build_runtime_profile(
         "domain_adapter": str(getattr(stage_execution, "adapter", "") or ""),
         "stage_guidance": str(stage_guidance or "").strip(),
         "model_tool_allowlist": tuple(str(item) for item in model_tool_allowlist if str(item)),
-        "inline_semantic_verification": bool(
-            inline_semantic_verification or surface_output_mode
-        ),
+        # Deprecated read-compatible fields remain serialized as false.  The
+        # one general done judge evaluates the original task from fresh pixels;
+        # there is no drawing-only inline verifier.
+        "inline_semantic_verification": False,
         "adaptive_visual_interaction": adaptive_visual_interaction,
-        "surface_output_mode": surface_output_mode,
-        "surface_output_criteria": surface_output_criteria,
+        "surface_output_mode": False,
+        "surface_output_criteria": "",
         "experience_enabled": experience_enabled,
         "plan_upfront": bool(
-            str(getattr(getattr(stage, "type", None), "value", "") or "")
-            == "ExecuteDesktopTask"
+            stage_type == "ExecuteDesktopTask"
         ),
+        # The native visual loop owns its pixels and asks for semantic probes
+        # explicitly.  Legacy/direct runtimes retain their background daemon;
+        # callers can also opt in with RuntimeProfile(perception_daemon=True).
+        "perception_daemon": stage_type != "ExecuteDesktopTask",
     }
     if not use_coding:
         return RuntimeProfile(

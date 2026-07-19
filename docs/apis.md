@@ -120,9 +120,9 @@ artifact endpoint 同时支持进程内 execution 和重启后的 manifest。man
 
 ### 运行语义边界
 
-- 原生视觉模型收到的不是固定全屏图。`controller.target_window_capture_enabled=true` 时，只在目标 hwnd 有效、可见、位于前台、几何可信、任务不要求桌面或多窗口上下文且裁剪确有收益时使用目标窗口；其余情况保守回退完整虚拟桌面。每帧都会给出 `scope`、`reason`、物理 `screen_region` 和 0..1000 坐标空间。关闭该配置可强制全桌面做 A/B 对照。
+- 原生视觉模型收到的不是固定全屏图。`controller.target_window_capture_enabled=true` 时，只在目标 hwnd 有效、可见、位于前台、几何可信、任务不要求桌面或多窗口上下文且裁剪确有收益时使用目标窗口；其余情况保守回退完整虚拟桌面。每帧都会给出 `scope`、`reason`、物理 `screen_region` 和精确提交图片尺寸。native 模型用 `image_*` 图片像素，runtime 再映射到内部 0..1000 坐标空间与物理桌面；关闭该配置可强制全桌面做 A/B 对照。
 - 实时交互在 `SurfaceBinding` 中额外校验目标 hwnd、窗口 client authority、frame identity 和 `InteractionRegion`。client bounds 是安全包络而不是自动 action region；区域含糊、帧陈旧、前台所有权丢失或动作逃逸时请求 fail-closed，不会把全桌面坐标猜成目标坐标。
-- `InteractionAction` 支持 `click`、`double_click`、`hover`、`move_mouse`、`drag`、`draw_strokes`、`scroll`、`select_color`、`type_text`、`hotkey`、`hold_key` 和 `wait_stable`。低层 `mouse_down` / `mouse_up` 仅允许出现在同一个经验证的 Controller batch 中，并且必须与移动/等待形成平衡事务；它们不是独立的顶层模型工具。长拖拽或连续路径的新鲜度 preflight 使用沿路径均匀抽样的多个局部 ROI（当前上限 12），而不是只比较一个容易稀释局部变化的大包围框。
+- `InteractionAction` 支持 `click`、独立的 `double_click`、`hover`、`move_mouse`、`drag`、`draw_strokes`、`scroll`、`select_color`、`type_text`、`hotkey`、`hold_key` 和 `wait_stable`。native 模型还可用受约束的顶层 `mouse_down` / `move_mouse` / `mouse_up` 跨新鲜帧完成按下后目标才出现的交互；runtime 只允许一个有超时的 held-pointer session，并在取消、失焦、异常或终态强制释放。Controller batch 中的按下/释放仍必须平衡。长拖拽或连续路径的新鲜度 preflight 使用沿路径均匀抽样的多个局部 ROI（当前上限 12），而不是只比较一个容易稀释局部变化的大包围框。
 - 每个空间动作在映射坐标前验证 observation artifact 的 current-run/purpose/sendable/HWND、实际 capture region、声明 frame region、尺寸、session 和 frame lineage；读取 artifact 时重新核验文件大小、SHA-256 与图像尺寸。`grounding_mode` 区分对象锚点、语义控件、自由路径、相对手势与有界坐标，`effect_region_binding` 则显式绑定 source/target/surface/independent。
 - 失败动作后的“新证据”只比较 source/target/path/effect 因果 ROI；整帧 hash 只是完全相同的快路径，无关动画和不可用比较都不能换取额外模型调用。判定写入 `failed_no_effect_evidence_check` 并 fail-closed。
 - `controller.multi_input_cooperation=false` 是默认值。开启后只是在人和 Agent 之间仲裁同一套系统光标/键盘焦点：优先后台安全动作，前台或光标所有权变化时中止物理动作。它不提供两个真实鼠标或两套键盘并发。

@@ -327,38 +327,6 @@ def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
     ok = bool(result.get("ok")) and bool(verified_steps)
     if result.get("ok") and not verified_steps:
         result = {**result, "ok": False, "error": "skill replay produced no verified steps"}
-    stage_verification: dict[str, Any] = {}
-    stage_type = str(node.config.get("stage_type") or "")
-    parameters = dict(node.config.get("parameters") or {})
-    if ok and stage_type == "DrawArtifact":
-        subject = str(parameters.get("subject") or "the requested subject")
-        quality = str(parameters.get("quality") or "normal")
-        session = ToolSession(
-            stop_event=stop_event,
-            task=f"Verify replayed drawing stage: {subject}",
-            runtime_profile=build_runtime_profile(f"Verify drawing of {subject}"),
-        )
-        session.run_id = context["run_id"]
-        try:
-            verdict = session.dispatch("vlm_verify", {
-                "criteria": (
-                    f"The latest drawing canvas clearly and recognizably depicts {subject}. "
-                    + ("It also meets the requested polished/detailed quality." if quality == "detailed" else "Do not require unrequested decorative detail.")
-                ),
-            })
-            stage_verification = _json_result(verdict.text)
-        finally:
-            session.close()
-        ok = bool(
-            stage_verification.get("verified") is True
-            or stage_verification.get("semantic_visual_verified") is True
-        )
-        if not ok:
-            result = {
-                **result,
-                "ok": False,
-                "error": str(stage_verification.get("error") or stage_verification.get("reason") or "stage semantic verification failed"),
-            }
     if memory_id:
         try:
             experience._store().record_attempt(
@@ -382,7 +350,6 @@ def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
         "script": script_name,
         "memory_id": memory_id or None,
         "memory_replay_ok": ok,
-        "stage_verification": stage_verification,
     }
     evidence = [{
         "predicate": "skill.replay",

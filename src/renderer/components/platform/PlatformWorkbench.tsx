@@ -1707,7 +1707,7 @@ function SystemView({ plane }: { plane: Plane }) {
               <div className="arp-perception-row" key={dimension}><span className="arp-level">L{index}</span><Toggle label={dimension.toUpperCase()} checked={Boolean(config.perception?.[dimension]?.enabled)} onChange={(value) => setConfig((current) => current ? { ...current, perception: { ...current.perception, [dimension]: { ...current.perception?.[dimension], enabled: value } } } : current)} /><code>P{config.perception?.[dimension]?.priority || index + 1}</code></div>
             ))}
             <Toggle checked={Boolean(config.fusion?.screen_watch_autostart)} onChange={(value) => patch('fusion', 'screen_watch_autostart', value)} label="自动启动屏幕监视" />
-            <Toggle checked={Boolean(config.controller?.native_visual_thinking)} onChange={(value) => patch('controller', 'native_visual_thinking', value)} label="实验性空间推理" />
+            <Toggle checked={Boolean(config.controller?.native_visual_thinking)} onChange={(value) => patch('controller', 'native_visual_thinking', value)} label="原生视觉推理（更慢）" />
             <Toggle checked={config.controller?.target_window_capture_enabled !== false} onChange={(value) => patch('controller', 'target_window_capture_enabled', value)} label="自动裁剪目标窗口画面" />
             <Toggle checked={Boolean(config.controller?.multi_input_cooperation)} onChange={(value) => patch('controller', 'multi_input_cooperation', value)} label="实验性多鼠标键盘协同" />
             <Toggle checked={Boolean(config.fusion?.ocr_skip_when_uia_rich)} onChange={(value) => patch('fusion', 'ocr_skip_when_uia_rich', value)} label="UIA 信息丰富时跳过 OCR" />

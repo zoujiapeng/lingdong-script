@@ -121,14 +121,6 @@ _COMPLETION_RATE_RE = re.compile(
     r"(?:\u5b8c\u6210\u7387|completion\s*(?:rate)?)\s*[:\uff1a]?\s*(\d{1,3})\s*%",
     re.IGNORECASE,
 )
-_NEW_BLANK_GOAL_RE = re.compile(
-    r"(?:\b(?:new|create)\b.{0,40}\b(?:blank|document|workbook|spreadsheet|presentation)\b)|"
-    r"(?:\bblank\b.{0,30}\b(?:document|workbook|spreadsheet|presentation)\b)|"
-    r"(?:\u65b0\u5efa|\u521b\u5efa).{0,30}(?:\u7a7a\u767d|\u6587\u6863|\u5de5\u4f5c\u7c3f|\u8868\u683c|\u6f14\u793a)",
-    re.IGNORECASE,
-)
-
-
 def _is_coding_runtime(session) -> bool:
     profile = getattr(session, "runtime_profile", None)
     return bool(getattr(profile, "coding", False))
@@ -485,25 +477,6 @@ class PlanToolMixin:
             )
             return ToolResult(
                 f"Subgoal {index} is not complete: {source_error}\n{self.plan.render()}"
-            )
-        if _NEW_BLANK_GOAL_RE.search(goal) and not bool(
-            getattr(self, "_new_blank_applied", False)
-        ):
-            detail = (
-                "opening/focusing the application does not prove that the requested new blank "
-                "document or workbook was created; execute the New routine and verify its title/surface first"
-            )
-            BUS.publish(
-                "agent_plan",
-                run_id=getattr(self, "run_id", ""),
-                action="subgoal_check",
-                index=index,
-                verified=False,
-                detail=detail,
-                source="compound_new_blank_guard",
-            )
-            return ToolResult(
-                f"Subgoal {index} is a compound open/create step and is not complete: {detail}."
             )
         ignored_file_check, ignored_detail = _spurious_agent_schedule_file_check(
             getattr(self, "task", ""),

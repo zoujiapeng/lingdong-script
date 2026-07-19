@@ -1,109 +1,60 @@
-"""Task-intent hints that change perception strategy.
+"""Select perception strategy from runtime intent, never product vocabulary.
 
-Pure string heuristics, no heavy deps, so both the perception layer
-(``fusion``) and the agent layer (``tools``) can import it without a layering
-inversion.
-
-Perception modes:
-- "normal"  : default; UIA-rich windows may skip OCR/VLM for speed.
-- "pixel_text": office/document surfaces; run UIA and OCR together, using a
-                 VLM only when OCR supplies no readable content.
-- "visual"  : chat/canvas/mirror tasks; OCR always runs; VLM runs as an
-              assist dimension when configured (not just as rescue).
-- "vlm_first": future; VLM leads, others fill gaps. Reserved for explicit
-              user config or fully pixel-rendered surfaces.
+Raw task text and window titles are deliberately not classified here.  The
+compiler/runtime contract owns semantic intent; live target binding and causal
+window deltas own application identity.  This module only projects those
+structured signals into a perception mode.
 """
 from __future__ import annotations
 
 from typing import Any
 
-# Drawing / canvas: the meaningful output is painted pixels, invisible to UIA.
-_DRAWING_TERMS = (
-    "draw", "drawing", "paint", "sketch", "canvas", "whiteboard", "doodle",
-    "画", "画图", "绘图", "涂鸦", "画板",
-    "白板", "颜色", "color", "手绘",
-)
+_RUNTIME_MODES = frozenset({
+    "normal", "pixel_text", "visual", "structured_ui", "vlm_first",
+})
+_VISUAL_OPERATIONS = frozenset({"draw", "capture", "send", "interact"})
 
-# Chat / messaging: bubbles and composer text are often OCR-only on modern
-# chat clients (QQNT / WeChat render messages on a custom surface).
-_CHAT_TERMS = (
-    "发信息", "发消息", "发送", "回复",
-    "私信", "聊天", "邮件", "message", "send", "reply",
-    "email", "chat", "微信", "qq", "会话",
-)
 
-# Phone mirror / cast: the phone screen is a single image to the host OS.
-_MIRROR_TERMS = (
-    "手机", "投屏", "镜像", "我的设备",
-    "我的电脑", "mirror", "scrcpy", "cast",
-)
-
-# Media frames the user wants understood (only when paired with a look/read
-# verb — handled by the caller; kept here for completeness/future use).
-_MEDIA_TERMS = (
-    "视频", "截图", "video", "screenshot",
-)
-
-# Office editors frequently expose ribbon chrome and stale document-window
-# nodes through UIA while the actual page/sheet remains pixel-rendered.
-_PIXEL_TEXT_TERMS = (
-    "spreadsheet", "workbook", "worksheet", "excel", "wps spreadsheets",
-    "电子表格", "工作簿", "wps表格", "wps 表格",
-    "wps writer", "microsoft word", "word document", "wps文字", "wps 文字",
-    "powerpoint", "wps presentation", "幻灯片", "wps演示", "wps 演示",
-)
+def _structured_intent(task: Any) -> dict[str, Any] | None:
+    if hasattr(task, "model_dump"):
+        payload = task.model_dump(mode="json")
+        return payload if isinstance(payload, dict) else None
+    if isinstance(task, dict):
+        return dict(task)
+    return None
 
 
 def perception_mode(task: Any, window_title: str = "", *, runtime_mode: str = "") -> str:
-    """Return the perception strategy mode for a task.
+    """Return an explicit mode or one derived from structured intent.
 
-    "normal"  — default; skip OCR/VLM on UIA-rich windows for speed.
-    "pixel_text" — office/document UI: UIA and OCR run together; VLM is
-                   reserved for an OCR-empty fallback.
-    "visual"  — chat / canvas / mirror: OCR always runs; VLM assists when
-                configured (not just as rescue ladder).
-    "vlm_first" — reserved for future explicit VLM-led perception.
-
-    Combines the task text with the current window title so that a generic
-    follow-up like "继续" still keeps the right mode while a QQ/Paint window
-    is in focus.
+    ``window_title`` remains in the public signature for compatibility but is
+    not semantic evidence.  A raw string task always selects ``normal``.
     """
-    if runtime_mode in {"normal", "pixel_text", "visual", "vlm_first"}:
+    if runtime_mode in _RUNTIME_MODES:
         return runtime_mode
-    if hasattr(task, "model_dump"):
-        structured = task.model_dump(mode="json")
-    elif isinstance(task, dict):
-        structured = dict(task)
-    else:
-        structured = None
-    if structured is not None:
-        operations_raw = structured.get("operation") or []
-        if isinstance(operations_raw, str):
-            operations_raw = [operations_raw]
-        operations = {str(item).casefold() for item in operations_raw}
-        interaction = structured.get("interaction") or {}
-        if (
-            bool(interaction.get("active"))
-            or operations.intersection({"draw", "capture", "send", "interact"})
-        ):
-            return "visual"
-        # Application/window identity is live runtime state, not a second task
-        # classifier.  It remains a useful hint for custom-rendered Office
-        # surfaces when the contract itself does not demand visual perception.
-        title = str(window_title or "").casefold()
-        if any(term in title for term in _PIXEL_TEXT_TERMS):
-            return "pixel_text"
+    structured = _structured_intent(task)
+    if structured is None:
         return "normal"
-    text = f"{task or ''} {window_title or ''}".casefold()
-    if any(term in text for term in (*_DRAWING_TERMS, *_CHAT_TERMS, *_MIRROR_TERMS)):
+
+    operations_raw = structured.get("operation") or []
+    if isinstance(operations_raw, str):
+        operations_raw = [operations_raw]
+    operations = {
+        str(getattr(item, "value", item) or "").strip().casefold()
+        for item in operations_raw
+    }
+    interaction = structured.get("interaction") or {}
+    if hasattr(interaction, "model_dump"):
+        interaction = interaction.model_dump(mode="json")
+    if not isinstance(interaction, dict):
+        interaction = {}
+    if bool(interaction.get("active")) or operations.intersection(_VISUAL_OPERATIONS):
         return "visual"
-    if any(term in text for term in _PIXEL_TEXT_TERMS):
-        return "pixel_text"
     return "normal"
 
 
 def vision_priority_task(task: Any, window_title: str = "") -> bool:
-    """Legacy bool accessor — True when perception_mode returns 'visual'.
+    """Legacy bool accessor for non-normal structured perception.
 
     Kept for call-sites that haven't migrated yet. New code should call
     perception_mode() directly.

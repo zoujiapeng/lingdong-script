@@ -49,6 +49,43 @@ def test_atomic_action_parser_matches_controller_shorthand_and_skips_malformed_c
     ]
 
 
+def test_batch_validator_reuses_precanonicalized_actions_without_reparsing(monkeypatch):
+    from winpilot.fast import action_contract
+
+    canonical, errors = action_contract.canonicalize_batch_actions([
+        {"action": "click", "x": 10, "y": 20},
+        {"hotkey": ["ctrl", "a"]},
+    ])
+
+    assert errors == []
+    assert [(item.ordinal, item.name) for item in canonical] == [
+        (0, "click"),
+        (1, "hotkey"),
+    ]
+    monkeypatch.setattr(
+        action_contract,
+        "parse_atomic_action",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("canonical actions must not be parsed again")
+        ),
+    )
+    assert action_contract.validate_batch_actions(canonical) == []
+
+
+def test_focus_window_contract_accepts_either_window_identity():
+    from winpilot.fast.action_contract import canonicalize_batch_actions
+
+    by_hwnd, hwnd_errors = canonicalize_batch_actions([
+        {"action": "focus_window", "hwnd": 42},
+    ])
+    by_title, title_errors = canonicalize_batch_actions([
+        {"action": "focus_window", "title": "Nebula"},
+    ])
+
+    assert len(by_hwnd) == 1 and hwnd_errors == []
+    assert len(by_title) == 1 and title_errors == []
+
+
 def test_execute_subgoal_atomic_actions_have_stable_declared_order():
     from winpilot.fast.action_contract import iter_atomic_actions
 
@@ -255,6 +292,7 @@ def test_supported_actions_is_stable_and_minimal_contract_projection():
     assert actions == tuple(sorted(actions))
     assert "click" in actions
     assert "draw_strokes" in actions
+    assert "ensure_document_surface" not in actions
     assert "run_shell" not in actions
 
     batch = next(

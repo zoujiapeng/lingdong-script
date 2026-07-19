@@ -10,7 +10,6 @@ matches the intuitive notion of a session boundary. Not persisted to disk.
 """
 from __future__ import annotations
 
-import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,37 +17,6 @@ from typing import Any
 _MAX_ENTRIES = 8
 _RECENT_FOR_PROMPT = 3
 _SUMMARY_CHARS = 160
-_REFERENCE_WORDS = (
-    "again",
-    "same",
-    "previous",
-    "last",
-    "continue",
-    "repeat",
-    "it",
-    "that",
-)
-_REFERENCE_PHRASES = (
-    "do it again",
-    "same one",
-    "last one",
-    "previous one",
-    "close it",
-)
-_REFERENCE_CUES_CN = (
-    "再来",
-    "再",
-    "继续",
-    "刚才",
-    "上一个",
-    "上次",
-    "之前",
-    "同样",
-    "重复",
-    "那个",
-    "它",
-    "把它",
-)
 
 
 @dataclass(frozen=True)
@@ -138,37 +106,38 @@ SESSION = SessionMemory()
 
 
 def render_context(entries: list[SessionEntry | dict[str, Any]]) -> str:
-    """Compact prompt block ('' when empty). Injected at the history tail."""
+    """Render bounded prior-run facts without interpreting references."""
     if not entries:
         return ""
-    lines = ["【本会话此前已完成的任务（从旧到新）】"]
+    lines = ["[Bounded same-client session facts, oldest to newest]"]
     for i, e in enumerate(entries, start=1):
         if isinstance(e, dict):
             task = str(e.get("task") or "")
             status = str(e.get("status") or "")
             summary = str(e.get("result") or "").replace("\n", " ").strip()
+            run_id = str(e.get("run_id") or "")
+            artifacts = [
+                dict(item) for item in (e.get("artifacts") or [])
+                if isinstance(item, dict)
+            ]
         else:
             task, status = e.task, e.status
             summary = e.result.replace("\n", " ").strip()
-        lines.append(f'{i}. "{task}" → {status}：{summary}')
-    lines.append(
-        "若当前指令含'再来一次/再来/重复/刚才那个/那个/把它关了/继续'等指代，"
-        "通常指上面【最后一条】任务——据此理解并执行，必要时仍先 observe 确认当前界面。"
-    )
-    lines.append(
-        "This session context is only for resolving references; do not treat it "
-        "as evidence that the current screen is already in that state."
-    )
+            run_id = e.run_id
+            artifacts = [dict(item) for item in e.artifacts]
+        lines.append(
+            f"{i}. run_id={run_id}; task={task!r}; status={status!r}; result={summary!r}"
+        )
+        for artifact in artifacts[-3:]:
+            compact = {
+                key: artifact.get(key)
+                for key in (
+                    "artifact_id", "managed_path", "mime_type", "source_window",
+                    "purpose", "sendable",
+                )
+                if artifact.get(key) not in (None, "")
+            }
+            if compact:
+                lines.append(f"   artifact={compact!r}")
+    lines.append("Prior-run facts are not evidence of the current screen state.")
     return "\n".join(lines)
-
-
-def should_include_context(task: str) -> bool:
-    """Return True when the new task appears to refer to prior session state."""
-    text = (task or "").casefold()
-    if not text:
-        return False
-    if any(phrase in text for phrase in _REFERENCE_PHRASES):
-        return True
-    if any(cue in text for cue in _REFERENCE_CUES_CN):
-        return True
-    return any(re.search(rf"\b{re.escape(word)}\b", text) for word in _REFERENCE_WORDS)

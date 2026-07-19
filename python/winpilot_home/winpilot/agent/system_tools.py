@@ -27,23 +27,65 @@ def _tools_attr(name: str, default):
     return getattr(tools_mod, name, default) if tools_mod is not None else default
 
 
-def _suite_component_title_terms(value: str) -> tuple[str, tuple[str, ...]] | None:
-    text = str(value or "").casefold()
-    if any(term in text for term in ("wps writer", "wps文字", "wps 文字")):
-        return "writer", ("文字文稿", "文字", "文档", "document", "writer", ".docx", ".doc")
-    if any(term in text for term in ("wps spreadsheet", "wps表格", "wps 表格")):
-        return "spreadsheet", ("工作簿", "表格", "spreadsheet", "workbook", ".xlsx", ".xls")
-    if any(term in text for term in ("wps presentation", "wps演示", "wps 演示")):
-        return "presentation", ("演示", "presentation", "幻灯片", ".pptx", ".ppt")
-    return None
-
-
 class SystemToolMixin:
+    @staticmethod
+    def _normalized_application_term(value: object) -> str:
+        return re.sub(
+            r"[^0-9a-z\u4e00-\u9fff]+",
+            "",
+            str(value or "").casefold(),
+        )
+
+    def _remember_application_identity(
+        self,
+        requested_name: str,
+        resolved: dict | None,
+        hwnd: int,
+    ) -> None:
+        terms = [requested_name]
+        if isinstance(resolved, dict):
+            terms.extend([
+                str(resolved.get("name") or ""),
+                *(str(item) for item in (resolved.get("aliases") or [])),
+            ])
+        normalized = list(dict.fromkeys(
+            term
+            for term in (
+                self._normalized_application_term(item) for item in terms
+            )
+            if term
+        ))
+        self._target_application_identity = {
+            "hwnd": int(hwnd),
+            "terms": normalized,
+            "name": str(
+                (resolved or {}).get("name") if isinstance(resolved, dict) else ""
+            ) or requested_name,
+            "kind": str((resolved or {}).get("kind") or ""),
+            "target": str((resolved or {}).get("target") or ""),
+        }
+
+    def _bound_application_matches(self, requested_name: str) -> bool:
+        identity = getattr(self, "_target_application_identity", None)
+        if not isinstance(identity, dict):
+            return False
+        try:
+            same_hwnd = int(identity.get("hwnd") or 0) == int(self.hwnd or 0)
+        except (TypeError, ValueError):
+            same_hwnd = False
+        query = self._normalized_application_term(requested_name)
+        return bool(
+            query
+            and same_hwnd
+            and query in set(identity.get("terms") or [])
+            and getattr(self, "_target_binding_verified", False)
+            and self._window_alive(self.hwnd)
+        )
+
     @staticmethod
     def _best_visible_app_window(app_state: dict, name: str) -> dict | None:
         """Choose a visible app window without relying on enumeration order."""
         query = re.sub(r"\s+", "", str(name or "").casefold())
-        component = _suite_component_title_terms(name)
         scored: list[tuple[float, dict]] = []
         for window in app_state.get("windows") or []:
             if not isinstance(window, dict) or not window.get("visible"):
@@ -53,8 +95,6 @@ class SystemToolMixin:
                 continue
             title = str(window.get("title") or "").strip()
             compact_title = re.sub(r"\s+", "", title.casefold())
-            if component is not None and not any(term in title.casefold() for term in component[1]):
-                continue
             score = 1.0
             if compact_title == query:
                 score += 3.0
@@ -325,6 +365,10 @@ class SystemToolMixin:
         prior_hwnd: int | None,
         timeout_s: float = 7.0,
     ) -> dict | None:
+        # Do not spend a second launch-verification timeout treating a local
+        # executable, shortcut, or AppID as if it were a web destination.
+        if not self._url_launch_terms(command, launch_result):
+            return None
         deadline = time.monotonic() + max(0.0, timeout_s)
         while True:
             found = self._url_launch_visible_window(command, launch_result, win32_mod, prior_hwnd)
@@ -343,7 +387,18 @@ class SystemToolMixin:
         This is intentionally conservative: URI launches and shell namespaces
         do not map to a stable process name, while exe/bare commands usually do.
         """
+        process_names = launch_result.get("process_names") or []
+        if not isinstance(process_names, (list, tuple, set)):
+            process_names = [process_names]
         candidates = [
+            *(
+                (str(process_name), True)
+                for process_name in (
+                    [launch_result.get("process_name")]
+                    + list(process_names)
+                )
+                if str(process_name or "").strip()
+            ),
             *(
                 (str(alias), True)
                 for alias in (launch_result.get("aliases") or [])
@@ -376,24 +431,134 @@ class SystemToolMixin:
                 return stem
         return ""
 
-    def _launch_visible_window(self, command: str, launch_result: dict, win32_mod) -> dict | None:
-        query = self._launch_process_query(command, launch_result)
-        if not query:
-            return None
+    @staticmethod
+    def _visible_window_snapshot(win32_mod) -> dict[int, dict]:
+        list_windows = getattr(win32_mod, "list_windows", None)
+        if not callable(list_windows):
+            return {}
         try:
-            app_state = win32_mod.find_app(query)
+            windows = list_windows() or []
         except Exception:
-            return None
-        for window in app_state.get("windows") or []:
+            return {}
+        return {
+            int(window.get("hwnd") or 0): dict(window)
+            for window in windows
+            if isinstance(window, dict) and int(window.get("hwnd") or 0)
+        }
+
+    def _launch_visible_window(
+        self,
+        command: str,
+        launch_result: dict,
+        win32_mod,
+        *,
+        before_windows: dict[int, dict] | None = None,
+        prelaunch_foreground_hwnd: int = 0,
+        prior_target_hwnd: int = 0,
+    ) -> dict | None:
+        before_windows = before_windows or {}
+        excluded = {
+            int(prelaunch_foreground_hwnd or 0),
+            int(prior_target_hwnd or 0),
+        }
+        query = self._launch_process_query(command, launch_result)
+        if query:
+            try:
+                app_state = win32_mod.find_app(query)
+            except Exception:
+                app_state = {}
+            for window in app_state.get("windows") or []:
+                hwnd = int(window.get("hwnd") or 0)
+                if window.get("visible") and self._window_alive(hwnd):
+                    return {
+                        "hwnd": hwnd,
+                        "title": str(window.get("title") or ""),
+                        "pid": window.get("pid"),
+                        "query": query,
+                        "process_count": app_state.get("process_count", 0),
+                    }
+
+        # Store/AppID launches often expose a localized display name but run
+        # under a package host whose executable does not resemble that name.
+        # In that case a visible title match is identity evidence; treating the
+        # display name as a process basename is not.  This is deliberately
+        # generic and uses only resolver-returned identity, never an app rule.
+        title_queries: list[str] = []
+        for raw in (
+            launch_result.get("name"),
+            *(launch_result.get("aliases") or []),
+            command,
+        ):
+            value = str(raw or "").strip().strip('"')
+            folded = value.casefold()
+            if (
+                not value
+                or "://" in folded
+                or folded.startswith(("shell:", "steam:", "ms-"))
+                or "\\" in value
+                or "/" in value
+                or "!" in value
+            ):
+                continue
+            if value not in title_queries:
+                title_queries.append(value)
+        for title_query in title_queries:
+            try:
+                window = win32_mod.find_window(title_query)
+            except Exception:
+                window = None
+            if not isinstance(window, dict):
+                continue
             hwnd = int(window.get("hwnd") or 0)
-            if window.get("visible") and self._window_alive(hwnd):
+            if (
+                hwnd
+                and hwnd not in before_windows
+                and hwnd not in excluded
+                and self._window_alive(hwnd)
+            ):
                 return {
                     "hwnd": hwnd,
                     "title": str(window.get("title") or ""),
                     "pid": window.get("pid"),
-                    "query": query,
-                    "process_count": app_state.get("process_count", 0),
+                    "query": f"title:{title_query}",
                 }
+
+        # A launcher can legitimately create a window whose title and process
+        # do not resemble its Start-menu/AppID identity.  A unique top-level
+        # window created after this launch is causal evidence; an already-open
+        # foreground/controller window is not.  Ambiguous deltas remain
+        # unbound so the semantic loop can inspect them visually.
+        after_windows = self._visible_window_snapshot(win32_mod)
+        new_windows = [
+            window
+            for hwnd, window in after_windows.items()
+            if hwnd not in before_windows
+            and hwnd not in excluded
+            and self._window_alive(hwnd)
+        ]
+        try:
+            foreground = int(win32gui.GetForegroundWindow() or 0)
+        except Exception:
+            foreground = 0
+        foreground_candidates = [
+            window
+            for window in new_windows
+            if int(window.get("hwnd") or 0) == foreground
+        ]
+        candidate = (
+            foreground_candidates[0]
+            if len(foreground_candidates) == 1
+            else None
+        )
+        if candidate is not None:
+            return {
+                **candidate,
+                "hwnd": int(candidate.get("hwnd") or 0),
+                "title": str(candidate.get("title") or ""),
+                "query": "launch-window-delta",
+                "causal_new_window": True,
+                "ownership_evidence": "new_foreground_window_after_launch",
+            }
         return None
 
     def _wait_launch_visible_window(
@@ -401,11 +566,22 @@ class SystemToolMixin:
         command: str,
         launch_result: dict,
         win32_mod,
+        *,
+        before_windows: dict[int, dict] | None = None,
+        prelaunch_foreground_hwnd: int = 0,
+        prior_target_hwnd: int = 0,
         timeout_s: float = 7.0,
     ) -> dict | None:
         deadline = time.monotonic() + max(0.0, timeout_s)
         while True:
-            found = self._launch_visible_window(command, launch_result, win32_mod)
+            found = self._launch_visible_window(
+                command,
+                launch_result,
+                win32_mod,
+                before_windows=before_windows,
+                prelaunch_foreground_hwnd=prelaunch_foreground_hwnd,
+                prior_target_hwnd=prior_target_hwnd,
+            )
             if found:
                 return found
             if time.monotonic() >= deadline:
@@ -413,170 +589,6 @@ class SystemToolMixin:
             if getattr(self, "stop_event", None) is not None and self.stop_event.is_set():
                 return None
             time.sleep(0.35)
-
-    @staticmethod
-    def _resolved_component_title_terms(resolved: dict | None) -> tuple[str, tuple[str, ...]] | None:
-        """Return stable title evidence for host-shared desktop suite components.
-
-        Some suites launch a component process (for example a spreadsheet
-        executable) but render the document in an existing shared host process.
-        Process-only discovery can then bind a splash/helper window even though
-        the real foreground document is already visible.  Keep this adapter at
-        the product-component boundary instead of teaching task prompts about
-        individual documents or coordinates.
-        """
-        if not isinstance(resolved, dict):
-            return None
-        target = str(resolved.get("target") or "").strip().strip('"')
-        stem = Path(target).stem.casefold()
-        name = str(resolved.get("name") or "").casefold()
-        labeled = _suite_component_title_terms(name)
-        if labeled is not None:
-            return labeled
-        if stem == "et" or any(term in name for term in ("spreadsheet", "wps表格")):
-            return "spreadsheet", ("工作簿", "表格", "spreadsheet", "workbook", ".xlsx", ".xls")
-        if stem == "wpp" or any(term in name for term in ("presentation", "wps演示")):
-            return "presentation", ("演示", "presentation", "幻灯片", ".pptx", ".ppt")
-        if stem == "wps" or any(term in name for term in ("writer", "wps文字")):
-            return "writer", ("文字", "文档", "document", "writer", ".docx", ".doc")
-        return None
-
-    def _wait_resolved_component_window(
-        self,
-        resolved: dict | None,
-        post_state: dict | None,
-        win32_mod,
-        timeout_s: float = 7.0,
-    ) -> dict | None:
-        deadline = time.monotonic() + max(0.0, timeout_s)
-        while True:
-            found = self._resolved_component_window(resolved, post_state, win32_mod)
-            if found is not None:
-                return found
-            if time.monotonic() >= deadline:
-                return None
-            if getattr(self, "stop_event", None) is not None and self.stop_event.is_set():
-                return None
-            time.sleep(0.25)
-
-    def _resolved_component_window(
-        self,
-        resolved: dict | None,
-        post_state: dict | None,
-        win32_mod,
-    ) -> dict | None:
-        """Prefer the visible document host that matches the launched component."""
-        component = self._resolved_component_title_terms(resolved)
-        if component is None:
-            return None
-        kind, terms = component
-        foreground_hwnd = int((post_state or {}).get("foreground_hwnd") or 0)
-        foreground_title = str((post_state or {}).get("foreground_title") or "").strip()
-
-        candidates: list[dict] = []
-        if foreground_hwnd and self._window_alive(foreground_hwnd):
-            candidates.append({
-                "hwnd": foreground_hwnd,
-                "title": foreground_title,
-                "pid": None,
-            })
-        list_windows = getattr(win32_mod, "list_windows", None)
-        if callable(list_windows):
-            try:
-                for window in list_windows() or []:
-                    if not isinstance(window, dict):
-                        continue
-                    hwnd = int(window.get("hwnd") or 0)
-                    if not hwnd or not self._window_alive(hwnd):
-                        continue
-                    if any(int(item.get("hwnd") or 0) == hwnd for item in candidates):
-                        continue
-                    candidates.append(window)
-            except Exception:
-                pass
-
-        scored: list[tuple[float, dict]] = []
-        for window in candidates:
-            title = str(window.get("title") or "").strip()
-            title_key = title.casefold()
-            matches = sum(1 for term in terms if term in title_key)
-            if not matches:
-                continue
-            score = matches * 3.0
-            if int(window.get("hwnd") or 0) == foreground_hwnd:
-                score += 4.0
-            if title:
-                score += 0.5
-            scored.append((score, window))
-        if not scored:
-            return None
-        scored.sort(key=lambda item: item[0], reverse=True)
-        score, window = scored[0]
-        return {
-            "hwnd": int(window.get("hwnd") or 0),
-            "title": str(window.get("title") or ""),
-            "pid": window.get("pid"),
-            "query": f"resolved-{kind}-host",
-            "score": round(float(score), 3),
-        }
-
-    @staticmethod
-    def _blank_document_surface_ready(
-        component: tuple[str, tuple[str, ...]] | None,
-        title: str,
-    ) -> bool:
-        """Recognize a suite-created untitled Writer surface from window state.
-
-        This belongs at the suite adapter boundary: the controller only needs
-        to know that an editable blank document already exists, not where a
-        product-specific New button happens to be.
-        """
-        if component is None or component[0] != "writer":
-            return False
-        compact = re.sub(r"\s+", "", str(title or "").casefold())
-        return bool(re.search(
-            r"(?:(?:文字文稿|文档|document)[-_]?\d+|(?:untitled|未命名)[-_]?\d*)"
-            r".*(?:wps|writer|office)",
-            compact,
-            re.IGNORECASE,
-        ))
-
-    def _mark_blank_document_surface(
-        self,
-        payload: dict,
-        component: tuple[str, tuple[str, ...]] | None,
-    ) -> dict:
-        title = str(payload.get("title") or "")
-        if component is None or component[0] != "writer":
-            return payload
-        if not self._blank_document_surface_ready(component, title):
-            compact = re.sub(r"\s+", "", title.casefold())
-            if compact in {
-                "文档-wpsoffice",
-                "新建文档-wpsoffice",
-                "wpsoffice",
-                "wps文字-wpsoffice",
-            }:
-                self._document_surface_ready = False
-                payload["document_surface_ready"] = False
-                payload["workspace_stage"] = "application_home"
-                payload["fast_path_advice"] = (
-                    "The Writer application home is focused, but no editable document surface "
-                    "exists yet. For a create-document task, submit the complete document "
-                    "execute_subgoal; the controller will create the blank document before input."
-                )
-            return payload
-        self._new_blank_applied = True
-        self._document_surface_ready = True
-        payload["blank_document_ready"] = True
-        payload["document_surface_ready"] = True
-        payload["needs_observe"] = False
-        payload["fast_path_advice"] = (
-            "A blank editable document is already open and focused. Do not click New, "
-            "a template, or the window title. Submit the complete document content, "
-            "formatting, and exact save path in one execute_subgoal controller routine."
-        )
-        return payload
 
     def _t_run_shell(self, args: dict) -> ToolResult:
         command = str(args["command"])
@@ -663,14 +675,15 @@ class SystemToolMixin:
                 if res.get("ok"):
                     BUS.publish("action", action="undo", what=f"关闭窗口 {title}")
                     return ToolResult(f'已关闭最近打开的程序窗口 "{title}"。')
-        result = _call_with_optional_hwnd(
-            executor_mod.press_keys,
-            ["ctrl", "z"],
-            hwnd=self._action_hwnd(),
-        )
-        if not result.get("ok"):
-            return ToolResult(self._fmt(result))
-        return ToolResult("无可回收的启动记录；已对当前窗口执行撤销 (Ctrl+Z)。")
+        # Never guess that Ctrl+Z belongs to this run. The foreground document
+        # may contain user-authored history that predates the agent. Recovery is
+        # safe only for a concrete mutation token recorded above.
+        return ToolResult(self._fmt({
+            "ok": False,
+            "undone": False,
+            "blocked": True,
+            "error": "No reversible mutation token from this run is available.",
+        }))
 
     def _t_search_files(self, args: dict) -> ToolResult:
         search_mod = _tools_attr("search", search)
@@ -712,15 +725,46 @@ class SystemToolMixin:
         if not name:
             return ToolResult(self._fmt({"ok": False, "error": "open_app requires name"}))
         win32_mod = _tools_attr("win32", win32)
+        apps_mod = _tools_attr("apps", apps)
         executor_mod = _tools_attr("executor", executor)
+        if self._bound_application_matches(name):
+            hwnd = int(self.hwnd)
+            focused = executor_mod.focus_window(hwnd)
+            if focused.get("ok"):
+                self._remember_target(hwnd, name)
+            try:
+                title_reader = getattr(win32_mod, "_window_text", win32._window_text)
+                title = str(title_reader(hwnd) or "")
+            except Exception:
+                title = ""
+            return ToolResult(
+                self._fmt({
+                    "ok": bool(focused.get("ok")),
+                    "verified": bool(focused.get("ok")),
+                    "route": "existing_bound_application",
+                    "app": name,
+                    "target_hwnd": hwnd,
+                    "title": title,
+                    "focus": focused,
+                    "binding_preserved": True,
+                    "needs_observe": True,
+                    **({
+                        "error": "The proven application window is still live but could not be focused."
+                    } if not focused.get("ok") else {}),
+                    "fast_path_advice": (
+                        "The already proven application instance was reused by stable launch identity. "
+                        "Continue from the newest authoritative frame; do not launch a duplicate."
+                    ),
+                }),
+                replay={"tool": "open_app", "name": name},
+            )
         resolved_hint = self._resolve_launch_target(name)
         direct_launchable = bool(
             Path(name).exists()
             or shutil.which(name)
             or re.match(r"^(?:https?://|[A-Za-z][A-Za-z0-9+.-]*:)", name)
         )
-        component_hint = self._resolved_component_title_terms(resolved_hint)
-        initial_query = "wps" if component_hint is not None else name
+        initial_query = self._launch_process_query(name, resolved_hint or {}) or name
         try:
             initial = win32_mod.find_app(initial_query)
         except Exception as exc:
@@ -741,7 +785,8 @@ class SystemToolMixin:
             hwnd = int(visible.get("hwnd") or 0)
             focused = executor_mod.focus_window(hwnd)
             if focused.get("ok"):
-                self._remember_target(hwnd, str(visible.get("title") or name))
+                self._remember_target(hwnd, name)
+                self._remember_application_identity(name, resolved_hint, hwnd)
             payload = {
                     "ok": bool(focused.get("ok")),
                     "verified": bool(focused.get("ok")),
@@ -765,7 +810,6 @@ class SystemToolMixin:
                         "observe once only when no fresh state was supplied. Do not launch it again."
                     ),
                 }
-            self._mark_blank_document_surface(payload, component_hint)
             return ToolResult(
                 self._fmt(payload),
                 replay={"tool": "open_app", "name": name},
@@ -780,6 +824,12 @@ class SystemToolMixin:
                 executor_mod,
             )
             if background_recovery.get("ok") is True:
+                recovered_hwnd = int(background_recovery.get("target_hwnd") or 0)
+                if recovered_hwnd:
+                    self._remember_target(recovered_hwnd, name)
+                    self._remember_application_identity(
+                        name, resolved_hint, recovered_hwnd,
+                    )
                 payload = {
                     **background_recovery,
                     "app": name,
@@ -794,7 +844,6 @@ class SystemToolMixin:
                         "Continue from its newest frame; do not launch another instance."
                     ),
                 }
-                self._mark_blank_document_surface(payload, component_hint)
                 return ToolResult(
                     self._fmt(payload),
                     replay={"tool": "open_app", "name": name},
@@ -824,34 +873,52 @@ class SystemToolMixin:
                     ),
                 }))
 
-        strict_resolution = bool(
-            args.get("strict_resolution") is True
-            or str(getattr(self, "task_intent", {}).get("source") or "").strip()
-        )
-        if strict_resolution and resolved_hint is None and not direct_launchable:
+        if resolved_hint is None and not direct_launchable:
+            try:
+                ranked = apps_mod.resolve(name, max_results=5) or []
+            except Exception:
+                ranked = []
+            ranked_candidates = [
+                {
+                    "display_name": str(item.get("name") or ""),
+                    "launch_kind": str(item.get("kind") or ""),
+                    "launch_target": str(item.get("target") or ""),
+                    "aliases": [
+                        str(alias) for alias in (item.get("aliases") or [])
+                        if str(alias).strip()
+                    ],
+                    "match_score": item.get("match_score"),
+                    "match_kind": str(item.get("match_kind") or ""),
+                    "matched_term": str(item.get("matched_term") or ""),
+                }
+                for item in ranked
+                if isinstance(item, dict)
+            ]
             return ToolResult(self._fmt({
                 "ok": False,
                 "verified": False,
-                "blocked": True,
-                "failure_type": "application_not_found",
+                "failure_type": (
+                    "application_resolution_ambiguous"
+                    if ranked_candidates
+                    else "application_not_found"
+                ),
                 "error": (
-                    f'No installed application could be resolved for "{name}". '
-                    "Raw shell fallback is disabled because it can bind the current "
-                    "terminal or an unrelated window. Ask for a clearer app identity "
-                    "or report that the application is unavailable."
+                    f'No unambiguous installed application could be resolved for "{name}". '
+                    "The local resolver did not execute a guessed target."
                 ),
                 "app": name,
-                "needs_user_input": True,
-                "needs_llm_reason": True,
-                "fast_path_advice": (
-                    "No installed application matched this name. Use one exposed "
-                    "window-list/focus recovery tool if a related visible window exists; "
-                    "otherwise report the unavailable application. Do not invoke an unexposed "
-                    "discovery tool or launch an unverified raw command."
-                ),
+                "ranked_candidates": ranked_candidates,
+                "resolution_sources": [
+                    "running_processes",
+                    "visible_windows",
+                    "start_menu",
+                    "start_apps",
+                    "app_paths",
+                    "executable_index",
+                ],
             }))
 
-        launch_result = self._t_launch({"command": name})
+        launch_result = self._t_launch({"command": name, "_reuse_checked": True})
         try:
             launched = json.loads(launch_result.text or "{}")
         except (json.JSONDecodeError, TypeError):
@@ -876,6 +943,8 @@ class SystemToolMixin:
             "needs_observe": bool(target_hwnd),
         }
         if target_hwnd:
+            self._remember_target(target_hwnd, name)
+            self._remember_application_identity(name, resolved_hint, target_hwnd)
             payload["fast_path_advice"] = (
                 "Background/no-window app recovery succeeded and target_hwnd is established. "
                 "Continue from the newest attached frame or structured observation; observe once "
@@ -884,12 +953,24 @@ class SystemToolMixin:
         else:
             payload["error"] = str(launched.get("error") or "app launched but no visible target window appeared")
             payload["needs_llm_reason"] = True
+            if launched.get("ok") is True:
+                payload.update({
+                    "failure_type": "launch_target_pending",
+                    "retryable": True,
+                    "needs_observe": True,
+                })
+                payload["error"] = (
+                    "The launch request succeeded, but no visible window has yet been "
+                    "proven to belong to the requested application. Observe/list windows "
+                    "once and bind only identity-matching evidence; do not reuse the "
+                    "previous target window."
+                )
             payload["fast_path_advice"] = (
-                "No visible app window appeared after local resolve+launch. Use one exposed "
-                "window-list/focus recovery tool or report the actual blocker; do not repeat "
-                "process/path shell probes."
+                "No proven visible app window appeared after local resolve+launch. Observe "
+                "or use one exposed window-list/focus recovery tool, then continue if the "
+                "requested window becomes identifiable; do not repeat the launch or probe "
+                "process paths with shell."
             )
-        self._mark_blank_document_surface(payload, component_hint)
         return ToolResult(
             self._fmt(payload),
             replay={"tool": "open_app", "name": name},
@@ -901,44 +982,73 @@ class SystemToolMixin:
         verify_mod = _tools_attr("verify", verify)
         win32_mod = _tools_attr("win32", win32)
         command = str(args["command"]).strip()
-        intent = getattr(self, "task_intent", {})
-        intent = intent if isinstance(intent, dict) else {}
-        explicit_desktop_app = bool(
-            str(intent.get("source") or "").strip()
-            and str(intent.get("domain") or "") == "desktop"
+        explicit_target = bool(
+            Path(command).exists()
+            or re.match(r"^(?:https?://|www\.|[A-Za-z][A-Za-z0-9+.-]*:)", command)
         )
-        requested_web_fallback = bool(re.search(
-            r"网页|网站|浏览器|网页版|web\s*(?:site|page|version)|browser|https?://|"
-            r"\bweb\b|客户端.*(?:不行|失败).*(?:网页|browser|web)",
-            str(getattr(self, "task", "") or ""),
-            re.IGNORECASE,
-        ))
-        if (
-            explicit_desktop_app
-            and re.match(r"^(?:https?://|www\.)", command, re.IGNORECASE)
-            and not requested_web_fallback
-        ):
-            return ToolResult(self._fmt({
-                "ok": False,
-                "blocked": True,
-                "failure_type": "application_constraint_violation",
-                "error": (
-                    "The task explicitly targets an installed desktop application; "
-                    "web fallback was not authorized. Re-resolve/focus the local app "
-                    "or report the blocker."
-                ),
-                "requested_app": str(intent.get("source") or ""),
-                "attempted_url": command,
-            }))
+        if not bool(args.get("_reuse_checked")) and not explicit_target:
+            # ``open_app`` and ``launch`` are two model-facing spellings of the
+            # same app operation.  Bare app identities always share the same
+            # reuse-first primitive so choosing either tool cannot create a
+            # duplicate logged-out instance.  URLs, protocols and explicit
+            # executable paths remain direct launch targets.
+            return self._t_open_app({"name": command})
         resolved = self._resolve_launch_target(command)
         prior_hwnd = self.hwnd
+        before_windows = self._visible_window_snapshot(win32_mod)
+        try:
+            prelaunch_foreground_hwnd = int(win32gui.GetForegroundWindow() or 0)
+        except Exception:
+            prelaunch_foreground_hwnd = 0
         cooperative = bool(CONFIG.get(
             "controller", "multi_input_cooperation", default=False,
         ))
 
         def do_launch() -> dict:
+            nonlocal resolved
             if resolved is not None:
-                return apps_mod.launch_target(resolved)
+                attempted_targets: set[str] = set()
+                attempts: list[dict] = []
+
+                def attempt(candidate: dict) -> dict:
+                    target = str(candidate.get("target") or "")
+                    attempted_targets.add(target.casefold())
+                    outcome = apps_mod.launch_target(candidate)
+                    attempts.append({
+                        "name": str(candidate.get("name") or ""),
+                        "kind": str(candidate.get("kind") or ""),
+                        "target": target,
+                        "ok": bool(outcome.get("ok")),
+                        "error": str(outcome.get("error") or ""),
+                    })
+                    return outcome
+
+                launched = attempt(resolved)
+                if launched.get("ok") is not True:
+                    # A synchronous failure means no launch request was
+                    # accepted, so one refreshed, distinct resolver target is
+                    # safe.  Never retry after ok=true merely because its
+                    # window is still pending.
+                    try:
+                        refreshed = apps_mod.resolve(
+                            command,
+                            max_results=5,
+                            force_refresh=True,
+                        ) or []
+                    except Exception:
+                        refreshed = []
+                    fallback = next((
+                        item for item in refreshed
+                        if isinstance(item, dict)
+                        and str(item.get("target") or "").casefold()
+                        not in attempted_targets
+                    ), None)
+                    if fallback is not None:
+                        resolved = fallback
+                        launched = attempt(fallback)
+                launched = dict(launched)
+                launched["launch_attempts"] = attempts
+                return launched
             return executor_mod.launch(command)
 
         result = verify_mod.run_with_verify(
@@ -951,41 +1061,50 @@ class SystemToolMixin:
             stop_event=self.stop_event,
             run_id=getattr(self, "run_id", None),
         )
-        component_requested = self._resolved_component_title_terms(resolved)
-        if result.get("ok") and component_requested is not None:
-            # Generic process/screen-change verification is insufficient for
-            # a shared office suite. Require a window matching the requested
-            # Writer/Spreadsheet/Presentation component.
+        if result.get("ok"):
+            # Generic launch verification observes global foreground/process
+            # changes; it cannot prove they belong to this resolved identity.
+            # Preserve it only as request evidence and require an owned window
+            # below before returning verified=true.
+            result["launch_request_verified"] = bool(result.get("verified"))
             result["verified"] = False
+            result.pop("target_hwnd", None)
         launch_window = None
         if result.get("ok") and result.get("verified") is not True:
-            if component_requested is not None:
-                launch_window = self._wait_resolved_component_window(
-                    resolved,
-                    result.get("post_state"),
+            launch_window = self._wait_launch_visible_window(
+                command,
+                result,
+                win32_mod,
+                before_windows=before_windows,
+                prelaunch_foreground_hwnd=prelaunch_foreground_hwnd,
+                prior_target_hwnd=int(prior_hwnd or 0),
+            )
+            if launch_window is None and self._url_launch_terms(command, result):
+                launch_window = self._wait_url_launch_visible_window(
+                    command,
+                    result,
                     win32_mod,
+                    prior_hwnd,
                 )
-            else:
-                launch_window = self._wait_launch_visible_window(command, result, win32_mod)
-                if launch_window is None:
-                    launch_window = self._wait_url_launch_visible_window(
-                        command,
-                        result,
-                        win32_mod,
-                        prior_hwnd,
-                    )
             if launch_window:
                 hwnd = int(launch_window["hwnd"])
                 focus_result = executor_mod.focus_window(hwnd)
                 if focus_result.get("ok"):
                     result["verified"] = True
+                    launch_query = str(launch_window.get("query") or "")
                     result["verify_method"] = (
                         "win32-url-window"
-                        if launch_window.get("query") == "url"
+                        if launch_query == "url"
                         else (
-                            "win32-component-window"
-                            if str(launch_window.get("query") or "").startswith("resolved-")
-                            else "win32-process"
+                            "win32-title"
+                            if launch_query.startswith("title:")
+                            else (
+                                "win32-window-delta"
+                                if launch_query == "launch-window-delta"
+                                else (
+                                "win32-process"
+                                )
+                            )
                         )
                     )
                     result["verify_detail"] = (
@@ -997,14 +1116,22 @@ class SystemToolMixin:
                 result["launch_window"] = launch_window
                 result["focus_after_launch"] = focus_result
         if result.get("ok"):
-            launched_hwnd = (result.get("post_state") or {}).get("foreground_hwnd")
             expect = args.get("expect") or {}
             want_title = str(expect.get("window_appears") or expect.get("window_title") or "").strip()
             title_hwnd = None
             if want_title:
                 found = win32_mod.find_window(want_title)
-                if found and self._window_alive(int(found.get("hwnd") or 0)):
-                    title_hwnd = int(found["hwnd"])
+                candidate_hwnd = int((found or {}).get("hwnd") or 0)
+                if (
+                    candidate_hwnd
+                    and candidate_hwnd not in before_windows
+                    and candidate_hwnd not in {
+                        int(prelaunch_foreground_hwnd or 0),
+                        int(prior_hwnd or 0),
+                    }
+                    and self._window_alive(candidate_hwnd)
+                ):
+                    title_hwnd = candidate_hwnd
             if launch_window:
                 self._remember_target(
                     int(launch_window["hwnd"]),
@@ -1020,24 +1147,19 @@ class SystemToolMixin:
                         f'visible window title matched "{want_title}" '
                         f"(hwnd={title_hwnd})"
                     )
-            elif resolved is not None and component_requested is None:
+            elif resolved is not None:
                 self.target_hint = str(resolved.get("name") or command)
                 if not cooperative:
                     target = self._find_target_window()
-                    if target:
+                    if (
+                        target
+                        and int(target) not in before_windows
+                        and int(target) not in {
+                            int(prelaunch_foreground_hwnd or 0),
+                            int(prior_hwnd or 0),
+                        }
+                    ):
                         self._remember_target(target)
-                    elif launched_hwnd and launched_hwnd != prior_hwnd:
-                        self._remember_target(
-                            launched_hwnd,
-                            str(resolved.get("name") or command),
-                        )
-            elif (
-                not cooperative
-                and component_requested is None
-                and launched_hwnd
-                and launched_hwnd != prior_hwnd
-            ):
-                self._remember_target(launched_hwnd)
             target_hwnd = self.hwnd if self._window_alive(self.hwnd) else None
             target_belongs_to_launch = bool(
                 launch_window
@@ -1065,23 +1187,36 @@ class SystemToolMixin:
                     )
                 except Exception:
                     result["foreground_matches_target"] = False
+                try:
+                    result["post_state"] = verify_mod.post_state_summary()
+                except Exception:
+                    pass
                 if target_hwnd != prior_hwnd or result.get("target_hwnd"):
                     self._undo_stack.append(("app", target_hwnd))
-            elif (
-                not cooperative
-                and launched_hwnd
-                and launched_hwnd != prior_hwnd
-            ):
-                self._undo_stack.append(("app", launched_hwnd))
             else:
                 # ShellExecute can report ok while doing nothing. The previous
                 # foreground hwnd is not evidence that the requested app opened.
                 result.pop("target_hwnd", None)
                 result["foreground_matches_target"] = False
+        if result.get("ok") and not int(result.get("target_hwnd") or 0):
+            result["verified"] = False
+            result["foreground_matches_target"] = False
         if resolved is not None:
             result["resolved_app"] = f'{resolved["name"]} [{resolved["kind"]}]'
-            if self.hwnd and (component_requested is None or launch_window is not None):
-                result["target_hwnd"] = self.hwnd
+            if not int(result.get("target_hwnd") or 0):
+                # Never launder the previously bound window into evidence for
+                # a newly requested application.  Leave the session unbound so
+                # the semantic loop observes/rebinds instead of clicking the
+                # stale controller or terminal window.
+                self.hwnd = None
+                self._target_binding_verified = False
+                self._target_process_id = 0
+                self._target_process_name = ""
+                self._target_window_class = ""
+                self._target_application_identity = {}
+                self.target_hint = str(resolved.get("name") or command)
+                result["verified"] = False
+                result["foreground_matches_target"] = False
         return ToolResult(
             self._fmt(result),
             replay={"tool": "launch", "command": command,
@@ -1100,7 +1235,7 @@ class SystemToolMixin:
             return None
         # Resolve registered display names before treating whitespace as a
         # possible shell command. Real applications frequently have multiword
-        # English names ("WPS Spreadsheets", "Visual Studio Code").
+        # Localized display names and executable aliases can differ.
         candidates = apps_mod.resolve(command)
         if candidates:
             first = candidates[0]

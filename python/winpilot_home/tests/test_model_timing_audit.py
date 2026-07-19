@@ -82,60 +82,7 @@ def test_chat_accumulates_only_until_canceled_call_is_abandoned():
         runner.session.close()
 
 
-def test_inline_semantic_vlm_wait_is_accumulated_on_success_and_error(monkeypatch):
-    import json
-
-    from winpilot.agent.runtime_profile import RuntimeProfile
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Create the requested visible shape",
-        runtime_profile=RuntimeProfile(
-            inline_semantic_verification=True,
-            stage_type="DrawArtifact",
-        ),
-    )
-    payload = {
-        "ok": True,
-        "evidence_packet": {
-            "scene_structure": {"executed_draw_count": 1},
-        },
-    }
-    try:
-        def verified(_name, _args):
-            time.sleep(0.02)
-            return ToolResult(json.dumps({
-                "ok": True,
-                "verified": True,
-                "semantic_visual_verified": True,
-            }))
-
-        monkeypatch.setattr(runner.session, "dispatch", verified)
-        verdict = runner._inline_stage_semantic_verdict(
-            "execute_subgoal",
-            payload,
-        )
-        assert verdict is not None
-        first_elapsed = runner.model_elapsed_ms
-        assert verdict["elapsed_ms"] == first_elapsed
-        assert first_elapsed >= 10
-
-        def failed(_name, _args):
-            time.sleep(0.02)
-            raise RuntimeError("semantic provider failed")
-
-        monkeypatch.setattr(runner.session, "dispatch", failed)
-        with pytest.raises(RuntimeError, match="semantic provider failed"):
-            runner._inline_stage_semantic_verdict("execute_subgoal", payload)
-
-        assert runner.model_request_count == 2
-        assert runner.model_elapsed_ms >= first_elapsed + 10
-    finally:
-        runner.session.close()
-
-
-def test_semantic_stage_metrics_subtract_model_and_boundary_time(monkeypatch):
+def test_semantic_stage_metrics_subtract_model_time(monkeypatch):
     import winpilot.tasking.stage_runtime as stage_runtime
 
     runner = SimpleNamespace(model_elapsed_ms=120)
@@ -144,10 +91,9 @@ def test_semantic_stage_metrics_subtract_model_and_boundary_time(monkeypatch):
     assert stage_runtime.StageRuntime._semantic_stage_metrics(
         10.0,
         runner,
-        boundary_elapsed_ms=30,
     ) == {
-        "model_elapsed_ms": 150,
-        "controller_elapsed_ms": 350,
+        "model_elapsed_ms": 120,
+        "controller_elapsed_ms": 380,
     }
 
 
@@ -177,11 +123,7 @@ class _FakeSemanticRunner:
         self.model_request_count = 2
         self.model_elapsed_ms = model_elapsed_ms
         self._done_verified = verified
-        self._inline_stage_semantic_passed = False
-        self._inline_stage_semantic_attempted = False
-        self._inline_stage_semantic_last_verdict = {}
         self._tool_history = []
-        self.session = SimpleNamespace(_last_canvas_region=None)
 
     def bind_target_window(self, _hwnd, _app):
         return None
@@ -271,63 +213,3 @@ def test_semantic_stage_failure_before_model_still_outputs_zero_model_time(monke
     assert result.ok is False
     assert result.output["model_elapsed_ms"] == 0
     assert result.output["controller_elapsed_ms"] >= 10
-
-
-def test_draw_stage_adds_independent_boundary_verifier_to_model_time(monkeypatch):
-    import json
-
-    import winpilot.tasking.stage_runtime as stage_runtime
-    from winpilot.agent.tool_result import ToolResult
-
-    contract, stage, context = _semantic_stage_context(
-        "Draw a generic shape in Paint",
-    )
-    fake = _FakeSemanticRunner(verified=False, model_elapsed_ms=12)
-    fake._tool_history = [
-        ("draw_strokes", {"strokes": []}, json.dumps({"ok": True})),
-    ]
-
-    class OpenSession:
-        def __init__(self, **_kwargs):
-            self.run_id = ""
-
-        def dispatch(self, name, _args):
-            assert name == "open_app"
-            return ToolResult(json.dumps({
-                "ok": True,
-                "verified": True,
-                "target_hwnd": 42,
-                "focus": {"ok": True},
-            }))
-
-        def close(self):
-            return None
-
-    runtime = stage_runtime.StageRuntime()
-    monkeypatch.setattr(stage_runtime, "ToolSession", OpenSession)
-    monkeypatch.setattr(stage_runtime, "build_runner", lambda *_args, **_kwargs: fake)
-    monkeypatch.setattr(runtime, "_resolve_hwnd", lambda _app: 42)
-    monkeypatch.setattr(
-        runtime,
-        "_verify_draw_boundary",
-        lambda **_kwargs: {
-            "ok": True,
-            "verified": True,
-            "semantic_visual_verified": True,
-            "elapsed_ms": 31,
-        },
-    )
-
-    result = runtime._execute(
-        stage,
-        contract,
-        context,
-        threading.Event(),
-        time.monotonic(),
-    )
-
-    assert result.ok is True
-    assert result.output["model_elapsed_ms"] == 43
-    assert result.output["controller_elapsed_ms"] >= 0
-    assert result.output["model_calls"] == 3
-    assert result.output["boundary_verification"]["elapsed_ms"] == 31

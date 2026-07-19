@@ -322,18 +322,12 @@ _IMPERATIVE_MANIPULATION_RELATION = re.compile(
     re.IGNORECASE,
 )
 
-_CHANNEL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("QQ", re.compile(r"(?<![A-Za-z])QQ(?![A-Za-z])", re.IGNORECASE)),
-    ("WeChat", re.compile(r"微信|WeChat", re.IGNORECASE)),
+_PROTOCOL_CHANNEL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("Email", re.compile(r"邮件|邮箱|email|mail", re.IGNORECASE)),
-)
-_SOURCE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("Paint", re.compile(r"画板|画图|MS\s*Paint|Paint(?:\s+app)?", re.IGNORECASE)),
-    ("Whiteboard", re.compile(r"白板|Whiteboard", re.IGNORECASE)),
 )
 _GENERIC_SOURCE_RELATION = re.compile(
     r"(?:在|查看|看看|观察|根据)\s*(?:当前|已打开的)?\s*"
-    r"([^，,。.!！？]{1,32}?)(?:应用|程序|软件|窗口|界面|页面)(?:里|中|上)?",
+    r"(?P<source>[^，,。.!！？]{1,32}?)(?:应用|程序|软件|窗口|界面|页面)(?:里|中|上)?",
     re.IGNORECASE,
 )
 
@@ -370,6 +364,47 @@ _GENERIC_TOOL_SOURCE_RELATION = re.compile(
     rf"(?:软件|应用|客户端|程序)?(?:里|里面|中|上)?\s*(?:帮我|来)?\s*"
     rf"(?=(?:{_APP_SCOPED_ACTION}))",
     re.IGNORECASE,
+)
+_COMMUNICATION_SCOPED_ACTION = (
+    r"发送|发给|发送给|发到|传给|传到|分享到|"
+    r"把[^，,。.!！？；;]{1,30}?(?:发|发送|传|分享)|"
+    r"给[^，,。.!！？；;]{1,30}?(?:发|发送|传|分享|说|告诉|解释|询问|回复)|"
+    r"(?:和|跟|与)[^，,。.!！？；;]{1,30}?(?:聊天|聊)|"
+    r"找|搜索|打开|进入|持续聊天|一直聊天|继续聊天|不停聊天|保持聊天|聊天|聊|回复|私信|"
+    r"send|share|find|search|open|enter|chat|reply|message|to\b"
+)
+_COMMUNICATION_NAME_STOP = (
+    r"然后|接着|随后|并且|截图|截取|捕获|保存|导出|绘制|"
+    r"(?<!刚)(?<!已)(?<!的)画|拖动|拖拽|点击|点赞|播放|转换|转成|"
+    r"\b(?:and|then|capture|screenshot|save|export|draw|paint|sketch|drag|click|play|convert)\b"
+)
+_GENERIC_COMMUNICATION_TOOL_RELATION = re.compile(
+    rf"(?:使用|通过|(?<![应用使])用|去|打开|进入|"
+    rf"\b(?:use|using|via|through|open|enter|go\s+to|in|on)\b)\s*"
+    rf"(?P<source>(?:(?!(?:{_COMMUNICATION_NAME_STOP}))"
+    rf"[A-Za-z0-9_.+\-\u4e00-\u9fff ]){{1,40}}?)"
+    rf"(?:软件|应用|客户端|程序)?(?:里|里面|中|上)?\s*"
+    rf"(?=(?:{_COMMUNICATION_SCOPED_ACTION}))",
+    re.IGNORECASE,
+)
+_GENERIC_COMMUNICATION_DESTINATION_RELATION = re.compile(
+    r"(?:发送到|发到|传到|分享到|发给|发送给|传给)\s*"
+    r"(?P<source>[A-Za-z0-9_.+\-\u4e00-\u9fff][A-Za-z0-9_.+\-\u4e00-\u9fff ]{0,39}?)"
+    r"(?:软件|应用|客户端|程序)?"
+    r"(?:(?:里|里面|中|上)|的\s*(?=[‘'\"“]))\s*",
+    re.IGNORECASE,
+)
+_GENERIC_COMMUNICATION_POSTFIX_RELATION = re.compile(
+    r"(?:send|share|message|chat)[^,.;!?]{0,80}?"
+    r"\b(?:via|through|using|in|on)\s+"
+    r"(?P<source>[A-Za-z0-9_.+\-][A-Za-z0-9_.+\- ]{0,39}?)"
+    r"(?:\s+(?:app|application|client))?\s*(?=$|[,.;!?])",
+    re.IGNORECASE,
+)
+_GENERIC_COMMUNICATION_RELATIONS = (
+    _GENERIC_COMMUNICATION_TOOL_RELATION,
+    _GENERIC_COMMUNICATION_DESTINATION_RELATION,
+    _GENERIC_COMMUNICATION_POSTFIX_RELATION,
 )
 _DEICTIC_SURFACE_SOURCE = re.compile(
     r"^(?:(?:(?:当前|现在|现有|这个|该|已打开(?:的)?|可见(?:的)?|眼前(?:的)?)\s*)*"
@@ -438,39 +473,26 @@ def _application_mentions(text: str, *, launch_target: str = "") -> list[str]:
     """
 
     found: list[tuple[int, str]] = []
-    known_spans: list[tuple[int, int]] = []
-    for name, pattern in (*_SOURCE_PATTERNS, *_CHANNEL_PATTERNS):
-        if name == "Email":
-            continue
+    application_relations = (
+        _GENERIC_SOURCE_RELATION,
+        _GENERIC_TOOL_SOURCE_RELATION,
+        *_GENERIC_COMMUNICATION_RELATIONS,
+    )
+    for pattern in application_relations:
         for match in pattern.finditer(text):
-            found.append((int(match.start()), name))
-            known_spans.append((int(match.start()), int(match.end())))
-    for match in _GENERIC_TOOL_SOURCE_RELATION.finditer(text):
-        source_span = (
-            int(match.start("source")),
-            int(match.end("source")),
-        )
-        if any(
-            source_span[0] < known_end and known_start < source_span[1]
-            for known_start, known_end in known_spans
-        ):
-            # A canonical source/channel pattern already owns these exact
-            # characters.  Do not turn one mention such as ``画板`` into two
-            # apparent applications (``Paint`` and ``画板``).
-            continue
-        candidate = str(match.group("source") or "").strip()
-        candidate = re.sub(
-            r"(?:软件|应用|客户端|程序)$",
-            "",
-            candidate,
-            flags=re.IGNORECASE,
-        ).strip(" \t\r\n'\"“”‘’")[:64]
-        if (
-            candidate
-            and not _is_deictic_surface_source(candidate)
-            and not _INPUT_METHOD_SOURCE.fullmatch(candidate)
-        ):
-            found.append((int(match.start("source")), candidate))
+            candidate = str(match.group("source") or "").strip()
+            candidate = re.sub(
+                r"(?:软件|应用|客户端|程序)$",
+                "",
+                candidate,
+                flags=re.IGNORECASE,
+            ).strip(" \t\r\n'\"“”‘’")[:64]
+            if (
+                candidate
+                and not _is_deictic_surface_source(candidate)
+                and not _INPUT_METHOD_SOURCE.fullmatch(candidate)
+            ):
+                found.append((int(match.start("source")), candidate))
     current_resource = _CURRENT_OPEN_APP_RESOURCE.search(text)
     if current_resource:
         candidate = str(current_resource.group("source") or "").strip(
@@ -499,6 +521,31 @@ def _application_mentions(text: str, *, launch_target: str = "") -> list[str]:
         ordered.append(value)
     return ordered
 
+
+def _communication_application(text: str) -> str:
+    """Return a literal client name grounded by a communication relation."""
+
+    matches = [
+        match
+        for pattern in _GENERIC_COMMUNICATION_RELATIONS
+        for match in pattern.finditer(text)
+    ]
+    for match in sorted(matches, key=lambda item: item.start("source")):
+        candidate = str(match.group("source") or "").strip()
+        candidate = re.sub(
+            r"(?:软件|应用|客户端|程序)$",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        ).strip(" \t\r\n'\"“”‘’")[:64]
+        if (
+            candidate
+            and not _is_deictic_surface_source(candidate)
+            and not _INPUT_METHOD_SOURCE.fullmatch(candidate)
+        ):
+            return candidate
+    return ""
+
 # A launch command may be followed by an arbitrary in-app workflow.  The old
 # full-match grammar treated that entire suffix as the application name.  Keep
 # the launch target and the semantic tail separate so the compiler can route
@@ -513,10 +560,10 @@ _OPEN_APPLICATION_PREFIX = re.compile(
     re.IGNORECASE,
 )
 _FOLLOWUP_ACTION_RELATION = re.compile(
-    rf"(?:\s*(?:，|,|并且|并|然后|再|接着|随后)\s*|\s+)"
-    rf"(?=(?:{_APP_SCOPED_ACTION}))|"
-    rf"(?=去[A-Za-z0-9_\u4e00-\u9fff]{{1,32}}(?:里|里面|中|上)?(?:{_APP_SCOPED_ACTION}))|"
-    rf"(?=(?:{_APP_SCOPED_ACTION}))",
+    rf"(?:\s*(?:，|,|并且|并|然后|再|接着|随后|and(?:\s+then)?|then)\s*|\s+)"
+    rf"(?=(?:{_APP_SCOPED_ACTION}|{_COMMUNICATION_SCOPED_ACTION}))|"
+    rf"(?=去[A-Za-z0-9_\u4e00-\u9fff]{{1,32}}(?:里|里面|中|上)?(?:{_APP_SCOPED_ACTION}|{_COMMUNICATION_SCOPED_ACTION}))|"
+    rf"(?=(?:{_APP_SCOPED_ACTION}|{_COMMUNICATION_SCOPED_ACTION}))",
     re.IGNORECASE,
 )
 
@@ -624,15 +671,16 @@ def _execution_domain(text: str) -> tuple[str, list[str], str]:
 
 def _recipient_after_channel(text: str, channel: str) -> str:
     escaped = {
-        "WeChat": r"(?:微信|WeChat)",
         "Email": r"(?:邮件|邮箱|email|mail)",
     }.get(channel, re.escape(channel))
     patterns = (
         rf"{escaped}\s*(?:的|里|中)\s*[‘'\"“]?([^’'\"”，。]{{1,40}})",
         rf"(?:发送到|发到|传到|分享到)\s*{escaped}\s*(?:的|里|中)?\s*[‘'\"“]?([^’'\"”，。]{{1,40}})",
-        rf"(?:用|通过|via)\s*{escaped}\s*给\s*([^，。,.]{{1,30}}?)(?=发|发送|传|分享)",
-        rf"(?:用|通过|via)\s*{escaped}\s*(?:发给|发送给|给|传给|分享到)\s*([^，。,.]{{1,40}})",
-        rf"(?:用|通过|via)\s*{escaped}\s*(?:找)?\s*([^，。,.]{{1,30}}?)(?=聊天|聊|chat)",
+        rf"(?:用|使用|通过|via|using|through)\s*{escaped}\s*给\s*([^，。,.]{{1,30}}?)(?=发|发送|传|分享)",
+        rf"(?:用|使用|通过|via|using|through)\s*{escaped}\s*(?:发给|发送给|给|传给|分享到)\s*([^，。,.]{{1,40}})",
+        rf"(?:用|使用)\s*{escaped}\s*(?:和|跟|与)\s*([^，。,.]{{1,30}}?)(?=聊天|聊)",
+        rf"(?:用|使用|通过|via|using|through)\s*{escaped}\s*(?:找)?\s*([^，。,.]{{1,30}}?)(?=聊天|聊|chat)",
+        rf"(?:via|using|through)\s+{escaped}\s+to\s+([^,.;]{{1,40}})",
         rf"(?:去|打开|进入)?\s*{escaped}\s*(?:里|中)?\s*(?:找|搜索|打开|进入)\s*"
         rf"([^，。,.]{{1,30}}?)(?=持续聊天|一直聊天|继续聊天|不停聊天|保持聊天|聊天|聊|chat)",
     )
@@ -651,7 +699,7 @@ def _recipient_from_relation(text: str) -> str:
         r"给\s*([^，。,.]{1,30})\s*(?:发|发送|传|分享)",
         r"(?:给|向)\s*([^，。,.]{1,30}?)\s*(?:说|告诉|解释|询问|问候|回复)",
         r"(?:回复)\s*(他|她|对方|联系人|收件人)",
-        r"(?:send|share)\s+(?:it\s+|the\s+(?:image|file|screenshot)\s+)?to\s+([^,.;]{1,40})",
+        r"(?:send|share)\s+(?:(?:it|an?\s+(?:image|file|screenshot|message)|the\s+(?:image|file|screenshot|message))\s+)?to\s+([^,.;]{1,40})",
         r"(?:tell|explain|ask|reply\s+to)\s+([^,.;]{1,40})",
         r"message\s+(?!via\b|through\b|using\b)([^,.;]{1,40})",
     )
@@ -1094,28 +1142,26 @@ class TaskIntentParser:
             operations.append("send")
 
         channel = ""
-        for name, pattern in _CHANNEL_PATTERNS:
+        for name, pattern in _PROTOCOL_CHANNEL_PATTERNS:
             if pattern.search(text):
                 channel = name
                 break
+        channel_provenance = (
+            "protocol_channel_relation" if channel else "unresolved"
+        )
         source = ""
-        for name, pattern in _SOURCE_PATTERNS:
-            if pattern.search(text):
-                source = name
-                break
-        if not source:
-            generic_source = _GENERIC_SOURCE_RELATION.search(text)
-            if generic_source:
-                candidate_source = generic_source.group(1).strip(" \t\r\n'\"“”‘’")[:64]
-                # Deictic qualifiers describe the authoritative live surface;
-                # they are not application identities.  Keep these commands
-                # target-bound to active_window instead of inventing a source
-                # application named "current".
-                if (
-                    not _is_deictic_surface_source(candidate_source)
-                    and not _INPUT_METHOD_SOURCE.fullmatch(candidate_source)
-                ):
-                    source = candidate_source
+        generic_source = _GENERIC_SOURCE_RELATION.search(text)
+        if generic_source:
+            candidate_source = generic_source.group(1).strip(" \t\r\n'\"“”‘’")[:64]
+            # Deictic qualifiers describe the authoritative live surface;
+            # they are not application identities.  Keep these commands
+            # target-bound to active_window instead of inventing a source
+            # application named "current".
+            if (
+                not _is_deictic_surface_source(candidate_source)
+                and not _INPUT_METHOD_SOURCE.fullmatch(candidate_source)
+            ):
+                source = candidate_source
         if not source:
             generic_tool_source = _GENERIC_TOOL_SOURCE_RELATION.search(text)
             if generic_tool_source:
@@ -1156,6 +1202,24 @@ class TaskIntentParser:
             source = applications[0]
         elif source:
             applications = [source]
+
+        if "send" in operations and not channel:
+            communication_application = _communication_application(text)
+            inferred_channel = (
+                communication_application
+                or launch_target
+                or (
+                    source
+                    if source and not any(
+                        operation in operations
+                        for operation in ("draw", "capture", "save")
+                    )
+                    else ""
+                )
+            )
+            if inferred_channel:
+                channel = inferred_channel
+                channel_provenance = "communication_application_relation"
 
         if _CAPABILITY_DEMONSTRATION.search(text):
             operations.append("demonstrate")
@@ -1280,7 +1344,7 @@ class TaskIntentParser:
             "operation": "structural_operation_relation",
             "domain": domain_provenance,
             "media_type": "media_role",
-            "channel": "destination_entity",
+            "channel": channel_provenance,
             "recipient": "communication_relation",
             "source": "source_application_entity",
         }

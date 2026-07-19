@@ -1,4 +1,9 @@
 import type { RunProjection } from './contracts';
+import {
+  classifyTaskOutcome,
+  isTerminalTaskStatus,
+  taskResultText,
+} from '../../shared/taskOutcome';
 
 export type TaskbarNotificationKind = 'success' | 'error' | 'info';
 
@@ -15,27 +20,6 @@ export interface TaskbarNotificationRequest {
 }
 
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'paused', 'canceling']);
-const SUCCESS_RUN_STATUSES = new Set(['done', 'completed', 'success', 'reply']);
-const STOPPED_RUN_STATUSES = new Set(['canceled', 'cancelled', 'stopped']);
-const TERMINAL_RUN_STATUSES = new Set([
-  ...SUCCESS_RUN_STATUSES,
-  ...STOPPED_RUN_STATUSES,
-  'failed',
-  'fail',
-  'error',
-]);
-
-function resultText(result: unknown): string {
-  if (typeof result === 'string') return result;
-  if (result && typeof result === 'object') {
-    try {
-      return JSON.stringify(result);
-    } catch {
-      return '';
-    }
-  }
-  return '';
-}
 
 export function taskbarNotificationForTransition(
   previous: TaskbarRunState | null,
@@ -46,7 +30,7 @@ export function taskbarNotificationForTransition(
     runId: currentRun.run_id,
     status: String(currentRun.status || '').toLowerCase(),
   };
-  if (!TERMINAL_RUN_STATUSES.has(current.status)) return null;
+  if (!isTerminalTaskStatus(current.status)) return null;
   if (!previous && !observedLiveStart) return null;
   const observedActiveTransition = (
     previous?.runId === current.runId
@@ -59,12 +43,17 @@ export function taskbarNotificationForTransition(
     return null;
   }
 
-  const success = SUCCESS_RUN_STATUSES.has(current.status);
-  const stopped = STOPPED_RUN_STATUSES.has(current.status);
+  const outcome = classifyTaskOutcome(
+    current.status,
+    currentRun.result,
+    currentRun.error,
+  );
+  const success = outcome === 'success';
+  const stopped = outcome === 'info';
   const title = success ? '任务完成' : stopped ? '任务已停止' : '任务失败';
   const body = String(
     currentRun.error
-      || resultText(currentRun.result)
+      || taskResultText(currentRun.result)
       || currentRun.goal
       || currentRun.run_id,
   ).slice(0, 220);

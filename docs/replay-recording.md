@@ -13,20 +13,20 @@ Agent/人类操作 -> trace -> automation-ir/1 -> Replayer / ARP / Flow editor
 
 当 `agent.llm_trace=true` 时，系统会记录 LLM 请求/响应、工具调用、截图引用和事件，用于复现模型每一步看到的信息。调试假成功时优先看 trace 和真实屏幕，不只看最终 `done`。
 
-原生视觉帧不保证永远是全屏或永远是目标窗口。启用 `controller.target_window_capture_enabled` 后，只有经过前台、可见性、几何、任务语义和收益检查的单窗口目标才会裁剪；其他场景回退完整虚拟桌面。LLM trace 中应同时核对该帧声明的 capture scope、reason、物理 screen region 和 0..1000 坐标空间，不能只打开 JPEG 猜它来自哪里。
+原生视觉帧不保证永远是全屏或永远是目标窗口。启用 `controller.target_window_capture_enabled` 后，只有经过前台、可见性、几何、任务语义和收益检查的单窗口目标才会裁剪；其他场景回退完整虚拟桌面。LLM trace 中应同时核对该帧声明的 capture scope、reason、物理 screen region、提交图片尺寸与模型提交的 `image_*` 像素；0..1000 `frame_*` 是映射后的内部/兼容坐标，不能只打开 JPEG 猜来源或混用两套坐标。
 
 关键文件/事件：
 
-- `python/winpilot_home/traces/<run_id>.jsonl`：BUS 事件流，含 `agent_step`、`agent_tool_start`、`agent_tool`、`agent_batch_action_start`、`agent_batch_action`、`done_check`、`agent_done`。
+- `python/winpilot_home/traces/<run_id>.jsonl`：BUS 事件流，当前主线重点看 `agent_step`、`agent_tool_start`、`agent_tool`、`done_check`、`agent_done`；旧 trace 还可能包含 legacy batch 子动作事件。
 - `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` / `NNN_llm_response.json`：模型每步真实输入输出。
 - `before_NNN.jpg` / `after_NNN.jpg`：顶层动作前后截图。
-- `batch_before_NNN.jpg` / `batch_after_NNN.jpg`：`run_action_batch` 内部子动作截图。
+- `batch_before_NNN.jpg` / `batch_after_NNN.jpg`：旧版公开 batch wrapper 留下的兼容子动作截图；当前 native 模型工具面不再产生这类宏调用。
 
 `GET /api/status` 的 `runtime` 还会记录 contract v2、进程加载/当前源码指纹和 loaded/current Git commit。复盘前先确认这些字段一致；源码已经变化但 Python 没重启的 run 不代表当前代码。原生工作台发现这种漂移会阻止提交新任务并要求重启。
 
 `GET /api/trace/{run_id}/summary` 会汇总工具耗时、done 证据、`low_latency` 和 `fast_gui` 指标。低延迟复盘优先看 summary，再打开对应截图和 LLM request/response 对照。
 
-真实 GUI 评测可用脚本生成证据报告：
+API 集成诊断可用脚本生成证据报告；它不等于真实客户端 E2E：
 
 ```bash
 python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http://127.0.0.1:8765
@@ -34,7 +34,7 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 
 脚本走公开 `/api/chat`，不会直接调用内部 runner。当前原生前端目标先由 `/api/v2/task-contracts/compile` 生成 typed contract，再走 `/api/v2/arp/runs`；可复用阶段按 `stage_type + parameters + app_version` 尝试参数化 Skill，miss/fail 只恢复当前阶段。确定性阶段由 StageRuntime、Controller、ArtifactStore 或 DomainAdapter 直接执行，只有语义创建/编辑或异常恢复才进入有界 AgentRunner。两条入口共享 RuntimeJob、桌面资源、trace 和证据规则，但不强制共享同一个 ToolSession/LLM loop。
 
-当前低延迟 GUI 靶场位于 `python/winpilot_home/eval_targets/gui_agent_target.html`。它用于测试 `run_action_batch(subgoal=...)`、自动 `screen_watch`、recent/action ROI、`observe(changed_only=true)` 和 fresh-screen done gate，不是生产功能的专属规则。
+当前低延迟 GUI 靶场位于 `python/winpilot_home/eval_targets/gui_agent_target.html`。它用于测试通用原子动作、自动 `screen_watch`、recent/action ROI、changed-only 观察和 fresh-screen done gate，不是生产功能的专属规则，也不是当前 native 客户端 E2E 入口。
 
 画布、绘图、签名、拖拽、手写都只是同一套连续指针能力的压力样例。某次画出可识别对象只能证明该次动作链；如果没有固定任务集、多次运行、同模型/显示/DPI 配置和外部 ground truth，不能从单条 trace 宣称真实成功率。
 
@@ -43,8 +43,8 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 当前边界：
 
 - 新导出的 agent 脚本使用 `format: "wps/2"`；`wps/1` 只作为旧脚本兼容输入保留。
-- `export_script()` 会收集顶层 `agent_tool.replay`，也会收集 `run_action_batch` 内部的 `agent_batch_action.replay`；只有 Replayer 已知的可执行工具会进入脚本，`auto_visual_verify`、`observe`、`execute_subgoal` 等观测/复合/校验事件不会变成重放动作。
-- `agent_plan`、`revise_plan` 和 `complete_subgoal` 是当前 run 的可变工作状态，也不会变成重放动作。模型可以随时替换、清空、增删、移动或重新打开 todo，但导出的脚本只保存实际发生且可验证的动作语义。
+- `export_script()` 收集当前顶层 `agent_tool.replay`；导入旧 trace 时也识别 legacy batch 子动作中的 replay 字段。只有 Replayer 已知的可执行动作会进入脚本，观察、复合编排和校验事件不会变成重放动作。
+- `agent_plan` 只是当前 run 的工作状态投影，不会变成重放动作。旧 trace 中已经删除的公开计划/子目标事件也只按兼容元数据读取；导出的脚本只保存实际发生且可验证的动作语义。
 - 保存前会做结构校验：未知工具、缺少 click 目标、缺少 type_text 文本、无效 `draw_strokes` 笔画、无效 loop 类型等会被拒绝，避免“能保存但不能重放”。`ctrl.if` 必须带 `cond` 对象，确实无条件时显式写 `{"always": true}`；`ctrl.loop` 的 `count` / `max_iters` 必须是数字，`while` / `until` 必须带 `cond` 对象，避免空条件循环跑到上限才停。
 - Replayer 当前支持 `click`、`type_text`、`hotkey`、`launch`、`focus_window`、`scroll`、`drag`、`draw_strokes`、`wait`、`run_shell`、`run_detached`、`tray_click`，以及 `ctrl.if` / `ctrl.loop` 和 `ext.*` 便利步骤。
 - 脚本如果声明 `target_window`，Replayer 会在任何动作前绑定稳定 title/process；Automation IR 声明桌面 mutation 却没有目标窗口时 fail-fast。`conditions.checks` 还可强制 `file_exists`、`process_running`、可见文本等 preflight。
@@ -138,5 +138,5 @@ Task Contract 的阶段 Skill 不是整句历史任务的模糊 replay。它以 
 - Replayer 与 FlowScript converter 都要跟 `.wps.json` schema 一起演进。
 - 不要让 Agent 直接编辑流程图内部格式。
 - 不要把运行 trace 当成源码文档提交。
-- 不要把 batch 顶层结果当成全部证据；`run_action_batch` 内部动作要看 `agent_batch_action` 和 `batch_before/batch_after`。
+- 复盘旧版 batch trace 时，不要把 legacy 顶层结果当成全部证据；应同时看兼容子动作事件和 `batch_before/batch_after`。当前 native 模型入口不再暴露该宏。
 - 不要把“检索到 Skill”“启动 replay”“执行了空脚本”“计划项已完成”或单纯像素变化当成 ARP evidence。只有非空执行叶子逐步通过 Replayer 核验，并满足最终目标 evidence，才能进入可信完成链。

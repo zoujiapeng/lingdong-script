@@ -23,14 +23,14 @@
     "thinking": false
   },
   "perception": {
-    "uia": { "enabled": true, "priority": 1 },
+    "uia": { "enabled": false, "priority": 1 },
     "win32": { "enabled": true, "priority": 2 },
-    "ocr": { "enabled": true, "priority": 3 },
+    "ocr": { "enabled": false, "priority": 3 },
     "cv": { "enabled": true, "priority": 4 },
     "vlm": { "enabled": false, "priority": 5 }
   },
   "fusion": {
-    "escalate_on_empty": true,
+    "escalate_on_empty": false,
     "ocr_skip_when_uia_rich": true,
     "vlm_skip_when_uia_rich": true,
     "uia_rich_threshold": 20,
@@ -38,7 +38,7 @@
     "observe_cache_ttl_s": 2.0,
     "native_vision_direct": true,
     "screen_watch_autostart": true,
-    "predictive_ocr_enabled": true,
+    "predictive_ocr_enabled": false,
     "predictive_ocr_prefer_cache": true,
     "incremental_perception_enabled": true,
     "incremental_perception_debounce_ms": 80,
@@ -72,7 +72,7 @@
   },
   "controller": {
     "physical_anchor_clicks": true,
-    "native_visual_thinking": false,
+    "native_visual_thinking": true,
     "target_window_capture_enabled": true,
     "multi_input_cooperation": false,
     "cooperative_cursor_tolerance_px": 12,

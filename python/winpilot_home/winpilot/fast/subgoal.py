@@ -12,7 +12,6 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -21,10 +20,6 @@ import win32gui
 from ..action.verify import _match_visible_text
 from ..config import CONFIG
 from ..agent.task_rules import (
-    _document_format_specs,
-    _exact_document_text_block,
-    _required_drawing_colors,
-    _required_literal_tokens,
     _required_visible_payloads,
     _visible_state_targets,
 )
@@ -196,14 +191,6 @@ def _app_launch_target(request: SubgoalRequest) -> str:
     )
     if _compact_key(label) in {_compact_key(item) for item in generic_controls}:
         return _initial_task_app_target(goal)
-    suite_text = f"{label} {goal}".casefold()
-    if "wps" in suite_text:
-        if re.search(r"\b(?:spreadsheet|workbook|worksheet)\b|表格|工作簿|工作表", suite_text, re.IGNORECASE):
-            return "WPS Spreadsheets"
-        if re.search(r"\b(?:presentation|slides?|slideshow)\b|演示|幻灯片", suite_text, re.IGNORECASE):
-            return "WPS Presentation"
-        if re.search(r"\b(?:writer|document|word processing)\b|文字|文档", suite_text, re.IGNORECASE):
-            return "WPS Writer"
     return label
 
 
@@ -265,10 +252,9 @@ def _initial_task_app_target(task: str) -> str:
             continue
         return candidate
 
-    # Natural tasks often name the application as a location/instrument rather
-    # than an explicit launch command: "在画板上画...", "用 QQ 给...", or
-    # "in Paint draw...". Extract only the app phrase; discovery/launch remains
-    # the generic app-catalog responsibility.
+    # Natural tasks often name an unknown application as a location/instrument
+    # rather than an explicit launch command. Extract only that app phrase;
+    # discovery/launch remains the generic app-catalog responsibility.
     implicit_patterns = (
         re.compile(
             r"(?:^|[，,。；;！？!?\s])在\s*([^，,。；;！？!?\r\n]{1,32}?)"
@@ -305,35 +291,11 @@ def _initial_task_app_target(task: str) -> str:
 
 
 _PRINTABLE_SEQUENCE_TRIGGERS = (
-    "input", "type", "enter", "key", "keyboard", "calculate", "compute", "result",
-    "输入", "键入", "录入", "按键", "键盘", "计算", "算出", "结果",
+    "input", "type", "enter", "key", "keyboard",
+    "输入", "键入", "录入", "按键", "键盘",
 )
 
 _PRINTABLE_LABEL_ALIASES = {
-    "add": "+",
-    "plus": "+",
-    "加": "+",
-    "subtract": "-",
-    "minus": "-",
-    "减": "-",
-    "multiply": "*",
-    "multiplyby": "*",
-    "times": "*",
-    "乘": "*",
-    "乘以": "*",
-    "divide": "/",
-    "divideby": "/",
-    "dividedby": "/",
-    "除": "/",
-    "除以": "/",
-    "equals": "=",
-    "equal": "=",
-    "等于": "=",
-    "decimal": ".",
-    "decimalpoint": ".",
-    "point": ".",
-    "dot": ".",
-    "小数点": ".",
     "space": " ",
     "空格": " ",
 }
@@ -347,10 +309,6 @@ def _click_label_to_printable_key(label: Any) -> str | None:
     if compact in _PRINTABLE_LABEL_ALIASES:
         return _PRINTABLE_LABEL_ALIASES[compact]
     if len(text) == 1:
-        if text in {"×", "✕"}:
-            return "*"
-        if text == "÷":
-            return "/"
         if text.isprintable() and not text.isspace():
             return text
     return None
@@ -398,95 +356,6 @@ def _click_label_to_hotkey(label: Any) -> list[str]:
             return []
         keys.append(key)
     return keys
-
-
-def _new_blank_item_hotkey(request: SubgoalRequest, click_spec: dict[str, Any]) -> list[str]:
-    """Compile a generic New/Blank document control into the standard shortcut."""
-    if request.input or request.formats or _draw_specs(request):
-        return []
-    label = str(
-        click_spec.get("label")
-        or click_spec.get("text")
-        or click_spec.get("name")
-        or ""
-    ).strip()
-    label_key = _compact_key(label)
-    new_labels = {
-        _compact_key(value)
-        for value in (
-            "New", "Create New", "Blank", "Blank Document", "Blank Workbook",
-            "New Document", "New Workbook", "新建", "创建", "空白文档", "空白工作簿", "空白表格",
-        )
-    }
-    label_mentions_new_blank = bool(
-        re.search(
-            r"\b(?:new|create|blank)\b.{0,40}\b(?:document|workbook|spreadsheet|presentation|file|tab)\b|"
-            r"新建|创建|空白(?:文档|工作簿|表格|演示)",
-            label,
-            re.IGNORECASE,
-        )
-    )
-    if label_key not in new_labels and not label_mentions_new_blank:
-        return []
-    if not re.search(
-        r"\b(?:new|create|blank)\s+(?:document|workbook|spreadsheet|presentation|file)\b|"
-        r"\bcreate\s+(?:a\s+)?new\b|新建|创建|空白(?:文档|工作簿|表格|演示)",
-        request.subgoal,
-        re.IGNORECASE,
-    ):
-        return []
-    return ["ctrl", "n"]
-
-
-_EXPLICIT_ARITHMETIC_RE = re.compile(
-    r"(?<![\d.])(\d+(?:\.\d+)?(?:\s*(?:[+*/xX\u00d7\u00f7-])\s*"
-    r"\d+(?:\.\d+)?){1,10})(?![\d.])"
-)
-_ARITHMETIC_INTENT_RE = re.compile(
-    r"\b(?:calculate|compute|arithmetic|equation|evaluate|sum|product|"
-    r"multiply|multiplied|divide|divided|plus|minus|result)\b|"
-    r"\u8ba1\u7b97|\u7b97\u51fa|\u7b97\u5f0f|\u7ed3\u679c|\u76f8\u4e58|\u4e58\u4ee5|\u76f8\u52a0|\u9664\u4ee5",
-    re.IGNORECASE,
-)
-
-
-def _explicit_arithmetic_keyboard_text(text: Any) -> str:
-    """Return a normalized expression only when the user supplied one."""
-    candidates = _EXPLICIT_ARITHMETIC_RE.findall(str(text or ""))
-    if not candidates:
-        return ""
-    expression = next(
-        (value for value in candidates if re.search(r"[+*/xX\u00d7\u00f7]", value)),
-        candidates[0],
-    )
-    return (
-        re.sub(r"\s+", "", expression)
-        .replace("\u00d7", "*")
-        .replace("\u00f7", "/")
-        .replace("X", "*")
-        .replace("x", "*")
-    )
-
-
-def _request_arithmetic_keyboard_text(request: SubgoalRequest, task: str = "") -> str:
-    intent_scope = " ".join([
-        str(task or ""),
-        request.subgoal,
-        " ".join(request.verify_texts),
-    ])
-    if not _ARITHMETIC_INTENT_RE.search(intent_scope):
-        return ""
-    direct = _explicit_arithmetic_keyboard_text(request.subgoal)
-    if direct:
-        return direct
-    request_scope = _compact_key(request.subgoal)
-    if any(
-        _compact_key(token) in request_scope
-        for token in ("calculate", "compute", "result", "计算", "算出", "结果")
-    ):
-        return _explicit_arithmetic_keyboard_text(task)
-    return ""
-
 
 def _successful_draw_scene_specs(
     draw_specs: list[dict[str, Any]],
@@ -578,8 +447,7 @@ def _merge_draw_scene_specs(
 
 
 def _click_sequence_as_keyboard_text(request: SubgoalRequest,
-                                     click_specs: list[dict[str, Any]],
-                                     task: str = "") -> str:
+                                     click_specs: list[dict[str, Any]]) -> str:
     if request.input or len(click_specs) < 2:
         return ""
     scope_text = _compact_key(
@@ -591,18 +459,6 @@ def _click_sequence_as_keyboard_text(request: SubgoalRequest,
     )
     if not any(_compact_key(token) in scope_text for token in _PRINTABLE_SEQUENCE_TRIGGERS):
         return ""
-    request_expression = _request_arithmetic_keyboard_text(request, task)
-    arithmetic_scope = any(
-        _compact_key(token) in scope_text
-        for token in ("calculate", "compute", "result", "计算", "算出", "结果")
-    ) or bool(request_expression)
-    if arithmetic_scope:
-        if request_expression:
-            return request_expression + "="
-    has_digit_label = any(
-        any(ch.isdigit() for ch in str(spec.get("label") or spec.get("text") or spec.get("name") or ""))
-        for spec in click_specs
-    )
     out: list[str] = []
     for spec in click_specs:
         if any(key in spec for key in ("x", "y", "element_id", "anchor", "double", "drag")):
@@ -618,8 +474,6 @@ def _click_sequence_as_keyboard_text(request: SubgoalRequest,
         key = _click_label_to_printable_key(label)
         if key is None:
             return ""
-        if key in {"x", "X"} and arithmetic_scope and has_digit_label:
-            key = "*"
         out.append(key)
     text = "".join(out)
     # Avoid converting generic two-button UI choices such as A/B unless the
@@ -629,110 +483,6 @@ def _click_sequence_as_keyboard_text(request: SubgoalRequest,
     return text
 
 
-_NUMERIC_KEYPAD_LABELS = {
-    "*": ("Multiply by", ["\u00d7", "*", "Multiply", "\u4e58", "\u4e58以"], "right"),
-    "/": ("Divide by", ["\u00f7", "/", "Divide", "\u9664", "\u9664以"], "right"),
-    "+": ("Plus", ["+", "Add", "\u52a0"], "right"),
-    "-": ("Minus", ["-", "Subtract", "\u51cf"], "right"),
-    ".": ("Decimal separator", [".", "Decimal", "\u5c0f数点"], "bottom"),
-    "=": ("Equals", ["=", "Equal", "\u7b49于"], "bottom-right"),
-}
-
-_NUMERIC_DIGIT_FALLBACKS = {
-    "0": ["Zero", "零"],
-    "1": ["One", "一"],
-    "2": ["Two", "二"],
-    "3": ["Three", "三"],
-    "4": ["Four", "四"],
-    "5": ["Five", "五"],
-    "6": ["Six", "六"],
-    "7": ["Seven", "七"],
-    "8": ["Eight", "八"],
-    "9": ["Nine", "九"],
-}
-
-
-def _numeric_keypad_click_actions(
-    expression: str,
-    *,
-    context: str,
-    click_specs: list[dict[str, Any]] | None = None,
-    include_clear: bool = True,
-) -> list[dict[str, Any]]:
-    """Compile an expression into semantic on-screen keypad actions."""
-    normalized = _explicit_arithmetic_keyboard_text(expression)
-    if not normalized:
-        return []
-    specs = [spec for spec in (click_specs or []) if isinstance(spec, dict)]
-    by_key: dict[str, dict[str, Any]] = {}
-    clear_spec: dict[str, Any] | None = None
-    for spec in specs:
-        label = spec.get("label") or spec.get("text") or spec.get("name")
-        compact = _compact_key(label)
-        if clear_spec is None and compact in {
-            "clear", "clearentry", "reset", "c", "ce", "\u6e05除", "\u91cd置",
-        }:
-            clear_spec = spec
-        key = _click_label_to_printable_key(label)
-        if key is not None and key not in by_key:
-            by_key[key] = spec
-
-    actions: list[dict[str, Any]] = []
-    if include_clear:
-        clear = {
-            "action": "click_element",
-            "label": "Clear",
-            "fallback_text": ["C", "CE", "Clear entry", "Reset", "\u6e05除", "\u91cd置"],
-            "role": "button",
-            "expected_region": "center",
-            "context": context,
-            "numeric_keypad_sequence": True,
-        }
-        if clear_spec:
-            for key in ("label", "text", "name", "fallback_text", "expected_region", "role"):
-                if clear_spec.get(key) not in (None, "", []):
-                    clear[key if key != "text" and key != "name" else "label"] = clear_spec[key]
-        actions.append(clear)
-        actions.append({"action": "wait", "duration_ms": 100})
-
-    keys = [*normalized, "="]
-    for index, key in enumerate(keys):
-        original = by_key.get(key, {})
-        if key.isdigit():
-            label, fallbacks, region = key, _NUMERIC_DIGIT_FALLBACKS.get(key, []), "bottom"
-        else:
-            label, fallbacks, region = _NUMERIC_KEYPAD_LABELS[key]
-        action = {
-            "action": "click_element",
-            "label": str(original.get("label") or original.get("text") or original.get("name") or label),
-            "fallback_text": list(original.get("fallback_text") or fallbacks),
-            "role": str(original.get("role") or "button"),
-            "expected_region": str(original.get("expected_region") or region),
-            "context": context,
-            "numeric_keypad_sequence": True,
-        }
-        actions.append(action)
-        if index < len(keys) - 1:
-            actions.append({"action": "wait", "duration_ms": 100})
-    actions.extend([
-        {"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0},
-        {"action": "read_text"},
-    ])
-    return actions
-
-
-def _session_has_numeric_keypad(session: Any) -> bool:
-    snapshot = getattr(session, "snapshot", None)
-    elements = getattr(snapshot, "elements", None) or []
-    keys = {
-        key
-        for element in elements
-        if (key := _click_label_to_printable_key(getattr(element, "text", ""))) is not None
-    }
-    digit_count = len({key for key in keys if key.isdigit()})
-    return digit_count >= 4 and "=" in keys and bool(keys.intersection({"+", "-", "*", "/"}))
-
-
 def _direct_keyboard_text(text: Any) -> str:
     value = unicodedata.normalize("NFKC", str(text or "")).strip()
     if not value or "\n" in value or "\r" in value or len(value) > 180:
@@ -740,17 +490,6 @@ def _direct_keyboard_text(text: Any) -> str:
     if not value.isprintable():
         return ""
     return value
-
-
-def _looks_like_executable_keyboard_sequence(text: Any) -> bool:
-    value = _direct_keyboard_text(text)
-    if not value:
-        return False
-    return (
-        value.endswith("=")
-        and any(ch.isdigit() for ch in value)
-        and any(op in value for op in "+-*/×÷")
-    )
 
 
 def _type_into_element_failed_to_focus(batch: dict[str, Any]) -> bool:
@@ -795,7 +534,7 @@ def _merge_fallback_batch(primary: dict[str, Any], fallback: dict[str, Any],
 
 
 def _task_visible_targets(task: str) -> list[str]:
-    return _unique([*_required_visible_payloads(task), *_required_literal_tokens(task), *_visible_state_targets(task)])
+    return _unique([*_required_visible_payloads(task), *_visible_state_targets(task)])
 
 
 def _looks_like_distinctive_state_token(text: str) -> bool:
@@ -1008,7 +747,6 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
         not verify_texts
         and input_spec.get("text")
         and not input_spec.get("navigation")
-        and not _looks_like_executable_keyboard_sequence(input_spec.get("text"))
     ):
         verify_texts.append(str(input_spec.get("text") or ""))
     # Task-level evidence still belongs to the final done gate. A routine should
@@ -1029,18 +767,10 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
         ensure_ascii=False,
         default=str,
     )
-    arithmetic_expression = _explicit_arithmetic_keyboard_text(
-        " ".join((str(task or ""), subgoal_text))
-    )
-    arithmetic_operands = set(re.findall(r"\d+(?:\.\d+)?", arithmetic_expression))
     for target in _task_visible_targets(task):
         if not _scope_mentions(target, scope_text):
             continue
         target_key = _compact_key(target)
-        # Operands describe what to enter, not what must be visible after the
-        # calculation.  Do not turn them into self-fulfilling output checks.
-        if arithmetic_expression and target_key in arithmetic_operands:
-            continue
         covered_by_explicit_target = bool(
             len(target_key) >= 3
             and any(
@@ -1067,128 +797,6 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
         verify_texts=_unique(verify_texts),
         constraints=constraints,
     )
-
-
-_SPREADSHEET_RANGE_BLOCK_RE = re.compile(
-    r"(?<![A-Z0-9])([A-Z]{1,3})(\d+)\s*:\s*([A-Z]{1,3})(\d+)\s*[:：]\s*(?:\r?\n)",
-    re.IGNORECASE,
-)
-_SPREADSHEET_BLOCK_INTENT_RE = re.compile(
-    r"\b(?:table|spreadsheet|workbook|cells?|range|grid|paste|enter|input|fill)\b|"
-    r"表格|工作簿|单元格|区域|整块|批量|粘贴|录入|输入|填写",
-    re.IGNORECASE,
-)
-
-
-def _spreadsheet_column_number(label: str) -> int:
-    value = 0
-    for char in str(label or "").upper():
-        if not "A" <= char <= "Z":
-            return 0
-        value = value * 26 + (ord(char) - ord("A") + 1)
-    return value
-
-
-def _spreadsheet_table_block(task: str, subgoal: str) -> dict[str, Any] | None:
-    """Extract a literal tabular block that immediately follows a cell range.
-
-    The user-provided tab/newline structure is the source of truth.  This is a
-    generic spreadsheet primitive, not an application workflow: once parsed,
-    the same clipboard block can be delivered to any focused spreadsheet grid.
-    """
-    task_text = str(task or "")
-    goal_text = str(subgoal or "")
-    if not _SPREADSHEET_BLOCK_INTENT_RE.search(goal_text):
-        return None
-    for match in _SPREADSHEET_RANGE_BLOCK_RE.finditer(task_text):
-        start_col, start_row_raw, end_col, end_row_raw = match.groups()
-        start_row = int(start_row_raw)
-        end_row = int(end_row_raw)
-        start_col_number = _spreadsheet_column_number(start_col)
-        end_col_number = _spreadsheet_column_number(end_col)
-        if start_row < 1 or end_row < start_row or start_col_number < 1 or end_col_number < start_col_number:
-            continue
-        row_count = end_row - start_row + 1
-        column_count = end_col_number - start_col_number + 1
-        if row_count > 500 or column_count > 100:
-            continue
-        range_text = f"{start_col.upper()}{start_row}:{end_col.upper()}{end_row}"
-        start_ref = f"{start_col.upper()}{start_row}"
-        compact_goal = _compact_key(goal_text)
-        if (
-            _compact_key(range_text) not in compact_goal
-            and not re.search(r"\b(?:entire|whole|all|full)\s+table\b|整个表格|全部数据|所有数据", goal_text, re.IGNORECASE)
-            and not re.search(r"\btable\s+(?:data|content)\b|表格(?:数据|内容)", goal_text, re.IGNORECASE)
-            and not (
-                _compact_key(start_ref) in compact_goal
-                and re.search(
-                    r"\b(?:start|begin|commence)\s+(?:the\s+)?(?:data\s+)?(?:entry|input)\b|"
-                    r"\bdata\s+entry\b|"
-                    r"\b(?:type|enter|input|fill)\b.{0,40}\bheader\s+row\b|"
-                    r"\b(?:focus|select|click)\b.{0,40}\b(?:spreadsheet\s+grid|cell\s+grid|grid)\b|"
-                    r"开始(?:数据)?(?:录入|输入)|数据录入起点|(?:输入|填写).{0,20}表头|聚焦.{0,20}(?:表格|单元格|网格)",
-                    goal_text,
-                    re.IGNORECASE,
-                )
-            )
-        ):
-            continue
-        raw_lines = task_text[match.end():].replace("\r\n", "\n").replace("\r", "\n").split("\n")
-        if len(raw_lines) < row_count:
-            continue
-        rows: list[list[str]] = []
-        valid = True
-        for raw_line in raw_lines[:row_count]:
-            cells = raw_line.split("\t")
-            if len(cells) > column_count:
-                valid = False
-                break
-            cells.extend([""] * (column_count - len(cells)))
-            rows.append(cells)
-        if not valid or len(rows) != row_count:
-            continue
-        clipboard_text = "\r\n".join("\t".join(row) for row in rows)
-        flattened = [cell.strip() for row in rows for cell in row if cell.strip()]
-        verification_tokens: list[str] = []
-        if flattened:
-            verification_tokens.append(flattened[0])
-            distinctive = next(
-                (value for value in reversed(flattened) if _looks_like_distinctive_state_token(value)),
-                flattened[-1],
-            )
-            verification_tokens.append(distinctive)
-        return {
-            "range": range_text,
-            "start_col": start_col.upper(),
-            "start_col_number": start_col_number,
-            "start_row": start_row,
-            "end_col": end_col.upper(),
-            "end_col_number": end_col_number,
-            "end_row": end_row,
-            "row_count": row_count,
-            "column_count": column_count,
-            "rows": rows,
-            "clipboard_text": clipboard_text,
-            "verification_tokens": _unique(verification_tokens),
-        }
-    return None
-
-
-def _spreadsheet_bold_rows(subgoal: str) -> list[int]:
-    text = str(subgoal or "")
-    if not re.search(r"\bbold\b|加粗", text, re.IGNORECASE):
-        return []
-    rows: list[int] = []
-    for pattern in (
-        r"\brow\s*(\d{1,5})\b",
-        r"第\s*(\d{1,5})\s*行",
-        r"(?<!\d)(\d{1,5})\s*行",
-    ):
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            value = int(match.group(1))
-            if 1 <= value <= 1_048_576 and value not in rows:
-                rows.append(value)
-    return rows
 
 
 def _pick_text(data: dict[str, Any]) -> str:
@@ -2018,25 +1626,19 @@ def _drawing_canvas_generation_token(session: Any) -> str:
     """Return a stable document-generation token without using screen epochs.
 
     ``_screen_epoch`` changes after every delivered stroke, so it cannot key a
-    coordinate transform.  Hosts which know that a new document/canvas was
-    created can expose one of the explicit generation counters below.  The
-    existing new-blank flag also invalidates a transform on its first change.
+    coordinate transform. Hosts which know that a new document/canvas was
+    created can expose one of the explicit generation counters below.
     """
     parts: list[str] = []
     for name in (
         "_canvas_generation",
         "_drawing_generation",
         "_document_generation",
-        "_new_blank_generation",
     ):
         if not hasattr(session, name):
             continue
         value = getattr(session, name, None)
         parts.append(f"{name}={value!r}")
-    if hasattr(session, "_new_blank_applied"):
-        parts.append(
-            f"_new_blank_applied={bool(getattr(session, '_new_blank_applied', False))}"
-        )
     return "|".join(parts) or "default"
 
 
@@ -2079,7 +1681,7 @@ def _cached_logical_scene_canvas(
 ) -> Region | None:
     """Reuse the first scene transform while its real window generation lives.
 
-    Ink can split Paint's white canvas into multiple bright components.  Those
+    Ink can split a white canvas into multiple bright components.  Those
     components are useful evidence that a canvas still exists, but they must
     not become a new 0..1000 coordinate origin on every repair pass.
     """
@@ -2756,10 +2358,15 @@ class SubgoalExecutor:
         hwnd = self._target_hwnd(request, allow_foreground=False)
         if not hwnd:
             return None
-        try:
-            region = window_region(hwnd)
-        except Exception:
-            region = getattr(getattr(self.session, "snapshot", None), "region", None)
+        snapshot = getattr(self.session, "snapshot", None)
+        region = None
+        if int(getattr(snapshot, "hwnd", 0) or 0) == int(hwnd):
+            region = getattr(snapshot, "region", None)
+        if region is None:
+            try:
+                region = window_region(hwnd)
+            except Exception:
+                region = None
         if region is None or region.width < 240 or region.height < 240:
             return None
         return {
@@ -2814,529 +2421,8 @@ class SubgoalExecutor:
             }
         return None
 
-    def _spreadsheet_grid_geometry(self) -> dict[str, Any] | None:
-        snapshot = getattr(self.session, "snapshot", None)
-        hwnd = getattr(self.session, "hwnd", None)
-        region = getattr(snapshot, "region", None)
-        if region is None and hwnd:
-            try:
-                region = window_region(int(hwnd))
-            except Exception:
-                region = None
-        if region is None or region.width < 320 or region.height < 260:
-            return None
-
-        elements = list(getattr(snapshot, "elements", []) or [])
-        column_a_candidates = [
-            element for element in elements
-            if str(getattr(element, "text", "") or "").strip().upper() == "A"
-            and region.left + int(region.width * 0.025) <= int(getattr(element, "cx", 0) or 0) <= region.left + int(region.width * 0.35)
-            and region.top + int(region.height * 0.18) <= int(getattr(element, "cy", 0) or 0) <= region.top + int(region.height * 0.50)
-        ]
-        column_a = max(column_a_candidates, key=lambda item: int(getattr(item, "cy", 0) or 0), default=None)
-
-        row_points: dict[int, tuple[int, int]] = {}
-        for element in elements:
-            label = str(getattr(element, "text", "") or "").strip()
-            if not re.fullmatch(r"\d{1,5}", label):
-                continue
-            cx = int(getattr(element, "cx", 0) or 0)
-            cy = int(getattr(element, "cy", 0) or 0)
-            if cx > region.left + int(region.width * 0.09):
-                continue
-            if not region.top + int(region.height * 0.22) <= cy <= region.top + int(region.height * 0.92):
-                continue
-            number = int(label)
-            if number not in row_points or cx < row_points[number][0]:
-                row_points[number] = (cx, cy)
-
-        if 1 in row_points and 2 in row_points:
-            row_height = max(12, row_points[2][1] - row_points[1][1])
-        else:
-            ordered = sorted(row_points.items())
-            deltas = [
-                (second_y - first_y) / max(1, second_number - first_number)
-                for (first_number, (_first_x, first_y)), (second_number, (_second_x, second_y))
-                in zip(ordered, ordered[1:])
-                if second_number > first_number and second_y > first_y
-            ]
-            if deltas:
-                ranked_deltas = sorted(deltas)
-                row_height = int(round(ranked_deltas[len(ranked_deltas) // 2]))
-            else:
-                row_height = max(16, int(region.height * 0.024))
-
-        if column_a is not None:
-            first_cell_x = int(getattr(column_a, "cx", 0) or 0)
-        else:
-            first_cell_x = region.left + int(region.width * 0.035)
-        if 1 in row_points:
-            first_cell_y = row_points[1][1]
-        elif row_points:
-            # OCR commonly misses the single-digit row labels while reading
-            # 10, 11, ... reliably. Infer row 1 from those grounded labels
-            # instead of using a fixed window percentage.
-            inferred = sorted(
-                int(y - (number - 1) * row_height)
-                for number, (_x, y) in row_points.items()
-            )
-            first_cell_y = inferred[len(inferred) // 2]
-            first_cell_y = max(
-                region.top + int(region.height * 0.12),
-                min(first_cell_y, region.top + int(region.height * 0.42)),
-            )
-        else:
-            first_cell_y = region.top + int(region.height * 0.27)
-        row_header_x = (
-            min(point[0] for point in row_points.values())
-            if row_points
-            else region.left + int(region.width * 0.012)
-        )
-        return {
-            "region": region,
-            "first_cell": (int(first_cell_x), int(first_cell_y)),
-            "row_header_x": int(row_header_x),
-            "row_points": row_points,
-            "row_height": int(row_height),
-        }
-
-    def _spreadsheet_table_actions(self, request: SubgoalRequest) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-        spec = _spreadsheet_table_block(getattr(self.session, "task", ""), request.subgoal)
-        if spec is None:
-            return [], None
-        applied = getattr(self.session, "_spreadsheet_blocks_applied", set())
-        if isinstance(applied, set) and str(spec.get("range") or "") in applied:
-            return [], None
-        geometry = self._spreadsheet_grid_geometry()
-        if geometry is None:
-            return [], spec
-        x, y = geometry["first_cell"]
-        actions: list[dict[str, Any]] = [
-            {"action": "hotkey", "keys": ["esc"]},
-            {
-                "action": "click",
-                "x": x,
-                "y": y,
-                "button": "left",
-                "physical": True,
-                "skip_auto_observe": True,
-                "context": "focus spreadsheet grid",
-            },
-            {"action": "hotkey", "keys": ["ctrl", "home"]},
-        ]
-        for _ in range(max(0, int(spec["start_row"]) - 1)):
-            actions.append({"action": "hotkey", "keys": ["down"]})
-        for _ in range(max(0, int(spec["start_col_number"]) - 1)):
-            actions.append({"action": "hotkey", "keys": ["right"]})
-        actions.extend([
-            {"action": "clipboard_write", "text": str(spec["clipboard_text"])},
-            {"action": "clipboard_paste"},
-            {"action": "wait_stable", "stable_ms": 400, "timeout_s": 4.0},
-            {"action": "read_text"},
-        ])
-        return actions, spec
-
-    def _spreadsheet_row_format_actions(self, request: SubgoalRequest) -> list[dict[str, Any]]:
-        rows = self._spreadsheet_requested_bold_rows(request)
-        if not rows:
-            return []
-        geometry = self._spreadsheet_grid_geometry()
-        if geometry is None:
-            return []
-        row_points = geometry["row_points"]
-        row_header_x = int(geometry["row_header_x"])
-        row_height = int(geometry["row_height"])
-        row_one_y = int(row_points.get(1, (row_header_x, geometry["first_cell"][1]))[1])
-        actions: list[dict[str, Any]] = [{"action": "hotkey", "keys": ["esc"]}]
-        for row in rows:
-            y = int(row_points.get(row, (row_header_x, row_one_y + (row - 1) * row_height))[1])
-            actions.extend([
-                {
-                    "action": "click",
-                    "x": row_header_x,
-                    "y": y,
-                    "button": "left",
-                    "physical": True,
-                    "skip_auto_observe": True,
-                    "context": f"select spreadsheet row {row}",
-                },
-                {"action": "hotkey", "keys": ["ctrl", "b"]},
-            ])
-        actions.extend([
-            {"action": "wait_stable", "stable_ms": 250, "timeout_s": 3.0},
-            {"action": "read_text"},
-        ])
-        return actions
-
-    def _exact_save_as_actions(self, request: SubgoalRequest) -> list[dict[str, Any]]:
-        if not bool(request.constraints.get("open_save_as")):
-            return []
-        save_path = str(
-            request.constraints.get("save_path")
-            or request.input.get("text")
-            or request.input.get("value")
-            or ""
-        ).strip()
-        if not _looks_like_file_path(save_path):
-            return []
-        snapshot = getattr(self.session, "snapshot", None)
-        dialog_ready = bool(
-            snapshot is not None
-            and any(
-                (
-                    str(getattr(element, "role", "") or "").casefold() in {"edit", "combobox", "textbox"}
-                    and (
-                        "文件名称" in str(getattr(element, "text", "") or "")
-                        or "文件名" in str(getattr(element, "text", "") or "")
-                        or int(getattr(element, "width", 0) or 0) >= 500
-                    )
-                )
-                for element in getattr(snapshot, "elements", []) or []
-            )
-            and any(
-                "保存" in str(getattr(element, "text", "") or "")
-                or str(getattr(element, "text", "") or "").strip().casefold() == "save"
-                for element in getattr(snapshot, "elements", []) or []
-            )
-        )
-        prefix: list[dict[str, Any]] = []
-        if not dialog_ready:
-            task_text = str(getattr(self.session, "task", "") or "")
-            office_like = bool(re.search(
-                r"\b(?:office|word|excel|powerpoint|spreadsheet|workbook|document|presentation|wps)\b|"
-                r"办公|文字|表格|工作簿|演示|文档",
-                task_text,
-                re.IGNORECASE,
-            ))
-            prefix.extend([
-                {"action": "hotkey", "keys": ["f12"] if office_like else ["ctrl", "shift", "s"]},
-                {"action": "wait", "duration_ms": 1200},
-                {"action": "observe", "full": True, "force_full": True},
-            ])
-        return [
-            *prefix,
-            {
-                "action": "type_into_element",
-                "label": "File name",
-                "fallback_text": ["文件名称(N)", "文件名", "文件名称", "File name"],
-                "role": "combobox",
-                "expected_region": "bottom",
-                "text": save_path,
-                "clear": True,
-                "verify_after_submit": True,
-                "context": "Save As filename field",
-            },
-            {
-                "action": "hotkey",
-                "keys": ["enter"],
-                "expect": {"file_exists": save_path, "timeout_s": 10.0},
-            },
-            {"action": "wait_stable", "stable_ms": 300, "timeout_s": 5.0},
-            {"action": "read_text"},
-        ]
-
-    def _spreadsheet_requested_bold_rows(self, request: SubgoalRequest) -> list[int]:
-        rows = _spreadsheet_bold_rows(request.subgoal)
-        if not rows:
-            return []
-        task_rows = _spreadsheet_bold_rows(getattr(self.session, "task", ""))
-        if task_rows:
-            rows = task_rows
-        applied = getattr(self.session, "_spreadsheet_bold_rows_applied", set())
-        if not isinstance(applied, set):
-            applied = set()
-        return [row for row in rows if row not in applied]
-
-    def _pending_exact_save_path(self) -> str:
-        from ..agent.done_verifier import _explicit_saved_paths
-
-        paths = _explicit_saved_paths(str(getattr(self.session, "task", "") or ""))
-        saved_paths = getattr(self.session, "_exact_save_paths_applied", set())
-        if not isinstance(saved_paths, set):
-            saved_paths = set()
-        if not paths or str(paths[0]).casefold() in saved_paths:
-            return ""
-        return str(paths[0])
-
-    def _advance_to_pending_exact_save(self, request: SubgoalRequest) -> bool:
-        save_path = self._pending_exact_save_path()
-        if not save_path:
-            return False
-        request.subgoal = f"Save As the exact requested path: {save_path}"
-        request.input = {"label": "File name", "text": save_path, "clear": True}
-        request.click = {"label": "Save", "fallback_text": ["Save"]}
-        request.clicks = []
-        request.verify_texts = [Path(save_path).name]
-        request.constraints = {
-            "open_save_as": True,
-            "save_path": save_path,
-            "wait": True,
-        }
-        return True
-
-    def _spreadsheet_task_actions(
-        self,
-        request: SubgoalRequest,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-        """Compile explicit table, row-format, and Save As work into one batch."""
-        actions, spec = self._spreadsheet_table_actions(request)
-        if not actions:
-            return [], spec
-        task_rows = _spreadsheet_bold_rows(str(getattr(self.session, "task", "") or ""))
-        if task_rows:
-            format_request = SubgoalRequest(
-                subgoal="Make " + " and ".join(f"row {row} bold" for row in task_rows),
-            )
-            actions.extend(self._spreadsheet_row_format_actions(format_request))
-        save_path = self._pending_exact_save_path()
-        if save_path:
-            request.constraints = {
-                **request.constraints,
-                "save_after": True,
-                "save_path": save_path,
-            }
-            save_request = SubgoalRequest(
-                subgoal=f"Save As the exact requested path: {save_path}",
-                input={"label": "File name", "text": save_path, "clear": True},
-                click={"label": "Save", "fallback_text": ["Save"]},
-                verify_texts=[Path(save_path).name],
-                constraints={
-                    "open_save_as": True,
-                    "save_path": save_path,
-                    "wait": True,
-                },
-            )
-            actions.extend(self._exact_save_as_actions(save_request))
-        return actions, spec
-
-    def _document_task_actions(self, request: SubgoalRequest) -> list[dict[str, Any]]:
-        """Compile an explicit document body, formatting, and Save As routine."""
-        if (
-            isinstance(request.input, dict)
-            and request.input.get(
-                "clear", request.input.get("replace", True)
-            ) is False
-        ):
-            # The exact-document routine is a whole-document replacement. An
-            # explicit append/preserve request must stay on the generic input
-            # path and must never be silently expanded to Ctrl+A/Backspace.
-            return []
-        task = str(getattr(self.session, "task", "") or "")
-        body = _exact_document_text_block(task)
-        if not body:
-            return []
-        formats = [dict(spec) for spec in _document_format_specs(task)]
-        lines = [line for line in body.splitlines() if line.strip()]
-        request.input = {
-            "text": body,
-            "document_surface": True,
-            "clear": True,
-        }
-        request.formats = formats
-        request.verify_texts = _unique([
-            *lines[:1],
-            *[
-                line for line in lines
-                if re.search(r"[A-Za-z]+[_-][A-Za-z0-9_-]+|\d{3,}", line)
-            ],
-            *lines[-1:],
-        ])[:4]
-        current_title = ""
-        current_hwnd = int(getattr(self.session, "hwnd", 0) or 0)
-        if current_hwnd:
-            try:
-                current_title = str(win32._window_text(current_hwnd) or "").strip()
-            except (OSError, TypeError, ValueError):
-                current_title = ""
-        if not current_title:
-            current_title = str(getattr(getattr(self.session, "snapshot", None), "title", "") or "")
-        compact_title = re.sub(r"\s+", "", current_title.casefold())
-        if compact_title in {
-            "文档-wpsoffice",
-            "新建文档-wpsoffice",
-            "wpsoffice",
-            "wps文字-wpsoffice",
-        }:
-            self.session._document_surface_ready = False
-        elif re.search(
-            r"(?:(?:文字文稿|文档|document)[-_]?\d+|(?:untitled|未命名)[-_]?\d*)"
-            r".*(?:wps|writer|office)",
-            compact_title,
-            re.IGNORECASE,
-        ):
-            self.session._document_surface_ready = True
-
-        actions: list[dict[str, Any]] = [
-            {"action": "ensure_document_surface", "max_attempts": 3},
-        ]
-        focus_action = self._central_document_focus_action(request)
-        if focus_action:
-            actions.append(focus_action)
-        actions.extend([
-            {"action": "hotkey", "keys": ["ctrl", "a"]},
-            {"action": "hotkey", "keys": ["backspace"]},
-        ])
-        raw_lines = body.splitlines()
-        first_format = next(
-            (spec for spec in formats if str(spec.get("range") or "").casefold() == "first_line"),
-            {},
-        )
-        body_format = next(
-            (
-                spec for spec in formats
-                if str(spec.get("range") or "").casefold() == "body_after_first_line"
-            ),
-            {},
-        )
-        stream_format = bool(
-            len(raw_lines) >= 2
-            and all(line.strip() for line in raw_lines)
-            and first_format.get("bold") is True
-            and str(first_format.get("alignment") or "").casefold() in {"center", "centre"}
-            and str(body_format.get("alignment") or "").casefold() == "left"
-        )
-        if stream_format:
-            # A fresh document has a deterministic insertion state. Apply the
-            # heading style before typing, then switch it off for the body. This
-            # avoids a second coordinate click and fragile backward selection.
-            actions.extend([
-                {"action": "hotkey", "keys": ["ctrl", "b"]},
-                {"action": "hotkey", "keys": ["ctrl", "e"]},
-                {"action": "type_text", "text": raw_lines[0]},
-                {"action": "hotkey", "keys": ["enter"]},
-                {"action": "hotkey", "keys": ["ctrl", "b"]},
-                {"action": "hotkey", "keys": ["ctrl", "l"]},
-                {"action": "type_text", "text": "\n".join(raw_lines[1:])},
-                {"action": "hotkey", "keys": ["ctrl", "end"]},
-            ])
-        else:
-            actions.append({"action": "type_text", "text": body})
-            for format_spec in formats:
-                actions.extend(_document_format_actions(format_spec))
-            if formats:
-                actions.append({"action": "hotkey", "keys": ["ctrl", "end"]})
-        save_path = self._pending_exact_save_path()
-        if save_path:
-            request.constraints = {
-                **request.constraints,
-                "save_after": True,
-                "save_path": save_path,
-            }
-            save_request = SubgoalRequest(
-                subgoal=f"Save As the exact requested path: {save_path}",
-                input={"label": "File name", "text": save_path, "clear": True},
-                click={"label": "Save", "fallback_text": ["Save"]},
-                verify_texts=[Path(save_path).name],
-                constraints={
-                    "open_save_as": True,
-                    "save_path": save_path,
-                    "wait": True,
-                },
-            )
-            actions.extend(self._exact_save_as_actions(save_request))
-        return actions
-
-    def _clipboard_replace_actions(self, request: SubgoalRequest) -> list[dict[str, Any]]:
-        """Compile a GUI find/replace operation that consumes the clipboard."""
-        scope = str(request.subgoal or "")
-        token_match = re.search(r"\[\[[^\]\r\n]{1,100}\]\]", scope)
-        if not token_match:
-            return []
-        token = token_match.group(0)
-        task_scope = str(getattr(self.session, "task", "") or "")
-        task_binds_token = token in task_scope
-        combined_scope = f"{scope}\n{task_scope if task_binds_token else ''}"
-        if not re.search(r"\b(?:find\s+and\s+replace|replac(?:e|ing))\b|查找和替换|替换", combined_scope, re.IGNORECASE):
-            return []
-        if not re.search(r"\bclipboard\b|剪贴板|\bcopy\b|复制", combined_scope, re.IGNORECASE):
-            return []
-        request.constraints = {
-            **request.constraints,
-            "clipboard_replace_token": token,
-        }
-        actions: list[dict[str, Any]] = []
-        focus_action = self._central_document_focus_action(request)
-        if focus_action:
-            actions.append(focus_action)
-        actions.extend([
-            {"action": "hotkey", "keys": ["ctrl", "h"]},
-            {"action": "wait_stable", "stable_ms": 250, "timeout_s": 3.0},
-            {"action": "observe", "full": True, "force_full": True},
-            {
-                "action": "type_into_element",
-                "label": "查找内容",
-                "fallback_text": ["查找内容(N):", "Find what", "Find"],
-                "role": "combobox",
-                "text": token,
-                "clear": True,
-            },
-            {
-                "action": "click_element",
-                "label": "替换为",
-                "fallback_text": ["替换为(I):", "Replace with"],
-                "role": "combobox",
-            },
-            {"action": "hotkey", "keys": ["ctrl", "v"]},
-            {
-                "action": "click_element",
-                "label": "全部替换",
-                "fallback_text": ["全部替换(A)", "Replace All"],
-                "role": "button",
-            },
-            {"action": "wait_change", "timeout_s": 4.0, "min_ratio": 0.0002, "required": False},
-            {"action": "wait_stable", "stable_ms": 200, "timeout_s": 3.0},
-            {"action": "observe", "full": True, "force_full": True},
-            {
-                "action": "click_element",
-                "label": "确定",
-                "fallback_text": ["OK", "确认"],
-                "role": "button",
-                "optional": True,
-            },
-            {"action": "wait_stable", "stable_ms": 150, "timeout_s": 2.0},
-            {"action": "hotkey", "keys": ["escape"]},
-            {"action": "wait_stable", "stable_ms": 150, "timeout_s": 2.0},
-            {"action": "read_text"},
-        ])
-        return actions
-
     def _build_actions(self, request: SubgoalRequest) -> list[dict[str, Any]]:
-        clipboard_replace_actions = self._clipboard_replace_actions(request)
-        if clipboard_replace_actions:
-            return clipboard_replace_actions
-        save_as_actions = self._exact_save_as_actions(request)
-        if save_as_actions:
-            return save_as_actions
-        spreadsheet_actions, _spreadsheet_spec = self._spreadsheet_task_actions(request)
-        if spreadsheet_actions:
-            return spreadsheet_actions
-        spreadsheet_format_actions = self._spreadsheet_row_format_actions(request)
-        if spreadsheet_format_actions:
-            save_path = str(request.constraints.get("save_path") or "").strip()
-            if save_path:
-                save_request = SubgoalRequest(
-                    subgoal=f"Save As the exact requested path: {save_path}",
-                    input={"label": "File name", "text": save_path, "clear": True},
-                    click={"label": "Save", "fallback_text": ["Save"]},
-                    verify_texts=[Path(save_path).name],
-                    constraints={
-                        "open_save_as": True,
-                        "save_path": save_path,
-                        "wait": True,
-                    },
-                )
-                spreadsheet_format_actions.extend(self._exact_save_as_actions(save_request))
-            return spreadsheet_format_actions
-        if (
-            isinstance(request.input, dict)
-            and request.input.get("document_surface") is True
-            and _exact_document_text_block(str(getattr(self.session, "task", "") or ""))
-        ):
-            document_actions = self._document_task_actions(request)
-            if document_actions:
-                return document_actions
         actions: list[dict[str, Any]] = []
-        read_after_input_sequence = False
         input_spec = request.input
         if input_spec:
             text = input_spec.get("text", input_spec.get("value", input_spec.get("text_input", "")))
@@ -3364,8 +2450,6 @@ class SubgoalExecutor:
                     elif isinstance(expect_text, str) and expect_text.strip():
                         action["expect"] = {"text_appears": expect_text.strip()}
                     actions.append(action)
-                if not request.verify_texts and _looks_like_executable_keyboard_sequence(text):
-                    read_after_input_sequence = True
         if input_spec and request.constraints.get("submit_with_enter") is True:
             actions.extend([
                 {"action": "hotkey", "keys": ["enter"]},
@@ -3391,36 +2475,6 @@ class SubgoalExecutor:
             actions.extend(_document_format_actions(format_spec))
         if request.formats and actions:
             actions.append({"action": "hotkey", "keys": ["ctrl", "end"]})
-            save_path = str(request.constraints.get("save_path") or "").strip()
-            if save_path:
-                # A named output is a single controller routine, not a new LLM
-                # episode. Refresh perception after opening the native dialog
-                # so the filename locator works for both UIA and OCR-only UIs.
-                actions.extend([
-                    {"action": "hotkey", "keys": ["ctrl", "s"]},
-                    {"action": "wait_stable", "stable_ms": 250, "timeout_s": 3.0},
-                    {"action": "observe"},
-                    {
-                        "action": "type_into_element",
-                        "label": "File name",
-                        "fallback_text": ["文件名称(N)", "文件名", "文件名称", "File name"],
-                        "role": "combobox",
-                        "expected_region": "bottom",
-                        "text": save_path,
-                        "clear": True,
-                        "verify_after_submit": True,
-                        "context": "Save As filename field",
-                    },
-                    {
-                        "action": "hotkey",
-                        "keys": ["enter"],
-                        "expect": {"file_exists": save_path, "timeout_s": 8.0},
-                    },
-                    {"action": "wait_stable", "stable_ms": 250, "timeout_s": 3.0},
-                    {"action": "read_text"},
-                ])
-            elif bool(request.constraints.get("save_after")):
-                actions.append({"action": "hotkey", "keys": ["ctrl", "s"]})
         draw_specs = _draw_specs(request)
         draw_canvas_context: tuple[Region, list[dict[str, Any]]] | None = None
         if draw_specs:
@@ -3502,13 +2556,9 @@ class SubgoalExecutor:
             actions[final_draw_index]["trace_checkpoint"] = True
         click_specs = request.clicks or ([request.click] if request.click else [])
         shortcut_keys: list[str] = []
-        new_blank_shortcut = False
         if not input_spec and len(click_specs) == 1:
             if _is_browser_location_click(click_specs[0]):
                 shortcut_keys = ["ctrl", "l"]
-            else:
-                shortcut_keys = _new_blank_item_hotkey(request, click_specs[0])
-            new_blank_shortcut = shortcut_keys == ["ctrl", "n"]
             shortcut_label = (
                 click_specs[0].get("label")
                 or click_specs[0].get("text")
@@ -3516,68 +2566,12 @@ class SubgoalExecutor:
             )
             if not shortcut_keys:
                 shortcut_keys = _click_label_to_hotkey(shortcut_label)
-            if not shortcut_keys and re.search(
-                r"\b(?:press(?:ing|ed)?|hotkey|shortcut)\b|\u6309\u4e0b|\u5feb\u6377\u952e",
-                request.subgoal,
-                re.IGNORECASE,
-            ):
-                shortcut_match = re.search(
-                    r"(?:ctrl|control|alt|shift)(?:\s*\+\s*(?:ctrl|control|alt|shift|"
-                    r"enter|return|tab|escape|esc|space|home|end|delete|del|backspace|"
-                    r"up|down|left|right|f(?:[1-9]|1[0-2])|[a-z0-9]))+",
-                    request.subgoal,
-                    re.IGNORECASE,
-                )
-                if shortcut_match:
-                    shortcut_keys = _click_label_to_hotkey(shortcut_match.group(0))
-            if shortcut_keys == ["ctrl", "n"] and re.search(
-                r"\b(?:new|create|blank)\b|新建|创建|空白",
-                request.subgoal,
-                re.IGNORECASE,
-            ):
-                new_blank_shortcut = True
         if shortcut_keys:
             actions.append({"action": "hotkey", "keys": shortcut_keys})
             if request.constraints.get("wait") is not False:
-                if new_blank_shortcut:
-                    actions.extend([
-                        {
-                            "action": "wait_change",
-                            "timeout_s": 6.0,
-                            "min_ratio": 0.0002,
-                            "required": False,
-                        },
-                        {"action": "wait_stable", "stable_ms": 300, "timeout_s": 5.0, "required": True},
-                    ])
-                else:
-                    actions.append({"action": "wait_stable", "stable_ms": 250, "timeout_s": 3.0})
-            shortcut_context = request.subgoal.casefold()
-            state_read_required = bool(
-                request.verify_texts
-                or re.search(
-                    r"\b(?:verify|confirm|check|new|create|open|blank)\b|"
-                    r"\u9a8c\u8bc1|\u786e\u8ba4|\u68c0\u67e5|\u65b0\u5efa|\u521b\u5efa|\u6253\u5f00|\u7a7a\u767d",
-                    shortcut_context,
-                )
-            )
-            if state_read_required:
+                actions.append({"action": "wait_stable", "stable_ms": 250, "timeout_s": 3.0})
+            if request.verify_texts:
                 actions.append({"action": "read_text"})
-            if new_blank_shortcut:
-                follow_request = SubgoalRequest(
-                    subgoal="Enter the complete table data into the requested cell range in one batch",
-                    target_window=dict(request.target_window),
-                )
-                follow_actions, _follow_spec = self._spreadsheet_task_actions(follow_request)
-                if follow_actions:
-                    request.constraints = {
-                        **request.constraints,
-                        **follow_request.constraints,
-                    }
-                    actions.extend(follow_actions)
-                else:
-                    document_actions = self._document_task_actions(request)
-                    if document_actions:
-                        actions.extend(document_actions)
             return actions
         submit_file_dialog_with_enter = bool(
             input_spec and click_specs and _file_dialog_enter_submit(request, input_spec, click_specs)
@@ -3631,47 +2625,23 @@ class SubgoalExecutor:
                 action["expect"] = {"window_gone": title, "timeout_s": 5.0}
             actions.append(action)
             click_specs = []
-        explicit_arithmetic_text = _request_arithmetic_keyboard_text(
-            request,
-            str(getattr(self.session, "task", "") or ""),
-        )
-        numeric_keypad_actions = _numeric_keypad_click_actions(
-            explicit_arithmetic_text,
-            context=request.subgoal,
-            click_specs=click_specs,
-        )
-        if numeric_keypad_actions:
-            actions.extend(numeric_keypad_actions)
-            return actions
         keyboard_text = _click_sequence_as_keyboard_text(
             request,
             click_specs,
-            task=str(getattr(self.session, "task", "") or ""),
         )
         if keyboard_text:
-            exact_arithmetic_sequence = bool(
-                explicit_arithmetic_text
-                and keyboard_text == explicit_arithmetic_text + "="
-            )
             action = {
                 "action": "type_text",
                 "text": keyboard_text,
                 "keyboard_sequence_from_clicks": True,
             }
-            if exact_arithmetic_sequence:
-                action["keyboard_mode"] = "numeric_keypad"
-            if len(request.verify_texts) == 1 and not exact_arithmetic_sequence:
+            if len(request.verify_texts) == 1:
                 action["expect"] = {"text_appears": request.verify_texts[0]}
             actions.append(action)
             wait_spec = request.constraints.get("wait") if isinstance(request.constraints, dict) else None
             if wait_spec is not False:
                 actions.append({"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0})
-            if (
-                exact_arithmetic_sequence
-                or
-                (request.verify_texts and len(request.verify_texts) != 1)
-                or (not request.verify_texts and _looks_like_executable_keyboard_sequence(keyboard_text))
-            ):
+            if request.verify_texts and len(request.verify_texts) != 1:
                 actions.append({"action": "read_text"})
             return actions
         changed_query_text = ""
@@ -3762,8 +2732,6 @@ class SubgoalExecutor:
                 })
             else:
                 actions.append({"action": "read_text"})
-        elif read_after_input_sequence:
-            actions.append({"action": "read_text"})
         return actions
 
     def _keyboard_fallback_actions(self, request: SubgoalRequest) -> list[dict[str, Any]]:
@@ -3776,29 +2744,6 @@ class SubgoalExecutor:
         )
         if not text:
             return []
-        arithmetic_text = _explicit_arithmetic_keyboard_text(text)
-        if arithmetic_text and not _session_has_numeric_keypad(self.session):
-            # A failed input-locator attempt can leave a query-directed/ROI
-            # snapshot in the session.  Refresh the complete target window
-            # once before deciding that an owner-drawn numeric keypad is not
-            # available.  This is a recovery-only perception call and keeps
-            # normal input paths on the low-latency snapshot.
-            try:
-                self.controller._dispatch("observe", {
-                    "full": True,
-                    "force_full": True,
-                    "include_icons": True,
-                    "max_elements": 240,
-                })
-            except Exception:
-                pass
-        if arithmetic_text and _session_has_numeric_keypad(self.session):
-            numeric_keypad_actions = _numeric_keypad_click_actions(
-                arithmetic_text,
-                context=f"{request.subgoal} (on-screen numeric keypad fallback)",
-            )
-            if numeric_keypad_actions:
-                return numeric_keypad_actions
         action = {
             "action": "type_text",
             "text": text,
@@ -3811,8 +2756,6 @@ class SubgoalExecutor:
         if wait_spec is not False:
             actions.append({"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0})
         if request.verify_texts and len(request.verify_texts) != 1:
-            actions.append({"action": "read_text"})
-        elif not request.verify_texts and _looks_like_executable_keyboard_sequence(text):
             actions.append({"action": "read_text"})
         return actions
 
@@ -4097,183 +3040,6 @@ class SubgoalExecutor:
 
     def execute(self, args: dict[str, Any]) -> ToolResult:
         request = parse_subgoal_request(args, task=getattr(self.session, "task", ""))
-        click_specs = request.clicks or ([request.click] if request.click else [])
-        new_blank_requested = bool(
-            not request.input
-            and len(click_specs) == 1
-            and _new_blank_item_hotkey(request, click_specs[0]) == ["ctrl", "n"]
-        )
-        if new_blank_requested and getattr(self.session, "_new_blank_applied", False):
-            task_text = str(getattr(self.session, "task", "") or "")
-            table_spec = _spreadsheet_table_block(
-                task_text,
-                "Enter the complete table data into the requested cell range in one batch",
-            )
-            applied_blocks = getattr(self.session, "_spreadsheet_blocks_applied", set())
-            if (
-                table_spec is not None
-                and (
-                    not isinstance(applied_blocks, set)
-                    or str(table_spec.get("range") or "") not in applied_blocks
-                )
-            ):
-                request.subgoal = "Enter the complete table data into the requested cell range in one batch"
-                request.click = {"label": "A1", "expected_region": "spreadsheet grid"}
-                request.clicks = []
-                new_blank_requested = False
-            else:
-                return ToolResult(json.dumps({
-                    "ok": True,
-                    "verified": False,
-                    "mutation_skipped": True,
-                    "new_blank_applied": True,
-                    "postcondition_pending": True,
-                    "needs_llm_reason": False,
-                    "subgoal": request.subgoal,
-                    "subgoal_route": "controller_first",
-                    "controller_state": {
-                        "phase": "executed",
-                        "verified": False,
-                        "needs_llm_reason": False,
-                    },
-                    "evidence_packet": {"matched_texts": [], "missing_texts": []},
-                    "fast_path_advice": (
-                        "A new blank document/workbook was already created in this run. The duplicate "
-                        "Ctrl+N mutation was skipped; continue with the next content, formatting, or save phase."
-                    ),
-                }, ensure_ascii=False, default=str))
-        task_text = str(getattr(self.session, "task", "") or "")
-        applied_blocks = getattr(self.session, "_spreadsheet_blocks_applied", set())
-        pure_verify_request = bool(
-            request.verify_texts
-            and not request.input
-            and not request.click
-            and not request.clicks
-            and not request.formats
-            and not request.draw
-            and not request.draws
-        )
-        if pure_verify_request and isinstance(applied_blocks, set) and applied_blocks:
-            task_rows = _spreadsheet_bold_rows(task_text)
-            applied_rows = getattr(self.session, "_spreadsheet_bold_rows_applied", set())
-            if not isinstance(applied_rows, set):
-                applied_rows = set()
-            pending_rows = [row for row in task_rows if row not in applied_rows]
-            if pending_rows:
-                request.subgoal = "Make " + " and ".join(f"row {row} bold" for row in pending_rows)
-                request.verify_texts = []
-            else:
-                if not self._advance_to_pending_exact_save(request):
-                    return ToolResult(json.dumps({
-                        "ok": True,
-                        "verified": False,
-                        "mutation_skipped": True,
-                        "postcondition_pending": True,
-                        "needs_llm_reason": False,
-                        "subgoal": request.subgoal,
-                        "subgoal_route": "controller_first",
-                        "controller_state": {
-                            "phase": "executed",
-                            "verified": False,
-                            "needs_llm_reason": False,
-                        },
-                        "evidence_packet": {
-                            "matched_texts": [],
-                            "missing_texts": [],
-                            "spreadsheet_ranges_applied": sorted(applied_blocks),
-                        },
-                        "fast_path_advice": (
-                            "The spreadsheet mutation stages are already complete. Do not repeat visual "
-                            "cell verification; use the saved workbook artifact verifier or call done."
-                        ),
-                    }, ensure_ascii=False, default=str))
-        if _spreadsheet_bold_rows(request.subgoal) and not request.constraints.get("open_save_as"):
-            pending_save_path = self._pending_exact_save_path()
-            if pending_save_path:
-                request.constraints = {
-                    **request.constraints,
-                    "save_after": True,
-                    "save_path": pending_save_path,
-                }
-        exact_save_path = str(request.constraints.get("save_path") or "").strip()
-        if request.constraints.get("open_save_as") and exact_save_path:
-            request.verify_texts = [Path(exact_save_path).name]
-        requested_bold_rows = _spreadsheet_bold_rows(request.subgoal)
-        task_bold_rows = _spreadsheet_bold_rows(getattr(self.session, "task", ""))
-        all_requested_bold_rows = (task_bold_rows or requested_bold_rows) if requested_bold_rows else []
-        applied_bold_rows = getattr(self.session, "_spreadsheet_bold_rows_applied", set())
-        if not isinstance(applied_bold_rows, set):
-            applied_bold_rows = set()
-        if all_requested_bold_rows and all(row in applied_bold_rows for row in all_requested_bold_rows):
-            if self._advance_to_pending_exact_save(request):
-                exact_save_path = str(request.constraints.get("save_path") or "").strip()
-                all_requested_bold_rows = []
-            else:
-                payload = {
-                    "ok": True,
-                    "verified": False,
-                    "mutation_skipped": True,
-                    "spreadsheet_row_format_applied": sorted(applied_bold_rows),
-                    "postcondition_pending": True,
-                    "subgoal": request.subgoal,
-                    "subgoal_route": "controller_first",
-                    "controller_state": {
-                        "phase": "executed",
-                        "verified": False,
-                        "needs_llm_reason": False,
-                    },
-                    "evidence_packet": {
-                        "matched_texts": [],
-                        "missing_texts": [],
-                        "spreadsheet_bold_rows": sorted(applied_bold_rows),
-                    },
-                    "needs_llm_reason": False,
-                    "fast_path_advice": (
-                        "The requested spreadsheet rows already received the bold toggle in this run. "
-                        "Do not press Ctrl+B again because it would undo the formatting. Continue to Save As; "
-                        "the XLSX artifact verifier will confirm the final styles."
-                    ),
-                }
-                return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
-        spreadsheet_spec = _spreadsheet_table_block(
-            getattr(self.session, "task", ""),
-            request.subgoal,
-        )
-        applied_spreadsheet_blocks = getattr(self.session, "_spreadsheet_blocks_applied", set())
-        if (
-            spreadsheet_spec is not None
-            and isinstance(applied_spreadsheet_blocks, set)
-            and str(spreadsheet_spec.get("range") or "") in applied_spreadsheet_blocks
-        ):
-            spreadsheet_spec = None
-        if spreadsheet_spec is not None:
-            start_ref = f"{spreadsheet_spec.get('start_col')}{spreadsheet_spec.get('start_row')}"
-            anchor_only_keys = {
-                _compact_key(start_ref),
-                _compact_key(f"cell {start_ref}"),
-                _compact_key(f"{start_ref} cell"),
-                _compact_key(f"单元格{start_ref}"),
-            }
-            request.verify_texts = _unique([
-                *[
-                    text for text in request.verify_texts
-                    if _compact_key(text) not in anchor_only_keys
-                ],
-                *list(spreadsheet_spec.get("verification_tokens") or []),
-            ])
-            task_text = str(getattr(self.session, "task", "") or "")
-            explicit_draw_task = bool(re.search(
-                r"\b(?:draw|paint|sketch|illustrate|diagram)\b|\u753b|\u7ed8\u5236|\u6d82\u9e26|\u63d2\u753b",
-                task_text,
-                re.IGNORECASE,
-            ))
-            if not explicit_draw_task:
-                # Some models misuse draw.box as a target-region hint when
-                # composing a spreadsheet request. The semantic spreadsheet
-                # routine does not execute that draw, so it must not create a
-                # phantom color postcondition after the workbook was saved.
-                request.draw = {}
-                request.draws = []
         launch_prelude: list[dict[str, Any]] = []
         draw_specs = _draw_specs(request)
         prior_scene_specs = getattr(self.session, "_verified_draw_scene_specs", [])
@@ -4523,18 +3289,6 @@ class SubgoalExecutor:
             ),
         ) if snapshot is not None else {}
         actions = self._build_actions(request)
-        if spreadsheet_spec is None and any(
-            action.get("action") == "clipboard_paste" for action in actions
-        ):
-            spreadsheet_spec = _spreadsheet_table_block(
-                getattr(self.session, "task", ""),
-                "Enter the complete table data into the requested cell range in one batch",
-            )
-            if spreadsheet_spec is not None:
-                request.verify_texts = _unique([
-                    *request.verify_texts,
-                    *list(spreadsheet_spec.get("verification_tokens") or []),
-                ])
         if skip_click_auto_observe:
             for action in actions:
                 if action.get("action") == "click_element":
@@ -4630,46 +3384,6 @@ class SubgoalExecutor:
             for result in batch_results
         )
         executed_actions = actions[:len(batch_results)]
-        new_shortcut_results = [
-            item
-            for action, item in zip(executed_actions, batch_results)
-            if isinstance(action, dict)
-            and action.get("action") == "hotkey"
-            and [str(key).casefold() for key in action.get("keys") or []] == ["ctrl", "n"]
-            and isinstance(item, dict)
-            and item.get("ok") is True
-        ]
-        new_wait_changed = any(
-            isinstance(item, dict)
-            and item.get("action") == "wait_change"
-            and item.get("ok") is True
-            and (
-                (isinstance(item.get("data"), dict) and item["data"].get("changed") is True)
-                or (isinstance(item.get("data"), dict)
-                    and isinstance(item["data"].get("delta"), dict)
-                    and item["data"]["delta"].get("changed") is True)
-            )
-            for item in batch_results
-        )
-        prior_title = str(getattr(snapshot, "title", "") or "").strip()
-        new_window_adopted = any(
-            isinstance(item.get("data"), dict)
-            and (
-                bool(item["data"].get("controller_adopted_foreground_hwnd"))
-                or (
-                    prior_title
-                    and isinstance(item["data"].get("post_state"), dict)
-                    and str(item["data"]["post_state"].get("foreground_title") or "").strip()
-                    and str(item["data"]["post_state"].get("foreground_title") or "").strip() != prior_title
-                )
-            )
-            for item in new_shortcut_results
-        )
-        new_blank_applied = bool(
-            new_blank_requested
-            and new_shortcut_results
-            and (new_wait_changed or new_window_adopted)
-        )
         planned_draw_actions = [
             action for action in actions if action.get("action") == "draw_strokes"
         ]
@@ -4731,26 +3445,6 @@ class SubgoalExecutor:
             request.formats
             and _document_format_prefix_ok(executed_actions, batch_results)
         )
-        save_dispatched = False
-        exact_save_path = str(request.constraints.get("save_path") or "").strip()
-        if request.formats and bool(request.constraints.get("save_after")):
-            for action, item in zip(executed_actions, batch_results):
-                keys = [str(key).casefold() for key in (action.get("keys") or [])]
-                final_exact_save = bool(
-                    exact_save_path
-                    and keys == ["enter"]
-                    and isinstance(action.get("expect"), dict)
-                    and action["expect"].get("file_exists") == exact_save_path
-                )
-                ordinary_save = bool(not exact_save_path and keys == ["ctrl", "s"])
-                if (
-                    action.get("action") == "hotkey"
-                    and (ordinary_save or final_exact_save)
-                    and isinstance(item, dict)
-                    and item.get("ok") is True
-                ):
-                    save_dispatched = True
-                    break
         verified = (
             bool(batch.get("ok"))
             and not missing
@@ -4782,75 +3476,9 @@ class SubgoalExecutor:
             "perception_reducer": reduction,
             "prelude": prelude,
             "input_applied": input_applied,
-            "save_dispatched": save_dispatched,
             "format_applied": format_applied,
             "format_specs": request.formats,
         }
-        spreadsheet_table_applied = bool(
-            spreadsheet_spec is not None
-            and any(
-                isinstance(item, dict)
-                and item.get("action") == "clipboard_paste"
-                and item.get("ok") is True
-                for item in batch_results
-            )
-        )
-        if spreadsheet_table_applied and spreadsheet_spec is not None:
-            applied = getattr(self.session, "_spreadsheet_blocks_applied", None)
-            if not isinstance(applied, set):
-                applied = set()
-                setattr(self.session, "_spreadsheet_blocks_applied", applied)
-            applied.add(str(spreadsheet_spec.get("range") or ""))
-        spreadsheet_rows_applied: list[int] = []
-        requested_rows_for_action = sorted({
-            int(match.group(1))
-            for action in executed_actions
-            for match in [re.search(
-                r"select spreadsheet row\s+(\d+)",
-                str(action.get("context") or ""),
-                re.IGNORECASE,
-            )]
-            if match
-        })
-        if not requested_rows_for_action:
-            requested_rows_for_action = self._spreadsheet_requested_bold_rows(request)
-        if requested_rows_for_action:
-            bold_hotkeys = sum(
-                1
-                for action, item in zip(executed_actions, batch_results)
-                if action.get("action") == "hotkey"
-                and [str(key).casefold() for key in action.get("keys") or []] == ["ctrl", "b"]
-                and isinstance(item, dict)
-                and item.get("ok") is True
-            )
-            if bold_hotkeys >= len(requested_rows_for_action):
-                applied = getattr(self.session, "_spreadsheet_bold_rows_applied", None)
-                if not isinstance(applied, set):
-                    applied = set()
-                    setattr(self.session, "_spreadsheet_bold_rows_applied", applied)
-                applied.update(requested_rows_for_action)
-                spreadsheet_rows_applied = sorted(requested_rows_for_action)
-        exact_save_as_applied = bool(
-            exact_save_path
-            and any(
-                isinstance(action, dict)
-                and action.get("action") == "hotkey"
-                and [str(key).casefold() for key in action.get("keys") or []] == ["enter"]
-                and isinstance(action.get("expect"), dict)
-                and action["expect"].get("file_exists") == exact_save_path
-                and isinstance(item, dict)
-                and item.get("ok") is True
-                for action, item in zip(executed_actions, batch_results)
-            )
-        )
-        if spreadsheet_spec is not None:
-            evidence_packet["spreadsheet_table"] = {
-                "range": spreadsheet_spec.get("range"),
-                "row_count": spreadsheet_spec.get("row_count"),
-                "column_count": spreadsheet_spec.get("column_count"),
-                "clipboard_batch": True,
-                "applied": spreadsheet_table_applied,
-            }
         if partial_matched and not batch.get("ok"):
             evidence_packet["partial_matched_texts"] = partial_matched
         payload = {
@@ -4869,121 +3497,18 @@ class SubgoalExecutor:
             "evidence_packet": evidence_packet,
             "needs_llm_reason": bool(missing or missing_required_visual_colors or not batch.get("ok")),
             "input_applied": input_applied,
-            "spreadsheet_table_applied": spreadsheet_table_applied,
-            "spreadsheet_row_format_applied": spreadsheet_rows_applied,
-            "exact_save_as_applied": exact_save_as_applied,
-            "new_blank_applied": new_blank_applied,
         }
-        clipboard_replace_token = str(
-            request.constraints.get("clipboard_replace_token") or ""
-        ).strip()
-        if clipboard_replace_token and bool(batch.get("ok")):
-            replacement_evidence = json.dumps(
-                batch.get("results") or [],
-                ensure_ascii=False,
-                default=str,
-            )
-            replacement_counts = [
-                int(value)
-                for value in re.findall(
-                    r"(?:完成\s*|replaced\s*)(\d+)\s*(?:处替换|replacement)",
-                    replacement_evidence,
-                    re.IGNORECASE,
-                )
-            ]
-            replacement_count = max(replacement_counts, default=-1)
-            replacement_verified = replacement_count > 0
-            payload.update({
-                "ok": True,
-                "verified": replacement_verified,
-                "clipboard_replace_applied": True,
-                "clipboard_replace_token": clipboard_replace_token,
-                "mutation_applied": True,
-                "postcondition_pending": not replacement_verified,
-                "needs_llm_reason": False,
-                "replacement_count": replacement_count if replacement_count >= 0 else None,
-            })
-            payload["controller_state"].update({
-                "phase": "verified" if replacement_verified else "executed",
-                "verified": replacement_verified,
-                "needs_llm_reason": False,
-            })
-            payload["evidence_packet"]["clipboard_replace_token"] = clipboard_replace_token
-            payload["fast_path_advice"] = (
-                f"The controller completed the GUI Find/Replace routine for {clipboard_replace_token}. "
-                + (
-                    f"The application reported {replacement_count} replacement(s). "
-                    if replacement_verified
-                    else "Verify that this token is absent in the document. "
-                )
-                + "Continue the next source or save; "
-                "do not repeat the replacement."
-            )
-        if new_blank_applied:
-            self.session._new_blank_applied = True
-            self.session._document_surface_ready = True
-            payload.update({
-                "ok": True,
-                "mutation_applied": True,
-                "postcondition_pending": True,
-                "needs_llm_reason": False,
-            })
-            payload["controller_state"].update({
-                "phase": "executed",
-                "needs_llm_reason": False,
-            })
-            payload["fast_path_advice"] = (
-                "The new blank document/workbook was created successfully. Do not invoke New or Ctrl+N "
-                "again; continue directly with the requested content routine."
-            )
-        if exact_save_as_applied:
-            saved = getattr(self.session, "_exact_save_paths_applied", None)
-            if not isinstance(saved, set):
-                saved = set()
-                setattr(self.session, "_exact_save_paths_applied", saved)
-            saved.add(exact_save_path.casefold())
-            payload.update({
-                "verified": True,
-                "mutation_applied": True,
-                "postcondition_pending": True,
-                "needs_llm_reason": False,
-                "saved_paths": [exact_save_path],
-            })
-            payload["controller_state"].update({
-                "phase": "verified",
-                "verified": True,
-            })
-            payload["controller_state"]["needs_llm_reason"] = False
-            payload["evidence_packet"]["saved_paths"] = [exact_save_path]
-        if spreadsheet_rows_applied:
-            payload.update({
-                "mutation_applied": True,
-                "postcondition_pending": True,
-                "needs_llm_reason": False,
-            })
-            payload["controller_state"]["needs_llm_reason"] = False
-            payload["evidence_packet"]["spreadsheet_bold_rows"] = spreadsheet_rows_applied
         if format_applied:
-            save_failed = bool(request.constraints.get("save_path")) and not save_dispatched
             payload.update({
                 "format_applied": True,
                 "mutation_applied": True,
                 "postcondition_pending": True,
-                "save_dispatched": save_dispatched,
-                "save_failed": save_failed,
-                "needs_llm_reason": save_failed,
+                "needs_llm_reason": bool(missing),
             })
-            payload["controller_state"]["needs_llm_reason"] = save_failed
+            payload["controller_state"]["needs_llm_reason"] = bool(missing)
             payload["fast_path_advice"] = (
-                "The requested rich-text ranges were selected and formatted in one local controller "
-                "batch. "
-                + (
-                    "Save was dispatched in the same batch; verify the saved artifact and do not repeat "
-                    "the selection or formatting hotkeys."
-                    if save_dispatched else
-                    "The later save phase did not finish. Resume only the Save/Save As workflow and "
-                    "verify the artifact; do not repeat the selection or formatting hotkeys."
-                )
+                "The explicitly structured rich-text formats were executed. "
+                "Use fresh visual evidence to decide the next action."
             )
         if scene_structure.get("structured_scene_verified"):
             payload["structured_scene_verified"] = True
@@ -5002,13 +3527,7 @@ class SubgoalExecutor:
                 " plan item or call done instead of repeating observe/read_text"
                 " for the same evidence."
             )
-        mutation_stage_applied = bool(
-            spreadsheet_table_applied
-            or spreadsheet_rows_applied
-            or format_applied
-            or exact_save_as_applied
-        )
-        if missing and not mutation_stage_applied:
+        if missing:
             payload["error"] = "subgoal routine completed but required visible text evidence is missing"
             payload["blocked"] = True
             if input_applied:
@@ -5028,25 +3547,6 @@ class SubgoalExecutor:
                     "candidate_click_labels": recovery_candidates,
                     "expected_visible_texts": request.verify_texts,
                 }
-        elif missing and mutation_stage_applied:
-            # The successful mutation grounds this stage. OCR can miss bold
-            # text or split identifiers at cell boundaries, so unresolved
-            # literals are deferred to the saved artifact verifier instead of
-            # triggering a duplicate non-idempotent action.
-            evidence_packet["pending_artifact_texts"] = list(missing)
-            evidence_packet["missing_texts"] = []
-            payload.update({
-                "ok": True,
-                "verified": bool(exact_save_as_applied),
-                "mutation_applied": True,
-                "postcondition_pending": True,
-                "needs_llm_reason": False,
-            })
-            payload["controller_state"].update({
-                "phase": "verified" if exact_save_as_applied else "executed",
-                "verified": bool(exact_save_as_applied),
-                "needs_llm_reason": False,
-            })
         if missing_visual_colors:
             draw_attempted = bool(verified_draw_actions)
             payload["error"] = (
@@ -5077,23 +3577,6 @@ class SubgoalExecutor:
                 "Drawing geometry was delivered using the current visible color after an optional "
                 "palette miss. Keep the existing scene; do not redraw or clear it. Let the final "
                 "semantic visual judge decide whether the completed picture satisfies the task."
-            )
-        elif spreadsheet_table_applied:
-            payload["fast_path_advice"] = (
-                "The complete literal spreadsheet block was pasted into the requested range in one "
-                "controller batch. Do not continue cell-by-cell or paste the block again. Continue "
-                "with formatting/save, and use the saved workbook artifact for exact cell/formula verification."
-            )
-        elif spreadsheet_rows_applied:
-            payload["fast_path_advice"] = (
-                "All explicitly requested spreadsheet rows received the bold toggle in one controller "
-                "batch. Do not press Ctrl+B again because it is not idempotent. Continue directly to "
-                "Save As; the saved XLSX style verifier will provide the final proof."
-            )
-        elif exact_save_as_applied:
-            payload["fast_path_advice"] = (
-                "Save As completed and the exact output path exists from this controller batch. "
-                "Do not open the File menu or save again. Continue to final artifact verification/done."
             )
         return ToolResult(
             json.dumps(payload, ensure_ascii=False, default=str),

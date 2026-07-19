@@ -45,6 +45,13 @@ class ReflectionMixin:
 
     def _maybe_reflect(self, step: int) -> None:
         """Inject a reflection checkpoint at configured intervals."""
+        native_check = getattr(self, "_native_visual_context_enabled", None)
+        if callable(native_check):
+            try:
+                if native_check():
+                    return
+            except Exception:
+                pass
         reflect_interval = int(CONFIG.get("agent", "reflect_interval", default=8))
         if reflect_interval <= 0:
             return

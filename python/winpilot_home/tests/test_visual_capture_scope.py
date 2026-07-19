@@ -163,80 +163,81 @@ def test_capture_scope_auto_falls_back_when_foreground_is_ambiguous(monkeypatch)
     assert decision.reason == "foreground_target_mismatch"
 
 
-def test_capture_scope_auto_keeps_desktop_context_for_global_task(monkeypatch):
+def test_capture_scope_uses_runtime_window_state_not_global_task_words(monkeypatch):
     from winpilot.utils import image_capture
     from winpilot.utils.screenshot import Region
 
     desktop = Region(0, 0, 1920, 1080)
     monkeypatch.setattr(image_capture.screenshot, "virtual_screen_region", lambda: desktop)
-    monkeypatch.setattr(
-        image_capture.win32gui,
-        "IsWindow",
-        lambda _hwnd: (_ for _ in ()).throw(AssertionError("global task must fall back first")),
-    )
+    target = Region(100, 80, 900, 700)
+    monkeypatch.setattr(image_capture.screenshot, "window_region", lambda _hwnd: target)
+    monkeypatch.setattr(image_capture.win32gui, "IsWindow", lambda _hwnd: True)
+    monkeypatch.setattr(image_capture.win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(image_capture.win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(image_capture.win32gui, "GetForegroundWindow", lambda: 71)
 
     decision = image_capture.select_visual_capture_scope(
         71,
         enabled=True,
-        task="把桌面图标拖到另一个窗口",
+        task="\u628a\u684c\u9762\u56fe\u6807\u62d6\u5230\u53e6\u4e00\u4e2a\u7a97\u53e3",
     )
 
-    assert decision.scope == "full_desktop"
-    assert decision.reason == "task_requires_desktop_context"
+    assert decision.scope == "target_window"
+    assert decision.region == target
+    assert decision.reason == "verified_foreground_target"
 
 
-def test_capture_scope_detects_common_cross_application_word_orders(monkeypatch):
+def test_capture_scope_does_not_classify_cross_application_word_orders(monkeypatch):
     from winpilot.utils import image_capture
     from winpilot.utils.screenshot import Region
 
     desktop = Region(0, 0, 1920, 1080)
     monkeypatch.setattr(image_capture.screenshot, "virtual_screen_region", lambda: desktop)
-    monkeypatch.setattr(
-        image_capture.win32gui,
-        "IsWindow",
-        lambda _hwnd: (_ for _ in ()).throw(
-            AssertionError("cross-app task must choose desktop before probing hwnd")
-        ),
-    )
+    target = Region(100, 80, 900, 700)
+    monkeypatch.setattr(image_capture.screenshot, "window_region", lambda _hwnd: target)
+    monkeypatch.setattr(image_capture.win32gui, "IsWindow", lambda _hwnd: True)
+    monkeypatch.setattr(image_capture.win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(image_capture.win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(image_capture.win32gui, "GetForegroundWindow", lambda: 71)
     tasks = [
-        "paste this into Word from Notepad",
-        "from Notepad copy the text to Word",
-        "把记事本的文字复制到Word",
-        "从记事本复制文本到Word",
-        "复制记事本文字到Word",
+        "paste this into the design tool from the notes app",
+        "from one unknown app copy the text to another app",
+        "\u4ece\u4e00\u4e2a\u672a\u77e5\u5e94\u7528\u590d\u5236\u6587\u672c\u5230\u53e6\u4e00\u4e2a\u5e94\u7528",
+        "\u628a\u6587\u4ef6\u4ece\u5de6\u8fb9\u7a97\u53e3\u62d6\u62fd\u5230\u53f3\u8fb9\u7a97\u53e3",
     ]
 
     for task in tasks:
         decision = image_capture.select_visual_capture_scope(71, enabled=True, task=task)
-        assert decision.scope == "full_desktop", task
-        assert decision.reason == "task_requires_desktop_context", task
+        assert decision.scope == "target_window", task
+        assert decision.region == target, task
+        assert decision.reason == "verified_foreground_target", task
 
 
-def test_capture_scope_keeps_both_windows_for_comparison_and_side_by_side_tasks(monkeypatch):
+def test_capture_scope_does_not_classify_comparison_or_side_by_side_words(monkeypatch):
     from winpilot.utils import image_capture
     from winpilot.utils.screenshot import Region
 
     desktop = Region(0, 0, 1920, 1080)
     monkeypatch.setattr(image_capture.screenshot, "virtual_screen_region", lambda: desktop)
-    monkeypatch.setattr(
-        image_capture.win32gui,
-        "IsWindow",
-        lambda _hwnd: (_ for _ in ()).throw(
-            AssertionError("multi-view task must choose desktop before probing hwnd")
-        ),
-    )
+    target = Region(100, 80, 900, 700)
+    monkeypatch.setattr(image_capture.screenshot, "window_region", lambda _hwnd: target)
+    monkeypatch.setattr(image_capture.win32gui, "IsWindow", lambda _hwnd: True)
+    monkeypatch.setattr(image_capture.win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(image_capture.win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(image_capture.win32gui, "GetForegroundWindow", lambda: 71)
     tasks = [
-        "compare Notepad and Word side by side",
+        "compare two unknown applications side by side",
         "look at both applications and report the differences",
-        "同时查看两个应用",
-        "对比记事本和Word的内容",
-        "查看左边窗口和右边窗口",
+        "\u540c\u65f6\u67e5\u770b\u4e24\u4e2a\u5e94\u7528",
+        "\u5bf9\u6bd4\u5de6\u4fa7\u7a97\u53e3\u4e0e\u53f3\u4fa7\u7a97\u53e3\u7684\u5185\u5bb9",
+        "\u67e5\u770b\u5de6\u8fb9\u7a97\u53e3\u548c\u53f3\u8fb9\u7a97\u53e3",
     ]
 
     for task in tasks:
         decision = image_capture.select_visual_capture_scope(71, enabled=True, task=task)
-        assert decision.scope == "full_desktop", task
-        assert decision.reason == "task_requires_desktop_context", task
+        assert decision.scope == "target_window", task
+        assert decision.region == target, task
+        assert decision.reason == "verified_foreground_target", task
 
 
 def test_capture_scope_does_not_expand_single_window_move_or_paste_tasks(monkeypatch):
@@ -252,9 +253,9 @@ def test_capture_scope_does_not_expand_single_window_move_or_paste_tasks(monkeyp
     monkeypatch.setattr(image_capture.win32gui, "IsIconic", lambda _hwnd: False)
     monkeypatch.setattr(image_capture.win32gui, "GetForegroundWindow", lambda: 71)
     tasks = [
-        "把这段文字粘贴到当前输入框",
-        "在画板中拖动圆形到右边",
-        "把图片移动到当前幻灯片中心",
+        "\u628a\u8fd9\u6bb5\u6587\u5b57\u7c98\u8d34\u5230\u5f53\u524d\u8f93\u5165\u6846",
+        "\u5728\u5f53\u524d\u5de5\u4f5c\u533a\u4e2d\u62d6\u52a8\u5bf9\u8c61\u5230\u53f3\u8fb9",
+        "\u628a\u56fe\u7247\u79fb\u52a8\u5230\u5f53\u524d\u9875\u9762\u4e2d\u5fc3",
     ]
 
     for task in tasks:
@@ -479,9 +480,11 @@ def test_main_model_frame_declares_scope_region_and_coordinate_space(monkeypatch
     assert runner._inject_visual_frame(phase="initial") is True
     text = runner.messages[-1]["content"][0]["text"]
     assert "Frame scope=target_window" in text
-    assert "left=-1600, top=40, width=900, height=700" in text
-    assert "image_* tool fields copied directly from this displayed image" in text
-    assert "frame_* 0..1000 fields are an alternative" in text
+    assert "Frame scope=target_window" in text
+    assert "Exact authoritative full-image size=900x700 pixels" in text
+    assert "All native spatial tool coordinates use image_* pixel values" in text
+    assert "x=0..899, y=0..699" in text
+    assert "frame_*" not in text
     event = events[-1][1]
     assert event["capture_scope"] == "target_window"
     assert event["capture_region"] == [-1600, 40, 900, 700]
@@ -495,3 +498,39 @@ def test_main_model_frame_declares_scope_region_and_coordinate_space(monkeypatch
         "width": 900,
         "height": 700,
     }
+    state = runner._frame_authority.current
+    assert state is not None
+    assert runner.session._frame_authority is runner._frame_authority
+    assert state.frame_id == runner.session._visual_frame_id
+    assert state.region == (-1600, 40, 900, 700)
+    assert state.submitted_size == (900, 700)
+    assert state.image_b64 == "jpeg"
+
+
+def test_normalized_detail_crop_magnifies_same_frame_pixels_without_new_coordinates():
+    import base64
+
+    import cv2
+    import numpy as np
+
+    from winpilot.utils.image_capture import normalized_detail_crop_jpeg_b64
+
+    image = np.zeros((300, 600, 3), dtype=np.uint8)
+    image[20:80, 240:360] = (255, 255, 255)
+    ok, encoded = cv2.imencode(".jpg", image)
+    assert ok is True
+
+    crop_b64, bounds = normalized_detail_crop_jpeg_b64(
+        base64.b64encode(encoded.tobytes()).decode("ascii"),
+        [400, 60, 600, 280],
+        padding=40,
+        min_long_side=560,
+    )
+
+    decoded = cv2.imdecode(
+        np.frombuffer(base64.b64decode(crop_b64), dtype=np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert bounds == [360, 20, 640, 320]
+    assert decoded is not None
+    assert max(decoded.shape[:2]) >= 560

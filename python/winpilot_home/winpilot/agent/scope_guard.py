@@ -1,15 +1,16 @@
 """Generic foreground/target-window guard for GUI mutations.
 
-The guard is deliberately app-agnostic. It does not know about QQ, Calculator,
-Steam, browsers, or any target page. It only enforces that once a ToolSession
-has established a target window, subsequent GUI mutations happen in that window
-(or an owned/root-related foreground window) unless the action itself is a
-focus/launch/window-discovery step.
+The guard is deliberately app-agnostic. It does not know about any particular
+desktop application or target page. It only enforces that once a ToolSession
+has established a target window, subsequent GUI mutations happen on pixels
+owned by that window (or an owned/root-related window).  Foreground HWND alone
+is not identity: many real applications use an independent tool/mini-player
+window which can temporarily own foreground while the main work surface is
+still the visible hit target.
 """
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import win32gui
@@ -22,6 +23,7 @@ from .tool_result import ToolResult
 
 GUI_SCOPE_MUTATIONS = {
     "click",
+    "double_click",
     "click_element",
     "type_text",
     "type_into_element",
@@ -31,7 +33,6 @@ GUI_SCOPE_MUTATIONS = {
     "draw_strokes",
     "ensure_input_mode",
     "select_color",
-    "ensure_document_surface",
     "clipboard_paste",
     "paste_image_file",
     "mouse_down",
@@ -49,8 +50,8 @@ _SCOPE_RECOVERY_TOOLS = {"open_app", "launch", "focus_window", "tray_click", "sc
 # foreground window merely because the session has not established a target
 # yet.  Keyboard-only compatibility paths remain unchanged for now.
 _SPATIAL_TARGET_REQUIRED = {
-    "click", "click_element", "scroll", "move_mouse", "drag",
-    "draw_strokes", "ensure_input_mode", "select_color", "ensure_document_surface",
+    "click", "double_click", "click_element", "scroll", "move_mouse", "drag",
+    "draw_strokes", "ensure_input_mode", "select_color",
     "mouse_down", "mouse_up", "coordinate_click_test", "paste_image_file",
 }
 
@@ -109,39 +110,6 @@ def _missing_target_result(session, tool_name: str) -> ToolResult:
         "needs_observe": True,
     }
     return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
-_STRONG_CONTROL_PLANE_TITLES = (
-    "灵动脚本",
-    "lingdong script",
-    "lingdong-script",
-)
-_EXPLICIT_CONTROL_PLANE_TASK_MARKERS = (
-    "winpilot control-plane",
-    "winpilot control plane",
-    "winpilot 控制面",
-    "winpilot控制面",
-    "灵动脚本",
-    "lingdong script",
-    "lingdong-script",
-)
-
-
-def _is_control_plane_title(title: str) -> bool:
-    folded = str(title or "").strip().casefold()
-    # ``WinPilot`` occurs legitimately in page titles, document names, eval
-    # targets, and user content.  A substring match therefore blocks the very
-    # target window the agent was asked to operate.  Keep branded Lingdong
-    # titles as strong markers and accept WinPilot only as the complete title.
-    return bool(
-        any(marker.casefold() in folded for marker in _STRONG_CONTROL_PLANE_TITLES)
-        or folded in {"winpilot", "winpilot agent"}
-    )
-
-
-def _task_targets_control_plane(session) -> bool:
-    task = str(getattr(session, "task", "") or "").casefold()
-    return any(marker.casefold() in task for marker in _EXPLICIT_CONTROL_PLANE_TASK_MARKERS)
-
-
 def _title(hwnd: int | None) -> str:
     if not hwnd:
         return ""
@@ -177,14 +145,55 @@ def _same_or_related(session, foreground: int | None, target: int | None) -> boo
         return bool(foreground and target and int(foreground) == int(target))
 
 
-def _focus(hwnd: int | None) -> bool:
-    if not _window_alive(hwnd):
+def _screen_point(tool_name: str, args: dict[str, Any]) -> tuple[int, int] | None:
+    """Return the physical start/hit point of a spatial action when available."""
+
+    key_pairs = (
+        (("x1", "y1"),) if tool_name == "drag" else (("x", "y"),)
+    )
+    for x_key, y_key in key_pairs:
+        try:
+            if args.get(x_key) is not None and args.get(y_key) is not None:
+                return int(round(float(args[x_key]))), int(round(float(args[y_key])))
+        except (TypeError, ValueError):
+            continue
+    if tool_name == "draw_strokes":
+        strokes = args.get("strokes") or []
+        try:
+            first = next(
+                point for stroke in strokes if isinstance(stroke, list)
+                for point in stroke if isinstance(point, (list, tuple)) and len(point) >= 2
+            )
+            return int(round(float(first[0]))), int(round(float(first[1])))
+        except (StopIteration, TypeError, ValueError):
+            return None
+    return None
+
+
+def _point_hits_target(session, point: tuple[int, int] | None, target: int | None) -> bool:
+    """Use the real z-ordered hit window instead of foreground as a proxy."""
+
+    if point is None or not target:
         return False
     try:
-        result = executor.focus_window(int(hwnd))
-        return bool(result.get("ok"))
+        hit = int(win32gui.WindowFromPoint((int(point[0]), int(point[1]))) or 0)
     except Exception:
         return False
+    return _same_or_related(session, hit, target)
+
+
+def _record_focus_transition(session) -> None:
+    """Invalidate pixel/structured authority after an internal focus repair."""
+
+    try:
+        session._screen_epoch = int(getattr(session, "_screen_epoch", 0) or 0) + 1
+    except Exception:
+        pass
+    for attr in ("snapshot", "_observe_cache", "_draw_surface_cache"):
+        try:
+            setattr(session, attr, None)
+        except Exception:
+            pass
 
 
 def _context(session) -> dict[str, Any]:
@@ -204,13 +213,7 @@ def _context(session) -> dict[str, Any]:
 
 
 def take_scope_recovery(session) -> dict[str, Any] | None:
-    """Consume evidence from the most recent successful foreground recovery.
-
-    ``ensure_scope`` historically returned only ``None`` on success, which made
-    an in-transaction refocus invisible to the Controller.  Keeping the public
-    return contract intact while exposing one-shot evidence lets callers
-    invalidate stale perception and record the recovery in the batch trace.
-    """
+    """Consume legacy recovery evidence; native scope checks never create it."""
 
     value = getattr(session, "_last_scope_recovery", None)
     try:
@@ -220,75 +223,14 @@ def take_scope_recovery(session) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
-def _recover_target_focus(
-    session,
-    target: int,
-    tool_name: str,
-    before: dict[str, Any],
-) -> tuple[bool, dict[str, Any], int, bool]:
-    """Refocus a remembered target and prove stable ownership before input.
-
-    Windows activation is asynchronous and a foreground process can briefly
-    reclaim focus.  A single API ``ok`` followed by one sample is therefore not
-    sufficient evidence.  This bounded loop requires two consecutive target-
-    related foreground samples.  It is app-agnostic and runs only after an
-    actual scope mismatch.
-    """
-
-    try:
-        max_attempts = int(CONFIG.get(
-            "controller", "focus_recovery_attempts", default=3,
-        ) or 3)
-    except (TypeError, ValueError):
-        max_attempts = 3
-    max_attempts = max(1, min(3, max_attempts))
-    try:
-        settle_s = float(CONFIG.get(
-            "controller", "focus_recovery_settle_s", default=0.08,
-        ) or 0.08)
-    except (TypeError, ValueError):
-        settle_s = 0.08
-    settle_s = max(0.02, min(0.2, settle_s))
-
-    after = dict(before)
-    focus_api_ok = False
-    for attempt in range(1, max_attempts + 1):
-        focus_api_ok = bool(_focus(target)) or focus_api_ok
-        time.sleep(settle_s)
-        first = _context(session)
-        first_target = first.get("target_hwnd") or target
-        if _same_or_related(session, first.get("foreground_hwnd"), first_target):
-            time.sleep(settle_s)
-            after = _context(session)
-            after_target = after.get("target_hwnd") or target
-            if _same_or_related(session, after.get("foreground_hwnd"), after_target):
-                evidence = {
-                    "tool": str(tool_name or ""),
-                    "target_hwnd": int(target),
-                    "attempts": attempt,
-                    "focus_api_ok": focus_api_ok,
-                    "before": before,
-                    "after": after,
-                    "authoritative_frame_required": True,
-                }
-                try:
-                    session._last_scope_recovery = evidence
-                except Exception:
-                    pass
-                return True, after, attempt, focus_api_ok
-        else:
-            after = first
-        if attempt < max_attempts:
-            time.sleep(settle_s)
-    return False, after, max_attempts, focus_api_ok
-
-
 def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | None:
     """Return a blocking ToolResult when a GUI action is out of scope.
 
-    Returning None means the caller may proceed. A mismatched foreground is
-    recovered once by focusing the remembered target, then blocked if recovery
-    cannot prove the foreground is target-related.
+    Returning None means the caller may proceed. Spatial actions are validated
+    against the actual window under their physical hit point. In autonomous
+    mode a known target may also be refocused once; if that changes which
+    pixels are exposed, the proposed spatial action is withheld until a fresh
+    authoritative frame is captured.
     """
     if tool_name in _SCOPE_RECOVERY_TOOLS or tool_name not in GUI_SCOPE_MUTATIONS:
         return None
@@ -356,11 +298,26 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
         }
         return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 
+    authority = getattr(session, "_frame_authority", None)
+    frame_state = getattr(authority, "current", None)
+    native_frame_grounded = bool(
+        getattr(session, "native_visual_runtime", False)
+        and frame_state is not None
+        and frame_state.is_fresh_for(
+            epoch=int(getattr(session, "_screen_epoch", -1) or 0),
+        )
+    )
+
     # Pointer/spatial actions are fail-closed without an explicit binding.  In
     # particular, do not call _find_target_window here: choosing whichever
     # foreground/task-hint happens to match is exactly the cross-application
     # state leak this guard is meant to prevent.
     if not _window_alive(target):
+        if native_frame_grounded:
+            # A current full-desktop/frame authority is itself an explicit
+            # visual binding. Execute against the foreground represented in
+            # those pixels; never invent a window from task text or UIA.
+            return None
         if _requires_live_target(tool_name, args):
             return _missing_target_result(session, tool_name)
         # Non-spatial compatibility actions may retain the historical
@@ -380,29 +337,14 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
     before = _context(session)
     foreground = before.get("foreground_hwnd")
     target = before.get("target_hwnd") or target
-    if not _task_targets_control_plane(session) and (
-        _is_control_plane_title(str(before.get("foreground_title") or ""))
-        or _is_control_plane_title(str(before.get("target_title") or ""))
-    ):
-        payload = {
-            "ok": False,
-            "verified": False,
-            "blocked": True,
-            "error": (
-                "scope_guard blocked a desktop mutation targeting WinPilot's own "
-                "control-plane window. Launch/focus the user's target application first."
-            ),
-            "tool": tool_name,
-            "scope_guard": {
-                "before": before,
-                "after": before,
-                "recovery_attempted": False,
-                "self_control_plane": True,
-            },
-            "needs_observe": True,
-        }
-        return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
     if _same_or_related(session, foreground, target):
+        return None
+
+    point = _screen_point(tool_name, args) if tool_name in _SPATIAL_TARGET_REQUIRED else None
+    if _point_hits_target(session, point, target):
+        # A click/scroll/drag on the proven target surface naturally transfers
+        # foreground ownership. Rejecting it merely because an auxiliary tool
+        # window owns foreground creates a false deadlock.
         return None
 
     if cooperative:
@@ -412,7 +354,7 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
         # physical/keyboard path below is rejected before it can inject input.
         background_safe = bool(
             tool_name in {
-                "click", "click_element", "scroll",
+                "click", "double_click", "click_element", "scroll",
                 "type_into_element", "run_action_batch", "execute_subgoal",
             }
             or (
@@ -442,39 +384,98 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
         }
         return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 
-    # Modern apps frequently replace their top-level hwnd during navigation,
-    # document creation, or tab/window promotion.  A visible foreground sibling
-    # from the same process is a stronger app-identity signal than a stale hwnd.
-    # Adopt it before trying to drag focus back to the obsolete window.
+    # Modern apps may replace their top-level HWND while keeping the same
+    # process. If the real hit-test also lands on that new foreground surface,
+    # rebind it and require a fresh frame. The hit-test qualification prevents
+    # a same-process palette/mini window from replacing the main work surface
+    # merely because it briefly owns foreground.
     try:
         same_process = bool(session._same_window_process(foreground, target))
     except Exception:
         same_process = False
-    if same_process and _window_alive(foreground):
+    if (
+        same_process
+        and _window_alive(foreground)
+        and _point_hits_target(session, point, foreground)
+    ):
         try:
             session._remember_target(foreground, str(before.get("foreground_title") or ""))
         except Exception:
             pass
-        return None
+        after = _context(session)
+        return ToolResult(json.dumps({
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "action_executed": False,
+            "target_rebound": True,
+            "error": "the application replaced its foreground window after the authoritative frame was captured",
+            "tool": tool_name,
+            "scope_guard": {
+                "before": before,
+                "after": after,
+                "recovery_attempted": False,
+            },
+            "needs_observe": True,
+        }, ensure_ascii=False, default=str))
 
-    recovered, after, recovery_attempts, focus_api_ok = _recover_target_focus(
-        session, int(target), tool_name, before,
+    # The autonomous task owns foreground. Attempt one exact-window focus
+    # repair before treating a transient shell/tool-window foreground as a
+    # hard failure. Keyboard actions can safely continue after verified focus;
+    # spatial coordinates are withheld when the focus transition exposed
+    # different pixels and must be grounded again.
+    focus_result: dict[str, Any]
+    try:
+        focus_result = executor.focus_window(int(target))
+    except Exception as exc:
+        focus_result = {"ok": False, "error": str(exc)}
+    after_focus = _context(session)
+    focus_verified = bool(
+        focus_result.get("ok")
+        and _same_or_related(
+            session,
+            after_focus.get("foreground_hwnd"),
+            after_focus.get("target_hwnd") or target,
+        )
     )
-    if recovered:
-        return None
+    if focus_verified:
+        if point is None:
+            return None
+        _record_focus_transition(session)
+        return ToolResult(json.dumps({
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "action_executed": False,
+            "recovery_action_executed": True,
+            "target_refocused": True,
+            "error": (
+                "The remembered target was refocused, changing the visible hit "
+                "surface. The proposed spatial action was not executed; use the "
+                "fresh authoritative frame for the next decision."
+            ),
+            "tool": tool_name,
+            "scope_guard": {
+                "before": before,
+                "after": after_focus,
+                "recovery_attempted": True,
+                "focus": focus_result,
+            },
+            "needs_observe": True,
+        }, ensure_ascii=False, default=str))
 
     payload = {
         "ok": False,
         "verified": False,
         "blocked": True,
-        "error": "scope_guard blocked GUI action because foreground window is not the remembered target window after one focus recovery attempt.",
+        "action_executed": False,
+        "error": "scope_guard blocked GUI action because the foreground window is not the remembered target window.",
         "tool": tool_name,
         "scope_guard": {
             "before": before,
-            "after": after,
+            "after": after_focus,
             "recovery_attempted": True,
-            "recovery_attempts": recovery_attempts,
-            "recovery_focus_ok": bool(focus_api_ok),
+            "focus": focus_result,
         },
         "needs_observe": True,
     }

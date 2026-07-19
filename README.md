@@ -7,12 +7,13 @@
 ## 设计原则
 
 1. **真实像素是可见状态的最终依据。** 原生视觉模型直接看当前权威帧；UIA、Win32、OCR 和传统 CV 只有在来源、窗口、帧和像素一致时才提供辅助定位，不能替代视觉理解。
-2. **模型决定语义，本地运行时执行动作。** 模型判断当前要做什么；Controller 负责坐标映射、输入状态、鼠标键盘事务、窗口约束和动作后采样。
-3. **每一步都重新闭环。** 观察、决策、执行、验证循环推进；工具返回 `ok`、像素发生变化或模型声称完成都不是最终成功。
-4. **通用原语优先。** 点击、滚动、输入、拖拽、按住、跨帧继续拖动、连续笔画和限区路径属于所有应用共享的能力，不属于 Paint、DrawArtifact 或某个测试样例的专用通道。
+2. **模型决定语义，本地运行时只执行通用动作。** 模型始终持有完整用户目标，按当前画面决定下一步；新画面或异常证据可以让模型修改乃至放弃旧策略，本地层不得要求它继续执行预定路径。本地层只负责坐标、输入状态、窗口约束、动作事务和证据采样，不把目标改写成应用脚本。
+3. **一个完整目标，一条视觉执行主线。** 未知 GUI 任务进入同一个视觉阶段和固定的通用工具面；每次 mutation 后都重新观察、判断、执行和验证。工具返回 `ok`、像素变化或模型声称完成都不是最终成功。
+4. **通用原语优先。** 点击、滚动、输入、拖拽、按住、跨帧继续拖动、连续路径和限区移动属于所有视觉任务共享的能力，不归属于某个应用、任务类型或测试样例。
 5. **编译器只表达合同，不替模型理解界面。** Task Contract 可以描述阶段、工件、依赖和完成义务，但不能把未知 GUI 任务编译成大量关键词分支和写死步骤。
-6. **记忆只加速，不补硬实力。** 冷启动会在整个 run 中禁用 Skill/Memory；有记忆和无记忆必须走同一条执行链。会话上下文只用于解析“刚刚”“继续”等引用，不可冒充当前屏幕证据。
+6. **记忆只加速，不补硬实力。** 冷启动会在整个 run 中禁用长期 Skill/Memory；有记忆和无记忆必须走同一条执行链。当前会话可以携带有界的原始事实与工件引用，但不靠关键词改写任务，也不可冒充当前屏幕证据。
 7. **测试必须与用户入口一致。** GUI 端到端测试从可见 Electron 客户端填写任务并点击运行；直接调用 Python 类或 HTTP API 只能叫单元测试或集成测试。
+8. **先修基础工具，不用提示词补规则。** 借鉴 Codex 式责任划分，通用工具自行完成多源发现、执行和证据返回，模型结合画面与结果决定下一步。当前应用索引已经合并进程/窗口、Start Menu、StartApps、App Paths、快捷方式和可执行身份，并在启动后核对进程/窗口因果关系；不能靠应用专属 prompt 猜路径。托盘、登录态和所有发现来源的唯一 owner 仍需继续收敛。
 
 ## 产品调用链
 
@@ -22,7 +23,10 @@ Electron「智能代理」
   -> POST /api/v2/arp/runs
   -> Task Contract / ARP capability preflight
   -> StageRuntime
-  -> bounded AgentRunner + FastGuiController
+  -> one ExecuteDesktopTask visual stage
+  -> bounded AgentRunner
+  -> FrameAuthority + FastGuiController
+  -> RunStateMachine + FailureRecoveryLayer
   -> authoritative frame + physical input transaction
   -> post-action evidence + completion gate
   -> Run projection / trace / artifact
@@ -36,9 +40,12 @@ Electron「智能代理」
 | --- | --- | --- |
 | `AgentRunner` | 目标理解、视觉决策、计划调整、异常恢复 | 物理坐标驱动、应用专属脚本库 |
 | Task Contract / ARP | 阶段、能力、工件、依赖、完成义务 | 根据测试语句写死操作步骤 |
-| `StageRuntime` | 执行阶段、传递工件、选择能力与证据 | 再实现一套 GUI planner |
-| `FastGuiController` | 低延迟动作、窗口/帧约束、局部验证 | 判断开放世界任务已经完成 |
-| Perception | 权威截图与按需结构化辅助 | 用 UIA/OCR 丰富度决定画面语义 |
+| `StageRuntime` | 保真传递完整目标并承载单一视觉阶段 | 再实现一套 GUI planner 或微步骤脚本 |
+| `FrameAuthority` | 原子发布当前帧、窗口、区域、epoch 和坐标身份 | 截图、解释画面或选择动作 |
+| `FastGuiController` | 规范化并执行一笔输入事务，采集局部效果证据 | 规划任务或判断开放世界目标已完成 |
+| `RunStateMachine` | 记录阶段、因果债务和运行状态 | 生成计划、猜测语义或驱动恢复动作 |
+| `FailureRecoveryLayer` | 分类失败并附加事实元数据 | 自动切换 UIA/OCR/MCP 或替模型选择恢复方案 |
+| Perception | 权威截图与显式按需的结构化辅助 | 用 UIA/OCR 丰富度决定画面语义 |
 | Done gate | 用新鲜证据核对用户目标 | 接受模型总结或工具 `ok` |
 | Memory / Skill | 复用经过验证的经验 | 覆盖当前画面或掩盖冷启动失败 |
 | MCP | 办公等能力的可选来源 | 取代 GUI Agent 的通用视觉闭环 |
@@ -49,21 +56,32 @@ Electron「智能代理」
 
 已经具备的通用机制包括：
 
-- 目标窗口发现、已运行实例优先、前台恢复和全虚拟桌面回退；
-- 权威帧身份、窗口裁剪、0..1000 归一化坐标和 DPI 映射；
-- 点击、双击、文本输入、快捷键、滚轮、拖拽、连续路径和限时按键；
+- 多源应用发现、已运行实例优先、启动后进程/窗口身份核对、前台恢复和全虚拟桌面回退；
+- 权威帧身份与窗口裁剪；模型空间工具使用所见当前图片的精确像素坐标，runtime 只映射一次到权威帧和物理桌面；
+- 点击、双击、文本输入、快捷键、滚轮、拖拽、连续路径、限时按键，以及等待外部画面变化后取得新权威帧；
 - 按下后目标才出现时，跨权威帧保留一个有超时和强制清理的 held-pointer session；
 - 动作前新鲜度检查、动作后因果区域验证、trace、artifact 和 completion obligation；
 - run 级冷启动、session 引用、可选 MCP、Memory Graph 和已验证 Skill replay；
 - 真实 Electron 客户端 E2E harness 与浏览器侧可信指针 oracle。
 
+原生视觉配置默认关闭 UIA、OCR 和 predictive OCR；这些结构化 provider 仍可在来源、当前帧和预期收益明确时显式启用，但动作失败不会自动触发它们。
+
+### 当前验证快照（2026-07-18）
+
+- 本地抖音客户端成功显示 `kimi k3` 搜索结果；这是冷启动、空 session 的真实客户端任务，终态由人工视觉核对，通用 report 没有独立业务 oracle。
+- `game-drag-v2` 通过真实客户端入口和独立 trusted-browser pointer oracle，正式计为 E2E pass。
+- 网易云任务已在真实客户端达到“播放请求歌曲、Windows 音量 100%”，并由用户确认成功；随后按用户要求停止声音与测试，因此不伪称 harness 已产生 formal terminal pass。
+
+单次样本不能换算为成功率；11 个真实任务和混合长任务仍需继续逐项验收。
+
 仍然存在的重要工程债务：
 
-- `AgentRunner`、Task Contract、StageRuntime、Controller 和部分 adapter 之间仍有职责重叠；
-- compiler、subgoal 和通信 adapter 中仍存在应用/任务族特化，必须继续迁移到通用能力或删除；
-- UIA/OCR 的旧融合路径仍然较重，自绘界面和弱可访问性软件容易受到错误结构化信号干扰；
+- `AgentRunner`、Task Contract、StageRuntime、Controller 和部分 adapter 之间仍有职责重叠，四个核心 owner 的边界还需继续落实；
+- 历史序列化合同仍保留旧 interaction stage 与 subgoal/通信 adapter 兼容代码；新编译器不再生成这条多阶段交互路线，但兼容层仍需继续隔离、压缩或删除；
+- 多源应用索引和启动后因果验证已经落地，但运行窗口、托盘、登录态和安装索引仍未完全收敛到唯一 owner；
+- UIA/OCR 的旧融合路径仍然较重；失败后应先废弃旧依据、重新观察并让模型判断，而不是自动切到结构化感知或 MCP；
 - 真实消费软件、多窗口、托盘、弹窗、动画目标、游戏、高 DPI 和多显示器的覆盖不足；
-- 11 个真实任务尚未全部通过，不能把受控拖拽成功描述为通用 computer-use 成功率。
+- 当前整改版本尚未完成 11 个真实任务及其混合长任务的真实客户端全量验收；不能把历史单次通过或受控拖拽描述为当前通用 computer-use 成功率。
 
 最新代码审计和整改顺序见 [GUI Agent 架构审计](docs/GUI_AGENT_ARCHITECTURE_AUDIT.md)。
 

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import * as net from 'net';
 
 vi.mock('electron', () => ({
   app: { isPackaged: false },
@@ -37,9 +38,26 @@ describe('WinPilot 托管服务兼容性提示', () => {
     expect(new Set(candidates).size).toBe(32);
     expect(candidates.every(isRendererSafePort)).toBe(true);
     expect(candidates.every((port) => port >= 49152)).toBe(true);
+    expect(candidates.some((port, index) => index > 0 && port !== candidates[index - 1] + 1)).toBe(true);
+
+    const completeHighRange = rendererSafePortCandidates(7, 65_535 - 49_152 + 1);
+    expect(new Set(completeHighRange).size).toBe(completeHighRange.length);
 
     const port = await findFreePort();
     expect(isRendererSafePort(port)).toBe(true);
+
+    // findFreePort must resolve only after its probe listener is closed. A
+    // caller should be able to bind the returned port immediately.
+    await new Promise<void>((resolve, reject) => {
+      const server = net.createServer();
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => {
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    });
   });
 
   it('使用中文说明运行时协议过期', () => {

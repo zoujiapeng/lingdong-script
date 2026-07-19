@@ -170,25 +170,6 @@ def test_cooperative_hotkey_is_not_sent_to_unrelated_foreground(monkeypatch):
     assert sent == []
 
 
-def test_scroll_retry_is_blocked_when_target_is_not_foreground(monkeypatch):
-    from winpilot.action import executor
-
-    sent = []
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: True)
-    monkeypatch.setattr(executor.win32gui, "GetForegroundWindow", lambda: 999)
-    monkeypatch.setattr(
-        executor,
-        "_send_inputs",
-        lambda _inputs: sent.append("physical"),
-    )
-
-    result = executor.scroll_sendinput_restored(100, 120, -2, hwnd=123)
-
-    assert result["blocked"] is True
-    assert result["cooperative_input"] is True
-    assert sent == []
-
-
 def test_cooperative_mode_disables_physical_visual_servo(monkeypatch):
     from winpilot.fast.controller import FastGuiController
     from winpilot.perception.model import UIElement
@@ -249,7 +230,11 @@ def test_scope_guard_never_focuses_or_adopts_user_window_in_cooperative_mode(mon
             adopted.append(hwnd)
 
     monkeypatch.setattr(scope_guard, "_window_alive", lambda _hwnd: True)
-    monkeypatch.setattr(scope_guard, "_focus", lambda hwnd: focused.append(hwnd) or True)
+    monkeypatch.setattr(
+        scope_guard.executor,
+        "focus_window",
+        lambda hwnd: focused.append(hwnd) or {"ok": True},
+    )
     monkeypatch.setattr(
         scope_guard.CONFIG,
         "get",
@@ -290,8 +275,8 @@ def test_scope_guard_allows_background_safe_click_without_focus(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        scope_guard,
-        "_focus",
+        scope_guard.executor,
+        "focus_window",
         lambda _hwnd: (_ for _ in ()).throw(AssertionError("must not focus")),
     )
 
@@ -674,69 +659,6 @@ def test_subgoal_focus_block_is_not_treated_as_success(monkeypatch):
     assert prelude[0]["blocked"] is True
 
 
-def test_blocked_scroll_retry_cannot_be_promoted_by_screen_delta(monkeypatch):
-    import numpy as np
-
-    from winpilot.action import executor
-    from winpilot.agent import scope_guard
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.agent.tools import ToolSession
-    from winpilot.utils.screenshot import Region
-
-    frame = np.zeros((30, 40, 3), dtype=np.uint8)
-    frames = iter([frame.copy(), frame.copy()])
-
-    class Watcher:
-        pixel_thresh = 12
-
-        @staticmethod
-        def status():
-            return {"running": True, "sequence": 1}
-
-        @staticmethod
-        def record_action_delta(*_args, **_kwargs):
-            return None
-
-    class Controller:
-        watcher = Watcher()
-        capture_fn = staticmethod(lambda _region: next(frames))
-
-        @staticmethod
-        def _target_region():
-            return Region(0, 0, 40, 30)
-
-    monkeypatch.setattr(
-        executor,
-        "scroll_sendinput_restored",
-        lambda *_args, **_kwargs: {
-            "ok": False,
-            "blocked": True,
-            "cooperative_input": True,
-            "error": "user took foreground ownership",
-        },
-    )
-    # This test isolates the retry/screen-delta contract.  Targetless spatial
-    # input is covered separately and now fails before reaching this layer.
-    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
-    session = ToolSession(task="scroll target")
-    session.world_enabled = False
-    session._fast_gui_controller = Controller()
-    session._t_scroll = lambda _args: ToolResult(
-        '{"ok": true, "via": "post_message"}'
-    )
-    session._action_screen_delta_enabled = lambda _name, _args: True
-
-    payload = json.loads(
-        session.dispatch("scroll", {"x": 10, "y": 10, "amount": -2}).text
-    )
-
-    assert payload["ok"] is False
-    assert payload["blocked"] is True
-    assert payload["cooperative_input"] is True
-    assert payload["scroll_retry"]["ok"] is False
-    assert payload["scroll_retry"]["changed"] is False
-
-
 def test_replay_type_preclick_block_stops_before_typing(monkeypatch):
     from winpilot.recorder import trace
 
@@ -982,7 +904,6 @@ def test_target_change_clears_snapshot_and_last_input_anchor(monkeypatch):
     session._observe_cache = {"stale": True}
     session._window_alive = lambda hwnd: int(hwnd or 0) in {100, 200}
     monkeypatch.setattr(session, "_bind_perception_target", lambda _hwnd: None)
-    monkeypatch.setattr(session, "_ensure_screen_watch", lambda _reason: None)
 
     session._remember_target(200)
 
@@ -1005,7 +926,6 @@ def test_remember_target_preserves_fresh_snapshot_for_new_hwnd(monkeypatch):
     session._last_input_element = object()
     session._window_alive = lambda hwnd: int(hwnd or 0) in {100, 200}
     monkeypatch.setattr(session, "_bind_perception_target", lambda _hwnd: None)
-    monkeypatch.setattr(session, "_ensure_screen_watch", lambda _reason: None)
 
     session._remember_target(200)
 

@@ -1,3 +1,5 @@
+import json
+
 from winpilot.agent.tools import ToolSession
 from winpilot.perception import fusion
 from winpilot.perception.model import UIElement
@@ -66,6 +68,49 @@ def test_controller_structured_observe_override_reaches_fusion(monkeypatch):
         "perception_mode": "structured_ui",
         "stop_event": session.stop_event,
     }]
+
+
+def test_native_visual_observe_query_refreshes_pixels_without_uia_or_ocr(monkeypatch):
+    from winpilot.agent import perception_tools
+
+    session = ToolSession(task="inspect the current GUI")
+    session.hwnd = 123
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(session, "_capture_window_b64", lambda hwnd: "fresh-frame")
+    monkeypatch.setattr(session, "_perception_mode", lambda: "visual")
+    monkeypatch.setattr(
+        session,
+        "_fast_native_visual_snapshot",
+        lambda hwnd: _snapshot("Dynamic GUI"),
+    )
+    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
+    monkeypatch.setattr(
+        perception_tools.CONFIG,
+        "get",
+        lambda section, key=None, default=None: (
+            0.0 if key == "observe_cache_ttl_s" else default
+        ),
+    )
+    monkeypatch.setattr(
+        perception_tools.fusion,
+        "observe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("native visual query must not enter fused perception")
+        ),
+    )
+    monkeypatch.setattr(
+        perception_tools.ocr,
+        "collect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("native visual query must not trigger OCR")
+        ),
+    )
+
+    result = session._t_observe({"query": "search box"})
+
+    assert result.image_b64 == "fresh-frame"
+    assert "Native visual direct observation" in result.text
 
 
 def test_observe_includes_fast_screen_bulletin_when_available(monkeypatch):
@@ -570,6 +615,31 @@ def test_mutating_dispatch_invalidates_observe_cache(monkeypatch):
 
     assert session._screen_epoch == 1
     assert session.cached_observe(key, 10.0) is None
+
+
+def test_blocked_mutation_does_not_advance_epoch_or_invalidate_frame_authority(monkeypatch):
+    from winpilot.agent import scope_guard
+
+    session = ToolSession(task="demo")
+    key = (123, True, "normal", session._screen_epoch)
+    session.store_observe_cache(key, _snapshot())
+    monkeypatch.setattr(session, "_t_click", lambda args: type("R", (), {
+        "text": json.dumps({
+            "ok": False,
+            "blocked": True,
+            "action_executed": False,
+            "error": "foreground mismatch",
+        }),
+        "is_observe": False,
+        "terminal": None,
+        "summary": "",
+    })())
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+
+    session.dispatch("click", {"x": 1, "y": 1, "skip_screen_delta": True})
+
+    assert session._screen_epoch == 0
+    assert session.cached_observe(key, 10.0) is not None
 
 
 def test_text_only_visual_observe_uses_full_fusion_when_uia_disabled(monkeypatch):

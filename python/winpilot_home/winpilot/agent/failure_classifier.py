@@ -1,8 +1,7 @@
-"""Local failure classification for WinPilot desktop-agent tool results.
+"""Factual classification of desktop tool failures.
 
-The classifier is intentionally deterministic. It reads the structured
-controller evidence already emitted by ToolResult.text and maps common GUI
-automation failures to local recovery strategies before involving the LLM.
+The classifier reads only result evidence.  It does not choose the next tool,
+rewrite an action, or turn a task phrase into a recovery playbook.
 """
 from __future__ import annotations
 
@@ -12,23 +11,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-try:
-    from .task_rules import (
-        _required_literal_tokens,
-        _required_visible_payloads,
-        _visible_state_targets,
-    )
-except Exception:  # pragma: no cover - defensive for partial imports
-    def _required_literal_tokens(_task: str) -> list[str]:
-        return []
-
-    def _required_visible_payloads(_task: str) -> list[str]:
-        return []
-
-    def _visible_state_targets(_task: str) -> list[str]:
-        return []
-
-
 class FailureType(str, Enum):
     WINDOW_NOT_FOUND = "WINDOW_NOT_FOUND"
     CONTROL_NOT_FOUND = "CONTROL_NOT_FOUND"
@@ -36,11 +18,9 @@ class FailureType(str, Enum):
     CLICK_COORD_OFFSET = "CLICK_COORD_OFFSET"
     WAIT_TIMEOUT = "WAIT_TIMEOUT"
     WINDOW_FOCUS_ERROR = "WINDOW_FOCUS_ERROR"
-    TASK_CONSTRAINT_LOST = "TASK_CONSTRAINT_LOST"
     VISUAL_GROUNDING_REQUIRED = "VISUAL_GROUNDING_REQUIRED"
     ACTION_SUCCEEDED_VERIFICATION_FAILED = "ACTION_SUCCEEDED_VERIFICATION_FAILED"
     VISUAL_ACTION_NO_EFFECT = "VISUAL_ACTION_NO_EFFECT"
-    DRAW_NO_VISIBLE_CHANGE = "DRAW_NO_VISIBLE_CHANGE"
 
 
 @dataclass
@@ -48,84 +28,15 @@ class FailureClassification:
     failure_type: FailureType
     confidence: float
     evidence: dict[str, Any] = field(default_factory=dict)
-    strategy: str = ""
-    llm_required: bool = False
-    retryable: bool = True
-    retry_budget: int = 1
     normalized_reason: str = ""
-    patch_hint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "failure_type": self.failure_type.value,
             "confidence": round(float(self.confidence), 3),
             "evidence": self.evidence,
-            "strategy": self.strategy,
-            "llm_required": bool(self.llm_required),
-            "retryable": bool(self.retryable),
-            "retry_budget": int(self.retry_budget),
             "normalized_reason": self.normalized_reason,
-            "patch_hint": self.patch_hint,
         }
-
-
-_STRATEGIES: dict[FailureType, tuple[str, str, int]] = {
-    FailureType.WINDOW_NOT_FOUND: (
-        "find_app_list_or_scan_windows_launch_focus_observe",
-        "Enumerate windows and app/process/title/class aliases, run find_app/list_windows/scan_windows, launch if absent, focus_window, update session.hwnd/target_hint, then observe.",
-        2,
-    ),
-    FailureType.WINDOW_FOCUS_ERROR: (
-        "enumerate_match_focus_reobserve",
-        "Match the intended window by title/process/class/alias, focus_window (or activation fallback), then observe before retrying the original GUI action.",
-        2,
-    ),
-    FailureType.CONTROL_NOT_FOUND: (
-        "candidate_labels_query_roi_anchor_cache",
-        "Use candidate_click_labels, observe(query), expanded ROI, anchor fallback, input_locator, and ElementCache refresh before asking the LLM for a new plan.",
-        2,
-    ),
-    FailureType.OCR_MISREAD: (
-        "alternate_perception_normalized_text_roi_template",
-        "Retry verification with UIA/Win32 first, normalized text matching, lower OCR threshold, targeted ROI, then CV/template only if text perception remains weak.",
-        2,
-    ),
-    FailureType.CLICK_COORD_OFFSET: (
-        "recompute_bbox_center_anchor_delta_verify",
-        "Do not repeat the same coordinates. Re-locate the element, click bbox center or anchor-relative point, and verify screen_delta inside the target region.",
-        1,
-    ),
-    FailureType.WAIT_TIMEOUT: (
-        "dynamic_wait_polling_screen_diff_or_control_state",
-        "Use wait_change/wait_stable, expect polling, screen diff, or control-state polling. Do not loop with bare sleep.",
-        2,
-    ),
-    FailureType.TASK_CONSTRAINT_LOST: (
-        "restore_required_literals_from_task_plan_evidence",
-        "Recover required literals, visible payloads, and target window from the original task, plan, visible_evidence_ledger, recent_results, and tool_history.",
-        1,
-    ),
-    FailureType.ACTION_SUCCEEDED_VERIFICATION_FAILED: (
-        "reverify_perception_wait_or_adjust_overstrict_expect",
-        "Treat the action as possibly successful. First check perception miss, insufficient wait, or overly strict verify condition; continue planning only when business evidence is truly absent.",
-        1,
-    ),
-    FailureType.VISUAL_GROUNDING_REQUIRED: (
-        "capture_fresh_target_frame_before_action",
-        "The action did not run. Capture a fresh real frame for the current target hwnd/screen epoch, inspect it, then choose one action.",
-        1,
-    ),
-    FailureType.VISUAL_ACTION_NO_EFFECT: (
-        "reobserve_and_reground_spatial_action",
-        "Do not repeat identical pointer geometry. Capture a fresh authoritative frame, confirm the source, path, target, and intended effect region, then retry only with new grounding evidence.",
-        1,
-    ),
-    FailureType.DRAW_NO_VISIBLE_CHANGE: (
-        "reobserve_canvas_focus_tool_and_relocate",
-        "Do not redraw the same path. Re-observe the target surface, confirm foreground focus, active drawing tool/color, and canvas bounds; then relocate before one controlled retry.",
-        1,
-    ),
-}
 
 
 _TEXT_NOT_FOUND_RE = re.compile(
@@ -239,10 +150,6 @@ def _compact_reason(value: Any, limit: int = 220) -> str:
     return text[:limit]
 
 
-def _normalize_visible_text(value: str) -> str:
-    return re.sub(r"[\s_\-:：,，。.;；!！?？\"'`]+", "", (value or "").casefold())
-
-
 def _dedupe(values: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -253,33 +160,6 @@ def _dedupe(values: list[str]) -> list[str]:
             seen.add(key)
             out.append(text)
     return out
-
-
-def _task_literals(task: str) -> list[str]:
-    values: list[str] = []
-    values.extend(_required_visible_payloads(task or ""))
-    values.extend(_visible_state_targets(task or ""))
-    values.extend(_required_literal_tokens(task or ""))
-    return _dedupe(values)
-
-
-def _evidence_text(
-    result_text: str,
-    recent_results: list[tuple[str, str]] | None,
-    visible_evidence_ledger: list[dict[str, Any]] | None,
-    tool_history: list[tuple[str, dict[str, Any], str]] | None,
-) -> str:
-    chunks = [result_text or ""]
-    for _name, text in recent_results or []:
-        chunks.append(str(text or ""))
-    for item in visible_evidence_ledger or []:
-        if not isinstance(item, dict):
-            continue
-        chunks.append(str(item.get("target") or ""))
-        chunks.append(str(item.get("snippet") or ""))
-    for _name, _args, text in tool_history or []:
-        chunks.append(str(text or "")[:1200])
-    return "\n".join(chunks)
 
 
 def _has_failed_signal(data: dict[str, Any], text: str) -> bool:
@@ -311,33 +191,17 @@ def _missing_texts(data: dict[str, Any]) -> list[str]:
     return _dedupe(values)[:12]
 
 
-def _strategy_for(failure_type: FailureType) -> tuple[str, str, int]:
-    return _STRATEGIES[failure_type]
-
-
 def _classification(
     failure_type: FailureType,
     confidence: float,
     evidence: dict[str, Any],
     reason: str,
-    *,
-    llm_required: bool = False,
-    retryable: bool = True,
-    retry_budget: int | None = None,
 ) -> FailureClassification:
-    strategy, patch_hint, default_budget = _strategy_for(failure_type)
-    if retry_budget is None:
-        retry_budget = default_budget
     return FailureClassification(
         failure_type=failure_type,
         confidence=confidence,
         evidence=evidence,
-        strategy=strategy,
-        llm_required=llm_required,
-        retryable=retryable,
-        retry_budget=retry_budget,
         normalized_reason=_compact_reason(reason),
-        patch_hint=patch_hint,
     )
 
 
@@ -360,25 +224,6 @@ class FailureClassifier:
         data = parse_tool_json(text)
         payloads = _child_payloads(data) if data else []
 
-        # Semantic format routines deliberately return postcondition_pending
-        # until the saved document can be inspected. Reclassifying that handoff
-        # as a failed action makes recovery repeat toggle shortcuts such as
-        # Ctrl+B, undoing a successful mutation.
-        if (
-            data.get("ok") is True
-            and data.get("needs_llm_reason") is False
-            and not data.get("error")
-            and (
-                data.get("format_applied") is True
-                or data.get("mutation_skipped") is True
-                or (
-                    data.get("mutation_applied") is True
-                    and data.get("postcondition_pending") is True
-                )
-            )
-        ):
-            return None
-
         focus = self._classify_window_focus(data, text)
         if focus is not None:
             return focus
@@ -399,10 +244,6 @@ class FailureClassifier:
         if click_offset is not None:
             return click_offset
 
-        draw_no_change = self._classify_draw_no_visible_change(data)
-        if draw_no_change is not None:
-            return draw_no_change
-
         visual_no_effect = self._classify_visual_action_no_effect(data)
         if visual_no_effect is not None:
             return visual_no_effect
@@ -414,18 +255,6 @@ class FailureClassifier:
         ocr = self._classify_ocr_misread(data, text)
         if ocr is not None:
             return ocr
-
-        task_constraint = self._classify_task_constraint_lost(
-            tool_name,
-            data,
-            text,
-            task=task,
-            recent_results=recent_results,
-            visible_evidence_ledger=visible_evidence_ledger,
-            tool_history=tool_history,
-        )
-        if task_constraint is not None:
-            return task_constraint
 
         if data and not _has_failed_signal(data, text):
             return None
@@ -443,8 +272,6 @@ class FailureClassifier:
                         "visual_grounding_required": True,
                     },
                     str(grounding_payload.get("error") or "fresh real frame required"),
-                    retryable=True,
-                    retry_budget=1,
                 )
             errors = [item.get("error") for item in payloads if item.get("error")]
             if errors:
@@ -453,38 +280,8 @@ class FailureClassifier:
                     0.45,
                     {"errors": errors[:3]},
                     errors[0],
-                    retryable=True,
-                    retry_budget=1,
                 )
         return None
-
-    def _classify_draw_no_visible_change(
-        self,
-        data: dict[str, Any],
-    ) -> FailureClassification | None:
-        if not data:
-            return None
-        failed_draws: list[dict[str, Any]] = []
-        for item in _child_payloads(data):
-            if item.get("action") != "draw_strokes":
-                continue
-            if _truthy_bool(item.get("visual_change_detected")) is False:
-                failed_draws.append({
-                    "visual_change_ratio": item.get("visual_change_ratio"),
-                    "verify_detail": item.get("verify_detail"),
-                    "error": item.get("error"),
-                })
-        if not failed_draws:
-            return None
-        return _classification(
-            FailureType.DRAW_NO_VISIBLE_CHANGE,
-            0.97,
-            {"draw_failures": failed_draws[:4]},
-            "drawing input was issued but the intended canvas region did not change",
-            llm_required=False,
-            retryable=True,
-            retry_budget=1,
-        )
 
     def _classify_visual_action_no_effect(
         self,
@@ -495,12 +292,10 @@ class FailureClassifier:
         failures: list[dict[str, Any]] = []
         for item in _child_payloads(data):
             payload = item.get("data") if isinstance(item.get("data"), dict) else item
-            if item.get("action") == "draw_strokes":
-                continue
             if (
                 payload.get("failure_type") == "VISUAL_ACTION_NO_EFFECT"
                 or (
-                    item.get("action") == "drag"
+                    item.get("action") in {"drag", "draw_strokes"}
                     and _truthy_bool(payload.get("visual_change_detected")) is False
                 )
             ):
@@ -516,10 +311,7 @@ class FailureClassifier:
             FailureType.VISUAL_ACTION_NO_EFFECT,
             0.97,
             {"visual_action_failures": failures[:4]},
-            "pointer input was issued but its intended visual region did not change",
-            llm_required=False,
-            retryable=True,
-            retry_budget=1,
+            "visual input was issued but its intended region did not change",
         )
 
     def _classify_window_focus(
@@ -569,9 +361,6 @@ class FailureClassifier:
             0.94 if scope_guard else 0.9,
             evidence,
             reason,
-            llm_required=False,
-            retryable=True,
-            retry_budget=2,
         )
 
     def _classify_window_not_found(
@@ -592,9 +381,6 @@ class FailureClassifier:
             0.92 if needs_target else 0.82,
             evidence,
             evidence.get("error") or "target window is unavailable",
-            llm_required=False,
-            retryable=True,
-            retry_budget=2,
         )
 
     def _classify_wait_timeout(
@@ -634,9 +420,6 @@ class FailureClassifier:
                     "metrics": data.get("metrics") if isinstance(data, dict) else {},
                 },
                 "dynamic wait condition did not become satisfied",
-                llm_required=False,
-                retryable=True,
-                retry_budget=2,
             )
         return None
 
@@ -698,9 +481,6 @@ class FailureClassifier:
             confidence,
             evidence,
             "control or anchor locator did not resolve",
-            llm_required=False,
-            retryable=True,
-            retry_budget=2,
         )
 
     def _classify_click_offset(
@@ -732,9 +512,6 @@ class FailureClassifier:
                 0.76,
                 {"screen_delta": screen_delta, "args": {k: args.get(k) for k in ("x", "y", "element_id")}},
                 "click did not produce evidence in the intended target region",
-                llm_required=False,
-                retryable=True,
-                retry_budget=1,
             )
         return None
 
@@ -784,9 +561,6 @@ class FailureClassifier:
                     "verify_method": data.get("verify_method"),
                 },
                 "action appears to have succeeded but verification evidence is absent or too strict",
-                llm_required=False,
-                retryable=True,
-                retry_budget=1,
             )
         return None
 
@@ -819,97 +593,8 @@ class FailureClassifier:
                     "verify_method": verify_methods[:3],
                 },
                 "text verification failed through OCR or no perception method",
-                llm_required=False,
-                retryable=True,
-                retry_budget=2,
             )
         return None
-
-    def _classify_task_constraint_lost(
-        self,
-        tool_name: str,
-        data: dict[str, Any],
-        text: str,
-        *,
-        task: str,
-        recent_results: list[tuple[str, str]] | None,
-        visible_evidence_ledger: list[dict[str, Any]] | None,
-        tool_history: list[tuple[str, dict[str, Any], str]] | None,
-    ) -> FailureClassification | None:
-        literals = _task_literals(task)
-        if not literals:
-            return None
-        evidence_blob = _normalize_visible_text(
-            _evidence_text(text, recent_results, visible_evidence_ledger, tool_history)
-        )
-        missing = [
-            literal for literal in literals
-            if _normalize_visible_text(literal) not in evidence_blob
-        ]
-        if not missing:
-            return None
-        failed = _has_failed_signal(data, text)
-        controller_state = _first_dict(data, "controller_state")
-        normal_observe_handoff = bool(
-            tool_name == "run_action_batch"
-            and _truthy_bool(data.get("ok")) is True
-            and _truthy_bool(data.get("needs_observe")) is True
-            and str(controller_state.get("phase") or "").casefold() == "needs_observe"
-            and not _missing_texts(data)
-            and not data.get("verify_detail")
-            and not data.get("verify_method")
-        )
-        if normal_observe_handoff:
-            return None
-        read_only_tools = {
-            "observe",
-            "read_text",
-            "coordinate_diagnostics",
-            "screenshot",
-            "zoom",
-            "list_windows",
-            "scan_windows",
-            "find_app",
-            "find_program",
-        }
-        if tool_name in read_only_tools and not failed:
-            return None
-        claimed_ok = any(_truthy_bool(item.get("ok")) is True for item in _child_payloads(data))
-        root_verified = _truthy_bool(data.get("verified")) is True
-        # Missing final-task literals are not a failure during preparatory GUI
-        # steps.  A successful focus/click/wait commonly occurs before the
-        # literal is typed, so treating any nested ``ok`` as proof that the
-        # task should already be complete creates false recovery/replan events.
-        # Only completed controller routines and verified text entry are
-        # expected to carry the final literal evidence on a successful result.
-        evidence_tools = {"execute_subgoal", "run_action_batch", "type_text"}
-        if tool_name not in evidence_tools:
-            return None
-        # A child action being verified only proves that click/type operation,
-        # not that the entire user task has reached its final visible state.
-        # Batch-level task-constraint checks therefore require root-level
-        # verification; concrete action/verify failures are classified above.
-        if tool_name == "run_action_batch" and not root_verified:
-            return None
-        if not failed and not root_verified:
-            return None
-        has_recovery_source = bool(task or visible_evidence_ledger or recent_results or tool_history)
-        return _classification(
-            FailureType.TASK_CONSTRAINT_LOST,
-            0.78 if claimed_ok or root_verified else 0.66,
-            {
-                "required_literals": literals,
-                "missing_literals": missing,
-                "has_task_source": bool(task),
-                "visible_evidence_count": len(visible_evidence_ledger or []),
-                "recent_result_count": len(recent_results or []),
-            },
-            "required task literal or visible payload is missing from evidence",
-            llm_required=not has_recovery_source,
-            retryable=has_recovery_source,
-            retry_budget=1 if has_recovery_source else 0,
-        )
-
 
 def classify_failure(
     tool_name: str,

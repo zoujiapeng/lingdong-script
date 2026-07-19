@@ -93,53 +93,31 @@ def test_model_draw_batch_is_forwarded_without_one_repair_compilation(monkeypatc
     assert dispatched[0][1]["draws"] == supplied
 
 
-def test_delivered_draw_progress_resets_subgoal_failure_debt(monkeypatch):
+def test_tool_session_preserves_partial_subgoal_output_without_progress_classification(monkeypatch):
     from winpilot.agent import scope_guard
     from winpilot.agent.tool_result import ToolResult
     from winpilot.agent.tools import ToolSession
 
-    session = ToolSession(task="draw a polished dog in Paint")
+    session = ToolSession(task="manipulate the visible fictional workspace")
     args = {
-        "subgoal": "draw dog",
-        "draws": [{"shape": "ellipse", "part": "body", "box": [200, 250, 400, 250]}],
+        "subgoal": "place one visible object",
+        "draws": [{"shape": "ellipse", "part": "object", "box": [200, 250, 400, 250]}],
     }
-    signature = session._subgoal_signature(args)
-    session._subgoal_no_progress_counts[signature] = 1
     session._t_execute_subgoal = lambda _args: ToolResult(json.dumps({
         "ok": False,
         "verified": False,
         "evidence_packet": {"scene_structure": {"executed_draw_count": 1}},
-        "actions_executed": [{"action": "draw_strokes", "part": "body"}],
+        "actions_executed": [{"action": "draw_strokes", "part": "object"}],
+        "partial_output": {"artifact_id": "fictional-7"},
     }))
     monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
 
-    session.dispatch("execute_subgoal", args)
+    payload = json.loads(session.dispatch("execute_subgoal", args).text)
 
-    assert signature not in session._subgoal_no_progress_counts
-
-
-def test_failed_draw_action_metadata_does_not_fake_visual_progress():
-    from winpilot.agent.tools import ToolSession
-
-    payload = {
-        "ok": False,
-        "verified": False,
-        "actions_executed": [{"action": "draw_strokes", "semantic_part": "body"}],
-        "results": [{
-            "action": "draw_strokes",
-            "ok": False,
-            "data": {
-                "visual_change_detected": False,
-                "failure_type": "DRAW_NO_VISIBLE_CHANGE",
-            },
-        }],
-        "evidence_packet": {
-            "scene_structure": {"executed_draw_count": 0},
-            "per_draw_color_evidence": [],
-        },
-    }
-
-    assert ToolSession._subgoal_has_visual_progress(payload) is False
+    assert payload["ok"] is False
+    assert payload["verified"] is False
+    assert payload["partial_output"] == {"artifact_id": "fictional-7"}
+    assert payload.get("blocked") is not True
 
 
 def test_huge_drawing_result_compacts_outcome_and_actual_colors_before_geometry():
@@ -266,7 +244,7 @@ def test_blocked_bulk_undo_batch_compaction_keeps_destructive_outcome():
     assert "call blocked/fail" in compact["fast_path_advice"]
 
 
-def test_folded_checkpoint_keeps_latest_drawing_outcome_first():
+def test_folded_checkpoint_keeps_facts_and_drops_controller_tactics():
     from winpilot.agent.loop import AgentRunner
 
     compact = AgentRunner._compact_tool_evidence("execute_subgoal", json.dumps({
@@ -275,7 +253,7 @@ def test_folded_checkpoint_keeps_latest_drawing_outcome_first():
         "mutation_applied": True,
         "actions_executed": [{
             "action": "draw_strokes",
-            "semantic_part": f"detail_{index}",
+            "semantic_part": f"visible_part_{index}",
             "canvas_region": {"x": 10, "y": 20, "width": 800, "height": 500},
             "strokes": [[[point, point] for point in range(200)]],
         } for index in range(20)],
@@ -286,7 +264,7 @@ def test_folded_checkpoint_keeps_latest_drawing_outcome_first():
         },
         "fast_path_advice": "Preserve the canvas; brown was not applied and black was matched.",
     }))
-    runner = AgentRunner("draw a polished dog in Paint")
+    runner = AgentRunner("modify the visible graphical workspace")
     runner._recent_results = [("execute_subgoal", compact)]
 
     checkpoint = runner._fold_checkpoint("old screenshot")
@@ -295,49 +273,23 @@ def test_folded_checkpoint_keeps_latest_drawing_outcome_first():
     assert '"matched_visual_colors": ["black"]' in checkpoint
     assert '"optional_missing_visual_colors": ["brown"]' in checkpoint
     assert '"effective_visual_colors": ["black"]' in checkpoint
-    assert "fast_path_advice" in checkpoint
-    assert "Preserve the canvas" in checkpoint
+    assert "fast_path_advice" not in checkpoint
+    assert "Preserve the canvas" not in checkpoint
     assert '"strokes":' not in checkpoint
 
 
 
 
-def test_repeated_no_progress_subgoal_blocks_without_forcing_terminal_reply():
-    from winpilot.agent.tools import ToolSession
-
-    session = ToolSession(task="create an illustration in the visible canvas")
-    args = {
-        "subgoal": "draw dog",
-        "draws": [{"part": "body", "shape": "ellipse", "box": [200, 200, 300, 200]}],
-    }
-    signature = session._subgoal_signature(args)
-    session._subgoal_no_progress_counts[signature] = 2
-    session._subgoal_no_progress_contexts[signature] = (
-        session._subgoal_recovery_context()
-    )
-    executed = []
-    session._t_execute_subgoal = lambda _args: executed.append(_args)
-
-    result = session.dispatch("execute_subgoal", args)
-
-    payload = json.loads(result.text)
-    assert result.terminal is None
-    assert payload["blocked"] is True
-    assert payload["duplicate_no_progress_subgoal"] is True
-    assert payload["verified"] is False
-    assert executed == []
-
-
-def test_no_progress_subgoal_retries_once_after_real_context_recovery(monkeypatch):
+def test_repeated_no_progress_subgoal_always_reaches_the_action_owner(monkeypatch):
     from winpilot.agent import scope_guard
     from winpilot.agent.tool_result import ToolResult
     from winpilot.agent.tools import ToolSession
 
-    session = ToolSession(task="create an illustration in the visible canvas")
+    session = ToolSession(task="operate the visible fictional workspace")
     session.world_enabled = False
     args = {
-        "subgoal": "draw dog",
-        "draws": [{"part": "body", "shape": "ellipse", "box": [200, 200, 300, 200]}],
+        "subgoal": "move the visible token",
+        "draws": [{"part": "token", "shape": "ellipse", "box": [200, 200, 300, 200]}],
     }
     executed = []
 
@@ -357,33 +309,11 @@ def test_no_progress_subgoal_retries_once_after_real_context_recovery(monkeypatc
     session._t_execute_subgoal = no_progress_handler
     monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
 
-    session.dispatch("execute_subgoal", args)
-    session.dispatch("execute_subgoal", args)
-    signature = session._subgoal_signature(args)
-    assert session._subgoal_no_progress_counts[signature] == 2
+    results = [session.dispatch("execute_subgoal", args) for _ in range(4)]
 
-    # The controller corrected both its target and the canvas transform/generation.
-    session.hwnd = 4321
-    session._canvas_generation = 1
-    session._last_canvas_region = {
-        "x": 80,
-        "y": 140,
-        "width": 900,
-        "height": 620,
-    }
-    recovered_retry = session.dispatch("execute_subgoal", args)
-
-    assert recovered_retry.terminal is None
-    assert len(executed) == 3
-    assert session._subgoal_no_progress_counts[signature] == 3
-
-    # The recovery transition is consumed: the unchanged corrected canvas
-    # cannot be used to resend the same coordinates indefinitely.
-    static_retry = session.dispatch("execute_subgoal", args)
-    static_payload = json.loads(static_retry.text)
-    assert static_retry.terminal is None
-    assert static_payload["blocked"] is True
-    assert static_payload["duplicate_no_progress_subgoal"] is True
-    assert len(executed) == 3
+    assert all(result.terminal is None for result in results)
+    assert all(json.loads(result.text)["verified"] is False for result in results)
+    assert all(json.loads(result.text).get("blocked") is not True for result in results)
+    assert len(executed) == 4
 
 # Drawing completion and further mutation now share the generic fresh-frame loop.

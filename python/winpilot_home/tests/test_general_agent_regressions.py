@@ -34,7 +34,8 @@ def test_composite_desktop_requests_keep_the_whole_goal(
     stage = contract.stages[0]
     assert stage.parameters["goal"] == task
     assert stage.parameters["app"].casefold() == expected_app.casefold()
-    assert stage.parameters["forbid_open_only"] is True
+    assert "forbid_open_only" not in stage.parameters
+    assert "minimum_effect_categories" not in stage.parameters
     assert "visual.spatial_interaction" in stage.execution.required_capabilities
     assert contract.requirement_coverage.complete is True
     assert contract.requirements[0].text == task
@@ -49,11 +50,11 @@ def test_explicit_drawing_application_is_not_replaced_by_paint() -> None:
     assert contract.intent.source == "kirta"
     assert [stage.type.value for stage in contract.stages] == ["ExecuteDesktopTask"]
     assert contract.stages[0].parameters["app"] == "kirta"
-    assert contract.stages[0].parameters["surface_output_mode"] == "continuous_pointer"
     assert {
-        "visual.adaptive_interaction",
-        "visual.surface_manipulation",
-    } <= set(
+        "surface_output_mode", "surface_output_subject",
+        "surface_output_quality", "subject", "quality",
+    }.isdisjoint(contract.stages[0].parameters)
+    assert "visual.adaptive_interaction" in (
         contract.stages[0].execution.required_capabilities
     )
 
@@ -79,21 +80,240 @@ def test_unnamed_surface_output_uses_the_same_general_stage_from_each_entrypoint
         assert stage.parameters["source"] == "active_window"
         assert stage.parameters["named_applications"] == []
         assert stage.parameters["preserve_original_intent"] is True
-        assert stage.parameters["surface_output_mode"] == "continuous_pointer"
         assert {
-            "visual.adaptive_interaction",
-            "visual.surface_manipulation",
-        } <= set(stage.execution.required_capabilities)
+            "surface_output_mode", "surface_output_subject",
+            "surface_output_quality", "subject", "quality",
+        }.isdisjoint(stage.parameters)
+        assert "visual.adaptive_interaction" in stage.execution.required_capabilities
         comparable_parameters.append({
             key: stage.parameters[key]
             for key in (
                 "goal", "app", "source", "named_applications",
-                "preserve_original_intent", "surface_output_mode",
-                "verification_policy",
+                "preserve_original_intent", "verification_policy",
             )
         })
 
     assert comparable_parameters[0] == comparable_parameters[1]
+
+
+@pytest.mark.parametrize("task", ["draw", "What can you do?"])
+def test_gui_entrypoint_reaches_the_live_frame_without_compile_time_clarification(
+    task: str,
+) -> None:
+    from winpilot.tasking.compiler import TaskContractCompiler
+
+    contract = TaskContractCompiler().compile(
+        task,
+        cold_start=True,
+        require_gui=True,
+    )
+
+    assert contract.clarification_questions == []
+    assert contract.session is None
+    assert [stage.type.value for stage in contract.stages] == [
+        "ExecuteDesktopTask",
+    ]
+    assert contract.stages[0].parameters["goal"] == task
+    assert contract.stages[0].parameters["original_task"] == task
+
+
+def test_same_board_different_user_intent_does_not_switch_runtime_mode() -> None:
+    from winpilot.agent.runtime_profile import build_runtime_profile
+    from winpilot.agent.tool_schemas import tool_schemas
+    from winpilot.tasking.compiler import TaskContractCompiler
+
+    tasks = (
+        "On the currently visible tic-tac-toe board, place my next mark.",
+        (
+            "Look at the currently visible tic-tac-toe board and tell me the "
+            "best move without interacting with it."
+        ),
+        (
+            "Using the currently visible tic-tac-toe board, teach me how the "
+            "game works without making a move."
+        ),
+    )
+    contracts = [
+        TaskContractCompiler().compile(
+            task,
+            cold_start=True,
+            require_gui=True,
+        )
+        for task in tasks
+    ]
+
+    tool_sets = []
+    native_schema_sets = []
+    capability_sets = []
+    for task, contract in zip(tasks, contracts):
+        assert [stage.type.value for stage in contract.stages] == [
+            "ExecuteDesktopTask",
+        ]
+        stage = contract.stages[0]
+        assert stage.parameters["goal"] == task
+        assert stage.parameters["original_task"] == task
+        assert {
+            "surface_output_mode", "surface_output_subject",
+            "surface_output_quality", "subject", "quality",
+        }.isdisjoint(stage.parameters)
+        profile = build_runtime_profile(
+            task,
+            task_contract=contract,
+            stage=stage,
+        )
+        assert profile.surface_output_mode is False
+        assert profile.inline_semantic_verification is False
+        tool_sets.append(set(stage.execution.model_tools))
+        capability_sets.append(set(stage.execution.required_capabilities))
+        native_schema_sets.append({
+            item["function"]["name"]
+            for item in tool_schemas(
+                planning=False,
+                allow_shell=False,
+                allow_files=False,
+                profile="lean_gui",
+                native_vision=True,
+                required_capabilities=profile.required_capabilities,
+                stage_tools=profile.stage_tools,
+                stage_type=profile.stage_type,
+                surface_output_mode=profile.surface_output_mode,
+            )
+        })
+
+    assert tool_sets[0] == tool_sets[1]
+    assert tool_sets[1] == tool_sets[2]
+    assert native_schema_sets[0] == native_schema_sets[1] == native_schema_sets[2]
+    assert capability_sets[0] == capability_sets[1] == capability_sets[2]
+    expected_model_tools = {
+        "open_app", "launch", "list_windows", "focus_window", "observe",
+        "click", "double_click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
+        "mouse_down", "move_mouse", "mouse_up",
+        "wait", "done", "blocked", "fail",
+        "capture_artifact", "paste_image_file",
+        "discover_mcp_tools", "call_mcp_tool",
+    }
+    assert tool_sets[0] == expected_model_tools
+    assert {
+        "run_action_batch", "execute_subgoal", "read_text", "screen_watch",
+        "vlm_describe", "vlm_verify", "revise_plan", "complete_subgoal",
+        "record_facts",
+    }.isdisjoint(tool_sets[0])
+    assert {
+        "click", "double_click", "type_text", "scroll", "drag", "draw_strokes",
+        "mouse_down", "move_mouse", "mouse_up",
+    } <= native_schema_sets[0]
+
+
+def test_execute_desktop_stage_passes_its_model_tools_to_runtime_profile(
+    monkeypatch,
+) -> None:
+    import winpilot.tasking.stage_runtime as stage_runtime
+    from winpilot.tasking.compiler import TaskContractCompiler
+
+    task = "On the currently visible tic-tac-toe board, place my next mark."
+    contract = TaskContractCompiler().compile(
+        task,
+        cold_start=True,
+        require_gui=True,
+    )
+    stage = contract.stages[0]
+    captured = {}
+
+    class FakeRunner:
+        run_id = "child-model-tool-contract"
+        status = "done"
+        result_text = "complete"
+        usage_total = {}
+        model_request_count = 1
+        model_elapsed_ms = 0
+        _done_verified = True
+        _inline_stage_semantic_attempted = False
+        _inline_stage_semantic_passed = False
+        _inline_stage_semantic_last_verdict = {}
+        _tool_history = [
+            ("click", {"frame_x": 500, "frame_y": 500}, '{"ok": true}'),
+        ]
+        session = SimpleNamespace(_last_canvas_region=None)
+
+        def run(self):
+            return self.result_text
+
+    def fake_build_runner(_goal, **kwargs):
+        captured["profile"] = kwargs["runtime_profile"]
+        return FakeRunner()
+
+    class Registry:
+        def record(self, predicate, **values):
+            return {"predicate": predicate, **values}
+
+    monkeypatch.setattr(stage_runtime, "build_runner", fake_build_runner)
+    runtime = stage_runtime.StageRuntime()
+    monkeypatch.setattr(runtime, "_evidence", lambda _context: Registry())
+    monkeypatch.setattr(runtime, "_store", lambda _context: object())
+
+    result = runtime._execute(
+        stage,
+        contract,
+        {"run_id": "run-model-tool-contract", "runtime_state": {}},
+        threading.Event(),
+        time.monotonic(),
+    )
+
+    assert result.ok is True
+    assert captured["profile"].model_tool_allowlist == tuple(
+        stage.execution.model_tools
+    )
+
+
+def test_desktop_answer_can_finish_without_inventing_a_gui_mutation(monkeypatch) -> None:
+    import winpilot.tasking.stage_runtime as stage_runtime
+    from winpilot.tasking.compiler import TaskContractCompiler
+
+    task = (
+        "Using the currently visible tic-tac-toe board, teach me how the "
+        "game works without making a move."
+    )
+    contract = TaskContractCompiler().compile(
+        task,
+        cold_start=True,
+        require_gui=True,
+    )
+    stage = contract.stages[0]
+
+    class FakeRunner:
+        run_id = "child-visual-answer"
+        status = "done"
+        result_text = "The model explained the visible game without moving a piece."
+        usage_total = {}
+        model_request_count = 1
+        model_elapsed_ms = 1
+        _done_verified = True
+        _inline_stage_semantic_passed = False
+        _inline_stage_semantic_attempted = False
+        _inline_stage_semantic_last_verdict = {}
+        _tool_history = []
+        session = SimpleNamespace(_last_canvas_region=None)
+
+        def run(self):
+            return self.result_text
+
+    monkeypatch.setattr(
+        stage_runtime,
+        "build_runner",
+        lambda *_args, **_kwargs: FakeRunner(),
+    )
+    result = stage_runtime.StageRuntime()._execute(
+        stage,
+        contract,
+        {"run_id": "run-visual-answer", "runtime_state": {}},
+        threading.Event(),
+        time.monotonic(),
+    )
+
+    assert "forbid_open_only" not in stage.parameters
+    assert "minimum_effect_categories" not in stage.parameters
+    assert result.ok is True
+    assert result.output["result"] == FakeRunner.result_text
 
 
 def test_unseen_slider_drag_uses_generic_visual_interaction_contract() -> None:
@@ -106,20 +326,15 @@ def test_unseen_slider_drag_uses_generic_visual_interaction_contract() -> None:
 
     assert contract.intent.interaction.active is True
     assert contract.intent.interaction.primary_action_modality == "drag"
-    assert [stage.type.value for stage in contract.stages] == [
-        "ObserveScene", "InferInteraction", "PerformTurn", "VerifyLocalEffect",
-    ]
-    perform = next(stage for stage in contract.stages if stage.type.value == "PerformTurn")
-    assert "visual.adaptive_interaction" in perform.execution.required_capabilities
-    assert {"execute_subgoal", "run_action_batch"} <= set(perform.execution.tools)
-    verify = next(stage for stage in contract.stages if stage.type.value == "VerifyLocalEffect")
-    infer = next(stage for stage in contract.stages if stage.type.value == "InferInteraction")
-    assert any(
-        edge.source == verify.id
-        and edge.target == infer.id
-        and edge.branch == "continue"
-        for edge in graph.edges
+    assert contract.session is None
+    assert [stage.type.value for stage in contract.stages] == ["ExecuteDesktopTask"]
+    stage = contract.stages[0]
+    assert stage.parameters["goal"] == "拖动当前界面的滑块到目标位置"
+    assert "visual.adaptive_interaction" in stage.execution.required_capabilities
+    assert {"observe", "click", "drag", "scroll"} <= set(
+        stage.execution.model_tools
     )
+    assert all(edge.branch != "continue" for edge in graph.edges)
 
 
 @pytest.mark.parametrize(
@@ -139,9 +354,9 @@ def test_hold_and_path_phrasing_uses_generic_visual_interaction(task: str) -> No
     assert contract.intent.interaction.active is True
     assert contract.intent.interaction.mode == "direct_visual_manipulation"
     assert contract.intent.interaction.primary_action_modality == "drag"
-    assert [stage.type.value for stage in contract.stages] == [
-        "ObserveScene", "InferInteraction", "PerformTurn", "VerifyLocalEffect",
-    ]
+    assert contract.session is None
+    assert [stage.type.value for stage in contract.stages] == ["ExecuteDesktopTask"]
+    assert contract.stages[0].parameters["goal"] == task
     assert "DrawArtifact" not in [stage.type.value for stage in contract.stages]
 
 
@@ -167,9 +382,10 @@ def test_deictic_live_surface_is_not_parsed_as_an_application(task: str) -> None
     assert contract.intent.applications == []
     assert contract.intent.interaction.active is True
     assert contract.intent.interaction.target == "active_window"
-    observe = contract.stages[0]
-    assert observe.type.value == "ObserveScene"
-    assert observe.parameters["source"] == "active_window"
+    stage = contract.stages[0]
+    assert stage.type.value == "ExecuteDesktopTask"
+    assert stage.parameters["source"] == "active_window"
+    assert stage.parameters["goal"] == task
 
 
 def test_named_application_before_hold_remains_an_application_constraint() -> None:
@@ -226,9 +442,11 @@ def test_unknown_gameplay_keeps_full_goal_and_all_spatial_primitives() -> None:
     assert stage.parameters["preserve_original_intent"] is True
     assert "visual.adaptive_interaction" in stage.execution.required_capabilities
     assert {
-        "click", "drag", "draw_strokes", "run_action_batch",
-        "execute_subgoal", "observe", "screen_watch",
+        "click", "drag", "draw_strokes", "observe",
     } <= set(stage.execution.model_tools)
+    assert {
+        "run_action_batch", "execute_subgoal", "screen_watch", "read_text",
+    }.isdisjoint(stage.execution.model_tools)
     assert "DrawArtifact" not in [item.type.value for item in contract.stages]
 
 
@@ -244,57 +462,62 @@ def test_drag_to_play_relation_resolves_an_open_ended_app_name() -> None:
     assert contract.intent.source == "植物大战僵尸"
     assert contract.intent.applications == ["植物大战僵尸"]
     assert contract.intent.interaction.primary_action_modality == "drag"
-    observe = contract.stages[0]
-    assert observe.type.value == "ObserveScene"
-    assert observe.parameters["source"] == "植物大战僵尸"
+    stage = contract.stages[0]
+    assert stage.type.value == "ExecuteDesktopTask"
+    assert stage.parameters["source"] == "植物大战僵尸"
+    assert stage.parameters["goal"] == "拖动游玩植物大战僵尸"
 
 
-def test_cold_start_keeps_short_term_antecedent_but_not_experience() -> None:
+def test_cold_start_carries_session_facts_without_compiler_rewrite() -> None:
     from winpilot.tasking.compiler import TaskContractCompiler
-    from winpilot.tasking.stage_runtime import StageRuntime
+    from winpilot.tasking.intent import TaskIntentParser
 
     prior = {
-        "task": "用画板画一朵花",
+        "task": "用绘图岛画一朵花",
         "status": "done",
         "result": "绘图完成",
         "run_id": "prior-draw",
         "intent": {
             "operation": ["draw"],
-            "source": "Paint",
+            "source": "绘图岛",
             "destination": "",
             "channel": "",
             "recipient": "",
             "subject": "一朵花",
         },
     }
+    task = "把刚刚画的画截图发给我的手机"
+    parsed_without_context = TaskIntentParser().parse(task)
     contract = TaskContractCompiler().compile(
-        "把刚刚画的画截图发给我的手机",
+        task,
         cold_start=True,
         session_context=[prior],
+        require_gui=True,
     )
 
     assert contract.experience_policy == "disabled"
-    assert contract.intent.source == "Paint"
-    assert contract.intent.operation == ["capture", "send"]
-    assert "subject" not in contract.intent.ambiguous_fields
-    assert contract.intent.provenance["session_run_id"] == "prior-draw"
+    assert contract.intent.model_dump(mode="json") == parsed_without_context.model_dump(
+        mode="json"
+    )
+    assert contract.session_context == [{
+        "task": prior["task"],
+        "status": prior["status"],
+        "result": prior["result"],
+        "run_id": prior["run_id"],
+        "intent": prior["intent"],
+        "artifacts": [],
+    }]
+    assert "session_reference" not in contract.intent.provenance
+    assert "session_run_id" not in contract.intent.provenance
     assert contract.clarification_questions == []
     assert [stage.type.value for stage in contract.stages] == ["ExecuteDesktopTask"]
     stage = contract.stages[0]
+    assert stage.parameters["goal"] == task
     assert stage.parameters["preserve_original_intent"] is True
-    assert stage.parameters["runtime_resolution_fields"] == ["channel"]
-    assert stage.parameters["source"] == "Paint"
+    assert "capture_artifact" in stage.execution.model_tools
     assert {
-        "capture_artifact", "find_program", "list_installed_apps",
-        "record_facts", "revise_plan", "send_artifact",
-    } <= set(stage.execution.model_tools)
-    scoped_intent = StageRuntime._stage_scoped_intent(
-        contract,
-        stage,
-        stage.parameters["goal"],
-    )
-    assert scoped_intent.operation == ["capture", "send"]
-    assert scoped_intent.ambiguous_fields == ["channel"]
+        "send_artifact", "open_conversation", "send_text",
+    }.isdisjoint(stage.execution.model_tools)
 
 
 def test_managed_artifact_handle_survives_native_context_compaction() -> None:
@@ -334,7 +557,7 @@ def test_send_artifact_recovers_one_stale_alias_without_guessing_between_multipl
         lambda _region=None: np.zeros((18, 22, 3), dtype=np.uint8),
     )
     store = ArtifactStore("run-artifact-alias", tmp_path / "artifacts")
-    artifact = store.capture_artifact(scope="screen", source_window="Paint")
+    artifact = store.capture_artifact(scope="screen", source_window="Drawing Harbor")
     evidence = EvidenceRegistry("run-artifact-alias")
     calls: list[tuple[str, str]] = []
 
@@ -373,27 +596,30 @@ def test_send_artifact_recovers_one_stale_alias_without_guessing_between_multipl
         ("send", artifact.artifact_id),
     ]
 
-    store.capture_artifact(scope="screen", source_window="Paint")
+    store.capture_artifact(scope="screen", source_window="Drawing Harbor")
     with pytest.raises(KeyError, match="ambiguous"):
         store.resolve_sendable("artifact_2")
 
 
-def test_unresolved_channel_discovers_a_grounded_verified_adapter(monkeypatch) -> None:
-    from winpilot.agent.tools import ToolSession
-    from winpilot.perception import apps, win32
-    from winpilot.tasking.adapters import DomainAdapterRegistry
+def _fake_communication_provider(
+    adapter_id: str,
+    app_name: str,
+    *,
+    succeeds: bool,
+    auto_discover: bool,
+    closed: list[str],
+):
+    from winpilot.tasking.adapters import CommunicationAdapter
 
-    closed: list[str] = []
-
-    class FakeAdapter:
-        def __init__(self, adapter_id: str, *, succeeds: bool):
-            self.id = adapter_id
-            self.succeeds = succeeds
-            self.session = SimpleNamespace(hwnd=0, target_hint=adapter_id)
-
-        def open_conversation(self, recipient: str):
-            if self.succeeds:
-                return {"ok": True, "recipient": recipient, "strategy": "verified-header"}
+    class Provider(CommunicationAdapter):
+        def open_conversation(self, recipient: str, *, stage_id: str = ""):
+            self.recipient = recipient
+            if succeeds:
+                return {
+                    "ok": True,
+                    "recipient": recipient,
+                    "target_hwnd": 777,
+                }
             return {
                 "ok": False,
                 "failure_type": "recipient_not_resolved",
@@ -401,45 +627,61 @@ def test_unresolved_channel_discovers_a_grounded_verified_adapter(monkeypatch) -
             }
 
         def resolve_composer(self):
-            return {"ok": self.succeeds, "method": "verified-composer"}
+            return {"ok": succeeds, "target_hwnd": 777}
+
+        def paste_or_attach_artifact(self, artifact_id: str, *, stage_id: str = ""):
+            return {"ok": succeeds, "artifact_id": artifact_id}
+
+        def send_current_composer(self, artifact_id: str = "", *, stage_id: str = ""):
+            return {"ok": succeeds, "artifact_id": artifact_id}
+
+        def send_text(self, text: str, *, stage_id: str = ""):
+            return {"ok": succeeds, "text": text}
+
+        def verify_latest_outbound(
+            self,
+            *,
+            artifact_id: str = "",
+            text: str = "",
+            stage_id: str = "",
+        ):
+            return {"ok": succeeds, "artifact_id": artifact_id, "text": text}
 
         def close(self):
-            closed.append(self.id)
+            closed.append(adapter_id)
 
-    descriptors = [
-        {
-            "adapter_id": "qq",
-            "app_name": "QQ",
-            "component": "qq_adapter",
-            "channels": ["qq", "QQ"],
-        },
-        {
-            "adapter_id": "wechat",
-            "app_name": "微信",
-            "component": "wechat_adapter",
-            "channels": ["wechat", "微信"],
-        },
-    ]
-    adapters = {
-        "qq": FakeAdapter("qq", succeeds=False),
-        "wechat": FakeAdapter("wechat", succeeds=True),
-    }
-    monkeypatch.setattr(
-        DomainAdapterRegistry,
-        "registered_adapters",
-        classmethod(lambda cls: descriptors),
+    Provider.id = adapter_id
+    Provider.app_name = app_name
+    Provider.channels = (adapter_id,)
+    Provider.auto_discover = auto_discover
+    return Provider
+
+
+def test_unresolved_channel_discovers_an_opted_in_plugin_provider(monkeypatch) -> None:
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception import apps, win32
+    from winpilot.tasking.adapters import DomainAdapterRegistry
+
+    monkeypatch.setattr(DomainAdapterRegistry, "_types", {})
+    monkeypatch.setattr(DomainAdapterRegistry, "_channel_names", {})
+    closed: list[str] = []
+    alpha = _fake_communication_provider(
+        "alpha", "Alpha Messenger",
+        succeeds=False, auto_discover=True, closed=closed,
     )
-    monkeypatch.setattr(
-        DomainAdapterRegistry,
-        "create",
-        classmethod(lambda cls, channel, **_kwargs: adapters[channel]),
+    beta = _fake_communication_provider(
+        "beta", "Beta Messenger",
+        succeeds=True, auto_discover=True, closed=closed,
     )
+    DomainAdapterRegistry.register(alpha)
+    DomainAdapterRegistry.register(beta)
+
     monkeypatch.setattr(
         win32,
         "find_app",
         lambda name: {
-            "running": name == "微信",
-            "has_visible_window": name == "微信",
+            "running": name == "Beta Messenger",
+            "has_visible_window": name == "Beta Messenger",
         },
     )
     monkeypatch.setattr(win32, "find_window", lambda _name: None)
@@ -453,34 +695,50 @@ def test_unresolved_channel_discovers_a_grounded_verified_adapter(monkeypatch) -
         }],
     )
 
-    session = ToolSession(task="send the current artifact to a known recipient")
+    session = ToolSession(task="send through a configured communication plugin")
     session.run_id = "run-route-discovery"
+    session._managed_artifacts = lambda: (object(), object())
     try:
         payload = json.loads(session._t_open_conversation({
-            "recipient": "我的手机",
+            "recipient": "Test Contact",
         }).text)
         assert payload["ok"] is True
         assert payload["route_discovered"] is True
-        assert payload["channel"] == "wechat"
-        assert payload["recipient"] == "我的手机"
+        assert payload["channel"] == "beta"
+        assert payload["recipient"] == "Test Contact"
         assert payload["conversation"]["ok"] is True
         assert payload["composer"]["ok"] is True
-        assert session.communication_adapter is adapters["wechat"]
+        assert isinstance(session.communication_adapter, beta)
         assert closed == []
     finally:
         session.close()
 
-    assert closed == ["wechat"]
+    assert closed == ["beta"]
 
 
-def test_registered_adapter_discovery_deduplicates_channel_aliases() -> None:
+def test_registered_adapter_discovery_deduplicates_channel_aliases(monkeypatch) -> None:
     from winpilot.tasking.adapters import DomainAdapterRegistry
 
+    monkeypatch.setattr(DomainAdapterRegistry, "_types", {})
+    monkeypatch.setattr(DomainAdapterRegistry, "_channel_names", {})
+    assert DomainAdapterRegistry.registered_adapters() == []
+
+    provider = _fake_communication_provider(
+        "fictional", "Fictional Messenger",
+        succeeds=True, auto_discover=False, closed=[],
+    )
+    DomainAdapterRegistry.register(
+        provider,
+        channels=("fictional", "Fictional Messenger", "FM"),
+    )
     descriptors = DomainAdapterRegistry.registered_adapters()
 
-    assert {item["adapter_id"] for item in descriptors} >= {"qq", "wechat"}
-    wechat = next(item for item in descriptors if item["adapter_id"] == "wechat")
-    assert {"wechat", "微信"} <= set(wechat["channels"])
+    assert len(descriptors) == 1
+    assert descriptors[0]["adapter_id"] == "fictional"
+    assert set(descriptors[0]["channels"]) == {
+        "fictional", "Fictional Messenger", "FM",
+    }
+    assert descriptors[0]["auto_discover"] is False
 
 
 def test_meta_question_uses_text_response_route_not_gui() -> None:
@@ -520,7 +778,8 @@ def test_untyped_visible_goal_still_receives_the_complete_gui_loop(task: str) ->
     stage = contract.stages[0]
     assert stage.parameters["goal"] == task
     assert stage.parameters["preserve_original_intent"] is True
-    assert stage.parameters["forbid_open_only"] is True
+    assert "forbid_open_only" not in stage.parameters
+    assert "minimum_effect_categories" not in stage.parameters
     assert {
         "open_app", "observe", "click", "scroll", "drag", "type_text",
     } <= set(stage.execution.model_tools)
@@ -528,68 +787,79 @@ def test_untyped_visible_goal_still_receives_the_complete_gui_loop(task: str) ->
     assert contract.final_conditions == ["desktop.full_goal_verified"]
 
 
-def test_capability_demonstration_requires_real_diverse_effects() -> None:
-    from winpilot.tasking.compiler import TaskContractCompiler
-
-    contract = TaskContractCompiler().compile("演示一下你有什么能力", cold_start=True)
-    stage = contract.stages[0]
-
-    assert stage.type.value == "ExecuteDesktopTask"
-    assert stage.parameters["verification_policy"] == "capability_demonstration"
-    assert stage.parameters["minimum_effect_categories"] == 2
-
-
-def test_persistent_desktop_goal_uses_the_generic_adaptive_runtime() -> None:
+def test_capability_demonstration_uses_the_same_full_goal_contract() -> None:
     from winpilot.tasking.compiler import TaskContractCompiler
 
     contract = TaskContractCompiler().compile(
-        "去qq找我的手机持续聊天,他如果发@电脑就说明在命令你,你要照做",
+        "演示一下你有什么能力",
         cold_start=True,
+        require_gui=True,
+    )
+    stage = contract.stages[0]
+
+    assert stage.type.value == "ExecuteDesktopTask"
+    assert stage.parameters["verification_policy"] == "full_goal_coverage"
+    assert "minimum_effect_categories" not in stage.parameters
+    assert "lifecycle" not in stage.parameters
+    assert contract.requirements[0].kind == "desktop_workflow"
+
+
+def test_continuous_chat_wording_does_not_install_desktop_lifecycle() -> None:
+    from winpilot.tasking.compiler import TaskContractCompiler
+
+    task = (
+        "去qq找我的手机持续聊天,他如果发@电脑就说明在命令你,"
+        "你要照做"
+    )
+    contract = TaskContractCompiler().compile(
+        task,
+        cold_start=True,
+        require_gui=True,
     )
 
-    assert contract.intent.send_mode == "continuous_chat"
-    assert contract.intent.channel == "QQ"
-    assert contract.intent.recipient == "我的手机"
     assert contract.clarification_questions == []
     assert [stage.type.value for stage in contract.stages] == ["ExecuteDesktopTask"]
     stage = contract.stages[0]
+    assert stage.parameters["goal"] == task
     assert stage.parameters["preserve_original_intent"] is True
-    assert stage.parameters["lifecycle"] == "persistent"
+    assert "lifecycle" not in stage.parameters
     assert stage.parameters["verification_policy"] == "full_goal_coverage"
+    assert contract.requirements[0].text == task
     assert {
         "communication_session", "command_trigger", "command_safety_policy",
     }.isdisjoint(stage.parameters)
     assert {
-        "find_program", "list_installed_apps", "record_facts", "revise_plan",
-        "open_conversation", "read_text", "send_text",
-    } <= set(
+        "open_conversation", "send_text", "send_artifact",
+    }.isdisjoint(stage.execution.model_tools)
+    assert {"observe", "click", "type_text"} <= set(
         stage.execution.model_tools
     )
+    assert {
+        "record_facts", "revise_plan", "read_text",
+    }.isdisjoint(stage.execution.model_tools)
 
 
 def test_installed_app_resolution_uses_binary_aliases_and_typo_fuzzing(monkeypatch) -> None:
     from winpilot.perception import apps
 
-    monkeypatch.setattr(apps, "_system_tool_entries", lambda: [])
-    monkeypatch.setattr(apps, "_wps_suite_entries", lambda: [])
     monkeypatch.setattr(apps, "_index", lambda: [
         {
-            "name": "抖音",
-            "target": r"C:\Start\抖音.lnk",
+            "name": "Nebula Player",
+            "target": r"C:\Start\Nebula Player.lnk",
             "kind": "lnk",
-            "aliases": [r"C:\Program Files\ByteDance\douyin\douyin.exe"],
+            "aliases": [r"C:\Programs\Nebula\nebula-player.exe"],
         },
         {
-            "name": "Krita (x64)",
-            "target": r"C:\Start\Krita.lnk",
+            "name": "Aurora Render",
+            "target": r"C:\Start\Aurora Render.lnk",
             "kind": "lnk",
-            "aliases": [r"C:\Program Files\Krita\bin\krita.exe"],
+            "aliases": [r"C:\Programs\Aurora\aurora-render.exe"],
         },
     ])
 
-    assert apps.resolve("douyin")[0]["name"] == "抖音"
-    fuzzy = apps.resolve("kirta")[0]
-    assert fuzzy["name"] == "Krita (x64)"
+    assert apps.resolve("nebula-player")[0]["name"] == "Nebula Player"
+    fuzzy = apps.resolve("Aurroa Render")[0]
+    assert fuzzy["name"] == "Aurora Render"
     assert fuzzy["match_kind"] == "fuzzy"
 
 
@@ -626,7 +896,76 @@ def test_open_application_stage_rejects_controller_ok_without_verification(monke
     assert caught.value.failure_type == "application_target_unverified"
 
 
-def test_desktop_effect_gate_rejects_open_only_and_typed_capability_list() -> None:
+def test_complete_desktop_stage_enters_agent_and_ignores_legacy_effect_gate(monkeypatch) -> None:
+    import winpilot.tasking.stage_runtime as stage_runtime
+    from winpilot.tasking.compiler import TaskContractCompiler
+
+    task = (
+        "\u6253\u5f00\u7f51\u6613\u4e91\u97f3\u4e50\u641c\u7d22\u6881\u9759\u8339\u5e76\u64ad\u653e"
+        "\u5217\u8868\u7684\u7b2c\u4e00\u9996\u6b4c,\u7136\u540e\u8c03\u5230\u6700\u5927\u58f0"
+    )
+    contract = TaskContractCompiler().compile(
+        task,
+        cold_start=True,
+        require_gui=True,
+    )
+    stage = contract.stages[0]
+    # A stale/evaluation-only parameter must not overrule the unified visual
+    # Agent's verified completion verdict.
+    stage.parameters["minimum_effect_categories"] = 99
+    built = []
+
+    class ForbiddenPreOpenSession:
+        def __init__(self, **_kwargs):
+            raise AssertionError("StageRuntime must not pre-open a semantic desktop app")
+
+    class FakeRunner:
+        run_id = "child-semantic-desktop"
+        status = "done"
+        result_text = "done"
+        usage_total = {}
+        model_request_count = 1
+        model_elapsed_ms = 1
+        _done_verified = True
+        _inline_stage_semantic_passed = False
+        _inline_stage_semantic_attempted = False
+        _inline_stage_semantic_last_verdict = {}
+        _tool_history = [
+            ("type_text", {"text": "search query"}, json.dumps({"ok": True})),
+        ]
+        session = SimpleNamespace(_last_canvas_region=None)
+
+        def bind_target_window(self, *_args):
+            raise AssertionError("an unrelated handoff window must not be bound")
+
+        def run(self):
+            return {"status": "done"}
+
+    def fake_build_runner(goal, **_kwargs):
+        built.append(goal)
+        return FakeRunner()
+
+    monkeypatch.setattr(stage_runtime, "ToolSession", ForbiddenPreOpenSession)
+    monkeypatch.setattr(stage_runtime, "build_runner", fake_build_runner)
+    context = {
+        "run_id": "run-semantic-desktop-owner",
+        "runtime_state": {},
+    }
+
+    result = stage_runtime.StageRuntime()._execute(
+        stage,
+        contract,
+        context,
+        threading.Event(),
+        time.monotonic(),
+    )
+
+    assert result.ok is True
+    assert built == [task]
+    assert result.output["model_calls"] == 1
+
+
+def test_desktop_effect_summary_reports_open_only_and_category_count() -> None:
     from winpilot.tasking.stage_runtime import StageRuntime
 
     open_only = StageRuntime._desktop_effect_summary([
@@ -640,16 +979,16 @@ def test_desktop_effect_gate_rejects_open_only_and_typed_capability_list() -> No
     assert typed_description["effect_category_count"] == 1
 
 
-def test_window_title_contains_alias_uses_the_canonical_title_check(monkeypatch) -> None:
+def test_window_title_contains_literal_uses_the_canonical_title_check(monkeypatch) -> None:
     from winpilot.action import verify
 
     monkeypatch.setattr(
         verify,
         "_check_window_title",
-        lambda needle, hwnd: (needle == "Wireshark" and hwnd == 123, "Wireshark"),
+        lambda needle, hwnd: (needle == "Nebula Monitor" and hwnd == 123, "Nebula Monitor"),
     )
     outcome = verify.check(
-        {"window_title_contains": "Wireshark"}, hwnd=123, timeout_s=10,
+        {"window_title_contains": "Nebula Monitor"}, hwnd=123, timeout_s=10,
     )
 
     assert outcome.verified is True
@@ -668,22 +1007,36 @@ def test_wait_with_truly_unknown_condition_fails_without_polling() -> None:
     assert time.monotonic() - started < 0.5
 
 
-def test_explicit_desktop_app_blocks_unrequested_web_fallback() -> None:
+def test_explicit_url_is_not_blocked_by_task_string_classification(monkeypatch) -> None:
+    from winpilot.agent import tools as tools_mod
     from winpilot.agent.tools import ToolSession
 
     session = ToolSession(
-        task="去抖音搜索kimi k3",
-        task_intent={"domain": "desktop", "source": "抖音"},
+        task="open the requested target in Nebula Desktop",
+        task_intent={"domain": "desktop", "source": "Nebula Desktop"},
+    )
+    launched = []
+    monkeypatch.setattr(session, "_resolve_launch_target", lambda _command: None)
+    monkeypatch.setattr(session, "_visible_window_snapshot", lambda _win32: {})
+    monkeypatch.setattr(
+        tools_mod.executor,
+        "launch",
+        lambda command: launched.append(command) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        tools_mod.verify,
+        "run_with_verify",
+        lambda _name, action, **_kwargs: {**action(), "verified": True},
     )
     try:
         result = json.loads(session._t_launch({
-            "command": "https://www.douyin.com/search/kimi%20k3",
+            "command": "https://example.test/visible-target",
         }).text)
     finally:
         session.close()
 
-    assert result["ok"] is False
-    assert result["failure_type"] == "application_constraint_violation"
+    assert result["ok"] is True
+    assert launched == ["https://example.test/visible-target"]
 
 
 def test_desktop_stage_exposes_optional_mcp_but_keeps_gui_controller() -> None:
@@ -696,7 +1049,8 @@ def test_desktop_stage_exposes_optional_mcp_but_keeps_gui_controller() -> None:
     tools = set(contract.stages[0].execution.model_tools)
 
     assert {"discover_mcp_tools", "call_mcp_tool"} <= tools
-    assert {"open_app", "observe", "click", "type_text", "execute_subgoal"} <= tools
+    assert {"open_app", "observe", "click", "type_text"} <= tools
+    assert {"execute_subgoal", "run_action_batch", "read_text"}.isdisjoint(tools)
 
 
 def test_calculator_natural_language_is_an_app_scoped_desktop_task() -> None:
@@ -714,68 +1068,7 @@ def test_calculator_natural_language_is_an_app_scoped_desktop_task() -> None:
     assert contract.stages[0].parameters["app"] == "\u8ba1\u7b97\u5668"
 
 
-def test_arithmetic_type_without_visual_effect_falls_back_to_semantic_keypad(
-    monkeypatch,
-) -> None:
-    from types import SimpleNamespace
-
-    import winpilot.agent.interaction_tools as interaction_tools
-    import winpilot.agent.tools as tools_mod
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.agent.tools import ToolSession
-    from winpilot.fast.subgoal import SubgoalExecutor
-    from winpilot.utils.screenshot import Region
-
-    captured: dict[str, object] = {}
-
-    fake_executor = SimpleNamespace(
-        cooperative_input_guard=lambda *_args, **_kwargs: None,
-        type_text=lambda text, **_kwargs: {"ok": True, "typed": len(text), "via": "vk"},
-        focus_window=lambda _hwnd: {"ok": True},
-    )
-
-    def run_with_verify(_name, action, **_kwargs):
-        return {**action(), "attempts": 1, "post_state": {"foreground_hwnd": 10}}
-
-    def fake_execute(_self, args):
-        captured.update(args)
-        return ToolResult(json.dumps({"ok": True, "verified": True}))
-
-    monkeypatch.setattr(tools_mod, "executor", fake_executor)
-    monkeypatch.setattr(
-        tools_mod,
-        "verify",
-        SimpleNamespace(run_with_verify=run_with_verify),
-    )
-    monkeypatch.setattr(
-        tools_mod,
-        "win32gui",
-        SimpleNamespace(GetForegroundWindow=lambda: 10),
-    )
-    monkeypatch.setattr(tools_mod, "capture", lambda _region: object())
-    monkeypatch.setattr(interaction_tools, "window_region", lambda _hwnd: Region(0, 0, 400, 600))
-    monkeypatch.setattr(interaction_tools.vision_cv, "diff_ratio", lambda _a, _b: 0.0)
-    monkeypatch.setattr(SubgoalExecutor, "execute", fake_execute)
-
-    session = ToolSession(task="calculate 86+79 in the calculator")
-    session.hwnd = 10
-    session._verification_watcher = lambda: None
-    session._fast_controller = lambda: object()
-    try:
-        payload = json.loads(session._t_type_text({"text": "86+79="}).text)
-    finally:
-        session.close()
-
-    assert payload["verified"] is True
-    assert payload["input_fallback"]["used"] is True
-    assert payload["input_fallback"]["expected_text"] == "165"
-    assert captured["verify_texts"] == ["165"]
-    assert [item["label"] for item in captured["clicks"]] == [
-        "Clear", "8", "6", "Plus", "7", "9", "Equals",
-    ]
-
-
-def test_type_text_schema_exposes_keyboard_mode_and_keypad_guidance() -> None:
+def test_type_text_schema_does_not_expose_keypad_fallback_tactics() -> None:
     from winpilot.agent.tool_schemas import tool_schemas
 
     type_tool = next(
@@ -784,9 +1077,9 @@ def test_type_text_schema_exposes_keyboard_mode_and_keypad_guidance() -> None:
         if tool["function"]["name"] == "type_text"
     )
 
-    keyboard_mode = type_tool["parameters"]["properties"]["keyboard_mode"]
-    assert set(keyboard_mode["enum"]) == {"default", "calculation", "numeric_keypad"}
-    assert "keypad" in type_tool["description"].casefold()
+    assert "keyboard_mode" not in type_tool["parameters"]["properties"]
+    assert "keypad" not in type_tool["description"].casefold()
+    assert "fallback" not in type_tool["description"].casefold()
 
 
 def test_unknown_mcp_server_does_not_fall_back_to_querying_every_server(monkeypatch) -> None:

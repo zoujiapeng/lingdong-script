@@ -128,7 +128,7 @@ class PerceptionToolMixin:
             return ""
         decision = select_visual_capture_scope(
             hwnd,
-            task=self.task,
+            enabled=None,
             related_window=getattr(self, "_window_related_to_target", None),
         )
         region = decision.region
@@ -522,13 +522,12 @@ class PerceptionToolMixin:
         """Return whether the main VLM can consume the real frame directly.
 
         A native multimodal model does not need the same screenshot decomposed
-        into several lossy, sometimes contradictory UIA/OCR/VLM summaries.  A
-        text query still opts into the structured grounding path; the direct
-        path is for scene understanding and coordinate decisions.
+        into several lossy, sometimes contradictory UIA/OCR/VLM summaries.
+        ``observe`` is therefore a visual refresh even when the caller supplies
+        a question-like query.  Structured perception remains an explicit
+        controller path rather than an automatic recovery from visual doubt.
         """
         if not bool(CONFIG.get("fusion", "native_vision_direct", default=True)):
-            return False
-        if str(args.get("query", "") or "").strip():
             return False
         if bool(args.get("full") or args.get("force_full") or args.get("changed_only")):
             return False
@@ -709,7 +708,8 @@ class PerceptionToolMixin:
             return ToolResult("无法确定目标窗口，请先 list_windows + focus_window")
         include_icons = bool(args.get("include_icons", True))
         fusion_mod = _tools_attr("fusion", fusion)
-        perception_mode = self._perception_mode()
+        native_visual = self._native_visual_direct_enabled(args)
+        perception_mode = "native_visual" if native_visual else self._perception_mode()
         # Domain controllers sometimes need a cheap structural snapshot and
         # then perform obligation-scoped OCR themselves.  Keep this private to
         # deterministic controller calls so the model-facing observe contract
@@ -718,7 +718,6 @@ class PerceptionToolMixin:
         if controller_mode == "structured_ui":
             perception_mode = controller_mode
         changed_regions = self._recent_changed_regions(hwnd) if bool(args.get("changed_only")) else []
-        native_visual = self._native_visual_direct_enabled(args)
         observe_profile = (
             "changed_roi"
             if changed_regions
@@ -801,7 +800,8 @@ class PerceptionToolMixin:
             and ocr_stats.get("scope") != "changed_roi"
         )
         if (
-            query_norm
+            not native_visual
+            and query_norm
             and not full_ocr_already_ran
             and not self._query_grounded_elements(
                 query_norm,
@@ -853,10 +853,13 @@ class PerceptionToolMixin:
             text = (
                 "Native visual direct observation: the attached real GUI frame is "
                 "authoritative. Structured UIA/OCR/VLM decomposition was intentionally "
-                "skipped to preserve scene context and latency. Use a query only when "
-                "exact text grounding is genuinely needed.\n" + text
+                "skipped.\n" + text
             )
-        action_proposal = self._maybe_auto_execute_grounded_communication(reduction)
+        action_proposal = (
+            None
+            if native_visual
+            else self._maybe_auto_execute_grounded_communication(reduction)
+        )
         if action_proposal is not None:
             try:
                 proposal_data = json.loads(action_proposal.text or "{}")

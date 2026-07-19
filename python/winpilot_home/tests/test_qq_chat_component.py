@@ -71,12 +71,24 @@ class TestVisionPrompt:
             style="compact",
         )
 
-        assert len(prompt) < 6000
+        assert len(prompt) < 2000
         assert "execution is not semantic" in prompt
         assert "fresh pixels against the user's criteria" in prompt
         assert "detailed creature" not in prompt
         assert "For a dog" not in prompt
         assert "15-30" not in prompt
+        assert "# Todo planning" not in prompt
+        assert "revise_plan" not in prompt
+        for scenario_rule in (
+            "suggestions are open",
+            "6+7=",
+            "calculator",
+            "canvas",
+            "game",
+            "handwriting",
+            "sliders",
+        ):
+            assert scenario_rule not in prompt.casefold()
         native_tools = {
             item["function"]["name"]
             for item in tool_schemas(
@@ -120,10 +132,11 @@ class TestVisionPrompt:
                 }
                 assert _main_model_has_vision() is False, f"expected no vision for {model}"
 
-    def test_screenshot_injected_after_observe_for_vision_model(self):
+    def test_screenshot_injects_the_authoritative_image_coordinate_contract(self):
         """_inject_observe_screenshot should append an image_url message when
-        the main model is vision-capable and an hwnd is set.  The message must
-        also describe how image-local coordinates map back to physical pixels.
+        the main model is vision-capable and an hwnd is set.  The model should
+        receive one exact image-pixel coordinate space, without physical-window
+        geometry that the runtime already owns.
         """
         from winpilot.utils.image_capture import VisualCaptureScope
         from winpilot.utils.screenshot import Region
@@ -155,9 +168,10 @@ class TestVisionPrompt:
         ]
         assert len(image_msgs) == 1
         text_part = next(part for part in image_msgs[0]["content"] if part.get("type") == "text")
-        assert "left=120, top=80, width=1400, height=900" in text_part["text"]
-        assert "1120x720" in text_part["text"]
-        assert "physical" in text_part["text"].lower() or "物理" in text_part["text"]
+        assert "Exact authoritative full-image size=1120x720 pixels" in text_part["text"]
+        assert "image_* pixel values" in text_part["text"]
+        assert "x=0..1119, y=0..719" in text_part["text"]
+        assert "left=120" not in text_part["text"]
 
     def test_no_screenshot_injected_for_text_model(self):
         """No injection when model lacks vision."""
@@ -264,8 +278,19 @@ class TestDoneGate:
         assert result is False
         assert runner._done_rejects == 1
 
-    def test_done_accepted_with_read_text_evidence(self):
-        runner = _make_runner()
+    def test_native_done_is_decided_from_fresh_pixels_not_read_text(self, monkeypatch):
+        from winpilot.agent import done_verifier
+        from winpilot.agent.loop import AgentRunner
+        from winpilot.agent.runtime_profile import RuntimeProfile
+
+        runner = AgentRunner(
+            TASK,
+            stop_event=threading.Event(),
+            runtime_profile=RuntimeProfile(
+                stage_type="ExecuteDesktopTask",
+                experience_enabled=False,
+            ),
+        )
         chat_readout = (
             "妈妈\nHELLO_FROM_AGENT\n好的，我看到了\nTHANKS_FOR_CONFIRMING"
         )
@@ -277,7 +302,8 @@ class TestDoneGate:
             ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
             ("read_text", {}, chat_readout),
         ]
-        # Simulate a real chat window: multiple long lines resembling message bubbles.
+        # Legacy read_text may remain as factual history, but it is not an
+        # acceptance shortcut for the unified native visual runtime.
         runner._recent_results = [
             ("read_text",
              "妈妈 在吗 帮我看一下 我发了个消息\n"
@@ -287,26 +313,44 @@ class TestDoneGate:
         ]
         runner._done_rejects = 0
 
-        with patch.object(runner.session, "hwnd", None), \
-             patch("winpilot.agent.loop.fusion") as mock_fusion, \
-             patch("winpilot.agent.loop.intent") as mock_intent:
-            mock_snap = MagicMock()
-            mock_snap.to_text.return_value = "QQ 聊天界面 妈妈 在吗"
-            mock_snap.title = "QQ"
-            mock_fusion.observe.return_value = mock_snap
-            mock_intent.perception_mode.return_value = "visual"
+        class _Config:
+            def get(self, *path, default=None):
+                return {
+                    ("agent", "verify_done"): True,
+                    ("agent", "done_max_rejects"): 2,
+                    ("api",): {"model": "mock-vision-judge"},
+                }.get(tuple(path), default)
 
-            client = MagicMock()
-            client.chat.completions.create.return_value = MagicMock(
-                choices=[MagicMock(message=MagicMock(
-                    content='{"done": true, "reason": "聊天窗口已打开，read_text 证据充分"}',
-                    reasoning_content="",
-                ))]
-            )
-            result = runner._verify_done(client, steps_left=10)
+        monkeypatch.setattr(done_verifier, "_config", lambda: _Config())
+        monkeypatch.setattr(
+            done_verifier,
+            "model_supports_vision",
+            lambda _model: True,
+        )
+
+        def fresh_screen():
+            runner._fresh_done_image_b64 = "fresh-chat-frame"
+            return "fresh authoritative frame"
+
+        monkeypatch.setattr(runner, "_fresh_done_screen", fresh_screen)
+        client = MagicMock()
+        client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(
+                content=(
+                    '{"done": true, "reason": '
+                    '"latest pixels satisfy the original request"}'
+                ),
+                reasoning_content="",
+            ))]
+        )
+
+        result = runner._verify_done(client, steps_left=10)
 
         assert result is True
         assert runner._done_verified is True
+        request = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+        assert isinstance(request, list)
+        assert any(part.get("type") == "image_url" for part in request)
 
     def test_done_force_accept_disabled_after_max_rejects(self):
         """Communication tasks must not turn repeated rejects into fake success."""
@@ -336,24 +380,27 @@ class TestDoneGate:
 
 
 # ---------------------------------------------------------------------------
-# 6. Perception: QQ window triggers visual mode, not normal mode
+# 6. Perception: structured intent, not product/window vocabulary, selects mode
 # ---------------------------------------------------------------------------
 
 class TestPerceptionMode:
-    def test_qq_chat_task_triggers_visual_mode(self):
+    def test_structured_send_task_triggers_visual_mode(self):
         from winpilot.perception.intent import perception_mode
 
-        mode = perception_mode(TASK, "QQ")
+        mode = perception_mode({
+            "operation": ["send"],
+            "interaction": {"active": False},
+        }, "QQ")
         assert mode == "visual", f"expected visual, got {mode}"
 
-    def test_qq_window_title_triggers_visual_mode(self):
+    def test_window_title_does_not_infer_perception_mode(self):
         from winpilot.perception.intent import perception_mode
 
         mode = perception_mode("打开应用", "QQ - 我的手机")
-        assert mode == "visual"
+        assert mode == "normal"
 
     def test_generic_dialog_stays_normal_mode(self):
         from winpilot.perception.intent import perception_mode
 
-        mode = perception_mode("打开记事本", "Notepad")
+        mode = perception_mode("Open the notes application", "Nebula Notes")
         assert mode == "normal"
