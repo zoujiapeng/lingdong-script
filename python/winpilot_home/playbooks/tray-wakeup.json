@@ -1,7 +1,16 @@
 {
   "name": "tray-wakeup",
-  "description": "托盘/后台程序唤起法",
-  "keywords": ["QQ", "微信", "wechat", "钉钉", "dingtalk", "飞书", "telegram", "消息", "聊天", "发送给", "托盘", "唤起", "通讯"],
-  "window_triggers": ["登录", "扫码"],
-  "content": "# 托盘/后台程序唤起法（重要）\n- QQ/微信/钉钉等程序常驻系统托盘时没有可见窗口，list_windows 看不到它们\n- **绝对禁止对已在运行的即时通讯软件再次 launch**——那会弹出新账号的登录窗口！\n- 正确做法: find_app 显示 running=true 但 has_visible_window=false → 用 tray_click(\"程序名\") 点击托盘图标唤起主窗口（单击无效再试 double=true）\n- 误开了登录窗口就用 hotkey [\"alt\",\"f4\"] 或点关闭按钮关掉它，再走托盘路径"
+  "description": "运行中但无可见窗口时的通用托盘恢复",
+  "keywords": ["托盘", "后台运行", "常驻后台", "唤起", "system tray", "running in background", "restore window", "no visible window"],
+  "window_triggers": [],
+  "conditions": [
+    "The exact user-named application is proven running by process identity.",
+    "No visible window belonging to that same application is available.",
+    "A tray or hidden-window candidate can be bound to that application; otherwise do not guess."
+  ],
+  "evidence": [
+    "After the wake action, require a newly visible live window bound to the same application identity.",
+    "Do not report success from a tray click alone, and do not treat an unrelated foreground window as proof."
+  ],
+  "content": "# 通用托盘/后台窗口恢复\n1. 先用 find_app 核验用户点名的目标进程已运行，并确认它当前没有可见窗口。\n2. 只有托盘候选能和同一应用身份可靠绑定时，才用 tray_click 唤醒；单击无因果变化时可尝试一次双击。\n3. 每次动作后重新观察，必须看到属于同一应用的实时窗口新出现并可聚焦，才算恢复成功。\n4. 在恢复路径尚未失败且无法证明重复启动安全之前，不要创建第二个实例。若候选身份不确定，返回可恢复的未解析状态，让视觉主循环重新观察。"
 }

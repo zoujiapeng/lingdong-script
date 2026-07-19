@@ -27,7 +27,6 @@ ALLOWED_BATCH_ACTIONS = {
     "wait_change",
     "wait_for_visual_change",
     "wait_stable",
-    "ensure_document_surface",
     "read_text",
     "zoom",
     "screenshot",
@@ -53,7 +52,6 @@ BATCH_MUTATING_ACTIONS = {
     "select_color",
     "focus_window",
     "launch",
-    "ensure_document_surface",
     "clipboard_paste",
 }
 
@@ -73,6 +71,7 @@ BATCH_CLIPBOARD_ACTIONS = {
 }
 
 VISUAL_TRANSACTION_ACTIONS = BATCH_MUTATING_ACTIONS | {
+    "double_click",
     "run_action_batch",
     "execute_subgoal",
     "open_app",
@@ -177,7 +176,7 @@ def action_reference_system(name: str, args: dict[str, Any]) -> str:
     if args.get("normalized_strokes") is not None:
         return "canvas_normalized_0_1000"
     if name in {
-        "click", "scroll", "move_mouse", "mouse_down", "mouse_up",
+        "click", "double_click", "scroll", "move_mouse", "mouse_down", "mouse_up",
         "drag", "draw_strokes", "zoom",
     }:
         return "screen_physical_px"
@@ -290,6 +289,30 @@ def parse_atomic_action(
     )
 
 
+def canonicalize_batch_actions(
+    actions: Any,
+) -> tuple[tuple[AtomicAction, ...], list[str]]:
+    """Parse each declared batch child exactly once, preserving its position."""
+    if not isinstance(actions, list) or not actions:
+        return (), ["config.actions must be a non-empty array"]
+    canonical: list[AtomicAction] = []
+    errors: list[str] = []
+    for index, action in enumerate(actions, start=1):
+        if not isinstance(action, dict):
+            errors.append(f"action {index} must be an object")
+            continue
+        parsed = parse_atomic_action(
+            action,
+            ordinal=index - 1,
+            source_path=f"actions[{index - 1}]",
+        )
+        if parsed is None:
+            errors.append(f"action {index} has no action/tool name")
+            continue
+        canonical.append(parsed)
+    return tuple(canonical), errors
+
+
 def iter_atomic_actions(
     tool_name: str,
     args: dict[str, Any],
@@ -390,8 +413,10 @@ def _missing_action_fields(name: str, args: dict[str, Any]) -> str:
         return "requires amount"
     if name == "drag" and not all(args.get(key) is not None for key in ("x1", "y1", "x2", "y2")):
         return "requires x1, y1, x2, and y2"
-    if name == "focus_window" and not str(args.get("title") or "").strip():
-        return "requires title"
+    if name == "focus_window" and not (
+        str(args.get("title") or "").strip() or args.get("hwnd") is not None
+    ):
+        return "requires title or hwnd"
     if name == "launch" and not str(args.get("command") or "").strip():
         return "requires command"
     condition = args.get("condition")
@@ -428,20 +453,24 @@ def validate_batch_actions(
     boundary only when the caller declares the exact button state before and
     after this batch.
     """
-    if not isinstance(actions, list) or not actions:
-        return ["config.actions must be a non-empty array"]
-    errors: list[str] = []
-    for index, action in enumerate(actions, start=1):
-        if not isinstance(action, dict):
-            errors.append(f"action {index} must be an object")
-            continue
-        name = batch_action_name(action)
-        if not name:
-            errors.append(f"action {index} has no action/tool name")
-        elif name not in ALLOWED_BATCH_ACTIONS:
+    if (
+        isinstance(actions, (list, tuple))
+        and actions
+        and all(isinstance(action, AtomicAction) for action in actions)
+    ):
+        canonical = tuple(actions)
+        errors: list[str] = []
+    else:
+        canonical, errors = canonicalize_batch_actions(actions)
+    if not canonical:
+        return errors or ["config.actions must be a non-empty array"]
+    for action in canonical:
+        index = action.ordinal + 1
+        name = action.name
+        if name not in ALLOWED_BATCH_ACTIONS:
             errors.append(f"action {index} uses unsupported controller action {name!r}")
         else:
-            missing = _missing_action_fields(name, batch_action_args(action))
+            missing = _missing_action_fields(name, action.inputs)
             if missing:
                 errors.append(f"action {index} ({name}) {missing}")
     before = str(pointer_hold_before or "").strip().casefold()
@@ -463,11 +492,10 @@ def validate_batch_actions(
         "move_mouse", "wait", "wait_change", "wait_for_visual_change",
         "wait_stable",
     }
-    for index, action in enumerate(actions if isinstance(actions, list) else [], start=1):
-        if not isinstance(action, dict):
-            continue
-        name = batch_action_name(action)
-        args = batch_action_args(action)
+    for action in canonical:
+        index = action.ordinal + 1
+        name = action.name
+        args = action.inputs
         button = str(args.get("button") or "left").casefold()
         if name == "mouse_down":
             if held_button:

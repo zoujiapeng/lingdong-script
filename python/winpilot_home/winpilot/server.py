@@ -106,7 +106,10 @@ if _started_by_direct_uvicorn() and not os.environ.get("WINPILOT_LAUNCHED_VIA_SE
     sys.exit(1)
 
 def _warm_perception_dimensions() -> None:
-    if "ocr" in CONFIG.enabled_dimensions():
+    if (
+        "ocr" in CONFIG.enabled_dimensions()
+        and bool(CONFIG.get("ocr", "warm_on_startup", default=False))
+    ):
         started = ocr.warm_async()
         if started:
             logger.info("OCR 后台预热已启动")

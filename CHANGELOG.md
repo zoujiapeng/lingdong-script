@@ -2,13 +2,33 @@
 
 ## Unreleased
 
-### Documentation and branch consolidation (2026-07-18)
+### Vision-first GUI runtime consolidation and real-client evidence (2026-07-18)
+
+- Audited the long-term documentation against the real Electron path: visible `PlatformWorkbench` submission, Task Contract/ARP, one `ExecuteDesktopTask` stage, `AgentRunner`, and the shared visual action loop.
+- Defined single responsibilities for `FrameAuthority`, `FastGuiController`, `RunStateMachine`, and `FailureRecoveryLayer`. Recovery now means invalidating stale evidence, observing a fresh authoritative frame, and returning the classified failure to the model; UIA, OCR, MCP, and domain adapters are never an automatic failure cascade.
+- Documented a small, fixed, general native GUI operator surface. The full user goal remains intact and the model composes unknown tasks one verified action at a time; old public macro and plan-mutator tool names are no longer described as the client contract.
+- Added the Codex-style basic-tool boundary: generic tools perform multi-source discovery and return evidence, while the model decides from the screen and results. Installed-app resolution now joins Start Menu shortcuts, `Get-StartApps`, App Paths, executable/process identity, already-running windows, and launch-time process/window evidence; unresolved tray/login-state ownership remains architecture debt.
+- Changed the native visual coordinate contract to pixels in the exact image submitted to the model, with one runtime mapping to the authoritative frame and physical desktop. Added a distinct `double_click` primitive, bounded same-frame detail crops for spatial actions, and post-action visual checkpoints that let the completion judge reason about transient/animated effects without treating historical pixels as current state.
+- Removed the executable `DrawArtifact` side channel. Historical task-contract documents still parse, but their stages are normalized to the same `ExecuteDesktopTask` runtime profile, capability-gated model surface, app discovery, recovery loop, and done judge. Click, constrained drag, multi-point drag, held-pointer movement, and continuous paths are shared primitives for every visual task rather than drawing-only capabilities.
+- Stopped the compiler from emitting the legacy Observe/Infer/Perform/Verify/Wait interaction pipeline. Every visible-client GUI request now compiles to one lossless `ExecuteDesktopTask` with the original goal; typed intent remains audit metadata and cannot inject task-family tactics into the visual runtime. Historical serialized contracts remain readable through an isolated compatibility path.
+- Added a generic bounded `wait(until_change=true)` primitive. It returns a fresh authoritative frame after external visual change without classifying the scene, claiming semantic progress, or forcing the model to continue its previous strategy.
+- Hardened Electron's managed-server port probe: high-port fallback now disperses candidates across the complete renderer-safe range and resolves only after the probe listener is closed, avoiding contiguous Windows reservations and immediate-rebind races.
+- Fixed two foundational gaps found during the final audit: portable or otherwise unregistered executables now reach the structured `.exe` fallback instead of being rejected by the public file-search guard, and the native done judge now receives bounded, deduplicated cross-window and transient post-action frames for long ordered tasks.
+- Made native vision the default path: example configuration disables UIA, OCR, and predictive OCR, while structured providers remain explicit, provenance-bound assistance. A failed action invalidates stale evidence and returns to a fresh visual decision instead of automatically switching to UIA, OCR, MCP, or a domain adapter.
+- Kept semantic recovery model-owned: a fresh frame or unexpected result may cause the model to revise or discard its prior strategy. Runtime checks enforce frame, window, coordinate, and input validity, but do not force consistency with a prewritten plan or encode task-specific recovery tactics.
+- Reaffirmed that the 11 original tasks and their mixed long-task variants are black-box acceptance material only. They must enter through the real Electron client with cold-start isolation and cannot contribute prompt rules, routes, coordinates, adapters, or special completion logic.
+- Real Electron-client, cold-start evidence on this worktree includes: the local Douyin desktop client reached visible `kimi k3` search results; `game-drag-v2` passed its independent trusted-browser pointer oracle; and the user confirmed that NetEase Cloud Music was playing the requested first result with Windows volume at 100%. The NetEase harness continued after the user-visible goal had been reached and was then stopped at the user's request, so it is a user-confirmed task result, **not** a formal terminal harness pass. The 11-task and mixed-long-task suites have not passed in full, and no success-rate claim is made.
+- Current-worktree silent verification after consolidation: WinPilot `1881 passed, 13 skipped, 1 deprecation warning`; root Python `2508 passed`; Vitest `20 files / 215 tests passed`; all renderer/main/CLI/AI TypeScript checks passed; and the production renderer/Electron build passed. The opt-in real GUI suites remained disabled and were not rerun.
+
+Entries below this point are historical snapshots of earlier implementations and reports. They are not a current tool contract or evidence that the present worktree passes the recorded checks.
+
+### Historical documentation and branch consolidation (2026-07-18)
 
 - Re-audited the repository documentation against the current Electron entrypoint, Task Contract/ARP runtime, native-vision loop, Controller primitives, memory policy, MCP boundary, legacy Flow/Browser compatibility code, and known architectural debt.
 - Replaced volatile run-by-run prose with durable architecture invariants: authoritative pixels, one client path, one action transaction, evidence-gated completion, generic pointer primitives, compiler limits, and memory as acceleration rather than capability.
 - Added `docs/testing.md` as the canonical definition of real Electron-client E2E, cold-start isolation, multi-turn context, the 11 black-box probes, mixed long tasks, external oracles, focus interference, reporting, and release gates.
 - Updated the architecture audit to distinguish reusable generic mechanisms from remaining duplication and application-specific debt. The old browser-based visual guide is intentionally not merged because it is a parallel presentation artifact rather than a runtime fact source.
-- Re-ran the current WinPilot suite after replacing the client harness's undeclared `pywinauto` dependency with the repository-supported `uiautomation + Win32`: `1985 passed, 13 skipped`. The visible Electron cold-start `dynamic-hold` rerun passed trusted external pointer ground truth, and both GitHub Actions jobs passed. These are mechanism checks, not a claim that all 11 real tasks pass.
+- The archived report recorded local regression, one visible-client pointer scenario, and CI checks. This documentation audit did not reproduce them, so they are historical mechanism evidence only and not a current acceptance result.
 
 ### Cross-frame pointer control and native-client stress matrix (2026-07-18)
 
@@ -16,7 +36,7 @@
 - Made a fresh frame a hard spatial-plan boundary while a pointer is held. Deferred coordinates authored against the old frame are discarded and replanned from current pixels; destination actions no longer inherit stale source regions, and candidate/anchor mapping uses current frame geometry.
 - Preserved authored subtarget coordinates inside broad plain-OCR boxes, added one bounded current-frame UIA/Win32 semantic recovery for first no-progress clicks, and hardened exact-window focus with isolated Windows fallbacks plus transient `Windows.UI.Core.CoreWindow` dismissal.
 - Added real Electron-client E2E harnesses: `client_visual_e2e_run.py` covers ordinary drag, slider, dynamic target reveal, constrained corridors, and game-like dragging with trusted external pointer ground truth; `client_e2e_run.py` contains the exact 11 user cases plus mixed and all-11 long tasks, resets session context by default, and verifies cold-start experience isolation.
-- The 2026-07-18 visible-client visual suite passed `7/7` with `experience_policy=disabled`; the dynamic case used one trusted pointerdown, revealed its goal only after the checkpoint, read a new frame, and released inside the goal. WinPilot regression was `1929 passed, 13 skipped, 2 warnings`, and all four TypeScript typecheck targets passed.
+- The archived 2026-07-18 report recorded a cold-start visual matrix and regression/typecheck checks. Those results were not rerun on the current worktree and must not be carried forward as a current baseline.
 - Kept the real-software result explicit: the latest QQ Space case exhausted 80 steps after a Windows Shell Experience focus takeover and is still failed; its trace is `arp-20260718-075223-92a997`. The subsequent generic focus fix has unit and manual reproduction evidence but the QQ case was not rerun after it, so this changelog does not claim it passed.
 
 ### General visual interaction reachability and control loop (2026-07-17)
@@ -50,7 +70,7 @@
 - Tightened the native-vision transaction loop: the model gets an initial authoritative frame and a fresh post-action frame, one visual mutation is accepted per turn, stale/missing frames fail closed, preflight checks use a grounded target ROI when possible, and final semantic completion is judged only from a newly captured goal-conditioned frame or deterministic evidence.
 - Hardened generic continuous-pointer execution without adding cat/dog/Paint-specific production rules. Tool arguments repair flat or stringified stroke arrays; paths are fit coherently to one detected work surface instead of clipping points independently; truncated/partial model output cannot trigger destructive recovery; visible partial work is repaired forward rather than entering repeated clear/undo loops.
 - Reduced the system prompt to one compact, vision-first contract. Same-frame UIA/OCR/VLM decomposition is skipped for ordinary native-vision observations; structured perception remains available for explicit queries, text-only models, grounding, verification, and recovery. Domain playbooks remain opt-in.
-- Made the live todo plan model-editable at any time. `revise_plan` can replace or clear the list, or atomically add, update, remove, move, and reopen items while retaining unrelated verified progress.
+- At that time, exposed a public plan-mutation tool that could replace, clear, add, update, remove, move, and reopen todo items. That public tool is historical and is not part of the current native-client operator contract.
 - Added experimental human/Agent input arbitration behind `controller.multi_input_cooperation=false`. It prefers background-safe window/UIA actions, never steals keyboard focus from an unrelated foreground window, lets human cursor movement win during long physical input, and blocks when target ownership cannot be proved. Windows physical input remains single-writer.
 - Added runtime contract v2 and a process-loaded source fingerprint. Electron and the renderer reject incompatible, source-drifted, or different-commit Python controllers; new frontend ARP runs also fail closed until the managed runtime is restarted.
 - Localized the native workbench to Chinese while preserving technical identifiers such as API, MCP, VLM, URL, model names, and coordinate fields.
@@ -85,7 +105,7 @@
   - `agent/perception_tools.py` now owns observe/read_text/VLM/template/color perception tools.
   - `agent/interaction_tools.py` now owns click/type/hotkey/scroll/drag/draw/wait tools.
   - `agent/system_tools.py` now owns run_shell/run_detached/launch/tray/search/undo tools.
-  - `agent/plan_tools.py` now owns revise_plan/complete_subgoal/done/fail tools.
+  - `agent/plan_tools.py` then owned the public plan/progress/terminal tools; this is a historical module split, not the current client schema contract.
   - `agent/file_tools.py` now owns generic file tools used by `ToolSession`.
   - `agent/memory_tools.py` now owns memory/replay tools used by `ToolSession`.
   - `agent/desktop_tools.py` now owns clipboard, mouse fine-control, screenshot, display, and app-list tools.
@@ -126,12 +146,12 @@
 ### Low-latency GUI agent
 
 - Added automatic `screen_watch` startup/shutdown around target windows and visible actions.
-- Added `run_action_batch(subgoal=...)` so traces can connect a controller batch to the high-level intent.
+- Added a then-public controller batch wrapper so traces could connect grouped actions to a high-level intent. The wrapper is historical and is not part of the current native-client operator contract.
 - Added `click_element` anchor evidence (`anchor_locator`, `resolved_element`) and made `ElementCache` revalidate cached anchors against the current snapshot instead of reusing stale `elem_id` values across observes.
 - Added independent before/after frame diffing for visible action `screen_delta`; the watcher now records action-attributed ROIs in `action_changed_regions`.
 - Made `observe(changed_only=true)` prefer fresh action ROIs before falling back to regular recent watcher ROIs.
 - Extended trace summaries with `low_latency` and `fast_gui` metrics for screen capture, perception, LLM decision, action execution, post-action verification, batch subgoals, controller phases, and anchor click/cache/failure counts.
-- Verified the webpage GUI target through the real `/api/chat` path with UIA disabled: run `20260703-025138-dcf2c6` reached `LOCAL_COUNTER_1` via `run_action_batch` + `observe(changed_only=true)` and passed fresh-screen done verification.
+- The archived report recorded a webpage target reached through `/api/chat` using the then-public batch wrapper. This was an integration-path result, not Electron-client E2E, and was not rerun for the current worktree.
 - Verified the merged state with `python -m pytest python/winpilot_home/tests -q`, `npx vitest run`, and `npm run build`.
 
 ### Earlier agent hardening

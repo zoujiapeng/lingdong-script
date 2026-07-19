@@ -55,6 +55,56 @@ describe('taskbarNotificationForTransition', () => {
     });
   });
 
+  it('treats a reply containing serialized failure signals as a failure', () => {
+    const result = JSON.stringify({
+      ok: false,
+      blocked: true,
+      safe_stop: true,
+      error: '模型重复了被阻止的动作',
+    });
+    expect(taskbarNotificationForTransition(
+      { runId: 'run-1', status: 'running' },
+      run('reply', { result }),
+    )).toEqual({
+      title: '任务失败',
+      body: result,
+      kind: 'error',
+      runId: 'run-1',
+    });
+  });
+
+  it('treats nested object failure signals and a reply error as failures', () => {
+    expect(taskbarNotificationForTransition(
+      { runId: 'run-1', status: 'running' },
+      run('reply', { result: { response: { ok: false } } }),
+    )?.kind).toBe('error');
+    expect(taskbarNotificationForTransition(
+      { runId: 'run-1', status: 'running' },
+      run('reply', { result: '没有完成', error: '目标窗口不可用' }),
+    )).toMatchObject({
+      title: '任务失败',
+      body: '目标窗口不可用',
+      kind: 'error',
+    });
+  });
+
+  it('keeps a reply without explicit failure signals successful', () => {
+    expect(taskbarNotificationForTransition(
+      { runId: 'run-1', status: 'running' },
+      run('reply', { result: JSON.stringify({ ok: true, answer: '已找到结果' }) }),
+    )?.kind).toBe('success');
+  });
+
+  it('lets explicit failure signals override a done status', () => {
+    expect(taskbarNotificationForTransition(
+      { runId: 'run-1', status: 'running' },
+      run('done', { result: { ok: false, error: '最终验证失败' } }),
+    )).toMatchObject({
+      title: '任务失败',
+      kind: 'error',
+    });
+  });
+
   it('notifies the first run when its live start event was observed', () => {
     expect(taskbarNotificationForTransition(
       null,

@@ -4,19 +4,30 @@ import pytest
 
 
 INTERACTIVE_TASKS = (
-    "和我在画板上玩游戏，你看看画板就知道了，我已经开始了",
-    "跟我在画图中互动；观察当前界面，我先操作过了",
+    "和我在星图工坊应用上玩游戏，你看看星图工坊就知道了，我已经开始了",
+    "跟我互动；在像素庭院应用中观察当前界面，我先操作过了",
     "轮到你了，请根据当前浏览器窗口完成你的下一步",
     "Collaborate with me in the current browser window; I already started.",
 )
 
 
-BOUNDED_STAGE_TYPES = [
-    "ObserveScene",
-    "InferInteraction",
-    "PerformTurn",
-    "VerifyLocalEffect",
-]
+def _assert_single_visual_model_stage(contract, task: str):
+    assert contract.session is None
+    assert contract.clarification_questions == []
+    assert [stage.type.value for stage in contract.stages] == [
+        "ExecuteDesktopTask",
+    ]
+    stage = contract.stages[0]
+    assert stage.parameters["goal"] == task
+    assert stage.parameters["original_task"] == task
+    assert stage.parameters["preserve_original_intent"] is True
+    assert [item.id for item in stage.obligations] == [
+        "desktop.full_goal_verified",
+    ]
+    assert {
+        "observe", "click", "drag", "scroll", "done",
+    } <= set(stage.execution.model_tools)
+    return stage
 
 
 @pytest.mark.parametrize(
@@ -67,13 +78,8 @@ def test_short_visual_commands_reach_bounded_typed_interaction(
     assert interaction.primary_action_modality == expected_primary
     assert expected_signal in interaction.signals
     assert interaction.provenance["active"] == "typed_command_relation"
-    assert contract.session is not None
-    assert contract.session.target == "active_window"
-    assert contract.session.primary_action_modality == expected_primary
-    assert [stage.type.value for stage in contract.stages] == BOUNDED_STAGE_TYPES
+    _assert_single_visual_model_stage(contract, task)
     assert all(node.kind.value != "agent_goal" for node in graph.nodes)
-    infer = next(stage for stage in contract.stages if stage.type.value == "InferInteraction")
-    assert expected_signal in infer.parameters["intent_signals"]
 
 
 def test_equivalent_direct_manipulation_rewrites_have_the_same_contract_shape():
@@ -89,7 +95,8 @@ def test_equivalent_direct_manipulation_rewrites_have_the_same_contract_shape():
     assert all(item.intent.interaction.action_modalities == ["drag"] for item in contracts)
     assert all(item.intent.interaction.mode == "direct_visual_manipulation" for item in contracts)
     assert all(item.intent.interaction.session_mode == "bounded" for item in contracts)
-    assert all([stage.type.value for stage in item.stages] == BOUNDED_STAGE_TYPES for item in contracts)
+    for task, contract in zip(rewrites, contracts, strict=True):
+        _assert_single_visual_model_stage(contract, task)
 
 
 @pytest.mark.parametrize(
@@ -151,27 +158,16 @@ def test_high_confidence_semantic_extractor_can_veto_structural_candidate():
     assert "interact" not in intent.operation
 
 
-def test_shared_visual_interaction_uses_typed_session_stages():
+def test_shared_visual_interaction_uses_one_visual_model_stage():
     from winpilot.tasking.compiler import TaskContractCompiler
 
     contract = TaskContractCompiler().compile(INTERACTIVE_TASKS[0])
     assert contract.intent.operation == ["interact"]
-    assert contract.intent.source == "Paint"
+    assert contract.intent.source == "星图工坊"
     assert contract.intent.interaction.active is True
     assert contract.intent.interaction.mode == "turn_based"
     assert contract.intent.interaction.turn_owner == "agent"
-    assert contract.session is not None
-    assert contract.session.target == "Paint"
-    assert contract.session.max_agent_turns_per_activation == 1
-    assert contract.session.wait_for_external_change is True
-    assert [stage.type.value for stage in contract.stages] == [
-        "ObserveScene",
-        "InferInteraction",
-        "PerformTurn",
-        "VerifyLocalEffect",
-        "WaitForExternalChange",
-    ]
-    assert [stage.parameters["max_steps"] for stage in contract.stages] == [2, 3, 4, 2, 1]
+    _assert_single_visual_model_stage(contract, INTERACTIVE_TASKS[0])
     assert contract.satisfiable is True
 
 
@@ -194,13 +190,7 @@ def test_minimal_shared_turn_handoff_observes_scene_before_acting(task: str):
     assert contract.intent.interaction.session_mode == "persistent"
     assert contract.intent.interaction.turn_owner == "agent"
     assert contract.intent.interaction.primary_action_modality == "infer_from_scene"
-    assert [stage.type.value for stage in contract.stages] == [
-        "ObserveScene",
-        "InferInteraction",
-        "PerformTurn",
-        "VerifyLocalEffect",
-        "WaitForExternalChange",
-    ]
+    _assert_single_visual_model_stage(contract, task)
     assert all(node.kind.value not in {"agent_goal", "skill_replay"} for node in graph.nodes)
 
 
@@ -224,7 +214,8 @@ def test_actor_assignments_keep_role_ownership_instead_of_flattening_values():
     from winpilot.tasking.intent import TaskIntentParser
 
     intent = TaskIntentParser().parse(
-        "和我在画板上玩游戏，你看看画板就知道了，我已经开始了，你用红色我用黑色"
+        "和我在星图工坊应用上玩游戏，你看看星图工坊就知道了，"
+        "我已经开始了，你用红色我用黑色"
     )
     assert intent.interaction.active is True
     assert intent.interaction.role_assignments == {
@@ -242,7 +233,7 @@ def test_interaction_routing_requires_a_live_relation_or_pointer_plus_visual_tar
     parser = TaskIntentParser()
     for task in (
         "打开一个游戏",
-        "在画板上画一只猫",
+        "在星图工坊应用上画一只猫",
     ):
         intent = parser.parse(task)
         assert intent.interaction.active is False, task
@@ -293,23 +284,13 @@ def test_semantic_extractor_can_supply_interaction_frame_without_keyword_routing
     assert "semantic_interaction_frame" in intent.interaction.signals
 
 
-def test_interaction_frames_are_ephemeral_state_not_sendable_artifacts():
+def test_new_interaction_contract_does_not_precompute_ephemeral_protocol_state():
     from winpilot.tasking.compiler import TaskContractCompiler
 
     contract = TaskContractCompiler().compile(INTERACTIVE_TASKS[0])
-    observe = contract.stages[0]
-    assert observe.outputs == []
-    assert {item.state_type for item in observe.state_outputs} == {
-        "authoritative_visual_frame", "bound_interaction_surface",
-    }
-    assert all(item.ephemeral for item in observe.state_outputs)
-    infer = next(
-        stage for stage in contract.stages
-        if stage.type.value == "InferInteraction"
-    )
-    assert {item.state_type for item in infer.state_outputs} == {
-        "interaction_protocol", "per_turn_interaction_region",
-    }
+    stage = _assert_single_visual_model_stage(contract, INTERACTIVE_TASKS[0])
+    assert stage.outputs == []
+    assert stage.state_outputs == []
 
 
 def test_legacy_interaction_contracts_default_new_constraints_without_rewrite():
@@ -350,18 +331,18 @@ def test_every_interaction_verifier_requirement_is_exposed():
 def test_fallback_semantic_stage_preserves_identified_source():
     from winpilot.tasking.compiler import TaskContractCompiler
 
-    contract = TaskContractCompiler().compile("在画板上把已有内容润色一下")
+    contract = TaskContractCompiler().compile("在星图工坊应用中把已有内容润色一下")
     assert [stage.type.value for stage in contract.stages] == ["CreateOrEditArtifact"]
-    assert contract.intent.source == "Paint"
-    assert contract.stages[0].parameters["app"] == "Paint"
-    assert contract.stages[0].parameters["source"] == "Paint"
+    assert contract.intent.source == "星图工坊"
+    assert contract.stages[0].parameters["app"] == "星图工坊"
+    assert contract.stages[0].parameters["source"] == "星图工坊"
 
 
-def test_interaction_compiles_to_graph_without_monolithic_agent_goal():
+def test_interaction_compiles_to_graph_with_one_visual_model_stage():
     from winpilot.tasking.compiler import TaskContractCompiler
 
     contract, graph = TaskContractCompiler().compile_graph(INTERACTIVE_TASKS[0])
-    assert contract.session is not None
+    _assert_single_visual_model_stage(contract, INTERACTIVE_TASKS[0])
     assert all(node.kind.value != "agent_goal" for node in graph.nodes)
     assert [
         node.config["stage"]["type"]
@@ -370,69 +351,46 @@ def test_interaction_compiles_to_graph_without_monolithic_agent_goal():
     ] == [stage.type.value for stage in contract.stages]
 
 
-def test_external_turn_is_compiled_as_verified_defer_not_forced_mutation():
+def test_external_turn_tactics_are_left_to_the_visual_model():
     from winpilot.tasking.compiler import TaskContractCompiler
 
-    contract = TaskContractCompiler().compile("轮到我了，等我操作后你再根据当前界面继续")
+    task = "轮到我了，等我操作后你再根据当前界面继续"
+    contract = TaskContractCompiler().compile(task)
     assert contract.intent.interaction.active is True
     assert contract.intent.interaction.turn_owner == "user"
-    perform = next(stage for stage in contract.stages if stage.type.value == "PerformTurn")
-    verify = next(stage for stage in contract.stages if stage.type.value == "VerifyLocalEffect")
-    assert perform.parameters["turn_guard"] == "only_when_agent_owns_turn"
-    assert perform.parameters["on_external_turn"] == "defer_without_mutation"
-    assert verify.parameters["accept_verified_defer"] is True
+    stage = _assert_single_visual_model_stage(contract, task)
+    assert "turn_guard" not in stage.parameters
+    assert "on_external_turn" not in stage.parameters
 
 
-def test_explicit_drag_selects_local_typed_completion_without_vlm_verifier():
+def test_explicit_drag_uses_general_visual_model_and_full_goal_verifier():
     from winpilot.tasking.compiler import TaskContractCompiler
 
-    contract = TaskContractCompiler().compile(
+    task = (
         "In the current visible window, drag the movable disk through the "
-        "visible route into the destination.",
-        cold_start=True,
+        "visible route into the destination."
     )
-    verify = next(
-        stage for stage in contract.stages
-        if stage.type.value == "VerifyLocalEffect"
-    )
-
-    assert verify.parameters["verification_policy"] == (
-        "typed_direct_manipulation_completion"
-    )
-    assert verify.execution.selected_evidence_providers == {
-        "interaction.local_effect_verified": (
-            "typed_direct_manipulation_completion"
-        ),
-        "interaction.task_completed": "typed_direct_manipulation_completion",
+    contract = TaskContractCompiler().compile(task, cold_start=True)
+    stage = _assert_single_visual_model_stage(contract, task)
+    assert stage.parameters["verification_policy"] == "full_goal_coverage"
+    assert stage.execution.selected_evidence_providers == {
+        "desktop.full_goal_verified": "desktop_closed_loop_verifier",
     }
-    assert "interaction.verify_transition" in (
-        verify.execution.verifier_requirements
-    )
-    assert "visual.semantic_verify" not in (
-        verify.execution.required_capabilities
-        + verify.execution.verifier_requirements
-    )
-    assert "vlm_verify" not in verify.execution.tools
-    assert verify.execution.model_role == "none"
+    assert "visual.semantic_verify" in stage.execution.verifier_requirements
+    assert "drag" in stage.execution.model_tools
 
 
-def test_unknown_or_click_interaction_keeps_semantic_completion_provider():
+def test_unknown_or_click_interaction_uses_same_general_completion_provider():
     from winpilot.tasking.compiler import TaskContractCompiler
 
-    contract = TaskContractCompiler().compile(
+    task = (
         "In the current visible window, click the only control matching the "
-        "visible instruction.",
-        cold_start=True,
+        "visible instruction."
     )
-    verify = next(
-        stage for stage in contract.stages
-        if stage.type.value == "VerifyLocalEffect"
-    )
-
-    assert verify.parameters["verification_policy"] == "semantic_visual_effect"
-    assert set(verify.execution.selected_evidence_providers.values()) == {
-        "local_semantic_effect_verifier", "interaction_terminal_verifier",
+    contract = TaskContractCompiler().compile(task, cold_start=True)
+    stage = _assert_single_visual_model_stage(contract, task)
+    assert stage.execution.selected_evidence_providers == {
+        "desktop.full_goal_verified": "desktop_closed_loop_verifier",
     }
-    assert "visual.semantic_verify" in verify.execution.verifier_requirements
-    assert "vlm_verify" in verify.execution.tools
-    assert verify.execution.model_role == "interaction_semantic_verifier"
+    assert "visual.semantic_verify" in stage.execution.verifier_requirements
+    assert "click" in stage.execution.model_tools

@@ -196,14 +196,6 @@ Make row 1 bold and row 5 bold. D5 evaluates to 1964.'''
     assert any("D5 cached result" in error for error in _xlsx_task_errors(task, cells))
 
 
-def test_drawing_task_does_not_trigger_on_screen_stability_phrase():
-    from winpilot.agent.task_rules import _is_drawing_task
-
-    assert not _is_drawing_task("点击按钮后等待约1秒让画面稳定，再观察最近变化区域")
-    assert _is_drawing_task("画一个三角形")
-    assert _is_drawing_task("draw a triangle on the canvas")
-
-
 def test_visible_state_done_accepts_fresh_screen_ocr_spacing(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
@@ -226,73 +218,6 @@ def test_visible_state_done_accepts_fresh_screen_ocr_spacing(monkeypatch):
 
     assert runner._verify_done(_Client()) is True
     assert runner._done_verified is True
-
-
-def test_verified_subgoal_auto_completes_matching_plan_item():
-    import json
-
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("type the meeting content")
-    runner.session.plan = planner.Plan(["输入会议纪要内容"])
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": True,
-        "subgoal": "输入会议纪要内容",
-        "evidence_packet": {"matched_texts": ["会议纪要"]},
-    }, ensure_ascii=False))
-
-    updated = runner._maybe_auto_complete_verified_subgoal_plan_items(
-        "execute_subgoal",
-        {"subgoal": "输入会议纪要内容"},
-        result,
-    )
-    payload = json.loads(updated.text)
-
-    assert runner.session.plan.all_done() is True
-    assert payload["auto_completed_plan_items"][0]["index"] == 1
-    assert updated.terminal == "done"
-
-
-def test_verified_save_subgoal_auto_completes_fresh_file_confirmation(tmp_path, monkeypatch):
-    import json
-
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    output = tmp_path / "report.txt"
-    output.write_text("verified", encoding="utf-8")
-    runner = AgentRunner("save report.txt and confirm the file saved successfully")
-    runner.session.plan = planner.Plan([
-        "点击保存按钮完成保存",
-        "确认文件保存成功",
-    ])
-    monkeypatch.setattr(runner, "_fresh_explicit_output_paths", lambda: [output])
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": True,
-        "subgoal": "点击保存按钮完成保存",
-        "evidence_packet": {"matched_texts": ["report.txt"]},
-    }, ensure_ascii=False))
-
-    updated = runner._maybe_auto_complete_verified_subgoal_plan_items(
-        "execute_subgoal",
-        {"subgoal": "点击保存按钮完成保存"},
-        result,
-    )
-    payload = json.loads(updated.text)
-
-    assert runner.session.plan.all_done() is True
-    assert [item["source"] for item in payload["auto_completed_plan_items"]] == [
-        "verified_subgoal",
-        "fresh_output_file",
-    ]
-    assert updated.terminal == "done"
-
-
 def test_visible_state_targets_extract_historical_list():
     from winpilot.agent.task_rules import _visible_state_targets
 
@@ -315,132 +240,6 @@ def test_visible_state_targets_ignore_english_articles_before_visual_description
     assert _visible_state_targets(
         "Confirm the red line actually appears before finishing."
     ) == []
-
-
-def test_required_literal_tokens_extracts_distinctive_payloads_not_urls():
-    from winpilot.agent.task_rules import _required_literal_tokens
-
-    assert _required_literal_tokens(
-        "Open http://127.0.0.1:8878/gui_agent_target.html, type FAST_WRAP_OK_071, "
-        "then confirm LOCAL_COUNTER and result 75765."
-    ) == ["FAST_WRAP_OK_071", "LOCAL_COUNTER", "75765"]
-
-
-def test_done_rejects_missing_distinctive_literal_even_when_other_state_changed(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Open the target page, type FAST_WRAP_OK_071 into the input, then confirm LOCAL_COUNTER."
-    )
-    runner.session.hwnd = 123
-    runner.result_text = "done; clicked the local counter instead"
-    runner._recent_results = [
-        ("click", '{"ok": true, "verified": true, "verify_detail": "LOCAL_COUNTER appeared"}'),
-    ]
-
-    def fresh_screen_without_native_frame():
-        runner._fresh_done_image_b64 = ""
-        return 'Window: "Target"\n[1] text "LOCAL_COUNTER_1"'
-
-    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_screen_without_native_frame)
-
-    class _Client:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(*_a, **_k):
-                    raise AssertionError("missing exact literal should reject before LLM judge")
-
-    assert runner._verify_done(_Client()) is False
-    assert "FAST_WRAP_OK_071" in runner._last_done_reject_reason
-
-
-def test_done_defers_missing_literal_to_fresh_native_judge(
-    monkeypatch,
-    mocked_visual_judge_capability,
-):
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "Open the target page, type FAST_WRAP_OK_071, then confirm LOCAL_COUNTER."
-    )
-    runner.session.hwnd = 123
-    runner.result_text = "done"
-    runner._recent_results = [("click", '{"ok": true}')]
-
-    def fresh_native_screen():
-        runner._fresh_done_image_b64 = "fresh-frame"
-        return 'Window: "Target"\n[1] text "LOCAL_COUNTER"'
-
-    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_native_screen)
-    monkeypatch.setattr(
-        runner,
-        "_visible_state_has_deterministic_done_evidence",
-        lambda *_args: (_ for _ in ()).throw(
-            AssertionError("a different visible target must not bypass the image judge")
-        ),
-    )
-    captured = {}
-
-    class _Client:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(*_args, **kwargs):
-                    captured.update(kwargs)
-                    return SimpleNamespace(choices=[SimpleNamespace(
-                        message=SimpleNamespace(content=(
-                            '{"done": true, "reason": "exact literal is legible in the fresh frame"}'
-                        ))
-                    )])
-
-    assert runner._verify_done(_Client()) is True
-    assert runner._done_verified is True
-    assert runner._pending_visual_literal_tokens == [
-        "FAST_WRAP_OK_071",
-        "LOCAL_COUNTER",
-    ]
-    user_content = captured["messages"][1]["content"]
-    assert isinstance(user_content, list)
-    assert any(part.get("type") == "image_url" for part in user_content)
-    prompt = next(part["text"] for part in user_content if part.get("type") == "text")
-    assert "AUTHORITATIVE EXACT-LITERAL VISUAL CHECK" in prompt
-    assert "FAST_WRAP_OK_071" in prompt
-    assert "return done=false" in prompt
-
-
-def test_done_rejects_when_native_judge_cannot_see_pending_literal(
-    monkeypatch,
-    mocked_visual_judge_capability,
-):
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("Confirm FAST_WRAP_OK_071 is visible in the target window.")
-    runner.session.hwnd = 123
-    runner.result_text = "done"
-
-    def fresh_native_screen():
-        runner._fresh_done_image_b64 = "fresh-frame"
-        return 'Window: "Target"\n[1] text "other state"'
-
-    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_native_screen)
-
-    class _Client:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(*_args, **_kwargs):
-                    return SimpleNamespace(choices=[SimpleNamespace(
-                        message=SimpleNamespace(content=(
-                            '{"done": false, "reason": "required literal is not visible"}'
-                        ))
-                    )])
-
-    assert runner._verify_done(_Client()) is False
-    assert runner._done_verified is False
-    assert runner._pending_visual_literal_tokens == ["FAST_WRAP_OK_071"]
-    assert "not visible" in runner._last_done_reject_reason
-
 
 def test_done_defers_missing_visible_payload_to_fresh_native_judge(
     monkeypatch,
@@ -546,202 +345,6 @@ def test_visible_evidence_ignores_reducer_why_and_trace_path_metadata():
     )
 
     assert runner._visible_evidence_ledger == []
-    assert runner._auto_done_visible_targets() == []
-
-
-def test_deterministic_arithmetic_verifier_accepts_fresh_calculator_result():
-    from winpilot.agent.done_verifier import _deterministic_arithmetic_verdict
-
-    assert _deterministic_arithmetic_verdict(
-        "calculate 2026*7*12",
-        'Window: "Calculator"\nDisplay is 170,184',
-    ) == (
-        True,
-        "Arithmetic result accepted from fresh screen evidence: 2026*7*12 = 170184.",
-    )
-    failed = _deterministic_arithmetic_verdict(
-        "calculate 2026*7*12",
-        'Window: "Calculator"\nDisplay is 170,100',
-    )
-    assert failed is not None
-    assert failed[0] is False
-    assert "170184" in failed[1]
-
-
-def test_deterministic_arithmetic_verifier_prefers_fresh_visual_ocr_over_stale_uia():
-    from winpilot.agent.done_verifier import _deterministic_arithmetic_verdict
-
-    stale_match = _deterministic_arithmetic_verdict(
-        "calculate 2026*7*12",
-        'Display is 170,184\nFresh visual OCR:\n12',
-    )
-    fresh_match = _deterministic_arithmetic_verdict(
-        "calculate 2026*7*12",
-        'Display is 9\nFresh visual OCR:\n170,184',
-    )
-
-    assert stale_match is not None and stale_match[0] is False
-    assert fresh_match is not None and fresh_match[0] is True
-
-
-def test_today_date_product_is_grounded_from_local_date():
-    from datetime import datetime, timezone
-
-    from winpilot.agent.done_verifier import _deterministic_arithmetic_verdict
-
-    verdict = _deterministic_arithmetic_verdict(
-        "calculate today's date numbers multiplied",
-        "Display is 170,184",
-        now=datetime(2026, 7, 12, 20, 0, tzinfo=timezone.utc),
-    )
-
-    assert verdict is not None
-    assert verdict[0] is True
-    assert "2026*7*12" in verdict[1]
-
-
-def test_arithmetic_controller_success_overrides_bad_model_verify_text(monkeypatch):
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("open the calculator and calculate 2026*7*12")
-    runner.run_state.unverified_actions = 1
-    runner.run_state.last_issue = "bad model verify text"
-    monkeypatch.setattr(
-        runner,
-        "_fresh_done_screen",
-        lambda: 'Window: "Calculator"\nDisplay is 170,184',
-    )
-    result = ToolResult(json.dumps({
-        "ok": False,
-        "verified": False,
-        "blocked": True,
-        "error": "model-provided verify text 141,82 was not found",
-        "actions_executed": [{"action": "click_element", "label": "Equals"}],
-        "results": [{"action": "click_element", "ok": True}],
-    }))
-
-    out = runner._maybe_auto_done_from_visible_evidence(
-        "execute_subgoal",
-        result,
-        len(runner._visible_evidence_ledger),
-    )
-
-    assert out.terminal == "done"
-    assert runner._done_verified is False
-    assert runner.run_state.unverified_actions == 0
-    payload = json.loads(out.text)
-    assert payload["auto_done"]["source"] == "deterministic_fresh_arithmetic"
-
-
-def test_arithmetic_fresh_observe_finishes_after_controller_mutation():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("open the calculator and calculate 2026*7*12")
-    runner._tool_history.append((
-        "execute_subgoal",
-        {"subgoal": "calculate 2026*7*12"},
-        '{"ok": true, "verified": false, "results": '
-        '[{"action": "click_element", "ok": true}]}',
-    ))
-    result = ToolResult(
-        'Window: "Calculator"\nExpression is 14182 x 12=\nDisplay is 170,184',
-        is_observe=True,
-    )
-
-    out = runner._maybe_auto_done_from_visible_evidence(
-        "observe",
-        result,
-        len(runner._visible_evidence_ledger),
-    )
-
-    assert out.terminal == "done"
-    assert json.loads(out.text)["auto_done"]["source"] == "deterministic_fresh_arithmetic"
-
-
-def test_arithmetic_controller_uses_nested_read_text_without_extra_observe(monkeypatch):
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("open the calculator and calculate 2026*7*12")
-    monkeypatch.setattr(
-        runner,
-        "_fresh_done_screen",
-        lambda: (_ for _ in ()).throw(AssertionError("nested read_text should be sufficient")),
-    )
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": False,
-        "results": [
-            {"action": "click_element", "ok": True},
-            {
-                "action": "read_text",
-                "full_text": 'Window: "Calculator"\nDisplay is 170,184',
-            },
-        ],
-    }))
-
-    out = runner._maybe_auto_done_from_visible_evidence(
-        "execute_subgoal",
-        result,
-        len(runner._visible_evidence_ledger),
-    )
-
-    assert out.terminal == "done"
-    assert json.loads(out.text)["auto_done"]["source"] == "deterministic_fresh_arithmetic"
-
-
-def test_arithmetic_observe_does_not_reuse_preexisting_result_without_mutation():
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("open the calculator and calculate 2026*7*12")
-    result = ToolResult('Window: "Calculator"\nDisplay is 170,184', is_observe=True)
-
-    out = runner._maybe_auto_done_from_visible_evidence(
-        "observe",
-        result,
-        len(runner._visible_evidence_ledger),
-    )
-
-    assert out.terminal is None
-
-
-def test_arithmetic_failed_controller_cannot_reuse_preexisting_result(monkeypatch):
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("open the calculator and calculate 2026*7*12")
-    monkeypatch.setattr(
-        runner,
-        "_fresh_done_screen",
-        lambda: 'Window: "Calculator"\nDisplay is 170,184',
-    )
-    result = ToolResult(json.dumps({
-        "ok": False,
-        "verified": False,
-        "blocked": True,
-        "failed_at": 1,
-        "results": [{"action": "type_into_element", "ok": False}],
-    }))
-
-    out = runner._maybe_auto_done_from_visible_evidence(
-        "execute_subgoal",
-        result,
-        len(runner._visible_evidence_ledger),
-    )
-
-    assert out.terminal is None
-    assert runner._done_verified is False
 
 
 def test_subgoal_evidence_ignores_observe_query_and_browser_url():
@@ -926,7 +529,9 @@ def test_visible_evidence_tracks_nested_batch_read_text():
 
     from winpilot.agent.loop import AgentRunner
 
-    runner = AgentRunner("confirm APPLIED_TEXT_1 and LOCAL_COUNTER_4")
+    runner = AgentRunner(
+        "confirm APPLIED_TEXT_1 and LOCAL_COUNTER_4 have appeared before finishing"
+    )
     runner._track_visible_evidence(
         "run_action_batch",
         {},
@@ -946,72 +551,38 @@ def test_visible_evidence_tracks_nested_batch_read_text():
     assert {"APPLIED_TEXT_1", "LOCAL_COUNTER_4"} <= targets
 
 
-def test_auto_done_accepts_strong_targets_from_visible_tool_evidence():
+def test_observation_evidence_waits_for_explicit_done_verification(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.agent.tool_result import ToolResult
 
     runner = AgentRunner(
-        "confirm APPLIED_TEXT_1, E2E_TARGET_AUTO_101 and LOCAL_COUNTER_4 are visible"
+        "confirm APPLIED_TEXT_1, E2E_TARGET_101 and LOCAL_COUNTER_4 have appeared"
     )
     result = ToolResult(
-        "Window: Target\nAPPLIED_TEXT_1: E2E_TARGET_AUTO_101\nLOCAL_COUNTER_4"
+        "Window: Target\nAPPLIED_TEXT_1: E2E_TARGET_101\nLOCAL_COUNTER_4",
+        is_observe=True,
     )
-    before = len(runner._visible_evidence_ledger)
-
     runner._track_visible_evidence("read_text", {}, result.text)
-    out = runner._maybe_auto_done_from_visible_evidence("read_text", result, before)
+    assert result.terminal is None
+    assert not hasattr(runner, "_maybe_auto_done_from_visible_evidence")
 
-    assert out.terminal == "done"
-    assert '"auto_done": true' in out.text
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    monkeypatch.setattr(runner, "_fresh_done_screen", lambda: result.text)
 
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **_kwargs):
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "visible evidence proves the request"}'
+                        ))
+                    )])
 
-def test_auto_done_waits_for_explicit_saved_output_file():
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    path = r"C:\Users\zou\Desktop\MISSING_AUTO_DONE_919.txt"
-    runner = AgentRunner(f"save visible TOKEN_AUTO_919 as {path} and confirm it")
-    result = ToolResult(f"Window: Save As\nTOKEN_AUTO_919\n{path}")
-    before = len(runner._visible_evidence_ledger)
-
-    runner._track_visible_evidence("read_text", {}, result.text)
-    out = runner._maybe_auto_done_from_visible_evidence("read_text", result, before)
-
-    assert out.terminal is None
-    assert "auto_done" not in out.text
-
-
-def test_verified_save_auto_done_uses_deterministic_artifact_verdict(monkeypatch):
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner(
-        r"Save As exactly C:\Users\zou\Desktop\verified-sheet.xlsx and verify its contents"
-    )
-    monkeypatch.setattr(runner, "_done_evidence", lambda: ("", "artifact evidence"))
-    monkeypatch.setattr(runner, "_fresh_done_screen", lambda: "verified-sheet.xlsx - WPS Office")
-    monkeypatch.setattr(
-        runner,
-        "_deterministic_saved_file_verdict",
-        lambda _screen, _evidence: (True, "saved XLSX content and styles verified"),
-    )
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": True,
-        "saved_paths": [r"C:\Users\zou\Desktop\verified-sheet.xlsx"],
-    }))
-
-    out = runner._maybe_auto_done_from_visible_evidence(
-        "execute_subgoal",
-        result,
-        len(runner._visible_evidence_ledger),
-    )
-
-    assert out.terminal == "done"
-    assert runner._done_verified is False
-    assert json.loads(out.text)["auto_done"]["source"] == "deterministic_saved_artifact"
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
 
 
 def test_done_gate_requires_independent_judge_after_deterministic_saved_artifact(monkeypatch):
@@ -1030,7 +601,6 @@ def test_done_gate_requires_independent_judge_after_deterministic_saved_artifact
         "_deterministic_saved_file_verdict",
         lambda _screen, _evidence: (True, "saved XLSX structure verified"),
     )
-    monkeypatch.setattr(runner, "_verify_required_literal_tokens", lambda *_args: True)
     captured = {}
 
     class _Client:
@@ -1051,40 +621,13 @@ def test_done_gate_requires_independent_judge_after_deterministic_saved_artifact
     assert "deterministic_saved_file" in prompt
 
 
-def test_auto_done_ignores_verified_expect_without_visible_tool_evidence():
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("confirm APPLIED_TEXT_1 and LOCAL_COUNTER_4 are visible")
-    before = len(runner._visible_evidence_ledger)
-    runner._append_visible_evidence(
-        "launch:verified_expect",
-        "APPLIED_TEXT_1",
-        "verified expect text appeared: APPLIED_TEXT_1",
-    )
-    runner._append_visible_evidence(
-        "launch:verified_expect",
-        "LOCAL_COUNTER_4",
-        "verified expect text appeared: LOCAL_COUNTER_4",
-    )
-
-    out = runner._maybe_auto_done_from_visible_evidence(
-        "launch",
-        ToolResult("{}"),
-        before,
-    )
-
-    assert out.terminal is None
-
-
-def test_failed_subgoal_packet_cannot_enter_visible_evidence_or_auto_done():
+def test_failed_subgoal_packet_cannot_enter_visible_evidence():
     import json
 
     from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
 
     runner = AgentRunner("type STALE_TOKEN_811, click Apply, and verify it")
-    result = ToolResult(json.dumps({
+    result_text = json.dumps({
         "ok": False,
         "verified": False,
         "blocked": True,
@@ -1093,16 +636,11 @@ def test_failed_subgoal_packet_cannot_enter_visible_evidence_or_auto_done():
             "partial_matched_texts": ["STALE_TOKEN_811"],
             "missing_texts": [],
         },
-    }))
-    before = len(runner._visible_evidence_ledger)
+    })
 
-    runner._track_visible_evidence("execute_subgoal", {}, result.text)
-    out = runner._maybe_auto_done_from_visible_evidence(
-        "execute_subgoal", result, before,
-    )
+    runner._track_visible_evidence("execute_subgoal", {}, result_text)
 
     assert runner._visible_evidence_ledger == []
-    assert out.terminal is None
 
 
 def test_done_gate_rejects_pending_failed_or_unverified_action():
@@ -1137,126 +675,23 @@ def test_coding_done_uses_deterministic_judge_despite_gui_counter(monkeypatch):
     monkeypatch.setattr(runner, "_call_done_judge", lambda *_args, **_kwargs: True)
 
     assert runner._verify_done(object()) is True
-
-
-def test_new_blank_document_plan_auto_completes_only_after_observed_title_change():
+def test_visible_evidence_rejects_literal_echoed_by_agent_control_surface():
     from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.planner import Plan
-    from winpilot.agent.tool_result import ToolResult
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("打开文字处理软件，新建空白文档并输入内容")
-    runner.session.plan = Plan([
-        "新建空白文档",
-        "输入指定内容",
-    ])
-    runner.session.snapshot = Snapshot(
-        hwnd=7,
-        title="文字文稿2 - Office",
-        region=Region(0, 0, 1000, 700),
-        elements=[],
-    )
-    runner._track_new_document_plan_attempt(
-        "execute_subgoal",
-        {"subgoal": "新建空白文档", "click": {"label": "新建"}},
-    )
-
-    # Opening the template chooser is not the requested completed state.
-    runner.session.snapshot.title = "新建文档 - Office"
-    unchanged = runner._maybe_auto_complete_new_document_plan_item(
-        "observe",
-        {},
-        ToolResult("Window: new document chooser", is_observe=True),
-    )
-    assert runner.session.plan.steps[0]["done"] is False
-    assert "plan auto-complete" not in unchanged.text
-
-    runner.session.snapshot.title = "文字文稿3 - Office"
-    completed = runner._maybe_auto_complete_new_document_plan_item(
-        "observe",
-        {},
-        ToolResult("Window: blank editor", is_observe=True),
-    )
-
-    assert runner.session.plan.steps[0]["done"] is True
-    assert runner.session.plan.steps[1]["done"] is False
-    assert "do not click New again" in completed.text
-    assert "文字文稿2" in completed.text
-    assert "文字文稿3" in completed.text
-
-
-def test_same_long_text_is_not_mutated_twice_in_same_window():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    literal = "项目周报\n标记：WPS_GUI_712\n已完成：真实GUI办公测试"
-    runner = AgentRunner("打开文字处理软件并输入项目周报，然后保存")
-    runner.session.hwnd = 77
-    runner._tool_sequence = 3
-    runner._remember_delivered_text_mutations(
-        "type_text",
-        {"text": literal},
-        '{"ok": true, "needs_observe": true}',
-    )
-    runner._tool_sequence = 6
-
-    skipped = runner._duplicate_text_mutation_result(
-        "type_text",
-        {"text": literal},
-    )
-
-    assert skipped is not None
-    payload = json.loads(skipped.text)
-    assert payload["ok"] is True
-    assert payload["mutation_skipped"] is True
-    assert payload["text_already_delivered"] is True
-    assert payload["needs_observe"] is True
-
-
-def test_explicit_repeat_task_allows_same_text_again():
-    from winpilot.agent.loop import AgentRunner
-
-    literal = "REPEAT_THIS_LONG_LITERAL"
-    runner = AgentRunner("把同一句文字重复输入两次")
-    runner.session.hwnd = 77
-    runner._tool_sequence = 1
-    runner._remember_delivered_text_mutations(
-        "type_text",
-        {"text": literal},
-        '{"ok": true}',
-    )
-    runner._tool_sequence = 2
-
-    assert runner._duplicate_text_mutation_result(
-        "type_text",
-        {"text": literal},
-    ) is None
-
-
-def test_auto_done_rejects_literal_echoed_by_agent_control_surface():
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
 
     task = (
         "Open the target page. Use a real physical mouse press, then confirm "
         "PRESS_PULSE_ACTIVE appeared during the press."
     )
     runner = AgentRunner(task)
-    result = ToolResult(
-        "Window: Lingdong Script\nAgent command\n" + task
-    )
-    before = len(runner._visible_evidence_ledger)
 
-    runner._track_visible_evidence("read_text", {}, result.text)
-    out = runner._maybe_auto_done_from_visible_evidence("read_text", result, before)
+    runner._track_visible_evidence(
+        "read_text", {}, "Window: Lingdong Script\nAgent command\n" + task,
+    )
 
     assert runner._visible_evidence_ledger == []
-    assert out.terminal is None
 
 
-def test_done_rejects_required_literal_when_only_source_is_task_echo(monkeypatch):
+def test_done_does_not_treat_task_echo_as_visual_completion_evidence(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
     task = (
@@ -1280,10 +715,15 @@ def test_done_rejects_required_literal_when_only_source_is_task_echo(monkeypatch
             class completions:
                 @staticmethod
                 def create(*_a, **_k):
-                    raise AssertionError("task echo must fail before the LLM judge")
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": false, "reason": "the requested state is not visible"}'
+                        ))
+                    )])
 
     assert runner._verify_done(_Client()) is False
-    assert "PRESS_PULSE_ACTIVE" in runner._last_done_reject_reason
+    assert runner._visible_evidence_ledger == []
+    assert "not visible" in runner._last_done_reject_reason
 
 
 def test_text_appears_scoped_to_target_window(monkeypatch):
@@ -1937,13 +1377,12 @@ def test_gui_only_shell_policy():
         _gui_only_shell_allowed,
         _is_gui_only_task,
     )
-    from winpilot.agent.task_rules import _gui_only_blocked_hotkey
 
-    assert _is_gui_only_task("GUI-only test. Use Notepad.")
-    native_drawing = "\u5728\u753b\u677f\u4e0a\u753b\u4e00\u53ea\u4e94\u989c\u516d\u8272\u7684\u732b"
-    assert _is_gui_only_task(native_drawing)
-    assert _gui_only_forbids_shell(native_drawing)
-    assert not _is_gui_only_task("Write a Python program that draws a cat image.")
+    assert _is_gui_only_task("GUI-only test. Use Quill Editor.")
+    visible_drawing = "Use Aurora Canvas to draw a colorful fictional creature."
+    assert not _is_gui_only_task(visible_drawing)
+    assert not _gui_only_forbids_shell(visible_drawing)
+    assert not _is_gui_only_task("Write a Python program that draws an image.")
     assert _is_gui_only_task("Use GUI only; do not use shell.")
     assert _is_gui_only_task("请只用GUI完成这个任务")
     assert _is_gui_only_task("\u5fc5\u987b\u901a\u8fc7\u771f\u5b9eGUI\u64cd\u4f5c")
@@ -1968,35 +1407,6 @@ def test_gui_only_shell_policy():
     assert _gui_only_forbids_shell("GUI only, complete it visibly.")
     assert _gui_only_launch_uses_shell("powershell -NoExit -Command python -m http.server 8878")
     assert not _gui_only_launch_uses_shell("calc")
-    assert _gui_only_blocked_hotkey("GUI only, complete it visibly.", ["ctrl", "shift", "j"])
-    assert _gui_only_blocked_hotkey("GUI only, complete it visibly.", ["ctrl", "r"])
-    assert not _gui_only_blocked_hotkey("GUI only, refresh the page visibly.", ["ctrl", "r"])
-    assert not _gui_only_blocked_hotkey("GUI only, open developer tools.", ["ctrl", "shift", "j"])
-
-
-def test_gui_only_dispatch_blocks_browser_reset_and_devtools_hotkeys(monkeypatch):
-    import winpilot.agent.tools as tools_mod
-    from winpilot.agent.tools import ToolSession
-
-    calls = []
-    fake_executor = SimpleNamespace(
-        press_keys=lambda keys: calls.append(keys) or {"ok": True},
-        focus_window=lambda hwnd: {"ok": True},
-    )
-    fake_verify = SimpleNamespace(
-        run_with_verify=lambda _name, action, **_kwargs: action(),
-    )
-    monkeypatch.setattr(tools_mod, "executor", fake_executor)
-    monkeypatch.setattr(tools_mod, "verify", fake_verify)
-
-    session = ToolSession(task="Use GUI only to operate the visible web app.")
-
-    devtools = session.dispatch("hotkey", {"keys": ["ctrl", "shift", "j"]})
-    refresh = session.dispatch("hotkey", {"keys": ["ctrl", "r"]})
-
-    assert "developer-tools hotkey" in devtools.text
-    assert "refresh/reload hotkey" in refresh.text
-    assert calls == []
 
 
 def test_tool_schemas_can_hide_shell_for_strict_gui_only():
@@ -2020,89 +1430,6 @@ def test_window_title_expect_condition(monkeypatch):
     out = verify._eval_once({"window_title": "WinPilotDeep_append.txt"}, hwnd=123, level=0)
 
     assert out.verified
-
-
-def test_save_task_refuses_cancel_button_click():
-    from winpilot.agent.tools import ToolSession
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    session = ToolSession(task="Save this file as C:\\Users\\zou\\Desktop\\x.txt")
-    session.snapshot = Snapshot(
-        hwnd=1,
-        title="Save As",
-        region=Region(0, 0, 800, 600),
-        elements=[UIElement(elem_id=7, role="button", text="Cancel", cx=10, cy=10, source="uia")],
-    )
-
-    result = session._t_click({"element_id": 7})
-
-    assert "Refused to click" in result.text
-
-
-def test_non_power_task_refuses_power_button_click():
-    from winpilot.agent.tools import ToolSession
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    session = ToolSession(task="把桌面上的文件夹拖到右上角")
-    session.snapshot = Snapshot(
-        hwnd=1,
-        title="DesktopWindowXamlSource",
-        region=Region(0, 0, 1920, 1080),
-        elements=[
-            UIElement(
-                elem_id=18,
-                role="button",
-                text="电源 电池状态: 95% 可用(电源已接通)",
-                cx=1768,
-                cy=1050,
-                left=1751,
-                top=1020,
-                width=35,
-                height=60,
-                source="uia",
-            )
-        ],
-    )
-
-    result = session._t_click({"element_id": 18})
-
-    assert "Refused to click a system power" in result.text
-
-
-def test_coordinate_click_refuses_power_element_under_point():
-    from winpilot.agent.tools import ToolSession
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
-
-    session = ToolSession(task="打开浏览器访问网页")
-    session.snapshot = Snapshot(
-        hwnd=1,
-        title="DesktopWindowXamlSource",
-        region=Region(0, 0, 1920, 1080),
-        elements=[
-            UIElement(
-                elem_id=9,
-                role="button",
-                text="关机",
-                cx=100,
-                cy=100,
-                left=80,
-                top=80,
-                width=50,
-                height=40,
-                source="uia",
-            )
-        ],
-    )
-
-    result = session._t_click({"x": 100, "y": 100})
-
-    assert "Refused to click a system power" in result.text
 
 
 def test_coordinate_click_keeps_pixel_authored_point_by_default(monkeypatch):
@@ -3176,7 +2503,7 @@ Plan hint: this todo is already active; do not call revise_plan just to restate 
     assert payload["verified"] is True
     assert payload["next_unfinished"]["index"] == 3
     assert payload["remaining_steps"][0]["goal"].startswith("在蓝色三角形右边")
-    assert "combine obvious adjacent" in payload["guidance"]
+    assert "guidance" not in payload
     assert "Plan hint:" not in content
 
 
@@ -3197,83 +2524,6 @@ def test_complete_subgoal_append_preserves_raw_trace_but_compacts_message():
     assert len(runner.messages[-1]["content"]) < 700
     assert '"next_unfinished"' in runner.messages[-1]["content"]
     assert "Plan hint:" not in runner.messages[-1]["content"]
-
-
-
-
-def test_verified_launch_auto_completes_pure_open_plan_item():
-    import json
-
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("open Paint, then draw a blue triangle")
-    runner.session.plan = planner.Plan([
-        "open Windows Paint app",
-        "draw a blue triangle",
-    ])
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": True,
-        "target_hwnd": 123,
-    }))
-
-    updated = runner._maybe_auto_complete_open_plan_item("launch", {"command": "mspaint"}, result)
-    payload = json.loads(updated.text)
-
-    assert runner.session.plan.steps[0]["done"] is True
-    assert runner.session.plan.steps[1]["done"] is False
-    assert payload["auto_completed_plan_items"][0]["index"] == 1
-    assert "next unfinished item" in payload["fast_path_advice"]
-
-
-def test_verified_launch_does_not_auto_complete_mixed_open_draw_goal():
-    import json
-
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("open Paint and draw a blue triangle")
-    runner.session.plan = planner.Plan([
-        "open Paint and verify blue triangle",
-        "draw a red rectangle",
-    ])
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": True,
-        "target_hwnd": 123,
-    }))
-
-    updated = runner._maybe_auto_complete_open_plan_item("launch", {"command": "mspaint"}, result)
-
-    assert updated is result
-    assert runner.session.plan.steps[0]["done"] is False
-
-
-def test_verified_launch_does_not_auto_complete_open_and_create_blank_workbook_goal():
-    import json
-
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("打开WPS表格并新建空白工作簿")
-    runner.session.plan = planner.Plan([
-        "打开WPS表格并新建空白工作簿",
-        "输入表格数据",
-    ])
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": True,
-        "target_hwnd": 123,
-    }))
-
-    updated = runner._maybe_auto_complete_open_plan_item("open_app", {"name": "WPS Spreadsheets"}, result)
-
-    assert updated is result
-    assert runner.session.plan.steps[0]["done"] is False
 
 
 
@@ -3309,37 +2559,6 @@ def test_compact_execute_subgoal_keeps_draw_actions_before_plan_summary():
     assert "auto_completed_plan_items" in compact
 
 
-def test_duplicate_document_format_toggle_routine_is_skipped():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("Make the first line bold and centered, then save")
-    runner.session.hwnd = 42
-    args = {
-        "formats": [{"range": "first_line", "bold": True, "alignment": "center"}],
-        "constraints": {"save_after": True},
-    }
-    runner._tool_sequence = 1
-    runner._remember_applied_format_mutation(
-        "execute_subgoal",
-        args,
-        json.dumps({
-            "ok": True,
-            "format_applied": True,
-            "save_dispatched": True,
-        }),
-    )
-    runner._tool_sequence = 2
-
-    result = runner._duplicate_format_mutation_result("execute_subgoal", args)
-    payload = json.loads(result.text)
-
-    assert payload["ok"] is True
-    assert payload["mutation_skipped"] is True
-    assert payload["format_already_applied"] is True
-    assert payload["save_dispatched"] is True
-    assert "duplicate toggle shortcuts were skipped" in payload["fast_path_advice"].casefold()
 
 
 def test_read_text_tracks_active_plan_visible_check_with_screen_epoch():
@@ -3363,70 +2582,6 @@ def test_read_text_tracks_active_plan_visible_check_with_screen_epoch():
     assert runner._visible_evidence_ledger[-1]["target"] == "办公自动化验收报告"
     assert runner._visible_evidence_ledger[-1]["source"] == "read_text"
     assert runner._visible_evidence_ledger[-1]["screen_epoch"] == 9
-
-
-def test_verified_saved_docx_format_plan_auto_terminates(monkeypatch, tmp_path):
-    import json
-    from types import SimpleNamespace
-
-    from winpilot.agent import loop
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.planner import Plan
-    from winpilot.agent.tool_result import ToolResult
-
-    target = tmp_path / "verified.docx"
-    target.write_bytes(b"placeholder")
-    runner = AgentRunner(
-        f"Make the first line bold and centered, make the body left aligned, save {target} and verify the window title"
-    )
-    runner._started_wall_time = 0.0
-    runner.session.snapshot = SimpleNamespace(title=f"{target.name} - WPS Office")
-    runner.session.plan = Plan([
-        "format the first line bold and centered",
-        "make the body left aligned",
-        "save the document",
-        "verify the window title",
-    ])
-    monkeypatch.setattr(runner, "_fresh_explicit_output_paths", lambda: [target])
-    monkeypatch.setattr(
-        loop,
-        "_docx_document_evidence",
-        lambda _path: (
-            "Heading\nBody",
-            [
-                {"text": "Heading", "bold_all": True, "alignment": "center"},
-                {"text": "Body", "bold_all": False, "alignment": "left"},
-            ],
-            "",
-        ),
-    )
-
-    result = runner._maybe_auto_complete_document_format_plan_items(
-        "execute_subgoal",
-        {
-            "formats": [
-                {"range": "first_line", "bold": True, "alignment": "center"},
-                {"range": "body_after_first_line", "alignment": "left"},
-            ],
-        },
-        ToolResult(json.dumps({
-            "ok": True,
-            "verified": False,
-            "format_applied": True,
-            "save_dispatched": True,
-            "controller_state": {"phase": "needs_observe"},
-            "evidence_packet": {},
-        })),
-    )
-    payload = json.loads(result.text)
-
-    assert result.terminal == "done"
-    assert payload["format_verified"] is True
-    assert payload["auto_done"] is True
-    assert payload["plan_all_done"] is True
-    assert runner.session.plan.all_done()
-
-
 
 
 def test_done_gate_sees_nested_execute_subgoal_draw_strokes():
@@ -3588,41 +2743,6 @@ def test_top_level_click_uses_fast_controller_without_explicit_batch():
     assert payload["metrics"]["screen_wait_count"] == 1
 
 
-def test_top_level_semantic_click_reports_anchor_source_action():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("click export")
-
-    def fake_dispatch(name, args):
-        assert name == "run_action_batch"
-        return ToolResult(json.dumps({
-            "ok": True,
-            "verified": True,
-            "needs_observe": False,
-            "last_action": "click_element",
-            "metrics": {"action_count": 1},
-            "results": [
-                {
-                    "index": 1,
-                    "action": "click_element",
-                    "upgraded_from": "click",
-                    "ok": True,
-                    "verified": True,
-                    "data": {"ok": True, "via": "click_element", "verified": True},
-                },
-            ],
-        }))
-
-    runner.session.dispatch = fake_dispatch
-    out = runner._dispatch_with_fast_visual_wrap("click", {"label": "Export", "role": "button"})
-    payload = json.loads(out.text)
-
-    assert payload["source_action"] == "click_element"
-    assert payload["source_action_verified"] is True
-    assert payload["verified"] is True
 
 
 def test_fast_visual_wrapper_preserves_scope_failure_instead_of_hiding_it():
@@ -3653,7 +2773,7 @@ def test_fast_visual_wrapper_preserves_scope_failure_instead_of_hiding_it():
     assert payload["scope_guard"]["before"]["target_hwnd"] is None
 
 
-def test_top_level_file_dialog_path_input_submits_and_verifies_file():
+def test_top_level_file_dialog_path_input_is_not_auto_submitted():
     import json
 
     from winpilot.agent.loop import AgentRunner
@@ -3680,13 +2800,11 @@ def test_top_level_file_dialog_path_input_submits_and_verifies_file():
         calls.append((name, args))
         return ToolResult(json.dumps({
             "ok": True,
-            "verified": True,
-            "needs_observe": False,
-            "last_action": "wait_stable",
+            "verified": False,
+            "needs_observe": True,
+            "last_action": "type_text",
             "results": [
                 {"action": "type_text", "ok": True, "data": {"ok": True}},
-                {"action": "hotkey", "ok": True, "verified": True, "data": {"ok": True, "verified": True}},
-                {"action": "wait_stable", "ok": True, "data": {"ok": True, "stable": True}},
             ],
         }))
 
@@ -3695,176 +2813,12 @@ def test_top_level_file_dialog_path_input_submits_and_verifies_file():
     payload = json.loads(out.text)
 
     assert calls == [("run_action_batch", {
-        "actions": [
-            {
-                "action": "type_into_element",
-                "text": path,
-                "clear": True,
-                "expected_region": "bottom",
-                "upgraded_from": "type_text",
-            },
-            {"action": "hotkey", "keys": ["Enter"], "expect": {"file_exists": path}},
-            {"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0},
-        ],
-        "subgoal": f"Submit file dialog path and verify saved output: {path}",
+        "actions": [{"action": "type_text", "text": path}],
     })]
-    assert payload["verified"] is True
+    assert payload["source_action"] == "type_text"
+    assert payload["verified"] is False
 
 
-def test_desktop_icon_drag_done_uses_final_uia_position(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "把桌面上的 WinPilotDragTest_123 文件夹图标通过鼠标拖动到桌面右上角附近。"
-    )
-    runner.session.hwnd = 123
-    runner.result_text = "done"
-    runner._steps_log = ['drag({"x1": 100, "y1": 500, "x2": 1850, "y2": 80})']
-    runner._recent_results = [
-        ("drag", '{"ok": true, "visual_change_detected": true}'),
-    ]
-
-    screen = (
-        'Window: "Program Manager" hwnd=1 rect=(0,0,1920x1080)\n'
-        '[160] listitem "WinPilotDragTest_123" center=(1852,58) '
-        'bbox=(1805,5,94,107) checked,selected,focused src=uia'
-    )
-    monkeypatch.setattr(
-        "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: screen),
-    )
-
-    class _Client:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(*_a, **_k):
-                    raise AssertionError("LLM judge should not run with deterministic drag evidence")
-
-    assert runner._verify_done(_Client()) is True
-    assert runner._done_verified is True
-
-
-def test_desktop_icon_drag_done_accepts_batch_drag(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "把桌面上的 WinPilotDragTest_123 文件夹图标通过鼠标拖动到桌面右上角附近。"
-    )
-    runner.session.hwnd = 123
-    runner.result_text = "done"
-    runner._steps_log = [
-        'run_action_batch({"actions": [{"action": "drag", "x1": 100, "y1": 500, "x2": 1850, "y2": 80}]})'
-    ]
-    runner._recent_results = [
-        ("run_action_batch", '{"ok": true, "verified": true, "results": [{"action": "drag", "preview": "{\\"visual_change_detected\\": true}"}]}'),
-    ]
-
-    screen = (
-        'Window: "Program Manager" hwnd=1 rect=(0,0,1920x1080)\n'
-        '[160] listitem "WinPilotDragTest_123" center=(1852,58) '
-        'bbox=(1805,5,94,107) checked,selected,focused src=uia'
-    )
-    monkeypatch.setattr(
-        "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: screen),
-    )
-
-    class _Client:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(*_a, **_k):
-                    raise AssertionError("LLM judge should not run with batch drag evidence")
-
-    assert runner._verify_done(_Client()) is True
-    assert runner._done_verified is True
-
-
-def test_desktop_drag_verified_batch_auto_completes_plan_item():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.planner import Plan
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner(
-        "把桌面上的 WinPilotDragTest_123 文件夹图标通过鼠标拖动到桌面右上角附近。"
-    )
-    runner.session.plan = Plan([
-        {"goal": "显示桌面"},
-        {"goal": "将 WinPilotDragTest_123 文件夹图标拖动到桌面右上角附近"},
-    ])
-    runner.session.plan.complete(1)
-    payload = {
-        "ok": True,
-        "verified": True,
-        "controller_state": {
-            "phase": "verified",
-            "verified": True,
-            "last_action": "drag",
-        },
-        "results": [
-            {
-                "action": "drag",
-                "data": {
-                    "ok": True,
-                    "verified": True,
-                    "visual_change_detected": True,
-                },
-            }
-        ],
-    }
-
-    result = runner._maybe_auto_complete_desktop_drag_plan_item(
-        "run_action_batch",
-        {"actions": [{"action": "drag", "x1": 100, "y1": 500, "x2": 1850, "y2": 80}]},
-        ToolResult(json.dumps(payload)),
-    )
-    data = json.loads(result.text)
-
-    assert result.terminal == "done"
-    assert runner.session.plan.all_done()
-    assert data["plan_all_done"] is True
-    assert data["auto_completed_plan_items"][0]["index"] == 2
-
-
-def test_desktop_icon_drag_done_rejects_wrong_area(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "把桌面上的 WinPilotDragTest_123 文件夹图标通过鼠标拖动到桌面右上角附近。"
-    )
-    runner.session.hwnd = 123
-    runner.result_text = "done"
-    runner._steps_log = ['drag({"x1": 100, "y1": 500, "x2": 960, "y2": 540})']
-    runner._recent_results = [
-        ("drag", '{"ok": true, "visual_change_detected": true}'),
-    ]
-
-    screen = (
-        'Window: "Program Manager" hwnd=1 rect=(0,0,1920x1080)\n'
-        '[160] listitem "WinPilotDragTest_123" center=(960,540) '
-        'bbox=(913,507,94,67) checked src=uia'
-    )
-    monkeypatch.setattr(
-        "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: screen),
-    )
-
-    class _Client:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(*_a, **_k):
-                    return SimpleNamespace(
-                        choices=[SimpleNamespace(message=SimpleNamespace(content='{"done": false, "reason": "wrong area"}'))]
-                    )
-
-    assert runner._verify_done(_Client()) is False
-
-
-def test_snapshot_to_text_query_surfaces_omitted_target():
     from winpilot.perception.fusion import Snapshot
     from winpilot.perception.model import UIElement
     from winpilot.utils.screenshot import Region
@@ -3899,110 +2853,48 @@ def test_snapshot_to_text_query_surfaces_omitted_target():
 
 
 
-def test_gui_search_done_requires_on_screen_query(monkeypatch):
+def test_gui_search_done_uses_generic_fresh_frame_after_opening_result(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     from winpilot.agent.loop import AgentRunner
 
-    runner = AgentRunner(
-        "Open Steam client and search Stardew Valley in the store page."
-    )
+    task = "Open Acme Music, search Blue Echo, then play the first result."
+    runner = AgentRunner(task)
     runner.session.hwnd = 123
     runner.result_text = "done"
     runner._recent_results = [
-        ("run_shell", "Steam library manifests show Stardew Valley is not installed"),
+        ("click", '{"ok": true, "native_action_executed": true}'),
     ]
 
-    monkeypatch.setattr(
-        "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Desktop"\nNo Steam window'),
-    )
+    def fresh_playback_screen():
+        runner._fresh_done_image_b64 = "fresh-playing-frame"
+        return 'Window: "Acme Music"\nNow playing\nPause\n00:07 / 03:42'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_playback_screen)
+    captured = {}
 
     class _Client:
         class chat:
             class completions:
                 @staticmethod
-                def create(*_a, **_k):
-                    raise AssertionError("LLM judge should not run after fast rejection")
+                def create(*_args, **kwargs):
+                    captured.update(kwargs)
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "fresh frame shows active playback"}'
+                        ))
+                    )])
 
-    assert runner._verify_done(_Client()) is False
-    assert runner._done_rejects == 1
-
-
-def test_store_search_allows_store_deeplink_but_blocks_run_protocol():
-    from winpilot.agent.loop import _blocks_store_search_action
-
-    task = "Open Steam client and search Stardew Valley in the store page."
-
-    assert _blocks_store_search_action(
-        task, "launch", {"command": "steam://rungameid/413150"}
-    )
-    assert _blocks_store_search_action(
-        task, "run_shell", {"command": "Start-Process steam://install/413150"}
-    )
-    assert not _blocks_store_search_action(
-        task, "launch", {"command": "steam://store/413150"}
-    )
-    assert not _blocks_store_search_action(
-        task, "run_shell", {"command": "Start-Process https://store.steampowered.com/app/413150/"}
-    )
-
-
-def test_upload_publish_blocks_media_playback_or_analysis_shell():
-    from winpilot.agent.loop import _blocks_upload_media_analysis, _is_upload_publish_task
-
-    task = "打开抖音，上传 C:\\Users\\zou\\Desktop\\demo.mp4，填写标题，但不要最终发布"
-
-    assert _is_upload_publish_task(task)
-    assert _is_upload_publish_task(
-        "Use creator page with C:\\Users\\zou\\Desktop\\winpilot_douyin_test.mp4"
-    )
-
-    assert _blocks_upload_media_analysis(
-        task, "run_shell", {"command": "ffprobe C:\\Users\\zou\\Desktop\\demo.mp4"}
-    )
-    assert _blocks_upload_media_analysis(
-        task, "run_shell", {"command": "Start-Process 'C:\\Users\\zou\\Desktop\\demo.mp4'"}
-    )
-    assert _blocks_upload_media_analysis(
-        task,
-        "run_detached",
-        {"script": "Start-Process wmplayer.exe -ArgumentList 'C:\\Users\\zou\\Desktop\\demo.mp4'"},
-    )
-    assert _blocks_upload_media_analysis(
-        task,
-        "launch",
-        {"command": '"C:\\Program Files\\Windows Media Player\\wmplayer.exe" "C:\\Users\\zou\\Desktop\\demo.mp4"'},
-    )
-    assert _blocks_upload_media_analysis(
-        task,
-        "launch",
-        {"command": '"C:\\Program Files\\VideoLAN\\VLC\\vlc.exe" "C:\\Users\\zou\\Desktop\\demo.mp4"'},
-    )
-    assert _blocks_upload_media_analysis(
-        task,
-        "launch",
-        {"command": "C:\\Users\\zou\\Desktop\\demo.mp4"},
-    )
-    assert _blocks_upload_media_analysis(
-        task,
-        "find_program",
-        {"name": "Windows Media Player"},
-    )
-    assert _blocks_upload_media_analysis(
-        task,
-        "find_program",
-        {"name": "VLC media player"},
-    )
-    assert _blocks_upload_media_analysis(
-        task,
-        "run_shell",
-        {"command": "Get-Command wmplayer.exe"},
-    )
-    assert not _blocks_upload_media_analysis(
-        task, "run_shell", {"command": "Test-Path 'C:\\Users\\zou\\Desktop\\demo.mp4'"}
-    )
-    assert not _blocks_upload_media_analysis(
-        task, "launch", {"command": "C:\\Program Files (x86)\\ByteDance\\douyin\\douyin.exe"}
-    )
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+    assert captured
+    user_content = captured["messages"][1]["content"]
+    assert isinstance(user_content, list)
+    prompt = next(part["text"] for part in user_content if part.get("type") == "text")
+    assert task in prompt
+    assert "Required visible content" not in prompt
+    assert any(part.get("type") == "image_url" for part in user_content)
 
 
 def test_upload_publish_task_does_not_inject_media_playbook(monkeypatch):
@@ -4025,7 +2917,9 @@ def test_upload_publish_task_does_not_inject_media_playbook(monkeypatch):
     monkeypatch.setattr(playbooks, "load_all", lambda: books)
     monkeypatch.setattr(playbooks, "enabled", lambda: True)
 
-    matched = playbooks.for_task("upload C:\\Users\\zou\\Desktop\\demo.mp4 to Douyin")
+    matched = playbooks.for_task(
+        "upload C:\\Users\\tester\\Desktop\\demo.mp4 through Aurora Studio"
+    )
 
     assert [book.name for book in matched] == ["file-dialog"]
 
@@ -4050,12 +2944,11 @@ def test_playbooks_are_opt_in_by_default():
 
 
 def test_gui_only_detects_bare_chinese_gui_operation_marker():
-    from winpilot.agent.task_rules import _gui_only_blocked_hotkey, _is_gui_only_task
+    from winpilot.agent.task_rules import _is_gui_only_task
 
     task = "\u5fc5\u987b\u901a\u8fc7GUI\u64cd\u4f5c"
 
     assert _is_gui_only_task(task)
-    assert _gui_only_blocked_hotkey(task, ["ctrl", "r"])
 
 
 def test_gui_only_detects_chinese_do_not_use_shell_phrase():
@@ -4171,28 +3064,6 @@ def test_saved_docx_done_gate_accepts_requested_format(tmp_path):
     assert verdict[0] is True
 
 
-def test_desktop_drag_task_does_not_force_accept_after_rejects():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "\u628a\u684c\u9762\u4e0a\u7684 WinPilotPerfDrag_Eval "
-        "\u6587\u4ef6\u5939\u56fe\u6807\u62d6\u52a8\u5230\u684c\u9762\u53f3\u4e0a\u89d2\u9644\u8fd1"
-    )
-    runner._done_rejects = 99
-
-    class _Client:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(*_a, **_k):
-                    raise AssertionError("max-reject side-effect tasks should not call the judge")
-
-    assert runner._verify_done(_Client()) is False
-    assert runner._done_unverified is False
-    assert "cannot be force-accepted" in runner._last_done_reject_reason
-
-
-def test_drawing_task_does_not_force_accept_after_rejects():
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("\u5728\u753b\u56fe\u753b\u5e03\u7a7a\u767d\u5904\u753b\u4e00\u4e2a\u5c0f\u4e09\u89d2\u5f62")
@@ -4411,7 +3282,7 @@ def test_generic_task_never_force_accepts_after_repeated_rejects():
     assert "cannot be force-accepted" in runner._last_done_reject_reason
 
 
-def test_desktop_drag_done_uses_fresh_frame_when_structured_name_is_truncated(
+def test_spatial_done_uses_original_goal_and_fresh_frame_without_fixed_geometry(
     monkeypatch,
     mocked_visual_judge_capability,
 ):
@@ -4461,7 +3332,8 @@ def test_desktop_drag_done_uses_fresh_frame_when_structured_name_is_truncated(
     assert runner._done_verified is True
     content = captured["messages"][1]["content"]
     prompt = next(part["text"] for part in content if part.get("type") == "text")
-    assert "AUTHORITATIVE SPATIAL RESULT CHECK" in prompt
+    assert "WinPilotPerfDrag_Eval" in prompt
+    assert "AUTHORITATIVE SPATIAL RESULT CHECK" not in prompt
 
 
 def test_text_only_pro_routes_fresh_gui_frame_to_configured_vision_model(monkeypatch):

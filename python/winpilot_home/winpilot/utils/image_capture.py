@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import base64
-import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -13,58 +12,6 @@ import win32gui
 from ..config import CONFIG
 from ..perception.surface_binding import InteractionRegion
 from . import screenshot
-
-
-_CROSS_APP_ENTITY = (
-    r"(?:记事本|写字板|画图|画板|浏览器|文件资源管理器|资源管理器|微信|企业微信|"
-    r"QQ|钉钉|飞书|Word|Excel|PowerPoint|WPS|Chrome|Edge|Firefox|"
-    r"窗口|应用|程序)"
-)
-
-
-_DESKTOP_CONTEXT_RE = re.compile(
-    r"\b(?:full[- ]?screen|whole desktop|entire desktop|desktop icon|taskbar|"
-    r"system tray|notification center|start menu|multiple windows?|both windows?|"
-    r"between windows?|across (?:apps?|windows?)|split[- ]?screen|"
-    r"second monitor|other monitor|another monitor|left app|right app)\b|"
-    r"\b(?:copy|move|drag|transfer|paste)\b.{0,80}\bfrom\b.{1,80}"
-    r"\b(?:to|into)\b|"
-    r"\b(?:copy|move|drag|transfer|paste)\b.{0,80}\b(?:to|into)\b.{1,80}"
-    r"\bfrom\b|"
-    r"\bfrom\b.{1,80}\b(?:copy|move|drag|transfer|paste)\b.{0,80}"
-    r"\b(?:to|into)\b|"
-    r"(?:全屏|整个桌面|桌面图标|任务栏|系统托盘|通知中心|开始菜单|多个窗口|多窗口|"
-    r"两个窗口|两窗口|窗口之间|跨应用|跨窗口|分屏|第二显示器|另一显示器|"
-    r"其他显示器|左侧应用|右侧应用)|"
-    r"(?:复制|移动|拖动|拖拽|传输|粘贴).{0,40}从.{1,40}(?:到|至|进)|"
-    r"从.{1,40}(?:复制|移动|拖动|拖拽|传输|粘贴).{0,40}(?:到|至|进)|"
-    rf"把.{{0,20}}{_CROSS_APP_ENTITY}.{{0,30}}(?:复制|移动|拖动|拖拽|传输|粘贴)"
-    rf".{{0,30}}(?:到|至|进).{{0,20}}{_CROSS_APP_ENTITY}|"
-    rf"(?:复制|移动|拖动|拖拽|传输|粘贴).{{0,20}}{_CROSS_APP_ENTITY}"
-    rf".{{0,30}}(?:到|至|进).{{0,20}}{_CROSS_APP_ENTITY}",
-    re.IGNORECASE,
-)
-
-# Multi-window observation is broader than copy/move workflows. Keep this
-# separate from the legacy transfer grammar so ordinary wording such as
-# "compare both apps" or "look at the left and right windows" cannot silently
-# discard half of the evidence when the remembered target happens to be front.
-_MULTI_VIEW_CONTEXT_RE = re.compile(
-    r"\b(?:compare|comparison|contrast|side[- ]by[- ]side|"
-    r"both\s+(?:apps?|applications?|windows?|documents?|pages?)|"
-    r"(?:two|multiple)\s+(?:apps?|applications?|windows?|documents?|pages?)|"
-    r"left\s+(?:app|application|window|pane|document|page).{0,50}"
-    r"right\s+(?:app|application|window|pane|document|page)|"
-    r"right\s+(?:app|application|window|pane|document|page).{0,50}"
-    r"left\s+(?:app|application|window|pane|document|page))\b|"
-    r"(?:同时|一起|一同|并排|分别).{0,20}(?:查看|观察|对照|比较|对比).{0,30}"
-    r"(?:两个|多个|应用|程序|窗口|文档|页面)|"
-    r"(?:比较|对比|对照).{0,50}(?:应用|程序|窗口|文档|页面|记事本|Word|WPS|浏览器)|"
-    r"(?:左边|左侧|左面).{0,50}(?:右边|右侧|右面)|"
-    r"(?:右边|右侧|右面).{0,50}(?:左边|左侧|左面)|"
-    r"(?:两个|多个).{0,12}(?:应用|程序|窗口|文档|页面)",
-    re.IGNORECASE,
-)
 
 
 @dataclass(frozen=True)
@@ -165,10 +112,8 @@ def select_visual_capture_scope(
 
     Disabling the optimization always returns the whole virtual desktop.  In
     auto mode a remembered hwnd is not sufficient on its own: the window must
-    still exist, be visible, be the foreground operation surface, have sane
-    geometry, and the task must not explicitly require desktop/multi-window
-    context.  Every failed check falls back to the full desktop rather than
-    returning a misleading crop.
+    still exist, be visible, be the foreground operation surface, and have sane
+    geometry.  Natural-language task text never changes the capture scope.
     """
     desktop = screenshot.virtual_screen_region()
 
@@ -187,12 +132,6 @@ def select_visual_capture_scope(
         ))
     if not enabled:
         return full("optimization_disabled")
-    task_text = str(task or "")
-    if (
-        _DESKTOP_CONTEXT_RE.search(task_text)
-        or _MULTI_VIEW_CONTEXT_RE.search(task_text)
-    ):
-        return full("task_requires_desktop_context", target=int(hwnd or 0) or None)
     try:
         target = int(hwnd or 0)
     except (TypeError, ValueError):
@@ -265,6 +204,67 @@ def capture_window_jpeg_b64(hwnd: int, max_side: int = 1120,
         return base64.b64encode(buf.tobytes()).decode()
     except Exception:
         return ""
+
+
+def normalized_detail_crop_jpeg_b64(
+    image_b64: str,
+    roi: tuple[float, float, float, float] | list[float] | None,
+    *,
+    padding: float = 140.0,
+    min_long_side: int = 560,
+    quality: int = 82,
+) -> tuple[str, list[int] | None]:
+    """Return a magnified same-frame crop around a normalized action ROI.
+
+    This is pixel attention, not OCR/UIA and not another action coordinate
+    system. The returned bounds identify where the detail came from in the
+    authoritative 0..1000 frame; all actions must still target the full frame.
+    """
+
+    if not image_b64 or not isinstance(roi, (list, tuple)) or len(roi) != 4:
+        return "", None
+    try:
+        raw = np.frombuffer(base64.b64decode(image_b64), dtype=np.uint8)
+        image = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            return "", None
+        h, w = image.shape[:2]
+        left, top, right, bottom = (float(value) for value in roi)
+        left = max(0.0, min(1000.0, left - padding))
+        top = max(0.0, min(1000.0, top - padding))
+        right = max(0.0, min(1000.0, right + padding))
+        bottom = max(0.0, min(1000.0, bottom + padding))
+        if right <= left or bottom <= top:
+            return "", None
+        x1 = max(0, min(w - 1, int(left * w / 1000.0)))
+        y1 = max(0, min(h - 1, int(top * h / 1000.0)))
+        x2 = max(x1 + 1, min(w, int(round(right * w / 1000.0))))
+        y2 = max(y1 + 1, min(h, int(round(bottom * h / 1000.0))))
+        crop = image[y1:y2, x1:x2]
+        long_side = max(crop.shape[:2])
+        if 0 < long_side < int(min_long_side):
+            scale = min(4.0, float(min_long_side) / float(long_side))
+            crop = cv2.resize(
+                crop,
+                (
+                    max(1, int(round(crop.shape[1] * scale))),
+                    max(1, int(round(crop.shape[0] * scale))),
+                ),
+                interpolation=cv2.INTER_CUBIC,
+            )
+        ok, encoded = cv2.imencode(
+            ".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, int(quality)],
+        )
+        if not ok:
+            return "", None
+        return base64.b64encode(encoded.tobytes()).decode(), [
+            int(round(left)),
+            int(round(top)),
+            int(round(right)),
+            int(round(bottom)),
+        ]
+    except Exception:
+        return "", None
 
 
 _CONTINUOUS_INPUT_EDGE_INSET_FRAME_UNITS = 24

@@ -30,7 +30,7 @@
 - 可选 MCP capability source；
 - graphical affordance/scene coverage 只从当前像素生成候选，不携带应用名或对象模板。
 
-这些机制可以保留，但必须继续下沉到所有视觉任务共享的 owner，不能只从 DrawArtifact、Paint 或某个 test stage 可达。
+这些机制可以保留，但必须由所有视觉任务共享的固定工具和 owner 直接提供，不能只从某个 stage、应用或 test fixture 可达。
 
 ## 仍然存在的结构性问题
 
@@ -46,13 +46,14 @@
 - scope/recovery；
 - done 编排。
 
-这使得任何 GUI 改动都容易扩散到巨型类。目标不是再拆几个 mixin，而是先定义三个稳定核心对象：
+这使得任何 GUI 改动都容易扩散到巨型类。当前代码已经引入四个应继续收敛的 owner：
 
-1. `FrameAuthority`：窗口、区域、帧、epoch、坐标、新鲜度；
-2. `ActionTransaction`：意图、grounding、preflight、输入、post-frame、local evidence；
-3. `TaskProgress`：阶段义务、artifact、失败原因和 task completion evidence。
+1. `FrameAuthority`：只原子发布帧、窗口、区域、epoch、坐标和新鲜度身份，不截图、不解释画面；
+2. `FastGuiController`：只规范化并执行一笔 action transaction，返回局部效果证据，不规划任务；
+3. `RunStateMachine`：只记录 phase、因果债务、未验证动作和终态，不生成 todo 或恢复步骤；
+4. `FailureRecoveryLayer`：只分类失败并附加事实元数据，不自行选择重试、UIA/OCR 或 MCP。
 
-上层只能组合这三个对象，不应再各自解析 batch/drag/held state。
+`AtomicAction` 与事务证据是这些 owner 之间的 typed data，不应再发展成第五个 planner。旧账本、scope guard、拖拽和 held state 必须逐步迁到唯一 owner，而不是继续复制一套。
 
 ### 2. 多套 planner/executor 重叠
 
@@ -67,6 +68,8 @@ user goal
   -> one canonical action transaction
   -> raw device executor
   -> evidence reducer
+  -> fresh authoritative frame
+  -> next semantic decision
 ```
 
 每层只允许向下一层传 typed data。下层不得反向 import 上层 planner 或 domain adapter。
@@ -74,6 +77,8 @@ user goal
 ### 3. Compiler 容易变成脆弱规则库
 
 Task Contract 对跨应用工件、显式阶段和完成义务有价值，但 compiler 内的关键词/任务族分支会让模型在看到界面前就失去探索空间。
+
+普通未知 GUI 目标应保留原文并进入一个 `ExecuteDesktopTask` 视觉阶段。模型始终持有完整目标；本地编译器不应把它拆成需要逐项执行的脚本。原生客户端工具面保持小、固定、通用，复合能力来自视觉闭环而不是不断增加宏工具。
 
 保留标准：
 
@@ -89,9 +94,9 @@ Task Contract 对跨应用工件、显式阶段和完成义务有价值，但 co
 - 通过题号或原句选择上下文；
 - 让 stage 名称决定底层能否拖拽、点击或滚动。
 
-### 4. UIA/OCR 仍可能误导视觉任务
+### 4. UIA/OCR 已退出默认路径，兼容入口仍需约束
 
-原生视觉 Agent 主路径已经可以直接接收权威帧，但 `perception/fusion.py` 的旧结构化路径仍包含 UIA/OCR rich/skip 行为，部分 action helper 也会把 OCR/UIA 候选直接提升为目标。
+原生视觉 Agent 主路径直接接收权威帧；当前默认配置已经关闭 UIA、OCR 与 predictive OCR。`perception/fusion.py` 的旧结构化路径仍包含 UIA/OCR rich/skip 行为，部分兼容 helper 也会把 OCR/UIA 候选直接提升为目标，因此“默认关闭”不能替代 provenance、frame consistency 和显式选择约束。
 
 整改原则：
 
@@ -100,12 +105,16 @@ Task Contract 对跨应用工件、显式阶段和完成义务有价值，但 co
 - 自绘/游戏/画布界面不能因 UIA 树为空或错误而降级能力；
 - structured UI 的确定性收益单独保留，不能污染通用视觉默认路径；
 - 所有 provider 都必须携带 provenance 和 confidence，最终选择写入 trace。
+- 动作失败后首先废弃旧 frame/anchor，重新观察并让模型判断；不得因失败自动启动 UIA/OCR/MCP fallback cascade。
+- 辅助通道只有在当前任务、来源和可验证收益明确匹配时才显式启用。
 
-### 5. 应用发现与窗口恢复仍分散
+### 5. 多源应用发现已落地，窗口恢复 owner 仍分散
 
-窗口列表、进程搜索、开始菜单、应用 alias、托盘、focus fallback 和 launch 分布在多个模块。失败表现包括重复启动、选择登录页、忽略已登录实例和焦点来回切换。
+当前实现已经合并 Start Menu 快捷方式、`Get-StartApps`、App Paths、可执行/进程 identity 和启动前后窗口证据，并默认先复用身份匹配的已运行实例。窗口列表、托盘、登录态、alias、focus fallback 和 launch 仍分布在多个模块；剩余风险包括隐藏实例恢复、登录页选择和焦点来回切换。
 
-需要一个 `AppResolver` owner，统一输出候选及证据：运行态、窗口态、可见性、登录态线索、安装态和启动方式。Agent 根据当前任务和画面选择候选；resolver 不写应用工作流。
+继续收敛到一个 `AppResolver` owner，并保持“基础工具发现事实，模型根据画面决策”的边界。以抽象 `app.open` 合同为例，它统一查询运行进程/窗口、Start Menu、StartApps、App Paths、安装信息和快捷方式元数据，输出候选、provenance、启动方式及启动前快照。执行后再用 pid/path/hwnd、时间和窗口变化证明新状态由本次动作产生。
+
+Agent 根据当前任务和画面选择复用、恢复或启动；resolver 不写应用工作流，也不靠应用专属 prompt 弥补索引缺失。本地抖音真实客户端任务已经证明现有多源索引可以找到桌面客户端，但一次通过不等于 owner 已完全统一。
 
 ### 6. 特化 adapter 仍是技术债务
 
@@ -157,24 +166,23 @@ E2E harness 使用 `uiautomation + Win32` 操作客户端自身控件。这不�
 
 完整规则见 [testing.md](testing.md)。
 
-## 当前验证事实
+## 当前验证状态
 
-在本次文档收口前，当前提交已完成：
+当前整改工作树已经从可见 Electron 客户端执行冷启动、空 session 的真实任务与视觉靶场，不再使用“只做了文档审计、没有跑 E2E”的旧基线：
 
-- WinPilot 全量回归：`1985 passed, 13 skipped`；
-- 客户端 E2E harness 聚焦测试：`18 passed`；
-- 真实 Electron 冷启动 `dynamic-hold`：外部 trusted pointer oracle 通过；
-- GitHub Actions：frontend 与 python 通过。
-
-这些数字只记录本次发布检查，不代表产品成功率。`dynamic-hold` 证明按下、经过 checkpoint、观察新目标并释放的机制可达；它不证明 11 个真实任务已经解决。
+- 本地抖音客户端显示 `kimi k3` 搜索结果，终态经人工视觉核对；通用 report 没有独立业务 oracle，因此自动报告仍不能记为 grounded pass；
+- `game-drag-v2` 的客户端 run 与独立 trusted-browser pointer oracle 均通过，正式计为 E2E pass；
+- 网易云任务达到请求歌曲播放和 Windows 音量 100%，用户明确确认成功；随后按用户要求停止声音与测试，harness 没有 terminal pass，因此只记“用户确认业务目标完成”，不改写成 formal terminal pass；
+- 11 个真实任务尚未全部通过，混合长任务也没有当前版本的全量通过证据；
+- 其他失败、`ungrounded`、超时和外部干扰 run 保留原分类，不能由文档改写为成功。
 
 ## 下一轮整改顺序
 
 ### A. 收敛动作 owner
 
 - 定义唯一 canonical action transaction；
-- 让 partial-output guard、scope guard、run state、done gate 读取同一对象；
-- 删除重复 batch/drag/held 解析；
+- 让 `FrameAuthority`、`FastGuiController`、`RunStateMachine`、partial-output guard、scope guard 和 done gate 读取同一身份与事务；
+- 删除重复的复合动作、拖拽和 held-state 解析；
 - 保持 raw executor 只负责输入，不解释任务语义。
 
 ### B. 收敛感知权威
@@ -182,13 +190,15 @@ E2E harness 使用 `uiautomation + Win32` 操作客户端自身控件。这不�
 - 明确 native visual 与 structured UI 两条策略的入口条件；
 - 移除 UIA/OCR rich 对视觉语义的隐式否决；
 - 给结构化 anchor 加 frame/pixel consistency gate；
+- 失败统一回到“重新观察 → 模型判断”，由 `FailureRecoveryLayer` 只提供分类事实；
 - 用自绘界面、错误 UIA 树和 OCR 干扰做负向回归。
 
 ### C. 收敛应用发现
 
-- 统一运行态/窗口态/托盘/安装态/启动态；
+- 在已有 Start Menu/StartApps、App Paths、快捷方式、进程身份和启动因果证据上，继续统一运行态/窗口态/托盘、登录态、安装态和启动态；
 - 默认先复用已运行实例；
 - 候选含糊时让模型看当前画面决定；
+- 启动后用进程/窗口的前后快照验证因果身份，不接受仅命令返回成功；
 - 删除散落 alias/focus/launch 重复实现。
 
 ### D. 削减 compiler 与 adapter
@@ -203,6 +213,7 @@ E2E harness 使用 `uiautomation + Win32` 操作客户端自身控件。这不�
 - 增加滚轮探索、遮挡、托盘、已有实例、动态弹窗和多 turn 引用；
 - 每类至少一个不同应用/不同布局；
 - 保留失败，不以新增规则换取单例绿色；
+- 增加失败后仍保持 native visual 主线、没有隐式切换辅助通道的断言；
 - 逐步增加重复次数和 seed 后才报告统计数据。
 
 ## 变更准入门

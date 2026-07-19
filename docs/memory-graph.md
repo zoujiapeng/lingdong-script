@@ -79,7 +79,7 @@ Agent 完成运行后的经验写入只有 `MemoryCompiler.ingest_run()` 一个�
 
 `agent/session.py` 仍只服务“刚才/继续/再来一次/previous/same/it”等指代型任务。它不是长期记忆，不进入 Memory Graph 的长期 fact 召回，也不会替代当前 GUI/文件/工具证据。工作台把 session memory 与长期记忆分栏显示，并允许单独清空 session；清空 session 不删除 Memory Graph。
 
-Agent 的 live todo 也不是长期记忆。模型可在运行中用 `revise_plan` 替换、清空、增删、移动或重新打开任务项；这些变化只更新当前 run 的 `agent_plan` 状态，不会自动改写 Memory Capsule。反过来，召回的 procedure/skill 只能作为计划候选，不能冻结任务列表或阻止模型根据新鲜画面改路。
+Agent 的内部工作计划也不是长期记忆。模型可在运行中根据新鲜画面调整工作状态；这些变化只更新当前 run 的 `agent_plan` 投影，不是公开计划工具，也不会自动改写 Memory Capsule。反过来，召回的 procedure/skill 只能作为候选提示，不能冻结任务列表或阻止模型根据新鲜画面改路。
 
 ## Coding Tasks
 

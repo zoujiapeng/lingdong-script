@@ -54,6 +54,169 @@ def _stage_output(_stage, _started, **payload):
     return payload
 
 
+def _legacy_interaction_contract(
+    *,
+    persistent: bool = False,
+    max_steps: int = 8,
+    task: str = "perform the visible interaction",
+    primary_action_modality: str = "infer_from_scene",
+    include_capture: bool = False,
+):
+    """Deserialize one frozen task-contract/1 interaction fixture.
+
+    The current compiler must not manufacture this legacy five-stage planner.
+    These tests retain the historical wire shape only so saved contracts can
+    still be deserialized and executed by the compatibility runtime.
+    """
+    from winpilot.tasking.contracts import TaskContract
+
+    requested = max(1, min(400, int(max_steps)))
+    session_id = "legacy-session-persistent" if persistent else "legacy-session-bounded"
+
+    def evidence(predicate, stage_id, *provider_ids):
+        return {
+            "id": predicate,
+            "predicate": predicate,
+            "description": f"legacy compatibility evidence for {predicate}",
+            "stage_id": stage_id,
+            "evidence_providers": [
+                {"id": provider_id} for provider_id in provider_ids
+            ],
+        }
+
+    obligations = {
+        "scene": evidence(
+            "interaction.scene_bound", "legacy-observe", "bound_scene_observer",
+        ),
+        "protocol": evidence(
+            "interaction.protocol_inferred",
+            "legacy-infer",
+            "interaction_protocol_inference",
+        ),
+        "turn": evidence(
+            "interaction.turn_resolved",
+            "legacy-perform",
+            "bound_interaction_transaction",
+        ),
+        "effect": evidence(
+            "interaction.local_effect_verified",
+            "legacy-verify",
+            "grounded_transaction_progress",
+            "local_semantic_effect_verifier",
+            "typed_freehand_turn_completion",
+        ),
+        "complete": evidence(
+            "interaction.task_completed",
+            "legacy-verify",
+            "interaction_terminal_verifier",
+        ),
+    }
+    execution = {
+        "controller": "legacy_task_contract_runtime",
+        "satisfiable": True,
+    }
+
+    def stage(stage_id, stage_type, step_limit, depends_on, obligation_keys, **parameters):
+        return {
+            "id": stage_id,
+            "type": stage_type,
+            "name": f"Legacy {stage_type}",
+            "parameters": {
+                "original_task": task,
+                "max_steps": min(step_limit, requested),
+                **parameters,
+            },
+            "depends_on": depends_on,
+            "obligations": [obligations[key] for key in obligation_keys],
+            "execution": execution,
+        }
+
+    interaction_parameters = {
+        "session_id": session_id,
+        "primary_action_modality": primary_action_modality,
+        "action_modalities": [primary_action_modality],
+    }
+    stages = [
+        stage("legacy-observe", "ObserveScene", 2, [], ["scene"]),
+        stage(
+            "legacy-infer", "InferInteraction", 3, ["legacy-observe"],
+            ["protocol"], **interaction_parameters,
+        ),
+        stage(
+            "legacy-perform", "PerformTurn", 4, ["legacy-infer"],
+            ["turn"], turn_scope="one_semantic_turn", max_agent_turns=1,
+            **interaction_parameters,
+        ),
+        stage(
+            "legacy-verify", "VerifyLocalEffect", 2, ["legacy-perform"],
+            ["effect", "complete"], session_id=session_id,
+            verification_policy="semantic_visual_effect",
+        ),
+    ]
+    if persistent:
+        stages.append(stage(
+            "legacy-wait", "WaitForExternalChange", 1, ["legacy-verify"],
+            [], session_id=session_id, timeout_s=300.0,
+        ))
+    if include_capture:
+        stages.append(stage(
+            "legacy-capture", "CaptureArtifact", 1, [stages[-1]["id"]], [],
+        ))
+
+    all_obligations = list(obligations.values())
+    return TaskContract.model_validate({
+        "format": "task-contract/1",
+        "task_id": "legacy-interaction-fixture",
+        "task": task,
+        "intent": {
+            "original_text": task,
+            "operation": ["interact"],
+            "domain": "desktop",
+            "interaction": {
+                "active": True,
+                "mode": "turn_based" if persistent else "direct_visual_manipulation",
+                "session_mode": "persistent" if persistent else "bounded",
+                "primary_action_modality": primary_action_modality,
+            },
+        },
+        "stages": stages,
+        "obligations": all_obligations,
+        "final_conditions": [item["id"] for item in all_obligations],
+        "session": {
+            "session_id": session_id,
+            "mode": "turn_based" if persistent else "direct_visual_manipulation",
+            "lifecycle": "persistent" if persistent else "bounded",
+            "initial_turn_owner": "agent",
+            "primary_action_modality": primary_action_modality,
+            "continuation_policy": (
+                "wait_for_external_change"
+                if persistent
+                else "reobserve_until_goal_complete"
+            ),
+            "wait_for_external_change": persistent,
+            "requested_max_steps": requested,
+            "max_semantic_turns": max(1, min(200, requested // 2)),
+            "max_replans": max(0, min(100, requested // 4)),
+            "max_model_calls": max(2, requested),
+            "external_change_timeout_s": 300.0,
+        },
+        "satisfiable": True,
+        "experience_policy": "disabled",
+        "compiler_version": "frozen-legacy-interaction-fixture",
+    })
+
+
+def _legacy_interaction_graph(**kwargs):
+    from winpilot.orchestrator.graph_compiler import task_contract_to_arp
+
+    contract = _legacy_interaction_contract(**kwargs)
+    return contract, task_contract_to_arp(contract)
+
+
+def _legacy_stage(contract, stage_type: str):
+    return next(item for item in contract.stages if item.type.value == stage_type)
+
+
 def test_persistent_stage_graph_accepts_post_action_reobserve_but_not_idle_loop():
     from winpilot.tasking.interaction import InteractionAction
     from winpilot.tasking.interaction_stage_runtime import (
@@ -75,72 +238,27 @@ def test_persistent_stage_graph_accepts_post_action_reobserve_but_not_idle_loop(
     assert _persistent_plan_has_causal_continuation(invalid_idle) is False
 
 
-def test_click_and_drag_tasks_route_to_bounded_typed_stages_without_external_wait():
+def test_compiler_routes_visual_interaction_to_one_model_owned_desktop_stage():
     from winpilot.orchestrator.contracts import validate_graph
     from winpilot.tasking.compiler import TaskContractCompiler
 
-    for task in (
-        "点击当前页面中的蓝色按钮",
-        "把可见卡片拖到目标区域",
-        "在当前界面选择合适控件并完成操作",
-        "connect the visible nodes on the current page",
-        "drag the visible slider to the target position",
-    ):
-        contract, graph = TaskContractCompiler().compile_graph(task, cold_start=True)
-        assert contract.intent.interaction.active is True, task
-        assert contract.session is not None
-        assert contract.session.lifecycle == "bounded"
-        assert contract.session.wait_for_external_change is False
-        assert [stage.type.value for stage in contract.stages] == [
-            "ObserveScene",
-            "InferInteraction",
-            "PerformTurn",
-            "VerifyLocalEffect",
-        ]
-        assert "WaitForExternalChange" not in {
-            stage.type.value for stage in contract.stages
-        }
+    task = "drag the visible item to its indicated destination"
+    contract, graph = TaskContractCompiler().compile_graph(task, cold_start=True)
 
-        infer = next(stage.id for stage in contract.stages if stage.type.value == "InferInteraction")
-        verify = next(stage.id for stage in contract.stages if stage.type.value == "VerifyLocalEffect")
-        perform = next(
-            stage.id for stage in contract.stages
-            if stage.type.value == "PerformTurn"
-        )
-        routes = {
-            (edge.branch, edge.target)
-            for edge in graph.edges
-            if edge.source == verify
-        }
-        observe = next(
-            stage.id for stage in contract.stages
-            if stage.type.value == "ObserveScene"
-        )
-        assert routes == {
-            ("continue", infer),
-            ("continue_local", perform),
-            ("complete", "end"),
-            ("recover_reobserve", observe),
-        }
-        assert any(
-            edge.source == perform
-            and edge.branch == "reobserve"
-            and edge.target == infer
-            for edge in graph.edges
-        )
-        validation = validate_graph(graph)
-        assert validation.valid, validation.errors
+    assert [stage.type.value for stage in contract.stages] == [
+        "ExecuteDesktopTask",
+    ]
+    assert contract.session is None
+    assert contract.task == task
+    assert contract.stages[0].parameters["original_task"] == task
+    validation = validate_graph(graph)
+    assert validation.valid, validation.errors
 
 
-def test_interaction_budgets_are_derived_from_requested_max_steps():
-    from winpilot.tasking.compiler import TaskContractCompiler
+def test_frozen_legacy_contract_preserves_serialized_budgets():
+    contract, graph = _legacy_interaction_graph(max_steps=6)
 
-    contract, graph = TaskContractCompiler().compile_graph(
-        "drag the visible item to its indicated destination",
-        max_steps=6,
-        cold_start=True,
-    )
-
+    assert contract.format == "task-contract/1"
     assert contract.session is not None
     assert contract.session.requested_max_steps == 6
     assert contract.session.max_semantic_turns == 3
@@ -160,34 +278,10 @@ def test_interaction_budgets_are_derived_from_requested_max_steps():
     )
 
 
-@pytest.mark.parametrize("max_steps", [1, 2, 6, 40, 400])
-def test_graph_visit_guard_cannot_preempt_interaction_contract_budgets(max_steps):
-    from winpilot.tasking.compiler import TaskContractCompiler
-
-    contract, graph = TaskContractCompiler().compile_graph(
-        "drag the visible item to its indicated destination",
-        max_steps=max_steps,
-        cold_start=True,
-    )
-
-    assert contract.session is not None
-    # InferInteraction can be entered once more to report model budget
-    # exhaustion, and a recovery node can be entered once more to report its
-    # own budget exhaustion.  The generic graph guard must never mask either
-    # precise failure with "node exceeded max visits" first.
-    assert graph.policy.max_node_visits >= contract.session.max_model_calls + 1
-    assert graph.policy.max_node_visits >= contract.session.max_replans + 1
-
-
 def test_model_and_semantic_turn_budgets_fail_with_precise_dimensions():
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
 
-    contract = TaskContractCompiler().compile(
-        "drag the visible item to its indicated destination",
-        max_steps=1,
-        cold_start=True,
-    )
+    contract = _legacy_interaction_contract(max_steps=1)
     assert contract.session is not None
     engine = InteractionStageEngine(stage_output=_stage_output)
     state = {}
@@ -207,15 +301,10 @@ def test_model_and_semantic_turn_budgets_fail_with_precise_dimensions():
     assert turn_exhausted.value.stage_details["budget_dimension"] == "semantic_turns"
 
 
-def test_recoverable_interaction_stages_route_through_fresh_observe():
+def test_frozen_legacy_graph_routes_recovery_through_fresh_observe():
     from winpilot.orchestrator.contracts import validate_graph
-    from winpilot.tasking.compiler import TaskContractCompiler
 
-    contract, graph = TaskContractCompiler().compile_graph(
-        "drag the visible item to its indicated destination",
-        max_steps=12,
-        cold_start=True,
-    )
+    contract, graph = _legacy_interaction_graph(max_steps=12)
     observe = next(
         stage.id for stage in contract.stages
         if stage.type.value == "ObserveScene"
@@ -236,45 +325,20 @@ def test_recoverable_interaction_stages_route_through_fresh_observe():
     assert validation.valid, validation.errors
 
 
-def test_shared_session_keeps_external_change_loop_after_verified_turn():
+def test_frozen_persistent_contract_keeps_wait_nonterminal():
     from winpilot.orchestrator.contracts import validate_graph
-    from winpilot.tasking.compiler import TaskContractCompiler
 
-    contract, graph = TaskContractCompiler().compile_graph(
-        "和我在当前窗口互动，你看看界面就知道了，我已经开始了",
-        cold_start=True,
-    )
+    contract, graph = _legacy_interaction_graph(persistent=True)
     assert contract.session is not None
     assert contract.session.lifecycle == "persistent"
-    wait = next(stage.id for stage in contract.stages if stage.type.value == "WaitForExternalChange")
-    infer = next(stage.id for stage in contract.stages if stage.type.value == "InferInteraction")
+    wait_stage = _legacy_stage(contract, "WaitForExternalChange")
+    verify_stage = _legacy_stage(contract, "VerifyLocalEffect")
+    infer = _legacy_stage(contract, "InferInteraction").id
     assert {
         (edge.branch, edge.target)
         for edge in graph.edges
-        if edge.source == wait
+        if edge.source == wait_stage.id
     } == {("changed", infer), ("complete", "end")}
-    validation = validate_graph(graph)
-    assert validation.valid, validation.errors
-
-
-def test_persistent_wait_is_not_a_terminal_obligation():
-    from winpilot.tasking.compiler import TaskContractCompiler
-
-    contract, _graph = TaskContractCompiler().compile_graph(
-        "play with me in the current window; I have already started",
-        cold_start=True,
-    )
-
-    assert contract.session is not None
-    assert contract.session.lifecycle == "persistent"
-    wait_stage = next(
-        stage for stage in contract.stages
-        if stage.type.value == "WaitForExternalChange"
-    )
-    verify_stage = next(
-        stage for stage in contract.stages
-        if stage.type.value == "VerifyLocalEffect"
-    )
     assert wait_stage.obligations == []
     assert "interaction.external_watch_armed" not in contract.final_conditions
     assert "interaction.task_completed" in contract.final_conditions
@@ -284,6 +348,8 @@ def test_persistent_wait_is_not_a_terminal_obligation():
     )
     assert terminal.stage_id == verify_stage.id
     assert terminal.evidence_predicate == "interaction.task_completed"
+    validation = validate_graph(graph)
+    assert validation.valid, validation.errors
 
 
 @pytest.mark.parametrize(
@@ -296,18 +362,11 @@ def test_persistent_first_turn_end_requires_exact_terminal_evidence(
 ):
     from winpilot.orchestrator.contracts import ArpNodeKind
     from winpilot.orchestrator.runtime import ArpExecution, NodeResult
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.contracts import StageType, TaskStage
     from winpilot.tasking.evidence import EvidenceRegistry
 
-    contract, graph = TaskContractCompiler().compile_graph(
-        "play with me in the current window; I have already started",
-        cold_start=True,
-    )
-    wait_stage = next(
-        stage for stage in contract.stages
-        if stage.type == StageType.WAIT_FOR_EXTERNAL_CHANGE
-    )
+    contract, graph = _legacy_interaction_graph(persistent=True)
+    wait_stage = _legacy_stage(contract, "WaitForExternalChange")
 
     def stage_handler(node, context, _stop_event):
         registry = context["runtime_state"].get("evidence_registry")
@@ -349,14 +408,10 @@ def test_persistent_first_turn_end_requires_exact_terminal_evidence(
 
 def test_interaction_complete_branch_reaches_later_typed_stages():
     from winpilot.orchestrator.contracts import validate_graph
-    from winpilot.tasking.compiler import TaskContractCompiler
 
-    contract, graph = TaskContractCompiler().compile_graph(
-        "点击当前页面中的按钮然后截图",
-        cold_start=True,
-    )
-    verify = next(stage.id for stage in contract.stages if stage.type.value == "VerifyLocalEffect")
-    capture = next(stage.id for stage in contract.stages if stage.type.value == "CaptureArtifact")
+    contract, graph = _legacy_interaction_graph(include_capture=True)
+    verify = _legacy_stage(contract, "VerifyLocalEffect").id
+    capture = _legacy_stage(contract, "CaptureArtifact").id
     assert any(
         edge.source == verify
         and edge.branch == "complete"
@@ -1536,16 +1591,15 @@ def test_controller_mapping_keeps_press_move_release_in_one_local_transaction():
 
 def test_external_turn_perform_stage_makes_zero_controller_calls(monkeypatch, tmp_path):
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
 
-    contract = TaskContractCompiler().compile(
-        "轮到我了，等我操作后你再根据当前界面继续",
-        cold_start=True,
+    contract = _legacy_interaction_contract(
+        persistent=True,
+        task="轮到我了，等我操作后你再根据当前界面继续",
     )
-    stage = next(item for item in contract.stages if item.type.value == "PerformTurn")
+    stage = _legacy_stage(contract, "PerformTurn")
     image_path = tmp_path / "external-turn.png"
     _write_frame(image_path, changed_box=(20, 20, 30, 30))
     store = ArtifactStore("run-zero-mutation", tmp_path / "artifacts")
@@ -1600,7 +1654,6 @@ def test_no_action_plan_revalidates_fresh_frame_before_wait_or_finish(
     continuation,
 ):
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
@@ -1616,13 +1669,11 @@ def test_no_action_plan_revalidates_fresh_frame_before_wait_or_finish(
     fresh = store.import_file(
         fresh_path, purpose="observation", sendable=False,
     )
-    contract = TaskContractCompiler().compile(
-        "play with me in the current window; I have already started",
-        cold_start=True,
+    contract = _legacy_interaction_contract(
+        persistent=True,
+        task="play with me in the current window; I have already started",
     )
-    stage = next(
-        item for item in contract.stages if item.type.value == "PerformTurn"
-    )
+    stage = _legacy_stage(contract, "PerformTurn")
     decision = _decision(
         action=None,
         turn_owner="user" if continuation == "wait_external" else "agent",
@@ -1699,7 +1750,6 @@ def test_perform_preflight_recovers_changed_same_hwnd_without_dispatch(
 ):
     """Inference coordinates are never replayed across a fresh-frame drift."""
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction import InteractionAction
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
@@ -1742,10 +1792,10 @@ def test_perform_preflight_recovers_changed_same_hwnd_without_dispatch(
         frame_id=4,
         observation_artifact_id=planned.artifact_id,
     )
-    contract = TaskContractCompiler().compile(
-        "click the visible control in the current window", cold_start=True,
+    contract = _legacy_interaction_contract(
+        task="click the visible control in the current window",
     )
-    stage = next(item for item in contract.stages if item.type.value == "PerformTurn")
+    stage = _legacy_stage(contract, "PerformTurn")
     target = {
         "hwnd": 77,
         "title": "generic target",
@@ -1834,7 +1884,6 @@ def test_perform_preflight_tolerates_bounded_pixel_noise(monkeypatch, tmp_path):
     from winpilot.agent.tool_result import ToolResult
     from winpilot.perception.surface_binding import InteractionRegion
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction import InteractionAction
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
@@ -1845,8 +1894,8 @@ def test_perform_preflight_tolerates_bounded_pixel_noise(monkeypatch, tmp_path):
     fresh_path = store.root / "fresh-noise.png"
     _write_frame(baseline_path)
     _write_frame(fresh_path, changed_box=(40, 40, 40, 40))
-    contract = TaskContractCompiler().compile(
-        "click the visible control in the current window", cold_start=True,
+    contract = _legacy_interaction_contract(
+        task="click the visible control in the current window",
     )
     assert contract.session is not None
     target = {
@@ -1891,7 +1940,7 @@ def test_perform_preflight_tolerates_bounded_pixel_noise(monkeypatch, tmp_path):
         frame_id=4,
         observation_artifact_id=planned.artifact_id,
     )
-    stage = next(item for item in contract.stages if item.type.value == "PerformTurn")
+    stage = _legacy_stage(contract, "PerformTurn")
     context = {
         "run_id": "run-small-noise",
         "runtime_state": {"interaction_state": {
@@ -1975,19 +2024,16 @@ def test_input_mode_and_color_prepare_then_rebind_spatial_action_to_fresh_frame(
     from winpilot.agent.tool_result import ToolResult
     from winpilot.perception.surface_binding import InteractionRegion
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction import InteractionAction
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
 
-    contract = TaskContractCompiler().compile(
-        "play with me on the current canvas, use red, your turn",
-        cold_start=True,
+    contract = _legacy_interaction_contract(
+        persistent=True,
+        task="play with me on the current canvas, use red, your turn",
     )
-    stage = next(
-        item for item in contract.stages if item.type.value == "PerformTurn"
-    )
+    stage = _legacy_stage(contract, "PerformTurn")
     store = ArtifactStore("run-preparation-frame", tmp_path / "artifacts")
     target = {
         "hwnd": 77,
@@ -2268,7 +2314,6 @@ def _run_roi_verify(
 ):
     from unittest.mock import patch
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction import InteractionAction
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
@@ -2290,15 +2335,11 @@ def _run_roi_verify(
         continuation="reobserve",
         observation_artifact_id=baseline.artifact_id,
     )
-    contract = TaskContractCompiler().compile(
-        "点击当前页面中的蓝色按钮",
-        cold_start=True,
+    contract = _legacy_interaction_contract(
+        persistent=persistent,
+        task="点击当前页面中的蓝色按钮",
     )
-    if persistent:
-        assert contract.session is not None
-        contract.session.lifecycle = "persistent"
-        contract.session.wait_for_external_change = True
-    stage = next(item for item in contract.stages if item.type.value == "VerifyLocalEffect")
+    stage = _legacy_stage(contract, "VerifyLocalEffect")
     context = {
         "run_id": "run-roi",
         "runtime_state": {"interaction_state": {
@@ -2364,7 +2405,6 @@ def test_local_effect_verification_uses_action_roi_not_unrelated_pixels(tmp_path
 def test_point_selection_can_verify_remote_feedback_on_bound_surface(tmp_path):
     from unittest.mock import patch
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction import InteractionAction
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
@@ -2391,13 +2431,10 @@ def test_point_selection_can_verify_remote_feedback_on_bound_surface(tmp_path):
         ),
         observation_artifact_id=baseline.artifact_id,
     )
-    contract = TaskContractCompiler().compile(
-        "click the unique visible target", cold_start=True,
+    contract = _legacy_interaction_contract(
+        task="click the unique visible target",
     )
-    stage = next(
-        item for item in contract.stages
-        if item.type.value == "VerifyLocalEffect"
-    )
+    stage = _legacy_stage(contract, "VerifyLocalEffect")
     context = {
         "run_id": "run-remote-effect",
         "runtime_state": {"interaction_state": {
@@ -2462,7 +2499,6 @@ def test_persistent_grounded_freehand_turn_skips_second_semantic_model_call(
     import numpy as np
 
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction import InteractionAction
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
@@ -2519,14 +2555,11 @@ def test_persistent_grounded_freehand_turn_skips_second_semantic_model_call(
     decision = decision.model_copy(update={
         "observation_artifact_id": baseline.artifact_id,
     })
-    contract = TaskContractCompiler().compile(
-        "play with me on this canvas, I already started, your turn",
-        cold_start=True,
+    contract = _legacy_interaction_contract(
+        persistent=True,
+        task="play with me on this canvas, I already started, your turn",
     )
-    stage = next(
-        item for item in contract.stages
-        if item.type.value == "VerifyLocalEffect"
-    )
+    stage = _legacy_stage(contract, "VerifyLocalEffect")
     assert any(
         provider.id == "typed_freehand_turn_completion"
         for obligation in stage.obligations
@@ -2884,7 +2917,6 @@ def test_model_change_ratio_is_capped_for_causal_detection_not_semantics():
 
 def test_bounded_no_action_finish_requires_independent_visual_proof(monkeypatch, tmp_path):
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
@@ -2899,8 +2931,8 @@ def test_bounded_no_action_finish_requires_independent_visual_proof(monkeypatch,
         continuation="finish",
         observation_artifact_id=artifact.artifact_id,
     )
-    contract = TaskContractCompiler().compile("点击当前页面中的蓝色按钮", cold_start=True)
-    stage = next(item for item in contract.stages if item.type.value == "VerifyLocalEffect")
+    contract = _legacy_interaction_contract(task="点击当前页面中的蓝色按钮")
+    stage = _legacy_stage(contract, "VerifyLocalEffect")
     context = {
         "run_id": "run-noop",
         "runtime_state": {"interaction_state": {
@@ -2931,7 +2963,6 @@ def test_bounded_no_action_finish_requires_independent_visual_proof(monkeypatch,
 
 def test_persistent_no_action_terminal_proof_emits_completion_evidence(monkeypatch, tmp_path):
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
@@ -2940,16 +2971,13 @@ def test_persistent_no_action_terminal_proof_emits_completion_evidence(monkeypat
     _write_frame(image_path, changed_box=(20, 20, 40, 40))
     store = ArtifactStore("run-persistent-noop", tmp_path / "artifacts")
     artifact = store.import_file(image_path, purpose="observation", sendable=False)
-    contract = TaskContractCompiler().compile(
-        "play with me in the current window; I have already started",
-        cold_start=True,
+    contract = _legacy_interaction_contract(
+        persistent=True,
+        task="play with me in the current window; I have already started",
     )
     assert contract.session is not None
     assert contract.session.lifecycle == "persistent"
-    stage = next(
-        item for item in contract.stages
-        if item.type.value == "VerifyLocalEffect"
-    )
+    stage = _legacy_stage(contract, "VerifyLocalEffect")
     decision = _decision(
         action=None,
         turn_owner="agent",
@@ -3002,18 +3030,13 @@ def test_persistent_no_action_terminal_proof_emits_completion_evidence(monkeypat
 
 
 def test_interaction_recovery_discards_old_plan_and_consumes_replan_budget():
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
 
-    contract = TaskContractCompiler().compile(
-        "drag the visible item to its indicated destination",
+    contract = _legacy_interaction_contract(
+        task="drag the visible item to its indicated destination",
         max_steps=4,
-        cold_start=True,
     )
-    stage = next(
-        item for item in contract.stages
-        if item.type.value == "PerformTurn"
-    )
+    stage = _legacy_stage(contract, "PerformTurn")
     context = {
         "run_id": "run-recovery",
         "runtime_state": {"interaction_state": {
@@ -3099,7 +3122,6 @@ def test_extreme_uniform_compositor_frame_is_rejected_before_model_use(
     import numpy as np
 
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
 
@@ -3118,9 +3140,8 @@ def test_extreme_uniform_compositor_frame_is_rejected_before_model_use(
     assert runtime_module._authoritative_frame_quality(
         control_artifact, [0, 0, 1000, 1000],
     )["usable"] is True
-    contract = TaskContractCompiler().compile(
-        "interact with the visible control in the current window",
-        cold_start=True,
+    contract = _legacy_interaction_contract(
+        task="interact with the visible control in the current window",
     )
     context = {
         "run_id": "run-uniform",
@@ -3176,7 +3197,6 @@ def test_infer_stage_retries_invalid_model_schema_once_on_same_authoritative_fra
     second_attempt_valid,
 ):
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction import (
         InteractionAction,
@@ -3185,15 +3205,13 @@ def test_infer_stage_retries_invalid_model_schema_once_on_same_authoritative_fra
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
 
-    contract = TaskContractCompiler().compile(
-        "continue the visible shared turn-based interface; it is your turn",
-        cold_start=True,
+    contract = _legacy_interaction_contract(
+        persistent=True,
+        task="continue the visible shared turn-based interface; it is your turn",
     )
     assert contract.session is not None
     assert contract.session.wait_for_external_change is True
-    stage = next(
-        item for item in contract.stages if item.type.value == "InferInteraction"
-    )
+    stage = _legacy_stage(contract, "InferInteraction")
     image_path = tmp_path / "authoritative-frame.png"
     _write_frame(image_path, changed_box=(50, 50, 120, 120))
     store = ArtifactStore("run-schema-retry", tmp_path / "artifacts")
@@ -3321,19 +3339,14 @@ def test_infer_stage_retries_invalid_model_schema_once_on_same_authoritative_fra
 
 
 def test_blocked_inference_is_fail_fast_not_reobserve_recovery(monkeypatch):
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.interaction_stage_runtime import _failure
     from winpilot.tasking.stage_runtime import StageRuntime
 
-    contract, graph = TaskContractCompiler().compile_graph(
-        "drag the visible item to its indicated destination",
+    contract, graph = _legacy_interaction_graph(
+        task="drag the visible item to its indicated destination",
         max_steps=8,
-        cold_start=True,
     )
-    infer_stage = next(
-        item for item in contract.stages
-        if item.type.value == "InferInteraction"
-    )
+    infer_stage = _legacy_stage(contract, "InferInteraction")
     node = next(item for item in graph.nodes if item.id == infer_stage.id)
     runtime = StageRuntime()
 
@@ -3364,19 +3377,14 @@ def test_blocked_inference_is_fail_fast_not_reobserve_recovery(monkeypatch):
 
 
 def test_stage_runtime_executes_recovery_policy_as_graph_branch(monkeypatch):
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.interaction_stage_runtime import _failure
     from winpilot.tasking.stage_runtime import StageRuntime
 
-    contract, graph = TaskContractCompiler().compile_graph(
-        "drag the visible item to its indicated destination",
+    contract, graph = _legacy_interaction_graph(
+        task="drag the visible item to its indicated destination",
         max_steps=8,
-        cold_start=True,
     )
-    infer_stage = next(
-        item for item in contract.stages
-        if item.type.value == "InferInteraction"
-    )
+    infer_stage = _legacy_stage(contract, "InferInteraction")
     node = next(item for item in graph.nodes if item.id == infer_stage.id)
     runtime = StageRuntime()
 
@@ -3422,7 +3430,6 @@ def test_external_wait_uses_contract_timeout_and_reports_controller_time(
     from types import SimpleNamespace
 
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
@@ -3442,17 +3449,14 @@ def test_external_wait_uses_contract_timeout_and_reports_controller_time(
         purpose="observation",
         sendable=False,
     )
-    contract = TaskContractCompiler().compile(
-        "play with me in the current window; I have already started",
+    contract = _legacy_interaction_contract(
+        persistent=True,
+        task="play with me in the current window; I have already started",
         max_steps=8,
-        cold_start=True,
     )
     assert contract.session is not None
     contract.session.external_change_timeout_s = 7.0
-    stage = next(
-        item for item in contract.stages
-        if item.type.value == "WaitForExternalChange"
-    )
+    stage = _legacy_stage(contract, "WaitForExternalChange")
     decision = _decision(
         action=None,
         turn_owner="user",
@@ -3548,7 +3552,6 @@ def test_external_wait_rearms_after_transient_watcher_without_artifact_delta(
     from types import SimpleNamespace
 
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
@@ -3564,16 +3567,13 @@ def test_external_wait_rearms_after_transient_watcher_without_artifact_delta(
     changed_artifact = store.import_file(
         changed_path, purpose="observation", sendable=False,
     )
-    contract = TaskContractCompiler().compile(
-        "play with me in the current window; I have already started",
-        cold_start=True,
+    contract = _legacy_interaction_contract(
+        persistent=True,
+        task="play with me in the current window; I have already started",
     )
     assert contract.session is not None
     contract.session.external_change_timeout_s = 7.0
-    stage = next(
-        item for item in contract.stages
-        if item.type.value == "WaitForExternalChange"
-    )
+    stage = _legacy_stage(contract, "WaitForExternalChange")
     decision = _decision(
         action=None,
         turn_owner="user",
@@ -3725,7 +3725,6 @@ def test_external_wait_detects_change_against_previous_authoritative_frame(
     tmp_path,
 ):
     from winpilot.tasking.artifacts import ArtifactStore
-    from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.evidence import EvidenceRegistry
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
@@ -3741,14 +3740,11 @@ def test_external_wait_detects_change_against_previous_authoritative_frame(
     fresh = store.import_file(
         fresh_path, purpose="observation", sendable=False,
     )
-    contract = TaskContractCompiler().compile(
-        "play with me in the current window; I have already started",
-        cold_start=True,
+    contract = _legacy_interaction_contract(
+        persistent=True,
+        task="play with me in the current window; I have already started",
     )
-    stage = next(
-        item for item in contract.stages
-        if item.type.value == "WaitForExternalChange"
-    )
+    stage = _legacy_stage(contract, "WaitForExternalChange")
     decision = _decision(
         action=None,
         turn_owner="user",

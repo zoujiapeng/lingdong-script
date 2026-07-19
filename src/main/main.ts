@@ -16,6 +16,7 @@ import { startApiServer } from './api';
 import { resolveMacroPath } from './macroPaths';
 import { callFeature, stopFeatureProcess } from './featureCallBridge';
 import { startWinpilotServer, getWinpilotConnection, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer, restartWinpilotServer } from './winpilotServer';
+import { classifyTaskOutcome, taskResultText } from '../shared/taskOutcome';
 import {
   mainWindow, setMainWindow,
   pythonProcess,
@@ -667,11 +668,18 @@ function startAgentProcess(goal: string, config?: Record<string, any>, supervise
         if (msg.type === 'agent_done') {
           setAgentRunning(false);
           const status = String(msg.status || '').toLowerCase();
-          const success = status === 'done' || status === 'completed' || status === 'reply';
-          const stopped = status === 'stopped' || status === 'canceled' || status === 'cancelled';
+          const outcome = classifyTaskOutcome(status, msg.result, msg.error);
+          const success = outcome === 'success';
+          const stopped = outcome === 'info';
           notifyTaskbarAttention(
             success ? '任务完成' : stopped ? '任务已停止' : '任务失败',
-            String(msg.result || msg.error || msg.task || msg.run_id || '').slice(0, 220),
+            String(
+              taskResultText(msg.error)
+              || taskResultText(msg.result)
+              || msg.task
+              || msg.run_id
+              || '',
+            ).slice(0, 220),
             success ? 'success' : stopped ? 'info' : 'error',
             String(msg.run_id || ''),
           );

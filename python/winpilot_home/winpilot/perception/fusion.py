@@ -288,17 +288,19 @@ def _escalate_empty(snapshot: Snapshot, region: Region,
                     fused: list[UIElement]) -> list[UIElement]:
     """Rescue path when perception came back blind (no readable element).
 
-    The agent cannot act on an empty screen — before returning it, retry with
-    progressively stronger fallbacks: window OCR at lowered confidence →
-    full-screen OCR → VLM (when configured). Controlled by
-    ``fusion.escalate_on_empty`` (turn off for dimension-isolation testing).
+    This compatibility path may retry only dimensions that the operator
+    explicitly enabled.  An empty structured snapshot must never silently
+    turn disabled OCR or VLM into a semantic fallback.
     """
-    steps: list[tuple[str, object]] = [
-        ("esc_ocr_window", lambda: ocr.collect(region, min_conf=_ESCALATE_OCR_CONF)),
-        ("esc_ocr_screen", lambda: ocr.collect(
-            virtual_screen_region(), min_conf=_ESCALATE_OCR_CONF)),
-    ]
-    if vlm.is_configured():
+    enabled = set(CONFIG.enabled_dimensions())
+    steps: list[tuple[str, object]] = []
+    if "ocr" in enabled:
+        steps.extend([
+            ("esc_ocr_window", lambda: ocr.collect(region, min_conf=_ESCALATE_OCR_CONF)),
+            ("esc_ocr_screen", lambda: ocr.collect(
+                virtual_screen_region(), min_conf=_ESCALATE_OCR_CONF)),
+        ])
+    if "vlm" in enabled and vlm.is_configured():
         steps.append(("esc_vlm", lambda: vlm.collect(region)))
 
     for name, collect_fn in steps:
@@ -743,7 +745,7 @@ def observe(hwnd: int, include_icons: bool = True,
         not _has_readable(fused)
         and not (stop_event is not None and stop_event.is_set())
         and not is_structured_ui
-        and CONFIG.get("fusion", "escalate_on_empty", default=True)
+        and CONFIG.get("fusion", "escalate_on_empty", default=False)
     ):
         fused = _escalate_empty(snapshot, region, fused)
 

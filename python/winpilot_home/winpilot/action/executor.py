@@ -148,15 +148,6 @@ _VK = {
 _EXTENDED_VKS = {0x2E, 0x2D, 0x24, 0x23, 0x21, 0x22, 0x26, 0x28, 0x25, 0x27, 0x5B, 0x5D}
 _VK_SHIFT, _VK_CTRL, _VK_ALT = 0x10, 0x11, 0x12
 _VK_TEXT_CHARS = set(string.digits + "+-*/=.,")
-_NUMERIC_OPERATOR_VKS = {
-    "*": 0x6A,  # VK_MULTIPLY
-    "+": 0x6B,  # VK_ADD
-    "-": 0x6D,  # VK_SUBTRACT
-    ".": 0x6E,  # VK_DECIMAL
-    ",": 0x6E,
-    "/": 0x6F,  # VK_DIVIDE
-    "=": 0x0D,  # Enter is the semantic equals key on calculation surfaces.
-}
 
 
 def _vk_of(key: str) -> int:
@@ -922,80 +913,12 @@ def scroll(
     return {"ok": True}
 
 
-@queued_desktop_action("scroll_retry")
-def scroll_sendinput_restored(
-    x: int,
-    y: int,
-    amount: int,
-    hwnd: int | None = None,
-) -> dict:
-    """Retry a wheel action through physical SendInput without stealing the cursor.
-
-    ``WM_MOUSEWHEEL`` is intentionally the first choice in no-mouse-steal mode,
-    but Chromium and some owner-drawn controls may accept the message without
-    scrolling.  The action-delta verifier calls this only after proving that the
-    first attempt produced no visible change.
-    """
-    if _dry_run():
-        return {"ok": True, "dry_run": True, "via": "sendinput_restored"}
-    cooperative_block = cooperative_input_guard("scroll_retry", hwnd)
-    if cooperative_block is not None:
-        return cooperative_block
-    saved = _cursor_pos()
-    completed = True
-    try:
-        _raw_move_mouse(int(x), int(y))
-        time.sleep(0.04)
-        if multi_input_cooperation_enabled() and not _cooperative_action_still_owned(
-            hwnd, expected_cursor=(int(x), int(y)),
-        ):
-            completed = False
-        else:
-            _send_inputs([
-                _mouse_input(
-                    win32con.MOUSEEVENTF_WHEEL,
-                    data=int(amount) * 120 & 0xFFFFFFFF,
-                )
-            ])
-            if multi_input_cooperation_enabled() and not _cooperative_action_still_owned(
-                hwnd, expected_cursor=(int(x), int(y)),
-            ):
-                completed = False
-    finally:
-        cursor_restored = _restore_cursor_after_agent_input(
-            saved, (int(x), int(y)), hwnd,
-        )
-    if not completed:
-        return {
-            "ok": False,
-            "verified": False,
-            "blocked": True,
-            "cooperative_input": True,
-            "cursor_restored": cursor_restored,
-            "error": "scroll retry stopped because the user took foreground/cursor ownership",
-        }
-    BUS.publish(
-        "action",
-        action="scroll_retry",
-        x=int(x),
-        y=int(y),
-        amount=int(amount),
-        via="sendinput_restored",
-    )
-    return {
-        "ok": True,
-        "via": "sendinput_restored",
-        "cursor_restored": cursor_restored,
-    }
-
-
 # ------------------------------------------------------------- keyboard API
 @queued_desktop_action("type_text")
 def type_text(
     text: str,
     interval_s: float = 0.008,
     hwnd: int | None = None,
-    numeric_keypad: bool = False,
 ) -> dict:
     """Unicode injection — IME-independent, supports Chinese.
 
@@ -1034,9 +957,7 @@ def type_text(
                     "requested": len(text),
                     "error": "foreground changed while typing; stopped instead of stealing keyboard focus",
                 }
-            if numeric_keypad and char in _NUMERIC_OPERATOR_VKS:
-                _press_vk_code(_NUMERIC_OPERATOR_VKS[char])
-            elif not _press_char_vk(char):
+            if not _press_char_vk(char):
                 break
             typed += 1
             if (
@@ -1055,11 +976,10 @@ def type_text(
                         "stopped without sending further input"
                     ),
                 }
-            time.sleep(max(interval_s, 0.04 if numeric_keypad else 0.03))
-        via = "numeric_keypad" if numeric_keypad else "vk"
-        BUS.publish("action", action="type_text", length=typed, via=via)
+            time.sleep(max(interval_s, 0.03))
+        BUS.publish("action", action="type_text", length=typed, via="vk")
         return {"ok": typed == len(text), "typed": typed,
-                "requested": len(text), "via": via}
+                "requested": len(text), "via": "vk"}
     typed = 0
     for char in text:
         if not _refocus_if_needed(typed):

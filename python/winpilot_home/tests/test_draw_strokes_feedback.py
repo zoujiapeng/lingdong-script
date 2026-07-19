@@ -191,10 +191,27 @@ def test_compacted_pixel_effect_does_not_look_like_goal_verification():
 
     rolled_preview = json.loads(AgentRunner._native_action_result_preview(raw))
     assert "verified" not in rolled_preview
-    assert rolled_preview["action_verified"] is True
+    assert rolled_preview["device_action_dispatched"] is True
     assert rolled_preview["semantic_verified"] is False
     assert rolled_preview["completion_evidence"] is False
     assert rolled_preview["summary_kind"] == "pixel_effect_only"
+
+    dispatched_but_semantically_failed = json.loads(raw)
+    dispatched_but_semantically_failed.update({
+        "ok": False,
+        "verified": False,
+        "blocked": True,
+        "native_action_executed": True,
+    })
+    failed_preview = json.loads(AgentRunner._native_action_result_preview(
+        json.dumps(dispatched_but_semantically_failed),
+    ))
+    assert "ok" not in failed_preview
+    assert "verified" not in failed_preview
+    assert failed_preview["native_action_executed"] is True
+    assert failed_preview["device_action_dispatched"] is True
+    assert failed_preview["semantic_verified"] is False
+    assert failed_preview["completion_evidence"] is False
 
 
 def test_draw_strokes_without_pixel_change_is_a_fail_closed_result(monkeypatch):

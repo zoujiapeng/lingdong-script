@@ -6,8 +6,8 @@ import re
 from ..config import CONFIG
 from ..perception.app_aliases import expand as expand_app_aliases
 from .task_rules import (
-    _is_communication_task,
     _is_gui_only_task,
+    _structured_task_intent,
 )
 
 
@@ -24,62 +24,23 @@ _OPEN_PLAN_MIXED_ACTION_TERMS = (
 )
 
 
-# ``_is_gui_only_task`` intentionally answers a policy question: whether the
-# task *must* stay in the visible UI.  Tool profiling needs a slightly broader
-# answer.  A normal request such as "open Notepad and type hello" is plainly a
-# desktop operation even when the user did not say "GUI-only".  Keep this
-# classifier about generic interaction grammar and visible UI surfaces; do not
-# encode benchmark subjects (for example a particular animal to draw).
-_NATIVE_GUI_ACTION_RE = re.compile(
-    r"\b(?:open|launch|start|focus|click|press|select|choose|type|enter|write|"
-    r"scroll|drag|drop|draw|paint|close|maximi[sz]e|minimi[sz]e|switch|"
-    r"navigate|browse|search|send|play|pause|calculate)\b|"
-    r"\u6253\u5f00|\u542f\u52a8|\u8fd0\u884c|\u805a\u7126|\u70b9\u51fb|\u6309\u4e0b|"
-    r"\u9009\u62e9|\u8f93\u5165|\u952e\u5165|\u586b\u5199|\u4e66\u5199|\u6eda\u52a8|"
-    r"\u62d6\u62fd|\u62d6\u52a8|\u653e\u7f6e|\u7ed8\u5236|\u753b|\u5173\u95ed|"
-    r"\u6700\u5927\u5316|\u6700\u5c0f\u5316|\u5207\u6362|\u6d4f\u89c8|\u641c\u7d22|"
-    r"\u53d1\u9001|\u64ad\u653e|\u6682\u505c|\u8ba1\u7b97",
-    re.IGNORECASE,
-)
-_NATIVE_GUI_TARGET_RE = re.compile(
-    r"\b(?:desktop|window|app|application|client|browser|webpage|tab|toolbar|"
-    r"menu|button|dialog|text\s*box|input\s*field|canvas|whiteboard|taskbar|"
-    r"system\s*tray|icon|notepad|calculator|paint|chrome|edge|firefox|"
-    r"file\s*explorer|settings|control\s*panel|word|excel|powerpoint|qq|wechat)\b|"
-    r"\u684c\u9762|\u7a97\u53e3|\u5e94\u7528|\u8f6f\u4ef6|\u5ba2\u6237\u7aef|"
-    r"\u6d4f\u89c8\u5668|\u7f51\u9875|\u6807\u7b7e\u9875|\u5de5\u5177\u680f|"
-    r"\u83dc\u5355|\u6309\u94ae|\u5bf9\u8bdd\u6846|\u8f93\u5165\u6846|\u753b\u5e03|"
-    r"\u753b\u677f|\u767d\u677f|\u4efb\u52a1\u680f|\u7cfb\u7edf\u6258\u76d8|"
-    r"\u56fe\u6807|\u8bb0\u4e8b\u672c|\u8ba1\u7b97\u5668|\u753b\u56fe|"
-    r"\u8d44\u6e90\u7ba1\u7406\u5668|\u8bbe\u7f6e|\u63a7\u5236\u9762\u677f|"
-    r"\u5fae\u4fe1",
-    re.IGNORECASE,
-)
-_DIRECT_NATIVE_GUI_GESTURE_RE = re.compile(
-    r"\b(?:click|scroll|drag|drop|hotkey|double[- ]click|right[- ]click)\b|"
-    r"\u70b9\u51fb|\u53cc\u51fb|\u53f3\u952e|\u6eda\u52a8|\u62d6\u62fd|\u62d6\u52a8",
-    re.IGNORECASE,
-)
-
-
-def _looks_like_native_gui_operation_task(task: str) -> bool:
+def _looks_like_native_gui_operation_task(task: str, *, task_intent=None) -> bool:
     """Return whether a native-vision run is clearly a visible GUI job.
 
-    This is deliberately narrower than "not coding": explanations, arithmetic,
-    repository work, and system inspection should keep the standard schema.
-    Direct pointer gestures are self-identifying; other verbs need an explicit
-    application or UI surface so phrases such as "search the documentation" do
-    not lose research/file tools.
+    The Task Contract parser owns application and interaction recognition.  A
+    second list of well-known programs here used to make the schema profile
+    depend on whether a product happened to be named in source code.  Use the
+    structured domain instead: named applications, current-window gestures,
+    drawing surfaces, browser tabs, games, and future UI types all compile to a
+    desktop/communication intent without another product catalogue.
     """
-    text = str(task or "").strip()
-    if not text:
+    source = task_intent if task_intent is not None else task
+    try:
+        intent = _structured_task_intent(source)
+    except (TypeError, ValueError):
         return False
-    if _DIRECT_NATIVE_GUI_GESTURE_RE.search(text):
-        return True
-    return bool(
-        _NATIVE_GUI_ACTION_RE.search(text)
-        and _NATIVE_GUI_TARGET_RE.search(text)
-    )
+    domain = str(intent.get("domain") or "").casefold()
+    return domain in {"desktop", "communication"}
 
 
 def _schema_profile_for_task(
@@ -103,15 +64,14 @@ def _schema_profile_for_task(
         return "standard"
     if str(stage_type or "").strip():
         return "lean_gui"
-    communication_source = task_intent if task_intent is not None else task
-    if _is_gui_only_task(task) or _is_communication_task(communication_source):
+    if _is_gui_only_task(task):
         return "lean_gui"
     # The broader GUI classifier is useful for both controller modes.  A
     # native-vision model gets the ultra-small frame/action schema downstream;
     # a text-only model keeps the richer lean GUI controller plus VLM tools.
     # In either case unrelated research/system/file tools should not be sent
     # on every turn of an obvious desktop interaction task.
-    if _looks_like_native_gui_operation_task(task):
+    if _looks_like_native_gui_operation_task(task, task_intent=task_intent):
         return "lean_gui"
     return "standard"
 

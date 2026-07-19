@@ -1,4 +1,4 @@
-"""Agent tool dispatcher and per-run tool session state.
+"""Agent tool dispatcher and per-run execution state.
 
 Function-calling schemas live in ``tool_schemas.py``. This module keeps the
 runtime state: latest Snapshot, current target hwnd, world model, undo stack,
@@ -9,7 +9,6 @@ condition (see action/verify.py DSL) and runs through Action→Verify→Retry.
 from __future__ import annotations
 
 import json
-import re
 import threading
 import time
 from typing import Any
@@ -28,11 +27,6 @@ from ..perception.app_aliases import expand as expand_app_aliases
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from . import planner, scope_guard
-from .task_rules import (
-    _communication_mode,
-    _gui_only_blocked_hotkey,
-    _is_multi_source_research_task,
-)
 
 # Several imports above are retained as stable monkeypatch targets for older
 # tests and scripts that patch winpilot.agent.tools.<module>. The mixins read
@@ -43,7 +37,6 @@ from .file_tools import FileToolMixin
 from .fast_tools import FastToolMixin
 from .interaction_tools import (
     InteractionToolMixin,
-    _call_with_optional_hwnd,
     normalize_key_sequence,
 )
 from .memory_tools import MemoryToolMixin
@@ -58,7 +51,7 @@ from .window_tools import WindowToolMixin
 from .working_set_tools import WorkingSetToolMixin
 
 _MUTATING_TOOLS = {
-    "open_app", "launch", "click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
+    "open_app", "launch", "click", "double_click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
     "focus_window", "wait", "tray_click", "run_shell", "run_detached",
     "write_file", "apply_patch", "clipboard_write", "clipboard_paste", "paste_image_file", "mouse_down",
     "mouse_up", "move_mouse", "hold_key", "run_action_batch", "execute_subgoal",
@@ -68,6 +61,7 @@ _MUTATING_TOOLS = {
 }
 _ACTION_SCREEN_DELTA_TOOLS = {
     "click",
+    "double_click",
     "type_text",
     "hotkey",
     "scroll",
@@ -81,15 +75,7 @@ _ACTION_SCREEN_DELTA_TOOLS = {
     "hold_key",
     "coordinate_click_test",
 }
-_HARD_REPEAT_GUARD_TOOLS = {"open_app", "launch", "run_shell", "run_detached"}
-_READ_ONLY_DISCOVERY_TOOLS = {
-    "list_windows", "scan_windows", "find_app", "find_program",
-    "list_installed_apps", "discover_mcp_tools",
-}
-_DISCOVERY_PROGRESS_TOOLS = {"record_facts", "revise_plan", "complete_subgoal"}
-_DRAFT_SEND_MARKERS = (
-    "send", "submit", "reply", "\u53d1\u9001", "\u53d1\u51fa", "\u63d0\u4ea4", "\u56de\u590d",
-)
+_CONTROLLER_COMPOSITE_TOOLS = {"run_action_batch", "execute_subgoal"}
 
 
 class ToolSession(
@@ -209,6 +195,11 @@ class ToolSession(
         self._target_process_id = 0
         self._target_process_name = ""
         self._target_window_class = ""
+        # Stable launch identity is separate from the mutable window title.
+        # Media/document apps routinely replace their title with the current
+        # song or file, so a later open_app call must not mistake that for a
+        # different/not-running application and create a duplicate instance.
+        self._target_application_identity: dict[str, Any] = {}
         # World model is fed from dispatch(); read once per run (runs are
         # short-lived, created per task) so a runtime toggle change applies
         # to the next task rather than mid-run.
@@ -231,18 +222,7 @@ class ToolSession(
         # Lightweight undo stack: things this run created that can be rolled back.
         self._undo_stack: list[tuple[str, object]] = []
         self._screen_epoch = 0
-        self._verified_subgoal_at_epoch: tuple[str, int] | None = None
-        self._subgoal_no_progress_counts: dict[str, int] = {}
-        # Bind failure debt to the window/canvas generation that produced it.
-        # Otherwise two failures before a real focus/canvas correction become a
-        # permanent latch and prevent the corrected plan from ever executing.
-        self._subgoal_no_progress_contexts: dict[str, str] = {}
-        self._research_exploration_actions = 0
-        self._discovery_generation = 0
-        self._discovery_result_history: dict[tuple[int, int, str, str], list[str]] = {}
-        self._empty_mcp_discovery_counts: dict[tuple[int, int], int] = {}
         self._observe_cache: dict[str, Any] | None = None
-        self._screen_watch_auto_started = False
         self._predictive_ocr_lock = threading.Lock()
         self._predictive_ocr_cache: dict[str, Any] | None = None
         self.visible_evidence_ledger: list[dict[str, Any]] = []
@@ -256,94 +236,6 @@ class ToolSession(
         self.memory_recipe_attempts: list[dict[str, Any]] = []
 
     # ----------------------------------------------------------- dispatch
-    @staticmethod
-    def _discovery_signature(args: dict[str, Any]) -> str:
-        public_args = {
-            str(key): value
-            for key, value in (args or {}).items()
-            if not str(key).startswith("_")
-        }
-        try:
-            return json.dumps(public_args, ensure_ascii=False, sort_keys=True, default=str)
-        except (TypeError, ValueError):
-            return repr(sorted(public_args.items(), key=lambda item: item[0]))
-
-    @staticmethod
-    def _discovery_result_fingerprint(result: ToolResult) -> str:
-        return re.sub(r"\s+", " ", str(result.text or "")).strip()[:12000]
-
-    def _discovery_repeat_block(
-        self,
-        name: str,
-        args: dict[str, Any],
-    ) -> ToolResult | None:
-        if name not in _READ_ONLY_DISCOVERY_TOOLS:
-            return None
-        context = (self._discovery_generation, self._screen_epoch)
-        if (
-            name == "discover_mcp_tools"
-            and self._empty_mcp_discovery_counts.get(context, 0) >= 3
-        ):
-            return ToolResult(self._fmt({
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "empty_mcp_discovery_budget_exhausted": True,
-                "empty_discoveries": self._empty_mcp_discovery_counts.get(context, 0),
-                "error": (
-                    "Three MCP discovery queries returned no usable tool without any "
-                    "intervening task progress. Stop varying the query and continue through "
-                    "the local GUI/controller route."
-                ),
-                "gui_fallback_required": True,
-                "needs_replan": True,
-            }))
-        key = (*context, name, self._discovery_signature(args))
-        history = self._discovery_result_history.get(key, [])
-        if len(history) >= 2 and history[-1] == history[-2]:
-            return ToolResult(self._fmt({
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "discovery_repeat_guard": True,
-                "tool": name,
-                "repeat_count": len(history) + 1,
-                "error": (
-                    "The same read-only discovery call already returned the same result twice "
-                    "without a screen mutation, recorded fact, or plan advance. Use the existing "
-                    "evidence and choose a different route instead of repeating it."
-                ),
-                "needs_replan": True,
-            }))
-        return None
-
-    def _record_discovery_outcome(
-        self,
-        name: str,
-        args: dict[str, Any],
-        result: ToolResult,
-    ) -> None:
-        if name not in _READ_ONLY_DISCOVERY_TOOLS:
-            return
-        context = (self._discovery_generation, self._screen_epoch)
-        key = (*context, name, self._discovery_signature(args))
-        history = self._discovery_result_history.setdefault(key, [])
-        history.append(self._discovery_result_fingerprint(result))
-        if len(history) > 3:
-            del history[:-3]
-        if name != "discover_mcp_tools":
-            return
-        try:
-            payload = json.loads(result.text or "{}")
-        except (json.JSONDecodeError, TypeError):
-            payload = {}
-        if isinstance(payload, dict) and payload.get("tools"):
-            self._empty_mcp_discovery_counts[context] = 0
-        elif isinstance(payload, dict) and payload.get("ok") is True:
-            self._empty_mcp_discovery_counts[context] = (
-                self._empty_mcp_discovery_counts.get(context, 0) + 1
-            )
-
     def dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
         handler = getattr(self, f"_t_{name}", None)
         if handler is None:
@@ -351,104 +243,15 @@ class ToolSession(
         if name == "hotkey":
             args = dict(args)
             args["keys"] = normalize_key_sequence(args.get("keys"))
-        if name == "hotkey":
-            blocked_hotkey = _gui_only_blocked_hotkey(self.task, args.get("keys") or [])
-            if blocked_hotkey:
-                return ToolResult(blocked_hotkey)
-        draft_block = self._draft_communication_block(name, args)
-        if draft_block:
-            return ToolResult(json.dumps({
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "draft_send_blocked": True,
-                "error": draft_block,
-                "fast_path_advice": (
-                    "The user requested a draft only. Type into the composer without a click on "
-                    "Send and without Enter, then verify the draft is still visible."
-                ),
-            }, ensure_ascii=False))
-        if name == "execute_subgoal":
-            signature = self._subgoal_signature(args)
-            if self._verified_subgoal_at_epoch == (signature, self._screen_epoch):
-                return ToolResult(self._fmt({
-                    "ok": False,
-                    "verified": False,
-                    "blocked": True,
-                    "duplicate_verified_subgoal": True,
-                    "error": (
-                        "This exact GUI subgoal was already verified on the current "
-                        "screen epoch. Record the evidence, complete the matching plan "
-                        "item, or advance to the next distinct subgoal instead of "
-                        "repeating it."
-                    ),
-                    "needs_replan": False,
-                }))
-            if self._subgoal_no_progress_counts.get(signature, 0) >= 2:
-                recovery_context = self._subgoal_recovery_context()
-                previous_failure_context = self._subgoal_no_progress_contexts.get(signature)
-                environment_changed = bool(
-                    previous_failure_context
-                    and previous_failure_context != recovery_context
-                )
-                if environment_changed:
-                    # The same semantic request may be reasonable after a real
-                    # target/epoch/foreground transition. Apply this uniformly
-                    # to GUI work instead of giving one test domain a private
-                    # recovery lane.
-                    # A handler/scope failure before normal result accounting must
-                    # not leave the same recovery transition reusable forever.
-                    self._subgoal_no_progress_contexts[signature] = recovery_context
-                else:
-                    return ToolResult(self._fmt({
-                        "ok": False,
-                        "verified": False,
-                        "blocked": True,
-                        "duplicate_no_progress_subgoal": True,
-                        "error": (
-                            "The same GUI subgoal produced no verified visual progress twice. "
-                            "Do not click it again; use the visible evidence already collected, "
-                            "choose a different control/strategy, or record unavailable fields."
-                        ),
-                        "needs_replan": True,
-                    }))
-        discovery_block = self._discovery_repeat_block(name, args)
-        if discovery_block is not None:
-            return discovery_block
-        if self._research_budget_blocks(name, args):
-            return ToolResult(self._fmt({
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "research_exploration_budget_exhausted": True,
-                "exploration_actions": self._research_exploration_actions,
-                "error": (
-                    "This source has already received a reasonable GUI exploration budget. "
-                    "Call record_facts now with every visibly supported field and explicit "
-                    "not-visible values for the rest, then advance to the next source."
-                ),
-                "needs_replan": False,
-            }))
-        if (
-            self.world_enabled
-            and name in _HARD_REPEAT_GUARD_TOOLS
-            and self.world.prospective_repeat_count(name, args) >= 4
-        ):
-            return ToolResult(json.dumps({
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "error": (
-                    "duplicate_action_guard blocked the fourth consecutive identical "
-                    f"{name} call. Inspect the previous result and choose a different "
-                    "tool or strategy instead of repeating it."
-                ),
-                "tool": name,
-                "repeat_count": self.world.prospective_repeat_count(name, args),
-                "needs_replan": True,
-            }, ensure_ascii=False))
-        guard_result = scope_guard.ensure_scope(self, name, args)
-        scope_recovery = scope_guard.take_scope_recovery(self)
+        guard_result = None
+        scope_recovery = None
+        if name not in _CONTROLLER_COMPOSITE_TOOLS:
+            # Composite tools own a sequence of child commits.  Their
+            # Controller/Subgoal executor checks scope immediately before each
+            # child, where focus and target state are current; an outer check
+            # here can refocus once and then race or duplicate that authority.
+            guard_result = scope_guard.ensure_scope(self, name, args)
+            scope_recovery = scope_guard.take_scope_recovery(self)
         if guard_result is not None:
             return guard_result
         if scope_recovery is not None:
@@ -489,7 +292,6 @@ class ToolSession(
                 result.text = json.dumps(scope_payload, ensure_ascii=False, default=str)
         if screen_delta_context is not None:
             result = self._attach_action_screen_delta(result, screen_delta_context)
-        self._record_discovery_outcome(name, args, result)
         if self.world_enabled:
             try:
                 # Controller-owned recovery probes are causal maintenance, not
@@ -512,240 +314,35 @@ class ToolSession(
             except Exception:
                 logger.exception("世界模型更新失败")  # never block tool flow
         if name in _MUTATING_TOOLS:
-            self._screen_epoch += 1
-            self._observe_cache = None
-        if name in _DISCOVERY_PROGRESS_TOOLS:
+            # An attempted mutation is not necessarily an executed mutation.
+            # Scope/grounding guards deliberately return a normal ToolResult so
+            # the model can replan, but advancing the epoch for those rejected
+            # calls invalidates the very FrameAuthority that the next decision
+            # must use.  Only explicit pre-execution rejection is exempt; an
+            # ambiguous result still advances fail-safe because the device may
+            # have received input before the error was observed.
+            advance_epoch = True
             try:
-                progress_payload = json.loads(result.text or "{}")
+                mutation_result = json.loads(result.text or "{}")
             except (json.JSONDecodeError, TypeError):
-                progress_payload = {}
-            if not isinstance(progress_payload, dict) or progress_payload.get("ok") is not False:
-                self._discovery_generation += 1
-        if name == "execute_subgoal":
-            try:
-                payload = json.loads(result.text or "{}")
-            except (json.JSONDecodeError, TypeError):
-                payload = {}
-            if isinstance(payload, dict) and payload.get("verified") is True:
-                self._verified_subgoal_at_epoch = (
-                    self._subgoal_signature(args),
-                    self._screen_epoch,
+                mutation_result = {}
+            if isinstance(mutation_result, dict):
+                explicitly_not_executed = (
+                    mutation_result.get("action_executed") is False
+                    and mutation_result.get("native_action_executed") is not True
+                    and mutation_result.get("recovery_action_executed") is not True
                 )
-                self._subgoal_no_progress_counts.pop(self._subgoal_signature(args), None)
-                self._subgoal_no_progress_contexts.pop(self._subgoal_signature(args), None)
-            elif isinstance(payload, dict):
-                signature = self._subgoal_signature(args)
-                if self._subgoal_has_visual_progress(payload):
-                    # A failed final palette/verification step does not erase
-                    # primitives that the same controller transaction already
-                    # delivered.  Clear stale failure debt so a missing-part
-                    # repair is not permanently locked out.
-                    self._subgoal_no_progress_counts.pop(signature, None)
-                    self._subgoal_no_progress_contexts.pop(signature, None)
-                else:
-                    self._subgoal_no_progress_counts[signature] = (
-                        self._subgoal_no_progress_counts.get(signature, 0) + 1
-                    )
-                    self._subgoal_no_progress_contexts[signature] = (
-                        self._subgoal_recovery_context()
-                    )
-        if _is_multi_source_research_task(self.task):
-            if name == "record_facts":
-                try:
-                    record_payload = json.loads(result.text or "{}")
-                except (json.JSONDecodeError, TypeError):
-                    record_payload = {}
-                if isinstance(record_payload, dict) and record_payload.get("created_new_source") is True:
-                    self._research_exploration_actions = 0
-            elif name in {"scroll", "observe", "read_text", "execute_subgoal", "run_action_batch"}:
-                self._research_exploration_actions += 1
-        if name in {"open_app", "launch", "focus_window", "observe", "read_text"}:
-            self._ensure_screen_watch(f"after:{name}")
+                pre_execution_guard = bool(
+                    mutation_result.get("visual_grounding_required")
+                    or mutation_result.get("missing_live_target")
+                    or mutation_result.get("native_no_progress_guard")
+                )
+                if explicitly_not_executed or pre_execution_guard:
+                    advance_epoch = False
+            if advance_epoch:
+                self._screen_epoch += 1
+                self._observe_cache = None
         return result
-
-    def _draft_communication_block(self, name: str, args: dict[str, Any]) -> str:
-        if _communication_mode(self.task_intent) != "draft":
-            return ""
-
-        def has_send_marker(value: object) -> bool:
-            text = str(value or "").strip().casefold()
-            return bool(text and any(marker in text for marker in _DRAFT_SEND_MARKERS))
-
-        def keys_submit(value: object) -> bool:
-            keys = value if isinstance(value, list) else [value]
-            normalized = {str(key or "").strip().casefold() for key in keys}
-            return bool(normalized.intersection({"enter", "return", "numpad_enter", "kp_enter"}))
-
-        def inspect(action_name: str, payload: dict[str, Any]) -> bool:
-            if action_name == "hotkey" and keys_submit(payload.get("keys")):
-                return True
-            if action_name in {"click", "click_element"}:
-                if has_send_marker(payload.get("label")):
-                    return True
-                if any(has_send_marker(item) for item in (payload.get("fallback_text") or [])):
-                    return True
-                element_id = payload.get("element_id")
-                x, y = payload.get("x"), payload.get("y")
-                for element in (getattr(self.snapshot, "elements", None) or []):
-                    if not has_send_marker(getattr(element, "text", "")):
-                        continue
-                    if element_id is not None and int(getattr(element, "elem_id", -1)) == int(element_id):
-                        return True
-                    if x is not None and y is not None:
-                        right = int(getattr(element, "left", 0)) + int(getattr(element, "width", 0))
-                        bottom = int(getattr(element, "top", 0)) + int(getattr(element, "height", 0))
-                        if (
-                            int(getattr(element, "left", 0)) <= int(x) <= right
-                            and int(getattr(element, "top", 0)) <= int(y) <= bottom
-                        ):
-                            return True
-            return False
-
-        if inspect(name, args):
-            return "Draft-only task blocked a send/submit action."
-        if name == "execute_subgoal":
-            clicks = [args.get("click"), *(args.get("clicks") or [])]
-            if any(isinstance(item, dict) and inspect("click_element", item) for item in clicks):
-                return "Draft-only task blocked a Send click inside execute_subgoal."
-            input_spec = args.get("input") if isinstance(args.get("input"), dict) else {}
-            if input_spec.get("submit") is True or input_spec.get("press_enter") is True:
-                return "Draft-only task blocked input submission."
-        if name == "run_action_batch":
-            for action in args.get("actions") or []:
-                if not isinstance(action, dict):
-                    continue
-                action_name = str(action.get("action") or action.get("tool") or "")
-                payload = dict(action.get("params") or {})
-                payload.update({key: value for key, value in action.items() if key != "params"})
-                if inspect(action_name, payload):
-                    return "Draft-only task blocked a send/submit action inside the batch."
-        return ""
-
-    @staticmethod
-    def _subgoal_signature(args: dict[str, Any]) -> str:
-        semantic = {
-            key: value
-            for key, value in (args or {}).items()
-            if key not in {"target_window", "expect", "timeout_s"}
-        }
-        return json.dumps(semantic, ensure_ascii=False, sort_keys=True, default=str)
-
-    def _subgoal_recovery_context(self) -> str:
-        """Stable evidence that a failed GUI subgoal's environment changed.
-
-        The action epoch is recorded *after* each failed execute_subgoal, so an
-        immediate identical retry sees the same value.  Window/canvas metadata,
-        explicit document generations, and the world's structural observation
-        allow a genuine recovery to earn one retry without treating a newly
-        captured but otherwise identical frame as progress.
-        """
-        snapshot = self.snapshot
-        snapshot_region = getattr(snapshot, "region", None)
-        snapshot_elements = sorted({
-            f"{getattr(element, 'role', '')}:{(getattr(element, 'text', '') or '').strip()}"
-            for element in (getattr(snapshot, "elements", None) or [])
-            if (getattr(element, "text", "") or "").strip()
-        })
-        world_observe = getattr(self.world, "_last_observe", None)
-        generations = {
-            name: getattr(self, name)
-            for name in (
-                "_canvas_generation",
-                "_drawing_generation",
-                "_document_generation",
-                "_new_blank_generation",
-                "_new_blank_applied",
-            )
-            if hasattr(self, name)
-        }
-        context = {
-            "screen_epoch": int(self._screen_epoch),
-            "target_hwnd": int(self.hwnd or 0),
-            "snapshot": {
-                "hwnd": int(getattr(snapshot, "hwnd", 0) or 0),
-                "title": str(getattr(snapshot, "title", "") or ""),
-                "region": (
-                    {
-                        "x": int(getattr(snapshot_region, "left", 0)),
-                        "y": int(getattr(snapshot_region, "top", 0)),
-                        "width": int(getattr(snapshot_region, "width", 0)),
-                        "height": int(getattr(snapshot_region, "height", 0)),
-                    }
-                    if snapshot_region is not None
-                    else None
-                ),
-                "elements": snapshot_elements,
-            },
-            "canvas": getattr(self, "_last_canvas_region", None),
-            "generations": generations,
-            "world": {
-                "title": str(getattr(world_observe, "title", "") or ""),
-                "fingerprint": sorted(getattr(world_observe, "fingerprint", ()) or ()),
-                "element_count": int(getattr(world_observe, "count", 0) or 0),
-                # This sequence advances only when the watcher reports a real
-                # changed-screen bulletin, not on every sample/observe.
-                "screen_change_sequence": int(
-                    getattr(self.world, "_screen_notice_seq", 0) or 0
-                ),
-            },
-        }
-        return json.dumps(context, ensure_ascii=False, sort_keys=True, default=str)
-
-    @staticmethod
-    def _subgoal_has_visual_progress(payload: dict[str, Any]) -> bool:
-        if payload.get("verified") is True:
-            return True
-        packet = payload.get("evidence_packet") or {}
-        navigation = packet.get("navigation") or {}
-        if navigation.get("ok") is True and navigation.get("required") is True:
-            return True
-        scene = packet.get("scene_structure") or {}
-        try:
-            if int(scene.get("executed_draw_count") or 0) > 0:
-                return True
-        except (TypeError, ValueError):
-            pass
-        per_draw = [
-            *(packet.get("per_draw_color_evidence") or []),
-            *(payload.get("per_draw_color_evidence") or []),
-        ]
-        if any(
-            isinstance(item, dict)
-            and (item.get("matched") is True or item.get("visual_color_matched") is True)
-            for item in per_draw
-        ):
-            return True
-        for item in payload.get("results") or []:
-            if not isinstance(item, dict):
-                continue
-            data = item.get("data") if isinstance(item.get("data"), dict) else {}
-            delta = data.get("screen_delta") if isinstance(data.get("screen_delta"), dict) else {}
-            wait_delta = data.get("delta") if isinstance(data.get("delta"), dict) else {}
-            if (
-                data.get("visual_change_detected") is True
-                or delta.get("changed") is True
-                or wait_delta.get("changed") is True
-                or (item.get("action") == "wait_change" and data.get("changed") is True)
-                or (
-                    item.get("ok") is not False
-                    and item.get("action") in {"draw_strokes", "drag"}
-                    and data.get("blocked") is not True
-                )
-            ):
-                return True
-        return False
-
-    def _research_budget_blocks(self, name: str, args: dict[str, Any]) -> bool:
-        if not _is_multi_source_research_task(self.task):
-            return False
-        if self._research_exploration_actions < 10:
-            return False
-        # This is a source-stage barrier, not merely a scroll limit. Once the
-        # reasonable exploration budget is exhausted, do not let a weak model
-        # evade convergence by renaming the same mutation as click, launch,
-        # focus, hotkey, or a nested batch. A newly created source record resets
-        # the stage and unlocks navigation to the next source.
-        return name in _MUTATING_TOOLS
 
     def _action_screen_delta_enabled(self, name: str, args: dict[str, Any]) -> bool:
         if name not in _ACTION_SCREEN_DELTA_TOOLS:
@@ -764,7 +361,6 @@ class ToolSession(
         context["_screen_delta_args"] = dict(action_args or {})
         controller = None
         try:
-            self._ensure_screen_watch("visible_action")
             controller = self._fast_controller()
             capture_fn = getattr(controller, "capture_fn", None)
             target_region_fn = getattr(controller, "_target_region", None)
@@ -869,81 +465,15 @@ class ToolSession(
                         item[0] == "press",
                     ),
                 )
-                retry_result = None
-                if (
-                    before_context.get("_screen_delta_action") == "scroll"
-                    and not delta.changed
-                    and data.get("via") == "post_message"
-                ):
-                    action_args = before_context.get("_screen_delta_args") or {}
-                    retry = getattr(executor, "scroll_sendinput_restored", None)
-                    if callable(retry):
-                        retry_result = _call_with_optional_hwnd(
-                            retry,
-                            int(action_args.get("x", 0)),
-                            int(action_args.get("y", 0)),
-                            int(action_args.get("amount", 0)),
-                            hwnd=self.hwnd,
-                        )
-                        retry_ok = bool(
-                            isinstance(retry_result, dict)
-                            and retry_result.get("ok") is True
-                            and retry_result.get("blocked") is not True
-                        )
-                        data["scroll_retry"] = {
-                            "attempted": True,
-                            "via": "sendinput_restored",
-                            "ok": retry_ok,
-                            "blocked": bool(
-                                isinstance(retry_result, dict)
-                                and retry_result.get("blocked")
-                            ),
-                            "changed": False,
-                        }
-                        if not retry_ok:
-                            # A failed ownership check means no physical wheel
-                            # action occurred.  Pixel noise after that refusal
-                            # must never turn the transaction back into success.
-                            data["ok"] = False
-                            data["verified"] = False
-                            data["blocked"] = bool(
-                                isinstance(retry_result, dict)
-                                and retry_result.get("blocked")
-                            )
-                            if isinstance(retry_result, dict):
-                                for key in (
-                                    "cooperative_input", "target_hwnd",
-                                    "foreground_hwnd", "error",
-                                ):
-                                    if key in retry_result:
-                                        data[key] = retry_result[key]
-                        else:
-                            time.sleep(0.08)
-                            retry_started = time.monotonic()
-                            retry_frame = controller.capture_fn(region)
-                            retry_capture_ms = int((time.monotonic() - retry_started) * 1000)
-                            retry_delta = changed_regions(
-                                before_frame,
-                                retry_frame,
-                                root_region=region,
-                                pixel_thresh=getattr(watcher, "pixel_thresh", 12),
-                            )
-                            source = "scroll_retry"
-                            delta = retry_delta
-                            selected_capture_ms = retry_capture_ms
-                            selected_frame = retry_frame
-                            data["scroll_retry"]["changed"] = bool(retry_delta.changed)
-                            if retry_delta.changed:
-                                data["via"] = "sendinput_restored"
-                            else:
-                                data["ok"] = False
-                                data["verified"] = False
-                                data["no_visible_effect"] = True
-                                data["needs_observe"] = True
-                                data["error"] = (
-                                    "scroll produced no visible screen change after both "
-                                    "window-message and physical-input attempts"
-                                )
+                if before_context.get("_screen_delta_action") == "scroll":
+                    # One model decision owns exactly one wheel input.  A
+                    # missing pixel delta is evidence for the next model turn,
+                    # never authority to issue a hidden second action here.
+                    data["no_visible_effect"] = not bool(delta.changed)
+                    if delta.changed:
+                        data.setdefault("verified", False)
+                    else:
+                        data["verified"] = False
                 if hasattr(watcher, "record_action_delta"):
                     try:
                         watcher.record_action_delta(
@@ -1064,6 +594,8 @@ class ToolSession(
         return result
 
     def _schedule_predictive_ocr(self, watcher: Any) -> None:
+        if not bool(getattr(self.runtime_profile, "perception_daemon", False)):
+            return
         if not bool(CONFIG.get("fusion", "predictive_ocr_enabled", default=True)):
             return
         # Shared daemon-managed watchers publish every changed ROI to the
@@ -1322,7 +854,6 @@ class ToolSession(
             self.target_hint = hint
         if self._window_alive(self.hwnd):
             self._bind_perception_target(int(self.hwnd))
-            self._ensure_screen_watch("target")
 
     def _recover_bound_target_window(self) -> int | None:
         """Rebind a stale HWND to the same previously proven application.
@@ -1485,6 +1016,8 @@ class ToolSession(
         return self._recover_bound_target_window()
 
     def _bind_perception_target(self, hwnd: int) -> None:
+        if not bool(getattr(self.runtime_profile, "perception_daemon", False)):
+            return
         controller = getattr(self, "_fast_gui_controller", None)
         if controller is None:
             return
@@ -1541,37 +1074,6 @@ class ToolSession(
                 previous_watcher.stop()
             except Exception:
                 logger.debug("legacy perception watcher stop failed", exc_info=True)
-
-    def _ensure_screen_watch(self, reason: str = "") -> None:
-        if not CONFIG.get("fusion", "screen_watch_autostart", default=True):
-            return
-        if not getattr(self, "run_id", None):
-            return
-        if not (self._window_alive(self.hwnd) or self.snapshot is not None):
-            return
-        controller = self._fast_controller()
-        watcher = controller.watcher
-        try:
-            status = watcher.status()
-        except Exception:
-            status = {}
-        if status.get("running"):
-            return
-        watcher.start()
-        self._screen_watch_auto_started = True
-        try:
-            status = watcher.status()
-            if self.world_enabled and status:
-                self.world.record_screen_bulletin(status)
-            BUS.publish(
-                "screen_watch",
-                run_id=getattr(self, "run_id", None),
-                action="auto_start",
-                reason=reason,
-                screen_watch=status,
-            )
-        except Exception:
-            logger.debug("screen_watch auto-start status publish failed", exc_info=True)
 
     def close(self) -> None:
         communication_adapter = getattr(self, "communication_adapter", None)

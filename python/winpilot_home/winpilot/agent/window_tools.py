@@ -8,7 +8,7 @@ import win32gui
 
 from ..action import executor
 from ..config import CONFIG
-from ..perception import apps, fusion, uia, win32
+from ..perception import apps, fusion, win32
 from .tool_result import ToolResult
 
 
@@ -40,50 +40,6 @@ class WindowToolMixin:
         )
         return any(marker in task for marker in intent)
 
-    @staticmethod
-    def _activate_browser_tab(query: str, windows: list[dict]) -> tuple[int, str] | None:
-        """Activate a matching Chrome/Edge tab when it is not the window title.
-
-        Chromium exposes background tabs through UI Automation even though
-        Win32 only reports the active tab as the top-level window title.
-        """
-        folded = str(query or "").strip().casefold()
-        if not folded:
-            return None
-        for window in windows:
-            class_name = str(window.get("class_name") or "").casefold()
-            title = str(window.get("title") or "").casefold()
-            if "chrome_widgetwin" not in class_name and not any(
-                marker in title for marker in ("chrome", "edge")
-            ):
-                continue
-            hwnd = int(window.get("hwnd") or 0)
-            if not hwnd or not win32gui.IsWindow(hwnd):
-                continue
-            try:
-                tabs = [
-                    element for element in uia.collect(hwnd)
-                    if element.role == "tab" and folded in element.text.casefold()
-                ]
-            except Exception:
-                continue
-            if not tabs:
-                continue
-            tab = tabs[0]
-            try:
-                executor.focus_window(hwnd)
-                activated = executor.uia_invoke(tab)
-                if not activated:
-                    result = executor.click(tab.cx, tab.cy, hwnd=hwnd)
-                    activated = bool((result or {}).get("ok"))
-                if not activated:
-                    continue
-                time.sleep(0.12)
-                return hwnd, win32._window_text(hwnd) or str(window.get("title") or "")
-            except Exception:
-                continue
-        return None
-
     def _t_list_windows(self, _args: dict) -> ToolResult:
         windows = win32.list_windows()
         lines = [
@@ -101,11 +57,7 @@ class WindowToolMixin:
         ]
         if duplicates:
             lines.append("")
-            lines.append(
-                "NOTE: multiple windows share the same title/class. Do not assume "
-                "the foreground one is the right one; use scan_windows(query=...) "
-                "or observe each hwnd before login/account actions."
-            )
+            lines.append("duplicate_title_class_groups:")
             for wins in duplicates[:5]:
                 label = wins[0].get("title", "")
                 hwnds = ", ".join(str(w.get("hwnd")) for w in wins[:8])
@@ -276,11 +228,6 @@ class WindowToolMixin:
             if matches:
                 hwnd = int(matches[0].get("hwnd") or 0)
                 resolved_by = "exact_title" if exact else "title_contains"
-            else:
-                browser_tab = WindowToolMixin._activate_browser_tab(query, windows)
-                if browser_tab is not None:
-                    hwnd, _activated_title = browser_tab
-                    resolved_by = "browser_tab"
         if not hwnd or not win32gui.IsWindow(hwnd):
             return ToolResult(self._fmt({
                 "ok": False,

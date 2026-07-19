@@ -214,7 +214,8 @@ class FastToolMixin:
             lease = None
             try:
                 hwnd = int(getattr(self, "hwnd", 0) or 0)
-                if hwnd:
+                runtime_profile = getattr(self, "runtime_profile", None)
+                if hwnd and bool(getattr(runtime_profile, "perception_daemon", False)):
                     lease = PERCEPTION_DAEMON.acquire(
                         hwnd,
                         run_id=str(getattr(self, "run_id", "") or ""),
@@ -308,49 +309,10 @@ class FastToolMixin:
         if not isinstance(actions, list) or not actions:
             return ToolResult("run_action_batch requires a non-empty actions array")
         formats = args.get("formats")
-        if args.get("semantic_override") == "clipboard_replace":
-            request = {
-                "subgoal": str(args.get("subgoal") or "Replace placeholder with clipboard content"),
-            }
-            if isinstance(args.get("target_window"), dict):
-                request["target_window"] = dict(args["target_window"])
-            return SubgoalExecutor(self, self._fast_controller()).execute(request)
         if args.get("semantic_override") == "document_format" and isinstance(formats, list) and formats:
             request = {
                 "subgoal": str(args.get("subgoal") or "Apply requested document formatting"),
                 "formats": formats,
-                "constraints": dict(args.get("constraints") or {}),
-            }
-            if isinstance(args.get("target_window"), dict):
-                request["target_window"] = dict(args["target_window"])
-            return SubgoalExecutor(self, self._fast_controller()).execute(request)
-        if args.get("semantic_override") == "spreadsheet_table":
-            request = {
-                "subgoal": (
-                    "Enter the complete table data into the requested cell range in one batch. "
-                    + str(args.get("subgoal") or "")
-                )[:360],
-                "click": {
-                    "label": "A1",
-                    "expected_region": "spreadsheet grid",
-                },
-            }
-            if isinstance(args.get("target_window"), dict):
-                request["target_window"] = dict(args["target_window"])
-            return SubgoalExecutor(self, self._fast_controller()).execute(request)
-        if args.get("semantic_override") == "spreadsheet_row_format":
-            request = {
-                "subgoal": str(args.get("subgoal") or "Apply requested spreadsheet row formatting"),
-            }
-            if isinstance(args.get("target_window"), dict):
-                request["target_window"] = dict(args["target_window"])
-            return SubgoalExecutor(self, self._fast_controller()).execute(request)
-        if args.get("semantic_override") == "exact_save_as":
-            request = {
-                "subgoal": str(args.get("subgoal") or "Save As exact path"),
-                "input": dict(args.get("input") or {}),
-                "click": dict(args.get("click") or {}),
-                "verify_texts": list(args.get("verify_texts") or []),
                 "constraints": dict(args.get("constraints") or {}),
             }
             if isinstance(args.get("target_window"), dict):

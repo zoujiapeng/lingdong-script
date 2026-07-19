@@ -53,9 +53,8 @@ def test_focus_window_returns_structured_error_for_missing_target(monkeypatch):
     assert result["query"] == "Missing app"
 
 
-def test_focus_window_activates_matching_background_browser_tab(monkeypatch):
+def test_focus_window_does_not_scan_or_activate_background_browser_tabs(monkeypatch):
     from winpilot.agent import window_tools
-    from winpilot.perception.model import UIElement
 
     focus_calls = []
     monkeypatch.setattr(window_tools.win32, "list_windows", lambda: [
@@ -66,59 +65,53 @@ def test_focus_window_activates_matching_background_browser_tab(monkeypatch):
         },
     ])
     monkeypatch.setattr(window_tools.win32gui, "IsWindow", lambda hwnd: hwnd == 42)
-    monkeypatch.setattr(window_tools.uia, "collect", lambda hwnd: [
-        UIElement(
-            role="tab",
-            text="WinPilot GUI Agent Target",
-            cx=320,
-            cy=18,
-        ),
-    ])
-    monkeypatch.setattr(window_tools.executor, "uia_invoke", lambda element: True)
     monkeypatch.setattr(
         window_tools.executor,
         "focus_window",
         lambda hwnd: focus_calls.append(hwnd) or {"ok": True},
     )
     monkeypatch.setattr(
-        window_tools.win32,
-        "_window_text",
-        lambda hwnd: "WinPilot GUI Agent Target - Chrome",
+        window_tools.executor,
+        "click",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("focus_window must not click a guessed browser tab")
+        ),
     )
     session = _WindowSession()
 
     result = json.loads(session.focus({"title": "WinPilot GUI Agent Target"}).text)
 
-    assert result["ok"] is True
-    assert result["hwnd"] == 42
-    assert result["resolved_by"] == "browser_tab"
-    assert focus_calls == [42, 42]
-    assert session.target == (42, "WinPilot GUI Agent Target - Chrome")
+    assert result["ok"] is False
+    assert result["query"] == "WinPilot GUI Agent Target"
+    assert focus_calls == []
+    assert session.target is None
 
 
-def test_focus_window_clicks_browser_tab_when_uia_invoke_is_unavailable(monkeypatch):
+def test_focus_window_can_bind_explicit_browser_hwnd_without_tab_inference(monkeypatch):
     from winpilot.agent import window_tools
-    from winpilot.perception.model import UIElement
 
-    click_calls = []
-    monkeypatch.setattr(window_tools.win32, "list_windows", lambda: [
-        {"hwnd": 7, "title": "App - Edge", "class_name": "Chrome_WidgetWin_1"},
-    ])
+    focus_calls = []
+    monkeypatch.setattr(
+        window_tools.win32,
+        "list_windows",
+        lambda: (_ for _ in ()).throw(AssertionError("explicit hwnd needs no scan")),
+    )
     monkeypatch.setattr(window_tools.win32gui, "IsWindow", lambda hwnd: hwnd == 7)
-    monkeypatch.setattr(window_tools.uia, "collect", lambda hwnd: [
-        UIElement(role="tab", text="Target board", cx=260, cy=18),
-    ])
-    monkeypatch.setattr(window_tools.executor, "uia_invoke", lambda element: False)
-    monkeypatch.setattr(window_tools.executor, "focus_window", lambda hwnd: {"ok": True})
     monkeypatch.setattr(
         window_tools.executor,
-        "click",
-        lambda x, y, hwnd=None: click_calls.append((x, y, hwnd)) or {"ok": True},
+        "focus_window",
+        lambda hwnd: focus_calls.append(hwnd) or {"ok": True},
     )
-    monkeypatch.setattr(window_tools.win32, "_window_text", lambda hwnd: "Target board - Edge")
+    monkeypatch.setattr(window_tools.win32, "_window_text", lambda hwnd: "App - Edge")
     session = _WindowSession()
 
-    result = json.loads(session.focus({"title": "Target board"}).text)
+    result = json.loads(session.focus({"hwnd": 7}).text)
 
-    assert result["resolved_by"] == "browser_tab"
-    assert click_calls == [(260, 18, 7)]
+    assert result == {
+        "ok": True,
+        "hwnd": 7,
+        "title": "App - Edge",
+        "resolved_by": "hwnd",
+    }
+    assert focus_calls == [7]
+    assert session.target == (7, "App - Edge")

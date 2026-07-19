@@ -1,48 +1,68 @@
 """Tests for perception_mode / vision_priority_task (backward-compat)."""
+import pytest
+
 from winpilot.perception import intent
 
 
 # ---- perception_mode() ------------------------------------------------
 
-def test_mode_drawing():
-    assert intent.perception_mode("画一只精致的猫") == "visual"
+@pytest.mark.parametrize(
+    ("task", "window_title"),
+    [
+        ("Sketch a symbol in Nebula Canvas", "Nebula Canvas"),
+        ("Send a message through Orbit Messenger", "Orbit Messenger"),
+        ("Continue editing the workbook", "Prism Office"),
+    ],
+)
+def test_raw_task_and_window_identity_default_to_normal(task, window_title):
+    assert intent.perception_mode(task, window_title) == "normal"
 
 
-def test_mode_chat_qq():
-    assert intent.perception_mode("用QQ给我的设备发消息") == "visual"
+@pytest.mark.parametrize("operation", ["draw", "capture", "send", "interact"])
+def test_structured_visual_operation_selects_visual_mode(operation):
+    assert intent.perception_mode({
+        "operation": [operation],
+        "interaction": {"active": False},
+    }) == "visual"
 
 
-def test_mode_mirror():
-    assert intent.perception_mode("和我的手机持续聊天") == "visual"
+def test_structured_active_interaction_selects_visual_mode():
+    assert intent.perception_mode({
+        "operation": ["operate"],
+        "interaction": {"active": True},
+    }) == "visual"
 
 
-def test_mode_title_carries_signal():
-    # Generic follow-up text, but window title has the signal.
-    assert intent.perception_mode("继续", "QQ") == "visual"
+def test_nonvisual_structured_operation_stays_normal():
+    assert intent.perception_mode({
+        "operation": ["open"],
+        "interaction": {"active": False},
+    }, "Nebula Canvas") == "normal"
 
 
-def test_mode_office_pixel_text_surface():
-    assert intent.perception_mode("Create a workbook in WPS Spreadsheets") == "pixel_text"
-    assert intent.perception_mode("继续", "工作簿31 - WPS Office") == "pixel_text"
-
-
-def test_mode_plain_task():
-    assert intent.perception_mode("打开计算器") == "normal"
-    assert intent.perception_mode("列出所有窗口") == "normal"
+@pytest.mark.parametrize(
+    "runtime_mode",
+    ["normal", "pixel_text", "visual", "structured_ui", "vlm_first"],
+)
+def test_explicit_runtime_mode_is_preserved(runtime_mode):
+    assert intent.perception_mode(
+        "arbitrary raw task",
+        "arbitrary window",
+        runtime_mode=runtime_mode,
+    ) == runtime_mode
 
 
 # ---- vision_priority_task() backward-compat ---------------------------
 
-def test_intent_flags_drawing_chat_mirror():
-    assert intent.vision_priority_task("画一只精致的猫")
-    assert intent.vision_priority_task("用QQ给我的设备发消息")
-    assert intent.vision_priority_task("和我的手机持续聊天")
-    assert intent.vision_priority_task("继续", "QQ")
-
-
-def test_intent_ignores_plain_tasks():
-    assert not intent.vision_priority_task("打开计算器")
-    assert not intent.vision_priority_task("列出所有窗口")
+def test_vision_priority_uses_structured_intent_only():
+    assert intent.vision_priority_task({
+        "operation": ["interact"],
+        "interaction": {"active": True},
+    })
+    assert not intent.vision_priority_task(
+        "Draw and chat in Nebula Messenger",
+        "Nebula Canvas",
+    )
 
 
 # ---- fusion.observe integration (perception_mode propagation) ---------
@@ -55,7 +75,7 @@ def _fake_observe_env(monkeypatch):
 
     region = Region(0, 0, 800, 600)
     monkeypatch.setattr(fusion, "window_region", lambda hwnd: region)
-    monkeypatch.setattr(fusion.win32, "_window_text", lambda hwnd: "QQ")
+    monkeypatch.setattr(fusion.win32, "_window_text", lambda hwnd: "Nebula UI")
     monkeypatch.setattr(fusion, "_foreground_modal_over_target", lambda hwnd, reg: False)
     config_get = fusion.CONFIG.get
 
@@ -181,6 +201,34 @@ def test_structured_ui_mode_skips_full_ocr_vlm_and_empty_rescue(monkeypatch):
     assert rescued["called"] is False
     assert snapshot.dim_stats["ocr"]["skipped"] == "structured_ui_scoped_ocr"
     assert snapshot.dim_stats["vlm"]["skipped"] == "structured_ui_controller"
+
+
+def test_empty_rescue_never_runs_disabled_ocr_or_vlm(monkeypatch):
+    from winpilot.perception import fusion, ocr, vlm
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.utils.screenshot import Region
+
+    region = Region(0, 0, 800, 600)
+    snapshot = Snapshot(hwnd=123, title="pixel surface", region=region)
+    monkeypatch.setattr(fusion.CONFIG, "enabled_dimensions", lambda: ["win32", "cv"])
+    monkeypatch.setattr(
+        ocr,
+        "collect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled OCR must not run")
+        ),
+    )
+    monkeypatch.setattr(vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        vlm,
+        "collect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled VLM must not run")
+        ),
+    )
+
+    assert fusion._escalate_empty(snapshot, region, []) == []
+    assert not any(name.startswith("esc_") for name in snapshot.dim_stats)
 
 
 def test_backward_compat_vision_priority_true(monkeypatch):

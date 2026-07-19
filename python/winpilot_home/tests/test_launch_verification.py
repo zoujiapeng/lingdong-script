@@ -39,101 +39,6 @@ def test_open_app_focuses_existing_visible_window_without_launch(monkeypatch):
     assert "Observe it once" not in data["fast_path_advice"]
 
 
-def test_open_app_marks_existing_blank_writer_as_ready_without_new_click(monkeypatch):
-    from winpilot.agent import tools
-    from winpilot.agent.tools import ToolSession
-
-    session = ToolSession(task="Use WPS Writer to create a report")
-    session._window_alive = lambda hwnd: bool(hwnd)
-    session._resolve_launch_target = lambda _name: {
-        "name": "WPS Writer",
-        "target": r"C:\\Program Files\\Kingsoft\\office6\\wps.exe",
-        "kind": "exe",
-    }
-    session._t_launch = lambda _args: (_ for _ in ()).throw(AssertionError("must not relaunch"))
-    monkeypatch.setattr(
-        tools,
-        "win32",
-        SimpleNamespace(find_app=lambda _name: {
-            "running": True,
-            "process_count": 1,
-            "windows": [
-                {"hwnd": 22, "title": "文字文稿1 - WPS Office", "visible": True},
-            ],
-        }),
-    )
-    monkeypatch.setattr(
-        tools,
-        "executor",
-        SimpleNamespace(focus_window=lambda hwnd: {"ok": True, "hwnd": hwnd}),
-    )
-
-    data = json.loads(session._t_open_app({"name": "WPS Writer"}).text)
-
-    assert data["blank_document_ready"] is True
-    assert data["document_surface_ready"] is True
-    assert data["needs_observe"] is False
-    assert session._new_blank_applied is True
-    assert "do not click new" in data["fast_path_advice"].casefold()
-
-
-def test_wps_home_title_is_not_mistaken_for_blank_document_surface():
-    from winpilot.agent.tools import ToolSession
-
-    component = ("writer", ("文字", "文档", "document", "writer"))
-
-    assert ToolSession._blank_document_surface_ready(
-        component,
-        "文档 - WPS Office",
-    ) is False
-    assert ToolSession._blank_document_surface_ready(
-        component,
-        "文字文稿1 - WPS Office",
-    ) is True
-
-
-def test_writer_home_is_exposed_as_non_editable_document_stage(monkeypatch):
-    from winpilot.agent import tools
-    from winpilot.agent.tools import ToolSession
-
-    session = ToolSession(task="create a report")
-    session._window_alive = lambda hwnd: bool(hwnd)
-    session._resolve_launch_target = lambda _name: {
-        "name": "WPS Writer",
-        "target": r"C:\\Program Files\\Kingsoft\\office6\\wps.exe",
-    }
-    monkeypatch.setattr(tools, "win32", SimpleNamespace(find_app=lambda _name: {
-        "running": True,
-        "process_count": 1,
-        "windows": [{"hwnd": 22, "title": "文档 - WPS Office", "visible": True}],
-    }))
-    monkeypatch.setattr(
-        tools,
-        "executor",
-        SimpleNamespace(focus_window=lambda hwnd: {"ok": True, "hwnd": hwnd}),
-    )
-
-    data = json.loads(session._t_open_app({"name": "WPS Writer"}).text)
-
-    assert data["document_surface_ready"] is False
-    assert data["workspace_stage"] == "application_home"
-    assert session._document_surface_ready is False
-    assert not hasattr(session, "_new_blank_applied")
-
-
-def test_new_document_hub_title_is_also_non_editable_stage():
-    from winpilot.agent.tools import ToolSession
-
-    session = ToolSession(task="create a report")
-    payload = {"title": "新建文档 - WPS Office"}
-    component = ("writer", ("文字", "文档", "document", "writer"))
-
-    session._mark_blank_document_surface(payload, component)
-
-    assert payload["document_surface_ready"] is False
-    assert session._document_surface_ready is False
-
-
 def test_open_app_reuses_title_matched_window_when_process_snapshot_misses(monkeypatch):
     from winpilot.agent import tools
     from winpilot.agent.tools import ToolSession
@@ -170,6 +75,47 @@ def test_open_app_reuses_title_matched_window_when_process_snapshot_misses(monke
     assert data["target_hwnd"] == 33
     assert session.hwnd == 33
     assert focused == [33]
+
+
+def test_redundant_open_app_reuses_stable_identity_when_window_title_changes(monkeypatch):
+    from winpilot.agent import tools
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="continue in a media app")
+    session.hwnd = 44
+    session._target_binding_verified = True
+    session._target_application_identity = {
+        "hwnd": 44,
+        "name": "Media Player",
+        "terms": ["mediaplayer"],
+        "kind": "appid",
+        "target": "Vendor.Media!App",
+    }
+    session._window_alive = lambda hwnd: hwnd == 44
+    session._t_launch = lambda _args: (_ for _ in ()).throw(
+        AssertionError("a title change must not launch a duplicate")
+    )
+    focused = []
+    monkeypatch.setattr(
+        tools,
+        "executor",
+        SimpleNamespace(
+            focus_window=lambda hwnd: focused.append(hwnd) or {"ok": True, "hwnd": hwnd},
+        ),
+    )
+    monkeypatch.setattr(
+        tools.win32,
+        "_window_text",
+        lambda hwnd: "Current Song - Different Artist",
+    )
+
+    data = json.loads(session._t_open_app({"name": "Media Player"}).text)
+
+    assert data["ok"] is True
+    assert data["route"] == "existing_bound_application"
+    assert data["target_hwnd"] == 44
+    assert data["binding_preserved"] is True
+    assert focused == [44]
 
 
 def test_open_app_restores_background_window_without_launching_duplicate(monkeypatch):
@@ -301,9 +247,77 @@ def test_open_app_failure_advice_does_not_require_an_unexposed_scan_tool(monkeyp
     data = json.loads(session._t_open_app({"name": "MissingApp"}).text)
 
     assert data["ok"] is False
-    assert data["needs_llm_reason"] is True
-    assert "scan_windows" not in data["fast_path_advice"]
-    assert "exposed window-list/focus recovery tool" in data["fast_path_advice"]
+    assert data["failure_type"] == "application_not_found"
+    assert data["ranked_candidates"] == []
+    assert "fast_path_advice" not in data
+
+
+def test_open_app_returns_ranked_identity_facts_for_ambiguous_local_matches(
+    monkeypatch,
+):
+    from winpilot.agent import tools
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="open Comet")
+    session._resolve_launch_target = lambda _name: None
+    monkeypatch.setattr(
+        tools,
+        "win32",
+        SimpleNamespace(
+            find_app=lambda _name: {"running": False, "windows": []},
+            find_window=lambda _name: None,
+        ),
+    )
+    monkeypatch.setattr(
+        tools,
+        "apps",
+        SimpleNamespace(resolve=lambda *_args, **_kwargs: [
+            {
+                "name": "Comet Canvas",
+                "kind": "lnk",
+                "target": r"C:\Start\Comet Canvas.lnk",
+                "aliases": ["comet-canvas.exe"],
+                "match_score": 64,
+                "match_kind": "fuzzy",
+                "matched_term": "Comet Canvas",
+            },
+            {
+                "name": "Comet Notes",
+                "kind": "appid",
+                "target": "Vendor.Comet!Notes",
+                "match_score": 62,
+                "match_kind": "fuzzy",
+                "matched_term": "Comet Notes",
+            },
+        ]),
+    )
+
+    data = json.loads(session._t_open_app({"name": "Comet"}).text)
+
+    assert data["failure_type"] == "application_resolution_ambiguous"
+    assert [item["display_name"] for item in data["ranked_candidates"]] == [
+        "Comet Canvas", "Comet Notes",
+    ]
+    assert data["ranked_candidates"][0]["launch_kind"] == "lnk"
+    assert data["ranked_candidates"][0]["launch_target"].endswith("Canvas.lnk")
+
+
+def test_non_url_launch_skips_url_window_polling_immediately():
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="open a local app")
+    started = __import__("time").monotonic()
+
+    found = session._wait_url_launch_visible_window(
+        "Comet Canvas",
+        {"target": r"C:\Start\Comet Canvas.lnk"},
+        SimpleNamespace(),
+        None,
+        timeout_s=5.0,
+    )
+
+    assert found is None
+    assert __import__("time").monotonic() - started < 0.1
 
 
 def test_resolve_launch_target_accepts_registered_multiword_application_name(monkeypatch):
@@ -421,6 +435,7 @@ def test_launch_verifies_visible_process_window(monkeypatch):
 
     result = session._t_launch({
         "command": "mspaint",
+        "_reuse_checked": True,
         "expect": {"window_title": "画图"},
     })
     data = json.loads(result.text)
@@ -478,6 +493,7 @@ def test_launch_does_not_verify_hidden_process(monkeypatch):
 
     result = session._t_launch({
         "command": "dummyapp",
+        "_reuse_checked": True,
         "expect": {"window_title": "Dummy"},
     })
     data = json.loads(result.text)
@@ -529,27 +545,183 @@ def test_launch_does_not_rebind_unchanged_prior_foreground(monkeypatch):
 
     data = json.loads(session._t_launch({"command": "missing-app"}).text)
 
-    assert data["ok"] is True
+    assert data["ok"] is False
     assert data["verified"] is False
     assert "target_hwnd" not in data
-    assert data["foreground_matches_target"] is False
+    assert data["failure_type"] == "application_not_found"
 
 
-def test_launch_rebinds_shared_suite_host_to_requested_spreadsheet_component(monkeypatch):
+def test_resolved_launch_never_returns_the_previous_bound_window(monkeypatch):
     from winpilot.agent import tools
     from winpilot.agent.tools import ToolSession
 
-    foreground = {"hwnd": 3868392}
-    focused = []
-    session = ToolSession(task="open WPS Spreadsheets")
-    session.hwnd = 3868392
-    session.target_hint = "Old document - WPS Office"
-    session._window_alive = lambda hwnd: bool(hwnd)
+    session = ToolSession(task="open a resolved desktop app")
+    session.hwnd = 777
+    session.target_hint = "Command Prompt"
+    session._target_binding_verified = True
+    session._target_process_id = 123
+    session._target_process_name = "cmd.exe"
+    session._target_window_class = "ConsoleWindowClass"
     session._resolve_launch_target = lambda _command: {
-        "name": "WPS Spreadsheets",
-        "target": r"C:\\Program Files\\Kingsoft\\office6\\et.exe",
-        "kind": "exe",
+        "name": "Example Music",
+        "target": "Vendor.Package!MUSIC",
+        "kind": "appid",
+        "aliases": ["Example Music"],
     }
+    session._window_alive = lambda hwnd: bool(hwnd)
+    session._find_target_window = lambda: None
+    session._wait_launch_visible_window = lambda *args, **kwargs: None
+    session._wait_url_launch_visible_window = lambda *args, **kwargs: None
+
+    monkeypatch.setattr(
+        tools,
+        "verify",
+        SimpleNamespace(
+            run_with_verify=lambda *args, **kwargs: {
+                "ok": True,
+                "verified": True,
+                "name": "Example Music",
+                "aliases": ["Example Music"],
+                "target": "Vendor.Package!MUSIC",
+                "post_state": {
+                    "foreground_hwnd": 777,
+                    "foreground_title": "Command Prompt",
+                },
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        tools,
+        "executor",
+        SimpleNamespace(
+            focus_window=lambda hwnd: {"ok": True, "hwnd": hwnd},
+        ),
+    )
+    monkeypatch.setattr(tools.win32gui, "GetForegroundWindow", lambda: 777)
+
+    data = json.loads(session._t_launch({
+        "command": "Example Music",
+        "_reuse_checked": True,
+    }).text)
+
+    assert data["ok"] is True
+    assert data["verified"] is False
+    assert data["launch_request_verified"] is True
+    assert "target_hwnd" not in data
+    assert session.hwnd is None
+    assert session.target_hint == "Example Music"
+    assert session._target_binding_verified is False
+    assert session._target_process_id == 0
+    assert session._target_process_name == ""
+    assert session._target_window_class == ""
+
+
+def test_synchronous_resolved_target_failure_tries_one_refreshed_distinct_target(
+    monkeypatch,
+):
+    from winpilot.agent import tools
+    from winpilot.agent.tools import ToolSession
+
+    primary = {
+        "name": "Comet Player",
+        "target": r"C:\Start\Comet Player.lnk",
+        "kind": "lnk",
+    }
+    fallback = {
+        "name": "Comet Player",
+        "target": "Vendor.Comet!Player",
+        "kind": "appid",
+    }
+    attempts = []
+    session = ToolSession(task="open Comet Player")
+    session._resolve_launch_target = lambda _command: dict(primary)
+    session._visible_window_snapshot = lambda _win32: {}
+    session._wait_launch_visible_window = lambda *args, **kwargs: None
+    session._find_target_window = lambda: None
+    session._window_alive = lambda _hwnd: False
+
+    def launch_target(entry):
+        attempts.append(entry["target"])
+        if entry["target"] == primary["target"]:
+            return {"ok": False, "error": "shortcut target is missing"}
+        return {"ok": True, "target": entry["target"], "via": entry["kind"]}
+
+    monkeypatch.setattr(
+        tools,
+        "apps",
+        SimpleNamespace(
+            launch_target=launch_target,
+            resolve=lambda *_args, **_kwargs: [primary, fallback],
+        ),
+    )
+    monkeypatch.setattr(
+        tools,
+        "verify",
+        SimpleNamespace(run_with_verify=lambda _name, action, **_kwargs: {
+            **action(), "verified": False,
+        }),
+    )
+    monkeypatch.setattr(
+        tools,
+        "win32",
+        SimpleNamespace(find_window=lambda _name: None, list_windows=lambda: []),
+    )
+    monkeypatch.setattr(tools.win32gui, "GetForegroundWindow", lambda: 0)
+
+    data = json.loads(session._t_launch({
+        "command": "Comet Player",
+        "_reuse_checked": True,
+    }).text)
+
+    assert attempts == [primary["target"], fallback["target"]]
+    assert data["resolved_app"] == "Comet Player [appid]"
+    assert data["verified"] is False
+    assert "target_hwnd" not in data
+
+
+def test_prelaunch_same_title_window_is_not_launch_ownership(monkeypatch):
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="open Comet Player")
+    session._window_alive = lambda hwnd: bool(hwnd)
+    monkeypatch.setattr(
+        "winpilot.agent.system_tools.win32gui.GetForegroundWindow",
+        lambda: 700,
+    )
+    win32_mod = SimpleNamespace(
+        find_app=lambda _query: {"windows": []},
+        find_window=lambda _query: {"hwnd": 700, "title": "Comet Player"},
+        list_windows=lambda: [{"hwnd": 700, "title": "Comet Player"}],
+    )
+
+    found = session._launch_visible_window(
+        "Comet Player",
+        {"name": "Comet Player", "target": "Vendor.Comet!Player"},
+        win32_mod,
+        before_windows={700: {"hwnd": 700, "title": "Comet Player"}},
+        prelaunch_foreground_hwnd=700,
+        prior_target_hwnd=700,
+    )
+
+    assert found is None
+
+
+def test_appid_launch_can_bind_resolver_display_title_without_process_alias(monkeypatch):
+    from winpilot.agent import tools
+    from winpilot.agent.tools import ToolSession
+
+    foreground = {"hwnd": 777}
+    focused = []
+    session = ToolSession(task="open a localized Store application")
+    session.hwnd = 777
+    session.target_hint = "Command Prompt"
+    session._resolve_launch_target = lambda _command: {
+        "name": "Example Music",
+        "target": "Vendor.Package!MUSIC",
+        "kind": "appid",
+        "aliases": ["Example Music"],
+    }
+    session._window_alive = lambda hwnd: bool(hwnd)
 
     monkeypatch.setattr(
         tools,
@@ -558,14 +730,17 @@ def test_launch_rebinds_shared_suite_host_to_requested_spreadsheet_component(mon
             run_with_verify=lambda *args, **kwargs: {
                 "ok": True,
                 "verified": False,
+                "name": "Example Music",
+                "aliases": ["Example Music"],
+                "target": "Vendor.Package!MUSIC",
                 "post_state": {
-                    "foreground_hwnd": 3868392,
-                    "foreground_title": "工作簿1 - WPS Office",
+                    "foreground_hwnd": 777,
+                    "foreground_title": "Command Prompt",
                 },
             },
             post_state_summary=lambda: {
                 "foreground_hwnd": foreground["hwnd"],
-                "foreground_title": "工作簿1 - WPS Office",
+                "foreground_title": "Example Music",
             },
         ),
     )
@@ -582,56 +757,61 @@ def test_launch_rebinds_shared_suite_host_to_requested_spreadsheet_component(mon
     )
     monkeypatch.setattr(
         tools,
-        "apps",
-        SimpleNamespace(launch_target=lambda resolved: {
-            "ok": True,
-            "target": resolved["target"],
-        }),
-    )
-    monkeypatch.setattr(
-        tools,
         "win32",
         SimpleNamespace(
-            find_app=lambda query: {
-                "running": True,
-                "process_count": 1,
-                "windows": [
-                    {"hwnd": 2098894, "title": "WPS", "visible": True, "pid": 17900},
-                ],
+            find_app=lambda _query: {
+                "running": False,
+                "process_count": 0,
+                "windows": [],
             },
-            list_windows=lambda: [
-                {"hwnd": 2098894, "title": "WPS", "visible": True, "pid": 17900},
-                {"hwnd": 3868392, "title": "工作簿1 - WPS Office", "visible": True, "pid": 14740},
-            ],
-            find_window=lambda _title: None,
+            find_window=lambda title: (
+                {"hwnd": 123, "title": "Example Music", "pid": 456}
+                if title == "Example Music"
+                else None
+            ),
         ),
     )
-    monkeypatch.setattr(tools.win32gui, "GetForegroundWindow", lambda: foreground["hwnd"])
+    monkeypatch.setattr(
+        tools.win32gui,
+        "GetForegroundWindow",
+        lambda: foreground["hwnd"],
+    )
 
-    data = json.loads(session._t_launch({"command": "WPS Spreadsheets"}).text)
+    data = json.loads(session._t_launch({
+        "command": "Example Music",
+        "_reuse_checked": True,
+    }).text)
 
     assert data["verified"] is True
-    assert data["verify_method"] == "win32-component-window"
-    assert data["target_hwnd"] == 3868392
-    assert data["launch_window"]["query"] == "resolved-spreadsheet-host"
-    assert session.hwnd == 3868392
-    assert focused == [3868392]
+    assert data["verify_method"] == "win32-title"
+    assert data["target_hwnd"] == 123
+    assert data["launch_window"]["query"] == "title:Example Music"
+    assert focused == [123]
+    assert session.hwnd == 123
 
 
-def test_writer_component_never_binds_to_visible_spreadsheet_host(monkeypatch):
+def test_resolved_appid_binds_the_unique_new_top_level_window(monkeypatch):
     from winpilot.agent import tools
     from winpilot.agent.tools import ToolSession
 
-    session = ToolSession(task="open WPS Writer")
-    session.hwnd = 332776
-    session._window_alive = lambda hwnd: bool(hwnd)
-    session._resolve_launch_target = lambda _command: {
-        "name": "WPS Writer",
-        "target": r"C:\Program Files\Kingsoft\office6\wps.exe",
-        "kind": "exe",
-        "arguments": ["/prometheus", "/wps"],
-    }
+    foreground = {"hwnd": 900}
+    snapshots = [
+        [{"hwnd": 900, "title": "Command Prompt", "pid": 90}],
+        [
+            {"hwnd": 900, "title": "Command Prompt", "pid": 90},
+            {"hwnd": 321, "title": "Now Playing", "pid": 32},
+        ],
+    ]
     focused = []
+    session = ToolSession(task="open a localized Store application")
+    session._resolve_launch_target = lambda _command: {
+        "name": "Localized Player",
+        "target": "Vendor.Package!PLAYER",
+        "kind": "appid",
+        "aliases": ["Localized Player"],
+    }
+    session._window_alive = lambda hwnd: bool(hwnd)
+
     monkeypatch.setattr(
         tools,
         "verify",
@@ -639,69 +819,63 @@ def test_writer_component_never_binds_to_visible_spreadsheet_host(monkeypatch):
             run_with_verify=lambda *args, **kwargs: {
                 "ok": True,
                 "verified": False,
+                "name": "Localized Player",
+                "aliases": ["Localized Player"],
+                "target": "Vendor.Package!PLAYER",
                 "post_state": {
-                    "foreground_hwnd": 332776,
-                    "foreground_title": "工作簿36 - WPS Office",
+                    "foreground_hwnd": 900,
+                    "foreground_title": "Command Prompt",
                 },
             },
             post_state_summary=lambda: {
-                "foreground_hwnd": 141694,
-                "foreground_title": "文字文稿1 - WPS Office",
+                "foreground_hwnd": foreground["hwnd"],
+                "foreground_title": "Now Playing",
             },
         ),
     )
-    monkeypatch.setattr(
-        tools,
-        "executor",
-        SimpleNamespace(
-            focus_window=lambda hwnd: focused.append(hwnd) or {"ok": True, "hwnd": hwnd},
-        ),
-    )
-    monkeypatch.setattr(
-        tools,
-        "apps",
-        SimpleNamespace(launch_target=lambda resolved: {
-            "ok": True,
-            "target": resolved["target"],
-            "arguments": resolved["arguments"],
-        }),
-    )
+
+    def focus_window(hwnd):
+        focused.append(hwnd)
+        foreground["hwnd"] = hwnd
+        return {"ok": True, "hwnd": hwnd}
+
+    def list_windows():
+        if len(snapshots) > 1:
+            return snapshots.pop(0)
+        foreground["hwnd"] = 321
+        return snapshots[0]
+
+    monkeypatch.setattr(tools, "executor", SimpleNamespace(focus_window=focus_window))
     monkeypatch.setattr(
         tools,
         "win32",
         SimpleNamespace(
-            list_windows=lambda: [
-                {"hwnd": 332776, "title": "工作簿36 - WPS Office", "pid": 12780},
-                {"hwnd": 141694, "title": "文字文稿1 - WPS Office", "pid": 20060},
-            ],
+            find_app=lambda _query: {
+                "running": False,
+                "process_count": 0,
+                "windows": [],
+            },
             find_window=lambda _title: None,
+            list_windows=list_windows,
         ),
     )
-    monkeypatch.setattr(tools.win32gui, "GetForegroundWindow", lambda: 141694)
+    monkeypatch.setattr(
+        tools.win32gui,
+        "GetForegroundWindow",
+        lambda: foreground["hwnd"],
+    )
 
-    data = json.loads(session._t_launch({"command": "WPS Writer"}).text)
+    data = json.loads(session._t_launch({
+        "command": "Localized Player",
+        "_reuse_checked": True,
+    }).text)
 
     assert data["verified"] is True
-    assert data["target_hwnd"] == 141694
-    assert data["launch_window"]["query"] == "resolved-writer-host"
-    assert focused == [141694]
-
-
-def test_existing_component_window_filter_rejects_wrong_wps_component():
-    from winpilot.agent.tools import ToolSession
-
-    state = {
-        "windows": [
-            {"hwnd": 1, "title": "工作簿1 - WPS Office", "visible": True},
-            {"hwnd": 2, "title": "文字文稿1 - WPS Office", "visible": True},
-        ]
-    }
-
-    assert ToolSession._best_visible_app_window(state, "WPS Writer")["hwnd"] == 2
-    assert ToolSession._best_visible_app_window(
-        {"windows": [state["windows"][0]]},
-        "WPS Writer",
-    ) is None
+    assert data["verify_method"] == "win32-window-delta"
+    assert data["target_hwnd"] == 321
+    assert data["launch_window"]["query"] == "launch-window-delta"
+    assert data["launch_window"]["causal_new_window"] is True
+    assert focused == [321]
 
 
 def test_launch_url_fallback_prefers_matching_browser_window_not_prior_foreground(monkeypatch):
@@ -837,6 +1011,7 @@ def test_launch_uses_single_attempt_before_process_window_fallback(monkeypatch):
 
     result = session._t_launch({
         "command": "dummyapp",
+        "_reuse_checked": True,
         "expect": {"window_title": "Dummy"},
     })
     data = json.loads(result.text)
@@ -899,6 +1074,7 @@ def test_launch_focuses_target_window_even_when_verify_already_passed(monkeypatc
 
     result = session._t_launch({
         "command": "notepad",
+        "_reuse_checked": True,
         "expect": {"window_appears": "Notepad"},
     })
     data = json.loads(result.text)
@@ -975,6 +1151,7 @@ def test_launch_window_title_fallback_marks_verified(monkeypatch):
     from winpilot.agent import tools
     from winpilot.agent.tools import ToolSession
 
+    foreground = {"hwnd": 999}
     session = ToolSession(task="open web target")
     session._resolve_launch_target = lambda _command: None
     session._window_alive = lambda hwnd: bool(hwnd)
@@ -984,12 +1161,18 @@ def test_launch_window_title_fallback_marks_verified(monkeypatch):
         tools,
         "verify",
         SimpleNamespace(
-            run_with_verify=lambda *args, **kwargs: {
-                "ok": True,
-                "verified": False,
-                "verify_detail": "initial foreground did not match",
-                "post_state": {"foreground_hwnd": 999, "foreground_title": "Codex"},
-            },
+                run_with_verify=lambda *args, **kwargs: (
+                    foreground.__setitem__("hwnd", 123)
+                    or {
+                        "ok": True,
+                        "verified": False,
+                        "verify_detail": "initial foreground did not match",
+                        "post_state": {
+                            "foreground_hwnd": 999,
+                            "foreground_title": "Codex",
+                        },
+                    }
+                ),
             post_state_summary=lambda: {
                 "foreground_hwnd": 123,
                 "foreground_title": "WinPilot GUI Agent Target - Google Chrome",
@@ -1000,7 +1183,10 @@ def test_launch_window_title_fallback_marks_verified(monkeypatch):
         tools,
         "executor",
         SimpleNamespace(
-            launch=lambda command: {"ok": True, "command": command, "via": "url"},
+                launch=lambda command: (
+                    foreground.__setitem__("hwnd", 123)
+                    or {"ok": True, "command": command, "via": "url"}
+                ),
             focus_window=lambda hwnd: {"ok": True, "hwnd": hwnd},
         ),
     )
@@ -1012,7 +1198,11 @@ def test_launch_window_title_fallback_marks_verified(monkeypatch):
             find_window=lambda title: {"hwnd": 123, "title": "WinPilot GUI Agent Target - Google Chrome"},
         ),
     )
-    monkeypatch.setattr(tools.win32gui, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(
+        tools.win32gui,
+        "GetForegroundWindow",
+        lambda: foreground["hwnd"],
+    )
 
     result = session._t_launch({
         "command": "http://127.0.0.1:8877/gui_agent_target.html",

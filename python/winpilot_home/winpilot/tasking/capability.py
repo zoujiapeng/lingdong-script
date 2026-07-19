@@ -13,7 +13,7 @@ CAPABILITY_TO_TOOLS: dict[str, tuple[str, ...]] = {
         "open_app", "launch", "find_app", "find_program",
         "list_installed_apps", "list_windows", "scan_windows", "focus_window",
         "observe", "screen_watch", "read_text", "screenshot",
-        "click", "type_text", "hotkey", "scroll", "move_mouse", "mouse_down", "mouse_up",
+        "click", "double_click", "type_text", "hotkey", "scroll", "move_mouse", "mouse_down", "mouse_up",
         "drag", "draw_strokes",
         "run_action_batch", "execute_subgoal", "wait",
         "capture_artifact", "paste_image_file",
@@ -27,7 +27,7 @@ CAPABILITY_TO_TOOLS: dict[str, tuple[str, ...]] = {
     "visual.read_text": ("read_text",),
     "visual.semantic_verify": ("vlm_verify", "observe"),
     "visual.spatial_interaction": (
-        "click", "move_mouse", "mouse_down", "mouse_up", "drag", "draw_strokes",
+        "click", "double_click", "move_mouse", "mouse_down", "mouse_up", "drag", "draw_strokes",
         "run_action_batch", "execute_subgoal",
     ),
     # Closed-loop visual action policy shared by arbitrary applications.  It
@@ -35,7 +35,7 @@ CAPABILITY_TO_TOOLS: dict[str, tuple[str, ...]] = {
     # short controller transactions, then returns to a fresh observation.  The
     # capability deliberately says nothing about an application or task type.
     "visual.adaptive_interaction": (
-        "observe", "screen_watch", "click", "move_mouse", "mouse_down", "mouse_up",
+        "observe", "screen_watch", "click", "double_click", "move_mouse", "mouse_down", "mouse_up",
         "drag", "draw_strokes",
         "run_action_batch", "execute_subgoal", "wait",
     ),
@@ -44,7 +44,7 @@ CAPABILITY_TO_TOOLS: dict[str, tuple[str, ...]] = {
     # desktops, canvases and ordinary list/pane rearrangement all consume the
     # same target-bound click/drag/path primitives and ROI constraints.
     "visual.surface_manipulation": (
-        "click", "move_mouse", "mouse_down", "mouse_up", "drag", "draw_strokes",
+        "click", "double_click", "move_mouse", "mouse_down", "mouse_up", "drag", "draw_strokes",
         "run_action_batch", "execute_subgoal",
     ),
     "visual.artifact_match": ("verify_delivery",),
@@ -89,6 +89,48 @@ CAPABILITY_TO_TOOLS: dict[str, tuple[str, ...]] = {
     ),
     "semantic.execute": (),
 }
+
+
+# ExecuteDesktopTask is the one general visual-agent boundary.  Keep its model
+# operator independent of parsed task vocabulary: the model sees the same
+# atomic desktop actions whether the visible scene calls for interaction,
+# advice, explanation, or a cross-application handoff.  Compound controller
+# routines and secondary perception/planning systems stay behind the runtime
+# boundary instead of competing with the authoritative frame.
+_EXECUTE_DESKTOP_MODEL_TOOLS: tuple[str, ...] = (
+    # Application and window discovery.
+    "open_app",
+    "launch",
+    "list_windows",
+    "focus_window",
+    # Authoritative observation plus one explicit atomic GUI action.
+    "observe",
+    "click",
+    "double_click",
+    "type_text",
+    "hotkey",
+    "scroll",
+    "move_mouse",
+    "mouse_down",
+    "mouse_up",
+    "drag",
+    "draw_strokes",
+    "wait",
+    # Generic artifact handoff and communication.
+    "capture_artifact",
+    "paste_image_file",
+    "open_conversation",
+    "send_text",
+    "send_artifact",
+    "verify_delivery",
+    # Optional explicitly configured semantic integrations.
+    "discover_mcp_tools",
+    "call_mcp_tool",
+    # Honest terminal outcomes.
+    "done",
+    "blocked",
+    "fail",
+)
 
 _COMPONENT_CAPABILITIES: dict[str, set[str]] = {
     "local_controller": {
@@ -141,9 +183,11 @@ _STAGE_BASE: dict[StageType, set[str]] = {
     },
     StageType.CREATE_OR_EDIT_ARTIFACT: {"artifact.create_edit", "visual.semantic_verify"},
     StageType.DRAW_ARTIFACT: {
-        "app.open", "window.focus", "controller.transaction",
-        "visual.spatial_interaction", "visual.surface_manipulation",
-        "visual.semantic_verify",
+        # Serialized compatibility alias for ExecuteDesktopTask.  Do not give
+        # an old contract a narrower drawing-only capability surface.
+        "desktop.execute", "app.open", "window.focus", "visual.observe",
+        "visual.read_text", "controller.transaction", "visual.spatial_interaction",
+        "visual.adaptive_interaction", "visual.semantic_verify",
     },
     StageType.CAPTURE_ARTIFACT: {"window.focus", "artifact.capture", "artifact.hash"},
     StageType.SAVE_ARTIFACT: {"artifact.save", "artifact.hash"},
@@ -331,9 +375,10 @@ class CapabilityPlanner:
                 if "visual.semantic_verify" in combined
                 else "none"
             )
-        elif stage.type == StageType.DRAW_ARTIFACT:
-            model_role = "visual_artifact_planner"
-        elif stage.type == StageType.EXECUTE_DESKTOP_TASK:
+        elif stage.type in {
+            StageType.EXECUTE_DESKTOP_TASK,
+            StageType.DRAW_ARTIFACT,
+        }:
             model_role = "semantic_stage"
         elif stage.type in {
             StageType.EXECUTE_WORKSPACE_TASK,
@@ -349,15 +394,28 @@ class CapabilityPlanner:
                 if any(choice.name == "llm_visual_stage" for choice in choices)
                 else "none"
             )
-        if stage.type == StageType.DRAW_ARTIFACT:
-            # The model describes a semantic, canvas-relative scene.  Raw
-            # pointer primitives, target binding, fresh frames, and semantic
-            # verification stay behind the local Controller transaction.  This
-            # reserves the two model decisions for base composition and one
-            # bounded repair instead of rediscovering/focusing the same window.
-            model_tools = [
-                "execute_subgoal", "done", "blocked", "fail",
-            ]
+        if stage.type in {
+            StageType.EXECUTE_DESKTOP_TASK,
+            StageType.DRAW_ARTIFACT,
+        }:
+            model_tools = list(_EXECUTE_DESKTOP_MODEL_TOOLS)
+            # Do not advertise adapter-only shortcuts that are guaranteed to
+            # fail.  An unregistered communication client is still fully
+            # operable through the same visual click/type tools; installed
+            # providers opt these shortcuts in by registering real capability.
+            from .adapters import DomainAdapterRegistry
+
+            if not DomainAdapterRegistry.registered_adapters():
+                unavailable_adapter_tools = {
+                    "open_conversation",
+                    "send_text",
+                    "send_artifact",
+                    "verify_delivery",
+                }
+                model_tools = [
+                    tool for tool in model_tools
+                    if tool not in unavailable_adapter_tools
+                ]
         elif stage.type in {
             StageType.INFER_INTERACTION,
             StageType.PERFORM_TURN,

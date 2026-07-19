@@ -1,6 +1,6 @@
 """System-tray dimension: enumerate and click notification-area icons.
 
-Apps "hidden in the tray" (QQ, WeChat, cloud drives...) have no visible
+Apps hidden in the notification area can have no visible
 top-level window, so ``list_windows`` can't see them. This module walks the
 taskbar's UIA tree (Shell_TrayWnd) and — when needed — expands the Win11
 overflow flyout ("显示隐藏的图标" chevron) to reach hidden icons.

@@ -1,9 +1,12 @@
-"""Opt-in real Windows E2E matrix for general visual interactions.
+"""Opt-in real-client Windows E2E matrix for general visual interactions.
 
-The test uses the same compile and ARP run HTTP endpoints as the native
-frontend.  It does not mock the model, screenshot pipeline, Controller,
-browser, or pointer input.  A localhost evaluation target records trusted
-browser pointer events as external ground truth.
+The test enters through the same ``require_gui=True`` compile request and ARP
+run request as the Electron client.  Every case is one opaque
+``ExecuteDesktopTask``: the model receives the unchanged root goal and live
+pixels, then owns its visual strategy.  The test does not mock the model,
+screenshot pipeline, Controller, browser, or pointer input.  A localhost
+evaluation target records trusted browser pointer events as independent ground
+truth, while the WinPilot trace proves the fresh-frame/action/root-goal chain.
 
 It is intentionally excluded from normal test runs.  Set
 ``WINPILOT_REAL_VISUAL_E2E=1`` only on an unlocked interactive Windows desktop.
@@ -46,7 +49,6 @@ VISUAL_SCENARIOS: tuple[dict[str, Any], ...] = (
             "inside the green DROP HERE target."
         ),
         "expected_actions": {"drag"},
-        "persistent": False,
     },
     {
         "scenario": "precise_click",
@@ -55,7 +57,6 @@ VISUAL_SCENARIOS: tuple[dict[str, Any], ...] = (
             "white center and ignore every distractor."
         ),
         "expected_actions": {"click"},
-        "persistent": False,
     },
     {
         "scenario": "ordered_clicks",
@@ -64,13 +65,11 @@ VISUAL_SCENARIOS: tuple[dict[str, Any], ...] = (
             "then 3 in ascending order. Ignore the gray letter distractors."
         ),
         "expected_actions": {"click"},
-        "persistent": False,
     },
     {
         "scenario": "slider",
         "task": "In the current visible window, drag the orange knob into the striped green GOAL band.",
         "expected_actions": {"drag", "mouse_down", "move_mouse", "mouse_up"},
-        "persistent": False,
     },
     # Mulberry32 seeds below deterministically cover all four route
     # orientations.  Random-only coverage repeatedly hid mirror/reversal bugs.
@@ -84,15 +83,13 @@ VISUAL_SCENARIOS: tuple[dict[str, Any], ...] = (
             "expected_actions": {
                 "drag", "mouse_down", "move_mouse", "mouse_up",
             },
-            "persistent": False,
         }
         for variant, seed in enumerate((7, 12, 1, 4))
     ),
     {
         "scenario": "shared_turn",
-        "task": "跟我玩游戏，现在到你了",
+        "task": "跟我玩这个棋局，现在到你了。",
         "expected_actions": {"draw_strokes"},
-        "persistent": True,
     },
 )
 
@@ -210,68 +207,13 @@ def _close_window(hwnd: int) -> None:
         pass
 
 
-def _is_verified_external_wait_checkpoint(run: dict[str, Any]) -> bool:
-    """Recognize a successful live-session turn without ending the session.
-
-    A persistent interaction is supposed to remain blocked on the bound visual
-    watcher after the agent has yielded its turn.  Treating that healthy wait
-    as a terminal timeout made the real E2E disagree with the client lifecycle.
-    This predicate requires the verified local effect and the explicit runtime
-    wait state; merely reaching a Wait node is not enough.  It is a checkpoint
-    for the agent's completed turn, not a claim that the external participant
-    responded or that the persistent session reached a terminal success.
-    """
-    stage_trace = run.get("stage_trace") or []
-    states = [run.get("interaction_state") or {}]
-    states.extend(
-        item.get("interaction_state") or {}
-        for item in reversed(stage_trace)
-        if isinstance(item, dict)
-    )
-    state = next((
-        item for item in states
-        if str(item.get("status") or "") == "waiting_external"
-    ), {})
-    verification = (
-        state.get("last_local_verification")
-        or state.get("local_verification")
-        or {}
-    )
-    verified_turn_stage = next((
-        item for item in reversed(stage_trace)
-        if isinstance(item, dict)
-        and item.get("stage_type") == "VerifyLocalEffect"
-        and item.get("status") == "done"
-    ), None)
-    return bool(
-        str(run.get("status") or "") == "running"
-        and str(run.get("current_node_id") or "").endswith(
-            "wait_for_external_change"
-        )
-        and verified_turn_stage is not None
-        and verification.get("verified") is True
-        and not state.get("failure_stage")
-    )
-
-
-def _poll_run(
-    base: str,
-    run_id: str,
-    timeout_s: float,
-    *,
-    accept_external_wait_checkpoint: bool = False,
-) -> dict[str, Any]:
+def _poll_run(base: str, run_id: str, timeout_s: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_s
     last: dict[str, Any] = {}
     while time.monotonic() < deadline:
         payload = _request("GET", f"{base}/api/v2/arp/runs/{run_id}")
         last = payload.get("run") if isinstance(payload, dict) else {}
         if str(last.get("status") or "") in TERMINAL:
-            return last
-        if (
-            accept_external_wait_checkpoint
-            and _is_verified_external_wait_checkpoint(last)
-        ):
             return last
         time.sleep(0.5)
     try:
@@ -305,6 +247,156 @@ def _trace_action_types(events: list[dict[str, Any]]) -> list[str]:
         if name:
             action_types.append(name)
     return action_types
+
+
+def _assert_model_owned_visual_evidence(
+    events: list[dict[str, Any]],
+    snapshot: dict[str, Any],
+    *,
+    task: str,
+    target_hwnd: int,
+) -> dict[str, Any]:
+    """Prove one root-goal -> fresh pixels -> action -> fresh pixels chain.
+
+    These are architecture assertions, not a scenario-specific plan.  The
+    browser oracle below decides whether the model's chosen strategy actually
+    solved the case; this helper only proves that the real native visual loop
+    owned that strategy and that completion used causal evidence.
+    """
+
+    starts = [
+        item for item in events
+        if item.get("type") == "agent_start"
+        and item.get("stage_type") == "ExecuteDesktopTask"
+    ]
+    assert starts, "the ExecuteDesktopTask child Agent never started"
+    start = starts[-1]
+    child_run_id = str(start.get("run_id") or "")
+    assert child_run_id, start
+    assert start.get("task") == task, start
+    runtime = start.get("runtime") or {}
+    assert runtime.get("stage_type") == "ExecuteDesktopTask", runtime
+    assert runtime.get("adaptive_visual_interaction") is True, runtime
+    assert runtime.get("perception_daemon") is False, runtime
+    assert runtime.get("experience_enabled") is False, runtime
+
+    child_events = [
+        item for item in events
+        if str(item.get("run_id") or "") == child_run_id
+    ]
+    indexed = list(enumerate(child_events))
+    decisions = [
+        item for item in child_events
+        if item.get("type") == "agent_decision" and item.get("ok") is True
+    ]
+    assert decisions, "the model never made a live visual decision"
+
+    frame_events = [
+        (index, item) for index, item in indexed
+        if item.get("type") == "visual_feedback"
+        and int(item.get("frame_id") or 0) > 0
+    ]
+    assert frame_events, "no authoritative native visual frame was traced"
+    frame_ids = [int(item.get("frame_id") or 0) for _, item in frame_events]
+    assert frame_ids == sorted(frame_ids), frame_ids
+    assert any(item.get("phase") == "initial" for _, item in frame_events), frame_events
+    assert all(int(item.get("hwnd") or 0) == target_hwnd for _, item in frame_events), frame_events
+    assert all(
+        item.get("capture_scope") in {"target_window", "full_desktop"}
+        and item.get("capture_scope_reason")
+        for _, item in frame_events
+    ), frame_events
+
+    successful_actions = [
+        (index, item) for index, item in indexed
+        if item.get("type") == "agent_batch_action"
+        and item.get("ok") is True
+    ]
+    assert successful_actions, "no native pointer action reached the Controller"
+    for _index, action in successful_actions:
+        envelope = action.get("action_envelope") or {}
+        target = envelope.get("target") or {}
+        assert int(target.get("hwnd") or 0) == target_hwnd, target
+        assert int(target.get("frame_id") or 0) > 0, envelope
+        region = target.get("region") or {}
+        assert int(region.get("width") or 0) > 0, target
+        assert int(region.get("height") or 0) > 0, target
+
+    # At least one executed action must be followed by a strictly newer
+    # authoritative post-action frame.  A successful input event or a pixel
+    # delta alone is never treated as task completion.
+    causal_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for action_index, action in successful_actions:
+        action_frame_id = int(
+            ((action.get("action_envelope") or {}).get("target") or {}).get(
+                "frame_id",
+            ) or 0
+        )
+        post_frame = next((
+            frame for frame_index, frame in frame_events
+            if frame_index > action_index
+            and frame.get("phase") == "post_action"
+            and int(frame.get("frame_id") or 0) > action_frame_id
+        ), None)
+        if post_frame is not None:
+            causal_pairs.append((action, post_frame))
+    assert causal_pairs, "native input was not followed by a fresh post-action frame"
+
+    passed_done_checks = [
+        (index, item) for index, item in indexed
+        if item.get("type") == "done_check" and item.get("passed") is True
+    ]
+    assert passed_done_checks, "root-goal completion was never visually accepted"
+    final_done_index, _final_done = passed_done_checks[-1]
+    assert any(
+        frame_index < final_done_index and frame.get("phase") == "post_action"
+        for frame_index, frame in frame_events
+    ), "completion was accepted without a preceding fresh post-action frame"
+
+    stage_trace = snapshot.get("stage_trace") or []
+    assert len(stage_trace) == 1, stage_trace
+    stage_record = stage_trace[0]
+    assert stage_record.get("stage_type") == "ExecuteDesktopTask", stage_record
+    assert stage_record.get("status") == "done", stage_record
+    assert int(stage_record.get("model_calls") or 0) >= 1, stage_record
+    assert not (stage_record.get("interaction_state") or {}), stage_record
+
+    evidence_snapshot = snapshot.get("contract_evidence") or {}
+    root_evidence = next((
+        item for item in evidence_snapshot.get("records") or []
+        if item.get("predicate") == "desktop.full_goal_verified"
+        and item.get("verified") is True
+        and item.get("value") == task
+    ), None)
+    assert root_evidence is not None, evidence_snapshot
+    evidence_metadata = root_evidence.get("metadata") or {}
+    assert evidence_metadata.get("child_run_id") == child_run_id, root_evidence
+    assert evidence_metadata.get("agent_done_verified") is True, root_evidence
+    assert evidence_metadata.get("runtime_stage_type") == "ExecuteDesktopTask", root_evidence
+
+    return {
+        "child_run_id": child_run_id,
+        "model_decision_count": len(decisions),
+        "authoritative_frame_ids": frame_ids,
+        "successful_action_count": len(successful_actions),
+        "causal_action_frame_pairs": [
+            {
+                "action": str(
+                    (action.get("action_envelope") or {}).get("type")
+                    or action.get("tool")
+                    or ""
+                ),
+                "source_frame_id": int(
+                    ((action.get("action_envelope") or {}).get("target") or {}).get(
+                        "frame_id",
+                    ) or 0
+                ),
+                "post_action_frame_id": int(frame.get("frame_id") or 0),
+            }
+            for action, frame in causal_pairs
+        ],
+        "root_goal_evidence_id": str(root_evidence.get("id") or ""),
+    }
 
 
 def _assert_external_scenario(
@@ -468,47 +560,84 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
             "task": task,
             "max_steps": 12,
             "cold_start": True,
+            "require_gui": True,
         })
         contract = compiled["contract"]
         graph = compiled["graph"]
-        interaction = (contract.get("intent") or {}).get("interaction") or {}
-        assert interaction.get("active") is True, interaction
-        if scenario_case["persistent"]:
-            assert interaction.get("mode") in {"turn_based", "shared_visual_session"}, interaction
-            assert interaction.get("session_mode") == "persistent", interaction
-        else:
-            assert interaction.get("mode") == "direct_visual_manipulation", interaction
-            assert interaction.get("session_mode") == "bounded", interaction
+        assert compiled.get("needs_input") is False, compiled
+        assert compiled.get("clarification_questions") == [], compiled
         assert contract.get("satisfiable") is True, contract.get("missing_capabilities")
+        assert contract.get("task") == task, contract
+        assert contract.get("experience_policy") == "disabled", contract
+        assert not contract.get("session"), contract.get("session")
         stage_types = [stage.get("type") for stage in contract.get("stages") or []]
-        expected_stages = [
-            "ObserveScene", "InferInteraction", "PerformTurn", "VerifyLocalEffect",
-        ]
-        if scenario_case["persistent"]:
-            expected_stages.append("WaitForExternalChange")
-        assert stage_types == expected_stages, stage_types
+        assert stage_types == ["ExecuteDesktopTask"], stage_types
+        stage = (contract.get("stages") or [])[0]
+        params = stage.get("parameters") or {}
+        assert params.get("goal") == task, params
+        assert params.get("original_task") == task, params
+        assert params.get("preserve_original_intent") is True, params
+        assert params.get("verification_policy") == "full_goal_coverage", params
+        assert stage.get("allow_skill_replay") is False, stage
+        assert {
+            "interaction_mode", "primary_action_modality", "planned_actions",
+            "surface_output_mode", "surface_output_subject",
+            "surface_output_quality", "subject", "quality", "lifecycle",
+            "forbid_open_only", "minimum_effect_categories",
+        }.isdisjoint(params), params
         node_kinds = [node.get("kind") for node in graph.get("nodes") or []]
-        assert "task_stage" in node_kinds
+        assert node_kinds.count("task_stage") == 1, node_kinds
         assert "agent_goal" not in node_kinds
         assert "skill_replay" not in node_kinds
+        task_node = next(
+            node for node in graph.get("nodes") or []
+            if node.get("kind") == "task_stage"
+        )
+        assert (
+            ((task_node.get("config") or {}).get("stage") or {}).get("type")
+            == "ExecuteDesktopTask"
+        ), task_node
+        assert graph.get("metadata", {}).get("experience_policy") == "disabled", graph
         assert (graph.get("policy") or {}).get("allow_shell") is False
 
-        # Reassert foreground immediately before the frontend-equivalent run request.
+        # Reproduce the native client's handoff/capture/start sequence.  The
+        # opt-in test already yielded focus to its target above, so it captures
+        # that foreground HWND through the same endpoint used by the client.
         assert _find_window(title, timeout_s=3.0) == browser_hwnd
+        desktop_context = _request(
+            "GET",
+            f"{base}/api/v2/desktop-context?exclude_process_id=0",
+        )
+        target_window = desktop_context.get("target") or {}
+        assert target_window.get("usable") is True, target_window
+        assert target_window.get("foreground_verified") is True, target_window
+        assert int(target_window.get("hwnd") or 0) == browser_hwnd, target_window
+        submitted_at = int(time.time() * 1000)
+        execution_context = {
+            "format": "execution-context/1",
+            "entrypoint": "native_agent_cockpit",
+            "task_id": contract.get("task_id"),
+            "submitted_at": submitted_at,
+            "desktop_handoff": {
+                "required": True,
+                "strategy": "foreground_after_control_surface_yield",
+                "yielded": True,
+                "control_surface_pid": 0,
+                "prepared_at": submitted_at,
+                "reason": "real E2E target already owns foreground",
+            },
+            "target_window": target_window,
+        }
         started = _request("POST", f"{base}/api/v2/arp/runs", {
             "graph": graph,
-            "inputs": {"e2e_case_id": case_id},
+            "inputs": {
+                "e2e_case_id": case_id,
+                "execution_context": execution_context,
+            },
         })
         run_id = str(started["run_id"])
         timeout_s = float(os.environ.get("WINPILOT_REAL_VISUAL_TIMEOUT_S", "240"))
-        snapshot = _poll_run(
-            base,
-            run_id,
-            timeout_s,
-            accept_external_wait_checkpoint=bool(
-                scenario_case["persistent"]
-            ),
-        )
+        snapshot = _poll_run(base, run_id, timeout_s)
         try:
             target_state = _wait_json(
                 state_url,
@@ -521,29 +650,24 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
 
         # Persist the trace before assertions so a real failure remains
         # inspectable instead of disappearing behind the first pytest error.
-        interaction_state = snapshot.get("interaction_state") or {}
         stage_trace = snapshot.get("stage_trace") or []
-        recovery_records = [
-            item for item in stage_trace if item.get("status") == "recovering"
-        ]
         model_calls = sum(int(item.get("model_calls") or 0) for item in stage_trace)
         model_ms = sum(int(item.get("model_elapsed_ms") or 0) for item in stage_trace)
         controller_ms = sum(int(item.get("controller_elapsed_ms") or 0) for item in stage_trace)
         capture_ms = sum(int(item.get("capture_elapsed_ms") or 0) for item in stage_trace)
+        recoveries = [
+            item for item in events if item.get("type") == "agent_recovery"
+        ]
         report = {
-            "kind": (
-                "real_windows_visual_interaction_agent_turn_checkpoint"
-                if scenario_case["persistent"]
-                else "real_windows_visual_interaction_e2e"
-            ),
-            "validation_scope": (
-                "verified_agent_turn_then_waiting_for_external_participant"
-                if scenario_case["persistent"]
-                else "terminal_autonomous_task"
-            ),
-            "requires_external_participant": bool(
-                scenario_case["persistent"]
-            ),
+            "kind": "real_client_windows_visual_interaction_e2e",
+            "validation_scope": "terminal_single_execute_desktop_task",
+            "entrypoint": {
+                "compile_api": "/api/v2/task-contracts/compile",
+                "run_api": "/api/v2/arp/runs",
+                "require_gui": True,
+                "cold_start": True,
+                "execution_context": execution_context,
+            },
             "run_id": run_id,
             "case_id": case_id,
             "scenario": scenario,
@@ -551,24 +675,17 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
             "seed": seed,
             "task": task,
             "status": snapshot.get("status"),
-            "outcome": (
-                "verified_external_wait_checkpoint"
-                if _is_verified_external_wait_checkpoint(snapshot)
-                else str(snapshot.get("status") or "")
-            ),
+            "outcome": str(snapshot.get("status") or ""),
             "error": snapshot.get("error"),
-            "failed_stage": snapshot.get("failed_stage"),
             "duration_s": round(time.time() - started_at, 3),
             "model_calls": model_calls,
             "model_elapsed_ms": model_ms,
             "controller_elapsed_ms": controller_ms,
             "capture_elapsed_ms": capture_ms,
-            "replan_count": int(interaction_state.get("replan_count") or 0),
-            "recovery_count": len(recovery_records),
-            "recoveries": recovery_records,
-            "budget": interaction_state.get("budget") or {},
+            "recovery_count": len(recoveries),
+            "recoveries": recoveries,
             "stage_trace": stage_trace,
-            "interaction_state": interaction_state,
+            "contract_evidence": snapshot.get("contract_evidence") or {},
             "external_ground_truth": target_state,
             "successful_action_types": _trace_action_types(events),
             "runtime": status.get("runtime"),
@@ -578,10 +695,7 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
         )
 
-        if scenario_case["persistent"]:
-            assert _is_verified_external_wait_checkpoint(snapshot), snapshot
-        else:
-            assert snapshot.get("status") == "done", snapshot
+        assert snapshot.get("status") == "done", snapshot
         _assert_external_scenario(
             target_state, case_id=case_id, scenario=scenario, seed=seed,
         )
@@ -591,62 +705,19 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
             successful_actions = _trace_action_types(events)
             assert successful_actions.count("click") >= 3, successful_actions
 
-        interaction_state = snapshot.get("interaction_state") or {}
-        assert int((interaction_state.get("target_binding") or {}).get("hwnd") or 0) == browser_hwnd
-        assert (interaction_state.get("last_mutating_plan") or {}).get("actions"), interaction_state
-        assert (interaction_state.get("last_executed_action") or {}).get("deferred") is not True
-        assert (
-            interaction_state.get("last_local_verification")
-            or interaction_state.get("local_verification")
-            or {}
-        ).get("verified") is True
-        assert not interaction_state.get("failure_stage"), interaction_state
-
-        stage_trace = snapshot.get("stage_trace") or []
-        traced_types = [item.get("stage_type") for item in stage_trace]
-        # Safe stale-frame recovery may repeat Infer/Perform, so require the
-        # contract stages as an ordered subsequence rather than pretending a
-        # real E2E can never take an explicit recovery edge.
-        cursor = 0
-        required_stages = [
-            item for item in stage_types if item != "WaitForExternalChange"
-        ]
-        for expected in required_stages:
-            cursor = traced_types.index(expected, cursor) + 1
-        assert traced_types[0] == "ObserveScene", traced_types
-        assert traced_types[-1] in {"VerifyLocalEffect", "WaitForExternalChange"}, traced_types
-        assert all(
-            item.get("status") in {"done", "recovering"}
-            for item in stage_trace
-        ), stage_trace
-        recovery_records = [
-            item for item in stage_trace if item.get("status") == "recovering"
-        ]
-        assert all(
-            item.get("failure_type")
-            and (item.get("recovery") or {}).get("action")
-            for item in recovery_records
-        ), recovery_records
-        assert stage_trace[-1].get("status") == "done", stage_trace[-1]
-        assert all(item.get("satisfiable") is not False for item in stage_trace), stage_trace
-        assert all(not (item.get("missing_capabilities") or []) for item in stage_trace), stage_trace
-        model_calls = sum(int(item.get("model_calls") or 0) for item in stage_trace)
-        model_ms = sum(int(item.get("model_elapsed_ms") or 0) for item in stage_trace)
-        controller_ms = sum(int(item.get("controller_elapsed_ms") or 0) for item in stage_trace)
-        capture_ms = sum(int(item.get("capture_elapsed_ms") or 0) for item in stage_trace)
-        # Model calls are a measured performance signal, not a correctness
-        # oracle.  Ambiguity and recovery may legitimately need extra turns;
-        # the run timeout/state-machine bounds already prevent an unbounded
-        # loop.  Reports retain the count and per-stage reason so regressions
-        # can be compared without making one benchmark shape the runtime.
-        assert model_calls >= 1, model_calls
-        assert model_ms >= 0
-        assert controller_ms >= 0
+        visual_evidence = _assert_model_owned_visual_evidence(
+            events,
+            snapshot,
+            task=task,
+            target_hwnd=browser_hwnd,
+        )
+        report["visual_evidence"] = visual_evidence
+        (REPORT_ROOT / f"{run_id}.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
 
     finally:
-        # A live-session success is intentionally non-terminal.  End only the
-        # test-owned activation after all evidence has been collected; this is
-        # explicit cleanup, not a simulated user turn or a success condition.
+        # Explicitly clean up only resources created by this opt-in test.
         if run_id:
             try:
                 current = _request(

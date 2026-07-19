@@ -34,6 +34,47 @@ def test_run_state_expected_action_failure_recovers():
     assert "text not visible" in state.guidance()
 
 
+def test_run_state_owns_repeated_subgoal_progress_evidence():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+    result = json.dumps({
+        "ok": True,
+        "verified": False,
+        "partial_output": {"artifact_id": "fictional-7"},
+    })
+
+    for _ in range(3):
+        state.before_tool("execute_subgoal", {"subgoal": "move visible token"})
+        state.after_tool(
+            "execute_subgoal",
+            {"subgoal": "move visible token"},
+            result,
+        )
+
+    assert state.phase == "need_observe"
+    assert state.last_tool == "execute_subgoal"
+    assert state.unverified_actions == 3
+    assert state.transition_count == 6
+
+
+def test_run_state_owns_no_progress_retry_count_and_termination_only():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+
+    first = state.register_no_progress_block("click:same-region")
+    assert first == 1
+    assert state.strategy_block_limit_reached("click:same-region", 2) is False
+
+    second = state.register_no_progress_block("click:same-region")
+    assert second == 2
+    assert state.strategy_block_limit_reached("click:same-region", 2) is True
+
+    state.clear_no_progress_strategy()
+    assert state.strategy_block_limit_reached("click:same-region", 1) is False
+
+
 def test_run_state_reads_batch_expect_from_params():
     from winpilot.agent.run_state import RunStateMachine
 
@@ -63,7 +104,10 @@ def test_run_state_batch_with_final_plain_observe_keeps_action_debt():
 
     assert state.phase == "visually_grounded"
     assert state.unverified_actions == 1
-    assert "not completion evidence" in state.guidance()
+    assert state.guidance() == (
+        "phase=visually_grounded after run_action_batch: "
+        "batch refreshed state but did not explicitly verify its action."
+    )
 
 
 def test_run_state_batch_with_explicit_matches_result_is_ready():

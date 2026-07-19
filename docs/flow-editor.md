@@ -102,6 +102,6 @@ WinPilot 成功 trace 会生成规范 `.automation.json`，并保留 `.wps.json`
 
 ## 计划与证据边界
 
-- Flow/ARP graph 是用户编辑并保存的编排 artifact，不等同于 Agent 的 live todo。运行到 `agent_goal` 时，同一 `AgentRunner` 可用 `revise_plan` 随时替换、清空、增删、移动或重新打开自己的任务项；这些变化不会静默改写已保存的 Flow 节点。
+- Flow/ARP graph 是用户编辑并保存的编排 artifact，不等同于 Agent 的内部工作计划。运行到 `agent_goal` 时，同一 `AgentRunner` 仍可根据新鲜画面调整自己的工作状态；这些变化不是公开流程工具调用，也不会静默改写已保存的 Flow 节点。
 - 客户端收到新的 `agent_plan` 快照后应整体更新显示，不能继续使用旧索引。计划项被标记完成只表示局部工作状态，不是 ARP `evidence_gate` 或最终任务成功证据。
 - `action_batch` 返回成功、画面发生变化、preview 走完、replay 结束或 graph 到达 `end` 都不能替代目标 evidence。需要可信完成时，图中必须保留与用户目标匹配的 evidence gate，或由 `agent_goal` 的新鲜画面/确定性 done gate 核验。

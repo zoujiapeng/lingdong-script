@@ -1,74 +1,80 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 
-def test_resolve_inbox_notepad_includes_system_exe():
+
+def test_app_alias_expansion_returns_only_the_normalized_literal():
+    from winpilot.perception.app_aliases import expand
+
+    assert expand("  Ｎｅｂｕｌａ Desk  ") == ["nebula desk"]
+    assert expand("星云工作台") == ["星云工作台"]
+    assert expand("") == []
+
+
+def test_app_index_uses_only_generic_discovery_sources(monkeypatch):
     from winpilot.perception import apps
 
-    candidates = apps.resolve("notepad")
-    assert candidates, "expected at least one notepad candidate"
-    assert any(
-        c["kind"] == "exe" and str(c["target"]).lower().endswith(r"system32\notepad.exe")
-        for c in candidates
-    )
+    shortcut = {
+        "name": "Nebula Desk",
+        "target": r"C:\Start\Nebula Desk.lnk",
+        "kind": "lnk",
+        "aliases": [r"C:\Programs\Nebula\nebula.exe"],
+    }
+    start_app = {
+        "name": "Orbit Notes",
+        "target": "Fictional.OrbitNotes_123!App",
+        "kind": "appid",
+    }
+    app_path = {
+        "name": "prism",
+        "target": r"C:\Programs\Prism\prism.exe",
+        "kind": "exe",
+    }
+    monkeypatch.setattr(apps, "_cache", None)
+    monkeypatch.setattr(apps, "_start_menu_entries", lambda: [shortcut])
+    monkeypatch.setattr(apps, "_uwp_entries", lambda: [start_app])
+    monkeypatch.setattr(apps, "_app_paths_entries", lambda: [app_path])
+
+    assert apps._index() == [shortcut, start_app, app_path]
+    assert not hasattr(apps, "_system_tool_entries")
+    assert not hasattr(apps, "_wps_suite_entries")
 
 
-def test_resolve_localized_inbox_tool_uses_fast_system_target(monkeypatch):
+def test_resolve_fictional_app_by_discovered_display_name(monkeypatch):
     from winpilot.perception import apps
 
-    monkeypatch.setattr(
-        apps,
-        "_index",
-        lambda: (_ for _ in ()).throw(AssertionError("slow app index must not run")),
-    )
+    monkeypatch.setattr(apps, "_index", lambda: [{
+        "name": "Nebula Desk",
+        "target": "Fictional.NebulaDesk_123!App",
+        "kind": "appid",
+    }])
 
-    candidates = apps.resolve("画图")
+    result = apps.resolve("Nebula Desk")
 
-    assert candidates
-    assert candidates[0]["name"] == "画图"
-    assert str(candidates[0]["target"]).lower().endswith("mspaint.exe")
+    assert result[0]["name"] == "Nebula Desk"
+    assert result[0]["target"] == "Fictional.NebulaDesk_123!App"
+    assert result[0]["match_kind"] == "literal_or_alias"
 
 
-def test_resolve_uses_product_alias_for_installed_start_app(monkeypatch):
+def test_resolve_fictional_app_by_discovered_shortcut_alias(monkeypatch):
     from winpilot.perception import apps
 
-    monkeypatch.setattr(
-        apps,
-        "_index",
-        lambda: [{"name": "WPS Office", "target": "wps-office", "kind": "appid"}],
-    )
-    monkeypatch.setattr(apps, "_system_tool_entries", lambda: [])
-    monkeypatch.setattr(apps, "_wps_suite_entries", lambda: [])
+    monkeypatch.setattr(apps, "_index", lambda: [{
+        "name": "Aurora Studio",
+        "target": r"C:\Start\Aurora Studio.lnk",
+        "kind": "lnk",
+        "aliases": [r"C:\Programs\Aurora\aurora-render.exe"],
+    }])
 
-    results = apps.resolve("WPS文字")
+    result = apps.resolve("aurora-render")
 
-    assert results[0]["name"] == "WPS Office"
-
-
-def test_resolve_wps_spreadsheets_prefers_et_component(monkeypatch):
-    from winpilot.perception import apps
-
-    et = r"C:\Program Files\Kingsoft\WPS Office\office6\et.exe"
-    monkeypatch.setattr(apps, "_system_tool_entries", lambda: [])
-    monkeypatch.setattr(
-        apps,
-        "_wps_suite_entries",
-        lambda: [
-            {"name": "WPS Writer", "target": et.replace("et.exe", "wps.exe"), "kind": "exe"},
-            {"name": "WPS Spreadsheets", "target": et, "kind": "exe"},
-        ],
-    )
-    monkeypatch.setattr(
-        apps,
-        "_index",
-        lambda: [{"name": "WPS Office", "target": "wps-office", "kind": "appid"}],
-    )
-
-    results = apps.resolve("WPS Spreadsheets")
-
-    assert results[0]["target"].casefold().endswith(r"office6\et.exe")
+    assert result[0]["name"] == "Aurora Studio"
+    assert result[0]["matched_term"].casefold().endswith("aurora-render.exe")
+    assert result[0]["match_kind"] == "target_alias"
 
 
-def test_launch_wps_component_passes_registered_suite_arguments(monkeypatch):
+def test_launch_discovered_exe_passes_generic_arguments(monkeypatch):
     from winpilot.perception import apps
 
     calls = []
@@ -79,12 +85,219 @@ def test_launch_wps_component_passes_registered_suite_arguments(monkeypatch):
     )
 
     result = apps.launch_target({
-        "name": "WPS Writer",
-        "target": r"C:\Program Files\Kingsoft\office6\wps.exe",
+        "name": "Prism Workspace",
+        "target": r"C:\Programs\Prism\prism.exe",
         "kind": "exe",
-        "arguments": ["/prometheus", "/wps"],
+        "arguments": ["--workspace", "demo"],
     })
 
     assert result["ok"] is True
-    assert calls[0][0][-2:] == ["/prometheus", "/wps"]
-    assert result["arguments"] == ["/prometheus", "/wps"]
+    assert calls[0][0][-2:] == ["--workspace", "demo"]
+    assert result["arguments"] == ["--workspace", "demo"]
+
+
+def test_resolve_refreshes_a_cached_multisource_index_once_on_miss(monkeypatch):
+    from winpilot.perception import apps
+
+    refreshed = {
+        "name": "Comet Canvas",
+        "target": r"C:\Start\Comet Canvas.lnk",
+        "kind": "lnk",
+    }
+    calls = []
+    monkeypatch.setattr(apps, "_cache", (1.0, []))
+
+    def fake_index(*, force_refresh=False):
+        calls.append(force_refresh)
+        return [refreshed] if force_refresh else []
+
+    monkeypatch.setattr(apps, "_index", fake_index)
+
+    assert apps.resolve("Comet Canvas")[0]["target"] == refreshed["target"]
+    assert calls == [False, True]
+
+
+def test_index_keeps_same_kind_entries_with_distinct_launch_targets(monkeypatch):
+    from winpilot.perception import apps
+
+    entries = [
+        {"name": "Comet", "target": r"C:\Apps\A\Comet.lnk", "kind": "lnk"},
+        {"name": "Comet", "target": r"C:\Apps\B\Comet.lnk", "kind": "lnk"},
+    ]
+    monkeypatch.setattr(apps, "_cache", None)
+    monkeypatch.setattr(apps, "_start_menu_entries", lambda: entries)
+    monkeypatch.setattr(apps, "_uwp_entries", lambda: [])
+    monkeypatch.setattr(apps, "_app_paths_entries", lambda: [])
+
+    assert [item["target"] for item in apps._index()] == [
+        entries[0]["target"], entries[1]["target"],
+    ]
+
+
+def test_start_app_record_adds_only_catalog_proven_runtime_identity():
+    from winpilot.perception import apps
+
+    executable = r"C:\Program Files\Orbit\orbit-player.exe"
+    entry = apps._start_app_entry({
+        "name": "Orbit Player",
+        "app_id": "Fictional.Orbit_123!Desktop",
+        "executable": executable,
+        "package_family": "Fictional.Orbit_123",
+    })
+
+    assert entry == {
+        "name": "Orbit Player",
+        "target": "Fictional.Orbit_123!Desktop",
+        "kind": "appid",
+        "app_id": "Fictional.Orbit_123!Desktop",
+        "package_family": "Fictional.Orbit_123",
+        "executable": executable,
+        "process_name": "orbit-player.exe",
+        "aliases": ["orbit-player.exe", "orbit-player", executable],
+    }
+
+
+def test_start_app_record_does_not_invent_a_process_from_display_or_app_id():
+    from winpilot.perception import apps
+
+    entry = apps._start_app_entry({
+        "name": "Comet Canvas",
+        "app_id": "Fictional.Comet_123!App",
+        "package_family": "Fictional.Comet_123",
+    })
+
+    assert entry["package_family"] == "Fictional.Comet_123"
+    assert "executable" not in entry
+    assert "process_name" not in entry
+    assert "aliases" not in entry
+
+
+def test_start_apps_json_parser_preserves_executable_and_package_identity():
+    from winpilot.perception import apps
+
+    payload = json.dumps([{
+        "name": "星云播放器",
+        "app_id": "Fictional.Nebula_456!Main",
+        "executable": r"C:\Apps\Nebula\nebula-host.exe",
+        "package_family": "Fictional.Nebula_456",
+    }], ensure_ascii=False)
+
+    result = apps._parse_start_apps_output(payload)
+
+    assert result[0]["name"] == "星云播放器"
+    assert result[0]["process_name"] == "nebula-host.exe"
+    assert result[0]["package_family"] == "Fictional.Nebula_456"
+
+
+def test_start_apps_discovery_uses_system_catalog_metadata_once(monkeypatch):
+    from winpilot.perception import apps
+
+    calls = []
+    payload = json.dumps([{
+        "name": "Orbit Player",
+        "app_id": "Fictional.Orbit_123!Desktop",
+        "executable": r"C:\Apps\Orbit\orbit.exe",
+        "package_family": "Fictional.Orbit_123",
+    }])
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(stdout=payload)
+
+    monkeypatch.setattr(apps.subprocess, "run", fake_run)
+
+    entry = apps._uwp_entries()[0]
+    script = calls[0][0][-1]
+    assert entry["process_name"] == "orbit.exe"
+    assert "shell:AppsFolder" in script
+    assert "Get-AppxPackageManifest" in script
+    assert "Get-ChildItem" not in script
+    assert len(calls) == 1
+
+
+def test_index_merges_structured_identity_for_the_same_app_id(monkeypatch):
+    from winpilot.perception import apps
+
+    app_id = "Fictional.Orbit_123!Desktop"
+    sparse = {"name": "Orbit Player", "target": app_id, "kind": "appid"}
+    rich = apps._start_app_entry({
+        "name": "Orbit Player Desktop",
+        "app_id": app_id,
+        "executable": r"C:\Apps\Orbit\orbit-player.exe",
+        "package_family": "Fictional.Orbit_123",
+    })
+    monkeypatch.setattr(apps, "_cache", None)
+    monkeypatch.setattr(apps, "_start_menu_entries", lambda: [sparse])
+    monkeypatch.setattr(apps, "_uwp_entries", lambda: [rich])
+    monkeypatch.setattr(apps, "_app_paths_entries", lambda: [])
+
+    entry = apps._index()[0]
+
+    assert entry["process_name"] == "orbit-player.exe"
+    assert entry["package_family"] == "Fictional.Orbit_123"
+    assert entry["aliases"][:3] == [
+        "orbit-player.exe",
+        "orbit-player",
+        r"C:\Apps\Orbit\orbit-player.exe",
+    ]
+
+
+def test_resolve_can_match_a_discovered_runtime_process_alias(monkeypatch):
+    from winpilot.perception import apps
+
+    entry = apps._start_app_entry({
+        "name": "Orbit Player",
+        "app_id": "Fictional.Orbit_123!Desktop",
+        "executable": r"C:\Apps\Orbit\orbit-player.exe",
+        "package_family": "Fictional.Orbit_123",
+    })
+    monkeypatch.setattr(apps, "_index", lambda: [entry])
+
+    result = apps.resolve("orbit-player.exe")
+
+    assert result[0]["target"] == "Fictional.Orbit_123!Desktop"
+    assert result[0]["process_name"] == "orbit-player.exe"
+    assert result[0]["match_kind"] == "target_alias"
+
+
+def test_resolve_falls_back_to_structured_executable_search(monkeypatch):
+    from winpilot.perception import apps, search
+
+    calls = []
+    portable_executable = r"C:\Portable\Nebula Desk.exe"
+    monkeypatch.setattr(apps, "_cache", None)
+    monkeypatch.setattr(apps, "_index", lambda: [])
+
+    def fake_everything(
+        query,
+        max_results,
+        path,
+        *,
+        kind="any",
+        extensions=None,
+        sort="path",
+    ):
+        calls.append((query, max_results, path, kind, extensions, sort))
+        return {
+            "engine": "everything",
+            "results": [portable_executable],
+            "count": 1,
+        }
+
+    monkeypatch.setattr(search, "_search_everything", fake_everything)
+    monkeypatch.setattr(
+        search,
+        "_search_scandir",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Everything result should be returned directly")
+        ),
+    )
+
+    result = apps.resolve("Nebula Desk.exe")
+
+    assert result == [{
+        "name": "Nebula Desk",
+        "target": portable_executable,
+        "kind": "exe",
+    }]
+    assert calls == [("Nebula Desk", 5, None, "file", ["exe"], "path")]

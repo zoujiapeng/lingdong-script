@@ -70,13 +70,10 @@ def test_reusable_script_requires_strong_implicit_match(fresh_memory):
     assert recipe["task"] == "open browser settings and clear cache"
 
 
-def test_session_context_only_for_referential_tasks():
+def test_session_module_does_not_classify_references_with_task_keywords():
     from winpilot.agent import session
 
-    assert session.should_include_context("open calculator") is False
-    assert session.should_include_context("do it again") is True
-    assert session.should_include_context("continue the previous one") is True
-    assert session.should_include_context("继续刚才那个") is True
+    assert not hasattr(session, "should_include_context")
 
 
 def test_session_generation_rejects_a_late_result_after_clear():

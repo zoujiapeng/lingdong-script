@@ -1,10 +1,8 @@
-"""Installed-app discovery: resolve human app names (incl. Chinese display
-names) to launchable targets.
+"""Resolve installed application display names to discovered launch targets.
 
-Why: ``find_app`` only sees RUNNING processes and ``launch`` only takes exe
-names/paths — asked to open 网易云音乐 the agent had no way to learn that the
-binary is ``cloudmusic.exe`` and got lost searching the disk. Display names
-live in Start-Menu shortcuts and the UWP app list; this module indexes those.
+Display names and executable aliases come from the machine's Start Menu,
+Get-StartApps output, App Paths registry, and shortcut metadata.  No product
+identity or system-tool launch target is embedded in this module.
 
 Sources (merged, deduped, scored):
 - Start Menu ``*.lnk`` (user + common) — shortcut filename IS the display name
@@ -14,9 +12,9 @@ Sources (merged, deduped, scored):
 """
 from __future__ import annotations
 
+import json
 import os
 import re
-import shutil
 import subprocess
 import threading
 import time
@@ -30,26 +28,98 @@ _CACHE_TTL_S = 300.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, list[dict]] | None = None
 
-_SYSTEM_TOOL_TARGETS = [
-    ("notepad", "notepad.exe"),
-    ("记事本", "notepad.exe"),
-    ("calculator", "calc.exe"),
-    ("计算器", "calc.exe"),
-    ("paint", "mspaint.exe"),
-    ("画图", "mspaint.exe"),
-    ("画板", "mspaint.exe"),
-    ("command prompt", "cmd.exe"),
-    ("命令提示符", "cmd.exe"),
-    ("powershell", "powershell.exe"),
-    ("terminal", "wt.exe"),
-    ("终端", "wt.exe"),
-]
-
 _START_MENU_DIRS = [
     Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
     Path(os.environ.get("PROGRAMDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
 ]
 _SKIP_WORDS = ("卸载", "uninstall", "帮助", "help", "网站", "website", "readme")
+
+
+def _unique_text(values) -> list[str]:
+    """Return non-empty strings once, preserving the strongest-first order."""
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in values:
+        value = str(raw or "").strip()
+        key = value.casefold()
+        if value and key not in seen:
+            seen.add(key)
+            result.append(value)
+    return result
+
+
+def _start_app_entry(record: dict) -> dict | None:
+    """Convert one StartApps catalog record into a launch candidate."""
+
+    name = str(record.get("name") or record.get("Name") or "").strip()
+    app_id = str(
+        record.get("app_id") or record.get("AppID") or record.get("appid") or ""
+    ).strip()
+    if not name or not app_id:
+        return None
+    entry = {
+        "name": name,
+        "target": app_id,
+        "kind": "appid",
+        "app_id": app_id,
+    }
+    package_family = str(
+        record.get("package_family") or record.get("PackageFamily") or ""
+    ).strip()
+    if package_family:
+        entry["package_family"] = package_family
+    executable = os.path.expandvars(str(
+        record.get("executable") or record.get("Executable") or ""
+    ).strip().strip('"'))
+    process_name = re.split(r"[\\/]", executable)[-1] if executable else ""
+    if process_name.casefold().endswith(".exe"):
+        entry.update({
+            "executable": executable,
+            "process_name": process_name,
+            "aliases": _unique_text([
+                process_name,
+                process_name[:-4],
+                executable,
+            ]),
+        })
+    return entry
+
+
+def _parse_start_apps_output(output: str) -> list[dict]:
+    """Parse one JSON catalog snapshot into normalized candidates."""
+
+    try:
+        decoded = json.loads(str(output or "[]"))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    records = decoded if isinstance(decoded, list) else [decoded]
+    return [
+        entry
+        for record in records
+        if isinstance(record, dict)
+        for entry in [_start_app_entry(record)]
+        if entry is not None
+    ]
+
+
+def _merge_entry_metadata(primary: dict, secondary: dict) -> dict:
+    """Merge two catalog observations for the same launch identity."""
+
+    merged = dict(primary)
+    for key, value in secondary.items():
+        if key != "aliases" and value not in (None, "") and not merged.get(key):
+            merged[key] = value
+    process_name = str(merged.get("process_name") or "")
+    merged["aliases"] = _unique_text([
+        process_name,
+        process_name[:-4] if process_name.casefold().endswith(".exe") else "",
+        merged.get("executable"),
+        *(primary.get("aliases") or []),
+        *(secondary.get("aliases") or []),
+        secondary.get("name"),
+    ])
+    return merged
 
 
 def _start_menu_entries() -> list[dict]:
@@ -99,27 +169,73 @@ def _start_menu_entries() -> list[dict]:
 def _uwp_entries() -> list[dict]:
     """Get-StartApps: display name -> AppID (covers UWP + many desktop apps).
 
-    Store apps (e.g. 网易云音乐) have NO classic .lnk/.exe — this list is the
-    only way to find them. Console output must be forced to UTF-8: PowerShell
-    5.1 pipes in the ANSI codepage (GBK here) which would mangle Chinese names.
+    Some Store apps have no classic ``.lnk`` or executable path. Console output
+    is forced to UTF-8 so localized display names remain intact.
     """
+    script = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$shell = New-Object -ComObject Shell.Application
+$appsFolder = $shell.Namespace('shell:AppsFolder')
+$packageByFamily = @{}
+@(Get-AppxPackage) | ForEach-Object {
+    $packageByFamily[[string]$_.PackageFamilyName] = $_
+}
+$records = @(Get-StartApps | ForEach-Object {
+    $appId = [string]$_.AppID
+    $shellItem = $null
+    try { $shellItem = $appsFolder.ParseName($appId) } catch {}
+    $executable = ''
+    $packageFamily = ''
+    if ($shellItem) {
+        $executable = [string]$shellItem.ExtendedProperty('System.Link.TargetParsingPath')
+        $packageFamily = [string]$shellItem.ExtendedProperty('System.AppUserModel.PackageFamilyName')
+    }
+    if (-not $packageFamily -and $appId.Contains('!')) {
+        $candidateFamily = $appId.Split('!')[0]
+        if ($packageByFamily.ContainsKey($candidateFamily)) {
+            $packageFamily = $candidateFamily
+        }
+    }
+    $package = $null
+    if ($packageFamily -and $packageByFamily.ContainsKey($packageFamily)) {
+        $package = $packageByFamily[$packageFamily]
+    }
+    if (-not $executable -and $package -and $appId.Contains('!')) {
+        $applicationId = $appId.Split('!')[-1]
+        try {
+            $manifest = Get-AppxPackageManifest -Package $package
+            $manifestApp = @($manifest.Package.Applications.Application) |
+                Where-Object { [string]$_.Id -eq $applicationId } |
+                Select-Object -First 1
+            $manifestExecutable = [Environment]::ExpandEnvironmentVariables(
+                [string]$manifestApp.Executable
+            )
+            if ($manifestExecutable) {
+                if ([IO.Path]::IsPathRooted($manifestExecutable)) {
+                    $executable = $manifestExecutable
+                } else {
+                    $executable = Join-Path ([string]$package.InstallLocation) $manifestExecutable
+                }
+            }
+        } catch {}
+    }
+    [pscustomobject]@{
+        name = [string]$_.Name
+        app_id = $appId
+        executable = $executable
+        package_family = $packageFamily
+    }
+})
+ConvertTo-Json -InputObject $records -Compress -Depth 3
+""".strip()
     try:
         out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
-             "Get-StartApps | ForEach-Object { $_.Name + '|' + $_.AppID }"],
+            ["powershell", "-NoProfile", "-Command", script],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=15, creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=20, creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        entries = []
-        for line in (out.stdout or "").splitlines():
-            if "|" not in line:
-                continue
-            name, appid = line.split("|", 1)
-            name, appid = name.strip(), appid.strip()
-            if name and appid:
-                entries.append({"name": name, "target": appid, "kind": "appid"})
-        return entries
+        return _parse_start_apps_output(out.stdout or "")
     except (subprocess.SubprocessError, OSError) as exc:
         logger.warning("Get-StartApps 失败: %s", exc)
         return []
@@ -152,90 +268,45 @@ def _app_paths_entries() -> list[dict]:
     return entries
 
 
-def _system_tool_entries() -> list[dict]:
-    """Stable Windows inbox tools that may not appear in StartApps/App Paths."""
-    windir = os.environ.get("WINDIR", r"C:\Windows")
-    system32 = Path(windir) / "System32"
-    entries: list[dict] = []
-    for name, exe in _SYSTEM_TOOL_TARGETS:
-        path = system32 / exe
-        target = str(path) if path.exists() else shutil.which(exe)
-        if target:
-            entries.append({"name": name, "target": str(target), "kind": "exe"})
-    return entries
-
-
-def _wps_suite_entries() -> list[dict]:
-    """Discover separately launchable WPS suite components.
-
-    StartApps often exposes only the umbrella "WPS Office" entry, which makes
-    Writer, Spreadsheets, and Presentation indistinguishable. Resolve the real
-    installed component executables without pinning a WPS version directory.
-    """
-    roots = [
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Kingsoft/WPS Office",
-        Path(os.environ.get("ProgramFiles", "")) / "Kingsoft/WPS Office",
-        Path(os.environ.get("ProgramFiles(x86)", "")) / "Kingsoft/WPS Office",
-    ]
-    components = (
-        ("wps.exe", ("/prometheus", "/wps"), ("WPS Writer", "WPS文字")),
-        ("et.exe", ("/prometheus", "/et"), ("WPS Spreadsheets", "WPS表格")),
-        ("wpp.exe", ("/prometheus", "/wpp"), ("WPS Presentation", "WPS演示")),
-    )
-    entries: list[dict] = []
-    for executable, arguments, names in components:
-        candidates: list[Path] = []
-        for root in roots:
-            if not root.exists():
-                continue
-            candidates.extend(
-                path for path in root.glob(f"*/office6/{executable}")
-                if "utility" not in {part.casefold() for part in path.parts}
-            )
-            direct = root / "office6" / executable
-            if direct.is_file():
-                candidates.append(direct)
-        if not candidates:
-            continue
-        target = max(
-            dict.fromkeys(candidates),
-            key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
-        )
-        entries.extend(
-            {
-                "name": name,
-                "target": str(target),
-                "kind": "exe",
-                "arguments": list(arguments),
-            }
-            for name in names
-        )
-    return entries
-
-
-def _index() -> list[dict]:
+def _index(*, force_refresh: bool = False) -> list[dict]:
     global _cache
     with _cache_lock:
-        if _cache is not None and time.monotonic() - _cache[0] < _CACHE_TTL_S:
+        if (
+            not force_refresh
+            and _cache is not None
+            and time.monotonic() - _cache[0] < _CACHE_TTL_S
+        ):
             return _cache[1]
     entries = (
         _start_menu_entries()
         + _uwp_entries()
         + _app_paths_entries()
-        + _wps_suite_entries()
-        + _system_tool_entries()
     )
-    # Dedupe by (lowered name, kind) keeping first occurrence.
-    seen: set[tuple[str, str]] = set()
-    deduped = []
+    # One physical launch identity may be reported by several sources/names;
+    # conversely, two shortcuts with the same display name may target distinct
+    # installs.  Deduplicate by normalized target and retain alternate names as
+    # aliases instead of dropping a launchable target by (name, kind).
+    seen: dict[str, int] = {}
+    deduped: list[dict] = []
     for e in entries:
-        key = (e["name"].lower(), e["kind"])
-        if key not in seen:
-            seen.add(key)
-            deduped.append(e)
+        raw_target = os.path.expandvars(str(e.get("target") or "").strip().strip('"'))
+        key = os.path.normcase(os.path.normpath(raw_target)).casefold()
+        if not key:
+            continue
+        existing_index = seen.get(key)
+        if existing_index is not None:
+            deduped[existing_index] = _merge_entry_metadata(
+                deduped[existing_index], e,
+            )
+            continue
+        copied = dict(e)
+        if e.get("aliases"):
+            copied["aliases"] = list(e.get("aliases") or [])
+        seen[key] = len(deduped)
+        deduped.append(copied)
     with _cache_lock:
         _cache = (time.monotonic(), deduped)
-    logger.info("应用索引就绪: %d 条 (开始菜单+UWP+注册表)", len(deduped))
+    logger.info("应用索引就绪: %d 条 (开始菜单+StartApps+App Paths)", len(deduped))
     return deduped
 
 
@@ -298,7 +369,12 @@ def _score_entry(entry: dict, variants: list[str], literal_query: str) -> tuple[
     return best, literal, matched_term
 
 
-def resolve(query: str, max_results: int = 5) -> list[dict]:
+def resolve(
+    query: str,
+    max_results: int = 5,
+    *,
+    force_refresh: bool = False,
+) -> list[dict]:
     """Installed-app candidates for a human name, best match first."""
     q = (query or "").strip().lower()
     if not q:
@@ -306,57 +382,69 @@ def resolve(query: str, max_results: int = 5) -> list[dict]:
     from .app_aliases import expand as expand_app_aliases
 
     query_variants = list(dict.fromkeys(expand_app_aliases(q) or [q]))
-    # Inbox tools have stable launch targets. Resolve them before the slower
-    # StartApps/shortcut index so a cold desktop task does not pay that scan.
-    fast_scored = [
-        (*_score_entry(entry, query_variants, q)[:2], entry)
-        for entry in (_system_tool_entries() + _wps_suite_entries())
-    ]
-    fast_scored = [item for item in fast_scored if item[0]]
-    if fast_scored:
-        # Preserve the user's localized/literal name when an alias has the
-        # same launch target and score.  The returned name is also evidence
-        # and a later title hint, so turning 画图 into "paint" is observable.
-        fast_scored.sort(key=lambda item: (-item[0], -item[1]))
+
+    def candidates(entries: list[dict]) -> list[dict]:
+        scored = []
+        for entry in entries:
+            score, literal_score, matched_term = _score_entry(
+                entry, query_variants, q,
+            )
+            if score:
+                # Shortcuts are the most reliable launch targets; AppID next.
+                score += {"lnk": 2, "appid": 1}.get(entry["kind"], 0)
+                scored.append((score, literal_score, matched_term, entry))
+        scored.sort(key=lambda item: (
+            -item[0],
+            -item[1],
+            str(item[3].get("name") or "").casefold(),
+        ))
         return [
             {
                 **entry,
+                "aliases": list(dict.fromkeys([
+                    *(str(item) for item in (entry.get("aliases") or []) if str(item).strip()),
+                    str(matched_term or ""),
+                ])),
                 "match_score": score,
-                "match_kind": "literal_or_alias",
+                "matched_term": matched_term,
+                "match_kind": (
+                    "fuzzy"
+                    if score < 70
+                    else (
+                        "target_alias"
+                        if _normalized(matched_term)
+                        != _normalized(entry.get("name") or "")
+                        else "literal_or_alias"
+                    )
+                ),
             }
-            for score, _literal_score, entry in fast_scored[:max_results]
+            for score, _literal, matched_term, entry in scored[:max_results]
         ]
-    scored = []
-    for e in _index():
-        s, literal_score, matched_term = _score_entry(e, query_variants, q)
-        if s:
-            # shortcuts are the most reliable launch targets; appid next
-            s += {"lnk": 2, "appid": 1}.get(e["kind"], 0)
-            scored.append((s, literal_score, matched_term, e))
-    scored.sort(key=lambda item: (-item[0], -item[1], str(item[3].get("name") or "").casefold()))
-    results = [
-        {
-            **entry,
-            "aliases": list(dict.fromkeys([
-                *(str(item) for item in (entry.get("aliases") or []) if str(item).strip()),
-                str(matched_term or ""),
-            ])),
-            "match_score": score,
-            "matched_term": matched_term,
-            "match_kind": (
-                "fuzzy"
-                if score < 70
-                else ("target_alias" if _normalized(matched_term) != _normalized(entry.get("name") or "") else "literal_or_alias")
-            ),
-        }
-        for score, _literal, matched_term, entry in scored[:max_results]
-    ]
+
+    with _cache_lock:
+        had_cached_index = _cache is not None
+    results = candidates(_index(force_refresh=force_refresh) if force_refresh else _index())
+    if not results and had_cached_index and not force_refresh:
+        # Install/uninstall and shortcut changes are common while the desktop
+        # client is running.  A miss is cheap enough to justify one forced
+        # multi-source refresh before declaring the app absent.
+        results = candidates(_index(force_refresh=True))
     if results:
         return results
-    # Last resort: Everything filename search for an exe.
+    # Last resort: search executable filenames without routing an app lookup
+    # through the public ``*.exe`` file-search guard.  The structured filters
+    # work for both Everything and the bounded native fallback.
     try:
         from . import search
-        hits = search.search(f"{query}*.exe", max_results=max_results)
+        executable_query = re.sub(
+            r"\.exe\s*$", "", str(query), flags=re.IGNORECASE,
+        ).strip()
+        hits = search.search(
+            executable_query,
+            max_results=max_results,
+            kind="file",
+            extensions=["exe"],
+        )
         return [{"name": Path(p).stem, "target": p, "kind": "exe"}
                 for p in (hits.get("results") or [])
                 if not any(w in p.lower() for w in _SKIP_WORDS)]

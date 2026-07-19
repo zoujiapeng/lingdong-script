@@ -249,12 +249,36 @@ def test_full_desktop_stage_forces_a_provisional_plan_with_live_context(monkeypa
     )
 
 
+def test_native_visual_stage_does_not_inject_a_speculative_upfront_plan(monkeypatch):
+    def unexpected_plan(*_args, **_kwargs):
+        raise AssertionError("native visual execution must decide from its live frame")
+
+    monkeypatch.setattr(context_guidance, "make_plan", unexpected_plan)
+
+    class Runner(context_guidance.ContextGuidanceMixin):
+        task = "operate the live GUI"
+        task_intent = {"operation": ["operate"]}
+        runtime_profile = SimpleNamespace(plan_upfront=True)
+        session = SimpleNamespace(plan=None)
+        messages = []
+
+        @staticmethod
+        def _native_visual_context_enabled():
+            return True
+
+    runner = Runner()
+    runner._maybe_plan_upfront(client=object())
+
+    assert runner.session.plan is None
+    assert runner.messages == []
+
+
 def test_prebound_target_is_planner_context_and_satisfies_open_step(monkeypatch):
     observed: dict = {}
 
     def fake_make_plan(_client, _model, _task, **kwargs):
         observed["runtime_context"] = kwargs.get("runtime_context")
-        return ["打开画图", "截取当前作品"]
+        return ["打开星图工坊", "截取当前作品"]
 
     monkeypatch.setattr(context_guidance, "make_plan", fake_make_plan)
     monkeypatch.setattr(
@@ -272,7 +296,7 @@ def test_prebound_target_is_planner_context_and_satisfies_open_step(monkeypatch)
             plan=None,
             snapshot=None,
             hwnd=321,
-            target_hint="Paint",
+            target_hint="星图工坊",
         )
         messages = []
         run_id = "run-prebound-plan"
@@ -285,7 +309,7 @@ def test_prebound_target_is_planner_context_and_satisfies_open_step(monkeypatch)
     runner._maybe_plan_upfront(client=object())
 
     assert observed["runtime_context"] == (
-        "Current target is already bound and open: Paint (hwnd=321)"
+        "Current target is already bound and open: 星图工坊 (hwnd=321)"
     )
     assert [step["done"] for step in runner.session.plan.steps] == [True, False]
 
@@ -293,9 +317,9 @@ def test_prebound_target_is_planner_context_and_satisfies_open_step(monkeypatch)
 def test_prebound_target_does_not_satisfy_opening_a_different_app():
     from winpilot.agent.gui_plan_helpers import _pure_open_goal_matches_bound_target
 
-    assert _pure_open_goal_matches_bound_target("打开画图", "Paint") is True
-    assert _pure_open_goal_matches_bound_target("打开微信", "Paint") is False
-    assert _pure_open_goal_matches_bound_target("打开当前窗口", "Paint") is True
+    assert _pure_open_goal_matches_bound_target("打开星图工坊", "星图工坊") is True
+    assert _pure_open_goal_matches_bound_target("打开云桥", "星图工坊") is False
+    assert _pure_open_goal_matches_bound_target("打开当前窗口", "星图工坊") is True
 
 
 def test_should_plan_upfront_keeps_raw_parse_as_legacy_fallback(monkeypatch):

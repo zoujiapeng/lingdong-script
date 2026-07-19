@@ -58,16 +58,18 @@ def test_platform_overview_exposes_contracts_and_capabilities(client):
 
 
 def test_frontend_task_contract_compile_endpoint_returns_typed_satisfiable_graph(client):
+    task = "用画板画一只鸟然后截图用QQ发给测试联系人"
     response = client.post(
         "/api/v2/task-contracts/compile",
-        json={"task": "用画板画一只鸟然后截图用QQ发给测试联系人", "max_steps": 50},
+        json={"task": task, "max_steps": 50, "require_gui": True},
     )
     assert response.status_code == 200
     data = response.json()
     assert data["contract"]["satisfiable"] is True
     assert [stage["type"] for stage in data["contract"]["stages"]] == [
-        "ExecuteDesktopTask", "CaptureArtifact", "OpenConversation", "SendArtifact", "VerifyDelivery",
+        "ExecuteDesktopTask",
     ]
+    assert data["contract"]["stages"][0]["parameters"]["goal"] == task
     assert "task_stage" in {node["kind"] for node in data["graph"]["nodes"]}
     assert "agent_goal" not in {node["kind"] for node in data["graph"]["nodes"]}
 

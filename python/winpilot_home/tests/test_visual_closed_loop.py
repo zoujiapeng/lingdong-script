@@ -89,7 +89,7 @@ def test_native_point_scope_guard_blocks_taskbar_hit(monkeypatch) -> None:
     assert blocked["action_executed"] is False
 
 
-def test_native_point_scope_guard_follows_rebound_target_on_full_desktop(
+def test_native_point_scope_guard_does_not_reinterpret_full_desktop_selection(
     monkeypatch,
 ) -> None:
     from winpilot.agent.loop import AgentRunner
@@ -100,15 +100,12 @@ def test_native_point_scope_guard_follows_rebound_target_on_full_desktop(
     runner._visual_frame_hwnd = 100
     runner._last_visual_feedback_b64 = "x" * 128
 
-    def refresh_target():
-        runner.session.hwnd = 200
-        runner.session._last_scope_recovery = {
-            "reason": "foreground_application_successor_rebound",
-        }
-        return 200
-
     monkeypatch.setattr(
-        runner.session, "_refresh_bound_target_window", refresh_target,
+        runner.session,
+        "_refresh_bound_target_window",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("full-desktop selection was reinterpreted through app scope")
+        ),
     )
     monkeypatch.setattr(
         "winpilot.agent.loop.win32gui.WindowFromPoint", lambda _point: 200,
@@ -132,7 +129,7 @@ def test_native_point_scope_guard_follows_rebound_target_on_full_desktop(
     assert runner._native_point_scope_guard(
         "click", {"x": 320, "y": 240},
     ) is None
-    assert runner.session.hwnd == 200
+    assert runner.session.hwnd == 100
 
 
 def test_native_point_scope_guard_requires_fresh_crop_after_target_rebound(
@@ -240,6 +237,55 @@ def test_visual_frame_marks_current_screen_epoch(monkeypatch):
     assert "authoritative current state" in frame[0]["text"]
 
 
+@pytest.mark.parametrize(
+    "action",
+    (
+        "click",
+        "double_click",
+        "scroll",
+        "move_mouse",
+        "mouse_down",
+        "mouse_up",
+        "drag",
+        "draw_strokes",
+    ),
+)
+def test_every_native_spatial_action_gets_same_frame_magnified_detail(
+    monkeypatch, action,
+):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("operate the tiny visible control")
+    runner.messages = [{"role": "system", "content": "sys"}]
+    runner.session.hwnd = 99
+    roi = (700.0, 650.0, 760.0, 900.0)
+    seen = []
+
+    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
+    monkeypatch.setattr(
+        "winpilot.agent.loop.normalized_detail_crop_jpeg_b64",
+        lambda image_b64, action_roi: (
+            seen.append((image_b64, action_roi)) or "detail-frame",
+            (650, 600, 810, 950),
+        ),
+    )
+
+    assert runner._inject_visual_frame(
+        phase="post_action",
+        action=action,
+        action_roi=roi,
+        image_b64="full-frame",
+        frame_region=Region(0, 0, 1920, 1080),
+    ) is True
+
+    content = runner.messages[-1]["content"]
+    assert seen == [("full-frame", roi)]
+    assert sum(part.get("type") == "image_url" for part in content) == 2
+    assert "last spatial action" in content[2]["text"]
+    assert "crop-local coordinates" in content[2]["text"]
+
+
 def test_visual_frame_rebinds_verified_application_successor_before_binding(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -330,6 +376,41 @@ def test_preflight_rebound_target_crop_returns_fresh_authoritative_frame(monkeyp
     assert captures == [(22, new_region)]
 
 
+def test_preflight_rebound_target_identity_blocks_full_desktop_keyboard_action(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    desktop = Region(0, 0, 1920, 1080)
+    runner = AgentRunner("continue only in the verified application identity")
+    runner.session.hwnd = 11
+    runner._visual_frame_scope = "full_desktop"
+    runner._visual_frame_hwnd = 11
+    runner._visual_frame_region = (0, 0, 1920, 1080)
+    runner._last_visual_feedback_b64 = "old-frame" * 64
+
+    def refresh_target():
+        runner.session.hwnd = 22
+        return 22
+
+    monkeypatch.setattr(runner.session, "_refresh_bound_target_window", refresh_target)
+    monkeypatch.setattr("winpilot.agent.loop.virtual_screen_region", lambda: desktop)
+    captures = []
+    monkeypatch.setattr(
+        "winpilot.agent.loop.capture_window_jpeg_b64",
+        lambda hwnd, **kwargs: captures.append((hwnd, kwargs["region"]))
+        or "new-frame" * 64,
+    )
+
+    frame, ratio, error, region = runner._preflight_visual_frame(
+        "type_text", {"text": "query"},
+    )
+
+    assert (frame, ratio, error, region) == (
+        "new-frame" * 64, 1.0, "", desktop,
+    )
+    assert captures == [(22, desktop)]
+
+
 def test_full_desktop_frame_stays_grounded_when_crop_becomes_available(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -410,240 +491,6 @@ def test_initial_prebind_frame_settle_requires_a_bounded_quiet_period(monkeypatc
     assert events[-1][1]["last_change_ratio"] == 0.0004
 
 
-def test_visual_frame_reports_unique_work_surface_in_frame_coordinates(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("create continuous paths on the visible work surface")
-    runner.messages = [{"role": "system", "content": "sys"}]
-    runner.session.hwnd = 99
-    runner.session._screen_epoch = 4
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
-    monkeypatch.setattr(runner, "_continuous_pointer_output_requested", lambda: True)
-    monkeypatch.setattr(
-        "winpilot.agent.loop.credible_work_surface_frame_bounds",
-        lambda _b64, **_kwargs: {
-            "work_surface_frame_bounds": [125, 359, 984, 932],
-            "source": "authoritative_frame_pixels",
-        },
-    )
-
-    assert runner._inject_visual_frame(
-        phase="initial",
-        image_b64="exact-authoritative-frame",
-        frame_region=Region(480, 154, 1008, 720),
-    ) is True
-
-    text = runner.messages[-1]["content"][0]["text"]
-    assert "work_surface_frame_bounds=[125, 359, 984, 932]" in text
-    assert "same frame 0..1000 coordinate system" in text
-    assert "every authored point must remain inside" in text
-    assert runner._visual_work_surface_frame_bounds == (125, 359, 984, 932)
-    assert runner._visual_work_surface_frame_id == runner._visual_frame_id
-    assert runner.session._visual_work_surface_frame_bounds == [125, 359, 984, 932]
-
-
-def test_visual_frame_skips_light_surface_detection_for_non_continuous_task(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("click the visible primary action")
-    runner.messages = [{"role": "system", "content": "sys"}]
-    runner.session.hwnd = 99
-    runner.session._screen_epoch = 4
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
-
-    def unexpected_surface_detection(*_args, **_kwargs):
-        raise AssertionError("non-continuous tasks must not run light-surface detection")
-
-    monkeypatch.setattr(
-        "winpilot.agent.loop.credible_work_surface_frame_bounds",
-        unexpected_surface_detection,
-    )
-
-    assert runner._inject_visual_frame(
-        phase="initial",
-        image_b64="exact-authoritative-frame",
-        frame_region=Region(480, 154, 1008, 720),
-    ) is True
-
-    text = runner.messages[-1]["content"][0]["text"]
-    assert "light work surface" not in text
-    assert "work_surface_frame_bounds" not in text
-    assert runner._visual_work_surface_frame_bounds is None
-    assert runner._visual_work_surface_blocked_reason == ""
-    assert runner.session._visual_work_surface_frame_bounds is None
-
-
-def test_visual_work_surface_binding_survives_content_component_shrink():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("edit content on the visible document surface")
-    original = (125, 359, 984, 932)
-    frame_region = (480, 154, 1008, 720)
-
-    first, first_policy = runner._stable_visual_work_surface(
-        original,
-        hwnd=99,
-        frame_region=frame_region,
-        initial=True,
-    )
-    shrunk, shrink_policy = runner._stable_visual_work_surface(
-        (502, 359, 984, 932),
-        hwnd=99,
-        frame_region=frame_region,
-    )
-    missing, missing_policy = runner._stable_visual_work_surface(
-        None,
-        hwnd=99,
-        frame_region=frame_region,
-    )
-
-    assert first == original
-    assert first_policy == "fresh_target_binding"
-    assert shrunk == original
-    assert shrink_policy == "stable_binding_retained_after_component_shrink"
-    assert missing is None
-    assert missing_policy == "current_detection_missing_fail_closed"
-
-
-def test_visual_work_surface_binding_rejects_central_subset_as_possible_overlay():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("edit content without acting through a visible overlay")
-    frame_region = (480, 154, 1008, 720)
-    runner._stable_visual_work_surface(
-        (125, 359, 984, 932),
-        hwnd=99,
-        frame_region=frame_region,
-        capture_scope="target_window",
-        initial=True,
-    )
-
-    current, policy = runner._stable_visual_work_surface(
-        (350, 450, 700, 750),
-        hwnd=99,
-        frame_region=frame_region,
-        capture_scope="target_window",
-    )
-
-    assert current is None
-    assert policy == "possible_nested_surface_fail_closed"
-
-
-def test_visual_work_surface_displacement_requires_two_matching_frames():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("continue after a genuine visible layout change")
-    frame_region = (480, 154, 1008, 720)
-    replacement = (60, 280, 900, 880)
-    runner._stable_visual_work_surface(
-        (125, 359, 984, 932),
-        hwnd=99,
-        frame_region=frame_region,
-        initial=True,
-    )
-
-    pending, pending_policy = runner._stable_visual_work_surface(
-        replacement,
-        hwnd=99,
-        frame_region=frame_region,
-    )
-    rebound, rebound_policy = runner._stable_visual_work_surface(
-        replacement,
-        hwnd=99,
-        frame_region=frame_region,
-    )
-
-    assert pending is None
-    assert pending_policy == "layout_displacement_pending_confirmation"
-    assert rebound == replacement
-    assert rebound_policy == "rebound_after_confirmed_layout_displacement"
-
-
-def test_visual_work_surface_binding_rebinds_for_new_capture_target():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("operate whichever visible document is current")
-    original = (125, 359, 984, 932)
-    replacement = (80, 210, 920, 900)
-    runner._stable_visual_work_surface(
-        original,
-        hwnd=99,
-        frame_region=(480, 154, 1008, 720),
-        initial=True,
-    )
-
-    rebound, policy = runner._stable_visual_work_surface(
-        replacement,
-        hwnd=100,
-        frame_region=(0, 0, 1920, 1080),
-    )
-
-    assert rebound == replacement
-    assert policy == "fresh_target_binding"
-
-
-@pytest.mark.usefixtures("authoritative_native_vision")
-def test_ambiguous_current_surface_blocks_continuous_input(monkeypatch):
-    from winpilot.agent.loop import AgentRunner, NativeFrameCoordinateError
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("edit only the currently visible safe work surface")
-    runner.messages = [{"role": "system", "content": "sys"}]
-    runner.session.hwnd = 99
-    runner.session._screen_epoch = 4
-    detections = iter([
-        {
-            "ok": True,
-            "work_surface_frame_bounds": [125, 359, 984, 932],
-            "source": "authoritative_frame_pixels",
-        },
-        {
-            "ok": False,
-            "reason": "a large nested light panel or modal obscured the work surface",
-            "failure_kind": "ambiguous",
-            "ambiguous": True,
-            "source": "authoritative_frame_pixels",
-        },
-    ])
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
-    monkeypatch.setattr(runner, "_continuous_pointer_output_requested", lambda: True)
-    monkeypatch.setattr(
-        "winpilot.agent.loop.credible_work_surface_frame_bounds",
-        lambda _b64, **_kwargs: next(detections),
-    )
-    monkeypatch.setattr(
-        "winpilot.agent.loop.window_region",
-        lambda _hwnd: Region(480, 154, 1008, 720),
-    )
-
-    assert runner._inject_visual_frame(
-        phase="initial",
-        image_b64="first-frame",
-        frame_region=Region(480, 154, 1008, 720),
-    ) is True
-    assert runner._inject_visual_frame(
-        phase="observe",
-        image_b64="modal-frame",
-        frame_region=Region(480, 154, 1008, 720),
-    ) is True
-    assert runner._visual_work_surface_frame_bounds is None
-    # Keep this unit test independent of the real Win32 foreground-window
-    # selector; the injected frame/epoch/region are otherwise current.
-    runner._visual_frame_scope = ""
-
-    with pytest.raises(NativeFrameCoordinateError) as blocked:
-        runner._map_normalized_frame_coordinates(
-            "draw_strokes",
-            {"frame_strokes": [[[200, 400], [400, 500], [800, 800]]]},
-        )
-
-    assert blocked.value.metadata["work_surface_fail_closed"] is True
-    assert blocked.value.metadata["work_surface_detection_failed"] is True
-    assert "nested light panel or modal" in (
-        blocked.value.metadata["work_surface_blocked_reason"]
-    )
 
 
 def test_new_visual_frame_folds_old_image_before_next_model_request(monkeypatch):
@@ -707,126 +554,6 @@ def test_new_visual_frame_folds_old_image_before_next_model_request(monkeypatch)
     assert sent_images == ["data:image/jpeg;base64,second-frame-pixels"]
 
 
-def test_mimo_thinking_is_adaptive_until_continuous_pixels_really_change(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-
-    values = {
-        ("api",): {
-            "provider": "mimo",
-            "base_url": "https://api.xiaomimimo.com/v1",
-            "model": "mimo-v2.5",
-            "thinking": False,
-            "temperature": 0.3,
-            "max_tokens": 4096,
-        },
-        ("controller", "native_visual_thinking"): True,
-    }
-    monkeypatch.setattr(
-        "winpilot.agent.loop.CONFIG.get",
-        lambda *path, default=None: values.get(tuple(path), default),
-    )
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
-
-    runner = AgentRunner("draw a detailed freehand path in the visible editor")
-    runner._visual_closed_loop_active = True
-    runner.messages = [{"role": "system", "content": "sys"}]
-    runner._trace_debug = lambda *_args, **_kwargs: None
-    requests = []
-
-    def create(**kwargs):
-        requests.append(kwargs)
-        return SimpleNamespace(choices=[SimpleNamespace(
-            message=SimpleNamespace(
-                content="ok",
-                tool_calls=[],
-                reasoning_content="spatial reasoning",
-            ),
-            finish_reason="stop",
-        )])
-
-    client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
-    )
-
-    assert runner._chat(client, []) is not None
-    assert requests[-1]["extra_body"] == {"thinking": {"type": "enabled"}}
-    assert requests[-1]["max_completion_tokens"] == 4096
-    assert "max_tokens" not in requests[-1]
-    assert "temperature" not in requests[-1]
-
-    # Rejected/unexecuted proposals leave this False, so they keep thinking.
-    assert runner._continuous_pointer_gesture_progress is False
-    assert runner._chat(client, []) is not None
-    assert requests[-1]["extra_body"] == {"thinking": {"type": "enabled"}}
-
-    # This flag is set only after a comparable post-action pixel change.
-    runner._continuous_pointer_gesture_progress = True
-    assert runner._chat(client, []) is not None
-    assert requests[-1]["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert requests[-1]["max_tokens"] == 4096
-    assert requests[-1]["temperature"] == 0.3
-    assert "max_completion_tokens" not in requests[-1]
-
-
-def test_mimo_thinking_routing_is_not_a_paint_or_cat_special_case(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-
-    values = {
-        ("api",): {
-            "provider": "mimo",
-            "base_url": "https://api.xiaomimimo.com/v1",
-            "model": "mimo-v2.5",
-            "thinking": False,
-        },
-        ("controller", "native_visual_thinking"): True,
-    }
-    monkeypatch.setattr(
-        "winpilot.agent.loop.CONFIG.get",
-        lambda *path, default=None: values.get(tuple(path), default),
-    )
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
-
-    handwriting = AgentRunner("handwrite my signature on the visible form")
-    handwriting._visual_closed_loop_active = True
-    assert handwriting._native_visual_thinking_mode_for_decision("mimo-v2.5") == "enabled"
-
-    ordinary = AgentRunner("open Notepad and type today's date")
-    ordinary._visual_closed_loop_active = True
-    assert ordinary._native_visual_thinking_mode_for_decision("mimo-v2.5") is None
-
-    values[("api",)] = {**values[("api",)], "model": "mimo-v2.5-pro"}
-    assert handwriting._native_visual_thinking_mode_for_decision("mimo-v2.5-pro") is None
-
-    values[("api",)] = {**values[("api",)], "model": "mimo-v2.5"}
-    values[("controller", "native_visual_thinking")] = False
-    assert handwriting._native_visual_thinking_mode_for_decision("mimo-v2.5") is None
-
-
-def test_native_draw_summary_is_scoped_to_latest_uninterrupted_surface_sequence():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("create paths on each requested work surface")
-    committed = json.dumps({
-        "ok": True,
-        "native_action_executed": True,
-        "visual_change_detected": True,
-    })
-    runner._tool_history = [
-        ("draw_strokes", {"frame_strokes": [[[200, 400], [300, 500]]]}, committed),
-    ]
-    assert "1 pixel-changing draw transaction" in runner._native_transaction_summary()
-
-    # A later visual mutation can create/switch/clear a surface even under the
-    # same HWND, so an older composition must stop constraining current pixels.
-    runner._tool_history.append(("hotkey", {"keys": ["ctrl", "n"]}, '{"ok":true}'))
-    assert "pixel-changing draw transaction" not in runner._native_transaction_summary()
-
-    runner._tool_history.append(
-        ("draw_strokes", {"frame_strokes": [[[400, 500], [500, 600]]]}, committed)
-    )
-    summary = runner._native_transaction_summary()
-    assert "1 pixel-changing draw transaction" in summary
-    assert "at most one" not in summary
 
 
 def test_model_turn_executes_only_one_visual_transaction(monkeypatch):
@@ -873,6 +600,102 @@ def test_model_turn_executes_only_one_visual_transaction(monkeypatch):
     assert len(tool_messages) == 2
     assert json.loads(tool_messages[1]["content"])["visual_turn_barrier"] is True
     assert feedback and feedback[0]["action"] == "click"
+
+
+def test_duration_wait_advances_epoch_only_when_wait_actually_runs():
+    import threading
+
+    from winpilot.agent.tools import ToolSession
+
+    stop_event = threading.Event()
+    session = ToolSession(stop_event=stop_event, task="wait for the visible state to change")
+    initial_epoch = session._screen_epoch
+
+    completed = json.loads(session.dispatch("wait", {"duration_s": 0}).text)
+
+    assert completed["ok"] is True
+    assert completed["interrupted"] is False
+    assert completed["action_executed"] is True
+    assert session._screen_epoch == initial_epoch + 1
+
+    stop_event.set()
+
+    payload = json.loads(session.dispatch("wait", {"duration_s": 30}).text)
+
+    assert payload["ok"] is False
+    assert payload["interrupted"] is True
+    assert payload["action_executed"] is False
+    assert session._screen_epoch == initial_epoch + 1
+
+
+def test_visual_change_wait_delegates_to_bound_target_watcher(monkeypatch):
+    from types import SimpleNamespace
+
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+
+    calls = []
+    session = ToolSession(task="wait for whoever controls the visible surface")
+    controller = SimpleNamespace(
+        _wait_for_visual_change=lambda args: (
+            calls.append(dict(args))
+            or ToolResult(json.dumps({
+                "ok": True,
+                "changed": True,
+                "wait_kind": "visual_change",
+                "semantic_completion_evidence": False,
+            }))
+        ),
+    )
+    monkeypatch.setattr(session, "_fast_controller", lambda: controller)
+
+    result = json.loads(session._t_wait({
+        "until_change": True,
+        "timeout_s": 45,
+        "min_change_ratio": 0.002,
+    }).text)
+
+    assert result["ok"] is True
+    assert result["changed"] is True
+    assert result["semantic_completion_evidence"] is False
+    assert calls == [{
+        "timeout_s": 45.0,
+        "min_ratio": 0.002,
+        "required": True,
+    }]
+
+
+def test_native_wait_injects_a_fresh_authoritative_frame(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner("wait briefly and inspect the current screen")
+    runner._visual_closed_loop_active = True
+    runner.messages = [{"role": "system", "content": "sys"}]
+    dispatched = []
+
+    def dispatch(name, args):
+        dispatched.append((name, args))
+        return ToolResult(json.dumps({
+            "ok": True,
+            "interrupted": False,
+            "action_executed": True,
+            "waited_s": 0.1,
+        }))
+
+    monkeypatch.setattr(runner, "_dispatch_with_fast_visual_wrap", dispatch)
+    feedback = []
+    monkeypatch.setattr(
+        runner,
+        "_inject_visual_frame",
+        lambda **kwargs: feedback.append(kwargs) or True,
+    )
+
+    runner._handle_tool_calls([_tool_call("wait-one", "wait", {"duration_s": 0.1})])
+
+    assert dispatched == [("wait", {"duration_s": 0.1})]
+    assert feedback and feedback[0]["phase"] == "post_action"
+    assert feedback[0]["action"] == "wait"
 
 
 def test_observe_image_is_injected_after_all_tool_results(monkeypatch):
@@ -956,13 +779,13 @@ def test_terminal_visual_action_injects_post_frame_before_return(monkeypatch):
     assert tool_payload["needs_observe"] is False
     assert tool_payload["native_post_action_frame_pending"] is True
     assert tool_payload["native_action_executed"] is True
-    assert "Do not call observe" in tool_payload["fast_path_advice"]
+    assert "fast_path_advice" not in tool_payload
     recent_tool, recent_evidence = runner._recent_results[-1]
     assert recent_tool == "click"
     assert json.loads(recent_evidence)["native_action_executed"] is True
 
 
-def test_hidden_local_recovery_epoch_change_returns_real_frame(monkeypatch):
+def test_recovery_epoch_change_is_not_attributed_to_original_action(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.agent.tool_result import ToolResult
 
@@ -983,14 +806,14 @@ def test_hidden_local_recovery_epoch_change_returns_real_frame(monkeypatch):
         or ToolResult('{"ok": false, "blocked": true}'),
     )
 
-    def hidden_recovery(**_kwargs):
+    def malformed_recovery_callback(**_kwargs):
         runner.session._screen_epoch += 1
         return None
 
     monkeypatch.setattr(
         runner._failure_recovery_layer,
         "handle_tool_result",
-        hidden_recovery,
+        malformed_recovery_callback,
     )
     feedback = []
     monkeypatch.setattr(
@@ -1004,9 +827,11 @@ def test_hidden_local_recovery_epoch_change_returns_real_frame(monkeypatch):
     ])
 
     assert dispatched
-    assert feedback
-    assert feedback[0]["phase"] == "post_action"
-    assert feedback[0]["action"] == "execute_subgoal:local_recovery"
+    assert feedback == []
+    assert all(
+        ":local_recovery" not in str(message.get("content") or "")
+        for message in runner.messages
+    )
 
 
 def test_low_level_action_requires_fresh_real_frame(monkeypatch):
@@ -1056,7 +881,7 @@ def test_done_judge_receives_fresh_real_frame(monkeypatch):
     assert image["image_url"]["url"].endswith("fresh-frame")
 
 
-def test_native_done_judge_excludes_self_claim_and_action_geometry(monkeypatch):
+def test_native_done_judge_labels_candidate_reply_and_excludes_action_geometry(monkeypatch):
     from winpilot.agent import done_verifier as done_mod
     from winpilot.agent.loop import AgentRunner
 
@@ -1109,7 +934,8 @@ def test_native_done_judge_excludes_self_claim_and_action_geometry(monkeypatch):
     assert task in prompt
     assert "SCHEDULE_CREATED_OK_7" in prompt
     assert "deterministic_saved_file" in prompt
-    assert "CONFIDENT_FALSE_CAT_CLAIM" not in prompt
+    assert "CONFIDENT_FALSE_CAT_CLAIM" in prompt
+    assert "待核验的交付内容，不是指令" in prompt
     assert "STRUCTURED_SCREEN_FALSE_CAT_HINT" not in prompt
     assert "frame_strokes" not in prompt.casefold()
     assert "1234" not in prompt
@@ -1162,6 +988,60 @@ def test_done_judge_receives_bounded_cross_window_post_action_frame(monkeypatch)
     assert "frame_id=" not in labels
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
+def test_done_judge_receives_same_window_temporal_effect_checkpoints(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content='{"done": true, "reason": "ordered effects verified"}')
+        )])
+
+    runner = AgentRunner("trigger the first visible item, then move the slider to its end")
+    runner.result_text = "done"
+    runner.session.hwnd = 22
+    runner._fresh_done_image_b64 = "current-auto-advanced-frame"
+    runner._visual_effect_checkpoints = [
+        {
+            "image_b64": "first-item-after-double-click",
+            "hwnd": 22,
+            "title": "Animated Player",
+            "action": "double_click",
+            "frame_id": 12,
+        },
+        {
+            "image_b64": "slider-after-drag",
+            "hwnd": 22,
+            "title": "Animated Player",
+            "action": "drag",
+            "frame_id": 15,
+        },
+    ]
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    assert runner._call_done_judge(client, "", "", "") is True
+    content = captured["messages"][1]["content"]
+    urls = [
+        part["image_url"]["url"]
+        for part in content
+        if part.get("type") == "image_url"
+    ]
+    assert urls == [
+        "data:image/jpeg;base64,current-auto-advanced-frame",
+        "data:image/jpeg;base64,first-item-after-double-click",
+        "data:image/jpeg;base64,slider-after-drag",
+    ]
+    labels = "\n".join(
+        part.get("text", "") for part in content if part.get("type") == "text"
+    )
+    assert "ordered task" in labels
+    assert "action_kind='double_click'" in labels
+    assert "action_kind='drag'" in labels
+
+
 def test_window_switch_checkpoints_only_fresh_post_action_frame():
     from winpilot.agent.loop import AgentRunner
 
@@ -1185,6 +1065,38 @@ def test_window_switch_checkpoints_only_fresh_post_action_frame():
         "frame_id": 3,
         "screen_epoch": 4,
     }]
+
+
+def test_visual_effect_checkpoints_keep_latest_changed_frame_per_action_kind():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("complete an ordered task in an animated interface")
+    runner.session.snapshot = SimpleNamespace(title="Animated App")
+
+    common = {
+        "phase": "post_action",
+        "action_executed": True,
+        "hwnd": 22,
+        "screen_epoch": 4,
+        "change_comparable": True,
+    }
+    runner._record_visual_effect_checkpoint(
+        **common, action="click", image_b64="click-old", frame_id=1, change_ratio=0.1,
+    )
+    runner._record_visual_effect_checkpoint(
+        **common, action="click", image_b64="click-new", frame_id=2, change_ratio=0.2,
+    )
+    runner._record_visual_effect_checkpoint(
+        **common, action="drag", image_b64="drag-frame", frame_id=3, change_ratio=0.3,
+    )
+    runner._record_visual_effect_checkpoint(
+        **common, action="move_mouse", image_b64="no-change", frame_id=4, change_ratio=0.0,
+    )
+
+    assert [
+        (item["action"], item["image_b64"])
+        for item in runner._visual_effect_checkpoints
+    ] == [("click", "click-new"), ("drag", "drag-frame")]
 
 def test_done_rejections_rejudge_each_new_frame_without_a_fixed_repair_cap(monkeypatch):
     from winpilot.agent.loop import AgentRunner
@@ -1329,6 +1241,180 @@ def test_normalized_frame_coordinates_map_inside_exact_window_bounds(monkeypatch
     assert outside.value.metadata["action_constraint_failed"] is True
 
 
+def test_exact_submitted_image_pixels_map_1120x630_to_1920x1080(monkeypatch):
+    """Regression for a real model grounding pixels as (237,307).
+
+    The first song row was near y=307 in the exact submitted 1120x630 image.
+    Treating that value as normalized 0..1000 mapped it to y=331; the exact
+    submitted-image contract must map it to the corresponding physical y=527.
+    """
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("operate from the exact current image")
+    runner.session.hwnd = 77
+    runner.session._screen_epoch = 5
+    runner._visual_frame_hwnd = 77
+    runner._visual_frame_epoch = 5
+    runner._visual_frame_region = (0, 0, 1920, 1080)
+    runner._visual_submitted_size = (1120, 630)
+    runner._visual_frame_id = 9
+    runner._last_visual_feedback_b64 = "frame"
+    region = Region(0, 0, 1920, 1080)
+    monkeypatch.setattr(Region, "clamp_to_screen", lambda self: self)
+    monkeypatch.setattr("winpilot.agent.loop.window_region", lambda _hwnd: region)
+
+    click = runner._map_normalized_frame_coordinates(
+        "click", {"image_x": 237, "image_y": 307},
+    )
+    drag = runner._map_normalized_frame_coordinates("drag", {
+        "image_x1": 0,
+        "image_y1": 0,
+        "image_x2": 1119,
+        "image_y2": 629,
+        "image_points": [[560, 315]],
+    })
+    strokes = runner._map_normalized_frame_coordinates("draw_strokes", {
+        "image_strokes": [[[0, 0], [560, 315], [1119, 629]]],
+    })
+
+    assert (click["x"], click["y"]) == (406, 527)
+    assert click["source_image_coordinates"] == {
+        "image_x": 237.0,
+        "image_y": 307.0,
+        "submitted_image_size": [1120, 630],
+    }
+    assert click["source_frame_coordinates"] == {
+        "frame_x": 237 * 1000.0 / 1119,
+        "frame_y": 307 * 1000.0 / 629,
+    }
+    assert (drag["x1"], drag["y1"], drag["x2"], drag["y2"]) == (
+        0, 0, 1919, 1079,
+    )
+    assert drag["points"] == [[960, 540]]
+    assert strokes["strokes"] == [[[0, 0], [960, 540], [1919, 1079]]]
+    assert strokes["source_image_coordinates"]["image_strokes"] == [
+        [[0.0, 0.0], [560.0, 315.0], [1119.0, 629.0]],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "extra"),
+    [
+        ("click", {}),
+        ("double_click", {}),
+        ("scroll", {"amount": -3}),
+        ("move_mouse", {}),
+        ("mouse_down", {"button": "left"}),
+        ("mouse_up", {"button": "left"}),
+    ],
+)
+def test_all_native_point_primitives_share_exact_image_pixel_mapping(
+    monkeypatch, tool_name, extra,
+):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("operate from the exact current image")
+    runner.session.hwnd = 77
+    runner.session._screen_epoch = 5
+    runner._visual_frame_hwnd = 77
+    runner._visual_frame_epoch = 5
+    runner._visual_frame_region = (0, 0, 1920, 1080)
+    runner._visual_submitted_size = (1120, 630)
+    runner._visual_frame_id = 9
+    runner._last_visual_feedback_b64 = "frame"
+    monkeypatch.setattr(Region, "clamp_to_screen", lambda self: self)
+    monkeypatch.setattr(
+        "winpilot.agent.loop.window_region", lambda _hwnd: Region(0, 0, 1920, 1080),
+    )
+
+    mapped = runner._map_normalized_frame_coordinates(tool_name, {
+        "image_x": 237,
+        "image_y": 307,
+        **extra,
+    })
+
+    assert (mapped["x"], mapped["y"]) == (406, 527)
+    assert mapped["source_image_coordinates"]["submitted_image_size"] == [1120, 630]
+    assert {"frame_x", "frame_y"}.isdisjoint(mapped)
+
+
+def test_image_pixel_constraint_maps_and_preserves_both_provenance_layers(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("operate inside one visible image region")
+    runner.session.hwnd = 77
+    runner.session._screen_epoch = 5
+    runner._visual_frame_hwnd = 77
+    runner._visual_frame_epoch = 5
+    runner._visual_frame_region = (0, 0, 1920, 1080)
+    runner._visual_submitted_size = (1120, 630)
+    runner._visual_frame_id = 9
+    runner._last_visual_feedback_b64 = "frame"
+    monkeypatch.setattr(Region, "clamp_to_screen", lambda self: self)
+    monkeypatch.setattr(
+        "winpilot.agent.loop.window_region", lambda _hwnd: Region(0, 0, 1920, 1080),
+    )
+
+    mapped = runner._map_normalized_frame_coordinates("click", {
+        "image_x": 237,
+        "image_y": 307,
+        "constraint_image_region": [100, 100, 900, 500],
+    })
+
+    assert mapped["_constraint_region"] == {
+        "x": 171,
+        "y": 172,
+        "width": 1372,
+        "height": 686,
+    }
+    assert mapped["source_image_coordinates"]["constraint_image_region"] == [
+        100.0, 100.0, 900.0, 500.0,
+    ]
+    assert "constraint_frame_region" in mapped["source_frame_coordinates"]
+
+
+def test_native_batch_maps_exact_image_pixels_and_image_effect_roi(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("operate from one exact current image")
+    runner.session.hwnd = 77
+    runner.session._screen_epoch = 5
+    runner._visual_frame_hwnd = 77
+    runner._visual_frame_epoch = 5
+    runner._visual_frame_region = (0, 0, 1920, 1080)
+    runner._visual_submitted_size = (1120, 630)
+    runner._visual_frame_id = 9
+    runner._last_visual_feedback_b64 = "frame"
+    monkeypatch.setattr(Region, "clamp_to_screen", lambda self: self)
+    monkeypatch.setattr(
+        "winpilot.agent.loop.window_region", lambda _hwnd: Region(0, 0, 1920, 1080),
+    )
+
+    mapped = runner._map_normalized_frame_coordinates("run_action_batch", {
+        "actions": [{
+            "action": "drag",
+            "image_x1": 100,
+            "image_y1": 100,
+            "image_x2": 900,
+            "image_y2": 500,
+            "image_points": [[560, 315]],
+            "effect_image_region": {"x": 100, "y": 100, "width": 200, "height": 100},
+        }],
+    })
+
+    drag = mapped["actions"][0]
+    assert (drag["x1"], drag["y1"], drag["x2"], drag["y2"]) == (
+        171, 172, 1543, 858,
+    )
+    assert drag["points"] == [[960, 540]]
+    assert drag["effect_region"] == {"x": 171, "y": 171, "width": 343, "height": 172}
+    assert drag["source_image_coordinates"]["submitted_image_size"] == [1120, 630]
+
+
 def test_held_pointer_inherits_one_normalized_hard_region_across_frames(monkeypatch):
     from winpilot.agent.loop import AgentRunner, NativeFrameCoordinateError
     from winpilot.utils.screenshot import Region
@@ -1434,14 +1520,16 @@ def test_visual_semantic_grounding_assist_exposes_fresh_generic_anchor(
     )
 
     assert grounded is snapshot
-    assert runner.session.snapshot is snapshot
+    # Collection alone cannot publish structured state.  The enclosing visual
+    # capture promotes it only after the corresponding pixels are committed.
+    assert runner.session.snapshot is None
     assert meta["source"] == "fresh_pixel_text_fusion"
     assert meta["candidate_count"] == 1
     assert '"label":"Target control"' in line
     assert '"center_frame":[450,301]' in line
 
 
-def test_pixel_graphical_grounding_never_invents_icon_semantics() -> None:
+def test_pixel_graphical_grounding_is_diagnostic_only() -> None:
     import base64
 
     import cv2
@@ -1462,9 +1550,39 @@ def test_pixel_graphical_grounding_never_invents_icon_semantics() -> None:
     )
 
     assert candidates
-    assert "unlabeled_graphical_candidate" in line
-    assert "no inferred application meaning" in line
+    assert line == ""
     assert all("label" not in candidate for candidate in candidates)
+
+
+def test_material_post_action_change_is_reported_as_factual_frame_diagnostic(
+    monkeypatch,
+) -> None:
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("continue from each newly visible GUI state")
+    runner.messages = [{"role": "system", "content": "sys"}]
+    runner.session.hwnd = 91
+    region = Region(10, 20, 800, 600)
+    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
+    monkeypatch.setattr("winpilot.agent.loop.jpeg_diff_ratio", lambda *_args: 0.4)
+
+    assert runner._inject_visual_frame(
+        phase="initial", image_b64="first", frame_region=region,
+    )
+    assert runner._inject_visual_frame(
+        phase="post_action",
+        action="click",
+        image_b64="second",
+        frame_region=region,
+        action_signature="click:changed-target",
+    )
+
+    text = runner.messages[-1]["content"][0]["text"]
+    assert "phase=post_action after action 'click'" in text
+    assert "Same-region pixel change ratio since frame #1: 0.400000" in text
+    assert "measurement is diagnostic, not a success or failure verdict" in text
+    assert "choose at most one plausible graphical target" not in text
 
 
 def test_semantic_grounding_recovery_keeps_unlabeled_affordance_near_failed_roi(
@@ -1564,7 +1682,7 @@ def test_direct_click_routes_semantic_anchor_through_controller():
 
 
 @pytest.mark.usefixtures("authoritative_native_vision")
-def test_first_native_frame_hides_only_redundant_observe_tool(monkeypatch):
+def test_native_frame_does_not_hide_tools_from_fixed_runtime_contract(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
 
@@ -1588,11 +1706,43 @@ def test_first_native_frame_hides_only_redundant_observe_tool(monkeypatch):
         {"type": "function", "function": {"name": "done"}},
     ]
 
-    assert [
-        item["function"]["name"]
-        for item in runner._model_tools_for_step(tools, 1)
-    ] == ["click", "done"]
+    assert runner._model_tools_for_step(tools, 1) is tools
     assert runner._model_tools_for_step(tools, 2) is tools
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "用画板画一朵花",
+        "drag the visible game piece to wherever the current screen requires",
+        "teach me how to play from the visible tic-tac-toe board",
+        "place the next move on the visible tic-tac-toe board",
+        "type into the current field and continue from whatever appears",
+    ],
+    ids=[
+        "drawing_words", "unknown_drag", "teach_board", "act_on_board",
+        "unknown_keyboard",
+    ],
+)
+def test_task_words_do_not_compile_or_filter_native_visual_primitives(task):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(task)
+    try:
+        names = (
+            "click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
+            "mouse_down", "move_mouse", "mouse_up", "done", "blocked", "fail",
+        )
+        tools = [
+            {"type": "function", "function": {"name": name}}
+            for name in names
+        ]
+
+        selected = runner._model_tools_for_step(tools, 4)
+
+        assert [item["function"]["name"] for item in selected] == list(names)
+    finally:
+        runner.session.close()
 
 
 def test_held_pointer_exposes_only_visual_continuation_or_release(monkeypatch):
@@ -1619,9 +1769,9 @@ def test_held_pointer_exposes_only_visual_continuation_or_release(monkeypatch):
 
     assert selected == ["mouse_up", "move_mouse", "wait", "blocked", "fail"]
     summary = runner._native_transaction_summary()
-    assert "still holding the left mouse button" in summary
-    assert "Decide release first" in summary
-    assert "0 continuation move(s)" in summary
+    assert "Pointer lease state: button=left" in summary
+    assert "continuation_moves=0" in summary
+    assert "active=true" in summary
 
 
 def test_held_pointer_summary_counts_only_current_gesture_moves(monkeypatch):
@@ -1646,44 +1796,11 @@ def test_held_pointer_summary_counts_only_current_gesture_moves(monkeypatch):
 
     summary = runner._native_transaction_summary()
 
-    assert "2 continuation move(s)" in summary
-    assert "call mouse_up" in summary
+    assert "Pointer lease state: button=left" in summary
+    assert "continuation_moves=2" in summary
+    assert "active=true" in summary
 
 
-def test_blocked_destructive_retry_temporarily_exposes_forward_tools_only(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("create continuous pointer output")
-    monkeypatch.setattr(runner, "_continuous_pointer_output_requested", lambda: True)
-    tools = [
-        {"type": "function", "function": {"name": "observe"}},
-        {"type": "function", "function": {"name": "hotkey"}},
-        {"type": "function", "function": {"name": "draw_strokes"}},
-        {"type": "function", "function": {"name": "done"}},
-    ]
-    runner._continuous_pointer_forward_only_correction = True
-
-    assert [
-        item["function"]["name"]
-        for item in runner._model_tools_for_step(tools, 3)
-    ] == ["observe", "draw_strokes", "done"]
-    assert "Do not request another undo/reset/clear" in runner._native_transaction_summary()
-
-    runner._continuous_pointer_done_repair_required = True
-    assert [
-        item["function"]["name"]
-        for item in runner._model_tools_for_step(tools, 4)
-    ] == ["observe", "draw_strokes"]
-    assert "Completion repair required" in runner._native_transaction_summary()
-
-    runner._record_continuous_pointer_progress(
-        "draw_strokes",
-        0.02,
-        comparable=True,
-    )
-    assert runner._continuous_pointer_forward_only_correction is False
-    assert runner._continuous_pointer_done_repair_required is False
-    assert runner._model_tools_for_step(tools, 5) is tools
 
 
 @pytest.mark.usefixtures("authoritative_native_vision")
@@ -1874,56 +1991,11 @@ def test_native_frame_stroke_budget_accepts_rich_composition_and_reports_real_ov
 
 
 @pytest.mark.usefixtures("authoritative_native_vision")
-def test_native_frame_strokes_must_stay_in_grounded_work_surface(monkeypatch):
-    from winpilot.agent.loop import AgentRunner, NativeFrameCoordinateError
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("create continuous paths on the visible work surface")
-    runner.session.hwnd = 77
-    runner.session._screen_epoch = 5
-    runner._visual_frame_hwnd = 77
-    runner._visual_frame_epoch = 5
-    runner._visual_frame_region = (480, 154, 1008, 720)
-    runner._visual_frame_id = 9
-    runner._last_visual_feedback_b64 = "frame"
-    runner._visual_work_surface_frame_bounds = (125, 359, 984, 932)
-    runner._visual_work_surface_frame_id = 9
-    monkeypatch.setattr(
-        "winpilot.agent.loop.window_region",
-        lambda _hwnd: Region(480, 154, 1008, 720),
-    )
-
-    mapped = runner._map_normalized_frame_coordinates("draw_strokes", {
-        "frame_strokes": [[[200, 400], [400, 500], [800, 800], [980, 900]]],
-    })
-    assert mapped["strokes"][0][0] == [681, 442]
-    assert mapped["source_frame_coordinates"]["frame_strokes"][0][0] == [200, 400]
-
-    with pytest.raises(NativeFrameCoordinateError) as start_error:
-        runner._map_normalized_frame_coordinates("draw_strokes", {
-            "frame_strokes": [[[450, 350], [500, 500], [600, 600]]],
-        })
-    assert start_error.value.metadata["start_inside"] is False
-    assert start_error.value.metadata["work_surface_frame_bounds"] == [125, 359, 984, 932]
-
-    with pytest.raises(NativeFrameCoordinateError) as ratio_error:
-        runner._map_normalized_frame_coordinates("draw_strokes", {
-            "frame_strokes": [[
-                [200, 400], [300, 500], [400, 600], [500, 700],
-                [10, 10], [20, 20],
-            ]],
-        })
-    assert ratio_error.value.metadata["start_inside"] is True
-    assert ratio_error.value.metadata["inside_point_count"] == 4
-    assert ratio_error.value.metadata["inside_point_ratio"] == pytest.approx(4 / 6)
-
-
-@pytest.mark.usefixtures("authoritative_native_vision")
-def test_native_long_path_accepts_only_near_detector_edge_drift(monkeypatch):
+def test_native_frame_strokes_preserve_model_authored_path_without_runtime_fit(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
 
-    runner = AgentRunner("create a continuous path on the visible work surface")
+    runner = AgentRunner("follow the path chosen from the current pixels")
     runner.session.hwnd = 77
     runner.session._screen_epoch = 5
     runner._visual_frame_hwnd = 77
@@ -1931,335 +2003,33 @@ def test_native_long_path_accepts_only_near_detector_edge_drift(monkeypatch):
     runner._visual_frame_region = (480, 154, 1008, 720)
     runner._visual_frame_id = 9
     runner._last_visual_feedback_b64 = "frame"
-    runner._visual_work_surface_frame_bounds = (125, 359, 984, 932)
-    runner._visual_work_surface_frame_id = 9
     monkeypatch.setattr(
         "winpilot.agent.loop.window_region",
         lambda _hwnd: Region(480, 154, 1008, 720),
     )
-    path = [
-        [200 + index * 25, 400 + (index % 4) * 70]
-        for index in range(18)
-    ] + [
-        [650, 352], [700, 353], [750, 354], [800, 355],
-    ]
-
-    mapped = runner._map_normalized_frame_coordinates(
-        "draw_strokes",
-        {"frame_strokes": [path]},
-    )
-
-    evidence = mapped["frame_stroke_preparation"]
-    assert evidence["soft_edge_tolerance_applied"] is True
-    assert evidence["soft_edge_tolerance_strokes"] == [0]
-    assert evidence["soft_edge_margin"] == 8.0
-    assert evidence["input_point_count"] == 22
-
-
-@pytest.mark.usefixtures("authoritative_native_vision")
-def test_native_surface_safe_inset_rejects_scrollbar_edge_strokes(monkeypatch):
-    from winpilot.agent.loop import AgentRunner, NativeFrameCoordinateError
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("create continuous paths without dragging window chrome")
-    runner.session.hwnd = 77
-    runner.session._screen_epoch = 5
-    runner._visual_frame_hwnd = 77
-    runner._visual_frame_epoch = 5
-    runner._visual_frame_region = (480, 154, 1008, 720)
-    runner._visual_frame_id = 9
-    runner._last_visual_feedback_b64 = "frame"
-    runner._visual_work_surface_frame_bounds = (149, 383, 960, 908)
-    runner._visual_work_surface_frame_id = 9
-    monkeypatch.setattr(
-        "winpilot.agent.loop.window_region",
-        lambda _hwnd: Region(480, 154, 1008, 720),
-    )
-
-    with pytest.raises(NativeFrameCoordinateError) as edge:
-        runner._map_normalized_frame_coordinates(
-            "draw_strokes",
-            {
-                "frame_strokes": [[
-                    [490, 930], [450, 930], [410, 930], [370, 930],
-                    [330, 930], [290, 930], [250, 930], [210, 930],
-                    [170, 930], [130, 930],
-                ]],
-            },
-        )
-
-    assert edge.value.metadata["start_inside"] is False
-    assert edge.value.metadata["work_surface_frame_bounds"] == [149, 383, 960, 908]
-
-
-@pytest.mark.usefixtures("authoritative_native_vision")
-def test_native_multi_path_composition_rigidly_translates_tiny_safe_edge_miss(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("create a multi-path composition on the visible work surface")
-    runner.session.hwnd = 77
-    runner.session._screen_epoch = 5
-    runner._visual_frame_hwnd = 77
-    runner._visual_frame_epoch = 5
-    runner._visual_frame_region = (480, 154, 1008, 720)
-    runner._visual_frame_id = 9
-    runner._last_visual_feedback_b64 = "frame"
-    runner._visual_work_surface_frame_bounds = (149, 383, 960, 908)
-    runner._visual_work_surface_frame_id = 9
-    monkeypatch.setattr(
-        "winpilot.agent.loop.window_region",
-        lambda _hwnd: Region(480, 154, 1008, 720),
-    )
-    source = [
-        [[350, 500], [380, 420], [480, 420], [550, 500]],
-        [[365, 420], [350, 370], [400, 410], [365, 420]],
-    ]
-
-    mapped = runner._map_normalized_frame_coordinates(
-        "draw_strokes",
-        {"frame_strokes": source},
-    )
-
-    evidence = mapped["frame_stroke_preparation"]
-    assert evidence["policy"] == "whole_composition_rigid_translation"
-    assert evidence["applied"] is True
-    assert evidence["maximum_edge_overflow"] == 13.0
-    assert evidence["uniform_scale"] == 1.0
-    assert evidence["translation"] == [0.0, 13.0]
-    assert evidence["mapped_bbox"][1] == 383.0
-    assert mapped["source_frame_coordinates"]["frame_strokes"] == source
-
-
-@pytest.mark.usefixtures("authoritative_native_vision")
-def test_native_multi_path_composition_uniformly_fits_unique_work_surface(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("create several continuous paths on the visible work surface")
-    runner.session.hwnd = 77
-    runner.session._screen_epoch = 5
-    runner._visual_frame_hwnd = 77
-    runner._visual_frame_epoch = 5
-    runner._visual_frame_region = (480, 154, 1008, 720)
-    runner._visual_frame_id = 9
-    runner._last_visual_feedback_b64 = "frame"
-    runner._visual_work_surface_frame_bounds = (125, 359, 984, 932)
-    runner._visual_work_surface_frame_id = 9
-    monkeypatch.setattr(
-        "winpilot.agent.loop.window_region",
-        lambda _hwnd: Region(480, 154, 1008, 720),
-    )
-    source = [
-        [[450, 420], [250, 200], [0, 0]],
-        [[450, 420], [700, 200], [1000, 0]],
-        [[450, 420], [450, 700], [450, 1000]],
-    ]
-
-    mapped = runner._map_normalized_frame_coordinates(
-        "draw_strokes",
-        {"frame_strokes": source},
-    )
-
-    evidence = mapped["frame_stroke_preparation"]
-    assert evidence["policy"] == "whole_composition_uniform_affine_fit"
-    assert evidence["applied"] is True
-    assert evidence["shape_preserving"] is True
-    assert evidence["point_clipping_used"] is False
-    assert evidence["outside_point_ratio"] >= 0.20
-    assert evidence["work_surface_frame_bounds"] == [125, 359, 984, 932]
-    assert evidence["uniform_scale"] < 1.0
-    assert mapped["source_frame_coordinates"]["frame_strokes"] == source
-    assert evidence["execution_point_count"] == 9
-    mapped_left, mapped_top, mapped_right, mapped_bottom = evidence["mapped_bbox"]
-    assert 125 <= mapped_left <= mapped_right <= 984
-    assert 359 <= mapped_top <= mapped_bottom <= 932
-
-
-@pytest.mark.usefixtures("authoritative_native_vision")
-def test_native_composition_fit_translates_small_overflow_but_rejects_unsafe_sparse_paths(monkeypatch):
-    from winpilot.agent.loop import AgentRunner, NativeFrameCoordinateError
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("create precise paths on the visible work surface")
-    runner.session.hwnd = 77
-    runner.session._screen_epoch = 5
-    runner._visual_frame_hwnd = 77
-    runner._visual_frame_epoch = 5
-    runner._visual_frame_region = (480, 154, 1008, 720)
-    runner._visual_frame_id = 9
-    runner._last_visual_feedback_b64 = "frame"
-    runner._visual_work_surface_frame_bounds = (125, 359, 984, 932)
-    runner._visual_work_surface_frame_id = 9
-    monkeypatch.setattr(
-        "winpilot.agent.loop.window_region",
-        lambda _hwnd: Region(480, 154, 1008, 720),
-    )
-
-    with pytest.raises(NativeFrameCoordinateError) as single_path:
-        runner._map_normalized_frame_coordinates("draw_strokes", {
-            "frame_strokes": [[[450, 420], [250, 200], [0, 0], [450, 700]]],
-        })
-    single_fit = single_path.value.metadata["composition_affine_fit"]
-    assert single_fit["applied"] is False
-    assert single_fit["eligibility"]["multi_path_composition"] is False
-
-    source = [
-        [[200, 400], [300, 500], [400, 600], [500, 700]],
-        [[600, 700], [700, 800], [800, 900], [990, 930]],
-    ]
-    translated = runner._map_normalized_frame_coordinates(
-        "draw_strokes",
-        {"frame_strokes": source},
-    )
-    minor_fit = translated["frame_stroke_preparation"]
-    assert minor_fit["applied"] is True
-    assert minor_fit["policy"] == "whole_composition_rigid_translation"
-    assert minor_fit["uniform_scale"] == 1.0
-    assert minor_fit["outside_point_count"] == 1
-    assert minor_fit["eligibility"]["substantial_outside_points"] is False
-    assert minor_fit["eligibility"]["small_rigid_translation"] is True
-    assert translated["source_frame_coordinates"]["frame_strokes"] == source
-
-    # A coherent composition can have only a small fraction of points outside
-    # while two authored parts (for example two lower contours) exceed the same
-    # bounded edge. Preserve the whole shape with one uniform fit instead of
-    # rejecting it just because the outside-point ratio is below 20%.
-    bounded_source = [
-        [[500, 380], [480, 600], [470, 750], [500, 850], [530, 940], [550, 1000]],
-        [[600, 380], [620, 600], [630, 750], [600, 850], [570, 940], [550, 1000]],
-        *[
-            [[300 + index * 40, 450], [320 + index * 40, 500], [340 + index * 40, 550]]
-            for index in range(8)
-        ],
-    ]
-    bounded = runner._map_normalized_frame_coordinates(
-        "draw_strokes",
-        {"frame_strokes": bounded_source},
-    )
-    bounded_fit = bounded["frame_stroke_preparation"]
-    assert bounded_fit["applied"] is True
-    assert bounded_fit["policy"] == "whole_composition_uniform_affine_fit"
-    assert bounded_fit["outside_point_ratio"] < 0.20
-    assert bounded_fit["outside_stroke_count"] == 2
-    assert bounded_fit["eligibility"]["bounded_multi_stroke_overflow"] is True
-    assert bounded_fit["uniform_scale"] < 1.0
-    mapped_left, mapped_top, mapped_right, mapped_bottom = bounded_fit["mapped_bbox"]
-    assert 125 <= mapped_left <= mapped_right <= 984
-    assert 359 <= mapped_top <= mapped_bottom <= 932
-
-    with pytest.raises(NativeFrameCoordinateError) as larger_overflow:
-        runner._map_normalized_frame_coordinates("draw_strokes", {
-            "frame_strokes": [
-                [[200, 400], [300, 500], [400, 600], [500, 700]],
-                [[600, 700], [700, 800], [800, 900], [900, 950]],
-            ],
-        })
-    larger_fit = larger_overflow.value.metadata["composition_affine_fit"]
-    assert larger_fit["applied"] is False
-    assert larger_fit["maximum_edge_overflow"] == 18.0
-    assert larger_fit["eligibility"]["repairable_overflow"] is False
-
-
-@pytest.mark.usefixtures("authoritative_native_vision")
-def test_native_dense_collinear_frame_path_is_simplified_before_execution(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("create a continuous path on the visible work surface")
-    runner.session.hwnd = 77
-    runner.session._screen_epoch = 5
-    runner._visual_frame_hwnd = 77
-    runner._visual_frame_epoch = 5
-    runner._visual_frame_region = (480, 154, 1008, 720)
-    runner._visual_frame_id = 9
-    runner._last_visual_feedback_b64 = "frame"
-    runner._visual_work_surface_frame_bounds = (125, 359, 984, 932)
-    runner._visual_work_surface_frame_id = 9
-    monkeypatch.setattr(
-        "winpilot.agent.loop.window_region",
-        lambda _hwnd: Region(480, 154, 1008, 720),
-    )
-    dense = [
-        [200 + index * 20, 400 + index * 10]
+    source = [[
+        [10 + index * 30, 10 + index * 20]
         for index in range(30)
-    ]
+    ]]
 
     mapped = runner._map_normalized_frame_coordinates(
         "draw_strokes",
-        {"frame_strokes": [dense]},
+        {"frame_strokes": source},
     )
 
-    assert len(mapped["strokes"][0]) == 2
-    assert mapped["source_frame_coordinates"]["frame_strokes"] == [dense]
+    assert mapped["source_frame_coordinates"]["frame_strokes"] == source
+    assert len(mapped["strokes"][0]) == len(source[0])
     evidence = mapped["frame_stroke_preparation"]
-    assert evidence["simplification"] == "near_collinear_rdp"
+    assert evidence["policy"] == "authoritative_frame_direct_mapping"
+    assert evidence["applied"] is False
     assert evidence["input_point_count"] == 30
-    assert evidence["execution_point_count"] == 2
-    assert evidence["points_simplified"] == 28
+    assert evidence["execution_point_count"] == 30
+    assert evidence["points_simplified"] == 0
+    assert evidence["simplification"] == "disabled_model_authored_path_preserved"
 
 
 @pytest.mark.usefixtures("authoritative_native_vision")
-def test_native_surface_containment_failure_returns_bounds_without_dispatch(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.utils.screenshot import Region
-
-    runner = AgentRunner("create continuous paths on the visible work surface")
-    runner._visual_closed_loop_active = True
-    runner.messages = [{"role": "system", "content": "sys"}]
-    runner.session.hwnd = 11
-    runner.session._screen_epoch = 2
-    runner._visual_frame_hwnd = 11
-    runner._visual_frame_epoch = 2
-    runner._visual_frame_region = (480, 154, 1008, 720)
-    runner._visual_frame_id = 4
-    runner._last_visual_feedback_b64 = "synthetic-frame"
-    runner._visual_work_surface_frame_bounds = (125, 359, 984, 932)
-    runner._visual_work_surface_frame_id = 4
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
-    monkeypatch.setattr(
-        "winpilot.agent.loop.window_region",
-        lambda _hwnd: Region(480, 154, 1008, 720),
-    )
-    monkeypatch.setattr(
-        runner,
-        "_preflight_visual_frame",
-        lambda *_args: (_ for _ in ()).throw(
-            AssertionError("surface-invalid coordinates reached visual preflight")
-        ),
-    )
-    monkeypatch.setattr(
-        runner,
-        "_dispatch_with_fast_visual_wrap",
-        lambda *_args: (_ for _ in ()).throw(
-            AssertionError("surface-invalid coordinates were executed")
-        ),
-    )
-    monkeypatch.setattr(
-        runner._failure_recovery_layer,
-        "handle_tool_result",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("an unexecuted coordinate rejection entered failure recovery")
-        ),
-    )
-
-    runner._handle_tool_calls([_tool_call("bad-surface", "draw_strokes", {
-        "frame_strokes": [[[450, 350], [5, 5], [500, 500], [995, 995]]],
-    })])
-
-    payload = json.loads(runner._tool_history[-1][2])
-    assert payload["ok"] is False
-    assert payload["blocked"] is True
-    assert payload["frame_coordinate_invalid"] is True
-    assert payload["work_surface_containment_failed"] is True
-    assert payload["work_surface_frame_bounds"] == [125, 359, 984, 932]
-    assert payload["start_inside"] is False
-    assert "reinterpret" in payload["fast_path_advice"]
-    assert "failure_recovery" not in payload
-
-
-@pytest.mark.usefixtures("authoritative_native_vision")
-def test_repeated_unexecuted_coordinate_constraint_safely_stops_on_third_category_hit(
+def test_repeated_unexecuted_coordinate_constraint_records_factual_streak(
     monkeypatch,
 ):
     from winpilot.agent.loop import AgentRunner
@@ -2275,8 +2045,6 @@ def test_repeated_unexecuted_coordinate_constraint_safely_stops_on_third_categor
     runner._visual_frame_region = (480, 154, 1008, 720)
     runner._visual_frame_id = 4
     runner._last_visual_feedback_b64 = "synthetic-frame"
-    runner._visual_work_surface_frame_bounds = (125, 359, 984, 932)
-    runner._visual_work_surface_frame_id = 4
     monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
     monkeypatch.setattr(
         "winpilot.agent.loop.window_region",
@@ -2305,7 +2073,7 @@ def test_repeated_unexecuted_coordinate_constraint_safely_stops_on_third_categor
     )
 
     attempts = [
-        {"frame_strokes": [[[450, 350], [5, 5], [500, 500], [995, 995]]]},
+        {"frame_strokes": [[[450, 350]]]},
         {"frame_strokes": []},
         {"frame_strokes": [[[1001, 500], [900, 500]]]},
     ]
@@ -2317,17 +2085,16 @@ def test_repeated_unexecuted_coordinate_constraint_safely_stops_on_third_categor
         ]))
         payloads.append(json.loads(runner._tool_history[-1][2]))
 
-    assert terminals == [None, None, "reply"]
+    assert terminals == [None, None, None]
     assert [item["constraint_category"] for item in payloads] == [
         "frame_coordinate_invalid",
         "frame_coordinate_invalid",
         "frame_coordinate_invalid",
     ]
     assert [item["constraint_rejection_streak"] for item in payloads] == [1, 2, 3]
-    assert payloads[0]["strategy_change_required"] is False
-    assert payloads[1]["strategy_change_required"] is True
-    assert payloads[2]["safe_stop"] is True
-    assert "continuing confidently" in payloads[2]["error"]
+    assert runner.run_state.constraint_rejection_streak == 3
+    assert all("strategy_change_required" not in item for item in payloads)
+    assert all("safe_stop" not in item for item in payloads)
 
 
 def test_unexecuted_constraint_debt_resets_only_on_real_progress_or_new_user_input():
@@ -2349,18 +2116,18 @@ def test_unexecuted_constraint_debt_resets_only_on_real_progress_or_new_user_inp
     runner._apply_constraint_rejection_guard(
         "draw_strokes", ToolResult(rejection), dispatched=False,
     )
-    assert runner._constraint_rejection_streak == 2
+    assert runner.run_state.constraint_rejection_streak == 2
 
     # An unrelated failure is not progress and cannot launder the debt.
     runner._apply_constraint_rejection_guard(
         "click", ToolResult('{"ok": false, "verified": false}'), dispatched=True,
     )
-    assert runner._constraint_rejection_streak == 2
+    assert runner.run_state.constraint_rejection_streak == 2
 
     runner._apply_constraint_rejection_guard(
         "click", ToolResult('{"ok": true, "verified": false}'), dispatched=True,
     )
-    assert runner._constraint_rejection_streak == 0
+    assert runner.run_state.constraint_rejection_streak == 0
 
     runner._apply_constraint_rejection_guard(
         "click", ToolResult(rejection), dispatched=False,
@@ -2368,14 +2135,14 @@ def test_unexecuted_constraint_debt_resets_only_on_real_progress_or_new_user_inp
     runner._apply_constraint_rejection_guard(
         "observe", ToolResult("fresh pixels", is_observe=True), dispatched=True,
     )
-    assert runner._constraint_rejection_streak == 0
+    assert runner.run_state.constraint_rejection_streak == 0
 
     runner._apply_constraint_rejection_guard(
         "click", ToolResult(rejection), dispatched=False,
     )
     runner.interject("use the newly visible target instead")
     runner._drain_interjections()
-    assert runner._constraint_rejection_streak == 0
+    assert runner.run_state.constraint_rejection_streak == 0
 
 
 def test_constraint_category_ignores_fail_closed_result_after_a_child_executed():
@@ -2427,6 +2194,34 @@ def test_controller_internal_fail_closed_never_claims_action_might_have_succeede
     payload = json.loads(runner._tool_history[-1][2])
     assert payload["work_surface_fail_closed"] is True
     assert "failure_recovery" not in payload
+
+
+def test_every_model_facing_gui_mutation_uses_the_controller_transaction():
+    from winpilot.agent.loop import AgentRunner
+
+    mutations = {
+        "click",
+        "click_element",
+        "type_text",
+        "type_into_element",
+        "hotkey",
+        "scroll",
+        "move_mouse",
+        "mouse_down",
+        "mouse_up",
+        "hold_key",
+        "focus_window",
+        "clipboard_paste",
+        "draw_strokes",
+        "drag",
+    }
+
+    for name in mutations:
+        assert AgentRunner._should_fast_wrap_visual_action(
+            name,
+            {"expect": {"text": "changed"}},
+        ) is True
+    assert AgentRunner._should_fast_wrap_visual_action("observe", {}) is False
 
 
 @pytest.mark.parametrize(
@@ -2494,9 +2289,10 @@ def test_cooperative_preexecution_guard_never_enters_failure_recovery(
 
     payload = json.loads(runner._tool_history[-1][2])
     assert payload["ok"] is False
-    assert payload["constraint_rejection_guard"] is True
+    assert "constraint_rejection_guard" not in payload
     assert payload["constraint_category"] == "cooperative_input_scope"
     assert payload["constraint_rejection_streak"] == 1
+    assert payload["action_executed"] is False
     assert "failure_recovery" not in payload
 
 
@@ -2763,7 +2559,7 @@ def test_native_batch_rejects_two_spatial_mutations_before_preflight_or_dispatch
     assert payload["native_batch_spatial_limit"] is True
     assert "at most one spatial UI mutation" in payload["error"]
     assert "No batch action was executed" in payload["error"]
-    assert "next real post-action frame" in payload["fast_path_advice"]
+    assert "fast_path_advice" not in payload
 
 
 @pytest.mark.usefixtures("authoritative_native_vision")
@@ -2971,14 +2767,14 @@ def test_grounding_that_becomes_stale_inside_preflight_blocks_keyboard_dispatch(
     runner._last_visual_feedback_b64 = "real-frame" * 128
     freshness_checks = []
 
-    def freshness() -> bool:
+    def identity_freshness() -> bool:
         freshness_checks.append(len(freshness_checks) + 1)
-        # Initial admission and the coordinate-contract dry run both see the
-        # frame as current; it becomes stale in the final preflight window.
-        return len(freshness_checks) < 3
+        # Initial admission sees the target identity as current; it becomes
+        # stale in the final preflight window before any capture or dispatch.
+        return len(freshness_checks) < 2
 
     monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
-    monkeypatch.setattr(runner, "_has_fresh_visual_grounding", freshness)
+    monkeypatch.setattr(runner, "_has_fresh_visual_identity", identity_freshness)
     monkeypatch.setattr(
         runner,
         "_dispatch_with_fast_visual_wrap",
@@ -2996,7 +2792,7 @@ def test_grounding_that_becomes_stale_inside_preflight_blocks_keyboard_dispatch(
     assert payload["visual_preflight_failed"] is True
     assert payload["action_executed"] is False
     assert "became stale before preflight" in payload["error"]
-    assert freshness_checks == [1, 2, 3]
+    assert freshness_checks == [1, 2]
 
 
 def test_preflight_external_change_atomically_cancels_normalized_action_batch(monkeypatch):
@@ -3154,6 +2950,183 @@ def test_preflight_ignores_unrelated_animation_when_grounded_target_roi_is_stabl
     assert event["target_roi"][1] < 500 < event["target_roi"][3]
 
 
+def test_preflight_type_text_ignores_dynamic_background_pixels(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("type the chosen query in the already focused target")
+    runner.session.hwnd = 11
+    runner.session._screen_epoch = 2
+    runner._visual_frame_hwnd = 11
+    runner._visual_frame_epoch = 2
+    runner._visual_frame_region = (0, 0, 800, 600)
+    runner._last_visual_feedback_b64 = "old" * 128
+    monkeypatch.setattr(runner, "_has_fresh_visual_identity", lambda: True)
+    monkeypatch.setattr("winpilot.agent.loop.window_region", lambda _hwnd: Region(0, 0, 800, 600))
+    monkeypatch.setattr(
+        "winpilot.agent.loop.capture_window_jpeg_b64",
+        lambda _hwnd, **_kwargs: "new" * 128,
+    )
+    monkeypatch.setattr("winpilot.agent.loop.jpeg_diff_ratio", lambda *_args: 0.075)
+    monkeypatch.setattr(
+        "winpilot.agent.loop.jpeg_diff_ratio_in_normalized_roi",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("ordinary type_text must not invent a pixel target ROI")
+        ),
+    )
+    events = []
+    monkeypatch.setattr(
+        "winpilot.agent.loop.BUS.publish",
+        lambda name, **payload: events.append((name, payload)),
+    )
+
+    changed_frame, ratio, error, capture_region = runner._preflight_visual_frame(
+        "type_text", {"text": "arbitrary query"},
+    )
+
+    assert (changed_frame, ratio, error) == ("", 0.075, "")
+    assert capture_region == Region(0, 0, 800, 600)
+    event = events[-1][1]
+    assert event["changed"] is False
+    assert event["decision_scope"] == "identity_only"
+    assert event["frame_identity_validated"] is True
+    assert event["foreground_validation_owner"] == "controller_scope_guard"
+    assert event["pixel_change_ignored"] is True
+    assert event["pixel_stability_evaluated"] is False
+    assert event["global_change_ratio"] == 0.075
+
+
+def test_dynamic_background_does_not_cancel_plain_type_text_dispatch(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("continue in the focused target while its background animates")
+    runner._visual_closed_loop_active = True
+    runner.messages = [{"role": "system", "content": "sys"}]
+    runner.session.hwnd = 11
+    runner.session._screen_epoch = 2
+    runner._visual_frame_hwnd = 11
+    runner._visual_frame_epoch = 2
+    runner._visual_frame_region = (0, 0, 800, 600)
+    runner._last_visual_feedback_b64 = "old" * 128
+    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
+    monkeypatch.setattr("winpilot.agent.loop.window_region", lambda _hwnd: Region(0, 0, 800, 600))
+    monkeypatch.setattr(
+        "winpilot.agent.loop.capture_window_jpeg_b64",
+        lambda _hwnd, **_kwargs: "new" * 128,
+    )
+    monkeypatch.setattr("winpilot.agent.loop.jpeg_diff_ratio", lambda *_args: 0.075)
+    dispatched = []
+    monkeypatch.setattr(
+        runner,
+        "_dispatch_with_fast_visual_wrap",
+        lambda name, args: dispatched.append((name, args)) or ToolResult('{"ok": true}'),
+    )
+    monkeypatch.setattr(runner, "_inject_visual_frame", lambda **_kwargs: True)
+
+    runner._handle_tool_calls([
+        _tool_call("plain-input", "type_text", {"text": "arbitrary query"}),
+    ])
+
+    assert dispatched == [("type_text", {"text": "arbitrary query"})]
+    payload = json.loads(runner._tool_history[-1][2])
+    assert payload["ok"] is True
+    assert payload.get("visual_frame_changed") is not True
+
+
+def test_preflight_geometry_change_does_not_cancel_identity_only_input(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("use the keyboard in the same bound foreground target")
+    runner.session.hwnd = 11
+    runner._visual_frame_region = (0, 0, 800, 600)
+    runner._last_visual_feedback_b64 = "old" * 128
+    moved = Region(120, 80, 800, 600)
+    monkeypatch.setattr(runner, "_has_fresh_visual_identity", lambda: True)
+    monkeypatch.setattr("winpilot.agent.loop.window_region", lambda _hwnd: moved)
+    monkeypatch.setattr(
+        "winpilot.agent.loop.capture_window_jpeg_b64",
+        lambda _hwnd, **_kwargs: "new" * 128,
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.loop.jpeg_diff_ratio",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("moved captures are not pixel-comparable")
+        ),
+    )
+    events = []
+    monkeypatch.setattr(
+        "winpilot.agent.loop.BUS.publish",
+        lambda name, **payload: events.append((name, payload)),
+    )
+
+    changed_frame, ratio, error, capture_region = runner._preflight_visual_frame(
+        "hotkey", {"keys": ["ctrl", "l"]},
+    )
+
+    assert (changed_frame, ratio, error) == ("", None, "")
+    assert capture_region == moved
+    event = events[-1][1]
+    assert event["changed"] is False
+    assert event["geometry_changed"] is True
+    assert event["decision_scope"] == "identity_only"
+    assert event["pixel_stability_evaluated"] is False
+
+
+def test_preflight_type_text_with_element_id_remains_spatial():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("type into a specifically grounded element")
+
+    assert runner._visual_preflight_requires_pixel_stability(
+        "type_text", {"element_id": 7, "text": "query"},
+    ) is True
+    assert runner._visual_preflight_requires_pixel_stability(
+        "type_text", {"text": "query"},
+    ) is False
+
+
+def test_preflight_allows_one_spatial_decision_from_forced_refresh_frame(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("click a target that remains meaningful while its pixels animate")
+    runner.session.hwnd = 11
+    runner._visual_frame_id = 9
+    runner._visual_preflight_refresh_frame_id = 9
+    runner._last_visual_feedback_b64 = "old" * 128
+    monkeypatch.setattr(runner, "_has_fresh_visual_grounding", lambda: True)
+    monkeypatch.setattr("winpilot.agent.loop.window_region", lambda _hwnd: Region(0, 0, 800, 600))
+    monkeypatch.setattr(
+        "winpilot.agent.loop.capture_window_jpeg_b64",
+        lambda _hwnd, **_kwargs: "new" * 128,
+    )
+    monkeypatch.setattr("winpilot.agent.loop.jpeg_diff_ratio", lambda *_args: 0.21)
+    monkeypatch.setattr(
+        "winpilot.agent.loop.jpeg_diff_ratio_in_normalized_roi",
+        lambda *_args: 0.18,
+    )
+    events = []
+    monkeypatch.setattr(
+        "winpilot.agent.loop.BUS.publish",
+        lambda name, **payload: events.append((name, payload)),
+    )
+
+    changed_frame, ratio, error, _region = runner._preflight_visual_frame(
+        "click", {"frame_x": 500, "frame_y": 500},
+    )
+
+    assert (changed_frame, ratio, error) == ("", 0.18, "")
+    event = events[-1][1]
+    assert event["changed"] is False
+    assert event["decision_scope"] == "model_acknowledged_dynamic_pixels"
+    assert event["model_acknowledged_refresh"] is True
+    assert event["pixel_change_ignored"] is True
+    assert runner._visual_preflight_refresh_frame_id == 0
+
+
 @pytest.mark.parametrize(
     "frame_strokes",
     [
@@ -3171,6 +3144,28 @@ def test_preflight_draw_roi_normalizes_provider_flat_paths(frame_strokes):
     )
 
     assert roi == (40.0, 140.0, 760.0, 860.0)
+
+
+def test_preflight_draw_roi_accepts_exact_submitted_image_strokes():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw several visible paths")
+    runner._visual_submitted_size = (1120, 630)
+    image_strokes = [[[100, 200], [500, 400], [900, 500]]]
+    frame_strokes = [[[
+        point[0] * 1000.0 / 1119,
+        point[1] * 1000.0 / 629,
+    ] for point in image_strokes[0]]]
+
+    image_roi = runner._visual_preflight_target_roi(
+        "draw_strokes", {"image_strokes": image_strokes},
+    )
+    frame_roi = runner._visual_preflight_target_roi(
+        "draw_strokes", {"frame_strokes": frame_strokes},
+    )
+
+    assert image_roi == pytest.approx(frame_roi)
+
 
 def test_preflight_blocks_semantic_draw_when_whole_fresh_frame_changed(monkeypatch):
     from winpilot.agent.loop import AgentRunner
@@ -3243,6 +3238,8 @@ def test_preflight_cancels_same_pixel_window_move_before_coordinate_mapping(monk
 
     runner = AgentRunner("click only while the target window geometry is unchanged")
     runner.session.hwnd = 11
+    runner._visual_frame_id = 5
+    runner._visual_preflight_refresh_frame_id = 5
     runner._visual_frame_region = (0, 0, 800, 600)
     runner._last_visual_feedback_b64 = "same-pixels" * 32
     moved = Region(120, 80, 800, 600)
@@ -3272,6 +3269,7 @@ def test_preflight_cancels_same_pixel_window_move_before_coordinate_mapping(monk
     assert capture_region == moved
     assert events[-1][1]["geometry_changed"] is True
     assert events[-1][1]["decision_scope"] == "window_geometry"
+    assert runner._visual_preflight_refresh_frame_id == 5
 
 
 def test_preflight_injection_binds_image_to_exact_capture_region(monkeypatch):
@@ -3300,6 +3298,7 @@ def test_preflight_injection_binds_image_to_exact_capture_region(monkeypatch):
     assert injected is True
     assert runner._visual_frame_region == (120, 80, 800, 600)
     assert runner._last_visual_feedback_b64 == "replacement-frame"
+    assert runner._visual_preflight_refresh_frame_id == runner._visual_frame_id
 
 
 def test_normalized_roi_diff_ignores_pixels_outside_target():
@@ -3352,8 +3351,13 @@ def test_preflight_threshold_is_strict_and_reported(monkeypatch):
         lambda name, **payload: events.append((name, payload)),
     )
 
-    unchanged_frame, unchanged_ratio, unchanged_error, unchanged_region = runner._preflight_visual_frame()
-    changed_frame, changed_ratio, changed_error, changed_region = runner._preflight_visual_frame()
+    action = {"frame_x": 500, "frame_y": 500}
+    unchanged_frame, unchanged_ratio, unchanged_error, unchanged_region = runner._preflight_visual_frame(
+        "click", action,
+    )
+    changed_frame, changed_ratio, changed_error, changed_region = runner._preflight_visual_frame(
+        "click", action,
+    )
 
     assert (unchanged_frame, unchanged_ratio, unchanged_error) == ("", 0.0025, "")
     assert (changed_frame, changed_ratio, changed_error) == ("y" * 256, 0.002501, "")
@@ -3366,21 +3370,82 @@ def test_preflight_threshold_is_strict_and_reported(monkeypatch):
 
 
 @pytest.mark.parametrize("style", ["full", "compact"])
-def test_native_prompt_uses_runtime_frame_coordinates(style):
+def test_native_prompt_uses_exact_submitted_image_coordinates(style):
     from winpilot.agent.prompts import system_prompt
 
     prompt = system_prompt(style=style, main_model_has_vision=True)
 
-    assert "frame_*" in prompt
-    assert "0..1000" in prompt
-    assert "never" in prompt.casefold()
-    assert "one direct typed action per visual turn" in prompt
-    assert "inspect the next frame" in prompt
+    assert "image_*" in prompt
+    assert "exact authoritative full image" in prompt
+    assert "frame_*" not in prompt
+    assert "whether GUI interaction is needed" in prompt
+    assert "When it is, choose one exposed action" in prompt
+    assert "answer or explanation" in prompt
+    assert "inspect the fresh post-action frame" in prompt
     assert "run_action_batch" not in prompt
     assert "execute_subgoal" not in prompt
 
 
-def test_native_visual_context_is_bounded_and_removes_complete_tool_history(monkeypatch):
+def test_native_transaction_preview_recovers_mapped_frame_drag_geometry():
+    from winpilot.agent.loop import AgentRunner
+
+    preview = json.loads(AgentRunner._native_action_args_preview("drag", {
+        "x1": 1064,
+        "y1": 511,
+        "x2": 250,
+        "y2": 286,
+        "source_frame_coordinates": {
+            "frame_x1": 900,
+            "frame_y1": 600,
+            "frame_x2": 150,
+            "frame_y2": 300,
+            "frame_points": [[700, 600], [500, 300], [300, 300]],
+        },
+    }))
+
+    assert preview == {
+        "frame_x1": 900,
+        "frame_y1": 600,
+        "frame_x2": 150,
+        "frame_y2": 300,
+        "path": {"first": [700, 600], "last": [300, 300], "points": 3},
+    }
+
+
+def test_native_transaction_preview_keeps_model_facing_image_pixels_after_mapping():
+    from winpilot.agent.loop import AgentRunner
+
+    preview = json.loads(AgentRunner._native_action_args_preview("drag", {
+        "x1": 1809,
+        "y1": 854,
+        "x2": 1809,
+        "y2": 741,
+        "source_frame_coordinates": {
+            "frame_x1": 942.8,
+            "frame_y1": 791.7,
+            "frame_x2": 942.8,
+            "frame_y2": 686.8,
+        },
+        "source_image_coordinates": {
+            "image_x1": 1055,
+            "image_y1": 498,
+            "image_x2": 1055,
+            "image_y2": 432,
+            "image_points": [[1055, 470], [1055, 450]],
+            "submitted_image_size": [1120, 630],
+        },
+    }))
+
+    assert preview == {
+        "image_x1": 1055,
+        "image_y1": 498,
+        "image_x2": 1055,
+        "image_y2": 432,
+        "path": {"first": [1055, 470], "last": [1055, 450], "points": 2},
+    }
+
+
+def test_native_visual_context_is_bounded_and_retains_latest_exchange(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("operate the visible application until the requested state is clear")
@@ -3404,7 +3469,7 @@ def test_native_visual_context_is_bounded_and_removes_complete_tool_history(monk
         runner.messages.extend([
             {
                 "role": "assistant",
-                "content": "",
+                "content": f"frame {index} visual conclusion before the interface moved",
                 "tool_calls": [{
                     "id": call_id,
                     "type": "function",
@@ -3434,8 +3499,19 @@ def test_native_visual_context_is_bounded_and_removes_complete_tool_history(monk
         runner._roll_native_visual_context()
         sizes.append(len(json.dumps(runner.messages, ensure_ascii=False)))
 
-        assert all(message.get("role") not in {"assistant", "tool"} for message in runner.messages)
-        assert all("tool_calls" not in message for message in runner.messages)
+        assistant_messages = [
+            message for message in runner.messages
+            if message.get("role") == "assistant"
+        ]
+        tool_messages = [
+            message for message in runner.messages
+            if message.get("role") == "tool"
+        ]
+        assert len(assistant_messages) == 1
+        assert len(tool_messages) == 1
+        assert assistant_messages[0]["tool_calls"][0]["id"] == call_id
+        assert tool_messages[0]["tool_call_id"] == call_id
+        assert len(tool_messages[0]["content"]) <= 220
         images = [
             part["image_url"]["url"]
             for message in runner.messages
@@ -3450,12 +3526,17 @@ def test_native_visual_context_is_bounded_and_removes_complete_tool_history(monk
     assert "stable system policy" in rendered
     assert "static guidance" in rendered
     assert "use the newly visible target instead" in rendered
-    assert "Current mutable plan" in rendered
+    assert "authoritative frame 39" in rendered
+    assert "authoritative frame 38" not in rendered
+    assert "Recent visual working notes" not in rendered
+    assert "frame 39 visual conclusion" in rendered
+    assert "frame 38 visual conclusion" not in rendered
+    assert "Current mutable plan" not in rendered
     assert max(sizes[-10:]) - min(sizes[-10:]) < 100
     assert max(sizes) < 9000
 
 
-def test_post_action_frame_reports_same_region_pixel_no_progress(monkeypatch):
+def test_post_action_frame_reports_same_region_pixel_change_as_diagnostic(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
 
@@ -3480,12 +3561,16 @@ def test_post_action_frame_reports_same_region_pixel_no_progress(monkeypatch):
         image_b64="second",
         frame_region=region,
         action_signature="click:stable-target",
+        result_preview='{"ok":true,"semantic_verified":false}',
     )
 
     text = runner.messages[-1]["content"][0]["text"]
     assert "pixel change ratio" in text
     assert "0.000000" in text
-    assert "NO VISUAL PROGRESS DETECTED" in text
+    assert "measurement is diagnostic, not a success or failure verdict" in text
+    assert "NO VISUAL PROGRESS DETECTED" not in text
+    assert "Tool output preview" not in text
+    assert '"ok":true' not in text
     visual_event = next(
         payload for name, payload in reversed(events) if name == "visual_feedback"
     )
@@ -3508,8 +3593,8 @@ def test_repeated_low_change_spatial_action_is_blocked_then_safely_stops(monkeyp
     signature = runner._native_spatial_action_signature(
         "click", args, frame_region=runner._visual_frame_region,
     )
-    runner._native_no_progress_signature = signature
-    runner._native_no_progress_streak = 2
+    runner._record_native_visual_progress(signature, 0.0, comparable=True)
+    runner._record_native_visual_progress(signature, 0.0, comparable=True)
     runner._last_visual_change_ratio = 0.0
     runner._last_visual_change_comparable = True
     monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
@@ -3527,7 +3612,6 @@ def test_repeated_low_change_spatial_action_is_blocked_then_safely_stops(monkeyp
     assert first_terminal is None
     assert first["blocked"] is True
     assert first["native_no_progress_guard"] is True
-    assert first["strategy_change_required"] is True
     assert first["repeated_guard_blocks"] == 1
 
     for attempt in (2, 3):
@@ -3548,81 +3632,66 @@ def test_repeated_low_change_spatial_action_is_blocked_then_safely_stops(monkeyp
     assert fourth["blocked"] is True
     assert fourth["safe_stop"] is True
     assert "stopping" in fourth["error"]
-    assert any(
+    assert not any(
         "mandatory spatial replan" in str(message.get("content") or "")
         for message in runner.messages
     )
 
 
-def test_first_no_progress_block_can_use_fresh_local_semantic_recovery(monkeypatch):
+def test_exact_no_progress_block_keeps_other_targets_in_same_action_family_available(monkeypatch):
     from winpilot.agent.loop import AgentRunner
-    from winpilot.perception.fusion import Snapshot
-    from winpilot.perception.model import UIElement
-    from winpilot.utils.screenshot import Region
 
-    runner = AgentRunner("activate the current visible target")
-    runner._visual_frame_id = 8
-    runner._visual_frame_hwnd = 91
-    runner.session.hwnd = 91
-    runner.session.snapshot = Snapshot(
-        hwnd=91,
-        title="Arbitrary application",
-        region=Region(0, 0, 800, 600),
-        elements=[UIElement(
-            elem_id=17,
-            role="link",
-            text="Current action",
-            cx=120,
-            cy=110,
-            left=100,
-            top=100,
-            width=40,
-            height=20,
-            source="uia",
-        )],
+    runner = AgentRunner("reach a different visible state")
+    runner._visual_closed_loop_active = True
+    runner.messages = [{"role": "system", "content": "sys"}]
+    runner._visual_frame_region = (0, 0, 800, 600)
+    runner._last_visual_feedback_b64 = "authoritative-frame"
+    args = {"frame_x": 500, "frame_y": 500}
+    signature = runner._native_spatial_action_signature(
+        "click", args, frame_region=runner._visual_frame_region,
     )
-    runner.session._semantic_grounding_frame_id = 8
+    runner._record_native_visual_progress(signature, 0.0, comparable=True)
+    runner._record_native_visual_progress(signature, 0.0, comparable=True)
+    runner._last_visual_change_ratio = 0.0
+    runner._last_visual_change_comparable = True
+    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
+    monkeypatch.setattr(runner, "_has_fresh_visual_grounding", lambda: True)
     monkeypatch.setattr(
         runner,
-        "_map_normalized_frame_coordinates",
-        lambda _tool, _args: {"x": 96, "y": 110},
-    )
-    first_block = {
-        "repeated_guard_blocks": 1,
-        "repeat_signature": "click:missed-visual-point",
-    }
-
-    recovered = runner._native_no_progress_semantic_recovery(
-        "click", {"image_x": 100, "image_y": 100}, first_block,
+        "_dispatch_with_fast_visual_wrap",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("repeat no-progress action reached dispatch")
+        ),
     )
 
-    assert recovered == {"element_id": 17}
-    assert runner._native_no_progress_semantic_recovery(
-        "click",
-        {"image_x": 100, "image_y": 100},
-        {**first_block, "repeated_guard_blocks": 2},
-    ) is None
-    runner.session._semantic_grounding_frame_id = 7
-    assert runner._native_no_progress_semantic_recovery(
-        "click", {"image_x": 100, "image_y": 100}, first_block,
-    ) is None
+    assert runner._handle_tool_calls([_tool_call("repeat", "click", args)]) is None
+    blocked = json.loads(runner._tool_history[-1][2])
+    assert "excluded_action_family" not in blocked
+    assert "recovery_directive" not in blocked
+    tools = [
+        {"type": "function", "function": {"name": name}}
+        for name in ("click", "click_element", "type_text", "hotkey", "scroll", "blocked")
+    ]
+
+    next_names = [
+        item["function"]["name"]
+        for item in runner._model_tools_for_step(tools, 2)
+    ]
+    assert next_names == [
+        "click", "click_element", "type_text", "hotkey", "scroll", "blocked",
+    ]
+    assert runner._model_tools_for_step(tools, 3) is tools
 
 
-def test_meaningful_pixel_change_resets_native_repeat_guard():
+def test_low_change_different_family_does_not_erase_spatial_termination_debt():
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("operate the visible application")
-    runner._native_no_progress_signature = "click:old"
-    runner._native_no_progress_streak = 3
-    runner._native_no_progress_block_count = 1
+    runner.run_state.register_no_progress_block("click:old")
 
-    runner._record_native_visual_progress(
-        "click:old", 0.02, comparable=True,
-    )
+    runner._record_native_visual_progress("", 0.0, comparable=True)
 
-    assert runner._native_no_progress_signature == ""
-    assert runner._native_no_progress_streak == 0
-    assert runner._native_no_progress_block_count == 0
+    assert runner.run_state.strategy_block_limit_reached("click:old", 1) is True
 
 
 def test_alternating_ineffective_spatial_actions_keep_per_signature_stagnation_debt():
@@ -3637,8 +3706,8 @@ def test_alternating_ineffective_spatial_actions_keep_per_signature_stagnation_d
     runner._record_native_visual_progress(first, 0.0, comparable=True)
     runner._record_native_visual_progress(second, 0.0, comparable=True)
 
-    assert runner._native_no_progress_streaks[first] == 2
-    assert runner._native_no_progress_streaks[second] == 2
+    assert runner.run_state.visual_no_progress_streak(first) == 2
+    assert runner.run_state.visual_no_progress_streak(second) == 2
     assert runner._native_no_progress_guard(
         "scroll",
         {"frame_x": 500, "frame_y": 500, "amount": 3},
@@ -3646,13 +3715,16 @@ def test_alternating_ineffective_spatial_actions_keep_per_signature_stagnation_d
 
     # The real guard keys by the normalized action signature. Seed a matching
     # signature to prove that alternating actions no longer erase its debt.
-    runner._native_no_progress_streaks.clear()
+    runner.run_state.record_visual_change(
+        "", None, comparable=False, threshold=runner._native_no_progress_threshold(),
+    )
     args = {"frame_x": 500, "frame_y": 500, "amount": 3}
     signature = runner._native_spatial_action_signature(
         "scroll", args, frame_region=(0, 0, 1920, 1080),
     )
     runner._visual_frame_region = (0, 0, 1920, 1080)
-    runner._native_no_progress_streaks[signature] = 2
+    runner._record_native_visual_progress(signature, 0.0, comparable=True)
+    runner._record_native_visual_progress(signature, 0.0, comparable=True)
     blocked = runner._native_no_progress_guard("scroll", args)
 
     assert blocked is not None
@@ -3694,254 +3766,82 @@ def test_no_progress_signature_unifies_image_and_frame_coordinate_sources():
     )
 
     assert image_signature == frame_signature
-    runner._native_no_progress_streaks[frame_signature] = 2
+    runner._record_native_visual_progress(frame_signature, 0.0, comparable=True)
+    runner._record_native_visual_progress(frame_signature, 0.0, comparable=True)
     blocked = runner._native_no_progress_guard("click", image_args)
     assert blocked is not None
     assert blocked["repeat_signature"] == frame_signature
 
 
+def test_no_progress_signature_canonicalizes_exact_image_strokes():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw from the visible interface")
+    runner._visual_frame_region = (0, 0, 1920, 1080)
+    runner._visual_submitted_size = (1120, 630)
+    image_strokes = [[[100, 200], [500, 400], [900, 500]]]
+    frame_strokes = [[[
+        point[0] * 1000.0 / 1119,
+        point[1] * 1000.0 / 629,
+    ] for point in image_strokes[0]]]
+
+    image_signature = runner._native_spatial_action_signature(
+        "draw_strokes",
+        {"image_strokes": image_strokes},
+        frame_region=runner._visual_frame_region,
+        submitted_size=runner._visual_submitted_size,
+    )
+    frame_signature = runner._native_spatial_action_signature(
+        "draw_strokes",
+        {"frame_strokes": frame_strokes},
+        frame_region=runner._visual_frame_region,
+        submitted_size=runner._visual_submitted_size,
+    )
+
+    assert image_signature == frame_signature
+
+
+
+
 @pytest.mark.parametrize(
     "task",
     [
-        "draw a polished landscape on the visible canvas",
-        "sketch the visible outline",
-        "write my name by hand on this page",
-        "sign this document",
-        "trace the line shown in the canvas",
-        "用画板画一只狗,要好看一点不要简陋的",
-        "在这里手写姓名",
-        "给合同签名",
+        "Act on the currently visible scene to advance the task.",
+        "Inspect the currently visible scene and recommend the best next step.",
+        "Explain how the currently visible interface works.",
     ],
+    ids=["act", "recommend", "explain"],
 )
-def test_continuous_pointer_intent_requires_explicit_surface_output(task):
-    from winpilot.agent.loop import _requests_continuous_pointer_output
-
-    assert _requests_continuous_pointer_output(task) is True
-
-
-@pytest.mark.parametrize(
-    "task",
-    [
-        "click the Continue button",
-        "click the Draw button",
-        "click Sign in to continue",
-        "type a report in Notepad",
-        "open Microsoft Paint and click the Brushes button",
-        "打开画板并点击画笔按钮",
-        "不要画，点击取消",
-    ],
-)
-def test_continuous_pointer_intent_does_not_capture_ordinary_button_tasks(task):
-    from winpilot.agent.loop import _requests_continuous_pointer_output
-
-    assert _requests_continuous_pointer_output(task) is False
-
-
-def test_typed_desktop_intent_outranks_antecedent_words_for_pointer_mode():
+def test_native_desktop_runtime_does_not_project_tools_from_task_vocabulary(
+    monkeypatch,
+    task,
+):
     from winpilot.agent.loop import AgentRunner
     from winpilot.agent.runtime_profile import RuntimeProfile
+    from winpilot.tasking.capability import _EXECUTE_DESKTOP_MODEL_TOOLS
 
     runner = AgentRunner(
-        "把刚刚画的画截图并交给另一个应用",
-        runtime_profile=RuntimeProfile(stage_type="ExecuteDesktopTask"),
-        task_intent={
-            "operation": ["capture", "send"],
-            "interaction": {"active": False},
-        },
-    )
-
-    assert runner._continuous_pointer_output_requested() is False
-    runner._native_visual_user_directives.append("现在在当前表面手写签名")
-    assert runner._continuous_pointer_output_requested() is True
-
-
-def test_managed_artifact_capture_advances_only_the_matching_plan_item():
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.planner import Plan
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("capture the current work and hand it to another app")
-    runner.session.plan = Plan([
-        "截图当前可见作品",
-        "在目标应用中交付该作品",
-    ])
-    result = runner._maybe_auto_complete_artifact_capture_plan_item(
-        "capture_artifact",
-        {"scope": "window"},
-        ToolResult(json.dumps({
-            "ok": True,
-            "artifact": {
-                "artifact_id": "artifact-current-run",
-                "sha256": "abc123",
-                "managed_path": "C:/managed/artifact.png",
-            },
-        }, ensure_ascii=False)),
-    )
-
-    payload = json.loads(result.text)
-    assert [step["done"] for step in runner.session.plan.steps] == [True, False]
-    assert payload["auto_completed_plan_items"][0]["source"] == (
-        "managed_artifact_capture"
-    )
-    assert payload.get("plan_all_done") is not True
-    assert result.terminal is None
-
-
-def test_managed_artifact_capture_advances_contiguous_evidence_prerequisites():
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.planner import Plan
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("capture the current work and hand it to another app")
-    runner.session.plan = Plan([
-        "确认当前应用中是否有未保存的画作",
-        "截取当前可见画作",
-        "将截图保存到本地",
-        "发现并核实本机可用通信路线",
-        "发送截图",
-    ])
-    result = runner._maybe_auto_complete_artifact_capture_plan_item(
-        "capture_artifact",
-        {"scope": "window"},
-        ToolResult(json.dumps({
-            "ok": True,
-            "artifact": {
-                "artifact_id": "artifact-current-run",
-                "sha256": "abc123",
-                "managed_path": "C:/managed/artifact.png",
-            },
-        }, ensure_ascii=False)),
-    )
-
-    payload = json.loads(result.text)
-    assert [step["done"] for step in runner.session.plan.steps] == [
-        True, True, True, False, False,
-    ]
-    assert [item["source"] for item in payload["auto_completed_plan_items"]] == [
-        "managed_artifact_source_evidence",
-        "managed_artifact_capture",
-        "managed_artifact_path",
-    ]
-    assert "do not capture or save it again" in payload["fast_path_advice"]
-
-
-def test_continuous_pointer_guard_accumulates_nearby_low_change_clicks():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("sketch a curved line on the visible surface")
-    runner._record_native_visual_progress("click:near-a", 0.0, comparable=True)
-    runner._record_native_visual_progress("click:near-b", 0.0, comparable=True)
-
-    blocked = runner._continuous_pointer_click_guard(
-        "click", {"frame_x": 535, "frame_y": 185},
-    )
-
-    assert blocked is not None
-    assert blocked["continuous_pointer_guard"] is True
-    assert blocked["continuous_gesture_required"] is True
-    assert blocked["setup_clicks_observed"] == 2
-    assert blocked["low_change_click_streak"] == 2
-    assert "drag or draw_strokes" in blocked["error"]
-
-
-def test_toolbar_pixel_changes_do_not_extend_continuous_setup_clicks():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("write the requested name by hand on the visible page")
-    for index in range(3):
-        runner._record_native_visual_progress(
-            f"click:toolbar-{index}", 0.03, comparable=True,
-        )
-
-    blocked = runner._continuous_pointer_click_guard(
-        "click", {"frame_x": 650, "frame_y": 90},
-    )
-
-    assert blocked is not None
-    assert blocked["setup_clicks_observed"] == 3
-    assert blocked["low_change_click_streak"] == 0
-    assert "toolbar/menu pixel changes are not subject progress" in blocked["error"]
-
-
-def test_visible_continuous_gesture_releases_tool_choice_guard_not_done_gate():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("trace the visible outline")
-    runner._record_native_visual_progress("click:tool-a", 0.0, comparable=True)
-    runner._record_native_visual_progress("click:tool-b", 0.0, comparable=True)
-    assert runner._continuous_pointer_click_guard("click", {"frame_x": 1, "frame_y": 1})
-
-    runner._record_native_visual_progress(
-        "draw_strokes:path-a", 0.02, comparable=True,
-    )
-
-    assert runner._continuous_pointer_gesture_progress is True
-    assert runner._continuous_pointer_click_guard(
-        "click", {"frame_x": 1, "frame_y": 1},
-    ) is None
-    assert runner._had_verified_action is False
-    assert runner._done_verified is False
-
-
-def test_continuous_pointer_guard_blocks_before_dispatch_then_safely_stops(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a freehand shape on the current canvas")
-    runner._visual_closed_loop_active = True
-    runner.messages = [{"role": "system", "content": "sys"}]
-    runner._visual_frame_region = (10, 20, 800, 600)
-    runner._last_visual_feedback_b64 = "authoritative-frame"
-    runner._record_native_visual_progress("click:one", 0.0, comparable=True)
-    runner._record_native_visual_progress("click:two", 0.0, comparable=True)
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
-    monkeypatch.setattr(runner, "_has_fresh_visual_grounding", lambda: True)
-    monkeypatch.setattr(
-        runner,
-        "_dispatch_with_fast_visual_wrap",
-        lambda *_args: (_ for _ in ()).throw(
-            AssertionError("continuous-output click reached dispatch")
+        task,
+        runtime_profile=RuntimeProfile(
+            stage_type="ExecuteDesktopTask",
+            adaptive_visual_interaction=True,
+            model_tool_allowlist=_EXECUTE_DESKTOP_MODEL_TOOLS,
         ),
     )
+    try:
+        schemas = [
+            {"type": "function", "function": {"name": name}}
+            for name in _EXECUTE_DESKTOP_MODEL_TOOLS
+        ]
 
-    first_terminal = runner._handle_tool_calls([
-        _tool_call("blocked-click-1", "click", {"frame_x": 200, "frame_y": 100}),
-    ])
-    first = json.loads(runner._tool_history[-1][2])
-    assert first_terminal is None
-    assert first["blocked"] is True
-    assert first["continuous_gesture_required"] is True
-    assert first["repeated_guard_blocks"] == 1
-
-    second_terminal = runner._handle_tool_calls([
-        _tool_call("blocked-click-2", "click", {"frame_x": 800, "frame_y": 120}),
-    ])
-    second = json.loads(runner._tool_history[-1][2])
-    assert second_terminal == "reply"
-    assert second["safe_stop"] is True
-    assert "stopping" in second["error"]
-
-
-def test_continuous_pointer_prompt_maps_output_to_gesture_tools():
-    from winpilot.agent.prompts import system_prompt
-
-    native = system_prompt(
-        main_model_has_vision=True,
-        continuous_pointer_output=True,
-    )
-    text_only = system_prompt(
-        main_model_has_vision=False,
-        continuous_pointer_output=True,
-    )
-    ordinary = system_prompt(main_model_has_vision=True)
-
-    assert "clicks are setup only and never output evidence" in native.casefold()
-    assert "use drag/draw_strokes for the output itself" in native
-    assert "at most 12 meaningful anchor points per path" in native
-    assert "if one rollback produces no visible change, never repeat it" in native
-    assert "draw_strokes with normalized_strokes in 0..1000" in text_only
-    assert "submit all currently known independent paths together" in text_only
-    assert "multi-path mutation" not in ordinary
-    assert "guide/scaffold strokes" not in ordinary
+        next_tools = runner._model_tools_for_step(schemas, 2)
+        next_names = tuple(
+            item["function"]["name"]
+            for item in next_tools
+        )
+        assert next_names == _EXECUTE_DESKTOP_MODEL_TOOLS
+    finally:
+        runner.session.close()
 
 
 def test_gui_truncated_tool_retry_keeps_room_for_one_complete_call(monkeypatch):
@@ -3973,16 +3873,24 @@ def test_gui_truncated_tool_retry_keeps_room_for_one_complete_call(monkeypatch):
         chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
     )
 
-    assert runner._chat(client, []) is not None
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "wait",
+            "description": "Wait.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }]
+    assert runner._chat(client, tools) is not None
     assert captured["max_tokens"] == 4096
+    assert captured["tool_choice"] == "required"
     assert runner._gui_tool_call_retry_pending is False
-    correction = next(
+    corrections = [
         message["content"] for message in runner.messages
         if message.get("role") == "user"
-    )
-    assert "exactly one real tool call" in correction
-    assert "at most 12 points per path" in correction
-    assert "regularly spaced samples" in correction
+    ]
+    assert len(corrections) == 1
+    assert len(corrections[0]) < 180
 
 
 def test_gui_truncated_tool_output_retries_once_then_fails_closed(monkeypatch):
@@ -4003,15 +3911,110 @@ def test_gui_truncated_tool_output_retries_once_then_fails_closed(monkeypatch):
     rendered = json.dumps(runner.messages)
     assert "first pseudo tool body" not in rendered
     assert "second pseudo tool body" not in rendered
-    assert sum(
-        "exactly one real tool call" in str(message.get("content") or "")
-        for message in runner.messages
-    ) == 1
+    assert sum(message.get("role") == "user" for message in runner.messages) == 1
     assert runner.status == "fail"
     assert "Safety stop" in runner.result_text
     recoveries = [payload for name, payload in events if name == "agent_recovery"]
     assert [payload["attempt"] for payload in recoveries] == [1, 2]
     assert recoveries[-1]["safe_stop"] is True
+
+
+def _prepare_one_step_length_response_run(monkeypatch, response):
+    from winpilot.agent import loop
+    from winpilot.agent.runtime_profile import RuntimeProfile
+
+    events = []
+    runner = loop.AgentRunner(
+        "operate the current visible application",
+        max_steps_override=1,
+        runtime_profile=RuntimeProfile(
+            stage_type="ExecuteDesktopTask",
+            experience_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(loop, "_main_model_has_vision", lambda: True)
+    monkeypatch.setattr(loop, "_client", lambda: object())
+    monkeypatch.setattr(loop, "build_model_adapter", lambda client, _settings: client)
+    monkeypatch.setattr(loop, "_main_agent_api_settings", lambda: {})
+    monkeypatch.setattr(loop, "tool_schemas", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        loop.BUS,
+        "publish",
+        lambda name, **payload: events.append((name, payload)),
+    )
+    monkeypatch.setattr(loop.playbooks, "for_task", lambda _task: [])
+    runner._native_visual_context_enabled = lambda: True
+    runner._inject_visual_frame = lambda **_kwargs: True
+    runner._maybe_plan_upfront = lambda _client: None
+    runner._track_usage = lambda _response: None
+    runner._chat = lambda _client, _tools: response
+    runner.session.close = lambda: None
+    return runner, events
+
+
+def test_length_finish_with_truncated_tool_arguments_enters_one_recovery(monkeypatch):
+    truncated_call = SimpleNamespace(
+        id="truncated-drag",
+        function=SimpleNamespace(
+            name="drag",
+            arguments='{"frame_x1":900,"frame_y1":600,"frame_points":[[700,600]',
+        ),
+    )
+    response = SimpleNamespace(choices=[SimpleNamespace(
+        message=SimpleNamespace(content="", tool_calls=[truncated_call]),
+        finish_reason="length",
+    )])
+    runner, events = _prepare_one_step_length_response_run(
+        monkeypatch, response,
+    )
+    runner._handle_tool_calls = lambda _calls: (_ for _ in ()).throw(
+        AssertionError("truncated arguments must not reach dispatch"),
+    )
+
+    result = runner.run()
+
+    assert result["status"] == "fail"
+    assert runner._gui_truncated_tool_retries == 1
+    recoveries = [payload for name, payload in events if name == "agent_recovery"]
+    assert len(recoveries) == 1
+    assert recoveries[0]["kind"] == "truncated_gui_tool_call"
+    assert recoveries[0]["attempt"] == 1
+    assert truncated_call.function.arguments not in json.dumps(runner.messages)
+
+
+def test_length_finish_with_complete_tool_arguments_is_dispatched(monkeypatch):
+    complete_call = _tool_call(
+        "complete-drag",
+        "drag",
+        {
+            "frame_x1": 900,
+            "frame_y1": 600,
+            "frame_x2": 150,
+            "frame_y2": 300,
+            "frame_points": [[700, 600], [500, 300]],
+        },
+    )
+    response = SimpleNamespace(choices=[SimpleNamespace(
+        message=SimpleNamespace(content="", tool_calls=[complete_call]),
+        finish_reason="length",
+    )])
+    runner, events = _prepare_one_step_length_response_run(
+        monkeypatch, response,
+    )
+    dispatched = []
+
+    def handle(calls):
+        dispatched.extend(calls)
+        return "fail"
+
+    runner._handle_tool_calls = handle
+
+    result = runner.run()
+
+    assert result["status"] == "fail"
+    assert dispatched == [complete_call]
+    assert runner._gui_truncated_tool_retries == 0
+    assert not [payload for name, payload in events if name == "agent_recovery"]
 
 
 def test_normal_complex_real_tool_call_keeps_configured_output_budget(monkeypatch):
@@ -4051,145 +4054,3 @@ def test_normal_complex_real_tool_call_keeps_configured_output_budget(monkeypatc
     assert captured["max_tokens"] == 4096
     assert response.choices[0].message.tool_calls == [complex_call]
     assert runner._gui_truncated_tool_retries == 0
-
-
-def test_text_continuous_setup_budget_blocks_before_dispatch_and_safely_stops(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tools import ToolResult
-
-    runner = AgentRunner("write my name by hand on the visible page")
-    runner.messages = [{"role": "system", "content": "sys"}]
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: False)
-    dispatched = []
-
-    def dispatch(name, args):
-        dispatched.append(name)
-        if name == "click":
-            return ToolResult('{"ok": true, "verified": false}')
-        if name == "execute_subgoal":
-            return ToolResult(json.dumps({
-                "ok": True,
-                "verified": False,
-                "actions_executed": [{"action": "select_color"}],
-            }))
-        return ToolResult('{"ok": true}')
-
-    monkeypatch.setattr(runner, "_dispatch_with_fast_visual_wrap", dispatch)
-
-    assert runner._handle_tool_calls([
-        _tool_call("setup-click", "click", {"x": 100, "y": 100}),
-    ]) is None
-    assert runner._continuous_pointer_text_setup_mutations == 1
-    assert runner._handle_tool_calls([
-        _tool_call("observe", "observe", {"full": True}),
-    ]) is None
-    assert runner._continuous_pointer_text_setup_mutations == 1
-    assert runner._handle_tool_calls([
-        _tool_call("setup-subgoal", "execute_subgoal", {
-            "subgoal": "select a visible pen option",
-            "click": {"label": "Pen"},
-        }),
-    ]) is None
-    assert runner._continuous_pointer_text_setup_mutations == 2
-
-    assert runner._handle_tool_calls([
-        _tool_call("blocked-click", "click", {"x": 200, "y": 100}),
-    ]) is None
-    first = json.loads(runner._tool_history[-1][2])
-    assert first["text_only_continuous_setup_guard"] is True
-    assert first["setup_mutations_observed"] == 2
-    assert "normalized_strokes in 0..1000" in first["error"]
-    assert dispatched == ["click", "observe", "execute_subgoal"]
-
-    terminal = runner._handle_tool_calls([
-        _tool_call("blocked-subgoal", "execute_subgoal", {
-            "subgoal": "select another brush",
-            "click": {"label": "Brush"},
-        }),
-    ])
-    second = json.loads(runner._tool_history[-1][2])
-    assert terminal == "reply"
-    assert second["safe_stop"] is True
-    assert dispatched == ["click", "observe", "execute_subgoal"]
-
-
-def test_text_continuous_outcomes_ignore_failures_verification_and_observation(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tools import ToolResult
-
-    runner = AgentRunner("sign this form by hand")
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: False)
-
-    runner._record_text_continuous_pointer_outcome(
-        "click", {"x": 1, "y": 1}, ToolResult('{"ok": false, "verified": false}'),
-    )
-    runner._record_text_continuous_pointer_outcome(
-        "click", {"x": 1, "y": 1}, ToolResult('{"ok": true, "blocked": true}'),
-    )
-    runner._record_text_continuous_pointer_outcome(
-        "click", {"x": 1, "y": 1}, ToolResult('{"ok": true, "verified": true}'),
-    )
-    runner._record_text_continuous_pointer_outcome(
-        "observe", {"full": True}, ToolResult('{"ok": true}'),
-    )
-    runner._record_text_continuous_pointer_outcome(
-        "revise_plan", {"steps": ["sign"]}, ToolResult('{"ok": true}'),
-    )
-    runner._record_text_continuous_pointer_outcome(
-        "draw_strokes",
-        {"normalized_strokes": [[[1, 1], [2, 2]]]},
-        ToolResult('{"ok": false, "blocked": true}'),
-    )
-
-    assert runner._continuous_pointer_text_setup_mutations == 0
-    assert runner._continuous_pointer_gesture_progress is False
-
-
-def test_successful_text_draw_releases_only_routing_guard(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tools import ToolResult
-
-    runner = AgentRunner("trace the visible line")
-    runner.messages = [{"role": "system", "content": "sys"}]
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: False)
-    runner._continuous_pointer_text_setup_mutations = 2
-    dispatched = []
-    monkeypatch.setattr(
-        runner,
-        "_dispatch_with_fast_visual_wrap",
-        lambda name, args: (
-            dispatched.append((name, args)),
-            ToolResult('{"ok": true, "verified": false}'),
-        )[1],
-    )
-
-    terminal = runner._handle_tool_calls([_tool_call(
-        "normalized-draw",
-        "draw_strokes",
-        {"normalized_strokes": [[[100, 100], [900, 900]]]},
-    )])
-
-    assert terminal is None
-    assert dispatched == [(
-        "draw_strokes",
-        {"normalized_strokes": [[[100, 100], [900, 900]]]},
-    )]
-    assert runner._continuous_pointer_gesture_progress is True
-    assert runner._continuous_pointer_text_setup_mutations == 0
-    assert runner._text_continuous_pointer_preparation_guard(
-        "click", {"x": 10, "y": 10},
-    ) is None
-    assert runner._had_verified_action is False
-    assert runner._done_verified is False
-
-
-def test_text_continuous_setup_guard_does_not_affect_ordinary_tasks(monkeypatch):
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("click the Continue button")
-    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: False)
-    runner._continuous_pointer_text_setup_mutations = 99
-
-    assert runner._text_continuous_pointer_preparation_guard(
-        "click", {"x": 10, "y": 10},
-    ) is None

@@ -22,10 +22,12 @@ from ..utils.log import BUS
 from ..utils.screenshot import Region, capture, window_region
 from .action_contract import (
     ALLOWED_BATCH_ACTIONS,
+    AtomicAction,
     BATCH_CLIPBOARD_ACTIONS,
     BATCH_MUTATING_ACTIONS,
     BATCH_OBSERVE_ACTIONS,
     build_action_envelope,
+    canonicalize_batch_actions,
     parse_atomic_action,
     validate_batch_actions,
 )
@@ -35,15 +37,6 @@ from .input_mode import inspect_input_mode
 from .types import BatchMetrics
 from .visual_servo import ServoConfig, track_visual_target
 from .watcher import ScreenWatcher
-_ANCHOR_HINT_KEYS = {
-    "anchor",
-    "label",
-    "expected_region",
-    "visual_anchor",
-    "fallback_text",
-    "role",
-    "text_query",
-}
 
 
 def _now_ms() -> int:
@@ -441,71 +434,6 @@ def _normalise_wait_condition(name: str, args: dict[str, Any]) -> tuple[str, dic
     return "wait_stable", normalised
 
 
-_HOTKEY_MODIFIERS = {
-    "alt", "alt_l", "alt_r", "ctrl", "control", "control_l", "control_r",
-    "shift", "shift_l", "shift_r", "meta", "super",
-}
-
-
-def _stable_batch_actions(actions: list[dict[str, Any]], subgoal: str) -> list[dict[str, Any]]:
-    """Normalize common model-generated key sequences before execution.
-
-    This remains application agnostic: it repairs invalid multi-key chords and
-    gives first-line formatting a deterministic document-start anchor.
-    """
-    expanded: list[dict[str, Any]] = []
-    for original in actions:
-        if not isinstance(original, dict):
-            expanded.append(original)
-            continue
-        name, args = _normalise_action(original)
-        keys = args.get("keys") if name == "hotkey" else None
-        if not isinstance(keys, list):
-            expanded.append(original)
-            continue
-        modifiers = [str(key) for key in keys if str(key).casefold() in _HOTKEY_MODIFIERS]
-        ordinary = [str(key) for key in keys if str(key).casefold() not in _HOTKEY_MODIFIERS]
-        if len(ordinary) <= 1:
-            if modifiers and ordinary:
-                normalized_keys = [*modifiers, *ordinary]
-                if normalized_keys != [str(key) for key in keys]:
-                    expanded.append({"action": "hotkey", "keys": normalized_keys})
-                else:
-                    expanded.append(original)
-            else:
-                expanded.append(original)
-            continue
-        # Models sometimes emit ["Down", "Home"] to mean two sequential
-        # keys.  Sending it as one chord is undefined in desktop editors.
-        for key in ordinary:
-            expanded.append({"action": "hotkey", "keys": [*modifiers, key]})
-
-    normalized_goal = _norm_text(subgoal)
-    first_line_format = (
-        any(term in normalized_goal for term in ("firstline", "firstparagraph", "heading", "title", "首行", "第一行", "标题"))
-        and any(term in normalized_goal for term in ("bold", "加粗"))
-        and any(term in normalized_goal for term in ("center", "centre", "居中"))
-    )
-    if not first_line_format:
-        return expanded
-
-    key_sets: list[set[str]] = []
-    for item in expanded:
-        name, args = _normalise_action(item) if isinstance(item, dict) else ("", {})
-        keys = args.get("keys") if name == "hotkey" else []
-        key_sets.append({str(key).casefold() for key in keys} if isinstance(keys, list) else set())
-    has_select_line = any(keys == {"shift", "end"} for keys in key_sets)
-    has_bold = any(keys in ({"ctrl", "b"}, {"control", "b"}) for keys in key_sets)
-    has_center = any(keys in ({"ctrl", "e"}, {"control", "e"}) for keys in key_sets)
-    if not (has_select_line and has_bold and has_center):
-        return expanded
-    for index, keys in enumerate(key_sets):
-        if keys == {"home"}:
-            expanded[index] = {"action": "hotkey", "keys": ["Ctrl", "Home"]}
-            break
-    return expanded
-
-
 def _anchor_payload(anchor) -> dict[str, Any]:
     return {
         "label": anchor.label,
@@ -603,61 +531,10 @@ def _with_batch_expect_defaults(name: str, args: dict[str, Any]) -> dict[str, An
     return updated
 
 
-def _has_anchor_hint(args: dict[str, Any]) -> bool:
-    if any(key in args and args.get(key) not in (None, "", []) for key in _ANCHOR_HINT_KEYS):
-        return True
-    anchor = args.get("anchor")
-    return isinstance(anchor, dict) and any(
-        key in anchor and anchor.get(key) not in (None, "", [])
-        for key in _ANCHOR_HINT_KEYS
-    )
 
 
-def _has_direct_click_target(args: dict[str, Any]) -> bool:
-    if args.get("element_id") is not None:
-        return True
-    return args.get("x") is not None and args.get("y") is not None
 
 
-def _upgrade_semantic_action(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
-    """Route semantic click/type hints through the visual-anchor controller.
-
-    Models naturally emit things like click(label="Export"). Raw click cannot
-    execute that safely; click_element can locate, cache, retry observe, and
-    return resolved evidence.
-    """
-    if name == "click" and not _has_direct_click_target(args) and _has_anchor_hint(args):
-        return "click_element", args, name
-    if name == "type_text" and _has_anchor_hint(args):
-        return "type_into_element", args, name
-    return name, args, ""
-
-
-_ARITHMETIC_KEYBOARD_SEQUENCE_RE = re.compile(
-    r"^\s*\d+(?:\.\d+)?(?:\s*(?:[+*/xX\u00d7\u00f7-])\s*"
-    r"\d+(?:\.\d+)?){1,10}\s*=\s*$"
-)
-
-
-def _single_arithmetic_type_args(
-    actions: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Return args for a lone effect-sensitive arithmetic type action.
-
-    RawDeviceExecutor intentionally minimizes overhead, but a successful
-    SendInput call does not prove that a calculator/kiosk keypad accepted a
-    printable expression.  ToolSession owns the visible-effect probe and the
-    semantic keypad recovery, so exact arithmetic sequences must not bypass it
-    when they appear inside run_action_batch.
-    """
-    if len(actions) != 1 or not isinstance(actions[0], dict):
-        return None
-    name, args = _normalise_action(actions[0])
-    if name != "type_text" or not _ARITHMETIC_KEYBOARD_SEQUENCE_RE.fullmatch(
-        str(args.get("text") or "")
-    ):
-        return None
-    return args
 
 
 class FastGuiController:
@@ -1931,32 +1808,12 @@ class FastGuiController:
 
     def _dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
         started = _now_ms()
-        scope_recovery = None
         if self.raw_device.supports(name):
-            # The batch owns one outer ToolSession call, but foreground scope
-            # can change between child actions (launches, dialogs, user input,
-            # multi-window apps). Re-check every raw mutation before bypassing
-            # the full ToolSession dispatch path.
-            if name in BATCH_MUTATING_ACTIONS:
-                from ..agent import scope_guard
-
-                blocked = scope_guard.ensure_scope(self.session, name, args)
-                scope_recovery = scope_guard.take_scope_recovery(self.session)
-                if blocked is not None:
-                    result = blocked
-                else:
-                    if scope_recovery is not None:
-                        self._invalidate_after_scope_recovery()
-                    result = self.raw_device.execute(name, args)
-            else:
-                result = self.raw_device.execute(name, args)
+            # _execute_in_lease is the sole commit-time scope owner for batch
+            # children. Raw dispatch only performs the already-admitted action.
+            result = self.raw_device.execute(name, args)
         else:
             result = self.session.dispatch(name, args)
-        if scope_recovery is not None:
-            data = _json_dict(result.text)
-            if data:
-                data.setdefault("scope_recovery", scope_recovery)
-                result.text = json.dumps(data, ensure_ascii=False, default=str)
         elapsed = max(0, _now_ms() - started)
         result.replay = result.replay or {}
         result.replay.setdefault("elapsed_ms", elapsed)
@@ -1970,27 +1827,38 @@ class FastGuiController:
         args: dict[str, Any],
     ) -> dict[str, Any]:
         snapshot = getattr(self.session, "snapshot", None)
-        region = (
-            args.get("region")
-            or getattr(self.session, "_visual_frame_region", None)
-            or getattr(snapshot, "region", None)
-        )
-        frame_id = (
-            args.get("visual_frame_id")
-            or args.get("frame_id")
-            or getattr(self.session, "_visual_frame_id", None)
-        )
+        authority = getattr(self.session, "_frame_authority", None)
+        frame_state = getattr(authority, "current", None)
+        if frame_state is not None:
+            region = tuple(frame_state.region)
+            frame_id = int(frame_state.frame_id)
+            epoch = int(frame_state.epoch)
+            hwnd = int(frame_state.hwnd or getattr(self.session, "hwnd", 0) or 0)
+        else:
+            # Legacy callers without FrameAuthority retain their old mirrors.
+            region = (
+                args.get("region")
+                or getattr(self.session, "_visual_frame_region", None)
+                or getattr(snapshot, "region", None)
+            )
+            frame_id = (
+                args.get("visual_frame_id")
+                or args.get("frame_id")
+                or getattr(self.session, "_visual_frame_id", None)
+            )
+            epoch = (
+                getattr(self.session, "_visual_frame_epoch", None)
+                if getattr(self.session, "_visual_frame_epoch", None) is not None
+                else getattr(self.session, "_screen_epoch", None)
+            )
+            hwnd = getattr(self.session, "hwnd", None)
         envelope = build_action_envelope(
             name,
             args,
             action_id=f"{batch_id}:{index}",
-            hwnd=getattr(self.session, "hwnd", None),
+            hwnd=hwnd,
             frame_id=frame_id,
-            epoch=(
-                getattr(self.session, "_visual_frame_epoch", None)
-                if getattr(self.session, "_visual_frame_epoch", None) is not None
-                else getattr(self.session, "_screen_epoch", None)
-            ),
+            epoch=epoch,
             region=region,
             retry_budget=0,
         )
@@ -2943,148 +2811,6 @@ class FastGuiController:
         return ToolResult(json.dumps(payload, ensure_ascii=False))
 
     @staticmethod
-    def _document_editor_ready(title: str, visible_text: str) -> bool:
-        compact_title = re.sub(r"\s+", "", str(title or "").casefold())
-        if compact_title in {
-            "文档-wpsoffice",
-            "新建文档-wpsoffice",
-            "新标签页-wpsoffice",
-            "wpsoffice",
-            "wps文字-wpsoffice",
-        }:
-            return False
-        text = str(visible_text or "")
-        chrome_hits = sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in (
-            r"(?:^|\n)(?:开始|home)(?:\n|$)",
-            r"(?:^|\n)(?:插入|insert)(?:\n|$)",
-            r"页面\s*[:：]?\s*\d|page\s*[:：]?\s*\d",
-            r"字数\s*[:：]?\s*\d|word\s*count\s*[:：]?\s*\d",
-        ))
-        return chrome_hits >= 2
-
-    def _ensure_document_surface(self, action: dict[str, Any]) -> ToolResult:
-        """Keep creation/navigation local until a real editor surface is visible."""
-        max_attempts = max(1, min(4, int(action.get("max_attempts") or 3)))
-        evidence: list[dict[str, Any]] = []
-        for attempt in range(1, max_attempts + 1):
-            hwnd = int(getattr(self.session, "hwnd", 0) or 0)
-            try:
-                title = str(win32gui.GetWindowText(hwnd) or "") if hwnd else ""
-            except Exception:
-                title = ""
-            read_result = self._dispatch("read_text", {})
-            visible_text = str(read_result.text or "")
-            ready = self._document_editor_ready(title, visible_text)
-            evidence.append({
-                "attempt": attempt,
-                "title": title,
-                "ready": ready,
-                "text_preview": visible_text[:500],
-            })
-            if ready:
-                self.session._document_surface_ready = True
-                self.session._new_blank_applied = True
-                return ToolResult(json.dumps({
-                    "ok": True,
-                    "verified": True,
-                    "document_surface_ready": True,
-                    "attempts": attempt,
-                    "evidence": evidence,
-                }, ensure_ascii=False, default=str))
-            compact_title = re.sub(r"\s+", "", title.casefold())
-            at_application_home = compact_title in {
-                "文档-wpsoffice",
-                "wpsoffice",
-                "wps文字-wpsoffice",
-            }
-            create_result = None
-            create_via = "ctrl+n"
-            snapshot = getattr(self.session, "snapshot", None)
-            region = getattr(snapshot, "region", None)
-            creation_hub = all(
-                re.search(rf"(?:^|\n){term}(?:\n|$)", visible_text, re.IGNORECASE)
-                for term in ("文字", "演示", "表格")
-            )
-            if creation_hub:
-                text_document_candidates = [
-                    element
-                    for element in (getattr(snapshot, "elements", []) or [])
-                    if re.sub(r"\s+", "", str(getattr(element, "text", "") or "")) == "文字"
-                ] if snapshot is not None else []
-                if text_document_candidates:
-                    element = max(
-                        text_document_candidates,
-                        key=lambda item: int(getattr(item, "width", 0) or 0) * int(getattr(item, "height", 0) or 0),
-                    )
-                    create_via = "grounded-document-type"
-                    create_result = self._dispatch("click", {
-                        "x": int(getattr(element, "cx", 0) or 0),
-                        "y": int(getattr(element, "cy", 0) or 0),
-                        "button": "left",
-                        "physical": True,
-                    })
-                else:
-                    create_via = "semantic-document-type"
-                    create_result = self._click_element({
-                        "label": "文字",
-                        "fallback_text": ["Document", "Writer", "Office文档"],
-                        "expected_region": "top-left",
-                    })
-            elif at_application_home and re.search(r"(?:^|\n)(?:\+|＋|十)?\s*(?:新建|new)(?:\n|$)", visible_text, re.IGNORECASE):
-                region = getattr(snapshot, "region", None)
-                wide_left_new = []
-                if snapshot is not None and region is not None:
-                    for element in getattr(snapshot, "elements", []) or []:
-                        label = re.sub(r"\s+", "", str(getattr(element, "text", "") or "").casefold())
-                        if not re.search(r"(?:新建|new)", label, re.IGNORECASE):
-                            continue
-                        if int(getattr(element, "cx", 0) or 0) > region.left + int(region.width * 0.40):
-                            continue
-                        if int(getattr(element, "cy", 0) or 0) < region.top + int(region.height * 0.07):
-                            continue
-                        width = int(getattr(element, "width", 0) or 0)
-                        if width >= 80:
-                            wide_left_new.append((width, element))
-                if wide_left_new:
-                    _width, element = max(wide_left_new, key=lambda item: item[0])
-                    create_via = "grounded-wide-left-new"
-                    create_result = self._dispatch("click", {
-                        "x": int(getattr(element, "cx", 0) or 0),
-                        "y": int(getattr(element, "cy", 0) or 0),
-                        "button": "left",
-                        "physical": True,
-                    })
-                else:
-                    create_via = "semantic-new-button"
-                    create_result = self._click_element({
-                        "label": "新建",
-                        "fallback_text": ["+ 新建", "＋ 新建", "New"],
-                        "role": "button",
-                        "expected_region": "left-center",
-                    })
-            if create_result is None or _failed(create_result):
-                create_via = "ctrl+n"
-                create_result = self._dispatch("hotkey", {"keys": ["ctrl", "n"]})
-            evidence[-1]["create_via"] = create_via
-            if _failed(create_result):
-                break
-            self._wait_change({
-                "timeout_s": 5.0,
-                "min_ratio": 0.0002,
-                "required": False,
-            })
-            self._wait_stable({"stable_ms": 300, "timeout_s": 5.0})
-        self.session._document_surface_ready = False
-        return ToolResult(json.dumps({
-            "ok": False,
-            "verified": False,
-            "blocked": True,
-            "document_surface_ready": False,
-            "error": "No editable document surface appeared after local creation retries.",
-            "evidence": evidence,
-        }, ensure_ascii=False, default=str))
-
-    @staticmethod
     def _pause(action: dict[str, Any]) -> ToolResult:
         duration_s: float | None = None
         if isinstance(action.get("duration_s"), (int, float)):
@@ -3331,12 +3057,7 @@ class FastGuiController:
     ) -> dict[str, Any]:
         pointer_hold_before = str(pointer_hold_before or "").strip().casefold()
         pointer_hold_after = str(pointer_hold_after or "").strip().casefold()
-        arithmetic_type_args = _single_arithmetic_type_args(actions)
-        actions = _stable_batch_actions(actions, subgoal)
-        if arithmetic_type_args is not None and actions:
-            stabilized_name, stabilized_args = _normalise_action(actions[0])
-            if stabilized_name == "type_text":
-                arithmetic_type_args = stabilized_args
+        actions, canonical_errors = canonicalize_batch_actions(actions)
         if pointer_hold_before:
             owned_buttons = [
                 button
@@ -3374,11 +3095,13 @@ class FastGuiController:
                     "all agent-owned buttons were released safely."
                 ),
             }
-        validation_errors = validate_batch_actions(
-            actions,
-            pointer_hold_before=pointer_hold_before,
-            pointer_hold_after=pointer_hold_after,
-        )
+        validation_errors = list(canonical_errors)
+        if actions:
+            validation_errors.extend(validate_batch_actions(
+                actions,
+                pointer_hold_before=pointer_hold_before,
+                pointer_hold_after=pointer_hold_after,
+            ))
         if validation_errors:
             return {
                 "ok": False,
@@ -3399,57 +3122,10 @@ class FastGuiController:
                 "validation_errors": validation_errors,
                 "error": "; ".join(validation_errors),
             }
-        if arithmetic_type_args is not None:
-            # Route before acquiring the outer controller transaction.  The
-            # ToolSession may recover by running a semantic keypad controller
-            # transaction whose observed app hwnd differs from the launch
-            # proxy hwnd; nesting that under the old window resource would be
-            # a forbidden resource escalation.
-            arithmetic_type_args = _with_batch_expect_defaults(
-                "type_text", arithmetic_type_args,
-            )
-            result = self.session.dispatch("type_text", arithmetic_type_args)
-            data = _json_dict(result.text)
-            ok = bool(data) and not _failed(result) and data.get("ok") is not False
-            verified = bool(ok and data.get("verified") is True)
-            needs_observe = bool(ok and not verified)
-            return {
-                "ok": ok,
-                "verified": verified,
-                "subgoal": str(subgoal or ""),
-                "controller_state": {
-                    "phase": "verified" if verified else "needs_observe" if ok else "blocked",
-                    "verified": verified,
-                    "needs_observe": needs_observe,
-                    "failed_at": None if ok else 1,
-                    "last_action": "type_text",
-                    "needs_llm_reason": not ok,
-                },
-                "results": [{
-                    "index": 1,
-                    "action": "type_text",
-                    "ok": ok,
-                    "verified": verified,
-                    "terminal": result.terminal,
-                    "preview": result.text[:800],
-                    "data": data if data else {"preview": result.text[:800]},
-                }],
-                "metrics": {
-                    "action_count": 1,
-                    "failed_at": None if ok else 1,
-                    "verified_tool_session_route": True,
-                    "nested_metrics": data.get("metrics") if isinstance(data, dict) else {},
-                },
-                "arithmetic_input_route": "verified_tool_session",
-                "needs_observe": needs_observe,
-            }
         has_mutation = False
         has_clipboard = False
         for action in actions:
-            if not isinstance(action, dict):
-                continue
-            name, args = _normalise_action(action)
-            name, _args, _upgraded_from = _upgrade_semantic_action(name, args)
+            name, args = action.name, action.inputs
             if name in BATCH_MUTATING_ACTIONS:
                 has_mutation = True
             if name in BATCH_CLIPBOARD_ACTIONS:
@@ -3552,7 +3228,7 @@ class FastGuiController:
 
     def _execute_in_lease(
         self,
-        actions: list[dict[str, Any]],
+        actions: tuple[AtomicAction, ...],
         stop_on_error: bool = True,
         sync: dict[str, Any] | bool | None = None,
         subgoal: str = "",
@@ -3573,12 +3249,11 @@ class FastGuiController:
         semantic_observe_after_visual = False
         typed_literals: list[str] = []
         for index, action in enumerate(actions, start=1):
-            if not isinstance(action, dict):
+            if not isinstance(action, AtomicAction):
                 metrics.failed_at = index
-                results.append({"index": index, "ok": False, "error": "action must be an object"})
+                results.append({"index": index, "ok": False, "error": "action is not canonical"})
                 break
-            name, normalised_args = _normalise_action(action)
-            name, normalised_args, upgraded_from = _upgrade_semantic_action(name, normalised_args)
+            name, normalised_args = action.name, dict(action.inputs)
             normalised_args = _with_batch_expect_defaults(name, normalised_args)
             if (
                 name in {"wait_change", "wait_for_visual_change", "wait_stable"}
@@ -3683,8 +3358,6 @@ class FastGuiController:
                 result = self._wait_for_visual_change(normalised_args)
             elif name == "wait_stable":
                 result = self._wait_stable(normalised_args)
-            elif name == "ensure_document_surface":
-                result = self._ensure_document_surface(normalised_args)
             else:
                 result = self._dispatch(name, normalised_args)
             if name in {"type_text", "type_into_element"} and not _failed(result):
@@ -3711,8 +3384,6 @@ class FastGuiController:
                 item["scope_recovery"] = scope_recovery
             if name in BATCH_OBSERVE_ACTIONS and len(result.text or "") > 800:
                 item["full_text"] = result.text
-            if upgraded_from:
-                item["upgraded_from"] = upgraded_from
             data = _json_dict(result.text)
             nested_scope_recovery = data.get("scope_recovery")
             if scope_recovery is None and isinstance(nested_scope_recovery, dict):

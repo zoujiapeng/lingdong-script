@@ -8,6 +8,7 @@ class _Session:
         self.hwnd = 100
         self.fg = 200
         self.focus_calls = []
+        self._screen_epoch = 0
 
     def _action_target_context(self):
         return {
@@ -29,85 +30,98 @@ class _Session:
             self.hwnd = int(hwnd)
 
 
-def test_scope_guard_recovers_by_refocusing_target(monkeypatch):
+def test_scope_guard_blocks_when_exact_target_refocus_fails(monkeypatch):
     session = _Session()
     monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+    monkeypatch.setattr(
+        scope_guard.executor,
+        "focus_window",
+        lambda hwnd: session.focus_calls.append(hwnd) or {"ok": False},
+    )
 
-    def fake_focus(hwnd):
-        session.focus_calls.append(hwnd)
-        session.fg = hwnd
-        return True
-
-    monkeypatch.setattr(scope_guard, "_focus", fake_focus)
-    monkeypatch.setattr(scope_guard.time, "sleep", lambda _seconds: None)
-
-    assert scope_guard.ensure_scope(session, "click", {"x": 1, "y": 2}) is None
-    assert session.focus_calls == [100]
-    recovery = scope_guard.take_scope_recovery(session)
-    assert recovery["attempts"] == 1
-    assert recovery["authoritative_frame_required"] is True
-
-
-def test_scope_guard_retries_transient_focus_reclaim_and_proves_stability(monkeypatch):
-    session = _Session()
-    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
-    monkeypatch.setattr(scope_guard.time, "sleep", lambda _seconds: None)
-
-    def fake_focus(hwnd):
-        session.focus_calls.append(hwnd)
-        if len(session.focus_calls) >= 2:
-            session.fg = hwnd
-        return True
-
-    monkeypatch.setattr(scope_guard, "_focus", fake_focus)
-
-    assert scope_guard.ensure_scope(session, "draw_strokes", {}) is None
-    recovery = scope_guard.take_scope_recovery(session)
-    assert session.focus_calls == [100, 100]
-    assert recovery["attempts"] == 2
-    assert recovery["after"]["foreground_hwnd"] == 100
-
-
-def test_scope_guard_blocks_when_refocus_cannot_recover(monkeypatch):
-    session = _Session()
-    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
-    monkeypatch.setattr(scope_guard, "_focus", lambda hwnd: False)
-    monkeypatch.setattr(scope_guard.time, "sleep", lambda _seconds: None)
-
-    result = scope_guard.ensure_scope(session, "type_text", {"text": "hello"})
+    result = scope_guard.ensure_scope(session, "click", {"x": 1, "y": 2})
 
     assert result is not None
     payload = json.loads(result.text)
     assert payload["blocked"] is True
     assert payload["scope_guard"]["recovery_attempted"] is True
-    assert payload["scope_guard"]["recovery_attempts"] == 3
-    assert payload["tool"] == "type_text"
+    assert payload["action_executed"] is False
+    assert session.focus_calls == [100]
+    assert scope_guard.take_scope_recovery(session) is None
 
 
-def test_scope_guard_adopts_same_process_foreground_window(monkeypatch):
+def test_scope_guard_uses_real_hit_window_when_auxiliary_window_owns_foreground(monkeypatch):
+    session = _Session()
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+    monkeypatch.setattr(scope_guard.win32gui, "WindowFromPoint", lambda point: 100)
+    monkeypatch.setattr(
+        scope_guard.executor,
+        "focus_window",
+        lambda hwnd: (_ for _ in ()).throw(AssertionError("hit-tested target needs no repair")),
+    )
+
+    assert scope_guard.ensure_scope(session, "click", {"x": 20, "y": 30}) is None
+
+
+def test_scope_guard_refocuses_keyboard_target_and_continues(monkeypatch):
+    session = _Session()
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+
+    def focus(hwnd):
+        session.fg = hwnd
+        return {"ok": True}
+
+    monkeypatch.setattr(scope_guard.executor, "focus_window", focus)
+
+    assert scope_guard.ensure_scope(session, "type_text", {"text": "hello"}) is None
+
+
+def test_scope_guard_refocuses_but_withholds_stale_spatial_coordinates(monkeypatch):
+    session = _Session()
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+    monkeypatch.setattr(scope_guard.win32gui, "WindowFromPoint", lambda point: 200)
+
+    def focus(hwnd):
+        session.fg = hwnd
+        return {"ok": True, "route": "test"}
+
+    monkeypatch.setattr(scope_guard.executor, "focus_window", focus)
+
+    result = scope_guard.ensure_scope(session, "click", {"x": 20, "y": 30})
+    payload = json.loads(result.text)
+
+    assert payload["target_refocused"] is True
+    assert payload["action_executed"] is False
+    assert payload["recovery_action_executed"] is True
+    assert session._screen_epoch == 1
+
+
+def test_scope_guard_records_same_process_window_replacement_as_stale_frame(monkeypatch):
     session = _Session()
     session._same_window_process = lambda foreground, target: (foreground, target) == (200, 100)
     monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
-    monkeypatch.setattr(
-        scope_guard,
-        "_focus",
-        lambda _hwnd: (_ for _ in ()).throw(AssertionError("must adopt before refocus")),
+    monkeypatch.setattr(scope_guard.win32gui, "WindowFromPoint", lambda point: 200)
+    result = scope_guard.ensure_scope(
+        session, "scroll", {"x": 10, "y": 10, "amount": -3},
     )
 
-    assert scope_guard.ensure_scope(session, "scroll", {"x": 10, "y": 10, "amount": -3}) is None
+    payload = json.loads(result.text)
+    assert payload["blocked"] is True
+    assert payload["target_rebound"] is True
+    assert payload["action_executed"] is False
     assert session.hwnd == 200
 
 
 def test_scope_guard_does_not_encode_application_specific_task_order():
     session = _Session()
-    session.task = "calculate a quotient, save a screenshot, then open QQ"
+    session.task = "calculate a quotient, save a screenshot, then open an unknown chat app"
     session.visible_evidence_ledger = []
     session.saved_screenshot_paths = []
 
-    assert scope_guard.ensure_scope(session, "launch", {"command": "QQ"}) is None
+    assert scope_guard.ensure_scope(session, "launch", {"command": "unknown-chat-app"}) is None
 
 
-def test_scope_guard_blocks_mutating_own_control_plane(monkeypatch):
+def test_scope_guard_does_not_use_product_title_blacklists(monkeypatch):
     session = _Session()
     monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
     session.task = "inventory installed applications and write a report"
@@ -119,12 +133,9 @@ def test_scope_guard_blocks_mutating_own_control_plane(monkeypatch):
         "foreground_matches_target": True,
     }
 
-    result = scope_guard.ensure_scope(session, "type_text", {"text": "unsafe"})
-
-    assert result is not None
-    payload = json.loads(result.text)
-    assert payload["blocked"] is True
-    assert payload["scope_guard"]["self_control_plane"] is True
+    assert scope_guard.ensure_scope(
+        session, "type_text", {"text": "literal input"},
+    ) is None
 
 
 def test_scope_guard_does_not_mistake_winpilot_named_browser_target_for_control_plane(monkeypatch):
@@ -145,7 +156,7 @@ def test_scope_guard_does_not_mistake_winpilot_named_browser_target_for_control_
     assert scope_guard.ensure_scope(session, "click", {"x": 1, "y": 2}) is None
 
 
-def test_winpilot_payload_name_does_not_disable_control_plane_guard(monkeypatch):
+def test_window_title_alone_never_changes_scope_ownership(monkeypatch):
     session = _Session()
     monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
     session.task = "save a note as WinPilotE2E_note.txt"
@@ -158,10 +169,9 @@ def test_winpilot_payload_name_does_not_disable_control_plane_guard(monkeypatch)
         "foreground_matches_target": True,
     }
 
-    result = scope_guard.ensure_scope(session, "type_text", {"text": "unsafe"})
-
-    assert result is not None
-    assert json.loads(result.text)["scope_guard"]["self_control_plane"] is True
+    assert scope_guard.ensure_scope(
+        session, "type_text", {"text": "literal input"},
+    ) is None
 
 
 def test_scope_guard_allows_explicit_control_plane_test(monkeypatch):
@@ -245,3 +255,40 @@ def test_scope_guard_requires_target_for_execute_subgoal_drag(monkeypatch):
     })
 
     assert json.loads(result.text)["missing_live_target"] is True
+
+
+def test_tool_session_delegates_composite_scope_to_child_controller(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="operate the current visual target")
+    calls = []
+    session._t_run_action_batch = lambda args: calls.append(
+        ("run_action_batch", args)
+    ) or ToolResult('{"ok": true, "verified": false}')
+    session._t_execute_subgoal = lambda args: calls.append(
+        ("execute_subgoal", args)
+    ) or ToolResult('{"ok": true, "verified": false}')
+    monkeypatch.setattr(
+        scope_guard,
+        "ensure_scope",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("composite dispatch must not perform an outer scope check")
+        ),
+    )
+    monkeypatch.setattr(
+        scope_guard,
+        "take_scope_recovery",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("composite dispatch must not consume child scope recovery")
+        ),
+    )
+
+    batch_args = {"actions": [{"action": "click", "x": 10, "y": 20}]}
+    subgoal_args = {"subgoal": "interact with the visible target"}
+    assert json.loads(session.dispatch("run_action_batch", batch_args).text)["ok"] is True
+    assert json.loads(session.dispatch("execute_subgoal", subgoal_args).text)["ok"] is True
+    assert calls == [
+        ("run_action_batch", batch_args),
+        ("execute_subgoal", subgoal_args),
+    ]

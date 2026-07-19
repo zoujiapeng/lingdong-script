@@ -3,7 +3,42 @@ from __future__ import annotations
 import pytest
 
 
-def test_interaction_runtime_preflight_requires_a_multimodal_provider(monkeypatch):
+def _fictional_communication_provider_type():
+    from winpilot.tasking.adapters import CommunicationAdapter
+
+    class NebulaRelayProvider(CommunicationAdapter):
+        id = "nebula_relay"
+        app_name = "Nebula Relay"
+        channels = ("Nebula Relay",)
+
+        def open_conversation(self, recipient: str, *, stage_id: str = ""):
+            return {"ok": True, "recipient": recipient}
+
+        def resolve_composer(self):
+            return {"ok": True}
+
+        def paste_or_attach_artifact(self, artifact_id: str, *, stage_id: str = ""):
+            return {"ok": True, "artifact_id": artifact_id}
+
+        def send_current_composer(self, artifact_id: str = "", *, stage_id: str = ""):
+            return {"ok": True, "artifact_id": artifact_id}
+
+        def send_text(self, text: str, *, stage_id: str = ""):
+            return {"ok": True, "text": text}
+
+        def verify_latest_outbound(
+            self,
+            *,
+            artifact_id: str = "",
+            text: str = "",
+            stage_id: str = "",
+        ):
+            return {"ok": True, "artifact_id": artifact_id, "text": text}
+
+    return NebulaRelayProvider
+
+
+def test_visual_model_runtime_preflight_requires_a_multimodal_provider(monkeypatch):
     from winpilot.perception import vlm
     from winpilot.tasking.capability import (
         CapabilityPlanner,
@@ -15,7 +50,7 @@ def test_interaction_runtime_preflight_requires_a_multimodal_provider(monkeypatc
         "拖动当前界面里的滑块到目标区域",
         cold_start=True,
     )
-    assert "interaction.infer" in {
+    assert "desktop.execute" in {
         capability
         for stage in contract.stages
         for capability in stage.execution.required_capabilities
@@ -118,9 +153,18 @@ def test_selected_unregistered_communication_adapter_fails_before_run(monkeypatc
         CapabilityUnsatisfiedError,
     )
     from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.intent import TaskIntentParser
 
-    contract = TaskContractCompiler().compile(
-        "用QQ给测试联系人发送消息",
+    monkeypatch.setattr(DomainAdapterRegistry, "_types", {})
+    monkeypatch.setattr(DomainAdapterRegistry, "_channel_names", {})
+    provider_type = _fictional_communication_provider_type()
+    DomainAdapterRegistry.register(provider_type)
+    parser = TaskIntentParser(semantic_extractor=lambda _task: {
+        "channel": "Nebula Relay",
+        "recipient": "Test Contact",
+    })
+    contract = TaskContractCompiler(parser=parser).compile(
+        "Send a message to Test Contact.",
         cold_start=True,
     )
     communication_adapters = {
@@ -137,24 +181,36 @@ def test_selected_unregistered_communication_adapter_fails_before_run(monkeypatc
             )
         )
     }
-    assert communication_adapters == {"qq_adapter"}
-    monkeypatch.setattr(DomainAdapterRegistry, "_types", {})
+    assert communication_adapters == {"nebula_relay_adapter"}
+    assert DomainAdapterRegistry.unregister(provider_type) is True
 
     report = CapabilityPlanner.runtime_provider_report(contract)
-    assert "runtime.communication_adapter.qq_adapter" in report["missing_capabilities"]
+    assert (
+        "runtime.communication_adapter.nebula_relay_adapter"
+        in report["missing_capabilities"]
+    )
     with pytest.raises(
         CapabilityUnsatisfiedError,
-        match="runtime.communication_adapter.qq_adapter",
+        match="runtime.communication_adapter.nebula_relay_adapter",
     ):
         CapabilityPlanner.assert_runtime_satisfiable(contract)
 
 
-def test_adapter_registry_probe_does_not_claim_login_or_installation() -> None:
+def test_adapter_registry_probe_does_not_claim_login_or_installation(monkeypatch) -> None:
     from winpilot.tasking.adapters import DomainAdapterRegistry
 
+    monkeypatch.setattr(DomainAdapterRegistry, "_types", {})
+    monkeypatch.setattr(DomainAdapterRegistry, "_channel_names", {})
+    assert DomainAdapterRegistry.probe_registration(
+        channel="Nebula Relay",
+        component="nebula_relay_adapter",
+    )["registered"] is False
+
+    provider_type = _fictional_communication_provider_type()
+    DomainAdapterRegistry.register(provider_type)
     probe = DomainAdapterRegistry.probe_registration(
-        channel="QQ",
-        component="qq_adapter",
+        channel="Nebula Relay",
+        component="nebula_relay_adapter",
     )
 
     assert probe["registered"] is True
@@ -162,9 +218,14 @@ def test_adapter_registry_probe_does_not_claim_login_or_installation() -> None:
     limitations = " ".join(probe["runtime_limitations"]).casefold()
     assert "installed" in limitations
     assert "login" in limitations
+    assert DomainAdapterRegistry.unregister(provider_type) is True
+    assert DomainAdapterRegistry.probe_registration(
+        channel="Nebula Relay",
+        component="nebula_relay_adapter",
+    )["registered"] is False
 
 
-def test_typed_stage_runtime_profile_does_not_reclassify_generated_goal(monkeypatch) -> None:
+def test_desktop_stage_runtime_profile_does_not_reclassify_generated_goal(monkeypatch) -> None:
     from winpilot.agent import runtime_profile
     from winpilot.tasking.compiler import TaskContractCompiler
 
@@ -172,7 +233,10 @@ def test_typed_stage_runtime_profile_does_not_reclassify_generated_goal(monkeypa
         "在当前界面拖动可见对象到目标区域",
         cold_start=True,
     )
-    stage = next(item for item in contract.stages if item.type.value == "InferInteraction")
+    stage = next(
+        item for item in contract.stages
+        if item.type.value == "ExecuteDesktopTask"
+    )
 
     def unexpected_raw_classifier(_task: str) -> bool:
         raise AssertionError("typed stage must not invoke raw task classifiers")
@@ -187,7 +251,7 @@ def test_typed_stage_runtime_profile_does_not_reclassify_generated_goal(monkeypa
     )
 
     assert profile.coding is False
-    assert profile.stage_type == "InferInteraction"
+    assert profile.stage_type == "ExecuteDesktopTask"
 
 
 def test_legacy_runtime_profile_keeps_raw_classifier_fallback(monkeypatch) -> None:

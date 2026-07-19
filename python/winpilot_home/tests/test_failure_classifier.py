@@ -9,7 +9,7 @@ def _classify(tool: str, payload: dict, **kwargs):
     return classify_failure(tool, kwargs.pop("args", {}), json.dumps(payload), **kwargs)
 
 
-def test_scope_guard_foreground_mismatch_is_window_focus_without_llm():
+def test_scope_guard_foreground_mismatch_is_recorded_as_window_focus_error():
     from winpilot.agent.failure_classifier import FailureType
 
     cls = _classify(
@@ -28,9 +28,8 @@ def test_scope_guard_foreground_mismatch_is_window_focus_without_llm():
 
     assert cls is not None
     assert cls.failure_type == FailureType.WINDOW_FOCUS_ERROR
-    assert cls.llm_required is False
-    assert cls.retryable is True
-    assert "focus_window" in cls.patch_hint
+    assert cls.confidence > 0.5
+    assert cls.normalized_reason
 
 
 def test_visual_grounding_block_is_not_misreported_as_action_success():
@@ -49,7 +48,7 @@ def test_visual_grounding_block_is_not_misreported_as_action_success():
 
     assert cls is not None
     assert cls.failure_type == FailureType.VISUAL_GROUNDING_REQUIRED
-    assert "did not run" in cls.patch_hint
+    assert cls.evidence["visual_grounding_required"] is True
 
 
 def test_execute_subgoal_needs_target_window_is_window_recovery_failure():
@@ -69,7 +68,6 @@ def test_execute_subgoal_needs_target_window_is_window_recovery_failure():
 
     assert cls is not None
     assert cls.failure_type in {FailureType.WINDOW_NOT_FOUND, FailureType.WINDOW_FOCUS_ERROR}
-    assert cls.llm_required is False
 
 
 def test_focus_window_missing_live_hwnd_is_window_not_found():
@@ -103,9 +101,7 @@ def test_click_element_anchor_missing_with_candidates_is_control_not_found():
 
     assert cls is not None
     assert cls.failure_type == FailureType.CONTROL_NOT_FOUND
-    assert cls.llm_required is False
     assert cls.evidence["candidate_click_labels"] == ["Apply", "Search locally"]
-    assert "candidate" in cls.strategy
 
 
 def test_successful_pending_mutation_is_not_reclassified_as_failure():
@@ -217,7 +213,6 @@ def test_ocr_missing_text_verify_detail_is_ocr_or_verify_failed():
         FailureType.OCR_MISREAD,
         FailureType.ACTION_SUCCEEDED_VERIFICATION_FAILED,
     }
-    assert cls.llm_required is False
 
 
 def test_screen_delta_foreground_mismatch_is_window_focus():
@@ -262,7 +257,7 @@ def test_wait_change_or_wait_stable_unmet_is_wait_timeout():
 
     assert cls is not None
     assert cls.failure_type == FailureType.WAIT_TIMEOUT
-    assert "bare sleep" in cls.patch_hint
+    assert cls.evidence
 
 
 def test_successful_wait_stable_timeout_setting_is_not_wait_timeout():
@@ -302,7 +297,7 @@ def test_ok_true_verified_false_missing_texts_is_action_succeeded_verify_failed(
     assert cls.evidence["missing_texts"] == ["READY_STATE"]
 
 
-def test_draw_without_pixel_change_has_dedicated_recovery_classification():
+def test_draw_without_pixel_change_uses_generic_visual_no_effect_classification():
     from winpilot.agent.failure_classifier import FailureType
 
     cls = _classify(
@@ -323,9 +318,8 @@ def test_draw_without_pixel_change_has_dedicated_recovery_classification():
     )
 
     assert cls is not None
-    assert cls.failure_type == FailureType.DRAW_NO_VISIBLE_CHANGE
-    assert cls.llm_required is False
-    assert "Re-observe" in cls.patch_hint
+    assert cls.failure_type == FailureType.VISUAL_ACTION_NO_EFFECT
+    assert cls.evidence["visual_action_failures"]
 
 
 def test_drag_without_pixel_change_uses_generic_spatial_recovery():
@@ -351,13 +345,10 @@ def test_drag_without_pixel_change_uses_generic_spatial_recovery():
 
     assert cls is not None
     assert cls.failure_type == FailureType.VISUAL_ACTION_NO_EFFECT
-    assert cls.llm_required is False
-    assert "source, path, target" in cls.patch_hint
+    assert cls.evidence["visual_action_failures"]
 
 
-def test_required_task_literal_missing_is_task_constraint_lost():
-    from winpilot.agent.failure_classifier import FailureType
-
+def test_failure_classifier_does_not_infer_constraints_from_task_words():
     cls = _classify(
         "execute_subgoal",
         {
@@ -371,10 +362,7 @@ def test_required_task_literal_missing_is_task_constraint_lost():
         tool_history=[],
     )
 
-    assert cls is not None
-    assert cls.failure_type == FailureType.TASK_CONSTRAINT_LOST
-    assert cls.llm_required is False
-    assert cls.evidence["missing_literals"] == ["SECRET_TOKEN_42"]
+    assert cls is None
 
 
 def test_successful_intermediate_batch_does_not_require_final_task_literal():
@@ -436,34 +424,17 @@ def test_runner_injects_failure_metadata_without_replacing_tool_result():
     assert terminal is None
     history_payload = json.loads(runner._tool_history[-1][2])
     assert history_payload["anchor_locator"]["found"] is False
-    tool_payload = json.loads(runner.messages[-2]["content"])
+    tool_payload = json.loads(runner.messages[-1]["content"])
     assert tool_payload["failure_classification"]["failure_type"] == "CONTROL_NOT_FOUND"
-    assert "failure recovery" in runner.messages[-1]["content"]
+    assert tool_payload["failure_recovery"]["executed"] is False
 
 
-def test_recovery_focus_enumerates_windows_focuses_and_observes():
-    from types import SimpleNamespace
-
+def test_recovery_focus_records_facts_without_touching_session():
     from winpilot.agent.failure_recovery import FailureRecoveryLayer, FailureRecoveryStatus
 
     class _Session:
-        def _action_target_context(self):
-            return {
-                "target_hwnd": 7,
-                "foreground_hwnd": 99,
-                "foreground_matches_target": False,
-            }
-
-        def _t_list_windows(self, _args):
-            return SimpleNamespace(text='hwnd=7 "Target" class=AppWindow')
-
-        def _t_focus_window(self, args):
-            assert args == {"hwnd": 7}
-            return SimpleNamespace(text='{"ok": true}')
-
-        def _t_observe(self, args):
-            assert args["hwnd"] == 7
-            return SimpleNamespace(text="Target window content")
+        def __getattr__(self, name):
+            raise AssertionError(f"recovery classification accessed session.{name}")
 
     layer = FailureRecoveryLayer()
     recovery = layer.handle_tool_result(
@@ -479,49 +450,36 @@ def test_recovery_focus_enumerates_windows_focuses_and_observes():
     )
 
     assert recovery is not None
-    assert recovery.status == FailureRecoveryStatus.LOCAL_RECOVERY_SUGGESTED
-    assert recovery.llm_required is False
-    assert [item["action"] for item in recovery.local_actions] == [
-        "inspect_window_context",
-        "list_windows",
-        "focus_window",
-        "observe_after_focus",
-    ]
+    assert recovery.status == FailureRecoveryStatus.RECORDED
+    assert recovery.classification.failure_type.value == "WINDOW_FOCUS_ERROR"
+    assert recovery.to_dict()["executed"] is False
 
 
-def test_recovery_focus_prefers_session_dispatch_over_private_handlers():
-    from types import SimpleNamespace
-
+def test_recovery_focus_never_dispatches_or_calls_private_handlers():
     from winpilot.agent.failure_recovery import FailureRecoveryLayer
 
     calls = []
 
     class _Session:
         def _action_target_context(self):
-            return {
-                "target_hwnd": 7,
-                "foreground_hwnd": 99,
-                "foreground_matches_target": False,
-            }
+            calls.append(("_action_target_context", {}))
+            raise AssertionError("classification must not inspect mutable session state")
 
         def dispatch(self, name, args):
             calls.append((name, dict(args)))
-            if name == "list_windows":
-                return SimpleNamespace(text='hwnd=7 "Target" class=AppWindow')
-            if name == "focus_window":
-                return SimpleNamespace(text='{"ok": true}')
-            if name == "observe":
-                return SimpleNamespace(text="Target window content")
-            raise AssertionError(name)
+            raise AssertionError("classification must not recursively dispatch")
 
         def _t_list_windows(self, _args):
-            raise AssertionError("recovery should use dispatch for list_windows")
+            calls.append(("_t_list_windows", {}))
+            raise AssertionError("classification must not call private handlers")
 
         def _t_focus_window(self, _args):
-            raise AssertionError("recovery should use dispatch for focus_window")
+            calls.append(("_t_focus_window", {}))
+            raise AssertionError("classification must not call private handlers")
 
         def _t_observe(self, _args):
-            raise AssertionError("recovery should use dispatch for observe")
+            calls.append(("_t_observe", {}))
+            raise AssertionError("classification must not call private handlers")
 
     layer = FailureRecoveryLayer()
     recovery = layer.handle_tool_result(
@@ -537,39 +495,37 @@ def test_recovery_focus_prefers_session_dispatch_over_private_handlers():
     )
 
     assert recovery is not None
-    assert calls == [
-        ("list_windows", {}),
-        ("focus_window", {"hwnd": 7}),
-        ("observe", {"hwnd": 7, "include_icons": False, "max_elements": 80}),
-    ]
-    assert [item.get("via") for item in recovery.local_actions[1:]] == [
-        "dispatch",
-        "dispatch",
-        "dispatch",
-    ]
+    assert calls == []
+    assert recovery.status.value == "recorded"
+    assert recovery.to_dict()["executed"] is False
 
 
-def test_local_recovery_probe_marks_dispatch_context_and_restores_it():
-    from types import SimpleNamespace
-
+def test_wait_recovery_records_timeout_without_touching_watcher():
     from winpilot.agent.failure_recovery import FailureRecoveryLayer
 
-    seen_depths = []
-
     class _Session:
-        _local_recovery_depth = 0
-
-        def dispatch(self, _name, _args):
-            seen_depths.append(self._local_recovery_depth)
-            return SimpleNamespace(text='{"ok": true}')
+        def _fast_controller(self):
+            raise AssertionError("classification must not access or wait on the controller watcher")
 
     session = _Session()
-    result, via = FailureRecoveryLayer()._dispatch_probe(session, "focus_window", {"hwnd": 7})
+    recovery = FailureRecoveryLayer().handle_tool_result(
+        tool_name="run_action_batch",
+        args={},
+        result_text=json.dumps({
+            "ok": False,
+            "verified": False,
+            "results": [{
+                "action": "wait_change",
+                "ok": False,
+                "data": {"ok": False, "changed": False},
+            }],
+        }),
+        session=session,
+    )
 
-    assert result.text == '{"ok": true}'
-    assert via == "dispatch"
-    assert seen_depths == [1]
-    assert session._local_recovery_depth == 0
+    assert recovery is not None
+    assert recovery.classification.failure_type.value == "WAIT_TIMEOUT"
+    assert recovery.to_dict()["executed"] is False
 
 
 def test_recovery_layer_does_not_attach_failure_to_verified_root_result():
@@ -594,6 +550,16 @@ def test_recovery_layer_does_not_attach_failure_to_verified_root_result():
     )
 
     assert recovery is None
+
+
+def test_legacy_auto_done_payload_is_not_proven_root_success():
+    from winpilot.agent.failure_recovery import _root_result_is_proven_success
+
+    assert _root_result_is_proven_success({
+        "ok": False,
+        "verified": False,
+        "auto_done": {"ok": True, "auto_done": True},
+    }) is False
 
 
 def test_recovery_layer_ignores_read_only_verify_miss():
@@ -658,10 +624,10 @@ def test_successful_unverified_click_before_literal_entry_is_not_constraint_lost
     assert cls is None
 
 
-def test_recovery_escalates_window_focus_after_consecutive_failures():
+def test_recovery_does_not_accumulate_hidden_escalation_state():
     from winpilot.agent.failure_recovery import FailureRecoveryLayer, FailureRecoveryStatus
 
-    layer = FailureRecoveryLayer(consecutive_llm_threshold=3)
+    layer = FailureRecoveryLayer()
     payload = json.dumps({
         "ok": False,
         "verified": False,
@@ -673,12 +639,10 @@ def test_recovery_escalates_window_focus_after_consecutive_failures():
     second = layer.handle_tool_result(tool_name="click", args={}, result_text=payload)
     third = layer.handle_tool_result(tool_name="click", args={}, result_text=payload)
 
-    assert first is not None and first.llm_required is False
-    assert second is not None and second.llm_required is False
-    assert third is not None
-    assert third.status == FailureRecoveryStatus.NEEDS_LLM
-    assert third.llm_required is True
-    assert third.retryable is False
+    assert first is not None and first.status == FailureRecoveryStatus.RECORDED
+    assert second is not None and second.status == FailureRecoveryStatus.RECORDED
+    assert third is not None and third.status == FailureRecoveryStatus.RECORDED
+    assert first.to_dict() == second.to_dict() == third.to_dict()
 
 
 def test_attach_recovery_metadata_preserves_non_json_tool_text():

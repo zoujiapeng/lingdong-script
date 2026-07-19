@@ -236,40 +236,6 @@ def test_complete_subgoal_is_idempotent_after_controller_completion(monkeypatch)
     assert result.terminal == "done"
 
 
-def test_complete_subgoal_does_not_treat_app_launch_as_new_blank_creation(monkeypatch):
-    import winpilot.agent.tools as tools_mod
-    from winpilot.agent import planner
-    from winpilot.agent.tools import ToolSession
-
-    monkeypatch.setattr(
-        tools_mod,
-        "verify",
-        SimpleNamespace(
-            check=lambda *_args, **_kwargs: SimpleNamespace(
-                verified=True,
-                detail="WPS window is visible",
-            )
-        ),
-    )
-    session = ToolSession(task="open WPS Spreadsheets and create a new blank workbook")
-    session.hwnd = 123
-    session.plan = planner.Plan([{
-        "goal": "open WPS Spreadsheets and create a new blank workbook",
-        "check": {"text_appears": "WPS Spreadsheets"},
-    }])
-
-    rejected = session._t_complete_subgoal({"index": 1})
-
-    assert session.plan.steps[0]["done"] is False
-    assert "does not prove" in rejected.text
-
-    session._new_blank_applied = True
-    accepted = session._t_complete_subgoal({"index": 1})
-
-    assert session.plan.steps[0]["done"] is True
-    assert accepted.terminal == "done"
-
-
 def test_complete_research_source_step_requires_matching_working_set_subject():
     from winpilot.agent import planner
     from winpilot.agent.tools import ToolSession

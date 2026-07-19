@@ -156,6 +156,103 @@ def test_main_agent_adapter_keeps_configured_thinking_until_request_routing(monk
     assert loop._main_agent_api_settings()["thinking"] is False
 
 
+def test_native_visual_request_enables_provider_thinking_at_request_boundary(monkeypatch):
+    from winpilot.agent import loop
+
+    api = {
+        "provider": "mimo",
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "model": "mimo-v2.5",
+        "thinking": False,
+        "max_tokens": 4096,
+        "temperature": 0.3,
+    }
+    monkeypatch.setattr(
+        loop.CONFIG,
+        "get",
+        lambda *path, default=None: (
+            api if path == ("api",)
+            else True if path == ("controller", "native_visual_thinking")
+            else default
+        ),
+    )
+    monkeypatch.setattr(loop, "_main_model_has_vision", lambda: True)
+
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(choices=[])
+
+    runner = loop.AgentRunner("operate the current visible application")
+    runner._visual_closed_loop_active = True
+    runner.messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": runner.task},
+    ]
+    runner._trace_debug = lambda *_args, **_kwargs: None
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
+
+    assert runner._chat(client, []) is not None
+    assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert captured["max_completion_tokens"] == 4096
+    assert "max_tokens" not in captured
+    assert "temperature" not in captured
+    assert runner._last_llm_thinking_enabled is True
+
+
+def test_native_visual_request_skips_text_only_escalation_model(monkeypatch):
+    from winpilot.agent import loop
+
+    api = {
+        "provider": "mimo",
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "model": "mimo-v2.5",
+        "thinking": False,
+        "max_tokens": 4096,
+        "temperature": 0.3,
+    }
+
+    def configured(*path, default=None):
+        if path == ("api",):
+            return api
+        if path == ("agent", "escalation_model"):
+            return "mimo-v2.5-pro"
+        if path == ("controller", "native_visual_thinking"):
+            return True
+        return default
+
+    monkeypatch.setattr(loop.CONFIG, "get", configured)
+    monkeypatch.setattr(loop, "_main_model_has_vision", lambda: True)
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(choices=[])
+
+    runner = loop.AgentRunner("operate the current visible application")
+    runner._visual_closed_loop_active = True
+    runner._escalate_next = True
+    runner.messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "authoritative frame"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,frame"}},
+        ]},
+    ]
+    runner._trace_debug = lambda *_args, **_kwargs: None
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
+
+    assert runner._chat(client, []) is not None
+    assert captured["model"] == "mimo-v2.5"
+    assert runner._last_llm_model == "mimo-v2.5"
+    assert runner._escalate_next is False
+
+
 def test_thinking_tool_history_can_preserve_complete_reasoning_content():
     from winpilot.agent.loop import _sanitize_assistant
 
