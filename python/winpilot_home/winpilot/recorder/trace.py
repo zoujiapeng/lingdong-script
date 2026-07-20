@@ -31,7 +31,13 @@ from ..perception.model import UIElement
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from ..utils.trace_payload import sanitize_trace_payload
+from ..vnext.telemetry import install_legacy_baseline_observer
 from . import replay_control
+
+# P0 is an observation-only BUS annotator.  Installing it before the recorder
+# sink means the existing JSONL trace receives the normalized baseline fields
+# without changing any model, tool, controller, or completion decision.
+LEGACY_BASELINE_OBSERVER = install_legacy_baseline_observer()
 
 _SCREENSHOT_TOOLS = {
     "click",
