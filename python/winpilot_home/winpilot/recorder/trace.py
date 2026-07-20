@@ -31,13 +31,8 @@ from ..perception.model import UIElement
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from ..utils.trace_payload import sanitize_trace_payload
-from ..vnext.telemetry import install_legacy_baseline_observer
+from ..vnext.telemetry import LegacyBaselineObserver
 from . import replay_control
-
-# P0 is an observation-only BUS annotator.  Installing it before the recorder
-# sink means the existing JSONL trace receives the normalized baseline fields
-# without changing any model, tool, controller, or completion decision.
-LEGACY_BASELINE_OBSERVER = install_legacy_baseline_observer()
 
 _SCREENSHOT_TOOLS = {
     "click",
@@ -96,6 +91,11 @@ class TraceRecorder:
         self._accepting = False
         self._action_steps: dict[str, int] = {}
         self._action_regions: dict[str, Region] = {}
+        # P0 observes only the private shallow copy enqueued for this
+        # recorder.  It is deliberately not registered as a BUS sink: live
+        # WebSocket subscribers and every other product consumer receive the
+        # original event object byte-for-byte unchanged.
+        self._baseline_observer = LegacyBaselineObserver()
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1024)
         self._dropped_events = 0
         self._worker = threading.Thread(
@@ -128,6 +128,8 @@ class TraceRecorder:
             run_id = self._run_id
             self._accepting = False
         self._queue.join()
+        if run_id:
+            self._baseline_observer.close_run(run_id)
         with self._lock:
             self._close()
         if run_id:
@@ -144,21 +146,25 @@ class TraceRecorder:
         self._accepting = False
 
     def _on_event(self, event: dict[str, Any]) -> None:
+        # BUS owns ``event`` and sends the same object to WebSocket subscribers
+        # and other sinks.  Never annotate it in place.
         with self._lock:
             if not self._accepting or self._file is None or event.get("type") == "trace":
                 return
+            record = dict(event)
+            self._baseline_observer.observe(record)
             run_id = self._run_id
             step: int | None = None
             phase = "after"
-            event_type = str(event.get("type") or "")
-            action_key = self._action_key(event)
+            event_type = str(record.get("type") or "")
+            action_key = self._action_key(record)
             frame_region: Region | None = None
-            if event_type == "agent_tool_start" and event.get("tool") in _SCREENSHOT_TOOLS:
+            if event_type == "agent_tool_start" and record.get("tool") in _SCREENSHOT_TOOLS:
                 self._step += 1
                 step = self._step
                 phase = "before"
                 self._action_steps[action_key] = step
-            elif event_type == "agent_tool" and event.get("tool") in _SCREENSHOT_TOOLS:
+            elif event_type == "agent_tool" and record.get("tool") in _SCREENSHOT_TOOLS:
                 step = self._action_steps.pop(action_key, None)
                 frame_region = self._action_regions.pop(action_key, None)
                 if step is None:
@@ -167,8 +173,8 @@ class TraceRecorder:
                 phase = "after"
             elif (
                 event_type == "agent_batch_action_start"
-                and event.get("tool") in _BATCH_SCREENSHOT_TOOLS
-                and event.get("trace_screenshot", True) is not False
+                and record.get("tool") in _BATCH_SCREENSHOT_TOOLS
+                and record.get("trace_screenshot", True) is not False
             ):
                 self._step += 1
                 step = self._step
@@ -176,8 +182,8 @@ class TraceRecorder:
                 self._action_steps[action_key] = step
             elif (
                 event_type == "agent_batch_action"
-                and event.get("tool") in _BATCH_SCREENSHOT_TOOLS
-                and event.get("trace_screenshot", True) is not False
+                and record.get("tool") in _BATCH_SCREENSHOT_TOOLS
+                and record.get("trace_screenshot", True) is not False
             ):
                 step = self._action_steps.pop(action_key, None)
                 frame_region = self._action_regions.pop(action_key, None)
@@ -196,7 +202,7 @@ class TraceRecorder:
             not in {"0", "false", "no", "off"}
         )
         if step is not None and phase in {"before", "batch_before"}:
-            expected_region = self._region_from_event(event)
+            expected_region = self._region_from_event(record)
             # A causal action record is useful only when its before-frame was
             # captured before input dispatch.  Make that invariant the normal
             # runtime contract; an explicit opt-out remains available for
@@ -227,7 +233,7 @@ class TraceRecorder:
                 except Exception:
                     frame = None
         elif step is not None and phase in {"after", "batch_after"} and strict_trace:
-            expected_region = frame_region or self._region_from_event(event)
+            expected_region = frame_region or self._region_from_event(record)
             if expected_region is not None:
                 try:
                     # Seal the post-action pixels before this event callback
@@ -242,7 +248,7 @@ class TraceRecorder:
                     frame = None
         if step is not None and phase in {"before", "batch_before"}:
             if frame_region is None:
-                frame_region = self._region_from_event(event)
+                frame_region = self._region_from_event(record)
             if frame_region is not None:
                 with self._lock:
                     if self._accepting and self._run_id == run_id:
@@ -250,7 +256,7 @@ class TraceRecorder:
         self._enqueue({
             "kind": "event",
             "run_id": run_id,
-            "record": dict(event),
+            "record": record,
             "step": step,
             "phase": phase,
             "frame": frame,
