@@ -54,7 +54,7 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 
 `codex/vnext-agent-core` 是迁移集成分支，不是永久 fork。未来代码可以在独立命名空间中旁路实现，但每个 run 只能选择一个 runtime，legacy 与 vNext 不能同时操作桌面。只读 shadow 可以比较编译结果、Broker 工具投影或 Verifier 判定，不能产生第二份鼠标键盘输入。
 
-达到默认切换门槛后，vNext 合并回 `master`，旧 owner 按证据逐项删除，迁移分支最终删除。长期仍只有一个产品入口和一个主分支。
+达到默认切换门槛后，旧 owner 仍按证据逐项删除；vNext 可以合并回 `master`，也可以保留用途清晰的迁移分支。仓库允许多个分支并存并全部推送到 GitHub，但长期仍只有一个产品入口，且每个 run 只能有一个桌面 mutation owner。
 
 ## 每轮工作开始前
 

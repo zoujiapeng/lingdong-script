@@ -136,7 +136,7 @@ npm run e2e:client:mixed
 | `python/engine/`, `python/features/` | legacy FlowScript/DSL 兼容路径，不是 GUI Agent 工具池 |
 | `python/winpilot_home/traces/`, `output/` | 本机运行产物，不提交 |
 
-`master` 是唯一最终长期分支。用户明确授权的 `codex/vnext-agent-core` 是大整改期间的迁移集成分支，不是第二条产品主线；达到切换和 legacy 删除门槛后合并回 `master` 并删除。其他临时分支只用于短期审查，合并后删除。
+`master` 是默认稳定分支，但仓库不限制只能保留一个长期分支。`codex/vnext-agent-core` 等迁移、实验或开发分支可以按明确用途持续存在，并应推送到 GitHub 以便协作和恢复；是否合并或删除由维护者根据阶段和证据决定。多分支不代表多套产品入口：同一次运行仍只能选择一个 GUI Runtime。
 
 ## 文档
 

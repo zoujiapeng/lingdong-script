@@ -120,7 +120,8 @@ GUI、Controller、感知、坐标、截图范围、上下文或 done gate 发�
 4. 运行与风险相称的验证，记录真实结果，不把模型自报 done 当成功。
 5. 提交前运行 `git diff --check` 并复核没有密钥、运行数据或无关文件。
 
-`master` 是唯一最终长期主分支。用户明确授权的 `codex/vnext-agent-core` 是大整改
-期间的迁移集成分支，不是第二条产品主线；达到默认切换和 legacy 删除门槛后必须
-合并回 `master` 并删除。其他临时开发分支应短期存在，合并后删除；提交信息使用
-清晰的命令式摘要，例如 `fix: fail closed on stale visual frames`。
+`master` 是默认稳定分支，但仓库允许多个用途清晰的长期、迁移、实验和开发分支
+并存。所有本地分支都应推送到 GitHub；合并和删除分支必须由维护者明确决定，不能
+把“已合并”自动等同于“应删除”。多分支不能引入第二套产品入口，也不能让同一次
+运行出现多个桌面 mutation owner。提交信息使用清晰的命令式摘要，例如
+`fix: fail closed on stale visual frames`。
