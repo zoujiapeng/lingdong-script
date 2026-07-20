@@ -1,6 +1,6 @@
 # vNext Agent 核心旁路
 
-状态：**P0/P1 已实现但审计整改中；Broker、Actor、Verifier、Planner/Inspector 仍未接入运行时**
+状态：**P0/P1 纯状态旁路已实现；Broker、Actor、Verifier、Planner/Inspector 仍未接入运行时**
 
 迁移分支：`codex/vnext-agent-core`
 
@@ -45,7 +45,7 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 
 ## 当前阶段
 
-当前分支正在审计整改 P0/P1 的纯旁路，仍不改变产品运行时：
+当前分支已完成 P0/P1 的纯旁路，仍不改变产品运行时：
 
 - P0 只在既有 trace/BUS 事件上增加观测字段；
 - P1 提供可重放的 MissionDefinition/Event/Projection/Reducer/Card 及 legacy shadow；
