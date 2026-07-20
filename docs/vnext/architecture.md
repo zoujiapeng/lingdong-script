@@ -1,6 +1,8 @@
 # vNext Agent 核心架构
 
-本文是 vNext 的目标架构，不描述已经完成的代码。当前实现事实仍以 [../architecture.md](../architecture.md) 和 [../winpilot-agent.md](../winpilot-agent.md) 为准。
+本文是 vNext 的目标架构，不描述完整运行时已经完成的代码。P0 观测旁路和 P1 纯 Mission 合同、
+Reducer、replay、MissionCard 及 legacy shadow 已实现，但尚未接入产品运行时；完整运行时的实现事实
+仍以 [../architecture.md](../architecture.md) 和 [../winpilot-agent.md](../winpilot-agent.md) 为准。
 
 ## 1. 设计目标
 
