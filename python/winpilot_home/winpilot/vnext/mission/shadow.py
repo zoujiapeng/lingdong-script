@@ -13,7 +13,7 @@ from .contracts import (
     MissionDefinition,
     MissionEvent,
     MissionProjection,
-    ObligationDefinition,
+    ObligationSpec,
 )
 from .reducer import MissionReducer
 
@@ -78,6 +78,66 @@ def _legacy_obligation_rows(contract: Any) -> tuple[tuple[Any, Any], ...]:
     return tuple(rows)
 
 
+def _artifact_names(value: Any) -> set[str]:
+    names: set[str] = set()
+    for item in _items(value):
+        if isinstance(item, Mapping):
+            name = _get(item, "name", "") or _get(item, "artifact_id", "")
+        else:
+            name = _get(item, "name", "") or _get(item, "artifact_id", "") or item
+        if str(name or "").strip():
+            names.add(str(name).strip())
+    return names
+
+
+def _row_edges(rows: tuple[tuple[Any, Any], ...]) -> tuple[set[tuple[int, int]], bool]:
+    """Return only explicit or cross-row artifact dependency edges.
+
+    A legacy list of obligations is not evidence that the rows form a safe
+    mission DAG.  Independent rows therefore collapse to one full-goal
+    obligation.  An edge is reliable only when it is declared by the legacy
+    dependency fields or when one row consumes an artifact named as another
+    row's output.
+    """
+    edges: set[tuple[int, int]] = set()
+    ids = [str(_get(raw, "id", "") or f"obligation-{index}") for index, (raw, _) in enumerate(rows, start=1)]
+    id_to_index = {item: index for index, item in enumerate(ids)}
+    for index, (_, stage) in enumerate(rows):
+        stage_id = str(_get(stage, "id", "") or "") if stage else ""
+        if stage_id:
+            id_to_index.setdefault(stage_id, index)
+    outputs: list[set[str]] = []
+    inputs: list[set[str]] = []
+    for raw, stage in rows:
+        raw_outputs = _artifact_names(_get(raw, "output_artifact_refs", ()))
+        raw_artifact = str(_get(raw, "artifact_ref", "") or "").strip()
+        if raw_artifact:
+            raw_outputs.add(raw_artifact)
+        stage_outputs = _artifact_names(_get(stage, "outputs", ())) if stage else set()
+        outputs.append(raw_outputs | stage_outputs)
+        raw_inputs = _artifact_names(_get(raw, "input_artifact_refs", ()))
+        stage_inputs = _artifact_names(_get(stage, "inputs", ())) if stage else set()
+        inputs.append(raw_inputs | stage_inputs)
+    for index, (raw, stage) in enumerate(rows):
+        explicit = [
+            *_items(_get(raw, "depends_on", ())),
+            *(_items(_get(stage, "depends_on", ())) if stage else ()),
+        ]
+        for dependency in explicit:
+            dep_index = id_to_index.get(str(dependency))
+            if dep_index is not None and dep_index != index:
+                edges.add((dep_index, index))
+        for producer_index, produced in enumerate(outputs):
+            if producer_index != index and produced.intersection(inputs[index]):
+                edges.add((producer_index, index))
+    return edges, bool(edges)
+
+
+def _safe_to_split(rows: tuple[tuple[Any, Any], ...]) -> bool:
+    """Only preserve a split when the legacy contract exposes hard edges."""
+    return len(rows) <= 1 or _row_edges(rows)[1]
+
+
 def project_legacy_contract(
     contract: Any,
     *,
@@ -102,7 +162,26 @@ def project_legacy_contract(
     stages, _ = _stage_maps(contract)
     rows = _legacy_obligation_rows(contract)
 
-    drafts: list[ObligationDefinition] = []
+    experience_policy = str(_get(contract, "experience_policy", "allow") or "allow")
+    # A contract with no required row cannot prove any user-visible completion
+    # condition.  Keep the original goal as one required obligation instead
+    # of manufacturing an apparently successful optional graph.
+    if not _safe_to_split(rows) or rows and not any(bool(_get(raw, "required", True)) for raw, _ in rows):
+        return MissionDefinition(
+            mission_id=mission_id,
+            run_id=run_id,
+            original_goal=original_goal,
+            obligations=(),
+            source="legacy_shadow",
+            experience_policy=experience_policy,
+            metadata={
+                "legacy_contract_format": str(_get(contract, "format", "task-contract/1") or "task-contract/1"),
+                "legacy_task_id": task_id,
+                "legacy_split_fallback": "full_goal",
+            },
+        )
+
+    drafts: list[ObligationSpec] = []
     used_ids: set[str] = set()
     stage_to_ids: dict[str, list[str]] = {}
     for index, (raw, stage) in enumerate(rows, start=1):
@@ -135,7 +214,7 @@ def project_legacy_contract(
         inputs = [str(_get(item, "name", "") or "") for item in _items(_get(stage, "inputs", ())) if _get(item, "name", "")]
         raw_inputs = _items(_get(raw, "input_artifact_refs", ()))
         inputs.extend(str(item) for item in raw_inputs if str(item))
-        draft = ObligationDefinition(
+        draft = ObligationSpec(
             id=obligation_id,
             desired_state=description,
             acceptance_criteria=criteria,
@@ -158,15 +237,21 @@ def project_legacy_contract(
     # If the legacy payload has no reliable obligation rows, the Definition's
     # constructor supplies the documented single-obligation fallback.
     if drafts:
-        rewritten: list[ObligationDefinition] = []
-        for draft, (raw, stage) in zip(drafts, rows):
+        artifact_edges, _ = _row_edges(rows)
+        rewritten: list[ObligationSpec] = []
+        for row_index, (draft, (raw, stage)) in enumerate(zip(drafts, rows)):
             dependency_ids: list[str] = []
             for stage_dependency in _items(_get(stage, "depends_on", ())) if stage else ():
                 dependency_ids.extend(stage_to_ids.get(str(stage_dependency), ()))
             explicit = _items(_get(raw, "depends_on", ()))
             dependency_ids.extend(str(item) for item in explicit)
+            dependency_ids.extend(
+                drafts[producer_index].id
+                for producer_index, consumer_index in artifact_edges
+                if consumer_index == row_index
+            )
             dependency_ids = [item for item in dict.fromkeys(dependency_ids) if item in used_ids and item != draft.id]
-            rewritten.append(ObligationDefinition(
+            rewritten.append(ObligationSpec(
                 id=draft.id,
                 desired_state=draft.desired_state,
                 acceptance_criteria=draft.acceptance_criteria,
@@ -187,9 +272,7 @@ def project_legacy_contract(
         original_goal=original_goal,
         obligations=tuple(drafts),
         source="legacy_shadow",
-        experience_policy=str(
-            _get(contract, "experience_policy", "allow") or "allow"
-        ),
+        experience_policy=experience_policy,
         metadata={
             "legacy_contract_format": str(_get(contract, "format", "task-contract/1") or "task-contract/1"),
             "legacy_task_id": task_id,
@@ -210,7 +293,7 @@ def legacy_trace_to_events(
     """
     events: list[MissionEvent] = []
     revision = 0
-    active = definition.obligations[0].id if definition.obligations else None
+    active = definition.stable_topological_order[0] if definition.stable_topological_order else None
     for raw in trace_events:
         event_type = str(raw.get("type") or "")
         if event_type == "agent_tool" and active:

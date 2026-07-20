@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping, Iterable
+
+
+JSONValue = Any
 
 
 MISSION_DEFINITION_FORMAT = "mission-definition/0"
@@ -26,6 +30,8 @@ def _as_tuple(value: Iterable[Any] | None) -> tuple[Any, ...]:
         return ()
     if isinstance(value, str):
         return (value,)
+    if isinstance(value, (set, frozenset)):
+        raise TypeError("unordered sets are not valid contract sequences")
     return tuple(value)
 
 
@@ -34,12 +40,25 @@ def _as_string_tuple(value: Iterable[Any] | None) -> tuple[str, ...]:
 
 
 def _freeze(value: Any) -> Any:
-    """Recursively freeze JSON-like event payloads."""
+    """Recursively freeze a strict JSONValue payload."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
+        return value
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+        frozen: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("JSON object keys must be strings")
+            frozen[key] = _freeze(item)
+        return MappingProxyType(frozen)
     if isinstance(value, (list, tuple, set, frozenset)):
+        if isinstance(value, (set, frozenset)):
+            raise TypeError("JSON arrays cannot be sets")
         return tuple(_freeze(item) for item in value)
-    return value
+    raise TypeError(f"value of type {type(value).__name__} is not JSONValue")
 
 
 def thaw(value: Any) -> Any:
@@ -54,7 +73,37 @@ def thaw(value: Any) -> Any:
 
 
 def _mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    return MappingProxyType({str(key): _freeze(item) for key, item in (value or {}).items()})
+    """Freeze an internal typed mapping without erasing its value objects.
+
+    Projection indexes intentionally contain ``EvidenceRef`` and
+    ``ArtifactRef`` instances, which are not JSONValue objects.  They are
+    immutable dataclass values and therefore safe to keep behind a mapping
+    proxy.  JSON-bearing contract fields use ``_json_mapping`` below.
+    """
+    if value is None:
+        value = {}
+    if not isinstance(value, Mapping):
+        raise TypeError("value must be a JSON object mapping")
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError("mapping keys must be strings")
+        normalized[key] = item
+    return MappingProxyType(normalized)
+
+
+def _json_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """Freeze and validate a mapping whose values must be strict JSONValue."""
+    if value is None:
+        value = {}
+    if not isinstance(value, Mapping):
+        raise TypeError("value must be a JSON object mapping")
+    frozen: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError("JSON object keys must be strings")
+        frozen[key] = _freeze(item)
+    return MappingProxyType(frozen)
 
 
 class MissionError(ValueError):
@@ -118,23 +167,44 @@ DEFAULT_ALLOWED_TRUST = (
 class EvidencePolicy:
     """Evidence requirements owned by an obligation, not by a model."""
 
-    allowed_trust: tuple[str, ...] = DEFAULT_ALLOWED_TRUST
-    minimum_evidence: int = 1
+    required_evidence_kinds: tuple[str, ...] = ()
+    preferred_evidence_kinds: tuple[str, ...] = ()
+    allow_independent_visual_verifier: bool = False
+    max_verification_attempts: int = 1
+    uncertain_policy: str = "blocked"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "allowed_trust", _as_string_tuple(self.allowed_trust))
-        if self.minimum_evidence < 1:
-            raise InvalidMissionDefinition("minimum_evidence must be positive")
+        object.__setattr__(self, "required_evidence_kinds", _as_string_tuple(self.required_evidence_kinds))
+        object.__setattr__(self, "preferred_evidence_kinds", _as_string_tuple(self.preferred_evidence_kinds))
+        object.__setattr__(self, "allow_independent_visual_verifier", bool(self.allow_independent_visual_verifier))
+        if int(self.max_verification_attempts) < 1:
+            raise InvalidMissionDefinition("max_verification_attempts must be positive")
+        object.__setattr__(self, "max_verification_attempts", int(self.max_verification_attempts))
+        if str(self.uncertain_policy) not in {"collect_more", "ask_user", "blocked", "fail"}:
+            raise InvalidMissionDefinition("invalid uncertain_policy")
+        object.__setattr__(self, "uncertain_policy", str(self.uncertain_policy))
+
+    @property
+    def allowed_trust(self) -> tuple[str, ...]:
+        """Compatibility view; trust is a runtime evidence invariant."""
+        return DEFAULT_ALLOWED_TRUST
+
+    @property
+    def minimum_evidence(self) -> int:
+        return 1
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "allowed_trust": list(self.allowed_trust),
-            "minimum_evidence": self.minimum_evidence,
+            "required_evidence_kinds": list(self.required_evidence_kinds),
+            "preferred_evidence_kinds": list(self.preferred_evidence_kinds),
+            "allow_independent_visual_verifier": self.allow_independent_visual_verifier,
+            "max_verification_attempts": self.max_verification_attempts,
+            "uncertain_policy": self.uncertain_policy,
         }
 
 
 @dataclass(frozen=True, slots=True)
-class ObligationDefinition:
+class ObligationSpec:
     """A desired result state; it contains no UI route or action steps."""
 
     id: str
@@ -161,6 +231,10 @@ class ObligationDefinition:
             "required_capabilities", "input_artifact_refs", "output_binding_names",
         ):
             object.__setattr__(self, name, _as_string_tuple(getattr(self, name)))
+        if not self.acceptance_criteria:
+            object.__setattr__(self, "acceptance_criteria", (self.desired_state,))
+        if not self.required_capabilities:
+            object.__setattr__(self, "required_capabilities", ("visual.interact",))
         policy = self.evidence_policy
         if isinstance(policy, Mapping):
             policy = EvidencePolicy(**dict(policy))
@@ -189,7 +263,9 @@ class ObligationDefinition:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "ObligationDefinition":
+    def from_dict(cls, raw: Mapping[str, Any]) -> "ObligationSpec":
+        if not isinstance(raw, Mapping):
+            raise InvalidMissionDefinition("obligation must be a JSON object")
         return cls(
             id=str(raw.get("id") or ""),
             desired_state=str(raw.get("desired_state") or raw.get("description") or ""),
@@ -218,6 +294,17 @@ class EvidenceRef:
     action_id: str | None = None
     artifact_id: str | None = None
     created_at: float | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("id", "mission_id", "run_id", "kind", "trust"):
+            if not str(getattr(self, name) or "").strip():
+                raise EvidenceScopeError(f"evidence {name} cannot be empty")
+            object.__setattr__(self, name, str(getattr(self, name)))
+        if not str(self.payload_hash or "").strip():
+            raise EvidenceScopeError("evidence payload_hash cannot be empty")
+        object.__setattr__(self, "payload_hash", str(self.payload_hash))
+        if self.created_at is not None and not math.isfinite(float(self.created_at)):
+            raise EvidenceScopeError("evidence created_at must be finite")
 
     @property
     def evidence_id(self) -> str:
@@ -292,6 +379,12 @@ class TargetBinding:
     title_snapshot: str
     established_by_evidence_ref: str
     epoch: int
+
+    def __post_init__(self) -> None:
+        if int(self.hwnd) <= 0:
+            raise InvalidMissionEvent("target hwnd must be positive")
+        if int(self.process_id) < 0 or int(self.epoch) < 0:
+            raise InvalidMissionEvent("target process_id/epoch cannot be negative")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -388,7 +481,7 @@ class MissionDefinition:
     mission_id: str
     run_id: str
     original_goal: str
-    obligations: tuple[ObligationDefinition, ...] = ()
+    obligations: tuple[ObligationSpec, ...] = ()
     goal_revision: int = 0
     source: str = "vnext"
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -400,6 +493,8 @@ class MissionDefinition:
     experience_policy: str = "allow"
 
     def __post_init__(self) -> None:
+        if self.format != MISSION_DEFINITION_FORMAT:
+            raise InvalidMissionDefinition(f"unsupported MissionDefinition format: {self.format!r}")
         if not str(self.mission_id).strip() or not str(self.run_id).strip():
             raise InvalidMissionDefinition("mission_id and run_id are required")
         if not str(self.original_goal).strip():
@@ -408,12 +503,12 @@ class MissionDefinition:
         object.__setattr__(self, "run_id", str(self.run_id))
         object.__setattr__(self, "original_goal", str(self.original_goal))
         obligations = tuple(
-            item if isinstance(item, ObligationDefinition) else ObligationDefinition.from_dict(item)
+            item if isinstance(item, ObligationSpec) else ObligationSpec.from_dict(item)
             for item in _as_tuple(self.obligations)
         )
         if not obligations:
             obligations = (
-                ObligationDefinition(
+                ObligationSpec(
                     id="obligation-1",
                     desired_state=self.original_goal,
                     acceptance_criteria=(self.original_goal,),
@@ -423,6 +518,8 @@ class MissionDefinition:
         ids = [item.id for item in obligations]
         if len(ids) != len(set(ids)):
             raise InvalidMissionDefinition("obligation ids must be unique")
+        if not any(item.required for item in obligations):
+            raise InvalidMissionDefinition("at least one obligation must be required")
         known = set(ids)
         for item in obligations:
             unknown = set(item.depends_on) - known
@@ -432,7 +529,10 @@ class MissionDefinition:
                 )
         _assert_acyclic(obligations)
         object.__setattr__(self, "obligations", obligations)
-        object.__setattr__(self, "metadata", _mapping(self.metadata))
+        try:
+            object.__setattr__(self, "metadata", _json_mapping(self.metadata))
+        except (TypeError, ValueError) as exc:
+            raise InvalidMissionDefinition("metadata must be JSONValue") from exc
         if int(self.goal_revision) < 0:
             raise InvalidMissionDefinition("goal_revision cannot be negative")
         topological_order = _stable_topological_order(obligations)
@@ -460,7 +560,7 @@ class MissionDefinition:
             run_id=run_id,
             original_goal=original_goal,
             obligations=(
-                ObligationDefinition(
+                ObligationSpec(
                     id="obligation-1",
                     desired_state=original_goal,
                     acceptance_criteria=(original_goal,),
@@ -486,18 +586,20 @@ class MissionDefinition:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "MissionDefinition":
+        if not isinstance(raw, Mapping):
+            raise InvalidMissionDefinition("MissionDefinition must be a JSON object")
         return cls(
             mission_id=str(raw.get("mission_id") or ""),
             run_id=str(raw.get("run_id") or ""),
             original_goal=str(raw.get("original_goal") or ""),
             obligations=tuple(
-                ObligationDefinition.from_dict(item)
+                ObligationSpec.from_dict(item)
                 for item in (raw.get("obligations") or ())
             ),
             goal_revision=int(raw.get("goal_revision") or 0),
             source=str(raw.get("source") or "vnext"),
             metadata=raw.get("metadata") or {},
-            format=str(raw.get("format") or MISSION_DEFINITION_FORMAT),
+            format=str(raw.get("format") or ""),
             stable_topological_order=raw.get("stable_topological_order") or (),
             experience_policy=str(raw.get("experience_policy") or "allow"),
         )
@@ -511,7 +613,7 @@ class MissionEvent:
     from a previous frame/role from mutating a newer mission projection.
     """
 
-    type: str
+    kind: str
     mission_id: str
     run_id: str
     base_revision: int
@@ -523,49 +625,56 @@ class MissionEvent:
 
     def __init__(
         self,
-        type: str | None = None,
+        kind: str | None = None,
         mission_id: str = "",
         run_id: str = "",
         base_revision: int = 0,
         payload: Mapping[str, Any] | None = None,
         event_id: str = "",
-        format: str = MISSION_EVENT_FORMAT,
+        format: str | None = MISSION_EVENT_FORMAT,
         evidence_refs: Iterable[str] | None = None,
         created_at: float | None = None,
         *,
-        kind: str | None = None,
+        type: str | None = None,
     ) -> None:
-        # ``type`` was the original P1 spelling; ``kind`` is the documented
-        # wire spelling.  Accept both without creating two event identities.
+        # ``type`` is accepted only as a legacy input alias.  The canonical
+        # field and wire representation remain ``kind``.
         if type and kind and str(type) != str(kind):
             raise InvalidMissionEvent("type and kind disagree")
-        resolved_type = str(type or kind or "")
-        object.__setattr__(self, "type", resolved_type)
+        resolved_kind = str(kind or type or "")
+        object.__setattr__(self, "kind", resolved_kind)
         object.__setattr__(self, "mission_id", str(mission_id))
         object.__setattr__(self, "run_id", str(run_id))
         object.__setattr__(self, "base_revision", int(base_revision))
         object.__setattr__(self, "payload", payload or {})
         object.__setattr__(self, "event_id", str(event_id or ""))
-        object.__setattr__(self, "format", str(format or MISSION_EVENT_FORMAT))
+        object.__setattr__(self, "format", MISSION_EVENT_FORMAT if format is None else str(format))
         object.__setattr__(self, "evidence_refs", _as_string_tuple(evidence_refs))
         object.__setattr__(self, "created_at", None if created_at is None else float(created_at))
         self.__post_init__()
 
     def __post_init__(self) -> None:
-        if not str(self.type).strip():
-            raise InvalidMissionEvent("event type cannot be empty")
+        if self.format != MISSION_EVENT_FORMAT:
+            raise InvalidMissionEvent(f"unsupported MissionEvent format: {self.format!r}")
+        if not str(self.kind).strip():
+            raise InvalidMissionEvent("event kind cannot be empty")
         if not str(self.mission_id).strip() or not str(self.run_id).strip():
             raise InvalidMissionEvent("event mission_id and run_id are required")
         if int(self.base_revision) < 0:
             raise InvalidMissionEvent("base_revision cannot be negative")
-        object.__setattr__(self, "type", str(self.type))
+        if self.created_at is not None and not math.isfinite(float(self.created_at)):
+            raise InvalidMissionEvent("created_at must be finite")
+        object.__setattr__(self, "kind", str(self.kind))
         object.__setattr__(self, "mission_id", str(self.mission_id))
         object.__setattr__(self, "run_id", str(self.run_id))
-        object.__setattr__(self, "payload", _mapping(self.payload))
+        try:
+            object.__setattr__(self, "payload", _json_mapping(self.payload))
+        except (TypeError, ValueError) as exc:
+            raise InvalidMissionEvent("payload must contain only JSONValue") from exc
         object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
         if not self.event_id:
             canonical = {
-                "type": self.type,
+                "kind": self.kind,
                 "mission_id": self.mission_id,
                 "run_id": self.run_id,
                 "base_revision": self.base_revision,
@@ -578,12 +687,13 @@ class MissionEvent:
             object.__setattr__(self, "event_id", f"event-{digest}")
 
     @property
-    def kind(self) -> str:
-        return self.type
+    def type(self) -> str:
+        """Legacy read alias; it is not a second serialized field."""
+        return self.kind
 
     @property
     def event_type(self) -> str:
-        return self.type
+        return self.kind
 
     @classmethod
     def create(
@@ -598,7 +708,7 @@ class MissionEvent:
         created_at: float | None = None,
     ) -> "MissionEvent":
         return cls(
-            type=event_type,
+            kind=event_type,
             mission_id=definition.mission_id,
             run_id=definition.run_id,
             base_revision=base_revision,
@@ -612,11 +722,10 @@ class MissionEvent:
         return {
             "format": self.format,
             "event_id": self.event_id,
-            "type": self.type,
             "mission_id": self.mission_id,
             "run_id": self.run_id,
             "base_revision": self.base_revision,
-            "kind": self.type,
+            "kind": self.kind,
             "payload": thaw(self.payload),
             "evidence_refs": list(self.evidence_refs),
             "created_at": self.created_at,
@@ -624,14 +733,20 @@ class MissionEvent:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "MissionEvent":
+        if not isinstance(raw, Mapping):
+            raise InvalidMissionEvent("MissionEvent must be a JSON object")
+        raw_kind = raw.get("kind")
+        raw_type = raw.get("type")
+        if raw_kind is not None and raw_type is not None and str(raw_kind) != str(raw_type):
+            raise InvalidMissionEvent("type and kind disagree")
         return cls(
-            type=str(raw.get("type") or raw.get("kind") or ""),
+            kind=str(raw_kind or raw_type or ""),
             mission_id=str(raw.get("mission_id") or ""),
             run_id=str(raw.get("run_id") or ""),
             base_revision=int(raw.get("base_revision", raw.get("revision", 0))),
             payload=raw.get("payload") or {},
             event_id=str(raw.get("event_id") or ""),
-            format=str(raw.get("format") or MISSION_EVENT_FORMAT),
+            format=str(raw.get("format") or ""),
             evidence_refs=raw.get("evidence_refs") or (),
             created_at=(float(raw["created_at"]) if raw.get("created_at") is not None else None),
         )
@@ -643,6 +758,7 @@ class ObligationProjection:
     status: ObligationStatus
     claim_evidence_refs: tuple[str, ...] = ()
     verified_evidence_refs: tuple[str, ...] = ()
+    verification_id: str | None = None
     failure_count: int = 0
     last_reason: str = ""
 
@@ -650,6 +766,8 @@ class ObligationProjection:
         object.__setattr__(self, "status", ObligationStatus(self.status))
         object.__setattr__(self, "claim_evidence_refs", _as_string_tuple(self.claim_evidence_refs))
         object.__setattr__(self, "verified_evidence_refs", _as_string_tuple(self.verified_evidence_refs))
+        if self.verification_id is not None:
+            object.__setattr__(self, "verification_id", str(self.verification_id))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -657,6 +775,7 @@ class ObligationProjection:
             "status": self.status.value,
             "claim_evidence_refs": list(self.claim_evidence_refs),
             "verified_evidence_refs": list(self.verified_evidence_refs),
+            "verification_id": self.verification_id,
             "failure_count": self.failure_count,
             "last_reason": self.last_reason,
         }
@@ -684,7 +803,14 @@ class MissionProjection:
     format: str = MISSION_PROJECTION_FORMAT
 
     def __post_init__(self) -> None:
+        if self.format != MISSION_PROJECTION_FORMAT:
+            raise InvalidMissionEvent(f"unsupported MissionProjection format: {self.format!r}")
+        if int(self.revision) < 0:
+            raise InvalidMissionEvent("projection revision cannot be negative")
         object.__setattr__(self, "obligation_states", tuple(self.obligation_states))
+        ids = tuple(item.id for item in self.obligation_states)
+        if len(ids) != len(set(ids)):
+            raise InvalidMissionEvent("projection obligation ids must be unique")
         object.__setattr__(self, "verified_facts", tuple(self.verified_facts))
         object.__setattr__(self, "artifact_bindings", _mapping(self.artifact_bindings))
         object.__setattr__(self, "evidence_refs", _mapping(self.evidence_refs))
@@ -692,7 +818,7 @@ class MissionProjection:
         object.__setattr__(self, "accepted_event_ids", _as_string_tuple(self.accepted_event_ids))
         object.__setattr__(self, "status", MissionStatus(self.status))
         if self.pending_approval is not None:
-            object.__setattr__(self, "pending_approval", _mapping(self.pending_approval))
+            object.__setattr__(self, "pending_approval", _json_mapping(self.pending_approval))
 
     @property
     def mission_id(self) -> str:
@@ -714,7 +840,7 @@ class MissionProjection:
         )
 
     @property
-    def obligations(self) -> tuple[ObligationDefinition, ...]:
+    def obligations(self) -> tuple[ObligationSpec, ...]:
         """Compatibility view of immutable definitions, never mutable status."""
         return self.definition.obligations
 
@@ -724,7 +850,7 @@ class MissionProjection:
                 return state
         raise KeyError(obligation_id)
 
-    def obligation_definition(self, obligation_id: str) -> ObligationDefinition:
+    def obligation_definition(self, obligation_id: str) -> ObligationSpec:
         for obligation in self.definition.obligations:
             if obligation.id == obligation_id:
                 return obligation
@@ -790,6 +916,12 @@ class MissionCard:
     failure_summary: FailureSummary | None = None
     format: str = MISSION_CARD_FORMAT
 
+    def __post_init__(self) -> None:
+        if self.format != MISSION_CARD_FORMAT:
+            raise InvalidMissionEvent(f"unsupported MissionCard format: {self.format!r}")
+        object.__setattr__(self, "verified_facts", tuple(self.verified_facts))
+        object.__setattr__(self, "artifact_bindings", tuple(self.artifact_bindings))
+
     @property
     def active_obligation_id(self) -> str | None:
         return self.active_obligation.id if self.active_obligation else None
@@ -811,6 +943,8 @@ class MissionCard:
     @classmethod
     def from_projection(cls, projection: MissionProjection) -> "MissionCard":
         active = None
+        relevant_facts: list[VerifiedFact] = []
+        relevant_artifacts: list[ArtifactRef] = []
         if projection.active_obligation_id:
             definition = projection.obligation_definition(projection.active_obligation_id)
             active = ActiveObligationCard(
@@ -821,13 +955,36 @@ class MissionCard:
                 required_capabilities=definition.required_capabilities,
                 depends_on=definition.depends_on,
             )
+            active_id = definition.id
+            for fact in projection.verified_facts:
+                evidence_related = any(
+                    projection.evidence_refs.get(ref_id)
+                    and projection.evidence_refs[ref_id].obligation_id == active_id
+                    for ref_id in fact.evidence_refs
+                )
+                if (
+                    active_id in fact.valid_for_obligation_ids
+                    or (not fact.valid_for_obligation_ids and fact.scope in {"mission", active_id})
+                    or evidence_related
+                ):
+                    relevant_facts.append(fact)
+            needed = set(definition.input_artifact_refs) | set(definition.output_binding_names)
+            seen_artifacts: set[str] = set()
+            for name, artifact in projection.artifact_bindings.items():
+                if (
+                    name in needed
+                    or artifact.artifact_id in needed
+                    or artifact.producer_obligation_id == active_id
+                ) and artifact.artifact_id not in seen_artifacts:
+                    seen_artifacts.add(artifact.artifact_id)
+                    relevant_artifacts.append(artifact)
         return cls(
             mission_id=projection.mission_id,
             mission_revision=projection.revision,
             original_goal=projection.original_goal,
             active_obligation=active,
-            verified_facts=projection.verified_facts,
-            artifact_bindings=tuple(projection.artifact_bindings.values()),
+            verified_facts=tuple(relevant_facts),
+            artifact_bindings=tuple(relevant_artifacts),
             target_binding=projection.target_binding,
             last_transition=projection.last_transition,
             failure_summary=projection.failure_summary,
@@ -869,6 +1026,31 @@ class EvidenceScope:
             return refs
         return cls(mission_id=mission_id, run_id=run_id, refs=tuple(refs or ()))
 
+    @classmethod
+    def from_source(
+        cls,
+        mission_id: str,
+        run_id: str,
+        source: Any = None,
+    ) -> "EvidenceScope":
+        """Read the current external registry snapshot for one apply call."""
+        if isinstance(source, EvidenceScope):
+            if source.mission_id != mission_id or source.run_id != run_id:
+                raise EvidenceScopeError("evidence scope does not match definition")
+            return source
+        current = source
+        if callable(current):
+            current = current()
+        elif current is not None and hasattr(current, "snapshot"):
+            current = current.snapshot()
+        elif current is not None and hasattr(current, "evidence_scope"):
+            current = current.evidence_scope
+        elif current is not None and hasattr(current, "refs"):
+            current = current.refs
+        if isinstance(current, Mapping):
+            current = current.values()
+        return cls.from_refs(mission_id, run_id, current)
+
     def require(self, ids: Iterable[str], *, obligation_id: str | None = None) -> tuple[EvidenceRef, ...]:
         normalized = _as_string_tuple(ids)
         if not normalized:
@@ -889,7 +1071,7 @@ class EvidenceScope:
         return tuple(found)
 
 
-def _assert_acyclic(obligations: tuple[ObligationDefinition, ...]) -> None:
+def _assert_acyclic(obligations: tuple[ObligationSpec, ...]) -> None:
     graph = {item.id: set(item.depends_on) for item in obligations}
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -910,7 +1092,7 @@ def _assert_acyclic(obligations: tuple[ObligationDefinition, ...]) -> None:
 
 
 def _stable_topological_order(
-    obligations: tuple[ObligationDefinition, ...],
+    obligations: tuple[ObligationSpec, ...],
 ) -> tuple[str, ...]:
     """Return a deterministic dependency-first order.
 
@@ -939,9 +1121,9 @@ def _stable_topological_order(
 # prevents callers from accidentally creating a second state structure.
 MissionState = MissionProjection
 
-# The migration documents use the more protocol-oriented name.  Keep one
-# implementation and one state owner while exposing that name to consumers.
-ObligationSpec = ObligationDefinition
+# Compatibility import for the pre-audit name.  There is one canonical class
+# and one serialized schema: ``ObligationSpec``.
+ObligationDefinition = ObligationSpec
 
 
 __all__ = [
@@ -949,7 +1131,7 @@ __all__ = [
     "MISSION_CARD_FORMAT", "MissionError", "InvalidMissionDefinition",
     "InvalidMissionEvent", "StaleRevisionError", "DuplicateEventError",
     "EvidenceScopeError", "IllegalTransitionError", "ObligationStatus", "MissionStatus",
-    "EvidencePolicy", "ObligationDefinition", "ObligationSpec", "EvidenceRef", "ArtifactRef",
+    "JSONValue", "EvidencePolicy", "ObligationSpec", "ObligationDefinition", "EvidenceRef", "ArtifactRef",
     "TargetBinding", "VerifiedFact", "TransitionSummary", "FailureSummary",
     "MissionDefinition", "MissionEvent", "ObligationProjection", "MissionProjection", "MissionState",
     "ActiveObligationCard", "MissionCard", "EvidenceScope", "thaw",
