@@ -85,6 +85,10 @@ Electron run API / trace / E2E harness
 
 ## 4. P0：先建立可测基线
 
+状态：**已完成（观测旁路）**。提交 `56b90f1` 建立 `vnext/telemetry.py`，由现有 trace BUS
+旁路标注 baseline；提交 `eaf8ae4` 在 legacy `AgentRunner` 已有决策事件上记录精确的上下文和
+工具 schema 字符数。两处都不参与 prompt、模型选择、工具 dispatch、Controller 或完成判断。
+
 目的：没有数据就不开始大迁移。
 
 逐回合记录：
@@ -120,7 +124,17 @@ P0 只添加观测，不改变决策。先从同一 Electron 入口收集 legacy
 
 P0 完成条件：能够准确回答一次失败的时间花在模型、Controller、等待还是 Verifier，模型当时看到多少上下文和哪些工具，以及 external oracle 为何失败。
 
+当前证据：`python/winpilot_home/tests/test_vnext_baseline.py`，以及已有 trace/evidence/eval
+测试回归通过。实际客户端 run 仍需在后续评测批次中收集 paired baseline；本提交不把单元测试当作
+真实 GUI 成功证据。
+
 ## 5. P1：纯 Mission 内核
+
+状态：**已完成（离线/shadow only）**。提交 `3de1227` 实现
+`python/winpilot_home/winpilot/vnext/mission/` 中的 versioned contracts、纯 Reducer、事件
+replay、stale revision/evidence scope 校验、单 obligation fallback、MissionCard 与
+`project_legacy_contract`/`project_legacy_trace`。它不被 legacy runner 读取，也不改变
+`task-contract/1`。
 
 新增内容仅限：
 
@@ -145,6 +159,8 @@ P1 不启动模型、不操控桌面、不替换 legacy runner。
 - stale revision event 被拒绝。
 
 P1 完成后可以用历史 trace 离线投影 MissionState，但仍不影响产品行为。
+
+本轮明确未实施 P2：没有 ToolCatalog、Capability Broker、shadow 工具投影或任何第二模型调用。
 
 ## 6. P2：Capability Broker shadow
 

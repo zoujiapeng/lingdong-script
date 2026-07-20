@@ -1,6 +1,6 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。所有名称均为设计合同，尚未实现。实现时应先固定 schema 与 reducer 测试，再接入模型或桌面动作。
+本文定义 vNext 各层交换的 typed data。P1 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；它们尚未接入模型、桌面动作或产品完成 gate。任何运行时接线都必须先经过迁移计划的 P2/P3 门槛。
 
 ## 1. 版本与基本规则
 
