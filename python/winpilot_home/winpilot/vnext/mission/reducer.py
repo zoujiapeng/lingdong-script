@@ -200,6 +200,15 @@ def _parse_transition(payload: Mapping[str, Any]) -> TransitionSummary:
     )
 
 
+def _event_evidence_ids(
+    event: MissionEvent,
+    payload: Mapping[str, Any],
+    key: str = "evidence_refs",
+) -> tuple[str, ...]:
+    """Merge wire-level evidence_refs with the legacy payload location."""
+    return tuple(dict.fromkeys((*event.evidence_refs, *_as_string_tuple(payload.get(key) or ()))))
+
+
 def _parse_fact(raw: Any) -> VerifiedFact:
     if isinstance(raw, VerifiedFact):
         return raw
@@ -261,8 +270,15 @@ def _apply_event(
         producer = _definition_for(projection, artifact.producer_obligation_id)
         if not artifact.artifact_id or not artifact.evidence_ref:
             raise IllegalTransitionError("artifact binding requires identity and evidence_ref")
+        artifact_evidence_ids = tuple(
+            dict.fromkeys((*event.evidence_refs, artifact.evidence_ref))
+        )
         refs = _evidence_refs(
-            projection, scope, (artifact.evidence_ref,), obligation_id=producer.id, required=True,
+            projection,
+            scope,
+            artifact_evidence_ids,
+            obligation_id=producer.id,
+            required=True,
         )
         if projection.obligation_state(producer.id).status is not ObligationStatus.VERIFIED:
             raise IllegalTransitionError("artifact producer obligation is not verified")
@@ -277,9 +293,10 @@ def _apply_event(
 
     if event_type == "target_bound":
         target = _parse_target(payload)
-        refs = _evidence_refs(
-            projection, scope, (target.established_by_evidence_ref,), required=True,
+        target_evidence_ids = tuple(
+            dict.fromkeys((*event.evidence_refs, target.established_by_evidence_ref))
         )
+        refs = _evidence_refs(projection, scope, target_evidence_ids, required=True)
         if not target.binding_id or target.hwnd < 0 or target.epoch < 0:
             raise IllegalTransitionError("invalid target binding")
         return _merge_evidence(replace(projection, target_binding=target), refs)
@@ -289,7 +306,16 @@ def _apply_event(
 
     if event_type == "transition_recorded":
         transition = _parse_transition(payload)
-        refs = _evidence_refs(projection, scope, transition.evidence_refs)
+        transition_refs = _event_evidence_ids(event, payload)
+        if transition_refs != transition.evidence_refs:
+            transition = TransitionSummary(
+                action=transition.action,
+                input_completed=transition.input_completed,
+                visible_effect=transition.visible_effect,
+                evidence_refs=transition_refs,
+                frame_id=transition.frame_id,
+            )
+        refs = _evidence_refs(projection, scope, transition_refs)
         return _merge_evidence(replace(projection, last_transition=transition), refs)
 
     if event_type == "obligation_claimed":
@@ -300,7 +326,7 @@ def _apply_event(
         previous = states[obligation_id]
         if previous.status not in {ObligationStatus.ACTIVE, ObligationStatus.CLAIMED}:
             raise IllegalTransitionError("obligation is not claimable")
-        evidence_ids = _as_string_tuple(payload.get("evidence_refs") or ())
+        evidence_ids = _event_evidence_ids(event, payload)
         if previous.status is ObligationStatus.CLAIMED and evidence_ids and set(evidence_ids) <= set(previous.claim_evidence_refs):
             raise DuplicateEventError("the same obligation evidence was already claimed")
         refs = _evidence_refs(projection, scope, evidence_ids, obligation_id=obligation_id)
@@ -326,7 +352,7 @@ def _apply_event(
         refs = _evidence_refs(
             projection,
             scope,
-            payload.get("evidence_refs") or (),
+            _event_evidence_ids(event, payload),
             obligation_id=obligation_id,
             required=verified,
         )
@@ -383,6 +409,16 @@ def _apply_event(
 
     if event_type == "fact_recorded":
         fact = _parse_fact(payload.get("fact") or payload)
+        fact_refs = _event_evidence_ids(event, payload)
+        if fact_refs and fact_refs != fact.evidence_refs:
+            fact = VerifiedFact(
+                id=fact.id,
+                statement=fact.statement,
+                evidence_refs=fact_refs,
+                scope=fact.scope,
+                valid_for_obligation_ids=fact.valid_for_obligation_ids,
+                expires_on_epoch_change=fact.expires_on_epoch_change,
+            )
         refs = _evidence_refs(projection, scope, fact.evidence_refs, required=True)
         return _merge_evidence(
             replace(projection, verified_facts=projection.verified_facts + (fact,)), refs,
@@ -578,12 +614,16 @@ class MissionReducer:
         *,
         payload: Mapping[str, Any] | None = None,
         base_revision: int | None = None,
+        evidence_refs: Iterable[str] | None = None,
+        created_at: float | None = None,
     ) -> MissionEvent:
         return MissionEvent.create(
             event_type,
             self.definition,
             base_revision=self._projection.revision if base_revision is None else base_revision,
             payload=payload,
+            evidence_refs=evidence_refs,
+            created_at=created_at,
         )
 
     @classmethod

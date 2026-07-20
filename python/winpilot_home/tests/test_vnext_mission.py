@@ -79,6 +79,38 @@ def test_definition_falls_back_to_one_lossless_obligation() -> None:
     assert definition.obligations[0].required_capabilities == ("visual.interact",)
 
 
+def test_definition_wire_metadata_and_event_kind_alias_are_deterministic() -> None:
+    definition = _definition()
+    assert definition.stable_topological_order == ("capture", "send")
+    assert definition.experience_policy == "allow"
+    restored = MissionDefinition.from_dict(definition.to_dict())
+    assert restored.to_dict() == definition.to_dict()
+
+    event = MissionEvent(
+        kind="obligation_claimed",
+        mission_id="m1",
+        run_id="r1",
+        base_revision=0,
+        payload={"obligation_id": "capture"},
+    )
+    assert event.type == event.kind == "obligation_claimed"
+    assert MissionEvent.from_dict(event.to_dict()).to_dict() == event.to_dict()
+
+
+def test_event_level_evidence_refs_are_scoped_by_the_reducer() -> None:
+    evidence = [_evidence("capture-proof", "capture")]
+    reducer = MissionReducer(_definition(), evidence=evidence)
+    reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "capture"}))
+    reducer.apply(
+        reducer.event(
+            "verification_recorded",
+            payload={"obligation_id": "capture", "verified": True},
+            evidence_refs=("capture-proof",),
+        )
+    )
+    assert reducer.projection.verified_obligation_ids == frozenset({"capture"})
+
+
 def test_reducer_derives_active_obligation_and_completion_from_evidence() -> None:
     definition = _definition()
     evidence = [_evidence("capture-proof", "capture"), _evidence("send-proof", "send"), _evidence("artifact-proof", "capture")]
