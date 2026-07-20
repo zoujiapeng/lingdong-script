@@ -10,221 +10,222 @@ vNext 要降低模型和本地层的重复职责，同时保留模型在未知 G
 
 ```mermaid
 flowchart LR
-    U["用户原始目标"] --> GC["Goal Compiler\n只生成结果义务"]
-    GC --> MR["Mission Reducer\nMissionState 唯一写入者"]
-    MR --> MS["Mission Ledger"]
-    MS --> RT["Mission Runtime\n机械选择 active obligation"]
-    RT --> CB["Capability Broker\n确定唯一执行路线/小工具面"]
-    CB -->|"visual_actor"| VA["Visual Actor\n唯一 GUI 语义写入者"]
-    CB -->|"deterministic/provider"| DX["Deterministic Capability Executor\n精确 I/O + receipt"]
+    U["用户原始目标"] --> GC["Goal Compiler\n只抽取可靠结果义务"]
+    GC --> MD["MissionDefinition\n原始目标 + ObligationSpec"]
+
+    MD --> TP["Task Profiler\n低频只读语义画像"]
+    TP --> PP["TaskProfileProposal"]
+    PP --> XP["Execution Policy\n校验并接受 ExecutionProfile"]
+
+    MD --> MR["Mission Reducer\n唯一 Mission 事件接受者"]
+    MR --> MP["MissionProjection\n可重放主线视图"]
+    MP --> RT["Mission Runtime\n机械选择 active obligation"]
+    XP --> RT
+
+    RT --> CB["Capability Broker\n本回合路线与小工具面"]
+    CB -->|visual_actor| VA["Visual Actor\n唯一 GUI mutation 提案者"]
+    CB -->|deterministic/provider| DX["Deterministic / Provider Executor\n精确 I/O + receipt"]
+
     FA["FrameAuthority\n最新权威帧"] --> VA
-    VA --> CT["Controller\n唯一动作事务"]
-    CT --> RD["RawDevice / Adapter\n单一 mutation owner"]
-    RD --> ER["Evidence Reducer"]
+    VA --> AP["ActorProposal"]
+    AP --> EN["Runtime Envelope\n绑定 revision/obligation/frame"]
+    EN --> CT["Controller\n唯一桌面动作事务"]
+    CT --> RD["RawDevice / DesktopActionQueue\n唯一物理输入写入者"]
+    RD --> ER["Evidence Registry / Reducer"]
     DX --> ER
     ER --> FA
-    ER --> OV["Obligation Verifier\n只读独立上下文"]
+
+    ER --> OV["Obligation Verifier\n独立只读上下文"]
     OV --> MR
     MR --> RT
-    RT -. "按事件" .-> PL["Planner\n只读 obligation patch"]
+
+    RT -. "按事件" .-> PL["Planner\n只读 MissionPatchProposal"]
     VA -. "按需" .-> VI["Visual Inspector\n只读视觉事实"]
     PL --> MR
     VI --> VA
 ```
 
-这里有两个不同的唯一写入权：
+## 2. 五个不可混淆的 owner
 
-- **桌面写入权**：只有 Visual Actor 可以提出 GUI mutation，Controller/RawDevice 只执行该动作。
-- **任务状态写入权**：只有 Mission Reducer 可以改变 MissionState。Actor、Planner、Verifier、Inspector 都不能直接改账本。
+### 2.1 桌面语义动作提案
 
-这避免“两个桌面 Agent”互相抢控制权，也避免多个模型通过自然语言暗中修改同一份主线。
+只有 **Visual Actor** 可以提出 GUI mutation。Planner、Task Profiler、Verifier、Inspector 不能点击、输入、滚动或拖拽。
 
-## 2. 不做什么
+### 2.2 桌面物理执行
+
+只有 **Controller -> RawDevice/DesktopActionQueue** 可以执行物理桌面输入。Visual Actor 提案，Controller 校验并执行；Actor本身不直接接触设备。
+
+### 2.3 Mission 状态
+
+只有 **Mission Reducer** 可以接受 MissionEvent 并产生新的 MissionProjection。模型只能提交 proposal、claim、report 或 assessment。
+
+### 2.4 执行策略
+
+只有 **Execution Policy** 可以把 TaskProfileProposal 转成有效 ExecutionProfile。Profiler 负责语义建议，不拥有最终路由权。
+
+### 2.5 证据
+
+只有 **EvidenceRegistry/Reducer** 可以登记不可变 run-scoped evidence。模型描述、工具 `ok` 和像素变化不能绕过 evidence contract。
+
+同一事实只能有一个 owner。Bridge 可以暂时转换数据形状，不能复制状态或重新解释语义。
+
+## 3. 不做什么
 
 vNext 不是：
 
 - 第二个具有鼠标键盘权限的 Agent；
 - 把一个巨型 Agent 拆成几个都能自由行动的模型；
-- 根据应用名选择工具或流程的路由器；
+- 根据应用名、任务标签或 benchmark 选择专用架构；
 - 把 11 个测试写成 obligation 模板的规则库；
 - 失败后自动切换 UIA/OCR/MCP 的 fallback 系统；
-- 让 Planner 预先输出点击、输入、滚动和坐标；
+- 让 Task Profiler 或 Planner 输出按钮、工具序列和坐标；
 - 让 Inspector 代替 Actor 选择动作；
-- 新建另一套前端、API、E2E 或 Artifact/Evidence 系统；
+- 新建另一套前端、API、E2E、Artifact 或 Evidence 系统；
 - 用更长 prompt 弥补应用发现、焦点、坐标、滚轮、拖拽、截图或验证工具不可靠。
 
-### 2.1 唯一 owner 表
+## 4. Goal Compiler、Task Profiler 与 Planner
 
-| 组件 | 唯一职责 | 明确禁止 |
+三者处理不同问题。
+
+| 组件 | 负责 | 禁止 |
 | --- | --- | --- |
-| Goal Compiler | 保留原始目标，抽取可可靠确定的结果义务、依赖和 broad capability | GUI 步骤、应用布局、坐标、题号规则 |
-| Mission Reducer | 校验事件并单写 MissionState | 看图、调用工具、生成计划 |
-| Mission Runtime | 机械激活 ready obligation，调度角色/验证 | 理解按钮、改 obligation 语义 |
-| Capability Broker | 按本地状态选择唯一执行路线并投影工具 | 根据应用名或 prompt 规划流程 |
-| Visual Actor | 从当前像素选择下一笔局部语义动作 | 维护全局主线、自验完成 |
-| FrameAuthority | 原子发布唯一当前 FrameState | 截图策略、画面理解、动作选择 |
-| Controller | 校验并执行一笔 canonical action transaction | OCR 吸附、换目标、恢复规划、完成判断 |
-| RawDevice / Direct Executor | 执行已验证的低层输入或精确 provider I/O | 解释用户目标、选择路线 |
-| Evidence Reducer/Registry | 归一化、哈希并引用动作、工件、receipt、oracle 证据 | 推断未观察到的业务事实 |
-| Verifier | 按 criteria 对 evidence 给只读 verdict | 修复桌面、写 MissionState |
-| Planner | 按事件提出高层 obligation patch | GUI 微步骤、直接写账本 |
-| Visual Inspector | 对冻结帧/ROI 提供只读视觉事实 | 决定或执行鼠标动作 |
-| AppResolver | 多源发现运行/安装/窗口候选及 provenance | 编写应用内工作流 |
+| Goal Compiler | 保留原始目标，抽取用户文本中可可靠确定的结果义务、依赖、工件和 broad capability | 猜界面、生成 GUI 步骤、决定工具 |
+| Task Profiler | 判断任务结构压力、建议执行深度、认知服务和升降档触发条件 | 生成 obligation、应用流程、按钮、坐标、runtime version |
+| Planner | 在预定义事件上提出高层 obligation/dependency patch | 当前 GUI 微步骤、工具调用、直接写状态 |
 
-同一事实只能有一个 owner。桥接层可以暂时转换数据形状，不能复制状态或重新解释语义。
+安全顺序是：
 
-## 3. Mission Ledger：主线外置
+1. Goal Compiler 生成 lossless MissionDefinition；无法可靠拆分时保持一个覆盖 `original_goal` 的义务。
+2. Task Profiler 读取原始目标、初始义务、已验证 session facts 和可用 runtime capability，提出 TaskProfileProposal。
+3. Execution Policy 校验 proposal，形成 accepted ExecutionProfile；Profiler unavailable 或低置信时使用安全 `standard` 默认。
+4. Planner 不是启动必需项。只有 profile 和运行事件证明需要时才调用。
 
-Mission Ledger 保存唯一结构化任务状态。它只做三件机械工作：
+详见 [execution-profile.md](execution-profile.md)。
 
-1. 保存有 evidence reference 的已确认事实、工件和绑定；
-2. 根据依赖与稳定拓扑顺序选择一个 ready obligation；
-3. 阻止没有合格证据的 obligation 或 mission 被标记完成。
+## 5. ExecutionProfile：同一架构的不同深度
 
-Ledger 不看截图、不理解按钮、不生成 GUI 路线、不判断某个界面属于什么“模式”。
+vNext 不为绘图、聊天、游戏或浏览器切换不同 Agent 架构。所有 GUI 任务共享同一骨架，只按深度和事件启用认知服务。
 
-### 3.1 Obligation 只描述状态
+### `direct`
 
-合法 obligation 示例：
+单一短义务、低风险、结果可确定或局部验证。不启动 Planner，尽量不启动额外视觉角色。
 
-```json
-{
-  "id": "send_artifact",
-  "desired_state": "当前任务捕获的图片已经发送给已绑定的手机联系人",
-  "acceptance_criteria": [
-    "接收人身份与当前任务绑定一致",
-    "发送对象的 artifact id 与捕获结果一致",
-    "存在发送后的可见证据、adapter receipt 或应用 oracle"
-  ],
-  "depends_on": ["capture_artifact", "bind_recipient"],
-  "forbidden_effects": ["不得发送给其他联系人"],
-  "required_capabilities": ["communication.send_artifact"],
-  "status": "pending"
-}
-```
+### `standard`
 
-禁止写入 obligation 的内容：
+默认档。MissionProjection + Visual Actor + Broker + obligation verification。通常保持一个 lossless obligation，由 Actor 自主探索当前应用。
 
-- 点击某个角落或某行；
-- 寻找加号、蓝色按钮或特定图标；
-- 输入联系人后滚动几次；
-- 某应用版本的固定坐标、控件别名或 fallback；
-- Controller 应该如何重试；
-- UIA/OCR 结果优先于像素的指令。
+### `orchestrated`
 
-### 3.2 不可靠拆分时保持一个义务
+明确存在跨应用工件、多个独立验收义务、外部等待、审批或复杂禁止效果时使用。允许多 obligation、MissionVerifier 和按需 Planner。
 
-Goal Compiler 只拆分用户文本能够可靠确定的结果依赖，例如“先产生工件，再发送同一工件”。如果拆分需要猜测界面、应用流程、联系人或中间按钮，Compiler 必须退化为：
+Depth 可以根据 accepted profile 和真实运行证据升降档，但不能由应用名、窗口标题或自由文本标签切换。`legacy/vnext` runtime version 始终由显式产品/实验配置决定，不能由 Profiler选择。
+
+## 6. Mission：事件与证据驱动的主线
+
+### 6.1 MissionDefinition
+
+MissionDefinition 保存：
+
+- `original_goal`；
+- immutable ObligationSpec；
+- dependency DAG；
+- artifact/fact binding requirements；
+- broad capability；
+- acceptance criteria 与 forbidden effects。
+
+ObligationSpec 不保存 lifecycle `status`，不包含按钮、selector、坐标或应用工作流。
+
+### 6.2 MissionEventLog
+
+所有状态变化由 accepted MissionEvent 记录，例如 activation、claim、verification、artifact binding、goal revision、approval 和 terminal event。事件必须绑定 revision 和 immutable evidence。
+
+### 6.3 MissionProjection
+
+MissionProjection 是 Reducer 从 MissionDefinition、accepted event log 和 EvidenceRegistry 产生的可重放视图。它可以缓存，但不是第二份独立真相。
+
+状态只保存一次：
 
 ```text
-O1.desired_state = original_goal
-O1.required_capabilities = [visual.interact]
+obligation_states[id] = pending | active | claimed | verified | blocked | superseded | canceled
 ```
 
-错误拆分会把错误细节级联给 Actor，因此“一个宽义务”优于“多个猜出来的步骤”。
+`verified_obligation_ids`、pending 列表和 mission coverage 只能是派生 property，不得再次序列化为权威字段。
 
-### 3.3 机械激活规则
+### 6.4 机械激活
 
-Mission Runtime 每次最多激活一个 obligation：
+Runtime 每次最多激活一个 obligation：
 
-1. 状态为 `pending`；
+1. lifecycle 为 `pending`；
 2. 所有 `depends_on` 已 `verified`；
 3. 没有未处理 approval；
-4. 所需输入 artifact/fact 已绑定；
-5. 按合同中的稳定拓扑顺序选择，不由模型临时挑选阶段。
+4. 所需 artifact/fact 已绑定；
+5. 按稳定拓扑顺序选择。
 
-若没有 ready obligation，Runtime 只能进入 `waiting_approval`、`waiting_external`、`blocked`、`failed` 或 `verified`，不能让模型自行跳过依赖。
+模型不能临时跳过依赖或自行选择另一个 obligation。
 
-## 4. Visual Actor：唯一桌面语义写入者
+## 7. MissionCard：Actor 的有界输入
 
-Visual Actor 每回合只处理一个 active obligation。它接收完整原始目标是为了避免局部目标失真，不是让它重新维护全局 todo。
+Visual Actor 每回合只处理一个 active obligation。它接收完整原始目标是为了防止局部目标失真，不是让它维护全局 todo。
 
-### 4.1 Actor 输入
+MissionCard 只包含：
 
-Actor 的稳定输入是一个 MissionCard，加上最新权威帧和 Broker 投影的少量工具：
-
-```json
-{
-  "original_goal": "用户原始表达，完整保留",
-  "active_obligation": {
-    "id": "...",
-    "desired_state": "...",
-    "acceptance_criteria": ["..."],
-    "forbidden_effects": ["..."]
-  },
-  "verified_facts": [
-    {"fact": "artifact-3 由当前任务捕获", "evidence_ref": "evidence-17"},
-    {"fact": "当前目标窗口身份已绑定", "evidence_ref": "evidence-19"}
-  ],
-  "last_transition": {
-    "action": "click",
-    "input_completed": true,
-    "visible_effect": "出现新的搜索界面",
-    "evidence_ref": "transition-22"
-  }
-}
-```
+- `original_goal`；
+- active obligation 的 desired state、criteria、forbidden effects；
+- 与当前义务有关的 verified facts 和 artifact bindings；
+- 必要的 preserve/future-dependency guardrails；
+- 当前 target binding 摘要；
+- 一个最新 transition；
+- 有界 failure/verifier feedback；
+- accepted ExecutionProfile 的必要摘要。
 
 Actor 不接收：
 
-- 其他模型的 chain-of-thought；
+- 其他角色 chain-of-thought；
 - 整份历史任务图和所有旧截图；
-- 未经验证的 OCR/UIA 推断；
-- 全部桌面、通信、MCP、Shell 与 artifact 工具；
-- legacy planner 的微步骤；
+- 未验证 OCR/UIA 推断；
+- 全部桌面、通信、MCP、Shell 和 artifact 工具；
+- legacy planner 微步骤；
 - 11 个测试的示例解法。
 
-### 4.2 Actor 输出
+## 8. Actor 只提交 proposal，Runtime 绑定身份
 
-Actor 每回合只能输出以下一种 typed intent：
+模型输出不携带 `mission_id`、revision、obligation id、frame id、evidence ids 或 broker projection id。
 
-1. 一笔当前界面动作；
-2. 请求新的完整观察或 `observe(image_region)`；
-3. `claim_obligation_done`；
-4. `blocked`，附局部事实；
-5. `request_replan`，附冲突或重复失败证据。
+模型可提交：
 
-Actor 不能：
+1. 一笔 `DesktopActionProposal`；
+2. `ObserveProposal`；
+3. `CapabilityRequest`；
+4. `InspectionRequest`；
+5. `ClaimObligationDone`；
+6. `BlockedReport`；
+7. `ReplanRequest`。
 
-- 直接改变其他 obligation；
-- 把 obligation 标记为 verified；
-- 调整全局依赖或任务顺序；
-- 创建未经 Reducer 接受的新事实；
-- 给自己最终验收通过；
-- 调用未由 Broker 暴露的工具；
-- 在 pointer lease 存在时启动另一笔无关 GUI 操作。
+Runtime 把 proposal 包入不可伪造的 ActorDecisionEnvelope，自动绑定：
 
-### 4.3 模型思考空间
+- run/mission/revision；
+- active obligation；
+- 当前 authoritative frame/epoch/target binding；
+- BrokerProjection；
+- 当前可引用 evidence scope。
 
-角色边界应短而稳定，不把任务策略塞入系统 prompt。模型的推理空间来自：
+Controller、Reducer、Planner 和 Verifier只接受 Runtime-bound envelope。这样模型不需要记忆或复制机械身份，也不能提交 stale/跨义务引用。
 
-- 清晰的局部状态与少量工具；
-- 最新权威像素；
-- 可信的动作结果；
-- 在首帧、复杂几何、重复失败和 verifier reject 时使用更强 reasoning；
-- 已验证的例行操作使用轻量模式。
+## 9. Capability Broker：确定性路线与小工具面
 
-不能通过不断追加“如果输入框怎样、如果动画怎样、如果棋盘怎样”的教学规则来提高单例成功率。
+Broker 不调用模型，也不理解应用工作流。它读取：
 
-## 5. Capability Broker：确定性路线与工具投影
-
-Broker 不调用模型，也不理解应用工作流。它只读取：
-
-- active obligation 的显式 broad capability；
-- TargetBinding 是否存在且新鲜；
-- PointerLease 是否存在；
-- 当前是否持有目标 obligation 需要的 artifact；
-- AdapterRegistry 中是否存在匹配、获授权且可验证的 adapter；
+- active obligation 的 broad capability；
+- accepted ExecutionProfile 与临时 capability grant；
+- TargetBinding 与 FrameState 是否有效；
+- PointerLease；
+- current-run artifact/fact binding；
+- Adapter/MCP registry、授权和 receipt 能力；
 - approval、desktop action lock 和 runtime health。
 
-Broker 明确不读取：
+Broker 不读取应用名称、窗口标题、测试题号、任务句关键词、历史坐标或 Actor自报“模式”来决定工作流。
 
-- 应用名称与窗口标题来决定工作流；
-- 测试题号或完整句子关键词；
-- Actor 声称的“绘图模式”“通信模式”；
-- 历史成功样例的坐标或 tool sequence。
-
-### 5.1 典型工具投影
+### 9.1 典型投影
 
 未绑定窗口：
 
@@ -236,74 +237,58 @@ open_app  switch_window  observe  blocked
 
 ```text
 observe  click  type_text  hotkey  scroll  drag  wait
-claim_obligation_done  blocked
+request_capability  claim_obligation_done  blocked
 ```
 
-pointer lease 存在：
+pointer lease：
 
 ```text
 move_mouse  mouse_up  wait  blocked
 ```
 
-视觉输出义务：
+视觉输出 capability 已接受时：
 
 ```text
 observe  click  hotkey  draw_strokes  wait
-claim_obligation_done  blocked
+request_capability  claim_obligation_done  blocked
 ```
 
-通信能力明确且所需身份/工件已具备时，才加入：
+工具目标通常小于十个。数字是认知预算，不是为凑数而硬编码；新增工具必须说明替代哪个旧入口。
 
-```text
-open_conversation  send_text  send_artifact  verify_delivery
-```
+### 9.2 CapabilityRequest
 
-MCP capability 明确、授权和 I/O 合同匹配时，才加入：
+Actor 可以请求 broad capability，例如 `pointer.dynamic` 或 `visual.read_text`。请求只是 proposal。Broker 必须校验 catalog、active obligation、当前状态、安全、provider 与授权后，才产生绑定 obligation/revision、有期限的 grant。禁止从自由文本解析应用模式。
 
-```text
-discover_mcp_tools  call_mcp_tool
-```
+### 9.3 路线互斥
 
-工具名是 vNext canonical contract；兼容层可以临时映射到当前 `focus_window` 等实现，但不能把 legacy 工具全集重新暴露给 Actor。
+某些 obligation 可以走 deterministic/provider route，例如 hash、精确转换、已授权 API 或可信 receipt。只有 I/O identity、授权、schema 和 verifier 均可证明时才允许。
 
-### 5.2 Broker 不是 Planner
+同一 obligation 的 mutation route 必须互斥：
 
-Broker 只做集合投影和前置条件检查。如果 capability 不可满足，它返回 typed `missing_capability`；如果 adapter 不可信，它不加载；如果窗口未绑定，它暴露发现工具。它不能自动调用工具、改变 obligation、猜测替代应用或生成恢复路线。
+- GUI route：Visual Actor -> Controller -> RawDevice；
+- deterministic/provider route：精确 executor -> receipt/evidence。
 
-目标是每回合通常小于十个工具。该数字是认知负担预算，不是为了凑数的硬编码；任何新增工具必须说明为何不能由现有通用原语表达，以及它会替换哪个旧入口。
+Provider executor 可以修改文件或获授权的外部系统，但不能操控桌面；Visual Actor 也不能同时获得该 obligation 的 mutation 工具。
 
-### 5.3 GUI 路线与确定性路线互斥
+## 10. Controller：只负责如何执行
 
-有些 obligation 不需要视觉模型，例如已绑定 artifact 的 hash/capture、精确文件转换、已授权 provider API 或能返回可信 receipt 的 MCP。Broker 可以在以下条件全部满足时选择 `deterministic/provider` 路线：
-
-- active obligation 的 broad capability 明确匹配；
-- 输入 artifact/fact identity 完整；
-- executor 已注册、获授权且 I/O schema 精确；
-- 成功结果有 deterministic evidence、provider receipt 或应用 oracle；
-- 该 executor 不需要理解未知 GUI；
-- 同一 obligation 不再把 mutation 工具暴露给 Visual Actor。
-
-否则选择 `visual_actor` 或返回 `missing_capability/blocked`。Broker 不能因“这个应用通常有 MCP”或“以前 adapter 成功过”自动改路线。
-
-Deterministic Capability Executor 可以修改文件或经授权的外部系统，但不能操控桌面；所有真实 GUI mutation 仍必须来自 Visual Actor -> Controller。两条路线的 evidence 最终进入同一个 ObligationVerifier 和 Mission Reducer。
-
-## 6. Controller：只负责如何执行
-
-Actor 选择：
+Actor 提案：
 
 ```json
 {
+  "kind": "desktop_action",
   "action": "click",
-  "frame_id": 41,
-  "image_x": 714,
-  "image_y": 382
+  "args": {"image_x": 714, "image_y": 382},
+  "local_intent": "激活当前可见目标"
 }
 ```
 
+Runtime envelope 自动绑定当前 frame/revision/obligation，再交给 Controller。
+
 Controller 负责：
 
-- image coordinate 到同一 FrameState/物理坐标的一次映射；
-- frame id、epoch、HWND、capture region 与窗口所有权校验；
+- submitted-image 坐标到同一 FrameState/物理坐标的一次映射；
+- frame、epoch、HWND、capture region 与窗口所有权校验；
 - Desktop Action Queue 和 input lease；
 - SendInput 的 down/up、滚轮、按键与路径插值；
 - 取消、超时、失焦和异常时释放输入；
@@ -312,14 +297,14 @@ Controller 负责：
 
 Controller 不得：
 
-- 因附近 OCR/UIA 标签更像而移动点击点；
+- 因 OCR/UIA 候选更像而移动点击点；
 - 自动选择另一个按钮或改写路径；
 - 根据应用名使用固定备用坐标；
-- 因动作无效而启动 UIA/OCR/MCP fallback cascade；
-- 自行返回上一步、重开应用或换目标；
+- 因动作无效启动 UIA/OCR/MCP fallback cascade；
+- 自行返回、重开应用或换目标；
 - 把 input completed、pixel changed 或 tool `ok` 当 obligation 完成。
 
-Controller 的动作结果必须区分：
+动作结果至少区分：
 
 ```text
 input_completed
@@ -329,130 +314,80 @@ frame_comparable
 semantic_completion = unknown
 ```
 
-## 7. 独立 Verifier：只读验收
+## 11. 独立 Verifier
 
-Verifier 是最有价值的第二个模型角色，但不是第二个 Agent。它没有桌面、Shell、文件写入或 adapter mutation 工具。
+Verifier 是有价值的第二个模型角色，但不是第二个 Agent。它没有桌面、Shell、文件写入或 adapter mutation 工具。
 
-### 7.1 三层验证
+三层验证：
 
-1. `ActionEffectVerifier`：输入是否实际执行、目标区域是否发生可比较的局部效果；尽量确定性完成。
-2. `ObligationVerifier`：当前 obligation 的 acceptance criteria 是否由证据满足；必要时使用独立视觉模型。
-3. `MissionVerifier`：所有 required obligation、依赖、artifact identity、forbidden effects 和 approval 是否完整闭合；优先确定性完成。
+1. `ActionEffectVerifier`：输入是否执行、目标区域是否有可比较局部效果，尽量确定性完成。
+2. `ObligationVerifier`：acceptance criteria 是否由证据满足，必要时调用独立视觉请求。
+3. `MissionVerifier`：所有 required obligation、依赖、artifact identity、forbidden effects 和 approval 是否闭合。
 
-### 7.2 证据顺序
-
-验证顺序固定为：
+证据顺序：
 
 1. 本地确定性 verifier；
-2. 应用 oracle、adapter receipt 或 provider receipt；
-3. 最后才使用独立视觉 Verifier。
+2. application oracle、adapter/provider receipt；
+3. 最后才是视觉 Verifier。
 
-例如文件存在、格式和 hash 不调用视觉模型；浏览器可信 pointer event 不交给 Actor 自评；消息送达优先 receipt/oracle；“画面是否像一朵花”才需要视觉判断。
+模型 Verifier 只输出 assessment 内容，Runtime 自动绑定 subject、revision、输入 evidence refs 和 verifier identity，形成 VerificationResult。它不读取 Actor chain-of-thought，也不能把 Actor claim 当证据。
 
-### 7.3 独立上下文
+同一个底层模型可以扮演 Actor 与 Verifier，但上下文、系统合同、schema、工具、预算和证据视角必须独立。相同模型仍有相关错误，因此 Verifier 应优先看 deterministic/oracle/receipt、前后帧或更高清终态 ROI，而不是简单重复 Actor 的同一输入。
 
-Obligation Verifier 只看：
+## 12. Planner 与 Visual Inspector
 
-- acceptance criteria 与 forbidden effects；
-- 必要的前后帧或 scoped crop；
-- Controller 的可信动作摘要；
-- artifact/evidence references；
-- provider/oracle 结果。
+### Planner
 
-它不读取 Actor 的完整推理，也不接受“我已经完成”的自然语言作为证据。输出只包含 `verified`、缺失条件、矛盾、证据引用和置信度。Verifier 的结果仍由 Mission Reducer 校验后写入 Ledger。
+仅在 accepted profile 或真实事件触发时调用，例如：
 
-## 8. Planner：事件触发的只读专家
+- Compiler 无法安全表达的跨义务依赖；
+- 两种实质不同的局部策略均失败；
+- 用户修改目标；
+- obligation 与新证据冲突；
+- approval policy 要求高层权衡。
 
-Planner 仅在以下事件出现时调用：
+Planner 只提交无身份的 MissionPatchProposal body。Runtime 绑定 base revision 和 evidence scope；Reducer校验无环依赖、original goal coverage、artifact identity、已验证义务和禁止 GUI 步骤后决定是否接受。
 
-- 初始目标包含可可靠识别的跨应用或 artifact dependency，但纯确定性 Compiler 无法安全表达；
-- 已尝试两种实质不同的局部策略且都没有进展；
-- 用户在运行中修改目标；
-- active obligation 与新证据发生冲突；
-- 即将执行现有 approval policy 定义的不可逆动作，需要重新权衡。
+### Visual Inspector
 
-Planner 输出只允许：
+默认先使用 Actor 自己的 `observe(image_region)`。只有多个 held-out 视觉任务证明额外只读分析有稳定 external-oracle 增益时才实现 Inspector。
 
-```json
-{
-  "obligations_to_add": [],
-  "obligations_to_update": [],
-  "dependency_changes": [],
-  "reason": "基于哪些已验证事实提出修改"
-}
-```
+Inspector 请求由 Runtime 绑定冻结 frame/ROI。报告只能包含可见事实、空间关系、候选、不确定性和建议放大区域，不能包含 tool call、点击点、拖拽动作、next step 或 completion claim。
 
-Planner 禁止输出按钮、坐标、点击顺序、滚动次数、输入内容执行步骤或应用布局。它的 patch 只是提案；Mission Reducer 必须检查无环依赖、原始目标覆盖、artifact identity 和已验证义务不可被无证据降级等不变量。
+## 13. 模型角色调度
 
-Planner 不常驻、不参与普通回合，也不是 Visual Actor 的上级主管。
+角色之间不自由对话，只通过 versioned typed contract 交换。默认顺序：
 
-## 9. Visual Inspector：按需只读视觉事实
+1. Goal Compiler 创建 MissionDefinition；
+2. Task Profiler 低频提出 profile，Execution Policy 接受或覆盖；
+3. Reducer/Runtime 选择 active obligation；
+4. Broker 投影路线和工具；
+5. Actor 提交 proposal；
+6. Runtime 绑定 envelope；
+7. action 交 Controller，claim 交 Verifier，replan 交 Planner，inspection 交 Inspector；
+8. 结果只产生 typed event/evidence；
+9. Reducer 产生新 MissionProjection；
+10. 下一回合使用新 projection 和新权威帧。
 
-Actor 可以在极小控件、复杂路径、图表、游戏通道、局部不清晰或多个相似候选时请求 Inspector：
+每条链默认串行并绑定冻结 revision/frame。迟到、超时、取消、格式错误或低置信结果保持状态不变并产生 typed failure fact。
 
-```json
-{
-  "frame_id": 41,
-  "region": [110, 180, 980, 690],
-  "question": "描述可通行区域的拓扑、关键转折和不确定处，不提出鼠标动作"
-}
-```
+## 14. 基础工具优先
 
-Inspector 只能返回：
+多角色系统不能替代基础工具。以下问题必须先修：
 
-- 可见事实；
-- 区域、候选、拓扑或关系；
-- 不确定性与置信度；
-- 建议继续放大的区域。
+- 已运行应用、隐藏窗口、托盘和安装入口发现；
+- target binding、焦点和 HWND 因果关系；
+- 模型图片与动作坐标是否同一 FrameState；
+- click、scroll、drag、held pointer、type 与 cancel 语义；
+- post-action 权威帧及时发布；
+- tool result 是否把 input completion 冒充 semantic success；
+- session artifact identity；
+- Broker 是否误裁剪或泄漏大工具面；
+- Runtime 是否把 verifier reject 变成重复相同动作。
 
-Inspector 不能输出最终点击/拖拽调用，不能操作桌面，不能改 MissionState。Actor 仍根据原始画面、Inspector 事实和当前 obligation 选择最终动作。
+只有工具链正确且离线静态画面仍证明模型不能理解几何时，才归因于 Actor；只有 Inspector 在多个 held-out 拓扑有可重复收益时才增加 Inspector。
 
-默认先使用现有 `observe(image_region)`。只有 held-out eval 证明“单次 Actor 高清裁剪”仍在多个任务族中稳定失败，Inspector 才进入实现阶段。
-
-## 10. 模型角色调度与上下文隔离
-
-模型之间不进行自由对话。Mission Runtime 是唯一调度者，所有角色通过 versioned typed contract 交换结果：
-
-| 角色 | 调用事件 | 输入 | 输出 | mutation 工具 | 可写状态 |
-| --- | --- | --- | --- | --- | --- |
-| Visual Actor | active visual obligation 需要下一决策 | MissionCard、当前帧、Broker 工具 | action/observe/claim/blocked/replan | 仅 Broker 当前投影 | 无，动作也由 Controller 执行 |
-| Obligation Verifier | 合法 claim 或新 evidence | criteria、必要帧、transition、oracle/receipt | VerificationResult | 无 | 无 |
-| Planner | 预定义跨义务事件 | original goal、obligation graph、verified facts、失败摘要 | MissionPatchProposal | 无 | 无，只提案 |
-| Visual Inspector | Actor 请求且策略允许 | 冻结 frame/ROI、视觉问题 | InspectionReport | 无 | 无 |
-
-每条决策链按顺序执行：
-
-1. Reducer/Runtime 选择 active obligation；
-2. Broker 根据当前本地状态投影工具；
-3. Actor 产生一个 typed decision；
-4. action 交给 Controller，claim 交给 Verifier，replan 事件交给 Planner，inspection 请求交给 Inspector；
-5. Controller/认知角色只返回 typed result；
-6. Reducer 校验 revision、evidence 与不变量，决定是否产生新 MissionState；
-7. 新状态和新权威帧进入下一回合。
-
-角色之间不共享 chain-of-thought，只共享经过 schema validation 的事实。Planner 不能把自己的 patch 作为 Actor 指令，Inspector 不能把候选变成 tool call，Verifier 不能在 reject 后执行修复。
-
-同一决策链默认串行并绑定冻结 revision/frame，避免迟到结果写入新状态。只读离线分析可以并发，但所有结果提交时都必须检查 revision/frame；超时、取消、格式错误或低置信结果保持状态不变并产生 typed failure fact。
-
-每个角色拥有独立调用预算：Actor 预算属于当前 obligation，Verifier 预算属于一次 claim/evidence generation，Planner/Inspector 预算属于对应事件。预算耗尽只能 blocked/fail closed，不能升级为另一个有 GUI 权限的模型。
-
-## 11. 基础工具优先
-
-多角色系统不是把所有不确定性都外包给更多模型。以下问题必须优先在基础工具和骨架解决：
-
-- 已运行应用、隐藏窗口、托盘和安装入口发现不完整；
-- target binding、焦点或 HWND 因果关系不可靠；
-- 模型看到的图片与动作坐标不是同一 FrameState；
-- 点击、滚轮、拖拽、held pointer、输入与取消语义不完整；
-- 动作后没有及时发布新权威帧；
-- tool result 把 input completed 误写成 semantic success；
-- 工件与“刚刚”的 session identity 丢失；
-- Broker 暴露过多或遗漏必要工具；
-- runtime 把 verifier reject 当成重试相同动作的理由。
-
-只有工具链正确且静态画面离线测试仍证明模型无法理解视觉几何时，才归因于 Actor 模型能力；只有 Inspector 在多个 held-out 拓扑上带来可重复收益时，才增加 Inspector。
-
-## 12. 完整任务示例
+## 15. 示例
 
 用户目标：
 
@@ -460,7 +395,7 @@ Inspector 不能输出最终点击/拖拽调用，不能操作桌面，不能改
 在画板画一朵花，截图后发给手机。
 ```
 
-Compiler 只生成结果义务：
+可能的 lossless obligation：
 
 ```text
 O1 产生符合描述的视觉工件
@@ -470,47 +405,45 @@ O4 发送 O2
 O5 验证送达
 ```
 
-- O1 激活时，Actor 只看到绘制目标、验收、禁止效果和绘制所需的小工具面。
-- O1 claim 后，由独立 Verifier 判断画面是否满足描述；通过后 Reducer 写入 verified。
-- O2 若是确定性 artifact operation，Runtime 直接执行，Actor 不参加。
-- O3 激活后 Broker 才加载窗口/通信能力，不再给 Actor 绘图工具。
-- O4 若 adapter 能证明 recipient 与 artifact identity，就由 adapter 单独执行；否则同一个 Actor 通过 GUI 操作。两条路径不能同时拥有 mutation 权限。
-- O5 由 receipt/oracle/Verifier 检查。所有 required obligation verified 后，Mission Reducer 才允许 mission 完成。
+Task Profiler 可以建议 `orchestrated`、obligation/mission verifier、artifact/recipient identity 和连续路径 capability，但不能建议 Paint、QQ、按钮或工具序列。
+
+- O1：Actor 只看绘制状态和小工具面；claim 后独立验证。
+- O2：若是确定性 capture，Runtime直接执行，Actor不参加。
+- O3/O4：只有相关 capability 与 identity 具备时才加载通信能力；GUI route 与 provider route 互斥。
+- O5：receipt/oracle/Verifier 闭合。所有 required obligation verified 后才完成 mission。
 
 Actor 从未维护五步主线，也没有第二个 GUI Agent 把主线翻译成点击剧本。
 
-## 13. `game-drag-v2` 的架构定位
+## 16. `game-drag-v2` 的定位
 
-该失败是视觉几何与动作轨迹压力测试，不应写入 Compiler 或 Broker。诊断顺序是：
+该失败是视觉几何与动作轨迹压力测试，不进入 Compiler、Profiler 或 Broker规则。顺序是：
 
-1. 核对 Actor 实际收到的图像范围、分辨率和 frame identity；
-2. 核对 `observe(image_region)` 是否足够表达高清局部观察；
-3. 核对 `drag` 关键点顺序、坐标映射、路径插值与 pointer oracle；
-4. 失败后废弃旧路线并用最新帧重新判断；
-5. 若多个随机拓扑仍稳定失败，再 A/B 只读几何 Inspector；
-6. Actor 保留最终路线决定权；成功/失败轨迹只进入 held-out eval 或训练数据。
+1. 核对图像范围、分辨率和 frame identity；
+2. 核对 `observe(image_region)`；
+3. 核对 drag 关键点、坐标映射、插值和 pointer oracle；
+4. 失败后用最新帧重新判断；
+5. 多个随机拓扑仍失败再 A/B 只读 Inspector；
+6. Actor 保留最终路线决定权，轨迹只进入 held-out eval 或训练数据。
 
-任何具体通道中心线、转折坐标或该网页的提示都不得进入生产文档、prompt 或代码。
+## 17. 与 legacy 的关系
 
-## 14. 与 legacy 的关系
-
-vNext 优先复用现有窄基础：
+vNext 复用：
 
 - Electron 用户入口与 run/trace 绑定；
 - FrameAuthority；
 - FastGuiController、RawDevice 与 Desktop Action Queue；
 - ScreenWatcher 与 held-pointer cleanup；
-- ArtifactStore、EvidenceRegistry 和应用/provider oracle；
-- 多源 AppResolver；
-- 冷启动、session context 与客户端 E2E harness。
+- ArtifactStore、EvidenceRegistry 与 oracle；
+- AppResolver；
+- cold-start、session context 与客户端 E2E harness。
 
-vNext 要旁路替代的主要职责：
+vNext 逐步替代：
 
-- AgentRunner 中的全局计划、工具全集、完成编排和重复账本；
+- AgentRunner 的全局计划、固定工具全集、完成编排和重复账本；
 - Compiler/StageRuntime 对未知 GUI 的重复语义拆解；
 - `_EXECUTE_DESKTOP_MODEL_TOOLS` 固定大工具面；
-- `done` 直接终止任务的语义；
+- `done` 直接终止任务；
 - DoneVerifier 中 action、obligation、mission 混合验收；
-- interaction stage、subgoal、adapter 与 Controller 之间重复的 planner 行为。
+- interaction stage、subgoal、adapter 与 Controller 间重复 planner 行为。
 
-具体阶段和删除门槛见 [migration-plan.md](migration-plan.md)。
+迁移分支是临时集成线。达到门槛后 vNext 合并回 `master`、旧职责净删，不能永久保留两套产品核心。具体阶段见 [migration-plan.md](migration-plan.md)。
