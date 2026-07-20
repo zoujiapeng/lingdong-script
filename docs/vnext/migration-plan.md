@@ -97,7 +97,8 @@ model adapter / timeout / usage accounting
 
 状态：**已完成（观测旁路）**。提交 `56b90f1` 建立 `vnext/telemetry.py`，由现有 trace BUS
 旁路标注 baseline；提交 `eaf8ae4` 在 legacy `AgentRunner` 已有决策事件上记录精确的上下文和
-工具 schema 字符数。两处都不参与 prompt、模型选择、工具 dispatch、Controller 或完成判断。
+工具 schema 字符数；提交 `c2f23a4` 补齐角色、Profiler/depth、obligation、oracle 和 artifact
+错误等可选 baseline 字段。三处都不参与 prompt、模型选择、工具 dispatch、Controller 或完成判断。
 
 目的：没有数据就不开始大迁移。
 
@@ -158,7 +159,8 @@ P0只添加观测，不改变决策。用同一 Electron入口收集 legacy基�
 状态：**已完成（离线/shadow only）**。提交 `3de1227` 实现
 `python/winpilot_home/winpilot/vnext/mission/` 中的 versioned contracts、纯 Reducer、事件
 replay、stale revision/evidence scope 校验、单 obligation fallback、MissionCard 与
-`project_legacy_contract`/`project_legacy_trace`。它不被 legacy runner 读取，也不改变
+`project_legacy_contract`/`project_legacy_trace`；提交 `e3f938d` 对齐 `ObligationSpec` 别名、稳定
+拓扑序、`kind`/`type` 双写线格式和事件级 evidence refs。它不被 legacy runner 读取，也不改变
 `task-contract/1`。
 
 新增内容仅限：
