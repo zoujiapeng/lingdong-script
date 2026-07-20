@@ -6,6 +6,21 @@
 
 让同一个 GUI Agent 从真实 Electron 客户端完成未知 Windows GUI 任务。11 个真实例子是黑盒探针，不是产品规格；不能为 QQ、画板、音乐、短视频、笔记、抓包或游戏逐项增加关键词、固定坐标、prompt 和 adapter 剧本。
 
+## vNext 旁路（`codex/vnext-agent-core`）
+
+该分支正在设计“单一 Visual Actor + 外置 Mission Ledger + 确定性 Capability Broker + 独立只读 Verifier + 按事件 Planner/Inspector”。先读 [`docs/vnext/README.md`](docs/vnext/README.md)。
+
+当前 vNext 状态仅为文档，尚未实现代码。后续工作必须遵守：
+
+- 只有 Visual Actor 可以提出 GUI mutation；
+- 只有确定性 Mission Reducer 可以修改 MissionState；
+- Planner、Verifier、Inspector 没有桌面写权限；
+- Obligation 只描述结果、验收、依赖和禁止效果，不包含点击步骤；
+- Broker 只根据 obligation capability、窗口、pointer lease、artifact 和 adapter 真实状态投影小工具面；
+- 基础工具、Frame/Controller、应用发现和调度骨架未经证明前，不通过 prompt 或新增模型角色修单例；
+- vNext 共用当前 Electron 入口和 E2E，不能形成第二套产品链；
+- 每个迁移切片必须列出未来删除的旧职责，最终合并到 `master` 并删除迁移分支。
+
 ## 唯一产品链
 
 ```text
@@ -100,4 +115,4 @@ npm run e2e:client:mixed
 
 ## 发布与分支
 
-`master` 是唯一长期分支。临时分支完成审查、CI 和合并后删除，不保留文档分支或第二条产品主线。
+`master` 仍是唯一最终长期分支。`codex/vnext-agent-core` 是用户明确授权的迁移集成分支，可以在大整改期间持续存在，但不得形成第二套产品入口或永久双栈；达到切换门槛后合并回 `master`，删除 legacy 职责和该分支。其他临时分支完成审查、CI 和合并后删除。

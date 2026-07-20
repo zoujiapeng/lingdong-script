@@ -178,6 +178,8 @@ E2E harness 使用 `uiautomation + Win32` 操作客户端自身控件。这不�
 
 本轮已落地的通用运行时改动包括：自适应 provider reasoning（首帧/恢复深思考，已验证例行回合轻量）、单次与总请求截止时间及安全重试、模型选择的 `observe.image_region` 高分辨率裁剪、以及带稳定变化结果的 `wait(persistent=true)`。这些能力没有引用 QQ、画板、WPS、浏览器或测试句子；后续应继续用未知任务验证，而不是新增样例分支。
 
+后续大整改采用 `codex/vnext-agent-core` 旁路：Mission Ledger 保存主线，确定性 Broker 投影小工具面，唯一 Visual Actor 负责桌面语义动作，Verifier 独立只读，Planner/Inspector 只按事件调用。当前仅完成设计文档，尚未实现代码；合同、阶段、实验和 legacy 删除门槛见 [vnext/README.md](vnext/README.md)。该旁路必须继续共用真实 Electron 入口，不能成为第二套 GUI 产品或测试捷径。
+
 ## 下一轮整改顺序
 
 ### A. 收敛动作 owner
