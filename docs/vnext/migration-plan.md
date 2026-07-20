@@ -1,29 +1,35 @@
 # vNext 旁路迁移计划
 
-本文规定如何在原仓库旁路建设 vNext、如何逐步切换，以及什么时候才能删除旧职责。原则是“小切片、同入口、单写入、可回退、以净删为终点”。
+本文规定如何在原仓库旁路建设 vNext、如何逐步切换，以及什么时候才能删除旧职责。原则是：**小切片、同入口、单写入、先 shadow、可回退、以净删为终点**。
 
 ## 1. 分支与产品入口
 
-迁移分支：`codex/vnext-agent-core`。
+迁移集成分支：`codex/vnext-agent-core`。
 
-该分支可以跨多个小 PR 持续建设，但不是第二个产品主线：
+该分支可在迁移期间跨多个小提交持续建设，但不是第二个长期产品主线：
 
-- `master` 保持当前可用行为；
-- vNext 定期吸收 `master` 的必要修复，避免长期漂移；
+- `master` 保持 canonical 产品事实和当前可用行为；
+- vNext 定期吸收 `master` 的必要修复，避免漂移；
 - 产品仍只有 Electron“智能代理”入口；
-- 未来由每个 run 的显式 runtime version 选择 `legacy` 或 `vnext`，不得根据任务文本自动路由；
+- 每个 run 的 `legacy/vnext` runtime version 由显式产品或实验配置选择，不由任务文本、Task Profiler 或模型暗中切换；
+- vNext 内部的 `direct/standard/orchestrated` ExecutionDepth 可以由 Profiler 建议并由 Execution Policy接受；这不等于切换产品 runtime；
 - 一个 run 只能有一个桌面 mutation owner；
-- shadow 只能比较纯状态、工具投影或 verifier verdict，不能让 legacy/vNext 同时移动鼠标键盘；
-- 达到默认切换与删除门槛后，旧职责按证据删除；vNext 可以合并回 `master`，迁移分支是否继续保留由维护者明确决定。
+- shadow 只能比较纯状态、profile、工具投影或 verifier verdict，不能让 legacy/vNext 同时移动鼠标键盘；
+- 默认切换完成后 vNext 合并回 `master`，旧职责净删，迁移分支归档或删除；耐久备份使用 tag。
 
 ## 2. 未来旁路目录
 
-为了避免继续向过重模块塞职责，建议第一阶段代码放入独立命名空间：
+为了避免继续向过重模块塞职责，建议迁移期代码放入独立命名空间：
 
 ```text
 python/winpilot_home/winpilot/vnext/
+  profiling/
+    contracts.py
+    profiler.py
+    policy.py
   mission/
     contracts.py
+    events.py
     reducer.py
     compiler.py
     runtime.py
@@ -32,8 +38,9 @@ python/winpilot_home/winpilot/vnext/
     catalog.py
     broker.py
   actor/
+    proposals.py
+    envelope.py
     loop.py
-    decisions.py
   verification/
     action_effect.py
     obligation.py
@@ -47,7 +54,7 @@ python/winpilot_home/winpilot/vnext/
   telemetry.py
 ```
 
-这只是迁移期间的物理隔离。切换完成后应把它提升为 canonical runtime，删除 `vnext` 命名和 legacy bridge；不能永久保留两套 Agent。
+物理隔离只是迁移手段。切换完成后应提升为 canonical runtime，删除 `vnext` 命名和 legacy bridge；不能永久保留两套 Agent。
 
 旁路复用现有服务，不复制：
 
@@ -59,39 +66,43 @@ ArtifactStore / EvidenceRegistry
 AppResolver
 provider adapters / MCP registry
 Electron run API / trace / E2E harness
+model adapter / timeout / usage accounting
 ```
 
 ## 3. 实施纪律
 
-每个实现 PR 只允许一个主要 owner 变化，并必须包含：
+每个实现提交只允许一个主要 owner 变化，并写明：
 
 - 本轮通用失败假设；
 - 新合同和唯一 owner；
 - 与 legacy 的桥接点；
-- 本轮不做的事情；
-- 受影响的旧职责及删除门槛；
+- 本轮明确不做什么；
+- 受影响旧职责及删除门槛；
 - unit/property/replay/E2E 证据；
 - 生产代码净增、删除和下一轮预期净删。
 
-建议把单个生产 PR 控制在可独立审查的几百行级别。若必须跨越约 500 行净新增，应优先拆成“合同/纯 Reducer”“Broker”“Actor 接线”“Verifier”多个 PR，而不是一次引入上万行新骨架。
+建议单个生产提交保持可独立审查。若明显超过约 500 行净新增，应优先拆成合同、纯 Reducer、Profiler shadow、Broker shadow、Actor 接线和 Verifier等切片，而不是一次引入上万行骨架。
 
-禁止在同一 PR 中同时：
+禁止在同一提交中同时：
 
-- 改 Compiler 拆分、Actor prompt、Controller 输入和 Verifier；
+- 改 Compiler 拆分、Profiler、Actor prompt、Controller 输入和 Verifier；
 - 新增多个常驻模型角色；
-- 复制 legacy ToolSession/AgentRunner 后再逐步清理；
-- 为一个失败样例加入 prompt、adapter 与坐标 fallback；
-- 修改真实客户端入口来给 vNext 特殊测试条件。
+- 复制 legacy ToolSession/AgentRunner 后再清理；
+- 为一个失败样例加入 prompt、adapter 和坐标 fallback；
+- 修改真实客户端入口给 vNext 特殊测试条件；
+- 广泛重命名并同时迁移 owner；
+- 在没有 shadow 数据时直接 enforce 工具裁剪或多义务状态。
 
 ## 4. P0：先建立可测基线
 
 目的：没有数据就不开始大迁移。
 
-逐回合记录：
+逐角色/回合记录：
 
 ```text
 runtime_version
 mission_or_stage_id
+model_role
 model_tool_count
 model_tool_schema_chars
 prompt_context_chars
@@ -105,77 +116,155 @@ target_adjustment_px
 model_elapsed_ms
 controller_elapsed_ms
 time_to_first_action_ms
+profile_call_count
 planner_call_count
 inspector_call_count
 ```
 
-P0 只添加观测，不改变决策。先从同一 Electron 入口收集 legacy 基线，并冻结一组：
+逐 mission 记录：
+
+```text
+recommended_execution_depth
+effective_execution_depth
+execution_policy_override_reason
+required_obligation_count
+verified_obligation_count
+false_done_count
+artifact_identity_errors
+external_oracle_pass
+```
+
+P0只添加观测，不改变决策。用同一 Electron入口收集 legacy基线，并冻结：
 
 - 受控随机视觉场景；
 - 原始 11 个真实任务；
 - 组合长任务；
-- 与实现者未共同调试的 held-out 任务；
+- 未共同调试的 held-out任务；
 - UIA/OCR 错误或空树负向场景；
-- 动画、遮挡、窗口抢焦点和已有实例场景。
+- 动画、遮挡、抢焦点、已有实例、高 DPI/多显示器场景。
 
-P0 完成条件：能够准确回答一次失败的时间花在模型、Controller、等待还是 Verifier，模型当时看到多少上下文和哪些工具，以及 external oracle 为何失败。
+完成条件：一次失败可以准确归因到入口、任务结构、窗口、帧、工具、Controller、模型、Verifier或外部环境，并知道模型当时看到什么。
 
-## 5. P1：纯 Mission 内核
+## 5. P1：纯 MissionDefinition、Event 与 Projection
 
 新增内容仅限：
 
-- versioned contracts；
+- versioned MissionDefinition/ObligationSpec；
+- MissionEvent；
 - 纯 Mission Reducer；
+- MissionProjection；
 - 机械 active obligation selection；
 - MissionCard projection；
 - event log/replay；
 - property tests。
 
-P1 不启动模型、不操控桌面、不替换 legacy runner。
+关键约束：
+
+- ObligationSpec不含 lifecycle status；
+- MissionProjection只保存一份 `obligation_states[id]`；
+- verified/pending/blocked id集合只能派生；
+- verified必须引用 accepted VerificationResult 与 immutable evidence；
+- Projection必须可从 Definition、accepted events 与 EvidenceRegistry重放；
+- 不建立脱离现有 TaskContract/Evidence的第二份持久化完成账本。
+
+P1不启动模型、不操控桌面、不替换 legacy runner。完成后可用历史 trace 离线投影，但不改变产品行为。
 
 测试重点：
 
-- dependency DAG 无环；
-- 同一事件 replay 得到相同状态；
-- claim 永远不能直接变 verified；
-- 没有 evidence ref 不能写 verified fact；
-- 单 obligation fallback 保留完整 original goal；
-- Planner patch 不能加入 GUI 步骤；
-- goal revision 不会静默丢失已覆盖的 required condition；
-- stale revision event 被拒绝。
+- dependency DAG无环；
+- deterministic replay；
+- stale event reject；
+- claim不能直接变verified；
+-无 evidence不能写 verified fact；
+- 单 obligation fallback保留完整 original goal；
+- Planner patch不能加入GUI步骤；
+- goal revision不丢 required coverage；
+- MissionProjection缓存删除后可完全重建。
 
-P1 完成后可以用历史 trace 离线投影 MissionState，但仍不影响产品行为。
+## 6. P2：Task Profiler 与 Execution Policy shadow
 
-## 6. P2：Capability Broker shadow
+先实现：
 
-建立 ToolCatalog 和纯 Broker：
+- TaskProfileProposal schema；
+- ExecutionProfile schema；
+- read-only TaskProfiler调用边界；
+- deterministic Execution Policy；
+- `direct/standard/orchestrated` depth；
+- CognitiveServices；
+- profile trace。
+
+Shadow阶段：
+
+- Profiler读取 original goal、初始 MissionDefinition、verified session facts和可用 capability；
+- 不生成 obligation、工具或GUI步骤；
+- 不选择 legacy/vNext；
+- Execution Policy只记录 accepted candidate profile，不改变 legacy执行；
+- malformed/unavailable/low-confidence走安全 `standard`；
+- 普通GUI回合不重复调用 Profiler。
+
+记录：
+
+```text
+profile_dimensions
+recommended_depth
+minimum_depth
+effective_depth
+requested/effective cognitive services
+policy overrides
+profile latency/cost
+over-profile / under-profile
+```
+
+P2进入 enforce 的门槛：
+
+- profile不含应用流程、题号和工具序列；
+- 改写任务、应用名变化与 held-out上保持语义稳定；
+- under-profile没有导致显式依赖/验收丢失；
+- over-profile额外成本可接受；
+- fixed-standard对照组存在。
+
+## 7. P3：Capability Broker shadow
+
+建立 ToolCatalog、CapabilityGrant 和纯 Broker：
 
 ```python
 project_execution(
-    mission_state,
+    mission_projection,
+    execution_profile,
     target_state,
     pointer_lease_state,
+    artifact_state,
     adapter_registry,
     approval_state,
+    active_grants,
 ) -> BrokerProjection
 ```
 
-先在 shadow 中把每个 legacy 回合映射为 vNext 工具面，记录：
+先在 shadow 中映射每个 legacy 回合：
 
-- legacy 实际调用工具是否包含在 projection；
-- route 是否在 `visual_actor`、`deterministic/provider` 和 `blocked` 之间保持单写入互斥；
-- projection 是否暴露无关工具；
-- 缺失工具来自合同错误还是基础能力缺口；
-- 平均/最大工具数与 schema 字符数；
-- pointer lease、未绑定窗口、artifact/adapter 状态切换是否正确。
+- legacy实际调用工具是否在 projection；
+- route在 `visual_actor/deterministic/provider/blocked` 间单写入互斥；
+- projection是否暴露无关工具；
+- 缺失工具来自 profile/contract错误还是基础能力缺口；
+- 平均/最大工具数与schema字符数；
+- pointer、target、artifact、adapter、MCP变化是否正确；
+- CapabilityRequest若出现，是否能被 catalog/policy安全解释。
 
-P2 不根据 shadow 结果改变 legacy 工具，不调用第二个模型。
+P3不改变 legacy工具，不调用第二个桌面模型。
 
-P2 进入执行前的门槛：held-out trace 上没有由应用名/题号产生的投影分支，且核心任务所需原语可以由 broad capability 和真实状态解释。
+进入 enforce 前：
 
-## 7. P3：Visual Actor 受控旁路
+- held-out trace无应用名/题号分支；
+- necessary tool recall达到门槛；
+- 普通工具面通常小于十个；
+- pointer lease工具面严格受限；
+- grant有revision/obligation/expiry并可审计。
 
-建立最小 Actor loop，只消费 MissionCard、FrameState 和 BrokerProjection。第一批只运行受控视觉目标：
+## 8. P4：Visual Actor 受控旁路
+
+建立最小 Actor loop，只消费 MissionCard、FrameState和BrokerProjection。模型只输出无Runtime身份的 ActorProposal，Runtime构造 ActorDecisionEnvelope。
+
+第一批只运行受控视觉目标：
 
 - 点击/输入/滚轮；
 - 静态拖拽；
@@ -184,20 +273,22 @@ P2 进入执行前的门槛：held-out trace 上没有由应用名/题号产生�
 - 外部变化等待；
 - unknown single obligation。
 
-P3 通过同一 Electron 客户端提交，但 runtime version 由显式实验配置选择，不在 prompt 或任务文本中隐藏。
+同一 Electron客户端提交任务，runtime version由显式实验配置选择。
 
 硬限制：
 
 - 每回合一笔 canonical transaction；
-- Actor 不持有全局 todo；
-- Actor 无 `done`，只有 claim/blocked/replan；
-- Controller 不改变目标；
-- legacy 与 vNext 不同时运行；
--失败完整保留，不通过添加靶场路线变绿。
+- Actor不持有全局 todo；
+- Actor无terminal done，只有claim/blocked/replan/request capability/inspection；
+- 模型不提交 mission/revision/obligation/frame/evidence identity；
+- Runtime envelope绑定当前状态；
+- Controller不改变目标；
+- legacy与vNext不同时运行；
+-失败保留真实oracle结论。
 
-## 8. P4：局部 claim 与独立 Verifier
+## 9. P5：claim 与独立 Verifier
 
-拆分当前混合 DoneVerifier 语义：
+拆分当前混合 DoneVerifier：
 
 ```text
 ActionEffectVerifier
@@ -205,132 +296,140 @@ ObligationVerifier
 MissionVerifier
 ```
 
-接入顺序：
+顺序：
 
-1. 先实现 deterministic evidence chain；
-2. 再接应用 oracle/provider receipt；
-3. 最后增加无 mutation 工具的独立视觉 Obligation Verifier；
-4. Verifier 只接收必要帧和 evidence，不接 Actor reasoning；
-5. Reducer 接受 verdict 后才修改状态。
+1. deterministic evidence chain；
+2. application oracle/provider receipt；
+3. 无mutation工具的独立视觉 ObligationVerifier；
+4. Runtime绑定subject/revision/evidence，模型只输出 VerifierAssessment；
+5. Reducer接受VerificationResult后才改变lifecycle；
+6.全部 required obligation verified 后再运行 MissionVerifier/CompletionContractVerifier。
 
 必须验证：
 
-- 相同证据重复 claim 不重复花费模型调用；
-- Actor 与 Verifier 不共享自我完成偏差上下文；
-- verifier unavailable 时 fail closed，state 不前进；
-- deterministic contradiction 优先于视觉 verdict；
-- mission complete 只由全部 required obligation verified 推导。
+- 相同evidence fingerprint重复claim不重复调用模型；
+- Actor与Verifier上下文隔离；
+- verifier unavailable/malformed fail closed；
+- deterministic contradiction优先；
+- EvidencePolicy最大次数和 uncertain policy生效；
+- false positive低于legacy，false negative可解释；
+- 同模型Actor/Verifier错误相关性有报告。
 
-## 9. P5：Planner 与 Inspector 按证据引入
+## 10. P6：Planner 与 Inspector 按证据引入
 
-Planner 和 Inspector 不是 P1-P4 的前置条件。
+Planner/Inspector不是P1-P5前置条件。
 
-Planner 只有在 trace 证明以下问题仍是主要瓶颈时引入：
+Planner引入判据：
 
-```text
-planner_required
-```
+- profile/Compiler无法安全表达跨义务依赖；
+- 两种实质不同局部策略失败；
+- 用户修改目标；
+- obligation与新证据冲突；
+- approval policy要求高层权衡。
 
-判据示例：跨应用 artifact dependency 无法由确定性 Compiler 安全表达；两种局部策略失败；用户修改目标；义务与新证据冲突。
+Inspector引入判据：
 
-Inspector 只有在以下 A/B 成立时引入：
+- Actor已用高清ROI；
+- frame/coordinate/path工具已通过确定性核对；
+- 多个held-out视觉拓扑仍失败；
+- Inspector相对Actor自行观察有external-oracle稳定增益；
+- 收益覆盖至少两个任务族。
 
-```text
-visual_inspector_required
-```
+两者只读、按事件、无常驻上下文、无GUI mutation工具。模型proposal由Runtime绑定revision/frame/evidence。
 
-- Actor 已使用高清 ROI；
-- frame/coordinate/drag 工具均通过确定性核对；
-- 单模型仍在多个 held-out 视觉拓扑中失败；
-- Inspector 改善 external oracle，而不是只让描述听起来更合理；
-- 收益覆盖至少两个不同视觉任务族。
+## 11. P7：真实任务 canary
 
-两个角色都只读、按事件调用、无常驻上下文、无 GUI mutation 工具。
+在受控场景稳定后运行：
 
-## 10. P6：真实任务 canary
-
-在受控场景稳定后，逐项运行：
-
-- 现有 11 个黑盒任务；
+- 11个黑盒任务；
 - 组合长任务；
-- 新增 held-out 未知任务；
+- held-out未知任务；
 - 同一任务不同应用版本/布局；
-- 已运行实例、托盘、登录态、弹窗和外部干扰。
+- 已运行实例、托盘、登录态、弹窗和外部干扰；
+- simple任务的over-profile；
+- complex任务的under-profile。
 
-每个 case 必须由同一客户端入口提交并隔离 memory。测试不得向 vNext 注入内部 obligation、route 或特殊工具；Compiler 输出和 BrokerProjection 必须作为被测结果，而不是测试 fixture。
+每个case从同一客户端入口提交并隔离memory。测试不得预置内部obligation、profile、route、工具或Inspector结论；Compiler、Profiler、Policy、Reducer、Broker和Verifier都是被测对象。
 
-canary 失败不自动回退到 legacy 继续操作桌面。可以在下一次独立 run 选择 legacy 进行对照，但不能让两个 runtime 在同一任务中交叉争夺动作所有权。
+Canary失败不在同一run偷切legacy。可以另开独立run对照。
 
-## 11. P7：默认切换
+## 12. P8：默认切换
 
-默认切换需要同时满足：
+默认切换必须同时满足：
 
-- contract/reducer/property tests 稳定；
-- Broker 未出现应用/测试专属分支；
-- 所有只读角色 mutation 权限测试为零；
-- 受控 E2E 不低于 legacy 基线；
-- held-out 任务的 grounded pass rate 不低于 legacy，false-done 更低；
-- mixed 任务中 obligation coverage、artifact identity 和 session reference 正确；
-- p50/p95 模型等待与总耗时有可解释结果；
-- 至少两种模型配置验证角色合同不依赖单一 provider；
-- Stop、pause、cancel、pointer cleanup 和 external wait 无回归；
-- 文档明确剩余失败，不使用历史 run 冒充当前通过。
+- contract/reducer/property tests稳定；
+- Profiler/Policy没有应用/测试专属路由；
+- Broker没有应用/测试专属分支；
+-只读角色mutation权限为零；
+- 受控E2E不低于legacy；
+- held-out grounded pass不低于legacy，false done更低；
+- mixed任务的obligation coverage、artifact identity和session reference正确；
+- p50/p95模型等待、time-to-first-action和总耗时可解释；
+-至少两种模型配置证明合同不依赖单一provider；
+-同模型不同角色的隔离与相关错误已校准；
+- stop/pause/cancel/pointer cleanup/external wait无回归；
+-文档明确剩余失败。
 
-默认切换先做小比例 canary，再扩大；回退是 run 级选择 legacy，不是在一次运行中动态换回旧 Agent。
+先做小比例canary，再扩大。回退是下一个独立run显式选择legacy，不在运行中切回旧Agent。
 
-## 12. P8：删除 legacy 职责
+## 13. P9：删除 legacy 职责
 
 切换不是完成，净删旧代码才是完成。每项删除需满足：
 
-1. vNext owner 已承载生产流量；
-2. legacy 调用 trace 连续观察窗口内为零；
-3. 等价或更强的 unit/E2E/oracle 证据存在；
-4. 不再需要读取旧序列化合同，或已有单向 migration adapter；
-5. 删除后不保留第二份状态、guard 或 planner。
+1. vNext owner已承载生产流量；
+2. legacy调用trace连续观察窗口内为零；
+3.等价或更强unit/E2E/oracle证据存在；
+4.旧序列化合同已有单向migration adapter或不再读取；
+5.删除后不保留第二份状态、guard、planner或tool route。
 
-## 13. 旧职责迁移矩阵
+## 14. 旧职责迁移矩阵
 
 | 当前职责 | vNext owner | 迁移方式 | 删除门槛 |
 | --- | --- | --- | --- |
-| `TaskContractCompiler` 对 GUI 的阶段/任务族解释 | Goal Compiler + Mission Reducer | 只保留可靠 obligation/artifact dependency，未知目标单 obligation | vNext contract 覆盖与 cold-start E2E 通过 |
-| `_EXECUTE_DESKTOP_MODEL_TOOLS` 固定大工具面 | ToolCatalog + Capability Broker | 先 shadow，再按 run 投影 | 所有执行回合从 BrokerProjection 取工具 |
-| `AgentRunner` 的全局 todo/计划维护 | Mission Ledger + Runtime | Actor 只消费 MissionCard | trace 无 legacy plan/state 读取 |
-| `AgentRunner` 的 frame/coordinate 镜像状态 | FrameAuthority + typed action | Actor 只引用 FrameState id | 所有动作通过统一 preflight |
-| `done` 直接结束 run | `claim_obligation_done` + Reducer | claim 触发 ObligationVerifier | 没有模型 terminal done 路径 |
-| `DoneVerifierMixin` 混合验证 | 三层 Verifier | 先 deterministic，再 oracle，再独立视觉 | obligation/mission verdict 全部 typed |
-| `RunStateMachine` 与多份进度账本重叠 | 本地 transaction state + MissionState | 保留动作 phase，删除全局语义副本 | 一个事实只有一个 owner |
-| `FailureRecoveryLayer` 选择恢复倾向 | FailureFact 分类 + Actor/Planner | 分类不执行；Actor决定局部，Planner提全局 patch | fallback cascade 调用为零 |
-| `InteractionStageEngine` 重复维护轮次/等待 | MissionRuntime + PointerLease/Watcher | 保留通用 external wait/lease | vNext 持续任务 E2E 通过 |
-| `SubgoalExecutor`/adapter 中 GUI planner | Controller 原语 + Actor | 保留确定性 adapter receipt，不保留 GUI 路线 | 通用路径覆盖并有第二任务族证据 |
-| UIA/OCR 自动语义升级 | 显式 probe capability | provenance/frame gate；默认不加载 | negative eval 无反向覆盖像素 |
+| `TaskContractCompiler` 对GUI任务族解释 | Goal Compiler | 只保留可靠obligation/artifact dependency，未知目标单obligation | coverage/cold-start E2E |
+| Actor自行判断任务复杂度 | TaskProfiler + ExecutionPolicy | 先shadow，再accept profile | over/under-profile达标 |
+| `_EXECUTE_DESKTOP_MODEL_TOOLS` 固定大工具面 | ToolCatalog + Broker | shadow后按run投影 | 所有Actor回合取BrokerProjection |
+| `AgentRunner`全局todo | MissionProjection + Runtime | Actor只消费MissionCard | trace无legacy plan读取 |
+| 模型复制frame/revision/obligation ids | Runtime envelope | proposal与身份分离 | 所有决策经envelope校验 |
+| `AgentRunner` frame/coordinate镜像 | FrameAuthority + typed envelope | 动作只引用当前绑定 | 统一preflight |
+| `done`直接结束run | claim + Verifier + Reducer | claim不改变状态 | 无模型terminal done |
+| `DoneVerifierMixin`混合验证 | 三层Verifier | deterministic -> oracle -> visual | typed verdict全覆盖 |
+| `RunStateMachine`与进度账本重叠 | transaction state + MissionProjection | 保留动作phase，删除全局语义副本 | 一个事实一个owner |
+| `FailureRecoveryLayer`选择恢复倾向 | FailureFact + Actor/Planner | 分类不执行 | fallback cascade为零 |
+| `InteractionStageEngine`重复轮次/等待 | MissionRuntime + Lease/Watcher | 保留通用wait/lease | 持续任务E2E |
+| Subgoal/adapter GUI planner | Controller原语 + Actor | 保留receipt，不保留GUI路线 | 第二任务族证据 |
+| UIA/OCR自动语义升级 | 显式probe capability | provenance/frame gate | negative eval通过 |
 
-## 14. Bridge 纪律
+## 15. Bridge纪律
 
-Bridge 只能做形状转换，不能承载业务逻辑：
+Bridge只能做形状转换：
 
-- legacy TaskContract -> initial MissionState；
-- vNext TransitionRecord -> 现有 trace/event projection；
-- 现有 FrameAuthority/Controller/Artifact/Evidence 的接口适配；
-- vNext run result -> 现有 Electron history view。
+- legacy TaskContract -> MissionDefinition；
+- legacy trace -> shadow TaskProfile/Mission/Broker输入；
+- vNext TransitionRecord -> 现有trace/event projection；
+- 现有FrameAuthority/Controller/Artifact/Evidence接口适配；
+- vNext run result -> Electron history view。
 
-Bridge 禁止：
+Bridge禁止：
 
-- 根据应用名补 obligation；
-- 把 legacy stage 转成点击步骤；
-- 在 vNext 失败后偷偷调用 legacy Agent；
-- 复制一份 FrameState 或 PointerLease；
-- 把 Actor claim 转成旧 `done=true` 绕过 Verifier。
+- 根据应用名补 obligation/profile；
+- 把legacy stage转成点击步骤；
+- vNext失败后偷偷调用legacy Agent；
+-复制FrameState、PointerLease或completion status；
+-把Actor claim转成旧`done=true`绕过Verifier；
+-接受模型提供的run/revision/frame/evidence身份覆盖Runtime绑定。
 
-每个 bridge 必须有删除 issue 和调用 telemetry；长期无调用后删除。
+每个bridge必须有删除条件和调用telemetry。
 
-## 15. 文档与状态维护
+## 16. 文档维护
 
-每个阶段完成时更新：
+每阶段完成时更新：
 
-- 本目录 README 的当前阶段；
-- 本迁移计划的完成证据和下一删除目标；
-- [evaluation.md](evaluation.md) 的基线/对照结果；
-- [failure-triage.md](failure-triage.md) 中出现的新通用失败模式；
-- 主架构文档中“已实现”与“目标设计”的边界。
+- 本目录README当前阶段；
+- 本迁移计划完成证据与下一删除目标；
+- [execution-profile.md](execution-profile.md) 的profile合同；
+- [evaluation.md](evaluation.md) 的基线/对照；
+- [failure-triage.md](failure-triage.md) 的通用失败模式；
+-主架构文档中“已实现/目标设计”边界。
 
-不得把本机绝对路径、单次临时截图、密钥或未复现的成功结论写入长期文档。具体 run 证据留在 trace/report，文档只记录可复现命令、结论边界和长期不变量。
+具体run证据留在trace/report。长期文档不保存密钥、本机绝对路径、单次临时截图或未复现成功。
