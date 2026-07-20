@@ -1,36 +1,36 @@
 # vNext 架构决策记录
 
-本文件记录已经确定的边界和仍需用实验回答的问题，防止后续实现因为某个失败样例重新引入第二个 GUI Agent、应用剧本或重复状态。
+本文件记录已经确定的边界和仍需用实验回答的问题，防止后续实现因为某个失败样例重新引入第二个 GUI Agent、应用剧本、模型伪造运行时身份或重复状态。
 
 ## 已接受决策
 
 ### D001：只有一个 Visual Actor
 
 - 状态：accepted
-- 决策：只有 Visual Actor 可以提出 GUI mutation；不存在第二个可点击、输入或拖拽的 Planner/Verifier/Inspector。
+- 决策：只有 Visual Actor 可以提出 GUI mutation；不存在第二个可点击、输入或拖拽的 Planner、Task Profiler、Verifier 或 Inspector。
 - 原因：多个桌面模型会争夺窗口、帧、鼠标状态与目标语义，恢复时无法确定唯一 owner。
 - 推论：所有其他模型角色的 tool allowlist 必须静态证明为 read-only。
 
-### D002：MissionState 由确定性 Reducer 单写
+### D002：Mission 由确定性 Reducer 单写且可重放
 
 - 状态：accepted
-- 决策：Actor/Planner/Verifier 只提交 typed proposal、claim、verdict，Reducer 校验 revision 和不变量后写状态。
-- 原因：让任一模型直接更新主线会重新制造不可 replay 的隐式计划。
-- 推论：相同 state + event 必须产生相同 next state；所有状态变化可审计。
+- 决策：Actor、Profiler、Planner、Verifier 只提交 typed proposal、claim 或 assessment；Reducer 校验 revision 和不变量后接受事件并产生新的 MissionProjection。
+- 原因：让任一模型直接更新主线会重新制造不可 replay 的隐式计划；另建一份独立完成账本会与 TaskContract/Evidence 产生双重真相。
+- 推论：MissionProjection 必须能从 MissionDefinition、accepted event log 和 immutable run-scoped evidence 重建；相同 state + event 必须产生相同 next state。
 
 ### D003：Obligation 描述结果，不描述路线
 
 - 状态：accepted
-- 决策：只包含 desired state、acceptance、dependency、forbidden effect、broad capability 和 artifact binding。
-- 原因：到达界面前无法知道的按钮和路径会限制模型随机应变。
-- 推论：无法可靠拆分时生成一个覆盖 original goal 的 obligation。
+- 决策：ObligationSpec 只包含 desired state、acceptance、dependency、forbidden effect、broad capability 和 artifact binding，不保存 GUI 路线或生命周期状态。
+- 原因：到达界面前无法知道的按钮和路径会限制模型随机应变；spec 与 runtime status 混在一起会产生重复真相。
+- 推论：无法可靠拆分时生成一个覆盖 original goal 的 obligation；生命周期由 MissionProjection 中唯一的 state map 表达。
 
 ### D004：Capability Broker 是纯状态投影
 
 - 状态：accepted
-- 决策：Broker 根据 obligation capability、TargetBinding、PointerLease、Artifact、AdapterRegistry 和 approval 投影工具。
+- 决策：Broker 根据 accepted broad capability、ExecutionProfile、TargetBinding、PointerLease、Artifact、AdapterRegistry 和 approval 投影工具。
 - 原因：模型不应额外判断 phase；固定大工具面浪费上下文并增加错误。
-- 推论：不得读取应用名、题号或 prompt 关键词选择工具。
+- 推论：Broker 不读取应用名、题号或 prompt 关键词选择工作流；Actor 可以提交 capability proposal，但授予权只在 Runtime/Broker。
 
 ### D005：Controller 不做语义修正
 
@@ -42,7 +42,7 @@
 ### D006：claim、verified、mission complete 三层分离
 
 - 状态：accepted
-- 决策：Actor claim 触发独立 ObligationVerifier；Reducer 接受 verdict 后写 verified；全部 required obligation verified 后才完成 mission。
+- 决策：Actor claim 触发独立 ObligationVerifier；Reducer 接受 verdict 后写入 verification event；全部 required obligation verified 后才允许 mission complete。
 - 原因：生成者自评有正向偏差，action success 与业务完成不是同一语义。
 - 推论：移除模型直接 `done` 的最终权限。
 
@@ -51,7 +51,7 @@
 - 状态：accepted
 - 决策：Verifier 不读取 Actor chain-of-thought，不持有 mutation 工具，优先 deterministic/oracle/receipt。
 - 原因：独立评价比要求同一 Actor 更“自我批判”更可控。
-- 推论：Verifier unavailable 时状态不前进。
+- 推论：Verifier unavailable 时状态不前进；同模型 Verifier 仍需不同证据视角，不能只重复看同一压缩图。
 
 ### D008：Planner 与 Inspector 按事件调用
 
@@ -63,7 +63,7 @@
 ### D009：先修基础工具和调度骨架
 
 - 状态：accepted
-- 决策：按入口 -> Mission -> Broker -> App/Window -> Frame/Coordinate -> Input -> Transition -> Verifier -> Model -> Prompt 顺序诊断。
+- 决策：按入口 -> Goal/Profile/Mission -> Broker -> App/Window -> Frame/Coordinate -> Input -> Transition -> Verifier -> Model -> Prompt 顺序诊断。
 - 原因：大量“模型不会”的表现实际来自工具缺失、旧帧、错误窗口、动作语义或重复状态。
 - 推论：没有前层证据时，prompt PR 和新模型角色 PR 不准入。
 
@@ -72,7 +72,56 @@
 - 状态：accepted
 - 决策：legacy/vNext 按 run 显式选择，共用 Electron、Frame/Controller、Artifact/Evidence 和 E2E；同一 run 不交叉执行。
 - 原因：第二套入口会制造无法与用户体验比较的假通过。
-- 推论：shadow 只允许纯计算，不允许双桌面 mutation。
+- 推论：shadow 只允许纯计算，不允许双桌面 mutation；runtime version 不由任务文本或 Profiler选择。
+
+### D011：Task Profiler 是低频只读角色
+
+- 状态：accepted
+- 决策：Goal Compiler 产生 lossless 初始 MissionDefinition 后，Task Profiler 可提出多维任务画像、执行深度、认知服务和升降档触发条件；确定性 Execution Policy 校验后形成 ExecutionProfile。
+- 原因：完全本地分类会死板，让 Visual Actor 决定架构又会把职责压回 Actor。
+- 推论：Profiler 不生成 obligation、工具序列、GUI 步骤、应用专属架构或 runtime version；普通 GUI 回合不重复调用。
+
+### D012：执行深度与产品 Runtime 版本分离
+
+- 状态：accepted
+- 决策：`legacy/vnext` 由显式产品或实验配置选择；vNext 内部的 `direct/standard/orchestrated` 由 ExecutionProfile 和运行证据决定。
+- 原因：任务语义可以决定需要多少认知服务，但不能偷偷切换到另一套产品主线。
+- 推论：测试必须分别记录 runtime version、recommended depth、effective depth 与 policy override。
+
+### D013：模型输出不携带运行时身份
+
+- 状态：accepted
+- 决策：模型只输出无身份的 typed proposal。`mission_id`、`run_id`、revision、active obligation、frame id、evidence refs、broker projection id 等由 Runtime envelope 绑定。
+- 原因：要求模型复制这些字段增加认知负担，并允许 stale、串线或伪造身份。
+- 推论：Controller、Reducer 和 Verifier只接受 Runtime-bound envelope；自然语言或模型字段不能覆盖绑定身份。
+
+### D014：ObligationSpec 与生命周期状态分离
+
+- 状态：accepted
+- 决策：ObligationSpec 不含 `status`；MissionProjection 只保存一份 `obligation_states[id]`。`verified_obligation_ids` 等集合只能是派生 property，不得另行序列化为权威字段。
+- 原因：在 spec 和 mission 顶层同时保存状态会产生内部双账本。
+- 推论：任何缓存都必须可从 lifecycle map 和 accepted verification evidence 重建。
+
+### D015：CapabilityRequest 是提案，不是授权
+
+- 状态：accepted
+- 决策：Visual Actor 可以请求 broad capability 或只读支持，但 Runtime/Broker 校验 catalog、active obligation、当前状态、安全和授权后才授予有界 grant。
+- 原因：完全封死工具会误裁剪；让模型直接加载工具又会破坏 Broker owner。
+- 推论：grant 必须绑定 obligation/revision，有有效期并写 trace；不得从自由文本解析应用模式。
+
+### D016：同一底层模型可以承担不同角色，但请求必须隔离
+
+- 状态：accepted
+- 决策：第一版允许同一个 provider/model 依次承担 Profiler、Planner、Actor、Verifier 和 Inspector。
+- 原因：可先验证架构而不引入多模型变量。
+- 推论：每个角色使用独立上下文、系统合同、输出 schema、工具 allowlist 和预算；角色只通过 typed data 交换，不共享 chain-of-thought。
+
+### D017：迁移分支是临时集成线
+
+- 状态：accepted
+- 决策：`codex/vnext-agent-core` 可在迁移期间持续存在并吸收 `master` 修复，但 `master` 仍是唯一长期 canonical 产品分支。
+- 原因：永久双栈和长期分支会漂移，尤其不利于以 Codex 为主的维护方式。
+- 推论：默认切换完成后合并回 `master`，旧职责净删，迁移分支归档或删除；耐久备份使用 tag。
 
 ## 延后决策
 
@@ -101,10 +150,22 @@
 - 先验：只拆显式结果依赖；无法证明就单 obligation。
 - 需要证据：人工标注 requirement coverage、artifact identity 与错误拆分率，而不是 parser 命中率。
 
-### Q005：何时提升 vNext 为默认并删除命名空间
+### Q005：Profiler 是否值得每个新任务一次额外模型调用
 
 - 状态：deferred
-- 判据：以 [migration-plan.md](migration-plan.md) 默认切换和 P8 删除门槛为准。
+- 先验：先 shadow；低置信或 unavailable 时使用 safe `standard` 默认。
+- 需要证据：over/under-profile、角色调用成本、time-to-first-action、mixed/held-out coverage 与 false done。
+
+### Q006：是否需要不同模型的 Verifier 或 Inspector
+
+- 状态：deferred
+- 先验：第一版同模型、不同上下文与不同证据。
+- 需要证据：Actor/Verifier 相关错误率、外部 oracle 校准，以及不同模型带来的增益与成本。
+
+### Q007：何时提升 vNext 为默认并删除命名空间
+
+- 状态：deferred
+- 判据：以 [migration-plan.md](migration-plan.md) 默认切换和 legacy 删除门槛为准。
 
 ## 修改决策的规则
 
@@ -112,7 +173,7 @@
 
 1. 新增一条替代决策，不静默改写历史；
 2. 给出至少两个不同任务族或一个系统级不变量冲突的证据；
-3. 说明对唯一 GUI writer、MissionState writer 和真实客户端入口的影响；
+3. 说明对唯一 GUI writer、Mission Reducer、Execution Policy 和真实客户端入口的影响；
 4. 说明新增复杂度将删除什么旧职责；
-5. 更新 architecture、contracts、migration 和 evaluation；
+5. 更新 architecture、execution-profile、contracts、migration 和 evaluation；
 6. 不得以单个测试变绿作为充分理由。
