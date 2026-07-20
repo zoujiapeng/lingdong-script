@@ -95,7 +95,7 @@ model adapter / timeout / usage accounting
 
 ## 4. P0：先建立可测基线
 
-状态：**P0/P1 已实现但审计整改中（观测旁路）**。提交 `56b90f1` 建立 `vnext/telemetry.py`，由现有 trace BUS
+状态：**已完成（观测旁路）**。提交 `56b90f1` 建立 `vnext/telemetry.py`，由现有 trace BUS
 旁路标注 baseline；提交 `eaf8ae4` 在 legacy `AgentRunner` 已有决策事件上记录精确的上下文和
 工具 schema 字符数；提交 `c2f23a4` 补齐角色、Profiler/depth、obligation、oracle 和 artifact
 错误等可选 baseline 字段。三处都不参与 prompt、模型选择、工具 dispatch、Controller 或完成判断。
@@ -156,9 +156,9 @@ P0只添加观测，不改变决策。用同一 Electron入口收集 legacy基�
 
 ## 5. P1：纯 MissionDefinition、Event 与 Projection
 
-审计整改说明：canonical wire schema 只序列化 `ObligationSpec` 与 `kind`；历史 `ObligationDefinition`/`type` 只作为读取旧记录的兼容输入，禁止继续产生双写事实。尚未完整实现的 planner、approval、external、user-goal 事件必须 fail-closed。验证必须覆盖全部 acceptance criteria、绑定 `verification_id` 并使用当前 run-scoped EvidenceRegistry；`MissionProjection` 与 `MissionCard` 只能由 Definition、accepted events 和当前证据派生。
+审计结果：canonical wire schema 只序列化 `ObligationSpec` 与 `kind`；历史 `ObligationDefinition`/`type` 只作为读取旧记录的兼容输入，禁止继续产生双写事实。尚未完整实现的 planner、approval、external、user-goal 事件必须 fail-closed。验证必须覆盖全部 acceptance criteria、绑定 `verification_id` 并使用当前 run-scoped EvidenceRegistry；`MissionProjection` 与 `MissionCard` 只能由 Definition、accepted events 和当前证据派生。
 
-状态：**P0/P1 已实现但审计整改中（离线/shadow only）**。提交 `3de1227` 实现
+状态：**已完成（离线/shadow only）**。提交 `3de1227` 实现
 `python/winpilot_home/winpilot/vnext/mission/` 中的 versioned contracts、纯 Reducer、事件
 replay、stale revision/evidence scope 校验、单 obligation fallback、MissionCard 与
 `project_legacy_contract`/`project_legacy_trace`；提交 `e3f938d` 对齐 `ObligationSpec` 别名、稳定
