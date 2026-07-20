@@ -23,7 +23,8 @@ Goal Compiler
 
 先读 [`docs/vnext/README.md`](docs/vnext/README.md) 和 [`docs/vnext/execution-profile.md`](docs/vnext/execution-profile.md)。
 
-当前 vNext 仅为文档，尚未实现代码。后续工作必须遵守：
+当前 vNext 尚未接入产品运行时；P0 观测旁路和 P1 纯 Mission 合同、Reducer、replay、MissionCard
+及 legacy shadow 已实现。后续工作必须遵守：
 
 - 只有 Visual Actor 可以提出 GUI mutation；
 - 只有 Controller/RawDevice 链可以执行桌面输入；

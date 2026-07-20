@@ -142,6 +142,10 @@ class MissionDefinition:
     experience_policy: str
 ```
 
+P1 的 Python 实现将 `ObligationSpec` 暴露为 `ObligationDefinition` 的同一实现别名，自动校验
+并序列化 `stable_topological_order`；`experience_policy` 只作为来源合同的无损上下文字段保存，
+不会在本阶段选择 runtime 或调用 Profiler。
+
 无法可靠拆分时，Definition 只包含一个 `desired_state=original_goal` 的 obligation。
 
 ## 5. ObligationSpec
@@ -226,6 +230,9 @@ class MissionEvent:
     evidence_refs: tuple[str, ...]
     created_at: float
 ```
+
+P1 同时接受历史实现使用的 `type` 与本合同的 `kind` 拼写，并将事件级 `evidence_refs` 合并到
+Reducer 的 run-scoped EvidenceScope。事件时间戳是审计元数据，不参与自动 event id 的确定性哈希。
 
 只有 Reducer可以接受事件。每个事件必须检查 base revision、主体、evidence scope 与不变量。
 
@@ -329,6 +336,9 @@ MissionProjection 不保存：
 - mouse-down 设备细节；
 - 应用专属 fallback；
 - 未验证 Actor 自述事实。
+
+本轮 P1 不创建 `ExecutionProfile` 或 `MissionGuardrails` 对象；合同中与 profile、Broker、Actor
+和 Verifier 相关的字段属于后续阶段，P1 projection/card 只投影已接受的 Mission 与证据状态。
 
 PointerLease、FrameState、DesktopActionLock 属于各自执行 owner；Broker 只读取快照。
 
