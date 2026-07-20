@@ -140,6 +140,42 @@ _NATIVE_DETAIL_CROP_ACTIONS = {
     "draw_strokes",
 }
 
+
+def _prompt_context_chars(messages: list[dict[str, Any]]) -> int:
+    """Measure textual/structural context without walking image payloads.
+
+    P0 telemetry must not serialize the full provider request on every model
+    turn.  Image bytes are intentionally represented by a fixed marker; the
+    metric is therefore a comparable context-size signal, not a claim about
+    encoded JPEG length or token count.
+    """
+    total = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        total += len(str(message.get("role") or ""))
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+            continue
+        if not isinstance(content, list):
+            if content is not None:
+                total += len(str(content))
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                total += len(str(part))
+                continue
+            part_type = str(part.get("type") or "")
+            total += len(part_type)
+            if part_type in {"image_url", "input_image"}:
+                total += 16
+            elif isinstance(part.get("text"), str):
+                total += len(part["text"])
+            elif part.get("content") is not None:
+                total += len(str(part.get("content")))
+    return total
+
 # Native visual decisions receive controller facts, never controller tactics.
 # These fields may remain in raw traces for diagnostics and legacy runtimes,
 # but exposing them to the visual model recreates a second planner beside it.
@@ -4639,6 +4675,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             # charge the same request a second time.
             self._accumulate_model_elapsed(decision_started)
 
+    def _model_role(self) -> str:
+        """Stable role label for telemetry ownership, not model routing."""
+        return "legacy_coding_agent" if self._is_coding else "legacy_visual_agent"
+
     def _chat_request(
         self,
         client,
@@ -4726,16 +4766,17 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             thinking_mode == "enabled"
             or (thinking_mode is None and configured_thinking_enabled)
         )
-        # P0 observation only: measure the exact serialized context/tool
-        # surface already sent to the provider.  These values never feed back
-        # into prompt construction, model selection, or action dispatch.
-        prompt_context_chars = len(json.dumps(
-            self.messages, ensure_ascii=False, separators=(",", ":"), default=str,
-        ))
+        # P0 observation only: measure textual/structural context without
+        # serializing image-bearing ``messages`` on the model hot path.  These
+        # values never feed back into prompt construction, model selection, or
+        # action dispatch.
+        prompt_context_chars = _prompt_context_chars(self.messages)
         model_tool_schema_chars = len(json.dumps(
             tools, ensure_ascii=False, separators=(",", ":"), default=str,
         ))
         model_tool_count = len(tools)
+        model_role = self._model_role()
+        decision_step = int(self._decision_step or 0)
         box: dict[str, Any] = {}
         self._last_llm_model = model
         self._last_llm_thinking_enabled = thinking_enabled
@@ -4847,6 +4888,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 BUS.publish(
                     "agent_decision",
                     run_id=self.run_id,
+                    step=decision_step,
+                    model_role=model_role,
                     model=model,
                     ok=False,
                     canceled=True,
@@ -4855,7 +4898,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     model_tool_count=model_tool_count,
                     model_tool_schema_chars=model_tool_schema_chars,
                     prompt_context_chars=prompt_context_chars,
-                    mission_card_chars=0,
+                    mission_card_chars=None,
+                    prompt_context_measurement="text_structure_without_binary",
                     thinking_policy=thinking_policy,
                 )
                 return None  # abandon the in-flight request (it finishes unused)
@@ -4878,6 +4922,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 BUS.publish(
                     "agent_decision",
                     run_id=self.run_id,
+                    step=decision_step,
+                    model_role=model_role,
                     model=model,
                     ok=False,
                     timeout=True,
@@ -4886,7 +4932,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     model_tool_count=model_tool_count,
                     model_tool_schema_chars=model_tool_schema_chars,
                     prompt_context_chars=prompt_context_chars,
-                    mission_card_chars=0,
+                    mission_card_chars=None,
+                    prompt_context_measurement="text_structure_without_binary",
                     thinking_policy=thinking_policy,
                 )
                 raise TimeoutError(message)
@@ -4900,6 +4947,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             BUS.publish(
                 "agent_decision",
                 run_id=self.run_id,
+                step=decision_step,
+                model_role=model_role,
                 model=model,
                 ok=False,
                 elapsed_ms=int((time.monotonic() - decision_started) * 1000),
@@ -4907,7 +4956,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 model_tool_count=model_tool_count,
                 model_tool_schema_chars=model_tool_schema_chars,
                 prompt_context_chars=prompt_context_chars,
-                mission_card_chars=0,
+                mission_card_chars=None,
+                prompt_context_measurement="text_structure_without_binary",
                 thinking_policy=thinking_policy,
             )
             raise box["exc"]
@@ -4920,6 +4970,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         BUS.publish(
             "agent_decision",
             run_id=self.run_id,
+            step=decision_step,
+            model_role=model_role,
             model=model,
             ok=box.get("resp") is not None,
             elapsed_ms=int((time.monotonic() - decision_started) * 1000),
@@ -4927,7 +4979,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             model_tool_count=model_tool_count,
             model_tool_schema_chars=model_tool_schema_chars,
             prompt_context_chars=prompt_context_chars,
-            mission_card_chars=0,
+            mission_card_chars=None,
+            prompt_context_measurement="text_structure_without_binary",
             thinking_policy=thinking_policy,
         )
         return box.get("resp")
@@ -6329,7 +6382,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "raw_arguments": tc.function.arguments,
                     "error": str(exc),
                 })
-                BUS.publish("agent_tool", run_id=self.run_id, action_id=tc.id,
+                BUS.publish("agent_tool", run_id=self.run_id, step=self._decision_step,
+                            model_role=self._model_role(), action_id=tc.id,
                             tool=tc.function.name, error=str(exc))
                 continue
 
@@ -6489,6 +6543,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self.run_state.before_tool(tc.function.name, args)
             BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
             BUS.publish("agent_tool_start", run_id=self.run_id,
+                        step=self._decision_step, model_role=self._model_role(),
                         event_name="action.started",
                         action_id=tc.id, action_envelope=action_envelope,
                         tool=tc.function.name, args=args)
@@ -6979,6 +7034,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             BUS.publish(
                 "agent_tool",
                 run_id=self.run_id,
+                step=self._decision_step,
+                model_role=self._model_role(),
                 event_name="action.finished",
                 action_id=tc.id,
                 action_envelope=action_envelope,
@@ -7087,6 +7144,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         BUS.publish(
             "agent_tool_start",
             run_id=self.run_id,
+            step=self._decision_step,
+            model_role=self._model_role(),
             action_id=action_id,
             tool="open_app",
             args=args,
@@ -7100,6 +7159,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         BUS.publish(
             "agent_tool",
             run_id=self.run_id,
+            step=self._decision_step,
+            model_role=self._model_role(),
             action_id=action_id,
             tool="open_app",
             result=result.text,
@@ -7309,7 +7370,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         ]
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,
                     max_steps=max_steps, has_experience=bool(hints),
-                    agent="unified", runtime=self.runtime_profile.to_dict(),
+                    agent="unified", model_role=self._model_role(),
+                    runtime=self.runtime_profile.to_dict(),
                     schema_profile=schema_profile,
                     model_tool_count=len(model_tool_names),
                     model_tool_names=model_tool_names,
@@ -7317,10 +7379,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     model_tool_schema_chars=len(json.dumps(
                         tools, ensure_ascii=False, separators=(",", ":"), default=str,
                     )),
-                    prompt_context_chars=len(json.dumps(
-                        self.messages, ensure_ascii=False, separators=(",", ":"), default=str,
-                    )),
-                    mission_card_chars=0,
+                    prompt_context_chars=_prompt_context_chars(self.messages),
+                    prompt_context_measurement="text_structure_without_binary",
+                    mission_card_chars=None,
                     task_contract_id=self.runtime_profile.task_contract_id,
                     stage_type=self.runtime_profile.stage_type,
                     experience_enabled=self.runtime_profile.experience_enabled,
