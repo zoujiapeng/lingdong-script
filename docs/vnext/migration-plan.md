@@ -14,7 +14,7 @@
 - 未来由每个 run 的显式 runtime version 选择 `legacy` 或 `vnext`，不得根据任务文本自动路由；
 - 一个 run 只能有一个桌面 mutation owner；
 - shadow 只能比较纯状态、工具投影或 verifier verdict，不能让 legacy/vNext 同时移动鼠标键盘；
-- 达到默认切换与删除门槛后，vNext 合并回 `master`，迁移分支删除。
+- 达到默认切换与删除门槛后，旧职责按证据删除；vNext 可以合并回 `master`，迁移分支是否继续保留由维护者明确决定。
 
 ## 2. 未来旁路目录
 
