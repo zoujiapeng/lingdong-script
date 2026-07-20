@@ -393,6 +393,11 @@ class MissionDefinition:
     source: str = "vnext"
     metadata: Mapping[str, Any] = field(default_factory=dict)
     format: str = MISSION_DEFINITION_FORMAT
+    stable_topological_order: tuple[str, ...] = ()
+    # This is a lossless context policy copied from the source contract.  It
+    # does not select a runtime or change any legacy behavior in the P1
+    # shadow; it merely keeps the input available for a later projection.
+    experience_policy: str = "allow"
 
     def __post_init__(self) -> None:
         if not str(self.mission_id).strip() or not str(self.run_id).strip():
@@ -430,6 +435,15 @@ class MissionDefinition:
         object.__setattr__(self, "metadata", _mapping(self.metadata))
         if int(self.goal_revision) < 0:
             raise InvalidMissionDefinition("goal_revision cannot be negative")
+        topological_order = _stable_topological_order(obligations)
+        requested_order = _as_string_tuple(self.stable_topological_order)
+        if requested_order and requested_order != topological_order:
+            raise InvalidMissionDefinition(
+                "stable_topological_order does not match the obligation DAG"
+            )
+        object.__setattr__(self, "stable_topological_order", topological_order)
+        policy = str(self.experience_policy or "allow")
+        object.__setattr__(self, "experience_policy", policy)
 
     @classmethod
     def from_goal(
@@ -439,6 +453,7 @@ class MissionDefinition:
         mission_id: str,
         run_id: str,
         required_capabilities: Iterable[str] = ("visual.interact",),
+        experience_policy: str = "allow",
     ) -> "MissionDefinition":
         return cls(
             mission_id=mission_id,
@@ -452,6 +467,7 @@ class MissionDefinition:
                     required_capabilities=tuple(required_capabilities),
                 ),
             ),
+            experience_policy=experience_policy,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -464,6 +480,8 @@ class MissionDefinition:
             "source": self.source,
             "metadata": thaw(self.metadata),
             "obligations": [item.to_dict() for item in self.obligations],
+            "stable_topological_order": list(self.stable_topological_order),
+            "experience_policy": self.experience_policy,
         }
 
     @classmethod
@@ -480,10 +498,12 @@ class MissionDefinition:
             source=str(raw.get("source") or "vnext"),
             metadata=raw.get("metadata") or {},
             format=str(raw.get("format") or MISSION_DEFINITION_FORMAT),
+            stable_topological_order=raw.get("stable_topological_order") or (),
+            experience_policy=str(raw.get("experience_policy") or "allow"),
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class MissionEvent:
     """One immutable input to the reducer.
 
@@ -498,6 +518,38 @@ class MissionEvent:
     payload: Mapping[str, Any] = field(default_factory=dict)
     event_id: str = ""
     format: str = MISSION_EVENT_FORMAT
+    evidence_refs: tuple[str, ...] = ()
+    created_at: float | None = None
+
+    def __init__(
+        self,
+        type: str | None = None,
+        mission_id: str = "",
+        run_id: str = "",
+        base_revision: int = 0,
+        payload: Mapping[str, Any] | None = None,
+        event_id: str = "",
+        format: str = MISSION_EVENT_FORMAT,
+        evidence_refs: Iterable[str] | None = None,
+        created_at: float | None = None,
+        *,
+        kind: str | None = None,
+    ) -> None:
+        # ``type`` was the original P1 spelling; ``kind`` is the documented
+        # wire spelling.  Accept both without creating two event identities.
+        if type and kind and str(type) != str(kind):
+            raise InvalidMissionEvent("type and kind disagree")
+        resolved_type = str(type or kind or "")
+        object.__setattr__(self, "type", resolved_type)
+        object.__setattr__(self, "mission_id", str(mission_id))
+        object.__setattr__(self, "run_id", str(run_id))
+        object.__setattr__(self, "base_revision", int(base_revision))
+        object.__setattr__(self, "payload", payload or {})
+        object.__setattr__(self, "event_id", str(event_id or ""))
+        object.__setattr__(self, "format", str(format or MISSION_EVENT_FORMAT))
+        object.__setattr__(self, "evidence_refs", _as_string_tuple(evidence_refs))
+        object.__setattr__(self, "created_at", None if created_at is None else float(created_at))
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if not str(self.type).strip():
@@ -510,6 +562,7 @@ class MissionEvent:
         object.__setattr__(self, "mission_id", str(self.mission_id))
         object.__setattr__(self, "run_id", str(self.run_id))
         object.__setattr__(self, "payload", _mapping(self.payload))
+        object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
         if not self.event_id:
             canonical = {
                 "type": self.type,
@@ -517,6 +570,7 @@ class MissionEvent:
                 "run_id": self.run_id,
                 "base_revision": self.base_revision,
                 "payload": thaw(self.payload),
+                "evidence_refs": list(self.evidence_refs),
             }
             digest = hashlib.sha256(
                 json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -540,6 +594,8 @@ class MissionEvent:
         base_revision: int,
         payload: Mapping[str, Any] | None = None,
         event_id: str = "",
+        evidence_refs: Iterable[str] | None = None,
+        created_at: float | None = None,
     ) -> "MissionEvent":
         return cls(
             type=event_type,
@@ -548,6 +604,8 @@ class MissionEvent:
             base_revision=base_revision,
             payload=payload or {},
             event_id=event_id,
+            evidence_refs=evidence_refs,
+            created_at=created_at,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -558,7 +616,10 @@ class MissionEvent:
             "mission_id": self.mission_id,
             "run_id": self.run_id,
             "base_revision": self.base_revision,
+            "kind": self.type,
             "payload": thaw(self.payload),
+            "evidence_refs": list(self.evidence_refs),
+            "created_at": self.created_at,
         }
 
     @classmethod
@@ -571,6 +632,8 @@ class MissionEvent:
             payload=raw.get("payload") or {},
             event_id=str(raw.get("event_id") or ""),
             format=str(raw.get("format") or MISSION_EVENT_FORMAT),
+            evidence_refs=raw.get("evidence_refs") or (),
+            created_at=(float(raw["created_at"]) if raw.get("created_at") is not None else None),
         )
 
 
@@ -846,10 +909,39 @@ def _assert_acyclic(obligations: tuple[ObligationDefinition, ...]) -> None:
         visit(node)
 
 
+def _stable_topological_order(
+    obligations: tuple[ObligationDefinition, ...],
+) -> tuple[str, ...]:
+    """Return a deterministic dependency-first order.
+
+    Declaration order is the tie breaker.  This is a pure serialization aid;
+    it does not encode GUI steps or choose a route for the actor.
+    """
+    graph = {item.id: item.depends_on for item in obligations}
+    ordered: list[str] = []
+    visited: set[str] = set()
+
+    def visit(node: str) -> None:
+        if node in visited:
+            return
+        for dependency in graph[node]:
+            visit(dependency)
+        visited.add(node)
+        ordered.append(node)
+
+    for node in graph:
+        visit(node)
+    return tuple(ordered)
+
+
 # The architecture documents use MissionState for the long-lived view; P1's
 # implementation calls the same derived value MissionProjection.  This alias
 # prevents callers from accidentally creating a second state structure.
 MissionState = MissionProjection
+
+# The migration documents use the more protocol-oriented name.  Keep one
+# implementation and one state owner while exposing that name to consumers.
+ObligationSpec = ObligationDefinition
 
 
 __all__ = [
@@ -857,7 +949,7 @@ __all__ = [
     "MISSION_CARD_FORMAT", "MissionError", "InvalidMissionDefinition",
     "InvalidMissionEvent", "StaleRevisionError", "DuplicateEventError",
     "EvidenceScopeError", "IllegalTransitionError", "ObligationStatus", "MissionStatus",
-    "EvidencePolicy", "ObligationDefinition", "EvidenceRef", "ArtifactRef",
+    "EvidencePolicy", "ObligationDefinition", "ObligationSpec", "EvidenceRef", "ArtifactRef",
     "TargetBinding", "VerifiedFact", "TransitionSummary", "FailureSummary",
     "MissionDefinition", "MissionEvent", "ObligationProjection", "MissionProjection", "MissionState",
     "ActiveObligationCard", "MissionCard", "EvidenceScope", "thaw",

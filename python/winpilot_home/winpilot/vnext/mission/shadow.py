@@ -187,6 +187,9 @@ def project_legacy_contract(
         original_goal=original_goal,
         obligations=tuple(drafts),
         source="legacy_shadow",
+        experience_policy=str(
+            _get(contract, "experience_policy", "allow") or "allow"
+        ),
         metadata={
             "legacy_contract_format": str(_get(contract, "format", "task-contract/1") or "task-contract/1"),
             "legacy_task_id": task_id,
