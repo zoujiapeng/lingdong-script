@@ -1,6 +1,6 @@
 # vNext Agent 核心旁路
 
-状态：**设计阶段，仅文档，尚未实现运行时代码**
+状态：**P0/P1 纯状态旁路已实现；Broker、Actor、Verifier、Planner/Inspector 仍未接入运行时**
 
 迁移分支：`codex/vnext-agent-core`
 
@@ -42,13 +42,15 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 
 ## 当前阶段
 
-当前分支只建立架构事实和迁移合同：
+当前分支已完成 P0/P1 的纯旁路，但仍不改变产品运行时：
 
-- 不新增 Python、TypeScript、配置或产品开关；
+- P0 只在既有 trace/BUS 事件上增加观测字段；
+- P1 提供可重放的 MissionDefinition/Event/Projection/Reducer/Card 及 legacy shadow；
+- 不新增模型调用、模型工具面、GUI 动作链、Controller 或完成语义接线；
 - 不改变当前 `master` 的产品行为；
-- 不声称 Mission Ledger、Broker 或多角色系统已经实现；
+- 不声称 Mission Ledger 已经接管产品运行；P1 projection 只能离线或 shadow 使用；
 - 不把历史单次 E2E 结果改写成 vNext 成功证据；
-- 下一步代码工作必须从 [migration-plan.md](migration-plan.md) 的 P0 指标和 P1 纯状态内核开始。
+- 下一步代码工作仍必须从 [migration-plan.md](migration-plan.md) 的 P2 Broker shadow 开始，不能提前接入 Actor。
 
 ## 旁路不是第二条产品主线
 
