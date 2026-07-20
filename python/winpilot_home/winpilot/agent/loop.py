@@ -4726,6 +4726,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             thinking_mode == "enabled"
             or (thinking_mode is None and configured_thinking_enabled)
         )
+        # P0 observation only: measure the exact serialized context/tool
+        # surface already sent to the provider.  These values never feed back
+        # into prompt construction, model selection, or action dispatch.
+        prompt_context_chars = len(json.dumps(
+            self.messages, ensure_ascii=False, separators=(",", ":"), default=str,
+        ))
+        model_tool_schema_chars = len(json.dumps(
+            tools, ensure_ascii=False, separators=(",", ":"), default=str,
+        ))
+        model_tool_count = len(tools)
         box: dict[str, Any] = {}
         self._last_llm_model = model
         self._last_llm_thinking_enabled = thinking_enabled
@@ -4841,6 +4851,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     ok=False,
                     canceled=True,
                     elapsed_ms=int((time.monotonic() - decision_started) * 1000),
+                    runtime_version="legacy",
+                    model_tool_count=model_tool_count,
+                    model_tool_schema_chars=model_tool_schema_chars,
+                    prompt_context_chars=prompt_context_chars,
+                    mission_card_chars=0,
+                    thinking_policy=thinking_policy,
                 )
                 return None  # abandon the in-flight request (it finishes unused)
             if time.monotonic() >= request_deadline:
@@ -4866,6 +4882,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     ok=False,
                     timeout=True,
                     elapsed_ms=int((time.monotonic() - decision_started) * 1000),
+                    runtime_version="legacy",
+                    model_tool_count=model_tool_count,
+                    model_tool_schema_chars=model_tool_schema_chars,
+                    prompt_context_chars=prompt_context_chars,
+                    mission_card_chars=0,
+                    thinking_policy=thinking_policy,
                 )
                 raise TimeoutError(message)
             thread.join(timeout=0.2)
@@ -4881,6 +4903,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 model=model,
                 ok=False,
                 elapsed_ms=int((time.monotonic() - decision_started) * 1000),
+                runtime_version="legacy",
+                model_tool_count=model_tool_count,
+                model_tool_schema_chars=model_tool_schema_chars,
+                prompt_context_chars=prompt_context_chars,
+                mission_card_chars=0,
+                thinking_policy=thinking_policy,
             )
             raise box["exc"]
         if box.get("resp") is not None:
@@ -4895,6 +4923,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             model=model,
             ok=box.get("resp") is not None,
             elapsed_ms=int((time.monotonic() - decision_started) * 1000),
+            runtime_version="legacy",
+            model_tool_count=model_tool_count,
+            model_tool_schema_chars=model_tool_schema_chars,
+            prompt_context_chars=prompt_context_chars,
+            mission_card_chars=0,
+            thinking_policy=thinking_policy,
         )
         return box.get("resp")
 
@@ -7279,6 +7313,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     schema_profile=schema_profile,
                     model_tool_count=len(model_tool_names),
                     model_tool_names=model_tool_names,
+                    runtime_version="legacy",
+                    model_tool_schema_chars=len(json.dumps(
+                        tools, ensure_ascii=False, separators=(",", ":"), default=str,
+                    )),
+                    prompt_context_chars=len(json.dumps(
+                        self.messages, ensure_ascii=False, separators=(",", ":"), default=str,
+                    )),
+                    mission_card_chars=0,
                     task_contract_id=self.runtime_profile.task_contract_id,
                     stage_type=self.runtime_profile.stage_type,
                     experience_enabled=self.runtime_profile.experience_enabled,
