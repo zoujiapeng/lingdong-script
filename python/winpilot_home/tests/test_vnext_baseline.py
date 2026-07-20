@@ -23,3 +23,26 @@ def test_p0_observer_only_adds_metrics_to_existing_events() -> None:
     assert snapshot["controller_elapsed_ms"] == 8
     assert snapshot["no_progress_streak"] == 2
     assert snapshot["turns"]
+
+
+def test_p0_snapshot_exposes_optional_mission_and_profile_metrics() -> None:
+    observer = LegacyBaselineObserver()
+    observer.observe({
+        "type": "agent_start",
+        "run_id": "r2",
+        "agent": "unified",
+        "recommended_execution_depth": "standard",
+        "effective_execution_depth": "direct",
+        "execution_policy_override_reason": "legacy baseline",
+        "required_obligation_count": 2,
+        "verified_obligation_count": 1,
+    })
+    observer.observe({"type": "profile_call", "run_id": "r2"})
+    observer.observe({"type": "agent_done", "run_id": "r2", "status": "done"})
+    snapshot = observer.snapshot("r2").to_dict()
+    assert snapshot["profile_call_count"] == 1
+    assert snapshot["recommended_execution_depth"] == "standard"
+    assert snapshot["effective_execution_depth"] == "direct"
+    assert snapshot["required_obligation_count"] == 2
+    assert snapshot["verified_obligation_count"] == 1
+    assert snapshot["false_done_count"] == 0

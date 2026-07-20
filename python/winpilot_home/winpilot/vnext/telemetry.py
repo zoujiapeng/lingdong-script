@@ -36,6 +36,7 @@ class BaselineTurn:
     """Normalized per-turn fields from legacy events."""
 
     step: int = 0
+    model_role: str = ""
     model_tool_count: int | None = None
     model_tool_schema_chars: int | None = None
     prompt_context_chars: int | None = None
@@ -51,10 +52,12 @@ class BaselineTurn:
     time_to_first_action_ms: int | None = None
     planner_call_count: int = 0
     inspector_call_count: int = 0
+    profile_call_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "step": self.step,
+            "model_role": self.model_role,
             "model_tool_count": self.model_tool_count,
             "model_tool_schema_chars": self.model_tool_schema_chars,
             "prompt_context_chars": self.prompt_context_chars,
@@ -70,6 +73,7 @@ class BaselineTurn:
             "time_to_first_action_ms": self.time_to_first_action_ms,
             "planner_call_count": self.planner_call_count,
             "inspector_call_count": self.inspector_call_count,
+            "profile_call_count": self.profile_call_count,
         }
 
 
@@ -83,6 +87,14 @@ class _RunObservation:
     first_action_ts: float | None = None
     last_action_signature: str = ""
     turns: dict[int, BaselineTurn] = field(default_factory=dict)
+    recommended_execution_depth: str | None = None
+    effective_execution_depth: str | None = None
+    execution_policy_override_reason: str | None = None
+    required_obligation_count: int | None = None
+    verified_obligation_count: int | None = None
+    false_done_count: int = 0
+    artifact_identity_errors: int = 0
+    external_oracle_pass: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +120,15 @@ class LegacyBaselineSnapshot:
     time_to_first_action_ms: int | None = None
     planner_call_count: int = 0
     inspector_call_count: int = 0
+    profile_call_count: int = 0
+    recommended_execution_depth: str | None = None
+    effective_execution_depth: str | None = None
+    execution_policy_override_reason: str | None = None
+    required_obligation_count: int | None = None
+    verified_obligation_count: int | None = None
+    false_done_count: int = 0
+    artifact_identity_errors: int = 0
+    external_oracle_pass: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -131,6 +152,15 @@ class LegacyBaselineSnapshot:
             "time_to_first_action_ms": self.time_to_first_action_ms,
             "planner_call_count": self.planner_call_count,
             "inspector_call_count": self.inspector_call_count,
+            "profile_call_count": self.profile_call_count,
+            "recommended_execution_depth": self.recommended_execution_depth,
+            "effective_execution_depth": self.effective_execution_depth,
+            "execution_policy_override_reason": self.execution_policy_override_reason,
+            "required_obligation_count": self.required_obligation_count,
+            "verified_obligation_count": self.verified_obligation_count,
+            "false_done_count": self.false_done_count,
+            "artifact_identity_errors": self.artifact_identity_errors,
+            "external_oracle_pass": self.external_oracle_pass,
         }
 
 
@@ -172,6 +202,37 @@ class LegacyBaselineObserver:
         value = event.get("result_meta")
         return value if isinstance(value, Mapping) else {}
 
+    @staticmethod
+    def _set_optional_int(run: _RunObservation, name: str, value: Any) -> None:
+        parsed = _safe_int(value)
+        if parsed is not None:
+            setattr(run, name, parsed)
+
+    def _observe_run_metadata(self, run: _RunObservation, event: Mapping[str, Any]) -> None:
+        """Copy only explicitly emitted facts into the observation sidecar."""
+        for name in (
+            "recommended_execution_depth",
+            "effective_execution_depth",
+            "execution_policy_override_reason",
+        ):
+            if event.get(name) is not None:
+                setattr(run, name, str(event.get(name)))
+        for name in ("required_obligation_count", "verified_obligation_count"):
+            if name in event:
+                self._set_optional_int(run, name, event.get(name))
+        for key in ("external_oracle_pass", "oracle_pass"):
+            if key in event and event.get(key) is not None:
+                run.external_oracle_pass = bool(event.get(key))
+        for key in ("artifact_identity_errors", "artifact_identity_error_count"):
+            if key in event:
+                value = _safe_int(event.get(key))
+                if value is not None:
+                    run.artifact_identity_errors = max(run.artifact_identity_errors, value)
+        if event.get("false_done") is True:
+            run.false_done_count += 1
+        if event.get("artifact_identity_error") is True:
+            run.artifact_identity_errors += 1
+
     def observe(self, event: dict[str, Any]) -> None:
         """Annotate an existing BUS event with a normalized baseline view."""
         if not isinstance(event, dict):
@@ -180,8 +241,9 @@ class LegacyBaselineObserver:
         run_id = str(event.get("run_id") or "")
         if not run_id:
             return
+        run = self._runs.get(run_id) or self._run(run_id, event)
+        self._observe_run_metadata(run, event)
         if event_type == "agent_start":
-            run = self._run(run_id, event)
             run.started_ts = float(event.get("ts") or time.time())
             runtime = event.get("runtime")
             run.runtime_version = str(
@@ -196,6 +258,7 @@ class LegacyBaselineObserver:
                 or ""
             )
             turn = self._turn(run, 1)
+            turn.model_role = str(event.get("model_role") or event.get("agent") or "")
             turn.model_tool_count = _safe_int(event.get("model_tool_count"))
             names = event.get("model_tool_names") or ()
             turn.model_tool_schema_chars = _safe_int(
@@ -205,11 +268,9 @@ class LegacyBaselineObserver:
             )
             event["vnext_baseline"] = self.snapshot(run_id).to_dict()
             return
-        run = self._runs.get(run_id)
-        if run is None:
-            run = self._run(run_id, event)
         if event_type in {"agent_step", "agent_turn"}:
             turn = self._turn(run, event.get("step"))
+            turn.model_role = str(event.get("model_role") or turn.model_role)
             if event.get("mission_card_chars") is not None:
                 turn.mission_card_chars = _safe_int(event.get("mission_card_chars")) or 0
             if event.get("prompt_context_chars") is not None:
@@ -220,6 +281,7 @@ class LegacyBaselineObserver:
                 turn.model_tool_schema_chars = _safe_int(event.get("model_tool_schema_chars"))
         elif event_type == "agent_decision":
             turn = self._turn(run)
+            turn.model_role = str(event.get("model_role") or turn.model_role)
             turn.model_elapsed_ms += _safe_int(event.get("elapsed_ms")) or 0
             if event.get("prompt_context_chars") is not None:
                 turn.prompt_context_chars = _safe_int(event.get("prompt_context_chars"))
@@ -255,12 +317,17 @@ class LegacyBaselineObserver:
                 turn.frame_refresh_count += 1
         elif event_type in {"visual_frame", "frame_refresh", "trace_screenshot"}:
             self._turn(run).frame_refresh_count += 1
-        elif event_type == "done_check" and event.get("passed") is False:
-            self._turn(run).verifier_reject_count += 1
+        elif event_type == "done_check":
+            if event.get("passed") is False:
+                self._turn(run).verifier_reject_count += 1
+                if event.get("after_agent_done") is True:
+                    run.false_done_count += 1
         elif event_type in {"agent_plan", "planner_call"}:
             self._turn(run).planner_call_count += 1
         elif event_type in {"visual_inspector", "inspector_call"}:
             self._turn(run).inspector_call_count += 1
+        elif event_type in {"task_profile", "profile_call", "profiler_call"}:
+            self._turn(run).profile_call_count += 1
         elif event_type == "agent_done":
             event["vnext_baseline"] = self.snapshot(run_id).to_dict()
 
@@ -277,6 +344,9 @@ class LegacyBaselineObserver:
                 runtime_version=self.runtime_version,
                 mission_or_stage_id="",
                 turns=(),
+                recommended_execution_depth=None,
+                effective_execution_depth=None,
+                execution_policy_override_reason=None,
             )
         turns = tuple(run.turns[key].to_dict() for key in sorted(run.turns))
         def total(name: str) -> int:
@@ -304,6 +374,15 @@ class LegacyBaselineObserver:
             ),
             planner_call_count=total("planner_call_count"),
             inspector_call_count=total("inspector_call_count"),
+            profile_call_count=total("profile_call_count"),
+            recommended_execution_depth=run.recommended_execution_depth,
+            effective_execution_depth=run.effective_execution_depth,
+            execution_policy_override_reason=run.execution_policy_override_reason,
+            required_obligation_count=run.required_obligation_count,
+            verified_obligation_count=run.verified_obligation_count,
+            false_done_count=run.false_done_count,
+            artifact_identity_errors=run.artifact_identity_errors,
+            external_oracle_pass=run.external_oracle_pass,
         )
 
 
