@@ -55,6 +55,19 @@ bearer token。
 列出新增行解决的通用失败模式、删除计划和第二任务族证据。禁止用一次上万行修改
 同时引入多套 planner、executor 或状态账本。
 
+### vNext 迁移切片
+
+`codex/vnext-agent-core` 上的 Agent 核心旁路工作以 `docs/vnext/` 为合同。每个实现
+切片只能引入一个主要 owner，并必须说明：Mission Reducer、Capability Broker、
+Visual Actor、Controller、Verifier、Planner 或 Inspector 中谁拥有该职责；哪些
+legacy 字段/路径将在何种证据下删除；为何问题不是基础工具或调度骨架缺陷。
+
+Visual Actor 是唯一可提出 GUI mutation 的模型，Mission Reducer 是唯一可写
+MissionState 的组件。Planner、Verifier 和 Inspector 必须静态限制为只读。不得因
+某应用、测试题号或 prompt 关键词投影工具，也不得让 legacy/vNext 在同一 run 中
+交叉操作桌面。完整阶段、A/B 和删除门槛见
+[`docs/vnext/migration-plan.md`](docs/vnext/migration-plan.md)。
+
 ## 文档与配置
 
 代码、配置和文档必须在同一变更中保持一致：
@@ -107,5 +120,7 @@ GUI、Controller、感知、坐标、截图范围、上下文或 done gate 发�
 4. 运行与风险相称的验证，记录真实结果，不把模型自报 done 当成功。
 5. 提交前运行 `git diff --check` 并复核没有密钥、运行数据或无关文件。
 
-`master` 是唯一长期主分支。临时开发分支应短期存在，合并后删除；提交信息使用
+`master` 是唯一最终长期主分支。用户明确授权的 `codex/vnext-agent-core` 是大整改
+期间的迁移集成分支，不是第二条产品主线；达到默认切换和 legacy 删除门槛后必须
+合并回 `master` 并删除。其他临时开发分支应短期存在，合并后删除；提交信息使用
 清晰的命令式摘要，例如 `fix: fail closed on stale visual frames`。

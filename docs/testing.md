@@ -42,6 +42,12 @@ for the invariants and the client-entry evaluation contract.
 
 测试名称必须诚实。直接调用 `/api/v2/arp/runs` 的测试是 runtime integration，不是客户端 E2E。
 
+## vNext 旁路 A/B
+
+`codex/vnext-agent-core` 的未来实现仍必须从同一可见 Electron 客户端进入。legacy/vNext 只能由每个 run 的显式实验配置选择，不能根据任务文本、应用名或测试题号路由；同一 run 不能让两个 runtime 交叉操作桌面。
+
+测试不得向 vNext 预置内部 obligation、工具面、路径或 Inspector 结论。Mission Compiler、Mission Reducer、Capability Broker 和独立 Verifier 都是被测对象。只读 shadow 可以离线比较状态、工具投影和 verdict，但不能发出第二份鼠标键盘输入。完整指标、held-out 与切换门槛见 [vnext/evaluation.md](vnext/evaluation.md)。
+
 ## 真实客户端 E2E 的必要条件
 
 一次通过必须同时满足：

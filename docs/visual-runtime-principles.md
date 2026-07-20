@@ -6,6 +6,13 @@ frame identity and coordinate mapping, one canonical input transaction, fresh
 post-action evidence, and bounded recovery.  It must not encode the rules of a
 particular application, game, drawing exercise, or test sentence.
 
+The vNext design keeps exactly one visual model role with desktop mutation
+authority: the Visual Actor. Mission progress lives in a deterministic ledger;
+tool exposure comes from a deterministic capability broker; verifier, planner,
+and inspector roles are read-only and event-triggered. See
+[`vnext/README.md`](vnext/README.md). This is currently a design target, not an
+implemented runtime claim.
+
 ## Reasoning and latency
 
 Native visual reasoning is adaptive.  The first frame, unchanged pixels,

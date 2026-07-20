@@ -136,13 +136,14 @@ npm run e2e:client:mixed
 | `python/engine/`, `python/features/` | legacy FlowScript/DSL 兼容路径，不是 GUI Agent 工具池 |
 | `python/winpilot_home/traces/`, `output/` | 本机运行产物，不提交 |
 
-`master` 是唯一长期分支。临时分支只能用于短期审查，合并后必须删除；不保留第二条产品主线。
+`master` 是唯一最终长期分支。用户明确授权的 `codex/vnext-agent-core` 是大整改期间的迁移集成分支，不是第二条产品主线；达到切换和 legacy 删除门槛后合并回 `master` 并删除。其他临时分支只用于短期审查，合并后删除。
 
 ## 文档
 
 - [文档索引](docs/README.md)
 - [架构与运行原理](docs/architecture.md)
 - [视觉运行时原则](docs/visual-runtime-principles.md)
+- [vNext Agent 核心旁路设计](docs/vnext/README.md)（目标架构，尚未实现）
 - [端到端测试规范](docs/testing.md)
 - [WinPilot Agent 细节](docs/winpilot-agent.md)
 - [原生前端](docs/frontend.md)

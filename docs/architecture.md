@@ -245,6 +245,8 @@ MCP 是显式可选的 capability source。只有能力、授权、输入输出�
 
 整改优先级见 [GUI Agent 架构审计](GUI_AGENT_ARCHITECTURE_AUDIT.md)。
 
+`codex/vnext-agent-core` 分支正在以旁路方式设计下一代核心：外置 Mission Ledger、逐回合 Capability Broker、单一 Visual Actor、独立只读 Verifier，以及按事件调用的 Planner/Inspector。该设计目前仅有文档，不是已实现事实；详见 [vNext 文档入口](vnext/README.md)。当前运行时行为仍以本文前述实现为准。
+
 ## 验收原则
 
 GUI 架构改动至少需要：

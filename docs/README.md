@@ -12,6 +12,20 @@
 | [GUI_AGENT_ARCHITECTURE_AUDIT.md](GUI_AGENT_ARCHITECTURE_AUDIT.md) | 全量架构审计、整改顺序和变更准入门 |
 | [../CLAUDE.md](../CLAUDE.md) | AI/开发者接手最短说明 |
 
+## vNext 旁路设计
+
+| 文档 | 内容 |
+| --- | --- |
+| [vnext/README.md](vnext/README.md) | vNext 文档入口、状态、不可妥协边界和工作顺序 |
+| [vnext/architecture.md](vnext/architecture.md) | 单一 Visual Actor、Mission Ledger、Capability Broker 与受限认知角色 |
+| [vnext/contracts.md](vnext/contracts.md) | MissionState、Obligation、Actor/Verifier/Planner/Inspector typed contracts |
+| [vnext/migration-plan.md](vnext/migration-plan.md) | 旁路阶段、同入口切换、legacy 职责删除门槛 |
+| [vnext/evaluation.md](vnext/evaluation.md) | P0 指标、A/B、真实客户端 E2E 与 held-out 发布标准 |
+| [vnext/failure-triage.md](vnext/failure-triage.md) | 工具和骨架优先的失败归因顺序 |
+| [vnext/decisions.md](vnext/decisions.md) | 已接受与延后的架构决策 |
+
+这些文档描述目标设计，不代表代码已经实现。当前产品事实仍以前一节核心文档为准。vNext 必须共用 Electron 用户入口和现有窄基础，不能形成第二个长期产品主线。
+
 ## 子系统文档
 
 | 文档 | 内容 |
@@ -54,5 +68,6 @@
 - Memory/Skill：`memory-graph.md`；
 - Trace/IR/Replay：`replay-recording.md`；
 - 架构债务和整改顺序：`GUI_AGENT_ARCHITECTURE_AUDIT.md`。
+- vNext 角色、状态合同、迁移阶段或实验门槛：同步 `vnext/` 全套文档，并明确哪些仍未实现。
 
 不要把临时交接文档、绝对路径、旧工作树行数或单次 run 细节提交成长期文档。
