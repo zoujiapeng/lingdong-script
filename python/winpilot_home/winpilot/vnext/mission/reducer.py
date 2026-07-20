@@ -16,7 +16,7 @@ from .contracts import (
     MissionProjection,
     MissionStatus,
     MissionCard,
-    ObligationDefinition,
+    ObligationSpec,
     ObligationProjection,
     ObligationStatus,
     TargetBinding,
@@ -31,19 +31,41 @@ from .contracts import (
 
 
 _TERMINAL_MISSION_STATUSES = {
+    MissionStatus.VERIFIED,
     MissionStatus.FAILED,
     MissionStatus.CANCELED,
 }
-_NON_MUTATING_EVENTS = {"mission_compiled", "obligation_activated", "mission_verified"}
+_EXPLICIT_HOLD_EVENTS = {
+    "mission_blocked",
+    "obligation_blocked",
+}
+_HOLD_STATUSES = {
+    MissionStatus.WAITING_APPROVAL,
+    MissionStatus.WAITING_EXTERNAL,
+    MissionStatus.BLOCKED,
+}
+_UNIMPLEMENTED_EVENTS = {
+    "approval_requested",
+    "approval_decided",
+    "external_change_armed",
+    "external_change_recorded",
+    "planner_requested",
+    "planner_patch_proposed",
+    "planner_patch_accepted",
+    "planner_patch_rejected",
+    "inspection_requested",
+    "inspection_recorded",
+    "capability_requested",
+    "capability_granted",
+    "capability_denied",
+    "execution_profile_accepted",
+    "execution_profile_revised",
+    "user_goal_revised",
+}
 
 
 def _payload_text(payload: Mapping[str, Any], key: str, default: str = "") -> str:
     return str(payload.get(key) or default)
-
-
-def _payload_mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
-    value = payload.get(key)
-    return value if isinstance(value, Mapping) else {}
 
 
 def _initial_projection(definition: MissionDefinition) -> MissionProjection:
@@ -60,7 +82,7 @@ def _initial_projection(definition: MissionDefinition) -> MissionProjection:
     return _recompute(projection)
 
 
-def _definition_for(projection: MissionProjection, obligation_id: str) -> ObligationDefinition:
+def _definition_for(projection: MissionProjection, obligation_id: str) -> ObligationSpec:
     try:
         return projection.obligation_definition(obligation_id)
     except KeyError as exc:
@@ -73,13 +95,13 @@ def _state_map(projection: MissionProjection) -> dict[str, ObligationProjection]
 
 def _dependencies_verified(
     projection: MissionProjection,
-    definition: ObligationDefinition,
+    definition: ObligationSpec,
 ) -> bool:
     states = _state_map(projection)
     return all(states[dependency].status is ObligationStatus.VERIFIED for dependency in definition.depends_on)
 
 
-def _ready(projection: MissionProjection, definition: ObligationDefinition) -> bool:
+def _ready(projection: MissionProjection, definition: ObligationSpec) -> bool:
     state = projection.obligation_state(definition.id)
     if state.status is not ObligationStatus.PENDING:
         return False
@@ -89,7 +111,8 @@ def _ready(projection: MissionProjection, definition: ObligationDefinition) -> b
 
 
 def _first_ready(projection: MissionProjection) -> str | None:
-    for definition in projection.definition.obligations:
+    for obligation_id in projection.definition.stable_topological_order:
+        definition = projection.obligation_definition(obligation_id)
         if _ready(projection, definition):
             return definition.id
     return None
@@ -104,9 +127,17 @@ def _required_verified(projection: MissionProjection) -> bool:
     )
 
 
-def _recompute(projection: MissionProjection) -> MissionProjection:
+def _recompute(
+    projection: MissionProjection,
+    *,
+    preserve_explicit_status: bool = False,
+) -> MissionProjection:
     """Derive active obligation and mission completion from state facts."""
     if projection.status in _TERMINAL_MISSION_STATUSES:
+        return projection
+    if projection.status in _HOLD_STATUSES:
+        return projection
+    if preserve_explicit_status:
         return projection
     if projection.pending_approval is not None:
         return replace(projection, status=MissionStatus.WAITING_APPROVAL)
@@ -224,19 +255,13 @@ def _parse_fact(raw: Any) -> VerifiedFact:
     )
 
 
-def _validate_patch_payload(payload: Mapping[str, Any]) -> None:
-    """Reject route-shaped planner patches before they can reach state."""
-    forbidden = {
-        "steps", "actions", "clicks", "coordinates", "selectors", "tool_order",
-        "route", "workflow", "ui_steps", "micro_steps",
-    }
-    if any(payload.get(key) for key in forbidden):
-        raise IllegalTransitionError("mission patch contains GUI route details")
-    for raw in payload.get("obligations_to_add") or ():
-        if not isinstance(raw, Mapping):
-            raise IllegalTransitionError("obligation draft must be an object")
-        if any(raw.get(key) for key in forbidden):
-            raise IllegalTransitionError("obligation draft contains GUI route details")
+def _criteria_covered(
+    required: Iterable[str],
+    supplied: Iterable[str],
+) -> bool:
+    required_set = {" ".join(str(item).split()).casefold() for item in required if str(item).strip()}
+    supplied_set = {" ".join(str(item).split()).casefold() for item in supplied if str(item).strip()}
+    return required_set.issubset(supplied_set)
 
 
 def _apply_event(
@@ -245,7 +270,7 @@ def _apply_event(
     scope: EvidenceScope,
 ) -> MissionProjection:
     payload = event.payload
-    event_type = event.type
+    event_type = event.kind
     states = _state_map(projection)
 
     if event_type == "mission_compiled":
@@ -288,7 +313,9 @@ def _apply_event(
         # optional human binding name as a second index preserves both forms
         # without introducing another state owner.
         bindings.setdefault(artifact.artifact_id, artifact)
-        updated = replace(projection, artifact_bindings=bindings)
+        # Binding the awaited external artifact is the explicit resume signal;
+        # the next recompute may now activate its consumer.
+        updated = replace(projection, artifact_bindings=bindings, status=MissionStatus.RUNNING)
         return _merge_evidence(updated, refs)
 
     if event_type == "target_bound":
@@ -297,7 +324,7 @@ def _apply_event(
             dict.fromkeys((*event.evidence_refs, target.established_by_evidence_ref))
         )
         refs = _evidence_refs(projection, scope, target_evidence_ids, required=True)
-        if not target.binding_id or target.hwnd < 0 or target.epoch < 0:
+        if not target.binding_id or target.hwnd <= 0 or target.epoch < 0:
             raise IllegalTransitionError("invalid target binding")
         return _merge_evidence(replace(projection, target_binding=target), refs)
 
@@ -349,6 +376,11 @@ def _apply_event(
         verified = bool(payload.get("verified", False))
         missing = _as_string_tuple(payload.get("missing_conditions") or ())
         contradictions = _as_string_tuple(payload.get("contradictions") or ())
+        satisfied = _as_string_tuple(
+            payload.get("satisfied_criteria")
+            or payload.get("satisfied_conditions")
+            or ()
+        )
         refs = _evidence_refs(
             projection,
             scope,
@@ -358,6 +390,13 @@ def _apply_event(
         )
         updated = _merge_evidence(projection, refs)
         if verified:
+            verification_id = _payload_text(payload, "verification_id")
+            if not verification_id:
+                raise IllegalTransitionError("verified result requires verification_id")
+            if not _criteria_covered(definition.acceptance_criteria, satisfied):
+                raise IllegalTransitionError(
+                    "verification does not mechanically cover every acceptance criterion"
+                )
             if missing or contradictions:
                 raise IllegalTransitionError("verified result still has missing or contradictory conditions")
             if len(refs) < definition.evidence_policy.minimum_evidence:
@@ -368,11 +407,23 @@ def _apply_event(
             disallowed = [ref.id for ref in refs if ref.trust not in allowed]
             if disallowed:
                 raise EvidenceScopeError(f"verification evidence is not allowed: {disallowed}")
+            required_kinds = set(definition.evidence_policy.required_evidence_kinds)
+            if required_kinds and not required_kinds.issubset({ref.kind for ref in refs}):
+                raise EvidenceScopeError(
+                    "verification evidence does not cover required evidence kinds"
+                )
             facts: list[VerifiedFact] = []
             for raw in payload.get("facts") or ():
                 fact = _parse_fact(raw)
-                if fact.evidence_refs:
-                    _evidence_refs(updated, scope, fact.evidence_refs, obligation_id=obligation_id, required=True)
+                if not fact.evidence_refs:
+                    raise EvidenceScopeError("verified fact requires evidence_refs")
+                _evidence_refs(
+                    updated,
+                    scope,
+                    fact.evidence_refs,
+                    obligation_id=obligation_id,
+                    required=True,
+                )
                 facts.append(fact)
             return replace(
                 updated,
@@ -381,6 +432,7 @@ def _apply_event(
                         item,
                         status=ObligationStatus.VERIFIED,
                         verified_evidence_refs=tuple(ref.id for ref in refs),
+                        verification_id=verification_id,
                         last_reason=_payload_text(payload, "verifier_kind", "verified"),
                     )
                     if item.id == obligation_id else item
@@ -432,6 +484,7 @@ def _apply_event(
         reason = _payload_text(payload, "reason", "obligation blocked")
         return replace(
             projection,
+            active_obligation_id=None,
             obligation_states=tuple(
                 replace(item, status=ObligationStatus.BLOCKED, last_reason=reason)
                 if item.id == obligation_id else item
@@ -458,24 +511,13 @@ def _apply_event(
             failure_summary=None,
         )
 
-    if event_type == "approval_requested":
-        approval = _payload_mapping(payload, "approval") or dict(payload)
-        return replace(projection, pending_approval=approval, status=MissionStatus.WAITING_APPROVAL)
-
-    if event_type == "approval_decided":
-        approved = bool(payload.get("approved", False))
-        if not approved:
-            return replace(projection, pending_approval=None, status=MissionStatus.BLOCKED, last_error="approval denied")
-        return replace(projection, pending_approval=None, status=MissionStatus.RUNNING)
-
-    if event_type == "external_change_armed":
-        return replace(projection, status=MissionStatus.WAITING_EXTERNAL)
-
-    if event_type == "external_change_recorded":
-        return replace(projection, status=MissionStatus.RUNNING, failure_summary=None)
-
     if event_type == "mission_blocked":
-        return replace(projection, status=MissionStatus.BLOCKED, last_error=_payload_text(payload, "reason", "mission blocked"))
+        return replace(
+            projection,
+            active_obligation_id=None,
+            status=MissionStatus.BLOCKED,
+            last_error=_payload_text(payload, "reason", "mission blocked"),
+        )
 
     if event_type == "mission_failed":
         return replace(projection, status=MissionStatus.FAILED, last_error=_payload_text(payload, "reason", "mission failed"))
@@ -487,40 +529,6 @@ def _apply_event(
         if not _required_verified(projection):
             raise IllegalTransitionError("mission_verified is not derivable from required obligations")
         return replace(projection, status=MissionStatus.VERIFIED)
-
-    if event_type in {"planner_patch_proposed", "planner_patch_rejected"}:
-        _validate_patch_payload(payload)
-        return projection
-
-    if event_type == "planner_patch_accepted":
-        _validate_patch_payload(payload)
-        additions = tuple(
-            item if isinstance(item, ObligationDefinition) else ObligationDefinition.from_dict(item)
-            for item in (payload.get("obligations_to_add") or ())
-        )
-        existing_ids = {item.id for item in projection.definition.obligations}
-        if existing_ids.intersection(item.id for item in additions):
-            raise IllegalTransitionError("planner patch adds an existing obligation id")
-        new_definition = replace(
-            projection.definition,
-            obligations=projection.definition.obligations + additions,
-        )
-        new_states = projection.obligation_states + tuple(
-            ObligationProjection(item.id, ObligationStatus.PENDING) for item in additions
-        )
-        return replace(projection, definition=new_definition, obligation_states=new_states)
-
-    if event_type == "user_goal_revised":
-        new_goal = _payload_text(payload, "original_goal")
-        new_revision = int(payload.get("goal_revision", projection.definition.goal_revision + 1))
-        if not new_goal or new_revision <= projection.definition.goal_revision:
-            raise IllegalTransitionError("goal revision must advance and preserve original_goal")
-        new_definition = replace(
-            projection.definition,
-            original_goal=new_goal,
-            goal_revision=new_revision,
-        )
-        return replace(projection, definition=new_definition, status=MissionStatus.RUNNING)
 
     raise InvalidMissionEvent(f"unsupported mission event type: {event_type}")
 
@@ -534,24 +542,33 @@ def reduce_projection(
     """Pure state transition.  The input projection is never mutated."""
     if event.mission_id != projection.mission_id or event.run_id != projection.run_id:
         raise InvalidMissionEvent("event does not belong to the projection mission/run")
+    if event.kind in _UNIMPLEMENTED_EVENTS:
+        raise InvalidMissionEvent(
+            f"mission event is not implemented in P1: {event.kind}"
+        )
     if event.event_id in projection.accepted_event_ids:
         raise DuplicateEventError(f"event already accepted: {event.event_id}")
     if event.base_revision != projection.revision:
         raise StaleRevisionError(
             f"stale mission revision: event={event.base_revision}, current={projection.revision}"
         )
-    if projection.status in _TERMINAL_MISSION_STATUSES and event.type not in {"mission_canceled"}:
+    if projection.status in _TERMINAL_MISSION_STATUSES:
         raise IllegalTransitionError(f"mission is terminal: {projection.status.value}")
-    scope = evidence if isinstance(evidence, EvidenceScope) else EvidenceScope.from_refs(
+    scope = EvidenceScope.from_source(
         projection.mission_id, projection.run_id, evidence,
     )
+    if event.evidence_refs:
+        scope.require(event.evidence_refs)
     candidate = _apply_event(projection, event, scope)
     candidate = replace(
         candidate,
         revision=projection.revision + 1,
         accepted_event_ids=projection.accepted_event_ids + (event.event_id,),
     )
-    return _recompute(candidate)
+    return _recompute(
+        candidate,
+        preserve_explicit_status=event.kind in _EXPLICIT_HOLD_EVENTS,
+    )
 
 
 class MissionReducer:
@@ -561,14 +578,21 @@ class MissionReducer:
         self,
         definition: MissionDefinition,
         *,
-        evidence: EvidenceScope | Iterable[EvidenceRef] | None = None,
+        evidence: Any = None,
     ) -> None:
         self.definition = definition
-        self.evidence_scope = evidence if isinstance(evidence, EvidenceScope) else EvidenceScope.from_refs(
-            definition.mission_id, definition.run_id, evidence,
-        )
+        self._evidence_source = evidence
         self._projection = _initial_projection(definition)
         self._events: list[MissionEvent] = []
+
+    @property
+    def evidence_scope(self) -> EvidenceScope:
+        """Resolve the current external registry snapshot, never a startup copy."""
+        return EvidenceScope.from_source(
+            self.definition.mission_id,
+            self.definition.run_id,
+            self._evidence_source,
+        )
 
     @property
     def projection(self) -> MissionProjection:
@@ -588,7 +612,7 @@ class MissionReducer:
         next_projection = reduce_projection(
             self._projection,
             event,
-            evidence=self.evidence_scope,
+            evidence=self._evidence_source,
         )
         self._projection = next_projection
         self._events.append(event)

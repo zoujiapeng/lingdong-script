@@ -150,6 +150,8 @@ P1 的 Python 实现将 `ObligationSpec` 暴露为 `ObligationDefinition` 的同
 
 ## 5. ObligationSpec
 
+Canonical rule: `ObligationSpec` is the only new obligation-definition schema. `ObligationDefinition` may remain only as a deprecated Python read alias for old shadow callers; it is never emitted by `to_dict()` or used as a second state fact. A definition with no provably safe decomposition becomes one required full-goal obligation.
+
 ```python
 @dataclass(frozen=True, slots=True)
 class ObligationSpec:
@@ -218,6 +220,8 @@ Policy 只表达用户要求所需的最低证据，不允许 Verifier自行增�
 
 ### 6.1 MissionEvent
 
+The canonical event key is `kind`; `type` is accepted only when reading a legacy record and is never serialized. Event `format` must equal `mission-event/0`, payload values must be strict finite JSONValue values, and every accepted event is bound to the current mission/run revision.
+
 ```python
 @dataclass(frozen=True, slots=True)
 class MissionEvent:
@@ -271,6 +275,8 @@ mission_canceled
 
 ### 6.2 ObligationLifecycle
 
+P1 currently accepts only the pure state events implemented by the reducer. Planner, approval, external-change, capability, inspection, execution-profile and user-goal-revision events are deliberately fail-closed until their complete contracts exist; they must not silently mutate a projection.
+
 ```python
 @dataclass(frozen=True, slots=True)
 class ObligationLifecycle:
@@ -306,6 +312,8 @@ class MissionProjection:
 ```
 
 MissionProjection 是 `MissionDefinition + accepted event log + EvidenceRegistry` 的可重放视图。它可以缓存，但不能成为脱离事件与证据的第二份真相。
+
+`verified`、`failed`、`canceled` 是 terminal mission statuses；Reducer 在这些状态下拒绝任何后续写入。`blocked` 和 `waiting_external` 等显式等待状态不能被一次普通 recompute 擅自改写。Verification 只有在全部 acceptance criteria 被机械覆盖、`verification_id` 非空且 evidence refs 通过当前 mission/run scope 校验后，才会把 obligation 置为 `verified`。
 
 以下只能是派生 property，不得另行序列化为权威字段：
 
