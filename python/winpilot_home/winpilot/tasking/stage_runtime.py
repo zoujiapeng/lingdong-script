@@ -11,6 +11,7 @@ from ..agent.runtime_profile import build_runtime_profile
 from ..agent.tools import ToolSession
 from ..orchestrator.contracts import ArpNode
 from ..orchestrator.runtime import NodeResult
+from ..orchestrator.runtime_selection import selection_from_runtime_context
 from ..perception import apps, win32
 from ..perception.app_aliases import expand as expand_app_aliases
 from ..utils.log import BUS
@@ -494,6 +495,10 @@ class StageRuntime:
         }
 
     def execute(self, node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
+        # Defence in depth for direct handler callers: an explicit vNext run
+        # cannot enter any legacy TaskStage while its live coordinator is
+        # unavailable.  This check precedes shared state writes and BUS events.
+        selection_from_runtime_context(context).require_live_coordinator()
         started = time.monotonic()
         stage = TaskStage.model_validate(node.config.get("stage") or {})
         contract = self._contract(context)
