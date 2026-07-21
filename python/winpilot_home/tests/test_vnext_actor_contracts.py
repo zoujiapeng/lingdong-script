@@ -333,6 +333,10 @@ def test_runtime_envelope_binds_all_authority_and_round_trips() -> None:
         obligation_id="obligation-1",
         frame_id=82,
         frame_epoch=7,
+        frame_hwnd=9123,
+        frame_region=(0, 0, 1200, 800),
+        submitted_image_size=(1200, 800),
+        frame_image_sha256="b" * 64,
         target_binding_id="binding-1",
         broker_projection_id="projection-1",
         capability_grant_ids=("grant-b", "grant-a"),
@@ -349,14 +353,16 @@ def test_runtime_envelope_binds_all_authority_and_round_trips() -> None:
 def test_envelope_is_strict_and_frame_identity_is_atomic() -> None:
     raw = json.loads(ActorDecisionEnvelope(
         decision_id="d", mission_id="m", run_id="r", mission_revision=0,
-        obligation_id="o", frame_id=None, frame_epoch=None,
+        obligation_id="o", frame_id=1, frame_epoch=0, frame_hwnd=1,
+        frame_region=(0, 0, 1, 1), submitted_image_size=(1, 1),
+        frame_image_sha256="c" * 64,
         target_binding_id=None, broker_projection_id="p",
         capability_grant_ids=(), allowed_evidence_scope=(), proposal=_action(),
     ).to_json())
     with pytest.raises(InvalidActorEnvelope, match="explicit format"):
         ActorDecisionEnvelope.from_dict({key: value for key, value in raw.items() if key != "format"})
     with pytest.raises(InvalidActorEnvelope):
-        ActorDecisionEnvelope.from_dict({**raw, "frame_id": 3, "frame_epoch": None})
+        ActorDecisionEnvelope.from_dict({**raw, "frame_region": (0, 0, 0, 1)})
     with pytest.raises(InvalidActorEnvelope):
         ActorDecisionEnvelope.from_dict({**raw, "mission_revision": True})
     with pytest.raises(InvalidActorEnvelope):
