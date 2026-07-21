@@ -41,6 +41,7 @@ class CommitAdmissionStatus(str, Enum):
 
 class CommitAdmissionReason(str, Enum):
     ADMITTED = "admitted"
+    FRAME_CHANGED = "frame_changed"
     OBSERVATION_FAILED = "observation_failed"
     OBSERVATION_INVALID = "observation_invalid"
     STOP_REQUESTED = "stop_requested"
