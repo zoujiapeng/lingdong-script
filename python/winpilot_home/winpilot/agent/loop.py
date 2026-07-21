@@ -1545,6 +1545,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             selected = [
                 held_by_name[name] for name in held_order if name in held_by_name
             ]
+        observer = getattr(self, "_vnext_broker_shadow_observer", None)
+        observe_turn = getattr(observer, "observe_turn", None)
+        if callable(observe_turn):
+            try:
+                observe_turn(
+                    runner=self,
+                    base_tools=tools,
+                    legacy_selected_tools=selected,
+                    step=step,
+                    pointer_status=dict(pointer_status),
+                )
+            except Exception:
+                # A shadow observer is trace-only. It must never change the
+                # request, trigger another request, or fail the legacy run.
+                logger.debug("vNext Broker shadow observer failed", exc_info=True)
         return selected
 
     def _is_native_execute_desktop_task(self) -> bool:

@@ -251,7 +251,7 @@ P2进入 enforce 的门槛：
 
 ## 7. P3：Capability Broker shadow
 
-状态：**P3a 纯合同、确定性 Broker 和可注入 shadow evaluator 已完成；真实 legacy 回合 sidecar 与 enforce 尚未接入。**
+状态：**P3a 纯合同与 P3b 默认关闭的 single-obligation partial legacy sidecar 已完成；多 obligation 对齐和 enforce 尚未接入。**
 
 建立 ToolCatalog、CapabilityGrant 和纯 Broker：
 
@@ -289,12 +289,15 @@ P3a 当前实现边界：
 - pointer held/unknown、stale frame、terminal mission 与 runtime 不可写状态均 fail closed；
 - shadow evaluator 不把 legacy 实际选择当作“必要工具”真相。没有完整可靠 oracle 标注时，`necessary_tool_recall` 必须保持 `None`。
 
-尚未满足的门槛：真实 Electron 回合还没有 BrokerProjection sidecar 和 held-out necessary-tool 标注，因此本阶段不得启用 enforce，也不得删除 legacy 固定工具面。
+P3b 的同入口接线只在 `vnext.broker_shadow.enabled=true` 时启用：模型请求前读取同一个 FrameAuthority、已验证 target、同一次 pointer 状态和 owner-scoped local capability registry，记录 BrokerProjection、outer monotonic turn、child run/step 关联以及可重放的 Definition/event/evidence delta。实际工具继续使用现有 `agent_tool` trace 离线配对；shadow 不改 legacy schema、顺序或对象，也不增加 BUS/WebSocket 事件。observer 在 run 结束时从 runner 显式解绑。
+
+尚未满足的门槛：当前没有真实 held-out necessary-tool 完整标注和 A/B 报告，因此不得启用 enforce，也不得删除 legacy 固定工具面。多 obligation 若无法与 legacy child runner 机械对齐必须记录 unavailable；artifact、adapter、MCP 与授权若没有可信 registry/receipt 必须保持空，不能从配置或任务文本推断。
 
 进入 enforce 前：
 
 - held-out trace无应用名/题号分支；
-- necessary tool recall达到门槛；
+- 所有用于门槛计算的 turn 都有独立、完整的 relevance oracle；缺标注的 turn 单独报告，不进入分母；
+- controlled、mixed 与 held-out 的 required tool group recall 均为 100%，任何必需 recovery、pointer release、stop/cancel 或证据工具漏失都阻止 enforce；
 - 普通工具面通常小于十个；
 - pointer lease工具面严格受限；
 - grant有revision/obligation/expiry并可审计。

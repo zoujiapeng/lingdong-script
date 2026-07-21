@@ -51,6 +51,9 @@ _DEFAULTS: dict[str, Any] = {
         # P2 shadow is opt-in and trace-only. It never selects runtime version
         # or changes legacy tools, prompts, plans, actions, or completion.
         "profiler_shadow": {"enabled": False},
+        # P3 shadow records a private per-turn Broker projection. It never
+        # filters the legacy request; enforce has a separate evidence gate.
+        "broker_shadow": {"enabled": False},
         "runtime_version": "legacy",
     },
     "perception": {

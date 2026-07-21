@@ -248,3 +248,24 @@
   unchanged. A real-turn sidecar and complete held-out relevance labels are
   still required; without them necessary-tool recall is `None`, so enforce is
   prohibited and no legacy tool owner may be deleted.
+
+### D022: P3b partial shadow observes a turn and never becomes a second executor
+
+- status: accepted
+- decision: an opt-in observer runs immediately before the existing legacy
+  model request, reads the same FrameAuthority and pointer snapshot, and writes
+  one private BrokerProjection sidecar. Its return value is ignored and the
+  legacy tool schema object and ordering are preserved.
+- replay: target binding changes use accepted Mission events backed by
+  deterministic run-scoped EvidenceRef values. The sidecar carries the outer
+  run, child run, step and Definition/event/evidence deltas needed for replay;
+  legacy tool success or `done` never advances the shadow Mission.
+- limits: multi-obligation alignment, artifact bindings, provider/MCP liveness
+  and authorization remain unavailable unless a trusted Runtime owner supplies
+  them. The feature defaults off, has no BUS/WebSocket output, and cannot be
+  used for enforcement until the independent relevance-oracle gate passes.
+- lifecycle: capability availability comes from an owner-scoped Runtime
+  registry, not a server tuple or model payload. Each observer has a monotonic
+  outer turn index and is detached from every runner when the run finishes.
+  P3b remains explicitly partial until Mission Runtime supplies a reliable
+  active-obligation envelope for multi-obligation tasks.

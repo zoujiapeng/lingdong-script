@@ -26,12 +26,15 @@ from winpilot.vnext.capabilities import (
     ToolRoute,
     ToolSpec,
     build_tool_catalog,
+    CapabilityOwner,
+    RuntimeCapabilityRegistry,
+    legacy_local_capability_registry,
 )
 from winpilot.vnext.mission import (
     ArtifactRef,
+    EvidenceRef,
     MissionDefinition,
     MissionReducer,
-    MissionStatus,
     ObligationSpec,
     TargetBinding,
 )
@@ -107,18 +110,87 @@ def _mission(capability: str = "visual.interact", *, bound: bool = True):
             required_capabilities=(capability,),
         ),),
     )
-    projection = MissionReducer(definition).projection
+    evidence = ()
     if bound:
-        projection = replace(projection, target_binding=TargetBinding(
-            binding_id="target-1",
-            hwnd=101,
-            process_id=7,
-            executable_identity="opaque-process-identity",
-            title_snapshot="",
-            established_by_evidence_ref="e-target",
-            epoch=3,
+        evidence = (EvidenceRef(
+            id="e-target", mission_id="m1", run_id="r1", kind="target",
+            trust="deterministic", obligation_id="o1",
+            payload_hash="target-payload-hash", frame_id=9,
+        ),)
+    reducer = MissionReducer(definition, evidence=evidence)
+    if bound:
+        reducer.apply(reducer.event(
+            "target_bound",
+            payload=TargetBinding(
+                binding_id="target-1",
+                hwnd=101,
+                process_id=7,
+                executable_identity="opaque-process-identity",
+                title_snapshot="",
+                established_by_evidence_ref="e-target",
+                epoch=3,
+            ).to_dict(),
+            evidence_refs=("e-target",),
         ))
-    return projection
+    return reducer.projection
+
+
+def _mission_with_artifact_binding():
+    definition = MissionDefinition(
+        mission_id="m1", run_id="r1", original_goal="capture and send one artifact",
+        obligations=(
+            ObligationSpec(
+                id="capture", desired_state="an artifact exists",
+                acceptance_criteria=("artifact existence is confirmed",),
+                required_capabilities=("artifact.capture",),
+                output_binding_names=("current_artifact",),
+            ),
+            ObligationSpec(
+                id="send", desired_state="the same artifact is delivered",
+                acceptance_criteria=("delivery is confirmed",),
+                depends_on=("capture",),
+                input_artifact_refs=("artifact-1",),
+                required_capabilities=("communication.send_artifact",),
+            ),
+        ),
+    )
+    evidence = (
+        EvidenceRef(
+            id="capture-proof", mission_id="m1", run_id="r1",
+            obligation_id="capture", kind="oracle", trust="deterministic",
+            payload_hash="capture-proof-hash",
+        ),
+        EvidenceRef(
+            id="artifact-proof", mission_id="m1", run_id="r1",
+            obligation_id="capture", kind="artifact", trust="deterministic",
+            payload_hash="artifact-proof-hash", artifact_id="artifact-1",
+            content_sha256="a" * 64,
+        ),
+    )
+    reducer = MissionReducer(definition, evidence=evidence)
+    reducer.apply(reducer.event(
+        "obligation_claimed", payload={"obligation_id": "capture"},
+    ))
+    reducer.apply(reducer.event(
+        "verification_recorded",
+        payload={
+            "obligation_id": "capture", "verified": True,
+            "satisfied_criteria": ["artifact existence is confirmed"],
+            "verification_id": "capture-verification",
+            "evidence_refs": ["capture-proof"],
+            "verifier_kind": "deterministic",
+        },
+    ))
+    artifact = ArtifactRef(
+        artifact_id="artifact-1", media_type="image/png", sha256="a" * 64,
+        producer_obligation_id="capture", evidence_ref="artifact-proof",
+    )
+    reducer.apply(reducer.event(
+        "artifact_bound",
+        payload={"binding_name": "current_artifact", "artifact": artifact.to_dict()},
+        evidence_refs=("artifact-proof",),
+    ))
+    return reducer.projection
 
 
 def _profile(mission):
@@ -155,6 +227,23 @@ def test_catalog_is_strict_versioned_and_order_deterministic() -> None:
     assert BrokerRuntimeState.from_dict(state.to_dict()) == state
     with pytest.raises(CapabilityContractError):
         BrokerRuntimeState.from_dict({**state.to_dict(), "task_text": "benchmark case"})
+
+
+def test_runtime_capability_availability_has_one_owner_scoped_registry() -> None:
+    snapshot = legacy_local_capability_registry().snapshot()
+    assert "visual.interact" in snapshot
+    assert "artifact.capture" in snapshot
+    assert "mcp.office" not in snapshot
+    registry = RuntimeCapabilityRegistry((
+        CapabilityOwner("live-owner", ("visual.interact",), True),
+        CapabilityOwner("offline-owner", ("visual.draw",), False),
+    ))
+    assert registry.snapshot() == ("visual.interact",)
+    with pytest.raises(CapabilityContractError, match="unique"):
+        RuntimeCapabilityRegistry((
+            CapabilityOwner("same-owner", ("visual.interact",)),
+            CapabilityOwner("same-owner", ("visual.draw",)),
+        ))
 
 
 def test_catalog_schema_is_deeply_immutable_and_cyclic_json_fails_closed() -> None:
@@ -324,7 +413,11 @@ def test_unknown_pointer_state_only_allows_release_wait_and_block() -> None:
 
 
 def test_terminal_mission_exposes_no_mutation() -> None:
-    mission = replace(_mission(), status=MissionStatus.FAILED)
+    reducer = MissionReducer(_mission(bound=False).definition)
+    reducer.apply(reducer.event(
+        "mission_failed", payload={"reason": "deterministic test failure"},
+    ))
+    mission = reducer.projection
     catalog = _catalog()
     projection = CapabilityBroker(catalog).project(
         mission, _profile(mission), _state()
@@ -417,13 +510,7 @@ def test_executor_offer_identity_is_unique_and_input_order_cannot_choose_route()
 
 
 def test_artifact_id_and_hash_must_match_mission_binding() -> None:
-    mission = _mission("communication.send_artifact", bound=False)
-    mission = replace(mission, artifact_bindings={
-        "current_artifact": ArtifactRef(
-            artifact_id="artifact-1", media_type="image/png", sha256="a" * 64,
-            producer_obligation_id="o1", evidence_ref="e-artifact",
-        ),
-    })
+    mission = _mission_with_artifact_binding()
     offer = ExecutorOffer(
         executor_id="provider-1", route=ToolRoute.PROVIDER,
         supported_capabilities=("communication.send_artifact",),
