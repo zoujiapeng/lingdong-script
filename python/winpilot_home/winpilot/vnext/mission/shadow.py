@@ -200,10 +200,14 @@ def project_legacy_contract(
     rows = _legacy_obligation_rows(contract)
     unknown_capabilities: list[str] = []
     for raw, stage in rows:
-        values = [
-            *_items(_get(raw, "required_capabilities", ())),
-            *(_items(_get(stage, "required_capabilities", ())) if stage else ()),
-        ]
+        values: list[Any] = []
+        for owner in (
+            raw,
+            stage,
+            _get(raw, "execution", None),
+            _get(stage, "execution", None) if stage else None,
+        ):
+            values.extend(_items(_get(owner, "required_capabilities", ())) if owner else ())
         for provider in _items(_get(raw, "evidence_providers", ())):
             values.extend(_items(_get(provider, "capabilities", ())))
         _, unknown = _partition_capabilities(values)
@@ -254,11 +258,12 @@ def project_legacy_contract(
             criteria = tuple(str(item) for item in _items(_get(raw, "acceptance_criteria")))
         stage_capabilities = _items(_get(stage, "required_capabilities", ())) if stage else ()
         raw_capabilities = _items(_get(raw, "required_capabilities", ()))
+        execution_capabilities = _items(_get(_get(stage, "execution", None), "required_capabilities", ())) if stage else ()
         provider_capabilities: list[str] = []
         for provider in _items(_get(raw, "evidence_providers", ())):
             provider_capabilities.extend(_items(_get(provider, "capabilities", ())))
         capabilities, _unknown = _partition_capabilities(
-            (*raw_capabilities, *stage_capabilities, *provider_capabilities)
+            (*raw_capabilities, *stage_capabilities, *execution_capabilities, *provider_capabilities)
         )
         artifact_ref = str(_get(raw, "artifact_ref", "") or "").strip()
         outputs = [str(_get(item, "name", "") or "") for item in _items(_get(stage, "outputs", ())) if _get(item, "name", "")]
