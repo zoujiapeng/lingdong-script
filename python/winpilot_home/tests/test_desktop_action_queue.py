@@ -353,6 +353,49 @@ def test_typed_click_uses_one_outer_queue_event(monkeypatch):
     ]
 
 
+def test_typed_click_unqueued_core_bypasses_queue_and_matches_public(monkeypatch):
+    backend_calls = []
+    queue_calls = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(
+        executor,
+        "_raw_click",
+        lambda *args, **kwargs: (
+            backend_calls.append((args, kwargs))
+            or RawBackendResult(True, {"via": "test"})
+        ),
+    )
+
+    def fake_run(action, fn, **kwargs):
+        queue_calls.append((action, kwargs))
+        return fn()
+
+    monkeypatch.setattr(
+        desktop_queue_module.DESKTOP_ACTION_QUEUE,
+        "run",
+        fake_run,
+    )
+    arguments = (
+        10,
+        20,
+        MouseButton.LEFT,
+        ClickCount.SINGLE,
+        ClickMechanism.PHYSICAL,
+    )
+
+    core_result = executor._execute_click_input_unqueued(*arguments, hwnd=123)
+    assert queue_calls == []
+
+    public_result = executor.execute_click_input(*arguments, hwnd=123)
+
+    assert public_result.to_dict() == core_result.to_dict()
+    assert queue_calls == [
+        ("click", {"target_hwnd": 123, "scope": "physical"}),
+    ]
+    assert len(backend_calls) == 2
+    assert backend_calls[0] == backend_calls[1]
+
+
 def test_window_scoped_decorator_binds_positional_hwnd(monkeypatch):
     observed = {}
 
