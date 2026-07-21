@@ -79,4 +79,3 @@ def test_untrusted_not_applied_payload_does_not_grant_legacy_replay(monkeypatch)
     assert calls == 1
     assert result["attempts"] == 1
     assert result["action_replay_suppressed"] is True
-
