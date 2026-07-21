@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any, Iterable, Mapping
+
+from ..capabilities.names import CAPABILITY_PATTERN, CANONICAL_CAPABILITIES
 
 from .contracts import (
     CognitiveServices,
@@ -25,24 +26,7 @@ from .contracts import (
     _text,
 )
 
-# Canonical, semantic capabilities from docs/vnext/contracts.md.  These are
-# deliberately broader than tools and contain no application or workflow name.
-DEFAULT_CAPABILITY_CATALOG = frozenset({
-    "application.resolve",
-    "artifact.capture",
-    "artifact.read",
-    "communication.bind_recipient",
-    "communication.send_artifact",
-    "communication.send_text",
-    "communication.verify_delivery",
-    "external.wait",
-    "mcp.office",
-    "pointer.dynamic",
-    "visual.draw",
-    "visual.interact",
-    "visual.read_text",
-})
-_CAPABILITY_PATTERN = re.compile(r"[a-z][a-z0-9]*(?:\.[a-z0-9_]+)+")
+DEFAULT_CAPABILITY_CATALOG = CANONICAL_CAPABILITIES
 _SERVICE_NAMES = tuple(CognitiveServices._FIELDS)
 _SERVICE_FIELDS = frozenset(_SERVICE_NAMES)
 
@@ -97,7 +81,7 @@ class ExecutionPolicy:
         if not catalog:
             raise InvalidProfileSchema("capability_catalog cannot be empty")
         for capability in catalog:
-            if not _CAPABILITY_PATTERN.fullmatch(capability):
+            if not CAPABILITY_PATTERN.fullmatch(capability):
                 raise InvalidProfileSchema(
                     f"non-canonical capability catalog entry {capability!r}"
                 )

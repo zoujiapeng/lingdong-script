@@ -231,3 +231,20 @@
 - rollout: `vnext.profiler_shadow.enabled` defaults to false. When enabled, the
   same Electron/ARP entry records a private trace sidecar and leaves legacy
   prompt, tools, actions and completion unchanged. P3 remains evidence-gated.
+
+### D021: P3a Broker is a pure state projection and remains non-enforcing
+
+- status: accepted
+- decision: ToolCatalog associates existing tool schemas with generic policy;
+  CapabilityBroker deterministically projects one mutually exclusive route and
+  a small tool surface from MissionProjection, ExecutionProfile, authoritative
+  target/frame/pointer/artifact state, live executor offers, authorization and
+  bounded grants. It cannot inspect application names, task prose, benchmark
+  identities, layouts or remembered coordinates.
+- identity: grants bind mission, run, obligation, revision, issued turn and
+  expiry. Artifact-dependent routes require matching run, artifact id and
+  content hash. Provider mutations require live authorization and a receipt.
+- rollout: P3a is pure and injected-test-only. The legacy tool surface is
+  unchanged. A real-turn sidecar and complete held-out relevance labels are
+  still required; without them necessary-tool recall is `None`, so enforce is
+  prohibited and no legacy tool owner may be deleted.

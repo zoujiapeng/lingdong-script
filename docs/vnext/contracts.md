@@ -628,9 +628,12 @@ class BrokerProjection:
 @dataclass(frozen=True, slots=True)
 class CapabilityGrant:
     grant_id: str
+    mission_id: str
+    run_id: str
     capability: str
     obligation_id: str
     mission_revision: int
+    issued_turn: int
     expires_after_turns: int
     policy_reason: str
 ```
@@ -645,6 +648,15 @@ class CapabilityGrant:
 - MCP 未注册、未授权或输出不可验证时不暴露；
 - 工具集变化由 state/profile/grant变化触发，不由应用名或 prompt 触发；
 - 所有 projection/grant 写入 trace。
+
+P3a 的可执行合同还要求：
+
+- ToolCatalog、BrokerRuntimeState、BrokerProjection 和 CapabilityGrant 使用严格版本字段并拒绝未知字段；
+- Tool schema 是深度不可变的 JSONValue，循环对象、非字符串 key、非有限数字和非 JSON 值 fail closed；
+- 布尔状态不接受 `0/1` 或字符串替代，HWND 必须大于零；
+- grant id 从其完整 scope 确定性派生，并同时绑定 mission、run、obligation、revision、issued turn 与 expiry；
+- BrokerProjection 的工具只能来自同一 ToolCatalog；route 每回合只有一个；
+- necessary-tool recall 不是由 legacy 实际调用反推。只有完整可靠 relevance label 才允许形成数值，否则为 `None`。
 
 ## 13. TransitionRecord
 
