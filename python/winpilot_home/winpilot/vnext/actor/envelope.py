@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ...visual_runtime.commit_admission import FrameCommitIdentity, TargetCommitIdentity
+from ..capabilities import PointerLeaseState
 from .proposals import ActorProposal
 
 
 ACTOR_ENVELOPE_FORMAT = "actor-envelope/0"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class InvalidActorEnvelope(ValueError):
@@ -45,21 +47,9 @@ class ActorDecisionEnvelope(BaseModel):
     run_id: str
     mission_revision: Annotated[int, Field(strict=True, ge=0)]
     obligation_id: str
-    frame_id: Annotated[int, Field(strict=True, ge=0)]
-    frame_epoch: Annotated[int, Field(strict=True, ge=0)]
-    frame_hwnd: Annotated[int, Field(strict=True, gt=0)]
-    frame_region: tuple[
-        Annotated[int, Field(strict=True)],
-        Annotated[int, Field(strict=True)],
-        Annotated[int, Field(strict=True, gt=0)],
-        Annotated[int, Field(strict=True, gt=0)],
-    ]
-    submitted_image_size: tuple[
-        Annotated[int, Field(strict=True, gt=0)],
-        Annotated[int, Field(strict=True, gt=0)],
-    ]
-    frame_image_sha256: str
-    target_binding_id: str | None
+    frame: FrameCommitIdentity
+    target: TargetCommitIdentity | None
+    pointer: PointerLeaseState
     broker_projection_id: str
     capability_grant_ids: tuple[str, ...]
     allowed_evidence_scope: tuple[str, ...]
@@ -73,22 +63,46 @@ class ActorDecisionEnvelope(BaseModel):
     def _required_identity(cls, value: Any, info: Any) -> str:
         return _identity(value, info.field_name)
 
-    @field_validator("target_binding_id")
+    @field_validator("frame", mode="before")
     @classmethod
-    def _optional_identity(cls, value: Any) -> str | None:
-        return None if value is None else _identity(value, "target_binding_id")
+    def _frame(cls, value: Any) -> FrameCommitIdentity:
+        if isinstance(value, FrameCommitIdentity):
+            return value
+        if isinstance(value, Mapping):
+            return FrameCommitIdentity.from_dict(value)
+        raise ValueError("frame must be FrameCommitIdentity")
+
+    @field_validator("target", mode="before")
+    @classmethod
+    def _target(cls, value: Any) -> TargetCommitIdentity | None:
+        if value is None or isinstance(value, TargetCommitIdentity):
+            return value
+        if isinstance(value, Mapping):
+            return TargetCommitIdentity.from_dict(value)
+        raise ValueError("target must be TargetCommitIdentity or null")
+
+    @field_validator("pointer", mode="before")
+    @classmethod
+    def _pointer(cls, value: Any) -> PointerLeaseState:
+        if isinstance(value, PointerLeaseState):
+            return value
+        if isinstance(value, Mapping):
+            return PointerLeaseState.from_dict(value)
+        raise ValueError("pointer must be PointerLeaseState")
 
     @field_validator("capability_grant_ids", "allowed_evidence_scope", mode="before")
     @classmethod
     def _identity_arrays(cls, value: Any, info: Any) -> tuple[str, ...]:
         return _identities(value, info.field_name)
 
-    @field_validator("frame_image_sha256")
-    @classmethod
-    def _image_sha256(cls, value: Any) -> str:
-        if type(value) is not str or not _SHA256.fullmatch(value.strip().lower()):
-            raise ValueError("frame_image_sha256 must be a SHA-256 digest")
-        return value.strip().lower()
+    @model_validator(mode="after")
+    def _identities_agree(self) -> "ActorDecisionEnvelope":
+        if self.target is not None and (
+            self.frame.hwnd != self.target.hwnd
+            or self.frame.epoch != self.target.epoch
+        ):
+            raise ValueError("frame and target identity disagree")
+        return self
 
     def to_json(self) -> str:
         return json.dumps(
