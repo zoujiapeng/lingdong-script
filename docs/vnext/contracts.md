@@ -284,8 +284,10 @@ class ObligationLifecycle:
         "pending", "active", "claimed", "verified",
         "blocked", "superseded", "canceled"
     ]
-    activation_count: int
+    activation_attempt_count: int
+    verification_attempt_count: int
     claim_fingerprint: str | None
+    verified_claim_fingerprint: str | None
     accepted_verification_id: str | None
     failure_budget_key: str | None
 ```
@@ -330,6 +332,7 @@ obligation_coverage_ratio
 running
 waiting_approval
 waiting_external
+awaiting_mission_verification
 blocked
 verified
 failed
@@ -785,3 +788,37 @@ reducer event and resulting revision
 ```
 
 这样失败可以归因到 Goal Compiler、Task Profiler、Execution Policy、Mission Reducer、Broker、Actor、Frame/Controller、Verifier、Planner、Inspector或外部环境，而不是笼统归因于“模型不行”。
+### P1.5 completion and recovery contract (canonical)
+
+The Python sidecar is explicit about the distinction between obligation
+verification and mission completion. When every required obligation is
+`verified`, the reducer derives `awaiting_mission_verification`; it never
+derives `verified`. Only one accepted `mission_verified` event can close the
+mission. That event must carry a new mission-level `verification_id` and at
+least one evidence reference from the current mission/run registry. The
+identity is stored as `mission_verification_id`; `verified`, `failed`, and
+`canceled` are terminal and reject every later write.
+
+Each `ObligationProjection` stores reducer-generated lifecycle facts:
+`claim_fingerprint`, `verified_claim_fingerprint`,
+`activation_attempt_count`, `verification_attempt_count`, and the accepted
+obligation `verification_id`. Fingerprints are derived from the obligation,
+runtime evidence IDs, and the bound transition summary; event IDs and model
+text are not inputs. A fingerprint can be verified only once. A new attempt
+requires a new runtime claim fingerprint, and the policy's
+`max_verification_attempts` and `uncertain_policy` determine whether the
+obligation remains active, waits for external recovery, or becomes blocked.
+Visual verifier evidence is accepted only when
+`allow_independent_visual_verifier` is true.
+
+`ArtifactRef`, `TargetBinding`, and `VerifiedFact` require non-empty stable
+identities. Reducer acceptance additionally checks that their evidence
+references are in the current run scope and identify the same artifact,
+target, or obligation. `TransitionSummary` and `FailureSummary` carry an
+`obligation_id`; `MissionCard` projects either summary only when it belongs to
+the currently active obligation, so feedback from a previous obligation
+cannot leak into the next card. Legacy decomposition is retained only when
+every split row participates in an explicit dependency or artifact edge.
+Unknown legacy capability labels are preserved in metadata and never become
+`required_capabilities`. An unprovably decomposable legacy contract falls
+back to one required full-goal obligation.
