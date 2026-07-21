@@ -1,8 +1,7 @@
 # vNext 状态与角色合同
 
 本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和
-legacy shadow；P2a 已实现纯 Task Profile 合同与确定性 Execution Policy，P2b 已增加默认关闭、无工具的真实 Profiler shadow；P3a Broker 合同与 P3b single-obligation partial shadow 已实现，但尚未 enforce。P4 Visual Actor、P5 Verifier、P6 Planner/Inspector 和桌面动作仍未接入 vNext。实现时先固定
-schema、Reducer 与 envelope 测试；任何运行时接线都必须经过迁移计划的后续阶段门槛。
+legacy shadow；P2a 已实现纯 Task Profile 合同与确定性 Execution Policy，P2b 已增加默认关闭、无工具的真实 Profiler shadow；P3a Broker 合同与 P3b single-obligation partial shadow 已实现，但尚未 enforce。P4a 已实现严格 Actor proposal/view/envelope 合同与注入式单回合 MissionRuntime；它不直接调用模型或设备，也未接入产品或 legacy 执行。P4b live Actor/共享执行桥、P5 Verifier 与 P6 Planner/Inspector 仍未实现。任何产品接线都必须经过迁移计划的后续阶段门槛。
 
 ## 1. 版本与基本规则
 
@@ -16,9 +15,17 @@ mission-definition/0
 mission-event/0
 mission-projection/0
 mission-card/0
+actor-mission-view/0
+actor-frame-view/0
+actor-tool-view/0
+actor-turn-input/0
 actor-proposal/0
 actor-envelope/0
 broker-projection/0
+runtime-frame/0
+runtime-snapshot/0
+controller-transition/0
+mission-runtime-result/0
 transition-record/0
 verifier-assessment/0
 verification-result/0
@@ -517,6 +524,17 @@ class MissionCard:
 - 不包含旧帧；
 - 不包含其他角色隐藏推理。
 
+### 9.1 P4a Actor 可见投影
+
+P4a 不把带 Runtime 身份的 `MissionCard` 或 `BrokerProjection` 原样交给 Actor。Runtime 机械投影：
+
+- `ActorMissionView`：完整 `original_goal`、当前义务的语义字段、相关事实/工件摘要、target 标题及当前义务自己的 transition/failure 摘要；
+- `ActorFrameView`：只说明图片是否可用、是否权威/新鲜，以及 `submitted_image_pixels` 坐标系；
+- `ActorToolView`：只包含当前 BrokerProjection 允许的 Visual Actor 工具名和严格 JSON schema；
+- `ActorTurnInput`：组合上述三种 view，图片字节和 submitted size 通过注入的 `ActorPort` 单独传递。
+
+这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。语义文本完整保留，不通过关键词替换或应用规则“清洗”。P4a 没有真实 Actor provider，因此这只是可注入、可测试的边界，不是产品模型调用。
+
 ## 10. 模型输出：ActorProposal
 
 模型每回合只输出一个 union variant，且**不包含 Runtime 身份**：
@@ -550,7 +568,7 @@ class DesktopActionProposal:
 ```python
 @dataclass(frozen=True, slots=True)
 class ObserveProposal:
-    kind: Literal["full", "image_region"]
+    observation_kind: Literal["full", "image_region"]
     image_region: ImageRegion | None
     question: str
 ```
@@ -587,7 +605,7 @@ class ClaimObligationDone:
     concise_claim: str
 ```
 
-模型不提交 obligation id、revision 或 evidence refs。Runtime绑定 active obligation 并收集当前可引用 evidence。Claim 不改变状态，只触发 verification event。
+模型不提交 obligation id、revision 或 evidence refs。Runtime 绑定 active obligation 和当前可引用的 run-scoped frame evidence，接受 `obligation_claimed` 后义务只进入 `CLAIMED`，单回合结果为 `verification_required`。它不会进入 `VERIFIED` 或结束 mission；P5 独立 ObligationVerifier 尚未接入。
 
 ### 10.6 BlockedReport
 
@@ -621,10 +639,15 @@ class ActorDecisionEnvelope:
     run_id: str
     mission_revision: int
     obligation_id: str
-    frame_id: int | None
-    frame_epoch: int | None
+    frame_id: int
+    frame_epoch: int
+    frame_hwnd: int
+    frame_region: tuple[int, int, int, int]
+    submitted_image_size: tuple[int, int]
+    frame_image_sha256: str
     target_binding_id: str | None
     broker_projection_id: str
+    capability_grant_ids: tuple[str, ...]
     proposal: ActorProposal
     allowed_evidence_scope: tuple[str, ...]
 ```
@@ -638,6 +661,37 @@ Runtime构造 envelope。必须拒绝：
 - 参数混用坐标系统；
 - proposal 试图覆盖 envelope 身份；
 - capability/inspection/replan trigger 不满足 policy。
+
+### 11.1 P4a 注入式 MissionRuntime
+
+P4a 的 `MissionRuntime.run_one_turn()` 是纯协调边界。它只持有注入的 `ActorPort`、`RuntimeStatePort`、`ControllerPort` 和可选 `PointerCleanupPort`，不会直接导入或调用模型 SDK、AgentRunner、ToolSession、FastGuiController、RawDevice 或 DesktopActionQueue。非 `visual_actor` route 不调用 Actor，也不会在同一 run 偷偷 fallback 到 legacy。
+
+单回合 admission 顺序固定为：
+
+1. 从 Reducer 的当前 Projection/Card 和 `RuntimeStatePort.observe()` 取得权威 snapshot；
+2. 确定性投影 Broker，并只把 Actor view、图片和小工具面交给注入 ActorPort；
+3. 严格解析一个 `actor-proposal/0`；
+4. Actor 返回后重新读取 revision、active obligation 和完整 authority snapshot，并重新投影 Broker；
+5. 任一 frame/epoch/HWND/region/image hash/target/pointer/grant/projection 或义务变化都返回 `stale_discarded`，不进入 Controller；
+6. 只有仍在最新 BrokerProjection 中的一笔 Visual Actor 动作，才由 Runtime 绑定 envelope 后交给注入 ControllerPort。
+
+P4a Controller 回执使用三态 `ControllerOutcome`：
+
+```text
+completed
+rejected
+unknown
+```
+
+`completed` 与 `rejected` 只有在 action identity、当前 post frame 和 evidence 能对账时才可产生 `transition_recorded`。`unknown`、Controller 执行后异常、身份不一致或 post-frame/evidence 无法对账时，Runtime 接受 `obligation_blocked`，且不自动重放 mutation。取消后的迟到 Actor 结果也不会进入 Controller；若 Runtime 已持有物理 pointer lease，只允许注入的确定性 release cleanup。
+
+`ObserveProposal` 只刷新观察；`BlockedReport` 只产生当前义务的 blocked event，其自然语言事实不会升级为 `VerifiedFact`。`CapabilityRequest`、`InspectionRequest` 和 `ReplanRequest` 在 P4a 均返回 `unavailable`；尤其 P6 Planner/Inspector 未启用时必须 fail closed。
+
+这一实现不等于 Broker enforce、live Actor、共享 FrameAuthority/Controller adapter 或产品 canary。P4b 必须复用现有唯一 frame/admission/execution owner 建桥，不能把注入端口实现成第二套执行链。
+
+### 11.2 P4a ControllerTransition
+
+注入式 ControllerPort 返回 `controller-transition/0`，至少绑定 `action_id`、`action`、三态 outcome、`input_completed`、post frame 和 evidence refs。`completed` 必须明确 `input_completed=true` 且带当前 post frame/evidence；`rejected` 必须明确 `input_completed=false` 且带 post frame；`unknown` 必须保持 `input_completed=null`，不能伪装成“确定未执行”。该边界是 Controller 事实回执，不拥有语义恢复或任务完成权限。
 
 ## 12. BrokerProjection 与 CapabilityGrant
 
