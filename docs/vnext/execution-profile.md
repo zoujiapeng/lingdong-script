@@ -1,6 +1,6 @@
 # Task Profiler 与 ExecutionProfile
 
-状态：**目标设计，尚未实现代码**。
+状态：**P2a 已完成，真实 Profiler 模型调用尚未接入**。
 
 本文补充 vNext 的低频架构选择入口。它解决的问题不是“任务应该点击哪里”，而是：当前任务需要多深的编排、哪些只读认知服务、什么证据强度，以及哪些运行事实应触发升档或降档。
 
@@ -257,7 +257,8 @@ Profiler 的价值必须体现为未知任务能力、长任务义务覆盖或�
 ## P2a implementation status (2026-07-21)
 
 P2a is complete for the pure contracts and deterministic shadow policy. The
-implemented sidecar validates the versioned `TaskProfileProposal` and
+implementation is independently owned by
+`python/winpilot_home/winpilot/vnext/profiling/`. It validates the versioned `TaskProfileProposal` and
 `ExecutionProfile` schemas, semantic `TaskDimensions`, `CognitiveServices`,
 `ExecutionDepth`, canonical broad capabilities, and policy audit reasons.
 Missing, malformed, unsupported, or low-confidence proposals resolve to the

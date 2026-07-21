@@ -212,6 +212,9 @@
   malformed, unsupported, or low-confidence proposals, restricts depth and
   services from semantic pressure and availability facts, and records policy
   reasons. It never calls a model or selects a GUI route.
+- owner: `python/winpilot_home/winpilot/vnext/profiling/` is the sole P2a
+  implementation owner. Its injected shadow evaluator compares over/under
+  profile and identity-free structural fingerprints without invoking a model.
 - rollout: P2a is shadow-only. Profiler model invocation, Broker, Actor,
   Planner, Inspector, prompts, tool surfaces, Controller, done semantics,
   legacy execution, and frontend integration remain disconnected.

@@ -260,6 +260,11 @@ Electron task input
 
 ## 6. Profiler评测
 
+P2a 已完成纯合同、确定性 Policy 与可注入 shadow 评测接口；真实 Profiler
+模型调用尚未接入。因此当前结果只能证明 malformed/低置信 fallback、provider
+和 capability 收紧、over/under-profile 判定、确定性 replay，以及对任务改写和
+应用标签变化的结构稳定性，不能证明真实模型分类质量或 GUI 任务成功。
+
 ### 6.1 Over-profile
 
 任务实际可由direct/standard完成，却启动过多obligation、Planner、Inspector或昂贵Verifier。影响指标：

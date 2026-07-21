@@ -201,18 +201,23 @@ P1不启动模型、不操控桌面、不替换 legacy runner。完成后可用�
 
 ## 6. P2：Task Profiler 与 Execution Policy shadow
 
-本轮明确未实施 P2：没有 TaskProfiler、Execution Policy、ToolCatalog、Capability Broker、
-shadow 工具投影或任何第二模型调用。
+状态：**P2a 已完成，真实 Profiler 模型调用尚未接入**。
 
-先实现：
+P2a 已在独立 `vnext/profiling/` 旁路中实现严格版本化合同、确定性
+Execution Policy、canonical broad capability/provider availability 校验、
+safe-standard fallback、完整 policy reasons、序列化与可注入 shadow 评测。
+它没有 TaskProfiler 模型调用、ToolCatalog、Capability Broker、shadow 工具投影或任何第二模型调用。
+
+P2a 已实现：
 
 - TaskProfileProposal schema；
 - ExecutionProfile schema；
-- read-only TaskProfiler调用边界；
 - deterministic Execution Policy；
 - `direct/standard/orchestrated` depth；
 - CognitiveServices；
-- profile trace。
+- 可重放 shadow case/result 与 over/under-profile、结构稳定性判定。
+
+P2b 才允许在单独评审后实现 read-only TaskProfiler 调用边界；P2a 不提供模型 client 或 provider 调用。
 
 Shadow阶段：
 
@@ -492,7 +497,9 @@ implemented with injected shadow tests. The policy validates canonical broad
 capabilities, defaults malformed or low-confidence input to safe `standard`,
 restricts depth and cognitive services, and records auditable reasons.
 
-The Profiler model invocation is still not connected. P2a does not change
+The Profiler model invocation is still not connected. The unique implementation
+owner is `python/winpilot_home/winpilot/vnext/profiling/`; its injected shadow
+interface cannot call a model or mutate a desktop. P2a does not change
 prompts, model calls, model tool surface, GUI actions, Controller, FrameAuthority,
 legacy execution, done semantics, or frontend. Broker, Actor, Planner, and
 Inspector remain future gates.

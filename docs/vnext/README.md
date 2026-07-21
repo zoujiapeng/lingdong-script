@@ -45,16 +45,17 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 
 ## 当前阶段
 
-当前分支已完成 P0/P1 的纯旁路，仍不改变产品运行时：
+当前分支已完成 P0/P1/P1.5 和 P2a 的纯旁路，仍不改变产品运行时：
 
 - P0 只在既有 trace/BUS 事件上增加观测字段；
 - P1 提供可重放的 MissionDefinition/Event/Projection/Reducer/Card 及 legacy shadow；
+- P2a 在独立 `vnext/profiling/` 中提供严格版本化合同、确定性 Execution Policy、序列化和可注入 shadow 评测；
 - 不新增模型调用、模型工具面、GUI 动作链、Controller 或完成语义接线；
 - 不改变当前 `master` 的产品行为；
 - 不声称 Mission Ledger 已经接管产品运行；P1 projection 只能离线或 shadow 使用；
-- 不声称 Task Profiler、Broker 或多角色系统已经实现；
+- 真实 Profiler 模型调用尚未接入；Broker、Actor、Verifier、Planner、Inspector 和多角色运行时均未实现；
 - 不把历史单次 E2E 结果改写成 vNext 成功证据；
-- 下一步代码工作必须从 [migration-plan.md](migration-plan.md) 的 P2 Task Profiler/Execution Policy shadow 开始，不能提前接入 Broker 或 Actor。
+- 下一步必须先以 shadow 证据审计 P2a，再单独评审 P2b Profiler 模型调用；不能提前接入 Broker 或 Actor。
 
 ## 旁路不是第二条产品主线
 
