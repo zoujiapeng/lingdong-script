@@ -432,8 +432,10 @@ class TargetBinding:
         object.__setattr__(self, "epoch", int(self.epoch))
         if int(self.hwnd) <= 0:
             raise InvalidMissionEvent("target hwnd must be positive")
-        if int(self.process_id) < 0 or int(self.epoch) < 0:
-            raise InvalidMissionEvent("target process_id/epoch cannot be negative")
+        if int(self.process_id) <= 0 or int(self.epoch) < 0:
+            raise InvalidMissionEvent(
+                "target process_id must be positive and epoch cannot be negative"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -8,6 +8,10 @@ import re
 from typing import Any, Iterable
 
 from ..capabilities import AuthoritativeFrameState, BrokerRuntimeState, ExecutionRoute
+from ...visual_runtime.commit_admission import (
+    FrameCommitIdentity,
+    TargetCommitIdentity,
+)
 
 
 RUNTIME_FRAME_FORMAT = "runtime-frame/0"
@@ -45,6 +49,7 @@ class RuntimeFrame:
     epoch: int
     hwnd: int
     region: tuple[int, int, int, int]
+    scope: str
     submitted_size: tuple[int, int]
     image_b64: str
     image_sha256: str
@@ -56,8 +61,10 @@ class RuntimeFrame:
             raise RuntimeContractError("unsupported RuntimeFrame format")
         for name in ("frame_id", "epoch"):
             value = getattr(self, name)
-            if type(value) is not int or value < 0:
-                raise RuntimeContractError(f"{name} must be a non-negative integer")
+            minimum = 1 if name == "frame_id" else 0
+            if type(value) is not int or value < minimum:
+                qualifier = "positive" if minimum else "non-negative"
+                raise RuntimeContractError(f"{name} must be a {qualifier} integer")
         if type(self.hwnd) is not int or self.hwnd <= 0:
             raise RuntimeContractError("hwnd must be a positive integer")
         region = tuple(self.region)
@@ -77,6 +84,7 @@ class RuntimeFrame:
             raise RuntimeContractError("submitted_size must contain two positive integers")
         if type(self.image_b64) is not str or not self.image_b64:
             raise RuntimeContractError("image_b64 cannot be empty")
+        scope = _identity(self.scope, "scope")
         try:
             digest = hashlib.sha256(self.image_b64.encode("ascii")).hexdigest()
         except UnicodeEncodeError as exc:
@@ -85,19 +93,27 @@ class RuntimeFrame:
         if not _SHA256.fullmatch(claimed_digest) or claimed_digest != digest:
             raise RuntimeContractError("image_sha256 does not identify image_b64")
         object.__setattr__(self, "region", region)
+        object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "submitted_size", size)
         object.__setattr__(self, "image_sha256", claimed_digest)
         object.__setattr__(self, "evidence_refs", _identities(self.evidence_refs, "evidence_refs"))
 
     @property
+    def commit_identity(self) -> FrameCommitIdentity:
+        return FrameCommitIdentity(
+            frame_id=self.frame_id,
+            epoch=self.epoch,
+            hwnd=self.hwnd,
+            region=self.region,
+            scope=self.scope,
+            submitted_size=self.submitted_size,
+            image_sha256=self.image_sha256,
+        )
+
+    @property
     def authority_key(self) -> tuple[Any, ...]:
         return (
-            self.frame_id,
-            self.epoch,
-            self.hwnd,
-            self.region,
-            self.submitted_size,
-            self.image_sha256,
+            self.commit_identity,
             self.evidence_refs,
         )
 
@@ -115,6 +131,7 @@ class RuntimeFrame:
 class RuntimeSnapshot:
     broker_state: BrokerRuntimeState
     frame: RuntimeFrame | None
+    target: TargetCommitIdentity | None
     format: str = RUNTIME_SNAPSHOT_FORMAT
 
     def __post_init__(self) -> None:
@@ -123,6 +140,20 @@ class RuntimeSnapshot:
         if not isinstance(self.broker_state, BrokerRuntimeState):
             raise RuntimeContractError("broker_state must be BrokerRuntimeState")
         frame_state = self.broker_state.frame
+        target_state = self.broker_state.target
+        if target_state.live:
+            if self.target is None:
+                raise RuntimeContractError("live Broker target requires commit identity")
+            if not isinstance(self.target, TargetCommitIdentity):
+                raise RuntimeContractError("target must be TargetCommitIdentity")
+            if (
+                target_state.binding_id != self.target.binding_id
+                or target_state.hwnd != self.target.hwnd
+                or target_state.epoch != self.target.epoch
+            ):
+                raise RuntimeContractError("target payload and Broker state identity disagree")
+        elif self.target is not None:
+            raise RuntimeContractError("non-live Broker target cannot have commit identity")
         if self.frame is None:
             if frame_state.frame_id is not None:
                 raise RuntimeContractError("frame payload is missing for broker frame identity")
@@ -135,12 +166,18 @@ class RuntimeSnapshot:
             or frame_state.hwnd != self.frame.hwnd
         ):
             raise RuntimeContractError("frame payload and Broker state identity disagree")
+        if self.target is not None and (
+            self.target.hwnd != self.frame.hwnd
+            or self.target.epoch != self.frame.epoch
+        ):
+            raise RuntimeContractError("frame and target commit identity disagree")
 
     @property
     def authority_key(self) -> tuple[Any, ...]:
         return (
             self.broker_state,
             None if self.frame is None else self.frame.authority_key,
+            self.target,
         )
 
 
@@ -238,6 +275,7 @@ __all__ = [
     "RUNTIME_FRAME_FORMAT", "RUNTIME_SNAPSHOT_FORMAT",
     "CONTROLLER_TRANSITION_FORMAT", "MISSION_RUNTIME_RESULT_FORMAT",
     "RuntimeContractError", "RuntimeFrame", "RuntimeSnapshot",
+    "FrameCommitIdentity", "TargetCommitIdentity",
     "ControllerOutcome", "ControllerTransition", "RuntimeStatus",
     "MissionRuntimeResult",
 ]

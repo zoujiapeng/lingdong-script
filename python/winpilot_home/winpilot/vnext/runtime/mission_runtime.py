@@ -151,6 +151,22 @@ class MissionRuntime:
             grants,
         )
 
+    def _snapshot_matches_mission(self, snapshot: RuntimeSnapshot) -> bool:
+        """Compare frozen OS commit identity with accepted Mission identity."""
+
+        binding = self._reducer.projection.target_binding
+        target = snapshot.target
+        if binding is None:
+            return target is None and not snapshot.broker_state.target.live
+        if target is None:
+            return False
+        return bool(
+            target.binding_id == binding.binding_id
+            and target.hwnd == binding.hwnd
+            and target.process_id == binding.process_id
+            and target.epoch == binding.epoch
+        )
+
     @staticmethod
     def _proposal_tool(proposal: object) -> str:
         if isinstance(proposal, DesktopActionProposal):
@@ -194,19 +210,23 @@ class MissionRuntime:
         frame = snapshot.frame
         if frame is None:
             raise ValueError("Visual Actor decision has no authoritative frame")
+        target = snapshot.target
+        pointer = snapshot.broker_state.pointer
+        if projection.target_binding_id != (
+            None if target is None else target.binding_id
+        ):
+            raise ValueError("Broker and Runtime target identity disagree")
+        if projection.pointer_lease_id != pointer.lease_id:
+            raise ValueError("Broker and Runtime pointer identity disagree")
         return ActorDecisionEnvelope(
             decision_id=decision_id,
             mission_id=self._reducer.definition.mission_id,
             run_id=self._reducer.definition.run_id,
             mission_revision=self._reducer.projection.revision,
             obligation_id=str(self._reducer.projection.active_obligation_id or ""),
-            frame_id=frame.frame_id,
-            frame_epoch=frame.epoch,
-            frame_hwnd=frame.hwnd,
-            frame_region=frame.region,
-            submitted_image_size=frame.submitted_size,
-            frame_image_sha256=frame.image_sha256,
-            target_binding_id=projection.target_binding_id,
+            frame=frame.commit_identity,
+            target=target,
+            pointer=pointer,
             broker_projection_id=projection.projection_id,
             capability_grant_ids=tuple(
                 grant.grant_id for grant in projection.active_grants
@@ -294,6 +314,8 @@ class MissionRuntime:
             )
             if initial.broker_state.turn_index != turn_index:
                 raise ValueError("Broker state turn_index does not match Runtime turn")
+            if not self._snapshot_matches_mission(initial):
+                raise ValueError("Runtime target identity does not match accepted Mission state")
             broker_projection = self._project(initial, grants)
         except Exception as exc:
             return self._result(RuntimeStatus.STATE_REJECTED, detail=str(exc))
@@ -343,6 +365,7 @@ class MissionRuntime:
         try:
             current_projection = self._reducer.projection
             latest = self._state.current(current_projection, turn_index=turn_index)
+            latest_matches_mission = self._snapshot_matches_mission(latest)
             latest_broker = self._project(latest, grants)
         except Exception as exc:
             return self._result(
@@ -356,6 +379,7 @@ class MissionRuntime:
         if (
             current_projection.revision != broker_projection.mission_revision
             or current_projection.active_obligation_id != broker_projection.obligation_id
+            or not latest_matches_mission
             or latest.authority_key != initial.authority_key
             or latest_broker != broker_projection
             or latest_broker.execution_route is not ExecutionRoute.VISUAL_ACTOR
@@ -374,17 +398,25 @@ class MissionRuntime:
                 proposal_kind=proposal_kind,
                 detail="proposal tool is outside the latest Broker projection",
             )
-        decision_id = self._decision_id(
-            turn_index=turn_index,
-            projection=latest_broker,
-            proposal=proposal,
-        )
-        envelope = self._envelope(
-            decision_id=decision_id,
-            snapshot=latest,
-            projection=latest_broker,
-            proposal=proposal,
-        )
+        try:
+            decision_id = self._decision_id(
+                turn_index=turn_index,
+                projection=latest_broker,
+                proposal=proposal,
+            )
+            envelope = self._envelope(
+                decision_id=decision_id,
+                snapshot=latest,
+                projection=latest_broker,
+                proposal=proposal,
+            )
+        except Exception as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                detail=str(exc),
+            )
         obligation_id = envelope.obligation_id
 
         if isinstance(proposal, ObserveProposal):

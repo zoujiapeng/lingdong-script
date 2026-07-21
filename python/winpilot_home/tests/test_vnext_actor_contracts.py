@@ -44,6 +44,8 @@ from winpilot.vnext.capabilities.state import (
     AuthoritativeFrameState,
     BrokerProjection,
     ExecutionRoute,
+    PointerDisposition,
+    PointerLeaseState,
 )
 from winpilot.vnext.mission.contracts import (
     ActiveObligationCard,
@@ -53,6 +55,10 @@ from winpilot.vnext.mission.contracts import (
     TargetBinding,
     TransitionSummary,
     VerifiedFact,
+)
+from winpilot.visual_runtime.commit_admission import (
+    FrameCommitIdentity,
+    TargetCommitIdentity,
 )
 
 
@@ -331,13 +337,24 @@ def test_runtime_envelope_binds_all_authority_and_round_trips() -> None:
         run_id="run-1",
         mission_revision=4,
         obligation_id="obligation-1",
-        frame_id=82,
-        frame_epoch=7,
-        frame_hwnd=9123,
-        frame_region=(0, 0, 1200, 800),
-        submitted_image_size=(1200, 800),
-        frame_image_sha256="b" * 64,
-        target_binding_id="binding-1",
+        frame=FrameCommitIdentity(
+            frame_id=82,
+            epoch=7,
+            hwnd=9123,
+            region=(0, 0, 1200, 800),
+            scope="target_window",
+            submitted_size=(1200, 800),
+            image_sha256="b" * 64,
+        ),
+        target=TargetCommitIdentity(
+            binding_id="binding-1",
+            hwnd=9123,
+            root_hwnd=9000,
+            process_id=44,
+            epoch=7,
+            window_region=(0, 0, 1200, 800),
+        ),
+        pointer=PointerLeaseState(PointerDisposition.RELEASED),
         broker_projection_id="projection-1",
         capability_grant_ids=("grant-b", "grant-a"),
         allowed_evidence_scope=("evidence-b", "evidence-a"),
@@ -346,6 +363,11 @@ def test_runtime_envelope_binds_all_authority_and_round_trips() -> None:
     raw = json.loads(envelope.to_json())
     assert raw["capability_grant_ids"] == ["grant-a", "grant-b"]
     assert raw["allowed_evidence_scope"] == ["evidence-a", "evidence-b"]
+    assert raw["frame"]["scope"] == "target_window"
+    assert raw["target"]["root_hwnd"] == 9000
+    assert raw["pointer"] == {
+        "disposition": "released", "lease_id": None, "physically_owned": False,
+    }
     assert ActorDecisionEnvelope.from_dict(raw).to_json() == envelope.to_json()
     assert raw["proposal"].keys().isdisjoint({"mission_id", "frame_id", "grant_ids"})
 
@@ -353,20 +375,71 @@ def test_runtime_envelope_binds_all_authority_and_round_trips() -> None:
 def test_envelope_is_strict_and_frame_identity_is_atomic() -> None:
     raw = json.loads(ActorDecisionEnvelope(
         decision_id="d", mission_id="m", run_id="r", mission_revision=0,
-        obligation_id="o", frame_id=1, frame_epoch=0, frame_hwnd=1,
-        frame_region=(0, 0, 1, 1), submitted_image_size=(1, 1),
-        frame_image_sha256="c" * 64,
-        target_binding_id=None, broker_projection_id="p",
+        obligation_id="o",
+        frame=FrameCommitIdentity(
+            1, 0, 1, (0, 0, 1, 1), "full_desktop", (1, 1), "c" * 64,
+        ),
+        target=None,
+        pointer=PointerLeaseState(PointerDisposition.RELEASED),
+        broker_projection_id="p",
         capability_grant_ids=(), allowed_evidence_scope=(), proposal=_action(),
     ).to_json())
     with pytest.raises(InvalidActorEnvelope, match="explicit format"):
         ActorDecisionEnvelope.from_dict({key: value for key, value in raw.items() if key != "format"})
     with pytest.raises(InvalidActorEnvelope):
-        ActorDecisionEnvelope.from_dict({**raw, "frame_region": (0, 0, 0, 1)})
+        ActorDecisionEnvelope.from_dict({
+            **raw,
+            "frame": {**raw["frame"], "region": (0, 0, 0, 1)},
+        })
     with pytest.raises(InvalidActorEnvelope):
         ActorDecisionEnvelope.from_dict({**raw, "mission_revision": True})
     with pytest.raises(InvalidActorEnvelope):
         ActorDecisionEnvelope.from_dict({**raw, "unexpected": "authority"})
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("scope", ""),
+        ("frame_id", 0),
+        ("image_sha256", "not-a-digest"),
+    ),
+)
+def test_envelope_rejects_invalid_frame_commit_identity(field: str, value: object) -> None:
+    envelope = ActorDecisionEnvelope(
+        decision_id="d", mission_id="m", run_id="r", mission_revision=0,
+        obligation_id="o",
+        frame=FrameCommitIdentity(
+            1, 0, 1, (0, 0, 1, 1), "full_desktop", (1, 1), "c" * 64,
+        ),
+        target=None,
+        pointer=PointerLeaseState(PointerDisposition.RELEASED),
+        broker_projection_id="p", capability_grant_ids=(),
+        allowed_evidence_scope=(), proposal=_action(),
+    )
+    raw = json.loads(envelope.to_json())
+    with pytest.raises(InvalidActorEnvelope):
+        ActorDecisionEnvelope.from_dict({
+            **raw,
+            "frame": {**raw["frame"], field: value},
+        })
+
+
+def test_envelope_rejects_frame_target_identity_disagreement() -> None:
+    frame = FrameCommitIdentity(
+        1, 4, 10, (0, 0, 100, 100), "target_window", (100, 100), "c" * 64,
+    )
+    target = TargetCommitIdentity(
+        "binding", 11, 11, 7, 4, (0, 0, 100, 100),
+    )
+    with pytest.raises(ValidationError, match="frame and target identity disagree"):
+        ActorDecisionEnvelope(
+            decision_id="d", mission_id="m", run_id="r", mission_revision=0,
+            obligation_id="o", frame=frame, target=target,
+            pointer=PointerLeaseState(PointerDisposition.RELEASED),
+            broker_projection_id="p", capability_grant_ids=(),
+            allowed_evidence_scope=(), proposal=_action(),
+        )
 
 
 def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> None:

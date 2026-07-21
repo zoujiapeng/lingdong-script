@@ -51,6 +51,7 @@ from winpilot.vnext.runtime import (
     RuntimeSnapshot,
     RuntimeStatus,
 )
+from winpilot.visual_runtime.commit_admission import TargetCommitIdentity
 
 
 ALL_CAPABILITIES = tuple(sorted(DEFAULT_CAPABILITY_CATALOG))
@@ -363,7 +364,14 @@ def _bind_target(reducer: MissionReducer, registry: EvidenceRegistry) -> None:
     ))
 
 
-def _frame(frame_id: int, *, hwnd: int = 101, epoch: int = 3, salt: str = "") -> RuntimeFrame:
+def _frame(
+    frame_id: int,
+    *,
+    hwnd: int = 101,
+    epoch: int = 3,
+    scope: str = "target_window",
+    salt: str = "",
+) -> RuntimeFrame:
     raw = f"frame:{frame_id}:{hwnd}:{epoch}:{salt}".encode()
     image_b64 = base64.b64encode(raw).decode("ascii")
     return RuntimeFrame(
@@ -371,6 +379,7 @@ def _frame(frame_id: int, *, hwnd: int = 101, epoch: int = 3, salt: str = "") ->
         epoch=epoch,
         hwnd=hwnd,
         region=(0, 0, 1280, 720),
+        scope=scope,
         submitted_size=(1280, 720),
         image_b64=image_b64,
         image_sha256=hashlib.sha256(image_b64.encode("ascii")).hexdigest(),
@@ -384,12 +393,21 @@ def _snapshot(
     turn_index: int = 4,
     pointer: PointerLeaseState | None = None,
     target: TargetState | None = None,
+    runtime_target: TargetCommitIdentity | None = None,
     paused: bool = False,
     canceled: bool = False,
     offers: tuple[ExecutorOffer, ...] = (),
     authorizations: tuple[str, ...] = (),
 ) -> RuntimeSnapshot:
     target_state = target or TargetState("target-1", frame.hwnd, frame.epoch, True)
+    target_identity = runtime_target or TargetCommitIdentity(
+        binding_id=str(target_state.binding_id),
+        hwnd=int(target_state.hwnd),
+        root_hwnd=int(target_state.hwnd),
+        process_id=7,
+        epoch=int(target_state.epoch),
+        window_region=(0, 0, 1280, 720),
+    )
     return RuntimeSnapshot(
         broker_state=BrokerRuntimeState(
             turn_index=turn_index,
@@ -405,6 +423,7 @@ def _snapshot(
             canceled=canceled,
         ),
         frame=frame,
+        target=target_identity,
     )
 
 
@@ -490,6 +509,51 @@ def test_runtime_frame_rejects_image_hash_mismatch() -> None:
         replace(_frame(9), image_sha256="0" * 64)
 
 
+@pytest.mark.parametrize(
+    "field,value,error",
+    (
+        ("frame_id", 0, "frame_id"),
+        ("scope", "", "scope"),
+    ),
+)
+def test_runtime_frame_rejects_incomplete_commit_identity(
+    field: str,
+    value: object,
+    error: str,
+) -> None:
+    with pytest.raises(RuntimeContractError, match=error):
+        replace(_frame(9), **{field: value})
+
+
+@pytest.mark.parametrize("field", ("binding_id", "hwnd", "epoch"))
+def test_runtime_snapshot_rejects_broker_target_identity_disagreement(field: str) -> None:
+    snapshot = _snapshot(_frame(9))
+    target = snapshot.target
+    assert target is not None
+    changes = {
+        "binding_id": "different-binding",
+        "hwnd": 202,
+        "epoch": 4,
+    }
+    with pytest.raises(RuntimeContractError, match="target payload"):
+        replace(snapshot, target=replace(target, **{field: changes[field]}))
+
+
+def test_initial_runtime_target_must_match_accepted_mission_process() -> None:
+    target = TargetCommitIdentity(
+        "target-1", 101, 101, 8, 3, (0, 0, 1280, 720),
+    )
+    initial = _snapshot(_frame(9), runtime_target=target)
+    harness = _harness(_click(), initial=initial)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.STATE_REJECTED
+    assert "accepted Mission state" in result.detail
+    assert harness.actor.calls == []
+    assert harness.controller.calls == []
+
+
 def test_visual_route_binds_one_actor_proposal_to_one_runtime_envelope() -> None:
     harness = _harness(_click())
     before = len(harness.reducer.events)
@@ -505,11 +569,15 @@ def test_visual_route_binds_one_actor_proposal_to_one_runtime_envelope() -> None
     assert envelope.run_id == "run-1"
     assert envelope.mission_revision == before
     assert envelope.obligation_id == "o1"
-    assert envelope.frame_id == 9
-    assert envelope.frame_epoch == 3
-    assert envelope.frame_hwnd == 101
-    assert envelope.frame_image_sha256 == _frame(9).image_sha256
-    assert envelope.target_binding_id == "target-1"
+    assert envelope.frame.frame_id == 9
+    assert envelope.frame.epoch == 3
+    assert envelope.frame.hwnd == 101
+    assert envelope.frame.scope == "target_window"
+    assert envelope.frame.image_sha256 == _frame(9).image_sha256
+    assert envelope.target.binding_id == "target-1"
+    assert envelope.target.root_hwnd == 101
+    assert envelope.target.process_id == 7
+    assert envelope.pointer == PointerLeaseState(PointerDisposition.RELEASED)
     assert envelope.proposal.action == "click"
     assert len(harness.reducer.events) == before + 1
     assert harness.reducer.events[-1].kind == "transition_recorded"
@@ -537,7 +605,10 @@ def test_action_records_transition_but_never_claims_or_completes(outcome: Contro
 
 @pytest.mark.parametrize(
     "race",
-    ("revision", "obligation", "frame", "hash", "target", "pointer", "grant", "broker"),
+    (
+        "revision", "obligation", "frame", "scope", "hash", "target",
+        "target_root", "target_pid", "target_geometry", "pointer", "grant", "broker",
+    ),
 )
 def test_post_actor_identity_or_authority_change_discards_without_execution(race: str) -> None:
     definition = _definition(two_obligations=race == "obligation")
@@ -559,6 +630,8 @@ def test_post_actor_identity_or_authority_change_discards_without_execution(race
     broker_factory: Callable[[ToolCatalog], CapabilityBroker] | None = None
     if race == "frame":
         current = _snapshot(_frame(11))
+    elif race == "scope":
+        current = _snapshot(_frame(9, scope="full_desktop"))
     elif race == "hash":
         current = _snapshot(_frame(9, salt="changed-pixels"))
     elif race == "target":
@@ -566,6 +639,19 @@ def test_post_actor_identity_or_authority_change_discards_without_execution(race
             _frame(9, hwnd=202),
             target=TargetState("target-2", 202, 3, True),
         )
+    elif race in {"target_root", "target_pid", "target_geometry"}:
+        target_identity = TargetCommitIdentity(
+            binding_id="target-1",
+            hwnd=101,
+            root_hwnd=(202 if race == "target_root" else 101),
+            process_id=(8 if race == "target_pid" else 7),
+            epoch=3,
+            window_region=(
+                (1, 0, 1280, 720)
+                if race == "target_geometry" else (0, 0, 1280, 720)
+            ),
+        )
+        current = _snapshot(_frame(9), runtime_target=target_identity)
     elif race == "pointer":
         current = _snapshot(
             _frame(9),
