@@ -395,6 +395,17 @@ def _criteria_covered(
     return required_set.issubset(supplied_set)
 
 
+def _criteria_exact(
+    required: Iterable[str],
+    supplied: Iterable[str],
+) -> bool:
+    """Compare a Runtime-defined condition set without accepting task rewrites."""
+
+    return _criteria_covered(required, supplied) and _criteria_covered(
+        supplied, required
+    )
+
+
 def _apply_event(
     projection: MissionProjection,
     event: MissionEvent,
@@ -556,6 +567,9 @@ def _apply_event(
             or payload.get("satisfied_conditions")
             or ()
         )
+        checked_forbidden = _as_string_tuple(
+            payload.get("checked_forbidden_effects") or ()
+        )
         refs = _evidence_refs(
             projection,
             scope,
@@ -586,6 +600,12 @@ def _apply_event(
             if not _criteria_covered(definition.acceptance_criteria, satisfied):
                 raise IllegalTransitionError(
                     "verification does not mechanically cover every acceptance criterion"
+                )
+            if not _criteria_exact(
+                definition.forbidden_effects, checked_forbidden
+            ):
+                raise IllegalTransitionError(
+                    "verification must exactly cover every forbidden effect"
                 )
             if missing or contradictions:
                 raise IllegalTransitionError("verified result still has missing or contradictory conditions")

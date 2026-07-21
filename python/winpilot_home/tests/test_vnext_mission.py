@@ -78,13 +78,14 @@ def _definition() -> MissionDefinition:
 
 
 def _verify_event(reducer: MissionReducer, obligation_id: str, evidence_id: str) -> MissionEvent:
-    criteria = reducer.projection.obligation_definition(obligation_id).acceptance_criteria
+    definition = reducer.projection.obligation_definition(obligation_id)
     return reducer.event(
         "verification_recorded",
         payload={
             "obligation_id": obligation_id,
             "verified": True,
-            "satisfied_criteria": list(criteria),
+            "satisfied_criteria": list(definition.acceptance_criteria),
+            "checked_forbidden_effects": list(definition.forbidden_effects),
             "verification_id": f"verification-{obligation_id}-{evidence_id}",
             "evidence_refs": [evidence_id],
             "verifier_kind": "deterministic",
@@ -499,6 +500,55 @@ def test_verification_requires_all_criteria_and_persists_verification_id() -> No
     state = reducer.projection.obligation_state("goal")
     assert state.status is ObligationStatus.VERIFIED
     assert state.verification_id == "v-complete"
+
+
+def test_verification_requires_exact_forbidden_effect_coverage() -> None:
+    definition = MissionDefinition(
+        mission_id="m1",
+        run_id="r1",
+        original_goal="change only the requested content",
+        obligations=(ObligationSpec(
+            id="goal",
+            desired_state="requested content changed",
+            acceptance_criteria=("requested result exists",),
+            forbidden_effects=("unrelated content was not changed",),
+        ),),
+    )
+    proof = _evidence("goal-proof", "goal")
+    reducer = MissionReducer(definition, evidence=[proof])
+    reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "goal"}))
+    base = {
+        "obligation_id": "goal",
+        "verified": True,
+        "verification_id": "goal-verification",
+        "satisfied_criteria": ["requested result exists"],
+        "evidence_refs": [proof.id],
+    }
+
+    with pytest.raises(IllegalTransitionError, match="forbidden effect"):
+        reducer.apply(reducer.event("verification_recorded", payload=base))
+    with pytest.raises(IllegalTransitionError, match="forbidden effect"):
+        reducer.apply(reducer.event(
+            "verification_recorded",
+            payload={
+                **base,
+                "checked_forbidden_effects": [
+                    "unrelated content was not changed",
+                    "a verifier-authored extra condition",
+                ],
+            },
+        ))
+
+    reducer.apply(reducer.event(
+        "verification_recorded",
+        payload={
+            **base,
+            "checked_forbidden_effects": [
+                "unrelated content was not changed"
+            ],
+        },
+    ))
+    assert reducer.projection.obligation_state("goal").status is ObligationStatus.VERIFIED
 
 
 def test_evidence_registry_is_read_again_on_each_apply() -> None:
