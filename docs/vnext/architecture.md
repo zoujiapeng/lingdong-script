@@ -289,7 +289,7 @@ Runtime envelope 自动绑定当前 frame/revision/obligation，再交给 Contro
 
 Controller 负责：
 
-- submitted-image 坐标到同一 FrameState/物理坐标的一次映射；
+- submitted-image、normalized-frame 与物理屏幕之间的每个坐标空间边界各映射一次，并保留 provenance；
 - frame、epoch、HWND、capture region 与窗口所有权校验；
 - Desktop Action Queue 和 input lease；
 - SendInput 的 down/up、滚轮、按键与路径插值；
@@ -451,6 +451,11 @@ vNext 复用：
 - AppResolver；
 - `winpilot/modeling/` 的冻结请求、provider adapter 与 transport retry 合同；
 - cold-start、session context 与客户端 E2E harness。
+
+复用不等于把完整 `FastGuiController` 当作 vNext bridge。它仍包含 legacy
+grounding、恢复和 adapter 行为；P4b 只能逐项抽取机械 owner，让 legacy 先委托同一
+Frame、坐标、admission 与 RawDevice primitive，再由 Runtime-bound ControllerPort
+调用。当前仅完成 shared frame、第一段坐标映射、run selection 和 scroll raw seam。
 
 vNext 逐步替代：
 

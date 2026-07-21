@@ -163,6 +163,9 @@ GUI mutation。重复 provider 计费、相同请求却不同 fingerprint、pars
 - stop/pause/cancel释放所有输入。
 
 “不会滚”“拖拽偏离”“点击没反应”先用确定性靶场验证工具。
+Raw `APPLIED` 只说明机械输入函数明确完成，不证明目标画面变化；仍须取得新的权威
+post-frame。`OUTCOME_UNKNOWN` 表示输入可能已经发生，只能观察、对账或阻塞，禁止
+自动重放或换一种输入机制再试。
 
 ### 2.11 动作后观察与 Transition
 

@@ -145,7 +145,7 @@ npm run e2e:client:mixed
 - [文档索引](docs/README.md)
 - [架构与运行原理](docs/architecture.md)
 - [视觉运行时原则](docs/visual-runtime-principles.md)
-- [vNext Agent 核心旁路设计](docs/vnext/README.md)（P0/P1/P1.5、P2a/P2b shadow、P3a/P3b partial shadow、product-package 模型请求合同与 P4a 纯 Actor/Runtime 合同已实现；P4b live 接线及 P5/P6 未实现）
+- [vNext Agent 核心旁路设计](docs/vnext/README.md)（P0/P1/P1.5、P2a/P2b shadow、P3a/P3b partial shadow、product-package 模型请求合同与 P4a 纯 Actor/Runtime 合同已实现；P4b 已开始共享 Frame/坐标/runtime-selection/scroll owner 抽取，live 接线及 P5/P6 未实现）
 - [vNext Task Profiler 与执行深度](docs/vnext/execution-profile.md)（P2b 真实 Profiler 已默认关闭地接入 trace-only shadow，不参与 legacy 执行）
 - [端到端测试规范](docs/testing.md)
 - [WinPilot Agent 细节](docs/winpilot-agent.md)

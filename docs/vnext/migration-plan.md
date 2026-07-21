@@ -336,7 +336,7 @@ P3b 的同入口接线只在 `vnext.broker_shadow.enabled=true` 时启用：模�
 
 ## 8. P4：Visual Actor 受控旁路
 
-状态：**P4a 纯 Actor 合同与注入式单回合 MissionRuntime 已完成；P4b shared frame/admission/controller bridge、live Actor 和产品 canary 尚未实现。**
+状态：**P4a 纯 Actor 合同与注入式单回合 MissionRuntime 已完成；P4b 已进入共享 owner 的早期抽取，完整 admission/controller bridge、live Actor 和产品 canary 尚未实现。**
 
 P4a 已在独立 `vnext/actor/` 和 `vnext/runtime/` 中实现严格版本化的 Actor 可见 view、无 Runtime 身份 proposal、Runtime-bound envelope、注入端口与单回合协调器。它不直接调用模型或设备，不导入 legacy AgentRunner/ToolSession/RawDevice，不接 Electron/StageRuntime，也不选择 runtime version。legacy 仍是默认且唯一产品桌面执行 runtime，Broker 仍未 enforce，因此本阶段保持产品行为不变。
 
@@ -345,6 +345,10 @@ P4a admission 在 Actor 返回后重新读取 Mission revision/active obligation
 `claim_obligation_done` 在 P4a 只接受 `obligation_claimed` 并进入 `CLAIMED`/`verification_required`，不能 verified 或结束 mission，必须等 P5 独立 Verifier。Capability/Inspector/Planner 等尚未接入的请求返回 unavailable；P6 Planner/Inspector 没有跨任务 A/B 证据前继续 fail closed。
 
 P4b 才能把这些合同接到现有唯一 FrameAuthority、admission/坐标校验和 Controller/RawDevice 链，并以默认关闭的 live Actor canary 从同一 Electron 入口运行。Bridge 必须先让 legacy 委托共享 owner，不能复制 capture、action parser、pointer owner 或执行器。
+
+P4b 当前只完成四个可独立回退的基础切片：legacy 委托两阶段 `FrameObserver`；submitted-image 坐标通过纯 mapper 转为 normalized-frame 坐标；每个 run 的 `DesktopRuntimeSelection` 只从 Runtime 配置冻结一次；scroll 通过唯一 DesktopActionQueue owner 产生 typed mechanical result，并可由 session-free、无 action parser 的 `RawDeviceExecutor.scroll(...)` 调用。每个坐标空间边界只转换一次并保留 provenance；第二段 normalized-frame 到物理坐标仍未共享。
+
+这些切片不构成 live bridge。当前 scroll context 只核对调用方提供的 target/current HWND，尚未在 commit time 重新读取 foreground、frame、epoch、PID 和 capture region；FastGuiController 仍通过显式 legacy adapter 处理未迁移原语。选择 `vnext` 只会在桌面 mutation 前安全拒绝，不会运行 Actor，也不会回退 legacy。PostMessage 调用结果不确定时禁止 SendInput fallback，是统一 no-uncertain-replay 合同的刻意安全修正，不应描述为完全行为不变。
 
 P4a 不授权删除任何 legacy 产品职责。`AgentRunner` 的全局 todo、模型直接 `done` 和固定大工具面只能在 paired canary 与真实 Electron E2E 达到 [evaluation.md](evaluation.md) 门槛，且 trace 证明所有 vNext Actor 回合分别由 MissionCard、P5 verification 和 BrokerProjection 接管后删除；单元测试、注入 fake 或一次受控成功都不构成删除证据。
 
@@ -487,6 +491,7 @@ Canary失败不在同一run偷切legacy。可以另开独立run对照。
 | UIA/OCR自动语义升级 | 显式probe capability | provenance/frame gate | negative eval通过 |
 | 各模型调用点/SDK自行重试 | `modeling/ModelCallRuntime` | adapter prepare一次，冻结request后仅做精确transport retry | product package无绕过；逐attempt trace与cancel闭合 |
 | mutation-capable node通用retry | mutation replay policy + 新Actor决策 | unknown outcome reconcile/block；仅确定未执行且显式幂等授权才可replay | 所有桌面mutation经同一transaction/evidence合同 |
+| session-bound raw action reflection | typed RawDevice primitive + 临时 legacy adapter | 按 primitive 先共享物理 owner；当前仅 scroll | click/type/hotkey/drag/draw 完成 parity、partial-input 与真实 E2E 后删除 adapter |
 | `python/providers/` legacy retry loop | 删除或单独迁移 | 先审计产品可达性，不接成第二个Runtime | P9观察窗口内生产调用为零或等价迁移通过 |
 
 ## 15. Bridge纪律
