@@ -1,6 +1,6 @@
 # vNext Agent 核心旁路
 
-状态：**P0/P1/P1.5 已实现；P2a 与默认关闭的 P2b Profiler shadow 已完成；Broker、Actor、Verifier、Planner/Inspector 尚未接入**
+状态：**P0/P1/P1.5 已实现；P2a/P2b Profiler shadow 与 P3a 纯 Capability Broker 已完成；Broker 仍未 enforce，Actor、Verifier、Planner/Inspector 尚未接入**
 
 迁移分支：`codex/vnext-agent-core`
 
@@ -45,18 +45,20 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 
 ## 当前阶段
 
-当前分支已完成 P0/P1/P1.5、P2a 纯合同及 P2b 只读 shadow，legacy 仍是默认且唯一桌面执行 runtime：
+当前分支已完成 P0/P1/P1.5、P2a 纯合同、P2b 只读 shadow 与 P3a 纯 Broker，legacy 仍是默认且唯一桌面执行 runtime：
 
 - P0 只在既有 trace/BUS 事件上增加观测字段；
 - P1 提供可重放的 MissionDefinition/Event/Projection/Reducer/Card 及 legacy shadow；
 - P2a 在独立 `vnext/profiling/` 中提供严格版本化合同、确定性 Execution Policy、序列化和可注入 shadow 评测；
 - P2b 提供每个 run 至多一次、无工具、无 runtime identity 的真实 Profiler provider；只有显式启用 `vnext.profiler_shadow.enabled` 时，才从同一 Electron/ARP 入口写入私有 trace sidecar；
 - Profiler shadow 不修改 legacy prompt、工具面、GUI 动作链、Controller、Mission 或完成语义，setup/provider 失败也不能阻断 legacy；
+- P3a 提供唯一 canonical capability catalog、严格版本化的 ToolCatalog、run/mission/obligation/revision/turn 有界 CapabilityGrant，以及只读取 MissionProjection、ExecutionProfile 和真实运行状态的确定性 CapabilityBroker；
+- Broker shadow evaluator 只有获得完整、可靠的 necessary-tool 标注时才计算 recall；当前尚无 held-out 实测数据，因此 Broker 不能 enforce，也没有裁剪 legacy 工具面；
 - 不改变当前 `master` 的产品行为；
 - 不声称 Mission Ledger 已经接管产品运行；P1 projection 只能离线或 shadow 使用；
-- Broker、Actor、Verifier、Planner、Inspector 和 vNext 可写运行时均未实现；
+- Broker 的产品回合 shadow 接线、Actor、Verifier、Planner、Inspector 和 vNext 可写运行时均未实现；
 - 不把历史单次 E2E 结果改写成 vNext 成功证据；
-- 下一步是 P3 ToolCatalog/CapabilityBroker 的纯合同与 shadow；在 necessary-tool recall 达标前不能 enforce。
+- 下一步是把 P3 projection 作为私有 sidecar 接到真实 legacy 回合并收集可靠标注；在 necessary-tool recall 达标前不能 enforce。
 
 ## 旁路不是第二条产品主线
 

@@ -251,6 +251,8 @@ P2进入 enforce 的门槛：
 
 ## 7. P3：Capability Broker shadow
 
+状态：**P3a 纯合同、确定性 Broker 和可注入 shadow evaluator 已完成；真实 legacy 回合 sidecar 与 enforce 尚未接入。**
+
 建立 ToolCatalog、CapabilityGrant 和纯 Broker：
 
 ```python
@@ -277,6 +279,17 @@ project_execution(
 - CapabilityRequest若出现，是否能被 catalog/policy安全解释。
 
 P3不改变 legacy工具，不调用第二个桌面模型。
+
+P3a 当前实现边界：
+
+- `vnext/capabilities/names.py` 是 canonical broad capability 的唯一 owner，Profiler Policy 复用它；
+- ToolCatalog 只把现有 schema owner 与通用 policy 关联，不复制工具实现；
+- Broker 只消费 MissionProjection、ExecutionProfile、权威 target/frame、pointer、artifact、executor offer、授权和 grant 状态；输入合同没有应用名、任务原句、benchmark、布局或坐标字段；
+- provider/deterministic offer 必须 live、已授权且能产生 receipt，并与 Visual Actor 路线互斥；artifact route 同时核对 run、artifact_id、content hash 与 sendable 状态；
+- pointer held/unknown、stale frame、terminal mission 与 runtime 不可写状态均 fail closed；
+- shadow evaluator 不把 legacy 实际选择当作“必要工具”真相。没有完整可靠 oracle 标注时，`necessary_tool_recall` 必须保持 `None`。
+
+尚未满足的门槛：真实 Electron 回合还没有 BrokerProjection sidecar 和 held-out necessary-tool 标注，因此本阶段不得启用 enforce，也不得删除 legacy 固定工具面。
 
 进入 enforce 前：
 

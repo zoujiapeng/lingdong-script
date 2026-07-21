@@ -397,6 +397,8 @@ external_environment
 -无关键词泄漏；
 -schema明显变小且necessary tool不缺失。
 
+P3a 已覆盖 strict schema、状态组合、route 互斥、grant scope、artifact identity、stale frame、pointer lease 和确定性 replay 的纯测试。它不等价于上述产品门槛：在真实 Electron legacy 回合尚未记录 projection，且没有完整 held-out relevance oracle 前，necessary-tool recall 记为缺失值，不能用 actual legacy tool 命中率代替，也不能开启 enforce。
+
 ### Actor受控执行
 
 -只有Actor提出GUI mutation；
