@@ -26,6 +26,12 @@ __all__ = (
     "ExecutionProfile",
     "DEFAULT_CAPABILITY_CATALOG",
     "ExecutionPolicy",
+    "PROFILE_SHADOW_CASE_FORMAT",
+    "PROFILE_SHADOW_RESULT_FORMAT",
+    "ShadowExpectation",
+    "ProfileShadowCase",
+    "ProfileShadowResult",
+    "ProfileShadowEvaluator",
 )
 
 
@@ -43,8 +49,10 @@ def __getattr__(name: str):
         "TASK_PROFILE_PROPOSAL_FORMAT", "EXECUTION_PROFILE_FORMAT", "ExecutionProfileError", "ExecutionPolicyError",
         "InvalidProfileSchema", "UnsupportedCapability", "ExecutionDepth", "TaskDimensions",
         "CognitiveServices", "ProfileTrigger", "TaskProfileProposal", "ExecutionProfile",
-        "DEFAULT_CAPABILITY_CATALOG", "ExecutionPolicy",
+        "DEFAULT_CAPABILITY_CATALOG", "ExecutionPolicy", "PROFILE_SHADOW_CASE_FORMAT",
+        "PROFILE_SHADOW_RESULT_FORMAT", "ShadowExpectation", "ProfileShadowCase",
+        "ProfileShadowResult", "ProfileShadowEvaluator",
     }:
-        from . import execution_profile
-        return getattr(execution_profile, name)
+        from . import profiling
+        return getattr(profiling, name)
     raise AttributeError(name)
