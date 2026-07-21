@@ -42,8 +42,9 @@ _PHYSICAL_COORD_FIELDS = frozenset({
 _BATCH_FIELDS = frozenset({"actions", "action_batch", "batch", "operations", "tool_calls"})
 _FORBIDDEN_ACTIONS = frozenset({
     "done", "fail", "failed", "finish", "complete", "complete_task",
-    "complete_subgoal", "claim_obligation_done", "run_action_batch",
-    "execute_action_batch", "execute_subgoal", "revise_plan",
+    "complete_subgoal", "claim_obligation_done", "blocked", "observe",
+    "request_capability", "request_inspection", "request_replan",
+    "run_action_batch", "execute_action_batch", "execute_subgoal", "revise_plan",
 })
 
 

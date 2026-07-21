@@ -5,13 +5,14 @@ import json
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .proposals import ActorProposal
 
 
 ACTOR_ENVELOPE_FORMAT = "actor-envelope/0"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class InvalidActorEnvelope(ValueError):
@@ -44,8 +45,20 @@ class ActorDecisionEnvelope(BaseModel):
     run_id: str
     mission_revision: Annotated[int, Field(strict=True, ge=0)]
     obligation_id: str
-    frame_id: Annotated[int, Field(strict=True, ge=0)] | None
-    frame_epoch: Annotated[int, Field(strict=True, ge=0)] | None
+    frame_id: Annotated[int, Field(strict=True, ge=0)]
+    frame_epoch: Annotated[int, Field(strict=True, ge=0)]
+    frame_hwnd: Annotated[int, Field(strict=True, gt=0)]
+    frame_region: tuple[
+        Annotated[int, Field(strict=True)],
+        Annotated[int, Field(strict=True)],
+        Annotated[int, Field(strict=True, gt=0)],
+        Annotated[int, Field(strict=True, gt=0)],
+    ]
+    submitted_image_size: tuple[
+        Annotated[int, Field(strict=True, gt=0)],
+        Annotated[int, Field(strict=True, gt=0)],
+    ]
+    frame_image_sha256: str
     target_binding_id: str | None
     broker_projection_id: str
     capability_grant_ids: tuple[str, ...]
@@ -70,11 +83,12 @@ class ActorDecisionEnvelope(BaseModel):
     def _identity_arrays(cls, value: Any, info: Any) -> tuple[str, ...]:
         return _identities(value, info.field_name)
 
-    @model_validator(mode="after")
-    def _complete_frame_identity(self) -> "ActorDecisionEnvelope":
-        if (self.frame_id is None) != (self.frame_epoch is None):
-            raise ValueError("frame_id and frame_epoch must be bound together")
-        return self
+    @field_validator("frame_image_sha256")
+    @classmethod
+    def _image_sha256(cls, value: Any) -> str:
+        if type(value) is not str or not _SHA256.fullmatch(value.strip().lower()):
+            raise ValueError("frame_image_sha256 must be a SHA-256 digest")
+        return value.strip().lower()
 
     def to_json(self) -> str:
         return json.dumps(
