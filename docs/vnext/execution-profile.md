@@ -253,3 +253,17 @@ profiler-enforced
 - Actor 与同模型 Verifier 的错误相关性。
 
 Profiler 的价值必须体现为未知任务能力、长任务义务覆盖或成本下降，不能以分类解释听起来合理作为成功。
+
+## P2a implementation status (2026-07-21)
+
+P2a is complete for the pure contracts and deterministic shadow policy. The
+implemented sidecar validates the versioned `TaskProfileProposal` and
+`ExecutionProfile` schemas, semantic `TaskDimensions`, `CognitiveServices`,
+`ExecutionDepth`, canonical broad capabilities, and policy audit reasons.
+Missing, malformed, unsupported, or low-confidence proposals resolve to the
+safe `standard` profile. Depth and cognitive services can only be tightened
+or restricted from semantic dimensions and injected availability facts.
+
+The Profiler model invocation is still not connected. This document does not
+authorize Broker, Visual Actor, Planner, Inspector, prompt, tool-surface,
+Controller, done, legacy execution, or frontend changes.

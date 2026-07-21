@@ -482,3 +482,17 @@ P1.5 的实现仍是 sidecar/shadow；产品真实客户端入口、WinPilot 全
 `npm test`、typecheck 和 build 只用于行为不变回归，不能把离线合同测试当作
 真实 GUI 成功证据。下一步仍从 P2 的独立设计门槛开始，不能在本阶段提前实现
 Profiler、Broker、Visual Actor、Planner 或 Inspector。
+
+## P2a status (2026-07-21)
+
+P2a is complete in the sidecar only: strict versioned
+`TaskDimensions`, `CognitiveServices`, `TaskProfileProposal`,
+`ExecutionDepth`, `ExecutionProfile`, and deterministic `ExecutionPolicy` are
+implemented with injected shadow tests. The policy validates canonical broad
+capabilities, defaults malformed or low-confidence input to safe `standard`,
+restricts depth and cognitive services, and records auditable reasons.
+
+The Profiler model invocation is still not connected. P2a does not change
+prompts, model calls, model tool surface, GUI actions, Controller, FrameAuthority,
+legacy execution, done semantics, or frontend. Broker, Actor, Planner, and
+Inspector remain future gates.
