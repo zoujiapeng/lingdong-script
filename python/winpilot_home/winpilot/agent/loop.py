@@ -51,6 +51,7 @@ from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, virtual_screen_region, window_region
 from ..utils.trace_payload import sanitize_trace_payload
 from ..visual_runtime.frame_observer import FrameObserver
+from ..visual_runtime.normalized_frame_coordinates import NormalizedFrameCoordinateMapper
 from ..visual_runtime.submitted_image_coordinates import SubmittedImageCoordinateMapper
 from . import playbooks, prompts, session as session_mod
 from .context_guidance import ContextGuidanceMixin
@@ -3836,6 +3837,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )
             return args
         left, top, width, height = region
+        frame_mapper = NormalizedFrameCoordinateMapper((left, top, width, height))
         mapped = dict(args)
         if (
             tool_name in {"move_mouse", "mouse_up"}
@@ -4169,11 +4171,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 raise ValueError(
                     f"{x_key}/{y_key} must stay inside the current frame's 0..1000 bounds"
                 )
-            # Region.right/bottom are exclusive.  Mapping 1000 through width
-            # itself would click one pixel outside the captured window.
-            px = int(round(left + nx / 1000.0 * max(0, width - 1)))
-            py = int(round(top + ny / 1000.0 * max(0, height - 1)))
-            return px, py
+            return frame_mapper.map_point(nx, ny)
 
         def require_normalized_instead_of_physical(
             physical_keys: tuple[str, ...],
