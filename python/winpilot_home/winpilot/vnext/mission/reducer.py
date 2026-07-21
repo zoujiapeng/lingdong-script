@@ -365,7 +365,9 @@ def _verification_exhausted_status(
 ) -> tuple[ObligationStatus, MissionStatus, str]:
     """Map an uncertain verification policy to an explicit recovery state."""
     policy = str(policy)
-    if policy in {"blocked", "fail"}:
+    if policy == "fail":
+        return ObligationStatus.BLOCKED, MissionStatus.FAILED, "verification_uncertain_failed"
+    if policy == "blocked":
         return ObligationStatus.BLOCKED, MissionStatus.BLOCKED, "verification_uncertain_blocked"
     # There is no user/external event implementation in P1.5.  Keep the
     # mission visibly waiting instead of silently retrying or marking success.
@@ -427,8 +429,10 @@ def _apply_event(
         if projection.obligation_state(producer.id).status is not ObligationStatus.VERIFIED:
             raise IllegalTransitionError("artifact producer obligation is not verified")
         artifact_ref = next(ref for ref in refs if ref.id == artifact.evidence_ref)
-        if artifact_ref.artifact_id not in (None, "", artifact.artifact_id):
+        if artifact_ref.artifact_id != artifact.artifact_id:
             raise EvidenceScopeError("artifact evidence does not identify the bound artifact")
+        if artifact_ref.content_sha256 != artifact.sha256:
+            raise EvidenceScopeError("artifact evidence content hash does not match the bound artifact")
         binding_name = _payload_text(payload, "binding_name", artifact.artifact_id)
         existing = projection.artifact_bindings.get(binding_name)
         if existing is not None and existing != artifact:
@@ -524,8 +528,6 @@ def _apply_event(
         if previous.verified_claim_fingerprint == previous.claim_fingerprint:
             raise DuplicateEventError("the active claim fingerprint was already verified")
         policy = definition.evidence_policy
-        if _visual_verifier_requested(payload) and not policy.allow_independent_visual_verifier:
-            raise EvidenceScopeError("visual verification is not permitted by the evidence policy")
         if previous.verification_attempt_count >= policy.max_verification_attempts:
             raise IllegalTransitionError("maximum verification attempts exceeded")
         verified = bool(payload.get("verified", False))
@@ -543,6 +545,14 @@ def _apply_event(
             obligation_id=obligation_id,
             required=verified,
         )
+        visual_refs = tuple(ref for ref in refs if ref.trust == "independent_visual_model")
+        visual_claim = _visual_verifier_requested(payload)
+        if visual_claim and not visual_refs:
+            raise EvidenceScopeError(
+                "visual verifier claim is not backed by independent_visual_model evidence trust"
+            )
+        if visual_refs and not policy.allow_independent_visual_verifier:
+            raise EvidenceScopeError("visual verification is not permitted by the evidence policy")
         updated = _merge_evidence(projection, refs)
         attempt_count = previous.verification_attempt_count + 1
         if verified:
