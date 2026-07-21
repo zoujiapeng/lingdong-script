@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,7 +19,11 @@ from winpilot.vnext.profiling import (
     TaskProfilerRequest,
     TaskProfilerShadowRecord,
     TaskProfilerShadowRuntime,
+    OpenAITaskProfilerModel,
+    LegacyTaskProfilerShadowHook,
+    profiler_input_from_legacy_contract,
 )
+from winpilot.modeling import ModelCallRuntime, ModelRetryPolicy
 
 
 def _proposal(**overrides) -> TaskProfileProposal:
@@ -229,3 +234,179 @@ def test_shadow_records_are_bounded_and_explicitly_cleanable() -> None:
     assert len(runtime) == 1
     runtime.clear()
     assert len(runtime) == 0
+
+
+class _ChatClient:
+    def __init__(self, create) -> None:
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=create),
+        )
+
+
+def _provider_response(payload: dict) -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(
+            content=json.dumps(payload, ensure_ascii=False),
+        ))],
+    )
+
+
+def test_real_profiler_provider_is_tool_free_and_identity_free() -> None:
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return _provider_response(_proposal().to_dict())
+
+    provider = OpenAITaskProfilerModel(
+        _ChatClient(create),
+        model="read-only-profiler",
+        decision_id_factory=lambda: "runtime-bound-decision",
+    )
+    proposal = TaskProfiler(provider).profile(_input())
+
+    assert proposal == _proposal()
+    assert len(calls) == 1
+    assert "tools" not in calls[0]
+    assert "runtime-bound-decision" not in json.dumps(
+        calls[0], ensure_ascii=False, sort_keys=True
+    )
+    model_input = json.loads(calls[0]["messages"][1]["content"])
+
+    def keys(value):
+        if isinstance(value, dict):
+            return set(value) | set().union(*(keys(item) for item in value.values()))
+        if isinstance(value, list):
+            return set().union(*(keys(item) for item in value)) if value else set()
+        return set()
+
+    input_keys = keys(model_input)
+    for forbidden in (
+        "mission_id",
+        "run_id",
+        "frame_id",
+        "runtime_version",
+        "obligation_patch",
+        "application_workflow",
+        "coordinate",
+        "tool_sequence",
+    ):
+        assert forbidden not in input_keys
+
+
+def test_profiler_transport_retry_preserves_exact_request() -> None:
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise TimeoutError("temporary provider timeout")
+        return _provider_response(_proposal().to_dict())
+
+    provider = OpenAITaskProfilerModel(
+        _ChatClient(create),
+        model="read-only-profiler",
+        retry_policy=ModelRetryPolicy(max_attempts=2, initial_backoff_s=0),
+        call_runtime=ModelCallRuntime(sleeper=lambda _delay: None),
+        decision_id_factory=lambda: "one-semantic-profile",
+    )
+    runtime = TaskProfilerShadowRuntime(
+        TaskProfiler(provider), ExecutionPolicy()
+    )
+    first = runtime.profile_once(
+        mission_key="run-1:mission-1",
+        mission_id="mission-1",
+        goal_revision=0,
+        profiler_input=_input(),
+    )
+    second = runtime.profile_once(
+        mission_key="run-1:mission-1",
+        mission_id="mission-1",
+        goal_revision=0,
+        profiler_input=_input(),
+    )
+
+    assert first.status == "completed"
+    assert second == first
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert provider.last_outcome is not None
+    assert provider.last_outcome.request_retry_count == 1
+
+
+@pytest.mark.parametrize("raw", ("not-json", "[]", "{} trailing"))
+def test_profiler_provider_rejects_malformed_output(raw) -> None:
+    client = _ChatClient(lambda **_kwargs: SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=raw))],
+    ))
+    with pytest.raises(InvalidProfileSchema):
+        TaskProfiler(OpenAITaskProfilerModel(
+            client,
+            model="read-only-profiler",
+        )).profile(_input())
+
+
+class _ShadowTrace:
+    def __init__(self) -> None:
+        self.events = []
+
+    def record_sidecar(self, event, *, run_id):
+        self.events.append({**event, "run_id": run_id})
+        return True
+
+
+def _legacy_contract(task: str = "Complete the currently visible task") -> dict:
+    return {
+        "format": "task-contract/1",
+        "task_id": "legacy-task",
+        "task": task,
+        "experience_policy": "deny",
+        "stages": [],
+        "obligations": [],
+    }
+
+
+def test_legacy_shadow_hook_calls_profiler_at_most_once_per_run() -> None:
+    model = StubProfilerModel()
+    trace = _ShadowTrace()
+    hook = LegacyTaskProfilerShadowHook(model)
+
+    first = hook.profile_run(
+        run_id="outer-run",
+        contract=_legacy_contract(),
+        trace=trace,
+    )
+    second = hook.profile_run(
+        run_id="outer-run",
+        contract=_legacy_contract("changed text must not trigger another call"),
+        trace=trace,
+    )
+
+    assert first == second
+    assert len(model.requests) == 1
+    assert len(trace.events) == 2
+    assert all(event["profile_call_count"] == 1 for event in trace.events)
+    assert model.requests[0].input.current_surface_summary is None
+    serialized = json.dumps(model.requests[0].model_payload(), ensure_ascii=False)
+    assert "outer-run" not in serialized
+    assert "mission-outer-run" not in serialized
+
+
+def test_legacy_bridge_filters_unknown_capability_without_teaching_profiler() -> None:
+    contract = _legacy_contract()
+    contract["obligations"] = [{
+        "id": "o1",
+        "description": "A result exists",
+        "acceptance_criteria": ["result is visible"],
+        "required_capabilities": ["visual.interact", "legacy.unknown"],
+        "required": True,
+    }]
+    definition, profiler_input = profiler_input_from_legacy_contract(
+        contract,
+        mission_id="m1",
+        run_id="r1",
+    )
+    assert definition.metadata["legacy_unknown_capabilities"] == ("legacy.unknown",)
+    assert profiler_input.initial_obligations[0].required_capabilities == (
+        "visual.interact",
+    )

@@ -37,6 +37,43 @@ def test_trace_sidecar_does_not_mutate_bus_event_and_records_private_baseline(tm
     assert "vnext_baseline" not in event
 
 
+def test_explicit_trace_sidecar_never_reaches_product_bus(tmp_path, monkeypatch):
+    import json
+
+    from winpilot.recorder import trace
+    from winpilot.utils.log import BUS
+
+    monkeypatch.setattr(trace, "TRACES_DIR", tmp_path)
+    recorder = trace.TraceRecorder()
+    events = None
+    try:
+        recorder.start("private-shadow")
+        events = BUS.subscribe()
+        assert recorder.record_sidecar(
+            {
+                "type": "vnext_profiler_shadow",
+                "status": "completed",
+                "profile_call_count": 1,
+            },
+            run_id="private-shadow",
+        ) is True
+        assert events.empty()
+        recorder.stop()
+    finally:
+        if events is not None:
+            BUS.unsubscribe(events)
+        BUS.remove_sink(recorder._on_event)
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "private-shadow.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    shadow = next(item for item in records if item.get("type") == "vnext_profiler_shadow")
+    assert shadow["run_id"] == "private-shadow"
+    assert shadow["profile_call_count"] == 1
+
+
 def test_llm_trace_redacts_frame_without_mutating_api_request(tmp_path, monkeypatch):
     import base64
     import hashlib

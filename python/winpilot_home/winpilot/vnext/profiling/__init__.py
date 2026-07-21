@@ -15,6 +15,12 @@ from .contracts import (
     UnsupportedCapability,
 )
 from .policy import DEFAULT_CAPABILITY_CATALOG, ExecutionPolicy
+from .provider import OpenAITaskProfilerModel
+from .legacy_shadow import (
+    LegacyTaskProfilerShadowHook,
+    ShadowTraceWriter,
+    profiler_input_from_legacy_contract,
+)
 from .profiler import (
     TASK_PROFILER_INPUT_FORMAT,
     TASK_PROFILER_REQUEST_FORMAT,
@@ -56,6 +62,10 @@ __all__ = [
     "ExecutionProfile",
     "DEFAULT_CAPABILITY_CATALOG",
     "ExecutionPolicy",
+    "OpenAITaskProfilerModel",
+    "ShadowTraceWriter",
+    "profiler_input_from_legacy_contract",
+    "LegacyTaskProfilerShadowHook",
     "TASK_PROFILER_INPUT_FORMAT",
     "TASK_PROFILER_REQUEST_FORMAT",
     "TASK_PROFILER_ROLE",

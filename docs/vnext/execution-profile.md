@@ -1,6 +1,6 @@
 # Task Profiler 与 ExecutionProfile
 
-状态：**P2a 已完成，真实 Profiler 模型调用尚未接入**。
+状态：**P2a 已完成；P2b 真实 Profiler 调用已接入默认关闭的只读 shadow**。
 
 本文补充 vNext 的低频架构选择入口。它解决的问题不是“任务应该点击哪里”，而是：当前任务需要多深的编排、哪些只读认知服务、什么证据强度，以及哪些运行事实应触发升档或降档。
 
@@ -265,6 +265,9 @@ Missing, malformed, unsupported, or low-confidence proposals resolve to the
 safe `standard` profile. Depth and cognitive services can only be tightened
 or restricted from semantic dimensions and injected availability facts.
 
-The Profiler model invocation is still not connected. This document does not
-authorize Broker, Visual Actor, Planner, Inspector, prompt, tool-surface,
-Controller, done, legacy execution, or frontend changes.
+P2b adds one isolated, tool-free provider request per run behind the default-off
+`vnext.profiler_shadow.enabled` flag. Runtime identity stays outside the model
+payload; exact transport retry uses the shared model-call Runtime, and the
+result is written only through `TraceRecorder.record_sidecar`. It does not
+authorize Broker, Visual Actor, Planner, Inspector, GUI tool-surface,
+Controller, done, or legacy execution changes.

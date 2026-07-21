@@ -976,6 +976,7 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
             "Compile it again before starting the run."
         )
     contract_data = graph.metadata.get("task_contract")
+    task_contract = None
     if isinstance(contract_data, dict):
         from .tasking.contracts import TaskContract
 
@@ -988,6 +989,30 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
     if human_mod.RECORDER.is_recording():
         raise RuntimeError("a human or apprentice recording is active")
 
+    shadow_config = CONFIG.get("vnext", "profiler_shadow", default={}) or {}
+    profiler_shadow_enabled = bool(
+        isinstance(shadow_config, dict) and shadow_config.get("enabled") is True
+    )
+    profiler_shadow_hook = None
+    profiler_shadow_setup_error: str | None = None
+    if profiler_shadow_enabled and task_contract is not None:
+        try:
+            from .vnext.profiling import (
+                LegacyTaskProfilerShadowHook,
+                OpenAITaskProfilerModel,
+            )
+
+            profiler_shadow_hook = LegacyTaskProfilerShadowHook(
+                OpenAITaskProfilerModel.from_api_config(
+                    CONFIG.get("api", default={}) or {},
+                ),
+            )
+        except Exception as exc:
+            # Shadow setup is observational and must never block the legacy
+            # product path. Record only the error type; provider configuration
+            # details may contain secrets.
+            profiler_shadow_setup_error = type(exc).__name__
+
     job_ref: dict[str, str] = {}
 
     def on_runner(runner: AgentRunner) -> None:
@@ -995,6 +1020,46 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
 
     def on_start(started: ArpExecution) -> None:
         trace_mod.RECORDER.start(started.run_id)
+        if not profiler_shadow_enabled:
+            return
+        if profiler_shadow_hook is None or task_contract is None:
+            trace_mod.RECORDER.record_sidecar(
+                {
+                    "type": "vnext_profiler_shadow",
+                    "runtime_version": "legacy",
+                    "status": "safe_default",
+                    "profile_call_count": 0,
+                    "request_retry_count": 0,
+                    "elapsed_ms": None,
+                    "proposal": None,
+                    "profile": None,
+                    "error_kind": profiler_shadow_setup_error or "Unavailable",
+                },
+                run_id=started.run_id,
+            )
+            return
+        try:
+            record = profiler_shadow_hook.profile_run(
+                run_id=started.run_id,
+                contract=task_contract,
+                trace=trace_mod.RECORDER,
+            )
+            started.runtime_state["vnext_profiler_shadow"] = record.to_dict()
+        except Exception as exc:
+            trace_mod.RECORDER.record_sidecar(
+                {
+                    "type": "vnext_profiler_shadow",
+                    "runtime_version": "legacy",
+                    "status": "safe_default",
+                    "profile_call_count": None,
+                    "request_retry_count": None,
+                    "elapsed_ms": None,
+                    "proposal": None,
+                    "profile": None,
+                    "error_kind": type(exc).__name__,
+                },
+                run_id=started.run_id,
+            )
 
     def on_finish(finished: ArpExecution) -> None:
         try:
@@ -1039,6 +1104,8 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
                     run_id=finished.run_id,
                 )
             finally:
+                if profiler_shadow_hook is not None:
+                    profiler_shadow_hook.close(finished.run_id)
                 trace_mod.RECORDER.stop()
 
     execution = ARP_RUNS.prepare(

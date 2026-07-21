@@ -1,7 +1,7 @@
 # vNext 状态与角色合同
 
 本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和
-legacy shadow；P2a 已实现纯 Task Profile 合同与确定性 Execution Policy。Profiler 模型调用、Broker、模型和桌面动作仍未接入。实现时先固定
+legacy shadow；P2a 已实现纯 Task Profile 合同与确定性 Execution Policy，P2b 已增加默认关闭、无工具的真实 Profiler shadow。Broker、Visual Actor 和桌面动作仍未接入 vNext。实现时先固定
 schema、Reducer 与 envelope 测试；任何运行时接线都必须经过迁移计划的后续阶段门槛。
 
 ## 1. 版本与基本规则
@@ -147,10 +147,11 @@ unsupported, or low-confidence proposals, and records every depth/service
 restriction and unavailable provider/capability in `policy_reasons`.
 `ProfileShadowEvaluator` accepts only injected proposal/runtime facts and
 reports over/under-profile plus an identity-free structural fingerprint for
-rewrite and application-label stability checks. The policy is shadow-only in P2a: no model
-profiler invocation, legacy execution, Broker, Actor, Planner, Inspector,
-prompt, tool surface, Controller, done semantics, or frontend integration is
-connected.
+rewrite and application-label stability checks. P2b adds a separate, tool-free
+`OpenAITaskProfilerModel` and an at-most-once legacy shadow hook. Its Runtime
+envelope binds request identity outside the model input, SDK retries are zero,
+and trace output uses a private recorder sidecar. Broker, Actor, Planner,
+Inspector, GUI tool surfaces, Controller and done semantics remain disconnected.
 
 ## 4. MissionDefinition
 
