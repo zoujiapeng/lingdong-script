@@ -3876,113 +3876,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         if tool_name in {"click", "double_click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
             convert_image_pair("image_x", "image_y", "frame_x", "frame_y")
         elif tool_name == "drag":
-            image_endpoint_present = any(
-                key in mapped
-                for key in ("image_x1", "image_y1", "image_x2", "image_y2")
+            mapped, drag_source = image_mapper.map_drag_image_coordinates(
+                mapped, context=tool_name, max_points=_NATIVE_DRAG_MAX_POINTS,
             )
-            if image_endpoint_present:
-                first_image = convert_image_pair(
-                    "image_x1", "image_y1", "frame_x1", "frame_y1",
-                )
-                second_image = convert_image_pair(
-                    "image_x2", "image_y2", "frame_x2", "frame_y2",
-                )
-                if not first_image or not second_image:
-                    raise ValueError(
-                        "drag submitted-image coordinates require both complete endpoints"
-                    )
-                if "frame_points" in mapped:
-                    raise ValueError(
-                        "drag received image endpoints with normalized frame_points"
-                    )
-                if "image_points" in mapped:
-                    raw_image_points = mapped.pop("image_points")
-                    if not isinstance(raw_image_points, list):
-                        raise ValueError("image_points must be an array of [x,y] pixels")
-                    compact_image_points: list[Any] = []
-                    for raw_point in raw_image_points:
-                        if not compact_image_points or raw_point != compact_image_points[-1]:
-                            compact_image_points.append(raw_point)
-                    if len(compact_image_points) > _NATIVE_DRAG_MAX_POINTS:
-                        raise ValueError(
-                            f"image_points accepts at most {_NATIVE_DRAG_MAX_POINTS} meaningful points"
-                        )
-                    converted_points: list[list[float]] = []
-                    original_points: list[list[float]] = []
-                    for index, raw_point in enumerate(compact_image_points):
-                        if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
-                            raise ValueError(f"image_points[{index}] must be [x,y]")
-                        temporary = {
-                            "image_x": raw_point[0],
-                            "image_y": raw_point[1],
-                        }
-                        prior = mapped
-                        mapped = temporary
-                        try:
-                            convert_image_pair(
-                                "image_x", "image_y", "frame_x", "frame_y",
-                            )
-                            converted_points.append([
-                                float(mapped["frame_x"]), float(mapped["frame_y"]),
-                            ])
-                            original_points.append([
-                                float(image_source.pop("image_x")),
-                                float(image_source.pop("image_y")),
-                            ])
-                        finally:
-                            mapped = prior
-                    mapped["frame_points"] = converted_points
-                    image_source["image_points"] = original_points
-            elif "image_points" in mapped:
-                raise ValueError(
-                    "image_points require drag endpoints in the same submitted-image coordinate source"
-                )
-        elif tool_name == "draw_strokes" and "image_strokes" in mapped:
-            if "frame_strokes" in mapped:
-                raise ValueError(
-                    "draw_strokes received mixed submitted-image and normalized-frame coordinates"
-                )
-            raw_image_strokes = mapped.pop("image_strokes")
-            if not isinstance(raw_image_strokes, list) or not raw_image_strokes:
-                raise ValueError("image_strokes must contain at least one stroke")
-            if len(raw_image_strokes) > 16:
-                raise ValueError("image_strokes accepts at most 16 strokes")
-            converted_strokes: list[list[list[float]]] = []
-            original_strokes: list[list[list[float]]] = []
-            for stroke_index, raw_stroke in enumerate(raw_image_strokes):
-                if not isinstance(raw_stroke, list) or not (2 <= len(raw_stroke) <= 16):
-                    raise ValueError(
-                        f"image_strokes[{stroke_index}] must contain 2..16 [x,y] points"
-                    )
-                converted_stroke: list[list[float]] = []
-                original_stroke: list[list[float]] = []
-                for point_index, raw_point in enumerate(raw_stroke):
-                    if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
-                        raise ValueError(
-                            f"image_strokes[{stroke_index}][{point_index}] must be [x,y]"
-                        )
-                    temporary = {"image_x": raw_point[0], "image_y": raw_point[1]}
-                    prior = mapped
-                    mapped = temporary
-                    try:
-                        convert_image_pair(
-                            "image_x", "image_y", "frame_x", "frame_y",
-                        )
-                        converted_stroke.append([
-                            float(mapped["frame_x"]), float(mapped["frame_y"]),
-                        ])
-                        original_stroke.append([
-                            float(image_source.pop("image_x")),
-                            float(image_source.pop("image_y")),
-                        ])
-                    finally:
-                        mapped = prior
-                converted_strokes.append(converted_stroke)
-                original_strokes.append(original_stroke)
-            mapped["frame_strokes"] = converted_strokes
-            image_source["image_strokes"] = original_strokes
-        elif tool_name == "draw_strokes" and "image_strokes" in image_source:
-            raise ValueError("invalid submitted-image stroke coordinates")
+            image_source.update(drag_source)
+        elif tool_name == "draw_strokes":
+            mapped, stroke_source = image_mapper.map_image_strokes(
+                mapped, context=tool_name, max_strokes=16, max_points_per_stroke=16,
+            )
+            image_source.update(stroke_source)
 
         if "constraint_image_region" in mapped:
             mapped, constraint_source = image_mapper.map_constraint_image_region(
