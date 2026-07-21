@@ -15,6 +15,7 @@ vNext 的目标不是让架构图更整齐，而是在相同模型、相同电�
 | H7 | Runtime envelope 绑定身份比模型复制 ID 更少 stale/串线错误 | identity mismatch、stale decision、invalid evidence reference |
 | H8 | 工具/骨架优先整改比 prompt 规则更能跨任务泛化 | held-out uplift、prompt chars、专属规则审计 |
 | H9 | 同模型不同角色的隔离降低自我确认，但同源错误仍可测 | Actor/Verifier error correlation、false positive、evidence diversity |
+| H10 | 单一冻结请求重试 owner 比 SDK/调用点隐式重试更少重复请求与不确定 action replay | request fingerprint、attempt kind、late result、duplicate mutation |
 
 任一新角色或模块必须对应可证伪假设。不得先实现，再为它寻找用途。
 
@@ -26,6 +27,7 @@ vNext 的目标不是让架构图更整齐，而是在相同模型、相同电�
 runtime_version
 mission_id / revision / active_obligation_id
 model_role
+decision_id / purpose / request_fingerprint
 model_name / provider / thinking_policy
 input_schema_version / output_schema_version
 prompt_context_chars
@@ -33,6 +35,8 @@ model_tool_count / model_tool_schema_chars
 frame_id / epoch / capture_scope（若适用）
 model_elapsed_ms
 request_retry_count
+attempt_count / attempt kind / error kind / retryable
+followup_kind / late_result_discarded
 validation_failure_count
 ```
 
@@ -361,6 +365,7 @@ mission_reducer
 capability_broker
 app_or_window_resolution
 frame_or_coordinate
+model_transport_runtime
 controller_or_raw_input
 post_action_observation
 visual_actor_reasoning
@@ -400,6 +405,24 @@ external_environment
 P3a 已覆盖 strict schema、状态组合、route 互斥、grant scope、artifact identity、stale frame、pointer lease 和确定性 replay 的纯测试。它不等价于上述产品门槛：在真实 Electron legacy 回合尚未记录 projection，且没有完整 held-out relevance oracle 前，necessary-tool recall 记为缺失值，不能用 actual legacy tool 命中率代替，也不能开启 enforce。
 
 Broker enforce 的数值门槛采用 fail-closed 标准：只有具备完整独立 relevance oracle 的 turn 才进入计算，controlled、mixed 与 held-out 各分组的 required tool group recall 都必须为 100%，并且 recovery、pointer release、stop/cancel 与证据链工具不得出现一次漏失。未标注样本、样本规模和覆盖到的状态组合必须同时报告；actual legacy tool 是否被允许仅是诊断项，不是 recall oracle。
+
+### 模型调用与重试合同
+
+- WinPilot product package 的 provider SDK 隐式重试为零；
+- 同一 request retry 的 decision id、role、purpose 和 fingerprint 完全一致；
+- adapter prepare 只发生一次，transport 每次收到冻结请求的新副本；
+- poll 不提交第二个请求，redecision 使用新 decision id；
+- response parse/schema/semantic validation failure 不触发 transport retry；
+- canceled/timed-out late result 不能进入 proposal、tool dispatch 或新 revision；
+- mutation outcome unknown 不自动 replay，且 request retry 不能被统计为 action replay；
+- 精确函数调用栈 AST guard 阻止 product package 新增绕过 Runtime 的 Chat transport，并拒绝 Responses transport；
+- 每个逻辑调用都能区分 semantic call count 与 transport attempt count。
+
+当前合同、主 Agent 请求和精确 AST guard 已存在；Profiler stop_event 也已从 ArpExecution 经
+shadow hook/runtime/provider 传到 ModelCallRuntime 并有测试。仍缺的是全角色逐 attempt
+sidecar，以及 legacy VLM helper 的 stop_event seam。因此“全角色可观测/可取消”门槛仍未达成；
+缺失数据保持 `None`，不能以零代替。外围 `python/providers/` 不进入 product-package 完成分母，
+必须在 P9 报告其生产可达性和删除/迁移结论。
 
 ### Actor受控执行
 

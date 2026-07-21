@@ -176,9 +176,9 @@ E2E harness 使用 `uiautomation + Win32` 操作客户端自身控件。这不�
 - 11 个真实任务尚未全部通过，混合长任务也没有当前版本的全量通过证据；
 - 其他失败、`ungrounded`、超时和外部干扰 run 保留原分类，不能由文档改写为成功。
 
-本轮已落地的通用运行时改动包括：自适应 provider reasoning（首帧/恢复深思考，已验证例行回合轻量）、单次与总请求截止时间及安全重试、模型选择的 `observe.image_region` 高分辨率裁剪、以及带稳定变化结果的 `wait(persistent=true)`。这些能力没有引用 QQ、画板、WPS、浏览器或测试句子；后续应继续用未知任务验证，而不是新增样例分支。
+本轮已落地的通用运行时改动包括：自适应 provider reasoning（首帧/恢复深思考，已验证例行回合轻量）、单次与总请求截止时间、WinPilot product package 内冻结且可追踪的精确 transport retry、模型选择的 `observe.image_region` 高分辨率裁剪、以及带稳定变化结果的 `wait(persistent=true)`。SDK 隐式重试关闭；改变 reasoning/messages/tools/预算属于新 redecision，桌面 mutation 结果不确定时不自动 replay。这些能力没有引用 QQ、画板、WPS、浏览器或测试句子；后续应继续用未知任务验证，而不是新增样例分支。
 
-后续大整改采用 `codex/vnext-agent-core` 旁路：Mission Ledger 保存主线，确定性 Broker 投影小工具面，唯一 Visual Actor 负责桌面语义动作，Verifier 独立只读，Planner/Inspector 只按事件调用。当前仅完成设计文档，尚未实现代码；合同、阶段、实验和 legacy 删除门槛见 [vnext/README.md](vnext/README.md)。该旁路必须继续共用真实 Electron 入口，不能成为第二套 GUI 产品或测试捷径。
+后续大整改采用 `codex/vnext-agent-core` 旁路：Mission Reducer/Projection 保存可重放主线，确定性 Broker 投影小工具面，唯一 Visual Actor 负责桌面语义动作，Verifier 独立只读，Planner/Inspector 只按事件调用。当前已完成 P0/P1/P1.5、P2a/P2b Profiler shadow、P3a/P3b single-obligation partial Broker shadow，以及 WinPilot product package 的模型请求/重试合同；Profiler stop_event 链与精确 transport AST guard 已有测试。Broker 尚未 enforce，P4 Visual Actor、P5 Verifier、P6 Planner/Inspector 和 vNext 可写 runtime 均未实现。外围 `python/providers/`、全角色逐 attempt sidecar 与 legacy VLM stop_event seam 仍是迁移债务。合同、阶段、实验和 legacy 删除门槛见 [vnext/README.md](vnext/README.md)。该旁路必须继续共用真实 Electron 入口，不能成为第二套 GUI 产品或测试捷径。
 
 ## 下一轮整改顺序
 

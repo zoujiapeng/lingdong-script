@@ -135,6 +135,7 @@ class TaskProfilerShadowRuntime:
         profiler_input: TaskProfilerInput,
         available_capabilities: Iterable[str] | None = None,
         provider_availability: Iterable[str] | Mapping[str, bool] | None = None,
+        stop_event: threading.Event | None = None,
     ) -> TaskProfilerShadowRecord:
         key = _text(mission_key, "mission_key")
         with self._lock:
@@ -153,7 +154,10 @@ class TaskProfilerShadowRuntime:
 
         started = time.monotonic()
         try:
-            proposal = self._profiler.profile(profiler_input)
+            proposal = self._profiler.profile(
+                profiler_input,
+                stop_event=stop_event,
+            )
             profile = self._policy.evaluate(
                 proposal,
                 mission_id=mission_id,

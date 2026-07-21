@@ -373,6 +373,18 @@ Inspector 请求由 Runtime 绑定冻结 frame/ROI。报告只能包含可见事
 
 每条链默认串行并绑定冻结 revision/frame。迟到、超时、取消、格式错误或低置信结果保持状态不变并产生 typed failure fact。
 
+模型角色共用一个机械的 model-call Runtime，但不共享请求上下文。provider adapter 先准备一次
+请求，Runtime 绑定 `model-request/0`、冻结 payload 并关闭 SDK 隐式重试；只有同一
+decision/role/purpose/fingerprint 的瞬时 transport failure 才能做有界 request retry。改变
+messages、工具、thinking、预算或目的属于新的 redecision；poll 不重新提交请求；响应解析和 schema
+失败发生在 transport 之外。模型 request retry 也不授予任何 action replay 权限，桌面 mutation
+结果不确定时必须重新观察、对账或阻塞。
+
+这个 model-call Runtime 是 transport owner，不是新的认知角色，也不改变唯一 Visual Actor 或唯一
+Controller/RawDevice 写入链。当前统一范围仅是 `python/winpilot_home/winpilot/` product package；
+外围 legacy provider、全角色逐 attempt sidecar 和 legacy VLM helper 的 stop_event seam 仍是迁移
+债务；Profiler 的 ArpExecution -> shadow hook/runtime/provider -> ModelCallRuntime 取消链已经闭合。
+
 ## 14. 基础工具优先
 
 多角色系统不能替代基础工具。以下问题必须先修：
@@ -437,6 +449,7 @@ vNext 复用：
 - ScreenWatcher 与 held-pointer cleanup；
 - ArtifactStore、EvidenceRegistry 与 oracle；
 - AppResolver；
+- `winpilot/modeling/` 的冻结请求、provider adapter 与 transport retry 合同；
 - cold-start、session context 与客户端 E2E harness。
 
 vNext 逐步替代：
@@ -447,5 +460,9 @@ vNext 逐步替代：
 - `done` 直接终止任务；
 - DoneVerifier 中 action、obligation、mission 混合验收；
 - interaction stage、subgoal、adapter 与 Controller 间重复 planner 行为。
+
+仓库根部 `python/providers/` 的 Flow/feature provider 仍包含独立 SDK 或 direct-HTTP
+重试，不是 vNext 的第二个 transport owner。P9 前必须审计其产品可达性：不可达则净删；仍有必要调用则
+在独立切片迁移到同一 model-call Runtime。不能仅为统一目录外观把它长期包成第二套请求系统。
 
 迁移分支是临时集成线。达到门槛后 vNext 合并回 `master`、旧职责净删，不能永久保留两套产品核心。具体阶段见 [migration-plan.md](migration-plan.md)。

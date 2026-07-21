@@ -23,8 +23,10 @@ Goal Compiler
 
 先读 [`docs/vnext/README.md`](docs/vnext/README.md) 和 [`docs/vnext/execution-profile.md`](docs/vnext/execution-profile.md)。
 
-当前 vNext 尚未接入产品运行时；P0 观测旁路和 P1 纯 Mission 合同、Reducer、replay、MissionCard
-及 legacy shadow 已实现。后续工作必须遵守：
+当前 legacy 仍是默认且唯一桌面执行 runtime。vNext 已完成 P0/P1/P1.5、P2a/P2b
+Profiler shadow、P3a/P3b single-obligation partial Broker shadow，以及 WinPilot product package
+的统一模型请求/重试边界；Broker 尚未 enforce，P4 Visual Actor、P5 Verifier、P6
+Planner/Inspector 和 vNext 可写运行时均未实现。后续工作必须遵守：
 
 - 只有 Visual Actor 可以提出 GUI mutation；
 - 只有 Controller/RawDevice 链可以执行桌面输入；
@@ -37,6 +39,7 @@ Goal Compiler
 - 模型只输出无身份 proposal；mission/revision/obligation/frame/evidence/broker id 由 Runtime envelope 绑定；
 - Broker 只根据 accepted capability、profile、窗口、pointer lease、artifact、adapter 和授权状态投影小工具面；
 - Actor 可以请求 broad capability，但 Runtime/Broker 才能授予有界 grant；
+- provider SDK 隐式重试必须关闭；`ModelCallRuntime` 只可重试同一冻结 request。poll、redecision 和 action replay 是不同合同，mutation 结果不确定时禁止自动重放；
 - 基础工具、Frame/Controller、应用发现和调度骨架未经证明前，不通过 prompt 或新增模型角色修单例；
 - vNext 共用当前 Electron 入口和 E2E，不能形成第二套产品链；
 - 每个迁移切片必须列出未来删除的旧职责。
@@ -64,6 +67,7 @@ Electron「智能代理」
 | `python/winpilot_home/winpilot/orchestrator/` | ARP graph 和运行投影 |
 | `python/winpilot_home/winpilot/agent/loop.py` | 统一 AgentRunner；当前过重，是收敛重点 |
 | `python/winpilot_home/winpilot/agent/tools.py` | ToolSession 和 dispatch |
+| `python/winpilot_home/winpilot/modeling/` | WinPilot product package 的冻结模型请求、SDK transport 和唯一 request-retry owner |
 | `python/winpilot_home/winpilot/fast/` | Controller、subgoal、watcher、输入定位 |
 | `python/winpilot_home/winpilot/action/` | 原子输入、Desktop Action Queue 和验证 |
 | `python/winpilot_home/winpilot/perception/` | 权威截图、UIA/Win32/OCR/CV/VLM |
@@ -111,6 +115,8 @@ Electron「智能代理」
 - `.wps.json`、FlowScript、DSL、旧 feature bridge 和浏览器 executor 只做兼容。
 - 新 GUI 能力只在 WinPilot 主 runtime 实现一次，不向 legacy 复制。
 - 兼容执行器不能模拟真实桌面成功。
+- `python/providers/` 仍是外围 legacy Flow/feature provider，其中独立 SDK/HTTP retry 尚未迁移；先审计生产可达性，P9 净删或单独迁移，不把它接成第二个 model Runtime。
+- 统一 transport 不等于 vNext 角色接入；legacy planner、done judge 或 VLM helper 经过 `ModelCallRuntime` 后仍不是 P4/P5/P6 实现。
 
 ## 测试
 

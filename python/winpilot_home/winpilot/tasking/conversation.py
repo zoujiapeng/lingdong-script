@@ -1,13 +1,19 @@
 """Single-turn conversational responses that must not enter the GUI loop."""
 from __future__ import annotations
 
+import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from ..config import CONFIG
 from ..model_adapter import build_model_adapter
-from ..modeling import create_openai_client
+from ..modeling import (
+    ModelRetryPolicy,
+    create_openai_client,
+    invoke_chat_completion,
+)
 
 
 class ConversationResponseError(RuntimeError):
@@ -24,6 +30,8 @@ class ConversationResponse:
 def generate_conversation_response(
     task: str,
     session_context: list[dict[str, Any]] | None = None,
+    *,
+    stop_event: threading.Event | None = None,
 ) -> ConversationResponse:
     api = dict(CONFIG.get("api", default={}) or {})
     if not (
@@ -33,14 +41,12 @@ def generate_conversation_response(
     ):
         raise ConversationResponseError("main text model is not configured")
 
-    client = build_model_adapter(
-        create_openai_client(
-            base_url=str(api["base_url"]),
-            api_key=str(api["api_key"]),
-            timeout=120,
-        ),
-        api,
+    raw_client = create_openai_client(
+        base_url=str(api["base_url"]),
+        api_key=str(api["api_key"]),
+        timeout=120,
     )
+    adapter = build_model_adapter(raw_client, api)
     recent = []
     for item in (session_context or [])[-3:]:
         if not isinstance(item, dict):
@@ -63,12 +69,21 @@ def generate_conversation_response(
     )
     started = time.monotonic()
     try:
-        response = client.chat.completions.create(
-            model=str(api["model"]),
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=700,
-            temperature=0.2,
+        outcome = invoke_chat_completion(
+            raw_client,
+            decision_id=f"conversation-response:{uuid.uuid4().hex}",
+            model_role="conversation_responder",
+            purpose="generate_text_only_response",
+            provider_request=adapter.prepare_chat_completion(
+                model=str(api["model"]),
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=700,
+                temperature=0.2,
+            ),
+            policy=ModelRetryPolicy(max_attempts=1),
+            stop_event=stop_event,
         )
+        response = outcome.response
         text = str(response.choices[0].message.content or "").strip()
     except Exception as exc:
         raise ConversationResponseError(

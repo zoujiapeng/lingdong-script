@@ -43,7 +43,7 @@ def _status_code(exc: Exception) -> int | None:
 def _retryable_transport_error(exc: Exception) -> bool:
     code = _status_code(exc)
     if code is not None:
-        return code == 429 or 500 <= code <= 599
+        return code in {408, 409, 429} or 500 <= code <= 599
     if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
         return True
     # Keep this allowlist explicit: matching arbitrary exception messages such
@@ -114,16 +114,6 @@ class ModelCallRuntime:
                 # Every request retry is therefore byte-identical in meaning,
                 # even if a transport mutates the mapping it receives.
                 response = send_once(envelope.provider_request())
-                attempt = ModelAttempt(
-                    attempt=attempt_number,
-                    kind=(RetryKind.INITIAL_REQUEST if attempt_number == 1 else RetryKind.REQUEST_RETRY),
-                    request_fingerprint=envelope.request_fingerprint,
-                    elapsed_ms=max(0, int((self._clock() - attempt_started) * 1000)),
-                    ok=True,
-                )
-                attempts.append(attempt)
-                _notify_attempt(on_attempt, attempt)
-                return ModelCallOutcome(response=response, attempts=tuple(attempts))
             except Exception as exc:
                 last_exc = exc
                 retryable = _retryable_transport_error(exc)
@@ -154,6 +144,49 @@ class ModelCallRuntime:
                     float(policy.max_backoff_s),
                     backoff * float(policy.backoff_multiplier),
                 )
+            else:
+                elapsed_ms = max(
+                    0, int((self._clock() - attempt_started) * 1000)
+                )
+                abandoned_reason = None
+                if stop_event is not None and stop_event.is_set():
+                    abandoned_reason = "ModelResponseCanceled"
+                elif self._clock() >= deadline:
+                    abandoned_reason = "ModelResponseDeadlineExceeded"
+                if abandoned_reason is not None:
+                    attempt = ModelAttempt(
+                        attempt=attempt_number,
+                        kind=(
+                            RetryKind.INITIAL_REQUEST
+                            if attempt_number == 1
+                            else RetryKind.REQUEST_RETRY
+                        ),
+                        request_fingerprint=envelope.request_fingerprint,
+                        elapsed_ms=elapsed_ms,
+                        ok=False,
+                        error_kind=abandoned_reason,
+                        retryable=False,
+                    )
+                    attempts.append(attempt)
+                    _notify_attempt(on_attempt, attempt)
+                    raise ModelCallError(
+                        "model response abandoned before consumption",
+                        tuple(attempts),
+                    )
+                attempt = ModelAttempt(
+                    attempt=attempt_number,
+                    kind=(
+                        RetryKind.INITIAL_REQUEST
+                        if attempt_number == 1
+                        else RetryKind.REQUEST_RETRY
+                    ),
+                    request_fingerprint=envelope.request_fingerprint,
+                    elapsed_ms=elapsed_ms,
+                    ok=True,
+                )
+                attempts.append(attempt)
+                _notify_attempt(on_attempt, attempt)
+                return ModelCallOutcome(response=response, attempts=tuple(attempts))
         raise ModelCallError(
             f"model transport failed after {len(attempts)} attempt(s): {last_exc}",
             tuple(attempts),

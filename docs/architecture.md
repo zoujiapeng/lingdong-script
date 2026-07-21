@@ -117,7 +117,7 @@ StageRuntime 是阶段生命周期 owner：能力预检、工件传递、可选�
 
 当主模型明确支持图像时，普通 GUI 回合直接附加当前权威 JPEG。模型从画面理解语义并提出一笔 typed transaction；动作后重新捕获权威帧，再进入下一回合。
 
-模型推理预算也属于运行时基础设施，而不是任务规则：首帧、画面未变、动作被阻止、完成验收失败或恢复中的回合允许 provider 使用较深的原生视觉推理；在动作已被新帧和因果证据确认后，例行回合才可使用轻量模式。每次 provider 请求同时受 SDK 单次超时和 AgentRunner 总截止时间约束；超时响应在进入工具分发前丢弃，有限重试不会重复执行已经发生的 GUI 动作。
+模型推理预算也属于运行时基础设施，而不是任务规则：首帧、画面未变、动作被阻止、完成验收失败或恢复中的回合允许 provider 使用较深的原生视觉推理；在动作已被新帧和因果证据确认后，例行回合才可使用轻量模式。每次 provider 请求同时受 SDK 单次超时和 AgentRunner 总截止时间约束；SDK 隐式重试关闭，WinPilot product package 的 `ModelCallRuntime` 只能在结果被消费前重发同一冻结 decision/role/purpose/fingerprint。改变 thinking、messages、tools 或预算是新 redecision，不是 request retry。超时响应在进入工具分发前丢弃；模型请求 retry 不授予 GUI action replay 权限，mutation outcome unknown 时必须重新观察、对账或阻塞。
 
 如果完整帧中某个区域确实需要更多细节，模型可以调用 `observe(image_region=...)`。这是当前权威图片像素到物理区域的一次通用映射，裁剪图会成为下一张权威帧，后续动作使用裁剪图自己的坐标；它不是画板、棋盘、浏览器或某个应用的特例，也不调用 OCR/UIA 来决定裁剪区域。
 

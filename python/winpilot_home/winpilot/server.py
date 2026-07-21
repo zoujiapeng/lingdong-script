@@ -1064,6 +1064,7 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
                         run_id=started.run_id,
                         contract=task_contract,
                         trace=trace_mod.RECORDER,
+                        stop_event=started.stop_event,
                     )
                     started.runtime_state["vnext_profiler_shadow"] = (
                         profiler_record.to_dict()

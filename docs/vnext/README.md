@@ -1,6 +1,6 @@
 # vNext Agent 核心旁路
 
-状态：**P0/P1/P1.5 已实现；P2a/P2b Profiler shadow、P3a Broker 与 P3b single-obligation partial shadow 已完成；Broker 仍未 enforce，Actor、Verifier、Planner/Inspector 尚未接入**
+状态：**P0/P1/P1.5 已实现；P2a/P2b Profiler shadow、P3a Broker 与 P3b single-obligation partial shadow 已完成；WinPilot product package 的模型请求/重试边界已统一；Broker 仍未 enforce，P4 Actor、P5 Verifier、P6 Planner/Inspector 尚未接入**
 
 迁移分支：`codex/vnext-agent-core`
 
@@ -56,9 +56,13 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 - P3b single-obligation partial shadow 通过默认关闭的 `vnext.broker_shadow.enabled` 在同一 Electron/ARP 入口逐回合写私有 sidecar；它读取现有 FrameAuthority、已验证 target、同一次 pointer 状态和 owner-scoped capability registry，但不改 legacy 请求、BUS、Controller 或完成语义；
 - target 变化在 shadow 中也必须由 run-scoped EvidenceRef 与 accepted Mission events 完整 replay；多 obligation 尚无法和 legacy child runner 可靠对齐时明确 unavailable，必须等 P4 Mission Runtime 提供 active-obligation envelope；
 - Broker shadow evaluator 只有获得完整、可靠的 necessary-tool 标注时才计算 recall；当前尚无 held-out 实测数据，因此 Broker 不能 enforce，也没有裁剪 legacy 工具面；
+- 跨阶段的 `winpilot/modeling/` 合同把 WinPilot product package 中的逻辑模型请求绑定为 `model-request/0`：provider adapter 先准备请求，Runtime 冻结一次，SDK 隐式重试为零；只有同一 decision、role、purpose 和 request fingerprint 的瞬时 transport failure 才能做有界 request retry；
+- poll 不重新提交模型请求；改变消息、thinking、工具、预算或目的属于新的 redecision；成功响应的解析/schema 失败不是 transport retry；桌面 action replay 由独立 mutation replay policy 管理，执行结果不确定时禁止自动重放；
+- 该完成声明只覆盖 `python/winpilot_home/winpilot/` 产品包。仓库外围 `python/providers/` 的旧 Flow/feature provider 仍有独立 SDK/HTTP 重试，必须先审计生产可达性，再在 P9 删除或单独迁移；不能把它们包装成第二个 Runtime；
+- Profiler 的 stop_event 已从 ArpExecution 经 shadow hook/runtime/provider 传到 ModelCallRuntime 并有测试；精确函数调用栈 AST guard 也已阻止 product package 绕过 transport 边界。仍未闭合的是全角色逐 attempt sidecar，以及缺少 stop_event seam 的 legacy VLM helper；
 - 不改变当前 `master` 的产品行为；
 - 不声称 Mission Ledger 已经接管产品运行；P1 projection 只能离线或 shadow 使用；
-- Actor、Verifier、Planner、Inspector 和 vNext 可写运行时均未实现；
+- P4 Visual Actor、P5 独立 Verifier、P6 Planner/Inspector 和 vNext 可写运行时均未实现；现有 legacy planner、done judge 或 VLM helper 经过统一 transport，不代表对应 vNext 角色已接入；
 - 不把历史单次 E2E 结果改写成 vNext 成功证据；
 - 下一步是在真实 legacy 回合收集完整 relevance oracle 并做 held-out 评测；在 required tool group recall 门槛达标前不能 enforce。
 

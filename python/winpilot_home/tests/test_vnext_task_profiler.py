@@ -62,9 +62,16 @@ class StubProfilerModel:
         self.output = output if output is not None else _proposal().to_dict()
         self.error = error
         self.requests: list[TaskProfilerRequest] = []
+        self.stop_events: list[threading.Event | None] = []
 
-    def propose(self, request: TaskProfilerRequest):
+    def propose(
+        self,
+        request: TaskProfilerRequest,
+        *,
+        stop_event: threading.Event | None = None,
+    ):
         self.requests.append(request)
+        self.stop_events.append(stop_event)
         if self.error is not None:
             raise self.error
         return self.output
@@ -183,8 +190,14 @@ def test_concurrent_shadow_requests_still_schedule_one_model_call() -> None:
     release = threading.Event()
 
     class BlockingModel(StubProfilerModel):
-        def propose(self, request: TaskProfilerRequest):
+        def propose(
+            self,
+            request: TaskProfilerRequest,
+            *,
+            stop_event: threading.Event | None = None,
+        ):
             self.requests.append(request)
+            self.stop_events.append(stop_event)
             entered.set()
             assert release.wait(2)
             return self.output
@@ -334,6 +347,35 @@ def test_profiler_transport_retry_preserves_exact_request() -> None:
     assert provider.last_outcome.request_retry_count == 1
 
 
+def test_profiler_abandons_response_when_run_is_stopped_during_transport() -> None:
+    stopped = threading.Event()
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        stopped.set()
+        return _provider_response(_proposal().to_dict())
+
+    runtime = TaskProfilerShadowRuntime(
+        TaskProfiler(OpenAITaskProfilerModel(
+            _ChatClient(create),
+            model="read-only-profiler",
+        )),
+        ExecutionPolicy(),
+    )
+    record = runtime.profile_once(
+        mission_key="run-1:mission-1",
+        mission_id="mission-1",
+        goal_revision=0,
+        profiler_input=_input(),
+        stop_event=stopped,
+    )
+
+    assert len(calls) == 1
+    assert record.status == "safe_default"
+    assert record.error_kind == "ModelCallError"
+
+
 @pytest.mark.parametrize("raw", ("not-json", "[]", "{} trailing"))
 def test_profiler_provider_rejects_malformed_output(raw) -> None:
     client = _ChatClient(lambda **_kwargs: SimpleNamespace(
@@ -370,11 +412,13 @@ def test_legacy_shadow_hook_calls_profiler_at_most_once_per_run() -> None:
     model = StubProfilerModel()
     trace = _ShadowTrace()
     hook = LegacyTaskProfilerShadowHook(model)
+    stopped = threading.Event()
 
     first = hook.profile_run(
         run_id="outer-run",
         contract=_legacy_contract(),
         trace=trace,
+        stop_event=stopped,
     )
     second = hook.profile_run(
         run_id="outer-run",
@@ -384,6 +428,7 @@ def test_legacy_shadow_hook_calls_profiler_at_most_once_per_run() -> None:
 
     assert first == second
     assert len(model.requests) == 1
+    assert model.stop_events == [stopped]
     assert len(trace.events) == 2
     assert all(event["profile_call_count"] == 1 for event in trace.events)
     assert model.requests[0].input.current_surface_summary is None

@@ -63,6 +63,7 @@ Electron「智能代理」
 - 动作前新鲜度检查、动作后因果区域验证、trace、artifact 和 completion obligation；
 - run 级冷启动、session 引用、可选 MCP、Memory Graph 和已验证 Skill replay；
 - 真实 Electron 客户端 E2E harness 与浏览器侧可信指针 oracle。
+- WinPilot product package 的模型请求由统一 Runtime 冻结并标识；provider SDK 隐式重试关闭，request retry、poll、redecision 与桌面 action replay 使用不同合同。
 
 原生视觉配置默认关闭 UIA、OCR 和 predictive OCR；这些结构化 provider 仍可在来源、当前帧和预期收益明确时显式启用，但动作失败不会自动触发它们。
 
@@ -82,6 +83,7 @@ Electron「智能代理」
 - UIA/OCR 的旧融合路径仍然较重；失败后应先废弃旧依据、重新观察并让模型判断，而不是自动切到结构化感知或 MCP；
 - 真实消费软件、多窗口、托盘、弹窗、动画目标、游戏、高 DPI 和多显示器的覆盖不足；
 - 当前整改版本尚未完成 11 个真实任务及其混合长任务的真实客户端全量验收；不能把历史单次通过或受控拖拽描述为当前通用 computer-use 成功率。
+- `python/winpilot_home/winpilot/` 的模型 request-retry owner 已收敛，Profiler stop_event 链和精确 transport AST guard 已有测试；但外围 `python/providers/` legacy Flow/feature provider 仍有独立 SDK/HTTP 重试，全角色逐 attempt sidecar 尚未闭合，legacy VLM helper 也缺少 stop_event seam。迁移前先审计生产可达性，不能把外围路径保留成第二个 Runtime。
 
 最新代码审计和整改顺序见 [GUI Agent 架构审计](docs/GUI_AGENT_ARCHITECTURE_AUDIT.md)。
 
@@ -143,8 +145,8 @@ npm run e2e:client:mixed
 - [文档索引](docs/README.md)
 - [架构与运行原理](docs/architecture.md)
 - [视觉运行时原则](docs/visual-runtime-principles.md)
-- [vNext Agent 核心旁路设计](docs/vnext/README.md)（P0/P1/P1.5 与 P2a 纯旁路已实现）
-- [vNext Task Profiler 与执行深度](docs/vnext/execution-profile.md)（P2a 已完成，真实 Profiler 模型调用尚未接入）
+- [vNext Agent 核心旁路设计](docs/vnext/README.md)（P0/P1/P1.5、P2a/P2b shadow、P3a/P3b partial shadow 与 product-package 模型请求合同已实现；P4-P6 未实现）
+- [vNext Task Profiler 与执行深度](docs/vnext/execution-profile.md)（P2b 真实 Profiler 已默认关闭地接入 trace-only shadow，不参与 legacy 执行）
 - [端到端测试规范](docs/testing.md)
 - [WinPilot Agent 细节](docs/winpilot-agent.md)
 - [原生前端](docs/frontend.md)

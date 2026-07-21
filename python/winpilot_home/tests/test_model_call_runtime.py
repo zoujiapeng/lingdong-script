@@ -15,10 +15,13 @@ from winpilot.modeling import (
     InvalidModelRequest,
     ModelCallError,
     ModelCallRuntime,
+    ModelAttempt,
     ModelRequestEnvelope,
     ModelRetryPolicy,
     classify_followup,
     create_openai_client,
+    invoke_chat_completion,
+    RetryKind,
 )
 
 
@@ -89,6 +92,16 @@ def test_envelope_rejects_non_json_values(bad) -> None:
         _envelope(extra=bad)
 
 
+def test_envelope_rejects_cyclic_request_as_a_controlled_contract_error() -> None:
+    cyclic = {}
+    cyclic["self"] = cyclic
+    with pytest.raises(InvalidModelRequest, match="cyclic"):
+        ModelRequestEnvelope.bind(
+            decision_id="decision-1", model_role="visual_actor",
+            purpose="next_semantic_action", provider_request=cyclic,
+        )
+
+
 def test_runtime_retries_only_the_exact_frozen_request() -> None:
     received = []
     received_content = []
@@ -118,7 +131,7 @@ def test_runtime_retries_only_the_exact_frozen_request() -> None:
     }
 
 
-@pytest.mark.parametrize("status", (429, 500, 503))
+@pytest.mark.parametrize("status", (408, 409, 429, 500, 503))
 def test_runtime_retries_transient_http_statuses(status) -> None:
     class ProviderError(Exception):
         status_code = status
@@ -239,6 +252,140 @@ def test_openai_client_factory_disables_sdk_retries() -> None:
     )
     assert captured["max_retries"] == 0
     assert captured["timeout"] == 17
+
+
+def test_chat_boundary_freezes_once_and_reuses_exact_image_request() -> None:
+    received = []
+
+    class Completions:
+        def create(self, **request):
+            received.append(request)
+            if len(received) == 1:
+                request["messages"][0]["content"] = "mutated transport copy"
+                raise TimeoutError("retry")
+            return "response"
+
+    client = type("Client", (), {
+        "chat": type("Chat", (), {"completions": Completions()})(),
+    })()
+    outcome = invoke_chat_completion(
+        client,
+        decision_id="visual-decision-1",
+        model_role="visual_inspector",
+        purpose="inspect_authoritative_frame",
+        provider_request=_request(),
+        policy=ModelRetryPolicy(max_attempts=2, initial_backoff_s=0),
+        runtime=ModelCallRuntime(sleeper=lambda _delay: None),
+    )
+    assert outcome.response == "response"
+    assert received[1]["messages"][0]["content"].endswith("AAAA")
+
+
+def test_chat_boundary_prepares_adapter_request_once_before_retry() -> None:
+    prepared = []
+    received = []
+
+    class Adapter:
+        def prepare_chat_completion(self, **request):
+            prepared.append(request)
+            return {**request, "extra_body": {"thinking": {"type": "disabled"}}}
+
+        def send_prepared_chat_completion(self, request):
+            received.append(request)
+            if len(received) == 1:
+                request["extra_body"]["thinking"]["type"] = "mutated"
+                raise TimeoutError("retry")
+            return "response"
+
+    outcome = invoke_chat_completion(
+        Adapter(),
+        decision_id="adapter-decision-1",
+        model_role="legacy_planner",
+        purpose="upfront_plan_generation",
+        provider_request={"model": "model", "messages": []},
+        policy=ModelRetryPolicy(max_attempts=2, initial_backoff_s=0),
+        runtime=ModelCallRuntime(sleeper=lambda _delay: None),
+    )
+
+    assert outcome.response == "response"
+    assert len(prepared) == 1
+    assert received[1]["extra_body"]["thinking"]["type"] == "disabled"
+
+
+def test_chat_boundary_does_not_treat_dynamic_attributes_as_adapter_methods() -> None:
+    requests = []
+
+    class DynamicClient:
+        def __init__(self):
+            self.chat = type("Chat", (), {"completions": self})()
+
+        def __getattr__(self, _name):
+            return lambda **_kwargs: "fabricated adapter method"
+
+        def create(self, **request):
+            requests.append(request)
+            return "response"
+
+    outcome = invoke_chat_completion(
+        DynamicClient(),
+        decision_id="plain-client-decision",
+        model_role="legacy_done_verifier",
+        purpose="completion_verification",
+        provider_request={"model": "model", "messages": []},
+    )
+
+    assert outcome.response == "response"
+    assert requests == [{"messages": [], "model": "model"}]
+
+
+def test_runtime_abandons_response_that_returns_after_total_deadline() -> None:
+    now = [0.0]
+
+    def send_once(_request):
+        now[0] = 2.0
+        return "late-response"
+
+    runtime = ModelCallRuntime(clock=lambda: now[0], sleeper=lambda _delay: None)
+    with pytest.raises(ModelCallError) as captured:
+        runtime.execute(
+            _envelope(),
+            send_once,
+            policy=ModelRetryPolicy(max_attempts=2, total_timeout_s=1),
+        )
+
+    assert captured.value.request_retry_count == 0
+    assert captured.value.attempts[0].error_kind == "ModelResponseDeadlineExceeded"
+    assert captured.value.attempts[0].retryable is False
+
+
+def test_runtime_abandons_response_when_stop_arrives_during_transport() -> None:
+    stopped = threading.Event()
+    sends = []
+
+    def send_once(request):
+        sends.append(request)
+        stopped.set()
+        return "canceled-response"
+
+    with pytest.raises(ModelCallError) as captured:
+        ModelCallRuntime().execute(
+            _envelope(),
+            send_once,
+            policy=ModelRetryPolicy(max_attempts=2),
+            stop_event=stopped,
+        )
+
+    assert len(sends) == 1
+    assert captured.value.attempts[0].error_kind == "ModelResponseCanceled"
+    assert captured.value.attempts[0].retryable is False
+
+
+def test_model_attempt_schema_rejects_inconsistent_success_and_failure() -> None:
+    fingerprint = _envelope().request_fingerprint
+    with pytest.raises(InvalidModelRequest):
+        ModelAttempt(1, RetryKind.INITIAL_REQUEST, fingerprint, 0, True, "Error")
+    with pytest.raises(InvalidModelRequest):
+        ModelAttempt(1, RetryKind.INITIAL_REQUEST, fingerprint, 0, False, None)
 
 
 @pytest.mark.parametrize(

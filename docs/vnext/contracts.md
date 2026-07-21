@@ -1,7 +1,7 @@
 # vNext 状态与角色合同
 
 本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和
-legacy shadow；P2a 已实现纯 Task Profile 合同与确定性 Execution Policy，P2b 已增加默认关闭、无工具的真实 Profiler shadow。Broker、Visual Actor 和桌面动作仍未接入 vNext。实现时先固定
+legacy shadow；P2a 已实现纯 Task Profile 合同与确定性 Execution Policy，P2b 已增加默认关闭、无工具的真实 Profiler shadow；P3a Broker 合同与 P3b single-obligation partial shadow 已实现，但尚未 enforce。P4 Visual Actor、P5 Verifier、P6 Planner/Inspector 和桌面动作仍未接入 vNext。实现时先固定
 schema、Reducer 与 envelope 测试；任何运行时接线都必须经过迁移计划的后续阶段门槛。
 
 ## 1. 版本与基本规则
@@ -9,6 +9,7 @@ schema、Reducer 与 envelope 测试；任何运行时接线都必须经过迁�
 建议初始格式：
 
 ```text
+model-request/0
 task-profile-proposal/0
 execution-profile/0
 mission-definition/0
@@ -38,6 +39,40 @@ inspection-report/0
 - 验证失败不改变完成状态；
 - 不保存、传播或要求模型 chain-of-thought；
 - 自然语言字段不能绕过 typed 权限边界。
+
+### 1.1 Model request、retry 与 follow-up
+
+`model-request/0` 是 Runtime 到 provider transport 的机械合同，不是模型输出，也不是
+`ActorDecisionEnvelope`。`ModelRequestEnvelope` 至少绑定：
+
+```text
+decision_id
+model_role
+purpose
+request_fingerprint
+```
+
+provider adapter 必须先完成一次请求形状转换，Runtime 再把 JSON request 冻结并计算稳定
+fingerprint。每次 transport attempt 都从冻结值解出新的副本；transport 修改自己的副本不能改变下一次
+attempt。循环、非 JSON 值、非字符串 object key、错误版本或不一致 fingerprint 必须 fail closed。
+
+`ModelAttempt` 区分 `initial_request` 与 `request_retry`，并记录 attempt number、同一
+request fingerprint、elapsed、成功/失败、error kind 和是否属于明确允许的瞬时 transport failure。
+provider SDK 的隐式重试必须为零；Runtime 是唯一 request retry owner。成功响应一旦交给调用者，后续
+空内容、JSON/schema 或业务验证失败都不能重新归类为 transport retry。
+
+follow-up 语义严格分开：
+
+- `request_retry`：同一 decision、role、purpose 和 fingerprint，调用者尚未消费任何结果；
+- `poll`：等待同一 in-flight request，不提交第二个模型请求；
+- `redecision`：输入、工具、thinking、预算、purpose 或语义决策发生变化，必须使用新的 decision id；
+- `action_replay`：不属于模型 retry，由 mutation replay contract 单独裁决；桌面 mutation 结果不确定时禁止自动重放。
+
+当前该合同覆盖 `python/winpilot_home/winpilot/` product package。外围 legacy
+`python/providers/` 仍需生产可达性审计；全角色逐 attempt trace 尚未闭合，legacy VLM helper
+也还没有 stop_event seam。Profiler 的 ArpExecution -> shadow hook/runtime/provider ->
+ModelCallRuntime 取消链已经闭合并有测试，不属于这些遗留项。
+这些遗留项不能被描述成 P4/P5/P6 角色已实现。
 
 ## 2. TaskProfileProposal
 
@@ -816,6 +851,9 @@ runtime_version
 mission_id / revision / obligation_id
 execution_profile_id / recommended_depth / effective_depth
 model_role / model / thinking_policy / elapsed_ms
+decision_id / purpose / request_fingerprint
+attempt_count / request_retry_count / attempt kind / error kind / retryable
+followup_kind / late_result_discarded
 mission_card_chars / prompt_context_chars
 model_tool_count / model_tool_schema_chars
 broker_projection_id / active capability grants
