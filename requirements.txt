@@ -38,6 +38,7 @@ mss>=9.0                     # Fast screenshot capture
 fastapi>=0.110               # WinPilot agent web server (embedded in Agent panel)
 uvicorn>=0.29                # ASGI server for WinPilot
 pydantic>=2.0                # WinPilot server request models
+jsonschema>=4.23,<5          # strict vNext tool-argument validation
 mcp>=1.26,<2                 # ChatGPT/Codex desktop Streamable HTTP bridge
 
 # Development

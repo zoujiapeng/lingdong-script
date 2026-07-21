@@ -4,6 +4,12 @@ from .names import *
 from .contracts import *
 from .state import *
 from .catalog import ToolPolicy, build_tool_catalog, schemas_by_name
+from .argument_validation import (
+    JSON_SCHEMA_DIALECT,
+    ToolArgumentValidationError,
+    ToolArgumentValidator,
+    ToolSchemaValidationError,
+)
 from .broker import CapabilityBroker
 from .shadow import (
     BROKER_SHADOW_RESULT_FORMAT,
