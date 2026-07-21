@@ -32,7 +32,7 @@ import win32gui
 from ..config import CONFIG
 from ..utils.log import BUS, logger
 from .desktop_queue import queued_desktop_action
-from .raw_device import RawBackendResult
+from .raw_device import ClickCount, ClickMechanism, MouseButton, RawBackendResult
 
 user32 = ctypes.windll.user32
 
@@ -290,38 +290,70 @@ def _same_window_root(candidate: int, expected: int | None) -> bool:
         return int(candidate or 0) == int(expected or 0)
 
 
+def _try_release(call: Callable[..., Any], *args: Any) -> bool:
+    try:
+        call(*args)
+        return True
+    except Exception:
+        return False
+
+
 def _post_click(
     x: int,
     y: int,
-    button: str,
-    double: bool,
+    button: MouseButton,
+    count: ClickCount,
     expected_hwnd: int | None = None,
-) -> bool:
-    """Background click at screen (x,y) via window messages — no cursor move.
-    Returns False if no target window resolved (caller falls back)."""
+) -> RawBackendResult:
+    """Attempt one message click; only a zero-message result permits fallback."""
     try:
         target = win32gui.WindowFromPoint((int(x), int(y)))
         if not target or not _same_window_root(int(target), expected_hwnd):
-            return False
+            return RawBackendResult(False, {"route_available": False})
         cx, cy = win32gui.ScreenToClient(target, (int(x), int(y)))
         lparam = (cy << 16) | (cx & 0xFFFF)
-        down, up, mk = _WM.get(button, _WM["left"])
-        for index in range(2 if double else 1):
-            down_message = _WM_DOUBLE.get(button, down) if index == 1 else down
+        down, up, mk = _WM[button.value]
+    except Exception:
+        return RawBackendResult(False, {"route_available": False})
+
+    completed_clicks = 0
+    for index in range(count.value):
+        down_message = _WM_DOUBLE[button.value] if index == 1 else down
+        try:
             win32gui.PostMessage(target, down_message, mk, lparam)
+        except Exception:
+            return _click_progress(
+                None, completed_clicks, "post_message_down_outcome_unknown",
+                cleanup=_try_release(win32gui.PostMessage, target, up, 0, lparam),
+                via="post_message",
+            )
+        try:
+            sampled = _sample_pressed_state()
+        except Exception:
             sampled = False
+        try:
+            win32gui.PostMessage(target, up, 0, lparam)
+        except Exception:
+            return _click_progress(
+                None, completed_clicks, "post_message_up_outcome_unknown",
+                cleanup=_try_release(win32gui.PostMessage, target, up, 0, lparam),
+                via="post_message",
+            )
+        completed_clicks += 1
+        if sampled:
             try:
-                sampled = _sample_pressed_state()
-            finally:
-                win32gui.PostMessage(target, up, 0, lparam)
-            if sampled:
                 _settle_after_release()
-            if double:
+            except Exception:
+                logger.debug("post-click settle failed", exc_info=True)
+        if index + 1 < count.value:
+            try:
                 time.sleep(0.05)
-        return True
-    except Exception as exc:
-        logger.debug("post_click 失败: %s", exc)
-        return False
+            except Exception:
+                return _click_progress(
+                    None, completed_clicks,
+                    "post_message_inter_click_wait_failed", via="post_message",
+                )
+    return _click_progress(True, completed_clicks, via="post_message")
 
 
 def _cursor_pos() -> tuple[int, int]:
@@ -464,6 +496,75 @@ def move_mouse(x: int, y: int, hwnd: int | None = None) -> dict:
     return {"ok": True, "x": int(x), "y": int(y)}
 
 
+_CLICK_OWNERSHIP_LOST = "click stopped because the user took foreground/cursor ownership"
+
+
+def _legacy_click_failure(
+    result: RawBackendResult,
+    *,
+    cursor_restored: bool | None = None,
+) -> dict[str, Any]:
+    facts = dict(result.facts)
+    facts.update({
+        "ok": False, "verified": False, "blocked": True,
+        "error": str(result.facts.get("error") or _CLICK_OWNERSHIP_LOST),
+    })
+    if cursor_restored is not None:
+        facts["cursor_restored"] = cursor_restored
+    if result.input_completed is not None:
+        facts.pop("completed_clicks", None)
+    else:
+        facts.update(input_completed=None, outcome_unknown=True)
+    return facts
+
+
+def _click_progress(
+    input_completed: bool | None,
+    completed_clicks: int,
+    error: str = "",
+    *,
+    cleanup: bool | None = None,
+    via: str = "",
+) -> RawBackendResult:
+    facts: dict[str, Any] = {"completed_clicks": int(completed_clicks)}
+    if error:
+        facts.update({"ok": False, "blocked": True, "error": error})
+        if error == _CLICK_OWNERSHIP_LOST:
+            facts["cooperative_input"] = True
+    if cleanup is not None:
+        facts.update(release_cleanup_attempted=True,
+                     release_cleanup_completed=cleanup)
+    if via:
+        facts["via"] = via
+    return RawBackendResult(input_completed, facts)
+
+
+@queued_desktop_action("click")
+def execute_click_input(
+    x: int,
+    y: int,
+    button: MouseButton,
+    count: ClickCount,
+    mechanism: ClickMechanism,
+    hwnd: int | None = None,
+) -> RawBackendResult:
+    """Strict single-mechanism click backend for RawDevice."""
+    if not (
+        type(x) is int and type(y) is int and isinstance(button, MouseButton)
+        and isinstance(count, ClickCount)
+        and isinstance(mechanism, ClickMechanism)
+    ):
+        return _click_progress(False, 0, "invalid typed click input")
+    if _dry_run():
+        return RawBackendResult(False, {"ok": True, "dry_run": True})
+    if mechanism is ClickMechanism.BACKGROUND_MESSAGE:
+        return _post_click(x, y, button, count, expected_hwnd=hwnd)
+    return _raw_click(
+        x, y, button, count, hwnd,
+        mechanism is ClickMechanism.PREPOSITIONED_PHYSICAL, False,
+    )
+
+
 @queued_desktop_action("click")
 def click(
     x: int,
@@ -482,6 +583,8 @@ def click(
     """
     if _dry_run():
         return {"ok": True, "dry_run": True}
+    typed_button = MouseButton(button)
+    count = ClickCount.DOUBLE if bool(double) else ClickCount.SINGLE
     # A visual-servo click deliberately owns the physical cursor: its final
     # confirmation is only valid for the cursor position it just measured.
     # Replacing that mouse-down with a background window message would break
@@ -493,32 +596,33 @@ def click(
                 "blocked": True,
                 "cooperative_input": True,
             }
-        if _post_click(x, y, button, double, expected_hwnd=hwnd):
-            BUS.publish("action", action="click", x=x, y=y, button=button,
-                        double=double, via="post_message")
+        posted = _post_click(
+            int(x), int(y), typed_button, count, expected_hwnd=hwnd,
+        )
+        if posted.input_completed is True:
+            _publish_action_fact("click", x=x, y=y, button=button,
+                                 double=double, via="post_message")
             return {"ok": True, "x": x, "y": y, "via": "post_message"}
+        if posted.input_completed is None:
+            return _legacy_click_failure(posted)
         # fallback: must use SendInput, but restore the user's cursor afterwards
         cooperative_block = cooperative_input_guard("click", hwnd)
         if cooperative_block is not None:
             return cooperative_block
         saved = _cursor_pos()
         try:
-            completed = _raw_click(x, y, button, double, hwnd)
+            completed = _raw_click(int(x), int(y), typed_button, count, hwnd)
         finally:
-            cursor_restored = _restore_cursor_after_agent_input(
-                saved, (int(x), int(y)), hwnd,
-            )
-        if completed is False:
-            return {
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "cooperative_input": True,
-                "cursor_restored": cursor_restored,
-                "error": "click stopped because the user took foreground/cursor ownership",
-            }
-        BUS.publish("action", action="click", x=x, y=y, button=button,
-                    double=double, via="sendinput_restored")
+            try:
+                cursor_restored = _restore_cursor_after_agent_input(
+                    saved, (int(x), int(y)), hwnd,
+                )
+            except Exception:
+                cursor_restored = False
+        if completed.input_completed is not True or completed.facts.get("blocked"):
+            return _legacy_click_failure(completed, cursor_restored=cursor_restored)
+        _publish_action_fact("click", x=x, y=y, button=button,
+                             double=double, via="sendinput_restored")
         return {
             "ok": True, "x": x, "y": y, "via": "sendinput_restored",
             "prepositioned": bool(prepositioned),
@@ -528,18 +632,14 @@ def click(
         cooperative_block = cooperative_input_guard("visual_servo_click", hwnd)
         if cooperative_block is not None:
             return cooperative_block
-        completed = _raw_click(x, y, button, double, hwnd, prepositioned=True)
+        completed = _raw_click(
+            int(x), int(y), typed_button, count, hwnd, True, False,
+        )
     else:
-        completed = _raw_click(x, y, button, double, hwnd)
-    if completed is False:
-        return {
-            "ok": False,
-            "verified": False,
-            "blocked": True,
-            "cooperative_input": True,
-            "error": "click stopped because the user took foreground/cursor ownership",
-        }
-    BUS.publish("action", action="click", x=x, y=y, button=button, double=double)
+        completed = _raw_click(int(x), int(y), typed_button, count, hwnd)
+    if completed.input_completed is not True or completed.facts.get("blocked"):
+        return _legacy_click_failure(completed)
+    _publish_action_fact("click", x=x, y=y, button=button, double=double)
     return {
         "ok": True,
         "x": x,
@@ -552,14 +652,20 @@ def click(
 def _raw_click(
     x: int,
     y: int,
-    button: str,
-    double: bool,
+    button: MouseButton,
+    count: ClickCount,
     hwnd: int | None,
     prepositioned: bool = False,
-) -> bool:
+    allow_target_focus: bool = True,
+) -> RawBackendResult:
     cooperative_mode = multi_input_cooperation_enabled()
-    if hwnd and not prepositioned and not cooperative_mode:
-        _raw_focus_window(hwnd)
+    if hwnd and not cooperative_mode:
+        if not prepositioned and allow_target_focus:
+            _raw_focus_window(hwnd)
+        if not _target_window_still_foreground(hwnd):
+            return _click_progress(
+                False, 0, "click target is not the current foreground window",
+            )
     if prepositioned:
         current_x, current_y = _cursor_pos()
         if abs(int(current_x) - int(x)) > 3 or abs(int(current_y) - int(y)) > 3:
@@ -571,43 +677,79 @@ def _raw_click(
     if cooperative_mode and not _cooperative_action_still_owned(
         hwnd, expected_cursor=(int(x), int(y)),
     ):
-        return False
-    if button == "left":
+        return _click_progress(
+            False, 0, _CLICK_OWNERSHIP_LOST,
+        )
+    if button is MouseButton.LEFT:
         down, up = win32con.MOUSEEVENTF_LEFTDOWN, win32con.MOUSEEVENTF_LEFTUP
-    elif button == "right":
+    elif button is MouseButton.RIGHT:
         down, up = win32con.MOUSEEVENTF_RIGHTDOWN, win32con.MOUSEEVENTF_RIGHTUP
-    elif button == "middle":
+    elif button is MouseButton.MIDDLE:
         down, up = win32con.MOUSEEVENTF_MIDDLEDOWN, win32con.MOUSEEVENTF_MIDDLEUP
     else:
-        raise ValueError(f"未知鼠标键: {button}")
-    for _ in range(2 if double else 1):
+        raise TypeError("button must be MouseButton")
+    completed_clicks = 0
+    for index in range(count.value):
+        if hwnd and not cooperative_mode and not _target_window_still_foreground(hwnd):
+            return _click_progress(
+                False if completed_clicks == 0 else None,
+                completed_clicks,
+                "click target lost foreground ownership before mouse-down",
+            )
         if cooperative_mode and not _cooperative_action_still_owned(
             hwnd, expected_cursor=(int(x), int(y)),
         ):
-            return False
-        _send_inputs([_mouse_input(down)])
-        sampled = False
-        still_owned = True
+            return _click_progress(
+                False if completed_clicks == 0 else None,
+                completed_clicks,
+                _CLICK_OWNERSHIP_LOST,
+            )
+        try:
+            _send_inputs([_mouse_input(down)])
+        except Exception:
+            return _click_progress(
+                None, completed_clicks, "click down outcome unknown",
+                cleanup=_try_release(_send_inputs, [_mouse_input(up)]),
+            )
         try:
             sampled = _sample_pressed_state()
-            if cooperative_mode:
-                still_owned = _cooperative_action_still_owned(
-                    hwnd, expected_cursor=(int(x), int(y)),
-                )
-        finally:
+            still_owned = not cooperative_mode or _cooperative_action_still_owned(
+                hwnd, expected_cursor=(int(x), int(y)),
+            )
+        except Exception:
+            sampled, still_owned = False, False
+        try:
             _send_inputs([_mouse_input(up)])
+        except Exception:
+            return _click_progress(
+                None, completed_clicks, "click up outcome unknown",
+                cleanup=_try_release(_send_inputs, [_mouse_input(up)]),
+            )
+        completed_clicks += 1
         if cooperative_mode and (
             not still_owned
             or not _cooperative_action_still_owned(
                 hwnd, expected_cursor=(int(x), int(y)),
             )
         ):
-            return False
+            return _click_progress(
+                True if completed_clicks == count.value else None,
+                completed_clicks,
+                _CLICK_OWNERSHIP_LOST,
+            )
         if sampled:
-            _settle_after_release()
-        if double:
-            time.sleep(0.06)
-    return True
+            try:
+                _settle_after_release()
+            except Exception:
+                logger.debug("physical-click settle failed", exc_info=True)
+        if index + 1 < count.value:
+            try:
+                time.sleep(0.06)
+            except Exception:
+                return _click_progress(
+                    None, completed_clicks, "click inter-click wait failed",
+                )
+    return _click_progress(True, completed_clicks)
 
 
 def _abs_mouse_move(x: int, y: int) -> None:
@@ -840,12 +982,12 @@ def draw_strokes(strokes: list, duration_s: float = 0.4,
     return result
 
 
-def _publish_scroll_fact(**payload: Any) -> None:
+def _publish_action_fact(action: str, **payload: Any) -> None:
     """Telemetry cannot turn one completed input into a fallback replay."""
     try:
-        BUS.publish("action", action="scroll", **payload)
+        BUS.publish("action", action=action, **payload)
     except Exception:
-        logger.debug("scroll action telemetry failed", exc_info=True)
+        logger.debug("%s action telemetry failed", action, exc_info=True)
 
 
 @queued_desktop_action("scroll")
@@ -885,7 +1027,8 @@ def execute_scroll_input(
                     "via": "post_message",
                     "error": "post_message_outcome_unknown",
                 })
-            _publish_scroll_fact(x=x, y=y, amount=amount, via="post_message")
+            _publish_action_fact("scroll", x=x, y=y, amount=amount,
+                                 via="post_message")
             return RawBackendResult(True, {"ok": True, "via": "post_message"})
         cooperative_block = cooperative_input_guard("scroll", hwnd)
         if cooperative_block is not None:
@@ -920,7 +1063,8 @@ def execute_scroll_input(
                 "cursor_restored": cursor_restored,
                 "error": "scroll stopped because the user took foreground/cursor ownership",
             })
-        _publish_scroll_fact(x=x, y=y, amount=amount, via="sendinput_restored")
+        _publish_action_fact("scroll", x=x, y=y, amount=amount,
+                             via="sendinput_restored")
         return RawBackendResult(True, {
             "ok": True,
             "via": "sendinput_restored",
@@ -929,7 +1073,7 @@ def execute_scroll_input(
     _raw_move_mouse(x, y)
     time.sleep(0.04)
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_WHEEL, data=amount * 120 & 0xFFFFFFFF)])
-    _publish_scroll_fact(x=x, y=y, amount=amount)
+    _publish_action_fact("scroll", x=x, y=y, amount=amount)
     return RawBackendResult(True, {"ok": True})
 
 

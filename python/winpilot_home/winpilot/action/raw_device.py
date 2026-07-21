@@ -3,11 +3,29 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 import math
 from types import MappingProxyType
 from typing import Any
 
 from .replay_policy import MutationOutcome
+
+
+class MouseButton(str, Enum):
+    LEFT = "left"
+    RIGHT = "right"
+    MIDDLE = "middle"
+
+
+class ClickCount(int, Enum):
+    SINGLE = 1
+    DOUBLE = 2
+
+
+class ClickMechanism(str, Enum):
+    BACKGROUND_MESSAGE = "background_message"
+    PHYSICAL = "physical"
+    PREPOSITIONED_PHYSICAL = "prepositioned_physical"
 
 
 def _scalar_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -56,11 +74,14 @@ class RawBackendResult:
 class RawActionReceipt:
     """Mechanical input fact, never proof of a visible or semantic effect."""
 
+    action: str
     outcome: MutationOutcome
     backend_result: RawBackendResult | None = None
     error_kind: str | None = None
 
     def __post_init__(self) -> None:
+        if self.action not in {"scroll", "click"}:
+            raise ValueError("unknown raw receipt action")
         if not isinstance(self.outcome, MutationOutcome):
             raise ValueError("raw receipt outcome must be MutationOutcome")
         if self.backend_result is not None and not isinstance(
@@ -90,10 +111,6 @@ class RawActionReceipt:
                 raise ValueError("certain raw receipt cannot contain error_kind")
 
     @property
-    def action(self) -> str:
-        return "scroll"
-
-    @property
     def input_completed(self) -> bool | None:
         return {
             MutationOutcome.APPLIED: True,
@@ -114,25 +131,86 @@ class RawActionReceipt:
         }
 
 
-ScrollBackend = Callable[..., RawBackendResult]
+RawBackend = Callable[..., RawBackendResult]
+
+
+@dataclass(frozen=True, slots=True)
+class RawDeviceBackends:
+    scroll: RawBackend | None = None
+    click: RawBackend | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("scroll", "click"):
+            backend = getattr(self, name)
+            if backend is not None and not callable(backend):
+                raise TypeError(f"{name} backend must be callable or null")
 
 
 class RawDeviceExecutor:
     """Always-strict typed primitive executor; no parsing, policy, or replay."""
 
-    def __init__(self, *, scroll_backend: ScrollBackend) -> None:
-        if not callable(scroll_backend):
-            raise TypeError("scroll_backend must be callable")
-        self._scroll_backend = scroll_backend
+    def __init__(self, backends: RawDeviceBackends) -> None:
+        if not isinstance(backends, RawDeviceBackends):
+            raise TypeError("backends must be RawDeviceBackends")
+        self._backends = backends
 
     @staticmethod
     def _receipt(
+        action: str,
         outcome: MutationOutcome,
         *,
         backend_result: RawBackendResult | None = None,
         error_kind: str | None = None,
     ) -> RawActionReceipt:
-        return RawActionReceipt(outcome, backend_result, error_kind)
+        return RawActionReceipt(action, outcome, backend_result, error_kind)
+
+    @staticmethod
+    def _context_error(context: RawActionContext) -> str | None:
+        valid_hwnd = lambda value: type(value) is int and value > 0
+        if not isinstance(context, RawActionContext) or not all(
+            map(valid_hwnd, (context.target_hwnd, context.current_hwnd))
+        ):
+            return "invalid_context"
+        if context.target_hwnd != context.current_hwnd:
+            return "target_mismatch"
+        return None
+
+    @classmethod
+    def _from_backend(cls, action: str, result: object) -> RawActionReceipt:
+        if not isinstance(result, RawBackendResult):
+            return cls._receipt(
+                action, MutationOutcome.OUTCOME_UNKNOWN,
+                error_kind="backend_result_uncertain",
+            )
+        completed = result.input_completed
+        outcome = (
+            MutationOutcome.OUTCOME_UNKNOWN if completed is None
+            else MutationOutcome.APPLIED if completed
+            else MutationOutcome.NOT_APPLIED
+        )
+        return cls._receipt(
+            action, outcome, backend_result=result,
+            error_kind="backend_result_uncertain" if completed is None else None,
+        )
+
+    @classmethod
+    def _call(
+        cls, action: str, backend: Callable[..., RawBackendResult] | None,
+        *args: Any, **kwargs: Any,
+    ) -> RawActionReceipt:
+        if backend is None:
+            return cls._receipt(
+                action, MutationOutcome.NOT_STARTED,
+                error_kind="backend_unavailable",
+            )
+        try:
+            result = backend(*args, **kwargs)
+        except Exception:
+            return cls._receipt(
+                action, MutationOutcome.OUTCOME_UNKNOWN,
+                error_kind="backend_exception",
+            )
+        return cls._from_backend(action, result)
 
     def scroll(
         self,
@@ -141,46 +219,54 @@ class RawDeviceExecutor:
         y: int,
         amount: int,
     ) -> RawActionReceipt:
-        valid_hwnd = lambda value: type(value) is int and value > 0
-        if not isinstance(context, RawActionContext) or not all(
-            map(valid_hwnd, (context.target_hwnd, context.current_hwnd))
-        ):
+        context_error = self._context_error(context)
+        if context_error is not None:
             return self._receipt(
-                MutationOutcome.NOT_STARTED, error_kind="invalid_context",
-            )
-        if context.target_hwnd != context.current_hwnd:
-            return self._receipt(
-                MutationOutcome.NOT_STARTED, error_kind="target_mismatch",
+                "scroll", MutationOutcome.NOT_STARTED,
+                error_kind=context_error,
             )
         if any(type(value) is not int for value in (x, y, amount)) or amount == 0:
             return self._receipt(
-                MutationOutcome.NOT_STARTED, error_kind="invalid_args",
+                "scroll", MutationOutcome.NOT_STARTED,
+                error_kind="invalid_args",
             )
-        try:
-            result = self._scroll_backend(
-                x, y, amount, hwnd=context.target_hwnd,
-            )
-        except Exception:
+        return self._call(
+            "scroll", self._backends.scroll,
+            x, y, amount, hwnd=context.target_hwnd,
+        )
+
+    def click(
+        self,
+        context: RawActionContext,
+        x: int,
+        y: int,
+        button: MouseButton,
+        count: ClickCount,
+        mechanism: ClickMechanism,
+    ) -> RawActionReceipt:
+        context_error = self._context_error(context)
+        if context_error is not None:
             return self._receipt(
-                MutationOutcome.OUTCOME_UNKNOWN, error_kind="backend_exception",
+                "click", MutationOutcome.NOT_STARTED,
+                error_kind=context_error,
             )
-        if not isinstance(result, RawBackendResult):
+        if not (
+            type(x) is int and type(y) is int
+            and isinstance(button, MouseButton)
+            and isinstance(count, ClickCount)
+            and isinstance(mechanism, ClickMechanism)
+        ):
             return self._receipt(
-                MutationOutcome.OUTCOME_UNKNOWN,
-                error_kind="backend_result_uncertain",
+                "click", MutationOutcome.NOT_STARTED,
+                error_kind="invalid_args",
             )
-        if result.input_completed is True:
-            return self._receipt(MutationOutcome.APPLIED, backend_result=result)
-        if result.input_completed is False:
-            return self._receipt(MutationOutcome.NOT_APPLIED, backend_result=result)
-        return self._receipt(
-            MutationOutcome.OUTCOME_UNKNOWN,
-            backend_result=result,
-            error_kind="backend_result_uncertain",
+        return self._call(
+            "click", self._backends.click, x, y, button=button, count=count,
+            mechanism=mechanism, hwnd=context.target_hwnd,
         )
 
 
 __all__ = [
-    "RawActionContext", "RawActionReceipt", "RawBackendResult",
-    "RawDeviceExecutor",
+    "ClickCount", "ClickMechanism", "MouseButton", "RawActionContext",
+    "RawActionReceipt", "RawBackendResult", "RawDeviceBackends", "RawDeviceExecutor",
 ]
