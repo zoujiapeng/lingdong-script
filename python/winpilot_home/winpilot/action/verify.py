@@ -1,11 +1,12 @@
-"""Action→Verify→Retry engine.
+"""Action and postcondition verification engine.
 
 Every action tool can carry an ``expect`` condition (a small DSL dict). After
 executing, we poll the condition until verified or timeout; failed checks
 escalate through perception dimensions (fused observe → window OCR →
-full-screen OCR) and failed actions are re-executed up to ``max_retries``
-times when safe. Results always report ``verified`` + a ``post_state``
-summary so the model can self-correct.
+full-screen OCR). Verification may poll, but a desktop mutation is never
+implicitly replayed: a failed postcondition does not prove the original input
+was not applied. Results report ``verified`` + a ``post_state`` summary so
+Runtime can reobserve and request a new decision.
 
 Expect DSL (keys may be combined; all must pass):
     {"text_appears": "另存为"}
@@ -801,97 +802,79 @@ def run_with_verify(
     action: Callable[[], dict],
     expect: dict | None = None,
     hwnd: int | None = None,
-    retryable: bool = True,
+    retryable: bool = False,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     stop_event=None,
     watcher: Any = None,
     run_id: str | None = None,
 ) -> dict[str, Any]:
-    """Execute an action, verify the expectation, retry on failure.
+    """Execute one mutation once, then poll its postcondition.
 
-    Non-retryable actions (e.g. type_text — re-running duplicates input) are
-    executed once; only verification is repeated. ``stop_event`` aborts the
-    verify polling + retry loop promptly when a Stop is requested.
+    ``retryable`` remains for legacy call compatibility, but cannot authorize
+    replay. A future Runtime-bound replay permit must use the separate action
+    replay contract and bind one exact action identity.
     """
-    max_retries = int(CONFIG.get("agent", "max_retries", default=2))
-    attempts = 0
+    attempts = 1
     result: dict[str, Any] = {}
     outcome: VerifyOutcome | None = None
-    # Hard wall-clock cap so a single action can never hang for minutes
-    # (e.g. screen_stable on a never-settling canvas + slow OCR escalation
-    # × retries). Once exceeded, stop retrying and report the last outcome.
-    overall_deadline = time.monotonic() + max(timeout_s * (max_retries + 1), timeout_s) + 4.0
-
-    while True:
-        attempts += 1
-        # Use the action-start generation even when the watcher has never seen
-        # a change. Otherwise a static pre-existing UIA label can satisfy a
-        # post-action text_appears check before any causal frame arrives.
-        watcher_change_baseline = max(1, int(time.monotonic() * 1000) - 1) \
-            if watcher is not None else 0
-        if watcher is not None:
-            status_reader = getattr(watcher, "status", None)
-            if callable(status_reader):
-                try:
-                    status = status_reader() or {}
-                    watcher_change_baseline = max(
-                        watcher_change_baseline,
-                        int(status.get("last_change_ms") or 0),
-                        int(status.get("last_action_change_ms") or 0),
-                    )
-                except Exception:
-                    # Keep the action-start monotonic baseline.  A broken
-                    # watcher status read must not disable causal text checks
-                    # and let pre-existing UIA content verify the action.
-                    pass
-        try:
-            result = action() or {}
-        except Exception as exc:
-            logger.warning("动作 %s 执行异常: %s", name, exc)
-            result = {"ok": False, "error": str(exc)}
-            # Don't verify a screen the action never touched — a stale match
-            # would falsely report success. Retry the action or give up.
-            if retryable and attempts <= max_retries and not (
-                    stop_event is not None and stop_event.is_set()):
-                continue
-            outcome = VerifyOutcome(False, f"动作执行异常: {exc}", "") if expect else None
-            break
-
-        if not expect:
-            outcome = None
-            break
-
-        # Shrink the verify budget to whatever's left of the overall cap.
-        budget = max(1.0, min(timeout_s, overall_deadline - time.monotonic()))
-        outcome = check(
-            expect,
-            hwnd=hwnd,
-            timeout_s=budget,
-            stop_event=stop_event,
-            watcher=watcher,
-            watcher_change_baseline=watcher_change_baseline,
-        )
-        BUS.publish(
-            "verify",
-            run_id=run_id,
-            action=name,
-            attempt=attempts,
-            verified=outcome.verified,
-            detail=outcome.detail,
-            method=outcome.method,
-            elapsed_ms=outcome.elapsed_ms,
-            trace=outcome.trace,
-        )
-        if outcome.verified:
-            break
-        if (not retryable or attempts > max_retries or not result.get("ok", True)
-                or time.monotonic() >= overall_deadline
-                or (stop_event is not None and stop_event.is_set())):
-            break
-        logger.info("动作 %s 验证失败（第%d次），重试: %s", name, attempts, outcome.detail)
+    watcher_change_baseline = max(1, int(time.monotonic() * 1000) - 1) \
+        if watcher is not None else 0
+    if watcher is not None:
+        status_reader = getattr(watcher, "status", None)
+        if callable(status_reader):
+            try:
+                status = status_reader() or {}
+                watcher_change_baseline = max(
+                    watcher_change_baseline,
+                    int(status.get("last_change_ms") or 0),
+                    int(status.get("last_action_change_ms") or 0),
+                )
+            except Exception:
+                pass
+    try:
+        result = action() or {}
+    except Exception as exc:
+        logger.warning("动作 %s 执行异常: %s", name, exc)
+        result = {
+            "ok": False,
+            "error": str(exc),
+            "mutation_outcome": "outcome_unknown",
+        }
+        outcome = VerifyOutcome(False, f"动作执行异常: {exc}", "") if expect else None
+    else:
+        if "mutation_outcome" not in result:
+            result["mutation_outcome"] = (
+                "applied" if result.get("ok", True) else "outcome_unknown"
+            )
+        if expect:
+            outcome = check(
+                expect,
+                hwnd=hwnd,
+                timeout_s=max(1.0, timeout_s),
+                stop_event=stop_event,
+                watcher=watcher,
+                watcher_change_baseline=watcher_change_baseline,
+            )
+            BUS.publish(
+                "verify",
+                run_id=run_id,
+                action=name,
+                attempt=attempts,
+                verified=outcome.verified,
+                detail=outcome.detail,
+                method=outcome.method,
+                elapsed_ms=outcome.elapsed_ms,
+                trace=outcome.trace,
+            )
 
     response = dict(result)
     response["attempts"] = attempts
+    response["action_replay_suppressed"] = bool(
+        retryable and (
+            (outcome is not None and not outcome.verified)
+            or result.get("ok", True) is not True
+        )
+    )
     if outcome is not None:
         response["verified"] = outcome.verified
         response["verify_detail"] = outcome.detail

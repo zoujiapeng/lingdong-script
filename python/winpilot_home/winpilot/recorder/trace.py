@@ -2205,7 +2205,8 @@ class Replayer:
                     lambda: executor.click(x, y, button=step.get("button", "left"),
                                            double=bool(step.get("double")), hwnd=self.hwnd,
                                            prepositioned=bool(servo_trace)),
-                    expect=expect, hwnd=self.hwnd, stop_event=self.stop_event)
+                    expect=expect, hwnd=self.hwnd, retryable=False,
+                    stop_event=self.stop_event)
             finally:
                 if probe_installed:
                     restore_probe = getattr(executor, "restore_press_probe", None)
@@ -2323,7 +2324,8 @@ class Replayer:
                     duration_s=float(step.get("duration", 0.4)),
                     hwnd=self.hwnd,
                 ),
-                expect=expect, hwnd=self.hwnd, stop_event=self.stop_event)
+                expect=expect, hwnd=self.hwnd, retryable=False,
+                stop_event=self.stop_event)
         if tool == "run_shell":
             from ..action import shell
             return shell.run(step.get("command", ""),

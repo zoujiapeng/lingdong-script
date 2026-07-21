@@ -423,7 +423,7 @@ def test_arp_execution_routes_condition_and_updates_variables():
     assert [item["node_id"] for item in result["history"]] == ["start", "set", "condition", "yes"]
 
 
-def test_arp_execution_retries_registered_handler():
+def test_arp_execution_never_blindly_replays_mutating_handler():
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpRetryPolicy
     from winpilot.orchestrator.runtime import ArpExecution, NodeResult
 
@@ -431,9 +431,11 @@ def test_arp_execution_retries_registered_handler():
 
     def handler(node, context, stop_event):
         calls.append(node.id)
-        if len(calls) == 1:
-            return NodeResult(ok=False, error="temporary")
-        return NodeResult(ok=True, output={"verified": True}, evidence=["batch verified"])
+        return NodeResult(
+            ok=False,
+            branch="fail",
+            error="postcondition missing; mutation outcome is unknown",
+        )
 
     graph = _graph(
         [
@@ -455,12 +457,9 @@ def test_arp_execution_retries_registered_handler():
     execution = ArpExecution(graph, {ArpNodeKind.ACTION_BATCH: handler}, run_id="arp-retry")
     result = execution.run()
 
-    assert result["status"] == "done"
-    assert calls == ["batch", "batch"]
-    assert result["history"][1]["attempts"] == 2
-    assert result["evidence"][0]["predicate"] == "legacy.unverified"
-    assert result["evidence"][0]["verified"] is False
-    assert result["evidence"][0]["value"] == "batch verified"
+    assert result["status"] == "failed"
+    assert calls == ["batch"]
+    assert result["history"][1]["attempts"] == 1
 
 
 def test_arp_execution_routes_explicit_failure_before_fail_fast():

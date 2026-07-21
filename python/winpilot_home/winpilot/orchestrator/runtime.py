@@ -25,6 +25,16 @@ class NodeResult:
 NodeHandler = Callable[[ArpNode, dict[str, Any], threading.Event], NodeResult]
 
 
+_MUTATION_CAPABLE_NODE_KINDS = frozenset({
+    ArpNodeKind.AGENT_GOAL,
+    ArpNodeKind.ACTION_BATCH,
+    ArpNodeKind.REPLAY_STEP,
+    ArpNodeKind.SKILL_REPLAY,
+    ArpNodeKind.TASK_STAGE,
+    ArpNodeKind.LEGACY_FLOW,
+})
+
+
 class PauseController:
     """Cooperative pause gate shared by an ARP run and its child runner.
 
@@ -874,6 +884,20 @@ class ArpExecution:
                             delay_ms = int(delay_ms * node.retry.backoff)
                         result = self._execute_node(node, last)
                         if result.ok or result.branch not in {"next", "fail"}:
+                            break
+                        if node.kind in _MUTATION_CAPABLE_NODE_KINDS:
+                            # A failed handler/postcondition does not prove
+                            # that its desktop input was not applied. Node
+                            # retries are not action redecisions, so replaying
+                            # the handler would duplicate an unknown mutation.
+                            BUS.publish(
+                                "arp_node_retry_suppressed",
+                                run_id=self.run_id,
+                                node_id=node.id,
+                                node_kind=node.kind.value,
+                                attempt=attempts,
+                                reason="mutation_outcome_unknown_never_auto_replay",
+                            )
                             break
 
                 self.outputs[node.id] = result.output

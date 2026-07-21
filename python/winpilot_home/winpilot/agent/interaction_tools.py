@@ -702,7 +702,9 @@ class InteractionToolMixin:
 
         result = verify_mod.run_with_verify(
             "click", action, expect=args.get("expect"), hwnd=self.hwnd,
-            retryable=bool(args.get("retryable", False)),
+            # Model arguments cannot grant action replay. Failed effects are
+            # handled by a fresh observation and a new semantic decision.
+            retryable=False,
             timeout_s=_expect_timeout(args), stop_event=self.stop_event,
             watcher=self._verification_watcher(),
             run_id=getattr(self, "run_id", None))

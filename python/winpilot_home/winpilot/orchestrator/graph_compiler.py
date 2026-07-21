@@ -38,10 +38,9 @@ def task_contract_to_arp(contract: TaskContract) -> ArpGraph:
                 "task": contract.task,
             },
             retry=ArpRetryPolicy(
-                max_attempts=2 if stage.type in {
-                    StageType.OPEN_APPLICATION, StageType.FOCUS_WINDOW,
-                    StageType.OPEN_CONVERSATION, StageType.VERIFY_DELIVERY,
-                } else 1,
+                # Stage failure recovery must reobserve/redecide explicitly;
+                # re-running a whole stage can duplicate unknown mutations.
+                max_attempts=1,
                 delay_ms=250,
                 backoff=1.5,
             ),
