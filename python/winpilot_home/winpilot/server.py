@@ -64,6 +64,7 @@ from .orchestrator.contracts import (
 )
 from .orchestrator.projection import RUN_PROJECTIONS
 from .orchestrator.runtime import ARP_RUNS, ArpExecution
+from .orchestrator.runtime_selection import DesktopRuntimeSelection
 from .orchestrator.graph_compiler import legacy_goal_graph_task
 from .tasking.capability import CapabilityPlanner
 from .tasking.artifacts import ArtifactStore
@@ -963,6 +964,9 @@ def validate_automation_ir_execution(automation: dict[str, Any]) -> dict[str, An
 
 
 def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecution:
+    desktop_runtime_selection = DesktopRuntimeSelection.from_config(
+        CONFIG.get("vnext", "runtime_version", default=None)
+    )
     current_session_generation = SESSION.generation()
     raw_session_generation = graph.metadata.get("session_generation")
     expected_session_generation = (
@@ -1210,6 +1214,7 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
         graph,
         default_handlers(on_runner),
         inputs=inputs,
+        desktop_runtime_selection=desktop_runtime_selection,
     )
     job_id = f"arp-job-{execution.run_id}"
     job_ref["job_id"] = job_id

@@ -11,6 +11,7 @@ from typing import Any, Callable
 from ..utils.log import BUS, logger
 from .contracts import ArpGraph, ArpNode, ArpNodeKind, ArpRunStatus, validate_graph
 from .evidence import evidence_matches, has_verified_evidence, normalize_evidence, parse_requirement
+from .runtime_selection import DesktopRuntimeSelection, DesktopRuntimeUnavailable
 
 
 @dataclass
@@ -237,11 +238,20 @@ class ArpExecution:
         *,
         inputs: dict[str, Any] | None = None,
         run_id: str | None = None,
+        desktop_runtime_selection: DesktopRuntimeSelection | None = None,
     ) -> None:
         self.graph = graph
         self.handlers = handlers or {}
         self.inputs = dict(inputs or {})
         self.run_id = run_id or f"arp-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        if (
+            desktop_runtime_selection is not None
+            and not isinstance(desktop_runtime_selection, DesktopRuntimeSelection)
+        ):
+            raise TypeError("desktop_runtime_selection must be DesktopRuntimeSelection")
+        self._desktop_runtime_selection = (
+            desktop_runtime_selection or DesktopRuntimeSelection()
+        )
         self.status = ArpRunStatus.QUEUED
         self.current_node_id: str | None = None
         self.variables = {**graph.variables, **self.inputs}
@@ -263,6 +273,11 @@ class ArpExecution:
         self._lock = threading.RLock()
         self._gate_condition = threading.Condition(self._lock)
         self._gate_decisions: dict[str, dict[str, Any]] = {}
+
+    @property
+    def desktop_runtime_selection(self) -> DesktopRuntimeSelection:
+        """The immutable product-runtime identity frozen for this run."""
+        return self._desktop_runtime_selection
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
@@ -462,6 +477,7 @@ class ArpExecution:
     def _context(self, last: NodeResult | None = None) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
+            "desktop_runtime_selection": self._desktop_runtime_selection,
             "graph": self.graph.model_dump(mode="json"),
             "inputs": self.inputs,
             "variables": self.variables,
@@ -819,6 +835,21 @@ class ArpExecution:
             BUS.publish("arp_run_done", run_id=self.run_id, status=self.status.value, error=self.error)
             return self.to_dict()
 
+        try:
+            self._desktop_runtime_selection.require_live_coordinator()
+        except DesktopRuntimeUnavailable as exc:
+            self.status = ArpRunStatus.FAILED
+            self.error = str(exc)
+            self.started_at = time.time()
+            self.finished_at = self.started_at
+            BUS.publish(
+                "arp_run_done",
+                run_id=self.run_id,
+                status=self.status.value,
+                error=self.error,
+            )
+            return self.to_dict()
+
         node_map = {node.id: node for node in self.graph.nodes}
         visits: dict[str, int] = {}
         current = validation.entry_node
@@ -1043,12 +1074,18 @@ class ArpRunManager:
         handlers: dict[ArpNodeKind, NodeHandler] | None = None,
         *,
         inputs: dict[str, Any] | None = None,
+        desktop_runtime_selection: DesktopRuntimeSelection | None = None,
     ) -> ArpExecution:
         """Register a queued execution without creating another runtime thread."""
         validation = validate_graph(graph)
         if not validation.valid:
             raise ValueError("; ".join(validation.errors))
-        execution = ArpExecution(graph, handlers, inputs=inputs)
+        execution = ArpExecution(
+            graph,
+            handlers,
+            inputs=inputs,
+            desktop_runtime_selection=desktop_runtime_selection,
+        )
         with self._lock:
             self._runs[execution.run_id] = execution
             self._current_id = execution.run_id
