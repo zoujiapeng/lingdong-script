@@ -218,3 +218,16 @@
 - rollout: P2a is shadow-only. Profiler model invocation, Broker, Actor,
   Planner, Inspector, prompts, tool surfaces, Controller, done semantics,
   legacy execution, and frontend integration remain disconnected.
+
+### D020: P2b is an at-most-once, trace-only Profiler shadow
+
+- status: accepted
+- decision: a Task Profiler semantic call is permitted at most once per run,
+  has no tools or runtime identity, and can only propose the strict P2a schema.
+- retry: provider SDK retries are disabled. Runtime may retry only the exact
+  frozen request before any result is consumed; poll, redecision and action
+  replay are distinct contracts. Unknown desktop mutation outcomes are never
+  automatically replayed.
+- rollout: `vnext.profiler_shadow.enabled` defaults to false. When enabled, the
+  same Electron/ARP entry records a private trace sidecar and leaves legacy
+  prompt, tools, actions and completion unchanged. P3 remains evidence-gated.

@@ -266,6 +266,42 @@ class TraceRecorder:
             "post_capture_source": post_capture_source,
         })
 
+    def record_sidecar(self, event: dict[str, Any], *, run_id: str) -> bool:
+        """Append a private trace-only event without publishing to BUS.
+
+        Shadow evaluators use this path so product/WebSocket events remain
+        byte-for-byte unchanged. The active run check prevents a late model
+        response from being written into a newer task's trace.
+        """
+        if not isinstance(event, dict):
+            raise TypeError("trace sidecar event must be a dict")
+        requested_run = str(run_id or "").strip()
+        if not requested_run:
+            raise ValueError("trace sidecar run_id is required")
+        with self._lock:
+            if (
+                not self._accepting
+                or self._file is None
+                or self._run_id != requested_run
+            ):
+                return False
+            record = dict(event)
+            supplied_run = str(record.get("run_id") or requested_run)
+            if supplied_run != requested_run:
+                return False
+            record["run_id"] = requested_run
+            self._baseline_observer.observe(record)
+        return self._enqueue({
+            "kind": "event",
+            "run_id": requested_run,
+            "record": record,
+            "step": None,
+            "phase": "sidecar",
+            "frame": None,
+            "region": None,
+            "require_supplied_frame": False,
+        })
+
     @staticmethod
     def _action_key(event: dict[str, Any]) -> str:
         action_id = str(event.get("action_id") or "").strip()

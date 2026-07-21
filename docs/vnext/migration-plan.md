@@ -201,12 +201,12 @@ P1不启动模型、不操控桌面、不替换 legacy runner。完成后可用�
 
 ## 6. P2：Task Profiler 与 Execution Policy shadow
 
-状态：**P2a 已完成，真实 Profiler 模型调用尚未接入**。
+状态：**P2a 已完成；P2b 真实 Profiler 调用已作为默认关闭的 trace-only shadow 接入同一产品入口**。
 
 P2a 已在独立 `vnext/profiling/` 旁路中实现严格版本化合同、确定性
 Execution Policy、canonical broad capability/provider availability 校验、
 safe-standard fallback、完整 policy reasons、序列化与可注入 shadow 评测。
-它没有 TaskProfiler 模型调用、ToolCatalog、Capability Broker、shadow 工具投影或任何第二模型调用。
+P2a 本身不调用模型；P2b 在独立提交中增加只读 provider 边界和同入口 shadow。ToolCatalog、Capability Broker 与 shadow 工具投影仍未实现。
 
 P2a 已实现：
 
@@ -217,7 +217,7 @@ P2a 已实现：
 - CognitiveServices；
 - 可重放 shadow case/result 与 over/under-profile、结构稳定性判定。
 
-P2b 才允许在单独评审后实现 read-only TaskProfiler 调用边界；P2a 不提供模型 client 或 provider 调用。
+P2b 已按单独评审实现：每个 run 至多一次 semantic profile，无工具、无帧、无 runtime identity；SDK 隐式重试关闭，只有 Runtime 可对同一冻结请求做 transport retry。flag 默认关闭，结果只写 TraceRecorder 私有副本，不修改 BUS 或 legacy 执行。
 
 Shadow阶段：
 
@@ -486,7 +486,7 @@ prompt、模型调用、工具面、Controller、GUI 动作或 legacy `done` 语
 P1.5 的实现仍是 sidecar/shadow；产品真实客户端入口、WinPilot 全量回归、
 `npm test`、typecheck 和 build 只用于行为不变回归，不能把离线合同测试当作
 真实 GUI 成功证据。下一步仍从 P2 的独立设计门槛开始，不能在本阶段提前实现
-Profiler、Broker、Visual Actor、Planner 或 Inspector。
+Broker、Visual Actor、Planner 或 Inspector。
 
 ## P2a status (2026-07-21)
 
@@ -497,9 +497,9 @@ implemented with injected shadow tests. The policy validates canonical broad
 capabilities, defaults malformed or low-confidence input to safe `standard`,
 restricts depth and cognitive services, and records auditable reasons.
 
-The Profiler model invocation is still not connected. The unique implementation
-owner is `python/winpilot_home/winpilot/vnext/profiling/`; its injected shadow
-interface cannot call a model or mutate a desktop. P2a does not change
-prompts, model calls, model tool surface, GUI actions, Controller, FrameAuthority,
-legacy execution, done semantics, or frontend. Broker, Actor, Planner, and
-Inspector remain future gates.
+P2b now adds the real, tool-free Profiler provider and an at-most-once shadow
+hook under the same owner. It is disabled by default and writes only a private
+TraceRecorder sidecar; it cannot mutate a desktop or select runtime version.
+P2a/P2b do not change legacy prompts, model tool surface, GUI actions,
+Controller, FrameAuthority, done semantics, or frontend. Broker, Actor,
+Planner, and Inspector remain future gates.

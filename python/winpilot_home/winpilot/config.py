@@ -47,6 +47,12 @@ _DEFAULTS: dict[str, Any] = {
     },
     "vlm": {"enabled": False, "base_url": "", "api_key": "", "model": "",
             "thinking": False},
+    "vnext": {
+        # P2 shadow is opt-in and trace-only. It never selects runtime version
+        # or changes legacy tools, prompts, plans, actions, or completion.
+        "profiler_shadow": {"enabled": False},
+        "runtime_version": "legacy",
+    },
     "perception": {
         # Accessibility and OCR are optional semantic probes.  Native visual
         # execution must opt into them instead of inheriting them as ambient

@@ -39,6 +39,9 @@ __all__ = (
     "TASK_PROFILER_SHADOW_RECORD_FORMAT",
     "TaskProfilerShadowRecord",
     "TaskProfilerShadowRuntime",
+    "OpenAITaskProfilerModel",
+    "LegacyTaskProfilerShadowHook",
+    "profiler_input_from_legacy_contract",
     "PROFILE_SHADOW_CASE_FORMAT",
     "PROFILE_SHADOW_RESULT_FORMAT",
     "ShadowExpectation",
@@ -69,7 +72,8 @@ def __getattr__(name: str):
         "TASK_PROFILE_PROPOSAL_JSON_SCHEMA", "ProfilerObligationView", "TaskProfilerInput",
         "TaskProfilerRequest", "TaskProfilerModel", "TaskProfiler",
         "TASK_PROFILER_SHADOW_RECORD_FORMAT", "TaskProfilerShadowRecord",
-        "TaskProfilerShadowRuntime",
+        "TaskProfilerShadowRuntime", "OpenAITaskProfilerModel",
+        "LegacyTaskProfilerShadowHook", "profiler_input_from_legacy_contract",
     }:
         from . import profiling
         return getattr(profiling, name)
