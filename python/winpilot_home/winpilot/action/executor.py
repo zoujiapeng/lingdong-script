@@ -32,6 +32,7 @@ import win32gui
 from ..config import CONFIG
 from ..utils.log import BUS, logger
 from .desktop_queue import queued_desktop_action
+from .raw_device import RawBackendResult
 
 user32 = ctypes.windll.user32
 
@@ -839,40 +840,59 @@ def draw_strokes(strokes: list, duration_s: float = 0.4,
     return result
 
 
+def _publish_scroll_fact(**payload: Any) -> None:
+    """Telemetry cannot turn one completed input into a fallback replay."""
+    try:
+        BUS.publish("action", action="scroll", **payload)
+    except Exception:
+        logger.debug("scroll action telemetry failed", exc_info=True)
+
+
 @queued_desktop_action("scroll")
-def scroll(
+def execute_scroll_input(
     x: int,
     y: int,
     amount: int,
     hwnd: int | None = None,
-) -> dict:
-    """amount: positive=up, negative=down; in notches."""
+) -> RawBackendResult:
+    """Execute one scroll attempt and report explicit mechanical completion."""
     if _dry_run():
-        return {"ok": True, "dry_run": True}
+        return RawBackendResult(False, {"ok": True, "dry_run": True})
     if _no_mouse_steal():
         if multi_input_cooperation_enabled() and not hwnd:
-            return cooperative_input_guard("scroll", hwnd) or {
+            result = cooperative_input_guard("scroll", hwnd) or {
                 "ok": False,
                 "blocked": True,
                 "cooperative_input": True,
             }
+            return RawBackendResult(False, result)
         # WM_MOUSEWHEEL to the window under the point — no cursor move.
+        target = 0
         try:
             target = win32gui.WindowFromPoint((int(x), int(y)))
-            if target and _same_window_root(int(target), hwnd):
-                wparam = (int(amount) * 120) << 16
-                lparam = (int(y) << 16) | (int(x) & 0xFFFF)  # screen coords for wheel
-                win32gui.PostMessage(target, win32con.WM_MOUSEWHEEL, wparam, lparam)
-                BUS.publish("action", action="scroll", x=x, y=y, amount=amount,
-                            via="post_message")
-                return {"ok": True, "via": "post_message"}
+            target_matches = bool(target and _same_window_root(int(target), hwnd))
         except Exception as exc:
-            logger.debug("post scroll 失败: %s", exc)
+            logger.debug("post scroll target resolution failed: %s", exc)
+            target_matches = False
+        if target_matches:
+            wparam = (int(amount) * 120) << 16
+            lparam = (int(y) << 16) | (int(x) & 0xFFFF)  # screen coords for wheel
+            try:
+                win32gui.PostMessage(target, win32con.WM_MOUSEWHEEL, wparam, lparam)
+            except Exception:
+                return RawBackendResult(None, {
+                    "ok": False,
+                    "via": "post_message",
+                    "error": "post_message_outcome_unknown",
+                })
+            _publish_scroll_fact(x=x, y=y, amount=amount, via="post_message")
+            return RawBackendResult(True, {"ok": True, "via": "post_message"})
         cooperative_block = cooperative_input_guard("scroll", hwnd)
         if cooperative_block is not None:
-            return cooperative_block
+            return RawBackendResult(False, cooperative_block)
         saved = _cursor_pos()
         completed = True
+        wheel_sent = False
         try:
             _raw_move_mouse(x, y)
             time.sleep(0.04)
@@ -882,6 +902,7 @@ def scroll(
                 completed = False
             else:
                 _send_inputs([_mouse_input(win32con.MOUSEEVENTF_WHEEL, data=amount * 120 & 0xFFFFFFFF)])
+                wheel_sent = True
                 if multi_input_cooperation_enabled() and not _cooperative_action_still_owned(
                     hwnd, expected_cursor=(int(x), int(y)),
                 ):
@@ -891,26 +912,35 @@ def scroll(
                 saved, (int(x), int(y)), hwnd,
             )
         if not completed:
-            return {
+            return RawBackendResult(wheel_sent, {
                 "ok": False,
                 "verified": False,
                 "blocked": True,
                 "cooperative_input": True,
                 "cursor_restored": cursor_restored,
                 "error": "scroll stopped because the user took foreground/cursor ownership",
-            }
-        BUS.publish("action", action="scroll", x=x, y=y, amount=amount,
-                    via="sendinput_restored")
-        return {
+            })
+        _publish_scroll_fact(x=x, y=y, amount=amount, via="sendinput_restored")
+        return RawBackendResult(True, {
             "ok": True,
             "via": "sendinput_restored",
             "cursor_restored": cursor_restored,
-        }
+        })
     _raw_move_mouse(x, y)
     time.sleep(0.04)
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_WHEEL, data=amount * 120 & 0xFFFFFFFF)])
-    BUS.publish("action", action="scroll", x=x, y=y, amount=amount)
-    return {"ok": True}
+    _publish_scroll_fact(x=x, y=y, amount=amount)
+    return RawBackendResult(True, {"ok": True})
+
+
+def scroll(
+    x: int,
+    y: int,
+    amount: int,
+    hwnd: int | None = None,
+) -> dict:
+    """Legacy mapping adapter; amount is positive=up, negative=down."""
+    return dict(execute_scroll_input(x, y, amount, hwnd=hwnd).facts)
 
 
 # ------------------------------------------------------------- keyboard API
