@@ -301,3 +301,36 @@
 - non-claim: Moving legacy planner, done-judge, conversation, message-content
   or VLM helper calls through this transport does not implement P4 Visual
   Actor, P5 Verifier or P6 Planner/Inspector semantics.
+
+### D024: P4a fixes the Actor boundary before product execution
+
+- status: accepted
+- decision: P4a implements strict versioned Actor-visible views, one
+  identity-free `ActorProposal`, a Runtime-owned `ActorDecisionEnvelope`, and
+  an injected single-turn `MissionRuntime`. Only the `visual_actor` route can
+  invoke ActorPort; provider, deterministic and blocked routes cannot fall
+  back to another GUI Agent in the same run.
+- admission: Runtime snapshots Mission/authority state and BrokerProjection,
+  then repeats all three after Actor returns. Any revision, active-obligation,
+  frame, target, pointer, grant or projection change discards the stale
+  proposal. Runtime admits only one action still present in the latest tool
+  surface and binds every runtime identity itself.
+- mutation result: Controller facts are `completed`, `rejected` or `unknown`.
+  An unknown outcome, exception after admission, identity mismatch or failed
+  post-frame/evidence reconciliation blocks the obligation and is never
+  automatically replayed.
+- lifecycle: `claim_obligation_done` accepts only an `obligation_claimed`
+  event, deriving `CLAIMED` and `verification_required`; it cannot verify an
+  obligation or finish a mission before P5. Capability, Inspector and Planner
+  requests whose services are not wired return unavailable and fail closed;
+  P6 remains evidence-gated.
+- rollout: The P4a Runtime calls only injected ports. It has no real model or
+  device adapter, no Electron/legacy integration, no Broker enforcement and
+  no live canary, so product behavior is unchanged. P4b must bridge to the
+  existing single FrameAuthority/admission/Controller chain without copying
+  an owner.
+- deletion gate: P4a tests do not authorize legacy deletion. AgentRunner's
+  global todo, direct `done`, and fixed large tool surface remain until paired
+  canary and real Electron E2E meet the documented thresholds and trace proves
+  MissionCard, P5 verification and BrokerProjection own every corresponding
+  vNext turn.

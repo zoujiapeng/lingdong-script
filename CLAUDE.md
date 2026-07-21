@@ -25,8 +25,9 @@ Goal Compiler
 
 当前 legacy 仍是默认且唯一桌面执行 runtime。vNext 已完成 P0/P1/P1.5、P2a/P2b
 Profiler shadow、P3a/P3b single-obligation partial Broker shadow，以及 WinPilot product package
-的统一模型请求/重试边界；Broker 尚未 enforce，P4 Visual Actor、P5 Verifier、P6
-Planner/Inspector 和 vNext 可写运行时均未实现。后续工作必须遵守：
+的统一模型请求/重试边界，并完成 P4a 纯 Actor proposal/view/envelope 合同与注入式单回合
+MissionRuntime；Broker 尚未 enforce，P4b live Actor/共享执行桥、P5 Verifier、P6
+Planner/Inspector 和 vNext 产品可写运行时均未实现。后续工作必须遵守：
 
 - 只有 Visual Actor 可以提出 GUI mutation；
 - 只有 Controller/RawDevice 链可以执行桌面输入；

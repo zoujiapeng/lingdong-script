@@ -1,6 +1,6 @@
 # vNext Agent 核心旁路
 
-状态：**P0/P1/P1.5 已实现；P2a/P2b Profiler shadow、P3a Broker 与 P3b single-obligation partial shadow 已完成；WinPilot product package 的模型请求/重试边界已统一；Broker 仍未 enforce，P4 Actor、P5 Verifier、P6 Planner/Inspector 尚未接入**
+状态：**P0/P1/P1.5 已实现；P2a/P2b Profiler shadow、P3a Broker 与 P3b single-obligation partial shadow 已完成；WinPilot product package 的模型请求/重试边界已统一；P4a Actor 合同与注入式单回合 MissionRuntime 已实现；Broker 仍未 enforce，P4b 产品桥接/live Actor、P5 Verifier、P6 Planner/Inspector 尚未接入**
 
 迁移分支：`codex/vnext-agent-core`
 
@@ -45,7 +45,7 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 
 ## 当前阶段
 
-当前分支已完成 P0/P1/P1.5、P2a 纯合同、P2b 只读 shadow 与 P3a/P3b Broker shadow，legacy 仍是默认且唯一桌面执行 runtime：
+当前分支已完成 P0/P1/P1.5、P2a 纯合同、P2b 只读 shadow、P3a/P3b Broker shadow 与 P4a 纯合同/注入式 Runtime，legacy 仍是默认且唯一桌面执行 runtime：
 
 - P0 只在既有 trace/BUS 事件上增加观测字段；
 - P1 提供可重放的 MissionDefinition/Event/Projection/Reducer/Card 及 legacy shadow；
@@ -60,11 +60,16 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 - poll 不重新提交模型请求；改变消息、thinking、工具、预算或目的属于新的 redecision；成功响应的解析/schema 失败不是 transport retry；桌面 action replay 由独立 mutation replay policy 管理，执行结果不确定时禁止自动重放；
 - 该完成声明只覆盖 `python/winpilot_home/winpilot/` 产品包。仓库外围 `python/providers/` 的旧 Flow/feature provider 仍有独立 SDK/HTTP 重试，必须先审计生产可达性，再在 P9 删除或单独迁移；不能把它们包装成第二个 Runtime；
 - Profiler 的 stop_event 已从 ArpExecution 经 shadow hook/runtime/provider 传到 ModelCallRuntime 并有测试；精确函数调用栈 AST guard 也已阻止 product package 绕过 transport 边界。仍未闭合的是全角色逐 attempt sidecar，以及缺少 stop_event seam 的 legacy VLM helper；
+- P4a 在 `vnext/actor/` 固定了严格版本化、无 Runtime 身份的 proposal、Actor 可见 view 和 Runtime-bound envelope；在 `vnext/runtime/` 实现了只依赖注入端口的单回合 MissionRuntime。它不直接调用模型或设备，也没有接入 Electron、StageRuntime、AgentRunner 或 legacy 产品执行；
+- P4a 在 Actor 返回后重新读取 Mission revision、active obligation、权威 frame/target/pointer 状态并重新投影 Broker；任一 TOCTOU 变化都丢弃 stale proposal，只有最新 projection 中的单笔动作才可进入注入式 ControllerPort；
+- Controller 回执严格区分 `completed`、`rejected` 和 `unknown`。`unknown`、执行后异常或无法与当前 post-frame/evidence 对账时只会阻塞当前义务，绝不自动重放 mutation；
+- `claim_obligation_done` 只接受 `obligation_claimed` 事件并进入 `CLAIMED`/`verification_required`，不会 verified 或结束 mission；P5 独立 Verifier 尚未实现。Capability/Inspector/Planner 等未接服务请求在 P4a fail closed；
+- P4a 没有 enforce Broker、没有 live Actor model call、没有真实 FrameAuthority/Controller bridge，也没有 canary，因此没有改变现有产品行为；
 - 不改变当前 `master` 的产品行为；
 - 不声称 Mission Ledger 已经接管产品运行；P1 projection 只能离线或 shadow 使用；
-- P4 Visual Actor、P5 独立 Verifier、P6 Planner/Inspector 和 vNext 可写运行时均未实现；现有 legacy planner、done judge 或 VLM helper 经过统一 transport，不代表对应 vNext 角色已接入；
+- P4b shared frame/admission/controller bridge 与 live Actor、P5 独立 Verifier、P6 Planner/Inspector 和 vNext 产品可写运行时均未实现；现有 legacy planner、done judge 或 VLM helper 经过统一 transport，不代表对应 vNext 角色已接入；
 - 不把历史单次 E2E 结果改写成 vNext 成功证据；
-- 下一步是在真实 legacy 回合收集完整 relevance oracle 并做 held-out 评测；在 required tool group recall 门槛达标前不能 enforce。
+- 下一步是保持 Broker 非 enforce，先建设不复制 owner 的 P4b shared frame/admission/controller bridge 和默认关闭的 live Actor canary；同时继续收集完整 relevance oracle。任何默认切换或 legacy 删除都必须先通过 paired canary、真实 Electron E2E 和文档既定门槛。
 
 ## 旁路不是第二条产品主线
 

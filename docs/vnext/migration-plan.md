@@ -336,6 +336,18 @@ P3b 的同入口接线只在 `vnext.broker_shadow.enabled=true` 时启用：模�
 
 ## 8. P4：Visual Actor 受控旁路
 
+状态：**P4a 纯 Actor 合同与注入式单回合 MissionRuntime 已完成；P4b shared frame/admission/controller bridge、live Actor 和产品 canary 尚未实现。**
+
+P4a 已在独立 `vnext/actor/` 和 `vnext/runtime/` 中实现严格版本化的 Actor 可见 view、无 Runtime 身份 proposal、Runtime-bound envelope、注入端口与单回合协调器。它不直接调用模型或设备，不导入 legacy AgentRunner/ToolSession/RawDevice，不接 Electron/StageRuntime，也不选择 runtime version。legacy 仍是默认且唯一产品桌面执行 runtime，Broker 仍未 enforce，因此本阶段保持产品行为不变。
+
+P4a admission 在 Actor 返回后重新读取 Mission revision/active obligation、完整权威 frame/target/pointer 状态并重新投影 Broker。TOCTOU 不一致或动作不在最新小工具面时丢弃 proposal；每回合至多向注入 ControllerPort 提交一笔 Runtime-bound transaction。Controller 结果严格区分 `completed`、`rejected`、`unknown`；`unknown`、执行后异常或无法对账的结果只会阻塞当前义务，不会自动 action replay。
+
+`claim_obligation_done` 在 P4a 只接受 `obligation_claimed` 并进入 `CLAIMED`/`verification_required`，不能 verified 或结束 mission，必须等 P5 独立 Verifier。Capability/Inspector/Planner 等尚未接入的请求返回 unavailable；P6 Planner/Inspector 没有跨任务 A/B 证据前继续 fail closed。
+
+P4b 才能把这些合同接到现有唯一 FrameAuthority、admission/坐标校验和 Controller/RawDevice 链，并以默认关闭的 live Actor canary 从同一 Electron 入口运行。Bridge 必须先让 legacy 委托共享 owner，不能复制 capture、action parser、pointer owner 或执行器。
+
+P4a 不授权删除任何 legacy 产品职责。`AgentRunner` 的全局 todo、模型直接 `done` 和固定大工具面只能在 paired canary 与真实 Electron E2E 达到 [evaluation.md](evaluation.md) 门槛，且 trace 证明所有 vNext Actor 回合分别由 MissionCard、P5 verification 和 BrokerProjection 接管后删除；单元测试、注入 fake 或一次受控成功都不构成删除证据。
+
 建立最小 Actor loop，只消费 MissionCard、FrameState和BrokerProjection。模型只输出无Runtime身份的 ActorProposal，Runtime构造 ActorDecisionEnvelope。
 
 第一批只运行受控视觉目标：
@@ -462,11 +474,11 @@ Canary失败不在同一run偷切legacy。可以另开独立run对照。
 | --- | --- | --- | --- |
 | `TaskContractCompiler` 对GUI任务族解释 | Goal Compiler | 只保留可靠obligation/artifact dependency，未知目标单obligation | coverage/cold-start E2E |
 | Actor自行判断任务复杂度 | TaskProfiler + ExecutionPolicy | 先shadow，再accept profile | over/under-profile达标 |
-| `_EXECUTE_DESKTOP_MODEL_TOOLS` 固定大工具面 | ToolCatalog + Broker | shadow后按run投影 | 所有Actor回合取BrokerProjection |
-| `AgentRunner`全局todo | MissionProjection + Runtime | Actor只消费MissionCard | trace无legacy plan读取 |
+| `_EXECUTE_DESKTOP_MODEL_TOOLS` 固定大工具面 | ToolCatalog + Broker | shadow后按run投影 | paired canary/真实E2E达标，所有Actor回合取BrokerProjection且必要工具recall门槛通过 |
+| `AgentRunner`全局todo | MissionProjection + Runtime | Actor只消费MissionCard | paired canary/真实E2E达标且trace无legacy plan读取 |
 | 模型复制frame/revision/obligation ids | Runtime envelope | proposal与身份分离 | 所有决策经envelope校验 |
 | `AgentRunner` frame/coordinate镜像 | FrameAuthority + typed envelope | 动作只引用当前绑定 | 统一preflight |
-| `done`直接结束run | claim + Verifier + Reducer | claim不改变状态 | 无模型terminal done |
+| `done`直接结束run | claim + Verifier + Reducer | claim仅进入CLAIMED，P5验收后才前进 | paired canary/真实E2E达标且无模型terminal done |
 | `DoneVerifierMixin`混合验证 | 三层Verifier | deterministic -> oracle -> visual | typed verdict全覆盖 |
 | `RunStateMachine`与进度账本重叠 | transaction state + MissionProjection | 保留动作phase，删除全局语义副本 | 一个事实一个owner |
 | `FailureRecoveryLayer`选择恢复倾向 | FailureFact + Actor/Planner | 分类不执行 | fallback cascade为零 |
@@ -536,8 +548,7 @@ prompt、模型调用、工具面、Controller、GUI 动作或 legacy `done` 语
 
 P1.5 的实现仍是 sidecar/shadow；产品真实客户端入口、WinPilot 全量回归、
 `npm test`、typecheck 和 build 只用于行为不变回归，不能把离线合同测试当作
-真实 GUI 成功证据。下一步仍从 P2 的独立设计门槛开始，不能在本阶段提前实现
-Broker、Visual Actor、Planner 或 Inspector。
+真实 GUI 成功证据。后续 P2/P3/P4a 的旁路实现不改变这一证据边界。
 
 ## P2a status (2026-07-21)
 
@@ -552,5 +563,6 @@ P2b now adds the real, tool-free Profiler provider and an at-most-once shadow
 hook under the same owner. It is disabled by default and writes only a private
 TraceRecorder sidecar; it cannot mutate a desktop or select runtime version.
 P2a/P2b do not change legacy prompts, model tool surface, GUI actions,
-Controller, FrameAuthority, done semantics, or frontend. Broker, Actor,
-Planner, and Inspector remain future gates.
+Controller, FrameAuthority, done semantics, or frontend. Later P3 and P4a
+sidecars do not retroactively change this P2 boundary; live Actor, Verifier,
+Planner, and Inspector remain later gates.
