@@ -509,10 +509,18 @@ class TransitionSummary:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action", str(self.action or "unknown"))
+        if type(self.input_completed) is not bool:
+            raise InvalidMissionEvent("transition input_completed must be boolean")
         object.__setattr__(self, "obligation_id", str(self.obligation_id or "").strip())
         if not self.obligation_id:
             raise InvalidMissionEvent("transition summary must bind an obligation")
         object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
+        if self.frame_id is not None and (
+            type(self.frame_id) is not int or self.frame_id < 0
+        ):
+            raise InvalidMissionEvent(
+                "transition frame_id must be a non-negative integer or null"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -92,14 +92,97 @@ def _verify_event(reducer: MissionReducer, obligation_id: str, evidence_id: str)
     )
 
 
+def _required_verification_identity(
+    reducer: MissionReducer,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    verification_ids: list[str] = []
+    evidence_ids: list[str] = []
+    for obligation_id in reducer.definition.stable_topological_order:
+        definition = reducer.projection.obligation_definition(obligation_id)
+        if not definition.required:
+            continue
+        state = reducer.projection.obligation_state(obligation_id)
+        assert state.verification_id is not None
+        verification_ids.append(state.verification_id)
+        evidence_ids.extend(state.verified_evidence_refs)
+    return tuple(verification_ids), tuple(dict.fromkeys(evidence_ids))
+
+
+def _mission_verification_payload(
+    reducer: MissionReducer,
+    evidence_id: str,
+    *,
+    verification_id: str | None = None,
+) -> dict[str, object]:
+    accepted_ids, obligation_evidence_ids = _required_verification_identity(reducer)
+    return {
+        "verified": True,
+        "verification_id": verification_id or f"mission-verification-{evidence_id}",
+        "accepted_obligation_verification_ids": list(accepted_ids),
+        "evidence_refs": [*obligation_evidence_ids, evidence_id],
+    }
+
+
 def _mission_verify_event(reducer: MissionReducer, evidence_id: str) -> MissionEvent:
     return reducer.event(
         "mission_verified",
-        payload={
-            "verification_id": f"mission-verification-{evidence_id}",
-            "evidence_refs": [evidence_id],
-        },
+        payload=_mission_verification_payload(reducer, evidence_id),
     )
+
+
+def _raw_event(
+    reducer: MissionReducer,
+    event_type: str,
+    payload: dict[str, object],
+) -> MissionEvent:
+    return MissionEvent(
+        kind=event_type,
+        mission_id=reducer.definition.mission_id,
+        run_id=reducer.definition.run_id,
+        base_revision=reducer.projection.revision,
+        payload=payload,
+    )
+
+
+def _verified_two_obligation_reducer(
+) -> tuple[MissionReducer, tuple[EvidenceRef, ...]]:
+    definition = MissionDefinition(
+        mission_id="m1",
+        run_id="r1",
+        original_goal="verify two dependent results",
+        obligations=(
+            ObligationSpec(
+                id="first",
+                desired_state="first result",
+                acceptance_criteria=("first accepted",),
+            ),
+            ObligationSpec(
+                id="second",
+                desired_state="second result",
+                acceptance_criteria=("second accepted",),
+                depends_on=("first",),
+            ),
+        ),
+    )
+    evidence = (
+        _evidence("first-proof", "first"),
+        _evidence("second-proof", "second"),
+        _evidence("mission-proof"),
+    )
+    reducer = MissionReducer(definition, evidence=evidence)
+    for obligation_id, evidence_id in (
+        ("first", "first-proof"),
+        ("second", "second-proof"),
+    ):
+        reducer.apply(
+            reducer.event(
+                "obligation_claimed",
+                payload={"obligation_id": obligation_id},
+            )
+        )
+        reducer.apply(_verify_event(reducer, obligation_id, evidence_id))
+    assert reducer.projection.status is MissionStatus.AWAITING_MISSION_VERIFICATION
+    return reducer, evidence
 
 
 def test_definition_falls_back_to_one_lossless_obligation() -> None:
@@ -160,6 +243,133 @@ def test_contracts_are_strict_versioned_json_and_canonical_on_wire() -> None:
             "mission_id": "m1",
             "run_id": "r1",
         })
+
+
+@pytest.mark.parametrize("input_completed", [None, 0, 1, "true", []])
+def test_transition_summary_requires_literal_boolean_input_completion(
+    input_completed,
+) -> None:
+    with pytest.raises(InvalidMissionEvent, match="input_completed"):
+        TransitionSummary(
+            action="click",
+            input_completed=input_completed,
+            frame_id=1,
+            obligation_id="obligation-1",
+        )
+
+
+@pytest.mark.parametrize("frame_id", [-1, True, 1.0, "1"])
+def test_transition_summary_requires_non_negative_integer_frame_identity(
+    frame_id,
+) -> None:
+    with pytest.raises(InvalidMissionEvent, match="frame_id"):
+        TransitionSummary(
+            action="click",
+            input_completed=True,
+            frame_id=frame_id,
+            obligation_id="obligation-1",
+        )
+
+
+@pytest.mark.parametrize("input_completed", [None, 0, 1, "true", []])
+def test_raw_transition_event_rejects_non_boolean_input_completion(
+    input_completed,
+) -> None:
+    reducer = MissionReducer(
+        MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1")
+    )
+    before = reducer.projection.to_dict()
+    event = _raw_event(
+        reducer,
+        "transition_recorded",
+        {
+            "obligation_id": "obligation-1",
+            "action": "click",
+            "input_completed": input_completed,
+            "frame_id": 1,
+        },
+    )
+
+    with pytest.raises(InvalidMissionEvent, match="input_completed"):
+        reducer.apply(event)
+
+    assert reducer.projection.to_dict() == before
+    assert reducer.events == ()
+
+
+def test_raw_transition_event_requires_explicit_input_completion() -> None:
+    reducer = MissionReducer(
+        MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1")
+    )
+    before = reducer.projection.to_dict()
+    event = _raw_event(
+        reducer,
+        "transition_recorded",
+        {
+            "obligation_id": "obligation-1",
+            "action": "click",
+            "frame_id": 1,
+        },
+    )
+
+    with pytest.raises(InvalidMissionEvent, match="input_completed"):
+        reducer.apply(event)
+
+    assert reducer.projection.to_dict() == before
+    assert reducer.events == ()
+
+
+@pytest.mark.parametrize("frame_id", [-1, True, 1.0, "1"])
+def test_raw_transition_event_rejects_noncanonical_frame_identity(frame_id) -> None:
+    reducer = MissionReducer(
+        MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1")
+    )
+    before = reducer.projection.to_dict()
+    event = _raw_event(
+        reducer,
+        "transition_recorded",
+        {
+            "obligation_id": "obligation-1",
+            "action": "click",
+            "input_completed": True,
+            "frame_id": frame_id,
+        },
+    )
+
+    with pytest.raises(InvalidMissionEvent, match="frame_id"):
+        reducer.apply(event)
+
+    assert reducer.projection.to_dict() == before
+    assert reducer.events == ()
+
+
+def test_transition_identity_is_stable_across_wire_replay() -> None:
+    definition = MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1")
+    reducer = MissionReducer(definition)
+    event = _raw_event(
+        reducer,
+        "transition_recorded",
+        {
+            "obligation_id": "obligation-1",
+            "action": "click",
+            "input_completed": True,
+            "visible_effect": "dialog opened",
+            "frame_id": 7,
+        },
+    )
+    reducer.apply(event)
+
+    replayed = MissionReducer.replay(definition, [event.to_dict()])
+
+    assert replayed.events[0].event_id == event.event_id
+    assert replayed.projection.last_transition == reducer.projection.last_transition
+    assert replayed.projection.last_transition == TransitionSummary(
+        action="click",
+        input_completed=True,
+        visible_effect="dialog opened",
+        frame_id=7,
+        obligation_id="obligation-1",
+    )
 
 
 def test_active_selection_uses_dependency_first_stable_topological_order() -> None:
@@ -627,6 +837,171 @@ def test_legacy_trace_shadow_never_turns_done_or_ok_into_verified() -> None:
     assert not projection.verified_obligation_ids
 
 
+@pytest.mark.parametrize(
+    ("claim_fingerprint", "error_type"),
+    [
+        (None, IllegalTransitionError),
+        ("stale-claim-fingerprint", StaleRevisionError),
+    ],
+)
+def test_raw_verification_event_requires_exact_runtime_claim_fingerprint(
+    claim_fingerprint,
+    error_type,
+) -> None:
+    definition = MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1")
+    proof = _evidence("goal-proof", "obligation-1")
+    reducer = MissionReducer(definition, evidence=[proof])
+    reducer.apply(
+        reducer.event(
+            "obligation_claimed",
+            payload={"obligation_id": "obligation-1"},
+        )
+    )
+    before = reducer.projection.to_dict()
+    payload: dict[str, object] = {
+        "obligation_id": "obligation-1",
+        "verified": True,
+        "verification_id": "goal-verification",
+        "satisfied_criteria": ["goal"],
+        "evidence_refs": [proof.id],
+    }
+    if claim_fingerprint is not None:
+        payload["claim_fingerprint"] = claim_fingerprint
+
+    with pytest.raises(error_type):
+        reducer.apply(_raw_event(reducer, "verification_recorded", payload))
+
+    assert reducer.projection.to_dict() == before
+    assert len(reducer.events) == 1
+
+
+@pytest.mark.parametrize("verified", [None, 0, 1, "true", [], {}])
+def test_raw_verification_event_rejects_non_boolean_verdict(verified) -> None:
+    definition = MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1")
+    proof = _evidence("goal-proof", "obligation-1")
+    reducer = MissionReducer(definition, evidence=[proof])
+    reducer.apply(
+        reducer.event(
+            "obligation_claimed",
+            payload={"obligation_id": "obligation-1"},
+        )
+    )
+    state = reducer.projection.obligation_state("obligation-1")
+    before = reducer.projection.to_dict()
+    event = _raw_event(
+        reducer,
+        "verification_recorded",
+        {
+            "obligation_id": "obligation-1",
+            "claim_fingerprint": state.claim_fingerprint,
+            "verified": verified,
+            "verification_id": "goal-verification",
+            "satisfied_criteria": ["goal"],
+            "evidence_refs": [proof.id],
+        },
+    )
+
+    with pytest.raises(InvalidMissionEvent, match="verdict must be boolean"):
+        reducer.apply(event)
+
+    assert reducer.projection.to_dict() == before
+    assert len(reducer.events) == 1
+
+
+@pytest.mark.parametrize(
+    "accepted_ids",
+    [
+        None,
+        ["verification-first-first-proof"],
+        ["verification-second-second-proof", "verification-first-first-proof"],
+        ["verification-first-first-proof", "verification-first-first-proof"],
+    ],
+    ids=["missing-field", "missing-id", "wrong-order", "duplicate"],
+)
+def test_raw_mission_verification_requires_exact_ordered_accepted_verification_ids(
+    accepted_ids,
+) -> None:
+    reducer, _evidence_registry = _verified_two_obligation_reducer()
+    payload = _mission_verification_payload(reducer, "mission-proof")
+    if accepted_ids is None:
+        payload.pop("accepted_obligation_verification_ids")
+    else:
+        payload["accepted_obligation_verification_ids"] = accepted_ids
+    before = reducer.projection.to_dict()
+
+    with pytest.raises(IllegalTransitionError, match="exact accepted"):
+        reducer.apply(_raw_event(reducer, "mission_verified", payload))
+
+    assert reducer.projection.to_dict() == before
+
+
+def test_raw_mission_verification_requires_every_obligation_evidence() -> None:
+    reducer, _evidence_registry = _verified_two_obligation_reducer()
+    payload = _mission_verification_payload(reducer, "mission-proof")
+    payload["evidence_refs"] = ["first-proof", "mission-proof"]
+    before = reducer.projection.to_dict()
+
+    with pytest.raises(EvidenceScopeError, match="every required obligation"):
+        reducer.apply(_raw_event(reducer, "mission_verified", payload))
+
+    assert reducer.projection.to_dict() == before
+
+
+def test_raw_mission_verification_requires_independent_mission_level_evidence() -> None:
+    reducer, _evidence_registry = _verified_two_obligation_reducer()
+    payload = _mission_verification_payload(reducer, "mission-proof")
+    payload["evidence_refs"] = ["first-proof", "second-proof"]
+    before = reducer.projection.to_dict()
+
+    with pytest.raises(EvidenceScopeError, match="mission-level evidence"):
+        reducer.apply(_raw_event(reducer, "mission_verified", payload))
+
+    assert reducer.projection.to_dict() == before
+
+
+@pytest.mark.parametrize("verified", [False, None, 0, 1, "true", []])
+def test_raw_mission_verification_requires_literal_true_verdict(verified) -> None:
+    reducer, _evidence_registry = _verified_two_obligation_reducer()
+    payload = _mission_verification_payload(reducer, "mission-proof")
+    payload["verified"] = verified
+    before = reducer.projection.to_dict()
+
+    with pytest.raises(IllegalTransitionError, match="boolean true"):
+        reducer.apply(_raw_event(reducer, "mission_verified", payload))
+
+    assert reducer.projection.to_dict() == before
+
+
+def test_mission_verification_identities_are_stable_across_full_wire_replay() -> None:
+    reducer, evidence = _verified_two_obligation_reducer()
+    mission_event = _raw_event(
+        reducer,
+        "mission_verified",
+        _mission_verification_payload(
+            reducer,
+            "mission-proof",
+            verification_id="mission-verification",
+        ),
+    )
+    reducer.apply(mission_event)
+    wire_events = [event.to_dict() for event in reducer.events]
+
+    replayed = MissionReducer.replay(reducer.definition, wire_events, evidence=evidence)
+
+    assert replayed.projection.to_dict() == reducer.projection.to_dict()
+    assert [event.event_id for event in replayed.events] == [
+        event.event_id for event in reducer.events
+    ]
+    assert replayed.projection.mission_verification_id == "mission-verification"
+    for obligation_id in ("first", "second"):
+        expected = reducer.projection.obligation_state(obligation_id)
+        actual = replayed.projection.obligation_state(obligation_id)
+        assert actual.verification_id == expected.verification_id
+        assert actual.claim_fingerprint == expected.claim_fingerprint
+        assert actual.verified_claim_fingerprint == expected.verified_claim_fingerprint
+        assert actual.verified_evidence_refs == expected.verified_evidence_refs
+
+
 def test_mission_completion_requires_independent_run_scoped_verification() -> None:
     definition = MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1")
     obligation_proof = _evidence("obligation-proof", "obligation-1")
@@ -645,28 +1020,43 @@ def test_mission_completion_requires_independent_run_scoped_verification() -> No
     ))
     assert reducer.projection.status is MissionStatus.AWAITING_MISSION_VERIFICATION
     assert reducer.projection.mission_verification_id is None
+    missing_evidence_payload = _mission_verification_payload(
+        reducer,
+        mission_proof.id,
+        verification_id="mission-without-proof",
+    )
+    missing_evidence_payload["evidence_refs"] = []
     with pytest.raises(EvidenceScopeError):
-        reducer.apply(reducer.event(
+        reducer.apply(
+            _raw_event(reducer, "mission_verified", missing_evidence_payload)
+        )
+    reducer.apply(
+        reducer.event(
             "mission_verified",
-            payload={"verification_id": "mission-without-proof"},
-        ))
-    reducer.apply(reducer.event(
-        "mission_verified",
-        payload={
-            "verification_id": "mission-verification",
-            "evidence_refs": [mission_proof.id],
-        },
-    ))
+            payload=_mission_verification_payload(
+                reducer,
+                mission_proof.id,
+                verification_id="mission-verification",
+            ),
+        )
+    )
     assert reducer.projection.status is MissionStatus.VERIFIED
     assert reducer.projection.mission_verification_id == "mission-verification"
     with pytest.raises(IllegalTransitionError):
-        reducer.apply(reducer.event(
-            "mission_verified",
-            payload={
-                "verification_id": "another-mission-verification",
-                "evidence_refs": [mission_proof.id],
-            },
-        ))
+        reducer.apply(
+            _raw_event(
+                reducer,
+                "mission_verified",
+                {
+                    "verified": True,
+                    "verification_id": "another-mission-verification",
+                    "accepted_obligation_verification_ids": [
+                        "obligation-verification"
+                    ],
+                    "evidence_refs": [obligation_proof.id, mission_proof.id],
+                },
+            )
+        )
 
 
 def test_claim_fingerprint_prevents_duplicate_verification_and_replay_is_stable() -> None:
@@ -706,7 +1096,12 @@ def test_claim_fingerprint_prevents_duplicate_verification_and_replay_is_stable(
         ))
     reducer.apply(reducer.event(
         "transition_recorded",
-        payload={"obligation_id": "goal", "action": "observe", "frame_id": 2},
+        payload={
+            "obligation_id": "goal",
+            "action": "observe",
+            "input_completed": False,
+            "frame_id": 2,
+        },
     ))
     reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "goal"}))
     second_state = reducer.projection.obligation_state("goal")
@@ -722,10 +1117,16 @@ def test_claim_fingerprint_prevents_duplicate_verification_and_replay_is_stable(
         },
     ))
     assert reducer.projection.status is MissionStatus.AWAITING_MISSION_VERIFICATION
-    reducer.apply(reducer.event(
-        "mission_verified",
-        payload={"verification_id": "mission-verification", "evidence_refs": [mission_proof.id]},
-    ))
+    reducer.apply(
+        reducer.event(
+            "mission_verified",
+            payload=_mission_verification_payload(
+                reducer,
+                mission_proof.id,
+                verification_id="mission-verification",
+            ),
+        )
+    )
     assert reducer.projection.status is MissionStatus.VERIFIED
 
 
@@ -785,7 +1186,12 @@ def test_fail_policy_waits_until_verification_attempts_are_exhausted() -> None:
 
     reducer.apply(reducer.event(
         "transition_recorded",
-        payload={"obligation_id": "goal", "action": "observe", "frame_id": 2},
+        payload={
+            "obligation_id": "goal",
+            "action": "observe",
+            "input_completed": False,
+            "frame_id": 2,
+        },
     ))
     reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "goal"}))
     reducer.apply(reducer.event(
