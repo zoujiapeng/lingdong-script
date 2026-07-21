@@ -760,6 +760,43 @@ def test_uncertain_verification_policy_is_explicit(policy: str) -> None:
         assert reducer.projection.status is MissionStatus.WAITING_EXTERNAL
 
 
+def test_fail_policy_waits_until_verification_attempts_are_exhausted() -> None:
+    definition = MissionDefinition(
+        mission_id="m1",
+        run_id="r1",
+        original_goal="goal",
+        obligations=(ObligationSpec(
+            id="goal",
+            desired_state="goal",
+            evidence_policy=EvidencePolicy(
+                max_verification_attempts=2,
+                uncertain_policy="fail",
+            ),
+        ),),
+    )
+    reducer = MissionReducer(definition)
+    reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "goal"}))
+    reducer.apply(reducer.event(
+        "verification_recorded",
+        payload={"obligation_id": "goal", "verified": False, "reason": "first rejection"},
+    ))
+    assert reducer.projection.obligation_state("goal").status is ObligationStatus.ACTIVE
+    assert reducer.projection.status is MissionStatus.RUNNING
+
+    reducer.apply(reducer.event(
+        "transition_recorded",
+        payload={"obligation_id": "goal", "action": "observe", "frame_id": 2},
+    ))
+    reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "goal"}))
+    reducer.apply(reducer.event(
+        "verification_recorded",
+        payload={"obligation_id": "goal", "verified": False, "reason": "second rejection"},
+    ))
+    assert reducer.projection.obligation_state("goal").verification_attempt_count == 2
+    assert reducer.projection.obligation_state("goal").status is ObligationStatus.BLOCKED
+    assert reducer.projection.status is MissionStatus.FAILED
+
+
 def test_visual_verifier_permission_and_identity_relationships_are_fail_closed() -> None:
     definition = MissionDefinition(
         mission_id="m1",
@@ -849,6 +886,79 @@ def test_visual_permission_uses_evidence_trust_not_payload_self_report() -> None
         },
     ))
     assert visual_reducer.projection.obligation_state("goal").status is ObligationStatus.VERIFIED
+
+
+def test_real_visual_evidence_still_requires_policy_permission() -> None:
+    definition = MissionDefinition(
+        mission_id="m1",
+        run_id="r1",
+        original_goal="goal",
+        obligations=(ObligationSpec(
+            id="goal",
+            desired_state="goal",
+            evidence_policy=EvidencePolicy(allow_independent_visual_verifier=False),
+        ),),
+    )
+    visual = EvidenceRef(
+        id="visual-proof",
+        mission_id="m1",
+        run_id="r1",
+        obligation_id="goal",
+        kind="visual-assessment",
+        trust="independent_visual_model",
+        payload_hash="hash-visual-proof",
+    )
+    reducer = MissionReducer(definition, evidence=[visual])
+    reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "goal"}))
+    with pytest.raises(EvidenceScopeError, match="not permitted"):
+        reducer.apply(reducer.event(
+            "verification_recorded",
+            payload={
+                "obligation_id": "goal",
+                "verified": True,
+                "verification_id": "visual-verification",
+                "verifier_kind": "visual_verifier",
+                "satisfied_criteria": ["goal"],
+                "evidence_refs": [visual.id],
+            },
+        ))
+
+
+@pytest.mark.parametrize(
+    "evidence_artifact_id,evidence_sha256,error",
+    (
+        ("other-artifact", ARTIFACT_SHA256, "does not identify"),
+        ("artifact-1", OTHER_ARTIFACT_SHA256, "content hash"),
+    ),
+)
+def test_artifact_binding_checks_id_and_hash_independently(
+    evidence_artifact_id: str,
+    evidence_sha256: str,
+    error: str,
+) -> None:
+    artifact_proof = EvidenceRef(
+        id="artifact-proof",
+        mission_id="m1",
+        run_id="r1",
+        obligation_id="capture",
+        artifact_id=evidence_artifact_id,
+        kind="artifact",
+        trust="deterministic",
+        payload_hash="hash-artifact-proof",
+        content_sha256=evidence_sha256,
+    )
+    capture_proof = _evidence("capture-proof", "capture")
+    reducer = MissionReducer(_definition(), evidence=[capture_proof, artifact_proof])
+    reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "capture"}))
+    reducer.apply(_verify_event(reducer, "capture", "capture-proof"))
+    artifact = ArtifactRef(
+        "artifact-1", "image/png", ARTIFACT_SHA256, "capture", "artifact-proof"
+    )
+    with pytest.raises(EvidenceScopeError, match=error):
+        reducer.apply(reducer.event(
+            "artifact_bound",
+            payload={"binding_name": "artifact-1", "artifact": artifact.to_dict()},
+        ))
 
 
 def test_artifact_target_and_fact_evidence_cannot_cross_identities() -> None:

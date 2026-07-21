@@ -623,9 +623,8 @@ def _apply_event(
             count=previous.failure_count + 1,
             obligation_id=obligation_id,
         )
-        uncertain = policy.uncertain_policy in {"blocked", "fail", "ask_user"}
         exhausted = attempt_count >= policy.max_verification_attempts
-        if uncertain or exhausted:
+        if exhausted:
             next_obligation_status, next_mission_status, policy_reason = _verification_exhausted_status(
                 policy.uncertain_policy
             )
