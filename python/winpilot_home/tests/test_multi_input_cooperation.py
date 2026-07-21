@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+from winpilot.action.raw_device import ClickCount, MouseButton, RawBackendResult
+
 
 def test_multi_input_cooperation_is_explicitly_opt_in():
     from winpilot.config import _DEFAULTS
@@ -52,7 +54,10 @@ def test_cooperative_click_never_falls_back_to_physical_on_other_foreground(monk
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
     monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
     monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: True)
-    monkeypatch.setattr(executor, "_post_click", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        executor, "_post_click",
+        lambda *_args, **_kwargs: RawBackendResult(False, {}),
+    )
     monkeypatch.setattr(executor.win32gui, "GetForegroundWindow", lambda: 999)
     monkeypatch.setattr(
         executor,
@@ -398,7 +403,10 @@ def test_cooperative_click_fallback_rechecks_ownership_before_mouse_down(monkeyp
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
     monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
     monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: True)
-    monkeypatch.setattr(executor, "_post_click", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        executor, "_post_click",
+        lambda *_args, **_kwargs: RawBackendResult(False, {}),
+    )
     monkeypatch.setattr(executor, "cooperative_input_guard", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(executor, "_cooperative_action_still_owned", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(executor, "_cursor_pos", lambda: (5, 5))
@@ -751,9 +759,12 @@ def test_raw_click_reports_interruption_between_down_and_up(monkeypatch):
     monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.append(inputs))
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
 
-    completed = executor._raw_click(10, 20, "left", False, 123)
+    completed = executor._raw_click(
+        10, 20, MouseButton.LEFT, ClickCount.SINGLE, 123,
+    )
 
-    assert completed is False
+    assert completed.input_completed is True
+    assert completed.facts["blocked"] is True
     assert len(sent) == 2  # DOWN and mandatory cleanup UP
 
 

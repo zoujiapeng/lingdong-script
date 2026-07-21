@@ -9,9 +9,13 @@ import random
 import pytest
 
 from winpilot.action.raw_device import (
+    ClickCount,
+    ClickMechanism,
+    MouseButton,
     RawActionContext,
     RawActionReceipt,
     RawBackendResult,
+    RawDeviceBackends,
     RawDeviceExecutor,
 )
 from winpilot.action.replay_policy import MutationOutcome
@@ -27,7 +31,7 @@ def _executor(calls: list, *, completed: bool | None = True) -> RawDeviceExecuto
         calls.append((x, y, amount, hwnd))
         return RawBackendResult(completed, {"via": "test"})
 
-    return RawDeviceExecutor(scroll_backend=backend)
+    return RawDeviceExecutor(RawDeviceBackends(scroll=backend))
 
 
 def test_fast_controller_names_reflective_session_adapter_as_legacy() -> None:
@@ -44,10 +48,12 @@ def test_fast_controller_names_reflective_session_adapter_as_legacy() -> None:
 
 
 def test_raw_device_requires_an_explicit_typed_backend() -> None:
-    with pytest.raises(TypeError, match="scroll_backend"):
+    with pytest.raises(TypeError, match="backends"):
         RawDeviceExecutor()
-    with pytest.raises(TypeError, match="must be callable"):
-        RawDeviceExecutor(scroll_backend=None)
+    with pytest.raises(TypeError, match="RawDeviceBackends"):
+        RawDeviceExecutor(None)
+    with pytest.raises(TypeError, match="callable"):
+        RawDeviceBackends(scroll=object())
 
 
 @pytest.mark.parametrize(
@@ -104,9 +110,9 @@ def test_scroll_uses_explicit_backend_completion_fact(
 
 def test_generic_ok_mapping_cannot_claim_input_completion() -> None:
     calls: list = []
-    executor = RawDeviceExecutor(
-        scroll_backend=lambda *args, **kwargs: calls.append((args, kwargs)) or {"ok": True},
-    )
+    executor = RawDeviceExecutor(RawDeviceBackends(
+        scroll=lambda *args, **kwargs: calls.append((args, kwargs)) or {"ok": True},
+    ))
 
     receipt = executor.scroll(_context(), 1, 2, -1)
 
@@ -123,7 +129,7 @@ def test_backend_exception_after_possible_input_is_unknown_and_not_replayed() ->
         calls.append((args, kwargs))
         raise OSError("injected post-admission failure")
 
-    receipt = RawDeviceExecutor(scroll_backend=backend).scroll(
+    receipt = RawDeviceExecutor(RawDeviceBackends(scroll=backend)).scroll(
         _context(), 1, 2, -3,
     )
 
@@ -140,7 +146,7 @@ def test_invalid_post_call_fact_is_unknown_instead_of_escaping() -> None:
         calls.append((args, kwargs))
         return RawBackendResult(True, {"invalid": object()})
 
-    receipt = RawDeviceExecutor(scroll_backend=backend).scroll(
+    receipt = RawDeviceExecutor(RawDeviceBackends(scroll=backend)).scroll(
         _context(), 1, 2, -3,
     )
 
@@ -165,22 +171,24 @@ def test_backend_facts_are_scalar_finite_and_immutable() -> None:
 
 def test_receipt_rejects_contradictory_completion_identity() -> None:
     with pytest.raises(ValueError, match="requires backend_result"):
-        RawActionReceipt(MutationOutcome.APPLIED)
+        RawActionReceipt("scroll", MutationOutcome.APPLIED)
     with pytest.raises(ValueError, match="backend_result contradicts"):
         RawActionReceipt(
+            "scroll",
             MutationOutcome.OUTCOME_UNKNOWN,
             RawBackendResult(True, {"ok": True}),
             "uncertain",
         )
     with pytest.raises(ValueError, match="backend_result contradicts"):
         RawActionReceipt(
+            "scroll",
             MutationOutcome.APPLIED,
             RawBackendResult(False, {"ok": False}),
         )
     with pytest.raises(ValueError, match="requires error_kind"):
-        RawActionReceipt(MutationOutcome.NOT_STARTED)
+        RawActionReceipt("scroll", MutationOutcome.NOT_STARTED)
     with pytest.raises(ValueError, match="requires error_kind"):
-        RawActionReceipt(MutationOutcome.OUTCOME_UNKNOWN)
+        RawActionReceipt("scroll", MutationOutcome.OUTCOME_UNKNOWN)
 
 
 def test_raw_device_has_no_session_or_second_action_parser() -> None:
@@ -217,6 +225,290 @@ def test_scroll_property_preserves_signed_coordinates_and_single_call() -> None:
         assert executor.scroll(_context(), *args).outcome is MutationOutcome.APPLIED
 
     assert calls == expected
+
+
+def test_click_uses_typed_single_mechanism_backend() -> None:
+    calls: list = []
+
+    def backend(x, y, *, button, count, mechanism, hwnd=None):
+        calls.append((x, y, button, count, mechanism, hwnd))
+        return RawBackendResult(True, {"via": mechanism.value})
+
+    receipt = RawDeviceExecutor(RawDeviceBackends(click=backend)).click(
+        _context(),
+        -12,
+        34,
+        MouseButton.RIGHT,
+        ClickCount.DOUBLE,
+        ClickMechanism.PHYSICAL,
+    )
+
+    assert calls == [(
+        -12, 34, MouseButton.RIGHT, ClickCount.DOUBLE,
+        ClickMechanism.PHYSICAL, 41,
+    )]
+    assert receipt.action == "click"
+    assert receipt.outcome is MutationOutcome.APPLIED
+    assert receipt.input_completed is True
+
+
+@pytest.mark.parametrize(
+    ("context", "x", "y", "button", "count", "mechanism", "error"),
+    [
+        (object(), 1, 2, MouseButton.LEFT, ClickCount.SINGLE,
+         ClickMechanism.PHYSICAL, "invalid_context"),
+        (_context(target=41, current=42), 1, 2, MouseButton.LEFT,
+         ClickCount.SINGLE, ClickMechanism.PHYSICAL, "target_mismatch"),
+        (_context(), True, 2, MouseButton.LEFT, ClickCount.SINGLE,
+         ClickMechanism.PHYSICAL, "invalid_args"),
+        (_context(), 1, 2, "left", ClickCount.SINGLE,
+         ClickMechanism.PHYSICAL, "invalid_args"),
+        (_context(), 1, 2, MouseButton.LEFT, 1,
+         ClickMechanism.PHYSICAL, "invalid_args"),
+        (_context(), 1, 2, MouseButton.LEFT, ClickCount.SINGLE,
+         "physical", "invalid_args"),
+    ],
+)
+def test_click_rejects_untyped_or_stale_input_before_backend(
+    context, x, y, button, count, mechanism, error,
+) -> None:
+    calls: list = []
+    executor = RawDeviceExecutor(RawDeviceBackends(
+        click=lambda *args, **kwargs: calls.append((args, kwargs)),
+    ))
+
+    receipt = executor.click(context, x, y, button, count, mechanism)
+
+    assert receipt.outcome is MutationOutcome.NOT_STARTED
+    assert receipt.error_kind == error
+    assert calls == []
+
+
+def test_missing_click_backend_fails_before_input() -> None:
+    receipt = RawDeviceExecutor(RawDeviceBackends()).click(
+        _context(), 1, 2, MouseButton.LEFT, ClickCount.SINGLE,
+        ClickMechanism.PHYSICAL,
+    )
+
+    assert receipt.outcome is MutationOutcome.NOT_STARTED
+    assert receipt.error_kind == "backend_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("fail_at", "completed_clicks"),
+    [(1, 0), (2, 0), (3, 1)],
+)
+def test_post_click_partial_failure_is_unknown_and_releases(
+    monkeypatch, fail_at: int, completed_clicks: int,
+) -> None:
+    from winpilot.action import executor
+
+    calls: list[tuple] = []
+
+    def post_message(*args):
+        calls.append(args)
+        if len(calls) == fail_at:
+            raise OSError("injected partial message failure")
+
+    monkeypatch.setattr(executor.win32gui, "WindowFromPoint", lambda point: 41)
+    monkeypatch.setattr(executor, "_same_window_root", lambda target, hwnd: True)
+    monkeypatch.setattr(
+        executor.win32gui, "ScreenToClient", lambda target, point: point,
+    )
+    monkeypatch.setattr(executor.win32gui, "PostMessage", post_message)
+    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    result = executor._post_click(
+        10, 20, MouseButton.LEFT, ClickCount.DOUBLE, expected_hwnd=41,
+    )
+
+    assert result.input_completed is None
+    assert result.facts["completed_clicks"] == completed_clicks
+    assert result.facts["release_cleanup_attempted"] is True
+    assert result.facts["release_cleanup_completed"] is True
+    assert len(calls) == fail_at + 1
+
+
+@pytest.mark.parametrize(
+    ("fail_at", "completed_clicks"),
+    [(1, 0), (2, 0), (3, 1)],
+)
+def test_physical_click_partial_failure_is_unknown_and_releases(
+    monkeypatch, fail_at: int, completed_clicks: int,
+) -> None:
+    from winpilot.action import executor
+
+    calls: list[list] = []
+
+    def send_inputs(inputs):
+        calls.append(inputs)
+        if len(calls) == fail_at:
+            raise OSError("injected partial SendInput failure")
+
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: None)
+    monkeypatch.setattr(executor, "_mouse_input", lambda flag: flag)
+    monkeypatch.setattr(executor, "_send_inputs", send_inputs)
+    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    result = executor._raw_click(
+        10, 20, MouseButton.LEFT, ClickCount.DOUBLE, None,
+    )
+
+    assert result.input_completed is None
+    assert result.facts["completed_clicks"] == completed_clicks
+    assert result.facts["release_cleanup_attempted"] is True
+    assert result.facts["release_cleanup_completed"] is True
+    assert len(calls) == fail_at + 1
+
+
+def test_physical_click_uses_final_root_ownership_not_focus_helper_result(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    sent: list[list] = []
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(executor, "_raw_focus_window", lambda hwnd: {"ok": False})
+    monkeypatch.setattr(executor, "_target_window_still_foreground", lambda hwnd: True)
+    monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: None)
+    monkeypatch.setattr(executor, "_mouse_input", lambda flag: flag)
+    monkeypatch.setattr(executor, "_send_inputs", sent.append)
+    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    result = executor._raw_click(
+        10, 20, MouseButton.LEFT, ClickCount.SINGLE, 41,
+    )
+
+    assert result.input_completed is True
+    assert len(sent) == 2
+
+
+def test_physical_click_rechecks_target_after_cursor_move(monkeypatch) -> None:
+    from winpilot.action import executor
+
+    ownership = iter((True, False))
+    sent: list[list] = []
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(executor, "_raw_focus_window", lambda hwnd: {"ok": True})
+    monkeypatch.setattr(
+        executor, "_target_window_still_foreground", lambda hwnd: next(ownership),
+    )
+    monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: None)
+    monkeypatch.setattr(executor, "_send_inputs", sent.append)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    result = executor._raw_click(
+        10, 20, MouseButton.LEFT, ClickCount.SINGLE, 41,
+    )
+
+    assert result.input_completed is False
+    assert result.facts["completed_clicks"] == 0
+    assert sent == []
+
+
+def test_strict_background_click_never_switches_mechanism(monkeypatch) -> None:
+    from winpilot.action import executor
+
+    posted: list[tuple] = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(
+        executor,
+        "_post_click",
+        lambda *args, **kwargs: (
+            posted.append((args, kwargs)) or RawBackendResult(False, {})
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_raw_click",
+        lambda *args, **kwargs: pytest.fail("strict click changed mechanism"),
+    )
+
+    result = executor.execute_click_input(
+        10, 20, MouseButton.LEFT, ClickCount.SINGLE,
+        ClickMechanism.BACKGROUND_MESSAGE, hwnd=41,
+    )
+
+    assert result.input_completed is False
+    assert len(posted) == 1
+
+
+def test_legacy_click_unknown_never_falls_back_or_claims_success(monkeypatch) -> None:
+    from winpilot.action import executor
+
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(
+        executor,
+        "_post_click",
+        lambda *args, **kwargs: RawBackendResult(
+            None, {"completed_clicks": 1, "via": "post_message"},
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_raw_click",
+        lambda *args, **kwargs: pytest.fail("unknown click was replayed"),
+    )
+
+    result = executor.click(10, 20, double=True, hwnd=41)
+
+    assert result["ok"] is False
+    assert result["verified"] is False
+    assert result["input_completed"] is None
+    assert result["outcome_unknown"] is True
+    assert result["completed_clicks"] == 1
+
+
+def test_legacy_click_dry_run_keeps_preexisting_argument_behavior(monkeypatch) -> None:
+    from winpilot.action import executor
+
+    monkeypatch.setattr(executor, "_dry_run", lambda: True)
+
+    assert executor.click(1, 2, button="legacy-invalid") == {
+        "ok": True,
+        "dry_run": True,
+    }
+
+
+def test_completed_click_is_not_replayed_when_telemetry_fails(monkeypatch) -> None:
+    from winpilot.action import executor
+
+    calls: list[str] = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(
+        executor,
+        "_post_click",
+        lambda *args, **kwargs: calls.append("post") or RawBackendResult(True, {}),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_raw_click",
+        lambda *args, **kwargs: pytest.fail("completed click was replayed"),
+    )
+    original_publish = executor.BUS.publish
+
+    def publish(event_type, **payload):
+        if event_type == "action":
+            raise RuntimeError("injected telemetry failure")
+        return original_publish(event_type, **payload)
+
+    monkeypatch.setattr(executor.BUS, "publish", publish)
+
+    assert executor.click(10, 20, hwnd=41) == {
+        "ok": True,
+        "x": 10,
+        "y": 20,
+        "via": "post_message",
+    }
+    assert calls == ["post"]
 
 
 def test_legacy_scroll_output_and_exception_semantics_are_unchanged(monkeypatch) -> None:
