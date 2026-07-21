@@ -278,6 +278,7 @@ def _schema(name: str, properties: Mapping[str, Any] | None = None) -> dict[str,
                 "type": "object",
                 "additionalProperties": False,
                 "properties": dict(properties or {}),
+                **({"required": ["x", "y"]} if name == "click" else {}),
             },
         },
     }
@@ -755,6 +756,27 @@ def test_actor_cannot_smuggle_provider_tool_into_controller() -> None:
     result = harness.runtime.run_one_turn(turn_index=4)
 
     assert result.status is RuntimeStatus.UNAVAILABLE
+    assert len(harness.actor.calls) == 1
+    assert harness.controller.calls == []
+    assert len(harness.reducer.events) == before
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        {"x": "320", "y": 240},
+        {"x": 320},
+        {"x": 320, "y": 240, "nearby_text": "repair me"},
+    ),
+)
+def test_desktop_action_arguments_fail_closed_before_controller(arguments: dict) -> None:
+    harness = _harness({**_click(), "args": arguments})
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.INVALID_PROPOSAL
+    assert "arguments rejected" in result.detail
     assert len(harness.actor.calls) == 1
     assert harness.controller.calls == []
     assert len(harness.reducer.events) == before

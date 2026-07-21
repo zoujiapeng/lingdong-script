@@ -30,6 +30,8 @@ from ..capabilities import (
     ExecutionRoute,
     PointerDisposition,
     ToolCatalog,
+    ToolArgumentValidationError,
+    ToolArgumentValidator,
     ToolRoute,
 )
 from ..mission import MissionError, MissionReducer
@@ -78,6 +80,7 @@ class MissionRuntime:
         self._profile = profile
         self._broker = broker
         self._catalog = catalog
+        self._argument_validator = ToolArgumentValidator(catalog)
         self._actor = actor
         self._state = state
         self._controller = controller
@@ -398,6 +401,16 @@ class MissionRuntime:
                 proposal_kind=proposal_kind,
                 detail="proposal tool is outside the latest Broker projection",
             )
+        if isinstance(proposal, DesktopActionProposal):
+            try:
+                self._argument_validator.validate(tool_name, proposal.args)
+            except ToolArgumentValidationError as exc:
+                return self._result(
+                    RuntimeStatus.INVALID_PROPOSAL,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    detail=str(exc),
+                )
         try:
             decision_id = self._decision_id(
                 turn_index=turn_index,
