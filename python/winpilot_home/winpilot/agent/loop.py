@@ -50,6 +50,7 @@ from ..utils.image_capture import (
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, virtual_screen_region, window_region
 from ..utils.trace_payload import sanitize_trace_payload
+from ..visual_runtime.frame_observer import FrameObserver
 from . import playbooks, prompts, session as session_mod
 from .context_guidance import ContextGuidanceMixin
 from .done_verifier import (
@@ -2639,56 +2640,40 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         )
         started = time.monotonic()
         try:
-            cached = getattr(self.session, "_last_native_frame_capture", None)
-            cached_matches = bool(
-                image_b64
-                and isinstance(cached, dict)
-                and cached.get("image_b64") == image_b64
-                and int(cached.get("hwnd") or 0) == hwnd
-                and cached.get("region") is not None
+            # Construct with this module's current dependencies on every call.
+            # Besides making the seam injectable for vNext, this preserves the
+            # legacy test/runtime ability to replace capture and scope owners.
+            observer = FrameObserver(
+                self._frame_authority,
+                capture=capture_window_jpeg_b64,
+                select_scope=select_visual_capture_scope,
+                settled_initial_capture=self._capture_settled_initial_frame,
+                virtual_desktop=virtual_screen_region,
             )
-            if frame_region is not None:
-                # Preflight captured these pixels from this exact rectangle.
-                # Never query a later window rectangle and pair it with an
-                # older JPEG: a move/resize between the two would corrupt all
-                # subsequent normalized coordinates.
-                region = frame_region
-                scope = (
-                    "full_desktop"
-                    if region == virtual_screen_region()
-                    else "target_window"
-                )
-                scope_reason = "preflight_exact_capture_region"
-            elif cached_matches:
-                # Explicit observe captured these pixels and this rectangle in
-                # one operation. Reuse the pair without a redundant screenshot.
-                region = cached["region"]
-                scope = str(cached.get("scope") or "target_window")
-                scope_reason = str(
-                    cached.get("scope_reason") or "observe_exact_capture_region"
-                )
-            else:
-                decision = select_visual_capture_scope(
-                    hwnd or None,
-                    enabled=None,
-                    related_window=getattr(
-                        self.session, "_window_related_to_target", None,
-                    ),
-                )
-                region = decision.region
-                scope = decision.scope
-                scope_reason = decision.reason
-            if region.width < 16 or region.height < 16:
+            epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
+            captured = observer.capture(
+                epoch=epoch,
+                hwnd=hwnd,
+                phase=phase,
+                action=action,
+                provided_image_b64=image_b64,
+                provided_region=frame_region,
+                cached_capture=getattr(
+                    self.session, "_last_native_frame_capture", None,
+                ),
+                related_window=getattr(
+                    self.session, "_window_related_to_target", None,
+                ),
+                expected_previous_frame_id=(
+                    previous_state.frame_id if previous_state is not None else 0
+                ),
+            )
+            if captured is None:
                 return False
-            if image_b64:
-                b64 = image_b64
-            elif phase == "initial" and action == "target_prebind":
-                b64 = self._capture_settled_initial_frame(hwnd, region)
-            else:
-                b64 = capture_window_jpeg_b64(hwnd, region=region)
-            if not b64:
-                return False
-            captured_at = time.time()
+            region = captured.region
+            scope = captured.scope
+            scope_reason = captured.reason
+            b64 = captured.image_b64
             region_tuple = (
                 int(region.left), int(region.top), int(region.width), int(region.height),
             )
@@ -2753,24 +2738,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     graphical_grounding_line,
                     pixel_graphical_candidates,
                 ) = self._visual_graphical_grounding_assist(b64)
-            max_side = 1120
-            scale = min(1.0, max_side / max(1, region.width, region.height))
-            submitted_width = max(1, int(region.width * scale))
-            submitted_height = max(1, int(region.height * scale))
-            epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
-            frame_state = self._frame_authority.commit(
-                epoch=epoch,
-                hwnd=hwnd,
-                region=region_tuple,
-                scope=scope,
-                reason=scope_reason,
-                submitted_size=(submitted_width, submitted_height),
-                image_b64=b64,
-                captured_at=captured_at,
-                expected_previous_frame_id=(
-                    previous_state.frame_id if previous_state is not None else 0
-                ),
-            )
+            frame_state = observer.commit(captured)
+            region = captured.region
+            submitted_width, submitted_height = frame_state.submitted_size
+            epoch = frame_state.epoch
             frame_id = frame_state.frame_id
             self._mirror_authoritative_frame(frame_state)
             self._record_visual_effect_checkpoint(
