@@ -38,7 +38,9 @@ from ..mission import MissionError, MissionReducer
 from ..profiling import ExecutionProfile
 from .contracts import (
     ControllerOutcome,
+    ControllerTransition,
     MissionRuntimeResult,
+    RuntimeFrame,
     RuntimeSnapshot,
     RuntimeStatus,
 )
@@ -334,6 +336,36 @@ class MissionRuntime:
             decision_id=decision_id,
             event_ids=event_ids,
             detail=detail,
+        )
+
+    def _transition_evidence_matches(
+        self,
+        transition: ControllerTransition,
+        *,
+        decision_id: str,
+        obligation_id: str,
+        post_frame: RuntimeFrame,
+    ) -> bool:
+        """Require current, deterministic evidence for this exact transition."""
+
+        evidence_refs = tuple(getattr(transition, "evidence_refs", ()) or ())
+        frame_evidence = tuple(getattr(post_frame, "evidence_refs", ()) or ())
+        frame_id = getattr(post_frame, "frame_id", None)
+        if not evidence_refs or not set(evidence_refs) <= set(frame_evidence):
+            return False
+        try:
+            refs = self._reducer.evidence_scope.require(
+                evidence_refs,
+                obligation_id=obligation_id,
+            )
+        except MissionError:
+            return False
+        return any(
+            ref.obligation_id == obligation_id
+            and ref.action_id == decision_id
+            and ref.frame_id == frame_id
+            and ref.trust == "deterministic"
+            for ref in refs
         )
 
     def run_one_turn(
@@ -655,6 +687,13 @@ class MissionRuntime:
             post = self._state.current(self._reducer.projection, turn_index=turn_index)
             if post.frame is None or post.frame.frame_id != transition.post_frame_id:
                 raise ValueError("Controller post frame is not current authority")
+            if not self._transition_evidence_matches(
+                transition,
+                decision_id=decision_id,
+                obligation_id=obligation_id,
+                post_frame=post.frame,
+            ):
+                raise ValueError("Controller transition evidence identity is not current")
             event_ids = self._accept(
                 "transition_recorded",
                 payload={
