@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -23,6 +24,7 @@ MISSION_DEFINITION_FORMAT = "mission-definition/0"
 MISSION_EVENT_FORMAT = "mission-event/0"
 MISSION_PROJECTION_FORMAT = "mission-projection/0"
 MISSION_CARD_FORMAT = "mission-card/0"
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def _as_tuple(value: Iterable[Any] | None) -> tuple[Any, ...]:
@@ -295,6 +297,7 @@ class EvidenceRef:
     action_id: str | None = None
     artifact_id: str | None = None
     created_at: float | None = None
+    content_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("id", "mission_id", "run_id", "kind", "trust"):
@@ -304,6 +307,29 @@ class EvidenceRef:
         if not str(self.payload_hash or "").strip():
             raise EvidenceScopeError("evidence payload_hash cannot be empty")
         object.__setattr__(self, "payload_hash", str(self.payload_hash))
+        if self.obligation_id is not None:
+            value = str(self.obligation_id).strip()
+            object.__setattr__(self, "obligation_id", value or None)
+        if self.action_id is not None:
+            value = str(self.action_id).strip()
+            object.__setattr__(self, "action_id", value or None)
+        if self.artifact_id is not None:
+            value = str(self.artifact_id).strip()
+            if not value:
+                object.__setattr__(self, "artifact_id", None)
+            else:
+                object.__setattr__(self, "artifact_id", value)
+                if self.content_sha256 is None:
+                    raise EvidenceScopeError(
+                        "artifact evidence requires content_sha256"
+                    )
+        if self.content_sha256 is not None:
+            content_sha = str(self.content_sha256).strip().lower()
+            if self.artifact_id is None:
+                raise EvidenceScopeError("content_sha256 requires artifact_id")
+            if not _SHA256_RE.fullmatch(content_sha):
+                raise EvidenceScopeError("content_sha256 must be a 64-character SHA-256 hex digest")
+            object.__setattr__(self, "content_sha256", content_sha)
         if self.created_at is not None and not math.isfinite(float(self.created_at)):
             raise EvidenceScopeError("evidence created_at must be finite")
 
@@ -324,6 +350,7 @@ class EvidenceRef:
             "action_id": self.action_id,
             "artifact_id": self.artifact_id,
             "created_at": self.created_at,
+            "content_sha256": self.content_sha256,
         }
 
     @classmethod
@@ -340,6 +367,7 @@ class EvidenceRef:
             action_id=(str(raw["action_id"]) if raw.get("action_id") is not None else None),
             artifact_id=(str(raw["artifact_id"]) if raw.get("artifact_id") is not None else None),
             created_at=(float(raw["created_at"]) if raw.get("created_at") is not None else None),
+            content_sha256=(str(raw["content_sha256"]) if raw.get("content_sha256") is not None else None),
         )
 
 
@@ -357,6 +385,10 @@ class ArtifactRef:
             if not value:
                 raise InvalidMissionEvent(f"artifact {name} cannot be empty")
             object.__setattr__(self, name, value)
+        digest = str(self.sha256).lower()
+        if not _SHA256_RE.fullmatch(digest):
+            raise InvalidMissionEvent("artifact sha256 must be a 64-character SHA-256 hex digest")
+        object.__setattr__(self, "sha256", digest)
 
     def to_dict(self) -> dict[str, Any]:
         return {

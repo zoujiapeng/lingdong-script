@@ -31,6 +31,10 @@ from winpilot.vnext.mission import (
 )
 
 
+ARTIFACT_SHA256 = "a" * 64
+OTHER_ARTIFACT_SHA256 = "b" * 64
+
+
 def _evidence(
     evidence_id: str,
     obligation_id: str | None = None,
@@ -198,7 +202,17 @@ def test_reducer_derives_active_obligation_and_completion_from_evidence() -> Non
     evidence = [
         _evidence("capture-proof", "capture"),
         _evidence("send-proof", "send"),
-        _evidence("artifact-proof", "capture"),
+        EvidenceRef(
+            id="artifact-proof",
+            mission_id="m1",
+            run_id="r1",
+            obligation_id="capture",
+            kind="artifact",
+            trust="deterministic",
+            payload_hash="hash-artifact-proof",
+            artifact_id="artifact-1",
+            content_sha256=ARTIFACT_SHA256,
+        ),
         _evidence("mission-proof"),
     ]
     reducer = MissionReducer(definition, evidence=evidence)
@@ -213,7 +227,7 @@ def test_reducer_derives_active_obligation_and_completion_from_evidence() -> Non
     artifact = ArtifactRef(
         artifact_id="artifact-1",
         media_type="image/png",
-        sha256="abc",
+        sha256=ARTIFACT_SHA256,
         producer_obligation_id="capture",
         evidence_ref="artifact-proof",
     )
@@ -475,8 +489,8 @@ def test_mission_card_filters_unrelated_facts_and_artifacts() -> None:
             + (VerifiedFact(**capture_fact), VerifiedFact(**send_fact))
         ),
         artifact_bindings={
-            "needed": ArtifactRef("artifact-1", "image/png", "a", "send", "proof"),
-            "unrelated": ArtifactRef("artifact-2", "image/png", "b", "capture", "proof"),
+            "needed": ArtifactRef("artifact-1", "image/png", ARTIFACT_SHA256, "send", "proof"),
+            "unrelated": ArtifactRef("artifact-2", "image/png", OTHER_ARTIFACT_SHA256, "capture", "proof"),
         },
     )
     # Set active obligation to send so the projection rule is observable.
@@ -735,7 +749,10 @@ def test_uncertain_verification_policy_is_explicit(policy: str) -> None:
     ))
     state = reducer.projection.obligation_state("goal")
     assert state.verification_attempt_count == 1
-    if policy in {"blocked", "fail"}:
+    if policy == "fail":
+        assert state.status is ObligationStatus.BLOCKED
+        assert reducer.projection.status is MissionStatus.FAILED
+    elif policy == "blocked":
         assert state.status is ObligationStatus.BLOCKED
         assert reducer.projection.status is MissionStatus.BLOCKED
     else:
@@ -777,9 +794,61 @@ def test_visual_verifier_permission_and_identity_relationships_are_fail_closed()
             scope="goal",
         )
     with pytest.raises(InvalidMissionEvent):
-        ArtifactRef("", "image/png", "hash", "goal", proof.id)
+        ArtifactRef("", "image/png", ARTIFACT_SHA256, "goal", proof.id)
     with pytest.raises(InvalidMissionEvent):
         TargetBinding("", 1, 1, "app", "title", proof.id, 0)
+
+
+def test_visual_permission_uses_evidence_trust_not_payload_self_report() -> None:
+    definition = MissionDefinition(
+        mission_id="m1",
+        run_id="r1",
+        original_goal="goal",
+        obligations=(ObligationSpec(
+            id="goal",
+            desired_state="goal",
+            evidence_policy=EvidencePolicy(allow_independent_visual_verifier=True),
+        ),),
+    )
+    deterministic = _evidence("deterministic-proof", "goal")
+    reducer = MissionReducer(definition, evidence=[deterministic])
+    reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "goal"}))
+    with pytest.raises(EvidenceScopeError, match="not backed"):
+        reducer.apply(reducer.event(
+            "verification_recorded",
+            payload={
+                "obligation_id": "goal",
+                "verified": True,
+                "verification_id": "payload-only-visual",
+                "verifier_kind": "visual_verifier",
+                "satisfied_criteria": ["goal"],
+                "evidence_refs": [deterministic.id],
+            },
+        ))
+
+    visual = EvidenceRef(
+        id="visual-proof",
+        mission_id="m1",
+        run_id="r1",
+        obligation_id="goal",
+        kind="visual-assessment",
+        trust="independent_visual_model",
+        payload_hash="hash-visual-proof",
+    )
+    visual_reducer = MissionReducer(definition, evidence=[visual])
+    visual_reducer.apply(visual_reducer.event("obligation_claimed", payload={"obligation_id": "goal"}))
+    visual_reducer.apply(visual_reducer.event(
+        "verification_recorded",
+        payload={
+            "obligation_id": "goal",
+            "verified": True,
+            "verification_id": "real-visual-proof",
+            "verifier_kind": "deterministic",
+            "satisfied_criteria": ["goal"],
+            "evidence_refs": [visual.id],
+        },
+    ))
+    assert visual_reducer.projection.obligation_state("goal").status is ObligationStatus.VERIFIED
 
 
 def test_artifact_target_and_fact_evidence_cannot_cross_identities() -> None:
@@ -792,6 +861,7 @@ def test_artifact_target_and_fact_evidence_cannot_cross_identities() -> None:
         kind="artifact",
         trust="deterministic",
         payload_hash="hash-artifact-proof",
+        content_sha256=ARTIFACT_SHA256,
     )
     capture_proof = _evidence("capture-proof", "capture")
     reducer = MissionReducer(_definition(), evidence=[capture_proof, artifact_proof])
@@ -803,7 +873,7 @@ def test_artifact_target_and_fact_evidence_cannot_cross_identities() -> None:
             payload={
                 "binding_name": "artifact-1",
                 "artifact": ArtifactRef(
-                    "artifact-1", "image/png", "hash", "capture", "artifact-proof"
+                    "artifact-1", "image/png", OTHER_ARTIFACT_SHA256, "capture", "artifact-proof"
                 ).to_dict(),
             },
         ))
@@ -813,6 +883,7 @@ def test_artifact_target_and_fact_evidence_cannot_cross_identities() -> None:
         mission_id="m2",
         run_id="r2",
         artifact_id="artifact-1",
+        content_sha256=OTHER_ARTIFACT_SHA256,
         kind="target",
         trust="deterministic",
         payload_hash="hash-target-proof",
