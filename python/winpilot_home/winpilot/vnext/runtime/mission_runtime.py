@@ -43,6 +43,7 @@ from .contracts import (
     RuntimeStatus,
 )
 from .ports import ActorPort, ControllerPort, PointerCleanupPort, RuntimeStatePort
+from .mutation_permits import MutationPermitAuthority, MutationPermitError
 
 
 _PROPOSAL_TOOL = {
@@ -69,6 +70,7 @@ class MissionRuntime:
         state: RuntimeStatePort,
         controller: ControllerPort,
         pointer_cleanup: PointerCleanupPort | None = None,
+        mutation_permits: MutationPermitAuthority | None = None,
     ) -> None:
         if not isinstance(reducer, MissionReducer):
             raise TypeError("reducer must be MissionReducer")
@@ -85,11 +87,24 @@ class MissionRuntime:
         self._state = state
         self._controller = controller
         self._pointer_cleanup = pointer_cleanup
+        self._mutation_permits = mutation_permits or MutationPermitAuthority(
+            reducer.definition.mission_id,
+            reducer.definition.run_id,
+        )
+        if (
+            self._mutation_permits.mission_id != reducer.definition.mission_id
+            or self._mutation_permits.run_id != reducer.definition.run_id
+        ):
+            raise TypeError("mutation permit authority must match Runtime mission/run")
         self._turn_lock = threading.Lock()
 
     @property
     def reducer(self) -> MissionReducer:
         return self._reducer
+
+    @property
+    def mutation_permits(self) -> MutationPermitAuthority:
+        return self._mutation_permits
 
     @staticmethod
     def _stopped(stop_event: threading.Event | None) -> bool:
@@ -168,6 +183,47 @@ class MissionRuntime:
             and target.hwnd == binding.hwnd
             and target.process_id == binding.process_id
             and target.epoch == binding.epoch
+        )
+
+    def _mutation_still_current(
+        self,
+        envelope: ActorDecisionEnvelope,
+        *,
+        turn_index: int,
+        grants: tuple[CapabilityGrant, ...],
+        stop_event: threading.Event | None,
+    ) -> bool:
+        """Read-only revalidation performed when Controller consumes a permit."""
+
+        if self._stopped(stop_event):
+            return False
+        projection = self._reducer.projection
+        if (
+            projection.mission_id != envelope.mission_id
+            or projection.run_id != envelope.run_id
+            or projection.revision != envelope.mission_revision
+            or projection.active_obligation_id != envelope.obligation_id
+        ):
+            return False
+        latest = self._state.current(projection, turn_index=turn_index)
+        if (
+            latest.broker_state.turn_index != turn_index
+            or not self._snapshot_matches_mission(latest)
+            or latest.frame is None
+            or latest.frame.commit_identity != envelope.frame
+            or latest.frame.evidence_refs != envelope.allowed_evidence_scope
+            or latest.target != envelope.target
+            or latest.broker_state.pointer != envelope.pointer
+        ):
+            return False
+        broker = self._project(latest, grants)
+        tool_name = self._proposal_tool(envelope.proposal)
+        return bool(
+            broker.execution_route is ExecutionRoute.VISUAL_ACTOR
+            and broker.projection_id == envelope.broker_projection_id
+            and tuple(grant.grant_id for grant in broker.active_grants)
+            == envelope.capability_grant_ids
+            and self._tool_admitted(tool_name, broker)
         )
 
     @staticmethod
@@ -543,14 +599,45 @@ class MissionRuntime:
         if self._stopped(stop_event):
             return self._canceled(turn_index)
         try:
+            self._mutation_permits.issue(
+                envelope,
+                turn_index=turn_index,
+                still_current=lambda: self._mutation_still_current(
+                    envelope,
+                    turn_index=turn_index,
+                    grants=grants,
+                    stop_event=stop_event,
+                ),
+            )
+        except MutationPermitError as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                detail=str(exc),
+            )
+        permit_was_pending = False
+        try:
             transition = self._controller.execute(envelope, stop_event=stop_event)
         except Exception as exc:
+            self._mutation_permits.revoke(decision_id)
             return self._block_unknown(
                 obligation_id,
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=decision_id,
                 detail=f"Controller raised after admission: {exc}",
+            )
+        else:
+            permit_was_pending = self._mutation_permits.revoke(decision_id)
+        if permit_was_pending and transition.outcome is not ControllerOutcome.REJECTED:
+            return self._block_unknown(
+                obligation_id,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                detail="Controller returned a mutation outcome without consuming Runtime permit",
             )
         if (
             transition.action_id != decision_id
