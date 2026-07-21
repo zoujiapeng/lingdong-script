@@ -1,6 +1,6 @@
 # vNext Agent 核心旁路
 
-状态：**P0/P1 纯状态旁路已实现；Broker、Actor、Verifier、Planner/Inspector 仍未接入运行时**
+状态：**P0/P1/P1.5 已实现；P2a 纯合同与确定性 Policy 已完成；Profiler 模型调用、Broker、Actor、Verifier、Planner/Inspector 仍未接入运行时**
 
 迁移分支：`codex/vnext-agent-core`
 

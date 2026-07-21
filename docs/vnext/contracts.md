@@ -1,7 +1,7 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。P1 已实现纯 Python 合同、Reducer、replay、MissionCard 和
-legacy shadow；Task Profiler、Execution Policy、Broker、模型和桌面动作仍未接入。实现时先固定
+本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和
+legacy shadow；P2a 已实现纯 Task Profile 合同与确定性 Execution Policy。Profiler 模型调用、Broker、模型和桌面动作仍未接入。实现时先固定
 schema、Reducer 与 envelope 测试；任何运行时接线都必须经过迁移计划的后续阶段门槛。
 
 ## 1. 版本与基本规则
@@ -124,6 +124,28 @@ Execution Policy 不理解 GUI，也不生成 obligation。它只能：
 - 根据 accepted runtime facts 产生有审计理由的 profile revision。
 
 `legacy/vnext` 不属于 ExecutionProfile，由产品或实验配置显式选择。
+
+### P2a implementation status (2026-07-21)
+
+P2a is implemented as a pure, versioned sidecar in
+`python/winpilot_home/winpilot/vnext/execution_profile.py`.  The canonical
+wire formats are `task-profile-proposal/0` and `execution-profile/0`.
+`TaskDimensions`, `CognitiveServices`, `TaskProfileProposal`,
+`ExecutionDepth`, `ExecutionProfile`, and `ExecutionPolicy` reject unknown
+fields, wrong versions, non-JSON values, non-canonical capabilities, and
+runtime identity or GUI-route fields.  A proposal can express only semantic
+dimensions, broad capability hypotheses, cognitive-service requests, semantic
+triggers, confidence, and rationale.  It cannot contain runtime version,
+application workflow, tools, buttons, selectors, coordinates, next actions,
+obligation/mission patches, or runtime identity.
+
+`ExecutionPolicy` is deterministic and injectable.  It validates the
+capability catalog, applies a safe `standard` default for missing, malformed,
+unsupported, or low-confidence proposals, and records every depth/service
+restriction in `policy_reasons`.  The policy is shadow-only in P2a: no model
+profiler invocation, legacy execution, Broker, Actor, Planner, Inspector,
+prompt, tool surface, Controller, done semantics, or frontend integration is
+connected.
 
 ## 4. MissionDefinition
 
@@ -811,10 +833,13 @@ obligation remains active, waits for external recovery, or becomes blocked.
 Visual verifier evidence is accepted only when
 `allow_independent_visual_verifier` is true.
 
-`ArtifactRef`, `TargetBinding`, and `VerifiedFact` require non-empty stable
-identities. Reducer acceptance additionally checks that their evidence
-references are in the current run scope and identify the same artifact,
-target, or obligation. `TransitionSummary` and `FailureSummary` carry an
+`ArtifactRef` requires a canonical SHA-256 content identity. Its bound
+evidence must carry the same artifact id and the same `content_sha256`, in
+the current run scope; an id-only or payload-only proof is rejected.
+`TargetBinding` and `VerifiedFact` require non-empty stable identities.
+Reducer acceptance additionally checks that their evidence references are in
+the current run scope and identify the same target or obligation.
+`TransitionSummary` and `FailureSummary` carry an
 `obligation_id`; `MissionCard` projects either summary only when it belongs to
 the currently active obligation, so feedback from a previous obligation
 cannot leak into the next card. Legacy decomposition is retained only when

@@ -197,3 +197,21 @@
   filters feedback by active obligation. Legacy split is retained only when
   every row has an explicit dependency/artifact edge; unknown capabilities are
   metadata, never requirements.
+
+### D019: P2a uses a pure proposal contract and deterministic policy
+
+- status: accepted
+- decision: `TaskDimensions`, `CognitiveServices`, `TaskProfileProposal`,
+  `ExecutionDepth`, and `ExecutionProfile` are strict versioned values. A
+  proposal contains semantic dimensions, broad capability hypotheses,
+  cognitive-service requests, semantic triggers, confidence, and rationale;
+  it cannot contain runtime identity, application workflows, tools, buttons,
+  selectors, coordinates, next actions, or obligation/mission patches.
+- policy: `ExecutionPolicy` is deterministic and injectable. It validates the
+  canonical capability catalog, applies a safe `standard` profile for missing,
+  malformed, unsupported, or low-confidence proposals, restricts depth and
+  services from semantic pressure and availability facts, and records policy
+  reasons. It never calls a model or selects a GUI route.
+- rollout: P2a is shadow-only. Profiler model invocation, Broker, Actor,
+  Planner, Inspector, prompts, tool surfaces, Controller, done semantics,
+  legacy execution, and frontend integration remain disconnected.
