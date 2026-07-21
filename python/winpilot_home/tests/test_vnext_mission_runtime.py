@@ -164,20 +164,29 @@ class SpyController:
         if self.raises is not None:
             raise self.raises
         evidence_refs: tuple[str, ...] = ()
-        if self.outcome is ControllerOutcome.COMPLETED:
+        if self.outcome in {ControllerOutcome.COMPLETED, ControllerOutcome.REJECTED}:
             evidence_id = f"evidence-{envelope.decision_id}"
             self.registry.add(EvidenceRef(
                 id=evidence_id,
                 mission_id=envelope.mission_id,
                 run_id=envelope.run_id,
                 obligation_id=envelope.obligation_id,
-                kind="action_effect",
+                kind="controller_transition",
                 trust="deterministic",
                 payload_hash=f"payload-{envelope.decision_id}",
                 frame_id=self.state.post_action.frame.frame_id,
                 action_id=envelope.decision_id,
             ))
             evidence_refs = (evidence_id,)
+            post_frame = self.state.post_action.frame
+            assert post_frame is not None
+            self.state.post_action = replace(
+                self.state.post_action,
+                frame=replace(
+                    post_frame,
+                    evidence_refs=post_frame.evidence_refs + evidence_refs,
+                ),
+            )
         proposal = envelope.proposal
         transition = ControllerTransition(
             outcome=self.outcome,
@@ -1011,6 +1020,56 @@ def test_controller_identity_mismatch_blocks_after_one_call_without_replay(misma
     assert len(harness.controller.calls) == 1
     assert [event.kind for event in harness.reducer.events[before:]] == ["obligation_blocked"]
     assert harness.reducer.projection.obligation_state("o1").status is ObligationStatus.BLOCKED
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ("action_id", "frame_id", "obligation_id", "trust", "post_frame_scope"),
+)
+def test_controller_evidence_must_bind_exact_transition_identity(mismatch: str) -> None:
+    harness = _harness(_click())
+
+    def corrupt(
+        envelope: ActorDecisionEnvelope,
+        transition: ControllerTransition,
+    ) -> ControllerTransition:
+        evidence_id = transition.evidence_refs[0]
+        if mismatch == "post_frame_scope":
+            post_frame = harness.state.post_action.frame
+            assert post_frame is not None
+            harness.state.post_action = replace(
+                harness.state.post_action,
+                frame=replace(
+                    post_frame,
+                    evidence_refs=tuple(
+                        ref for ref in post_frame.evidence_refs if ref != evidence_id
+                    ),
+                ),
+            )
+            return transition
+        ref = harness.registry.refs[evidence_id]
+        changes = {
+            "action_id": "other-decision",
+            "frame_id": 999,
+            "obligation_id": "other-obligation",
+            "trust": "model_visual",
+        }
+        harness.registry.refs[evidence_id] = replace(
+            ref,
+            **{mismatch: changes[mismatch]},
+        )
+        return transition
+
+    harness.controller.transition_mutator = corrupt
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.BLOCKED
+    assert len(harness.controller.calls) == 1
+    assert [event.kind for event in harness.reducer.events[before:]] == [
+        "obligation_blocked",
+    ]
 
 
 def test_canceled_held_pointer_uses_only_deterministic_cleanup() -> None:
