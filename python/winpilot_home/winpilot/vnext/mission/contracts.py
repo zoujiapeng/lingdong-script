@@ -148,6 +148,7 @@ class MissionStatus(str, Enum):
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
     WAITING_EXTERNAL = "waiting_external"
+    AWAITING_MISSION_VERIFICATION = "awaiting_mission_verification"
     BLOCKED = "blocked"
     VERIFIED = "verified"
     FAILED = "failed"
@@ -350,6 +351,13 @@ class ArtifactRef:
     producer_obligation_id: str
     evidence_ref: str
 
+    def __post_init__(self) -> None:
+        for name in ("artifact_id", "media_type", "sha256", "producer_obligation_id", "evidence_ref"):
+            value = str(getattr(self, name) or "").strip()
+            if not value:
+                raise InvalidMissionEvent(f"artifact {name} cannot be empty")
+            object.__setattr__(self, name, value)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "artifact_id": self.artifact_id,
@@ -381,6 +389,15 @@ class TargetBinding:
     epoch: int
 
     def __post_init__(self) -> None:
+        for name in ("binding_id", "executable_identity", "established_by_evidence_ref"):
+            value = str(getattr(self, name) or "").strip()
+            if not value:
+                raise InvalidMissionEvent(f"target {name} cannot be empty")
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "title_snapshot", str(self.title_snapshot or ""))
+        object.__setattr__(self, "hwnd", int(self.hwnd))
+        object.__setattr__(self, "process_id", int(self.process_id))
+        object.__setattr__(self, "epoch", int(self.epoch))
         if int(self.hwnd) <= 0:
             raise InvalidMissionEvent("target hwnd must be positive")
         if int(self.process_id) < 0 or int(self.epoch) < 0:
@@ -420,8 +437,21 @@ class VerifiedFact:
     expires_on_epoch_change: bool = True
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
-        object.__setattr__(self, "valid_for_obligation_ids", _as_string_tuple(self.valid_for_obligation_ids))
+        for name in ("id", "statement", "scope"):
+            value = str(getattr(self, name) or "").strip()
+            if not value:
+                raise InvalidMissionEvent(f"verified fact {name} cannot be empty")
+            object.__setattr__(self, name, value)
+        evidence_refs = _as_string_tuple(self.evidence_refs)
+        if not evidence_refs:
+            raise EvidenceScopeError("verified fact requires evidence_refs")
+        if len(evidence_refs) != len(set(evidence_refs)):
+            raise EvidenceScopeError("verified fact evidence_refs must be unique")
+        valid_for = _as_string_tuple(self.valid_for_obligation_ids)
+        if len(valid_for) != len(set(valid_for)):
+            raise InvalidMissionEvent("verified fact obligation ids must be unique")
+        object.__setattr__(self, "evidence_refs", evidence_refs)
+        object.__setattr__(self, "valid_for_obligation_ids", valid_for)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -441,8 +471,13 @@ class TransitionSummary:
     visible_effect: str = ""
     evidence_refs: tuple[str, ...] = ()
     frame_id: int | None = None
+    obligation_id: str = ""
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "action", str(self.action or "unknown"))
+        object.__setattr__(self, "obligation_id", str(self.obligation_id or "").strip())
+        if not self.obligation_id:
+            raise InvalidMissionEvent("transition summary must bind an obligation")
         object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
 
     def to_dict(self) -> dict[str, Any]:
@@ -452,6 +487,7 @@ class TransitionSummary:
             "visible_effect": self.visible_effect,
             "evidence_refs": list(self.evidence_refs),
             "frame_id": self.frame_id,
+            "obligation_id": self.obligation_id,
         }
 
 
@@ -461,9 +497,17 @@ class FailureSummary:
     message: str = ""
     evidence_refs: tuple[str, ...] = ()
     count: int = 1
+    obligation_id: str = ""
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", str(self.kind or "failure"))
+        object.__setattr__(self, "obligation_id", str(self.obligation_id or "").strip())
+        if not self.obligation_id:
+            raise InvalidMissionEvent("failure summary must bind an obligation")
         object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
+        if int(self.count) < 1:
+            raise InvalidMissionEvent("failure count must be positive")
+        object.__setattr__(self, "count", int(self.count))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -471,6 +515,7 @@ class FailureSummary:
             "message": self.message,
             "evidence_refs": list(self.evidence_refs),
             "count": self.count,
+            "obligation_id": self.obligation_id,
         }
 
 
@@ -761,13 +806,45 @@ class ObligationProjection:
     verification_id: str | None = None
     failure_count: int = 0
     last_reason: str = ""
+    claim_fingerprint: str | None = None
+    verified_claim_fingerprint: str | None = None
+    activation_attempt_count: int = 0
+    verification_attempt_count: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", ObligationStatus(self.status))
         object.__setattr__(self, "claim_evidence_refs", _as_string_tuple(self.claim_evidence_refs))
         object.__setattr__(self, "verified_evidence_refs", _as_string_tuple(self.verified_evidence_refs))
         if self.verification_id is not None:
-            object.__setattr__(self, "verification_id", str(self.verification_id))
+            value = str(self.verification_id).strip()
+            if not value:
+                raise InvalidMissionEvent("verification_id cannot be empty")
+            object.__setattr__(self, "verification_id", value)
+        if self.claim_fingerprint is not None:
+            value = str(self.claim_fingerprint).strip()
+            if not value:
+                raise InvalidMissionEvent("claim_fingerprint cannot be empty")
+            object.__setattr__(self, "claim_fingerprint", value)
+        if self.verified_claim_fingerprint is not None:
+            value = str(self.verified_claim_fingerprint).strip()
+            if not value:
+                raise InvalidMissionEvent("verified_claim_fingerprint cannot be empty")
+            object.__setattr__(self, "verified_claim_fingerprint", value)
+        for name in ("failure_count", "activation_attempt_count", "verification_attempt_count"):
+            value = int(getattr(self, name))
+            if value < 0:
+                raise InvalidMissionEvent(f"{name} cannot be negative")
+            object.__setattr__(self, name, value)
+
+    @property
+    def accepted_verification_id(self) -> str | None:
+        """Canonical read name for the accepted obligation verifier identity."""
+        return self.verification_id
+
+    @property
+    def activation_count(self) -> int:
+        """Compatibility read alias; the serialized field is explicit."""
+        return self.activation_attempt_count
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -778,6 +855,10 @@ class ObligationProjection:
             "verification_id": self.verification_id,
             "failure_count": self.failure_count,
             "last_reason": self.last_reason,
+            "claim_fingerprint": self.claim_fingerprint,
+            "verified_claim_fingerprint": self.verified_claim_fingerprint,
+            "activation_attempt_count": self.activation_attempt_count,
+            "verification_attempt_count": self.verification_attempt_count,
         }
 
 
@@ -799,6 +880,7 @@ class MissionProjection:
     last_transition: TransitionSummary | None = None
     failure_summary: FailureSummary | None = None
     status: MissionStatus = MissionStatus.RUNNING
+    mission_verification_id: str | None = None
     last_error: str = ""
     format: str = MISSION_PROJECTION_FORMAT
 
@@ -817,6 +899,11 @@ class MissionProjection:
         object.__setattr__(self, "failure_budgets", _mapping(self.failure_budgets))
         object.__setattr__(self, "accepted_event_ids", _as_string_tuple(self.accepted_event_ids))
         object.__setattr__(self, "status", MissionStatus(self.status))
+        if self.mission_verification_id is not None:
+            value = str(self.mission_verification_id).strip()
+            if not value:
+                raise InvalidMissionEvent("mission_verification_id cannot be empty")
+            object.__setattr__(self, "mission_verification_id", value)
         if self.pending_approval is not None:
             object.__setattr__(self, "pending_approval", _json_mapping(self.pending_approval))
 
@@ -877,6 +964,7 @@ class MissionProjection:
             "last_transition": self.last_transition.to_dict() if self.last_transition else None,
             "failure_summary": self.failure_summary.to_dict() if self.failure_summary else None,
             "status": self.status.value,
+            "mission_verification_id": self.mission_verification_id,
             "last_error": self.last_error,
         }
 
@@ -978,6 +1066,13 @@ class MissionCard:
                 ) and artifact.artifact_id not in seen_artifacts:
                     seen_artifacts.add(artifact.artifact_id)
                     relevant_artifacts.append(artifact)
+        active_id = projection.active_obligation_id
+        transition = projection.last_transition
+        if transition is not None and transition.obligation_id != active_id:
+            transition = None
+        failure = projection.failure_summary
+        if failure is not None and failure.obligation_id != active_id:
+            failure = None
         return cls(
             mission_id=projection.mission_id,
             mission_revision=projection.revision,
@@ -986,8 +1081,8 @@ class MissionCard:
             verified_facts=tuple(relevant_facts),
             artifact_bindings=tuple(relevant_artifacts),
             target_binding=projection.target_binding,
-            last_transition=projection.last_transition,
-            failure_summary=projection.failure_summary,
+            last_transition=transition,
+            failure_summary=failure,
         )
 
 

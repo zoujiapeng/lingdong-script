@@ -35,23 +35,53 @@ def _items(value: Any) -> tuple[Any, ...]:
         return (value,)
 
 
-def _broad_capabilities(values: Iterable[Any]) -> tuple[str, ...]:
-    """Keep legacy capability names lossless while removing route granularity."""
+_KNOWN_CAPABILITIES = {
+    # These are capability classes, not application or task rules.  Unknown
+    # legacy labels remain metadata and can never silently become requirements.
+    "visual.interact",
+    "visual.observe",
+    "visual.read",
+    "visual.read_text",
+    "visual.spatial",
+    "pointer.dynamic",
+    "artifact.capture",
+    "artifact.read",
+    "artifact.transform",
+    "application.resolve",
+    "application.open",
+    "communication.send_text",
+    "communication.send_artifact",
+    "mcp.discover",
+    "mcp.office",
+    "external.wait",
+}
+
+
+def _partition_capabilities(values: Iterable[Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return known broad capabilities and isolate unknown legacy metadata."""
     aliases = {
         "visual.adaptive_interaction": "visual.interact",
         "visual.execute": "visual.interact",
         "desktop.execute": "visual.interact",
         "desktop.interact": "visual.interact",
+        "visual.spatial_interaction": "visual.spatial",
     }
-    result: list[str] = []
+    known: list[str] = []
+    unknown: list[str] = []
     for raw in values:
         name = str(raw or "").strip()
         if not name:
             continue
         name = aliases.get(name, name)
-        if name not in result:
-            result.append(name)
-    return tuple(result or ("visual.interact",))
+        target = known if name in _KNOWN_CAPABILITIES else unknown
+        if name not in target:
+            target.append(name)
+    return tuple(known or ("visual.interact",)), tuple(unknown)
+
+
+def _broad_capabilities(values: Iterable[Any]) -> tuple[str, ...]:
+    """Compatibility helper returning only canonical known capabilities."""
+    return _partition_capabilities(values)[0]
 
 
 def _stage_maps(contract: Any) -> tuple[dict[str, Any], dict[str, str]]:
@@ -130,7 +160,14 @@ def _row_edges(rows: tuple[tuple[Any, Any], ...]) -> tuple[set[tuple[int, int]],
         for producer_index, produced in enumerate(outputs):
             if producer_index != index and produced.intersection(inputs[index]):
                 edges.add((producer_index, index))
-    return edges, bool(edges)
+    # Every split row must participate in at least one reliable relation.  A
+    # single independent row is otherwise enough to make the generated DAG
+    # look more certain than the legacy contract actually is.
+    covered: set[int] = set()
+    for producer, consumer in edges:
+        covered.add(producer)
+        covered.add(consumer)
+    return edges, len(covered) == len(rows)
 
 
 def _safe_to_split(rows: tuple[tuple[Any, Any], ...]) -> bool:
@@ -161,6 +198,18 @@ def project_legacy_contract(
     run_id = str(run_id or _get(contract, "run_id", "") or f"legacy-shadow-run-{task_id}")
     stages, _ = _stage_maps(contract)
     rows = _legacy_obligation_rows(contract)
+    unknown_capabilities: list[str] = []
+    for raw, stage in rows:
+        values = [
+            *_items(_get(raw, "required_capabilities", ())),
+            *(_items(_get(stage, "required_capabilities", ())) if stage else ()),
+        ]
+        for provider in _items(_get(raw, "evidence_providers", ())):
+            values.extend(_items(_get(provider, "capabilities", ())))
+        _, unknown = _partition_capabilities(values)
+        for item in unknown:
+            if item not in unknown_capabilities:
+                unknown_capabilities.append(item)
 
     experience_policy = str(_get(contract, "experience_policy", "allow") or "allow")
     # A contract with no required row cannot prove any user-visible completion
@@ -178,6 +227,7 @@ def project_legacy_contract(
                 "legacy_contract_format": str(_get(contract, "format", "task-contract/1") or "task-contract/1"),
                 "legacy_task_id": task_id,
                 "legacy_split_fallback": "full_goal",
+                **({"legacy_unknown_capabilities": tuple(unknown_capabilities)} if unknown_capabilities else {}),
             },
         )
 
@@ -203,10 +253,13 @@ def project_legacy_contract(
         if _get(raw, "acceptance_criteria", None):
             criteria = tuple(str(item) for item in _items(_get(raw, "acceptance_criteria")))
         stage_capabilities = _items(_get(stage, "required_capabilities", ())) if stage else ()
+        raw_capabilities = _items(_get(raw, "required_capabilities", ()))
         provider_capabilities: list[str] = []
         for provider in _items(_get(raw, "evidence_providers", ())):
             provider_capabilities.extend(_items(_get(provider, "capabilities", ())))
-        capabilities = _broad_capabilities((*stage_capabilities, *provider_capabilities))
+        capabilities, _unknown = _partition_capabilities(
+            (*raw_capabilities, *stage_capabilities, *provider_capabilities)
+        )
         artifact_ref = str(_get(raw, "artifact_ref", "") or "").strip()
         outputs = [str(_get(item, "name", "") or "") for item in _items(_get(stage, "outputs", ())) if _get(item, "name", "")]
         if artifact_ref and artifact_ref not in outputs:
@@ -244,7 +297,9 @@ def project_legacy_contract(
             for stage_dependency in _items(_get(stage, "depends_on", ())) if stage else ():
                 dependency_ids.extend(stage_to_ids.get(str(stage_dependency), ()))
             explicit = _items(_get(raw, "depends_on", ()))
-            dependency_ids.extend(str(item) for item in explicit)
+            for item in explicit:
+                dependency_ids.extend(stage_to_ids.get(str(item), ()))
+                dependency_ids.append(str(item))
             dependency_ids.extend(
                 drafts[producer_index].id
                 for producer_index, consumer_index in artifact_edges
@@ -277,6 +332,7 @@ def project_legacy_contract(
             "legacy_contract_format": str(_get(contract, "format", "task-contract/1") or "task-contract/1"),
             "legacy_task_id": task_id,
             "legacy_stage_ids": tuple(stages),
+            **({"legacy_unknown_capabilities": tuple(unknown_capabilities)} if unknown_capabilities else {}),
         },
     )
 
