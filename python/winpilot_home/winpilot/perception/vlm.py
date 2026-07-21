@@ -23,6 +23,7 @@ import cv2
 
 from ..config import CONFIG
 from ..model_adapter import model_profile_from_config
+from ..modeling import create_openai_client
 from ..utils.log import logger
 from ..utils.screenshot import Region, capture
 from .model import UIElement
@@ -71,10 +72,8 @@ def is_configured() -> bool:
 
 
 def _client():
-    from openai import OpenAI
-
     vlm = _settings()
-    return OpenAI(
+    return create_openai_client(
         base_url=vlm["base_url"],
         api_key=vlm.get("api_key") or "none",
         timeout=120,

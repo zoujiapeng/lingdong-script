@@ -26,6 +26,13 @@ from ..model_adapter import (
     empty_usage_total,
     model_profile_from_config,
 )
+from ..modeling import (
+    ModelCallError,
+    ModelCallRuntime,
+    ModelRequestEnvelope,
+    ModelRetryPolicy,
+    create_openai_client,
+)
 from ..perception import fusion, intent, reducer, vlm
 from ..runtime_info import runtime_fingerprint
 from ..fast.action_contract import (
@@ -692,8 +699,6 @@ def _unexecuted_constraint_category(result_text: str) -> str:
 
 
 def _client():
-    from openai import OpenAI
-
     api = CONFIG.get("api", default={})
     if not api.get("api_key"):
         raise RuntimeError("config.json 缺少 api.api_key")
@@ -705,7 +710,11 @@ def _client():
     # invalid or unexpectedly large value.  AgentRunner owns the total
     # request watchdog below and ignores late responses after a deadline.
     timeout_s = max(5.0, min(180.0, timeout_s))
-    return OpenAI(base_url=api["base_url"], api_key=api["api_key"], timeout=timeout_s)
+    return create_openai_client(
+        base_url=api["base_url"],
+        api_key=api["api_key"],
+        timeout=timeout_s,
+    )
 
 
 def _main_model_has_vision() -> bool:
@@ -4800,78 +4809,79 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "tools": tools,
         })
 
-        def _is_rate_limit(exc: Exception) -> bool:
-            text = str(exc).lower()
-            return "429" in text or "too many requests" in text or "rate limit" in text
-
         cancel_event = threading.Event()
 
-        def _backoff_sleep(seconds: float) -> bool:
-            """Sleep in small slices so a Stop interrupts the wait. Returns
-            False if a Stop was requested mid-wait."""
-            waited = 0.0
-            while waited < seconds:
-                if self.stop_event.is_set() or cancel_event.is_set():
-                    return False
-                time.sleep(0.2)
-                waited += 0.2
-            return True
+        request_params: dict[str, Any] = {
+            "model": model,
+            "messages": self.messages,
+            "tools": tools,
+        }
+        if gui_tool_recovery_request and tools:
+            request_params["tool_choice"] = "required"
+        if thinking_enabled:
+            request_params["max_completion_tokens"] = request_max_tokens
+        else:
+            request_params["temperature"] = float(api.get("temperature", 0.3))
+            request_params["max_tokens"] = request_max_tokens
+        if thinking_mode is not None:
+            request_params["extra_body"] = {
+                "thinking": {"type": thinking_mode},
+            }
+
+        prepare_request = getattr(client, "prepare_chat_completion", None)
+        send_prepared = getattr(client, "send_prepared_chat_completion", None)
+        if callable(prepare_request) and callable(send_prepared):
+            provider_request = prepare_request(**request_params)
+            send_once = send_prepared
+        else:
+            provider_request = request_params
+
+            def send_once(params: dict[str, Any]):
+                return client.chat.completions.create(**params)
+
+        request_envelope = ModelRequestEnvelope.bind(
+            decision_id=f"{self.run_id}:{decision_step}:{self.model_request_count}",
+            model_role=model_role,
+            purpose="legacy_agent_decision",
+            provider_request=provider_request,
+        )
+        retry_policy = ModelRetryPolicy(
+            max_attempts=max_attempts,
+            total_timeout_s=total_timeout_s,
+            initial_backoff_s=1.5,
+            backoff_multiplier=2.0,
+            max_backoff_s=20.0,
+        )
+
+        def record_attempt(attempt) -> None:
+            self._trace_debug("llm_request_attempt", {
+                "run_id": self.run_id,
+                "decision_id": request_envelope.decision_id,
+                "request_fingerprint": request_envelope.request_fingerprint,
+                "attempt": attempt.attempt,
+                "retry_kind": attempt.kind.value,
+                "ok": attempt.ok,
+                "error_kind": attempt.error_kind,
+                "retryable": attempt.retryable,
+                "elapsed_ms": attempt.elapsed_ms,
+            })
 
         def worker() -> None:
-            last_exc: Exception | None = None
-            for attempt in range(1, max_attempts + 1):
-                if self.stop_event.is_set() or cancel_event.is_set():
-                    return
-                try:
-                    # A timed-out deep visual request may get one bounded
-                    # lightweight reconsideration. No GUI tool has run yet,
-                    # so this retry cannot duplicate a desktop action.
-                    attempt_thinking_enabled = bool(
-                        thinking_enabled and not (
-                            attempt > 1
-                            and thinking_mode == "enabled"
-                            and thinking_policy not in {"always_by_config", "provider_configured"}
-                        )
-                    )
-                    attempt_thinking_mode = (
-                        "enabled" if attempt_thinking_enabled
-                        else "disabled" if thinking_mode is not None
-                        and (attempt > 1 or thinking_mode == "disabled")
-                        else None
-                    )
-                    request_params: dict[str, Any] = {
-                        "model": model,
-                        "messages": self.messages,
-                        "tools": tools,
-                    }
-                    if gui_tool_recovery_request and tools:
-                        request_params["tool_choice"] = "required"
-                    if attempt_thinking_enabled:
-                        request_params["max_completion_tokens"] = request_max_tokens
-                    else:
-                        request_params["temperature"] = float(api.get("temperature", 0.3))
-                        request_params["max_tokens"] = request_max_tokens
-                    if attempt_thinking_mode is not None:
-                        request_params["extra_body"] = {
-                            "thinking": {"type": attempt_thinking_mode},
-                        }
-                    box["resp"] = client.chat.completions.create(**request_params)
-                    return
-                except Exception as exc:
-                    last_exc = exc
-                    logger.warning("API 调用失败 (第%d次): %s", attempt, exc)
-                    if attempt < max_attempts and not cancel_event.is_set():
-                        # Rate limits (429) need a much longer wait than a
-                        # transient network blip — back off exponentially
-                        # (5s, 10s, 20s...) so a burst of drawing strokes
-                        # doesn't kill the run. Stop interrupts the wait.
-                        if _is_rate_limit(exc):
-                            if not _backoff_sleep(_RATE_LIMIT_BACKOFF_S * (2 ** (attempt - 1))):
-                                return
-                        else:
-                            if not _backoff_sleep(1.5 * attempt):
-                                return
-            box["exc"] = RuntimeError(f"API 连续 {_API_RETRIES} 次失败: {last_exc}")
+            try:
+                outcome = ModelCallRuntime().execute(
+                    request_envelope,
+                    send_once,
+                    policy=retry_policy,
+                    stop_event=cancel_event,
+                    on_attempt=record_attempt,
+                )
+                box["resp"] = outcome.response
+                box["model_attempts"] = outcome.attempts
+                box["request_retry_count"] = outcome.request_retry_count
+            except ModelCallError as exc:
+                box["exc"] = exc
+                box["model_attempts"] = exc.attempts
+                box["request_retry_count"] = exc.request_retry_count
 
         thread = threading.Thread(target=worker, daemon=True, name="llm-call")
         thread.start()
@@ -4901,6 +4911,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     mission_card_chars=None,
                     prompt_context_measurement="text_structure_without_binary",
                     thinking_policy=thinking_policy,
+                    request_retry_count=int(box.get("request_retry_count") or 0),
+                    request_fingerprint=request_envelope.request_fingerprint,
                 )
                 return None  # abandon the in-flight request (it finishes unused)
             if time.monotonic() >= request_deadline:
@@ -4935,6 +4947,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     mission_card_chars=None,
                     prompt_context_measurement="text_structure_without_binary",
                     thinking_policy=thinking_policy,
+                    request_retry_count=int(box.get("request_retry_count") or 0),
+                    request_fingerprint=request_envelope.request_fingerprint,
                 )
                 raise TimeoutError(message)
             thread.join(timeout=0.2)
@@ -4959,6 +4973,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 mission_card_chars=None,
                 prompt_context_measurement="text_structure_without_binary",
                 thinking_policy=thinking_policy,
+                request_retry_count=int(box.get("request_retry_count") or 0),
+                request_fingerprint=request_envelope.request_fingerprint,
             )
             raise box["exc"]
         if box.get("resp") is not None:
@@ -4982,6 +4998,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             mission_card_chars=None,
             prompt_context_measurement="text_structure_without_binary",
             thinking_policy=thinking_policy,
+            request_retry_count=int(box.get("request_retry_count") or 0),
+            request_fingerprint=request_envelope.request_fingerprint,
         )
         return box.get("resp")
 
