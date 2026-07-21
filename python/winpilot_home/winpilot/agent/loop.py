@@ -51,6 +51,7 @@ from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, virtual_screen_region, window_region
 from ..utils.trace_payload import sanitize_trace_payload
 from ..visual_runtime.frame_observer import FrameObserver
+from ..visual_runtime.submitted_image_coordinates import SubmittedImageCoordinateMapper
 from . import playbooks, prompts, session as session_mod
 from .context_guidance import ContextGuidanceMixin
 from .done_verifier import (
@@ -3854,16 +3855,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             ):
                 mapped["constraint_frame_region"] = dict(inherited_constraint)
         image_source: dict[str, Any] = {}
-
-        def numeric_image_value(value: Any, field: str) -> float:
-            if isinstance(value, bool):
-                raise ValueError(f"{field} must be a numeric submitted-image pixel coordinate")
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                raise ValueError(
-                    f"{field} must be a numeric submitted-image pixel coordinate"
-                ) from None
+        image_mapper = SubmittedImageCoordinateMapper(self._visual_submitted_size)
 
         def convert_image_pair(
             image_x_key: str,
@@ -3871,43 +3863,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             frame_x_key: str,
             frame_y_key: str,
         ) -> bool:
-            present = (image_x_key in mapped, image_y_key in mapped)
-            if not any(present):
-                return False
-            if not all(present):
-                raise ValueError(
-                    f"{tool_name} requires both {image_x_key} and {image_y_key}"
-                )
-            if frame_x_key in mapped or frame_y_key in mapped:
-                raise ValueError(
-                    f"{tool_name} received mixed submitted-image and normalized-frame coordinates"
-                )
-            submitted = self._visual_submitted_size
-            if not submitted or submitted[0] <= 0 or submitted[1] <= 0:
-                raise ValueError(
-                    f"{tool_name} submitted-image coordinates require the current frame image dimensions"
-                )
-            image_width, image_height = submitted
-            image_x = numeric_image_value(mapped.pop(image_x_key), image_x_key)
-            image_y = numeric_image_value(mapped.pop(image_y_key), image_y_key)
-            if not (
-                0.0 <= image_x <= max(0, image_width - 1)
-                and 0.0 <= image_y <= max(0, image_height - 1)
-            ):
-                raise ValueError(
-                    f"{image_x_key}/{image_y_key} must stay inside the exact submitted "
-                    f"image bounds 0..{max(0, image_width - 1)} by "
-                    f"0..{max(0, image_height - 1)}"
-                )
-            mapped[frame_x_key] = (
-                image_x * 1000.0 / max(1, image_width - 1)
+            nonlocal mapped
+            mapped, point_source = image_mapper.map_point_pair(
+                mapped,
+                image_keys=(image_x_key, image_y_key),
+                frame_keys=(frame_x_key, frame_y_key),
+                context=tool_name,
             )
-            mapped[frame_y_key] = (
-                image_y * 1000.0 / max(1, image_height - 1)
-            )
-            image_source[image_x_key] = image_x
-            image_source[image_y_key] = image_y
-            return True
+            image_source.update(point_source)
+            return bool(point_source)
 
         if tool_name in {"click", "double_click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
             convert_image_pair("image_x", "image_y", "frame_x", "frame_y")
@@ -4021,48 +3985,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             raise ValueError("invalid submitted-image stroke coordinates")
 
         if "constraint_image_region" in mapped:
-            if "constraint_frame_region" in mapped:
-                raise ValueError(
-                    f"{tool_name} received both submitted-image and normalized-frame constraints"
-                )
-            submitted = self._visual_submitted_size
-            if not submitted or submitted[0] <= 0 or submitted[1] <= 0:
-                raise ValueError(
-                    f"{tool_name} submitted-image constraint requires the current image dimensions"
-                )
-            raw_image_constraint = mapped.pop("constraint_image_region")
-            if not isinstance(raw_image_constraint, (list, tuple)) or len(raw_image_constraint) != 4:
-                raise ValueError(
-                    "constraint_image_region requires [left,top,right,bottom] pixel bounds"
-                )
-            try:
-                image_left, image_top, image_right, image_bottom = (
-                    numeric_image_value(value, "constraint_image_region")
-                    for value in raw_image_constraint
-                )
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "constraint_image_region requires numeric [left,top,right,bottom] pixel bounds"
-                ) from None
-            image_width, image_height = submitted
-            if not (
-                0.0 <= image_left < image_right <= max(0, image_width - 1)
-                and 0.0 <= image_top < image_bottom <= max(0, image_height - 1)
-            ):
-                raise ValueError(
-                    "constraint_image_region must be a positive rectangle inside the exact "
-                    f"submitted image bounds 0..{max(0, image_width - 1)} by "
-                    f"0..{max(0, image_height - 1)}"
-                )
-            mapped["constraint_frame_region"] = [
-                image_left * 1000.0 / max(1, image_width - 1),
-                image_top * 1000.0 / max(1, image_height - 1),
-                image_right * 1000.0 / max(1, image_width - 1),
-                image_bottom * 1000.0 / max(1, image_height - 1),
-            ]
-            image_source["constraint_image_region"] = [
-                image_left, image_top, image_right, image_bottom,
-            ]
+            mapped, constraint_source = image_mapper.map_constraint_image_region(
+                mapped,
+                context=tool_name,
+            )
+            image_source["constraint_image_region"] = constraint_source
         constraint_frame_region: dict[str, float] | None = None
         if "constraint_frame_region" in mapped:
             if "constraint_region" in mapped or "_constraint_region" in mapped:
