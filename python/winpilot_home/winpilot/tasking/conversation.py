@@ -7,6 +7,7 @@ from typing import Any
 
 from ..config import CONFIG
 from ..model_adapter import build_model_adapter
+from ..modeling import create_openai_client
 
 
 class ConversationResponseError(RuntimeError):
@@ -32,10 +33,8 @@ def generate_conversation_response(
     ):
         raise ConversationResponseError("main text model is not configured")
 
-    from openai import OpenAI
-
     client = build_model_adapter(
-        OpenAI(
+        create_openai_client(
             base_url=str(api["base_url"]),
             api_key=str(api["api_key"]),
             timeout=120,
