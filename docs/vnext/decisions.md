@@ -334,3 +334,30 @@
   canary and real Electron E2E meet the documented thresholds and trace proves
   MissionCard, P5 verification and BrokerProjection own every corresponding
   vNext turn.
+
+### D025: P4b migrates shared owners one primitive at a time
+
+- status: accepted
+- decision: P4b first makes legacy delegate reusable mechanical owners, then
+  connects the same owners to vNext. It does not copy FastGuiController or
+  create a second capture, coordinate, action-parser, pointer or input chain.
+- completed partial seams: two-phase `FrameObserver`, submitted-image to
+  normalized-frame mapping, immutable per-run `DesktopRuntimeSelection`, and
+  a scroll-only typed RawDevice primitive behind the existing
+  DesktopActionQueue.
+- raw boundary: RawDevice accepts typed physical arguments after Controller
+  parsing. It does not interpret pixels, select a target, recover, switch
+  mechanisms or replay. A mechanical receipt is diagnostic input truth, not
+  visible-effect evidence or obligation completion.
+- uncertainty: a backend must explicitly report input completion. PostMessage
+  uncertainty, post-call exceptions and malformed results become unknown and
+  cannot trigger SendInput fallback or automatic replay. Telemetry cannot
+  affect this decision.
+- runtime selection: runtime version is frozen once from Runtime configuration;
+  task text, model proposals and graph metadata cannot override it. Until a
+  live vNext coordinator exists, explicit vNext selection fails before desktop
+  mutation and never falls back to legacy in the same run.
+- non-claim: commit-time frame/foreground admission, normalized-to-physical
+  mapping, complete ControllerPort, live Actor, Broker enforcement and Electron
+  canary remain unimplemented. The temporary legacy adapter is deleted only
+  after all primitives meet parity, partial-input and real E2E gates.

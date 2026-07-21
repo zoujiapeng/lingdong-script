@@ -209,7 +209,7 @@ Electron task input
 ### 5.4 Controller 与基础工具
 
 - frame/epoch/HWND过期fail closed；
-- image coordinate只映射一次；
+- 每个坐标空间边界只映射一次并保留provenance；
 - click/type/scroll/drag/draw/held pointer cleanup；
 -滚轮方向/目标窗口正确；
 -多关键点drag按序插值；
@@ -218,6 +218,13 @@ Electron task input
 - stop/pause/cancel释放pointer/key；
 - AppResolver优先已运行/可恢复实例；
 - Controller无OCR snap、备用按钮或fallback cascade。
+- strict target mismatch在零backend调用时拒绝；
+- backend异常、非法回执和PostMessage不确定结果进入unknown且不重放；
+- Raw receipt的机械三态与`input_completed=true/false/null`一致；
+- legacy scroll正常输出保持兼容，安全修正只禁止不确定后的第二种输入机制。
+
+以上 RawDevice 项当前只有 unit/characterization 证据，不代表 live Actor、完整
+Controller bridge、paired canary或真实 Electron E2E 已通过。
 
 ### 5.5 Broker
 

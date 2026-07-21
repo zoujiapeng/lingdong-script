@@ -1,7 +1,7 @@
 # vNext 状态与角色合同
 
 本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和
-legacy shadow；P2a 已实现纯 Task Profile 合同与确定性 Execution Policy，P2b 已增加默认关闭、无工具的真实 Profiler shadow；P3a Broker 合同与 P3b single-obligation partial shadow 已实现，但尚未 enforce。P4a 已实现严格 Actor proposal/view/envelope 合同与注入式单回合 MissionRuntime；它不直接调用模型或设备，也未接入产品或 legacy 执行。P4b live Actor/共享执行桥、P5 Verifier 与 P6 Planner/Inspector 仍未实现。任何产品接线都必须经过迁移计划的后续阶段门槛。
+legacy shadow；P2a 已实现纯 Task Profile 合同与确定性 Execution Policy，P2b 已增加默认关闭、无工具的真实 Profiler shadow；P3a Broker 合同与 P3b single-obligation partial shadow 已实现，但尚未 enforce。P4a 已实现严格 Actor proposal/view/envelope 合同与注入式单回合 MissionRuntime；它不直接调用模型或设备，也未接入产品或 legacy 执行。P4b 已开始抽取 shared frame/coordinate/runtime-selection/scroll raw seam，但 live Actor、完整 admission/Controller bridge、P5 Verifier 与 P6 Planner/Inspector 仍未实现。任何产品接线都必须经过迁移计划的后续阶段门槛。
 
 ## 1. 版本与基本规则
 
@@ -692,6 +692,14 @@ unknown
 ### 11.2 P4a ControllerTransition
 
 注入式 ControllerPort 返回 `controller-transition/0`，至少绑定 `action_id`、`action`、三态 outcome、`input_completed`、post frame 和 evidence refs。`completed` 必须明确 `input_completed=true` 且带当前 post frame/evidence；`rejected` 必须明确 `input_completed=false` 且带 post frame；`unknown` 必须保持 `input_completed=null`，不能伪装成“确定未执行”。该边界是 Controller 事实回执，不拥有语义恢复或任务完成权限。
+
+### 11.3 P4b 内部机械输入合同（partial）
+
+当前 scroll-only seam 使用 typed `RawBackendResult` 和 `RawActionReceipt`，机械完成三态固定映射为：`APPLIED -> true`、`NOT_APPLIED/NOT_STARTED -> false`、`OUTCOME_UNKNOWN -> null`。backend 必须显式报告 `input_completed`；泛型 `ok:true` 不能升级为已执行。设备调用后的异常、非法 backend result 或 PostMessage 不确定结果都进入 `OUTCOME_UNKNOWN`，上层只能重新观察、对账或阻塞，不能自动重放。
+
+RawDevice 接收 Controller 已解析的 `scroll(context, x, y, amount)`，不再接收 `action + args`，因此不是第二个 action parser。它不读取 session、截图、OCR/UIA、任务、应用名或恢复状态。Receipt 的 backend facts 是可序列化的只读诊断，不是 run-scoped evidence，`APPLIED` 也不证明像素变化或语义完成。
+
+该内部 seam 尚未冻结为 vNext `/0` 产品合同。当前 `RawActionContext` 只校验正 HWND 与 target/current 一致；完整 frame/epoch/PID/foreground/region admission、动作后权威帧和 `ControllerTransition` 对账仍是后续 P4b 门槛。`DesktopRuntimeSelection` 只由 Runtime 配置在 run 开始时产生；显式 vNext unavailable 时必须在 mutation 前拒绝，不能隐式 fallback 到 legacy。
 
 ## 12. BrokerProjection 与 CapabilityGrant
 

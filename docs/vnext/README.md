@@ -1,6 +1,6 @@
 # vNext Agent 核心旁路
 
-状态：**P0/P1/P1.5 已实现；P2a/P2b Profiler shadow、P3a Broker 与 P3b single-obligation partial shadow 已完成；WinPilot product package 的模型请求/重试边界已统一；P4a Actor 合同与注入式单回合 MissionRuntime 已实现；Broker 仍未 enforce，P4b 产品桥接/live Actor、P5 Verifier、P6 Planner/Inspector 尚未接入**
+状态：**P0/P1/P1.5 已实现；P2a/P2b Profiler shadow、P3a Broker 与 P3b single-obligation partial shadow 已完成；WinPilot product package 的模型请求/重试边界已统一；P4a Actor 合同与注入式单回合 MissionRuntime 已实现；P4b 正在进行共享 owner 的早期抽取，Broker 仍未 enforce，完整产品桥接/live Actor、P5 Verifier、P6 Planner/Inspector 尚未接入**
 
 迁移分支：`codex/vnext-agent-core`
 
@@ -45,7 +45,7 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 
 ## 当前阶段
 
-当前分支已完成 P0/P1/P1.5、P2a 纯合同、P2b 只读 shadow、P3a/P3b Broker shadow 与 P4a 纯合同/注入式 Runtime，legacy 仍是默认且唯一桌面执行 runtime：
+当前分支已完成 P0/P1/P1.5、P2a 纯合同、P2b 只读 shadow、P3a/P3b Broker shadow、P4a 纯合同/注入式 Runtime，并开始 P4b 的共享 owner 抽取；legacy 仍是默认且唯一桌面执行 runtime：
 
 - P0 只在既有 trace/BUS 事件上增加观测字段；
 - P1 提供可重放的 MissionDefinition/Event/Projection/Reducer/Card 及 legacy shadow；
@@ -65,11 +65,15 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 - Controller 回执严格区分 `completed`、`rejected` 和 `unknown`。`unknown`、执行后异常或无法与当前 post-frame/evidence 对账时只会阻塞当前义务，绝不自动重放 mutation；
 - `claim_obligation_done` 只接受 `obligation_claimed` 事件并进入 `CLAIMED`/`verification_required`，不会 verified 或结束 mission；P5 独立 Verifier 尚未实现。Capability/Inspector/Planner 等未接服务请求在 P4a fail closed；
 - P4a 没有 enforce Broker、没有 live Actor model call、没有真实 FrameAuthority/Controller bridge，也没有 canary，因此没有改变现有产品行为；
+- P4b 已让 legacy 观察路径委托共享的两阶段 `FrameObserver`，并抽取 submitted-image 到 normalized-frame 的纯坐标映射；normalized-frame 到物理坐标、完整 preflight 与动作后观察仍由 legacy owner 持有；
+- `DesktopRuntimeSelection` 在每个 run 开始时只从 Runtime 配置冻结一次。默认仍为 legacy；显式选择 `vnext` 在 live coordinator 未接入时于任何桌面 mutation 前 fail closed，禁止同一 run 隐式回退 legacy；
+- scroll 是第一个共享物理原语：唯一 queued owner 明确返回 `input_completed=true/false/null`，session-free `RawDeviceExecutor.scroll(...)` 只接受 typed 参数和已绑定 HWND，不解析 action、不恢复、不重放。Raw receipt 只证明机械输入事实，不是视觉变化、evidence 或 obligation 完成；
+- PostMessage 结果不确定时不再自动切换为 SendInput，遥测失败也不能触发第二次输入。这是 no-uncertain-replay 的安全语义修正；click/type/hotkey/drag/draw 尚未迁移；
 - 不改变当前 `master` 的产品行为；
 - 不声称 Mission Ledger 已经接管产品运行；P1 projection 只能离线或 shadow 使用；
-- P4b shared frame/admission/controller bridge 与 live Actor、P5 独立 Verifier、P6 Planner/Inspector 和 vNext 产品可写运行时均未实现；现有 legacy planner、done judge 或 VLM helper 经过统一 transport，不代表对应 vNext 角色已接入；
+- P4b 仅完成 shared frame、第一段坐标映射、run-scoped runtime selection 和 scroll raw seam；commit-time frame/foreground admission、完整 ControllerPort、live Actor、P5 独立 Verifier、P6 Planner/Inspector 和 vNext 产品可写运行时均未实现；现有 legacy planner、done judge 或 VLM helper 经过统一 transport，不代表对应 vNext 角色已接入；
 - 不把历史单次 E2E 结果改写成 vNext 成功证据；
-- 下一步是保持 Broker 非 enforce，先建设不复制 owner 的 P4b shared frame/admission/controller bridge 和默认关闭的 live Actor canary；同时继续收集完整 relevance oracle。任何默认切换或 legacy 删除都必须先通过 paired canary、真实 Electron E2E 和文档既定门槛。
+- 下一步是保持 Broker 非 enforce，继续按 primitive 让 legacy 委托同一 typed input owner，闭合 frame/foreground admission、物理坐标映射和 ControllerPort 后，才建设默认关闭的 live Actor canary；同时继续收集完整 relevance oracle。任何默认切换或 legacy 删除都必须先通过 paired canary、真实 Electron E2E 和文档既定门槛。
 
 ## 旁路不是第二条产品主线
 
