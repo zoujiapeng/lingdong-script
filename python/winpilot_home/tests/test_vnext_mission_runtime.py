@@ -46,6 +46,7 @@ from winpilot.vnext.runtime import (
     ControllerOutcome,
     ControllerTransition,
     MissionRuntime,
+    MutationPermitAuthority,
     RuntimeContractError,
     RuntimeFrame,
     RuntimeSnapshot,
@@ -129,14 +130,19 @@ class SpyController:
         self,
         state: ScriptedState,
         registry: EvidenceRegistry,
+        permits: MutationPermitAuthority,
         *,
         outcome: ControllerOutcome = ControllerOutcome.COMPLETED,
         raises: Exception | None = None,
+        consume_permit: bool = True,
     ) -> None:
         self.state = state
         self.registry = registry
         self.outcome = outcome
         self.raises = raises
+        self.permits = permits
+        self.consume_permit = consume_permit
+        self.permit_results = []
         self.calls: list[ActorDecisionEnvelope] = []
         self.transition_mutator: (
             Callable[[ActorDecisionEnvelope, ControllerTransition], ControllerTransition] | None
@@ -150,6 +156,10 @@ class SpyController:
     ) -> ControllerTransition:
         assert isinstance(envelope, ActorDecisionEnvelope)
         self.calls.append(envelope)
+        if self.consume_permit:
+            permit = self.permits.consume(envelope)
+            self.permit_results.append(permit)
+            assert permit.allowed is True
         self.state.action_executed = True
         if self.raises is not None:
             raise self.raises
@@ -267,6 +277,7 @@ class Harness:
     runtime: MissionRuntime
     profile: Any
     catalog: ToolCatalog
+    permits: MutationPermitAuthority
 
 
 def _schema(name: str, properties: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -466,6 +477,7 @@ def _harness(
     controller_error: Exception | None = None,
     broker_factory: Callable[[ToolCatalog], CapabilityBroker] | None = None,
     pointer_cleanup: Any = None,
+    consume_permit: bool = True,
 ) -> Harness:
     registry = EvidenceRegistry()
     mission = definition or _definition(capability)
@@ -482,8 +494,10 @@ def _harness(
     post = post_action or _snapshot(post_frame)
     state = ScriptedState(pre, current=current, post_action=post)
     actor = ScriptedActor(proposal, after_propose=actor_hook)
+    permits = MutationPermitAuthority(mission.mission_id, mission.run_id)
     controller = SpyController(
-        state, registry, outcome=controller_outcome, raises=controller_error,
+        state, registry, permits, outcome=controller_outcome, raises=controller_error,
+        consume_permit=consume_permit,
     )
     catalog = _catalog()
     profile = ExecutionPolicy().safe_default(
@@ -501,8 +515,11 @@ def _harness(
         state=state,
         controller=controller,
         pointer_cleanup=pointer_cleanup,
+        mutation_permits=permits,
     )
-    return Harness(reducer, registry, actor, state, controller, runtime, profile, catalog)
+    return Harness(
+        reducer, registry, actor, state, controller, runtime, profile, catalog, permits,
+    )
 
 
 def test_runtime_frame_rejects_image_hash_mismatch() -> None:
@@ -580,6 +597,9 @@ def test_visual_route_binds_one_actor_proposal_to_one_runtime_envelope() -> None
     assert envelope.target.process_id == 7
     assert envelope.pointer == PointerLeaseState(PointerDisposition.RELEASED)
     assert envelope.proposal.action == "click"
+    assert len(harness.controller.permit_results) == 1
+    assert harness.controller.permit_results[0].allowed is True
+    assert harness.permits.pending_count == 0
     assert len(harness.reducer.events) == before + 1
     assert harness.reducer.events[-1].kind == "transition_recorded"
     assert harness.reducer.projection.obligation_state("o1").status is ObligationStatus.ACTIVE
@@ -780,6 +800,22 @@ def test_desktop_action_arguments_fail_closed_before_controller(arguments: dict)
     assert len(harness.actor.calls) == 1
     assert harness.controller.calls == []
     assert len(harness.reducer.events) == before
+
+
+def test_controller_cannot_report_completed_without_consuming_runtime_permit() -> None:
+    harness = _harness(_click(), consume_permit=False)
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.BLOCKED
+    assert "without consuming Runtime permit" in result.detail
+    assert len(harness.controller.calls) == 1
+    assert harness.controller.permit_results == []
+    assert harness.permits.pending_count == 0
+    assert [event.kind for event in harness.reducer.events[before:]] == [
+        "obligation_blocked",
+    ]
 
 
 def test_claim_is_only_claimed_and_replays_from_accepted_event() -> None:
