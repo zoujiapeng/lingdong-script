@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from typing import Any, Callable, Mapping
 
@@ -83,7 +84,12 @@ class OpenAITaskProfilerModel:
             ),
         )
 
-    def propose(self, request: TaskProfilerRequest) -> Mapping[str, Any]:
+    def propose(
+        self,
+        request: TaskProfilerRequest,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> Mapping[str, Any]:
         if not isinstance(request, TaskProfilerRequest):
             raise InvalidProfileSchema("Task Profiler request has the wrong type")
         payload = request.model_payload()
@@ -130,6 +136,7 @@ class OpenAITaskProfilerModel:
             envelope,
             send_once,
             policy=self._retry_policy,
+            stop_event=stop_event,
         )
         self.last_outcome = outcome
         try:

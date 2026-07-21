@@ -8,14 +8,20 @@ also preventing the generator from inventing personal or time-sensitive facts.
 from __future__ import annotations
 
 import json
+import threading
 import time
+import uuid
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import CONFIG
 from ..model_adapter import build_model_adapter
-from ..modeling import create_openai_client
+from ..modeling import (
+    ModelRetryPolicy,
+    create_openai_client,
+    invoke_chat_completion,
+)
 
 
 class MessageContentGenerationError(RuntimeError):
@@ -57,6 +63,7 @@ def generate_message_content(
     instruction: str,
     recipient: str,
     channel: str,
+    stop_event: threading.Event | None = None,
 ) -> MessageDraft:
     """Generate the exact outbound body, or explicitly report missing context."""
     api = dict(CONFIG.get("api", default={}) or {})
@@ -67,14 +74,12 @@ def generate_message_content(
     ):
         raise MessageContentGenerationError("main text model is not configured")
 
-    client = build_model_adapter(
-        create_openai_client(
-            base_url=str(api["base_url"]),
-            api_key=str(api["api_key"]),
-            timeout=120,
-        ),
-        api,
+    raw_client = create_openai_client(
+        base_url=str(api["base_url"]),
+        api_key=str(api["api_key"]),
+        timeout=120,
     )
+    adapter = build_model_adapter(raw_client, api)
     prompt = (
         "Produce the exact text body for one outbound message. The user's send "
         "instruction is authorization to draft, not permission to invent facts. "
@@ -93,19 +98,31 @@ def generate_message_content(
     )
     started = time.monotonic()
     try:
-        response = client.chat.completions.create(
-            model=str(api["model"]),
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=700,
-            temperature=0.1,
+        outcome = invoke_chat_completion(
+            raw_client,
+            decision_id=f"message-content:{uuid.uuid4().hex}",
+            model_role="message_content_generator",
+            purpose="draft_grounded_outbound_message",
+            provider_request=adapter.prepare_chat_completion(
+                model=str(api["model"]),
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=700,
+                temperature=0.1,
+            ),
+            policy=ModelRetryPolicy(max_attempts=1),
+            stop_event=stop_event,
         )
-        payload = _json_object(response.choices[0].message.content or "")
+        response = outcome.response
+        raw_content = response.choices[0].message.content or ""
     except MessageContentGenerationError:
         raise
     except Exception as exc:
         raise MessageContentGenerationError(
             f"message content generation failed: {exc}"
         ) from exc
+    # Parsing is deliberately outside the transport Runtime. A malformed
+    # successful response is not a request retry.
+    payload = _json_object(raw_content)
     elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
     try:
         return MessageDraft.model_validate({

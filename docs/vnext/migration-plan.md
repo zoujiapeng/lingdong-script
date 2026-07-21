@@ -206,7 +206,7 @@ P1不启动模型、不操控桌面、不替换 legacy runner。完成后可用�
 P2a 已在独立 `vnext/profiling/` 旁路中实现严格版本化合同、确定性
 Execution Policy、canonical broad capability/provider availability 校验、
 safe-standard fallback、完整 policy reasons、序列化与可注入 shadow 评测。
-P2a 本身不调用模型；P2b 在独立提交中增加只读 provider 边界和同入口 shadow。ToolCatalog、Capability Broker 与 shadow 工具投影仍未实现。
+P2a 本身不调用模型；P2b 在独立提交中增加只读 provider 边界和同入口 shadow。后续 P3a ToolCatalog/Capability Broker 与 P3b single-obligation partial shadow 已实现，但尚未 enforce。
 
 P2a 已实现：
 
@@ -248,6 +248,38 @@ P2进入 enforce 的门槛：
 - under-profile没有导致显式依赖/验收丢失；
 - over-profile额外成本可接受；
 - fixed-standard对照组存在。
+
+## 6.1 P2.5：统一模型请求与重试合同
+
+状态：**WinPilot product package 已接入；外围 legacy provider、全角色逐 attempt sidecar 与 legacy VLM stop_event seam 尚未闭合。**
+
+提交 `3198d5e` 建立 `model-request/0`、`ModelRequestEnvelope`、
+`ModelCallRuntime` 和 SDK `max_retries=0` 的唯一 request-retry owner；提交
+`435bb0f` 将桌面 mutation replay 从模型请求 retry 中分离，并对不确定 mutation 结果
+fail closed。随后辅助 planner、done judge、VLM、conversation 和 message-content 逻辑调用
+也通过同一 transport 合同，不再各自直接拥有重试循环。
+
+合同边界：
+
+- provider adapter 只准备一次请求，Runtime 冻结 JSON 并产生 fingerprint；
+- request retry 只能重发同一 decision/role/purpose/fingerprint，且调用者尚未消费结果；
+- retryable transport failure 使用显式 allowlist 和有界总 deadline；程序错误、解析错误和 schema 错误不重发；
+- poll 只等待 in-flight request；修改消息、工具、thinking、预算或目的必须是新的 redecision；
+- action replay 由 mutation replay policy 独立裁决；结果 unknown 时只能 reconcile/block，不能自动重复桌面输入；
+- 精确函数调用栈 AST guard 限制 WinPilot product package 内允许的 Chat Completions transport，并拒绝 Responses 或未授权调用路径；物理 adapter call site 不等于第二个 retry owner。
+
+该阶段不改变 prompt、模型工具面、Controller、GUI action、legacy done 或 vNext runtime
+选择，也不实现 P4/P5/P6。仍未完成：
+
+- `python/providers/openai.py`、`deepseek.py`、`vlm.py` 属于外围 legacy
+  Flow/feature stack，仍有 SDK/direct-HTTP retry；必须先证明产品不可达，再于 P9 删除，或单独迁移；
+- 某些 legacy 变量仍把截断恢复或 tool-call correction 称为 retry；它们改变请求，语义上必须记为 redecision；
+- 全角色尚未把每个 `ModelAttempt` 写入统一 sidecar；legacy VLM helper 还缺少 stop_event seam。Profiler 的 stop_event 已从 ArpExecution 经 shadow hook/runtime/provider 传到 ModelCallRuntime 并有测试；缺失 telemetry 不得记为零或“已验证”；
+- transport 收敛不改变 legacy planner/done/VLM helper 的语义 owner，不能据此宣称 Visual Actor、独立 Verifier、Planner 或 Inspector 已接入。
+
+未来删除旧 transport/retry 职责的门槛是：产品可达模型调用无绕过 owner、SDK 隐式重试为零、
+request retry/redecision/poll/action replay 可由 trace 区分、late response 不能产生动作，且外围
+legacy provider 的生产调用连续观察为零或已通过独立迁移。
 
 ## 7. P3：Capability Broker shadow
 
@@ -441,6 +473,9 @@ Canary失败不在同一run偷切legacy。可以另开独立run对照。
 | `InteractionStageEngine`重复轮次/等待 | MissionRuntime + Lease/Watcher | 保留通用wait/lease | 持续任务E2E |
 | Subgoal/adapter GUI planner | Controller原语 + Actor | 保留receipt，不保留GUI路线 | 第二任务族证据 |
 | UIA/OCR自动语义升级 | 显式probe capability | provenance/frame gate | negative eval通过 |
+| 各模型调用点/SDK自行重试 | `modeling/ModelCallRuntime` | adapter prepare一次，冻结request后仅做精确transport retry | product package无绕过；逐attempt trace与cancel闭合 |
+| mutation-capable node通用retry | mutation replay policy + 新Actor决策 | unknown outcome reconcile/block；仅确定未执行且显式幂等授权才可replay | 所有桌面mutation经同一transaction/evidence合同 |
+| `python/providers/` legacy retry loop | 删除或单独迁移 | 先审计产品可达性，不接成第二个Runtime | P9观察窗口内生产调用为零或等价迁移通过 |
 
 ## 15. Bridge纪律
 

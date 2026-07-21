@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 
 def _mock_vlm_response(monkeypatch, content: str) -> None:
     from winpilot.perception import vlm
@@ -17,6 +19,114 @@ def _mock_vlm_response(monkeypatch, content: str) -> None:
         "_client",
         lambda: SimpleNamespace(chat=SimpleNamespace(completions=completions)),
     )
+
+
+def test_vlm_calls_use_unified_role_scoped_model_boundary(monkeypatch):
+    from winpilot.perception import vlm
+    from winpilot.utils.screenshot import Region
+
+    captured = []
+    encoded_regions = []
+    contents = {
+        "describe_screen_region": "visible description",
+        "inspect_authoritative_visual_artifact": '{"value":true}',
+        "verify_visual_completion": json.dumps({
+            "passed": True,
+            "confidence": 0.99,
+            "subject_present": True,
+            "colorful": None,
+            "detail_level": "unknown",
+            "observed": ["target"],
+            "issues": [],
+        }),
+        "ground_interactive_elements": "[]",
+    }
+
+    def invoke(_client, **kwargs):
+        captured.append(kwargs)
+        response = SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=contents[kwargs["purpose"]]),
+        )])
+        return SimpleNamespace(response=response)
+
+    def encode_region(*_args, **_kwargs):
+        encoded_regions.append(True)
+        return "jpeg-once", 1.0
+
+    encoded_array = SimpleNamespace(tobytes=lambda: b"array-jpeg-once")
+    monkeypatch.setattr(vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(vlm, "_settings", lambda: {"model": "test-vlm"})
+    monkeypatch.setattr(vlm, "_client", lambda: object())
+    monkeypatch.setattr(vlm, "_encode_region", encode_region)
+    monkeypatch.setattr(vlm.cv2, "imencode", lambda *_args, **_kwargs: (
+        True, encoded_array,
+    ))
+    monkeypatch.setattr(vlm, "invoke_chat_completion", invoke)
+
+    region = Region(0, 0, 100, 100)
+    image = SimpleNamespace(size=3, shape=(1, 1, 3))
+    assert vlm.describe(region, "what is visible?") == "visible description"
+    assert vlm.structured_json_from_array(image, "return JSON") == {"value": True}
+    assert vlm.verify(region, "target is visible")["verified"] is True
+    assert vlm.collect(region) == []
+
+    assert encoded_regions == [True, True, True]
+    assert [
+        (item["model_role"], item["purpose"])
+        for item in captured
+    ] == [
+        ("legacy_visual_helper", "describe_screen_region"),
+        ("legacy_visual_helper", "inspect_authoritative_visual_artifact"),
+        ("legacy_visual_verifier", "verify_visual_completion"),
+        ("legacy_visual_helper", "ground_interactive_elements"),
+    ]
+    expected_prefixes = (
+        "perception-vlm-describe-",
+        "perception-vlm-structured-json-",
+        "perception-vlm-verify-",
+        "perception-vlm-collect-",
+    )
+    for call, prefix in zip(captured, expected_prefixes, strict=True):
+        assert call["decision_id"].startswith(prefix)
+        assert "policy" not in call  # Unified boundary defaults to one attempt.
+        content = call["provider_request"]["messages"][0]["content"]
+        assert content[0]["image_url"]["url"].startswith(
+            "data:image/jpeg;base64,"
+        )
+
+
+def test_vlm_json_parse_failure_is_not_retried(monkeypatch):
+    from winpilot.perception import vlm
+
+    sends = []
+    encodes = []
+    response = SimpleNamespace(choices=[SimpleNamespace(
+        message=SimpleNamespace(content="not JSON"),
+    )])
+
+    class Completions:
+        def create(self, **request):
+            sends.append(request)
+            return response
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions()),
+    )
+    encoded = SimpleNamespace(tobytes=lambda: b"same-jpeg")
+    monkeypatch.setattr(vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(vlm, "_settings", lambda: {"model": "test-vlm"})
+    monkeypatch.setattr(vlm, "_client", lambda: client)
+    monkeypatch.setattr(vlm.cv2, "imencode", lambda *_args, **_kwargs: (
+        encodes.append(True) or True,
+        encoded,
+    ))
+
+    image = SimpleNamespace(size=3, shape=(1, 1, 3))
+    with pytest.raises(ValueError, match="no JSON object"):
+        vlm.structured_json_from_array(image, "return JSON")
+
+    assert len(encodes) == 1
+    assert len(sends) == 1
 
 
 def test_vlm_collect_keeps_only_valid_explicitly_confident_groundings(monkeypatch):

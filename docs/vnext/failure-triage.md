@@ -130,7 +130,26 @@ Profiler判断错不能通过给Actor增加“记住这是复杂任务”的prom
 
 若模型只是复制错ID，不应通过提示词要求它“更仔细”；应从模型schema删除机械身份。
 
-### 2.9 基础输入工具
+### 2.9 模型请求与重试边界
+
+核对：
+
+- provider SDK 是否以 `max_retries=0` 创建；
+- adapter 是否只准备一次，Runtime 是否冻结 request 并记录稳定 fingerprint；
+- `request_retry` 是否保持同一 decision/role/purpose/fingerprint，且没有结果被调用者消费；
+- transient transport allowlist、attempt 上限、总 deadline 和 backoff 是否有界；
+- poll 是否只等待 in-flight request，而没有重新提交；
+- 改变 messages、tools、thinking、预算或 purpose 的恢复是否使用新 decision id 并记为 redecision；
+- empty content、JSON/schema 或业务验证失败是否被错误当成 transport retry；
+- stop/timeout 后的 late response 是否可能进入 tool dispatch 或写入新 revision；
+- mutation outcome unknown 是否进入 reconcile/block，而不是自动 action replay；
+- legacy 名称中的 `retry` 是否其实是截断恢复或 tool-call correction，导致指标混淆。
+
+请求重试发生在任何模型结果或桌面动作之前。它不能证明模型重新思考，也不能授权重复
+GUI mutation。重复 provider 计费、相同请求却不同 fingerprint、parse error 后再次发送，或 timeout
+后出现桌面动作，优先归因 `ModelCallRuntime`/transport ownership，而不是 Actor 智力。
+
+### 2.10 基础输入工具
 
 逐个核对：
 
@@ -145,7 +164,7 @@ Profiler判断错不能通过给Actor增加“记住这是复杂任务”的prom
 
 “不会滚”“拖拽偏离”“点击没反应”先用确定性靶场验证工具。
 
-### 2.10 动作后观察与 Transition
+### 2.11 动作后观察与 Transition
 
 核对：
 
@@ -158,7 +177,7 @@ Profiler判断错不能通过给Actor增加“记住这是复杂任务”的prom
 
 Actor不知道点击后发生什么，通常是Transition/Card质量问题。
 
-### 2.11 Verifier 与完成语义
+### 2.12 Verifier 与完成语义
 
 核对：
 
@@ -175,9 +194,9 @@ Actor不知道点击后发生什么，通常是Transition/Card质量问题。
 
 重复claim和假完成优先修协议；false negative则检查criteria和evidence，不靠无限放宽。
 
-### 2.12 Actor 模型能力
+### 2.13 Actor 模型能力
 
-只有前十一层有证据后才检查模型：
+只有前十二层有证据后才检查模型：
 
 1. 用当时frame、MissionCard、BrokerProjection和相同schema离线重放；
 2. 去掉无关历史，保持角色合同；
@@ -188,7 +207,7 @@ Actor不知道点击后发生什么，通常是Transition/Card质量问题。
 7.同模型Verifier重复同一误判时增加不同证据视角，不能把“角色不同”当独立性；
 8.多个held-out场景仍稳定受益时才考虑Inspector或训练。
 
-### 2.13 Prompt 变更
+### 2.14 Prompt 变更
 
 Prompt是最后一层。只允许修正：
 
@@ -230,6 +249,8 @@ Prompt是最后一层。只允许修正：
 | 持续会话立即结束 | lifecycle/watcher/obligation | 应用专属循环 |
 | UIA/OCR带偏 | Broker/provenance/frame | 更多融合权重规则 |
 | 模型调用慢 | Profile/tool/context/reasoning/role calls | 随意删视觉帧 |
+| 同一模型请求重复计费/重复发送 | ModelCallRuntime、SDK retries、fingerprint/attempt trace | 增加调用点本地重试 |
+| timeout或异常后重复桌面动作 | late-result gate、mutation outcome、action replay policy | 把node retry次数调高 |
 | stale/跨义务动作 | Runtime envelope | 让模型复制更多ID |
 
 ## 4. 何时重新 profiling

@@ -1,6 +1,7 @@
 """Same-entry legacy shadow bridge for one read-only task profile per run."""
 from __future__ import annotations
 
+import threading
 from typing import Any, Iterable, Mapping, Protocol
 
 from ..mission import project_legacy_contract
@@ -88,6 +89,7 @@ class LegacyTaskProfilerShadowHook:
         run_id: str,
         contract: Any,
         trace: ShadowTraceWriter,
+        stop_event: threading.Event | None = None,
     ) -> TaskProfilerShadowRecord:
         mission_id = f"mission-{run_id}"
         definition, profiler_input = profiler_input_from_legacy_contract(
@@ -103,6 +105,7 @@ class LegacyTaskProfilerShadowHook:
             profiler_input=profiler_input,
             available_capabilities=self._available_capabilities,
             provider_availability=self._provider_availability,
+            stop_event=stop_event,
         )
         last_outcome = getattr(self._model, "last_outcome", None)
         trace.record_sidecar(

@@ -32,22 +32,49 @@ class FollowupKind(str, Enum):
 FrozenJSON = tuple[Any, ...] | str | bool | int | float | None
 
 
-def _freeze_json(value: Any, path: str = "request") -> FrozenJSON:
+def _freeze_json(
+    value: Any,
+    path: str = "request",
+    *,
+    _ancestors: set[int] | None = None,
+) -> FrozenJSON:
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
             raise InvalidModelRequest(f"{path} contains a non-finite number")
         return value
-    if isinstance(value, (list, tuple)):
-        return ("list", *(_freeze_json(item, f"{path}[]") for item in value))
-    if isinstance(value, Mapping):
-        if any(not isinstance(key, str) for key in value):
-            raise InvalidModelRequest(f"{path} object keys must be strings")
-        return (
-            "object",
-            *((key, _freeze_json(value[key], f"{path}.{key}")) for key in sorted(value)),
-        )
+    if isinstance(value, (list, tuple, Mapping)):
+        ancestors = _ancestors if _ancestors is not None else set()
+        marker = id(value)
+        if marker in ancestors:
+            raise InvalidModelRequest(f"{path} contains a cyclic JSON value")
+        ancestors.add(marker)
+        try:
+            if isinstance(value, (list, tuple)):
+                return (
+                    "list",
+                    *(
+                        _freeze_json(item, f"{path}[]", _ancestors=ancestors)
+                        for item in value
+                    ),
+                )
+            if any(not isinstance(key, str) for key in value):
+                raise InvalidModelRequest(f"{path} object keys must be strings")
+            return (
+                "object",
+                *(
+                    (
+                        key,
+                        _freeze_json(
+                            value[key], f"{path}.{key}", _ancestors=ancestors
+                        ),
+                    )
+                    for key in sorted(value)
+                ),
+            )
+        finally:
+            ancestors.remove(marker)
     raise InvalidModelRequest(f"{path} contains non-JSON value {type(value).__name__}")
 
 
@@ -219,6 +246,16 @@ class ModelAttempt:
             raise InvalidModelRequest("attempt kind does not match attempt number")
         if type(self.elapsed_ms) is not int or self.elapsed_ms < 0:
             raise InvalidModelRequest("elapsed_ms must be non-negative")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.request_fingerprint):
+            raise InvalidModelRequest("attempt request_fingerprint must be SHA-256")
+        if type(self.ok) is not bool or type(self.retryable) is not bool:
+            raise InvalidModelRequest("attempt ok/retryable must be boolean")
+        if self.ok and (self.error_kind is not None or self.retryable):
+            raise InvalidModelRequest("successful attempt cannot carry an error")
+        if not self.ok and (
+            not isinstance(self.error_kind, str) or not self.error_kind.strip()
+        ):
+            raise InvalidModelRequest("failed attempt requires error_kind")
 
 
 def classify_followup(

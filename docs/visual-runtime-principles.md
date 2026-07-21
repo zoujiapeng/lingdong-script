@@ -32,9 +32,20 @@ decision uses live frame/action evidence only; it never matches task keywords.
 An explicit `api.thinking=true` setting remains authoritative.
 
 Every provider call has both a per-call SDK timeout and a runner-owned total
-deadline. A timed-out response is abandoned before tool dispatch. A bounded
-retry may retry the same decision with lightweight reasoning; it cannot replay
-an already executed GUI action.
+deadline. Provider SDK implicit retries are disabled. A timed-out response is
+abandoned before tool dispatch. A bounded request retry can only resend the
+exact frozen provider request with the same decision id, role, purpose, and
+fingerprint before any result is consumed. Changing reasoning mode, messages,
+tools, output budget, or purpose is a new redecision, not a request retry. A
+model request retry never authorizes replay of a GUI action; an uncertain
+mutation outcome must be reconciled, re-observed, or blocked.
+
+This unified request boundary currently covers the WinPilot product package.
+Profiler cancellation is already propagated from ArpExecution through the
+shadow runtime/provider into the model-call Runtime. Root legacy providers,
+all-role per-attempt sidecars, and the missing stop-event seam in the legacy VLM
+helper remain migration debt; the transport boundary does not mean the vNext
+Actor, Verifier, Planner, or Inspector is implemented.
 
 ## Visual observation
 

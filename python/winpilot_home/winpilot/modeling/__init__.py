@@ -12,6 +12,7 @@ from .contracts import (
 )
 from .openai_transport import create_openai_client
 from .runtime import ModelCallError, ModelCallOutcome, ModelCallRuntime
+from .chat import invoke_chat_completion
 
 __all__ = [
     "MODEL_REQUEST_FORMAT",
@@ -26,4 +27,5 @@ __all__ = [
     "ModelCallError",
     "ModelCallOutcome",
     "ModelCallRuntime",
+    "invoke_chat_completion",
 ]

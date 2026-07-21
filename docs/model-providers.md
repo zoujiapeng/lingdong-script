@@ -6,9 +6,10 @@
 
 ## 当前调用路径
 
-WinPilot 只有一个 `AgentRunner`。GUI、编程和仓库任务共享同一条
-OpenAI-compatible Chat Completions 调用路径；编程能力由 RuntimeProfile
-启用，不存在第二套 Coding Agent 主循环。
+WinPilot 的桌面/编程主循环只有一个 `AgentRunner`；编程能力由 RuntimeProfile
+启用，不存在第二套 Coding Agent 主循环。Profiler、legacy done judge/planner、conversation、
+message-content 和 VLM helper 仍可产生受限的辅助模型请求，但它们不拥有另一条 GUI 主循环，也不能
+因为共用同一底层模型而共享上下文或桌面写权限。
 
 `python/winpilot_home/winpilot/model_adapter.py` 是薄适配层：
 
@@ -17,6 +18,14 @@ OpenAI-compatible Chat Completions 调用路径；编程能力由 RuntimeProfile
   `client.chat.completions.create(...)` 的调用形状。
 - `request_extra_body()` 处理 MiMo / Reasonix 的 thinking 参数。
 - `normalize_usage()`、`accumulate_usage()` 归一化 token、缓存和成本。
+
+`python/winpilot_home/winpilot/modeling/` 是 product package 的请求与 transport 边界：
+
+- `create_openai_client()` 固定 `max_retries=0`，关闭 SDK 隐式重试；
+- provider adapter 只准备一次请求，`ModelRequestEnvelope` 冻结 JSON 并计算 fingerprint；
+- `ModelCallRuntime` 是唯一 request retry owner，只对明确允许的瞬时 transport failure 重发同一冻结请求；
+- `invoke_chat_completion()` 供不需要自定义 worker/watchdog 的辅助调用复用相同边界；
+- response parsing、schema validation 和业务判断留在调用者，失败时不能冒充 transport retry。
 
 它不是代理服务，也不替代 GUI Controller。配置仍来自
 `python/winpilot_home/winpilot/config.py` 和本机、被 Git 忽略的
@@ -97,10 +106,29 @@ text-only 路径不会收到不可见的截图字节。它必须依赖 UIA、Win
 - `api.extra_body` 可做显式高级覆盖；调用者需要自行承担兼容性、延迟和截断风险。
 
 每次请求还受 `api.request_timeout_s`、`api.request_total_timeout_s` 和
-`api.max_retries` 约束。总截止时间到达时，late response 会在工具分发前被丢弃；
-因此重试不会重复已经执行的 GUI 动作。GUI 工具调用截断恢复仍会关闭 thinking，
-以给完整函数参数保留输出预算。该策略适用于所有原生视觉任务，不是画图或连续
+`api.max_retries` 约束；在 WinPilot product package 中，`api.max_retries` 由
+`ModelCallRuntime` 解释为显式 transport attempt 上限，而不是 SDK 内部重试。总截止时间到达时，
+late response 会在工具分发前被丢弃。同一 request retry 的 decision id、role、purpose、thinking、
+messages、tools、预算和 fingerprint 必须完全一致。
+
+GUI 工具调用截断恢复可能关闭 thinking，以给完整函数参数保留输出预算；因为它改变了 provider
+request，所以它是使用新 decision id 的 redecision，不是 request retry。poll 只等待同一 in-flight
+request；response parse/schema 失败也不重发。模型请求 retry 从不重复已经执行的 GUI 动作；桌面
+mutation 是否可 replay 由独立 mutation replay policy 和执行证据决定，outcome unknown 时禁止自动
+replay。该策略适用于所有原生视觉任务，不是画图或连续
 指针专属能力，也不会让 `mimo-v2.5-pro` 获得视觉能力。
+
+## 范围与遗留债务
+
+上述统一边界只对 `python/winpilot_home/winpilot/` product package 作完成声明。仓库外围
+`python/providers/openai.py`、`deepseek.py` 和 `vlm.py` 服务 legacy Flow/feature 路径，仍有独立
+SDK/direct-HTTP transport 与 retry。迁移前必须审计它们是否可从当前 Electron/WinPilot 产品链到达：
+不可达则在 P9 净删；仍需使用则在独立切片迁移到同一 Runtime。不得长期保留第二个 retry owner。
+
+Profiler 的 stop_event 已从 ArpExecution 经 shadow hook/runtime/provider 传播到
+`ModelCallRuntime`，精确函数调用栈 AST guard 也已覆盖 transport owner。仍未完成的是全角色逐
+attempt sidecar 和 legacy VLM helper 的 stop_event seam。缺失 telemetry 保持未知，不能写成零；
+transport 已统一也不代表 P4 Visual Actor、P5 独立 Verifier 或 P6 Planner/Inspector 已实现。
 
 ## 缓存
 

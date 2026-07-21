@@ -269,3 +269,35 @@
   outer turn index and is detached from every runner when the run finishes.
   P3b remains explicitly partial until Mission Runtime supplies a reliable
   active-obligation envelope for multi-obligation tasks.
+
+### D023: Model request retry is Runtime-owned and is not redecision or action replay
+
+- status: accepted
+- decision: Every logical model request in the WinPilot product package is
+  bound once as `model-request/0` after provider-adapter preparation. Provider
+  SDK retries are disabled. `ModelCallRuntime` is the sole request-retry owner
+  and may retry only the exact frozen provider request, with the same decision
+  id, role, purpose and fingerprint, before any response is consumed.
+- boundaries: A poll submits no new request. A changed message, tool surface,
+  thinking mode, output budget, purpose or decision is a redecision with a new
+  decision id. Empty content, parsing, schema and semantic validation failures
+  happen after transport success and cannot trigger a request retry. Action
+  replay is governed by the mutation replay contract; an unknown desktop
+  mutation outcome is never automatically replayed.
+- observability: Each transport attempt has an initial/retry kind, stable
+  fingerprint, elapsed time, outcome, error kind and retryable classification.
+  A static AST guard verifies the exact permitted Chat Completions transport
+  function stacks and rejects Responses or any unowned call path. Profiler
+  cancellation is propagated from ArpExecution through its shadow hook,
+  runtime and provider into `ModelCallRuntime` and is covered by tests. What
+  remains incomplete is all-role per-attempt sidecar coverage and a stop-event
+  seam for the legacy VLM helper; those remain rollout gates rather than
+  inferred successes.
+- scope: This decision's completed implementation scope is
+  `python/winpilot_home/winpilot/`. The root `python/providers/` Flow/feature
+  stack still owns legacy SDK/direct-HTTP retry loops. It must be proven
+  unreachable from the product runtime and removed in P9, or migrated in a
+  separate behavior-reviewed slice. It must not become a second model Runtime.
+- non-claim: Moving legacy planner, done-judge, conversation, message-content
+  or VLM helper calls through this transport does not implement P4 Visual
+  Actor, P5 Verifier or P6 Planner/Inspector semantics.

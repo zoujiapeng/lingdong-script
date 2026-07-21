@@ -6,6 +6,7 @@ returns a proposal that still has to pass :class:`ExecutionPolicy`.
 """
 from __future__ import annotations
 
+import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
@@ -249,7 +250,12 @@ class TaskProfilerRequest:
 class TaskProfilerModel(Protocol):
     """Injected provider boundary. Implementations perform exactly one call."""
 
-    def propose(self, request: TaskProfilerRequest) -> Mapping[str, Any]: ...
+    def propose(
+        self,
+        request: TaskProfilerRequest,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> Mapping[str, Any]: ...
 
 
 class TaskProfiler:
@@ -260,9 +266,14 @@ class TaskProfiler:
             raise InvalidProfileSchema("TaskProfiler requires a propose(request) provider")
         self._model = model
 
-    def profile(self, profiler_input: TaskProfilerInput) -> TaskProfileProposal:
+    def profile(
+        self,
+        profiler_input: TaskProfilerInput,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> TaskProfileProposal:
         request = TaskProfilerRequest(input=profiler_input)
-        raw = self._model.propose(request)
+        raw = self._model.propose(request, stop_event=stop_event)
         if not isinstance(raw, Mapping):
             raise InvalidProfileSchema("Task Profiler model output must be a JSON object")
         return TaskProfileProposal.from_dict(raw)

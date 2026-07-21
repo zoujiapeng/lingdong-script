@@ -271,3 +271,16 @@ payload; exact transport retry uses the shared model-call Runtime, and the
 result is written only through `TraceRecorder.record_sidecar`. It does not
 authorize Broker, Visual Actor, Planner, Inspector, GUI tool-surface,
 Controller, done, or legacy execution changes.
+
+“At most once” counts one semantic Profiler decision, not provider transport
+attempts. A bounded request retry preserves the same decision id, role, purpose
+and exact fingerprint, so it does not increment `profile_call_count`. Any
+changed prompt, schema, model parameters or purpose is a new redecision and is
+not permitted by the current once-per-run shadow hook. The Profiler has no
+special retry owner outside the shared Runtime.
+
+The shared transport boundary is implemented only for the WinPilot product
+package. Profiler cancellation now propagates from ArpExecution through the
+shadow hook, runtime and provider to `ModelCallRuntime`, with tests. Root legacy
+providers, all-role per-attempt sidecars and the missing legacy-VLM stop-event
+seam remain migration debt; this does not change the P4/P5/P6 status.
