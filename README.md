@@ -143,8 +143,8 @@ npm run e2e:client:mixed
 - [文档索引](docs/README.md)
 - [架构与运行原理](docs/architecture.md)
 - [视觉运行时原则](docs/visual-runtime-principles.md)
-- [vNext Agent 核心旁路设计](docs/vnext/README.md)（目标架构，尚未实现）
-- [vNext Task Profiler 与执行深度](docs/vnext/execution-profile.md)（目标设计，尚未实现）
+- [vNext Agent 核心旁路设计](docs/vnext/README.md)（P0/P1/P1.5 与 P2a 纯旁路已实现）
+- [vNext Task Profiler 与执行深度](docs/vnext/execution-profile.md)（P2a 已完成，真实 Profiler 模型调用尚未接入）
 - [端到端测试规范](docs/testing.md)
 - [WinPilot Agent 细节](docs/winpilot-agent.md)
 - [原生前端](docs/frontend.md)

@@ -128,7 +128,9 @@ Execution Policy 不理解 GUI，也不生成 obligation。它只能：
 ### P2a implementation status (2026-07-21)
 
 P2a is implemented as a pure, versioned sidecar in
-`python/winpilot_home/winpilot/vnext/execution_profile.py`.  The canonical
+`python/winpilot_home/winpilot/vnext/profiling/`. The top-level
+`vnext/execution_profile.py` is imports-only compatibility and is not a second
+contract owner. The canonical
 wire formats are `task-profile-proposal/0` and `execution-profile/0`.
 `TaskDimensions`, `CognitiveServices`, `TaskProfileProposal`,
 `ExecutionDepth`, `ExecutionProfile`, and `ExecutionPolicy` reject unknown
@@ -142,7 +144,10 @@ obligation/mission patches, or runtime identity.
 `ExecutionPolicy` is deterministic and injectable.  It validates the
 capability catalog, applies a safe `standard` default for missing, malformed,
 unsupported, or low-confidence proposals, and records every depth/service
-restriction in `policy_reasons`.  The policy is shadow-only in P2a: no model
+restriction and unavailable provider/capability in `policy_reasons`.
+`ProfileShadowEvaluator` accepts only injected proposal/runtime facts and
+reports over/under-profile plus an identity-free structural fingerprint for
+rewrite and application-label stability checks. The policy is shadow-only in P2a: no model
 profiler invocation, legacy execution, Broker, Actor, Planner, Inspector,
 prompt, tool surface, Controller, done semantics, or frontend integration is
 connected.
