@@ -454,3 +454,31 @@ Bridge禁止：
 -主架构文档中“已实现/目标设计”边界。
 
 具体run证据留在trace/report。长期文档不保存密钥、本机绝对路径、单次临时截图或未复现成功。
+## P1.5：完成、证据与恢复合同闭合（已完成，仍为离线 shadow）
+
+本阶段只扩展 P1 的纯合同与可重放 Reducer，没有进入 P2，也没有改变
+prompt、模型调用、工具面、Controller、GUI 动作或 legacy `done` 语义。
+
+已实现并由负向、随机化和 replay 测试覆盖：
+
+- required obligations 全部 verified 后只派生
+  `awaiting_mission_verification`；独立的 `mission_verified` 事件必须携带
+  新的 mission-level `verification_id` 和当前 run-scoped evidence，之后才
+  能进入 terminal `verified`；
+- obligation 记录 Runtime 生成的 claim fingerprint、上次已验证 fingerprint、
+  activation/verification attempt 计数和 accepted verification identity；同一
+  fingerprint 不会重复触发验证；EvidencePolicy 的视觉 Verifier 许可、最大
+  次数和 uncertain policy 进入 Reducer 状态机；
+- ArtifactRef、TargetBinding、VerifiedFact 的身份和 evidence 关系严格校验；
+  TransitionSummary/FailureSummary 绑定 obligation，MissionCard 不向新义务
+  泄漏上一义务的反馈；
+- legacy split 只有在每一行都被显式 dependency/artifact edge 覆盖时保留，
+  否则退回单个 full-goal obligation；未知 legacy capability 只进入 metadata，
+  不进入 required_capabilities；
+- 完成、重复 fingerprint、超出尝试次数、错误证据 scope、错误身份、stale
+  event、terminal write 和 replay/property 情况均 fail-closed。
+
+P1.5 的实现仍是 sidecar/shadow；产品真实客户端入口、WinPilot 全量回归、
+`npm test`、typecheck 和 build 只用于行为不变回归，不能把离线合同测试当作
+真实 GUI 成功证据。下一步仍从 P2 的独立设计门槛开始，不能在本阶段提前实现
+Profiler、Broker、Visual Actor、Planner 或 Inspector。

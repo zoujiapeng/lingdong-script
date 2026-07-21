@@ -177,3 +177,23 @@
 4. 说明新增复杂度将删除什么旧职责；
 5. 更新 architecture、execution-profile、contracts、migration 和 evaluation；
 6. 不得以单个测试变绿作为充分理由。
+### D018: P1.5 closes completion and recovery without a second ledger
+
+- status: accepted
+- decision: Required obligation verification derives
+  `awaiting_mission_verification`. Only an accepted `mission_verified` event
+  with a distinct mission-level `verification_id` and current run-scoped
+  evidence may derive terminal `verified`.
+- rationale: An obligation verifier proves one desired state; it cannot prove
+  that the whole mission is complete. Keeping the identity and evidence in the
+  existing event-derived projection prevents a second completion ledger.
+- recovery: Runtime claims receive a deterministic fingerprint and lifecycle
+  counters. The same fingerprint is never verified twice. EvidencePolicy
+  controls visual-verifier permission, attempt limits, and uncertain recovery;
+  reducer states remain explicit (`waiting_external` or `blocked`) instead of
+  being recomputed into success.
+- identity: ArtifactRef, TargetBinding, VerifiedFact, TransitionSummary and
+  FailureSummary must carry stable identity/evidence relationships. MissionCard
+  filters feedback by active obligation. Legacy split is retained only when
+  every row has an explicit dependency/artifact edge; unknown capabilities are
+  metadata, never requirements.
