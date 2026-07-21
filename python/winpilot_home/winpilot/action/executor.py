@@ -539,8 +539,7 @@ def _click_progress(
     return RawBackendResult(input_completed, facts)
 
 
-@queued_desktop_action("click")
-def execute_click_input(
+def _execute_click_input_unqueued(
     x: int,
     y: int,
     button: MouseButton,
@@ -548,7 +547,7 @@ def execute_click_input(
     mechanism: ClickMechanism,
     hwnd: int | None = None,
 ) -> RawBackendResult:
-    """Strict single-mechanism click backend for RawDevice."""
+    """Execute one strict click after the caller has serialized admission."""
     if not (
         type(x) is int and type(y) is int and isinstance(button, MouseButton)
         and isinstance(count, ClickCount)
@@ -562,6 +561,21 @@ def execute_click_input(
     return _raw_click(
         x, y, button, count, hwnd,
         mechanism is ClickMechanism.PREPOSITIONED_PHYSICAL, False,
+    )
+
+
+@queued_desktop_action("click")
+def execute_click_input(
+    x: int,
+    y: int,
+    button: MouseButton,
+    count: ClickCount,
+    mechanism: ClickMechanism,
+    hwnd: int | None = None,
+) -> RawBackendResult:
+    """Queue one strict single-mechanism click for RawDevice."""
+    return _execute_click_input_unqueued(
+        x, y, button, count, mechanism, hwnd=hwnd,
     )
 
 
