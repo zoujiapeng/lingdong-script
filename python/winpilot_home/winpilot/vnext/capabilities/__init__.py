@@ -11,5 +11,17 @@ from .shadow import (
     BrokerShadowResult,
     NecessaryToolExpectation,
 )
+from .legacy_shadow import (
+    BROKER_LEGACY_SHADOW_FORMAT,
+    LegacyBrokerShadowObserver,
+    attach_legacy_broker_shadow,
+    build_legacy_broker_shadow_observer,
+    detach_legacy_broker_shadow,
+)
+from .registry import (
+    CapabilityOwner,
+    RuntimeCapabilityRegistry,
+    legacy_local_capability_registry,
+)
 
 __all__ = [name for name in globals() if not name.startswith("_")]

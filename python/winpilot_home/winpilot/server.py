@@ -1013,50 +1013,140 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
             # details may contain secrets.
             profiler_shadow_setup_error = type(exc).__name__
 
+    broker_shadow_config = CONFIG.get("vnext", "broker_shadow", default={}) or {}
+    broker_shadow_enabled = bool(
+        isinstance(broker_shadow_config, dict)
+        and broker_shadow_config.get("enabled") is True
+    )
+    broker_shadow_state: dict[str, Any] = {
+        "observer": None,
+        "pending_runners": [],
+        "attached_runners": [],
+    }
+
     job_ref: dict[str, str] = {}
 
     def on_runner(runner: AgentRunner) -> None:
         STATE.bind_runner(runner, job_ref.get("job_id", ""))
+        if not broker_shadow_enabled:
+            return
+        observer = broker_shadow_state.get("observer")
+        if observer is None:
+            broker_shadow_state["pending_runners"].append(runner)
+            return
+        from .vnext.capabilities import attach_legacy_broker_shadow
+
+        attach_legacy_broker_shadow(runner, observer)
+        broker_shadow_state["attached_runners"].append(runner)
 
     def on_start(started: ArpExecution) -> None:
         trace_mod.RECORDER.start(started.run_id)
-        if not profiler_shadow_enabled:
+        profiler_record = None
+        if profiler_shadow_enabled:
+            if profiler_shadow_hook is None or task_contract is None:
+                trace_mod.RECORDER.record_sidecar(
+                    {
+                        "type": "vnext_profiler_shadow",
+                        "runtime_version": "legacy",
+                        "status": "safe_default",
+                        "profile_call_count": 0,
+                        "request_retry_count": 0,
+                        "elapsed_ms": None,
+                        "proposal": None,
+                        "profile": None,
+                        "error_kind": profiler_shadow_setup_error or "Unavailable",
+                    },
+                    run_id=started.run_id,
+                )
+            else:
+                try:
+                    profiler_record = profiler_shadow_hook.profile_run(
+                        run_id=started.run_id,
+                        contract=task_contract,
+                        trace=trace_mod.RECORDER,
+                    )
+                    started.runtime_state["vnext_profiler_shadow"] = (
+                        profiler_record.to_dict()
+                    )
+                except Exception as exc:
+                    trace_mod.RECORDER.record_sidecar(
+                        {
+                            "type": "vnext_profiler_shadow",
+                            "runtime_version": "legacy",
+                            "status": "safe_default",
+                            "profile_call_count": None,
+                            "request_retry_count": None,
+                            "elapsed_ms": None,
+                            "proposal": None,
+                            "profile": None,
+                            "error_kind": type(exc).__name__,
+                        },
+                        run_id=started.run_id,
+                    )
+
+        if not broker_shadow_enabled:
             return
-        if profiler_shadow_hook is None or task_contract is None:
+        if task_contract is None:
             trace_mod.RECORDER.record_sidecar(
                 {
-                    "type": "vnext_profiler_shadow",
+                    "type": "vnext_broker_shadow",
                     "runtime_version": "legacy",
-                    "status": "safe_default",
-                    "profile_call_count": 0,
-                    "request_retry_count": 0,
-                    "elapsed_ms": None,
-                    "proposal": None,
-                    "profile": None,
-                    "error_kind": profiler_shadow_setup_error or "Unavailable",
+                    "status": "unavailable",
+                    "reason": "task_contract_unavailable",
                 },
                 run_id=started.run_id,
             )
             return
         try:
-            record = profiler_shadow_hook.profile_run(
+            from .vnext.capabilities import (
+                attach_legacy_broker_shadow,
+                build_legacy_broker_shadow_observer,
+                legacy_local_capability_registry,
+            )
+            from .vnext.mission import project_legacy_contract
+            from .vnext.profiling import ExecutionPolicy
+
+            mission_id = f"mission-{started.run_id}"
+            definition = project_legacy_contract(
+                task_contract,
+                mission_id=mission_id,
+                run_id=started.run_id,
+            )
+            profile = getattr(profiler_record, "profile", None)
+            broker_shadow_local_capabilities = (
+                legacy_local_capability_registry().snapshot()
+            )
+            if profile is None:
+                profile = ExecutionPolicy().safe_default(
+                    mission_id,
+                    definition.goal_revision,
+                    reason="broker_shadow_without_profiler",
+                    available_capabilities=broker_shadow_local_capabilities,
+                )
+            observer = build_legacy_broker_shadow_observer(
                 run_id=started.run_id,
                 contract=task_contract,
+                profile=profile,
                 trace=trace_mod.RECORDER,
+                available_capabilities=broker_shadow_local_capabilities,
             )
-            started.runtime_state["vnext_profiler_shadow"] = record.to_dict()
+            broker_shadow_state["observer"] = observer
+            for runner in broker_shadow_state["pending_runners"]:
+                attach_legacy_broker_shadow(runner, observer)
+                broker_shadow_state["attached_runners"].append(runner)
+            broker_shadow_state["pending_runners"].clear()
+            started.runtime_state["vnext_broker_shadow"] = {
+                "status": "ready",
+                "enforced": False,
+                "profile_id": profile.profile_id,
+            }
         except Exception as exc:
             trace_mod.RECORDER.record_sidecar(
                 {
-                    "type": "vnext_profiler_shadow",
+                    "type": "vnext_broker_shadow",
                     "runtime_version": "legacy",
-                    "status": "safe_default",
-                    "profile_call_count": None,
-                    "request_retry_count": None,
-                    "elapsed_ms": None,
-                    "proposal": None,
-                    "profile": None,
-                    "error_kind": type(exc).__name__,
+                    "status": "unavailable",
+                    "reason": type(exc).__name__,
                 },
                 run_id=started.run_id,
             )
@@ -1106,6 +1196,13 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
             finally:
                 if profiler_shadow_hook is not None:
                     profiler_shadow_hook.close(finished.run_id)
+                observer = broker_shadow_state.get("observer")
+                if observer is not None:
+                    from .vnext.capabilities import detach_legacy_broker_shadow
+
+                    for runner in broker_shadow_state.get("attached_runners", ()):
+                        detach_legacy_broker_shadow(runner, observer)
+                broker_shadow_state.clear()
                 trace_mod.RECORDER.stop()
 
     execution = ARP_RUNS.prepare(

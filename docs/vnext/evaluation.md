@@ -399,6 +399,8 @@ external_environment
 
 P3a 已覆盖 strict schema、状态组合、route 互斥、grant scope、artifact identity、stale frame、pointer lease 和确定性 replay 的纯测试。它不等价于上述产品门槛：在真实 Electron legacy 回合尚未记录 projection，且没有完整 held-out relevance oracle 前，necessary-tool recall 记为缺失值，不能用 actual legacy tool 命中率代替，也不能开启 enforce。
 
+Broker enforce 的数值门槛采用 fail-closed 标准：只有具备完整独立 relevance oracle 的 turn 才进入计算，controlled、mixed 与 held-out 各分组的 required tool group recall 都必须为 100%，并且 recovery、pointer release、stop/cancel 与证据链工具不得出现一次漏失。未标注样本、样本规模和覆盖到的状态组合必须同时报告；actual legacy tool 是否被允许仅是诊断项，不是 recall oracle。
+
 ### Actor受控执行
 
 -只有Actor提出GUI mutation；

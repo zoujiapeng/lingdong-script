@@ -1710,6 +1710,53 @@ def test_native_frame_does_not_hide_tools_from_fixed_runtime_contract(monkeypatc
     assert runner._model_tools_for_step(tools, 2) is tools
 
 
+def test_broker_shadow_observer_cannot_change_legacy_tool_request(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("operate the current visible surface")
+    pointer_reads = []
+    observed = []
+
+    def pointer_status():
+        pointer_reads.append(True)
+        return {"active": False, "button": ""}
+
+    class Observer:
+        def observe_turn(self, **values):
+            observed.append(values)
+            return [{"function": {"name": "not_a_legacy_tool"}}]
+
+    monkeypatch.setattr(runner.session, "_pointer_hold_status", pointer_status)
+    runner._vnext_broker_shadow_observer = Observer()
+    tools = [
+        {"type": "function", "function": {"name": "observe"}},
+        {"type": "function", "function": {"name": "click"}},
+    ]
+
+    selected = runner._model_tools_for_step(tools, 3)
+
+    assert selected is tools
+    assert len(pointer_reads) == 1
+    assert len(observed) == 1
+    assert observed[0]["base_tools"] is tools
+    assert observed[0]["legacy_selected_tools"] is tools
+    assert observed[0]["pointer_status"] == {"active": False, "button": ""}
+
+
+def test_broker_shadow_observer_failure_is_behavior_neutral(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("operate the current visible surface")
+
+    class BrokenObserver:
+        def observe_turn(self, **_values):
+            raise TimeoutError("shadow must not fail the product request")
+
+    runner._vnext_broker_shadow_observer = BrokenObserver()
+    tools = [{"type": "function", "function": {"name": "observe"}}]
+    assert runner._model_tools_for_step(tools, 1) is tools
+
+
 @pytest.mark.parametrize(
     "task",
     [
