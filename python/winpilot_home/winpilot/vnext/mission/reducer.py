@@ -236,12 +236,24 @@ def _parse_target(payload: Mapping[str, Any]) -> TargetBinding:
 
 def _parse_transition(payload: Mapping[str, Any]) -> TransitionSummary:
     obligation_id = _payload_text(payload, "obligation_id")
+    if "input_completed" not in payload:
+        raise InvalidMissionEvent("transition input_completed is required")
+    input_completed = payload["input_completed"]
+    if type(input_completed) is not bool:
+        raise InvalidMissionEvent("transition input_completed must be boolean")
+    frame_id = payload.get("frame_id")
+    if frame_id is not None and (
+        type(frame_id) is not int or frame_id < 0
+    ):
+        raise InvalidMissionEvent(
+            "transition frame_id must be a non-negative integer or null"
+        )
     return TransitionSummary(
         action=_payload_text(payload, "action", "unknown"),
-        input_completed=bool(payload.get("input_completed", False)),
+        input_completed=input_completed,
         visible_effect=_payload_text(payload, "visible_effect"),
         evidence_refs=payload.get("evidence_refs") or (),
-        frame_id=(int(payload["frame_id"]) if payload.get("frame_id") is not None else None),
+        frame_id=frame_id,
         obligation_id=obligation_id,
     )
 
@@ -523,14 +535,20 @@ def _apply_event(
         if not previous.claim_fingerprint:
             raise IllegalTransitionError("verification must reference a runtime claim")
         supplied_fingerprint = _payload_text(payload, "claim_fingerprint")
-        if supplied_fingerprint and supplied_fingerprint != previous.claim_fingerprint:
+        if not supplied_fingerprint:
+            raise IllegalTransitionError(
+                "verification requires the Runtime-bound claim_fingerprint"
+            )
+        if supplied_fingerprint != previous.claim_fingerprint:
             raise StaleRevisionError("verification claim_fingerprint does not match the active claim")
         if previous.verified_claim_fingerprint == previous.claim_fingerprint:
             raise DuplicateEventError("the active claim fingerprint was already verified")
         policy = definition.evidence_policy
         if previous.verification_attempt_count >= policy.max_verification_attempts:
             raise IllegalTransitionError("maximum verification attempts exceeded")
-        verified = bool(payload.get("verified", False))
+        if type(payload.get("verified")) is not bool:
+            raise InvalidMissionEvent("verification verdict must be boolean")
+        verified = payload["verified"]
         missing = _as_string_tuple(payload.get("missing_conditions") or ())
         contradictions = _as_string_tuple(payload.get("contradictions") or ())
         satisfied = _as_string_tuple(
@@ -752,8 +770,10 @@ def _apply_event(
             raise IllegalTransitionError(
                 "mission_verified requires every required obligation to be verified"
             )
-        if "verified" in payload and not bool(payload.get("verified")):
-            raise IllegalTransitionError("mission_verified cannot carry a false verdict")
+        if "verified" in payload and payload.get("verified") is not True:
+            raise IllegalTransitionError(
+                "mission_verified verdict must be the boolean true"
+            )
         verification_id = _payload_text(payload, "verification_id")
         if not verification_id:
             raise IllegalTransitionError("mission_verified requires an independent verification_id")
@@ -763,8 +783,40 @@ def _apply_event(
             if state.verification_id
         } or verification_id == projection.mission_verification_id:
             raise DuplicateEventError("mission verification identity was already accepted")
+        expected_obligation_verification_ids = tuple(
+            projection.obligation_state(obligation_id).verification_id
+            for obligation_id in projection.definition.stable_topological_order
+            if projection.obligation_definition(obligation_id).required
+        )
+        supplied_obligation_verification_ids = _as_string_tuple(
+            payload.get("accepted_obligation_verification_ids") or ()
+        )
+        if (
+            any(item is None for item in expected_obligation_verification_ids)
+            or supplied_obligation_verification_ids
+            != expected_obligation_verification_ids
+        ):
+            raise IllegalTransitionError(
+                "mission verification must cover the exact accepted obligation verifications"
+            )
         evidence_ids = _event_evidence_ids(event, payload)
         refs = _evidence_refs(projection, scope, evidence_ids, required=True)
+        required_obligation_evidence = {
+            evidence_id
+            for obligation_id in projection.definition.stable_topological_order
+            if projection.obligation_definition(obligation_id).required
+            for evidence_id in projection.obligation_state(
+                obligation_id
+            ).verified_evidence_refs
+        }
+        if not required_obligation_evidence.issubset(set(evidence_ids)):
+            raise EvidenceScopeError(
+                "mission verification evidence does not cover every required obligation"
+            )
+        if not any(ref.obligation_id in (None, "") for ref in refs):
+            raise EvidenceScopeError(
+                "mission verification requires independent mission-level evidence"
+            )
         # A mission verifier may aggregate obligation evidence, but it may not
         # use an actor/model claim as its only identity proof.  The evidence
         # must still be in this exact mission/run scope (checked above).
@@ -902,11 +954,37 @@ class MissionReducer:
         evidence_refs: Iterable[str] | None = None,
         created_at: float | None = None,
     ) -> MissionEvent:
+        bound_payload = dict(payload or {})
+        if event_type == "verification_recorded":
+            obligation_id = _payload_text(
+                bound_payload,
+                "obligation_id",
+                _payload_text(bound_payload, "subject_id"),
+            )
+            try:
+                claim_fingerprint = self._projection.obligation_state(
+                    obligation_id
+                ).claim_fingerprint
+            except KeyError:
+                claim_fingerprint = None
+            if claim_fingerprint and "claim_fingerprint" not in bound_payload:
+                bound_payload["claim_fingerprint"] = claim_fingerprint
+        elif event_type == "mission_verified":
+            bound_payload.setdefault(
+                "accepted_obligation_verification_ids",
+                [
+                    self._projection.obligation_state(
+                        obligation_id
+                    ).verification_id
+                    for obligation_id in self.definition.stable_topological_order
+                    if self._projection.obligation_definition(obligation_id).required
+                ],
+            )
         return MissionEvent.create(
             event_type,
             self.definition,
             base_revision=self._projection.revision if base_revision is None else base_revision,
-            payload=payload,
+            payload=bound_payload,
             evidence_refs=evidence_refs,
             created_at=created_at,
         )
