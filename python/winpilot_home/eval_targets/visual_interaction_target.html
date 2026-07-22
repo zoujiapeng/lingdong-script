@@ -24,7 +24,6 @@
       font-size: 19px; font-weight: 800; letter-spacing: .02em; }
     .status.success { border-color: #169b62; background: #e7f8ef; color: #087747; }
     .status.failure { border-color: #c43d45; background: #fff0f1; color: #a12931; }
-    .case-id { float: right; color: #65748a; font: 12px ui-monospace, monospace; }
     .token { position: absolute; display: grid; place-items: center; z-index: 5; cursor: grab;
       border: 5px solid #0a4ea8; border-radius: 50%; background: #2684ff; color: #fff;
       font-weight: 800; box-shadow: 0 6px 15px rgba(38,132,255,.3); }
@@ -81,23 +80,36 @@
     .scroll-hint { position: absolute; width: 220px; padding: 14px 16px; border: 2px solid #a8b4c4;
       border-radius: 11px; background: #fff; color: #42516a; font-size: 16px; font-weight: 700;
       line-height: 1.45; }
+    .keyboard-code { position: absolute; display: grid; place-items: center; padding: 13px 20px;
+      border: 3px solid #3f4f66; border-radius: 12px; background: #fff; color: #19283e;
+      font: 800 27px ui-monospace, monospace; letter-spacing: .18em; }
+    .keyboard-card { position: absolute; padding: 11px; border: 3px solid #aab5c4;
+      border-radius: 12px; background: #eef2f7; }
+    .keyboard-card strong { display: block; margin-bottom: 7px; color: #59687d;
+      font-size: 13px; letter-spacing: .05em; }
+    .keyboard-card.keyboard-target { border: 5px solid #148052; background: #dcf6e9;
+      box-shadow: 0 7px 18px rgba(20,128,82,.18); }
+    .keyboard-card.keyboard-target strong { color: #087747; font-size: 16px; }
+    .keyboard-input, .keyboard-editor { width: 100%; border: 2px solid #718096; border-radius: 8px;
+      background: #fff; color: #17263b; font: 700 18px "Segoe UI", sans-serif;
+      user-select: text; }
+    .keyboard-input { height: 46px; padding: 8px 11px; }
+    .keyboard-editor { height: 92px; padding: 9px 11px; resize: none; line-height: 1.35; }
   </style>
 </head>
 <body>
   <main>
-    <span class="case-id" id="caseId"></span>
     <h1 id="heading">Visual Interaction Test</h1>
     <p class="instruction" id="instruction"></p>
     <section class="arena" id="arena" aria-label="Visual interaction arena"></section>
-    <div class="status" id="status" role="status">WAITING_FOR_REAL_POINTER_INPUT</div>
+    <div class="status" id="status" role="status">WAITING_FOR_REAL_INPUT</div>
   </main>
   <script>
     const query = new URLSearchParams(location.search);
     const caseId = query.get('case') || 'manual';
     const scenario = query.get('scenario') || 'drag_fit';
     const seed = Number(query.get('seed') || 1) >>> 0;
-    document.title = `WinPilot Visual Interaction Target ${caseId}`;
-    document.getElementById('caseId').textContent = `case=${caseId} scenario=${scenario} seed=${seed}`;
+    document.title = 'WinPilot Visual Interaction Target';
     const arena = document.getElementById('arena');
     const instruction = document.getElementById('instruction');
     const heading = document.getElementById('heading');
@@ -108,6 +120,7 @@
     // never observed.
     let readyDetails = () => ({});
     let moveCount = 0;
+    let reportTail = Promise.resolve();
 
     function rngFactory(value) {
       let a = value || 0x6d2b79f5;
@@ -128,12 +141,14 @@
         screen_x: event && Math.round(event.screenX) || 0,
         screen_y: event && Math.round(event.screenY) || 0,
         move_count: moveCount, succeeded: Boolean(details.succeeded), details };
-      return fetch('/event', {method:'POST', headers:{'Content-Type':'application/json'},
+      const persist = () => fetch('/event', {method:'POST', headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload), cache:'no-store'}).catch(() => {});
+      reportTail = reportTail.then(persist, persist);
+      return reportTail;
     }
     function markSuccess(message, event, details = {}) {
       status.className = 'status success'; status.textContent = message;
-      report('scenario_success', event, {...details, succeeded:true});
+      return report('scenario_success', event, {...details, succeeded:true});
     }
     function markFailure(message, event, details = {}) {
       status.className = 'status failure'; status.textContent = message;
@@ -397,7 +412,171 @@
         pane:box(pane),pane_viewport:paneViewport(),target:box(target),target_fully_visible:false});
     }
 
-    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn,scroll_reveal:setupScrollReveal};
+    function setupKeyboardEntry() {
+      heading.textContent='Visual Text Entry';
+      instruction.textContent='Enter the code shown below into the highlighted empty field.';
+      const W=arena.clientWidth,alphabet='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      const expectedText=Array.from({length:6},()=>alphabet[Math.floor(rng()*alphabet.length)]).join('');
+      const code=document.createElement('div');code.className='keyboard-code';code.textContent=expectedText;
+      place(code,Math.round(W/2-105),24,210,64);arena.append(code);
+      const cardWidth=250,targetIndex=Math.floor(rng()*3),slots=[38,Math.round((W-cardWidth)/2),W-cardWidth-38];
+      for(let i=slots.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[slots[i],slots[j]]=[slots[j],slots[i]];}
+      const fields=[];
+      for(let index=0;index<3;index++){
+        const card=document.createElement('label');card.className=`keyboard-card ${index===targetIndex?'keyboard-target':''}`;
+        const label=document.createElement('strong');label.textContent=index===targetIndex?'TYPE HERE':'OTHER FIELD';
+        const field=document.createElement('input');field.className='keyboard-input';field.type='text';
+        field.autocomplete='off';field.autocapitalize='off';field.spellcheck=false;field.placeholder='empty field';
+        field.dataset.targetId=`entry-field-${index}`;card.append(label,field);arena.append(card);
+        place(card,slots[index],142,cardWidth,92);fields.push(field);
+      }
+      const target=fields[targetIndex],targetId=target.dataset.targetId;
+      let acceptedPrefix='',pendingBefore=null,beforeinputCount=0,inputCount=0;
+      let wrongTargetActivity=false,sequenceValid=target.value==='';
+      function activityDetails(field,event,extra={}){return{
+        target_id:field.dataset.targetId,input_type:event.inputType||'',
+        data:typeof event.data==='string'?event.data:'',is_composing:Boolean(event.isComposing),...extra,
+      };}
+      fields.forEach(field=>{
+        for(const eventName of ['compositionstart','compositionupdate','compositionend']){
+          field.addEventListener(eventName,event=>{
+            if(field!==target)wrongTargetActivity=true;sequenceValid=false;
+            report(eventName,event,activityDetails(field,event,{value_before:field.value}));
+          });
+        }
+        field.addEventListener('paste',event=>{
+          if(field!==target)wrongTargetActivity=true;sequenceValid=false;
+          report(event.isTrusted?'trusted_paste':'untrusted_paste',event,
+            activityDetails(field,event,{value_before:field.value}));
+        });
+        field.addEventListener('drop',event=>{
+          if(field!==target)wrongTargetActivity=true;sequenceValid=false;
+          report(event.isTrusted?'trusted_drop':'untrusted_drop',event,
+            activityDetails(field,event,{value_before:field.value}));
+        });
+        field.addEventListener('beforeinput',event=>{
+          const valueBefore=field.value,inputType=event.inputType||'';
+          const data=typeof event.data==='string'?event.data:'';
+          if(field!==target){wrongTargetActivity=true;sequenceValid=false;}
+          if(field===target&&event.isTrusted)beforeinputCount++;
+          const candidate=valueBefore+data;
+          const valid=field===target&&event.isTrusted&&inputType==='insertText'&&data
+            &&!event.isComposing
+            &&pendingBefore===null&&valueBefore===acceptedPrefix&&expectedText.startsWith(candidate);
+          if(!valid)sequenceValid=false;
+          if(field===target)pendingBefore={data,valueBefore,candidate,valid};
+          report(event.isTrusted?'trusted_beforeinput':'untrusted_beforeinput',event,
+            activityDetails(field,event,{value_before:valueBefore}));
+        });
+        field.addEventListener('input',event=>{
+          const inputType=event.inputType||'',data=typeof event.data==='string'?event.data:'';
+          if(field!==target){wrongTargetActivity=true;sequenceValid=false;}
+          if(field===target&&event.isTrusted)inputCount++;
+          const valid=field===target&&event.isTrusted&&inputType==='insertText'
+            &&!event.isComposing
+            &&pendingBefore&&pendingBefore.valid&&pendingBefore.data===data
+            &&field.value===pendingBefore.candidate;
+          if(valid)acceptedPrefix=field.value;else sequenceValid=false;
+          if(field===target)pendingBefore=null;
+          report(event.isTrusted?'trusted_input':'untrusted_input',event,
+            activityDetails(field,event,{value:field.value}));
+          const succeeded=valid&&field.value===expectedText&&acceptedPrefix===expectedText
+            &&beforeinputCount===inputCount&&!wrongTargetActivity&&sequenceValid;
+          if(succeeded)markSuccess('TEXT_ENTRY_SUCCEEDED',event,{
+            target_id:targetId,expected_text:expectedText,final_value:field.value,
+            beforeinput_count:beforeinputCount,input_count:inputCount,
+            wrong_target_activity:wrongTargetActivity,sequence_valid:sequenceValid,
+          });
+        });
+      });
+      readyDetails=()=>({target_id:targetId,expected_text:expectedText,candidate_count:fields.length,
+        target:box(target),initial_value:target.value});
+    }
+
+    function setupKeyboardSelectAll() {
+      heading.textContent='Keyboard Selection';
+      instruction.textContent='Use the standard Select All keyboard shortcut in the highlighted editor without changing its content.';
+      const W=arena.clientWidth,words=['amber','cedar','falcon','harbor','meadow','orbit','silver','willow'];
+      const makeText=index=>Array.from({length:7},(_,offset)=>words[(index+offset+Math.floor(rng()*words.length))%words.length]).join(' ');
+      const cardWidth=268,targetIndex=Math.floor(rng()*3),slots=[24,Math.round((W-cardWidth)/2),W-cardWidth-24];
+      for(let i=slots.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[slots[i],slots[j]]=[slots[j],slots[i]];}
+      const editors=[];
+      for(let index=0;index<3;index++){
+        const card=document.createElement('label');card.className=`keyboard-card ${index===targetIndex?'keyboard-target':''}`;
+        const label=document.createElement('strong');label.textContent=index===targetIndex?'SELECT ALL HERE':'OTHER TEXT';
+        const editor=document.createElement('textarea');editor.className='keyboard-editor';editor.spellcheck=false;
+        editor.dataset.targetId=`selection-editor-${index}`;editor.value=makeText(index);card.append(label,editor);arena.append(card);
+        place(card,slots[index],92,cardWidth,142);editors.push(editor);
+      }
+      const target=editors[targetIndex],targetId=target.dataset.targetId,originalText=target.value;
+      let phase=0,mutationCount=0,wrongTargetActivity=false,sequenceValid=true;
+      function keyDetails(editor,event){return{
+        target_id:editor.dataset.targetId,key:event.key||'',code:event.code||'',
+        ctrl_key:Boolean(event.ctrlKey),alt_key:Boolean(event.altKey),
+        shift_key:Boolean(event.shiftKey),meta_key:Boolean(event.metaKey),
+        repeat:Boolean(event.repeat),
+        selection_start:editor.selectionStart,selection_end:editor.selectionEnd,content:editor.value,
+      };}
+      editors.forEach(editor=>{
+        for(const eventName of ['cut','paste','drop']){
+          editor.addEventListener(eventName,event=>{
+            sequenceValid=false;if(editor!==target)wrongTargetActivity=true;
+            report(`${event.isTrusted?'trusted':'untrusted'}_${eventName}`,event,{
+              target_id:editor.dataset.targetId,content:editor.value,
+            });
+          });
+        }
+        editor.addEventListener('beforeinput',event=>{
+          sequenceValid=false;if(editor!==target)wrongTargetActivity=true;
+          report(event.isTrusted?'trusted_beforeinput':'untrusted_beforeinput',event,{
+            target_id:editor.dataset.targetId,input_type:event.inputType||'',
+            data:typeof event.data==='string'?event.data:'',value_before:editor.value,
+          });
+        });
+        editor.addEventListener('input',event=>{
+          mutationCount++;sequenceValid=false;if(editor!==target)wrongTargetActivity=true;
+          report(event.isTrusted?'trusted_input':'untrusted_input',event,{
+            target_id:editor.dataset.targetId,input_type:event.inputType||'',
+            data:typeof event.data==='string'?event.data:'',value:editor.value,
+          });
+        });
+        editor.addEventListener('keydown',event=>{
+          const key=(event.key||'').toLowerCase(),onTarget=editor===target;
+          if(!event.isTrusted&&(key==='control'||key==='a'))sequenceValid=false;
+          if(!onTarget&&key==='a'&&event.ctrlKey)wrongTargetActivity=true;
+          if(onTarget&&event.isTrusted&&key==='control'&&phase===0
+            &&event.ctrlKey&&!event.altKey&&!event.shiftKey&&!event.metaKey&&!event.repeat)phase=1;
+          else if(onTarget&&event.isTrusted&&key==='a'&&phase===1
+            &&event.ctrlKey&&!event.altKey&&!event.shiftKey&&!event.metaKey&&!event.repeat)phase=2;
+          else if(onTarget&&(key==='control'||(key==='a'&&event.ctrlKey)))sequenceValid=false;
+          report(event.isTrusted?'trusted_keydown':'untrusted_keydown',event,keyDetails(editor,event));
+        });
+        editor.addEventListener('keyup',event=>{
+          const key=(event.key||'').toLowerCase(),onTarget=editor===target;
+          if(!event.isTrusted&&(key==='control'||key==='a'))sequenceValid=false;
+          if(onTarget&&event.isTrusted&&key==='a'&&phase===2&&event.ctrlKey
+            &&!event.altKey&&!event.shiftKey&&!event.metaKey&&!event.repeat)phase=3;
+          else if(onTarget&&event.isTrusted&&key==='control'&&phase===3&&!event.ctrlKey
+            &&!event.altKey&&!event.shiftKey&&!event.metaKey&&!event.repeat)phase=4;
+          else if(onTarget&&(key==='control'||key==='a'))sequenceValid=false;
+          const details=keyDetails(editor,event);
+          report(event.isTrusted?'trusted_keyup':'untrusted_keyup',event,details);
+          const succeeded=phase===4&&onTarget&&event.isTrusted&&details.selection_start===0
+            &&details.selection_end===originalText.length&&editor.value===originalText
+            &&mutationCount===0&&!wrongTargetActivity&&sequenceValid;
+          if(succeeded)markSuccess('SELECT_ALL_SUCCEEDED',event,{
+            target_id:targetId,original_text:originalText,final_text:editor.value,
+            selection_start:details.selection_start,selection_end:details.selection_end,
+            modifier_released:!event.ctrlKey,mutation_count:mutationCount,
+            wrong_target_activity:wrongTargetActivity,sequence_valid:sequenceValid,
+          });
+        });
+      });
+      readyDetails=()=>({target_id:targetId,original_text:originalText,candidate_count:editors.length,
+        target:box(target),selection_start:target.selectionStart,selection_end:target.selectionEnd});
+    }
+
+    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn,scroll_reveal:setupScrollReveal,keyboard_entry:setupKeyboardEntry,keyboard_select_all:setupKeyboardSelectAll};
     (setups[scenario]||setupDragFit)();
     requestAnimationFrame(()=>requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
       viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails()})));
