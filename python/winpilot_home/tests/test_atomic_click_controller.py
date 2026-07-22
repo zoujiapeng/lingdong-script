@@ -267,6 +267,31 @@ def test_final_guard_rejection_is_not_applied_and_never_calls_input_backend():
     assert len(final_guard.requests) == 1
 
 
+def test_stop_requested_at_final_guard_rejects_before_input():
+    authority, frame = _authority()
+    envelope = _envelope(frame)
+    raw_calls = []
+    stop_event = threading.Event()
+
+    class StopBeforeGuard(FinalGuard):
+        def check_before_mouse_down(self, request, screen_point):
+            stop_event.set()
+            return super().check_before_mouse_down(request, screen_point)
+
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *args, **kwargs: raw_calls.append((args, kwargs)),
+        final_guard=StopBeforeGuard(),
+    )
+
+    transition = controller.execute(envelope, stop_event=stop_event)
+
+    assert transition.outcome is ControllerOutcome.REJECTED
+    assert transition.input_completed is False
+    assert raw_calls == []
+
+
 def test_unknown_raw_outcome_is_not_replayed():
     authority, frame = _authority()
     envelope = _envelope(frame)

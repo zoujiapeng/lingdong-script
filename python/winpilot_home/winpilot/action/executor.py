@@ -757,11 +757,22 @@ def _raw_click(
             )
         if final_guard is not None:
             try:
-                guard_decision = final_guard(int(x), int(y))
+                cursor_before = tuple(map(int, _cursor_pos()))
+                guard_decision = final_guard(*cursor_before)
+                cursor_after = tuple(map(int, _cursor_pos()))
             except Exception:
                 guard_decision = FinalClickGuardDecision.TARGET_UNAVAILABLE
+                cursor_before = cursor_after = ()
             if not isinstance(guard_decision, FinalClickGuardDecision):
                 guard_decision = FinalClickGuardDecision.TARGET_UNAVAILABLE
+            if (
+                guard_decision is FinalClickGuardDecision.ADMITTED
+                and (
+                    cursor_before != (int(x), int(y))
+                    or cursor_after != cursor_before
+                )
+            ):
+                guard_decision = FinalClickGuardDecision.POINTER_POSITION_CHANGED
             if guard_decision is not FinalClickGuardDecision.ADMITTED:
                 return _click_progress(
                     False if completed_clicks == 0 else None,

@@ -334,6 +334,7 @@ def _physical_executor_mocks(monkeypatch, events):
     monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
     monkeypatch.setattr(executor, "_target_window_still_foreground", lambda _hwnd: True)
     monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: events.append(("move", x, y)))
+    monkeypatch.setattr(executor, "_cursor_pos", lambda: (10, 20))
     monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
     monkeypatch.setattr(executor, "_send_inputs", lambda inputs: events.append(("input", inputs[0])))
     monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
@@ -408,6 +409,24 @@ def test_final_guard_failure_is_certain_before_first_down_and_unknown_after_part
         final_guard=lambda _x, _y: FinalClickGuardDecision.TARGET_ROOT_CHANGED,
     )
     assert rejected.input_completed is False
+    assert not [event for event in events if event[0] == "input"]
+
+
+def test_admitted_backend_rejects_pointer_motion_during_final_guard(monkeypatch):
+    events = []
+    executor = _physical_executor_mocks(monkeypatch, events)
+    positions = iter(((10, 20), (11, 20)))
+    monkeypatch.setattr(executor, "_cursor_pos", lambda: next(positions))
+
+    result = executor.ADMITTED_PHYSICAL_CLICK_BACKEND(
+        10, 20, button=MouseButton.LEFT, count=ClickCount.SINGLE,
+        mechanism=ClickMechanism.PHYSICAL, hwnd=41,
+        final_guard=lambda _x, _y: FinalClickGuardDecision.ADMITTED,
+    )
+
+    assert result.input_completed is False
+    assert result.facts["via"] == "final_target_guard"
+    assert "pointer_position_changed" in result.facts["error"]
     assert not [event for event in events if event[0] == "input"]
 
 

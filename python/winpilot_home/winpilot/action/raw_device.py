@@ -37,6 +37,8 @@ class FinalClickGuardDecision(str, Enum):
     TARGET_PROCESS_CHANGED = "target_process_changed"
     TARGET_GEOMETRY_CHANGED = "target_geometry_changed"
     POINT_OUTSIDE_TARGET = "point_outside_target"
+    POINTER_POSITION_CHANGED = "pointer_position_changed"
+    STOP_REQUESTED = "stop_requested"
     HIT_TEST_UNAVAILABLE = "hit_test_unavailable"
     HIT_TEST_CHANGED = "hit_test_changed"
 
