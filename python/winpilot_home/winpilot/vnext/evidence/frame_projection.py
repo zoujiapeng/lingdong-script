@@ -16,6 +16,8 @@ from .registry import EvidenceRegistry
 
 POST_ACTION_FRAME_EVIDENCE_FORMAT = "post-action-frame-evidence/0"
 POST_ACTION_FRAME_EVIDENCE_KIND = "post_action_frame"
+CURRENT_FRAME_EVIDENCE_FORMAT = "current-frame-evidence/0"
+CURRENT_FRAME_EVIDENCE_KIND = "current_frame"
 
 
 def frame_identity_payload_hash(frame: FrameCommitIdentity) -> str:
@@ -25,6 +27,26 @@ def frame_identity_payload_hash(frame: FrameCommitIdentity) -> str:
         raise TypeError("frame must be FrameCommitIdentity")
     payload = {
         "format": POST_ACTION_FRAME_EVIDENCE_FORMAT,
+        "frame": frame.to_dict(),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def current_frame_payload_hash(frame: FrameCommitIdentity) -> str:
+    """Hash the exact pixels/geometry of a non-mutation observation frame."""
+
+    if not isinstance(frame, FrameCommitIdentity):
+        raise TypeError("frame must be FrameCommitIdentity")
+    payload = {
+        "format": CURRENT_FRAME_EVIDENCE_FORMAT,
         "frame": frame.to_dict(),
     }
     return hashlib.sha256(
@@ -74,9 +96,12 @@ class RegistryFrameEvidenceProjector:
 
 
 __all__ = [
+    "CURRENT_FRAME_EVIDENCE_FORMAT",
+    "CURRENT_FRAME_EVIDENCE_KIND",
     "POST_ACTION_FRAME_EVIDENCE_FORMAT",
     "POST_ACTION_FRAME_EVIDENCE_KIND",
     "FrameEvidenceProjectionPort",
     "RegistryFrameEvidenceProjector",
+    "current_frame_payload_hash",
     "frame_identity_payload_hash",
 ]

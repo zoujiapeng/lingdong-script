@@ -33,17 +33,16 @@ from ..capabilities import (
     TargetState,
 )
 from ..evidence.frame_projection import (
+    CURRENT_FRAME_EVIDENCE_FORMAT,
+    CURRENT_FRAME_EVIDENCE_KIND,
     POST_ACTION_FRAME_EVIDENCE_KIND,
+    current_frame_payload_hash,
     frame_identity_payload_hash,
 )
 from ..evidence.registry import EvidenceRegistry
 from ..mission import EvidenceRef, MissionProjection, TargetBinding
 from ..runtime.contracts import RuntimeFrame, RuntimeSnapshot
 from ..runtime.mutation_permits import MutationPermitAuthority
-
-
-CURRENT_FRAME_EVIDENCE_FORMAT = "current-frame-evidence/0"
-CURRENT_FRAME_EVIDENCE_KIND = "current_frame"
 
 
 class RuntimeStateBridgeError(RuntimeError):
@@ -107,26 +106,6 @@ class RuntimeReadState:
             self.pointer.disposition is PointerDisposition.RELEASED
             and self.pointer.physically_owned is False
         )
-
-
-def current_frame_payload_hash(frame: FrameCommitIdentity) -> str:
-    """Identify every pixel and geometry field of one current frame."""
-
-    if not isinstance(frame, FrameCommitIdentity):
-        raise TypeError("frame must be FrameCommitIdentity")
-    payload = {
-        "format": CURRENT_FRAME_EVIDENCE_FORMAT,
-        "frame": frame.to_dict(),
-    }
-    return hashlib.sha256(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 class RuntimeStateBridge:
