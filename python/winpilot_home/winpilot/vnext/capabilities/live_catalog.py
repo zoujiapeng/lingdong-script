@@ -6,7 +6,9 @@ application, task phrase, or visual layout.
 """
 from __future__ import annotations
 
+from ...orchestrator.runtime_admission import RuntimeCapabilitySnapshot
 from .contracts import MutationKind, ToolCatalog, ToolRoute, ToolSpec
+from .registry import CapabilityOwner, RuntimeCapabilityRegistry
 
 
 CLICK_LIVE_TOOL_NAMES = (
@@ -14,6 +16,19 @@ CLICK_LIVE_TOOL_NAMES = (
     "double_click",
     "claim_obligation_done",
     "blocked",
+)
+
+CLICK_LIVE_CONTROLLER_TOOL_NAMES = (
+    "click",
+    "double_click",
+)
+
+CLICK_LIVE_RUNTIME_SERVICES = (
+    "authoritative_frame_input",
+    "desktop_controller",
+    "mission_verifier",
+    "obligation_verifier",
+    "visual_actor",
 )
 
 _FRAME_PREREQUISITES = (
@@ -104,4 +119,37 @@ def build_click_live_catalog() -> ToolCatalog:
     ))
 
 
-__all__ = ["CLICK_LIVE_TOOL_NAMES", "build_click_live_catalog"]
+def build_click_live_runtime_snapshot() -> RuntimeCapabilitySnapshot:
+    """Describe the exact click-only composition assembled in production.
+
+    This is a mechanical inventory, not a task classifier.  The resulting
+    immutable object is shared by queue-time admission, ExecutionPolicy,
+    RuntimeState, and the CapabilityBroker for the lifetime of a coordinator.
+    """
+
+    catalog = build_click_live_catalog()
+    return RuntimeCapabilitySnapshot(
+        runtime_version="vnext",
+        catalog=catalog,
+        capability_registry=RuntimeCapabilityRegistry((
+            CapabilityOwner(
+                "atomic-click-controller",
+                ("visual.interact",),
+            ),
+            CapabilityOwner(
+                "authoritative-frame-visual-actor",
+                ("visual.read_text",),
+            ),
+        )),
+        controller_tool_names=CLICK_LIVE_CONTROLLER_TOOL_NAMES,
+        available_services=CLICK_LIVE_RUNTIME_SERVICES,
+    )
+
+
+__all__ = [
+    "CLICK_LIVE_CONTROLLER_TOOL_NAMES",
+    "CLICK_LIVE_RUNTIME_SERVICES",
+    "CLICK_LIVE_TOOL_NAMES",
+    "build_click_live_catalog",
+    "build_click_live_runtime_snapshot",
+]

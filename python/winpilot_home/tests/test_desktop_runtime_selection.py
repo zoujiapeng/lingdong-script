@@ -31,6 +31,14 @@ from winpilot.orchestrator.runtime_selection import (
     DesktopRuntimeUnavailable,
     InvalidDesktopRuntimeSelection,
 )
+from winpilot.tasking.capability import (
+    CapabilityPlanner,
+    CapabilityUnsatisfiedError,
+)
+from winpilot.tasking.compiler import TaskContractCompiler
+from winpilot.vnext.capabilities.live_catalog import (
+    build_click_live_runtime_snapshot,
+)
 
 
 def _task_stage_graph(*, metadata: dict | None = None) -> ArpGraph:
@@ -62,6 +70,22 @@ def _task_stage_graph(*, metadata: dict | None = None) -> ArpGraph:
     )
 
 
+def _vnext_task_stage_graph(*, metadata: dict | None = None) -> ArpGraph:
+    contract, graph = TaskContractCompiler().compile_graph(
+        "Complete the task visible in the current window.",
+        max_steps=8,
+        cold_start=True,
+        require_gui=True,
+    )
+    assert contract.format == "task-contract/1"
+    assert contract.compiler_version == "typed-stage-5"
+    assert [stage.type.value for stage in contract.stages] == [
+        "ExecuteDesktopTask",
+    ]
+    graph.metadata.update(metadata or {})
+    return graph
+
+
 _DEFAULT_COORDINATOR = object()
 
 
@@ -74,6 +98,8 @@ def _install_live_coordinator_factory(
     calls = []
 
     class Coordinator:
+        runtime_capability_snapshot = build_click_live_runtime_snapshot()
+
         def run(self, _context):
             return DesktopRuntimeCoordinatorResult(
                 status=DesktopRuntimeCoordinatorStatus.DONE,
@@ -100,6 +126,51 @@ def _install_live_coordinator_factory(
         sys.modules, "winpilot.vnext.bridge.coordinator", module,
     )
     return resolved, calls
+
+
+def _install_server_run_capture(monkeypatch, server, *, calls=None):
+    captured: dict[str, object] = {}
+    call_log: list[str] = calls if calls is not None else []
+
+    class Config:
+        @staticmethod
+        def get(*_path: str, default=None):
+            return default
+
+    class Runs:
+        @staticmethod
+        def prepare(
+            graph,
+            handlers,
+            *,
+            inputs,
+            desktop_runtime_selection,
+            desktop_runtime_coordinator,
+        ):
+            call_log.append("prepare")
+            captured.update({
+                "handlers": handlers,
+                "selection": desktop_runtime_selection,
+                "coordinator": desktop_runtime_coordinator,
+            })
+            return ArpExecution(
+                graph,
+                handlers,
+                inputs=inputs,
+                desktop_runtime_selection=desktop_runtime_selection,
+                desktop_runtime_coordinator=desktop_runtime_coordinator,
+            )
+
+    class Jobs:
+        @staticmethod
+        def submit(*_args, **_kwargs):
+            call_log.append("job")
+
+    monkeypatch.setattr(server, "CONFIG", Config())
+    monkeypatch.setattr(server, "ARP_RUNS", Runs())
+    monkeypatch.setattr(server, "RUNTIME_JOBS", Jobs())
+    monkeypatch.setattr(server.human_mod.RECORDER, "is_recording", lambda: False)
+    return captured, call_log
 
 
 @pytest.mark.parametrize("raw", ["", "Legacy", "VNEXT", " vnext ", True, 1, {}, []])
@@ -595,7 +666,12 @@ def test_server_reads_runtime_config_once_and_freezes_selection(
     monkeypatch.setattr(server.human_mod.RECORDER, "is_recording", lambda: False)
     coordinator, factory_calls = _install_live_coordinator_factory(monkeypatch)
 
-    graph = _task_stage_graph(metadata={
+    graph_builder = (
+        _task_stage_graph
+        if selected_version == "legacy"
+        else _vnext_task_stage_graph
+    )
+    graph = graph_builder(metadata={
         "runtime_version": "vnext",
         "task_profile": {"runtime_version": "vnext"},
     })
@@ -686,7 +762,7 @@ def test_explicit_product_run_selection_is_atomic_and_ignores_semantic_fields(
     coordinator, factory_calls = _install_live_coordinator_factory(monkeypatch)
 
     execution = server._start_arp_execution(
-        _task_stage_graph(metadata={"runtime_version": "legacy"}),
+        _vnext_task_stage_graph(metadata={"runtime_version": "legacy"}),
         {"runtime_version": "legacy"},
         runtime_version="vnext",
     )
@@ -697,6 +773,161 @@ def test_explicit_product_run_selection_is_atomic_and_ignores_semantic_fields(
         assert captured["handlers"] is None
         assert factory_calls == [server.trace_mod.RECORDER]
         assert config_reads == []
+    finally:
+        with server.STATE.lock:
+            server.STATE.run_jobs.pop(execution.run_id, None)
+
+
+def test_vnext_server_admission_does_not_call_legacy_capability_preflight(
+    monkeypatch,
+) -> None:
+    import winpilot.server as server
+
+    graph = _vnext_task_stage_graph()
+    captured, calls = _install_server_run_capture(monkeypatch, server)
+    monkeypatch.setattr(
+        CapabilityPlanner,
+        "assert_satisfiable",
+        staticmethod(lambda _contract: pytest.fail(
+            "vNext admission must not call legacy static capability planning"
+        )),
+    )
+    monkeypatch.setattr(
+        CapabilityPlanner,
+        "assert_runtime_satisfiable",
+        staticmethod(lambda _contract: pytest.fail(
+            "vNext admission must not probe legacy runtime providers"
+        )),
+    )
+    coordinator, _factory_calls = _install_live_coordinator_factory(monkeypatch)
+
+    execution = server._start_arp_execution(
+        graph,
+        {},
+        runtime_version="vnext",
+    )
+    try:
+        assert calls == ["prepare", "job"]
+        assert captured["coordinator"] is coordinator
+        assert captured["handlers"] is None
+        assert coordinator.runtime_capability_snapshot is not None
+    finally:
+        with server.STATE.lock:
+            server.STATE.run_jobs.pop(execution.run_id, None)
+
+
+def test_vnext_admission_failure_precedes_prepare_model_controller_job_and_fallback(
+    monkeypatch,
+) -> None:
+    import winpilot.action.executor as executor_module
+    import winpilot.server as server
+    from winpilot.action.raw_device import AdmittedPhysicalClickBackend
+
+    calls: list[str] = []
+    _captured, calls = _install_server_run_capture(
+        monkeypatch,
+        server,
+        calls=calls,
+    )
+
+    class Coordinator:
+        runtime_capability_snapshot = build_click_live_runtime_snapshot()
+
+        def run(self, _context):
+            calls.append("model_or_controller")
+            pytest.fail("an unadmitted run must never enter the live coordinator")
+
+    monkeypatch.setattr(
+        server,
+        "default_handlers",
+        lambda *_args, **_kwargs: calls.append("legacy_fallback"),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "ADMITTED_PHYSICAL_CLICK_BACKEND",
+        AdmittedPhysicalClickBackend(
+            lambda *_args, **_kwargs: calls.append("controller_mutation"),
+        ),
+    )
+    _install_live_coordinator_factory(monkeypatch, coordinator=Coordinator())
+
+    with pytest.raises(
+        CapabilityUnsatisfiedError,
+        match="requires task-contract/1",
+    ):
+        server._start_arp_execution(
+            _task_stage_graph(),
+            {},
+            runtime_version="vnext",
+        )
+
+    assert calls == []
+
+
+def test_legacy_server_without_contract_skips_capability_preflight(
+    monkeypatch,
+) -> None:
+    import winpilot.server as server
+
+    captured, calls = _install_server_run_capture(monkeypatch, server)
+    monkeypatch.setattr(
+        CapabilityPlanner,
+        "assert_satisfiable",
+        staticmethod(lambda _contract: pytest.fail(
+            "legacy graphs without a contract remain admissible"
+        )),
+    )
+    monkeypatch.setattr(
+        CapabilityPlanner,
+        "assert_runtime_satisfiable",
+        staticmethod(lambda _contract: pytest.fail(
+            "legacy graphs without a contract do not probe providers"
+        )),
+    )
+
+    execution = server._start_arp_execution(
+        _task_stage_graph(),
+        {},
+        runtime_version="legacy",
+    )
+    try:
+        assert captured["handlers"] is not None
+        assert calls == ["prepare", "job"]
+    finally:
+        with server.STATE.lock:
+            server.STATE.run_jobs.pop(execution.run_id, None)
+
+
+def test_legacy_server_preserves_static_then_runtime_preflight_order(
+    monkeypatch,
+) -> None:
+    import winpilot.server as server
+
+    graph = _vnext_task_stage_graph()
+    calls: list[str] = []
+    _captured, calls = _install_server_run_capture(
+        monkeypatch,
+        server,
+        calls=calls,
+    )
+    monkeypatch.setattr(
+        CapabilityPlanner,
+        "assert_satisfiable",
+        staticmethod(lambda _contract: calls.append("static")),
+    )
+    monkeypatch.setattr(
+        CapabilityPlanner,
+        "assert_runtime_satisfiable",
+        staticmethod(lambda _contract: calls.append("runtime")),
+    )
+
+    execution = server._start_arp_execution(
+        graph,
+        {},
+        runtime_version="legacy",
+    )
+    try:
+        assert calls == ["static", "runtime", "prepare", "job"]
     finally:
         with server.STATE.lock:
             server.STATE.run_jobs.pop(execution.run_id, None)
@@ -790,6 +1021,7 @@ def test_unknown_product_runtime_config_fails_before_prepare_or_job_submit(
 def test_runtime_selection_has_one_product_owner_and_no_semantic_selector() -> None:
     package_root = Path(__file__).parents[1] / "winpilot"
     calls: list[tuple[Path, ast.Call, ast.AST | None]] = []
+    admission_calls: list[tuple[Path, ast.AST | None]] = []
     for path in package_root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         parents: dict[ast.AST, ast.AST] = {}
@@ -800,6 +1032,18 @@ def test_runtime_selection_has_one_product_owner_and_no_semantic_selector() -> N
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "admit"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "DesktopRuntimeAdmission"
+            ):
+                admission_owner: ast.AST | None = node
+                while admission_owner is not None and not isinstance(
+                    admission_owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    admission_owner = parents.get(admission_owner)
+                admission_calls.append((path, admission_owner))
             if not (
                 isinstance(func, ast.Attribute)
                 and func.attr == "from_config"
@@ -824,3 +1068,9 @@ def test_runtime_selection_has_one_product_owner_and_no_semantic_selector() -> N
     owner_source = ast.unparse(owner)
     assert "CONFIG.get('vnext', 'runtime_version', default=None)" in owner_source
     assert "runtime_version is None" in owner_source
+    assert len(admission_calls) == 1
+    admission_path, admission_owner = admission_calls[0]
+    assert admission_path.name == "server.py"
+    assert isinstance(admission_owner, ast.FunctionDef)
+    assert admission_owner.name == "_start_arp_execution"
+    assert "CapabilityPlanner.assert_" not in owner_source
