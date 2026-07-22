@@ -719,6 +719,8 @@ def test_visual_target_defers_ready_geometry_until_first_painted_frame():
     assert "const direction=rng()<.5?'up':'down'" in scroll_setup
     assert "initialScrollTop=direction==='down'" in scroll_setup
     assert "if(!event.isTrusted)return" in scroll_setup
+    assert source.count("['pointerdown','click','focus','blur']") == 2
+    assert source.count("active_target_id:") == 2
 
 
 def _keyboard_entry_state() -> dict:
@@ -814,6 +816,35 @@ def test_external_verdict_accepts_exact_trusted_keyboard_entry_chain():
         _keyboard_entry_state(),
         case_id="case-1", scenario="keyboard_entry", seed=17,
     )
+    assert verdict["passed"] is True
+
+
+def test_keyboard_focus_diagnostics_do_not_change_oracle_acceptance():
+    harness = _load_harness()
+    state = _keyboard_entry_state()
+    ready = state["events"][0]
+    state["events"][1:1] = [
+        {
+            "case_id": ready["case_id"],
+            "scenario": ready["scenario"],
+            "seed": ready["seed"],
+            "type": "trusted_focus",
+            "trusted": True,
+            "succeeded": False,
+            "details": {
+                "target_id": ready["details"]["target_id"],
+                "active_target_id": ready["details"]["target_id"],
+                "value_length": 0,
+                "selection_start": 0,
+                "selection_end": 0,
+            },
+        }
+    ]
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="keyboard_entry", seed=17,
+    )
+
     assert verdict["passed"] is True
 
 
