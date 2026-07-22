@@ -149,6 +149,11 @@ def test_trace_binding_uses_only_the_exact_client_run(monkeypatch, tmp_path):
             "run_id": client_run_id,
             "task": "target task",
         }),
+        json.dumps({
+            "type": "desktop_runtime_selected",
+            "run_id": bound_trace_id,
+            "runtime_version": "vnext",
+        }),
     ]) + "\n", encoding="utf-8")
     (tmp_path / "arp-20260718-010203-other.jsonl").write_text("\n".join([
         json.dumps({
@@ -169,6 +174,14 @@ def test_trace_binding_uses_only_the_exact_client_run(monkeypatch, tmp_path):
     assert evidence["passed"] is True
     assert evidence["trace_ids"] == [bound_trace_id]
     assert evidence["matching_trace_count"] == 1
+    selected = harness._bound_trace_evidence(
+        client_run_id, "target task", "vnext",
+    )
+    assert selected["passed"] is True
+    assert selected["runtime_versions"] == ["vnext"]
+    assert harness._bound_trace_evidence(
+        client_run_id, "target task", "legacy",
+    )["passed"] is False
     assert harness._bound_trace_evidence(client_run_id, "other task")["passed"] is False
 
 

@@ -47,7 +47,9 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     )
     assert {
         item["scenario"] for item in harness.VISUAL_CASES.values()
-    } == {"drag_fit", "slider", "corridor_drag", "dynamic_hold"}
+    } == {"precise_click", "drag_fit", "slider", "corridor_drag", "dynamic_hold"}
+    assert harness.SUITES["vnext-canary"] == ("precise-click",)
+    assert harness.VISUAL_CASES["precise-click"]["runtime_version"] == "vnext"
     assert {
         harness.VISUAL_CASES[name]["expected_variant"]
         for name in ("corridor-v0", "corridor-v1", "game-drag-v2", "corridor-v3")
@@ -71,6 +73,90 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     assert "植物大战僵尸" not in " ".join(
         item["task"] for item in harness.VISUAL_CASES.values()
     )
+
+
+def test_external_verdict_requires_exact_precise_click_identity_and_geometry():
+    harness = _load_harness()
+    target = {
+        "left": 120,
+        "top": 80,
+        "right": 182,
+        "bottom": 142,
+        "width": 62,
+        "height": 62,
+    }
+    state = _state(
+        "precise_click",
+        {"target_index": 7, "target": dict(target)},
+        moves=0,
+    )
+    state["success_event"]["client_x"] = 151
+    state["success_event"]["client_y"] = 111
+    state["events"].insert(0, {
+        "case_id": "case-1",
+        "scenario": "precise_click",
+        "seed": 17,
+        "type": "page_ready",
+        "trusted": False,
+        "details": {
+            "target_index": 7,
+            "target": dict(target),
+            "candidate_count": 12,
+            "distractor_count": 11,
+        },
+    })
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="precise_click", seed=17,
+    )
+
+    assert verdict["passed"] is True
+    state["success_event"]["details"]["target"]["left"] += 1
+    failed = harness.external_verdict(
+        state, case_id="case-1", scenario="precise_click", seed=17,
+    )
+    assert failed["passed"] is False
+    assert "success target geometry does not match page-ready identity" in failed["errors"]
+
+
+def test_external_verdict_rejects_precise_click_movement_and_wrong_target_identity():
+    harness = _load_harness()
+    target = {
+        "left": 120,
+        "top": 80,
+        "right": 182,
+        "bottom": 142,
+        "width": 62,
+        "height": 62,
+    }
+    state = _state(
+        "precise_click",
+        {"target_index": 12, "target": dict(target)},
+        moves=1,
+    )
+    state["success_event"]["client_x"] = 151
+    state["success_event"]["client_y"] = 111
+    state["events"].insert(0, {
+        "case_id": "case-1",
+        "scenario": "precise_click",
+        "seed": 17,
+        "type": "page_ready",
+        "trusted": False,
+        "details": {
+            "target_index": 7,
+            "target": dict(target),
+            "candidate_count": 12,
+            "distractor_count": 11,
+        },
+    })
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="precise_click", seed=17,
+    )
+
+    assert verdict["passed"] is False
+    assert "precise click unexpectedly recorded pointer movement" in verdict["errors"]
+    assert "precise click target identity is invalid" in verdict["errors"]
 
 
 def test_external_verdict_requires_complete_object_placement():

@@ -170,7 +170,7 @@
           if(target)markSuccess('CLICK_SUCCEEDED',event,{succeeded:true,target_index:targetIndex,target:box(el)});
           else markFailure('WRONG_OBJECT_CLICKED',event,{succeeded:false,clicked_index:i,target_index:targetIndex}); }); arena.append(el);
       }
-      const target=arena.querySelector('.target-shape'); readyDetails={target:box(target),distractor_count:cols*rows-1};
+      const target=arena.querySelector('.target-shape'); readyDetails={target_index:targetIndex,target:box(target),candidate_count:cols*rows,distractor_count:cols*rows-1};
     }
 
     function setupOrderedClicks() {

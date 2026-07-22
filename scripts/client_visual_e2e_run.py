@@ -56,6 +56,14 @@ DEFAULT_OUTPUT = WORKSPACE / "output" / "playwright" / "client-visual-e2e"
 VISUAL_TEST_TASK = "完成当前界面上的测试。"
 
 VISUAL_CASES: dict[str, dict[str, Any]] = {
+    "precise-click": {
+        "scenario": "precise_click",
+        "task": VISUAL_TEST_TASK,
+        "seed": 424242,
+        "max_steps": 18,
+        "timeout": 300,
+        "runtime_version": "vnext",
+    },
     "drag-fit": {
         "scenario": "drag_fit",
         "task": VISUAL_TEST_TASK,
@@ -114,6 +122,7 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
 
 SUITES = {
     "smoke": ("drag-fit", "slider", "dynamic-hold", "game-drag-v2"),
+    "vnext-canary": ("precise-click",),
     "all": tuple(VISUAL_CASES),
 }
 
@@ -270,11 +279,61 @@ def external_verdict(
         errors.append("seed mismatch")
     if event.get("trusted") is not True or event.get("succeeded") is not True:
         errors.append("success event is not trusted and successful")
+    if event.get("type") != "scenario_success":
+        errors.append("success evidence is not a scenario_success event")
+    if event.get("case_id") != case_id or event.get("scenario") != scenario:
+        errors.append("success event identity mismatch")
+    if int(event.get("seed") or 0) != int(seed):
+        errors.append("success event seed mismatch")
     if details.get("succeeded") is not True:
         errors.append("scenario details are not successful")
 
     move_count = int(event.get("move_count") or 0)
-    if scenario == "drag_fit":
+    if scenario == "precise_click":
+        ready = next(
+            (
+                item for item in reversed(state.get("events") or [])
+                if item.get("type") == "page_ready"
+                and item.get("case_id") == case_id
+                and item.get("scenario") == scenario
+                and int(item.get("seed") or 0) == int(seed)
+            ),
+            {},
+        )
+        ready_details = ready.get("details") or {}
+        target = details.get("target") or {}
+        ready_target = ready_details.get("target") or {}
+        geometry_keys = ("left", "top", "right", "bottom", "width", "height")
+        geometry_valid = all(
+            isinstance(target.get(key), (int, float))
+            and isinstance(ready_target.get(key), (int, float))
+            for key in geometry_keys
+        )
+        if move_count != 0:
+            errors.append("precise click unexpectedly recorded pointer movement")
+        target_index = details.get("target_index")
+        if not isinstance(target_index, int) or not 0 <= target_index < 12:
+            errors.append("precise click target identity is invalid")
+        elif target_index != ready_details.get("target_index"):
+            errors.append("success target identity does not match page-ready identity")
+        if int(ready_details.get("candidate_count") or -1) != 12:
+            errors.append("precise click candidate count is invalid")
+        if int(ready_details.get("distractor_count") or -1) != 11:
+            errors.append("precise click candidate identity set is incomplete")
+        if not geometry_valid:
+            errors.append("precise click target geometry is incomplete")
+        elif any(target[key] != ready_target[key] for key in geometry_keys):
+            errors.append("success target geometry does not match page-ready identity")
+        elif not (
+            target["width"] > 0
+            and target["height"] > 0
+            and target["right"] - target["left"] == target["width"]
+            and target["bottom"] - target["top"] == target["height"]
+            and target["left"] <= int(event.get("client_x") or -1) < target["right"]
+            and target["top"] <= int(event.get("client_y") or -1) < target["bottom"]
+        ):
+            errors.append("trusted click coordinates are outside canonical target geometry")
+    elif scenario == "drag_fit":
         token = details.get("token") or {}
         target = details.get("target") or {}
         if move_count < 2:
@@ -419,6 +478,7 @@ def run_visual_case(
         "entrypoint": "electron_client_windows_uia",
         "cold_start_required": True,
         "ground_truth": "trusted_browser_pointer_events",
+        "runtime_version": str(source.get("runtime_version") or "legacy"),
         "started_at": started_at,
     }
     try:
@@ -504,6 +564,7 @@ def run_visual_case(
                 "task": source["task"],
                 "max_steps": int(source["max_steps"]),
                 "timeout": int(source["timeout"]),
+                "runtime_version": str(source.get("runtime_version") or "legacy"),
             },
             output_root=case_dir / "client",
             reset_session=True,
