@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from enum import Enum
 import time
-from typing import Any
+from typing import Any, Literal
 import uuid
 
 from pydantic import BaseModel, Field
@@ -143,6 +143,7 @@ class EvidenceRequirement(BaseModel):
 class ArpRunRequest(BaseModel):
     graph: ArpGraph
     inputs: dict[str, Any] = Field(default_factory=dict)
+    runtime_version: Literal["legacy", "vnext"] | None = None
 
 
 def _validate_node_config(node: ArpNode) -> list[str]:

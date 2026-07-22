@@ -963,9 +963,19 @@ def validate_automation_ir_execution(automation: dict[str, Any]) -> dict[str, An
     return validate_graph(graph).model_dump(mode="json")
 
 
-def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecution:
-    desktop_runtime_selection = DesktopRuntimeSelection.from_config(
+def _start_arp_execution(
+    graph: ArpGraph,
+    inputs: dict[str, Any],
+    *,
+    runtime_version: str | None = None,
+) -> ArpExecution:
+    selected_runtime_version = (
         CONFIG.get("vnext", "runtime_version", default=None)
+        if runtime_version is None
+        else runtime_version
+    )
+    desktop_runtime_selection = DesktopRuntimeSelection.from_config(
+        selected_runtime_version
     )
     current_session_generation = SESSION.generation()
     raw_session_generation = graph.metadata.get("session_generation")
@@ -1266,7 +1276,11 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
                 session_context=session_context,
             )
             graph.metadata["session_generation"] = session_generation
-        execution = _start_arp_execution(graph, req.inputs)
+        execution = _start_arp_execution(
+            graph,
+            req.inputs,
+            runtime_version=req.runtime_version,
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
