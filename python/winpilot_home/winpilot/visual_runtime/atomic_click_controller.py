@@ -178,7 +178,7 @@ class AtomicDesktopController:
             )
         args = dict(proposal.args)
         expected_args = (
-            {"image_x", "image_y", "amount"}
+            {"image_x", "image_y", "direction", "notches"}
             if proposal.action == "scroll"
             else {"image_x", "image_y"}
         )
@@ -186,13 +186,20 @@ class AtomicDesktopController:
             raise AtomicDesktopControllerError(
                 f"{proposal.action} args do not match the submitted-image contract"
             )
-        amount = args.pop("amount", None)
+        direction = args.pop("direction", None)
+        notches = args.pop("notches", None)
         if proposal.action == "scroll" and (
-            type(amount) is not int or amount == 0 or not -12 <= amount <= 12
+            type(direction) is not str
+            or direction not in {"up", "down"}
+            or type(notches) is not int
+            or not 1 <= notches <= 12
         ):
             raise AtomicDesktopControllerError(
-                "scroll amount must be a non-zero integer from -12 through 12"
+                "scroll requires direction up/down and integer notches from 1 through 12"
             )
+        amount = None
+        if proposal.action == "scroll":
+            amount = notches if direction == "up" else -notches
         try:
             mapped, _source = SubmittedImageCoordinateMapper(
                 envelope.frame.submitted_size

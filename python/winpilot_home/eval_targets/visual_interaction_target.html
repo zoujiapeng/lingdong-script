@@ -385,12 +385,14 @@
           wheel_delta_y:event.deltaY,wheel_count:wheelCount,pane:box(pane),pane_viewport:viewport,target:targetBox,
           target_fully_visible:fullyVisible};}
       pane.addEventListener('wheel',event=>{if(!event.isTrusted)return;const before=pane.scrollTop;wheelCount++;
-        requestAnimationFrame(async()=>{const after=pane.scrollTop,details=wheelDetails(event,before,after);
+        // Chromium can apply the wheel default action after callbacks queued
+        // for the current frame. Sample in the next task and frame instead.
+        setTimeout(()=>requestAnimationFrame(async()=>{const after=pane.scrollTop,details=wheelDetails(event,before,after);
           await report('trusted_wheel',event,{...details,succeeded:false});
           const correctDirection=direction==='down'?event.deltaY>0&&details.scroll_delta>0:event.deltaY<0&&details.scroll_delta<0;
           if(correctDirection&&details.scroll_delta!==0&&details.total_scroll_delta!==0&&details.target_fully_visible){
             markSuccess('SCROLL_REVEAL_SUCCEEDED',event,{...details,succeeded:true});
-          }});},{passive:true});
+          }}),0);},{passive:true});
       readyDetails=()=>({direction,initial_scroll_top:pane.scrollTop,max_scroll_top:maxScrollTop,
         pane:box(pane),pane_viewport:paneViewport(),target:box(target),target_fully_visible:false});
     }

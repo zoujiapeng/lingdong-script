@@ -68,26 +68,42 @@ def test_click_contract_is_exactly_submitted_image_xy() -> None:
             validator.validate("click", arguments)
 
 
-def test_scroll_contract_is_strict_bounded_and_nonzero() -> None:
-    validator = ToolArgumentValidator(build_live_catalog())
+def test_scroll_contract_is_explicit_strict_and_bounded() -> None:
+    catalog = build_live_catalog()
+    validator = ToolArgumentValidator(catalog)
     rng = random.Random(20260722)
+
+    properties = catalog.get("scroll").schema["properties"]
+    assert properties["direction"]["enum"] == ("up", "down")
+    assert properties["notches"]["minimum"] == 1
+    assert properties["notches"]["maximum"] == 12
 
     for _ in range(100):
         arguments = {
             "image_x": rng.uniform(0, 20_000),
             "image_y": rng.uniform(0, 20_000),
-            "amount": rng.choice(tuple(range(-12, 0)) + tuple(range(1, 13))),
+            "direction": rng.choice(("up", "down")),
+            "notches": rng.randint(1, 12),
         }
         assert validator.validate("scroll", arguments) == arguments
 
     for arguments in (
         {"image_x": 1, "image_y": 2},
-        {"image_x": 1, "image_y": 2, "amount": 0},
-        {"image_x": 1, "image_y": 2, "amount": True},
-        {"image_x": 1, "image_y": 2, "amount": 13},
-        {"image_x": 1, "image_y": 2, "amount": -13},
-        {"x": 1, "y": 2, "amount": -1},
-        {"image_x": 1, "image_y": 2, "amount": -1, "frame_id": 7},
+        {"image_x": 1, "image_y": 2, "direction": "up"},
+        {"image_x": 1, "image_y": 2, "direction": "left", "notches": 1},
+        {"image_x": 1, "image_y": 2, "direction": "up", "notches": 0},
+        {"image_x": 1, "image_y": 2, "direction": "up", "notches": True},
+        {"image_x": 1, "image_y": 2, "direction": "up", "notches": 13},
+        {"image_x": 1, "image_y": 2, "direction": "down", "notches": -1},
+        {"x": 1, "y": 2, "direction": "down", "notches": 1},
+        {
+            "image_x": 1, "image_y": 2, "direction": "down", "notches": 1,
+            "amount": -1,
+        },
+        {
+            "image_x": 1, "image_y": 2, "direction": "down", "notches": 1,
+            "frame_id": 7,
+        },
     ):
         with pytest.raises(ToolArgumentValidationError):
             validator.validate("scroll", arguments)

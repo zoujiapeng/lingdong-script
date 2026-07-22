@@ -1090,7 +1090,11 @@ def execute_admitted_physical_scroll(
     *,
     final_guard: FinalPointerGuard,
 ) -> RawBackendResult:
-    """Send one already-queued physical wheel input after its final guard."""
+    """Send one already-queued physical wheel input after its final guard.
+
+    ``amount`` keeps WinPilot's canonical wheel convention: negative scrolls
+    down and positive scrolls up.
+    """
 
     if (
         any(type(value) is not int for value in (x, y, amount))
