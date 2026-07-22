@@ -761,12 +761,14 @@ hash，不能信任 event payload 自报。只有 `input_completed=true + unchan
 
 ### 11.3 P4b 内部机械输入合同（partial）
 
-当前 admitted physical scroll 与 atomic click/double-click 使用 typed `RawBackendResult` 和 `RawActionReceipt`，机械完成三态固定映射为：`APPLIED -> true`、`NOT_APPLIED/NOT_STARTED -> false`、`OUTCOME_UNKNOWN -> null`。backend 必须显式报告 `input_completed`；泛型 `ok:true` 不能升级为已执行。设备调用后的异常或非法 backend result 都进入 `OUTCOME_UNKNOWN`，上层只能重新观察、对账或阻塞，不能自动重放。legacy PostMessage 不确定语义仍保持同一 no-replay 边界。
+当前 admitted physical scroll、atomic click/double-click 以及 P4b.1 的 keyboard mechanical owner 使用 typed `RawBackendResult` 和 `RawActionReceipt`，机械完成三态固定映射为：`APPLIED -> true`、`NOT_APPLIED/NOT_STARTED -> false`、`OUTCOME_UNKNOWN -> null`。backend 必须显式报告 `input_completed`；泛型 `ok:true` 不能升级为已执行。设备调用后的异常或非法 backend result 都进入 `OUTCOME_UNKNOWN`，上层只能重新观察、对账或阻塞，不能自动重放。legacy PostMessage 不确定语义仍保持同一 no-replay 边界。
 
-RawDevice 接收 Controller 已解析的 typed scroll/click 参数，不接收 `action + args`，因此不是第二个 action parser。它不读取 session、截图、OCR/UIA、任务、应用名或恢复状态。Receipt 的 backend facts 是可序列化的只读诊断，不是 run-scoped evidence，`APPLIED` 也不证明像素变化或语义完成。
+RawDevice 接收 Controller 已解析的 typed scroll/click 参数、bounded text 或 canonical `HotkeyChord`，不接收 `action + args`，因此不是第二个 action parser。它不读取 session、截图、OCR/UIA、clipboard、任务、应用名或恢复状态。Keyboard backend 只走 SendInput；每个字符和 chord 都由调用方提供的只读 final guard 限定，部分输入、down/release 异常或 guard 在输入后变化均为 unknown，不能重放。Hotkey 一旦尝试 down 就必须逆序尝试 release。Receipt facts 只允许 codepoint/key 数量和 cleanup 状态，不得保存原始文本或 chord；这些 facts 只是可序列化诊断，不是 run-scoped evidence，`APPLIED` 也不证明像素变化或语义完成。
 
-具体 live coordinator 的 `raw_device` 是必需注入项。产品 composition root 构造
-`RawDeviceExecutor` 与 admitted physical click/scroll backend 后注入；coordinator、MissionRuntime 和
+具体 live coordinator 的 `raw_device` 是必需注入项。产品 composition root 当前仍只构造并注入
+admitted physical click/scroll backend；P4b.1 已让 legacy `type_text`/`press_keys` 在原有单一 queue
+入口内委托同一个 unqueued keyboard mechanical owner，但 keyboard backend 尚未接入 live composition。
+coordinator、MissionRuntime 和
 Actor 都不得自行创建 backend 或在缺失时 fallback。这样 composition 与执行仍只有一个物理 owner。
 
 该内部 seam 尚未冻结为 vNext `/1` 产品合同。Actor 可见 scroll args 严格为 `{image_x, image_y, direction: "up" | "down", notches: 1..12}`；`up` 表示显露 viewport 上方内容，`down` 表示显露下方内容。旧 signed `amount` 在 Actor 边界不兼容并 fail closed；`AtomicDesktopController` 只机械映射 `up -> +notches`、`down -> -notches` 到既有 RawDevice canonical convention。`AtomicDesktopController` 由 Runtime permit 和权威 frame pin 限定一次 transaction，commit-time 重读 frame/epoch/HWND/PID/region/hit-test，并在 click mouse-down 或 scroll wheel 紧前做 final target guard；后续 `AtomicPostActionBridge` 在同一 physical lease 中 CAS 提交动作后权威帧并写入 exact action/frame evidence。scroll 只调用 unqueued admitted physical SendInput backend，不做机制切换；任一动作后证据缺失都是 `unknown`，不能转成可重放 rejection。当前默认关闭的 live coordinator 接入 `click`/`double_click`/`scroll`；`type_text`、`hotkey`、`drag`、`draw_strokes`、held pointer 与 ROI observe 均未接入。`DesktopRuntimeSelection` 只在 run 开始时冻结；缺失 coordinator 或任一 vNext 端口都必须在 mutation 前拒绝，不能隐式 fallback 到 legacy。

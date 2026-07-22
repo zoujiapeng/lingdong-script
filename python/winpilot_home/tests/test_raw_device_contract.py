@@ -10,10 +10,16 @@ import pytest
 
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
+    AdmittedPhysicalHotkeyBackend,
     AdmittedPhysicalScrollBackend,
+    AdmittedPhysicalTypeTextBackend,
+    CANONICAL_HOTKEY_KEYS,
     ClickCount,
     ClickMechanism,
+    FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
+    HotkeyChord,
+    MAX_TYPE_TEXT_CODEPOINTS,
     MouseButton,
     RawActionContext,
     RawActionReceipt,
@@ -59,6 +65,10 @@ def test_raw_device_requires_an_explicit_typed_backend() -> None:
         RawDeviceBackends(scroll=object())
     with pytest.raises(TypeError, match="AdmittedPhysicalScrollBackend"):
         RawDeviceBackends(admitted_physical_scroll=object())
+    with pytest.raises(TypeError, match="AdmittedPhysicalTypeTextBackend"):
+        RawDeviceBackends(admitted_physical_type_text=object())
+    with pytest.raises(TypeError, match="AdmittedPhysicalHotkeyBackend"):
+        RawDeviceBackends(admitted_physical_hotkey=object())
 
 
 @pytest.mark.parametrize(
@@ -331,6 +341,175 @@ def test_missing_click_backend_fails_before_input() -> None:
 
     assert receipt.outcome is MutationOutcome.NOT_STARTED
     assert receipt.error_kind == "backend_unavailable"
+
+
+_KEYBOARD_INPUTS = (
+    ("type_text", "keyboard text"),
+    ("hotkey", HotkeyChord(("ctrl", "s"))),
+)
+_KEYBOARD_BACKENDS = {
+    "type_text": ("admitted_physical_type_text", AdmittedPhysicalTypeTextBackend),
+    "hotkey": ("admitted_physical_hotkey", AdmittedPhysicalHotkeyBackend),
+}
+
+
+def _keyboard_raw(action: str, backend=None) -> RawDeviceExecutor:
+    field, wrapper = _KEYBOARD_BACKENDS[action]
+    value = None if backend is None else wrapper(backend)
+    return RawDeviceExecutor(RawDeviceBackends(**{field: value}))
+
+
+def _call_keyboard(raw, action, argument, guard=None):
+    return getattr(raw, action)(
+        _context(), argument,
+        final_guard=guard or (lambda: FinalKeyboardGuardDecision.ADMITTED),
+    )
+
+
+@pytest.mark.parametrize("keys", [
+    (), ("ctrl",) * 7, ("ctrl", "ctrl"), ("control", "s"),
+    ("CTRL", "s"), (" ctrl", "s"), ("unknown",), (1,),
+    ("s", "ctrl"), ("shift", "ctrl", "s"), ("ctrl", "s", "a"),
+    ("ctrl", "alt"), ("a", "b"), "ctrl+s", ["ctrl", "s"], b"ctrl+s",
+])
+def test_hotkey_chord_rejects_noncanonical_or_ambiguous_keys(keys) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        HotkeyChord(keys)
+
+
+def test_hotkey_chord_accepts_canonical_modifier_prefix_and_one_primary() -> None:
+    assert HotkeyChord(("enter",)).keys == ("enter",)
+    chord = HotkeyChord(("ctrl", "alt", "shift", "win", "f12"))
+    assert chord.keys == ("ctrl", "alt", "shift", "win", "f12")
+    assert all(key in CANONICAL_HOTKEY_KEYS for key in chord.keys)
+
+
+@pytest.mark.parametrize("action,argument", _KEYBOARD_INPUTS)
+@pytest.mark.parametrize("context,error", [
+    (object(), "invalid_context"),
+    (_context(target=41, current=42), "target_mismatch"),
+])
+def test_keyboard_context_rejection_has_zero_backend_calls(
+    action, argument, context, error,
+) -> None:
+    calls: list = []
+    raw = _keyboard_raw(action, lambda *args, **kwargs: calls.append((args, kwargs)))
+    receipt = getattr(raw, action)(
+        context, argument,
+        final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+    )
+    assert (receipt.outcome, receipt.error_kind, calls) == (
+        MutationOutcome.NOT_STARTED, error, [])
+
+
+@pytest.mark.parametrize("action,argument,guard", [
+    ("type_text", "", None),
+    ("type_text", "x" * (MAX_TYPE_TEXT_CODEPOINTS + 1), None),
+    ("type_text", True, None),
+    ("type_text", "a", object()),
+    ("hotkey", ("ctrl", "s"), None),
+    ("hotkey", "ctrl+s", None),
+    ("hotkey", HotkeyChord(("ctrl", "s")), object()),
+])
+def test_keyboard_argument_rejection_has_zero_backend_calls(
+    action, argument, guard,
+) -> None:
+    calls: list = []
+    raw = _keyboard_raw(action, lambda *args, **kwargs: calls.append((args, kwargs)))
+    receipt = _call_keyboard(raw, action, argument, guard)
+    assert (receipt.outcome, receipt.error_kind, calls) == (
+        MutationOutcome.NOT_STARTED, "invalid_args", [],
+    )
+
+
+@pytest.mark.parametrize("action,argument", _KEYBOARD_INPUTS)
+def test_keyboard_actions_require_their_exact_admitted_backend(
+    action, argument,
+) -> None:
+    receipt = _call_keyboard(_keyboard_raw(action), action, argument)
+    assert (receipt.outcome, receipt.input_completed, receipt.error_kind) == (
+        MutationOutcome.NOT_STARTED, False, "backend_unavailable",
+    )
+
+
+@pytest.mark.parametrize("action,argument", _KEYBOARD_INPUTS)
+@pytest.mark.parametrize("completed,outcome", [
+    (True, MutationOutcome.APPLIED),
+    (False, MutationOutcome.NOT_APPLIED),
+    (None, MutationOutcome.OUTCOME_UNKNOWN),
+])
+def test_keyboard_actions_map_backend_completion(
+    action, argument, completed, outcome,
+) -> None:
+    calls: list = []
+
+    def backend(value, *, hwnd, final_guard):
+        calls.append((value, hwnd, final_guard()))
+        return RawBackendResult(completed, {})
+
+    receipt = _call_keyboard(_keyboard_raw(action, backend), action, argument)
+    assert calls == [(argument, 41, FinalKeyboardGuardDecision.ADMITTED)]
+    assert (receipt.outcome, receipt.input_completed) == (outcome, completed)
+    assert receipt.error_kind == (
+        "backend_result_uncertain" if completed is None else None
+    )
+
+
+@pytest.mark.parametrize("action,argument", _KEYBOARD_INPUTS)
+def test_raw_device_filters_malicious_keyboard_backend_content_facts(
+    action, argument,
+) -> None:
+    sentinel = "RAW-KEYBOARD-SENTINEL-7c54"
+    safe_fact = ("requested_codepoints", 26) if action == "type_text" else (
+        "key_count", 2,
+    )
+
+    def backend(*_args, **_kwargs):
+        return RawBackendResult(True, {
+            "ok": True, "via": "physical_sendinput", safe_fact[0]: safe_fact[1],
+            "text": sentinel, "echo": sentinel, "error": sentinel,
+        })
+
+    receipt = _call_keyboard(_keyboard_raw(action, backend), action, argument)
+    assert receipt.outcome is MutationOutcome.APPLIED
+    assert sentinel not in json.dumps(receipt.to_dict(), sort_keys=True)
+    assert receipt.backend_result.facts[safe_fact[0]] == safe_fact[1]
+
+
+@pytest.mark.parametrize("action,argument", _KEYBOARD_INPUTS)
+def test_keyboard_backend_exception_is_unknown_and_never_replayed(
+    action, argument,
+) -> None:
+    calls: list = []
+
+    def backend(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise OSError("injected uncertain keyboard input")
+
+    receipt = _call_keyboard(_keyboard_raw(action, backend), action, argument)
+    assert len(calls) == 1
+    assert (receipt.outcome, receipt.input_completed, receipt.error_kind) == (
+        MutationOutcome.OUTCOME_UNKNOWN, None, "backend_exception",
+    )
+
+
+def test_keyboard_raw_device_property_preserves_values_and_single_calls() -> None:
+    rng = random.Random(20260723)
+    modifiers = ("ctrl", "alt", "shift", "win")
+    primaries = sorted(CANONICAL_HOTKEY_KEYS - set(modifiers))
+    for _ in range(50):
+        text = "".join(rng.choice("aZ09 汉") for _ in range(rng.randint(1, 40)))
+        keys = (*(key for key in modifiers if rng.choice((False, True))),
+                rng.choice(primaries))
+        for action, value in (("type_text", text), ("hotkey", HotkeyChord(keys))):
+            calls: list = []
+            backend = lambda item, **kwargs: (
+                calls.append((item, kwargs["hwnd"])) or RawBackendResult(True, {})
+            )
+            assert _call_keyboard(
+                _keyboard_raw(action, backend), action, value,
+            ).outcome is MutationOutcome.APPLIED
+            assert calls == [(value, 41)]
 
 
 def test_final_guard_uses_only_explicit_admitted_backend() -> None:
@@ -613,6 +792,278 @@ def test_admitted_backend_rejects_pointer_motion_during_final_guard(monkeypatch)
     assert result.facts["via"] == "final_target_guard"
     assert "pointer_position_changed" in result.facts["error"]
     assert not [event for event in events if event[0] == "input"]
+
+
+def _keyboard_executor_mocks(monkeypatch):
+    from winpilot.action import executor
+
+    sent: list[tuple] = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        executor,
+        "_key_input",
+        lambda **kwargs: ("key", tuple(sorted(kwargs.items()))),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_send_inputs",
+        lambda inputs: sent.append(tuple(inputs)),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_vk_of",
+        lambda key: {"ctrl": 0x11, "shift": 0x10, "s": 0x53}[key],
+    )
+    return executor, sent
+
+
+def test_admitted_type_text_guards_each_character_and_never_queues(monkeypatch):
+    from winpilot.action import desktop_queue
+
+    executor, sent = _keyboard_executor_mocks(monkeypatch)
+    guards: list[int] = []
+    monkeypatch.setattr(
+        desktop_queue.DESKTOP_ACTION_QUEUE,
+        "run",
+        lambda *args, **kwargs: pytest.fail("admitted type_text queued twice"),
+    )
+
+    result = executor.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND(
+        "ab", hwnd=41,
+        final_guard=lambda: (
+            guards.append(len(sent)) or FinalKeyboardGuardDecision.ADMITTED
+        ),
+    )
+
+    assert result.input_completed is True
+    assert guards[0] == 0
+    assert guards.count(1) >= 1
+    assert guards[-1] == 2
+    assert len(sent) == 2
+    assert "ab" not in json.dumps(dict(result.facts), sort_keys=True)
+    assert executor.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND.execute is (
+        executor.execute_admitted_physical_type_text
+    )
+    assert not hasattr(executor.execute_admitted_physical_type_text, "__wrapped__")
+
+
+@pytest.mark.parametrize("backend_name,argument", [
+    ("ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND", "secret"),
+    ("ADMITTED_PHYSICAL_HOTKEY_BACKEND", HotkeyChord(("ctrl", "s"))),
+])
+def test_admitted_keyboard_guard_rejects_before_any_input(
+    monkeypatch, backend_name, argument,
+) -> None:
+    executor, sent = _keyboard_executor_mocks(monkeypatch)
+    result = getattr(executor, backend_name)(
+        argument, hwnd=41,
+        final_guard=lambda: FinalKeyboardGuardDecision.FOREGROUND_CHANGED,
+    )
+    assert result.input_completed is False
+    assert sent == []
+    assert "secret" not in json.dumps(dict(result.facts), sort_keys=True)
+
+
+def test_admitted_type_text_guard_rejection_after_partial_input_is_unknown(
+    monkeypatch,
+) -> None:
+    executor, sent = _keyboard_executor_mocks(monkeypatch)
+    decisions = iter((
+        FinalKeyboardGuardDecision.ADMITTED,
+        FinalKeyboardGuardDecision.FOREGROUND_CHANGED,
+    ))
+
+    result = executor.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND(
+        "ab", hwnd=41, final_guard=lambda: next(decisions),
+    )
+
+    assert result.input_completed is None
+    assert len(sent) == 1
+    assert result.facts["completed_codepoints"] == 1
+
+
+@pytest.mark.parametrize("fail_at", [1, 2])
+def test_admitted_type_text_send_failure_is_unknown_without_replay(
+    monkeypatch, fail_at,
+) -> None:
+    executor, sent = _keyboard_executor_mocks(monkeypatch)
+
+    def fail_once(inputs):
+        sent.append(tuple(inputs))
+        if len(sent) == fail_at:
+            raise OSError("injected uncertain SendInput")
+
+    monkeypatch.setattr(executor, "_send_inputs", fail_once)
+    result = executor.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND(
+        "ab", hwnd=41,
+        final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+    )
+
+    assert result.input_completed is None
+    assert len(sent) == fail_at + 1  # one best-effort key-up cleanup, no retry
+    assert "ab" not in json.dumps(dict(result.facts), sort_keys=True)
+
+
+def test_admitted_hotkey_sends_one_chord_and_always_releases_in_reverse(
+    monkeypatch,
+) -> None:
+    from winpilot.action import desktop_queue
+
+    executor, sent = _keyboard_executor_mocks(monkeypatch)
+    guard_calls: list[None] = []
+    monkeypatch.setattr(
+        desktop_queue.DESKTOP_ACTION_QUEUE,
+        "run",
+        lambda *args, **kwargs: pytest.fail("admitted hotkey queued twice"),
+    )
+
+    result = executor.ADMITTED_PHYSICAL_HOTKEY_BACKEND(
+        HotkeyChord(("ctrl", "shift", "s")), hwnd=41,
+        final_guard=lambda: (
+            guard_calls.append(None) or FinalKeyboardGuardDecision.ADMITTED
+        ),
+    )
+
+    assert result.input_completed is True
+    assert len(guard_calls) == 3  # before down, after down, after cleanup
+    assert len(sent) == 4
+    downs, *up_batches = sent
+    ups = tuple(batch[0] for batch in up_batches)
+    assert [dict(token[1])["vk"] for token in downs] == [0x11, 0x10, 0x53]
+    assert [dict(token[1])["vk"] for token in ups] == [0x53, 0x10, 0x11]
+    assert all(dict(token[1]).get("flags", 0) == 0 for token in downs)
+    assert all(
+        dict(token[1]).get("flags", 0) & executor._KEYEVENTF_KEYUP
+        for token in ups
+    )
+    assert executor.ADMITTED_PHYSICAL_HOTKEY_BACKEND.execute is (
+        executor.execute_admitted_physical_hotkey
+    )
+    assert not hasattr(executor.execute_admitted_physical_hotkey, "__wrapped__")
+
+
+@pytest.mark.parametrize("fail_at", [1, 2, 3])
+def test_admitted_hotkey_send_failure_is_unknown_and_continues_reverse_cleanup(
+    monkeypatch, fail_at,
+) -> None:
+    executor, sent = _keyboard_executor_mocks(monkeypatch)
+
+    def fail_once(inputs):
+        sent.append(tuple(inputs))
+        if len(sent) == fail_at:
+            raise OSError("injected uncertain chord SendInput")
+
+    monkeypatch.setattr(executor, "_send_inputs", fail_once)
+    result = executor.ADMITTED_PHYSICAL_HOTKEY_BACKEND(
+        HotkeyChord(("ctrl", "s")), hwnd=41,
+        final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+    )
+
+    assert result.input_completed is None
+    assert len(sent) == 3
+    assert [dict(batch[0][1])["vk"] for batch in sent[1:]] == [0x53, 0x11]
+
+
+def test_legacy_keyboard_public_entries_delegate_to_shared_unqueued_owners(
+    monkeypatch,
+) -> None:
+    from winpilot.action import desktop_queue, executor
+
+    keys = ["*", "=", "ctrl", "ctrl", "a", "b", "c"]
+    mapped = {"*": 0x6A, "=": 0xBB, "ctrl": 0x11,
+              "a": 0x41, "b": 0x42, "c": 0x43}
+    queued: list[tuple] = []
+    typed: list[tuple] = []
+    hotkey_vks: list[tuple] = []
+
+    def run(action, fn, **_kwargs):
+        queued.append(action)
+        return fn()
+
+    def type_backend(text, *, hwnd, final_guard, interval_s, **_kwargs):
+        typed.append((text, hwnd, interval_s, final_guard()))
+        return RawBackendResult(
+            True, {"ok": True, "completed_codepoints": len(text)},
+        )
+
+    def hotkey_backend(vks, *, final_guard, release_individually=True):
+        hotkey_vks.append((vks, final_guard(), release_individually))
+        return RawBackendResult(True, {"ok": True, "key_count": len(vks)})
+
+    monkeypatch.setattr(desktop_queue.DESKTOP_ACTION_QUEUE, "run", run)
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "cooperative_input_guard", lambda *_args: None)
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(executor, "_execute_physical_type_text", type_backend)
+    monkeypatch.setattr(executor, "_vk_of", mapped.__getitem__)
+    monkeypatch.setattr(executor, "_execute_physical_hotkey_vks", hotkey_backend)
+
+    typed_result = executor.type_text("legacy", interval_s=0.25, hwnd=41)
+    hotkey_result = executor.press_keys(keys, hwnd=41)
+
+    assert typed_result == {"ok": True, "typed": 6}
+    assert hotkey_result == {"ok": True, "keys": keys}
+    assert queued == ["type_text", "press_keys"]
+    assert typed == [(
+        "legacy", 41, 0.25, FinalKeyboardGuardDecision.ADMITTED,
+    )]
+    assert hotkey_vks == [(
+        (0x6A, 0xBB, 0x11, 0x11, 0x41, 0x42, 0x43),
+        FinalKeyboardGuardDecision.ADMITTED, False,
+    )]
+
+
+def test_legacy_keyboard_bus_action_payloads_remain_byte_for_byte_compatible(
+    monkeypatch,
+) -> None:
+    executor, _sent = _keyboard_executor_mocks(monkeypatch)
+    events: list[dict] = []
+    focused: list[int] = []
+    monkeypatch.setattr(executor, "cooperative_input_guard", lambda *_args: None)
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(executor.win32gui, "GetForegroundWindow", lambda: 999)
+    monkeypatch.setattr(
+        executor, "_raw_focus_window",
+        lambda hwnd: focused.append(hwnd) or {"ok": True},
+    )
+
+    executor.BUS.add_sink(events.append)
+    try:
+        assert executor.type_text("abcdefghi", interval_s=0, hwnd=41) == {
+            "ok": True, "typed": 9,
+        }
+        monkeypatch.setattr(executor, "_should_type_via_vk", lambda _text: True)
+        monkeypatch.setattr(
+            executor,
+            "_vk_character_inputs",
+            lambda char: (
+                [executor._key_input(vk=ord(char))],
+                [executor._key_input(
+                    vk=ord(char), flags=executor._KEYEVENTF_KEYUP,
+                )],
+            ),
+        )
+        assert executor.type_text("12", interval_s=0, hwnd=41) == {
+            "ok": True, "typed": 2, "requested": 2, "via": "vk",
+        }
+        assert executor.press_keys(["ctrl", "s"], hwnd=41) == {
+            "ok": True, "keys": ["ctrl", "s"],
+        }
+    finally:
+        executor.BUS.remove_sink(events.append)
+
+    assert focused == [41]
+    action_payloads = [
+        {key: value for key, value in event.items() if key not in {"type", "ts"}}
+        for event in events
+        if event.get("type") == "action"
+    ]
+    assert action_payloads == [
+        {"action": "type_text", "length": 9},
+        {"action": "type_text", "length": 2, "via": "vk"},
+        {"action": "hotkey", "keys": ["ctrl", "s"]},
+    ]
 
 
 @pytest.mark.parametrize(
