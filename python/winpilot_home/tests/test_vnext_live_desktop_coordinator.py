@@ -303,7 +303,7 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     assert len(verifier.calls) == 1
     assert len(raw_calls) == 1
     second_turn = actor.calls[1][0]
-    assert second_turn.mission.no_progress_streak == 1
+    assert second_turn.mission.unchanged_frame_streak == 1
     assert second_turn.mission.last_transition.local_visual_change == "unchanged"
     assert second_turn.mission.last_transition.frame_comparable is True
     assert second_turn.mission.last_transition.semantic_completion == "unknown"
@@ -339,8 +339,8 @@ def test_repeated_unchanged_actions_are_replay_derived_actor_feedback() -> None:
     assert len(actor.calls) == 3
     assert len(raw_calls) == 2
     assert len(verifier.calls) == 1
-    assert actor.calls[1][0].mission.no_progress_streak == 1
-    assert actor.calls[2][0].mission.no_progress_streak == 2
+    assert actor.calls[1][0].mission.unchanged_frame_streak == 1
+    assert actor.calls[2][0].mission.unchanged_frame_streak == 2
     turn_records = [
         record for _run_id, record in trace.records
         if record["type"] == "vnext_mission_runtime_turn"

@@ -97,7 +97,7 @@ class ActorMissionView(_View):
     target_title: str | None
     last_transition: ActorTransitionView | None
     failure_summary: ActorFailureView | None
-    no_progress_streak: Annotated[int, Field(strict=True, ge=0)] = 0
+    unchanged_frame_streak: Annotated[int, Field(strict=True, ge=0)] = 0
 
     @field_validator("original_goal")
     @classmethod
@@ -245,7 +245,7 @@ def project_actor_mission_view(card: MissionCard) -> ActorMissionView:
                 kind=failure.kind, message=failure.message, count=failure.count
             ) if failure else None
         ),
-        no_progress_streak=card.no_progress_streak,
+        unchanged_frame_streak=card.no_progress_streak,
     )
 
 
