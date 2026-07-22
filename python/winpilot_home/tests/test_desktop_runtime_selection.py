@@ -94,6 +94,7 @@ def _install_live_coordinator_factory(
     *,
     coordinator=_DEFAULT_COORDINATOR,
     failure: Exception | None = None,
+    raw_devices: list | None = None,
 ):
     calls = []
 
@@ -114,6 +115,8 @@ def _install_live_coordinator_factory(
     ):
         assert isinstance(api_config, dict)
         assert raw_device is not None
+        if raw_devices is not None:
+            raw_devices.append(raw_device)
         calls.append(trace_sidecar)
         if failure is not None:
             raise failure
@@ -811,6 +814,46 @@ def test_vnext_server_admission_does_not_call_legacy_capability_preflight(
         assert captured["coordinator"] is coordinator
         assert captured["handlers"] is None
         assert coordinator.runtime_capability_snapshot is not None
+    finally:
+        with server.STATE.lock:
+            server.STATE.run_jobs.pop(execution.run_id, None)
+
+
+def test_vnext_server_composes_all_admitted_raw_backends_without_legacy(
+    monkeypatch,
+) -> None:
+    import winpilot.server as server
+    from winpilot.visual_runtime.atomic_click_controller import (
+        AtomicDesktopController,
+    )
+
+    captured, calls = _install_server_run_capture(monkeypatch, server)
+    raw_devices = []
+    coordinator, _factory_calls = _install_live_coordinator_factory(
+        monkeypatch,
+        raw_devices=raw_devices,
+    )
+    monkeypatch.setattr(
+        server,
+        "default_handlers",
+        lambda *_args, **_kwargs: pytest.fail(
+            "explicit vNext composition must not construct legacy handlers"
+        ),
+    )
+
+    execution = server._start_arp_execution(
+        _vnext_task_stage_graph(),
+        {},
+        runtime_version="vnext",
+    )
+    try:
+        assert calls == ["prepare", "job"]
+        assert captured["coordinator"] is coordinator
+        assert captured["handlers"] is None
+        assert len(raw_devices) == 1
+        assert raw_devices[0].admitted_action_names == tuple(sorted(
+            AtomicDesktopController.required_raw_action_names
+        ))
     finally:
         with server.STATE.lock:
             server.STATE.run_jobs.pop(execution.run_id, None)

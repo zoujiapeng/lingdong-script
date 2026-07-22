@@ -1012,7 +1012,9 @@ def _start_arp_execution(
             from .orchestrator.desktop_runtime import DesktopRuntimeCoordinatorPort
             from .action.executor import (
                 ADMITTED_PHYSICAL_CLICK_BACKEND,
+                ADMITTED_PHYSICAL_HOTKEY_BACKEND,
                 ADMITTED_PHYSICAL_SCROLL_BACKEND,
+                ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
             )
             from .action.raw_device import RawDeviceBackends, RawDeviceExecutor
             from .vnext.bridge.coordinator import (
@@ -1024,6 +1026,8 @@ def _start_arp_execution(
                 raw_device=RawDeviceExecutor(RawDeviceBackends(
                     admitted_physical_click=ADMITTED_PHYSICAL_CLICK_BACKEND,
                     admitted_physical_scroll=ADMITTED_PHYSICAL_SCROLL_BACKEND,
+                    admitted_physical_type_text=ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
+                    admitted_physical_hotkey=ADMITTED_PHYSICAL_HOTKEY_BACKEND,
                 )),
                 trace_sidecar=trace_mod.RECORDER,
             )

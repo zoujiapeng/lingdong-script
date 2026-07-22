@@ -63,7 +63,7 @@ Electron「智能代理」
 - run 级冷启动、session 引用、可选 MCP、Memory Graph 和已验证 Skill replay；
 - 真实 Electron 客户端 E2E harness 与浏览器侧可信指针 oracle。
 - WinPilot product package 的模型请求由统一 Runtime 冻结并标识；provider SDK 隐式重试关闭，request retry、poll、redecision 与桌面 action replay 使用不同合同。
-- vNext 已有默认关闭、按 run 显式选择的增量 live 实验链：一个 Visual Actor、Broker 小工具面、唯一 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。当前 Actor 工具面为 `click`、`double_click`、`scroll`、`claim_obligation_done`、`blocked`。客户端默认仍为 legacy；2026-07-22 三个 `precise-click` seed，以及 ActionEffect 接线前 direction/notches 合同下各一个 down/up `scroll-reveal` seed，已从冷启动、空 session、可见 Electron/UIA 入口通过独立 trusted-browser oracle，但只证明当时这两种受控原语闭环。
+- vNext 已有默认关闭、按 run 显式选择的增量 live 实验链：一个 Visual Actor、Broker 小工具面、唯一 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。当前 Actor 工具面为 `click`、`double_click`、`scroll`、`type_text`、`hotkey`、`claim_obligation_done`、`blocked`。键盘原语已进入同一 snapshot、Broker、Controller、RawDevice 和 post-action evidence 链，但目前只有合同/负向/property/注入式证据，真实 Electron keyboard oracle 尚未运行；客户端默认仍为 legacy。2026-07-22 三个 `precise-click` seed，以及 ActionEffect 接线前 direction/notches 合同下各一个 down/up `scroll-reveal` seed，已从冷启动、空 session、可见 Electron/UIA 入口通过独立 trusted-browser oracle，但只证明当时这两种受控原语闭环。
 - vNext coordinator context `/1` 分离回合边界 pause wait 与非阻塞 pause reading，明确用 frame max-age（默认 30 秒）拒绝旧帧，并只从 canonical ExecuteDesktopTask `max_steps` 取得回合预算；物理 RawDevice 由产品 composition root 注入。queue-time capability admission 已收敛为唯一 `DesktopRuntimeAdmission`：legacy 保留原 preflight，vNext 从一个不可变 `RuntimeCapabilitySnapshot` 机械准入，同一 snapshot 供 `ExecutionPolicy`、live `RuntimeState` 与 Broker 使用。该收敛没有扩写 prompt、工具面或 Controller；下一门槛仍是多原语 parity 与同入口 E2E。
 
 原生视觉配置默认关闭 UIA、OCR 和 predictive OCR；这些结构化 provider 仍可在来源、当前帧和预期收益明确时显式启用，但动作失败不会自动触发它们。
@@ -87,7 +87,7 @@ Electron「智能代理」
 - UIA/OCR 的旧融合路径仍然较重；失败后应先废弃旧依据、重新观察并让模型判断，而不是自动切到结构化感知或 MCP；
 - 真实消费软件、多窗口、托盘、弹窗、动画目标、游戏、高 DPI 和多显示器的覆盖不足；
 - 当前整改版本尚未完成 11 个真实任务及其混合长任务的真实客户端全量验收；不能把历史单次通过或受控拖拽描述为当前通用 computer-use 成功率。
-- vNext 实验链尚未覆盖 `type_text`、`hotkey`、拖拽、绘制、held pointer、ROI observe、应用发现、provider/MCP 或 live Profiler；ActionEffect/no-progress 已接入但尚无动画/真实任务校准，scroll 只有接线前的双向受控基线与当前 2 pass / 1 fail 的首轮复测，多布局、paired legacy 和真实任务覆盖仍不足。Planner/Inspector 继续禁用，P7、默认切换和 legacy 删除门槛均未达到。
+- vNext 的 `type_text`、`hotkey` 已接入 live 代码但尚未通过同入口 Electron oracle；拖拽、绘制、held pointer、ROI observe、应用发现、provider/MCP 或 live Profiler 仍未覆盖。ActionEffect/no-progress 已接入但尚无动画/真实任务校准，scroll 只有接线前的双向受控基线与当前 2 pass / 1 fail 的首轮复测，多布局、paired legacy 和真实任务覆盖仍不足。Planner/Inspector 继续禁用，P7、默认切换和 legacy 删除门槛均未达到。
 - `python/winpilot_home/winpilot/` 的模型 request-retry owner 已收敛，Profiler stop_event 链和精确 transport AST guard 已有测试；但外围 `python/providers/` legacy Flow/feature provider 仍有独立 SDK/HTTP 重试，全角色逐 attempt sidecar 尚未闭合，legacy VLM helper 也缺少 stop_event seam。迁移前先审计生产可达性，不能把外围路径保留成第二个 Runtime。
 
 最新代码审计和整改顺序见 [GUI Agent 架构审计](docs/GUI_AGENT_ARCHITECTURE_AUDIT.md)。

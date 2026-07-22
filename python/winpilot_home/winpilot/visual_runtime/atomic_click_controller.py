@@ -1,4 +1,4 @@
-"""Opt-in atomic vNext ControllerPort adapter for point-grounded input.
+"""Opt-in atomic vNext ControllerPort adapter for bounded desktop input.
 
 The adapter deliberately supports only a narrow mutation slice.  It owns no
 global runtime state and is not exported from :mod:`visual_runtime`; callers
@@ -15,6 +15,7 @@ from ..action.desktop_queue import DesktopActionQueue
 from ..action.raw_device import (
     ClickCount,
     ClickMechanism,
+    FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
     MouseButton,
     RawActionContext,
@@ -43,11 +44,23 @@ from .commit_admission import (
     CommitEnvironment,
     CommitRoute,
 )
+from .keyboard_contracts import (
+    CANONICAL_HOTKEY_KEYS,
+    CANONICAL_HOTKEY_MODIFIERS,
+    HotkeyChord,
+    MAX_TYPE_TEXT_CODEPOINTS,
+)
 from .normalized_frame_coordinates import NormalizedFrameCoordinateMapper
 from .submitted_image_coordinates import SubmittedImageCoordinateMapper
 
 
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
+SUPPORTED_DESKTOP_TOOL_NAMES = tuple(sorted((
+    "click", "double_click", "scroll", "type_text", "hotkey",
+)))
+REQUIRED_RAW_ACTION_NAMES = tuple(sorted((
+    "click", "scroll", "type_text", "hotkey",
+)))
 
 
 class AtomicDesktopControllerError(ValueError):
@@ -68,6 +81,18 @@ class PhysicalInputFinalGuardPort(Protocol):
     def check_before_pointer_input(
         self, request: CommitAdmissionRequest, screen_point: tuple[int, int],
     ) -> FinalPointerGuardDecision: ...
+
+    def check_before_keyboard_input(
+        self, request: CommitAdmissionRequest,
+    ) -> FinalKeyboardGuardDecision: ...
+
+
+@runtime_checkable
+class AdmittedRawDeviceInventoryPort(Protocol):
+    """Name-only view used by composition before any Actor is constructed."""
+
+    @property
+    def admitted_action_names(self) -> tuple[str, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,14 +143,19 @@ class ControllerPostActionPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class _PreparedPointInput:
+class _PreparedInput:
     request: CommitAdmissionRequest
     click_count: ClickCount | None = None
     scroll_amount: int | None = None
+    text: str | None = None
+    chord: HotkeyChord | None = None
 
 
 class AtomicDesktopController:
-    """Default-off adapter for one physical point-input transaction."""
+    """Default-off adapter for one physical desktop-input transaction."""
+
+    supported_tool_names = SUPPORTED_DESKTOP_TOOL_NAMES
+    required_raw_action_names = REQUIRED_RAW_ACTION_NAMES
 
     def __init__(
         self,
@@ -165,19 +195,79 @@ class AtomicDesktopController:
         self._enabled = enabled
 
     @staticmethod
-    def _request(envelope: ActorDecisionEnvelope) -> _PreparedPointInput:
+    def _request(envelope: ActorDecisionEnvelope) -> _PreparedInput:
         proposal = envelope.proposal
-        if not isinstance(proposal, DesktopActionProposal) or proposal.action not in {
-            "click", "double_click", "scroll",
-        }:
+        if (
+            not isinstance(proposal, DesktopActionProposal)
+            or proposal.action not in SUPPORTED_DESKTOP_TOOL_NAMES
+        ):
             raise AtomicDesktopControllerError(
-                "AtomicDesktopController supports only click, double_click, and scroll"
+                "AtomicDesktopController does not support this desktop action"
             )
         if envelope.target is None:
             raise AtomicDesktopControllerError(
-                "point input requires a Runtime-bound target"
+                "desktop input requires a Runtime-bound target"
             )
         args = dict(proposal.args)
+        if proposal.action == "type_text":
+            if set(args) != {"text"}:
+                raise AtomicDesktopControllerError(
+                    "type_text args do not match the desktop-input contract"
+                )
+            text = args["text"]
+            if type(text) is not str or not 1 <= len(text) <= MAX_TYPE_TEXT_CODEPOINTS:
+                raise AtomicDesktopControllerError(
+                    "type_text requires bounded non-empty text"
+                )
+            return _PreparedInput(
+                request=CommitAdmissionRequest(
+                    request_id=envelope.decision_id,
+                    frame=envelope.frame,
+                    target=envelope.target,
+                    route=CommitRoute.PHYSICAL,
+                    input_kind=CommitInputKind.KEYBOARD,
+                    screen_point=None,
+                ),
+                text=text,
+            )
+        if proposal.action == "hotkey":
+            if set(args) != {"modifiers", "key"}:
+                raise AtomicDesktopControllerError(
+                    "hotkey args do not match the desktop-input contract"
+                )
+            modifiers, key = args["modifiers"], args["key"]
+            if (
+                not isinstance(modifiers, (list, tuple))
+                or any(type(item) is not str for item in modifiers)
+                or len(modifiers) != len(set(modifiers))
+                or any(item not in CANONICAL_HOTKEY_MODIFIERS for item in modifiers)
+                or type(key) is not str
+                or key not in CANONICAL_HOTKEY_KEYS
+                or key in CANONICAL_HOTKEY_MODIFIERS
+            ):
+                raise AtomicDesktopControllerError(
+                    "hotkey requires unique canonical modifiers and one primary key"
+                )
+            try:
+                chord = HotkeyChord((
+                    *tuple(sorted(
+                        modifiers, key=CANONICAL_HOTKEY_MODIFIERS.index,
+                    )),
+                    key,
+                ))
+            except (TypeError, ValueError) as exc:
+                raise AtomicDesktopControllerError(str(exc)) from exc
+            return _PreparedInput(
+                request=CommitAdmissionRequest(
+                    request_id=envelope.decision_id,
+                    frame=envelope.frame,
+                    target=envelope.target,
+                    route=CommitRoute.PHYSICAL,
+                    input_kind=CommitInputKind.KEYBOARD,
+                    screen_point=None,
+                ),
+                chord=chord,
+            )
         expected_args = (
             {"image_x", "image_y", "direction", "notches"}
             if proposal.action == "scroll"
@@ -223,7 +313,7 @@ class AtomicDesktopController:
             )
         except ValueError as exc:
             raise AtomicDesktopControllerError(str(exc)) from exc
-        return _PreparedPointInput(
+        return _PreparedInput(
             request=request,
             click_count=(
                 None
@@ -353,33 +443,57 @@ class AtomicDesktopController:
                 return FinalPointerGuardDecision.STOP_REQUESTED
             return decision
 
+        def final_keyboard_guard() -> FinalKeyboardGuardDecision:
+            if stop_event is not None and stop_event.is_set():
+                return FinalKeyboardGuardDecision.STOP_REQUESTED
+            decision = self._final_guard.check_before_keyboard_input(request)
+            if stop_event is not None and stop_event.is_set():
+                return FinalKeyboardGuardDecision.STOP_REQUESTED
+            return decision
+
         def under_physical_lease() -> ControllerTransition:
             def under_frame_pin() -> CommitCallbackResult[RawActionReceipt]:
                 permit = self._permits.begin_admission(envelope)
                 try:
-                    return self._permit_result(
-                        request,
-                        permit,
-                        self._gate,
-                        lambda: (
-                            self._raw.scroll(
-                                RawActionContext(target.hwnd, target.hwnd),
+                    def execute_raw() -> RawActionReceipt:
+                        context = RawActionContext(target.hwnd, target.hwnd)
+                        if prepared.text is not None:
+                            return self._raw.type_text(
+                                context,
+                                prepared.text,
+                                final_guard=final_keyboard_guard,
+                            )
+                        if prepared.chord is not None:
+                            return self._raw.hotkey(
+                                context,
+                                prepared.chord,
+                                final_guard=final_keyboard_guard,
+                            )
+                        assert request.screen_point is not None
+                        if prepared.scroll_amount is not None:
+                            return self._raw.scroll(
+                                context,
                                 request.screen_point[0],
                                 request.screen_point[1],
                                 prepared.scroll_amount,
                                 final_guard=final_guard,
                             )
-                            if prepared.scroll_amount is not None
-                            else self._raw.click(
-                                RawActionContext(target.hwnd, target.hwnd),
-                                request.screen_point[0],
-                                request.screen_point[1],
-                                MouseButton.LEFT,
-                                prepared.click_count,
-                                ClickMechanism.PHYSICAL,
-                                final_guard=final_guard,
-                            )
-                        ),
+                        assert prepared.click_count is not None
+                        return self._raw.click(
+                            context,
+                            request.screen_point[0],
+                            request.screen_point[1],
+                            MouseButton.LEFT,
+                            prepared.click_count,
+                            ClickMechanism.PHYSICAL,
+                            final_guard=final_guard,
+                        )
+
+                    return self._permit_result(
+                        request,
+                        permit,
+                        self._gate,
+                        execute_raw,
                     )
                 finally:
                     if permit.allowed:
@@ -422,8 +536,11 @@ class AtomicDesktopController:
 __all__ = [
     "AtomicDesktopController",
     "AtomicDesktopControllerError",
+    "AdmittedRawDeviceInventoryPort",
     "ControllerPostAction",
     "ControllerPostActionPort",
     "DesktopCommitObservation",
     "PhysicalInputFinalGuardPort",
+    "REQUIRED_RAW_ACTION_NAMES",
+    "SUPPORTED_DESKTOP_TOOL_NAMES",
 ]

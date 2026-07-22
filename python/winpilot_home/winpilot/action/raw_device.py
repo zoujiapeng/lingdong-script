@@ -8,6 +8,12 @@ import math
 from types import MappingProxyType
 from typing import Any
 
+from ..visual_runtime.keyboard_contracts import (
+    CANONICAL_HOTKEY_KEYS,
+    CANONICAL_HOTKEY_MODIFIERS,
+    HotkeyChord,
+    MAX_TYPE_TEXT_CODEPOINTS,
+)
 from .replay_policy import MutationOutcome
 
 
@@ -54,50 +60,6 @@ class FinalKeyboardGuardDecision(str, Enum):
     FOREGROUND_UNAVAILABLE = "foreground_unavailable"
     FOREGROUND_CHANGED = "foreground_changed"
     STOP_REQUESTED = "stop_requested"
-
-
-MAX_TYPE_TEXT_CODEPOINTS = 4096
-CANONICAL_HOTKEY_KEYS = frozenset({
-    "ctrl", "alt", "shift", "win",
-    "enter", "esc", "tab", "space", "backspace", "delete", "insert",
-    "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
-    "capslock", "numlock", "printscreen", "menu",
-    "plus", "minus", "comma", "period", "slash",
-    *(f"f{index}" for index in range(1, 13)),
-    *tuple("abcdefghijklmnopqrstuvwxyz0123456789"),
-})
-_HOTKEY_MODIFIER_ORDER = ("ctrl", "alt", "shift", "win")
-
-
-@dataclass(frozen=True, slots=True)
-class HotkeyChord:
-    """A canonical chord; parsing aliases belongs above RawDevice."""
-
-    keys: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        if type(self.keys) is not tuple:
-            raise TypeError("hotkey keys must be a tuple of canonical names")
-        keys = self.keys
-        if (
-            not 1 <= len(keys) <= 6
-            or any(type(key) is not str or key not in CANONICAL_HOTKEY_KEYS for key in keys)
-            or len(keys) != len(set(keys))
-        ):
-            raise ValueError("hotkey keys must be unique canonical names")
-        if len(keys) > 1:
-            modifiers, primary = keys[:-1], keys[-1]
-            if (
-                primary in _HOTKEY_MODIFIER_ORDER
-                or any(key not in _HOTKEY_MODIFIER_ORDER for key in modifiers)
-                or tuple(sorted(
-                    modifiers, key=_HOTKEY_MODIFIER_ORDER.index,
-                )) != modifiers
-            ):
-                raise ValueError(
-                    "hotkey chord must be ordered modifiers followed by one key"
-                )
-        object.__setattr__(self, "keys", keys)
 
 
 def _scalar_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -320,6 +282,23 @@ class RawDeviceExecutor:
         if not isinstance(backends, RawDeviceBackends):
             raise TypeError("backends must be RawDeviceBackends")
         self._backends = backends
+
+    @property
+    def admitted_action_names(self) -> tuple[str, ...]:
+        """Return the immutable inventory of queue-admitted physical primitives.
+
+        This exposes names only, never backend callables.  Product composition
+        uses it to prove that every advertised Controller primitive has one
+        concrete RawDevice route before the Visual Actor is constructed.
+        """
+
+        pairs = (
+            ("click", self._backends.admitted_physical_click),
+            ("scroll", self._backends.admitted_physical_scroll),
+            ("type_text", self._backends.admitted_physical_type_text),
+            ("hotkey", self._backends.admitted_physical_hotkey),
+        )
+        return tuple(sorted(name for name, backend in pairs if backend is not None))
 
     @staticmethod
     def _receipt(
@@ -553,7 +532,8 @@ class RawDeviceExecutor:
 __all__ = [
     "AdmittedPhysicalClickBackend", "AdmittedPhysicalHotkeyBackend",
     "AdmittedPhysicalScrollBackend", "AdmittedPhysicalTypeTextBackend",
-    "CANONICAL_HOTKEY_KEYS", "ClickCount", "ClickMechanism",
+    "CANONICAL_HOTKEY_KEYS", "CANONICAL_HOTKEY_MODIFIERS",
+    "ClickCount", "ClickMechanism",
     "FinalKeyboardGuard", "FinalKeyboardGuardDecision", "FinalPointerGuard",
     "FinalPointerGuardDecision", "HotkeyChord", "MAX_TYPE_TEXT_CODEPOINTS",
     "MouseButton",

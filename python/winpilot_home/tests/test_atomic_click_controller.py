@@ -9,10 +9,14 @@ import pytest
 from winpilot.action.desktop_queue import DesktopActionQueue
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
+    AdmittedPhysicalHotkeyBackend,
     AdmittedPhysicalScrollBackend,
+    AdmittedPhysicalTypeTextBackend,
     ClickCount,
     ClickMechanism,
+    FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
+    HotkeyChord,
     MouseButton,
     RawBackendResult,
     RawDeviceBackends,
@@ -89,8 +93,9 @@ def _envelope(frame, *, decision_id="decision-1", action="click", args=None):
 
 
 class Observation:
-    def __init__(self, *, pointer_released=True):
+    def __init__(self, *, pointer_released=True, foreground=True):
         self.pointer_released = pointer_released
+        self.foreground = foreground
         self.requests = []
 
     def observe_commit(self, request):
@@ -101,24 +106,38 @@ class Observation:
             mutation_allowed=True,
             stop_requested=False,
             canceled=False,
-            foreground_hwnd=request.target.hwnd,
-            foreground_root_hwnd=request.target.root_hwnd,
-            foreground_process_id=request.target.process_id,
+            foreground_hwnd=request.target.hwnd if self.foreground else 202,
+            foreground_root_hwnd=request.target.root_hwnd if self.foreground else 202,
+            foreground_process_id=request.target.process_id if self.foreground else 8,
             hit_test_point=request.screen_point,
-            hit_hwnd=request.target.hwnd,
-            hit_root_hwnd=request.target.root_hwnd,
-            hit_process_id=request.target.process_id,
+            hit_hwnd=request.target.hwnd if request.screen_point is not None else None,
+            hit_root_hwnd=(
+                request.target.root_hwnd if request.screen_point is not None else None
+            ),
+            hit_process_id=(
+                request.target.process_id if request.screen_point is not None else None
+            ),
         )
 
 
 class FinalGuard:
-    def __init__(self, decision=FinalPointerGuardDecision.ADMITTED):
+    def __init__(
+        self,
+        decision=FinalPointerGuardDecision.ADMITTED,
+        keyboard_decision=FinalKeyboardGuardDecision.ADMITTED,
+    ):
         self.decision = decision
+        self.keyboard_decision = keyboard_decision
         self.requests = []
+        self.keyboard_requests = []
 
     def check_before_pointer_input(self, request, screen_point):
         self.requests.append((request, screen_point))
         return self.decision
+
+    def check_before_keyboard_input(self, request):
+        self.keyboard_requests.append(request)
+        return self.keyboard_decision
 
 
 def _admitted_backend(backend):
@@ -141,6 +160,16 @@ def _admitted_scroll_backend(backend):
         return backend(x, y, amount, hwnd=hwnd)
 
     return AdmittedPhysicalScrollBackend(execute)
+
+
+def _admitted_keyboard_backend(wrapper, backend):
+    def execute(value, *, hwnd, final_guard):
+        decision = final_guard()
+        if decision is not FinalKeyboardGuardDecision.ADMITTED:
+            return RawBackendResult(False, {"guard_decision": decision.value})
+        return backend(value, hwnd=hwnd)
+
+    return wrapper(execute)
 
 
 class PostAction:
@@ -190,6 +219,8 @@ def _controller(
     permits=None,
     turn_index=0,
     scroll_backend=None,
+    type_text_backend=None,
+    hotkey_backend=None,
 ):
     permits = permits or MutationPermitAuthority(envelope.mission_id, envelope.run_id)
     permits.issue(envelope, turn_index=turn_index, still_current=lambda: True)
@@ -205,6 +236,16 @@ def _controller(
                 None
                 if scroll_backend is None
                 else _admitted_scroll_backend(scroll_backend)
+            ),
+            admitted_physical_type_text=(
+                None if type_text_backend is None else _admitted_keyboard_backend(
+                    AdmittedPhysicalTypeTextBackend, type_text_backend,
+                )
+            ),
+            admitted_physical_hotkey=(
+                None if hotkey_backend is None else _admitted_keyboard_backend(
+                    AdmittedPhysicalHotkeyBackend, hotkey_backend,
+                )
             ),
         )),
         post_action=post or PostAction(),
@@ -351,6 +392,164 @@ def test_uncertain_scroll_backend_is_called_once_and_never_replayed():
     assert transition.outcome is ControllerOutcome.UNKNOWN
     assert transition.input_completed is None
     assert len(raw_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("action", "args", "expected_value"),
+    (
+        ("type_text", {"text": "Hello, 世界"}, "Hello, 世界"),
+        (
+            "hotkey",
+            {"modifiers": ["shift", "ctrl"], "key": "a"},
+            HotkeyChord(("ctrl", "shift", "a")),
+        ),
+    ),
+)
+def test_keyboard_actions_use_one_coordinate_free_atomic_transaction(
+    action, args, expected_value,
+):
+    authority, frame = _authority()
+    envelope = _envelope(frame, action=action, args=args)
+    raw_calls = []
+    observation = Observation()
+    final_guard = FinalGuard()
+    post = PostAction(frame_authority=authority)
+    queue = DesktopActionQueue()
+
+    def backend(value, *, hwnd):
+        raw_calls.append((value, hwnd))
+        return RawBackendResult(True, {"ok": True})
+
+    controller, permits = _controller(
+        envelope,
+        authority,
+        lambda *_args, **_kwargs: pytest.fail("pointer backend must not run"),
+        observation=observation,
+        final_guard=final_guard,
+        post=post,
+        queue=queue,
+        type_text_backend=backend if action == "type_text" else None,
+        hotkey_backend=backend if action == "hotkey" else None,
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.COMPLETED
+    assert transition.input_completed is True
+    assert raw_calls == [(expected_value, 101)]
+    assert observation.requests[0].screen_point is None
+    assert final_guard.requests == []
+    assert final_guard.keyboard_requests == [observation.requests[0]]
+    assert len(post.calls) == 1
+    assert permits.pending_count == 0
+    assert permits.consumed_count == 1
+    queue_status = queue.status()
+    assert queue_status["submitted"] == 1
+    assert queue_status["completed"] == 1
+    assert queue_status["last_action"] == action
+
+
+def test_keyboard_final_guard_rejects_without_pointer_guard_or_input():
+    authority, frame = _authority()
+    envelope = _envelope(frame, action="type_text", args={"text": "never sent"})
+    raw_calls = []
+    final_guard = FinalGuard(
+        keyboard_decision=FinalKeyboardGuardDecision.FOREGROUND_CHANGED,
+    )
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *_args, **_kwargs: pytest.fail("pointer backend must not run"),
+        final_guard=final_guard,
+        type_text_backend=lambda *call, **kwargs: raw_calls.append((call, kwargs)),
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.REJECTED
+    assert transition.input_completed is False
+    assert raw_calls == []
+    assert final_guard.requests == []
+    assert len(final_guard.keyboard_requests) == 1
+
+
+@pytest.mark.parametrize("action,args", (
+    ("type_text", {"text": "once"}),
+    ("hotkey", {"modifiers": ["ctrl"], "key": "a"}),
+))
+@pytest.mark.parametrize("failure", ("unknown", "exception", "post"))
+def test_keyboard_uncertainty_is_never_replayed(action, args, failure):
+    authority, frame = _authority()
+    envelope = _envelope(frame, action=action, args=args)
+    raw_calls = []
+    post = PostAction(fail=failure == "post")
+
+    def backend(value, *, hwnd):
+        raw_calls.append((value, hwnd))
+        if failure == "exception":
+            raise OSError("input outcome unknown")
+        return RawBackendResult(None if failure == "unknown" else True, {})
+
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *_args, **_kwargs: pytest.fail("pointer backend must not run"),
+        post=post,
+        type_text_backend=backend if action == "type_text" else None,
+        hotkey_backend=backend if action == "hotkey" else None,
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.UNKNOWN
+    assert transition.input_completed is None
+    assert len(raw_calls) == 1
+    assert len(post.calls) == 1
+
+
+@pytest.mark.parametrize("action,args", (
+    ("type_text", {"text": "must not be sent"}),
+    ("hotkey", {"modifiers": ["ctrl"], "key": "a"}),
+))
+@pytest.mark.parametrize("rejection", ("stale_frame", "foreground"))
+def test_keyboard_stale_frame_or_foreground_rejects_before_raw(
+    action, args, rejection,
+):
+    authority, frame = _authority()
+    envelope = _envelope(frame, action=action, args=args)
+    if rejection == "stale_frame":
+        authority.commit(
+            epoch=3, hwnd=101, region=(10, 20, 101, 51),
+            scope="target_window", reason="newer", submitted_size=(11, 6),
+            image_b64=IMAGE + "A", captured_at=2.0,
+            expected_previous_frame_id=frame.frame_id,
+        )
+    raw_calls = []
+
+    def backend(*call, **kwargs):
+        raw_calls.append((call, kwargs))
+        return RawBackendResult(True, {})
+
+    observation = Observation(foreground=rejection != "foreground")
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *_args, **_kwargs: pytest.fail("pointer backend must not run"),
+        observation=observation,
+        type_text_backend=backend if action == "type_text" else None,
+        hotkey_backend=backend if action == "hotkey" else None,
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.REJECTED
+    assert transition.input_completed is False
+    assert raw_calls == []
+    if rejection == "stale_frame":
+        assert observation.requests == []
+    else:
+        request = observation.requests[0]
+        assert request.screen_point is None
 
 
 def test_commit_observation_reads_the_same_transient_permit_owner() -> None:

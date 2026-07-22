@@ -132,11 +132,23 @@ class AtomicPostActionBridge:
             )
         if raw_receipt is not None and not isinstance(raw_receipt, RawActionReceipt):
             raise TypeError("raw_receipt must be RawActionReceipt or null")
-        expected_raw_action = "scroll" if proposal.action == "scroll" else "click"
+        raw_action_by_tool = {
+            "click": "click",
+            "double_click": "click",
+            "scroll": "scroll",
+            "type_text": "type_text",
+            "hotkey": "hotkey",
+        }
+        try:
+            expected_raw_action = raw_action_by_tool[proposal.action]
+        except KeyError as exc:
+            raise AtomicPostActionBridgeError(
+                "post-action bridge received an unsupported desktop action"
+            ) from exc
         if admission.status is CommitAdmissionStatus.ADMITTED:
             if raw_receipt is None or raw_receipt.action != expected_raw_action:
                 raise AtomicPostActionBridgeError(
-                    "admitted point input requires its exact raw receipt"
+                    "admitted desktop input requires its exact raw receipt"
                 )
         elif raw_receipt is not None:
             raise AtomicPostActionBridgeError(
