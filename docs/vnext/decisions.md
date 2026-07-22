@@ -319,11 +319,13 @@
   An unknown outcome, exception after admission, identity mismatch or failed
   post-frame/evidence reconciliation blocks the obligation and is never
   automatically replayed.
-- lifecycle: `claim_obligation_done` accepts only an `obligation_claimed`
-  event, deriving `CLAIMED` and `verification_required`; it cannot verify an
-  obligation or finish a mission before P5. Capability, Inspector and Planner
-  requests whose services are not wired return unavailable and fail closed;
-  P6 remains evidence-gated.
+- lifecycle: `claim_obligation_done` itself accepts only an
+  `obligation_claimed` event and derives `CLAIMED`. P5a may then invoke one
+  injected read-only ObligationVerifier when the ExecutionProfile permits it;
+  P5b may close an awaiting mission only through the paired local
+  deterministic verifier and canonical EvidenceRegistry. Capability,
+  Inspector and Planner requests whose services are not wired return
+  unavailable and fail closed; P6 remains evidence-gated.
 - rollout: The P4a Runtime calls only injected ports. It has no real model or
   device adapter, no Electron/legacy integration, no Broker enforcement and
   no live canary, so product behavior is unchanged. P4b must bridge to the
@@ -341,10 +343,17 @@
 - decision: P4b first makes legacy delegate reusable mechanical owners, then
   connects the same owners to vNext. It does not copy FastGuiController or
   create a second capture, coordinate, action-parser, pointer or input chain.
-- completed partial seams: two-phase `FrameObserver`, submitted-image to
-  normalized-frame mapping, immutable per-run `DesktopRuntimeSelection`, and
-  a scroll-only typed RawDevice primitive behind the existing
-  DesktopActionQueue.
+- completed partial seams: two-phase `FrameObserver`, one-way
+  submitted-image -> normalized-frame -> physical-screen mapping, immutable
+  per-run `DesktopRuntimeSelection`, a typed scroll RawDevice seam, and a
+  default-off injected `AtomicClickController` for click/double-click behind
+  the existing DesktopActionQueue.
+- atomic click: Runtime consumes a single-use mutation permit while the
+  authoritative frame is pinned; commit-time Windows facts bind target/frame
+  identity, every physical mouse-down has a final target guard, and the same
+  physical lease captures a CAS-published post-action frame with deterministic
+  run-scoped evidence. Missing post-action evidence becomes unknown and never
+  makes the action replayable.
 - raw boundary: RawDevice accepts typed physical arguments after Controller
   parsing. It does not interpret pixels, select a target, recover, switch
   mechanisms or replay. A mechanical receipt is diagnostic input truth, not
@@ -354,10 +363,40 @@
   cannot trigger SendInput fallback or automatic replay. Telemetry cannot
   affect this decision.
 - runtime selection: runtime version is frozen once from Runtime configuration;
-  task text, model proposals and graph metadata cannot override it. Until a
-  live vNext coordinator exists, explicit vNext selection fails before desktop
-  mutation and never falls back to legacy in the same run.
-- non-claim: commit-time frame/foreground admission, normalized-to-physical
-  mapping, complete ControllerPort, live Actor, Broker enforcement and Electron
-  canary remain unimplemented. The temporary legacy adapter is deleted only
-  after all primitives meet parity, partial-input and real E2E gates.
+  task text, model proposals and graph metadata cannot override it. On the
+  normal Server path, explicit vNext selection fails before desktop mutation
+  while no coordinator is injected, and never falls back to legacy in the
+  same run.
+- product seam: P4c defines an injectable coordinator protocol. With a frozen
+  vNext selection and an explicitly injected port, ArpExecution bypasses all
+  legacy handlers while reusing the same run, BUS, stop and pause owners.
+  Server injects no coordinator by default and there is no live implementation,
+  so the normal product path remains fail-closed.
+- non-claim: this is still an injected click/double-click slice, not a complete
+  ControllerPort. Type, hotkey, drag, draw and held-pointer parity, a concrete
+  Visual Actor, Broker enforcement, live coordinator and Electron canary
+  remain unimplemented. The temporary legacy adapter is deleted only after all
+  primitives meet parity, partial-input and real E2E gates.
+
+### D026: P5 verification is Runtime-bound and evidence-first
+
+- status: accepted
+- obligation boundary: the Actor emits only a claim. Runtime freezes the
+  accepted claim fingerprint, attempt and current run-scoped evidence, invokes
+  an injected read-only ObligationVerifier only when policy permits it, and
+  binds the identity-free assessment into a Reducer event. Stale, malformed,
+  unavailable and contradictory results fail closed.
+- mission boundary: the local `DeterministicMissionCompletionVerifier` and
+  canonical `EvidenceRegistry` must be injected as one pair, and the Reducer
+  must read that exact registry. Runtime freezes every required obligation's
+  accepted verification and evidence, appends one content-hash-bound aggregate
+  evidence object, reads it back, then submits `mission_verified`.
+- permissions: no verifier receives GUI mutation tools and neither verifier
+  changes Mission state directly. There is no model or visual verifier call in
+  this slice, and `ActionEffectVerifier` remains unimplemented.
+- durability limit: the evidence-first ordering is process-local. There is no
+  cross-process WAL or proven exactly-once recovery if the process terminates
+  between aggregate evidence append and accepted mission event.
+- rollout: P5 remains injection-only until a live vNext coordinator exists;
+  unit/property tests do not establish false-positive improvement or authorize
+  deletion of legacy `done`/`DoneVerifierMixin`.

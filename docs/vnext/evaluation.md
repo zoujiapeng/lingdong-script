@@ -163,6 +163,8 @@ Electron task input
 
 直接调用 Reducer、Profiler、Policy、Broker、Actor 或 `/api/v2` 只是 unit/integration。vNext不能获得额外截图、预置计划、特殊 max steps 或后门工具。
 
+当前 P4c 只提供可注入 product coordinator protocol/seam：显式注入时 `ArpExecution` 可在 frozen `vnext` selection 下绕过 legacy handlers，但 Server 默认未注入且仓库无 live coordinator/Actor 实现。因此目前没有可运行的 vNext Electron E2E；protocol、fake port、注入式 Controller 或 legacy shadow 测试都不进入 GUI grounded-pass 分母。
+
 冷启动在整个 run禁用长期 Memory/Skill，同时保留同一 scenario 明确的 typed artifact dependency。多 turn 中“刚刚”“继续”必须由当前 scenario 的 evidence/artifact ref 解析。
 
 ## 5. 测试矩阵
@@ -223,8 +225,7 @@ Electron task input
 - Raw receipt的机械三态与`input_completed=true/false/null`一致；
 - legacy scroll正常输出保持兼容，安全修正只禁止不确定后的第二种输入机制。
 
-以上 RawDevice 项当前只有 unit/characterization 证据，不代表 live Actor、完整
-Controller bridge、paired canary或真实 Electron E2E 已通过。
+以上 RawDevice 项当前只有 unit/characterization 证据。P4b 的默认关闭 atomic click/double-click 切片已覆盖 Runtime permit、双段坐标映射、commit-time Windows identity、每次 mouse-down 紧前 final guard、post-action authoritative frame/evidence 以及 unknown-no-replay；它只由注入测试组装，不代表完整 ControllerPort、live Actor、paired canary 或真实 Electron E2E 已通过。
 
 ### 5.5 Broker
 
@@ -309,6 +310,8 @@ Profiler成功不是“解释听起来合理”，而是：
 
 ## 7. Verifier评测
 
+当前实现边界：P5a 已把注入式只读 ObligationVerifier 接到 MissionRuntime；P5b 已将本地 `DeterministicMissionCompletionVerifier` 与 Reducer 使用的同一 `EvidenceRegistry` 成对绑定，并以 aggregate evidence append/read-back -> `mission_verified` 的顺序机械关闭 mission。当前无模型/视觉 Verifier、无 ActionEffectVerifier、无跨进程 WAL/exactly-once，也没有 false-positive/false-negative 或 Actor/Verifier 相关错误的真实 A/B 报告，因此 P5 产品门槛未达。
+
 单独校准：
 
 - true positive；
@@ -340,6 +343,8 @@ Profiler成功不是“解释听起来合理”，而是：
 不能把“不同角色名称”当成真正独立性证明。
 
 ## 8. Planner 与 Inspector评测
+
+当前 P6 保持禁用：没有至少两个 held-out 任务族的 external-oracle uplift 和成本对照，因此不实现或调用 Planner/Inspector。
 
 Planner：
 
@@ -439,6 +444,8 @@ sidecar，以及 legacy VLM helper 的 stop_event seam。因此“全角色可�
 -受控任务不低于legacy；
 -保留真实oracle失败。
 
+当前只有注入式 ActorPort/MissionRuntime、atomic click/double-click 和 product coordinator protocol seam；Server 未注入 live coordinator，无具体 Visual Actor，也无受控或真实 vNext E2E 对照，所以该门槛未达。
+
 ### Verifier
 
 -claim不能直接完成；
@@ -447,12 +454,16 @@ sidecar，以及 legacy VLM helper 的 stop_event seam。因此“全角色可�
 -verifier failure不污染state；
 -同模型相关错误已报告。
 
+当前只能证明注入式 obligation verification 和进程内 deterministic mission completion 的合同/replay/fail-closed 性质；不能证明 false-positive 低于 legacy 或同模型错误已校准。
+
 ### Planner/Inspector
 
 -只在预定义事件；
 -权限零mutation；
 -至少两个任务族held-out uplift；
 -收益大于成本。
+
+当前无 A/B 证据，因此两者均禁用。
 
 ### 默认切换
 
@@ -462,6 +473,8 @@ sidecar，以及 legacy VLM helper 的 stop_event seam。因此“全角色可�
 -Profiler没有明显over/under-profile；
 -停止、暂停、取消、外部等待和输入清理无回归；
 -legacy删除计划可执行，不是无限双栈。
+
+当前 P7 真实 canary、P8 默认切换和 P9 净删均未开始；legacy 产品职责删除数为 0。
 
 ## 11. 报告格式
 

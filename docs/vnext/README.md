@@ -1,6 +1,6 @@
 # vNext Agent 核心旁路
 
-状态：**P0/P1/P1.5 已实现；P2a/P2b Profiler shadow、P3a Broker 与 P3b single-obligation partial shadow 已完成；WinPilot product package 的模型请求/重试边界已统一；P4a Actor 合同与注入式单回合 MissionRuntime 已实现；P4b 正在进行共享 owner 的早期抽取，Broker 仍未 enforce，完整产品桥接/live Actor、P5 Verifier、P6 Planner/Inspector 尚未接入**
+状态：**P0/P1/P1.5 已实现；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；P4a 注入式 Runtime、P4b 默认关闭的 atomic click/double-click 切片和 P4c 可注入 product coordinator protocol seam 已实现；P5a ObligationVerifier 和 P5b 本地 evidence-first MissionVerifier 已接入该注入式 Runtime；Server 默认未注入 coordinator，无 live Actor/coordinator 实现、无模型/视觉 Verifier，P6 禁用，P7–P9 未开始，legacy 删除为 0**
 
 迁移分支：`codex/vnext-agent-core`
 
@@ -45,35 +45,14 @@ Visual Actor 只做最难本地化的事情：根据当前真实像素和局部�
 
 ## 当前阶段
 
-当前分支已完成 P0/P1/P1.5、P2a 纯合同、P2b 只读 shadow、P3a/P3b Broker shadow、P4a 纯合同/注入式 Runtime，并开始 P4b 的共享 owner 抽取；legacy 仍是默认且唯一桌面执行 runtime：
+当前所有 vNext 能力仍是旁路或注入式能力；`legacy` 是默认且唯一可在 Electron 中修改桌面的 runtime：
 
-- P0 只在既有 trace/BUS 事件上增加观测字段；
-- P1 提供可重放的 MissionDefinition/Event/Projection/Reducer/Card 及 legacy shadow；
-- P2a 在独立 `vnext/profiling/` 中提供严格版本化合同、确定性 Execution Policy、序列化和可注入 shadow 评测；
-- P2b 提供每个 run 至多一次、无工具、无 runtime identity 的真实 Profiler provider；只有显式启用 `vnext.profiler_shadow.enabled` 时，才从同一 Electron/ARP 入口写入私有 trace sidecar；
-- Profiler shadow 不修改 legacy prompt、工具面、GUI 动作链、Controller、Mission 或完成语义，setup/provider 失败也不能阻断 legacy；
-- P3a 提供唯一 canonical capability catalog、严格版本化的 ToolCatalog、run/mission/obligation/revision/turn 有界 CapabilityGrant，以及只读取 MissionProjection、ExecutionProfile 和真实运行状态的确定性 CapabilityBroker；
-- P3b single-obligation partial shadow 通过默认关闭的 `vnext.broker_shadow.enabled` 在同一 Electron/ARP 入口逐回合写私有 sidecar；它读取现有 FrameAuthority、已验证 target、同一次 pointer 状态和 owner-scoped capability registry，但不改 legacy 请求、BUS、Controller 或完成语义；
-- target 变化在 shadow 中也必须由 run-scoped EvidenceRef 与 accepted Mission events 完整 replay；多 obligation 尚无法和 legacy child runner 可靠对齐时明确 unavailable，必须等 P4 Mission Runtime 提供 active-obligation envelope；
-- Broker shadow evaluator 只有获得完整、可靠的 necessary-tool 标注时才计算 recall；当前尚无 held-out 实测数据，因此 Broker 不能 enforce，也没有裁剪 legacy 工具面；
-- 跨阶段的 `winpilot/modeling/` 合同把 WinPilot product package 中的逻辑模型请求绑定为 `model-request/0`：provider adapter 先准备请求，Runtime 冻结一次，SDK 隐式重试为零；只有同一 decision、role、purpose 和 request fingerprint 的瞬时 transport failure 才能做有界 request retry；
-- poll 不重新提交模型请求；改变消息、thinking、工具、预算或目的属于新的 redecision；成功响应的解析/schema 失败不是 transport retry；桌面 action replay 由独立 mutation replay policy 管理，执行结果不确定时禁止自动重放；
-- 该完成声明只覆盖 `python/winpilot_home/winpilot/` 产品包。仓库外围 `python/providers/` 的旧 Flow/feature provider 仍有独立 SDK/HTTP 重试，必须先审计生产可达性，再在 P9 删除或单独迁移；不能把它们包装成第二个 Runtime；
-- Profiler 的 stop_event 已从 ArpExecution 经 shadow hook/runtime/provider 传到 ModelCallRuntime 并有测试；精确函数调用栈 AST guard 也已阻止 product package 绕过 transport 边界。仍未闭合的是全角色逐 attempt sidecar，以及缺少 stop_event seam 的 legacy VLM helper；
-- P4a 在 `vnext/actor/` 固定了严格版本化、无 Runtime 身份的 proposal、Actor 可见 view 和 Runtime-bound envelope；在 `vnext/runtime/` 实现了只依赖注入端口的单回合 MissionRuntime。它不直接调用模型或设备，也没有接入 Electron、StageRuntime、AgentRunner 或 legacy 产品执行；
-- P4a 在 Actor 返回后重新读取 Mission revision、active obligation、权威 frame/target/pointer 状态并重新投影 Broker；任一 TOCTOU 变化都丢弃 stale proposal，只有最新 projection 中的单笔动作才可进入注入式 ControllerPort；
-- Controller 回执严格区分 `completed`、`rejected` 和 `unknown`。`unknown`、执行后异常或无法与当前 post-frame/evidence 对账时只会阻塞当前义务，绝不自动重放 mutation；
-- `claim_obligation_done` 只接受 `obligation_claimed` 事件并进入 `CLAIMED`/`verification_required`，不会 verified 或结束 mission；P5 独立 Verifier 尚未实现。Capability/Inspector/Planner 等未接服务请求在 P4a fail closed；
-- P4a 没有 enforce Broker、没有 live Actor model call、没有真实 FrameAuthority/Controller bridge，也没有 canary，因此没有改变现有产品行为；
-- P4b 已让 legacy 观察路径委托共享的两阶段 `FrameObserver`，并抽取 submitted-image 到 normalized-frame 的纯坐标映射；normalized-frame 到物理坐标、完整 preflight 与动作后观察仍由 legacy owner 持有；
-- `DesktopRuntimeSelection` 在每个 run 开始时只从 Runtime 配置冻结一次。默认仍为 legacy；显式选择 `vnext` 在 live coordinator 未接入时于任何桌面 mutation 前 fail closed，禁止同一 run 隐式回退 legacy；
-- scroll 是第一个共享物理原语：唯一 queued owner 明确返回 `input_completed=true/false/null`，session-free `RawDeviceExecutor.scroll(...)` 只接受 typed 参数和已绑定 HWND，不解析 action、不恢复、不重放。Raw receipt 只证明机械输入事实，不是视觉变化、evidence 或 obligation 完成；
-- PostMessage 结果不确定时不再自动切换为 SendInput，遥测失败也不能触发第二次输入。这是 no-uncertain-replay 的安全语义修正；click/type/hotkey/drag/draw 尚未迁移；
-- 不改变当前 `master` 的产品行为；
-- 不声称 Mission Ledger 已经接管产品运行；P1 projection 只能离线或 shadow 使用；
-- P4b 仅完成 shared frame、第一段坐标映射、run-scoped runtime selection 和 scroll raw seam；commit-time frame/foreground admission、完整 ControllerPort、live Actor、P5 独立 Verifier、P6 Planner/Inspector 和 vNext 产品可写运行时均未实现；现有 legacy planner、done judge 或 VLM helper 经过统一 transport，不代表对应 vNext 角色已接入；
-- 不把历史单次 E2E 结果改写成 vNext 成功证据；
-- 下一步是保持 Broker 非 enforce，继续按 primitive 让 legacy 委托同一 typed input owner，闭合 frame/foreground admission、物理坐标映射和 ControllerPort 后，才建设默认关闭的 live Actor canary；同时继续收集完整 relevance oracle。任何默认切换或 legacy 删除都必须先通过 paired canary、真实 Electron E2E 和文档既定门槛。
+- **Mission 与验证**：P1/P1.5 提供可重放的 Definition/Event/Projection/Reducer/Card。P5a 在 `claim_obligation_done` 被 Reducer 接受后，只在 ExecutionProfile 允许且注入只读 port 时调用 ObligationVerifier；Actor 不能直接完成义务。P5b 将本地 `DeterministicMissionCompletionVerifier` 与 Reducer 使用的同一 `EvidenceRegistry` 成对注入；全部 required obligation verified 后，Runtime 冻结 accepted verification/evidence，先写入 canonical aggregate evidence，再接受 `mission_verified`。这是进程内 evidence-first 机械闭合，不是模型/视觉 Verifier，也没有跨进程 WAL 或 exactly-once 保证。
+- **Profiler 与 Broker**：P2a 纯合同/Policy、P2b 每 run 至多一次的 trace-only Profiler shadow、P3a 纯 ToolCatalog/Grant/Broker 和 P3b single-obligation partial shadow 已实现。两个 shadow 都默认关闭，不改 legacy prompt、工具或动作；当前没有完整 over/under-profile 基线、multi-obligation 对齐或 held-out relevance oracle，因此 Broker 不得 enforce，`necessary_tool_recall` 不得伪写为数值。
+- **Actor 与输入链**：P4a 只实现无 Runtime 身份 proposal、Runtime-bound envelope 和注入式单回合 `MissionRuntime`。P4b 复用唯一 `FrameAuthority`/`DesktopActionQueue`/`RawDeviceExecutor`，完成默认关闭的 atomic `click`/`double_click` 窄切片：双段坐标映射、commit-time Windows target/frame 校验、每次 mouse-down 紧前 final guard，以及同一 physical lease 内的 post-action authoritative frame/evidence。它仅在注入测试中使用；`type_text`/`hotkey`/`drag`/`draw_strokes`/held pointer 尚无等价 vNext ControllerPort。
+- **Runtime 与产品边界**：`DesktopRuntimeSelection` 每 run 只从产品配置冻结一次。P4c 已定义可注入的 product coordinator protocol/seam；`ArpExecution` 在 frozen `vnext` selection 且显式注入 coordinator 时可绕过 legacy handlers，并复用同一 run/BUS/stop/pause owner。Server 默认未注入该 port，仓库也没有具体 live coordinator/Visual Actor 实现；因此显式选择 `vnext` 仍在桌面 mutation 前 fail closed，不会在同一 run 偷回 legacy。目前没有可运行的 vNext Electron E2E 路径，单元/注入测试不得报告为 GUI 成功。
+- **模型请求**：`winpilot/modeling/` 已统一 product package 的冻结 request 和有界 transport retry，unknown mutation 不自动 replay。全角色逐 attempt sidecar、legacy VLM stop_event seam 和外围 `python/providers/` 的生产可达性仍是迁移债务。
+- **后续门槛**：P6 Planner/Inspector 在没有至少两个 held-out 任务族的 A/B 收益前保持禁用；P7 真实 canary、P8 默认切换和 P9 legacy 净删尚未开始。当前没有任何 legacy 产品职责达到删除门槛，删除数为 0。下一步是保持 Broker 非 enforce，组装默认关闭的同入口 live coordinator/Actor，再以 independent oracle 做 paired canary。
 
 ## 旁路不是第二条产品主线
 
