@@ -192,6 +192,21 @@ ActionEffect 接线后的同入口复测必须单独报告，不能覆盖上述�
 标记为外部干扰并排除，不计入产品通过或失败。最终 2 pass / 1 fail 的单 seed 结果不能换算成功率，
 也不能证明 ActionEffect 提升了恢复能力。
 
+P7a measurement-only harness 正在审计：真实失败不再因“等不到 success”退化为异常字符串，而会保存
+最后一份浏览器状态，并把结果分为 conclusive pass、conclusive fail 与 oracle unavailable；runner error
+单独记录。paired 目前只允许已有 legacy/vNext 原语 parity 的 `precise-click` 和 `scroll-reveal`，同一
+case/seed 的两侧串行运行、跨 pair 交替顺序并生成稳定 `pair_id`；非 paired run 的 `pair_id` 为 `null`，
+不进入 paired comparison。
+
+报告只从准确绑定且完整闭合的 trace 读取 vNext turn、ActionEffect 和 streak；不可靠的来源保持
+`None`。当前证据不能
+可靠测量机械动作重复，也不能推导 Actor 是否改变语义策略，因此二者不作为指标或恢复收益结论。
+attempted pair 也不等于有效 A/B：只有恰好一条 legacy 与一条 vNext、评测配置、provider/model
+和 Runtime 服务身份相同，服务的 run 前后身份一致且无 source drift，两侧 run-scoped evidence 与
+oracle 均有效且评测起点为已知 clean revision，才标记 `eligible_for_ab`。
+这只是仍在审计的评测底座，尚未新增真实 grounded 或 eligible A/B 样本；多 seed paired、边界/no-op/
+delayed/ambient/incomparable 条件仍待实跑。
+
 早期真实尝试分别暴露了冗余 full-frame `observe` 循环、Verifier provider 的字符串 confidence 与条件文本复制、harness `SW_RESTORE` 引起的目标几何变化，以及 page-ready 后复用旧几何。修复位于通用 Catalog/Runtime、Verifier schema 和 harness 状态读取层，没有把 case、seed、布局、坐标或成功条件加入生产 Agent。
 
 冷启动在整个 run禁用长期 Memory/Skill，同时保留同一 scenario 明确的 typed artifact dependency。多 turn 中“刚刚”“继续”必须由当前 scenario 的 evidence/artifact ref 解析。
@@ -494,7 +509,7 @@ capability/service 与 Catalog/Controller parity，同一 snapshot 继续供 `Ex
 两边 missing-capability、snapshot/runtime identity、Catalog/Controller drift，以及 admission 失败时
 prepare/model/Controller/legacy fallback 调用数为零。仅有 snapshot 单元测试仍不能替代真实入口证据。
 
-下一门槛是扩大通用 ActionEffect/unchanged-frame 的随机 seed、滚动边界、动态画面、多布局与 paired 覆盖，量化 Actor 是否真正利用中性反馈，而不是扩写 prompt 或增加方向规则：`type_text`、`hotkey`、`drag`、`draw_strokes`、held pointer 和 ROI observe 必须逐项进入同一 snapshot/Catalog/Broker/Controller owner，
+P7a 的 multi-seed/paired runner 与 fail-closed 报告合同仍在审计，尚未产生新的真实或 eligible A/B 样本。下一门槛是先完成审计，再用它扩大通用 ActionEffect/unchanged-frame 的随机 seed、滚动边界、动态画面、多布局与 paired 覆盖；是否真正利用中性反馈必须由后续独立任务结果判断，不能从当前 trace 推导，也不能靠扩写 prompt 或增加方向规则：`type_text`、`hotkey`、`drag`、`draw_strokes`、held pointer 和 ROI observe 必须逐项进入同一 snapshot/Catalog/Broker/Controller owner，
 并通过必要工具 recall、unknown-no-replay、负向/property 与同入口 Electron oracle。完成这些之前，
 现有受控 canary 仍不参与默认切换判定。
 
