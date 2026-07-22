@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import inspect
 import sys
@@ -47,9 +48,15 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     )
     assert {
         item["scenario"] for item in harness.VISUAL_CASES.values()
-    } == {"precise_click", "drag_fit", "slider", "corridor_drag", "dynamic_hold"}
+    } == {
+        "precise_click", "scroll_reveal", "drag_fit", "slider",
+        "corridor_drag", "dynamic_hold",
+    }
     assert harness.SUITES["vnext-canary"] == ("precise-click",)
+    assert harness.SUITES["vnext-scroll"] == ("scroll-reveal",)
+    assert "scroll-reveal" not in harness.SUITES["vnext-canary"]
     assert harness.VISUAL_CASES["precise-click"]["runtime_version"] == "vnext"
+    assert harness.VISUAL_CASES["scroll-reveal"]["runtime_version"] == "vnext"
     assert {
         harness.VISUAL_CASES[name]["expected_variant"]
         for name in ("corridor-v0", "corridor-v1", "game-drag-v2", "corridor-v3")
@@ -129,8 +136,188 @@ def test_visual_target_defers_ready_geometry_until_first_painted_frame():
     ).read_text(encoding="utf-8")
 
     assert "let readyDetails = () => ({})" in source
-    assert source.count("readyDetails=()=>") == 7
+    assert source.count("readyDetails=()=>") == 8
     assert "...readyDetails()" in source
+    scroll_setup = source[source.index("function setupScrollReveal()") :]
+    assert "const direction=rng()<.5?'up':'down'" in scroll_setup
+    assert "initialScrollTop=direction==='down'" in scroll_setup
+    assert "if(!event.isTrusted)return" in scroll_setup
+
+
+def _scroll_reveal_state() -> dict:
+    pane = {
+        "left": 100, "top": 100, "right": 500, "bottom": 350,
+        "width": 400, "height": 250,
+    }
+    ready_target = {
+        "left": 150, "top": 800, "right": 450, "bottom": 888,
+        "width": 300, "height": 88,
+    }
+    target = {
+        "left": 150, "top": 250, "right": 450, "bottom": 338,
+        "width": 300, "height": 88,
+    }
+    details = {
+        "direction": "down",
+        "initial_scroll_top": 100,
+        "before_scroll_top": 600,
+        "after_scroll_top": 650,
+        "scroll_delta": 50,
+        "total_scroll_delta": 550,
+        "max_scroll_top": 900,
+        "wheel_delta_y": 120,
+        "wheel_count": 6,
+        "pane": dict(pane),
+        "pane_viewport": dict(pane),
+        "target": dict(target),
+        "target_fully_visible": True,
+    }
+    state = _state("scroll_reveal", details, moves=0)
+    success = state["success_event"]
+    success["client_x"] = 300
+    success["client_y"] = 200
+    ready = {
+        "case_id": "case-1",
+        "scenario": "scroll_reveal",
+        "seed": 17,
+        "type": "page_ready",
+        "trusted": False,
+        "details": {
+            "succeeded": False,
+            "direction": "down",
+            "initial_scroll_top": 100,
+            "max_scroll_top": 900,
+            "pane": dict(pane),
+            "pane_viewport": dict(pane),
+            "target": ready_target,
+            "target_fully_visible": False,
+        },
+    }
+    wheel = {
+        "case_id": "case-1",
+        "scenario": "scroll_reveal",
+        "seed": 17,
+        "type": "trusted_wheel",
+        "trusted": True,
+        "client_x": 300,
+        "client_y": 200,
+        "succeeded": False,
+        "details": {"succeeded": False, **copy.deepcopy(details)},
+    }
+    state["events"] = [ready, wheel, success]
+    return state
+
+
+def test_external_verdict_accepts_trusted_scroll_reveal_transition():
+    harness = _load_harness()
+    state = _scroll_reveal_state()
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="scroll_reveal", seed=17,
+    )
+
+    assert verdict["passed"] is True
+
+
+def test_external_verdict_accepts_upward_scroll_reveal_transition():
+    harness = _load_harness()
+    state = _scroll_reveal_state()
+    ready_target = {
+        "left": 150, "top": -350, "right": 450, "bottom": -262,
+        "width": 300, "height": 88,
+    }
+    target = {
+        "left": 150, "top": 150, "right": 450, "bottom": 238,
+        "width": 300, "height": 88,
+    }
+    ready_details = state["events"][0]["details"]
+    ready_details.update({
+        "direction": "up",
+        "initial_scroll_top": 800,
+        "target": ready_target,
+    })
+    for details in (
+        state["success_event"]["details"], state["events"][1]["details"],
+    ):
+        details.update({
+            "direction": "up",
+            "initial_scroll_top": 800,
+            "before_scroll_top": 350,
+            "after_scroll_top": 300,
+            "scroll_delta": -50,
+            "total_scroll_delta": -500,
+            "wheel_delta_y": -120,
+            "target": dict(target),
+        })
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="scroll_reveal", seed=17,
+    )
+
+    assert verdict["passed"] is True
+
+
+def test_external_verdict_rejects_programmatic_scroll_reveal():
+    harness = _load_harness()
+    state = _scroll_reveal_state()
+    state["success_event"]["trusted"] = False
+    state["events"][1]["trusted"] = False
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="scroll_reveal", seed=17,
+    )
+
+    assert verdict["passed"] is False
+    assert "scroll reveal has no trusted wheel evidence" in verdict["errors"]
+
+
+def test_external_verdict_rejects_wrong_scroll_reveal_direction():
+    harness = _load_harness()
+    state = _scroll_reveal_state()
+    state["success_event"]["details"]["wheel_delta_y"] = -120
+    state["events"][1]["details"]["wheel_delta_y"] = -120
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="scroll_reveal", seed=17,
+    )
+
+    assert verdict["passed"] is False
+    assert "trusted wheel moved in the wrong reveal direction" in verdict["errors"]
+
+
+def test_external_verdict_rejects_wheel_without_scrolltop_change():
+    harness = _load_harness()
+    state = _scroll_reveal_state()
+    for details in (
+        state["success_event"]["details"], state["events"][1]["details"],
+    ):
+        details["before_scroll_top"] = 650
+        details["scroll_delta"] = 0
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="scroll_reveal", seed=17,
+    )
+
+    assert verdict["passed"] is False
+    assert "trusted wheel did not change scrollTop" in verdict["errors"]
+
+
+def test_external_verdict_rejects_partially_visible_scroll_target():
+    harness = _load_harness()
+    state = _scroll_reveal_state()
+    partial = {
+        "left": 150, "top": 300, "right": 450, "bottom": 388,
+        "width": 300, "height": 88,
+    }
+    state["success_event"]["details"]["target"] = dict(partial)
+    state["events"][1]["details"]["target"] = dict(partial)
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="scroll_reveal", seed=17,
+    )
+
+    assert verdict["passed"] is False
+    assert "scroll target is not completely visible in the pane" in verdict["errors"]
 
 
 def test_external_verdict_requires_exact_precise_click_identity_and_geometry():

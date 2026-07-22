@@ -69,6 +69,18 @@
     .legend { position: absolute; padding: 10px 13px; border-radius: 10px; background: #fff;
       border: 2px solid #9eabbc; line-height: 1.6; font-weight: 800; }
     .red { color: #d5222a; } .black { color: #111; }
+    .scroll-pane { position: absolute; overflow-y: auto; overflow-x: hidden; border: 4px solid #425b78;
+      border-radius: 13px; background: #edf3f9; overscroll-behavior: contain; scroll-behavior: auto; }
+    .scroll-content { position: relative; width: 100%; background:
+      repeating-linear-gradient(0deg,#f7f9fc 0 88px,#e8eef5 88px 90px); }
+    .scroll-card { position: absolute; left: 34px; right: 34px; height: 74px; display: grid;
+      place-items: center; border: 2px solid #9baabd; border-radius: 11px; background: #fff;
+      color: #53647a; font-size: 17px; font-weight: 750; }
+    .scroll-card.reveal-target { height: 88px; border: 5px solid #148052; background: #dff7eb;
+      color: #087747; font-size: 23px; font-weight: 900; box-shadow: 0 7px 17px rgba(20,128,82,.18); }
+    .scroll-hint { position: absolute; width: 220px; padding: 14px 16px; border: 2px solid #a8b4c4;
+      border-radius: 11px; background: #fff; color: #42516a; font-size: 16px; font-weight: 700;
+      line-height: 1.45; }
   </style>
 </head>
 <body>
@@ -338,7 +350,52 @@
       readyDetails=()=>({board:box(canvas),user_cell:userCell,cell_size:cell,legend:box(legend)});
     }
 
-    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn};
+    function setupScrollReveal() {
+      heading.textContent='Hidden Target Reveal';
+      instruction.textContent='Bring the green TARGET card completely into view inside the panel.';
+      const W=arena.clientWidth,paneWidth=Math.round(between(500,590)),paneHeight=Math.round(between(245,285));
+      const pane=document.createElement('div');pane.className='scroll-pane';
+      const paneLeft=Math.round(between(42,Math.max(43,W-paneWidth-275))),paneTop=Math.round(between(45,75));
+      place(pane,paneLeft,paneTop,paneWidth,paneHeight);
+      const content=document.createElement('div');content.className='scroll-content';
+      const contentHeight=Math.round(between(1120,1280));content.style.height=`${contentHeight}px`;pane.append(content);arena.append(pane);
+      const direction=rng()<.5?'up':'down';
+      const target=document.createElement('div');target.className='scroll-card reveal-target';target.textContent='TARGET';
+      const targetTop=direction==='down'?contentHeight-Math.round(between(135,185)):Math.round(between(42,82));
+      target.style.top=`${targetTop}px`;content.append(target);
+      for(let i=0;i<9;i++){const card=document.createElement('div');card.className='scroll-card';card.textContent=`distractor ${i+1}`;
+        const fraction=(i+1)/10;let top=Math.round(fraction*(contentHeight-86));
+        if(Math.abs(top-targetTop)<105)top=Math.max(8,Math.min(contentHeight-82,top+(top<targetTop?-118:118)));
+        card.style.top=`${top}px`;content.append(card);}
+      const hint=document.createElement('div');hint.className='scroll-hint';hint.textContent='The green card is outside the current view. Keep it entirely within the panel.';
+      place(hint,Math.min(W-235,paneLeft+paneWidth+24),paneTop+Math.round(paneHeight/2)-58,220,116);arena.append(hint);
+
+      const maxScrollTop=Math.max(0,contentHeight-pane.clientHeight);
+      const initialScrollTop=direction==='down'
+        ?Math.round(between(18,Math.min(260,maxScrollTop*.32)))
+        :Math.round(between(Math.max(0,maxScrollTop*.68),Math.max(1,maxScrollTop-18)));
+      pane.scrollTop=initialScrollTop;
+      let wheelCount=0;
+      function paneViewport(){const r=pane.getBoundingClientRect(),left=r.left+pane.clientLeft,top=r.top+pane.clientTop;
+        return{left:Math.round(left),top:Math.round(top),right:Math.round(left+pane.clientWidth),bottom:Math.round(top+pane.clientHeight),width:pane.clientWidth,height:pane.clientHeight};}
+      function wheelDetails(event,before,after){const viewport=paneViewport(),targetBox=box(target),scrollDelta=after-before;
+        const fullyVisible=targetBox.left>=viewport.left&&targetBox.right<=viewport.right&&targetBox.top>=viewport.top&&targetBox.bottom<=viewport.bottom;
+        return{direction,initial_scroll_top:initialScrollTop,before_scroll_top:before,after_scroll_top:after,
+          scroll_delta:scrollDelta,total_scroll_delta:after-initialScrollTop,max_scroll_top:maxScrollTop,
+          wheel_delta_y:event.deltaY,wheel_count:wheelCount,pane:box(pane),pane_viewport:viewport,target:targetBox,
+          target_fully_visible:fullyVisible};}
+      pane.addEventListener('wheel',event=>{if(!event.isTrusted)return;const before=pane.scrollTop;wheelCount++;
+        requestAnimationFrame(async()=>{const after=pane.scrollTop,details=wheelDetails(event,before,after);
+          await report('trusted_wheel',event,{...details,succeeded:false});
+          const correctDirection=direction==='down'?event.deltaY>0&&details.scroll_delta>0:event.deltaY<0&&details.scroll_delta<0;
+          if(correctDirection&&details.scroll_delta!==0&&details.total_scroll_delta!==0&&details.target_fully_visible){
+            markSuccess('SCROLL_REVEAL_SUCCEEDED',event,{...details,succeeded:true});
+          }});},{passive:true});
+      readyDetails=()=>({direction,initial_scroll_top:pane.scrollTop,max_scroll_top:maxScrollTop,
+        pane:box(pane),pane_viewport:paneViewport(),target:box(target),target_fully_visible:false});
+    }
+
+    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn,scroll_reveal:setupScrollReveal};
     (setups[scenario]||setupDragFit)();
     requestAnimationFrame(()=>requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
       viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails()})));

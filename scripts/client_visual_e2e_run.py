@@ -64,6 +64,14 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "timeout": 300,
         "runtime_version": "vnext",
     },
+    "scroll-reveal": {
+        "scenario": "scroll_reveal",
+        "task": VISUAL_TEST_TASK,
+        "seed": 20260722,
+        "max_steps": 24,
+        "timeout": 360,
+        "runtime_version": "vnext",
+    },
     "drag-fit": {
         "scenario": "drag_fit",
         "task": VISUAL_TEST_TASK,
@@ -123,6 +131,7 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
 SUITES = {
     "smoke": ("drag-fit", "slider", "dynamic-hold", "game-drag-v2"),
     "vnext-canary": ("precise-click",),
+    "vnext-scroll": ("scroll-reveal",),
     "all": tuple(VISUAL_CASES),
 }
 
@@ -432,6 +441,141 @@ def external_verdict(
                 errors.append("trusted pointerup did not complete inside the final goal")
         if move_count < 2:
             errors.append("dynamic held gesture did not span multiple pointer moves")
+    elif scenario == "scroll_reveal":
+        all_events = state.get("events") or []
+        ready = next(
+            (
+                item for item in reversed(all_events)
+                if item.get("type") == "page_ready"
+                and item.get("case_id") == case_id
+                and item.get("scenario") == scenario
+                and int(item.get("seed") or 0) == int(seed)
+            ),
+            {},
+        )
+        ready_details = ready.get("details") or {}
+        trusted_wheels = [
+            item for item in all_events
+            if item.get("type") == "trusted_wheel"
+            and item.get("trusted") is True
+            and item.get("case_id") == case_id
+            and item.get("scenario") == scenario
+            and int(item.get("seed") or 0) == int(seed)
+        ]
+        def number(value: Any) -> bool:
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+        def valid_box(value: Any) -> bool:
+            return isinstance(value, dict) and all(
+                number(value.get(key))
+                for key in ("left", "top", "right", "bottom", "width", "height")
+            ) and bool(
+                value["width"] > 0
+                and value["height"] > 0
+                and value["right"] - value["left"] == value["width"]
+                and value["bottom"] - value["top"] == value["height"]
+            )
+
+        direction = details.get("direction")
+        ready_direction = ready_details.get("direction")
+        if direction not in {"up", "down"} or direction != ready_direction:
+            errors.append("scroll direction identity does not match page-ready state")
+        transition_keys = (
+            "direction", "initial_scroll_top", "before_scroll_top",
+            "after_scroll_top", "scroll_delta", "total_scroll_delta",
+            "max_scroll_top", "wheel_delta_y", "wheel_count",
+            "target_fully_visible",
+        )
+        matching_wheels = [
+            item for item in trusted_wheels
+            if all(
+                (item.get("details") or {}).get(key) == details.get(key)
+                for key in transition_keys
+            )
+        ]
+        wheel = matching_wheels[-1] if matching_wheels else {}
+        if not trusted_wheels:
+            errors.append("scroll reveal has no trusted wheel evidence")
+        elif not matching_wheels:
+            errors.append("success does not match a trusted wheel transition")
+
+        numeric_keys = (
+            "initial_scroll_top", "before_scroll_top", "after_scroll_top",
+            "scroll_delta", "total_scroll_delta", "max_scroll_top",
+            "wheel_delta_y",
+        )
+        if not all(number(details.get(key)) for key in numeric_keys):
+            errors.append("scroll transition metrics are incomplete")
+        else:
+            initial = details["initial_scroll_top"]
+            before = details["before_scroll_top"]
+            after = details["after_scroll_top"]
+            delta = details["scroll_delta"]
+            total_delta = details["total_scroll_delta"]
+            maximum = details["max_scroll_top"]
+            wheel_delta = details["wheel_delta_y"]
+            if (
+                initial != ready_details.get("initial_scroll_top")
+                or maximum != ready_details.get("max_scroll_top")
+            ):
+                errors.append("scroll range identity does not match page-ready state")
+            if delta == 0 or after == before or after - before != delta:
+                errors.append("trusted wheel did not change scrollTop")
+            if total_delta == 0 or after - initial != total_delta:
+                errors.append("scrollTop did not move away from its initial position")
+            if not 0 <= after <= maximum:
+                errors.append("scrollTop is outside the canonical pane range")
+            direction_valid = (
+                direction == "down" and wheel_delta > 0 and delta > 0 and total_delta > 0
+            ) or (
+                direction == "up" and wheel_delta < 0 and delta < 0 and total_delta < 0
+            )
+            if not direction_valid:
+                errors.append("trusted wheel moved in the wrong reveal direction")
+
+        pane = details.get("pane_viewport") or {}
+        ready_pane = ready_details.get("pane_viewport") or {}
+        target = details.get("target") or {}
+        ready_target = ready_details.get("target") or {}
+        if not all(valid_box(value) for value in (pane, ready_pane, target, ready_target)):
+            errors.append("scroll reveal geometry is incomplete")
+        else:
+            if pane != ready_pane:
+                errors.append("scroll pane geometry changed after page-ready")
+            client_x = event.get("client_x")
+            client_y = event.get("client_y")
+            if not (
+                number(client_x) and number(client_y)
+                and pane["left"] <= client_x < pane["right"]
+                and pane["top"] <= client_y < pane["bottom"]
+            ):
+                errors.append("trusted wheel coordinates are outside the scroll pane")
+            elif wheel and (
+                wheel.get("client_x") != client_x or wheel.get("client_y") != client_y
+            ):
+                errors.append("success coordinates do not match trusted wheel evidence")
+            initially_visible = (
+                ready_target["left"] >= ready_pane["left"]
+                and ready_target["right"] <= ready_pane["right"]
+                and ready_target["top"] >= ready_pane["top"]
+                and ready_target["bottom"] <= ready_pane["bottom"]
+            )
+            fully_visible = (
+                target["left"] >= pane["left"]
+                and target["right"] <= pane["right"]
+                and target["top"] >= pane["top"]
+                and target["bottom"] <= pane["bottom"]
+            )
+            if initially_visible:
+                errors.append("scroll target was already fully visible at page-ready")
+            if details.get("target_fully_visible") is not True or not fully_visible:
+                errors.append("scroll target is not completely visible in the pane")
+            total_delta = details.get("total_scroll_delta")
+            if number(total_delta) and (
+                abs((ready_target["top"] - total_delta) - target["top"]) > 1
+                or abs((ready_target["bottom"] - total_delta) - target["bottom"]) > 1
+            ):
+                errors.append("target geometry does not agree with the scrollTop delta")
     else:
         errors.append(f"unsupported scenario: {scenario}")
 
