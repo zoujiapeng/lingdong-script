@@ -32,7 +32,15 @@ import win32gui
 from ..config import CONFIG
 from ..utils.log import BUS, logger
 from .desktop_queue import queued_desktop_action
-from .raw_device import ClickCount, ClickMechanism, MouseButton, RawBackendResult
+from .raw_device import (
+    AdmittedPhysicalClickBackend,
+    ClickCount,
+    ClickMechanism,
+    FinalClickGuard,
+    FinalClickGuardDecision,
+    MouseButton,
+    RawBackendResult,
+)
 
 user32 = ctypes.windll.user32
 
@@ -546,6 +554,8 @@ def _execute_click_input_unqueued(
     count: ClickCount,
     mechanism: ClickMechanism,
     hwnd: int | None = None,
+    *,
+    final_guard: FinalClickGuard | None = None,
 ) -> RawBackendResult:
     """Execute one strict click after the caller has serialized admission."""
     if not (
@@ -558,10 +568,36 @@ def _execute_click_input_unqueued(
         return RawBackendResult(False, {"ok": True, "dry_run": True})
     if mechanism is ClickMechanism.BACKGROUND_MESSAGE:
         return _post_click(x, y, button, count, expected_hwnd=hwnd)
-    return _raw_click(
+    raw_args = (
         x, y, button, count, hwnd,
         mechanism is ClickMechanism.PREPOSITIONED_PHYSICAL, False,
     )
+    if final_guard is None:
+        return _raw_click(*raw_args)
+    return _raw_click(*raw_args, final_guard=final_guard)
+
+
+def execute_admitted_physical_click(
+    x: int,
+    y: int,
+    button: MouseButton,
+    count: ClickCount,
+    mechanism: ClickMechanism,
+    hwnd: int | None = None,
+    *,
+    final_guard: FinalClickGuard,
+) -> RawBackendResult:
+    """Run an already-queued physical click with a true pre-down guard."""
+    if not callable(final_guard) or mechanism is ClickMechanism.BACKGROUND_MESSAGE:
+        return _click_progress(False, 0, "invalid admitted physical click")
+    return _execute_click_input_unqueued(
+        x, y, button, count, mechanism, hwnd=hwnd, final_guard=final_guard,
+    )
+
+
+ADMITTED_PHYSICAL_CLICK_BACKEND = AdmittedPhysicalClickBackend(
+    execute_admitted_physical_click
+)
 
 
 @queued_desktop_action("click")
@@ -671,6 +707,7 @@ def _raw_click(
     hwnd: int | None,
     prepositioned: bool = False,
     allow_target_focus: bool = True,
+    final_guard: FinalClickGuard | None = None,
 ) -> RawBackendResult:
     cooperative_mode = multi_input_cooperation_enabled()
     if hwnd and not cooperative_mode:
@@ -718,6 +755,20 @@ def _raw_click(
                 completed_clicks,
                 _CLICK_OWNERSHIP_LOST,
             )
+        if final_guard is not None:
+            try:
+                guard_decision = final_guard(int(x), int(y))
+            except Exception:
+                guard_decision = FinalClickGuardDecision.TARGET_UNAVAILABLE
+            if not isinstance(guard_decision, FinalClickGuardDecision):
+                guard_decision = FinalClickGuardDecision.TARGET_UNAVAILABLE
+            if guard_decision is not FinalClickGuardDecision.ADMITTED:
+                return _click_progress(
+                    False if completed_clicks == 0 else None,
+                    completed_clicks,
+                    f"final click guard rejected: {guard_decision.value}",
+                    via="final_target_guard",
+                )
         try:
             _send_inputs([_mouse_input(down)])
         except Exception:
