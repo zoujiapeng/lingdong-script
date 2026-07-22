@@ -40,6 +40,11 @@ NAV_ASSETS = "技能与学习"
 RUN_TASK = "运行任务"
 STOP_TASK = "停止"
 COLD_START = "冷启动（禁用 Skill/长期经验）"
+RUNTIME_SELECTOR = "实验运行时"
+RUNTIME_LABELS = {
+    "legacy": "Legacy（默认）",
+    "vnext": "vNext（实验）",
+}
 CLARIFICATION_HEADING = "任务尚未启动，请先补充必要信息"
 
 ORIGINAL_CASES: dict[str, dict[str, Any]] = {
@@ -265,7 +270,7 @@ class ElectronClientDriver:
                 key: current.get(key)
                 for key in (
                     "run_id", "kind", "status", "phase", "goal",
-                    "current_node_id", "current_tool", "error",
+                    "current_node_id", "current_tool", "runtime_version", "error",
                 )
             }
         return {
@@ -452,7 +457,12 @@ class ElectronClientDriver:
         self.navigate(NAV_AGENT)
         return {"before": before, "after": after, "cleared": cleared, "proof": proof}
 
-    def configure_goal(self, task: str, max_steps: int) -> dict[str, Any]:
+    def configure_goal(
+        self,
+        task: str,
+        max_steps: int,
+        runtime_version: str = "legacy",
+    ) -> dict[str, Any]:
         self.restore_and_focus()
         try:
             self.navigate(NAV_AGENT)
@@ -466,6 +476,34 @@ class ElectronClientDriver:
             edits[0],
         )
         _set_control_value(goal, task)
+
+        expected_runtime = str(runtime_version or "legacy").casefold()
+        if expected_runtime not in RUNTIME_LABELS:
+            raise RuntimeError(f"不支持的客户端实验运行时: {runtime_version!r}")
+        runtime_select = next(
+            (
+                item for item in _visible_descendants(self.window, "ComboBox")
+                if item.Name.strip() == RUNTIME_SELECTOR
+            ),
+            None,
+        )
+        if runtime_select is None:
+            raise RuntimeError("客户端实验运行时选择器不可见")
+        runtime_select.Click()
+        auto.SendKeys("{Home}" if expected_runtime == "legacy" else "{End}")
+        auto.SendKeys("{Enter}")
+        auto.SendKeys("{Tab}")
+        time.sleep(0.2)
+        observed_runtime = _control_value(runtime_select).strip()
+        accepted_values = {
+            expected_runtime,
+            RUNTIME_LABELS[expected_runtime].casefold(),
+        }
+        if observed_runtime.casefold() not in accepted_values:
+            raise RuntimeError(
+                "无法通过客户端选择实验运行时: "
+                f"expected={expected_runtime!r}, observed={observed_runtime!r}"
+            )
 
         checkboxes = _visible_descendants(self.window, "CheckBox")
         checkbox = next(
@@ -497,6 +535,8 @@ class ElectronClientDriver:
             "task_input": value,
             "cold_start_toggle": _toggle_state(checkbox),
             "max_steps": max_steps,
+            "runtime_version": expected_runtime,
+            "runtime_selector_value": observed_runtime,
         }
 
     def stop_active_run(self, *, timeout: int = 30) -> dict[str, Any]:
@@ -781,7 +821,11 @@ def _trace_names() -> set[str]:
     }
 
 
-def _bound_trace_evidence(run_id: str, task: str) -> dict[str, Any]:
+def _bound_trace_evidence(
+    run_id: str,
+    task: str,
+    expected_runtime_version: str = "",
+) -> dict[str, Any]:
     """Bind evidence to the exact outer run submitted by the visible client."""
 
     run_id = str(run_id or "").strip()
@@ -800,11 +844,13 @@ def _bound_trace_evidence(run_id: str, task: str) -> dict[str, Any]:
         paths.extend(path for path in recent if path not in paths)
     starts: list[dict[str, Any]] = []
     agent_starts: list[dict[str, Any]] = []
+    runtime_selections: list[dict[str, Any]] = []
     matched_paths: list[Path] = []
     parse_errors: list[str] = []
     for path in paths:
         path_starts: list[dict[str, Any]] = []
         path_agent_starts: list[dict[str, Any]] = []
+        path_runtime_selections: list[dict[str, Any]] = []
         try:
             for raw_line in path.read_text(encoding="utf-8").splitlines():
                 if not raw_line.strip():
@@ -814,6 +860,11 @@ def _bound_trace_evidence(run_id: str, task: str) -> dict[str, Any]:
                     path_starts.append(event)
                 if isinstance(event, dict) and event.get("type") == "agent_start":
                     path_agent_starts.append(event)
+                if (
+                    isinstance(event, dict)
+                    and event.get("type") == "desktop_runtime_selected"
+                ):
+                    path_runtime_selections.append(event)
         except Exception as error:
             parse_errors.append(f"{path.name}: {type(error).__name__}: {error}")
             continue
@@ -829,10 +880,28 @@ def _bound_trace_evidence(run_id: str, task: str) -> dict[str, Any]:
         legacy_outer_start = any(
             str(event.get("run_id") or "") == run_id for event in task_starts
         )
-        if task_starts and (client_starts or legacy_outer_start):
+        accepted_runtime_run_ids = {
+            run_id,
+            *(
+                str(event.get("run_id") or "")
+                for event in task_starts
+                if str(event.get("run_id") or "")
+            ),
+        }
+        runtime_matches = (
+            not expected_runtime_version
+            or any(
+                str(event.get("run_id") or "") in accepted_runtime_run_ids
+                and str(event.get("runtime_version") or "")
+                == expected_runtime_version
+                for event in path_runtime_selections
+            )
+        )
+        if task_starts and (client_starts or legacy_outer_start) and runtime_matches:
             matched_paths.append(path)
             starts = path_starts
             agent_starts = path_agent_starts
+            runtime_selections = path_runtime_selections
             break
     path = matched_paths[0] if len(matched_paths) == 1 else None
     return {
@@ -842,6 +911,11 @@ def _bound_trace_evidence(run_id: str, task: str) -> dict[str, Any]:
         "trace_file": str(path) if path is not None else "",
         "start_event_count": len(starts),
         "agent_start_count": len(agent_starts),
+        "expected_runtime_version": expected_runtime_version,
+        "runtime_versions": [
+            str(event.get("runtime_version") or "")
+            for event in runtime_selections
+        ],
         "matching_trace_count": len(matched_paths),
         "candidate_trace_count": len(paths),
         "candidate_trace_files": [str(item) for item in paths[:8]],
@@ -1088,7 +1162,9 @@ def run_case(
         else:
             result["session_reset"] = {"skipped": True, "reason": "same scenario context"}
         result["configuration"] = driver.configure_goal(
-            spec["task"], int(spec.get("max_steps", 120))
+            spec["task"],
+            int(spec.get("max_steps", 120)),
+            str(spec.get("runtime_version") or "legacy"),
         )
         result["screenshots"] = {
             "before_submit": driver.capture_window("before-submit.png")
@@ -1104,6 +1180,7 @@ def run_case(
                     "task": spec["task"],
                     "client_pid": driver.identity.pid,
                     "cold_start": True,
+                    "runtime_version": result["configuration"]["runtime_version"],
                 },
                 ensure_ascii=False,
             ),
@@ -1156,6 +1233,7 @@ def run_case(
         result["trace_binding"] = _bound_trace_evidence(
             bound_run_id,
             str(result.get("task") or ""),
+            str((result.get("configuration") or {}).get("runtime_version") or ""),
         )
         result["bound_trace_ids"] = list(
             result["trace_binding"].get("trace_ids") or []
