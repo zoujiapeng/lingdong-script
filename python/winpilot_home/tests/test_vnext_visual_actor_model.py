@@ -202,6 +202,64 @@ def test_visual_actor_transport_retry_reuses_exact_frozen_image_request() -> Non
     assert actor.last_outcome.request_retry_count == 1
 
 
+def test_catalog_claim_description_is_projected_once_to_provider_function() -> None:
+    requests = []
+    turn = _turn("claim_obligation_done")
+
+    def create(**request):
+        requests.append(request)
+        return _response(_tool_call(
+            "claim_obligation_done",
+            {"concise_claim": "The requested state is now visible"},
+        ))
+
+    proposal = parse_actor_proposal(_actor(create).propose(
+        turn,
+        image_b64="AAAA",
+        submitted_size=(100, 100),
+    ))
+
+    expected = build_live_catalog().get("claim_obligation_done").schema["description"]
+    serialized = json.loads(turn.to_json())
+    assert serialized["tools"][0]["schema"]["description"] == expected
+    assert (
+        ActorTurnInput.from_dict(serialized).tools[0].input_schema["description"]
+        == expected
+    )
+    function = requests[0]["tools"][0]["function"]
+    assert proposal.kind == "claim_obligation_done"
+    assert function["description"] == expected
+    assert "description" not in function["parameters"]
+    assert requests[0]["messages"][0]["content"] == VISUAL_ACTOR_SYSTEM_CONTRACT
+    assert expected not in VISUAL_ACTOR_SYSTEM_CONTRACT
+
+
+@pytest.mark.parametrize(
+    "invalid_description",
+    (None, "", "   ", " leading", "trailing ", 7),
+)
+def test_visual_actor_rejects_invalid_catalog_description_before_provider_call(
+    invalid_description,
+) -> None:
+    raw = json.loads(_turn("click").to_json())
+    raw["tools"][0]["schema"]["description"] = invalid_description
+    turn = ActorTurnInput.from_dict(raw)
+    provider_called = False
+
+    def create(**_request):
+        nonlocal provider_called
+        provider_called = True
+        return _response(_tool_call("click", {"image_x": 1, "image_y": 2}))
+
+    with pytest.raises(VisualActorModelError, match="description"):
+        _actor(create).propose(
+            turn,
+            image_b64="AAAA",
+            submitted_size=(100, 100),
+        )
+    assert provider_called is False
+
+
 def test_explicit_scroll_contract_reaches_the_provider_tool_schema() -> None:
     requests = []
 

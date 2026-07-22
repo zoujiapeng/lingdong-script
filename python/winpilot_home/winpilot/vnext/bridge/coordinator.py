@@ -102,6 +102,73 @@ def _digest(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(wire.encode("utf-8")).hexdigest()
 
 
+def _accepted_turn_events(
+    reducer: MissionReducer,
+    event_ids: tuple[str, ...],
+) -> tuple[Any, ...] | None:
+    """Resolve only events that the canonical Reducer actually accepted.
+
+    The sidecar is observational: an inconsistent Runtime result must remain
+    visible as unresolved telemetry rather than being completed from nearby
+    Mission state or event ordering.
+    """
+
+    if not event_ids:
+        return ()
+    if len(set(event_ids)) != len(event_ids):
+        return None
+    requested = set(event_ids)
+    by_id: dict[str, Any] = {}
+    for event in reducer.events:
+        if event.event_id in by_id:
+            return None
+        by_id[event.event_id] = event
+    if any(event_id not in by_id for event_id in requested):
+        return None
+    return tuple(
+        event for event in reducer.events if event.event_id in requested
+    )
+
+
+def _accepted_turn_tool_name(
+    result: Any,
+    accepted_events: tuple[Any, ...] | None,
+) -> str | None:
+    """Return a tool only when accepted Mission facts prove it."""
+
+    if accepted_events is None:
+        return None
+    if (
+        result.status is RuntimeStatus.ACTION_RECORDED
+        and result.proposal_kind == "desktop_action"
+    ):
+        transitions = tuple(
+            event for event in accepted_events if event.kind == "transition_recorded"
+        )
+        if len(transitions) != 1:
+            return None
+        payload = transitions[0].payload
+        action = payload.get("action")
+        if (
+            type(action) is str
+            and action
+            and payload.get("action_id") == result.decision_id
+        ):
+            return action
+        return None
+    if (
+        result.proposal_kind == "claim_obligation_done"
+        and any(event.kind == "obligation_claimed" for event in accepted_events)
+    ):
+        return "claim_obligation_done"
+    if (
+        result.proposal_kind == "blocked"
+        and any(event.kind == "obligation_blocked" for event in accepted_events)
+    ):
+        return "blocked"
+    return None
+
+
 def _handoff_region(value: Any) -> tuple[int, int, int, int]:
     """Convert Win32 ``left, top, right, bottom`` to Runtime geometry."""
 
@@ -532,15 +599,35 @@ class LiveDesktopRuntimeCoordinator:
                     if projection.active_obligation_id is not None
                     else None
                 )
+                accepted_turn_events = _accepted_turn_events(
+                    reducer, result.accepted_event_ids,
+                )
                 self._trace(context.run_id, {
                     "type": "vnext_mission_runtime_turn",
                     "runtime_version": "vnext",
                     "turn_index": turn_index,
+                    "step": turn_index + 1,
+                    "model_role": (
+                        "visual_actor"
+                        if result.proposal_kind is not None
+                        else None
+                    ),
                     "status": result.status.value,
                     "route": None if result.route is None else result.route.value,
                     "proposal_kind": result.proposal_kind,
+                    "accepted_tool_name": _accepted_turn_tool_name(
+                        result, accepted_turn_events,
+                    ),
                     "decision_id": result.decision_id,
                     "accepted_event_ids": list(result.accepted_event_ids),
+                    "accepted_events": (
+                        [
+                            {"event_id": event.event_id, "kind": event.kind}
+                            for event in accepted_turn_events
+                        ]
+                        if accepted_turn_events is not None
+                        else None
+                    ),
                     "mission_revision": projection.revision,
                     "mission_status": projection.status.value,
                     "active_obligation_id": projection.active_obligation_id,

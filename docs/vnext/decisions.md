@@ -566,3 +566,32 @@
   `arp-20260722-214805-c9faaf` is excluded because the user switched windows and invalidated target
   identity. These outcomes preserve the failure, do not establish uplift and do not authorize an
   automatic direction rule or prompt expansion.
+
+### D032: completion handoff is an Actor-to-Verifier API, not a local success heuristic
+
+- status: accepted; same-entry multi-seed evaluation pending
+- evidence: in an eligible paired `precise-click` baseline, vNext physically satisfied the external
+  oracle on its first accepted click but proposed only accepted clicks for all 18 turns, never issued
+  `claim_obligation_done`, never invoked the independent Verifier and ended at the turn budget. Other
+  seeds completed after one or several redundant clicks. This isolates an unstable completion handoff;
+  it is not a coordinate, Controller, browser-oracle or P5 state-machine failure.
+- view boundary: `actor-mission-view/2` removes the Actor-visible, always-constant
+  `semantic_completion=unknown`; `actor-turn-input/2` upgrades with its nested mission view. The
+  internal `action-effect/0` field remains `unknown`, because the pixel comparator still has no
+  semantic completion authority. No replacement `done=false` or local completion guess is added.
+- tool ABI: the canonical Catalog schema owns one generic `claim_obligation_done` description. The
+  provider adapter mechanically promotes that annotation to the function description without a
+  tool-name switch or prompt duplication. Calling it requests independent verification and cannot
+  mark an obligation or mission complete. This intentionally changes Catalog, runtime snapshot,
+  Broker projection and provider request fingerprints, so pre/post paired results are different
+  configurations and must be reported separately.
+- observability: the private `vnext_mission_runtime_turn` sidecar records one-based `step`, a
+  `model_role` only when a parsed proposal proves the Actor participated, an `accepted_tool_name`
+  only when accepted Mission events prove it, and accepted event id/kind pairs in Reducer replay
+  order. Missing sources remain null. The sidecar does not enter BUS/WebSocket events and does not
+  serialize messages, image bytes, coordinates or reasoning. It cannot yet correlate provider
+  transport attempts or rejected tool proposals; those fields remain unavailable rather than zero.
+- boundaries: no prompt, model call count, Controller, GUI action, automatic claim, external-oracle
+  injection, retry, application rule or legacy behavior changed. P7 remains unmet until the same
+  Electron entry demonstrates both improved true completion and no increase in false claims across
+  randomized positive and negative held-out scenes. P6, P8 and P9 remain disabled.

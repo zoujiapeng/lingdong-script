@@ -15,10 +15,10 @@ mission-event/0
 mission-projection/1
 mission-card/1
 action-effect/0
-actor-mission-view/1
+actor-mission-view/2
 actor-frame-view/0
 actor-tool-view/0
-actor-turn-input/1
+actor-turn-input/2
 actor-proposal/0
 actor-envelope/0
 broker-projection/0
@@ -558,7 +558,7 @@ P4a 不把带 Runtime 身份的 `MissionCard` 或 `BrokerProjection` 原样交�
 - `ActorToolView`：只包含当前 BrokerProjection 允许的 Visual Actor 工具名和严格 JSON schema；
 - `ActorTurnInput`：组合上述三种 view，图片字节和 submitted size 通过注入的 `ActorPort` 单独传递。
 
-这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前增量 live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
+这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。`actor-mission-view/2` 不再投影内部 ActionEffect 恒定的 `semantic_completion=unknown`：该值只表示像素比较器没有语义完成权限，不能伪装成 Runtime 对当前义务“尚未完成”的判断。内部 `action-effect/0` 仍保留该哨兵。`actor-turn-input/2` 随嵌套 mission view 一并升级并严格拒绝旧版或混合版本。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前增量 live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
 
 ## 10. 模型输出：ActorProposal
 
@@ -631,6 +631,8 @@ class ClaimObligationDone:
 ```
 
 模型不提交 obligation id、revision 或 evidence refs。Runtime 绑定 active obligation 和当前可引用的 run-scoped frame evidence；`obligation_claimed` 本身只让义务进入 `CLAIMED`。只有 ExecutionProfile 允许且注入了只读 ObligationVerifier 时，Runtime 才紧接着冻结 claim fingerprint/attempt/evidence 并接受 verification event；否则返回 `verification_required`。Actor claim 永远不能直接进入 `VERIFIED` 或结束 mission。
+
+`claim_obligation_done` 的 Catalog schema 根部拥有唯一的通用工具描述：它只请求独立 Verifier 按当前权威帧、accepted evidence 与 active obligation 的验收条件检查候选完成，不授予完成权。provider adapter 机械把该 schema annotation 投影为 function description，并从 parameters 的根部移除同一 annotation，避免第二份描述或重复上下文。描述必须是无首尾空白的非空文本；缺失描述的其他工具仍合法，显式 `null`、空白或非字符串则在 provider 调用前 fail closed。描述不得包含应用流程、按钮、坐标、测试身份或 Runtime identity。
 
 ### 10.6 BlockedReport
 

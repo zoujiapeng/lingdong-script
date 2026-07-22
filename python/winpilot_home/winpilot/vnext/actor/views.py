@@ -15,10 +15,10 @@ from ..mission.contracts import MissionCard
 from .proposals import _freeze, _json_value, _reject_overreach, _thaw, _unique_text
 
 
-ACTOR_MISSION_VIEW_FORMAT = "actor-mission-view/1"
+ACTOR_MISSION_VIEW_FORMAT = "actor-mission-view/2"
 ACTOR_FRAME_VIEW_FORMAT = "actor-frame-view/0"
 ACTOR_TOOL_VIEW_FORMAT = "actor-tool-view/0"
-ACTOR_TURN_INPUT_FORMAT = "actor-turn-input/1"
+ACTOR_TURN_INPUT_FORMAT = "actor-turn-input/2"
 _TOOL = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _NO_MUTATION_OUTCOME_TOOLS = frozenset({
     "done", "fail", "complete", "complete_task", "complete_subgoal",
@@ -79,7 +79,6 @@ class ActorTransitionView(_View):
     local_visual_change: Literal["changed", "unchanged", "unknown"] | None = None
     frame_comparable: Annotated[bool, Field(strict=True)] | None = None
     target_binding_valid: Annotated[bool, Field(strict=True)] | None = None
-    semantic_completion: Literal["unknown"] = "unknown"
 
 
 class ActorFailureView(_View):
@@ -89,7 +88,7 @@ class ActorFailureView(_View):
 
 
 class ActorMissionView(_View):
-    format: Literal["actor-mission-view/1"]
+    format: Literal["actor-mission-view/2"]
     original_goal: str
     active_obligation: ActorObligationView
     verified_facts: tuple[str, ...]
@@ -165,7 +164,7 @@ class ActorToolView(_View):
 class ActorTurnInput(_View):
     """Complete model-visible turn input; the image bytes travel separately."""
 
-    format: Literal["actor-turn-input/1"]
+    format: Literal["actor-turn-input/2"]
     mission: ActorMissionView
     frame: ActorFrameView
     tools: tuple[ActorToolView, ...]
@@ -237,7 +236,6 @@ def project_actor_mission_view(card: MissionCard) -> ActorMissionView:
                     if transition.action_effect is not None
                     else None
                 ),
-                semantic_completion="unknown",
             ) if transition else None
         ),
         failure_summary=(
