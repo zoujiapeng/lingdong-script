@@ -27,7 +27,10 @@ MISSION_CARD_FORMAT = "mission-card/1"
 ACTION_EFFECT_FORMAT = "action-effect/0"
 ACTION_EFFECT_COMPARATOR_VERSION = "frame-delta/0"
 ACTION_EFFECT_EVIDENCE_KIND = "deterministic_action_effect"
-ACTION_EFFECT_CHANGE_RATIO_THRESHOLD = 0.0005
+# ``unchanged`` is intentionally a high-precision fact: any decoded pixel
+# delta is reported as ``changed``.  A non-zero threshold can turn a real
+# small-control response (caret, checkbox, focus ring) into false no-progress.
+ACTION_EFFECT_CHANGE_RATIO_THRESHOLD = 0.0
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 

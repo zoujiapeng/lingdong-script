@@ -29,10 +29,11 @@ def _image(
     width: int = 100,
     height: int = 100,
     changed_pixels: int = 0,
+    changed_value: int = 255,
 ) -> str:
     pixels = np.zeros((height, width, 3), dtype=np.uint8)
     if changed_pixels:
-        pixels.reshape(-1, 3)[:changed_pixels] = 255
+        pixels.reshape(-1, 3)[:changed_pixels] = changed_value
     ok, encoded = cv2.imencode(".png", pixels)
     assert ok
     return base64.b64encode(encoded.tobytes()).decode("ascii")
@@ -108,27 +109,28 @@ def test_exact_authoritative_pixels_are_unchanged_and_evidence_bound() -> None:
 
 
 @pytest.mark.parametrize(
-    ("changed_pixels", "expected"),
-    ((1, LocalVisualChange.UNCHANGED), (10, LocalVisualChange.CHANGED)),
+    ("changed_pixels", "changed_value"),
+    ((1, 1), (1, 255), (10, 255)),
 )
-def test_aligned_pixel_delta_uses_one_versioned_generic_threshold(
+def test_any_aligned_pixel_delta_is_reported_as_changed(
     changed_pixels: int,
-    expected: LocalVisualChange,
+    changed_value: int,
 ) -> None:
     before = _frame(1, image_b64=_image())
-    after = _frame(2, image_b64=_image(changed_pixels=changed_pixels))
+    after = _frame(2, image_b64=_image(
+        changed_pixels=changed_pixels,
+        changed_value=changed_value,
+    ))
 
     summary = DeterministicActionEffectVerifier().verify(
         _request(before, after)
     ).summary
 
-    assert summary.local_visual_change is expected
+    assert summary.local_visual_change is LocalVisualChange.CHANGED
     assert summary.frame_comparable is True
     assert summary.reason is ActionEffectReason.ALIGNED_PIXEL_DELTA
     assert summary.change_ratio == pytest.approx(changed_pixels / 10_000)
-    assert (summary.change_ratio > ACTION_EFFECT_CHANGE_RATIO_THRESHOLD) is (
-        expected is LocalVisualChange.CHANGED
-    )
+    assert summary.change_ratio > ACTION_EFFECT_CHANGE_RATIO_THRESHOLD
 
 
 @pytest.mark.parametrize(

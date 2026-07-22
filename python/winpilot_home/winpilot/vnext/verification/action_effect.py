@@ -43,7 +43,7 @@ class _RuntimeFramePort(Protocol):
     evidence_refs: tuple[str, ...]
 
 
-PIXEL_CHANNEL_DELTA_THRESHOLD = 12
+PIXEL_CHANNEL_DELTA_THRESHOLD = 0
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
