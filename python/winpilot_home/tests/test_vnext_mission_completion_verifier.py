@@ -187,7 +187,7 @@ def test_evidence_scope_and_obligation_association_are_checked(changed) -> None:
         )
 
 
-def test_request_rejects_empty_and_duplicate_runtime_identities() -> None:
+def test_request_rejects_empty_and_duplicate_obligation_identities() -> None:
     with pytest.raises(ValidationError, match="at least one"):
         MissionCompletionVerificationRequest(
             mission_id="mission-1",
@@ -204,12 +204,9 @@ def test_request_rejects_empty_and_duplicate_runtime_identities() -> None:
     duplicate_verification = _accepted("second", "verification-shared", (
         replace(proof, id="second"),
     ))
-    duplicate_evidence = _accepted("second", "verification-second", (proof,))
-
     for items, message in (
         ((first, duplicate_obligation), "obligation ids"),
         ((first, duplicate_verification), "verification ids"),
-        ((first, duplicate_evidence), "evidence ids"),
     ):
         with pytest.raises(ValidationError, match=message):
             MissionCompletionVerificationRequest(
@@ -218,6 +215,28 @@ def test_request_rejects_empty_and_duplicate_runtime_identities() -> None:
                 mission_revision=1,
                 required_obligations=items,
             )
+
+
+def test_mission_level_evidence_can_cover_multiple_obligations_once() -> None:
+    shared = _evidence("shared", obligation_id=None)
+    request = MissionCompletionVerificationRequest(
+        mission_id="mission-1",
+        run_id="run-1",
+        mission_revision=1,
+        required_obligations=(
+            _accepted("first", "verification-first", (shared,)),
+            _accepted("second", "verification-second", (shared,)),
+        ),
+    )
+
+    assert request.obligation_evidence_ids == (shared.id,)
+    result = MissionCompletionVerificationResult.bind(
+        request, DeterministicMissionCompletionVerifier().verify(request)
+    )
+    assert result.event_evidence_refs == (
+        shared.id,
+        result.aggregate_evidence.id,
+    )
 
 
 def test_verifier_assessment_is_positive_and_contains_no_runtime_identity() -> None:
