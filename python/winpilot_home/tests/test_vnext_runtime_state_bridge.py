@@ -158,6 +158,8 @@ def _bridge(
     reader: _TargetReader | None = None,
     capture=None,
     runtime_state=None,
+    frame_max_age_s=30.0,
+    clock=lambda: 123.0,
 ):
     resolved_target = target or _target()
     resolved_authority = authority or FrameAuthority()
@@ -180,8 +182,31 @@ def _bridge(
         mutation_permits=permits,
         read_target_identity=resolved_reader.read,
         read_runtime_state=runtime_state or (lambda: _read_state()),
+        frame_max_age_s=frame_max_age_s,
+        clock=clock,
     )
     return bridge, observer, permits, resolved_registry, resolved_reader
+
+
+def test_current_frame_freshness_expires_without_fabricating_new_identity() -> None:
+    now = [123.0]
+    target = _target()
+    bridge, observer, _permits, _registry, _reader = _bridge(
+        target=target,
+        frame_max_age_s=5.0,
+        clock=lambda: now[0],
+    )
+
+    observed = bridge.observe(_projection(target), turn_index=0)
+    assert observed.broker_state.frame.fresh is True
+    now[0] = 128.001
+    current = bridge.current(_projection(target), turn_index=0)
+
+    assert current.broker_state.frame.fresh is False
+    assert current.frame is not None and observed.frame is not None
+    assert current.frame.authority_key == observed.frame.authority_key
+    assert current.authority_key != observed.authority_key
+    assert observer.capture_calls == observer.commit_calls == 1
 
 
 def _envelope(
@@ -513,6 +538,8 @@ def test_randomized_frame_geometry_replays_deterministically() -> None:
             mutation_permits=MutationPermitAuthority("mission-1", "run-1"),
             read_target_identity=reader.read,
             read_runtime_state=lambda: _read_state(),
+            frame_max_age_s=30.0,
+            clock=lambda: 123.0,
         )
 
         first = bridge.observe(_projection(target), turn_index=index)
@@ -641,6 +668,8 @@ def test_constructor_rejects_duplicate_owners_and_scope_mismatch() -> None:
             mutation_permits=MutationPermitAuthority("mission-1", "run-1"),
             read_target_identity=lambda: target,
             read_runtime_state=lambda: _read_state(),
+            frame_max_age_s=30.0,
+            clock=lambda: 123.0,
         )
     with pytest.raises(TypeError, match="share mission/run"):
         RuntimeStateBridge(
@@ -651,6 +680,8 @@ def test_constructor_rejects_duplicate_owners_and_scope_mismatch() -> None:
             mutation_permits=permits,
             read_target_identity=lambda: target,
             read_runtime_state=lambda: _read_state(),
+            frame_max_age_s=30.0,
+            clock=lambda: 123.0,
         )
 
 

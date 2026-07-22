@@ -25,7 +25,10 @@ from winpilot.visual_runtime.frame_observer import FrameObserver
 from winpilot.visual_runtime.windows_desktop_facts import WindowsDesktopFactsReader
 from winpilot.vnext.verification import VerifierAssessment
 from winpilot.vnext.verification.visual_model import ReadOnlyVisualVerifierAdapter
-from winpilot.vnext.bridge.coordinator import LiveDesktopRuntimeCoordinator
+from winpilot.vnext.bridge.coordinator import (
+    LiveDesktopRuntimeCoordinator,
+    build_live_desktop_runtime_coordinator,
+)
 
 
 class Backend:
@@ -92,11 +95,11 @@ class Trace:
         return True
 
 
-def _task_contract() -> dict:
+def _task_contract(*, max_steps=18) -> dict:
     goal = "Complete the currently visible unknown interface task"
     return TaskContractCompiler().compile(
         goal,
-        max_steps=18,
+        max_steps=max_steps,
         cold_start=True,
         require_gui=True,
     ).model_dump(mode="json")
@@ -139,6 +142,7 @@ def _context(*, contract=None, stop_event=None):
         },
         stop_event=stopped,
         wait_if_paused=lambda: not stopped.is_set(),
+        is_paused=lambda: False,
     )
 
 
@@ -160,7 +164,16 @@ def _observer(authority):
     )
 
 
-def _coordinator(actor, verifier_model, *, trace=None, raw_calls=None, max_turns=6):
+def _coordinator(
+    actor,
+    verifier_model,
+    *,
+    trace=None,
+    raw_calls=None,
+    max_turns=6,
+    frame_max_age_s=30.0,
+    clock=lambda: 10.0,
+):
     calls = raw_calls if raw_calls is not None else []
 
     def raw_click(x, y, button, count, mechanism, hwnd=None, *, final_guard):
@@ -186,7 +199,8 @@ def _coordinator(actor, verifier_model, *, trace=None, raw_calls=None, max_turns
         ),
         window_exists_resolver=lambda hwnd: hwnd == 101,
         max_turns=max_turns,
-        clock=lambda: 10.0,
+        frame_max_age_s=frame_max_age_s,
+        clock=clock,
     )
 
 
@@ -261,6 +275,7 @@ def test_missing_contract_fails_before_actor_or_raw_device():
         inputs=context.inputs,
         stop_event=context.stop_event,
         wait_if_paused=context.wait_if_paused,
+        is_paused=context.is_paused,
     )
 
     result = _coordinator(
@@ -288,6 +303,7 @@ def test_invalid_handoff_fails_closed_without_model_or_legacy_fallback():
         inputs=inputs,
         stop_event=context.stop_event,
         wait_if_paused=context.wait_if_paused,
+        is_paused=context.is_paused,
     )
 
     result = _coordinator(
@@ -323,6 +339,7 @@ def test_handoff_identity_mismatch_fails_before_actor(field, value):
         inputs=inputs,
         stop_event=context.stop_event,
         wait_if_paused=context.wait_if_paused,
+        is_paused=context.is_paused,
     )
 
     result = _coordinator(actor, verifier).run(context)
@@ -348,6 +365,7 @@ def test_getwindowrect_and_dwm_geometry_may_differ_before_current_binding():
         inputs=inputs,
         stop_event=context.stop_event,
         wait_if_paused=context.wait_if_paused,
+        is_paused=context.is_paused,
     )
 
     result = _coordinator(actor, verifier).run(context)
@@ -371,6 +389,7 @@ def test_malformed_handoff_geometry_fails_before_actor():
         inputs=inputs,
         stop_event=context.stop_event,
         wait_if_paused=context.wait_if_paused,
+        is_paused=context.is_paused,
     )
 
     result = _coordinator(actor, verifier).run(context)
@@ -396,6 +415,7 @@ def test_control_surface_that_did_not_yield_is_rejected_before_actor():
         inputs=inputs,
         stop_event=context.stop_event,
         wait_if_paused=context.wait_if_paused,
+        is_paused=context.is_paused,
     )
 
     result = _coordinator(actor, verifier).run(context)
@@ -417,6 +437,157 @@ def test_turn_budget_is_explicit_and_never_fabricates_completion():
     assert "turn_budget_exhausted" in result.error
     assert len(actor.calls) == 2
     assert verifier.calls == []
+
+
+def test_canonical_contract_budget_caps_runtime_turns() -> None:
+    actor = ScriptedActor([_observe() for _ in range(20)])
+    verifier = PositiveVisualModel()
+    trace = Trace()
+
+    result = _coordinator(
+        actor, verifier, trace=trace, max_turns=100,
+    ).run(_context(contract=_task_contract(max_steps=3)))
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert len(actor.calls) == 3
+    assert trace.records[0][1]["turn_budget"] == 3
+
+
+def test_conflicting_contract_budgets_fail_before_actor() -> None:
+    contract = _task_contract(max_steps=3)
+    contract["session"] = {
+        "session_id": "session-1",
+        "mode": "bounded",
+        "requested_max_steps": 4,
+    }
+    actor = ScriptedActor([_click()])
+    verifier = PositiveVisualModel()
+
+    result = _coordinator(actor, verifier).run(_context(contract=contract))
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert actor.calls == []
+
+
+@pytest.mark.parametrize("budget", (None, 0, -1, "3"))
+def test_invalid_or_missing_stage_budget_fails_closed(budget) -> None:
+    contract = _task_contract(max_steps=3)
+    parameters = contract["stages"][0]["parameters"]
+    if budget is None:
+        parameters.pop("max_steps")
+    else:
+        parameters["max_steps"] = budget
+    actor = ScriptedActor([_click()])
+
+    result = _coordinator(actor, PositiveVisualModel()).run(
+        _context(contract=contract)
+    )
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert actor.calls == []
+
+
+def test_click_canary_rejects_a_second_executable_stage() -> None:
+    contract = _task_contract(max_steps=3)
+    extra = dict(contract["stages"][0])
+    extra["id"] = "stage-extra"
+    extra["type"] = "OpenApplication"
+    contract["stages"].append(extra)
+    actor = ScriptedActor([_click()])
+
+    result = _coordinator(actor, PositiveVisualModel()).run(
+        _context(contract=contract)
+    )
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert actor.calls == []
+
+
+def test_stale_frame_after_actor_decision_never_reaches_raw_device() -> None:
+    now = [10.0]
+    raw_calls = []
+
+    class AgingActor:
+        calls = 0
+
+        def propose(self, *_args, **_kwargs):
+            self.calls += 1
+            now[0] = 11.0
+            return _click()
+
+    actor = AgingActor()
+    result = _coordinator(
+        actor,
+        PositiveVisualModel(),
+        raw_calls=raw_calls,
+        max_turns=2,
+        frame_max_age_s=0.5,
+        clock=lambda: now[0],
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert actor.calls == 1
+    assert raw_calls == []
+
+
+def test_pause_during_actor_decision_discards_click_before_raw_device() -> None:
+    entered = threading.Event()
+    released = threading.Event()
+    paused = threading.Event()
+    stopped = threading.Event()
+    raw_calls = []
+    finished = []
+
+    class BlockingActor:
+        def propose(self, *_args, **_kwargs):
+            entered.set()
+            assert released.wait(2.0)
+            return _click()
+
+    base = _context(stop_event=stopped)
+
+    def wait_if_paused():
+        while paused.is_set() and not stopped.is_set():
+            time.sleep(0.01)
+        return not stopped.is_set()
+
+    context = DesktopRuntimeCoordinatorContext(
+        run_id=base.run_id,
+        graph=base.graph,
+        inputs=base.inputs,
+        stop_event=stopped,
+        wait_if_paused=wait_if_paused,
+        is_paused=paused.is_set,
+    )
+    coordinator = _coordinator(
+        BlockingActor(), PositiveVisualModel(), raw_calls=raw_calls,
+    )
+    thread = threading.Thread(
+        target=lambda: finished.append(coordinator.run(context)),
+    )
+    thread.start()
+    assert entered.wait(1.0)
+    paused.set()
+    released.set()
+    time.sleep(0.1)
+    assert raw_calls == []
+    stopped.set()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert raw_calls == []
+    assert finished[0].status is DesktopRuntimeCoordinatorStatus.CANCELED
+
+
+def test_factory_accepts_only_injected_physical_owner() -> None:
+    raw = RawDeviceExecutor(RawDeviceBackends())
+    coordinator = build_live_desktop_runtime_coordinator(
+        api_config={}, raw_device=raw,
+    )
+
+    assert isinstance(coordinator, LiveDesktopRuntimeCoordinator)
+    with pytest.raises(TypeError, match="composition root"):
+        build_live_desktop_runtime_coordinator(api_config={}, raw_device=None)
 
 
 def test_preexisting_cancellation_performs_zero_model_or_input_calls():

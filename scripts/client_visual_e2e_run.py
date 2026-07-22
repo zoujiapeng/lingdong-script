@@ -156,6 +156,12 @@ def _wait_json(url: str, predicate, *, timeout: float) -> dict[str, Any]:
     raise RuntimeError(f"timed out waiting for {url}; last={last}")
 
 
+def _trusted_scenario_succeeded(state: dict[str, Any]) -> bool:
+    """Wait for persisted browser success, never merely ``page_ready``."""
+
+    return state.get("success") is True
+
+
 def _browser_executable() -> Path:
     explicit = os.environ.get("WINPILOT_REAL_VISUAL_BROWSER", "").strip()
     candidates = (
@@ -543,8 +549,7 @@ def run_visual_case(
         def verify_external_state(_client_result: dict[str, Any]) -> dict[str, Any]:
             state = _wait_json(
                 state_url,
-                lambda value: value.get("success") is True
-                or bool(value.get("events")),
+                _trusted_scenario_succeeded,
                 timeout=5,
             )
             verdict = external_verdict(

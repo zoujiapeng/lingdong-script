@@ -856,6 +856,7 @@ class ArpExecution:
             inputs=self.inputs,
             stop_event=self.stop_event,
             wait_if_paused=self._wait_if_paused,
+            is_paused=lambda: self.pause_controller.paused,
         ))
         if not isinstance(outcome, DesktopRuntimeCoordinatorResult):
             raise TypeError("desktop runtime coordinator returned an invalid result")

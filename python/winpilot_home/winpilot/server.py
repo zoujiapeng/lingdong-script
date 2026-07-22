@@ -1008,11 +1008,17 @@ def _start_arp_execution(
     if not is_legacy_runtime:
         try:
             from .orchestrator.desktop_runtime import DesktopRuntimeCoordinatorPort
+            from .action.executor import ADMITTED_PHYSICAL_CLICK_BACKEND
+            from .action.raw_device import RawDeviceBackends, RawDeviceExecutor
             from .vnext.bridge.coordinator import (
                 build_live_desktop_runtime_coordinator,
             )
 
             desktop_runtime_coordinator = build_live_desktop_runtime_coordinator(
+                api_config=CONFIG.get("api", default={}) or {},
+                raw_device=RawDeviceExecutor(RawDeviceBackends(
+                    admitted_physical_click=ADMITTED_PHYSICAL_CLICK_BACKEND,
+                )),
                 trace_sidecar=trace_mod.RECORDER,
             )
             if not isinstance(

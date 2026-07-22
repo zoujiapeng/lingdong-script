@@ -10,21 +10,19 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import hashlib
 import json
+import math
 import threading
 import time
 from typing import Any, Protocol
 
 from ...action.desktop_queue import DESKTOP_ACTION_QUEUE, DesktopActionQueue
-from ...action.executor import ADMITTED_PHYSICAL_CLICK_BACKEND
-from ...action.raw_device import RawDeviceBackends, RawDeviceExecutor
 from ...agent.frame_authority import FrameAuthority
-from ...config import CONFIG
 from ...orchestrator.desktop_runtime import (
     DesktopRuntimeCoordinatorContext,
     DesktopRuntimeCoordinatorResult,
     DesktopRuntimeCoordinatorStatus,
 )
-from ...tasking.contracts import TaskContract
+from ...tasking.contracts import StageType, TaskContract
 from ...tasking.execution_context import (
     foreground_handoff_conflict,
     normalize_execution_context,
@@ -58,6 +56,7 @@ from .runtime_state import RuntimeReadState, RuntimeStateBridge
 
 
 DEFAULT_MAX_TURNS = 24
+DEFAULT_FRAME_MAX_AGE_S = 30.0
 _LIVE_CAPABILITIES = ("visual.interact", "visual.read_text")
 _RECOVERABLE_TURN_STATUSES = frozenset({
     RuntimeStatus.ACTION_RECORDED,
@@ -120,15 +119,16 @@ class LiveDesktopRuntimeCoordinator:
         self,
         *,
         api_config: Mapping[str, Any],
+        raw_device: Any,
         trace_sidecar: TraceSidecarPort | None = None,
         action_queue: DesktopActionQueue = DESKTOP_ACTION_QUEUE,
-        raw_device: RawDeviceExecutor | None = None,
         facts_reader: WindowsDesktopFactsReader | None = None,
         observer_factory: Callable[[FrameAuthority], FrameObserver] | None = None,
         actor_factory: Callable[[Mapping[str, Any]], Any] | None = None,
         verifier_factory: Callable[[Mapping[str, Any]], Any] | None = None,
         window_exists_resolver: Callable[[int], bool] | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
+        frame_max_age_s: float = DEFAULT_FRAME_MAX_AGE_S,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if not isinstance(api_config, Mapping):
@@ -139,14 +139,20 @@ class LiveDesktopRuntimeCoordinator:
             raise TypeError("trace_sidecar must provide record_sidecar()")
         if not isinstance(action_queue, DesktopActionQueue):
             raise TypeError("action_queue must be DesktopActionQueue")
-        if raw_device is not None and not isinstance(raw_device, RawDeviceExecutor):
-            raise TypeError("raw_device must be RawDeviceExecutor")
+        if raw_device is None:
+            raise TypeError("raw_device must be supplied by the product composition root")
         if facts_reader is not None and not isinstance(
             facts_reader, WindowsDesktopFactsReader
         ):
             raise TypeError("facts_reader must be WindowsDesktopFactsReader")
         if type(max_turns) is not int or not 1 <= max_turns <= 1000:
             raise ValueError("max_turns must be an integer from 1 through 1000")
+        if (
+            type(frame_max_age_s) not in (int, float)
+            or not math.isfinite(float(frame_max_age_s))
+            or float(frame_max_age_s) <= 0
+        ):
+            raise ValueError("frame_max_age_s must be a positive number")
         for name, factory in (
             ("observer_factory", observer_factory),
             ("actor_factory", actor_factory),
@@ -164,9 +170,10 @@ class LiveDesktopRuntimeCoordinator:
         self._api_config = dict(api_config)
         self._trace_sidecar = trace_sidecar
         self._action_queue = action_queue
-        self._raw_device = raw_device or RawDeviceExecutor(RawDeviceBackends(
-            admitted_physical_click=ADMITTED_PHYSICAL_CLICK_BACKEND,
-        ))
+        # vNext owns semantic coordination, not physical-device construction.
+        # AtomicClickController performs the concrete owner validation when the
+        # run is composed; the product composition root supplies that owner.
+        self._raw_device = raw_device
         self._facts = facts_reader or WindowsDesktopFactsReader()
         self._observer_factory = observer_factory or FrameObserver
         self._actor_factory = actor_factory or OpenAIVisualActor.from_api_config
@@ -177,7 +184,32 @@ class LiveDesktopRuntimeCoordinator:
         )
         self._window_exists = window_exists_resolver
         self._max_turns = max_turns
+        self._frame_max_age_s = float(frame_max_age_s)
         self._clock = clock
+
+    def _turn_budget(self, contract: TaskContract) -> int:
+        """Read one canonical full-goal budget and cap it locally."""
+
+        desktop_stages = tuple(
+            stage for stage in contract.stages
+            if stage.type is StageType.EXECUTE_DESKTOP_TASK
+        )
+        if len(desktop_stages) != 1 or len(contract.stages) != 1:
+            raise LiveDesktopCoordinatorError(
+                "selected vNext run requires one full-goal ExecuteDesktopTask"
+            )
+        raw_stage_budget = desktop_stages[0].parameters.get("max_steps")
+        if type(raw_stage_budget) is not int or not 1 <= raw_stage_budget <= 400:
+            raise LiveDesktopCoordinatorError(
+                "selected vNext run has no valid canonical turn budget"
+            )
+        if contract.session is not None:
+            session_budget = contract.session.requested_max_steps
+            if session_budget != raw_stage_budget:
+                raise LiveDesktopCoordinatorError(
+                    "selected vNext run has conflicting canonical turn budgets"
+                )
+        return min(self._max_turns, raw_stage_budget)
 
     def _trace(self, run_id: str, event: dict[str, Any]) -> None:
         writer = self._trace_sidecar
@@ -339,7 +371,7 @@ class LiveDesktopRuntimeCoordinator:
                 available_capabilities=_LIVE_CAPABILITIES,
                 pointer=PointerLeaseState(),
                 runtime_healthy=not stopped,
-                paused=False,
+                paused=bool(context.is_paused()),
                 canceled=stopped,
                 stop_requested=stopped,
             )
@@ -352,6 +384,8 @@ class LiveDesktopRuntimeCoordinator:
             mutation_permits=permits,
             read_target_identity=current_target,
             read_runtime_state=read_runtime_state,
+            frame_max_age_s=self._frame_max_age_s,
+            clock=self._clock,
         )
         facts_observation = WindowsDesktopCommitObservation(self._facts, state)
         controller = AtomicClickController(
@@ -414,6 +448,7 @@ class LiveDesktopRuntimeCoordinator:
                     error="vNext desktop Runtime was canceled before admission",
                 )
             contract = self._contract(context)
+            turn_budget = self._turn_budget(contract)
             definition = project_legacy_contract(
                 contract,
                 mission_id=f"mission-{context.run_id}",
@@ -439,9 +474,10 @@ class LiveDesktopRuntimeCoordinator:
                 "active_obligation_id": reducer.projection.active_obligation_id,
                 "tool_names": list(tool_names),
                 "profile_source": "safe_default",
+                "turn_budget": turn_budget,
             })
 
-            for turn_index in range(self._max_turns):
+            for turn_index in range(turn_budget):
                 if context.stop_event.is_set() or not context.wait_if_paused():
                     return DesktopRuntimeCoordinatorResult(
                         DesktopRuntimeCoordinatorStatus.CANCELED,
@@ -525,18 +561,21 @@ class LiveDesktopRuntimeCoordinator:
 
 def build_live_desktop_runtime_coordinator(
     *,
+    api_config: Mapping[str, Any],
+    raw_device: Any,
     trace_sidecar: TraceSidecarPort | None = None,
 ) -> LiveDesktopRuntimeCoordinator:
     """Build the selected product coordinator without starting a run."""
 
     return LiveDesktopRuntimeCoordinator(
-        api_config=CONFIG.get("api", default={}) or {},
+        api_config=api_config,
+        raw_device=raw_device,
         trace_sidecar=trace_sidecar,
     )
 
 
 __all__ = [
-    "DEFAULT_MAX_TURNS",
+    "DEFAULT_FRAME_MAX_AGE_S", "DEFAULT_MAX_TURNS",
     "LiveDesktopCoordinatorError",
     "LiveDesktopRuntimeCoordinator",
     "TraceSidecarPort",

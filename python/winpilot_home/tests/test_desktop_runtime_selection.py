@@ -83,7 +83,11 @@ def _install_live_coordinator_factory(
     resolved = Coordinator() if coordinator is _DEFAULT_COORDINATOR else coordinator
     module = ModuleType("winpilot.vnext.bridge.coordinator")
 
-    def build_live_desktop_runtime_coordinator(*, trace_sidecar):
+    def build_live_desktop_runtime_coordinator(
+        *, api_config, raw_device, trace_sidecar,
+    ):
+        assert isinstance(api_config, dict)
+        assert raw_device is not None
         calls.append(trace_sidecar)
         if failure is not None:
             raise failure
@@ -182,6 +186,17 @@ def test_coordinator_contracts_reject_malformed_or_non_json_values() -> None:
             inputs={},
             stop_event=stop,
             wait_if_paused=lambda: True,
+            is_paused=lambda: False,
+            format="desktop-runtime-coordinator-context/0",
+        )
+    with pytest.raises(DesktopRuntimeCoordinatorContractError, match="format"):
+        DesktopRuntimeCoordinatorContext(
+            run_id="run-1",
+            graph={},
+            inputs={},
+            stop_event=stop,
+            wait_if_paused=lambda: True,
+            is_paused=lambda: False,
             format="desktop-runtime-coordinator-context/9",
         )
     with pytest.raises(DesktopRuntimeCoordinatorContractError, match="JSON"):
@@ -191,6 +206,7 @@ def test_coordinator_contracts_reject_malformed_or_non_json_values() -> None:
             inputs={"opaque": object()},
             stop_event=stop,
             wait_if_paused=lambda: True,
+            is_paused=lambda: False,
         )
     with pytest.raises(DesktopRuntimeCoordinatorContractError, match="requires an error"):
         DesktopRuntimeCoordinatorResult(
@@ -243,6 +259,7 @@ def test_explicit_vnext_coordinator_owns_run_once_and_bypasses_handlers(
             assert context.run_id == execution.run_id
             assert context.stop_event is execution.stop_event
             assert context.wait_if_paused() is True
+            assert context.is_paused() is False
             with pytest.raises(TypeError):
                 context.inputs["runtime_version"] = "legacy"  # type: ignore[index]
             return DesktopRuntimeCoordinatorResult(
