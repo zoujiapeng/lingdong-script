@@ -961,7 +961,8 @@ def test_real_execute_desktop_bridge_keeps_full_goal_and_visual_verifier_policy(
     assert projected.desired_state == goal
     assert projected.acceptance_criteria == (goal,)
     assert projected.evidence_policy.allow_independent_visual_verifier is True
-    assert projected.required_capabilities == ("visual.interact", "visual.observe")
+    assert projected.required_capabilities == ("visual.interact",)
+    assert "visual.observe" in definition.metadata["legacy_unknown_capabilities"]
     assert definition.metadata["legacy_projection"] == "full_goal_execute_desktop"
     assert "visual.semantic_verify" in definition.metadata["legacy_unknown_capabilities"]
 

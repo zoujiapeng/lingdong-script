@@ -9,7 +9,7 @@ from typing import Annotated, Any, Literal, Mapping
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from ..capabilities.contracts import ToolCatalog, ToolRoute
-from ..capabilities.names import InvalidCapability, canonical_capabilities
+from ..capability_names import InvalidCapability, canonical_capabilities
 from ..capabilities.state import AuthoritativeFrameState, BrokerProjection, ExecutionRoute
 from ..mission.contracts import MissionCard
 from .proposals import _freeze, _json_value, _reject_overreach, _thaw, _unique_text

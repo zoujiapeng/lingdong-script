@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .contracts import CapabilityContractError, _identity
-from .names import canonical_capabilities
+from ..capability_names import canonical_capabilities
 
 
 @dataclass(frozen=True, slots=True)

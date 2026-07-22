@@ -17,7 +17,7 @@ from .contracts import (
     ToolRoute,
     ToolSpec,
 )
-from .names import CANONICAL_CAPABILITIES
+from ..capability_names import CANONICAL_CAPABILITIES
 from .state import ArtifactState, BrokerProjection, BrokerRuntimeState, ExecutorOffer
 
 
