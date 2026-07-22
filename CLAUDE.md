@@ -29,9 +29,11 @@ P3a/P3b partial Broker shadow和统一模型请求/重试边界；P4/P5 已有�
 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier，失败不回退 legacy；
 当前工具面为 `click`、`double_click`、`scroll`、`claim_obligation_done`、`blocked`。三个冷启动、
 空 session、可见 Electron/UIA `precise-click` seed 已由独立 trusted-browser oracle 通过，但这只证明
-受控点击闭环。`scroll` 已接入同一 atomic transaction，使用明确 direction/notches 合同；最终合同下
-各一个 down/up seed 已通过同入口独立 oracle，但仍只是受控闭环。type/hotkey/drag/draw/app resolve/provider/MCP、live
-Profiler、P6 Planner/Inspector、paired/真实任务门槛、默认切换和 legacy 删除均未完成。后续工作必须遵守：
+历史受控点击闭环。`scroll` 已接入同一 atomic transaction，使用明确 direction/notches 合同；
+ActionEffect 接线前各一个 down/up seed 曾通过同入口独立 oracle。最终 ActionEffect 代码的首轮复测为
+down 与 precise-click 通过、up 在 24 回合后失败；Actor 虽看到了最长 12 次连续 unchanged 反馈，仍未
+稳定改变错误策略。type/hotkey/drag/draw/app resolve/provider/MCP、live Profiler、P6 Planner/Inspector、
+paired/真实任务门槛、默认切换和 legacy 删除均未完成。后续工作必须遵守：
 
 - 只有 Visual Actor 可以提出 GUI mutation；
 - 只有 Controller/RawDevice 链可以执行桌面输入；
