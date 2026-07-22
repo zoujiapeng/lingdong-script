@@ -222,14 +222,10 @@ def _claim():
     }
 
 
-def _observe():
-    return {
-        "format": "actor-proposal/0",
-        "kind": "observe",
-        "observation_kind": "full",
-        "image_region": None,
-        "question": "inspect the latest complete visual state",
-    }
+def _invalid_click():
+    proposal = _click()
+    proposal["args"] = {"image_x": "not-a-coordinate", "image_y": 100}
+    return proposal
 
 
 def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
@@ -248,7 +244,7 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     assert output["mission_status"] == "verified"
     assert output["turn_count"] == 2
     assert output["tool_names"] == [
-        "observe", "click", "double_click", "claim_obligation_done", "blocked",
+        "click", "double_click", "claim_obligation_done", "blocked",
     ]
     assert len(actor.calls) == 2
     assert len(verifier.calls) == 1
@@ -426,7 +422,7 @@ def test_control_surface_that_did_not_yield_is_rejected_before_actor():
 
 
 def test_turn_budget_is_explicit_and_never_fabricates_completion():
-    actor = ScriptedActor([_observe(), _observe()])
+    actor = ScriptedActor([_invalid_click(), _invalid_click()])
     verifier = PositiveVisualModel()
 
     result = _coordinator(
@@ -440,7 +436,7 @@ def test_turn_budget_is_explicit_and_never_fabricates_completion():
 
 
 def test_canonical_contract_budget_caps_runtime_turns() -> None:
-    actor = ScriptedActor([_observe() for _ in range(20)])
+    actor = ScriptedActor([_invalid_click() for _ in range(20)])
     verifier = PositiveVisualModel()
     trace = Trace()
 

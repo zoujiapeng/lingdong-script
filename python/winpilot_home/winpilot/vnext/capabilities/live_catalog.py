@@ -10,7 +10,6 @@ from .contracts import MutationKind, ToolCatalog, ToolRoute, ToolSpec
 
 
 CLICK_LIVE_TOOL_NAMES = (
-    "observe",
     "click",
     "double_click",
     "claim_obligation_done",
@@ -37,16 +36,6 @@ def _point_schema() -> dict[str, object]:
     }
 
 
-def _observe_schema() -> dict[str, object]:
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "question": {"type": "string", "minLength": 1},
-        },
-    }
-
-
 def build_click_live_catalog() -> ToolCatalog:
     """Return the deterministic, click-only production catalog.
 
@@ -58,21 +47,13 @@ def build_click_live_catalog() -> ToolCatalog:
 
     return ToolCatalog((
         ToolSpec(
-            name="observe",
-            schema=_observe_schema(),
-            route=ToolRoute.VISUAL_ACTOR,
-            mutation_kind=MutationKind.NONE,
-            prerequisites=_FRAME_PREREQUISITES,
-            order=10,
-        ),
-        ToolSpec(
             name="click",
             schema=_point_schema(),
             route=ToolRoute.VISUAL_ACTOR,
             mutation_kind=MutationKind.GUI,
             required_any_capabilities=("visual.interact",),
             prerequisites=_CLICK_PREREQUISITES,
-            order=20,
+            order=10,
         ),
         ToolSpec(
             name="double_click",
@@ -81,7 +62,7 @@ def build_click_live_catalog() -> ToolCatalog:
             mutation_kind=MutationKind.GUI,
             required_any_capabilities=("visual.interact",),
             prerequisites=_CLICK_PREREQUISITES,
-            order=30,
+            order=20,
         ),
         ToolSpec(
             name="claim_obligation_done",
@@ -96,7 +77,7 @@ def build_click_live_catalog() -> ToolCatalog:
             route=ToolRoute.VISUAL_ACTOR,
             mutation_kind=MutationKind.NONE,
             prerequisites=_FRAME_PREREQUISITES,
-            order=40,
+            order=30,
         ),
         ToolSpec(
             name="blocked",
@@ -118,7 +99,7 @@ def build_click_live_catalog() -> ToolCatalog:
             },
             route=ToolRoute.VISUAL_ACTOR,
             mutation_kind=MutationKind.NONE,
-            order=50,
+            order=40,
         ),
     ))
 

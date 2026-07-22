@@ -25,7 +25,6 @@ def test_live_catalog_advertises_only_currently_executable_contracts() -> None:
 
     assert tuple(tool.name for tool in catalog.tools) == CLICK_LIVE_TOOL_NAMES
     assert set(CLICK_LIVE_TOOL_NAMES) == {
-        "observe",
         "click",
         "double_click",
         "claim_obligation_done",
@@ -37,7 +36,7 @@ def test_live_catalog_advertises_only_currently_executable_contracts() -> None:
     assert catalog.get("double_click").mutation_kind is MutationKind.GUI
     assert all(
         catalog.get(name).mutation_kind is MutationKind.NONE
-        for name in ("observe", "claim_obligation_done", "blocked")
+        for name in ("claim_obligation_done", "blocked")
     )
 
 
@@ -69,29 +68,6 @@ def test_click_contract_is_exactly_submitted_image_xy() -> None:
 
 def test_non_mutating_contracts_are_strict_and_executable() -> None:
     validator = ToolArgumentValidator(build_click_live_catalog())
-
-    assert validator.validate("observe", {}) == {}
-    assert validator.validate("observe", {
-        "question": "What changed?",
-    }) == {"question": "What changed?"}
-    invalid_observations = (
-        {
-            "observation_kind": "full",
-            "image_region": None,
-            "question": "Mismatch",
-        },
-        {
-            "observation_kind": "image_region",
-            "image_region": {"x": 1, "y": 2, "width": 30, "height": 40},
-            "question": "RuntimeState cannot execute this crop yet",
-        },
-        {
-            "question": "",
-        },
-    )
-    for arguments in invalid_observations:
-        with pytest.raises(ToolArgumentValidationError):
-            validator.validate("observe", arguments)
 
     with pytest.raises(ToolArgumentValidationError):
         validator.validate("claim_obligation_done", {

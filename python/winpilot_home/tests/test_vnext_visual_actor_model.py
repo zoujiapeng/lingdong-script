@@ -12,10 +12,12 @@ from winpilot.vnext.actor.model import (
     VISUAL_ACTOR_SYSTEM_CONTRACT,
     OpenAIVisualActor,
     VisualActorModelError,
+    VisualActorResponseError,
 )
 from winpilot.vnext.actor.proposals import (
     ACTOR_PROPOSAL_FORMAT,
     DesktopActionProposal,
+    InvalidActorProposal,
     parse_actor_proposal,
 )
 from winpilot.vnext.actor.views import (
@@ -58,6 +60,18 @@ def _response(
 
 def _turn(*tool_names: str) -> ActorTurnInput:
     catalog = build_click_live_catalog()
+
+    def schema(name: str):
+        if name == "observe":
+            return {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "question": {"type": "string", "minLength": 1},
+                },
+            }
+        return catalog.get(name).schema
+
     return ActorTurnInput(
         format=ACTOR_TURN_INPUT_FORMAT,
         mission=ActorMissionView(
@@ -86,7 +100,7 @@ def _turn(*tool_names: str) -> ActorTurnInput:
             ActorToolView(
                 format=ACTOR_TOOL_VIEW_FORMAT,
                 name=name,
-                schema=catalog.get(name).schema,
+                schema=schema(name),
             )
             for name in tool_names
         ),
@@ -221,6 +235,11 @@ def test_visual_actor_rejects_text_multiple_malformed_and_identity_overreach(
             image_b64="AAAA",
             submitted_size=(100, 100),
         )
+
+
+def test_provider_response_errors_are_recoverable_but_invariants_are_not() -> None:
+    assert issubclass(VisualActorResponseError, InvalidActorProposal)
+    assert not issubclass(VisualActorModelError, InvalidActorProposal)
 
 
 def test_visual_actor_rejects_tool_outside_exact_broker_projection() -> None:
