@@ -15,10 +15,10 @@ from ..mission.contracts import MissionCard
 from .proposals import _freeze, _json_value, _reject_overreach, _thaw, _unique_text
 
 
-ACTOR_MISSION_VIEW_FORMAT = "actor-mission-view/0"
+ACTOR_MISSION_VIEW_FORMAT = "actor-mission-view/1"
 ACTOR_FRAME_VIEW_FORMAT = "actor-frame-view/0"
 ACTOR_TOOL_VIEW_FORMAT = "actor-tool-view/0"
-ACTOR_TURN_INPUT_FORMAT = "actor-turn-input/0"
+ACTOR_TURN_INPUT_FORMAT = "actor-turn-input/1"
 _TOOL = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _NO_MUTATION_OUTCOME_TOOLS = frozenset({
     "done", "fail", "complete", "complete_task", "complete_subgoal",
@@ -76,6 +76,10 @@ class ActorTransitionView(_View):
     action: str
     input_completed: Annotated[bool, Field(strict=True)]
     visible_effect: str
+    local_visual_change: Literal["changed", "unchanged", "unknown"] | None = None
+    frame_comparable: Annotated[bool, Field(strict=True)] | None = None
+    target_binding_valid: Annotated[bool, Field(strict=True)] | None = None
+    semantic_completion: Literal["unknown"] = "unknown"
 
 
 class ActorFailureView(_View):
@@ -85,7 +89,7 @@ class ActorFailureView(_View):
 
 
 class ActorMissionView(_View):
-    format: Literal["actor-mission-view/0"]
+    format: Literal["actor-mission-view/1"]
     original_goal: str
     active_obligation: ActorObligationView
     verified_facts: tuple[str, ...]
@@ -93,6 +97,7 @@ class ActorMissionView(_View):
     target_title: str | None
     last_transition: ActorTransitionView | None
     failure_summary: ActorFailureView | None
+    no_progress_streak: Annotated[int, Field(strict=True, ge=0)] = 0
 
     @field_validator("original_goal")
     @classmethod
@@ -160,7 +165,7 @@ class ActorToolView(_View):
 class ActorTurnInput(_View):
     """Complete model-visible turn input; the image bytes travel separately."""
 
-    format: Literal["actor-turn-input/0"]
+    format: Literal["actor-turn-input/1"]
     mission: ActorMissionView
     frame: ActorFrameView
     tools: tuple[ActorToolView, ...]
@@ -217,6 +222,22 @@ def project_actor_mission_view(card: MissionCard) -> ActorMissionView:
                 action=transition.action,
                 input_completed=transition.input_completed,
                 visible_effect=transition.visible_effect,
+                local_visual_change=(
+                    transition.action_effect.local_visual_change.value
+                    if transition.action_effect is not None
+                    else None
+                ),
+                frame_comparable=(
+                    transition.action_effect.frame_comparable
+                    if transition.action_effect is not None
+                    else None
+                ),
+                target_binding_valid=(
+                    transition.action_effect.target_binding_valid
+                    if transition.action_effect is not None
+                    else None
+                ),
+                semantic_completion="unknown",
             ) if transition else None
         ),
         failure_summary=(
@@ -224,6 +245,7 @@ def project_actor_mission_view(card: MissionCard) -> ActorMissionView:
                 kind=failure.kind, message=failure.message, count=failure.count
             ) if failure else None
         ),
+        no_progress_streak=card.no_progress_streak,
     )
 
 

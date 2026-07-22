@@ -34,7 +34,13 @@ from ..capabilities import (
     ToolArgumentValidator,
     ToolRoute,
 )
-from ..evidence.registry import EvidenceRegistry
+from ..evidence import (
+    CURRENT_FRAME_EVIDENCE_KIND,
+    POST_ACTION_FRAME_EVIDENCE_KIND,
+    EvidenceRegistry,
+    current_frame_payload_hash,
+    frame_identity_payload_hash,
+)
 from ..mission import (
     MissionError,
     MissionReducer,
@@ -45,6 +51,9 @@ from ..mission import (
 from ..profiling import ExecutionProfile
 from ..verification import (
     AcceptedObligationVerification,
+    ActionEffectVerificationRequest,
+    ActionEffectVerificationResult,
+    DeterministicActionEffectVerifier,
     DeterministicMissionCompletionVerifier,
     InvalidVerificationSchema,
     MissionCompletionVerificationRequest,
@@ -113,6 +122,7 @@ class MissionRuntime:
         mission_completion_verifier: (
             DeterministicMissionCompletionVerifier | None
         ) = None,
+        action_effect_verifier: DeterministicActionEffectVerifier | None = None,
         evidence_registry: EvidenceRegistry | None = None,
     ) -> None:
         if not isinstance(reducer, MissionReducer):
@@ -156,19 +166,30 @@ class MissionRuntime:
             raise TypeError(
                 "attested visual verifier and evidence registry must be injected together"
             )
+        if action_effect_verifier is not None and evidence_registry is None:
+            raise TypeError(
+                "action effect verifier and evidence registry must be injected together"
+            )
         if (
             evidence_registry is not None
             and mission_completion_verifier is None
             and attested_visual_verifier is None
+            and action_effect_verifier is None
         ):
             raise TypeError(
-                "mission completion verifier and evidence registry must be injected together"
+                "Runtime verification owner and evidence registry must be injected together"
             )
         if mission_completion_verifier is not None:
             if type(mission_completion_verifier) is not DeterministicMissionCompletionVerifier:
                 raise TypeError(
                     "mission completion requires DeterministicMissionCompletionVerifier"
                 )
+        if action_effect_verifier is not None and type(
+            action_effect_verifier
+        ) is not DeterministicActionEffectVerifier:
+            raise TypeError(
+                "action effect verification requires DeterministicActionEffectVerifier"
+            )
         if evidence_registry is not None:
             if type(evidence_registry) is not EvidenceRegistry:
                 raise TypeError("verification requires canonical EvidenceRegistry")
@@ -184,6 +205,7 @@ class MissionRuntime:
                     "mission completion EvidenceRegistry must match Runtime mission/run"
                 )
         self._mission_completion_verifier = mission_completion_verifier
+        self._action_effect_verifier = action_effect_verifier
         self._evidence_registry = evidence_registry
         self._mutation_permits = mutation_permits or MutationPermitAuthority(
             reducer.definition.mission_id,
@@ -1292,6 +1314,107 @@ class MissionRuntime:
             for ref in refs
         )
 
+    def _deterministic_frame_evidence_ref(
+        self,
+        frame: RuntimeFrame,
+        *,
+        obligation_id: str,
+        kind: str,
+        action_id: str | None,
+    ) -> tuple[str, str] | None:
+        """Select one exact immutable frame proof from the live registry."""
+
+        if self._evidence_registry is None:
+            return None
+        try:
+            refs = self._reducer.evidence_scope.require(
+                frame.evidence_refs,
+                obligation_id=obligation_id,
+            )
+        except MissionError:
+            return None
+        expected_hash = (
+            current_frame_payload_hash(frame.commit_identity)
+            if kind == CURRENT_FRAME_EVIDENCE_KIND
+            else frame_identity_payload_hash(frame.commit_identity)
+        )
+        matches = tuple(
+            ref.id
+            for ref in refs
+            if ref.kind == kind
+            and ref.trust == "deterministic"
+            and ref.obligation_id == obligation_id
+            and ref.frame_id == frame.frame_id
+            and ref.payload_hash == expected_hash
+            and ref.action_id == action_id
+        )
+        return (sorted(matches)[0], expected_hash) if matches else None
+
+    def _verify_action_effect(
+        self,
+        *,
+        obligation_id: str,
+        decision_id: str,
+        input_completed: bool,
+        before: RuntimeFrame,
+        after: RuntimeFrame,
+        target_binding_valid: bool,
+    ) -> ActionEffectVerificationResult | None:
+        """Build and register one optional deterministic frame comparison."""
+
+        verifier = self._action_effect_verifier
+        registry = self._evidence_registry
+        if verifier is None or registry is None:
+            return None
+        before_proof = self._deterministic_frame_evidence_ref(
+            before,
+            obligation_id=obligation_id,
+            kind=CURRENT_FRAME_EVIDENCE_KIND,
+            action_id=None,
+        )
+        after_proof = self._deterministic_frame_evidence_ref(
+            after,
+            obligation_id=obligation_id,
+            kind=POST_ACTION_FRAME_EVIDENCE_KIND,
+            action_id=decision_id,
+        )
+        if before_proof is None or after_proof is None:
+            return None
+        before_ref, before_payload_hash = before_proof
+        after_ref, after_payload_hash = after_proof
+        try:
+            result = verifier.verify(ActionEffectVerificationRequest(
+                mission_id=self._reducer.definition.mission_id,
+                run_id=self._reducer.definition.run_id,
+                obligation_id=obligation_id,
+                action_id=decision_id,
+                input_completed=input_completed,
+                before_frame=before,
+                after_frame=after,
+                before_frame_evidence_ref=before_ref,
+                after_frame_evidence_ref=after_ref,
+                before_frame_payload_hash=before_payload_hash,
+                after_frame_payload_hash=after_payload_hash,
+                target_binding_valid=target_binding_valid,
+            ))
+            if not isinstance(result, ActionEffectVerificationResult):
+                return None
+            registry.append(result.evidence)
+            accepted = tuple(
+                ref for ref in registry.snapshot() if ref.id == result.evidence.id
+            )
+            if accepted != (result.evidence,):
+                return None
+            return ActionEffectVerificationResult(
+                summary=result.summary,
+                evidence=accepted[0],
+            )
+        except Exception:
+            # Comparison is supplemental evidence.  Losing it must not erase a
+            # Controller transition whose input and post frame are already
+            # closed, nor may it turn the action into a replayable rejection.
+            return None
+
     def run_one_turn(
         self,
         *,
@@ -1678,17 +1801,46 @@ class MissionRuntime:
                 post_frame=post.frame,
             ):
                 raise ValueError("Controller transition evidence identity is not current")
+            action_effect = self._verify_action_effect(
+                obligation_id=obligation_id,
+                decision_id=decision_id,
+                input_completed=bool(transition.input_completed),
+                before=latest.frame,
+                after=post.frame,
+                target_binding_valid=bool(
+                    self._snapshot_matches_mission(post)
+                    and post.target == latest.target
+                ),
+            )
+            event_evidence_refs = tuple(dict.fromkeys((
+                *transition.evidence_refs,
+                *(
+                    (
+                        action_effect.summary.before_frame_evidence_ref,
+                        action_effect.summary.after_frame_evidence_ref,
+                        action_effect.evidence.id,
+                    )
+                    if action_effect is not None
+                    else ()
+                ),
+            )))
             event_ids = self._accept(
                 "transition_recorded",
                 payload={
                     "obligation_id": obligation_id,
+                    "action_id": decision_id,
                     "action": proposal.action,
                     "input_completed": transition.input_completed,
                     "visible_effect": transition.visible_effect,
-                    "evidence_refs": list(transition.evidence_refs),
+                    "evidence_refs": list(event_evidence_refs),
                     "frame_id": transition.post_frame_id,
+                    "action_effect": (
+                        action_effect.summary.to_dict()
+                        if action_effect is not None
+                        else None
+                    ),
                 },
-                evidence_refs=transition.evidence_refs,
+                evidence_refs=event_evidence_refs,
             )
         except (MissionError, ValueError) as exc:
             return self._block_unknown(

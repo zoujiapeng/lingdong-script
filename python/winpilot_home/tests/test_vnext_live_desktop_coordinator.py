@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 import threading
 import time
 
+import cv2
+import numpy as np
 import pytest
 
 import winpilot.vnext.bridge.coordinator as coordinator_module
@@ -153,6 +156,11 @@ def _context(*, contract=None, stop_event=None):
 
 
 def _observer(authority):
+    pixels = np.zeros((600, 800, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".png", pixels)
+    assert ok
+    image_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
+
     def select_scope(hwnd, **_kwargs):
         return VisualCaptureScope(
             Region(10, 20, 800, 600),
@@ -164,7 +172,7 @@ def _observer(authority):
 
     return FrameObserver(
         authority,
-        capture=lambda _hwnd, *, region: "ZmFrZS1mcmFtZQ==",
+        capture=lambda _hwnd, *, region: image_b64,
         select_scope=select_scope,
         captured_at=lambda: 10.0,
     )
@@ -294,6 +302,11 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     assert len(actor.calls) == 2
     assert len(verifier.calls) == 1
     assert len(raw_calls) == 1
+    second_turn = actor.calls[1][0]
+    assert second_turn.mission.no_progress_streak == 1
+    assert second_turn.mission.last_transition.local_visual_change == "unchanged"
+    assert second_turn.mission.last_transition.frame_comparable is True
+    assert second_turn.mission.last_transition.semantic_completion == "unknown"
     assert raw_calls[0][0:2] == (110, 120)
     assert raw_calls[0][-1] is FinalPointerGuardDecision.ADMITTED
     assert [record[1]["type"] for record in trace.records] == [
@@ -303,6 +316,63 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
         "vnext_mission_runtime_finished",
     ]
     assert all(run_id == "arp-run-1" for run_id, _record in trace.records)
+    action_trace = trace.records[1][1]
+    assert action_trace["local_visual_change"] == "unchanged"
+    assert action_trace["frame_comparable"] is True
+    assert action_trace["no_progress_streak"] == 1
+
+
+def test_repeated_unchanged_actions_are_replay_derived_actor_feedback() -> None:
+    actor = ScriptedActor([_click(), _click(), _claim()])
+    verifier = PositiveVisualModel()
+    trace = Trace()
+    raw_calls = []
+
+    result = _coordinator(
+        actor,
+        verifier,
+        trace=trace,
+        raw_calls=raw_calls,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    assert len(actor.calls) == 3
+    assert len(raw_calls) == 2
+    assert len(verifier.calls) == 1
+    assert actor.calls[1][0].mission.no_progress_streak == 1
+    assert actor.calls[2][0].mission.no_progress_streak == 2
+    turn_records = [
+        record for _run_id, record in trace.records
+        if record["type"] == "vnext_mission_runtime_turn"
+    ]
+    assert [record["no_progress_streak"] for record in turn_records] == [
+        1,
+        2,
+        None,
+    ]
+
+
+def test_turn_trace_never_reattributes_a_previous_action_effect() -> None:
+    actor = ScriptedActor([_click(), _invalid_click(), _claim()])
+    trace = Trace()
+
+    result = _coordinator(
+        actor,
+        PositiveVisualModel(),
+        trace=trace,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    turns = [
+        record for _run_id, record in trace.records
+        if record["type"] == "vnext_mission_runtime_turn"
+    ]
+    assert turns[0]["local_visual_change"] == "unchanged"
+    assert turns[0]["no_progress_streak"] == 1
+    assert turns[1]["status"] == "invalid_proposal"
+    assert turns[1]["local_visual_change"] is None
+    assert turns[1]["frame_comparable"] is None
+    assert turns[1]["no_progress_streak"] is None
 
 
 def test_live_coordinator_scroll_uses_same_actor_controller_and_verifier_chain():

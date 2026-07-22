@@ -16,7 +16,7 @@ from ...visual_runtime.commit_admission import (
 
 RUNTIME_FRAME_FORMAT = "runtime-frame/0"
 RUNTIME_SNAPSHOT_FORMAT = "runtime-snapshot/0"
-CONTROLLER_TRANSITION_FORMAT = "controller-transition/0"
+CONTROLLER_TRANSITION_FORMAT = "controller-transition/1"
 MISSION_RUNTIME_RESULT_FORMAT = "mission-runtime-result/0"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
