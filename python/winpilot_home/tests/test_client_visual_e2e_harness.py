@@ -75,6 +75,22 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     )
 
 
+def test_oracle_wait_ignores_page_ready_until_success_is_persisted():
+    harness = _load_harness()
+
+    assert harness._trusted_scenario_succeeded({
+        "success": False,
+        "events": [{"type": "page_ready"}],
+    }) is False
+    assert harness._trusted_scenario_succeeded({
+        "success": True,
+        "events": [
+            {"type": "page_ready"},
+            {"type": "scenario_success", "trusted": True},
+        ],
+    }) is True
+
+
 def test_external_verdict_requires_exact_precise_click_identity_and_geometry():
     harness = _load_harness()
     target = {

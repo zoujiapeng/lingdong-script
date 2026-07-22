@@ -1,6 +1,6 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达。P4a 已实现严格 Actor proposal/view/envelope 与注入式 MissionRuntime；P4b 已有默认关闭的 atomic click/double-click、final mouse-down guard 和 post-action frame evidence 切片；P4c 已有可注入 product coordinator protocol/seam，但 Server 默认未注入且没有 live Actor/coordinator 实现。P5a 注入式 ObligationVerifier 与 P5b 本地 deterministic MissionCompletionVerifier 已接入该 Runtime；没有模型/视觉 Verifier、ActionEffectVerifier 或跨进程 exactly-once。P6 保持禁用，P7–P9 未开始。
+本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达。P4/P5 现有默认关闭的 click-only live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、Broker 小工具面、共享 atomic click/double-click 执行链、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认；真实 Electron canary 尚未运行，ActionEffectVerifier、其他 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
 
 ## 1. 版本与基本规则
 
@@ -25,7 +25,7 @@ runtime-frame/0
 runtime-snapshot/0
 controller-transition/0
 mission-runtime-result/0
-desktop-runtime-coordinator-context/0
+desktop-runtime-coordinator-context/1
 desktop-runtime-coordinator-result/0
 transition-record/0
 verifier-assessment/0
@@ -278,6 +278,12 @@ benchmark.game_drag_route
 ```
 
 无法可靠确定时使用 `visual.interact`。
+
+canonical 名称的唯一代码 owner 是 `vnext/capability_names.py`；
+`vnext/capabilities/names.py` 只做兼容 re-export。当前真实 Compiler 的 ExecuteDesktopTask
+required capabilities 包含 `visual.interact` 和 `visual.read_text`，click-only live Runtime state
+也声明同一集合：`visual.read_text` 表示 Visual Actor 直接读取当前像素，不等于启用结构化文字
+provider；Catalog 仍只用 `visual.interact` 授权 `click`/`double_click`。
 
 ### 5.2 EvidencePolicy
 
@@ -540,7 +546,7 @@ P4a 不把带 Runtime 身份的 `MissionCard` 或 `BrokerProjection` 原样交�
 - `ActorToolView`：只包含当前 BrokerProjection 允许的 Visual Actor 工具名和严格 JSON schema；
 - `ActorTurnInput`：组合上述三种 view，图片字节和 submitted size 通过注入的 `ActorPort` 单独传递。
 
-这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。语义文本完整保留，不通过关键词替换或应用规则“清洗”。P4a 没有真实 Actor provider，因此这只是可注入、可测试的边界，不是产品模型调用。
+这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前 click-only live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
 
 ## 10. 模型输出：ActorProposal
 
@@ -669,9 +675,9 @@ Runtime构造 envelope。必须拒绝：
 - proposal 试图覆盖 envelope 身份；
 - capability/inspection/replan trigger 不满足 policy。
 
-### 11.1 P4a 注入式 MissionRuntime
+### 11.1 P4 MissionRuntime
 
-P4a 的 `MissionRuntime.run_one_turn()` 是纯协调边界。它只持有注入的 `ActorPort`、`RuntimeStatePort`、`ControllerPort` 和可选 `PointerCleanupPort`，不会直接导入或调用模型 SDK、AgentRunner、ToolSession、FastGuiController、RawDevice 或 DesktopActionQueue。非 `visual_actor` route 不调用 Actor，也不会在同一 run 偷偷 fallback 到 legacy。
+`MissionRuntime.run_one_turn()` 是纯协调边界。它只持有注入的 `ActorPort`、`RuntimeStatePort`、`ControllerPort`、只读验证端口和可选 `PointerCleanupPort`；具体 live coordinator 负责组装这些端口，但 Runtime 不导入 legacy AgentRunner/ToolSession，也不成为 RawDevice owner。非 `visual_actor` route 不调用 Actor，同一 run 的任何失败都不会偷偷 fallback 到 legacy。
 
 单回合 admission 顺序固定为：
 
@@ -694,7 +700,7 @@ unknown
 
 `ObserveProposal` 只刷新观察；`BlockedReport` 只产生当前义务的 blocked event，其自然语言事实不会升级为 `VerifiedFact`。`CapabilityRequest`、`InspectionRequest` 和 `ReplanRequest` 在 P4a 均返回 `unavailable`；尤其 P6 Planner/Inspector 未启用时必须 fail closed。
 
-这一实现不等于 Broker enforce、live Actor、共享 FrameAuthority/Controller adapter 或产品 canary。P4b 必须复用现有唯一 frame/admission/execution owner 建桥，不能把注入端口实现成第二套执行链。
+当前产品接线只对显式 `vnext` run 组装 click-only Actor、Broker、Frame/Controller bridge 与验证端口。它不等于全局 Broker enforce 或产品 canary 已通过；P3 的 necessary-tool recall 门槛仍未达到，真实 Electron oracle 尚未运行。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
 
 ### 11.2 P4a ControllerTransition
 
@@ -706,11 +712,11 @@ unknown
 
 RawDevice 接收 Controller 已解析的 typed scroll/click 参数，不接收 `action + args`，因此不是第二个 action parser。它不读取 session、截图、OCR/UIA、任务、应用名或恢复状态。Receipt 的 backend facts 是可序列化的只读诊断，不是 run-scoped evidence，`APPLIED` 也不证明像素变化或语义完成。
 
-该内部 seam 尚未冻结为 vNext `/1` 产品合同。atomic click 由 Runtime permit 和权威 frame pin 限定一次 transaction，commit-time 重读 frame/epoch/HWND/PID/region/hit-test，每次 physical mouse-down 紧前再做 final guard；后续 `AtomicPostActionBridge` 在同一 physical lease 中 CAS 提交动作后权威帧并写入 exact action/frame evidence。任一动作后证据缺失都是 `unknown`，不能转成可重放 rejection。这仅适用于默认关闭的注入式 click/double-click 切片；其他原语、live Actor 和 live Electron coordinator 实现仍未接入。`DesktopRuntimeSelection` 只由 Runtime 配置在 run 开始时产生；Server 未注入 coordinator 时必须在 mutation 前拒绝 vNext，不能隐式 fallback 到 legacy。
+该内部 seam 尚未冻结为 vNext `/1` 产品合同。atomic click 由 Runtime permit 和权威 frame pin 限定一次 transaction，commit-time 重读 frame/epoch/HWND/PID/region/hit-test，每次 physical mouse-down 紧前再做 final guard；后续 `AtomicPostActionBridge` 在同一 physical lease 中 CAS 提交动作后权威帧并写入 exact action/frame evidence。任一动作后证据缺失都是 `unknown`，不能转成可重放 rejection。当前默认关闭的 live coordinator 只接入 `click`/`double_click`；`type_text`、`hotkey`、Actor 可见 `scroll`、`drag`、`draw_strokes`、held pointer 与 ROI observe 均未接入。`DesktopRuntimeSelection` 只在 run 开始时冻结；缺失 coordinator 或任一 vNext 端口都必须在 mutation 前拒绝，不能隐式 fallback 到 legacy。
 
-### 11.4 P4c product coordinator seam（injected only）
+### 11.4 P4c product coordinator 与 per-run selector
 
-`desktop-runtime-coordinator-context/0` 只携带 Runtime 冻结的 run id、任务/contract 只读快照与现有 stop/pause owner；`desktop-runtime-coordinator-result/0` 只允许严格 terminal 结果。`ArpExecution` 仅在 selection 为 `vnext` 且显式注入 `DesktopRuntimeCoordinatorPort` 时调用一次 coordinator，并完全绕过 legacy node handlers；结果非法、异常或取消都不得 fallback。Server 默认不注入该 port，因此这是 product protocol seam，不是 live coordinator 或 Electron E2E 已可用的声明。
+`desktop-runtime-coordinator-context/1` 只携带 Runtime 冻结的 run id、任务/contract 只读快照、现有 stop owner、回合入口的 blocking pause gate 与 commit 前的只读 `is_paused`；`desktop-runtime-coordinator-result/0` 只允许严格 terminal 结果。`/1` 不兼容 `/0`，因为新增的非阻塞 pause reading 用于丢弃模型调用期间产生的旧动作，恢复后必须从新权威帧重新决策。客户端只在顶层 ARP run request 发送 `runtime_version`，不把它写入 graph、task contract、Profiler 或模型 payload。`ArpExecution` 仅在 selection 为 `vnext` 且 Server 注入 click-only `DesktopRuntimeCoordinatorPort` 时调用一次 coordinator，并完全绕过 legacy node handlers；结果非法、异常或取消都不得 fallback。缺省/`legacy` run 仍不注入该 coordinator。
 
 ## 12. BrokerProjection 与 CapabilityGrant
 
@@ -792,9 +798,9 @@ class TransitionRecord:
 
 ## 14. VerifierAssessment 与 VerificationResult
 
-当前 P5 实现是注入式、进程内的 evidence-first 闭合：P5a 提供严格的 `ObligationVerificationRequest`、无 Runtime 身份的 `VerifierAssessment`、Runtime-bound `ObligationVerificationResult` 和 deterministic-first dispatcher；P5b 提供 `AcceptedObligationVerification`、`MissionCompletionVerificationRequest/Result` 和内容哈希绑定的 mission aggregate evidence。
+当前 P5 实现是进程内的 evidence-first 闭合：P5a 提供严格的 `ObligationVerificationRequest`、无 Runtime 身份的 `VerifierAssessment`、Runtime-bound `ObligationVerificationResult` 和 deterministic-first dispatcher；click-only live coordinator 还注入隔离、只读的视觉模型 Verifier。P5b 提供 `AcceptedObligationVerification`、`MissionCompletionVerificationRequest/Result` 和内容哈希绑定的 mission aggregate evidence。
 
-P5b 构造时必须同时注入 `DeterministicMissionCompletionVerifier` 和 canonical `EvidenceRegistry`，且 `MissionReducer.evidence_source` 必须是该同一 registry。Runtime 先 append/read-back aggregate evidence，再提交 exact `mission_verified` event；Reducer 独立校验 accepted obligation verification ids、证据顺序、aggregate id/hash/kind/trust 和 canonical mission verification id。当前无模型/视觉 Verifier、无 `ActionEffectVerifier`、无跨进程 WAL 或已证明的 exactly-once 恢复。
+P5b 构造时必须同时注入 `DeterministicMissionCompletionVerifier` 和 canonical `EvidenceRegistry`，且 `MissionReducer.evidence_source` 必须是该同一 registry。Runtime 先 append/read-back aggregate evidence，再提交 exact `mission_verified` event；Reducer 独立校验 accepted obligation verification ids、证据顺序、aggregate id/hash/kind/trust 和 canonical mission verification id。视觉模型只返回无身份 assessment；许可同时依赖 EvidencePolicy 与 Registry 中真实 evidence trust，Runtime 复核 claim/revision/current authoritative frame 后才写入本地 attested `independent_visual_model` evidence。payload 自报 trust 或 evidence identity 无效。当前仍无 `ActionEffectVerifier`、跨进程 WAL 或已证明的 exactly-once 恢复。
 
 视觉/模型 Verifier 只输出 assessment，不回填 subject 或 evidence identity：
 

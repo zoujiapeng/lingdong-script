@@ -16,7 +16,7 @@ from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 
-DESKTOP_COORDINATOR_CONTEXT_FORMAT = "desktop-runtime-coordinator-context/0"
+DESKTOP_COORDINATOR_CONTEXT_FORMAT = "desktop-runtime-coordinator-context/1"
 DESKTOP_COORDINATOR_RESULT_FORMAT = "desktop-runtime-coordinator-result/0"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 
@@ -70,6 +70,7 @@ class DesktopRuntimeCoordinatorContext:
     inputs: Mapping[str, Any]
     stop_event: threading.Event
     wait_if_paused: Callable[[], bool]
+    is_paused: Callable[[], bool]
     format: str = DESKTOP_COORDINATOR_CONTEXT_FORMAT
 
     def __post_init__(self) -> None:
@@ -83,6 +84,8 @@ class DesktopRuntimeCoordinatorContext:
             raise DesktopRuntimeCoordinatorContractError("stop_event must be threading.Event")
         if not callable(self.wait_if_paused):
             raise DesktopRuntimeCoordinatorContractError("wait_if_paused must be callable")
+        if not callable(self.is_paused):
+            raise DesktopRuntimeCoordinatorContractError("is_paused must be callable")
         graph = _freeze_json(self.graph, "graph")
         inputs = _freeze_json(self.inputs, "inputs")
         if not isinstance(graph, Mapping) or not isinstance(inputs, Mapping):

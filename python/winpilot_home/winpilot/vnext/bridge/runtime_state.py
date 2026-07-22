@@ -12,7 +12,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import threading
+import time
 
 from ...agent.frame_authority import FrameAuthority, FrameState
 from ...visual_runtime.commit_admission import (
@@ -127,6 +129,8 @@ class RuntimeStateBridge:
         mutation_permits: MutationPermitAuthority,
         read_target_identity: Callable[[], TargetCommitIdentity | None],
         read_runtime_state: Callable[[], RuntimeReadState],
+        frame_max_age_s: float,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         if not isinstance(frame_authority, FrameAuthority):
             raise TypeError("frame_authority must be FrameAuthority")
@@ -151,6 +155,14 @@ class RuntimeStateBridge:
             raise TypeError("read_target_identity must be callable")
         if not callable(read_runtime_state):
             raise TypeError("read_runtime_state must be callable")
+        if (
+            type(frame_max_age_s) not in (int, float)
+            or not math.isfinite(float(frame_max_age_s))
+            or float(frame_max_age_s) <= 0
+        ):
+            raise TypeError("frame_max_age_s must be a positive finite number")
+        if not callable(clock):
+            raise TypeError("clock must be callable")
         self._frames = frame_authority
         self._observer = observer
         self._evidence = evidence
@@ -158,6 +170,8 @@ class RuntimeStateBridge:
         self._permits = mutation_permits
         self._read_target_identity = read_target_identity
         self._read_runtime_state = read_runtime_state
+        self._frame_max_age_s = float(frame_max_age_s)
+        self._clock = clock
         self._observe_lock = threading.RLock()
 
     @staticmethod
@@ -349,7 +363,11 @@ class RuntimeStateBridge:
                     live=True,
                 ),
                 frame=(
-                    runtime_frame.broker_frame()
+                    runtime_frame.broker_frame(fresh=frame_state.is_fresh_for(
+                        epoch=target.epoch,
+                        max_age_s=self._frame_max_age_s,
+                        now=self._clock(),
+                    ))
                     if runtime_frame is not None
                     else AuthoritativeFrameState()
                 ),
