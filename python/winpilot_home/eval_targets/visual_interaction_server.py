@@ -27,8 +27,221 @@ STATE: dict[str, Any] = {
 }
 
 
+def _same_case(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    try:
+        seeds_match = int(left.get("seed") or 0) == int(right.get("seed") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        str(left.get("case_id") or "") == str(right.get("case_id") or "")
+        and left.get("scenario") == right.get("scenario")
+        and seeds_match
+    )
+
+
+def _prior_case_events(
+    events: list[dict[str, Any]], index: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    terminal = events[index]
+    scoped = [
+        item for item in events[:index] if _same_case(item, terminal)
+    ]
+    ready_indexes = [
+        offset for offset, item in enumerate(scoped)
+        if item.get("type") == "page_ready"
+    ]
+    if len(ready_indexes) != 1:
+        return {}, []
+    ready_index = ready_indexes[0]
+    return scoped[ready_index], scoped[ready_index + 1:]
+
+
+def _positive_int(value: Any) -> bool:
+    return type(value) is int and value > 0
+
+
+def _accepted_keyboard_entry_success(
+    events: list[dict[str, Any]], index: int,
+) -> bool:
+    terminal = events[index]
+    details = terminal.get("details") or {}
+    target_id = details.get("target_id")
+    expected = details.get("expected_text")
+    before_count = details.get("beforeinput_count")
+    input_count = details.get("input_count")
+    if not (
+        isinstance(target_id, str) and target_id
+        and isinstance(expected, str) and expected
+        and details.get("final_value") == expected
+        and _positive_int(before_count)
+        and _positive_int(input_count)
+        and before_count == input_count
+        and details.get("wrong_target_activity") is False
+        and details.get("sequence_valid") is True
+        and details.get("succeeded") is True
+    ):
+        return False
+
+    ready, prior = _prior_case_events(events, index)
+    ready_details = ready.get("details") or {}
+    if not (
+        ready_details.get("target_id") == target_id
+        and ready_details.get("expected_text") == expected
+        and ready_details.get("initial_value") == ""
+        and _positive_int(ready_details.get("candidate_count"))
+        and ready_details["candidate_count"] >= 2
+    ):
+        return False
+    forbidden = {
+        "trusted_paste", "trusted_drop", "untrusted_beforeinput",
+        "untrusted_input", "untrusted_paste", "untrusted_drop",
+        "compositionstart", "compositionupdate", "compositionend",
+    }
+    if any(item.get("type") in forbidden for item in prior):
+        return False
+
+    activity_events = [
+        item for item in prior
+        if item.get("type") in {"trusted_beforeinput", "trusted_input"}
+    ]
+    if len(activity_events) != 2 * before_count:
+        return False
+
+    prefix = ""
+    for offset in range(0, len(activity_events), 2):
+        before, input_event = activity_events[offset:offset + 2]
+        before_details = before.get("details") or {}
+        input_details = input_event.get("details") or {}
+        data = before_details.get("data")
+        if not (
+            before.get("type") == "trusted_beforeinput"
+            and input_event.get("type") == "trusted_input"
+            and before.get("trusted") is True
+            and input_event.get("trusted") is True
+            and before_details.get("target_id") == target_id
+            and input_details.get("target_id") == target_id
+            and before_details.get("input_type") == "insertText"
+            and input_details.get("input_type") == "insertText"
+            and before_details.get("is_composing") is False
+            and input_details.get("is_composing") is False
+            and isinstance(data, str) and data
+            and input_details.get("data") == data
+            and before_details.get("value_before") == prefix
+        ):
+            return False
+        prefix += data
+        if input_details.get("value") != prefix or not expected.startswith(prefix):
+            return False
+    return prefix == expected
+
+
+def _accepted_keyboard_select_success(
+    events: list[dict[str, Any]], index: int,
+) -> bool:
+    terminal = events[index]
+    details = terminal.get("details") or {}
+    target_id = details.get("target_id")
+    original = details.get("original_text")
+    if not (
+        isinstance(target_id, str) and target_id
+        and isinstance(original, str) and original
+        and details.get("final_text") == original
+        and type(details.get("selection_start")) is int
+        and details.get("selection_start") == 0
+        and type(details.get("selection_end")) is int
+        and details.get("selection_end") == len(original)
+        and details.get("modifier_released") is True
+        and type(details.get("mutation_count")) is int
+        and details.get("mutation_count") == 0
+        and details.get("wrong_target_activity") is False
+        and details.get("sequence_valid") is True
+        and details.get("succeeded") is True
+    ):
+        return False
+
+    ready, prior = _prior_case_events(events, index)
+    ready_details = ready.get("details") or {}
+    if not (
+        ready_details.get("target_id") == target_id
+        and ready_details.get("original_text") == original
+        and _positive_int(ready_details.get("candidate_count"))
+        and ready_details["candidate_count"] >= 2
+        and type(ready_details.get("selection_start")) is int
+        and type(ready_details.get("selection_end")) is int
+        and ready_details["selection_start"] == ready_details["selection_end"]
+        and 0 <= ready_details["selection_start"] <= len(original)
+    ):
+        return False
+    forbidden = {
+        "trusted_beforeinput", "trusted_input", "trusted_paste",
+        "trusted_drop", "untrusted_beforeinput", "untrusted_input",
+        "untrusted_paste", "untrusted_drop",
+        "trusted_cut", "untrusted_cut", "untrusted_keydown", "untrusted_keyup",
+        "compositionstart", "compositionupdate", "compositionend",
+    }
+    if any(item.get("type") in forbidden for item in prior):
+        return False
+
+    phase = 0
+    for item in prior:
+        if item.get("type") not in {"trusted_keydown", "trusted_keyup"}:
+            continue
+        event_details = item.get("details") or {}
+        key = str(event_details.get("key") or "").casefold()
+        if key not in {"control", "a"}:
+            continue
+        if not (
+            item.get("trusted") is True
+            and event_details.get("target_id") == target_id
+            and event_details.get("content") == original
+            and event_details.get("alt_key") is False
+            and event_details.get("shift_key") is False
+            and event_details.get("meta_key") is False
+            and event_details.get("repeat") is False
+        ):
+            return False
+        event_type = item.get("type")
+        code = event_details.get("code")
+        if (
+            (key == "a" and code != "KeyA")
+            or (key == "control" and code not in {"ControlLeft", "ControlRight"})
+        ):
+            return False
+        if (
+            phase == 0 and event_type == "trusted_keydown"
+            and key == "control" and event_details.get("ctrl_key") is True
+        ):
+            phase = 1
+        elif (
+            phase == 1 and event_type == "trusted_keydown"
+            and key == "a" and event_details.get("ctrl_key") is True
+        ):
+            phase = 2
+        elif (
+            phase == 2 and event_type == "trusted_keyup"
+            and key == "a" and event_details.get("ctrl_key") is True
+            and type(event_details.get("selection_start")) is int
+            and event_details.get("selection_start") == 0
+            and type(event_details.get("selection_end")) is int
+            and event_details.get("selection_end") == len(original)
+        ):
+            phase = 3
+        elif (
+            phase == 3 and event_type == "trusted_keyup"
+            and key == "control" and event_details.get("ctrl_key") is False
+            and type(event_details.get("selection_start")) is int
+            and event_details.get("selection_start") == 0
+            and type(event_details.get("selection_end")) is int
+            and event_details.get("selection_end") == len(original)
+        ):
+            phase = 4
+        else:
+            return False
+    return phase == 4
+
+
 def _accepted_success_event(events: list[dict[str, Any]], index: int) -> bool:
-    """Accept dynamic-hold success only after a trusted in-goal release."""
+    """Accept terminal success only after required trusted browser evidence."""
 
     event = events[index]
     if not (
@@ -37,7 +250,12 @@ def _accepted_success_event(events: list[dict[str, Any]], index: int) -> bool:
         and event.get("succeeded") is True
     ):
         return False
-    if event.get("scenario") != "dynamic_hold":
+    scenario = event.get("scenario")
+    if scenario == "keyboard_entry":
+        return _accepted_keyboard_entry_success(events, index)
+    if scenario == "keyboard_select_all":
+        return _accepted_keyboard_select_success(events, index)
+    if scenario != "dynamic_hold":
         return True
 
     details = event.get("details") or {}
@@ -175,6 +393,20 @@ class Handler(BaseHTTPRequestHandler):
             event = json.loads(self.rfile.read(size).decode("utf-8"))
             if not isinstance(event, dict):
                 raise ValueError("event must be an object")
+            if not (
+                isinstance(event.get("case_id"), str)
+                and event["case_id"]
+                and isinstance(event.get("scenario"), str)
+                and event["scenario"]
+                and type(event.get("seed")) is int
+                and 0 <= event["seed"] <= 0xFFFFFFFF
+                and isinstance(event.get("type"), str)
+                and event["type"]
+                and type(event.get("trusted")) is bool
+                and type(event.get("succeeded")) is bool
+                and isinstance(event.get("details"), dict)
+            ):
+                raise ValueError("event identity or evidence schema is invalid")
         except Exception as exc:
             self._send_json(400, {"ok": False, "error": str(exc)})
             return
