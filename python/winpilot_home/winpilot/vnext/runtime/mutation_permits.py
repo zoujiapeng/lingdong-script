@@ -72,6 +72,7 @@ class MutationPermitAuthority:
         self.run_id = run_id.strip()
         self._limit = consumed_history_limit
         self._pending: dict[str, _PendingPermit] = {}
+        self._active: dict[str, _PendingPermit] = {}
         self._consumed: OrderedDict[str, str] = OrderedDict()
         self._last_issued_turn = -1
         self._closed = False
@@ -105,7 +106,11 @@ class MutationPermitAuthority:
                 raise MutationPermitError("permit authority is closed")
             if turn_index <= self._last_issued_turn:
                 raise MutationPermitError("permit turn_index must increase monotonically")
-            if envelope.decision_id in self._pending or envelope.decision_id in self._consumed:
+            if (
+                envelope.decision_id in self._pending
+                or envelope.decision_id in self._active
+                or envelope.decision_id in self._consumed
+            ):
                 raise MutationPermitError("decision already has an admission attempt")
             self._pending[envelope.decision_id] = _PendingPermit(
                 permit_id,
@@ -117,8 +122,13 @@ class MutationPermitAuthority:
             self._last_issued_turn = turn_index
         return permit_id
 
-    def consume(self, envelope: ActorDecisionEnvelope) -> RuntimeMutationPermit:
-        """Consume before validation so every admission attempt is at-most-once."""
+    def _consume(
+        self,
+        envelope: ActorDecisionEnvelope,
+        *,
+        activate: bool,
+    ) -> RuntimeMutationPermit:
+        """Retire one pending permit and optionally hold its commit admission."""
 
         if not isinstance(envelope, ActorDecisionEnvelope):
             raise MutationPermitError("envelope must be ActorDecisionEnvelope")
@@ -130,7 +140,10 @@ class MutationPermitAuthority:
             if pending is None:
                 reason = (
                     MutationPermitReason.ALREADY_CONSUMED
-                    if envelope.decision_id in self._consumed
+                    if (
+                        envelope.decision_id in self._active
+                        or envelope.decision_id in self._consumed
+                    )
                     else MutationPermitReason.MISSING
                 )
                 return self._result(envelope, fingerprint, None, reason)
@@ -147,7 +160,7 @@ class MutationPermitAuthority:
                 envelope, fingerprint, pending,
                 MutationPermitReason.RUNTIME_STATE_UNAVAILABLE,
             )
-        return self._result(
+        result = self._result(
             envelope,
             fingerprint,
             pending,
@@ -157,6 +170,64 @@ class MutationPermitAuthority:
                 else MutationPermitReason.RUNTIME_STATE_CHANGED
             ),
         )
+        if activate and result.allowed:
+            with self._lock:
+                if self._closed:
+                    return self._result(
+                        envelope,
+                        fingerprint,
+                        pending,
+                        MutationPermitReason.AUTHORITY_CLOSED,
+                    )
+                self._active[envelope.decision_id] = pending
+        return result
+
+    def consume(self, envelope: ActorDecisionEnvelope) -> RuntimeMutationPermit:
+        """Consume once without opening a Controller commit admission."""
+
+        return self._consume(envelope, activate=False)
+
+    def begin_admission(
+        self, envelope: ActorDecisionEnvelope,
+    ) -> RuntimeMutationPermit:
+        """Consume once and expose exact authorization until ``finish_admission``.
+
+        The active entry is transient execution authority held by this same
+        owner.  It is not replayable history and is cleared whether commit
+        validation, raw input, or post-action observation succeeds or raises.
+        """
+
+        return self._consume(envelope, activate=True)
+
+    def active_admission_matches(
+        self,
+        decision_id: str,
+        *,
+        frame: object,
+        target: object,
+        pointer: object,
+    ) -> bool:
+        """Read whether one exact Runtime envelope currently owns admission."""
+
+        with self._lock:
+            if self._closed:
+                return False
+            pending = self._active.get(str(decision_id))
+            if pending is None:
+                return False
+            envelope = pending.envelope
+            return bool(
+                envelope.decision_id == decision_id
+                and envelope.frame == frame
+                and envelope.target == target
+                and envelope.pointer == pointer
+            )
+
+    def finish_admission(self, decision_id: str) -> bool:
+        """Close transient commit authority without making it replayable."""
+
+        with self._lock:
+            return self._active.pop(str(decision_id), None) is not None
 
     def revoke(self, decision_id: str) -> bool:
         """Permanently retire an unconsumed permit."""
@@ -173,6 +244,7 @@ class MutationPermitAuthority:
             for pending in self._pending.values():
                 self._remember(pending.envelope.decision_id, pending.envelope_sha256)
             self._pending.clear()
+            self._active.clear()
             self._closed = True
 
     @property
@@ -184,6 +256,11 @@ class MutationPermitAuthority:
     def consumed_count(self) -> int:
         with self._lock:
             return len(self._consumed)
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return len(self._active)
 
     def _remember(self, decision_id: str, fingerprint: str) -> None:
         self._consumed[decision_id] = fingerprint

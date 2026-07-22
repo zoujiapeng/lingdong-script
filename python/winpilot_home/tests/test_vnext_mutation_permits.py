@@ -148,6 +148,61 @@ def test_concurrent_consumers_allow_exactly_one_commit_attempt() -> None:
     )
 
 
+def test_active_admission_is_exact_transient_and_not_replayable() -> None:
+    authority = MutationPermitAuthority("mission-1", "run-1")
+    envelope = _envelope()
+    authority.issue(envelope, turn_index=0, still_current=lambda: True)
+
+    permit = authority.begin_admission(envelope)
+
+    assert permit.allowed is True
+    assert authority.pending_count == 0
+    assert authority.active_count == 1
+    assert authority.active_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        target=envelope.target,
+        pointer=envelope.pointer,
+    ) is True
+    assert authority.active_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        target=envelope.target,
+        pointer=PointerLeaseState(PointerDisposition.UNKNOWN),
+    ) is False
+    assert authority.begin_admission(envelope).reason is (
+        MutationPermitReason.ALREADY_CONSUMED
+    )
+
+    assert authority.finish_admission(envelope.decision_id) is True
+    assert authority.finish_admission(envelope.decision_id) is False
+    assert authority.active_count == 0
+    assert authority.active_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        target=envelope.target,
+        pointer=envelope.pointer,
+    ) is False
+    assert authority.consume(envelope).reason is MutationPermitReason.ALREADY_CONSUMED
+
+
+def test_close_revokes_an_active_admission() -> None:
+    authority = MutationPermitAuthority("mission-1", "run-1")
+    envelope = _envelope()
+    authority.issue(envelope, turn_index=0, still_current=lambda: True)
+    assert authority.begin_admission(envelope).allowed is True
+
+    authority.close()
+
+    assert authority.active_count == 0
+    assert authority.active_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        target=envelope.target,
+        pointer=envelope.pointer,
+    ) is False
+
+
 def test_consumed_history_is_bounded_and_scope_is_strict() -> None:
     authority = MutationPermitAuthority(
         "mission-1", "run-1", consumed_history_limit=2,

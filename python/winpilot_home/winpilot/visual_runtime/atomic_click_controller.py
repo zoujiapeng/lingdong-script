@@ -287,21 +287,25 @@ class AtomicClickController:
 
         def under_physical_lease() -> ControllerTransition:
             def under_frame_pin() -> CommitCallbackResult[RawActionReceipt]:
-                permit = self._permits.consume(envelope)
-                return self._permit_result(
-                    request,
-                    permit,
-                    self._gate,
-                    lambda: self._raw.click(
-                        RawActionContext(target.hwnd, target.hwnd),
-                        request.screen_point[0],
-                        request.screen_point[1],
-                        MouseButton.LEFT,
-                        count,
-                        ClickMechanism.PHYSICAL,
-                        final_guard=final_guard,
-                    ),
-                )
+                permit = self._permits.begin_admission(envelope)
+                try:
+                    return self._permit_result(
+                        request,
+                        permit,
+                        self._gate,
+                        lambda: self._raw.click(
+                            RawActionContext(target.hwnd, target.hwnd),
+                            request.screen_point[0],
+                            request.screen_point[1],
+                            MouseButton.LEFT,
+                            count,
+                            ClickMechanism.PHYSICAL,
+                            final_guard=final_guard,
+                        ),
+                    )
+                finally:
+                    if permit.allowed:
+                        self._permits.finish_admission(envelope.decision_id)
 
             pinned, commit = self._frames.run_if_current(
                 envelope.frame, under_frame_pin,
