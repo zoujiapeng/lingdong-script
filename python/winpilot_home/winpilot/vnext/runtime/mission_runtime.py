@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import threading
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol
 
 from ..actor import (
+    ACTOR_PREVIOUS_ACTION_FORMAT,
     ActorDecisionEnvelope,
+    ActorPreviousActionView,
     BlockedReport,
     CapabilityRequest,
     ClaimObligationDone,
@@ -23,11 +26,15 @@ from ..actor import (
     parse_actor_proposal,
     project_actor_turn_input,
 )
+from ..actor.action_history import (
+    try_project_action_history_args,
+)
 from ..capabilities import (
     BrokerProjection,
     CapabilityBroker,
     CapabilityGrant,
     ExecutionRoute,
+    MutationKind,
     PointerDisposition,
     ToolCatalog,
     ToolArgumentValidationError,
@@ -100,6 +107,17 @@ class AttestedVisualVerifierPort(Protocol):
         *,
         stop_event: threading.Event | None = None,
     ) -> "VisualVerifierAttestation": ...
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingActorAction:
+    """Safe action-local context bound to one immediately following turn."""
+
+    mission_revision: int
+    obligation_id: str
+    target_binding_id: str | None
+    local_intent: str
+    arguments: Mapping[str, Any]
 
 
 class MissionRuntime:
@@ -217,6 +235,7 @@ class MissionRuntime:
         ):
             raise TypeError("mutation permit authority must match Runtime mission/run")
         self._turn_lock = threading.Lock()
+        self._pending_actor_action: _PendingActorAction | None = None
 
     @property
     def reducer(self) -> MissionReducer:
@@ -258,6 +277,7 @@ class MissionRuntime:
         event_ids: Iterable[str] = (),
         detail: str = "turn canceled before desktop admission",
     ) -> MissionRuntimeResult:
+        self._pending_actor_action = None
         attempted = False
         try:
             snapshot = self._state.current(
@@ -295,6 +315,92 @@ class MissionRuntime:
             snapshot.broker_state,
             grants,
         )
+
+    def _eligible_previous_action(
+        self,
+        pending: _PendingActorAction | None,
+        projection: BrokerProjection,
+    ) -> ActorPreviousActionView | None:
+        """Project one pending action only when every current binding still matches."""
+
+        if pending is None:
+            return None
+        mission = self._reducer.projection
+        transition = mission.last_transition
+        if (
+            pending.mission_revision != mission.revision
+            or pending.obligation_id != mission.active_obligation_id
+            or pending.target_binding_id != projection.target_binding_id
+            or transition is None
+            or transition.action not in projection.tool_names
+        ):
+            return None
+        try:
+            spec = self._catalog.get(transition.action)
+        except KeyError:
+            return None
+        if (
+            spec.route is not ToolRoute.VISUAL_ACTOR
+            or spec.mutation_kind is not MutationKind.GUI
+        ):
+            return None
+        effect = transition.action_effect
+        if effect is None or not effect.target_binding_valid:
+            return None
+        try:
+            return ActorPreviousActionView(
+                format=ACTOR_PREVIOUS_ACTION_FORMAT,
+                action=transition.action,
+                local_intent=pending.local_intent,
+                arguments=pending.arguments,
+                input_completed=transition.input_completed,
+                post_action_frame_reconciled=True,
+                visible_effect=transition.visible_effect,
+                local_visual_change=effect.local_visual_change.value,
+                frame_comparable=effect.frame_comparable,
+                target_binding_valid=effect.target_binding_valid,
+            )
+        except Exception:
+            # Optional context must be total even for an injected ActorPort
+            # that did not honor the production provider's tighter schema.
+            return None
+
+    def _remember_actor_action(
+        self,
+        proposal: DesktopActionProposal,
+        *,
+        decision_id: str,
+        obligation_id: str,
+        target_binding_id: str | None,
+    ) -> None:
+        """Best-effort sidecar write after the canonical transition commits."""
+
+        self._pending_actor_action = None
+        try:
+            recorded = self._reducer.projection.last_transition
+            if (
+                recorded is None
+                or recorded.obligation_id != obligation_id
+                or recorded.action_id != decision_id
+                or recorded.action != proposal.action
+            ):
+                raise ValueError("accepted transition was not read back from Mission state")
+            arguments = try_project_action_history_args(
+                proposal.args, self._catalog.get(proposal.action).schema,
+            )
+            if arguments is None:
+                raise ValueError("action history is not safely projectable")
+            self._pending_actor_action = _PendingActorAction(
+                mission_revision=self._reducer.projection.revision,
+                obligation_id=obligation_id,
+                target_binding_id=target_binding_id,
+                local_intent=proposal.local_intent,
+                arguments=arguments,
+            )
+        except Exception:
+            # The mutation and transition event are already closed. Optional
+            # local context may disappear, but can never alter or replay them.
+            self._pending_actor_action = None
 
     def _snapshot_matches_mission(self, snapshot: RuntimeSnapshot) -> bool:
         """Compare frozen OS commit identity with accepted Mission identity."""
@@ -1442,13 +1548,19 @@ class MissionRuntime:
         grants: tuple[CapabilityGrant, ...],
         stop_event: threading.Event | None,
     ) -> MissionRuntimeResult:
+        # This is a one-shot cognitive aid, not Mission truth. Merely
+        # failing to observe a usable turn must not consume the only context;
+        # an actual Actor request, cancellation, or terminal state does.
+        pending_actor_action = self._pending_actor_action
         terminal_status = self._reducer.projection.status
         if terminal_status is MissionStatus.VERIFIED:
+            self._pending_actor_action = None
             return self._result(
                 RuntimeStatus.MISSION_VERIFIED,
                 detail="mission was already independently verified",
             )
         if terminal_status in {MissionStatus.FAILED, MissionStatus.CANCELED}:
+            self._pending_actor_action = None
             return self._result(
                 RuntimeStatus.STATE_REJECTED,
                 detail=f"mission is terminal: {terminal_status.value}",
@@ -1460,6 +1572,7 @@ class MissionRuntime:
             stop_event=stop_event,
         )
         if completion is not None:
+            self._pending_actor_action = None
             return completion
         try:
             initial = self._state.observe(
@@ -1500,7 +1613,18 @@ class MissionRuntime:
                 initial.broker_state.frame,
                 self._catalog,
                 broker_projection,
+                previous_action=self._eligible_previous_action(
+                    pending_actor_action,
+                    broker_projection,
+                ),
             )
+        except Exception as exc:
+            return self._result(RuntimeStatus.ACTOR_ERROR, route=route, detail=str(exc))
+        # The typed input is now frozen and about to enter the Actor request.
+        # Consume even if the provider later errors so it never becomes an
+        # unbounded retry history across separate decisions.
+        self._pending_actor_action = None
+        try:
             raw = self._actor.propose(
                 turn,
                 image_b64=initial.frame.image_b64,
@@ -1801,16 +1925,17 @@ class MissionRuntime:
                 post_frame=post.frame,
             ):
                 raise ValueError("Controller transition evidence identity is not current")
+            target_binding_valid = bool(
+                self._snapshot_matches_mission(post)
+                and post.target == latest.target
+            )
             action_effect = self._verify_action_effect(
                 obligation_id=obligation_id,
                 decision_id=decision_id,
                 input_completed=bool(transition.input_completed),
                 before=latest.frame,
                 after=post.frame,
-                target_binding_valid=bool(
-                    self._snapshot_matches_mission(post)
-                    and post.target == latest.target
-                ),
+                target_binding_valid=target_binding_valid,
             )
             event_evidence_refs = tuple(dict.fromkeys((
                 *transition.evidence_refs,
@@ -1824,22 +1949,23 @@ class MissionRuntime:
                     else ()
                 ),
             )))
+            transition_payload = {
+                "obligation_id": obligation_id,
+                "action_id": decision_id,
+                "action": proposal.action,
+                "input_completed": transition.input_completed,
+                "visible_effect": transition.visible_effect,
+                "evidence_refs": list(event_evidence_refs),
+                "frame_id": transition.post_frame_id,
+                "action_effect": (
+                    action_effect.summary.to_dict()
+                    if action_effect is not None
+                    else None
+                ),
+            }
             event_ids = self._accept(
                 "transition_recorded",
-                payload={
-                    "obligation_id": obligation_id,
-                    "action_id": decision_id,
-                    "action": proposal.action,
-                    "input_completed": transition.input_completed,
-                    "visible_effect": transition.visible_effect,
-                    "evidence_refs": list(event_evidence_refs),
-                    "frame_id": transition.post_frame_id,
-                    "action_effect": (
-                        action_effect.summary.to_dict()
-                        if action_effect is not None
-                        else None
-                    ),
-                },
+                payload=transition_payload,
                 evidence_refs=event_evidence_refs,
             )
         except (MissionError, ValueError) as exc:
@@ -1850,6 +1976,14 @@ class MissionRuntime:
                 decision_id=decision_id,
                 detail=f"Controller result could not be reconciled: {exc}",
             )
+        self._remember_actor_action(
+            proposal,
+            decision_id=decision_id,
+            obligation_id=obligation_id,
+            target_binding_id=(
+                post.target.binding_id if post.target is not None else None
+            ),
+        )
         return self._result(
             RuntimeStatus.ACTION_RECORDED,
             route=route,

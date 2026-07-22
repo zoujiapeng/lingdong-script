@@ -55,8 +55,12 @@ def _point_schema() -> dict[str, object]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "image_x": {"type": "number", "minimum": 0},
-            "image_y": {"type": "number", "minimum": 0},
+            "image_x": {
+                "type": "number", "minimum": 0, "historyVisible": True,
+            },
+            "image_y": {
+                "type": "number", "minimum": 0, "historyVisible": True,
+            },
         },
         "required": ["image_x", "image_y"],
     }
@@ -72,12 +76,14 @@ def _scroll_schema() -> dict[str, object]:
             "Viewport navigation direction: up reveals content above; "
             "down reveals content below."
         ),
+        "historyVisible": True,
     }
     properties["notches"] = {
         "type": "integer",
         "minimum": 1,
         "maximum": 12,
         "description": "Positive wheel-notch magnitude; larger moves farther.",
+        "historyVisible": True,
     }
     schema["properties"] = properties
     schema["required"] = ["image_x", "image_y", "direction", "notches"]

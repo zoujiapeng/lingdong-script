@@ -377,6 +377,18 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     assert len(verifier.calls) == 1
     assert len(raw_calls) == 1
     second_turn = actor.calls[1][0]
+    assert second_turn.previous_action is not None
+    assert second_turn.previous_action.action == "click"
+    assert dict(second_turn.previous_action.arguments) == {
+        "image_x": 100,
+        "image_y": 100,
+    }
+    assert second_turn.previous_action.local_intent == (
+        "select the visible target on the current frame"
+    )
+    assert second_turn.previous_action.input_completed is True
+    assert second_turn.previous_action.post_action_frame_reconciled is True
+    assert second_turn.previous_action.target_binding_valid is True
     assert second_turn.mission.unchanged_frame_streak == 1
     assert second_turn.mission.last_transition.local_visual_change == "unchanged"
     assert second_turn.mission.last_transition.frame_comparable is True
@@ -432,6 +444,15 @@ def test_repeated_unchanged_actions_are_replay_derived_actor_feedback() -> None:
     assert len(actor.calls) == 3
     assert len(raw_calls) == 2
     assert len(verifier.calls) == 1
+    assert actor.calls[0][0].previous_action is None
+    assert actor.calls[1][0].previous_action is not None
+    assert actor.calls[2][0].previous_action is not None
+    assert dict(actor.calls[1][0].previous_action.arguments) == {
+        "image_x": 100, "image_y": 100,
+    }
+    assert dict(actor.calls[2][0].previous_action.arguments) == {
+        "image_x": 100, "image_y": 100,
+    }
     assert actor.calls[1][0].mission.unchanged_frame_streak == 1
     assert actor.calls[2][0].mission.unchanged_frame_streak == 2
     turn_records = [
@@ -593,7 +614,10 @@ def test_live_turn_sidecar_uses_real_trace_recorder_without_product_bus_events(
         "obligation_claimed", "verification_recorded", "mission_verified",
     ]
     serialized = json.dumps(turns, ensure_ascii=False)
-    for forbidden in ("messages", "image_b64", "image_url", "image_x", "image_y"):
+    for forbidden in (
+        "messages", "image_b64", "image_url", "image_x", "image_y",
+        "previous_action", "local_intent", "historyVisible",
+    ):
         assert forbidden not in serialized
 
 

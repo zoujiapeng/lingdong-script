@@ -468,7 +468,7 @@ def test_envelope_rejects_frame_target_identity_disagreement() -> None:
 
 
 def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> None:
-    assert ACTOR_TURN_INPUT_FORMAT == "actor-turn-input/2"
+    assert ACTOR_TURN_INPUT_FORMAT == "actor-turn-input/3"
     assert ACTOR_MISSION_VIEW_FORMAT == "actor-mission-view/2"
     turn = project_actor_turn_input(_card(), _frame(), _catalog(), _projection())
     raw = json.loads(turn.to_json())
@@ -482,6 +482,7 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
         "coordinate_space": "submitted_image_pixels",
     }
     assert raw["tools"][0]["format"] == ACTOR_TOOL_VIEW_FORMAT
+    assert raw["tools"][0]["requires_local_intent"] is True
     assert raw["tools"][0]["schema"]["properties"]["image_x"] == {"type": "number"}
     text = turn.to_json()
     for secret in (
@@ -517,14 +518,15 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
 @pytest.mark.parametrize(
     "mutate",
     (
-        lambda raw: raw.update(format="actor-turn-input/1"),
+        lambda raw: raw.update(format="actor-turn-input/2"),
         lambda raw: raw["mission"].update(format="actor-mission-view/1"),
+        lambda raw: raw["tools"][0].update(format="actor-tool-view/0"),
         lambda raw: raw["mission"]["last_transition"].update(
             semantic_completion="unknown"
         ),
     ),
 )
-def test_actor_turn_v2_rejects_stale_formats_and_removed_completion_hint(mutate) -> None:
+def test_actor_turn_v3_rejects_stale_formats_and_removed_completion_hint(mutate) -> None:
     raw = json.loads(
         project_actor_turn_input(_card(), _frame(), _catalog(), _projection()).to_json()
     )

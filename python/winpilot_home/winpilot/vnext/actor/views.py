@@ -6,9 +6,15 @@ import re
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+)
 
-from ..capabilities.contracts import ToolCatalog, ToolRoute
+from ..capabilities.contracts import MutationKind, ToolCatalog, ToolRoute
 from ..capability_names import InvalidCapability, canonical_capabilities
 from ..capabilities.state import AuthoritativeFrameState, BrokerProjection, ExecutionRoute
 from ..mission.contracts import MissionCard
@@ -17,8 +23,11 @@ from .proposals import _freeze, _json_value, _reject_overreach, _thaw, _unique_t
 
 ACTOR_MISSION_VIEW_FORMAT = "actor-mission-view/2"
 ACTOR_FRAME_VIEW_FORMAT = "actor-frame-view/0"
-ACTOR_TOOL_VIEW_FORMAT = "actor-tool-view/0"
-ACTOR_TURN_INPUT_FORMAT = "actor-turn-input/2"
+ACTOR_TOOL_VIEW_FORMAT = "actor-tool-view/1"
+ACTOR_TURN_INPUT_FORMAT = "actor-turn-input/3"
+ACTOR_PREVIOUS_ACTION_FORMAT = "actor-previous-action/0"
+MAX_ACTOR_PREVIOUS_INTENT_CHARS = 240
+MAX_ACTOR_PREVIOUS_ARGUMENT_CHARS = 4_096
 _TOOL = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _NO_MUTATION_OUTCOME_TOOLS = frozenset({
     "done", "fail", "complete", "complete_task", "complete_subgoal",
@@ -80,6 +89,59 @@ class ActorTransitionView(_View):
     frame_comparable: Annotated[bool, Field(strict=True)] | None = None
     target_binding_valid: Annotated[bool, Field(strict=True)] | None = None
 
+    @field_validator("action")
+    @classmethod
+    def _action(cls, value: Any) -> str:
+        if type(value) is not str or not _TOOL.fullmatch(value):
+            raise ValueError("transition action must be a canonical tool name")
+        return value
+
+
+class ActorPreviousActionView(ActorTransitionView):
+    """One identity-free, non-authoritative action view for the next turn."""
+
+    format: Literal["actor-previous-action/0"]
+    local_intent: str
+    arguments: Mapping[str, Any]
+    post_action_frame_reconciled: Annotated[bool, Field(strict=True)]
+
+    @field_validator("local_intent")
+    @classmethod
+    def _local_intent(cls, value: Any) -> str:
+        if type(value) is not str or not value.strip():
+            raise ValueError("previous action local intent must be non-empty")
+        normalized = value.strip()
+        if len(normalized) > MAX_ACTOR_PREVIOUS_INTENT_CHARS:
+            raise ValueError("previous action local intent is too long")
+        return normalized
+
+    @field_validator("arguments", mode="before")
+    @classmethod
+    def _arguments(cls, value: Any) -> Mapping[str, Any]:
+        normalized = _json_value(value, "previous_action.arguments")
+        if not isinstance(normalized, dict):
+            raise ValueError("previous action arguments must be an object")
+        _reject_overreach(normalized, "previous_action.arguments")
+        encoded = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        if len(encoded) > MAX_ACTOR_PREVIOUS_ARGUMENT_CHARS:
+            raise ValueError("previous action arguments exceed the bounded context")
+        return normalized
+
+    @field_validator("arguments", mode="after")
+    @classmethod
+    def _freeze_arguments(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        return _freeze(dict(value))
+
+    @field_serializer("arguments")
+    def _serialize_arguments(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return _thaw(value)
+
 
 class ActorFailureView(_View):
     kind: str
@@ -126,9 +188,10 @@ class ActorFrameView(_View):
 
 
 class ActorToolView(_View):
-    format: Literal["actor-tool-view/0"]
+    format: Literal["actor-tool-view/1"]
     name: str
     input_schema: Mapping[str, Any] = Field(alias="schema")
+    requires_local_intent: Annotated[bool, Field(strict=True)]
 
     @field_validator("name")
     @classmethod
@@ -164,10 +227,11 @@ class ActorToolView(_View):
 class ActorTurnInput(_View):
     """Complete model-visible turn input; the image bytes travel separately."""
 
-    format: Literal["actor-turn-input/2"]
+    format: Literal["actor-turn-input/3"]
     mission: ActorMissionView
     frame: ActorFrameView
     tools: tuple[ActorToolView, ...]
+    previous_action: ActorPreviousActionView | None = None
 
     @field_validator("tools")
     @classmethod
@@ -274,7 +338,12 @@ def project_actor_tool_views(
             raise InvalidActorView(f"Broker projected unknown tool {name!r}") from exc
         if spec.route is not ToolRoute.VISUAL_ACTOR:
             raise InvalidActorView(f"tool {name!r} is not owned by Visual Actor route")
-        tools.append(ActorToolView(format=ACTOR_TOOL_VIEW_FORMAT, name=name, schema=spec.schema))
+        tools.append(ActorToolView(
+            format=ACTOR_TOOL_VIEW_FORMAT,
+            name=name,
+            schema=spec.schema,
+            requires_local_intent=(spec.mutation_kind is MutationKind.GUI),
+        ))
     return tuple(tools)
 
 
@@ -283,6 +352,8 @@ def project_actor_turn_input(
     frame: AuthoritativeFrameState,
     catalog: ToolCatalog,
     projection: BrokerProjection,
+    *,
+    previous_action: ActorPreviousActionView | None = None,
 ) -> ActorTurnInput:
     if card.active_obligation_id != projection.obligation_id:
         raise InvalidActorView("MissionCard and BrokerProjection obligation mismatch")
@@ -300,13 +371,17 @@ def project_actor_turn_input(
         mission=project_actor_mission_view(card),
         frame=project_actor_frame_view(frame),
         tools=project_actor_tool_views(catalog, projection),
+        previous_action=previous_action,
     )
 
 
 __all__ = [
     "ACTOR_MISSION_VIEW_FORMAT", "ACTOR_FRAME_VIEW_FORMAT", "ACTOR_TOOL_VIEW_FORMAT",
-    "ACTOR_TURN_INPUT_FORMAT", "InvalidActorView", "ActorObligationView",
+    "ACTOR_TURN_INPUT_FORMAT", "ACTOR_PREVIOUS_ACTION_FORMAT",
+    "MAX_ACTOR_PREVIOUS_INTENT_CHARS", "MAX_ACTOR_PREVIOUS_ARGUMENT_CHARS",
+    "InvalidActorView", "ActorObligationView",
     "ActorArtifactView", "ActorTransitionView", "ActorFailureView", "ActorMissionView",
-    "ActorFrameView", "ActorToolView", "ActorTurnInput", "project_actor_mission_view",
+    "ActorPreviousActionView", "ActorFrameView", "ActorToolView", "ActorTurnInput",
+    "project_actor_mission_view",
     "project_actor_frame_view", "project_actor_tool_views", "project_actor_turn_input",
 ]

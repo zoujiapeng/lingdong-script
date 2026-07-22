@@ -18,6 +18,10 @@ from ...modeling import (
     create_openai_client,
     invoke_chat_completion,
 )
+from .action_history import (
+    ActionHistoryProjectionError,
+    project_action_history_args,
+)
 from .proposals import (
     ACTOR_PROPOSAL_FORMAT,
     ActorContractError,
@@ -25,7 +29,7 @@ from .proposals import (
     actor_proposal_to_json,
     parse_actor_proposal,
 )
-from .views import ActorToolView, ActorTurnInput
+from .views import MAX_ACTOR_PREVIOUS_INTENT_CHARS, ActorToolView, ActorTurnInput
 
 
 VISUAL_ACTOR_ROLE = "visual_actor"
@@ -34,6 +38,12 @@ VISUAL_ACTOR_SYSTEM_CONTRACT = (
     "then call exactly one provided tool for the next action. Use submitted-image "
     "pixel coordinates only. Never answer with text or invent runtime identity."
 )
+_LOCAL_INTENT_FIELD = "local_intent"
+_LOCAL_INTENT_DESCRIPTION = (
+    "Briefly state the direct visible effect intended by this one action "
+    "without copying argument values."
+)
+_PREVIOUS_ACTION_CALL_ID = "previous_visual_action"
 
 
 class VisualActorModelError(ActorContractError):
@@ -101,8 +111,80 @@ def _plain_schema(tool: ActorToolView) -> dict[str, Any]:
     return raw
 
 
-def _validate_arguments(tool: ActorToolView, arguments: Mapping[str, Any]) -> None:
-    schema = _plain_schema(tool)
+def _without_local_annotations(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove local schema-node annotations without changing property names."""
+
+    result = dict(schema)
+    result.pop("historyVisible", None)
+    for keyword in (
+        "properties", "patternProperties", "dependentSchemas", "$defs", "definitions",
+    ):
+        children = result.get(keyword)
+        if isinstance(children, Mapping):
+            result[keyword] = {
+                name: (
+                    _without_local_annotations(child)
+                    if isinstance(child, Mapping)
+                    else child
+                )
+                for name, child in children.items()
+            }
+    items = result.get("items")
+    if isinstance(items, Mapping):
+        result["items"] = _without_local_annotations(items)
+    additional = result.get("additionalProperties")
+    if isinstance(additional, Mapping):
+        result["additionalProperties"] = _without_local_annotations(additional)
+    for keyword in ("allOf", "anyOf", "oneOf", "prefixItems"):
+        children = result.get(keyword)
+        if isinstance(children, list):
+            result[keyword] = [
+                _without_local_annotations(child)
+                if isinstance(child, Mapping)
+                else child
+                for child in children
+            ]
+    for keyword in (
+        "not", "if", "then", "else", "contains", "propertyNames",
+        "unevaluatedProperties", "unevaluatedItems", "additionalItems", "contentSchema",
+    ):
+        child = result.get(keyword)
+        if isinstance(child, Mapping):
+            result[keyword] = _without_local_annotations(child)
+    return result
+
+
+def _provider_parameter_schema(tool: ActorToolView) -> dict[str, Any]:
+    schema = _without_local_annotations(_plain_schema(tool))
+    if not tool.requires_local_intent:
+        return schema
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        raise VisualActorModelError(
+            f"GUI tool {tool.name!r} requires canonical object properties and required"
+        )
+    if _LOCAL_INTENT_FIELD in properties or _LOCAL_INTENT_FIELD in required:
+        raise VisualActorModelError(
+            f"GUI tool {tool.name!r} collides with Actor local-intent envelope"
+        )
+    schema["properties"] = {
+        **properties,
+        _LOCAL_INTENT_FIELD: {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_ACTOR_PREVIOUS_INTENT_CHARS,
+            "description": _LOCAL_INTENT_DESCRIPTION,
+        },
+    }
+    schema["required"] = [*required, _LOCAL_INTENT_FIELD]
+    return schema
+
+
+def _validated_arguments(
+    tool: ActorToolView, arguments: Mapping[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    schema = _provider_parameter_schema(tool)
     try:
         Draft202012Validator.check_schema(schema)
         errors = sorted(
@@ -118,9 +200,20 @@ def _validate_arguments(tool: ActorToolView, arguments: Mapping[str, Any]) -> No
         raise VisualActorResponseError(
             f"Visual Actor arguments do not match Broker schema for {tool.name!r}"
         )
+    execution_arguments = dict(arguments)
+    local_intent = None
+    if tool.requires_local_intent:
+        local_intent = str(execution_arguments.pop(_LOCAL_INTENT_FIELD)).strip()
+    return execution_arguments, local_intent
 
 
-def _proposal_for(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+def _proposal_for(
+    tool: ActorToolView,
+    arguments: Mapping[str, Any],
+    *,
+    local_intent: str | None,
+) -> dict[str, Any]:
+    name = tool.name
     if name == "observe":
         raw = {
             "format": ACTOR_PROPOSAL_FORMAT,
@@ -145,14 +238,16 @@ def _proposal_for(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
             **dict(arguments),
         }
     else:
+        if local_intent is None:
+            raise VisualActorResponseError(
+                f"GUI action {name!r} has no bounded local intent"
+            )
         raw = {
             "format": ACTOR_PROPOSAL_FORMAT,
             "kind": "desktop_action",
             "action": name,
             "args": dict(arguments),
-            "local_intent": (
-                "perform the selected action on the current submitted image"
-            ),
+            "local_intent": local_intent,
         }
     try:
         proposal = parse_actor_proposal(raw)
@@ -165,7 +260,7 @@ def _provider_tools(turn: ActorTurnInput) -> list[dict[str, Any]]:
     result = []
     missing_description = object()
     for tool in turn.tools:
-        parameters = _plain_schema(tool)
+        parameters = _provider_parameter_schema(tool)
         description = parameters.pop("description", missing_description)
         if description is not missing_description and (
             type(description) is not str
@@ -186,6 +281,85 @@ def _provider_tools(turn: ActorTurnInput) -> list[dict[str, Any]]:
             "function": function,
         })
     return result
+
+
+def _previous_action_messages(turn: ActorTurnInput) -> list[dict[str, Any]]:
+    previous = turn.previous_action
+    transition = turn.mission.last_transition
+    if (
+        previous is None
+        or transition is None
+        or not previous.input_completed
+        or not previous.post_action_frame_reconciled
+        or previous.target_binding_valid is not True
+        or (
+            previous.action,
+            previous.input_completed,
+            previous.visible_effect,
+            previous.local_visual_change,
+            previous.frame_comparable,
+            previous.target_binding_valid,
+        ) != (
+            transition.action,
+            transition.input_completed,
+            transition.visible_effect,
+            transition.local_visual_change,
+            transition.frame_comparable,
+            transition.target_binding_valid,
+        )
+    ):
+        return []
+    matching_tools = tuple(tool for tool in turn.tools if tool.name == previous.action)
+    if len(matching_tools) != 1:
+        return []
+    try:
+        tool = matching_tools[0]
+        call_arguments = dict(project_action_history_args(
+            previous.arguments, tool.input_schema,
+        ))
+        call_arguments[_LOCAL_INTENT_FIELD] = previous.local_intent
+        _validated_arguments(tool, call_arguments)
+    except (ActionHistoryProjectionError, VisualActorModelError):
+        return []
+    receipt_payload = {
+        "input_completed": previous.input_completed,
+        "post_action_frame_reconciled": previous.post_action_frame_reconciled,
+        "visible_effect": previous.visible_effect,
+        "local_visual_change": previous.local_visual_change,
+        "frame_comparable": previous.frame_comparable,
+        "target_binding_valid": previous.target_binding_valid,
+    }
+    return [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": _PREVIOUS_ACTION_CALL_ID,
+                "type": "function",
+                "function": {
+                    "name": previous.action,
+                    "arguments": json.dumps(
+                        call_arguments,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                },
+            }],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": _PREVIOUS_ACTION_CALL_ID,
+            "content": json.dumps(
+                receipt_payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        },
+    ]
 
 
 class OpenAIVisualActor:
@@ -290,18 +464,23 @@ class OpenAIVisualActor:
         # from the same ActorTurnInput, while the model sees one smaller schema
         # copy and no legacy history.
         turn_payload = json.loads(turn.to_json())
+        previous_action_messages = _previous_action_messages(turn)
+        mission_payload = turn_payload["mission"]
+        if previous_action_messages:
+            mission_payload["last_transition"] = None
         user_payload = {
             "submitted_image_size": {
                 "width": submitted_size[0],
                 "height": submitted_size[1],
             },
-            "mission": turn_payload["mission"],
+            "mission": mission_payload,
             "frame": turn_payload["frame"],
         }
         request = {
             "model": self._model,
             "messages": [
                 {"role": "system", "content": VISUAL_ACTOR_SYSTEM_CONTRACT},
+                *previous_action_messages,
                 {
                     "role": "user",
                     "content": [
@@ -346,8 +525,12 @@ class OpenAIVisualActor:
             raise VisualActorResponseError(
                 f"Visual Actor called tool outside Broker projection: {name!r}"
             )
-        _validate_arguments(tool, arguments)
-        return _proposal_for(name, arguments)
+        execution_arguments, local_intent = _validated_arguments(tool, arguments)
+        return _proposal_for(
+            tool,
+            execution_arguments,
+            local_intent=local_intent,
+        )
 
 
 __all__ = [

@@ -55,6 +55,25 @@ def test_live_catalog_advertises_only_currently_executable_contracts() -> None:
     )
 
 
+def test_live_catalog_history_visibility_is_explicit_and_default_deny() -> None:
+    catalog = build_live_catalog()
+    expected = {
+        "click": {"image_x", "image_y"},
+        "double_click": {"image_x", "image_y"},
+        "scroll": {"image_x", "image_y", "direction", "notches"},
+        "type_text": set(),
+        "hotkey": set(),
+    }
+
+    for tool_name, visible_names in expected.items():
+        properties = catalog.get(tool_name).schema["properties"]
+        assert {
+            name
+            for name, schema in properties.items()
+            if schema.get("historyVisible") is True
+        } == visible_names
+
+
 def test_click_contract_is_exactly_submitted_image_xy() -> None:
     validator = ToolArgumentValidator(build_live_catalog())
     rng = random.Random(8701)
