@@ -197,6 +197,36 @@ class WindowsDesktopFactsReader:
             raise WindowsDesktopFactsError("target DWM region is unavailable")
         return _TargetSample(window, raw_region)
 
+    def read_target_identity(
+        self,
+        hwnd: int,
+        *,
+        binding_id: str,
+        epoch: int,
+    ) -> TargetCommitIdentity:
+        """Read one stable target identity without selecting or focusing it.
+
+        Runtime composition needs the same mechanical HWND/root/process/DWM
+        facts before it can publish its first frame.  Keep that read inside
+        this existing Windows-facts owner instead of duplicating Win32 calls
+        in a coordinator.
+        """
+
+        first = self._target_sample(hwnd)
+        second = self._target_sample(hwnd)
+        if second != first:
+            raise WindowsDesktopFactsError(
+                "target identity changed during Windows observation"
+            )
+        return TargetCommitIdentity(
+            binding_id=binding_id,
+            hwnd=first.window.hwnd,
+            root_hwnd=first.window.root_hwnd,
+            process_id=first.window.process_id,
+            epoch=epoch,
+            window_region=first.region,
+        )
+
     def read(self, request: CommitAdmissionRequest) -> WindowsDesktopFacts:
         if not isinstance(request, CommitAdmissionRequest):
             raise TypeError("request must be CommitAdmissionRequest")

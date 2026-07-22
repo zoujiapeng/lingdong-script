@@ -116,6 +116,35 @@ def test_reader_uses_os_identity_but_only_carries_runtime_binding_and_epoch():
     assert region_reads[0] < backend.calls.index(("foreground_hwnd",)) < region_reads[1]
 
 
+def test_reader_exposes_stable_target_identity_for_runtime_composition():
+    backend = Backend()
+
+    target = WindowsDesktopFactsReader(backend).read_target_identity(
+        101,
+        binding_id="binding-runtime",
+        epoch=4,
+    )
+
+    assert target == TargetCommitIdentity(
+        "binding-runtime", 101, 100, 7, 4, (10, 20, 800, 600),
+    )
+    assert backend.calls.count(("window_region", 101)) == 2
+    assert ("foreground_hwnd",) not in backend.calls
+    assert not any(call[0] == "window_from_point" for call in backend.calls)
+
+
+def test_runtime_composition_target_read_fails_closed_on_sample_drift():
+    backend = Backend()
+    backend.second_target_region = (11, 20, 800, 600)
+
+    with pytest.raises(WindowsDesktopFactsError, match="changed"):
+        WindowsDesktopFactsReader(backend).read_target_identity(
+            101,
+            binding_id="binding-runtime",
+            epoch=4,
+        )
+
+
 def test_adapter_builds_environment_and_gate_admits_once():
     backend = Backend()
     runtime = RuntimeState()
