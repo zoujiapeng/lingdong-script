@@ -161,7 +161,7 @@ def _context(*, contract=None, stop_event=None):
                     "title": "Unknown visual surface",
                     "process_id": 7,
                     "class_name": "Surface",
-                    "rect": [10, 20, 800, 600],
+                    "rect": [10, 20, 810, 620],
                     "captured_at": int(time.time() * 1000),
                     "foreground_verified": True,
                     "usable": True,
@@ -338,7 +338,7 @@ def test_invalid_handoff_fails_closed_without_model_or_legacy_fallback():
     (
         ("foreground_verified", False),
         ("process_id", 8),
-        ("rect", [11, 20, 800, 600]),
+        ("rect", [11, 20, 810, 620]),
     ),
 )
 def test_handoff_identity_mismatch_fails_before_actor(field, value):
