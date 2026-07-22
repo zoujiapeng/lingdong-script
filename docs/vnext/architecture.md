@@ -1,9 +1,10 @@
 # vNext Agent 核心架构
 
-本文同时描述 vNext 的目标架构和当前实现边界。P0/P1/P1.5、P2/P3 shadow 已实现；P4/P5
-现有一条默认关闭、按 run 显式选择的 click-only 实验链，已经从同一产品入口接到唯一 Visual Actor、
+本文同时描述 vNext 的目标架构和当前实现边界。P0/P1/P1.5、P2/P3 shadow 已实现，queue-time
+capability admission 已收敛为一个 runtime-aware owner；P4/P5 现有一条默认关闭、按 run 显式选择的
+click-only 实验链，已经从同一产品入口接到唯一 Visual Actor、
 Capability Broker、共享 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。
-legacy 仍默认；两个随机 seed 的冷启动、空 session、可见 Electron click canary 已通过独立
+legacy 仍默认；三个随机 seed 的冷启动、空 session、可见 Electron click canary 已通过独立
 trusted-browser oracle，但完整 P7、其他 GUI 原语和默认切换均未完成。完整 legacy
 运行时事实仍以 [../architecture.md](../architecture.md) 和 [../winpilot-agent.md](../winpilot-agent.md) 为准。
 
@@ -482,9 +483,20 @@ reprojection 中重新计算；过龄帧不能进入 click admission。任务回
 一致，当前 composition 再以 24 回合上限收紧。物理 `RawDeviceExecutor` 由 Server composition
 root 创建并注入 coordinator；Runtime/Actor/Broker 都不能自行实例化另一份。
 
-当前 Server 在 runtime-specific composition 前仍执行 legacy `CapabilityPlanner` 的 satisfiable/
-runtime-satisfiable admission。这是扩大 vNext capability 前必须迁移的边界债务：最终 admission
-必须理解选中的 runtime 且只有一个 owner，不能让 legacy Planner 与 vNext Broker 同时解释能力。
+当前 queue-time capability admission 已收敛到一个 `DesktopRuntimeAdmission` owner。Server 先冻结
+`DesktopRuntimeSelection`；vNext composition root 随后构造一个不可变
+`RuntimeCapabilitySnapshot`，其中机械列出 canonical capability owner、ToolCatalog、Controller 可执行
+GUI 工具和只读服务。进入 run queue、模型调用或桌面 mutation 之前，admission 只核对 canonical
+TaskContract/Mission 要求是否被该 snapshot 覆盖，不理解 GUI 路线，也不根据应用名、任务原句或模型
+自报能力做决定。legacy 分支仍在同一 admission owner 内按原顺序执行既有 static/runtime preflight，
+因此没有放宽 legacy 缺失能力检查。
+
+同一个 snapshot 实例同时供 queue-time admission、`ExecutionPolicy` safe profile、live
+`RuntimeState` 和 `CapabilityBroker` 使用；Catalog、Controller tool parity、服务与 capability owner 不再由
+coordinator 的第二组常量重新解释。snapshot fingerprint 只写 private trace sidecar 供审计，不进入模型
+payload，也不成为第二份运行状态。queue-time admission 与每回合 Broker 不是两个 Planner：前者只证明
+所选 runtime composition 能承载 canonical broad requirements，后者只按当前 obligation 和真实状态投影
+当回合小工具面。
 
 vNext 逐步替代：
 

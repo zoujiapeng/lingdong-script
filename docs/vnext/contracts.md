@@ -1,6 +1,6 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达。P4/P5 现有默认关闭的 click-only live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、Broker 小工具面、共享 atomic click/double-click 执行链、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认；两个随机 seed 的真实 Electron click-only canary 已通过独立 oracle，但完整 P7 未达，ActionEffectVerifier、其他 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
+本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的 click-only live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、Broker 小工具面、共享 atomic click/double-click 执行链、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认；三个随机 seed 的真实 Electron click-only canary 已通过独立 oracle，但完整 P7 未达，ActionEffectVerifier、其他 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
 
 ## 1. 版本与基本规则
 
@@ -27,6 +27,8 @@ controller-transition/0
 mission-runtime-result/0
 desktop-runtime-coordinator-context/1
 desktop-runtime-coordinator-result/0
+runtime-capability-snapshot/0
+runtime-admission-decision/0
 transition-record/0
 verifier-assessment/0
 verification-result/0
@@ -704,7 +706,7 @@ unknown
 
 `ObserveProposal` 只刷新观察；`BlockedReport` 只产生当前义务的 blocked event，其自然语言事实不会升级为 `VerifiedFact`。`CapabilityRequest`、`InspectionRequest` 和 `ReplanRequest` 在 P4a 均返回 `unavailable`；尤其 P6 Planner/Inspector 未启用时必须 fail closed。
 
-当前产品接线只对显式 `vnext` run 组装 click-only Actor、Broker、Frame/Controller bridge 与验证端口。两个随机 seed 已通过真实 Electron 与独立 oracle，但这不等于全局 Broker enforce 或完整 P7 已通过；P3 的 necessary-tool recall 门槛仍未达到。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
+当前产品接线只对显式 `vnext` run 组装 click-only Actor、Broker、Frame/Controller bridge 与验证端口。三个随机 seed 已通过真实 Electron 与独立 oracle，但这不等于全局 Broker enforce 或完整 P7 已通过；P3 的 necessary-tool recall 门槛仍未达到。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
 
 ### 11.2 P4a ControllerTransition
 
@@ -736,9 +738,35 @@ full-goal ExecuteDesktopTask 的整数 `max_steps`（1..400），session `reques
 与之相等，effective budget 为它与 coordinator 上限（默认 24）的较小值。缺失、冲突或非法值均在
 模型/桌面 mutation 前 fail closed。
 
-当前产品入口在 runtime-specific coordinator composition 前仍调用 legacy `CapabilityPlanner` 的
-两项 admission assertion。这不是 vNext capability/Broker contract；它是扩大 vNext 工具、provider
-或多原语前必须迁移的 legacy guard，最终不得与 Broker 并列成为第二个能力解释 owner。
+### 11.5 queue-time runtime capability admission
+
+`DesktopRuntimeAdmission` 是产品 queue-time capability admission 的唯一 owner。它接收 Runtime 冻结的
+`DesktopRuntimeSelection`、canonical `TaskContract` 和（仅 vNext）composition root 构造的
+`RuntimeCapabilitySnapshot`；接受后返回 `RuntimeAdmissionDecision`，拒绝则必须发生在 run prepare、
+模型调用、Controller 构造性使用和桌面 mutation 之前。该合同不选择 GUI 路线、工具、坐标、目标或恢复策略。
+
+`runtime-capability-snapshot/0` 是不可变 composition inventory，至少机械绑定：
+
+- `runtime_version`；
+- `ToolCatalog` fingerprint 和 capability owner registry；
+- Controller 实际提供的 GUI mutation tool names；
+- 可用只读/执行服务；
+- 由上述 canonical material 派生的 snapshot fingerprint。
+
+构造时必须 fail closed 校验 Catalog 所需 capability 均有 live owner、GUI Catalog tools 与 Controller tool
+names 完全一致、GUI mutation 有唯一 desktop controller、像素读取 capability 有 Visual Actor 与权威帧输入
+服务，并拒绝未知 service 或没有机械 backing 的 capability。vNext coordinator 持有的同一个 snapshot 实例
+同时投影给 queue-time admission、`ExecutionPolicy`、live `RuntimeState` 和 `CapabilityBroker`；任何一层不得
+复制另一组 availability 常量或按任务文本扩写 snapshot。
+
+`runtime-admission-decision/0` 只保存 accepted decision：冻结 runtime、required/available canonical
+capabilities、required/available services、审计理由和（vNext）snapshot fingerprint。vNext 只接受
+`task-contract/1`、`typed-stage-5`、单个 lossless full-goal `ExecuteDesktopTask`，再从 legacy bridge 的
+required obligation 机械投影 canonical capability；未知 legacy capability metadata 不进入 required set。
+缺 contract、错误 runtime/snapshot identity、缺 capability/service 或 Catalog/Controller parity 失败都
+fail closed。legacy 分支不接收 vNext snapshot；有 TaskContract 时仍按原顺序执行既有 static 与 runtime
+preflight，无 TaskContract 的兼容 graph 仍保持原行为。private trace sidecar 可以记录 accepted decision，
+但不得修改 BUS/WebSocket 产品事件，也不得成为第二份 admission 状态。
 
 ## 12. BrokerProjection 与 CapabilityGrant
 

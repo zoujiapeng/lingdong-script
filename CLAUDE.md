@@ -44,7 +44,8 @@ Profiler、P6 Planner/Inspector、paired/真实任务门槛、默认切换和 le
 - Actor 可以请求 broad capability，但 Runtime/Broker 才能授予有界 grant；
 - provider SDK 隐式重试必须关闭；`ModelCallRuntime` 只可重试同一冻结 request。poll、redecision 和 action replay 是不同合同，mutation 结果不确定时禁止自动重放；
 - coordinator context `/1` 的 `is_paused` 只能非阻塞读取；模型期间 pause 必须让旧 proposal 在 admission 前失效。frame freshness 使用显式 max-age，回合预算来自 canonical ExecuteDesktopTask `max_steps`，RawDevice 只由产品 composition root 注入；
-- 扩大 vNext capability/provider 前先迁移 Server 的 legacy `CapabilityPlanner` admission，不能让它和 Broker 长期形成两个能力解释 owner；
+- queue-time capability admission 只有 `DesktopRuntimeAdmission` 一个 owner；legacy 保留原 preflight，vNext 只从 composition root 的不可变 `RuntimeCapabilitySnapshot` 准入，并让 `ExecutionPolicy`、live `RuntimeState` 与 Broker 复用同一 snapshot，禁止复制 availability 常量；
+- 下一能力门槛是把 type/hotkey/scroll/drag/draw/held-pointer/ROI observe 逐项接入同一 snapshot/Catalog/Broker/Controller parity 合同并做同入口 E2E，不通过 prompt 扩写或 legacy fallback 补齐；
 - 基础工具、Frame/Controller、应用发现和调度骨架未经证明前，不通过 prompt 或新增模型角色修单例；
 - vNext 共用当前 Electron 入口和 E2E，不能形成第二套产品链；
 - 每个迁移切片必须列出未来删除的旧职责。

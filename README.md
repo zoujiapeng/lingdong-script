@@ -21,10 +21,11 @@
 Electron「智能代理」
   -> POST /api/v2/task-contracts/compile
   -> POST /api/v2/arp/runs（per-run Legacy 默认 / vNext 实验）
-  -> Task Contract / ARP capability preflight
+  -> one queue-time DesktopRuntimeAdmission
   -> legacy: StageRuntime -> AgentRunner -> FastGuiController
-     或 vNext click-only: MissionRuntime -> Visual Actor -> Broker
-                         -> shared Controller/RawDevice -> independent Verifier
+     或 vNext click-only: immutable RuntimeCapabilitySnapshot
+                          -> MissionRuntime -> Visual Actor -> Broker
+                          -> shared Controller/RawDevice -> independent Verifier
   -> authoritative frame + physical input transaction + evidence
   -> Run projection / trace / artifact
 ```
@@ -61,8 +62,8 @@ Electron「智能代理」
 - run 级冷启动、session 引用、可选 MCP、Memory Graph 和已验证 Skill replay；
 - 真实 Electron 客户端 E2E harness 与浏览器侧可信指针 oracle。
 - WinPilot product package 的模型请求由统一 Runtime 冻结并标识；provider SDK 隐式重试关闭，request retry、poll、redecision 与桌面 action replay 使用不同合同。
-- vNext 已有默认关闭、按 run 显式选择的 click-only 实验链：一个 Visual Actor、Broker 小工具面、唯一 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。客户端默认仍为 legacy；2026-07-22 两个随机 seed 的冷启动、空 session、可见 Electron/UIA `precise-click` 已通过独立 trusted-browser oracle，但只证明这条受控点击闭环。
-- vNext coordinator context `/1` 分离回合边界 pause wait 与非阻塞 pause reading，明确用 frame max-age（默认 30 秒）拒绝旧帧，并只从 canonical ExecuteDesktopTask `max_steps` 取得回合预算；物理 RawDevice 由产品 composition root 注入。Server 仍在 vNext 组装前运行 legacy `CapabilityPlanner` admission，这是扩大工具/provider 前必须收敛的迁移债务。
+- vNext 已有默认关闭、按 run 显式选择的 click-only 实验链：一个 Visual Actor、Broker 小工具面、唯一 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。客户端默认仍为 legacy；2026-07-22 三个随机 seed 的冷启动、空 session、可见 Electron/UIA `precise-click` 已通过独立 trusted-browser oracle，但只证明这条受控点击闭环。
+- vNext coordinator context `/1` 分离回合边界 pause wait 与非阻塞 pause reading，明确用 frame max-age（默认 30 秒）拒绝旧帧，并只从 canonical ExecuteDesktopTask `max_steps` 取得回合预算；物理 RawDevice 由产品 composition root 注入。queue-time capability admission 已收敛为唯一 `DesktopRuntimeAdmission`：legacy 保留原 preflight，vNext 从一个不可变 `RuntimeCapabilitySnapshot` 机械准入，同一 snapshot 供 `ExecutionPolicy`、live `RuntimeState` 与 Broker 使用。该收敛没有扩写 prompt、工具面或 Controller；下一门槛仍是多原语 parity 与同入口 E2E。
 
 原生视觉配置默认关闭 UIA、OCR 和 predictive OCR；这些结构化 provider 仍可在来源、当前帧和预期收益明确时显式启用，但动作失败不会自动触发它们。
 
@@ -71,7 +72,7 @@ Electron「智能代理」
 - 本地抖音客户端成功显示 `kimi k3` 搜索结果；这是冷启动、空 session 的真实客户端任务，终态由人工视觉核对，通用 report 没有独立业务 oracle。
 - 最近一次 `game-drag-v2` 已通过真实 Electron 客户端入口、冷启动和空 session 进入 Agent，并产生了可信的真实鼠标事件；但模型把弯曲通道误读成直角路径，独立 trusted-browser pointer oracle 判定失败。因此这次只能证明入口、记忆隔离和真实输入链路有效，不能记为任务成功。报告保存在 `output/playwright/client-visual-e2e/20260719-213401-suite/`。
 - 网易云任务已在真实客户端达到“播放请求歌曲、Windows 音量 100%”，并由用户确认成功；随后按用户要求停止声音与测试，因此不伪称 harness 已产生 formal terminal pass。
-- 2026-07-22 的 vNext click-only canary 从同一可见 Electron 客户端选择器进入，冷启动且 session 为空。seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）和 seed `424242`（run `arp-20260722-154447-9329b4`，2 turns）均通过独立 trusted-browser pointer oracle；这不是 legacy paired、11 题、真实应用或其他 GUI 原语的通过证据。
+- 2026-07-22 的 vNext click-only canary 从同一可见 Electron 客户端选择器进入，冷启动且 session 为空。seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）、seed `424242`（run `arp-20260722-154447-9329b4`，2 turns）和 capability-admission 收敛后的 seed `135791`（run `arp-20260722-165702-086da6`，2 turns）均通过独立 trusted-browser pointer oracle；这不是 legacy paired、11 题、真实应用或其他 GUI 原语的通过证据。
 
 单次样本不能换算为成功率；11 个真实任务和混合长任务仍需继续逐项验收。
 
@@ -146,7 +147,7 @@ npm run e2e:client:mixed
 - [文档索引](docs/README.md)
 - [架构与运行原理](docs/architecture.md)
 - [视觉运行时原则](docs/visual-runtime-principles.md)
-- [vNext Agent 核心旁路设计](docs/vnext/README.md)（P4/P5 click-only 实验链已接到同一 per-run 客户端入口并通过两个随机 seed 的受控 Electron canary；legacy 默认，P7 完整门槛、多原语、P6、默认切换和 legacy 删除尚未完成）
+- [vNext Agent 核心旁路设计](docs/vnext/README.md)（P4/P5 click-only 实验链已接到同一 per-run 客户端入口并通过三个随机 seed 的受控 Electron canary；legacy 默认，P7 完整门槛、多原语、P6、默认切换和 legacy 删除尚未完成）
 - [vNext Task Profiler 与执行深度](docs/vnext/execution-profile.md)（P2b 真实 Profiler 已默认关闭地接入 trace-only shadow，不参与 legacy 执行）
 - [端到端测试规范](docs/testing.md)
 - [WinPilot Agent 细节](docs/winpilot-agent.md)
