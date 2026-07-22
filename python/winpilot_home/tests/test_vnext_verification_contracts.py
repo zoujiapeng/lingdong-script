@@ -176,6 +176,27 @@ def test_request_round_trip_binds_scope_and_ignores_untrusted_evidence() -> None
         _request(evidence=(replace(trusted, obligation_id="other-obligation"),))
 
 
+def test_runtime_binding_accepts_real_visual_trust_as_policy_gated_evidence() -> None:
+    visual = _evidence("visual", "independent_visual_model")
+    request = _request(evidence=(visual,))
+    assessment = VerifierAssessment(
+        verified=True,
+        satisfied_conditions=request.required_conditions,
+        missing_conditions=(),
+        contradictions=(),
+        concise_reason="current pixels cover the requested condition",
+    )
+
+    result = ObligationVerificationResult.bind(
+        request,
+        assessment,
+        verifier_kind="independent_visual_model",
+        evidence_refs=(visual.id,),
+    )
+
+    assert result.evidence_refs == (visual.id,)
+
+
 def test_runtime_binding_is_stable_and_requires_full_coverage_and_trusted_evidence() -> None:
     proof = _evidence("proof", "deterministic")
     request = _request(

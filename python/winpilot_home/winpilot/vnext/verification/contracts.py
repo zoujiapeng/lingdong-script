@@ -26,6 +26,7 @@ TRUST_ORDER = (
     "application_oracle",
     "provider_receipt",
     "trusted_external_harness",
+    "independent_visual_model",
 )
 FORBIDDEN_EFFECT_CONDITION_PREFIX = "forbidden_effect_absent:"
 
