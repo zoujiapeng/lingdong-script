@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from .contracts import (
+    EvidencePolicy,
     EvidenceRef,
     MissionDefinition,
     MissionEvent,
@@ -175,6 +176,52 @@ def _safe_to_split(rows: tuple[tuple[Any, Any], ...]) -> bool:
     return len(rows) <= 1 or _row_edges(rows)[1]
 
 
+def _enum_text(value: Any) -> str:
+    """Read a typed enum or its JSON value without importing task-contract/1."""
+
+    return str(getattr(value, "value", value) or "").strip()
+
+
+def _row_capability_values(raw: Any, stage: Any) -> tuple[Any, ...]:
+    values: list[Any] = []
+    for owner in (
+        raw,
+        stage,
+        _get(raw, "execution", None),
+        _get(stage, "execution", None) if stage else None,
+    ):
+        values.extend(_items(_get(owner, "required_capabilities", ())) if owner else ())
+    for provider in _items(_get(raw, "evidence_providers", ())):
+        values.extend(_items(_get(provider, "capabilities", ())))
+    return tuple(values)
+
+
+def _allows_independent_visual_verifier(raw: Any, stage: Any) -> bool:
+    """Project only an explicit typed visual-verification requirement."""
+
+    declared = set()
+    execution = _get(stage, "execution", None) if stage else None
+    declared.update(
+        str(item or "").strip()
+        for item in _items(_get(execution, "verifier_requirements", ()))
+    )
+    for provider in _items(_get(raw, "evidence_providers", ())):
+        declared.update(
+            str(item or "").strip()
+            for item in _items(_get(provider, "capabilities", ()))
+        )
+    return "visual.semantic_verify" in declared
+
+
+def _is_lossless_desktop_goal(rows: tuple[tuple[Any, Any], ...]) -> bool:
+    """A generic desktop stage delegates one complete goal to the Visual Actor."""
+
+    if len(rows) != 1:
+        return False
+    _raw, stage = rows[0]
+    return bool(stage) and _enum_text(_get(stage, "type", "")) == "ExecuteDesktopTask"
+
+
 def project_legacy_contract(
     contract: Any,
     *,
@@ -200,22 +247,48 @@ def project_legacy_contract(
     rows = _legacy_obligation_rows(contract)
     unknown_capabilities: list[str] = []
     for raw, stage in rows:
-        values: list[Any] = []
-        for owner in (
-            raw,
-            stage,
-            _get(raw, "execution", None),
-            _get(stage, "execution", None) if stage else None,
-        ):
-            values.extend(_items(_get(owner, "required_capabilities", ())) if owner else ())
-        for provider in _items(_get(raw, "evidence_providers", ())):
-            values.extend(_items(_get(provider, "capabilities", ())))
-        _, unknown = _partition_capabilities(values)
+        _, unknown = _partition_capabilities(_row_capability_values(raw, stage))
         for item in unknown:
             if item not in unknown_capabilities:
                 unknown_capabilities.append(item)
 
     experience_policy = str(_get(contract, "experience_policy", "allow") or "allow")
+    if _is_lossless_desktop_goal(rows):
+        raw, stage = rows[0]
+        capabilities, _unknown = _partition_capabilities(
+            _row_capability_values(raw, stage)
+        )
+        return MissionDefinition(
+            mission_id=mission_id,
+            run_id=run_id,
+            original_goal=original_goal,
+            obligations=(ObligationSpec(
+                id="obligation-1",
+                desired_state=original_goal,
+                acceptance_criteria=(original_goal,),
+                required_capabilities=capabilities,
+                evidence_policy=EvidencePolicy(
+                    allow_independent_visual_verifier=(
+                        _allows_independent_visual_verifier(raw, stage)
+                    ),
+                ),
+                source_span=(0, len(original_goal)),
+            ),),
+            source="legacy_shadow",
+            experience_policy=experience_policy,
+            metadata={
+                "legacy_contract_format": str(
+                    _get(contract, "format", "task-contract/1")
+                    or "task-contract/1"
+                ),
+                "legacy_task_id": task_id,
+                "legacy_projection": "full_goal_execute_desktop",
+                **(
+                    {"legacy_unknown_capabilities": tuple(unknown_capabilities)}
+                    if unknown_capabilities else {}
+                ),
+            },
+        )
     # A contract with no required row cannot prove any user-visible completion
     # condition.  Keep the original goal as one required obligation instead
     # of manufacturing an apparently successful optional graph.

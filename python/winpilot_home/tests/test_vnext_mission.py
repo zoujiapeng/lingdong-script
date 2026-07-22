@@ -910,6 +910,62 @@ def test_real_task_contract_bridge_collapses_unsafe_execute_desktop_split() -> N
     assert safe_definition.obligations[1].depends_on == ("first",)
 
 
+def test_real_execute_desktop_bridge_keeps_full_goal_and_visual_verifier_policy() -> None:
+    from winpilot.tasking.contracts import (
+        CompletionObligation,
+        EvidenceProviderSpec,
+        CapabilitySelection,
+        StageType,
+        TaskContract,
+        TaskIntent,
+        TaskStage,
+    )
+
+    goal = "Complete the currently visible unknown interface task"
+    provider = EvidenceProviderSpec(
+        id="closed-loop",
+        capabilities=["visual.observe", "visual.semantic_verify"],
+    )
+    obligation = CompletionObligation(
+        id="desktop.full_goal_verified",
+        description="internal completion contract",
+        predicate="desktop.full_goal_verified",
+        stage_id="desktop",
+        evidence_providers=[provider],
+    )
+    stage = TaskStage(
+        id="desktop",
+        type=StageType.EXECUTE_DESKTOP_TASK,
+        name="generic desktop task",
+        required_capabilities=["visual.adaptive_interaction"],
+        obligations=[obligation],
+        execution=CapabilitySelection(
+            required_capabilities=["visual.adaptive_interaction"],
+            verifier_requirements=["visual.observe", "visual.semantic_verify"],
+        ),
+    )
+    contract = TaskContract(
+        task_id="real-full-goal",
+        task=goal,
+        intent=TaskIntent(original_text=goal),
+        stages=[stage],
+        obligations=[obligation],
+        final_conditions=[obligation.id],
+        experience_policy="disabled",
+    )
+
+    definition = project_legacy_contract(contract, mission_id="m1", run_id="r1")
+
+    assert len(definition.obligations) == 1
+    projected = definition.obligations[0]
+    assert projected.desired_state == goal
+    assert projected.acceptance_criteria == (goal,)
+    assert projected.evidence_policy.allow_independent_visual_verifier is True
+    assert projected.required_capabilities == ("visual.interact", "visual.observe")
+    assert definition.metadata["legacy_projection"] == "full_goal_execute_desktop"
+    assert "visual.semantic_verify" in definition.metadata["legacy_unknown_capabilities"]
+
+
 def test_legacy_trace_shadow_never_turns_done_or_ok_into_verified() -> None:
     definition = MissionDefinition.from_goal("完成未知目标", mission_id="m1", run_id="r1")
     projection = project_legacy_trace(
