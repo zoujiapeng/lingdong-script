@@ -237,6 +237,7 @@ class RuntimeStatus(str, Enum):
     ACTION_RECORDED = "action_recorded"
     VERIFICATION_REQUIRED = "verification_required"
     VERIFICATION_RECORDED = "verification_recorded"
+    MISSION_VERIFIED = "mission_verified"
     BLOCKED = "blocked"
     OBSERVED = "observed"
     UNAVAILABLE = "unavailable"

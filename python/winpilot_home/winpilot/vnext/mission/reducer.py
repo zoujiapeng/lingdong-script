@@ -820,35 +820,53 @@ def _apply_event(
                 "mission verification must cover the exact accepted obligation verifications"
             )
         evidence_ids = _event_evidence_ids(event, payload)
-        refs = _evidence_refs(projection, scope, evidence_ids, required=True)
-        required_obligation_evidence = {
+        required_obligation_evidence = tuple(dict.fromkeys(
             evidence_id
             for obligation_id in projection.definition.stable_topological_order
             if projection.obligation_definition(obligation_id).required
             for evidence_id in projection.obligation_state(
                 obligation_id
             ).verified_evidence_refs
-        }
-        if not required_obligation_evidence.issubset(set(evidence_ids)):
+        ))
+        aggregate_evidence_id = _payload_text(payload, "aggregate_evidence_id")
+        aggregate_payload_hash = _payload_text(payload, "aggregate_payload_hash")
+        if not aggregate_evidence_id or not aggregate_payload_hash:
             raise EvidenceScopeError(
-                "mission verification evidence does not cover every required obligation"
+                "mission verification requires aggregate evidence identity and payload hash"
             )
-        if not any(ref.obligation_id in (None, "") for ref in refs):
-            raise EvidenceScopeError(
-                "mission verification requires independent mission-level evidence"
+        if (
+            len(aggregate_payload_hash) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in aggregate_payload_hash
             )
-        # A mission verifier may aggregate obligation evidence, but it may not
-        # use an actor/model claim as its only identity proof.  The evidence
-        # must still be in this exact mission/run scope (checked above).
-        disallowed = [
-            ref.id
-            for ref in refs
-            if ref.trust in {"actor_claim", "model_self", "telemetry_only"}
-            or ref.kind in {"claim", "model_claim"}
-        ]
-        if disallowed:
+        ):
             raise EvidenceScopeError(
-                f"mission verification evidence is not independent: {disallowed}"
+                "mission verification aggregate payload hash must be lowercase SHA-256"
+            )
+        if evidence_ids != required_obligation_evidence + (aggregate_evidence_id,):
+            raise EvidenceScopeError(
+                "mission verification evidence must exactly cover obligations and aggregate"
+            )
+        refs = _evidence_refs(projection, scope, evidence_ids, required=True)
+        aggregate = refs[-1]
+        expected_aggregate_id = "evidence-mission-" + hashlib.sha256(
+            ("evidence|" + aggregate_payload_hash).encode("utf-8")
+        ).hexdigest()[:24]
+        expected_verification_id = "mission-verification-" + hashlib.sha256(
+            ("verification|" + aggregate_payload_hash).encode("utf-8")
+        ).hexdigest()[:24]
+        if (
+            aggregate.id != aggregate_evidence_id
+            or aggregate.id != expected_aggregate_id
+            or aggregate.payload_hash != aggregate_payload_hash
+            or aggregate.kind != "mission_completion_aggregate"
+            or aggregate.trust != "deterministic"
+            or aggregate.obligation_id not in (None, "")
+            or verification_id != expected_verification_id
+        ):
+            raise EvidenceScopeError(
+                "mission verification aggregate identity is not canonical"
             )
         return replace(
             _merge_evidence(projection, refs),
@@ -926,6 +944,12 @@ class MissionReducer:
             self.definition.run_id,
             self._evidence_source,
         )
+
+    @property
+    def evidence_source(self) -> Any:
+        """Return the single external evidence owner used by every apply."""
+
+        return self._evidence_source
 
     @property
     def projection(self) -> MissionProjection:
