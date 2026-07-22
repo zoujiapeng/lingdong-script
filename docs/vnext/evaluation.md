@@ -192,11 +192,11 @@ ActionEffect 接线后的同入口复测必须单独报告，不能覆盖上述�
 标记为外部干扰并排除，不计入产品通过或失败。最终 2 pass / 1 fail 的单 seed 结果不能换算成功率，
 也不能证明 ActionEffect 提升了恢复能力。
 
-P7a measurement-only harness 正在审计：真实失败不再因“等不到 success”退化为异常字符串，而会保存
-最后一份浏览器状态，并把结果分为 conclusive pass、conclusive fail 与 oracle unavailable；runner error
-单独记录。paired 目前只允许已有 legacy/vNext 原语 parity 的 `precise-click` 和 `scroll-reveal`，同一
-case/seed 的两侧串行运行、跨 pair 交替顺序并生成稳定 `pair_id`；非 paired run 的 `pair_id` 为 `null`，
-不进入 paired comparison。
+P7a measurement-only harness 已完成本轮审计并开始真实校准：真实失败不再因“等不到 success”退化为
+异常字符串，而会保存最后一份浏览器状态，并把结果分为 conclusive pass、conclusive fail 与 oracle
+unavailable；runner error 单独记录。paired 目前只允许已有 legacy/vNext 原语 parity 的
+`precise-click` 和 `scroll-reveal`，同一 case/seed 的两侧串行运行、跨 pair 交替顺序并生成稳定
+`pair_id`；非 paired run 的 `pair_id` 为 `null`，不进入 paired comparison。
 
 报告只从准确绑定且完整闭合的 trace 读取 vNext turn、ActionEffect 和 streak；不可靠的来源保持
 `None`。当前证据不能
@@ -204,8 +204,29 @@ case/seed 的两侧串行运行、跨 pair 交替顺序并生成稳定 `pair_id`
 attempted pair 也不等于有效 A/B：只有恰好一条 legacy 与一条 vNext、评测配置、provider/model
 和 Runtime 服务身份相同，服务的 run 前后身份一致且无 source drift，两侧 run-scoped evidence 与
 oracle 均有效且评测起点为已知 clean revision，才标记 `eligible_for_ab`。
-这只是仍在审计的评测底座，尚未新增真实 grounded 或 eligible A/B 样本；多 seed paired、边界/no-op/
-delayed/ambient/incomparable 条件仍待实跑。
+
+commit `f8fa2a7` 的首批结果为：
+
+- paired precise-click suite `20260723-023658` 有 1 个 eligible pair，vNext 与 legacy 均 grounded
+  pass；vNext 为 2 turns / 1 action / 17.406 s，legacy wall latency 为 21.702 s；
+- 修复后的 vNext precise-click seeds `135791`、`135792`、`135793` 均以 2 turns / 1 action
+  grounded pass；修复前同三 seed 为 2/3、合计 25 clicks；
+- unpaired scroll suite `20260723-024131` 两 seed 均 grounded pass，其中 down 为 2 turns /
+  1 action，up 为 3 turns / 2 actions；
+- paired scroll suite `20260723-024333` 有 2 个 eligible pairs，legacy 为 2/2 pass，vNext 为
+  1/2 pass；vNext up 在 24 actions 后失败。
+
+因此当前只证明 runner、eligible 判定和窄链测量可达，不能称为 uplift。相同模型存在 run-to-run
+随机性，单 pair 的 latency 差异和三 seed 的修复前后差异都只是校准样本；unpaired pass 不能抵消
+paired fail。trusted-browser oracle 是 harness 外部测试 oracle，未注入产品 Runtime、Actor 或
+Verifier。paired scroll 已明确表明 recovery gate 未达，多 seed paired、边界/no-op/delayed/ambient/
+incomparable 条件仍需扩展。
+
+paired scroll 失败 arm `20260723-024625` 的 24 次 wheel 均为 trusted 且确认已执行，方向分布为
+5 次 up / 19 次 down，并且从未连续两次 up；frame effect 为 13 `changed` / 11 `unchanged`，最长
+连续 `unchanged` 为 8，且未进入 claim 或 Verifier。相同 commit 的通过 arm `20260723-024258`
+则在连续两次 `+5` wheel 后进入 claim。该对照说明执行链可达，当前失败位于 Actor 的局部策略和对
+中性反馈的利用；它不支持把原因归给 prompt、settle，也不构成启用 Inspector 的 A/B 证据。
 
 早期真实尝试分别暴露了冗余 full-frame `observe` 循环、Verifier provider 的字符串 confidence 与条件文本复制、harness `SW_RESTORE` 引起的目标几何变化，以及 page-ready 后复用旧几何。修复位于通用 Catalog/Runtime、Verifier schema 和 harness 状态读取层，没有把 case、seed、布局、坐标或成功条件加入生产 Agent。
 
@@ -276,7 +297,7 @@ delayed/ambient/incomparable 条件仍待实跑。
 - Raw receipt的机械三态与`input_completed=true/false/null`一致；
 - legacy scroll正常输出保持兼容，安全修正只禁止不确定后的第二种输入机制。
 
-以上 RawDevice 项大多仍只有 unit/characterization 证据。P4 live 路径已用同一个 `AtomicDesktopController` 组装 click/double-click/scroll，覆盖 Runtime permit、双段坐标映射、commit-time Windows identity、紧邻物理输入的 final target guard、post-action authoritative frame/evidence 以及 unknown-no-replay。scroll 只走 unqueued admitted physical SendInput backend，不在不确定结果后切换机制或重放；Actor-visible direction/notches 由 Controller 机械映射到 RawDevice signed amount。三个随机 seed 的历史 Electron/UIA click 与 ActionEffect 接线前最终 scroll 合同的一对 down/up seed 已通过独立 oracle；ActionEffect 最终代码的同入口复测则是 down/click 通过、up 失败。没有 paired legacy 对照，也不代表多原语门槛通过；`type_text`、`hotkey`、`drag`、`draw_strokes`、held pointer 和 ROI observe 仍没有 live parity。权威前后帧的通用 `changed/unchanged/unknown` 与 replay-derived per-obligation streak 已进入 Actor 的中性 `unchanged_frame_streak` 反馈。
+以上 RawDevice 项大多仍只有 unit/characterization 证据。P4 live 路径已用同一个 `AtomicDesktopController` 组装 click/double-click/scroll，覆盖 Runtime permit、双段坐标映射、commit-time Windows identity、紧邻物理输入的 final target guard、post-action authoritative frame/evidence 以及 unknown-no-replay。scroll 只走 unqueued admitted physical SendInput backend，不在不确定结果后切换机制或重放；Actor-visible direction/notches 由 Controller 机械映射到 RawDevice signed amount。三个随机 seed 的历史 Electron/UIA click 与 ActionEffect 接线前最终 scroll 合同的一对 down/up seed 已通过独立 oracle；ActionEffect 最终代码的同入口复测则是 down/click 通过、up 失败。P7a 已补充窄范围 legacy/vNext paired 对照，但 precise-click 仅 1 pair，scroll 的 vNext 1/2 又低于 legacy 2/2，因此仍不代表多原语门槛通过；`type_text`、`hotkey`、`drag`、`draw_strokes`、held pointer 和 ROI observe 仍没有 live parity。权威前后帧的通用 `changed/unchanged/unknown` 与 replay-derived per-obligation streak 已进入 Actor 的中性 `unchanged_frame_streak` 反馈。
 
 ActionEffect 评测必须把 frame fact 与最终 oracle 分开报告，至少覆盖：静止 no-op、滚动边界、
 ambient animation、视频、短暂动画、错误 target binding 和不可比较帧。只有解码后像素完全一致才记
@@ -500,7 +521,7 @@ sidecar，以及 legacy VLM helper 的 stop_event seam。因此“全角色可�
 -受控任务不低于legacy；
 -保留真实oracle失败。
 
-当前已有增量 live coordinator、具体模型 Visual Actor、`click/double_click/scroll/claim/blocked` 小工具面和共享 `AtomicDesktopController` 链；客户端可显式选择实验 runtime，legacy 仍默认。历史三个 `precise-click` 与 ActionEffect 接线前最终 scroll 合同的一对 down/up `scroll-reveal` 已通过独立 trusted-browser oracle；ActionEffect 最终代码的首轮同入口复测为 down/click 通过、up 失败。没有 paired legacy、真实任务、多布局、其余原语或规模化 held-out 对照，所以该门槛未达。
+当前已有增量 live coordinator、具体模型 Visual Actor、`click/double_click/scroll/claim/blocked` 小工具面和共享 `AtomicDesktopController` 链；客户端可显式选择实验 runtime，legacy 仍默认。历史三个 `precise-click` 与 ActionEffect 接线前最终 scroll 合同的一对 down/up `scroll-reveal` 已通过独立 trusted-browser oracle。commit `f8fa2a7` 的 P7a precise-click 产生 1 个两侧均通过的 eligible pair，但 scroll-reveal 的 2 个 eligible pairs 中 vNext 为 1/2、legacy 为 2/2。外部 oracle 不进入产品上下文；没有真实任务、多布局、其余原语或规模化 held-out 对照，所以该门槛未达。
 
 queue-time capability admission 门槛已经结构性闭合：同一冻结 runtime 只有一个
 `DesktopRuntimeAdmission` owner；vNext 从不可变 `RuntimeCapabilitySnapshot` 核对 canonical
@@ -509,7 +530,7 @@ capability/service 与 Catalog/Controller parity，同一 snapshot 继续供 `Ex
 两边 missing-capability、snapshot/runtime identity、Catalog/Controller drift，以及 admission 失败时
 prepare/model/Controller/legacy fallback 调用数为零。仅有 snapshot 单元测试仍不能替代真实入口证据。
 
-P7a 的 multi-seed/paired runner 与 fail-closed 报告合同仍在审计，尚未产生新的真实或 eligible A/B 样本。下一门槛是先完成审计，再用它扩大通用 ActionEffect/unchanged-frame 的随机 seed、滚动边界、动态画面、多布局与 paired 覆盖；是否真正利用中性反馈必须由后续独立任务结果判断，不能从当前 trace 推导，也不能靠扩写 prompt 或增加方向规则：`type_text`、`hotkey`、`drag`、`draw_strokes`、held pointer 和 ROI observe 必须逐项进入同一 snapshot/Catalog/Broker/Controller owner，
+P7a 的 multi-seed/paired runner 与 fail-closed 报告合同已产生首批真实 grounded 和 eligible A/B 校准样本，但 paired scroll 的 vNext 1/2 对 legacy 2/2 使 recovery gate 未达。下一门槛是继续扩大通用 ActionEffect/unchanged-frame 的随机 seed、滚动边界、动态画面、多布局与 paired 覆盖；是否稳定利用中性反馈必须由后续独立任务结果判断，不能靠扩写 prompt、增加方向规则或提前启用 Inspector：`type_text`、`hotkey`、`drag`、`draw_strokes`、held pointer 和 ROI observe 必须逐项进入同一 snapshot/Catalog/Broker/Controller owner，
 并通过必要工具 recall、unknown-no-replay、负向/property 与同入口 Electron oracle。完成这些之前，
 现有受控 canary 仍不参与默认切换判定。
 
@@ -541,7 +562,7 @@ P7a 的 multi-seed/paired runner 与 fail-closed 报告合同仍在审计，尚�
 -停止、暂停、取消、外部等待和输入清理无回归；
 -legacy删除计划可执行，不是无限双栈。
 
-P7 已开始并获得三个随机 seed 的历史点击 grounded pass 与 ActionEffect 接线前最终 scroll 合同的一对双向 grounded pass；ActionEffect 最终代码的首轮复测为 2 pass / 1 fail。paired legacy、11 个真实任务、mixed/held-out、多布局和其余原语矩阵均未完成，因此 P7 仍未达标；P8 默认切换和 P9 净删未开始，legacy 产品职责删除数为 0。这些受控通过不能越过 Verifier 校准、Profiler/Broker 或完整多原语门槛。
+P7 已开始并获得历史点击/滚动 grounded pass；commit `f8fa2a7` 的首批 paired 校准是 precise-click 两侧 1/1 pass、scroll-reveal vNext 1/2 对 legacy 2/2。单 pair、同模型随机性和 unpaired pass 均不能形成 uplift 结论；11 个真实任务、mixed/held-out、多布局和其余原语矩阵均未完成，因此 P7 仍未达标。P6 仍禁用，P8 默认切换和 P9 净删未开始，legacy 产品职责删除数为 0。这些受控通过不能越过 Verifier 校准、Profiler/Broker 或完整多原语门槛。
 
 ## 11. 报告格式
 
