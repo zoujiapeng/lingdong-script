@@ -121,6 +121,18 @@ def test_focus_preserves_visible_target_geometry_and_only_restores_minimized(
     assert restored == [(hwnd, harness.win32con.SW_RESTORE)]
 
 
+def test_visual_target_defers_ready_geometry_until_first_painted_frame():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "eval_targets"
+        / "visual_interaction_target.html"
+    ).read_text(encoding="utf-8")
+
+    assert "let readyDetails = () => ({})" in source
+    assert source.count("readyDetails=()=>") == 7
+    assert "...readyDetails()" in source
+
+
 def test_external_verdict_requires_exact_precise_click_identity_and_geometry():
     harness = _load_harness()
     target = {
