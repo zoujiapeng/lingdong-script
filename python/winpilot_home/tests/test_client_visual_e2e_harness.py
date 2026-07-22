@@ -91,6 +91,36 @@ def test_oracle_wait_ignores_page_ready_until_success_is_persisted():
     }) is True
 
 
+def test_focus_preserves_visible_target_geometry_and_only_restores_minimized(
+    monkeypatch,
+):
+    harness = _load_harness()
+    hwnd = 123
+    restored = []
+
+    monkeypatch.setattr(harness.win32gui, "IsWindow", lambda value: value == hwnd)
+    monkeypatch.setattr(harness.win32gui, "BringWindowToTop", lambda _value: None)
+    monkeypatch.setattr(harness.win32gui, "SetForegroundWindow", lambda _value: None)
+    monkeypatch.setattr(harness.win32gui, "GetForegroundWindow", lambda: hwnd)
+    monkeypatch.setattr(harness.win32gui, "GetWindowText", lambda _value: "target")
+    monkeypatch.setattr(
+        harness.win32gui,
+        "ShowWindow",
+        lambda value, command: restored.append((value, command)),
+    )
+    monkeypatch.setattr(harness.win32api, "keybd_event", lambda *_args: None)
+    monkeypatch.setattr(harness.time, "sleep", lambda _delay: None)
+
+    monkeypatch.setattr(harness.win32gui, "IsIconic", lambda _value: False)
+    result = harness._focus_window(hwnd)
+    assert result["focused"] is True
+    assert restored == []
+
+    monkeypatch.setattr(harness.win32gui, "IsIconic", lambda _value: True)
+    harness._focus_window(hwnd)
+    assert restored == [(hwnd, harness.win32con.SW_RESTORE)]
+
+
 def test_external_verdict_requires_exact_precise_click_identity_and_geometry():
     harness = _load_harness()
     target = {

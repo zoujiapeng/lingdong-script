@@ -199,7 +199,12 @@ def _find_window(title: str, *, timeout: float = 25.0) -> int:
 def _focus_window(hwnd: int) -> dict[str, Any]:
     if not hwnd or not win32gui.IsWindow(hwnd):
         raise RuntimeError("target window no longer exists")
-    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    # Preserve the target geometry the product is about to bind.  Restoring an
+    # already visible maximized window races the Runtime's target capture and
+    # turns the E2E driver itself into an untrusted layout mutation.  A truly
+    # minimized window still has to be restored before it can be observed.
+    if win32gui.IsIconic(hwnd):
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
     win32gui.BringWindowToTop(hwnd)
     focused = False
     errors: list[str] = []
