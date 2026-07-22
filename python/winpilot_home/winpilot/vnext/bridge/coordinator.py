@@ -97,6 +97,22 @@ def _digest(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(wire.encode("utf-8")).hexdigest()
 
 
+def _handoff_region(value: Any) -> tuple[int, int, int, int]:
+    """Convert Win32 ``left, top, right, bottom`` to Runtime geometry."""
+
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 4
+        or any(type(item) is not int for item in value)
+    ):
+        raise LiveDesktopCoordinatorError("desktop handoff target rect is invalid")
+    left, top, right, bottom = value
+    width, height = right - left, bottom - top
+    if width <= 0 or height <= 0:
+        raise LiveDesktopCoordinatorError("desktop handoff target rect is invalid")
+    return left, top, width, height
+
+
 class LiveDesktopRuntimeCoordinator:
     """Compose and run one isolated, click-only vNext Mission."""
 
@@ -243,7 +259,7 @@ class LiveDesktopRuntimeCoordinator:
             epoch=0,
         )
         handoff_process_id = int(handoff.get("process_id") or 0)
-        handoff_rect = tuple(handoff.get("rect") or ())
+        handoff_region = _handoff_region(handoff.get("rect"))
         if handoff.get("foreground_verified") is not True:
             raise LiveDesktopCoordinatorError(
                 "desktop handoff target was not foreground-verified"
@@ -252,7 +268,7 @@ class LiveDesktopRuntimeCoordinator:
             raise LiveDesktopCoordinatorError(
                 "desktop handoff process identity changed"
             )
-        if handoff_rect != target.window_region:
+        if handoff_region != target.window_region:
             raise LiveDesktopCoordinatorError(
                 "desktop handoff target geometry changed"
             )
