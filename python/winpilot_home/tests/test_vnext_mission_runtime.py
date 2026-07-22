@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping
 
 import pytest
 
-from winpilot.vnext.actor import ActorDecisionEnvelope
+from winpilot.vnext.actor import ActorDecisionEnvelope, InvalidActorProposal
 from winpilot.vnext.capabilities import (
     AuthoritativeFrameState,
     BrokerProjection,
@@ -95,9 +95,11 @@ class ScriptedActor:
         proposal: Mapping[str, Any],
         *,
         after_propose: Callable[[], None] | None = None,
+        raises: Exception | None = None,
     ) -> None:
         self.proposal = dict(proposal)
         self.after_propose = after_propose
+        self.raises = raises
         self.calls: list[tuple[Any, str, tuple[int, int], Event | None]] = []
 
     def propose(
@@ -111,6 +113,8 @@ class ScriptedActor:
         self.calls.append((turn, image_b64, submitted_size, stop_event))
         if self.after_propose is not None:
             self.after_propose()
+        if self.raises is not None:
+            raise self.raises
         return dict(self.proposal)
 
 
@@ -623,6 +627,7 @@ def _harness(
     initial: RuntimeSnapshot | None = None,
     post_action: RuntimeSnapshot | None = None,
     actor_hook: Callable[[], None] | None = None,
+    actor_error: Exception | None = None,
     controller_outcome: ControllerOutcome = ControllerOutcome.COMPLETED,
     controller_error: Exception | None = None,
     broker_factory: Callable[[ToolCatalog], CapabilityBroker] | None = None,
@@ -645,7 +650,9 @@ def _harness(
     pre = initial or _snapshot(pre_frame)
     post = post_action or _snapshot(post_frame)
     state = ScriptedState(pre, current=current, post_action=post)
-    actor = ScriptedActor(proposal, after_propose=actor_hook)
+    actor = ScriptedActor(
+        proposal, after_propose=actor_hook, raises=actor_error,
+    )
     permits = MutationPermitAuthority(mission.mission_id, mission.run_id)
     controller = SpyController(
         state, registry, permits, outcome=controller_outcome, raises=controller_error,
@@ -1187,6 +1194,23 @@ def test_desktop_action_arguments_fail_closed_before_controller(arguments: dict)
     assert "arguments rejected" in result.detail
     assert len(harness.actor.calls) == 1
     assert harness.controller.calls == []
+    assert len(harness.reducer.events) == before
+
+
+def test_actor_schema_error_is_recoverable_without_controller_admission() -> None:
+    harness = _harness(
+        _click(),
+        actor_error=InvalidActorProposal("provider arguments missed the tool schema"),
+    )
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.INVALID_PROPOSAL
+    assert "missed the tool schema" in result.detail
+    assert len(harness.actor.calls) == 1
+    assert harness.controller.calls == []
+    assert harness.permits.pending_count == 0
     assert len(harness.reducer.events) == before
 
 

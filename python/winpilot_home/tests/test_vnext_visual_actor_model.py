@@ -240,11 +240,7 @@ def test_visual_actor_rejects_tool_outside_exact_broker_projection() -> None:
     (
         (
             "observe",
-            {
-                "observation_kind": "full",
-                "image_region": None,
-                "question": "What changed?",
-            },
+            {},
             "observe",
         ),
         (
@@ -274,6 +270,10 @@ def test_visual_actor_maps_each_non_mutating_live_tool_to_one_strict_proposal(
         submitted_size=(100, 100),
     ))
     assert proposal.kind == kind
+    if name == "observe":
+        assert proposal.observation_kind == "full"
+        assert proposal.image_region is None
+        assert proposal.question == "refresh the current authoritative frame"
 
 
 def test_visual_actor_rejects_multiple_choices_and_non_current_images() -> None:
