@@ -325,9 +325,11 @@ def _previous_action_messages(turn: ActorTurnInput) -> list[dict[str, Any]]:
         "input_completed": previous.input_completed,
         "post_action_frame_reconciled": previous.post_action_frame_reconciled,
         "visible_effect": previous.visible_effect,
-        "local_visual_change": previous.local_visual_change,
+        "temporal_full_frame_change": previous.local_visual_change,
         "frame_comparable": previous.frame_comparable,
         "target_binding_valid": previous.target_binding_valid,
+        "semantic_completion": "unknown",
+        "causal_attribution": "unknown",
     }
     return [
         {

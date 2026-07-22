@@ -82,6 +82,21 @@ class TraceSidecarPort(Protocol):
     def record_sidecar(self, event: dict[str, Any], *, run_id: str) -> bool: ...
 
 
+class _ActorProjectionProbe:
+    """Record one non-sensitive Actor-input fact for the trace sidecar."""
+
+    def __init__(self, actor: Any) -> None:
+        self._actor = actor
+        self.previous_action_projected: bool | None = None
+
+    def reset(self) -> None:
+        self.previous_action_projected = None
+
+    def propose(self, turn: Any, **kwargs: Any) -> Any:
+        self.previous_action_projected = turn.previous_action is not None
+        return self._actor.propose(turn, **kwargs)
+
+
 class LiveDesktopCoordinatorError(RuntimeError):
     """The selected vNext run cannot safely continue."""
 
@@ -444,7 +459,7 @@ class LiveDesktopRuntimeCoordinator:
         reducer: MissionReducer,
         evidence: EvidenceRegistry,
         target: Any,
-    ) -> tuple[MissionRuntime, tuple[str, ...]]:
+    ) -> tuple[MissionRuntime, tuple[str, ...], _ActorProjectionProbe]:
         frames = FrameAuthority()
         observer = self._observer_factory(frames)
         if not isinstance(observer, FrameObserver) or observer.authority is not frames:
@@ -517,12 +532,13 @@ class LiveDesktopRuntimeCoordinator:
             ),
             provider_availability=provider_availability,
         )
+        actor_probe = _ActorProjectionProbe(self._actor_factory(self._api_config))
         runtime = MissionRuntime(
             reducer=reducer,
             profile=profile,
             broker=CapabilityBroker(catalog),
             catalog=catalog,
-            actor=self._actor_factory(self._api_config),
+            actor=actor_probe,
             state=state,
             controller=controller,
             mutation_permits=permits,
@@ -531,7 +547,7 @@ class LiveDesktopRuntimeCoordinator:
             action_effect_verifier=DeterministicActionEffectVerifier(),
             evidence_registry=evidence,
         )
-        return runtime, tuple(tool.name for tool in catalog.tools)
+        return runtime, tuple(tool.name for tool in catalog.tools), actor_probe
 
     @staticmethod
     def _failed(status: str) -> DesktopRuntimeCoordinatorResult:
@@ -569,7 +585,7 @@ class LiveDesktopRuntimeCoordinator:
                 handoff_hwnd=hwnd,
                 handoff=handoff,
             )
-            runtime, tool_names = self._runtime(
+            runtime, tool_names, actor_probe = self._runtime(
                 context, reducer, evidence, target,
             )
             self._trace(context.run_id, {
@@ -595,6 +611,7 @@ class LiveDesktopRuntimeCoordinator:
                         DesktopRuntimeCoordinatorStatus.CANCELED,
                         error="vNext desktop Runtime was canceled",
                     )
+                actor_probe.reset()
                 result = runtime.run_one_turn(
                     turn_index=turn_index,
                     stop_event=context.stop_event,
@@ -624,8 +641,11 @@ class LiveDesktopRuntimeCoordinator:
                     "step": turn_index + 1,
                     "model_role": (
                         "visual_actor"
-                        if result.proposal_kind is not None
+                        if actor_probe.previous_action_projected is not None
                         else None
+                    ),
+                    "previous_action_projected": (
+                        actor_probe.previous_action_projected
                     ),
                     "status": result.status.value,
                     "route": None if result.route is None else result.route.value,

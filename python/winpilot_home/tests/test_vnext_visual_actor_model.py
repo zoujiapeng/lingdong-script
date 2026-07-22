@@ -325,8 +325,10 @@ def test_visual_actor_projects_one_complete_previous_action_before_current_image
     assert receipt["input_completed"] is True
     assert receipt["post_action_frame_reconciled"] is True
     assert receipt["target_binding_valid"] is True
-    assert receipt["local_visual_change"] == "changed"
+    assert receipt["temporal_full_frame_change"] == "changed"
     assert receipt["frame_comparable"] is True
+    assert receipt["semantic_completion"] == "unknown"
+    assert receipt["causal_attribution"] == "unknown"
     current_content = messages[3]["content"]
     assert len(current_content) == 2
     assert current_content[0]["type"] == "text"
