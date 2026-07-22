@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+import sys
 import threading
+from types import ModuleType
 
 import pytest
 from pydantic import ValidationError
@@ -58,6 +60,42 @@ def _task_stage_graph(*, metadata: dict | None = None) -> ArpGraph:
         policy=ArpPolicy(require_evidence_on_done=False),
         metadata=dict(metadata or {}),
     )
+
+
+_DEFAULT_COORDINATOR = object()
+
+
+def _install_live_coordinator_factory(
+    monkeypatch,
+    *,
+    coordinator=_DEFAULT_COORDINATOR,
+    failure: Exception | None = None,
+):
+    calls = []
+
+    class Coordinator:
+        def run(self, _context):
+            return DesktopRuntimeCoordinatorResult(
+                status=DesktopRuntimeCoordinatorStatus.DONE,
+                output={"runtime": "vnext"},
+            )
+
+    resolved = Coordinator() if coordinator is _DEFAULT_COORDINATOR else coordinator
+    module = ModuleType("winpilot.vnext.bridge.coordinator")
+
+    def build_live_desktop_runtime_coordinator(*, trace_sidecar):
+        calls.append(trace_sidecar)
+        if failure is not None:
+            raise failure
+        return resolved
+
+    module.build_live_desktop_runtime_coordinator = (
+        build_live_desktop_runtime_coordinator
+    )
+    monkeypatch.setitem(
+        sys.modules, "winpilot.vnext.bridge.coordinator", module,
+    )
+    return resolved, calls
 
 
 @pytest.mark.parametrize("raw", ["", "Legacy", "VNEXT", " vnext ", True, 1, {}, []])
@@ -479,7 +517,15 @@ def test_stage_runtime_defence_rejects_vnext_before_build_runner_or_state_write(
     assert context["runtime_state"] == {}
 
 
-def test_server_reads_runtime_config_once_and_freezes_selection(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("selected_version", "later_version"),
+    (("legacy", "vnext"), ("vnext", "legacy")),
+)
+def test_server_reads_runtime_config_once_and_freezes_selection(
+    monkeypatch,
+    selected_version,
+    later_version,
+) -> None:
     import winpilot.server as server
 
     runtime_reads: list[tuple[str, ...]] = []
@@ -488,11 +534,13 @@ def test_server_reads_runtime_config_once_and_freezes_selection(monkeypatch) -> 
         def get(self, *path: str, default=None):
             if path == ("vnext", "runtime_version"):
                 runtime_reads.append(path)
-                return "legacy" if len(runtime_reads) == 1 else "vnext"
+                return selected_version if len(runtime_reads) == 1 else later_version
             if path in {
                 ("vnext", "profiler_shadow"),
                 ("vnext", "broker_shadow"),
             }:
+                if selected_version == "vnext":
+                    raise AssertionError("vNext must not read legacy shadow config")
                 return {"enabled": False}
             return default
 
@@ -500,13 +548,23 @@ def test_server_reads_runtime_config_once_and_freezes_selection(monkeypatch) -> 
 
     class Runs:
         @staticmethod
-        def prepare(graph, handlers, *, inputs, desktop_runtime_selection):
+        def prepare(
+            graph,
+            handlers,
+            *,
+            inputs,
+            desktop_runtime_selection,
+            desktop_runtime_coordinator,
+        ):
             captured["selection"] = desktop_runtime_selection
+            captured["coordinator"] = desktop_runtime_coordinator
+            captured["handlers"] = handlers
             return ArpExecution(
                 graph,
                 handlers,
                 inputs=inputs,
                 desktop_runtime_selection=desktop_runtime_selection,
+                desktop_runtime_coordinator=desktop_runtime_coordinator,
             )
 
     class Jobs:
@@ -518,6 +576,7 @@ def test_server_reads_runtime_config_once_and_freezes_selection(monkeypatch) -> 
     monkeypatch.setattr(server, "ARP_RUNS", Runs())
     monkeypatch.setattr(server, "RUNTIME_JOBS", Jobs())
     monkeypatch.setattr(server.human_mod.RECORDER, "is_recording", lambda: False)
+    coordinator, factory_calls = _install_live_coordinator_factory(monkeypatch)
 
     graph = _task_stage_graph(metadata={
         "runtime_version": "vnext",
@@ -534,12 +593,21 @@ def test_server_reads_runtime_config_once_and_freezes_selection(monkeypatch) -> 
     try:
         selection = captured["selection"]
         assert isinstance(selection, DesktopRuntimeSelection)
-        assert selection.runtime_version == "legacy"
+        assert selection.runtime_version == selected_version
         assert execution.desktop_runtime_selection is selection
         assert runtime_reads == [("vnext", "runtime_version")]
-        # The fake config would now return vNext, but the existing run cannot switch.
-        assert server.CONFIG.get("vnext", "runtime_version") == "vnext"
-        assert execution.desktop_runtime_selection.runtime_version == "legacy"
+        # The fake config now flips, but the existing run cannot switch.
+        assert server.CONFIG.get("vnext", "runtime_version") == later_version
+        assert execution.desktop_runtime_selection.runtime_version == selected_version
+        assert captured["coordinator"] is (
+            None if selected_version == "legacy" else coordinator
+        )
+        assert (captured["handlers"] is not None) is (
+            selected_version == "legacy"
+        )
+        assert factory_calls == (
+            [] if selected_version == "legacy" else [server.trace_mod.RECORDER]
+        )
         assert captured["submitted"] is True
     finally:
         with server.STATE.lock:
@@ -563,20 +631,30 @@ def test_explicit_product_run_selection_is_atomic_and_ignores_semantic_fields(
                 ("vnext", "profiler_shadow"),
                 ("vnext", "broker_shadow"),
             }:
-                return {"enabled": False}
+                raise AssertionError("vNext must not read legacy shadow config")
             return default
 
     captured = {}
 
     class Runs:
         @staticmethod
-        def prepare(graph, handlers, *, inputs, desktop_runtime_selection):
+        def prepare(
+            graph,
+            handlers,
+            *,
+            inputs,
+            desktop_runtime_selection,
+            desktop_runtime_coordinator,
+        ):
             captured["selection"] = desktop_runtime_selection
+            captured["coordinator"] = desktop_runtime_coordinator
+            captured["handlers"] = handlers
             return ArpExecution(
                 graph,
                 handlers,
                 inputs=inputs,
                 desktop_runtime_selection=desktop_runtime_selection,
+                desktop_runtime_coordinator=desktop_runtime_coordinator,
             )
 
     class Jobs:
@@ -588,6 +666,7 @@ def test_explicit_product_run_selection_is_atomic_and_ignores_semantic_fields(
     monkeypatch.setattr(server, "ARP_RUNS", Runs())
     monkeypatch.setattr(server, "RUNTIME_JOBS", Jobs())
     monkeypatch.setattr(server.human_mod.RECORDER, "is_recording", lambda: False)
+    coordinator, factory_calls = _install_live_coordinator_factory(monkeypatch)
 
     execution = server._start_arp_execution(
         _task_stage_graph(metadata={"runtime_version": "legacy"}),
@@ -597,10 +676,70 @@ def test_explicit_product_run_selection_is_atomic_and_ignores_semantic_fields(
     try:
         assert captured["selection"].runtime_version == "vnext"
         assert execution.desktop_runtime_selection.runtime_version == "vnext"
+        assert captured["coordinator"] is coordinator
+        assert captured["handlers"] is None
+        assert factory_calls == [server.trace_mod.RECORDER]
         assert config_reads == []
     finally:
         with server.STATE.lock:
             server.STATE.run_jobs.pop(execution.run_id, None)
+
+
+@pytest.mark.parametrize(
+    ("factory_value", "factory_failure", "error_kind"),
+    (
+        (None, None, "TypeError"),
+        (_DEFAULT_COORDINATOR, RuntimeError("secret provider detail"), "RuntimeError"),
+    ),
+)
+def test_vnext_coordinator_construction_failure_is_fail_closed_before_prepare(
+    monkeypatch,
+    factory_value,
+    factory_failure,
+    error_kind,
+) -> None:
+    import winpilot.server as server
+
+    class Config:
+        @staticmethod
+        def get(*path: str, default=None):
+            if path in {
+                ("vnext", "profiler_shadow"),
+                ("vnext", "broker_shadow"),
+            }:
+                raise AssertionError("vNext must not read legacy shadow config")
+            return default
+
+    monkeypatch.setattr(server, "CONFIG", Config())
+    monkeypatch.setattr(server.human_mod.RECORDER, "is_recording", lambda: False)
+    monkeypatch.setattr(
+        server, "default_handlers",
+        lambda *_args, **_kwargs: pytest.fail("legacy handlers must not be built"),
+    )
+    monkeypatch.setattr(
+        server.ARP_RUNS, "prepare",
+        lambda *_args, **_kwargs: pytest.fail("run must not be prepared"),
+    )
+    monkeypatch.setattr(
+        server.RUNTIME_JOBS, "submit",
+        lambda *_args, **_kwargs: pytest.fail("job must not be submitted"),
+    )
+    _resolved, factory_calls = _install_live_coordinator_factory(
+        monkeypatch,
+        coordinator=factory_value,
+        failure=factory_failure,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"coordinator construction failed \({error_kind}\)",
+    ) as raised:
+        server._start_arp_execution(
+            _task_stage_graph(), {}, runtime_version="vnext",
+        )
+
+    assert "secret provider detail" not in str(raised.value)
+    assert factory_calls == [server.trace_mod.RECORDER]
 
 
 def test_unknown_product_runtime_config_fails_before_prepare_or_job_submit(
