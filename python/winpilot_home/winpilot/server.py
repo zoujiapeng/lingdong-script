@@ -1003,7 +1003,36 @@ def _start_arp_execution(
     if human_mod.RECORDER.is_recording():
         raise RuntimeError("a human or apprentice recording is active")
 
-    shadow_config = CONFIG.get("vnext", "profiler_shadow", default={}) or {}
+    is_legacy_runtime = desktop_runtime_selection.runtime_version == "legacy"
+    desktop_runtime_coordinator = None
+    if not is_legacy_runtime:
+        try:
+            from .orchestrator.desktop_runtime import DesktopRuntimeCoordinatorPort
+            from .vnext.bridge.coordinator import (
+                build_live_desktop_runtime_coordinator,
+            )
+
+            desktop_runtime_coordinator = build_live_desktop_runtime_coordinator(
+                trace_sidecar=trace_mod.RECORDER,
+            )
+            if not isinstance(
+                desktop_runtime_coordinator, DesktopRuntimeCoordinatorPort,
+            ):
+                raise TypeError("factory returned an invalid coordinator")
+        except Exception as exc:
+            # A selected vNext run has no legacy fallback.  Keep provider or
+            # configuration detail out of the product error because it may
+            # contain credentials.
+            raise RuntimeError(
+                "vNext desktop runtime coordinator construction failed "
+                f"({type(exc).__name__})"
+            ) from exc
+
+    shadow_config = (
+        CONFIG.get("vnext", "profiler_shadow", default={}) or {}
+        if is_legacy_runtime
+        else {}
+    )
     profiler_shadow_enabled = bool(
         isinstance(shadow_config, dict) and shadow_config.get("enabled") is True
     )
@@ -1027,7 +1056,11 @@ def _start_arp_execution(
             # details may contain secrets.
             profiler_shadow_setup_error = type(exc).__name__
 
-    broker_shadow_config = CONFIG.get("vnext", "broker_shadow", default={}) or {}
+    broker_shadow_config = (
+        CONFIG.get("vnext", "broker_shadow", default={}) or {}
+        if is_legacy_runtime
+        else {}
+    )
     broker_shadow_enabled = bool(
         isinstance(broker_shadow_config, dict)
         and broker_shadow_config.get("enabled") is True
@@ -1231,9 +1264,10 @@ def _start_arp_execution(
 
     execution = ARP_RUNS.prepare(
         graph,
-        default_handlers(on_runner),
+        default_handlers(on_runner) if is_legacy_runtime else None,
         inputs=inputs,
         desktop_runtime_selection=desktop_runtime_selection,
+        desktop_runtime_coordinator=desktop_runtime_coordinator,
     )
     job_id = f"arp-job-{execution.run_id}"
     job_ref["job_id"] = job_id
