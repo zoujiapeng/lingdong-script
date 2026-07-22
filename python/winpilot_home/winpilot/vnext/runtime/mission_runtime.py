@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 from ..actor import (
     ActorDecisionEnvelope,
@@ -34,8 +34,15 @@ from ..capabilities import (
     ToolArgumentValidator,
     ToolRoute,
 )
-from ..mission import MissionError, MissionReducer
+from ..mission import MissionError, MissionReducer, ObligationStatus
 from ..profiling import ExecutionProfile
+from ..verification import (
+    InvalidVerificationSchema,
+    ObligationVerificationRequest,
+    ObligationVerificationResult,
+    ObligationVerifierPort,
+    VerifierAssessment,
+)
 from .contracts import (
     ControllerOutcome,
     ControllerTransition,
@@ -73,6 +80,7 @@ class MissionRuntime:
         controller: ControllerPort,
         pointer_cleanup: PointerCleanupPort | None = None,
         mutation_permits: MutationPermitAuthority | None = None,
+        obligation_verifier: ObligationVerifierPort | None = None,
     ) -> None:
         if not isinstance(reducer, MissionReducer):
             raise TypeError("reducer must be MissionReducer")
@@ -89,6 +97,11 @@ class MissionRuntime:
         self._state = state
         self._controller = controller
         self._pointer_cleanup = pointer_cleanup
+        if obligation_verifier is not None and not callable(
+            getattr(obligation_verifier, "verify", None)
+        ):
+            raise TypeError("obligation_verifier must provide verify()")
+        self._obligation_verifier = obligation_verifier
         self._mutation_permits = mutation_permits or MutationPermitAuthority(
             reducer.definition.mission_id,
             reducer.definition.run_id,
@@ -133,7 +146,13 @@ class MissionRuntime:
             pointer_cleanup_attempted=pointer_cleanup_attempted,
         )
 
-    def _canceled(self, turn_index: int) -> MissionRuntimeResult:
+    def _canceled(
+        self,
+        turn_index: int,
+        *,
+        event_ids: Iterable[str] = (),
+        detail: str = "turn canceled before desktop admission",
+    ) -> MissionRuntimeResult:
         attempted = False
         try:
             snapshot = self._state.current(
@@ -155,7 +174,8 @@ class MissionRuntime:
             pass
         return self._result(
             RuntimeStatus.CANCELED,
-            detail="turn canceled before desktop admission",
+            event_ids=event_ids,
+            detail=detail,
             pointer_cleanup_attempted=attempted,
         )
 
@@ -296,12 +316,335 @@ class MissionRuntime:
             proposal=proposal,  # type: ignore[arg-type]
         )
 
-    def _accept(self, kind: str, *, payload: dict, evidence_refs=()) -> tuple[str, ...]:
+    def _accept(
+        self,
+        kind: str,
+        *,
+        payload: dict,
+        evidence_refs=(),
+        base_revision: int | None = None,
+    ) -> tuple[str, ...]:
         event = self._reducer.event(
-            kind, payload=payload, evidence_refs=tuple(evidence_refs)
+            kind,
+            payload=payload,
+            evidence_refs=tuple(evidence_refs),
+            base_revision=base_revision,
         )
         self._reducer.apply(event)
         return (event.event_id,)
+
+    def _obligation_verification_enabled(self) -> bool:
+        """Require both deterministic policy admission and an injected port."""
+
+        return bool(
+            self._obligation_verifier is not None
+            and self._profile.services.obligation_verifier is True
+        )
+
+    def _freeze_verification_request(
+        self,
+        obligation_id: str,
+    ) -> tuple[ObligationVerificationRequest, int]:
+        """Freeze the accepted claim identity and its exact evidence objects."""
+
+        projection = self._reducer.projection
+        state = projection.obligation_state(obligation_id)
+        if (
+            projection.active_obligation_id != obligation_id
+            or state.status is not ObligationStatus.CLAIMED
+            or not state.claim_fingerprint
+        ):
+            raise InvalidVerificationSchema(
+                "obligation verifier requires the current accepted claim"
+            )
+        definition = projection.obligation_definition(obligation_id)
+        refs = self._reducer.evidence_scope.require(
+            state.claim_evidence_refs,
+            obligation_id=obligation_id,
+        )
+        return (
+            ObligationVerificationRequest(
+                mission_id=projection.mission_id,
+                run_id=projection.run_id,
+                mission_revision=projection.revision,
+                obligation_id=obligation_id,
+                claim_fingerprint=state.claim_fingerprint,
+                desired_state=definition.desired_state,
+                acceptance_criteria=definition.acceptance_criteria,
+                forbidden_effects=definition.forbidden_effects,
+                evidence_policy=definition.evidence_policy,
+                evidence_refs=refs,
+            ),
+            state.verification_attempt_count,
+        )
+
+    def _verification_identity_is_current(
+        self,
+        request: ObligationVerificationRequest,
+        *,
+        verification_attempt_count: int,
+    ) -> bool:
+        projection = self._reducer.projection
+        if (
+            projection.mission_id != request.mission_id
+            or projection.run_id != request.run_id
+            or projection.revision != request.mission_revision
+            or projection.active_obligation_id != request.obligation_id
+        ):
+            return False
+        try:
+            state = projection.obligation_state(request.obligation_id)
+        except KeyError:
+            return False
+        return bool(
+            state.status is ObligationStatus.CLAIMED
+            and state.claim_fingerprint == request.claim_fingerprint
+            and state.claim_evidence_refs
+            == tuple(ref.id for ref in request.evidence_refs)
+            and state.verification_attempt_count == verification_attempt_count
+        )
+
+    def _verification_evidence_is_current(
+        self,
+        request: ObligationVerificationRequest,
+    ) -> bool:
+        try:
+            current = self._reducer.evidence_scope.require(
+                (ref.id for ref in request.evidence_refs),
+                obligation_id=request.obligation_id,
+            )
+        except MissionError:
+            return False
+        return current == request.evidence_refs
+
+    @staticmethod
+    def _failed_verification_assessment(
+        request: ObligationVerificationRequest,
+        reason: str,
+    ) -> VerifierAssessment:
+        return VerifierAssessment(
+            verified=False,
+            satisfied_conditions=(),
+            missing_conditions=request.required_conditions,
+            contradictions=(),
+            confidence=None,
+            concise_reason=reason,
+        )
+
+    @staticmethod
+    def _parse_verifier_assessment(raw: Any) -> VerifierAssessment:
+        if isinstance(raw, VerifierAssessment):
+            return raw
+        if isinstance(raw, Mapping):
+            return VerifierAssessment.from_dict(dict(raw))
+        raise InvalidVerificationSchema(
+            "obligation verifier must return VerifierAssessment"
+        )
+
+    def _verifier_kind(self) -> str:
+        value = getattr(self._obligation_verifier, "verifier_kind", None)
+        if type(value) is str and value.strip():
+            return value.strip()
+        return "injected_deterministic"
+
+    def _verification_event_payload(
+        self,
+        request: ObligationVerificationRequest,
+        result: ObligationVerificationResult,
+        assessment: VerifierAssessment,
+        *,
+        failure_kind: str,
+    ) -> dict[str, Any]:
+        return {
+            **result.to_mission_event_payload(request),
+            "reason": assessment.concise_reason,
+            "failure_kind": failure_kind,
+        }
+
+    def _run_obligation_verifier(
+        self,
+        *,
+        turn_index: int,
+        route: ExecutionRoute,
+        proposal_kind: str,
+        decision_id: str,
+        obligation_id: str,
+        claim_event_ids: tuple[str, ...],
+        stop_event: threading.Event | None,
+    ) -> MissionRuntimeResult:
+        """Run one injected read-only verifier against one frozen claim.
+
+        The port returns an identity-free assessment.  Runtime binds all
+        mission/evidence identity and only the Reducer records the outcome.
+        """
+
+        def finish(
+            status: RuntimeStatus,
+            detail: str,
+            event_ids: tuple[str, ...] = claim_event_ids,
+        ) -> MissionRuntimeResult:
+            return self._result(
+                status,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                event_ids=event_ids,
+                detail=detail,
+            )
+
+        def fail_closed(
+            request: ObligationVerificationRequest,
+            reason: str,
+            failure_kind: str,
+        ) -> tuple[VerifierAssessment, ObligationVerificationResult, str]:
+            assessment = self._failed_verification_assessment(request, reason)
+            return (
+                assessment,
+                ObligationVerificationResult.bind(
+                    request,
+                    assessment,
+                    verifier_kind="runtime_fail_closed",
+                    evidence_refs=(),
+                ),
+                failure_kind,
+            )
+
+        try:
+            request, attempt_count = self._freeze_verification_request(obligation_id)
+        except (MissionError, InvalidVerificationSchema, ValueError) as exc:
+            return finish(
+                RuntimeStatus.STATE_REJECTED,
+                f"accepted claim could not be frozen for verification: {exc}",
+            )
+        if self._stopped(stop_event):
+            return self._canceled(
+                turn_index,
+                event_ids=claim_event_ids,
+                detail="turn canceled after claim and before verification",
+            )
+
+        assessment: VerifierAssessment
+        used_evidence: tuple[str, ...] | None = None
+        failure_kind = "verification_rejected"
+        try:
+            assert self._obligation_verifier is not None
+            raw = self._obligation_verifier.verify(
+                request,
+                stop_event=stop_event,
+            )
+            assessment = self._parse_verifier_assessment(raw)
+        except Exception:
+            assessment, bound, failure_kind = fail_closed(
+                request,
+                "injected obligation verifier failed closed",
+                "verifier_error",
+            )
+        else:
+            bound = None
+
+        # A late verifier result is never allowed to write after cancellation.
+        if self._stopped(stop_event):
+            return self._canceled(
+                turn_index,
+                event_ids=claim_event_ids,
+                detail="late obligation verifier result was discarded after cancellation",
+            )
+        if not self._verification_identity_is_current(
+            request,
+            verification_attempt_count=attempt_count,
+        ):
+            return finish(
+                RuntimeStatus.STALE_DISCARDED,
+                "Mission claim identity changed while verifier was running",
+            )
+        if not self._verification_evidence_is_current(request):
+            assessment, bound, failure_kind = fail_closed(
+                request,
+                "claim evidence changed while verifier was running; failed closed",
+                "verification_evidence_stale",
+            )
+
+        if bound is None:
+            try:
+                bound = ObligationVerificationResult.bind(
+                    request,
+                    assessment,
+                    verifier_kind=self._verifier_kind(),
+                    evidence_refs=used_evidence,
+                )
+            except Exception:
+                assessment, bound, failure_kind = fail_closed(
+                    request,
+                    "malformed obligation verifier result failed closed",
+                    "verifier_schema_error",
+                )
+
+        # Revalidate once more immediately before creating the accepted event.
+        if not self._verification_identity_is_current(
+            request,
+            verification_attempt_count=attempt_count,
+        ):
+            return finish(
+                RuntimeStatus.STALE_DISCARDED,
+                "Mission claim identity changed before verification commit",
+            )
+        if bound.evidence_refs and not self._verification_evidence_is_current(request):
+            assessment, bound, failure_kind = fail_closed(
+                request,
+                "claim evidence changed before verification commit; failed closed",
+                "verification_evidence_stale",
+            )
+
+        payload = self._verification_event_payload(
+            request,
+            bound,
+            assessment,
+            failure_kind=failure_kind,
+        )
+        try:
+            verification_event_ids = self._accept(
+                "verification_recorded",
+                payload=payload,
+                evidence_refs=bound.evidence_refs,
+                base_revision=request.mission_revision,
+            )
+        except MissionError as first_error:
+            # A rejected positive assessment must still consume this exact
+            # current claim as a failed verification attempt.  Base revision
+            # and fingerprint checks prevent this fallback from touching a
+            # newer claim.
+            if not bound.verified:
+                return finish(
+                    RuntimeStatus.STATE_REJECTED,
+                    str(first_error),
+                )
+            assessment, bound, failure_kind = fail_closed(
+                request,
+                "positive verifier result was rejected by Mission policy; failed closed",
+                "verification_policy_rejected",
+            )
+            try:
+                verification_event_ids = self._accept(
+                    "verification_recorded",
+                    payload=self._verification_event_payload(
+                        request,
+                        bound,
+                        assessment,
+                        failure_kind=failure_kind,
+                    ),
+                    evidence_refs=(),
+                    base_revision=request.mission_revision,
+                )
+            except MissionError as fallback_error:
+                return finish(
+                    RuntimeStatus.STATE_REJECTED,
+                    str(fallback_error),
+                )
+        return finish(
+            RuntimeStatus.VERIFICATION_RECORDED,
+            assessment.concise_reason,
+            claim_event_ids + verification_event_ids,
+        )
 
     def _block_unknown(
         self,
@@ -576,6 +919,16 @@ class MissionRuntime:
                     proposal_kind=proposal_kind,
                     decision_id=decision_id,
                     detail=str(exc),
+                )
+            if self._obligation_verification_enabled():
+                return self._run_obligation_verifier(
+                    turn_index=turn_index,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    obligation_id=obligation_id,
+                    claim_event_ids=event_ids,
+                    stop_event=stop_event,
                 )
             return self._result(
                 RuntimeStatus.VERIFICATION_REQUIRED,
