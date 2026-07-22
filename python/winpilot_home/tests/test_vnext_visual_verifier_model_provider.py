@@ -11,7 +11,6 @@ import pytest
 
 from winpilot.modeling import ModelCallError, ModelCallRuntime, ModelRetryPolicy
 from winpilot.vnext.verification.contracts import (
-    VERIFIER_ASSESSMENT_FORMAT,
     VerifierAssessment,
     forbidden_effect_condition,
 )
@@ -48,15 +47,9 @@ def _request() -> VisualVerifierModelRequest:
 
 def _assessment(**overrides) -> dict:
     value = {
-        "format": VERIFIER_ASSESSMENT_FORMAT,
-        "verified": True,
-        "satisfied_conditions": [
-            CRITERION,
-            forbidden_effect_condition(FORBIDDEN),
-        ],
-        "missing_conditions": [],
+        "satisfied_condition_indices": [0, 1],
+        "missing_condition_indices": [],
         "contradictions": [],
-        "confidence": 0.94,
         "concise_reason": "the image visibly satisfies every condition",
     }
     value.update(overrides)
@@ -118,6 +111,11 @@ def test_provider_uses_isolated_identity_free_image_request_and_one_tool(
 
     assert isinstance(assessment, VerifierAssessment)
     assert assessment.verified is True
+    assert assessment.satisfied_conditions == (
+        CRITERION,
+        forbidden_effect_condition(FORBIDDEN),
+    )
+    assert assessment.confidence is None
     assert boundary[0]["model_role"] == VISUAL_VERIFIER_ROLE
     assert boundary[0]["purpose"] == "independent_visual_assessment"
     assert len(provider_requests) == 1
@@ -128,7 +126,17 @@ def test_provider_uses_isolated_identity_free_image_request_and_one_tool(
     ]
     schema = sent["tools"][0]["function"]["parameters"]
     assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == set(VerifierAssessment.model_fields)
+    assert set(schema["required"]) == {
+        "satisfied_condition_indices",
+        "missing_condition_indices",
+        "contradictions",
+        "concise_reason",
+    }
+    assert schema["properties"]["satisfied_condition_indices"]["items"] == {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1,
+    }
     assert sent["messages"][0] == {
         "role": "system",
         "content": VISUAL_VERIFIER_SYSTEM_CONTRACT,
@@ -137,10 +145,21 @@ def test_provider_uses_isolated_identity_free_image_request_and_one_tool(
     payload = json.loads(content[0]["text"])
     assert set(payload) == {
         "desired_state",
-        "acceptance_criteria",
-        "forbidden_effects",
+        "required_conditions",
         "submitted_image_size",
     }
+    assert payload["required_conditions"] == [
+        {
+            "condition_index": 0,
+            "kind": "acceptance",
+            "condition": CRITERION,
+        },
+        {
+            "condition_index": 1,
+            "kind": "forbidden_effect_absent",
+            "condition": FORBIDDEN,
+        },
+    ]
     request = _request()
     assert content[1]["image_url"]["url"] == (
         f"data:image/jpeg;base64,{request.image_b64}"
@@ -177,17 +196,56 @@ def test_provider_uses_isolated_identity_free_image_request_and_one_tool(
             "unknown tool",
         ),
         (_response(_tool_call("not-json")), "malformed assessment"),
-        (_response(_tool_call([])), "malformed assessment"),
+        (_response(_tool_call([])), "non-canonical assessment fields"),
         (
             _response(_tool_call({**_assessment(), "mission_id": "invented"})),
-            "malformed assessment",
+            "non-canonical assessment fields",
         ),
         (
             _response(_tool_call(_assessment(
-                verified=True,
-                missing_conditions=[CRITERION],
+                missing_condition_indices=[0],
             ))),
-            "malformed assessment",
+            "classifications overlap",
+        ),
+        (
+            _response(_tool_call(_assessment(
+                satisfied_condition_indices=[0],
+            ))),
+            "classify every required condition",
+        ),
+        (
+            _response(_tool_call(_assessment(
+                satisfied_condition_indices=[0, "1"],
+            ))),
+            "array of integers",
+        ),
+        (
+            _response(_tool_call(_assessment(
+                satisfied_condition_indices=[0, 0, 1],
+            ))),
+            "must not contain duplicates",
+        ),
+        (
+            _response(_tool_call(_assessment(
+                contradictions=[1],
+            ))),
+            "contradictions must be",
+        ),
+        (
+            _response(_tool_call(_assessment(
+                contradictions=["conflict", " conflict"],
+            ))),
+            "canonical assessment",
+        ),
+        (
+            _response(_tool_call(_assessment(
+                concise_reason=" ",
+            ))),
+            "concise_reason",
+        ),
+        (
+            _response(_tool_call({**_assessment(), "confidence": "1"})),
+            "non-canonical assessment fields",
         ),
         (
             _response(_tool_call(_assessment(), call_type="provider")),
@@ -209,6 +267,24 @@ def test_provider_rejects_multiple_choices() -> None:
     ))
     with pytest.raises(VisualVerifierModelError, match="exactly one choice"):
         provider.assess(_request())
+
+
+def test_provider_maps_index_classification_to_exact_canonical_conditions() -> None:
+    provider = _model(lambda **_request: _response(_tool_call(_assessment(
+        satisfied_condition_indices=[1],
+        missing_condition_indices=[0],
+        concise_reason="the requested result is not yet visible",
+    ))))
+
+    assessment = provider.assess(_request())
+
+    assert assessment.verified is False
+    assert assessment.satisfied_conditions == (
+        forbidden_effect_condition(FORBIDDEN),
+    )
+    assert assessment.missing_conditions == (CRITERION,)
+    assert assessment.contradictions == ()
+    assert assessment.confidence is None
 
 
 def test_transport_retry_reuses_exact_frozen_image_request() -> None:

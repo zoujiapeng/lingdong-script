@@ -16,9 +16,8 @@ from ...modeling import (
     invoke_chat_completion,
 )
 from .contracts import (
-    VERIFIER_ASSESSMENT_FORMAT,
-    InvalidVerificationSchema,
     VerifierAssessment,
+    forbidden_effect_condition,
 )
 from .visual_model import VisualVerifierContractError, VisualVerifierModelRequest
 
@@ -27,9 +26,9 @@ VISUAL_VERIFIER_ROLE = "visual_verifier"
 VISUAL_ASSESSMENT_TOOL = "submit_visual_assessment"
 VISUAL_VERIFIER_SYSTEM_CONTRACT = (
     "Act as an independent read-only visual verifier. Judge only the supplied "
-    "image against the stated conditions and call submit_visual_assessment exactly "
-    "once. Use criterion text verbatim; encode an absent forbidden effect as "
-    "forbidden_effect_absent:<effect>. Never propose actions or answer with text."
+    "image and classify every numbered condition exactly once as satisfied or "
+    "missing. Call submit_visual_assessment exactly once. Never propose actions "
+    "or answer with text."
 )
 
 
@@ -37,45 +36,47 @@ class VisualVerifierModelError(VisualVerifierContractError):
     """The provider response is not one strict, identity-free assessment."""
 
 
-_ASSESSMENT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "format": {"const": VERIFIER_ASSESSMENT_FORMAT},
-        "verified": {"type": "boolean"},
-        "satisfied_conditions": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-            "uniqueItems": True,
+_ASSESSMENT_ARGUMENT_FIELDS = frozenset({
+    "satisfied_condition_indices",
+    "missing_condition_indices",
+    "contradictions",
+    "concise_reason",
+})
+
+
+def _required_conditions(request: VisualVerifierModelRequest) -> tuple[str, ...]:
+    return request.acceptance_criteria + tuple(
+        forbidden_effect_condition(effect) for effect in request.forbidden_effects
+    )
+
+
+def _assessment_schema(condition_count: int) -> dict[str, Any]:
+    if type(condition_count) is not int or condition_count < 1:
+        raise VisualVerifierModelError("visual verifier requires at least one condition")
+    index_array = {
+        "type": "array",
+        "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": condition_count - 1,
         },
-        "missing_conditions": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-            "uniqueItems": True,
+        "uniqueItems": True,
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "satisfied_condition_indices": index_array,
+            "missing_condition_indices": index_array,
+            "contradictions": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "uniqueItems": True,
+            },
+            "concise_reason": {"type": "string", "minLength": 1},
         },
-        "contradictions": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-            "uniqueItems": True,
-        },
-        "confidence": {
-            "oneOf": [
-                {"type": "number", "minimum": 0, "maximum": 1},
-                {"type": "null"},
-            ],
-        },
-        "concise_reason": {"type": "string", "minLength": 1},
-    },
-    "required": [
-        "format",
-        "verified",
-        "satisfied_conditions",
-        "missing_conditions",
-        "contradictions",
-        "confidence",
-        "concise_reason",
-    ],
-}
+        "required": sorted(_ASSESSMENT_ARGUMENT_FIELDS),
+    }
 
 
 def _member(value: Any, name: str) -> Any:
@@ -84,7 +85,10 @@ def _member(value: Any, name: str) -> Any:
     return getattr(value, name, None)
 
 
-def _assessment_from_response(response: Any) -> VerifierAssessment:
+def _assessment_from_response(
+    response: Any,
+    request: VisualVerifierModelRequest,
+) -> VerifierAssessment:
     choices = _member(response, "choices")
     if (
         isinstance(choices, (str, bytes, Mapping))
@@ -119,10 +123,68 @@ def _assessment_from_response(response: Any) -> VerifierAssessment:
     if type(arguments) is not str:
         raise VisualVerifierModelError("visual verifier arguments must be JSON text")
     try:
-        return VerifierAssessment.from_json(arguments)
-    except InvalidVerificationSchema as exc:
+        raw = json.loads(arguments)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise VisualVerifierModelError(
             "visual verifier returned malformed assessment arguments"
+        ) from exc
+    if type(raw) is not dict or set(raw) != _ASSESSMENT_ARGUMENT_FIELDS:
+        raise VisualVerifierModelError(
+            "visual verifier returned non-canonical assessment fields"
+        )
+
+    def indices(name: str) -> tuple[int, ...]:
+        value = raw[name]
+        if type(value) is not list or any(type(item) is not int for item in value):
+            raise VisualVerifierModelError(
+                f"visual verifier {name} must be an array of integers"
+            )
+        result = tuple(value)
+        if len(result) != len(set(result)):
+            raise VisualVerifierModelError(
+                f"visual verifier {name} must not contain duplicates"
+            )
+        return result
+
+    satisfied_indices = tuple(sorted(indices("satisfied_condition_indices")))
+    missing_indices = tuple(sorted(indices("missing_condition_indices")))
+    required = _required_conditions(request)
+    expected = set(range(len(required)))
+    supplied = set(satisfied_indices) | set(missing_indices)
+    if set(satisfied_indices) & set(missing_indices):
+        raise VisualVerifierModelError(
+            "visual verifier condition classifications overlap"
+        )
+    if supplied != expected:
+        raise VisualVerifierModelError(
+            "visual verifier must classify every required condition exactly once"
+        )
+    contradictions = raw["contradictions"]
+    if (
+        type(contradictions) is not list
+        or any(type(item) is not str or not item.strip() for item in contradictions)
+        or len(contradictions) != len(set(contradictions))
+    ):
+        raise VisualVerifierModelError(
+            "visual verifier contradictions must be unique non-empty strings"
+        )
+    reason = raw["concise_reason"]
+    if type(reason) is not str or not reason.strip():
+        raise VisualVerifierModelError(
+            "visual verifier concise_reason must be a non-empty string"
+        )
+    try:
+        return VerifierAssessment(
+            verified=not missing_indices and not contradictions,
+            satisfied_conditions=tuple(required[index] for index in satisfied_indices),
+            missing_conditions=tuple(required[index] for index in missing_indices),
+            contradictions=tuple(item.strip() for item in contradictions),
+            confidence=None,
+            concise_reason=reason.strip(),
+        )
+    except (TypeError, ValueError) as exc:
+        raise VisualVerifierModelError(
+            "visual verifier classifications cannot form a canonical assessment"
         ) from exc
 
 
@@ -206,10 +268,27 @@ class OpenAIVisualVerifierModel:
             raise VisualVerifierModelError("visual verifier request has the wrong type")
         if stop_event is not None and not isinstance(stop_event, threading.Event):
             raise VisualVerifierModelError("stop_event must be threading.Event or null")
+        required_conditions = _required_conditions(request)
         visible_input = {
             "desired_state": request.desired_state,
-            "acceptance_criteria": list(request.acceptance_criteria),
-            "forbidden_effects": list(request.forbidden_effects),
+            "required_conditions": [
+                {
+                    "condition_index": index,
+                    "kind": (
+                        "acceptance"
+                        if index < len(request.acceptance_criteria)
+                        else "forbidden_effect_absent"
+                    ),
+                    "condition": (
+                        condition
+                        if index < len(request.acceptance_criteria)
+                        else request.forbidden_effects[
+                            index - len(request.acceptance_criteria)
+                        ]
+                    ),
+                }
+                for index, condition in enumerate(required_conditions)
+            ],
             "submitted_image_size": {
                 "width": request.submitted_size[0],
                 "height": request.submitted_size[1],
@@ -245,7 +324,7 @@ class OpenAIVisualVerifierModel:
                 "type": "function",
                 "function": {
                     "name": VISUAL_ASSESSMENT_TOOL,
-                    "parameters": _ASSESSMENT_SCHEMA,
+                    "parameters": _assessment_schema(len(required_conditions)),
                 },
             }],
             "tool_choice": "required",
@@ -263,7 +342,7 @@ class OpenAIVisualVerifierModel:
             runtime=self._call_runtime,
         )
         self.last_outcome = outcome
-        return _assessment_from_response(outcome.response)
+        return _assessment_from_response(outcome.response, request)
 
 
 __all__ = [
