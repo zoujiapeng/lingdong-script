@@ -4,7 +4,7 @@
 capability admission 已收敛为一个 runtime-aware owner；P4/P5 现有一条默认关闭、按 run 显式选择的
 增量实验链，已经从同一产品入口接到唯一 Visual Actor、
 Capability Broker、共享 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。
-当前 live 工具面为 `click/double_click/scroll/type_text/hotkey/claim/blocked`。keyboard 代码合同已闭合但同入口 Electron oracle 尚未运行。legacy 仍默认；三个随机 seed 的
+当前 live 工具面为 `click/double_click/scroll/type_text/hotkey/claim/blocked`。keyboard 已完成代码合同和同入口 Electron trusted-browser oracle 的窄原语验证。legacy 仍默认；三个随机 seed 的
 冷启动、空 session、可见 Electron click canary，以及 ActionEffect 接线前 direction/notches 合同下各一个
 down/up scroll canary，已通过独立 trusted-browser oracle。ActionEffect 最终代码的首轮复测为 down/click
 通过、up 失败；完整 P7、其他 GUI 原语和默认切换均未完成。完整 legacy
@@ -185,6 +185,14 @@ MissionCard 只包含：
 - 一个最新 transition；
 - 有界 failure/verifier feedback；
 - accepted ExecutionProfile 的必要摘要。
+
+Actor 的完整回合输入还包括最新权威帧、当回合 BrokerProjection，以及可选的一笔
+`actor-previous-action/0`。后一项不是 MissionCard 字段，也不是第二份状态：Runtime 只在同 revision、
+obligation、target、当前工具和可信 ActionEffect 全部匹配时，从 canonical transition 派生一次性、
+非持久的有界视图。它只暴露 schema 明确允许的非敏感参数和 Actor 当时的局部意图；provider 把它
+渲染为原生 tool-call/result，结果只报告时间上的全帧变化，语义完成和因果归因保持 unknown。
+view 在 Actor request 前即消费、重启即丢失，不能参与 Reducer、Verifier 或完成判断；文本和快捷键
+历史不投影，trace 只记录 `previous_action_projected` 布尔值。
 
 Actor 不接收：
 
@@ -478,7 +486,7 @@ Frame、坐标、admission 与 RawDevice primitive，再由 Runtime-bound Contro
 和 RawDevice primitive；click/double-click/scroll/type-text/hotkey 进入同一个 `AtomicDesktopController` transaction，
 在紧邻物理输入前执行对应的 pointer 或 keyboard final target guard。scroll 与 keyboard 只走 unqueued admitted physical SendInput backend，
 Actor 以明确 direction/notches 表达 viewport 导航，Controller 才机械映射到 RawDevice signed amount；
-结果不确定时不切换机制也不自动重放。keyboard 已完成 owner/parity 的代码合同但尚无真实 Electron oracle；`drag`、`draw_strokes` 和 held pointer 必须逐项完成相同 owner/parity/unknown-no-replay 合同，不能通过 legacy fallback 补齐。
+结果不确定时不切换机制也不自动重放。keyboard 已完成 owner/parity 代码合同，并由同入口 Electron trusted-browser oracle 验证 type-text 三个随机 seed 与 hotkey select-all；这些是非 paired 的窄原语可达性证据，不代表 P7 或默认切换完成。`drag`、`draw_strokes` 和 held pointer 必须逐项完成相同 owner/parity/unknown-no-replay 合同，不能通过 legacy fallback 补齐。
 
 live bridge 对 frame freshness 使用显式 max-age（默认 30 秒），并在 Actor 返回后的 Broker
 reprojection 中重新计算；过龄帧不能进入 click admission。任务回合数来自 canonical

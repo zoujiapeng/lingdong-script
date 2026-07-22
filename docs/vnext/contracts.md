@@ -1,6 +1,6 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、`click/double_click/scroll/type_text/hotkey/claim/blocked` 小工具面、共享 atomic Controller 执行链、deterministic ActionEffectVerifier、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认。P4b.1 keyboard 只有代码与注入式测试闭环，尚无真实 Electron oracle；ActionEffect 最终代码的同入口 canary 为 down/click 通过、up 失败；完整 P7、其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
+本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、`click/double_click/scroll/type_text/hotkey/claim/blocked` 小工具面、共享 atomic Controller 执行链、deterministic ActionEffectVerifier、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认。P4b.1 keyboard 已有同一 Electron 入口和独立 oracle 证据：`keyboard-entry` 在当前 previous-action 合同下 3/3 通过，`keyboard-select-all` 在修正 layout-independent oracle 后通过。这些配置与早期基线不同，不证明通用 Agent 能力提升，也不满足完整 P7；其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
 
 ## 1. 版本与基本规则
 
@@ -17,8 +17,9 @@ mission-card/1
 action-effect/0
 actor-mission-view/2
 actor-frame-view/0
-actor-tool-view/0
-actor-turn-input/2
+actor-tool-view/1
+actor-turn-input/3
+actor-previous-action/0
 actor-proposal/0
 actor-envelope/0
 broker-projection/0
@@ -46,10 +47,13 @@ inspection-report/0
 `/0` 表示尚未发生首个不兼容升级的旁路实验合同；单个合同只有在真实字段边界变化时才升版，
 不是等到默认切换时统一改号。
 以上版本已按当前代码逐项核对：coordinator context 因新增非阻塞 pause reading 升为
-`desktop-runtime-coordinator-context/1`；ActionEffect/no-progress 切片使
-`mission-projection`、`mission-card`、`actor-mission-view`、`actor-turn-input` 和
-`controller-transition` 各自升为 `/1`，旧版本均不再接受。`action-effect/0` 是新合同；其余仍列为
-`/0` 的合同尚未发生不兼容字段变化，不能为追求版本号整齐而批量改号。
+`desktop-runtime-coordinator-context/1`；ActionEffect/no-progress 切片使 `mission-projection`、
+`mission-card` 和 `controller-transition` 升为 `/1`。completion handoff 后 `actor-mission-view`
+为 `/2`、`actor-turn-input` 为 `/2`；本轮因 tool 增加 `requires_local_intent` 将
+`actor-tool-view` 升为 `/1`，因 turn 增加可选 `previous_action` 将 `actor-turn-input`
+升为 `/3`，并新增 `actor-previous-action/0`。这些旧版本均不再接受；
+`action-effect/0` 与 `actor-previous-action/0` 是新合同。其他仍列为 `/0` 的合同未发生
+不兼容字段变化，不能为追求版本号整齐而批量改号。
 
 基本规则：
 
@@ -555,10 +559,38 @@ P4a 不把带 Runtime 身份的 `MissionCard` 或 `BrokerProjection` 原样交�
 
 - `ActorMissionView`：完整 `original_goal`、当前义务的语义字段、相关事实/工件摘要、target 标题、当前义务自己的 transition/failure 摘要，以及中性的 `unchanged_frame_streak`；
 - `ActorFrameView`：只说明图片是否可用、是否权威/新鲜，以及 `submitted_image_pixels` 坐标系；
-- `ActorToolView`：只包含当前 BrokerProjection 允许的 Visual Actor 工具名和严格 JSON schema；
-- `ActorTurnInput`：组合上述三种 view，图片字节和 submitted size 通过注入的 `ActorPort` 单独传递。
+- `ActorToolView`：只包含当前 BrokerProjection 允许的 Visual Actor 工具名、严格 JSON schema 和机械布尔值 `requires_local_intent`；
+- `ActorTurnInput`：组合上述三种 view 与可选的一条 `previous_action`，图片字节和 submitted size 通过注入的 `ActorPort` 单独传递。
 
-这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。`actor-mission-view/2` 不再投影内部 ActionEffect 恒定的 `semantic_completion=unknown`：该值只表示像素比较器没有语义完成权限，不能伪装成 Runtime 对当前义务“尚未完成”的判断。内部 `action-effect/0` 仍保留该哨兵。`actor-turn-input/2` 随嵌套 mission view 一并升级并严格拒绝旧版或混合版本。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前增量 live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
+这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。`actor-mission-view/2` 不再投影内部 ActionEffect 恒定的 `semantic_completion=unknown`：该值只表示像素比较器没有语义完成权限，不能伪装成 Runtime 对当前义务“尚未完成”的判断。内部 `action-effect/0` 仍保留该哨兵。`actor-tool-view/1` 与 `actor-turn-input/3` 严格拒绝旧版或混合版本。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前增量 live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
+
+### 9.2 上一笔 Actor 动作的有界上下文
+
+`actor-previous-action/0` 不是动作历史或新 ledger，而是只供下一次合格 Actor request
+使用的、run-local 的一次性认知侧车。Runtime 只在 GUI mutation 已写入 canonical
+`transition_recorded` 后保留有界 `local_intent` 和经投影参数；action、执行结果和像素效果始终
+从当前 Mission 的 canonical `last_transition` / `ActionEffect` 重建，不在侧车中复制第二份事实。
+
+投影必须 fail closed：
+
+- pending revision、active obligation、target binding 和 action tool 必须与当前 Mission/Broker 完全一致；该 tool 仍必须是 Broker 允许的 Visual Actor GUI mutation；
+- canonical transition 必须带真实 `ActionEffect`，且 `target_binding_valid=true`；provider 还要求 `input_completed=true`、post-action frame 已对账，并且 previous-action 与平面 transition 的 action/effect 字段完全相等；
+- 参数采用 default-deny 投影：只接受 closed top-level object 中显式标注 `historyVisible=true` 的 finite JSON scalar，必须覆盖所有 required 和实际参数；任何歧义、未标注或越界都省略整笔动作，不做部分泄漏；
+- 当前只有 `click`、`double_click` 和 `scroll` 的完整参数满足该投影；`type_text` 和 `hotkey` 未标注为 history-visible，因此其整笔 native previous-action 均省略。
+
+`actor-tool-view/1.requires_local_intent` 由 Runtime/Catalog 按 mutation kind 机械投影。对 GUI mutation，
+provider 把有界非空 `local_intent` 加入函数 schema 并强制模型提供，严格验证后在交给
+Controller 前移除。它只说明 Actor 上一笔局部意图，不是计划、完成声明或恢复命令。
+
+当 native previous-action 可用时，provider 在最新 user image 前放入一组原生 assistant
+tool-call 和 tool result，同时从 user payload 省略重复的平面 `last_transition`。tool result 只报告
+`temporal_full_frame_change`、`frame_comparable`、`target_binding_valid` 等已对账事实；
+`semantic_completion` 和 `causal_attribution` 恒为 `unknown`，像素时序变化不得冒充语义进展或因果。
+
+侧车在真正进入下一次 Actor request 前消耗；provider 错误也不恢复它。请求前的暂时
+observation/state failure 不伪装成已消费；terminal/cancel 会清理，进程重启则必然丢失。它不写入
+MissionDefinition、MissionEvent、MissionProjection、EvidenceRegistry、BUS/WebSocket、replay、claim、
+Verifier 或 completion truth，也不能触发动作重放。
 
 ## 10. 模型输出：ActorProposal
 
@@ -714,7 +746,7 @@ unknown
 
 `ObserveProposal` 只刷新观察；`BlockedReport` 只产生当前义务的 blocked event，其自然语言事实不会升级为 `VerifiedFact`。`CapabilityRequest`、`InspectionRequest` 和 `ReplanRequest` 在 P4a 均返回 `unavailable`；尤其 P6 Planner/Inspector 未启用时必须 fail closed。
 
-当前产品接线只对显式 `vnext` run 组装增量 Actor、Broker、Frame/Controller bridge 与验证端口，工具面为 `click/double_click/scroll/type_text/hotkey/claim/blocked`。三个 click seed 与 ActionEffect 接线前最终 scroll 合同的一对 down/up seed 已通过真实 Electron 与独立 oracle；keyboard 尚无同入口 oracle；ActionEffect 最终代码的首轮复测为 down/click 通过、up 失败。这不等于全局 Broker enforce 或完整 P7 已通过；P3 的 necessary-tool recall 门槛仍未达到。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
+当前产品接线只对显式 `vnext` run 组装增量 Actor、Broker、Frame/Controller bridge 与验证端口，工具面为 `click/double_click/scroll/type_text/hotkey/claim/blocked`。三个 click seed、最终 scroll 合同的部分 canary 以及 keyboard 的 `keyboard-entry`/`keyboard-select-all` 已有同一 Electron 入口与独立 oracle 证据；同时 ActionEffect 复测仍保留 up 失败。这不等于全局 Broker enforce 或完整 P7 已通过；P3 的 necessary-tool recall 门槛仍未达到。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
 
 ### 11.2 P4a ControllerTransition
 
@@ -767,7 +799,7 @@ RawDevice 接收 Controller 已解析的 typed scroll/click 参数、bounded tex
 
 具体 live coordinator 的 `raw_device` 是必需注入项。产品 composition root 构造并注入 admitted physical click/scroll/type-text/hotkey backend；coordinator 在 Actor 创建前机械核对 Catalog GUI tools、Controller supported tools、Controller required raw primitives 与 RawDevice 实际 inventory，任何缺失或漂移都 fail closed。legacy `type_text`/`press_keys` 仍在原有单一 queue 入口内委托同一个 unqueued keyboard mechanical owner。coordinator、MissionRuntime 和 Actor 都不得自行创建 backend 或在缺失时 fallback。这样 composition 与执行仍只有一个物理 owner。
 
-Actor 可见 scroll args 严格为 `{image_x, image_y, direction: "up" | "down", notches: 1..12}`；`up` 表示显露 viewport 上方内容，`down` 表示显露下方内容。Actor 可见 keyboard args 严格为 `type_text:{text: 1..4096 codepoints}` 和 `hotkey:{modifiers: unique subset of ctrl/alt/shift/win, key: one canonical non-modifier}`；Runtime 先按 Catalog schema 验证，Controller 再以固定 modifier 顺序构造 `HotkeyChord`。keyboard 的 `CommitAdmissionRequest` 使用 `input_kind=keyboard` 与 `screen_point=null`，不调用坐标 mapper 或 hit-test；它仍共享 Runtime permit、权威 frame pin、target/foreground 复核、唯一 physical lease、post-action frame/evidence 和 unknown-no-replay。sidecar、evidence 与 raw facts 不保存文本或 chord 内容。`DesktopRuntimeSelection` 只在 run 开始时冻结；缺失 coordinator、任一端口或任一 raw primitive 都必须在 Actor/mutation 前拒绝，不能隐式 fallback 到 legacy。真实 Electron keyboard oracle 尚未运行；`drag`、`draw_strokes`、held pointer 与 ROI observe 仍未接入。
+Actor 可见 scroll args 严格为 `{image_x, image_y, direction: "up" | "down", notches: 1..12}`；`up` 表示显露 viewport 上方内容，`down` 表示显露下方内容。Actor 可见 keyboard args 严格为 `type_text:{text: 1..4096 codepoints}` 和 `hotkey:{modifiers: unique subset of ctrl/alt/shift/win, key: one canonical non-modifier}`；Runtime 先按 Catalog schema 验证，Controller 再以固定 modifier 顺序构造 `HotkeyChord`。keyboard 的 `CommitAdmissionRequest` 使用 `input_kind=keyboard` 与 `screen_point=null`，不调用坐标 mapper 或 hit-test；它仍共享 Runtime permit、权威 frame pin、target/foreground 复核、唯一 physical lease、post-action frame/evidence 和 unknown-no-replay。sidecar、evidence 与 raw facts 不保存文本或 chord 内容。`DesktopRuntimeSelection` 只在 run 开始时冻结；缺失 coordinator、任一端口或任一 raw primitive 都必须在 Actor/mutation 前拒绝，不能隐式 fallback 到 legacy。`drag`、`draw_strokes`、held pointer 与 ROI observe 仍未接入。
 
 P4b.1 先把共享 commit admission 从 `commit-admission-request/0` 升级为严格的
 `commit-admission-request/1`，显式区分 `input_kind=point|keyboard`。point 必须携带 `screen_point`，并继续
@@ -775,6 +807,14 @@ P4b.1 先把共享 commit admission 从 `commit-admission-request/0` 升级为�
 跳过无意义的 `WindowFromPoint`，但仍核对同一 frame/epoch/target、pointer released、mutation authority、
 stop/cancel 与 foreground root/process。最终 keyboard guard 也只读复核 target/foreground，不选择或聚焦
 窗口。P4b.1 后续切片已在不改 prompt 的前提下向显式 vNext run 暴露 `type_text`/`hotkey`；legacy 默认与其既有工具面、done 语义和执行入口保持不变。
+
+同入口 keyboard 证据截至 2026-07-23：
+
+- 早期基线 commit `f26b7de` 的 `keyboard-entry` 失败；suite `20260723-053146-suite`、run `arp-20260723-053225-58685a` 连续 24 次 click，为 0 次 `type_text`；
+- 引入最终 previous-action 合同的 commit `515b286` 先在 suite `20260723-070921-suite`、run `arp-20260723-071001-9b5a7c` 取得首次通过，随后 suite `20260723-071108-suite` 三个 `keyboard-entry` 全部通过：run `arp-20260723-071141-0f75a0`、`arp-20260723-071245-fa6469`、`arp-20260723-071350-e03585`；
+- `keyboard-select-all` 在 suite `20260723-071428-suite`、run `arp-20260723-071500-ae5d4c` 被旧 oracle 误报为失败；commit `a5c0c95` 把 oracle 改为 layout-independent 的逻辑 hotkey 验证后，suite `20260723-072628-suite`、run `arp-20260723-072705-9dbc00` 通过。
+
+基线与修复后运行的 provider 请求合同和代码配置不同，因此这是失败归因与可达性证据，不是同配置的通用能力 A/B，也不得声称完成 P7。
 
 ### 11.4 P4c product coordinator 与 per-run selector
 
@@ -1039,6 +1079,7 @@ runtime_version
 mission_id / revision / obligation_id
 execution_profile_id / recommended_depth / effective_depth
 model_role / model / thinking_policy / elapsed_ms
+previous_action_projected: bool | null
 decision_id / purpose / request_fingerprint
 attempt_count / request_retry_count / attempt kind / error kind / retryable
 followup_kind / late_result_discarded
@@ -1052,6 +1093,10 @@ controller transition id
 verifier invocation and evidence refs
 reducer event and resulting revision
 ```
+
+其中 `previous_action_projected=true` 只表示该次 Actor request 收到了有界 previous-action view，
+`false` 表示 Actor 已被调用但未投影，`null` 表示该回合没有可靠的 Actor-request 来源。
+它是不含参数、意图或图像的私有 trace sidecar 事实，不进入 BUS/WebSocket 或 Mission 真相。
 
 这样失败可以归因到 Goal Compiler、Task Profiler、Execution Policy、Mission Reducer、Broker、Actor、Frame/Controller、Verifier、Planner、Inspector或外部环境，而不是笼统归因于“模型不行”。
 ### P1.5 completion and recovery contract (canonical)

@@ -202,13 +202,19 @@ Actor不知道点击后发生什么，通常是Transition/Card质量问题。
 只有前十二层有证据后才检查模型：
 
 1. 用当时frame、MissionCard、BrokerProjection和相同schema离线重放；
-2. 去掉无关历史，保持角色合同；
-3. 比较轻/深reasoning与更强computer-use模型；
-4.检查能否描述可见拓扑、目标和不确定性；
-5.静态理解正确但function call错时检查schema/输出预算；
-6.多个模型都因细节失败时检查ROI/截图；
-7.同模型Verifier重复同一误判时增加不同证据视角，不能把“角色不同”当独立性；
-8.多个held-out场景仍稳定受益时才考虑Inspector或训练。
+2. 核对该回合是否投影 bounded previous action，以及 provider 是否按合同渲染原生 tool-call/result；
+3. 去掉无关历史，保持角色合同；
+4. 比较轻/深reasoning与更强computer-use模型；
+5.检查能否描述可见拓扑、目标和不确定性；
+6.静态理解正确但function call错时检查schema/输出预算；
+7.多个模型都因细节失败时检查ROI/截图；
+8.同模型Verifier重复同一误判时增加不同证据视角，不能把“角色不同”当独立性；
+9.多个held-out场景仍稳定受益时才考虑Inspector或训练。
+
+production trace 只保存 `previous_action_projected` 布尔值，不保存局部意图、参数、provider messages
+或图像；这保护输入内容，也意味着仅凭生产 trace 不能 bit-for-bit 重建包含该 view 的模型请求。
+需要精确回放时必须使用受控评测 fixture 在同一 Runtime/adapter 边界捕获冻结请求，不能从 Mission
+replay 猜测，也不能把重启后已丢失的 sidecar 伪装成可恢复状态。
 
 ### 2.14 Prompt 变更
 
