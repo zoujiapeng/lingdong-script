@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Protocol
 
 from ..actor import (
     ActorDecisionEnvelope,
@@ -54,6 +54,10 @@ from ..verification import (
     ObligationVerifierPort,
     VerifierAssessment,
 )
+from ..verification.visual_model import (
+    VisualVerifierAttestation,
+    append_visual_verifier_evidence,
+)
 from .contracts import (
     ControllerOutcome,
     ControllerTransition,
@@ -76,6 +80,20 @@ _PROPOSAL_TOOL = {
 }
 
 
+class AttestedVisualVerifierPort(Protocol):
+    """Read-only visual verifier that returns a locally bound attestation."""
+
+    verifier_kind: str
+
+    def attest(
+        self,
+        request: ObligationVerificationRequest,
+        frame: RuntimeFrame,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> VisualVerifierAttestation: ...
+
+
 class MissionRuntime:
     """Coordinate exactly one local obligation decision per call."""
 
@@ -92,6 +110,7 @@ class MissionRuntime:
         pointer_cleanup: PointerCleanupPort | None = None,
         mutation_permits: MutationPermitAuthority | None = None,
         obligation_verifier: ObligationVerifierPort | None = None,
+        attested_visual_verifier: AttestedVisualVerifierPort | None = None,
         mission_completion_verifier: (
             DeterministicMissionCompletionVerifier | None
         ) = None,
@@ -116,8 +135,33 @@ class MissionRuntime:
             getattr(obligation_verifier, "verify", None)
         ):
             raise TypeError("obligation_verifier must provide verify()")
+        if obligation_verifier is not None and attested_visual_verifier is not None:
+            raise TypeError(
+                "generic and attested visual obligation verifiers are mutually exclusive"
+            )
+        if attested_visual_verifier is not None and (
+            not callable(getattr(attested_visual_verifier, "attest", None))
+            or getattr(attested_visual_verifier, "verifier_kind", None)
+            != "independent_visual_model"
+        ):
+            raise TypeError(
+                "attested_visual_verifier must provide independent_visual_model attest()"
+            )
         self._obligation_verifier = obligation_verifier
-        if (mission_completion_verifier is None) != (evidence_registry is None):
+        self._attested_visual_verifier = attested_visual_verifier
+        if mission_completion_verifier is not None and evidence_registry is None:
+            raise TypeError(
+                "mission completion verifier and evidence registry must be injected together"
+            )
+        if attested_visual_verifier is not None and evidence_registry is None:
+            raise TypeError(
+                "attested visual verifier and evidence registry must be injected together"
+            )
+        if (
+            evidence_registry is not None
+            and mission_completion_verifier is None
+            and attested_visual_verifier is None
+        ):
             raise TypeError(
                 "mission completion verifier and evidence registry must be injected together"
             )
@@ -126,11 +170,12 @@ class MissionRuntime:
                 raise TypeError(
                     "mission completion requires DeterministicMissionCompletionVerifier"
                 )
+        if evidence_registry is not None:
             if type(evidence_registry) is not EvidenceRegistry:
-                raise TypeError("mission completion requires canonical EvidenceRegistry")
+                raise TypeError("verification requires canonical EvidenceRegistry")
             if reducer.evidence_source is not evidence_registry:
                 raise TypeError(
-                    "mission completion and MissionReducer must share one EvidenceRegistry"
+                    "verification and MissionReducer must share one EvidenceRegistry"
                 )
             if (
                 evidence_registry.mission_id != reducer.definition.mission_id
@@ -377,6 +422,12 @@ class MissionRuntime:
 
         return bool(
             self._obligation_verifier is not None
+            and self._profile.services.obligation_verifier is True
+        )
+
+    def _attested_visual_verification_enabled(self) -> bool:
+        return bool(
+            self._attested_visual_verifier is not None
             and self._profile.services.obligation_verifier is True
         )
 
@@ -679,6 +730,279 @@ class MissionRuntime:
                     RuntimeStatus.STATE_REJECTED,
                     str(fallback_error),
                 )
+        accepted_ids = claim_event_ids + verification_event_ids
+        completion = self._maybe_verify_mission(
+            turn_index=turn_index,
+            stop_event=stop_event,
+            route=route,
+            proposal_kind=proposal_kind,
+            decision_id=decision_id,
+            prior_event_ids=accepted_ids,
+        )
+        if completion is not None:
+            return completion
+        return finish(
+            RuntimeStatus.VERIFICATION_RECORDED,
+            assessment.concise_reason,
+            accepted_ids,
+        )
+
+    def _visual_claim_frame_is_current(
+        self,
+        request: ObligationVerificationRequest,
+        verification_attempt_count: int,
+        frozen_frame: RuntimeFrame,
+        *,
+        turn_index: int,
+    ) -> bool:
+        if not self._verification_identity_is_current(
+            request,
+            verification_attempt_count=verification_attempt_count,
+        ):
+            return False
+        try:
+            snapshot = self._state.current(
+                self._reducer.projection,
+                turn_index=turn_index,
+            )
+        except Exception:
+            return False
+        frame_state = snapshot.broker_state.frame
+        return bool(
+            snapshot.broker_state.turn_index == turn_index
+            and self._snapshot_matches_mission(snapshot)
+            and snapshot.frame == frozen_frame
+            and frame_state.authoritative
+            and frame_state.fresh
+            and frame_state.frame_id == frozen_frame.frame_id
+            and frame_state.hwnd == frozen_frame.hwnd
+            and frame_state.epoch == frozen_frame.epoch
+        )
+
+    def _run_attested_visual_verifier(
+        self,
+        *,
+        turn_index: int,
+        route: ExecutionRoute,
+        proposal_kind: str,
+        decision_id: str,
+        obligation_id: str,
+        claim_event_ids: tuple[str, ...],
+        frozen_frame: RuntimeFrame,
+        stop_event: threading.Event | None,
+    ) -> MissionRuntimeResult:
+        """Attest one claim/frame pair and commit only Runtime-bound evidence."""
+
+        def finish(
+            status: RuntimeStatus,
+            detail: str,
+            event_ids: tuple[str, ...] = claim_event_ids,
+        ) -> MissionRuntimeResult:
+            return self._result(
+                status,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                event_ids=event_ids,
+                detail=detail,
+            )
+
+        try:
+            claim_request, attempt_count = self._freeze_verification_request(
+                obligation_id
+            )
+        except (MissionError, InvalidVerificationSchema, ValueError) as exc:
+            return finish(
+                RuntimeStatus.STATE_REJECTED,
+                f"accepted claim could not be frozen for visual verification: {exc}",
+            )
+        if tuple(ref.id for ref in claim_request.evidence_refs) != frozen_frame.evidence_refs:
+            return finish(
+                RuntimeStatus.STATE_REJECTED,
+                "visual verification frame is not the accepted claim frame",
+            )
+
+        def record_failure(reason: str, failure_kind: str) -> MissionRuntimeResult:
+            if self._stopped(stop_event):
+                return self._canceled(
+                    turn_index,
+                    event_ids=claim_event_ids,
+                    detail="visual verification failed after cancellation",
+                )
+            if not self._visual_claim_frame_is_current(
+                claim_request,
+                attempt_count,
+                frozen_frame,
+                turn_index=turn_index,
+            ):
+                return finish(
+                    RuntimeStatus.STALE_DISCARDED,
+                    "visual claim or frame changed before failure commit",
+                )
+            assessment = self._failed_verification_assessment(
+                claim_request, reason
+            )
+            try:
+                bound = ObligationVerificationResult.bind(
+                    claim_request,
+                    assessment,
+                    verifier_kind="runtime_fail_closed",
+                    evidence_refs=(),
+                )
+                event_ids = self._accept(
+                    "verification_recorded",
+                    payload=self._verification_event_payload(
+                        claim_request,
+                        bound,
+                        assessment,
+                        failure_kind=failure_kind,
+                    ),
+                    evidence_refs=(),
+                    base_revision=claim_request.mission_revision,
+                )
+            except (MissionError, InvalidVerificationSchema, ValueError) as exc:
+                return finish(RuntimeStatus.STATE_REJECTED, str(exc))
+            return finish(
+                RuntimeStatus.VERIFICATION_RECORDED,
+                assessment.concise_reason,
+                claim_event_ids + event_ids,
+            )
+
+        if not claim_request.evidence_policy.allow_independent_visual_verifier:
+            return record_failure(
+                "independent visual verification is disabled by EvidencePolicy",
+                "visual_verifier_not_permitted",
+            )
+        if self._stopped(stop_event):
+            return self._canceled(
+                turn_index,
+                event_ids=claim_event_ids,
+                detail="turn canceled before visual verification",
+            )
+
+        try:
+            assert self._attested_visual_verifier is not None
+            attestation = self._attested_visual_verifier.attest(
+                claim_request,
+                frozen_frame,
+                stop_event=stop_event,
+            )
+        except Exception:
+            attestation = None
+        if self._stopped(stop_event):
+            return self._canceled(
+                turn_index,
+                event_ids=claim_event_ids,
+                detail="late visual verifier result was discarded after cancellation",
+            )
+
+        if not isinstance(attestation, VisualVerifierAttestation):
+            return record_failure(
+                "independent visual verifier failed closed",
+                "visual_verifier_error",
+            )
+        if not self._visual_claim_frame_is_current(
+            claim_request,
+            attempt_count,
+            frozen_frame,
+            turn_index=turn_index,
+        ):
+            return finish(
+                RuntimeStatus.STALE_DISCARDED,
+                "visual claim or authoritative frame changed during verification",
+            )
+        if not self._verification_evidence_is_current(claim_request):
+            return record_failure(
+                "claim evidence changed during visual verification",
+                "verification_evidence_stale",
+            )
+
+        registry = self._evidence_registry
+        if registry is None:
+            return record_failure(
+                "canonical visual evidence registry is unavailable",
+                "visual_evidence_registry_unavailable",
+            )
+        try:
+            visual_ref = append_visual_verifier_evidence(
+                claim_request,
+                frozen_frame,
+                attestation,
+                registry,
+                stop_event=stop_event,
+            )
+        except Exception:
+            return record_failure(
+                "visual attestation evidence append failed closed",
+                "visual_evidence_append_failed",
+            )
+
+        if self._stopped(stop_event):
+            return self._canceled(
+                turn_index,
+                event_ids=claim_event_ids,
+                detail="visual verification canceled before commit",
+            )
+        if not self._visual_claim_frame_is_current(
+            claim_request,
+            attempt_count,
+            frozen_frame,
+            turn_index=turn_index,
+        ):
+            return finish(
+                RuntimeStatus.STALE_DISCARDED,
+                "visual claim or authoritative frame changed before commit",
+            )
+        if not self._verification_evidence_is_current(claim_request):
+            return record_failure(
+                "claim evidence changed before visual verification commit",
+                "verification_evidence_stale",
+            )
+        visual_request = ObligationVerificationRequest(
+            mission_id=claim_request.mission_id,
+            run_id=claim_request.run_id,
+            mission_revision=claim_request.mission_revision,
+            obligation_id=claim_request.obligation_id,
+            claim_fingerprint=claim_request.claim_fingerprint,
+            desired_state=claim_request.desired_state,
+            acceptance_criteria=claim_request.acceptance_criteria,
+            forbidden_effects=claim_request.forbidden_effects,
+            evidence_policy=claim_request.evidence_policy,
+            evidence_refs=claim_request.evidence_refs + (visual_ref,),
+        )
+        try:
+            assessment = attestation.assessment
+            bound = ObligationVerificationResult.bind(
+                visual_request,
+                assessment,
+                verifier_kind="independent_visual_model",
+                evidence_refs=(visual_ref.id,),
+            )
+        except Exception:
+            return record_failure(
+                "malformed visual verifier assessment failed closed",
+                "visual_verifier_schema_error",
+            )
+
+        try:
+            verification_event_ids = self._accept(
+                "verification_recorded",
+                payload=self._verification_event_payload(
+                    visual_request,
+                    bound,
+                    assessment,
+                    failure_kind="verification_rejected",
+                ),
+                evidence_refs=(visual_ref.id,),
+                base_revision=claim_request.mission_revision,
+            )
+        except MissionError as first_error:
+            if not bound.verified:
+                return finish(RuntimeStatus.STATE_REJECTED, str(first_error))
+            return record_failure(
+                "positive visual verifier result was rejected by Mission policy",
+                "verification_policy_rejected",
+            )
         accepted_ids = claim_event_ids + verification_event_ids
         completion = self._maybe_verify_mission(
             turn_index=turn_index,
@@ -1185,6 +1509,17 @@ class MissionRuntime:
                     proposal_kind=proposal_kind,
                     decision_id=decision_id,
                     detail=str(exc),
+                )
+            if self._attested_visual_verification_enabled():
+                return self._run_attested_visual_verifier(
+                    turn_index=turn_index,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    obligation_id=obligation_id,
+                    claim_event_ids=event_ids,
+                    frozen_frame=latest.frame,
+                    stop_event=stop_event,
                 )
             if self._obligation_verification_enabled():
                 return self._run_obligation_verifier(
