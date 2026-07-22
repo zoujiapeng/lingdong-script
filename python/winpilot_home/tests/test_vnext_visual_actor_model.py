@@ -31,7 +31,7 @@ from winpilot.vnext.actor.views import (
     ActorToolView,
     ActorTurnInput,
 )
-from winpilot.vnext.capabilities.live_catalog import build_click_live_catalog
+from winpilot.vnext.capabilities.live_catalog import build_live_catalog
 
 
 class _ChatClient:
@@ -59,7 +59,7 @@ def _response(
 
 
 def _turn(*tool_names: str) -> ActorTurnInput:
-    catalog = build_click_live_catalog()
+    catalog = build_live_catalog()
 
     def schema(name: str):
         if name == "observe":

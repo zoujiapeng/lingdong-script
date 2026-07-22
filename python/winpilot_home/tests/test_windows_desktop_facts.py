@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from winpilot.action.raw_device import FinalClickGuardDecision
+from winpilot.action.raw_device import FinalPointerGuardDecision
 from winpilot.visual_runtime.commit_admission import (
     CommitAdmissionGate,
     CommitAdmissionReason,
@@ -19,7 +19,7 @@ from winpilot.visual_runtime.windows_desktop_facts import (
     WindowsDesktopCommitObservation,
     WindowsDesktopFactsError,
     WindowsDesktopFactsReader,
-    WindowsPhysicalClickFinalGuard,
+    WindowsPhysicalInputFinalGuard,
 )
 
 
@@ -214,16 +214,16 @@ def test_target_change_between_samples_fails_closed_before_callback():
     assert calls == []
 
 
-def test_final_click_guard_reads_no_foreground_and_admits_exact_target_hit():
+def test_final_pointer_guard_reads_no_foreground_and_admits_exact_target_hit():
     backend = Backend()
-    guard = WindowsPhysicalClickFinalGuard(WindowsDesktopFactsReader(backend))
+    guard = WindowsPhysicalInputFinalGuard(WindowsDesktopFactsReader(backend))
 
-    decision = guard.check_before_mouse_down(_request(), (150, 140))
+    decision = guard.check_before_pointer_input(_request(), (150, 140))
 
-    assert decision is FinalClickGuardDecision.ADMITTED
-    assert guard.check_before_mouse_down(
+    assert decision is FinalPointerGuardDecision.ADMITTED
+    assert guard.check_before_pointer_input(
         _request(), (151, 140)
-    ) is FinalClickGuardDecision.HIT_TEST_CHANGED
+    ) is FinalPointerGuardDecision.HIT_TEST_CHANGED
     assert ("foreground_hwnd",) not in backend.calls
     assert backend.calls.count(("window_region", 101)) == 2
     assert backend.calls.count(("window_from_point", (150, 140))) == 1
@@ -232,15 +232,15 @@ def test_final_click_guard_reads_no_foreground_and_admits_exact_target_hit():
 @pytest.mark.parametrize(
     ("change", "decision"),
     (
-        ("root", FinalClickGuardDecision.TARGET_ROOT_CHANGED),
-        ("pid", FinalClickGuardDecision.TARGET_PROCESS_CHANGED),
-        ("geometry", FinalClickGuardDecision.TARGET_GEOMETRY_CHANGED),
-        ("hit", FinalClickGuardDecision.HIT_TEST_CHANGED),
-        ("hit_unavailable", FinalClickGuardDecision.HIT_TEST_UNAVAILABLE),
-        ("point", FinalClickGuardDecision.POINT_OUTSIDE_TARGET),
+        ("root", FinalPointerGuardDecision.TARGET_ROOT_CHANGED),
+        ("pid", FinalPointerGuardDecision.TARGET_PROCESS_CHANGED),
+        ("geometry", FinalPointerGuardDecision.TARGET_GEOMETRY_CHANGED),
+        ("hit", FinalPointerGuardDecision.HIT_TEST_CHANGED),
+        ("hit_unavailable", FinalPointerGuardDecision.HIT_TEST_UNAVAILABLE),
+        ("point", FinalPointerGuardDecision.POINT_OUTSIDE_TARGET),
     ),
 )
-def test_final_click_guard_fails_closed_on_each_mechanical_identity(
+def test_final_pointer_guard_fails_closed_on_each_mechanical_identity(
     change, decision,
 ):
     backend = Backend()
@@ -258,9 +258,9 @@ def test_final_click_guard_fails_closed_on_each_mechanical_identity(
     else:
         request = replace(request, screen_point=(900, 900))
 
-    assert WindowsPhysicalClickFinalGuard(
+    assert WindowsPhysicalInputFinalGuard(
         WindowsDesktopFactsReader(backend)
-    ).check_before_mouse_down(request, request.screen_point) is decision
+    ).check_before_pointer_input(request, request.screen_point) is decision
 
 
 @pytest.mark.parametrize("live", ({100, 111}, {101, 100, 111}))

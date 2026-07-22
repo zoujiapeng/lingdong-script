@@ -37,7 +37,7 @@ from winpilot.tasking.capability import (
 )
 from winpilot.tasking.compiler import TaskContractCompiler
 from winpilot.vnext.capabilities.live_catalog import (
-    build_click_live_runtime_snapshot,
+    build_live_runtime_snapshot,
 )
 
 
@@ -98,7 +98,7 @@ def _install_live_coordinator_factory(
     calls = []
 
     class Coordinator:
-        runtime_capability_snapshot = build_click_live_runtime_snapshot()
+        runtime_capability_snapshot = build_live_runtime_snapshot()
 
         def run(self, _context):
             return DesktopRuntimeCoordinatorResult(
@@ -831,7 +831,7 @@ def test_vnext_admission_failure_precedes_prepare_model_controller_job_and_fallb
     )
 
     class Coordinator:
-        runtime_capability_snapshot = build_click_live_runtime_snapshot()
+        runtime_capability_snapshot = build_live_runtime_snapshot()
 
         def run(self, _context):
             calls.append("model_or_controller")

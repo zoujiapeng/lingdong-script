@@ -9,7 +9,7 @@ import pytest
 from winpilot.action.desktop_queue import DesktopActionQueue
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
-    FinalClickGuardDecision,
+    FinalPointerGuardDecision,
     RawActionReceipt,
     RawBackendResult,
     RawDeviceBackends,
@@ -34,7 +34,7 @@ from winpilot.vnext.runtime import (
     MutationPermitAuthority,
     RuntimeFrame,
 )
-from winpilot.visual_runtime.atomic_click_controller import AtomicClickController
+from winpilot.visual_runtime.atomic_click_controller import AtomicDesktopController
 from winpilot.visual_runtime.atomic_post_action_bridge import (
     AtomicPostActionBridge,
     AtomicPostActionBridgeError,
@@ -82,7 +82,12 @@ def _identity(frame: FrameState) -> FrameCommitIdentity:
     )
 
 
-def _envelope(frame: FrameState, *, run_id: str = "run-1") -> ActorDecisionEnvelope:
+def _envelope(
+    frame: FrameState,
+    *,
+    run_id: str = "run-1",
+    action: str = "click",
+) -> ActorDecisionEnvelope:
     return ActorDecisionEnvelope(
         decision_id="decision-1",
         mission_id="mission-1",
@@ -100,8 +105,12 @@ def _envelope(frame: FrameState, *, run_id: str = "run-1") -> ActorDecisionEnvel
         proposal=parse_actor_proposal({
             "format": "actor-proposal/0",
             "kind": "desktop_action",
-            "action": "click",
-            "args": {"image_x": 400, "image_y": 300},
+            "action": action,
+            "args": {
+                "image_x": 400,
+                "image_y": 300,
+                **({"amount": -3} if action == "scroll" else {}),
+            },
             "local_intent": "activate the visible semantic target",
         }),
     )
@@ -121,6 +130,14 @@ def _receipt() -> RawActionReceipt:
         "click",
         MutationOutcome.APPLIED,
         RawBackendResult(True, {"sent": 1}),
+    )
+
+
+def _scroll_receipt() -> RawActionReceipt:
+    return RawActionReceipt(
+        "scroll",
+        MutationOutcome.APPLIED,
+        RawBackendResult(True, {"sent_notches": -3}),
     )
 
 
@@ -174,14 +191,14 @@ class _Observation:
 
 
 class _FinalGuard:
-    def check_before_mouse_down(self, _request, _screen_point):
-        return FinalClickGuardDecision.ADMITTED
+    def check_before_pointer_input(self, _request, _screen_point):
+        return FinalPointerGuardDecision.ADMITTED
 
 
 def _admitted_backend(calls: list[tuple]) -> AdmittedPhysicalClickBackend:
     def execute(x, y, *, button, count, mechanism, hwnd, final_guard):
         decision = final_guard(x, y)
-        if decision is not FinalClickGuardDecision.ADMITTED:
+        if decision is not FinalPointerGuardDecision.ADMITTED:
             return RawBackendResult(False, {"final_guard": decision.value})
         calls.append((x, y, button, count, mechanism, hwnd))
         return RawBackendResult(True, {"sent": 1})
@@ -195,10 +212,10 @@ def _controller(
     queue: DesktopActionQueue,
     bridge: AtomicPostActionBridge,
     raw_calls: list[tuple],
-) -> AtomicClickController:
+) -> AtomicDesktopController:
     permits = MutationPermitAuthority(envelope.mission_id, envelope.run_id)
     permits.issue(envelope, turn_index=0, still_current=lambda: True)
-    return AtomicClickController(
+    return AtomicDesktopController(
         action_queue=queue,
         frame_authority=authority,
         permits=permits,
@@ -261,6 +278,35 @@ def test_bridge_cas_commits_and_registers_exact_projectable_frame_evidence() -> 
         evidence_refs=projector.evidence_refs_for(identity),
     )
     assert runtime_frame.evidence_refs == post.evidence_refs
+
+
+def test_bridge_accepts_the_exact_scroll_receipt_for_a_scroll_action() -> None:
+    authority, before = _authority()
+    envelope = _envelope(before, action="scroll")
+    registry = EvidenceRegistry("mission-1", "run-1")
+    bridge = _bridge(authority, registry)
+
+    post = bridge.observe_after(
+        envelope,
+        admission=_admission(envelope),
+        raw_receipt=_scroll_receipt(),
+    )
+
+    evidence, = registry.snapshot()
+    assert post.post_frame_id == before.frame_id + 1
+    assert evidence.action_id == envelope.decision_id
+    with pytest.raises(AtomicPostActionBridgeError, match="exact raw receipt"):
+        next_authority, next_before = _authority()
+        wrong = _envelope(next_before, action="scroll")
+        AtomicPostActionBridge(
+            frame_authority=next_authority,
+            observer=_observer(next_authority),
+            evidence=EvidenceRegistry("mission-1", "run-1"),
+        ).observe_after(
+            wrong,
+            admission=_admission(wrong),
+            raw_receipt=_receipt(),
+        )
 
 
 def test_not_started_admission_still_gets_a_fresh_bound_frame_without_receipt() -> None:

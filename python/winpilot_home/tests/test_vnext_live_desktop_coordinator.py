@@ -11,7 +11,8 @@ import winpilot.vnext.bridge.coordinator as coordinator_module
 from winpilot.action.desktop_queue import DesktopActionQueue
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
-    FinalClickGuardDecision,
+    AdmittedPhysicalScrollBackend,
+    FinalPointerGuardDecision,
     RawBackendResult,
     RawDeviceBackends,
     RawDeviceExecutor,
@@ -32,7 +33,7 @@ from winpilot.vnext.bridge.coordinator import (
     build_live_desktop_runtime_coordinator,
 )
 from winpilot.vnext.capabilities.live_catalog import (
-    build_click_live_runtime_snapshot,
+    build_live_runtime_snapshot,
 )
 
 
@@ -176,13 +177,15 @@ def _coordinator(
     runtime_snapshot=None,
     trace=None,
     raw_calls=None,
+    raw_scroll_calls=None,
+    raw_scroll_completed=True,
     max_turns=6,
     frame_max_age_s=30.0,
     clock=lambda: 10.0,
 ):
     calls = raw_calls if raw_calls is not None else []
     snapshot = (
-        build_click_live_runtime_snapshot()
+        build_live_runtime_snapshot()
         if runtime_snapshot is None
         else runtime_snapshot
     )
@@ -191,7 +194,21 @@ def _coordinator(
         decision = final_guard(x, y)
         calls.append((x, y, button, count, mechanism, hwnd, decision))
         return RawBackendResult(
-            decision is FinalClickGuardDecision.ADMITTED,
+            decision is FinalPointerGuardDecision.ADMITTED,
+            {"final_guard": decision.value},
+        )
+
+    scroll_calls = raw_scroll_calls if raw_scroll_calls is not None else []
+
+    def raw_scroll(x, y, amount, hwnd=None, *, final_guard):
+        decision = final_guard(x, y)
+        scroll_calls.append((x, y, amount, hwnd, decision))
+        return RawBackendResult(
+            (
+                raw_scroll_completed
+                if decision is FinalPointerGuardDecision.ADMITTED
+                else False
+            ),
             {"final_guard": decision.value},
         )
 
@@ -202,6 +219,7 @@ def _coordinator(
         action_queue=DesktopActionQueue(),
         raw_device=RawDeviceExecutor(RawDeviceBackends(
             admitted_physical_click=AdmittedPhysicalClickBackend(raw_click),
+            admitted_physical_scroll=AdmittedPhysicalScrollBackend(raw_scroll),
         )),
         facts_reader=WindowsDesktopFactsReader(Backend()),
         observer_factory=_observer,
@@ -234,6 +252,16 @@ def _claim():
     }
 
 
+def _scroll(*, amount=-4):
+    return {
+        "format": "actor-proposal/0",
+        "kind": "desktop_action",
+        "action": "scroll",
+        "args": {"image_x": 100, "image_y": 100, "amount": amount},
+        "local_intent": "move the visible content in the intended direction",
+    }
+
+
 def _invalid_click():
     proposal = _click()
     proposal["args"] = {"image_x": "not-a-coordinate", "image_y": 100}
@@ -256,13 +284,13 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     assert output["mission_status"] == "verified"
     assert output["turn_count"] == 2
     assert output["tool_names"] == [
-        "click", "double_click", "claim_obligation_done", "blocked",
+        "click", "double_click", "scroll", "claim_obligation_done", "blocked",
     ]
     assert len(actor.calls) == 2
     assert len(verifier.calls) == 1
     assert len(raw_calls) == 1
     assert raw_calls[0][0:2] == (110, 120)
-    assert raw_calls[0][-1] is FinalClickGuardDecision.ADMITTED
+    assert raw_calls[0][-1] is FinalPointerGuardDecision.ADMITTED
     assert [record[1]["type"] for record in trace.records] == [
         "vnext_mission_runtime_started",
         "vnext_mission_runtime_turn",
@@ -272,8 +300,48 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     assert all(run_id == "arp-run-1" for run_id, _record in trace.records)
 
 
+def test_live_coordinator_scroll_uses_same_actor_controller_and_verifier_chain():
+    actor = ScriptedActor([_scroll(amount=-5), _claim()])
+    verifier = PositiveVisualModel()
+    raw_scroll_calls = []
+
+    result = _coordinator(
+        actor,
+        verifier,
+        raw_scroll_calls=raw_scroll_calls,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    assert len(raw_scroll_calls) == 1
+    x, y, amount, hwnd, decision = raw_scroll_calls[0]
+    assert x >= 10 and y >= 20
+    assert amount == -5
+    assert hwnd == 101
+    assert decision is FinalPointerGuardDecision.ADMITTED
+    assert len(verifier.calls) == 1
+    assert "scroll" in {tool.name for tool in actor.calls[0][0].tools}
+
+
+def test_uncertain_scroll_blocks_without_retry_claim_or_verifier_call():
+    actor = ScriptedActor([_scroll(amount=4), _claim()])
+    verifier = PositiveVisualModel()
+    raw_scroll_calls = []
+
+    result = _coordinator(
+        actor,
+        verifier,
+        raw_scroll_calls=raw_scroll_calls,
+        raw_scroll_completed=None,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert len(raw_scroll_calls) == 1
+    assert len(actor.calls) == 1
+    assert verifier.calls == []
+
+
 def test_one_runtime_snapshot_drives_state_profile_broker_and_trace(monkeypatch):
-    snapshot = build_click_live_runtime_snapshot()
+    snapshot = build_live_runtime_snapshot()
     trace = Trace()
     observed = {
         "profile_available": None,
@@ -671,7 +739,7 @@ def test_factory_accepts_only_injected_physical_owner() -> None:
     )
 
     assert isinstance(coordinator, LiveDesktopRuntimeCoordinator)
-    expected_snapshot = build_click_live_runtime_snapshot()
+    expected_snapshot = build_live_runtime_snapshot()
     assert type(coordinator.runtime_capability_snapshot) is type(expected_snapshot)
     assert coordinator.runtime_capability_snapshot.to_dict() == (
         expected_snapshot.to_dict()

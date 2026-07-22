@@ -9,9 +9,10 @@ import pytest
 from winpilot.action.desktop_queue import DesktopActionQueue
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
+    AdmittedPhysicalScrollBackend,
     ClickCount,
     ClickMechanism,
-    FinalClickGuardDecision,
+    FinalPointerGuardDecision,
     MouseButton,
     RawBackendResult,
     RawDeviceBackends,
@@ -25,8 +26,8 @@ from winpilot.vnext.runtime import (
     MutationPermitAuthority,
 )
 from winpilot.visual_runtime.atomic_click_controller import (
-    AtomicClickController,
-    AtomicClickControllerError,
+    AtomicDesktopController,
+    AtomicDesktopControllerError,
     ControllerPostAction,
 )
 from winpilot.visual_runtime.commit_admission import (
@@ -111,11 +112,11 @@ class Observation:
 
 
 class FinalGuard:
-    def __init__(self, decision=FinalClickGuardDecision.ADMITTED):
+    def __init__(self, decision=FinalPointerGuardDecision.ADMITTED):
         self.decision = decision
         self.requests = []
 
-    def check_before_mouse_down(self, request, screen_point):
+    def check_before_pointer_input(self, request, screen_point):
         self.requests.append((request, screen_point))
         return self.decision
 
@@ -123,13 +124,23 @@ class FinalGuard:
 def _admitted_backend(backend):
     def execute(x, y, *, button, count, mechanism, hwnd, final_guard):
         decision = final_guard(x, y)
-        if decision is not FinalClickGuardDecision.ADMITTED:
+        if decision is not FinalPointerGuardDecision.ADMITTED:
             return RawBackendResult(False, {"final_guard": decision.value})
         return backend(
             x, y, button=button, count=count, mechanism=mechanism, hwnd=hwnd,
         )
 
     return AdmittedPhysicalClickBackend(execute)
+
+
+def _admitted_scroll_backend(backend):
+    def execute(x, y, amount, *, hwnd, final_guard):
+        decision = final_guard(x, y)
+        if decision is not FinalPointerGuardDecision.ADMITTED:
+            return RawBackendResult(False, {"final_guard": decision.value})
+        return backend(x, y, amount, hwnd=hwnd)
+
+    return AdmittedPhysicalScrollBackend(execute)
 
 
 class PostAction:
@@ -178,10 +189,11 @@ def _controller(
     enabled=True,
     permits=None,
     turn_index=0,
+    scroll_backend=None,
 ):
     permits = permits or MutationPermitAuthority(envelope.mission_id, envelope.run_id)
     permits.issue(envelope, turn_index=turn_index, still_current=lambda: True)
-    return AtomicClickController(
+    return AtomicDesktopController(
         action_queue=queue or DesktopActionQueue(),
         frame_authority=authority,
         permits=permits,
@@ -189,6 +201,11 @@ def _controller(
         final_guard=final_guard or FinalGuard(),
         raw_device=RawDeviceExecutor(RawDeviceBackends(
             admitted_physical_click=_admitted_backend(backend),
+            admitted_physical_scroll=(
+                None
+                if scroll_backend is None
+                else _admitted_scroll_backend(scroll_backend)
+            ),
         )),
         post_action=post or PostAction(),
         enabled=enabled,
@@ -224,6 +241,94 @@ def test_success_maps_submitted_pixels_and_posts_outside_frame_pin(
         110, 70, MouseButton.LEFT, expected_count, ClickMechanism.PHYSICAL, 101,
     )]
     assert len(post.calls) == 1
+
+
+def test_scroll_maps_submitted_pixels_and_uses_one_admitted_backend_call():
+    authority, frame = _authority()
+    envelope = _envelope(
+        frame,
+        action="scroll",
+        args={"image_x": 10, "image_y": 5, "amount": -4},
+    )
+    raw_calls = []
+
+    def scroll_backend(x, y, amount, *, hwnd):
+        raw_calls.append((x, y, amount, hwnd))
+        return RawBackendResult(True, {"sent_notches": amount})
+
+    final_guard = FinalGuard()
+    post = PostAction(frame_authority=authority)
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *_args, **_kwargs: pytest.fail("click backend must not run"),
+        final_guard=final_guard,
+        post=post,
+        scroll_backend=scroll_backend,
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.COMPLETED
+    assert transition.input_completed is True
+    assert transition.action == "scroll"
+    assert raw_calls == [(110, 70, -4, 101)]
+    assert len(final_guard.requests) == 1
+    assert len(post.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "args",
+    (
+        {"image_x": 10, "image_y": 5},
+        {"image_x": 10, "image_y": 5, "amount": 0},
+        {"image_x": 10, "image_y": 5, "amount": True},
+        {"image_x": 10, "image_y": 5, "amount": 13},
+        {"image_x": 10, "image_y": 5, "amount": -13},
+    ),
+)
+def test_scroll_rejects_noncanonical_args_before_queue_or_raw(args):
+    authority, frame = _authority()
+    envelope = _envelope(frame, action="scroll", args=args)
+    raw_calls = []
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *_args, **_kwargs: pytest.fail("click backend must not run"),
+        scroll_backend=lambda *call, **kwargs: raw_calls.append((call, kwargs)),
+    )
+
+    with pytest.raises(AtomicDesktopControllerError):
+        controller.execute(envelope)
+
+    assert raw_calls == []
+
+
+def test_uncertain_scroll_backend_is_called_once_and_never_replayed():
+    authority, frame = _authority()
+    envelope = _envelope(
+        frame,
+        action="scroll",
+        args={"image_x": 10, "image_y": 5, "amount": 3},
+    )
+    raw_calls = []
+
+    def uncertain(*args, **kwargs):
+        raw_calls.append((args, kwargs))
+        raise OSError("wheel outcome unknown")
+
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *_args, **_kwargs: pytest.fail("click backend must not run"),
+        scroll_backend=uncertain,
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.UNKNOWN
+    assert transition.input_completed is None
+    assert len(raw_calls) == 1
 
 
 def test_commit_observation_reads_the_same_transient_permit_owner() -> None:
@@ -281,7 +386,7 @@ def test_final_guard_rejection_is_not_applied_and_never_calls_input_backend():
     authority, frame = _authority()
     envelope = _envelope(frame)
     raw_calls = []
-    final_guard = FinalGuard(FinalClickGuardDecision.HIT_TEST_CHANGED)
+    final_guard = FinalGuard(FinalPointerGuardDecision.HIT_TEST_CHANGED)
     controller, _permits = _controller(
         envelope,
         authority,
@@ -304,9 +409,9 @@ def test_stop_requested_at_final_guard_rejects_before_input():
     stop_event = threading.Event()
 
     class StopBeforeGuard(FinalGuard):
-        def check_before_mouse_down(self, request, screen_point):
+        def check_before_pointer_input(self, request, screen_point):
             stop_event.set()
-            return super().check_before_mouse_down(request, screen_point)
+            return super().check_before_pointer_input(request, screen_point)
 
     controller, _permits = _controller(
         envelope,
@@ -437,7 +542,7 @@ def test_physical_queue_serializes_raw_through_post_action():
         time.sleep(0.02)
         return RawBackendResult(True, {})
 
-    controller = AtomicClickController(
+    controller = AtomicDesktopController(
         action_queue=DesktopActionQueue(),
         frame_authority=authority,
         permits=permits,
@@ -467,7 +572,7 @@ def test_default_off_and_non_image_args_fail_before_queue_or_raw():
         lambda *args, **kwargs: raw_calls.append((args, kwargs)),
         enabled=False,
     )
-    with pytest.raises(AtomicClickControllerError, match="disabled"):
+    with pytest.raises(AtomicDesktopControllerError, match="disabled"):
         controller.execute(envelope)
 
     bad = _envelope(
@@ -480,15 +585,15 @@ def test_default_off_and_non_image_args_fail_before_queue_or_raw():
         authority,
         lambda *args, **kwargs: raw_calls.append((args, kwargs)),
     )
-    with pytest.raises(AtomicClickControllerError, match="only submitted-image"):
+    with pytest.raises(AtomicDesktopControllerError, match="submitted-image contract"):
         enabled.execute(bad)
     assert raw_calls == []
 
 
 def test_controller_post_action_contract_is_strict():
-    with pytest.raises(AtomicClickControllerError, match="positive"):
+    with pytest.raises(AtomicDesktopControllerError, match="positive"):
         ControllerPostAction(0, ("evidence-1",))
-    with pytest.raises(AtomicClickControllerError, match="duplicates"):
+    with pytest.raises(AtomicDesktopControllerError, match="duplicates"):
         ControllerPostAction(2, ("evidence-1", "evidence-1"))
-    with pytest.raises(AtomicClickControllerError, match="valid"):
+    with pytest.raises(AtomicDesktopControllerError, match="valid"):
         ControllerPostAction(2, ("not an identity",))

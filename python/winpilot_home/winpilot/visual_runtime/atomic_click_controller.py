@@ -1,6 +1,6 @@
-"""Opt-in atomic vNext ControllerPort adapter for image-grounded clicks.
+"""Opt-in atomic vNext ControllerPort adapter for point-grounded input.
 
-The adapter deliberately supports only one narrow mutation slice.  It owns no
+The adapter deliberately supports only a narrow mutation slice.  It owns no
 global runtime state and is not exported from :mod:`visual_runtime`; callers
 must inject every existing owner explicitly and enable it deliberately.
 """
@@ -15,7 +15,7 @@ from ..action.desktop_queue import DesktopActionQueue
 from ..action.raw_device import (
     ClickCount,
     ClickMechanism,
-    FinalClickGuardDecision,
+    FinalPointerGuardDecision,
     MouseButton,
     RawActionContext,
     RawActionReceipt,
@@ -49,7 +49,7 @@ from .submitted_image_coordinates import SubmittedImageCoordinateMapper
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 
 
-class AtomicClickControllerError(ValueError):
+class AtomicDesktopControllerError(ValueError):
     """Raised before queue admission when this narrow adapter cannot execute."""
 
 
@@ -61,12 +61,12 @@ class DesktopCommitObservation(Protocol):
 
 
 @runtime_checkable
-class PhysicalClickFinalGuardPort(Protocol):
-    """Read-only final target guard invoked by the admitted physical backend."""
+class PhysicalInputFinalGuardPort(Protocol):
+    """Read-only final target guard invoked by an admitted physical backend."""
 
-    def check_before_mouse_down(
+    def check_before_pointer_input(
         self, request: CommitAdmissionRequest, screen_point: tuple[int, int],
-    ) -> FinalClickGuardDecision: ...
+    ) -> FinalPointerGuardDecision: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,26 +79,26 @@ class ControllerPostAction:
 
     def __post_init__(self) -> None:
         if type(self.post_frame_id) is not int or self.post_frame_id <= 0:
-            raise AtomicClickControllerError("post_frame_id must be a positive integer")
+            raise AtomicDesktopControllerError("post_frame_id must be a positive integer")
         if isinstance(self.evidence_refs, (str, bytes)):
-            raise AtomicClickControllerError("evidence_refs must be an identity array")
+            raise AtomicDesktopControllerError("evidence_refs must be an identity array")
         try:
             refs = tuple(self.evidence_refs)
         except TypeError as exc:
-            raise AtomicClickControllerError(
+            raise AtomicDesktopControllerError(
                 "evidence_refs must be an identity array"
             ) from exc
         if not refs or any(
             type(ref) is not str or not _IDENTITY.fullmatch(ref.strip()) for ref in refs
         ):
-            raise AtomicClickControllerError(
+            raise AtomicDesktopControllerError(
                 "evidence_refs must contain valid non-empty identities"
             )
         normalized = tuple(sorted(ref.strip() for ref in refs))
         if len(normalized) != len(set(normalized)):
-            raise AtomicClickControllerError("evidence_refs must not contain duplicates")
+            raise AtomicDesktopControllerError("evidence_refs must not contain duplicates")
         if type(self.visible_effect) is not str:
-            raise AtomicClickControllerError("visible_effect must be a string")
+            raise AtomicDesktopControllerError("visible_effect must be a string")
         object.__setattr__(self, "evidence_refs", normalized)
         object.__setattr__(self, "visible_effect", self.visible_effect.strip())
 
@@ -116,8 +116,15 @@ class ControllerPostActionPort(Protocol):
     ) -> ControllerPostAction: ...
 
 
-class AtomicClickController:
-    """Default-off adapter implementing only physical click/double-click."""
+@dataclass(frozen=True, slots=True)
+class _PreparedPointInput:
+    request: CommitAdmissionRequest
+    click_count: ClickCount | None = None
+    scroll_amount: int | None = None
+
+
+class AtomicDesktopController:
+    """Default-off adapter for one physical point-input transaction."""
 
     def __init__(
         self,
@@ -126,7 +133,7 @@ class AtomicClickController:
         frame_authority: FrameAuthority,
         permits: MutationPermitAuthority,
         observation: DesktopCommitObservation,
-        final_guard: PhysicalClickFinalGuardPort,
+        final_guard: PhysicalInputFinalGuardPort,
         raw_device: RawDeviceExecutor,
         post_action: ControllerPostActionPort,
         enabled: bool = False,
@@ -141,8 +148,8 @@ class AtomicClickController:
             raise TypeError("raw_device must be RawDeviceExecutor")
         if not isinstance(observation, DesktopCommitObservation):
             raise TypeError("observation must implement DesktopCommitObservation")
-        if not isinstance(final_guard, PhysicalClickFinalGuardPort):
-            raise TypeError("final_guard must implement PhysicalClickFinalGuardPort")
+        if not isinstance(final_guard, PhysicalInputFinalGuardPort):
+            raise TypeError("final_guard must implement PhysicalInputFinalGuardPort")
         if not isinstance(post_action, ControllerPostActionPort):
             raise TypeError("post_action must implement ControllerPostActionPort")
         if type(enabled) is not bool:
@@ -157,22 +164,34 @@ class AtomicClickController:
         self._enabled = enabled
 
     @staticmethod
-    def _request(envelope: ActorDecisionEnvelope) -> tuple[
-        CommitAdmissionRequest, ClickCount,
-    ]:
+    def _request(envelope: ActorDecisionEnvelope) -> _PreparedPointInput:
         proposal = envelope.proposal
         if not isinstance(proposal, DesktopActionProposal) or proposal.action not in {
-            "click", "double_click",
+            "click", "double_click", "scroll",
         }:
-            raise AtomicClickControllerError(
-                "AtomicClickController supports only click and double_click"
+            raise AtomicDesktopControllerError(
+                "AtomicDesktopController supports only click, double_click, and scroll"
             )
         if envelope.target is None:
-            raise AtomicClickControllerError("click requires a Runtime-bound target")
+            raise AtomicDesktopControllerError(
+                "point input requires a Runtime-bound target"
+            )
         args = dict(proposal.args)
-        if set(args) != {"image_x", "image_y"}:
-            raise AtomicClickControllerError(
-                "click args must contain only submitted-image image_x and image_y"
+        expected_args = (
+            {"image_x", "image_y", "amount"}
+            if proposal.action == "scroll"
+            else {"image_x", "image_y"}
+        )
+        if set(args) != expected_args:
+            raise AtomicDesktopControllerError(
+                f"{proposal.action} args do not match the submitted-image contract"
+            )
+        amount = args.pop("amount", None)
+        if proposal.action == "scroll" and (
+            type(amount) is not int or amount == 0 or not -12 <= amount <= 12
+        ):
+            raise AtomicDesktopControllerError(
+                "scroll amount must be a non-zero integer from -12 through 12"
             )
         try:
             mapped, _source = SubmittedImageCoordinateMapper(
@@ -194,13 +213,18 @@ class AtomicClickController:
                 screen_point=point,
             )
         except ValueError as exc:
-            raise AtomicClickControllerError(str(exc)) from exc
-        count = (
-            ClickCount.DOUBLE
-            if proposal.action == "double_click"
-            else ClickCount.SINGLE
+            raise AtomicDesktopControllerError(str(exc)) from exc
+        return _PreparedPointInput(
+            request=request,
+            click_count=(
+                None
+                if proposal.action == "scroll"
+                else ClickCount.DOUBLE
+                if proposal.action == "double_click"
+                else ClickCount.SINGLE
+            ),
+            scroll_amount=amount,
         )
-        return request, count
 
     @staticmethod
     def _rejected(
@@ -268,21 +292,22 @@ class AtomicClickController:
         stop_event: Event | None = None,
     ) -> ControllerTransition:
         if not self._enabled:
-            raise AtomicClickControllerError("AtomicClickController is disabled")
+            raise AtomicDesktopControllerError("AtomicDesktopController is disabled")
         if not isinstance(envelope, ActorDecisionEnvelope):
             raise TypeError("envelope must be ActorDecisionEnvelope")
         if stop_event is not None and not isinstance(stop_event, Event):
             raise TypeError("stop_event must be threading.Event or null")
-        request, count = self._request(envelope)
+        prepared = self._request(envelope)
+        request = prepared.request
         target = envelope.target
         assert target is not None  # established by _request
 
-        def final_guard(x: int, y: int) -> FinalClickGuardDecision:
+        def final_guard(x: int, y: int) -> FinalPointerGuardDecision:
             if stop_event is not None and stop_event.is_set():
-                return FinalClickGuardDecision.STOP_REQUESTED
-            decision = self._final_guard.check_before_mouse_down(request, (x, y))
+                return FinalPointerGuardDecision.STOP_REQUESTED
+            decision = self._final_guard.check_before_pointer_input(request, (x, y))
             if stop_event is not None and stop_event.is_set():
-                return FinalClickGuardDecision.STOP_REQUESTED
+                return FinalPointerGuardDecision.STOP_REQUESTED
             return decision
 
         def under_physical_lease() -> ControllerTransition:
@@ -293,14 +318,24 @@ class AtomicClickController:
                         request,
                         permit,
                         self._gate,
-                        lambda: self._raw.click(
-                            RawActionContext(target.hwnd, target.hwnd),
-                            request.screen_point[0],
-                            request.screen_point[1],
-                            MouseButton.LEFT,
-                            count,
-                            ClickMechanism.PHYSICAL,
-                            final_guard=final_guard,
+                        lambda: (
+                            self._raw.scroll(
+                                RawActionContext(target.hwnd, target.hwnd),
+                                request.screen_point[0],
+                                request.screen_point[1],
+                                prepared.scroll_amount,
+                                final_guard=final_guard,
+                            )
+                            if prepared.scroll_amount is not None
+                            else self._raw.click(
+                                RawActionContext(target.hwnd, target.hwnd),
+                                request.screen_point[0],
+                                request.screen_point[1],
+                                MouseButton.LEFT,
+                                prepared.click_count,
+                                ClickMechanism.PHYSICAL,
+                                final_guard=final_guard,
+                            )
                         ),
                     )
                 finally:
@@ -340,15 +375,15 @@ class AtomicClickController:
             target_hwnd=target.hwnd,
             scope="physical",
             cancel_event=stop_event,
-            metadata={"owner": "vnext_atomic_click_controller"},
+            metadata={"owner": "vnext_atomic_desktop_controller"},
         )
 
 
 __all__ = [
-    "AtomicClickController",
-    "AtomicClickControllerError",
+    "AtomicDesktopController",
+    "AtomicDesktopControllerError",
     "ControllerPostAction",
     "ControllerPostActionPort",
     "DesktopCommitObservation",
-    "PhysicalClickFinalGuardPort",
+    "PhysicalInputFinalGuardPort",
 ]

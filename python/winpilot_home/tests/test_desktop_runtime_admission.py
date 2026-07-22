@@ -19,7 +19,7 @@ from winpilot.tasking.capability import (
 )
 from winpilot.tasking.compiler import TaskContractCompiler
 from winpilot.tasking.contracts import StageType, TaskContract
-from winpilot.vnext.capabilities.live_catalog import build_click_live_catalog
+from winpilot.vnext.capabilities.live_catalog import build_live_catalog
 from winpilot.vnext.capabilities.registry import (
     CapabilityOwner,
     RuntimeCapabilityRegistry,
@@ -43,11 +43,11 @@ def _snapshot(
 ) -> RuntimeCapabilitySnapshot:
     return RuntimeCapabilitySnapshot(
         runtime_version="vnext",
-        catalog=build_click_live_catalog(),
+        catalog=build_live_catalog(),
         capability_registry=RuntimeCapabilityRegistry((
             CapabilityOwner("live-visual-runtime", capabilities),
         )),
-        controller_tool_names=("click", "double_click"),
+        controller_tool_names=("click", "double_click", "scroll"),
         available_services=(
             tuple(sorted(CANONICAL_RUNTIME_SERVICES))
             if services is None
@@ -145,7 +145,7 @@ def test_snapshot_rejects_catalog_controller_gui_tool_disagreement(
     ):
         RuntimeCapabilitySnapshot(
             runtime_version="vnext",
-            catalog=build_click_live_catalog(),
+            catalog=build_live_catalog(),
             capability_registry=RuntimeCapabilityRegistry((
                 CapabilityOwner(
                     "live-visual-runtime",
