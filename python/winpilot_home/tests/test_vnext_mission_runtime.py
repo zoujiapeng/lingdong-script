@@ -33,10 +33,12 @@ from winpilot.vnext.capabilities import (
     build_tool_catalog,
 )
 from winpilot.vnext.mission import (
+    EvidencePolicy,
     EvidenceRef,
     MissionCard,
     MissionDefinition,
     MissionReducer,
+    MissionStatus,
     ObligationSpec,
     ObligationStatus,
     TargetBinding,
@@ -51,6 +53,11 @@ from winpilot.vnext.runtime import (
     RuntimeFrame,
     RuntimeSnapshot,
     RuntimeStatus,
+)
+from winpilot.vnext.verification import (
+    ObligationVerificationRequest,
+    VerifierAssessment,
+    forbidden_effect_condition,
 )
 from winpilot.visual_runtime.commit_admission import TargetCommitIdentity
 
@@ -93,6 +100,35 @@ class ScriptedActor:
         if self.after_propose is not None:
             self.after_propose()
         return dict(self.proposal)
+
+
+class ScriptedVerifier:
+    verifier_kind = "deterministic_first"
+
+    def __init__(
+        self,
+        response: VerifierAssessment | Mapping[str, Any] | object,
+        *,
+        after_verify: Callable[[], None] | None = None,
+        raises: Exception | None = None,
+    ) -> None:
+        self.response = response
+        self.after_verify = after_verify
+        self.raises = raises
+        self.calls: list[tuple[ObligationVerificationRequest, Event | None]] = []
+
+    def verify(
+        self,
+        request: ObligationVerificationRequest,
+        *,
+        stop_event: Event | None = None,
+    ) -> VerifierAssessment | Mapping[str, Any] | object:
+        self.calls.append((request, stop_event))
+        if self.after_verify is not None:
+            self.after_verify()
+        if self.raises is not None:
+            raise self.raises
+        return self.response
 
 
 class ScriptedState:
@@ -287,6 +323,7 @@ class Harness:
     profile: Any
     catalog: ToolCatalog
     permits: MutationPermitAuthority
+    verifier: ScriptedVerifier | None
 
 
 def _schema(name: str, properties: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -472,6 +509,28 @@ def _click(x: int = 320, y: int = 240) -> dict[str, Any]:
     }
 
 
+def _claim() -> dict[str, Any]:
+    return {
+        "format": "actor-proposal/0",
+        "kind": "claim_obligation_done",
+        "concise_claim": "the requested local state is now visible",
+    }
+
+
+def _verified_assessment(
+    *conditions: str,
+    reason: str = "trusted evidence covers every required condition",
+) -> VerifierAssessment:
+    return VerifierAssessment(
+        verified=True,
+        satisfied_conditions=conditions,
+        missing_conditions=(),
+        contradictions=(),
+        confidence=1.0,
+        concise_reason=reason,
+    )
+
+
 def _harness(
     proposal: Mapping[str, Any],
     *,
@@ -487,6 +546,8 @@ def _harness(
     broker_factory: Callable[[ToolCatalog], CapabilityBroker] | None = None,
     pointer_cleanup: Any = None,
     consume_permit: bool = True,
+    obligation_verifier: ScriptedVerifier | None = None,
+    verifier_enabled: bool = False,
 ) -> Harness:
     registry = EvidenceRegistry()
     mission = definition or _definition(capability)
@@ -514,6 +575,11 @@ def _harness(
         mission.goal_revision,
         available_capabilities=ALL_CAPABILITIES,
     )
+    if verifier_enabled:
+        profile = replace(
+            profile,
+            services=replace(profile.services, obligation_verifier=True),
+        )
     broker = broker_factory(catalog) if broker_factory else CapabilityBroker(catalog)
     runtime = MissionRuntime(
         reducer=reducer,
@@ -525,9 +591,11 @@ def _harness(
         controller=controller,
         pointer_cleanup=pointer_cleanup,
         mutation_permits=permits,
+        obligation_verifier=obligation_verifier,
     )
     return Harness(
         reducer, registry, actor, state, controller, runtime, profile, catalog, permits,
+        obligation_verifier,
     )
 
 
@@ -828,12 +896,7 @@ def test_controller_cannot_report_completed_without_consuming_runtime_permit() -
 
 
 def test_claim_is_only_claimed_and_replays_from_accepted_event() -> None:
-    proposal = {
-        "format": "actor-proposal/0",
-        "kind": "claim_obligation_done",
-        "concise_claim": "the requested local state is now visible",
-    }
-    harness = _harness(proposal)
+    harness = _harness(_claim())
     before = len(harness.reducer.events)
 
     result = harness.runtime.run_one_turn(turn_index=4)
@@ -858,6 +921,331 @@ def test_claim_is_only_claimed_and_replays_from_accepted_event() -> None:
     assert repeated.status is RuntimeStatus.STATE_REJECTED
     assert len(harness.reducer.events) == event_count
     assert harness.controller.calls == []
+
+
+def test_injected_verifier_requires_profile_admission_and_port() -> None:
+    assessment = _verified_assessment("the requested state is visibly confirmed")
+    disabled_port = ScriptedVerifier(assessment)
+    profile_disabled = _harness(
+        _claim(),
+        obligation_verifier=disabled_port,
+        verifier_enabled=False,
+    )
+
+    disabled_result = profile_disabled.runtime.run_one_turn(turn_index=4)
+
+    assert profile_disabled.profile.services.obligation_verifier is False
+    assert disabled_result.status is RuntimeStatus.VERIFICATION_REQUIRED
+    assert disabled_port.calls == []
+    assert [event.kind for event in profile_disabled.reducer.events[-1:]] == [
+        "obligation_claimed"
+    ]
+
+    port_missing = _harness(
+        _claim(),
+        obligation_verifier=None,
+        verifier_enabled=True,
+    )
+    enabled_result = port_missing.runtime.run_one_turn(turn_index=4)
+
+    assert port_missing.profile.services.obligation_verifier is True
+    assert enabled_result.status is RuntimeStatus.VERIFICATION_REQUIRED
+    assert [event.kind for event in port_missing.reducer.events[-1:]] == [
+        "obligation_claimed"
+    ]
+
+
+def test_runtime_binds_one_verifier_call_and_records_only_obligation_verification() -> None:
+    base = _definition()
+    forbidden = "unrelated existing content is changed"
+    definition = replace(
+        base,
+        obligations=(replace(base.obligations[0], forbidden_effects=(forbidden,)),),
+    )
+    assessment = _verified_assessment(
+        "the requested state is visibly confirmed",
+        forbidden_effect_condition(forbidden),
+    )
+    verifier = ScriptedVerifier(assessment)
+    harness = _harness(
+        _claim(),
+        definition=definition,
+        obligation_verifier=verifier,
+        verifier_enabled=True,
+    )
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.VERIFICATION_RECORDED
+    assert len(verifier.calls) == 1
+    request, observed_stop = verifier.calls[0]
+    assert observed_stop is None
+    assert request.mission_id == "mission-1"
+    assert request.run_id == "run-1"
+    assert request.mission_revision == before + 1
+    assert request.obligation_id == "o1"
+    assert request.claim_fingerprint == harness.reducer.projection.obligation_state(
+        "o1"
+    ).claim_fingerprint
+    assert request.acceptance_criteria == definition.obligations[0].acceptance_criteria
+    assert request.forbidden_effects == (forbidden,)
+    assert tuple(ref.id for ref in request.evidence_refs) == (
+        "frame-proof-9-base",
+    )
+    assert all(ref.trust == "deterministic" for ref in request.evidence_refs)
+    assert harness.controller.calls == []
+
+    accepted = harness.reducer.events[before:]
+    assert [event.kind for event in accepted] == [
+        "obligation_claimed",
+        "verification_recorded",
+    ]
+    verification_event = accepted[1]
+    assert verification_event.payload["checked_forbidden_effects"] == (forbidden,)
+    assert verification_event.payload["verification_id"].startswith("verification-")
+    assert set(result.accepted_event_ids) == {event.event_id for event in accepted}
+    state = harness.reducer.projection.obligation_state("o1")
+    assert state.status is ObligationStatus.VERIFIED
+    assert state.verification_id == verification_event.payload["verification_id"]
+    assert state.verified_claim_fingerprint == state.claim_fingerprint
+    assert state.verification_attempt_count == 1
+    assert harness.reducer.projection.status is MissionStatus.AWAITING_MISSION_VERIFICATION
+    assert harness.reducer.projection.mission_verification_id is None
+    assert all(event.kind != "mission_verified" for event in harness.reducer.events)
+
+    replayed = MissionReducer.replay(
+        harness.reducer.definition,
+        harness.reducer.events,
+        evidence=harness.registry.snapshot(),
+    )
+    assert replayed.projection.to_dict() == harness.reducer.projection.to_dict()
+
+
+def test_negative_verifier_result_consumes_exact_claim_fingerprint() -> None:
+    assessment = VerifierAssessment(
+        verified=False,
+        satisfied_conditions=(),
+        missing_conditions=("the requested state is visibly confirmed",),
+        contradictions=(),
+        confidence=0.8,
+        concise_reason="the current frame does not prove the requested state",
+    )
+    verifier = ScriptedVerifier(assessment)
+    harness = _harness(
+        _claim(),
+        obligation_verifier=verifier,
+        verifier_enabled=True,
+    )
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.VERIFICATION_RECORDED
+    assert len(verifier.calls) == 1
+    assert harness.controller.calls == []
+    assert [event.kind for event in harness.reducer.events[before:]] == [
+        "obligation_claimed",
+        "verification_recorded",
+    ]
+    event = harness.reducer.events[-1]
+    assert event.payload["verified"] is False
+    state = harness.reducer.projection.obligation_state("o1")
+    assert state.status is ObligationStatus.BLOCKED
+    assert state.verified_claim_fingerprint == state.claim_fingerprint
+    assert state.verification_attempt_count == 1
+    assert harness.reducer.projection.status is MissionStatus.BLOCKED
+    assert harness.reducer.projection.mission_verification_id is None
+
+
+@pytest.mark.parametrize("failure", ("exception", "malformed"))
+def test_verifier_failure_records_false_once_and_never_retries_claim(
+    failure: str,
+) -> None:
+    verifier = ScriptedVerifier(
+        ({"verified": "true"} if failure == "malformed" else object()),
+        raises=(RuntimeError("verifier unavailable") if failure == "exception" else None),
+    )
+    harness = _harness(
+        _claim(),
+        obligation_verifier=verifier,
+        verifier_enabled=True,
+    )
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.VERIFICATION_RECORDED
+    assert len(verifier.calls) == 1
+    assert harness.controller.calls == []
+    accepted = harness.reducer.events[before:]
+    assert [event.kind for event in accepted] == [
+        "obligation_claimed",
+        "verification_recorded",
+    ]
+    assert accepted[-1].payload["verified"] is False
+    assert accepted[-1].payload["failure_kind"] in {
+        "verifier_error",
+        "verifier_schema_error",
+    }
+    assert accepted[-1].evidence_refs == ()
+    state = harness.reducer.projection.obligation_state("o1")
+    assert state.verified_claim_fingerprint == state.claim_fingerprint
+    assert state.verification_attempt_count == 1
+
+    event_count = len(harness.reducer.events)
+    harness.runtime.run_one_turn(turn_index=4)
+    assert len(verifier.calls) == 1
+    assert len(harness.reducer.events) == event_count
+
+
+def test_positive_assessment_rejected_by_evidence_policy_fails_closed() -> None:
+    base = _definition()
+    definition = replace(
+        base,
+        obligations=(replace(
+            base.obligations[0],
+            evidence_policy=EvidencePolicy(
+                required_evidence_kinds=("application_receipt",),
+            ),
+        ),),
+    )
+    verifier = ScriptedVerifier(
+        _verified_assessment("the requested state is visibly confirmed")
+    )
+    harness = _harness(
+        _claim(),
+        definition=definition,
+        obligation_verifier=verifier,
+        verifier_enabled=True,
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.VERIFICATION_RECORDED
+    assert len(verifier.calls) == 1
+    event = harness.reducer.events[-1]
+    assert event.kind == "verification_recorded"
+    assert event.payload["verified"] is False
+    assert event.payload["failure_kind"] == "verification_policy_rejected"
+    assert event.evidence_refs == ()
+    state = harness.reducer.projection.obligation_state("o1")
+    assert state.verification_attempt_count == 1
+    assert state.verified_claim_fingerprint == state.claim_fingerprint
+    assert harness.reducer.projection.status is MissionStatus.BLOCKED
+    assert harness.controller.calls == []
+
+
+@pytest.mark.parametrize("evidence_race", ("removed", "replaced"))
+def test_verifier_cannot_accept_evidence_that_changed_during_call(
+    evidence_race: str,
+) -> None:
+    holder: dict[str, Harness] = {}
+
+    def change_evidence() -> None:
+        harness = holder["harness"]
+        evidence_id = "frame-proof-9-base"
+        if evidence_race == "removed":
+            del harness.registry.refs[evidence_id]
+        else:
+            original = harness.registry.refs[evidence_id]
+            harness.registry.refs[evidence_id] = replace(
+                original,
+                payload_hash="replacement-payload",
+            )
+
+    verifier = ScriptedVerifier(
+        _verified_assessment("the requested state is visibly confirmed"),
+        after_verify=change_evidence,
+    )
+    harness = _harness(
+        _claim(),
+        obligation_verifier=verifier,
+        verifier_enabled=True,
+    )
+    holder["harness"] = harness
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.VERIFICATION_RECORDED
+    assert len(verifier.calls) == 1
+    assert harness.controller.calls == []
+    accepted = harness.reducer.events[before:]
+    assert [event.kind for event in accepted] == [
+        "obligation_claimed",
+        "verification_recorded",
+    ]
+    assert accepted[-1].payload["verified"] is False
+    assert accepted[-1].payload["failure_kind"] == "verification_evidence_stale"
+    assert accepted[-1].evidence_refs == ()
+    state = harness.reducer.projection.obligation_state("o1")
+    assert state.verified_claim_fingerprint == state.claim_fingerprint
+    assert state.verification_attempt_count == 1
+
+
+def test_verifier_result_is_discarded_if_claim_revision_changes_during_call() -> None:
+    holder: dict[str, Harness] = {}
+
+    def advance_revision() -> None:
+        reducer = holder["harness"].reducer
+        reducer.apply(reducer.event(
+            "obligation_blocked",
+            payload={
+                "obligation_id": "o1",
+                "blocker_kind": "external_state_changed",
+                "reason": "a concurrent accepted event changed the claim state",
+            },
+        ))
+
+    verifier = ScriptedVerifier(
+        _verified_assessment("the requested state is visibly confirmed"),
+        after_verify=advance_revision,
+    )
+    harness = _harness(
+        _claim(),
+        obligation_verifier=verifier,
+        verifier_enabled=True,
+    )
+    holder["harness"] = harness
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.STALE_DISCARDED
+    assert len(verifier.calls) == 1
+    assert harness.controller.calls == []
+    assert [event.kind for event in harness.reducer.events[before:]] == [
+        "obligation_claimed",
+        "obligation_blocked",
+    ]
+    assert all(event.kind != "verification_recorded" for event in harness.reducer.events)
+
+
+def test_stop_during_verifier_discards_late_result_without_verification_event() -> None:
+    stop = Event()
+    verifier = ScriptedVerifier(
+        _verified_assessment("the requested state is visibly confirmed"),
+        after_verify=stop.set,
+    )
+    harness = _harness(
+        _claim(),
+        obligation_verifier=verifier,
+        verifier_enabled=True,
+    )
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4, stop_event=stop)
+
+    assert result.status is RuntimeStatus.CANCELED
+    assert len(verifier.calls) == 1
+    assert verifier.calls[0][1] is stop
+    assert harness.controller.calls == []
+    accepted = harness.reducer.events[before:]
+    assert [event.kind for event in accepted] == ["obligation_claimed"]
+    assert set(result.accepted_event_ids) == {accepted[0].event_id}
+    assert harness.reducer.projection.obligation_state("o1").status is ObligationStatus.CLAIMED
+    assert all(event.kind != "verification_recorded" for event in harness.reducer.events)
 
 
 @pytest.mark.parametrize("invalid_scope", ("missing", "other_run", "other_obligation"))
