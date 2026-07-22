@@ -61,7 +61,7 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 | POST | `/api/v2/jobs/{job_id}/cancel` | 取消任意 runtime job |
 | POST | `/api/v2/arp/validate` | 校验 `arp/1` 图 |
 | POST | `/api/v2/task-contracts/compile` | 将自然语言编译为可满足性已检查的 `task-contract/1` 与 typed `arp/1` graph |
-| POST | `/api/v2/arp/runs` | 启动原生 ARP 图；源码漂移时 fail-closed |
+| POST | `/api/v2/arp/runs` | 启动原生 ARP 图；可在 request 顶层显式选择 per-run `legacy/vnext`，源码漂移时 fail-closed |
 | GET | `/api/v2/arp/runs/{run_id}` | 查询 ARP 执行快照 |
 | POST | `/api/v2/arp/runs/{run_id}/cancel` | 取消 ARP run |
 | POST | `/api/v2/arp/runs/{run_id}/gate` | 决定等待中的人工门 |
@@ -85,6 +85,12 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 | GET | `/api/v2/replay/modes` | 查询 replay / apprentice 模式 |
 
 `POST /api/v2/task-contracts/compile` 接受 `task`、`max_steps` 与可选的 `cold_start`。`cold_start=true` 会在合同和图上写入 `experience_policy=disabled`，不生成 `skill_replay` 节点，并禁止该 run 读取或写入阶段 Skill、经验提示和会话记忆；它用于验证首次探索路径，不会改变任务语义或为某个测试对象增加分支。
+
+`POST /api/v2/arp/runs` 可在 request 顶层携带 `runtime_version: "legacy" | "vnext"`；该字段
+不得写进 graph、inputs、Task Contract、Profiler proposal 或模型 payload。Runtime 在 run 开始时
+冻结选择，`ArpExecution.to_dict()` 返回同一值。缺省/客户端默认仍是 legacy；显式 vNext 时
+Server 注入 click-only coordinator 并绕过全部 legacy handlers。任何失败都不得在同一 run
+fallback，回滚必须提交新的 legacy run。
 
 当结构化 intent 表明任务依赖当前可见状态、轮次或共享交互面时，编译结果包含 `InteractionSessionContract`，并生成 `ObserveScene → InferInteraction → PerformTurn → VerifyLocalEffect`。只有 `expected_external_change=true` 的持续会话才可能进入 `WaitForExternalChange`；普通一次性拖动、点击或选择任务在语义完成核验后结束。等待阶段发出的 `interaction.external_change_observed` 只是下一轮控制/遥测证据，不是最终 completion obligation；最终必须由最新权威帧上的 `interaction.task_completed` 满足。合同中的 `authoritative_state_ref` 与 `interaction_region_ref` 是 ephemeral state binding，不是可发送 artifact。
 

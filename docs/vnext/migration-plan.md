@@ -314,7 +314,7 @@ P3不改变 legacy工具，不调用第二个桌面模型。
 
 P3a 当前实现边界：
 
-- `vnext/capabilities/names.py` 是 canonical broad capability 的唯一 owner，Profiler Policy 复用它；
+- `vnext/capability_names.py` 是 canonical broad capability 的唯一 owner，Profiler Policy 复用它；`vnext/capabilities/names.py` 只提供兼容 re-export；
 - ToolCatalog 只把现有 schema owner 与通用 policy 关联，不复制工具实现；
 - Broker 只消费 MissionProjection、ExecutionProfile、权威 target/frame、pointer、artifact、executor offer、授权和 grant 状态；输入合同没有应用名、任务原句、benchmark、布局或坐标字段；
 - provider/deterministic offer 必须 live、已授权且能产生 receipt，并与 Visual Actor 路线互斥；artifact route 同时核对 run、artifact_id、content hash 与 sendable 状态；
@@ -336,21 +336,38 @@ P3b 的同入口接线只在 `vnext.broker_shadow.enabled=true` 时启用：模�
 
 ## 8. P4：Visual Actor 受控旁路
 
-状态：**P4a 注入式 MissionRuntime、P4b 默认关闭的 atomic click/double-click 机械链和 P4c 可注入 product coordinator protocol/seam 已完成；Server 默认未注入 coordinator，live Actor/coordinator 实现和 canary 尚未实现。**
+状态：**P4 的 click-only 实验闭环已接到同一产品入口：Server 按冻结的 per-run selection 注入具体 coordinator，唯一模型 Visual Actor 通过 Broker 小工具面提出 click/double-click/claim/blocked，动作复用唯一 Controller/RawDevice 链；两个随机 seed 的真实 Electron/UIA canary 已通过独立 oracle，legacy 仍默认，完整 P7 未达。**
 
-P4a 已在独立 `vnext/actor/` 和 `vnext/runtime/` 中实现严格版本化的 Actor 可见 view、无 Runtime 身份 proposal、Runtime-bound envelope、注入端口与单回合协调器。它不直接调用模型或设备，不导入 legacy AgentRunner/ToolSession/RawDevice，不接 Electron/StageRuntime，也不选择 runtime version。legacy 仍是默认且唯一产品桌面执行 runtime，Broker 仍未 enforce，因此本阶段保持产品行为不变。
+P4a 先在独立 `vnext/actor/` 和 `vnext/runtime/` 中实现严格版本化的 Actor 可见 view、无 Runtime 身份 proposal、Runtime-bound envelope、注入端口与单回合协调器。当前 click-only live coordinator 在这些端口之外组装隔离模型 Actor、RuntimeState bridge、Broker 与 atomic Controller；MissionRuntime 本身仍不导入 legacy AgentRunner/ToolSession，也不选择 runtime version。legacy 仍是默认，P3 全量 Broker enforce 门槛仍未达到。
 
 P4a admission 在 Actor 返回后重新读取 Mission revision/active obligation、完整权威 frame/target/pointer 状态并重新投影 Broker。TOCTOU 不一致或动作不在最新小工具面时丢弃 proposal；每回合至多向注入 ControllerPort 提交一笔 Runtime-bound transaction。Controller 结果严格区分 `completed`、`rejected`、`unknown`；`unknown`、执行后异常或无法对账的结果只会阻塞当前义务，不会自动 action replay。
 
 `claim_obligation_done` 本身只接受 `obligation_claimed` 并进入 `CLAIMED`。P5a 只有在 ExecutionProfile 允许且注入只读 ObligationVerifier 时才继续验证；P5b 只有在本地 MissionCompletionVerifier 与 Reducer 共用同一 EvidenceRegistry 时才机械关闭 mission。Capability/Inspector/Planner 等未接服务仍返回 unavailable；P6 在没有跨任务 A/B 证据前继续 fail closed。
 
-P4b 按原语把这些合同接到现有唯一 FrameAuthority、admission/坐标校验和 Controller/RawDevice 链。Bridge 必须先让 legacy 委托共享 owner，不能复制 capture、action parser、pointer owner 或执行器；当前窄切片不是 live Actor canary。
+P4b 按原语把这些合同接到现有唯一 FrameAuthority、admission/坐标校验和 Controller/RawDevice 链。Bridge 必须先让 legacy 委托共享 owner，不能复制 capture、action parser、pointer owner 或执行器。当前只有 click/double-click 进入 live 实验链；两个受控 seed 证明该窄链可达，不证明其他原语或真实任务。
 
 P4b 当前完成的可独立回退切片包括：legacy 委托两阶段 `FrameObserver`；submitted-image -> normalized-frame -> physical-screen 的单次 typed 坐标映射；每 run 冻结一次的 `DesktopRuntimeSelection`；typed scroll RawDevice seam；以及默认关闭的 `AtomicClickController`。该 Controller 仅接受 `click`/`double_click`，在唯一 physical lease 中消费 Runtime mutation permit、pin 权威 frame、核对 commit-time HWND/PID/epoch/region/hit-test，并在每次 mouse-down 紧前做 final target guard。动作后释放 frame pin 但保持同一 physical lease，再由 `AtomicPostActionBridge` CAS 提交新权威帧并向 run-scoped EvidenceRegistry 写入对应 evidence。
 
-这些切片不构成 live bridge。`AtomicClickController` 只由注入代码/测试组装，无具体 Visual Actor model port 或 live Electron coordinator 实现，也未覆盖 type/hotkey/drag/draw/held-pointer。FastGuiController 仍通过显式 legacy adapter 处理产品原语。Server 默认选择 `vnext` 会在桌面 mutation 前安全拒绝，不会运行 Actor，也不会回退 legacy。PostMessage 结果不确定时禁止 SendInput fallback，是 no-uncertain-replay 合同的刻意安全修正。
+具体 live coordinator 已组装 `AtomicClickController`、共享 Frame/target/evidence owner、隔离 Visual Actor model port 和只读验证端口。它的 Catalog 只暴露 `click`、`double_click`、`claim_obligation_done`、`blocked`；Runtime 每回合自动捕获最新权威帧，不暴露会得到同一 full-frame 的冗余 `observe`。真实 ExecuteDesktopTask contract 和 live Runtime state 同时声明 canonical `visual.interact` 与 `visual.read_text`，因为 Actor 直接读取当前像素；Catalog 仍只以 `visual.interact` 授权点击，`visual.read_text` 不加载 OCR/UIA。此前 capability owner/授权不一致已统一，未增加应用或 canary 专属 capability。`type_text`、`hotkey`、Actor 可见 `scroll`、`drag`、`draw_strokes`、held pointer、ROI observe 仍未覆盖；FastGuiController 继续处理 legacy 产品原语。PostMessage 结果不确定时禁止 SendInput fallback，是 no-uncertain-replay 合同的刻意安全修正。
 
-P4c 只定义 product coordinator 的严格注入 seam。`ArpExecution` 仅在 runtime selection 已冻结为 `vnext` 且显式注入 coordinator 时绕过 legacy handlers，并复用同一 run id、BUS、stop 与 pause gate；coordinator 失败不得回退 legacy。Server 目前不注入该 port，也没有可运行的 live implementation，所以该 seam 不是 Electron vNext 路径已可用的证据。
+P4c 已把 product coordinator 严格注入 seam 接到 Server。可见客户端的 `Legacy（默认）` / `vNext（实验）` 选择只存在于顶层 run request；`ArpExecution` 仅在 selection 已冻结为 `vnext` 且注入 coordinator 时绕过 legacy handlers，并复用同一 run id、BUS、stop 与 pause gate。coordinator 构造或运行失败不得回退 legacy；回滚只能在下一个独立 run 明确选择 `legacy`。两个 `precise-click` grounded pass 是该窄入口的证据，不是完整产品切换证据。
+
+本轮将 coordinator context 升为严格的 `desktop-runtime-coordinator-context/1`。新增
+`is_paused` 是非阻塞 read：`wait_if_paused` 仍只在 turn 边界协作式等待，Actor/model 返回后则通过
+`is_paused` 让 admission 立即失效；resume 不继续旧 proposal，而是从新权威帧开启新 decision。
+旧 context `/0` 必须拒绝；result 合同仍是 `desktop-runtime-coordinator-result/0`，其他 `/0`
+合同没有不兼容字段变化，不做无意义批量升版。
+
+live bridge 还闭合三项机械来源：frame freshness 使用显式 injectable max-age（默认 30 秒）并在
+post-model reprojection 重算；turn budget 只接受唯一 full-goal ExecuteDesktopTask 的 canonical
+`max_steps`，与 session `requested_max_steps` 冲突时 fail closed，effective turns 再由本地默认 24
+上限收紧；`RawDeviceExecutor` 只由 Server product composition root 构造并注入，coordinator 缺失
+该依赖就拒绝构造，不复制 backend owner。
+
+仍未迁移的 admission 债务：Server 在选择/组装 coordinator 前继续调用 legacy
+`CapabilityPlanner.assert_satisfiable()` 与 `assert_runtime_satisfiable()`。扩大 vNext capability、
+provider/MCP 或多原语之前，必须把它拆成 runtime-aware 的单一 admission owner，并证明 legacy 与
+vNext 各自的 missing-capability 负向场景不被放宽；不能长期让它在 Broker 外再次解释 vNext 工具面。
 
 P4a 不授权删除任何 legacy 产品职责。`AgentRunner` 的全局 todo、模型直接 `done` 和固定大工具面只能在 paired canary 与真实 Electron E2E 达到 [evaluation.md](evaluation.md) 门槛，且 trace 证明所有 vNext Actor 回合分别由 MissionCard、P5 verification 和 BrokerProjection 接管后删除；单元测试、注入 fake 或一次受控成功都不构成删除证据。
 
@@ -380,11 +397,11 @@ P4a 不授权删除任何 legacy 产品职责。`AgentRunner` 的全局 todo、�
 
 ## 9. P5：claim 与独立 Verifier
 
-状态：**P5a 注入式 ObligationVerifier 和 P5b 本地 deterministic MissionCompletionVerifier 已接入注入式 MissionRuntime；模型/视觉 Verifier、ActionEffectVerifier、产品接线和跨进程 exactly-once 尚未实现。**
+状态：**P5 的 click-only live 路径已接入独立视觉 ObligationVerifier 和本地 deterministic MissionCompletionVerifier；ActionEffectVerifier、跨进程 exactly-once 和真实 verifier 校准仍未实现。**
 
-P5a 冻结 accepted claim fingerprint、attempt 和当前 run-scoped evidence，只把无 Runtime 身份的 assessment 交回 Runtime；不可用、异常、malformed、stale 或证据变化都 fail closed，最终只能由 Reducer 接受 verification event。当前 port 是注入式，没有另一个真实视觉模型调用。
+P5a 冻结 accepted claim fingerprint、attempt 和当前 run-scoped evidence，只把无 Runtime 身份的 assessment 交回 Runtime；不可用、异常、malformed、stale 或证据变化都 fail closed，最终只能由 Reducer 接受 verification event。当前 live port 使用与 Actor 隔离的只读视觉模型上下文，且没有 mutation 工具。视觉许可必须同时满足 EvidencePolicy 和 Registry 中真实 evidence trust；模型只分类 Runtime 编号后的验收条件，Runtime 机械恢复 canonical assessment，并在 provider 无可靠数值来源时记录 `confidence=None`。Runtime 校验当前 frame/revision/claim 后才把 assessment 写成 attested run-scoped evidence，模型 payload 不能自报 trust、frame、canonical 条件或 evidence identity。
 
-P5b 是进程内 evidence-first 闭合：`DeterministicMissionCompletionVerifier` 和 canonical `EvidenceRegistry` 必须成对注入，且 Reducer 必须读取同一 registry。Runtime 冻结全部 required obligation 的 accepted verification identity 与完整证据，生成内容哈希绑定的 mission aggregate，先写 evidence，重读确认后再接受 `mission_verified`。这不是可持久 WAL；进程在 evidence 与 event 之间崩溃时没有已证明的跨进程恢复/exactly-once 语义。
+P5b 是进程内 evidence-first 闭合：`DeterministicMissionCompletionVerifier` 和 canonical `EvidenceRegistry` 必须成对注入，且 Reducer 必须读取同一 registry。Runtime 冻结全部 required obligation 的 accepted verification identity 与完整证据，生成内容哈希绑定的 mission aggregate，先写 evidence，重读确认后再接受 `mission_verified`。视觉 ObligationVerifier 不拥有 mission completion 权限。这不是可持久 WAL；进程在 evidence 与 event 之间崩溃时没有已证明的跨进程恢复/exactly-once 语义。
 
 拆分当前混合 DoneVerifier：
 
@@ -439,7 +456,19 @@ Inspector引入判据：
 
 ## 11. P7：真实任务 canary
 
-状态：**未开始。当前只有可注入 coordinator protocol/seam，Server 默认未注入且无 live vNext coordinator/Actor 实现，不能以注入测试或 legacy shadow 冒充 canary。**
+状态：**P7 已开始：同入口 click-only canary 的 seed `987654` 与 `424242` 已从冷启动、空 session、可见 Electron/UIA 客户端通过独立 trusted-browser oracle；paired legacy、真实 11 题、mixed/held-out、多布局和多原语矩阵仍未完成，因此 P7 未达标。**
+
+第一步只用随机化 `precise-click` 验证“客户端选择 -> runtime 冻结 -> Actor proposal -> Broker
+admission -> 唯一 Controller/RawDevice -> 新权威帧 -> 独立 obligation/mission 验证 -> external
+oracle”这一条 click 链。case 名、几何和成功条件只存在于 harness/oracle；生产 Runtime、Catalog、
+Actor 和 Verifier 不读取它们。当前通过记录：
+
+- seed `987654`：run `arp-20260722-154335-a9e64b`，3 turns，`output/playwright/client-visual-e2e/20260722-154302-suite/suite-report.json`；
+- seed `424242`：run `arp-20260722-154447-9329b4`，2 turns，`output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json`。
+
+它们只证明对应 seed 的 click-only 闭环，不证明其他原语或真实任务。此前失败尝试暴露的
+冗余 observe 循环、Verifier schema、`SW_RESTORE` 几何变化和 page-ready stale geometry 均以
+通用 Runtime/Verifier/harness 修复闭合，生产代码未读取 case、seed、布局或固定坐标。
 
 在受控场景稳定后运行：
 
@@ -457,7 +486,7 @@ Canary失败不在同一run偷切legacy。可以另开独立run对照。
 
 ## 12. P8：默认切换
 
-状态：**未开始；P2/P3 评测门槛、P4 live canary、P5 false-positive 校准和 P7 真实报告均未满足。**
+状态：**未开始；P2/P3 评测门槛、P4/P7 真实 canary 结果、P5 false-positive 校准和多原语/真实任务报告均未满足。**
 
 默认切换必须同时满足：
 
@@ -493,6 +522,7 @@ Canary失败不在同一run偷切legacy。可以另开独立run对照。
 | 当前职责 | vNext owner | 迁移方式 | 删除门槛 |
 | --- | --- | --- | --- |
 | `TaskContractCompiler` 对GUI任务族解释 | Goal Compiler | 只保留可靠obligation/artifact dependency，未知目标单obligation | coverage/cold-start E2E |
+| Server 的 legacy `CapabilityPlanner` 通用 admission | runtime-aware capability admission | 保留 fail-closed satisfiability，但按已冻结 runtime 使用 canonical catalog/offer；不解释 GUI 路线 | vNext 多原语/provider 扩展前完成 paired missing-capability 负向测试，且 trace 只有一个 admission owner |
 | Actor自行判断任务复杂度 | TaskProfiler + ExecutionPolicy | 先shadow，再accept profile | over/under-profile达标 |
 | `_EXECUTE_DESKTOP_MODEL_TOOLS` 固定大工具面 | ToolCatalog + Broker | shadow后按run投影 | paired canary/真实E2E达标，所有Actor回合取BrokerProjection且必要工具recall门槛通过 |
 | `AgentRunner`全局todo | MissionProjection + Runtime | Actor只消费MissionCard | paired canary/真实E2E达标且trace无legacy plan读取 |

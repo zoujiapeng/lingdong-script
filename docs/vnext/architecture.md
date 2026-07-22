@@ -1,8 +1,11 @@
 # vNext Agent 核心架构
 
-本文是 vNext 的目标架构，不描述完整运行时已经完成的代码。P0 观测旁路和 P1 纯 Mission 合同、
-Reducer、replay、MissionCard 及 legacy shadow 已实现，但尚未接入产品运行时；完整运行时的实现事实
-仍以 [../architecture.md](../architecture.md) 和 [../winpilot-agent.md](../winpilot-agent.md) 为准。
+本文同时描述 vNext 的目标架构和当前实现边界。P0/P1/P1.5、P2/P3 shadow 已实现；P4/P5
+现有一条默认关闭、按 run 显式选择的 click-only 实验链，已经从同一产品入口接到唯一 Visual Actor、
+Capability Broker、共享 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。
+legacy 仍默认；两个随机 seed 的冷启动、空 session、可见 Electron click canary 已通过独立
+trusted-browser oracle，但完整 P7、其他 GUI 原语和默认切换均未完成。完整 legacy
+运行时事实仍以 [../architecture.md](../architecture.md) 和 [../winpilot-agent.md](../winpilot-agent.md) 为准。
 
 ## 1. 设计目标
 
@@ -257,6 +260,14 @@ request_capability  claim_obligation_done  blocked
 
 工具目标通常小于十个。数字是认知预算，不是为凑数而硬编码；新增工具必须说明替代哪个旧入口。
 
+当前 live 实验投影更窄：已绑定窗口时只允许 `click`、`double_click`、
+`claim_obligation_done` 和 `blocked`。Runtime 每回合自动捕获最新权威帧，所以不向 Actor 暴露
+等价的 full-frame `observe`。这是能力尚未迁移完整的 click-only canary 边界，不是按应用、
+任务句或 canary 名称形成的规则。ExecuteDesktopTask contract 与 live Runtime state 同时声明
+`visual.interact` 和 `visual.read_text`：后者表示 Actor 可直接读取当前像素，不意味着加载 OCR/UIA；
+Catalog 只用 `visual.interact` 授权 click/double-click。canonical 名称统一由
+`vnext/capability_names.py` 持有，兼容 re-export 不能成为第二 owner。
+
 ### 9.2 CapabilityRequest
 
 Actor 可以请求 broad capability，例如 `pointer.dynamic` 或 `visual.read_text`。请求只是 proposal。Broker 必须校验 catalog、active obligation、当前状态、安全、provider 与授权后，才产生绑定 obligation/revision、有期限的 grant。禁止从自由文本解析应用模式。
@@ -373,6 +384,11 @@ Inspector 请求由 Runtime 绑定冻结 frame/ROI。报告只能包含可见事
 
 每条链默认串行并绑定冻结 revision/frame。迟到、超时、取消、格式错误或低置信结果保持状态不变并产生 typed failure fact。
 
+产品 coordinator 合同当前为 `desktop-runtime-coordinator-context/1`。`wait_if_paused` 只在回合
+边界协作式阻塞；`is_paused` 是模型调用期间和 commit 前可读取的非阻塞状态。Actor 返回后若 pause
+已生效，Runtime 不等待旧 proposal 恢复执行，而是拒绝 admission；resume 后必须重新观察并产生新
+decision。这样 pause reading 不会把 Broker/Controller 热路径阻塞成第二个调度器。
+
 模型角色共用一个机械的 model-call Runtime，但不共享请求上下文。provider adapter 先准备一次
 请求，Runtime 绑定 `model-request/0`、冻结 payload 并关闭 SDK 隐式重试；只有同一
 decision/role/purpose/fingerprint 的瞬时 transport failure 才能做有界 request retry。改变
@@ -455,7 +471,20 @@ vNext 复用：
 复用不等于把完整 `FastGuiController` 当作 vNext bridge。它仍包含 legacy
 grounding、恢复和 adapter 行为；P4b 只能逐项抽取机械 owner，让 legacy 先委托同一
 Frame、坐标、admission 与 RawDevice primitive，再由 Runtime-bound ControllerPort
-调用。当前仅完成 shared frame、第一段坐标映射、run selection 和 scroll raw seam。
+调用。当前 click-only live coordinator 已复用 shared frame、两段坐标映射、atomic
+admission、最终 mouse-down guard、run selection 和 RawDevice click primitive；typed scroll
+raw seam 仍未进入 Actor live 工具面。`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`
+和 held pointer 必须逐项完成相同 owner/parity/unknown-no-replay 合同，不能通过 legacy fallback 补齐。
+
+live bridge 对 frame freshness 使用显式 max-age（默认 30 秒），并在 Actor 返回后的 Broker
+reprojection 中重新计算；过龄帧不能进入 click admission。任务回合数来自 canonical
+`task-contract/1` 的唯一 full-goal ExecuteDesktopTask `max_steps`，session 的同名请求若存在必须
+一致，当前 composition 再以 24 回合上限收紧。物理 `RawDeviceExecutor` 由 Server composition
+root 创建并注入 coordinator；Runtime/Actor/Broker 都不能自行实例化另一份。
+
+当前 Server 在 runtime-specific composition 前仍执行 legacy `CapabilityPlanner` 的 satisfiable/
+runtime-satisfiable admission。这是扩大 vNext capability 前必须迁移的边界债务：最终 admission
+必须理解选中的 runtime 且只有一个 owner，不能让 legacy Planner 与 vNext Broker 同时解释能力。
 
 vNext 逐步替代：
 

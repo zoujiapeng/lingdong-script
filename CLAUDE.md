@@ -23,12 +23,13 @@ Goal Compiler
 
 先读 [`docs/vnext/README.md`](docs/vnext/README.md) 和 [`docs/vnext/execution-profile.md`](docs/vnext/execution-profile.md)。
 
-当前 legacy 仍是默认且唯一桌面执行 runtime。vNext 已完成 P0/P1/P1.5、P2a/P2b
-Profiler shadow、P3a/P3b single-obligation partial Broker shadow，以及 WinPilot product package
-的统一模型请求/重试边界，并完成 P4a 纯 Actor proposal/view/envelope 合同与注入式单回合
-MissionRuntime。P4b 已开始抽取共享 FrameObserver、第一段坐标映射、run-scoped runtime
-selection 和 scroll-only typed RawDevice seam；Broker 尚未 enforce，完整 admission/Controller
-bridge、live Actor、P5 Verifier、P6 Planner/Inspector 和 vNext 产品可写运行时均未实现。后续工作必须遵守：
+当前 legacy 仍是默认 runtime。vNext 已完成 P0/P1/P1.5、P2a/P2b Profiler shadow、
+P3a/P3b partial Broker shadow和统一模型请求/重试边界；P4/P5 已有默认关闭、由客户端按 run
+显式选择的 click-only live coordinator。它组装唯一模型 Visual Actor、Broker 小工具面、共享
+Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier，失败不回退 legacy。
+两个冷启动、空 session、可见 Electron/UIA `precise-click` seed 已由独立 trusted-browser oracle
+通过，但这只证明 click-only 受控闭环；type/scroll/drag/draw/app resolve/provider/MCP、live
+Profiler、P6 Planner/Inspector、paired/真实任务门槛、默认切换和 legacy 删除均未完成。后续工作必须遵守：
 
 - 只有 Visual Actor 可以提出 GUI mutation；
 - 只有 Controller/RawDevice 链可以执行桌面输入；
@@ -42,6 +43,8 @@ bridge、live Actor、P5 Verifier、P6 Planner/Inspector 和 vNext 产品可写�
 - Broker 只根据 accepted capability、profile、窗口、pointer lease、artifact、adapter 和授权状态投影小工具面；
 - Actor 可以请求 broad capability，但 Runtime/Broker 才能授予有界 grant；
 - provider SDK 隐式重试必须关闭；`ModelCallRuntime` 只可重试同一冻结 request。poll、redecision 和 action replay 是不同合同，mutation 结果不确定时禁止自动重放；
+- coordinator context `/1` 的 `is_paused` 只能非阻塞读取；模型期间 pause 必须让旧 proposal 在 admission 前失效。frame freshness 使用显式 max-age，回合预算来自 canonical ExecuteDesktopTask `max_steps`，RawDevice 只由产品 composition root 注入；
+- 扩大 vNext capability/provider 前先迁移 Server 的 legacy `CapabilityPlanner` admission，不能让它和 Broker 长期形成两个能力解释 owner；
 - 基础工具、Frame/Controller、应用发现和调度骨架未经证明前，不通过 prompt 或新增模型角色修单例；
 - vNext 共用当前 Electron 入口和 E2E，不能形成第二套产品链；
 - 每个迁移切片必须列出未来删除的旧职责。
@@ -51,9 +54,10 @@ bridge、live Actor、P5 Verifier、P6 Planner/Inspector 和 vNext 产品可写�
 ```text
 Electron「智能代理」
   -> /api/v2/task-contracts/compile
-  -> /api/v2/arp/runs
-  -> StageRuntime
-  -> AgentRunner / FastGuiController / deterministic capability
+  -> /api/v2/arp/runs（per-run Legacy 默认 / vNext 实验）
+  -> legacy StageRuntime / AgentRunner
+     或 vNext click-only MissionRuntime / Visual Actor / Broker
+  -> 唯一 Controller / RawDevice / deterministic capability
   -> evidence / completion gate / trace
 ```
 

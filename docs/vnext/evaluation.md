@@ -163,7 +163,9 @@ Electron task input
 
 直接调用 Reducer、Profiler、Policy、Broker、Actor 或 `/api/v2` 只是 unit/integration。vNext不能获得额外截图、预置计划、特殊 max steps 或后门工具。
 
-当前 P4c 只提供可注入 product coordinator protocol/seam：显式注入时 `ArpExecution` 可在 frozen `vnext` selection 下绕过 legacy handlers，但 Server 默认未注入且仓库无 live coordinator/Actor 实现。因此目前没有可运行的 vNext Electron E2E；protocol、fake port、注入式 Controller 或 legacy shadow 测试都不进入 GUI grounded-pass 分母。
+当前可见 Electron 客户端提供按 run 的 `Legacy（默认）` / `vNext（实验）` 选择器。冻结为 `vnext` 时，Server 注入 click-only live coordinator，`ArpExecution` 完全绕过 legacy handlers；失败不得在同一 run 回退。2026-07-22，`precise-click` seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）与 seed `424242`（run `arp-20260722-154447-9329b4`，2 turns）已从冷启动、空 session、可见 Electron/UIA 入口通过独立 trusted-browser oracle。suite report 为 `output/playwright/client-visual-e2e/20260722-154302-suite/suite-report.json` 与 `output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json`。这两例只进入受控 click-only grounded-pass 记录；protocol、fake port、单元测试或 legacy shadow 仍不得计入。
+
+早期真实尝试分别暴露了冗余 full-frame `observe` 循环、Verifier provider 的字符串 confidence 与条件文本复制、harness `SW_RESTORE` 引起的目标几何变化，以及 page-ready 后复用旧几何。修复位于通用 Catalog/Runtime、Verifier schema 和 harness 状态读取层，没有把 case、seed、布局、坐标或成功条件加入生产 Agent。
 
 冷启动在整个 run禁用长期 Memory/Skill，同时保留同一 scenario 明确的 typed artifact dependency。多 turn 中“刚刚”“继续”必须由当前 scenario 的 evidence/artifact ref 解析。
 
@@ -183,7 +185,8 @@ Electron task input
 - Planner patch 不变量；
 - BrokerProjection exhaustive/property test；
 - read-only角色mutation权限为零；
-- mission completion只由required obligations verified推导。
+- required obligations verified 只推导 `awaiting_mission_verification`；只有带独立 mission
+  verification identity 和当前 run-scoped evidence 的 accepted `mission_verified` 才能终结 mission。
 
 ### 5.2 Runtime envelope
 
@@ -195,6 +198,12 @@ Electron task input
 - evidence scope不能串用旧run/旧artifact；
 - late model result不能写入新revision；
 - proposal replay在相同envelope下可解释。
+- coordinator context `/1` 的 `is_paused` 为非阻塞 read，模型期间 pause 使 admission 为零；
+- resume 使用新 frame/new decision，不恢复旧 proposal；
+- frame freshness 由显式 max-age（当前默认 30 秒）重算，过龄帧 backend 调用为零；
+- canonical ExecuteDesktopTask `max_steps` 与 session budget 冲突时模型调用为零；
+- effective turn budget 不超过 canonical `max_steps` 和 coordinator local cap；
+- RawDevice 只由 product composition root 注入，缺失依赖无 fallback/backend 调用。
 
 ### 5.3 Task Profiler / Execution Policy
 
@@ -225,7 +234,7 @@ Electron task input
 - Raw receipt的机械三态与`input_completed=true/false/null`一致；
 - legacy scroll正常输出保持兼容，安全修正只禁止不确定后的第二种输入机制。
 
-以上 RawDevice 项当前只有 unit/characterization 证据。P4b 的默认关闭 atomic click/double-click 切片已覆盖 Runtime permit、双段坐标映射、commit-time Windows identity、每次 mouse-down 紧前 final guard、post-action authoritative frame/evidence 以及 unknown-no-replay；它只由注入测试组装，不代表完整 ControllerPort、live Actor、paired canary 或真实 Electron E2E 已通过。
+以上 RawDevice 项大多仍只有 unit/characterization 证据。P4 click-only live 路径已组装 atomic click/double-click，覆盖 Runtime permit、双段坐标映射、commit-time Windows identity、每次 mouse-down 紧前 final guard、post-action authoritative frame/evidence 以及 unknown-no-replay。两个随机 seed 的真实 Electron/UIA click 已通过独立 pointer oracle，但没有 paired legacy 对照，也不代表多原语门槛通过；`type_text`、`hotkey`、Actor 可见 `scroll`、`drag`、`draw_strokes`、held pointer 和 ROI observe 仍没有 live parity。
 
 ### 5.5 Broker
 
@@ -310,7 +319,7 @@ Profiler成功不是“解释听起来合理”，而是：
 
 ## 7. Verifier评测
 
-当前实现边界：P5a 已把注入式只读 ObligationVerifier 接到 MissionRuntime；P5b 已将本地 `DeterministicMissionCompletionVerifier` 与 Reducer 使用的同一 `EvidenceRegistry` 成对绑定，并以 aggregate evidence append/read-back -> `mission_verified` 的顺序机械关闭 mission。当前无模型/视觉 Verifier、无 ActionEffectVerifier、无跨进程 WAL/exactly-once，也没有 false-positive/false-negative 或 Actor/Verifier 相关错误的真实 A/B 报告，因此 P5 产品门槛未达。
+当前实现边界：P5 已把隔离、只读的视觉 ObligationVerifier 接到 click-only MissionRuntime；live 模型只分类 Runtime 编号后的验收条件，Runtime 机械重建 canonical assessment，provider 无可靠数值置信度时保存 `confidence=None`。Runtime 同时核验 EvidencePolicy、真实 evidence trust、claim/revision 与当前权威 frame，随后才写入 attested evidence。P5b 将本地 `DeterministicMissionCompletionVerifier` 与 Reducer 使用的同一 `EvidenceRegistry` 成对绑定，并以 aggregate evidence append/read-back -> `mission_verified` 的顺序机械关闭 mission。两个 click-only canary 证明了成功闭环可以工作，但当前无 ActionEffectVerifier、无跨进程 WAL/exactly-once，也没有 false-positive/false-negative 或 Actor/Verifier 相关错误的校准报告，因此 P5 产品门槛未达。
 
 单独校准：
 
@@ -444,7 +453,12 @@ sidecar，以及 legacy VLM helper 的 stop_event seam。因此“全角色可�
 -受控任务不低于legacy；
 -保留真实oracle失败。
 
-当前只有注入式 ActorPort/MissionRuntime、atomic click/double-click 和 product coordinator protocol seam；Server 未注入 live coordinator，无具体 Visual Actor，也无受控或真实 vNext E2E 对照，所以该门槛未达。
+当前已有 click-only live coordinator、具体模型 Visual Actor、Broker 小工具面和共享 atomic click/double-click 链；客户端可显式选择实验 runtime，legacy 仍默认。两个随机 seed 的真实可见 Electron/UIA `precise-click` 已通过独立 trusted-browser oracle，但没有 paired legacy、真实任务、多原语或规模化 held-out 对照，所以该门槛未达。
+
+扩大该工具面前还必须迁移 Server 的 legacy `CapabilityPlanner` admission：当前它在
+runtime-specific composition 前执行，仍可能用 legacy capability 假设拒绝 vNext。门槛要求同一
+冻结 runtime 只有一个 capability admission owner，并以 paired missing-capability 负向测试证明没有
+静默放宽；仅让 Broker 单元测试通过不满足该门槛。
 
 ### Verifier
 
@@ -454,7 +468,7 @@ sidecar，以及 legacy VLM helper 的 stop_event seam。因此“全角色可�
 -verifier failure不污染state；
 -同模型相关错误已报告。
 
-当前只能证明注入式 obligation verification 和进程内 deterministic mission completion 的合同/replay/fail-closed 性质；不能证明 false-positive 低于 legacy 或同模型错误已校准。
+当前还能证明视觉 assessment 的角色隔离、无 mutation 工具、真实 evidence trust 许可与 Runtime attestation 合同；两个 Electron case 只证明真阳性闭环可达，不能证明 false-positive 低于 legacy 或同模型错误已校准。
 
 ### Planner/Inspector
 
@@ -474,7 +488,7 @@ sidecar，以及 legacy VLM helper 的 stop_event seam。因此“全角色可�
 -停止、暂停、取消、外部等待和输入清理无回归；
 -legacy删除计划可执行，不是无限双栈。
 
-当前 P7 真实 canary、P8 默认切换和 P9 净删均未开始；legacy 产品职责删除数为 0。
+P7 已开始并获得两个随机 seed 的 click-only grounded pass，但 paired legacy、11 个真实任务、mixed/held-out、多布局和多原语矩阵均未完成，因此 P7 仍未达标；P8 默认切换和 P9 净删未开始，legacy 产品职责删除数为 0。这些 `precise-click` 通过不能越过 Verifier 校准、Profiler/Broker 或多原语门槛。
 
 ## 11. 报告格式
 
