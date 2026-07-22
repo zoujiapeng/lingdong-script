@@ -283,7 +283,7 @@ The shared transport boundary is implemented only for the WinPilot product
 package. Profiler cancellation now propagates from ArpExecution through the
 shadow hook, runtime and provider to `ModelCallRuntime`, with tests. Root legacy
 providers, all-role per-attempt sidecars and the missing legacy-VLM stop-event
-seam remain migration debt. The click-only P4/P5 live path currently uses a
+seam remain migration debt. The incremental P4/P5 live path currently uses a
 deterministic safe profile; the real Profiler remains shadow-only and cannot
 select runtime version, enlarge tools, enable Planner/Inspector, or claim
 progress toward the P6 gate.

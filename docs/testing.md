@@ -19,6 +19,18 @@ pointer oracle 判定通过。suite report 分别为：
 - `output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json`
 - `output/playwright/client-visual-e2e/20260722-165627-suite/suite-report.json`
 
+最终 direction/notches scroll 合同还通过了同一可见 Electron/UIA、冷启动、空 session 入口的
+双向 `scroll-reveal`：
+
+- down seed `20260722`：run `arp-20260722-182113-91882e`，report `output/playwright/client-visual-e2e/20260722-182040-suite/suite-report.json`；
+- up seed `20260723`：run `arp-20260722-181904-2b30b1`，report `output/playwright/client-visual-e2e/20260722-181825-suite/suite-report.json`。
+
+独立 oracle 同时核对 trusted wheel、方向、实际 `scrollTop` 变化、目标窗口区域和目标完全可见。
+前置失败没有删除：`20260722-174712-suite` 暴露 signed amount 语义含糊并进入 actor_error；
+`20260722-175451-suite` 暴露浏览器默认滚动采样过早且 Actor 随后振荡；
+`20260722-180448-suite` 的 up seed 在旧 signed 合同下重复错误方向并耗尽 24 turns。修复只改变通用
+scroll tool schema、Controller 机械映射和 oracle settle；没有增加任务、seed、布局或坐标生产规则。
+
 此前真实尝试依次暴露了 Actor 对冗余 full-frame `observe` 的循环、视觉 Verifier provider
 返回字符串 confidence/复制条件文本、harness 的 `SW_RESTORE` 改变目标几何，以及 page-ready
 后仍使用旧几何。修复均发生在通用工具投影、Verifier 合同和 harness 状态读取层，没有把 case、
@@ -38,15 +50,14 @@ seed、目标位置、布局或成功条件写入生产 Agent。
 | `game-drag-v2` | 同一客户端入口、冷启动隔离和可信真实鼠标事件成立；模型把弯曲通道误读成直角路径 | E2E 失败；独立 oracle 未通过 |
 | 网易云搜索梁静茹、播放第一首并调到最大音量 | 客户端入口与冷启动隔离；新鲜帧可见播放状态和 Windows 音量 100%，用户确认成功 | 用户确认业务结果；harness 未产生 terminal pass，不能记正式终态通过 |
 | vNext `precise-click` seeds `987654` / `424242` / `135791` | 可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace 和独立 trusted-browser pointer oracle | 三个受控 click-only seed grounded pass；不是 legacy paired、真实应用、11 题或其他原语通过 |
+| vNext `scroll-reveal` seeds `20260722` down / `20260723` up | 最终 direction/notches 合同；可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace、trusted wheel/滚动几何独立 oracle | 一对双向受控 grounded pass；不是 paired legacy、多布局、真实应用或完整 P7 |
 
-这些证据仍只覆盖少量样本。它们证明通用主线到达真实软件、游戏式拖拽和受控 vNext 点击场景，不证明
+这些证据仍只覆盖少量样本。它们证明通用主线到达真实软件、游戏式拖拽和受控 vNext 点击/滚轮场景，不证明
 11 题、混合长任务、任意电脑或任意应用全部可用。失败、超时、`ungrounded` 和受干扰
 run 保留原状态。
 
-同一工作树回归为 WinPilot `2732 passed, 13 skipped, 1 deprecation warning`、根目录 Python
-`2508 passed` 和 renderer `218 passed`；TypeScript 全量检查和 production renderer/Electron build
-通过。本轮真实客户端靶场运行上表 seed `135791`，没有把历史结果冒充本轮通过。回归证明代码合同未破坏，
-不能替代真实 GUI oracle。
+当前提交的准确全量回归计数应保存在 CI/交付报告，不在长期规范中冻结旧数字。下述标准命令通过只能证明
+代码合同未破坏，不能替代上表真实 GUI oracle；同样，单个 E2E pass 也不能替代全量回归。
 
 ## 测试分层
 
@@ -68,14 +79,24 @@ E2E。
 Task Profiler 或测试题号暗中切换；同一 run 不能让两个 runtime 交叉操作桌面。
 
 当前客户端已有可见的 `Legacy（默认）` / `vNext（实验）` per-run 选择器。选择 `vnext`
-后，Server 注入 click-only coordinator，并完全绕过 legacy handlers；构造、模型、动作或验证
-失败都不得在同一 run 回退。当前工具面只有通用 `click`、`double_click`、
+后，Server 注入增量 live coordinator，并完全绕过 legacy handlers；构造、模型、动作或验证
+失败都不得在同一 run 回退。当前工具面只有通用 `click`、`double_click`、`scroll`、
 `claim_obligation_done` 和 `blocked`；Runtime 在每回合自动捕获最新权威帧，不把等价的
 full-frame `observe` 暴露给 Actor。ExecuteDesktopTask 与 live Runtime state 同时声明
 canonical `visual.interact` 和 `visual.read_text`，因为模型直接读取像素；Catalog 只以
-`visual.interact` 授权点击，`visual.read_text` 不隐式加载 OCR/UIA。投影不包含 case、应用、
+`visual.interact` 授权 GUI mutation，`visual.read_text` 不隐式加载 OCR/UIA。投影不包含 case、应用、
 原句或坐标规则。独立视觉 ObligationVerifier 无 mutation 工具，最终完成仍需
 deterministic MissionVerifier 与同一 run-scoped EvidenceRegistry。
+
+click/double-click/scroll 进入同一个 `AtomicDesktopController` transaction。scroll 只走 unqueued
+admitted physical SendInput backend，在 wheel 紧前执行 final target guard；结果不确定时不得切换
+第二种输入机制或自动重放。其参数语义、窗口身份、post-action frame/evidence 与点击一样必须由
+Runtime/Controller 机械绑定，不能由 prompt 或 case 规则补齐。
+
+Actor-visible scroll schema 使用 `direction: "up" | "down"` 和整数 `notches: 1..12`；方向表示
+显露 viewport 上方或下方内容。Controller 机械转换到 RawDevice 的 signed amount。旧 `amount`、零/负
+notches、未知方向、额外字段和 bool 必须在零 RawDevice 调用下拒绝；ToolCatalog 与
+RuntimeCapabilitySnapshot fingerprint 必须随 schema 稳定变化。
 
 当前 coordinator context 是 `/1`：harness/集成测试必须覆盖模型 in-flight 时触发 pause，确认
 非阻塞 `is_paused` 使旧 proposal 在零 Controller 调用下失效；resume 后必须看到新 frame/new
@@ -90,13 +111,14 @@ coordinator 的同一不可变 `RuntimeCapabilitySnapshot` 校验 canonical capa
 Controller parity，并将该 snapshot 继续供 `ExecutionPolicy`、live `RuntimeState` 与 Broker 使用。
 回归测试必须覆盖 legacy/vNext missing-capability、缺 contract、runtime/snapshot identity、未知 service、
 Catalog/Controller drift、snapshot fingerprint replay，以及拒绝后 prepare/model/Controller/legacy fallback
-调用数为零。上述合同通过不代表 click-only 以外的 GUI 原语可用。
+调用数为零。scroll 虽已有最终合同下的一对真实客户端双向证据，上述合同仍不代表其余 GUI 原语可用。
 
-`precise-click` 是这条窄链的第一个随机化受控 oracle，不是产品策略。上述两个 seed 已从
+`precise-click` 是这条窄链的第一个随机化受控 oracle，不是产品策略。上述三个 seed 已从
 真实可见 Electron/UIA 入口获得 vNext grounded pass；三次均为冷启动、空 session，且外部
 trusted-browser oracle 独立确认目标鼠标事件。它们尚未包含 legacy paired 对照，也不能满足
-完整 P7。`type_text`、`hotkey`、Actor 可见滚轮、拖拽、绘制、held pointer、ROI observe、
-应用发现、provider/MCP 和 live Profiler 仍不得从这些 case 推断为可用。
+完整 P7。`scroll-reveal` 的最终 down/up 合同已实际从同一入口通过，但仍缺 paired、多布局和真实任务覆盖。
+`type_text`、`hotkey`、拖拽、绘制、held pointer、ROI observe、应用发现、provider/MCP 和 live
+Profiler 仍不得从这些 case 推断为可用。
 
 vNext 内部的 `direct/standard/orchestrated` 执行深度可以由只读 Task Profiler 提议，
 并由确定性 Execution Policy 校验。这是 vNext 内部认知服务深度，不是第二套产品
@@ -270,10 +292,17 @@ npm run e2e:client:all
 python scripts/client_visual_e2e_run.py --case dynamic-hold --seed 424242 --fail-fast
 ```
 
-vNext click-only canary（harness 必须通过客户端可见控件明确选择实验 runtime；当前已有下述两个 seed 通过记录，但仍不代表完整 P7）：
+vNext click canary（harness 必须通过客户端可见控件明确选择实验 runtime；当前已有三个 seed 通过记录，但仍不代表完整 P7）：
 
 ```bash
 python scripts/client_visual_e2e_run.py --case precise-click --seed 424242 --fail-fast
+```
+
+vNext scroll canary（随机化方向和初始位置；以下两个 seed 分别覆盖最终合同的 down/up）：
+
+```bash
+python scripts/client_visual_e2e_run.py --case scroll-reveal --seed 20260722 --fail-fast
+python scripts/client_visual_e2e_run.py --case scroll-reveal --seed 20260723 --fail-fast
 ```
 
 常规回归：

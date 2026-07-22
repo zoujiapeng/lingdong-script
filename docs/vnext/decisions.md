@@ -479,3 +479,39 @@
   semantics, front end or task-contract schema. It does not make Broker globally enforced, expand the
   click-only Catalog or satisfy P7/P8/P9. P6 remains disabled. The next capability gate is incremental
   multi-primitive parity and same-entry evidence, not application- or benchmark-specific rules.
+
+### D030: scroll extends the same atomic mutation owner one primitive at a time
+
+- status: accepted
+- supersedes: D027 and D029 remain authoritative for product selection, fail-closed behavior,
+  identity, verification, queue-time admission and historical click evidence. This decision only
+  supersedes their then-current click-only tool-surface snapshot.
+- actor surface: the live Catalog/Broker/Runtime snapshot now projects `click`, `double_click`,
+  `scroll`, `claim_obligation_done` and `blocked`. Actor-visible scroll args are strictly
+  `{image_x, image_y, direction: "up" | "down", notches: 1..12}`; direction means revealing content
+  above or below the viewport. The old signed `amount` is rejected. `scroll` is authorized by the
+  same canonical `visual.interact` capability; no application, task phrase, benchmark, layout,
+  coordinate rule, system prompt or additional model call was added. The ToolCatalog/Runtime snapshot
+  fingerprint changes because this generic tool schema intentionally changed.
+- transaction owner: `AtomicDesktopController` is the single Controller transaction for click,
+  double-click and scroll. It consumes the same Runtime permit, authoritative frame pin, target and
+  coordinate mapping, commit-time identity checks, physical lease and post-action evidence path.
+  The Controller mechanically maps `up -> +notches` and `down -> -notches` to the existing RawDevice
+  convention. The final target guard runs immediately before the physical mouse-down or wheel input.
+- physical mechanism: vNext scroll uses one unqueued admitted physical SendInput backend. The raw
+  receipt preserves `true/false/null` mechanical completion; exceptions or unprovable execution are
+  `unknown`. It never switches to a second mechanism or automatically replays an uncertain mutation.
+  Legacy scroll compatibility remains separate and unchanged.
+- evaluation: the generic randomized `scroll-reveal` target and independent oracle verify trusted
+  wheel provenance, direction, actual `scrollTop` movement, target-pane coordinates and complete
+  target visibility. They are eval-only and are not read by production Runtime, Actor, Broker or
+  Controller. With the final direction/notches schema, down seed `20260722` (run
+  `arp-20260722-182113-91882e`) and up seed `20260723` (run
+  `arp-20260722-181904-2b30b1`) passed the visible Electron/UIA, cold-start, empty-session entry and
+  independent oracle. Earlier signed-schema failures remain recorded: ambiguous sign/actor error,
+  premature wheel sampling followed by oscillation, and an up case repeating the wrong direction for
+  24 turns. Intermediate signed-schema passes are not the primary evidence for the final contract.
+- limits: `type_text`, `hotkey`, `drag`, `draw_strokes`, held pointer and ROI observe still lack live
+  parity. Broker enforce/necessary-tool recall, P7, default selection and legacy deletion gates are
+  not met; P6 remains disabled and no legacy product responsibility is deleted. Explicit no-progress
+  feedback for an unchanged post-scroll frame remains a separate recovery slice.

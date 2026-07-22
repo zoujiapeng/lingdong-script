@@ -26,7 +26,7 @@
 | [vnext/failure-triage.md](vnext/failure-triage.md) | 工具、Profiler、身份 envelope 和骨架优先的失败归因顺序 |
 | [vnext/decisions.md](vnext/decisions.md) | 已接受与延后的架构决策 |
 
-这些文档同时记录目标设计与迁移进度。当前 vNext 只有默认关闭的 click-only live 实验链；legacy 仍默认，两个随机 seed 的受控 Electron canary 已通过独立 oracle，但完整 P7、其余原语、默认切换和 legacy 删除未完成。vNext 必须共用 Electron 用户入口和现有窄基础，不能形成第二个长期产品主线；具体边界以 [vNext 文档入口](vnext/README.md) 为准。
+这些文档同时记录目标设计与迁移进度。当前 vNext 有默认关闭的增量 live 实验链，Actor 工具面为 `click/double_click/scroll/claim/blocked`；legacy 仍默认。三个 `precise-click` seed 和最终 direction/notches 合同下的一对双向 `scroll-reveal` seed 已通过真实 Electron 独立 oracle。完整 P7、其余原语、默认切换和 legacy 删除未完成。vNext 必须共用 Electron 用户入口和现有窄基础，不能形成第二个长期产品主线；具体边界以 [vNext 文档入口](vnext/README.md) 为准。
 
 ## 子系统文档
 
