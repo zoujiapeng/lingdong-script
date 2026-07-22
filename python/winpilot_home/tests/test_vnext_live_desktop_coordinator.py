@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -38,6 +39,7 @@ from winpilot.visual_runtime.atomic_click_controller import (
 from winpilot.visual_runtime.frame_observer import FrameObserver
 from winpilot.visual_runtime.windows_desktop_facts import WindowsDesktopFactsReader
 from winpilot.vnext.verification import VerifierAssessment
+from winpilot.vnext.actor.model import OpenAIVisualActor
 from winpilot.vnext.verification.visual_model import ReadOnlyVisualVerifierAdapter
 from winpilot.vnext.bridge.coordinator import (
     LiveDesktopCoordinatorError,
@@ -287,13 +289,18 @@ def _coordinator(
     )
 
 
-def _click():
+def _click(
+    *,
+    image_x: int = 100,
+    image_y: int = 100,
+    local_intent: str = "select the visible target on the current frame",
+):
     return {
         "format": "actor-proposal/0",
         "kind": "desktop_action",
         "action": "click",
-        "args": {"image_x": 100, "image_y": 100},
-        "local_intent": "select the visible target on the current frame",
+        "args": {"image_x": image_x, "image_y": image_y},
+        "local_intent": local_intent,
     }
 
 
@@ -405,6 +412,7 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     action_trace = trace.records[1][1]
     assert action_trace["step"] == 1
     assert action_trace["model_role"] == "visual_actor"
+    assert action_trace["previous_action_projected"] is False
     assert action_trace["accepted_tool_name"] == "click"
     assert action_trace["accepted_events"] == [{
         "event_id": action_trace["accepted_event_ids"][0],
@@ -416,6 +424,7 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     claim_trace = trace.records[2][1]
     assert claim_trace["step"] == 2
     assert claim_trace["model_role"] == "visual_actor"
+    assert claim_trace["previous_action_projected"] is True
     assert claim_trace["accepted_tool_name"] == "claim_obligation_done"
     assert [item["kind"] for item in claim_trace["accepted_events"]] == [
         "obligation_claimed",
@@ -427,8 +436,67 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     } == set(claim_trace["accepted_event_ids"])
 
 
+def test_live_coordinator_projects_previous_action_into_provider_request() -> None:
+    requests = []
+
+    def tool_call(name, arguments):
+        return SimpleNamespace(
+            type="function",
+            function=SimpleNamespace(
+                name=name,
+                arguments=json.dumps(arguments),
+            ),
+        )
+
+    responses = [
+        tool_call("click", {
+            "image_x": 100,
+            "image_y": 100,
+            "local_intent": "focus the visible target",
+        }),
+        tool_call("claim_obligation_done", {
+            "concise_claim": "the requested state is now visible",
+        }),
+    ]
+
+    def create(**request):
+        requests.append(request)
+        call = responses.pop(0)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=None, tool_calls=[call],
+        ))])
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
+    actor = OpenAIVisualActor(client, model="test-visual-actor")
+
+    result = _coordinator(actor, PositiveVisualModel()).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    assert len(requests) == 2
+    assert [message["role"] for message in requests[1]["messages"]] == [
+        "system", "assistant", "tool", "user",
+    ]
+    previous = json.loads(
+        requests[1]["messages"][1]["tool_calls"][0]["function"]["arguments"]
+    )
+    assert previous == {
+        "image_x": 100,
+        "image_y": 100,
+        "local_intent": "focus the visible target",
+    }
+    effect = json.loads(requests[1]["messages"][2]["content"])
+    assert effect["semantic_completion"] == "unknown"
+    assert effect["causal_attribution"] == "unknown"
+
+
 def test_repeated_unchanged_actions_are_replay_derived_actor_feedback() -> None:
-    actor = ScriptedActor([_click(), _click(), _claim()])
+    actor = ScriptedActor([
+        _click(image_x=100, image_y=100, local_intent="select the first target"),
+        _click(image_x=180, image_y=140, local_intent="select the second target"),
+        _claim(),
+    ])
     verifier = PositiveVisualModel()
     trace = Trace()
     raw_calls = []
@@ -451,8 +519,10 @@ def test_repeated_unchanged_actions_are_replay_derived_actor_feedback() -> None:
         "image_x": 100, "image_y": 100,
     }
     assert dict(actor.calls[2][0].previous_action.arguments) == {
-        "image_x": 100, "image_y": 100,
+        "image_x": 180, "image_y": 140,
     }
+    assert actor.calls[1][0].previous_action.local_intent == "select the first target"
+    assert actor.calls[2][0].previous_action.local_intent == "select the second target"
     assert actor.calls[1][0].mission.unchanged_frame_streak == 1
     assert actor.calls[2][0].mission.unchanged_frame_streak == 2
     turn_records = [
@@ -553,6 +623,31 @@ def test_turn_rejected_before_actor_has_no_model_role_or_selected_tool() -> None
     assert turn["accepted_events"] == []
 
 
+def test_actor_error_retains_explicit_turn_model_role() -> None:
+    class RaisingActor:
+        def propose(self, turn, **kwargs):
+            raise RuntimeError("provider request failed")
+
+    trace = Trace()
+
+    result = _coordinator(
+        RaisingActor(),
+        PositiveVisualModel(),
+        trace=trace,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    turn = next(
+        record for _run_id, record in trace.records
+        if record["type"] == "vnext_mission_runtime_turn"
+    )
+    assert turn["status"] == "actor_error"
+    assert turn["proposal_kind"] is None
+    assert turn["model_role"] == "visual_actor"
+    assert turn["previous_action_projected"] is False
+    assert turn["accepted_events"] == []
+
+
 def test_live_turn_sidecar_uses_real_trace_recorder_without_product_bus_events(
     tmp_path, monkeypatch,
 ) -> None:
@@ -604,6 +699,9 @@ def test_live_turn_sidecar_uses_real_trace_recorder_without_product_bus_events(
     assert [turn["model_role"] for turn in turns] == [
         "visual_actor", "visual_actor",
     ]
+    assert [turn["previous_action_projected"] for turn in turns] == [
+        False, True,
+    ]
     assert [turn["accepted_tool_name"] for turn in turns] == [
         "click", "claim_obligation_done",
     ]
@@ -616,7 +714,7 @@ def test_live_turn_sidecar_uses_real_trace_recorder_without_product_bus_events(
     serialized = json.dumps(turns, ensure_ascii=False)
     for forbidden in (
         "messages", "image_b64", "image_url", "image_x", "image_y",
-        "previous_action", "local_intent", "historyVisible",
+        '"previous_action":', "local_intent", "historyVisible",
     ):
         assert forbidden not in serialized
 
