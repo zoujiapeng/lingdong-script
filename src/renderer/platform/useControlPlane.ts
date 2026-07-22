@@ -3,6 +3,7 @@ import {
   ControlPlaneClient,
   resolveControlPlaneConnection,
   runtimeCompatibilityError,
+  type DesktopRuntimeVersion,
 } from './client';
 import { buildClientRunInputs } from './executionContext';
 import type { ArpExecutionSnapshot, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
@@ -13,6 +14,22 @@ export type ConnectionState = 'connecting' | 'online' | 'degraded' | 'offline';
 
 export const CONTROL_PLANE_FALLBACK_REFRESH_MS = 5_000;
 export const CONTROL_PLANE_EVENT_REFRESH_MS = 80;
+
+export async function submitGoalThroughControlPlane(
+  client: ControlPlaneClient,
+  goal: string,
+  maxSteps = 30,
+  coldStart = false,
+  runtimeVersion: DesktopRuntimeVersion = 'legacy',
+) {
+  const compiled = await client.compileTask(goal, maxSteps, coldStart);
+  const inputs = await buildClientRunInputs(
+    compiled.contract,
+    Date.now(),
+    (handoff) => client.captureDesktopContext(handoff.control_surface_pid),
+  );
+  return client.startGraph(compiled.graph, inputs, runtimeVersion);
+}
 
 export function useControlPlane() {
   const clientRef = useRef<ControlPlaneClient | null>(null);
@@ -187,15 +204,16 @@ export function useControlPlane() {
     return requireClient();
   };
 
-  const startGoal = useCallback(async (goal: string, maxSteps = 30, coldStart = false) => {
+  const startGoal = useCallback(async (
+    goal: string,
+    maxSteps = 30,
+    coldStart = false,
+    runtimeVersion: DesktopRuntimeVersion = 'legacy',
+  ) => {
     const client = requireCompatibleClient();
-    const compiled = await client.compileTask(goal, maxSteps, coldStart);
-    const inputs = await buildClientRunInputs(
-      compiled.contract,
-      Date.now(),
-      (handoff) => client.captureDesktopContext(handoff.control_surface_pid),
+    const run = await submitGoalThroughControlPlane(
+      client, goal, maxSteps, coldStart, runtimeVersion,
     );
-    const run = await client.startGraph(compiled.graph, inputs);
     await refresh();
     return run;
   }, [refresh]);

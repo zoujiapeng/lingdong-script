@@ -18,6 +18,8 @@ const FALLBACK_URL = 'http://127.0.0.1:8765/';
 const ELECTRON_SERVER_READY_TIMEOUT_MS = 35_000;
 const ELECTRON_SERVER_POLL_MS = 200;
 export const EXPECTED_RUNTIME_CONTRACT_VERSION = 2;
+export const DESKTOP_RUNTIME_VERSIONS = ['legacy', 'vnext'] as const;
+export type DesktopRuntimeVersion = typeof DESKTOP_RUNTIME_VERSIONS[number];
 
 export class TaskClarificationRequired extends Error {
   readonly questions: string[];
@@ -396,10 +398,17 @@ export class ControlPlaneClient {
     });
   }
 
-  async startGraph(graph: ArpGraph, inputs: Record<string, unknown> = {}): Promise<ArpExecutionSnapshot> {
+  async startGraph(
+    graph: ArpGraph,
+    inputs: Record<string, unknown> = {},
+    runtimeVersion: DesktopRuntimeVersion = 'legacy',
+  ): Promise<ArpExecutionSnapshot> {
+    if (!DESKTOP_RUNTIME_VERSIONS.includes(runtimeVersion)) {
+      throw new Error(`不支持的桌面运行时：${String(runtimeVersion)}`);
+    }
     const response = await this.request<{ ok: boolean; run_id: string; run: ArpExecutionSnapshot }>('api/v2/arp/runs', {
       method: 'POST',
-      body: JSON.stringify({ graph, inputs }),
+      body: JSON.stringify({ graph, inputs, runtime_version: runtimeVersion }),
     });
     return response.run;
   }
