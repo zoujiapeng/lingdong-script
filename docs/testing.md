@@ -8,19 +8,26 @@ prompt or controller rules. See
 [`visual-runtime-principles.md`](visual-runtime-principles.md) for the
 invariants and the client-entry evaluation contract.
 
-最近一次真实验证（2026-07-19）使用 `npm run dev` 启动的可见 Electron 客户端，
-`cold_start=1` 且 session 为空，运行 `game-drag-v2`。Agent 确实发出了可信的鼠标
-拖拽事件，但模型误读弯曲通道，trusted-browser oracle 判定失败；这不是“入口成功”
-的伪通过。报告：`output/playwright/client-visual-e2e/20260719-213401-suite/`。
-后续整改应优先改进通用视觉判断、路径表达和失败后的重新观察，不得为该靶场添加
-路线规则。
+最近一次真实验证（2026-07-22）使用 `npm run dev` 启动的可见 Electron 客户端，
+通过 UIA 操作与用户相同的 vNext 选择、冷启动和提交入口，session 为空。随机化
+`precise-click` seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）和 seed
+`424242`（run `arp-20260722-154447-9329b4`，2 turns）均由独立 trusted-browser
+pointer oracle 判定通过。suite report 分别为：
+
+- `output/playwright/client-visual-e2e/20260722-154302-suite/suite-report.json`
+- `output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json`
+
+此前真实尝试依次暴露了 Actor 对冗余 full-frame `observe` 的循环、视觉 Verifier provider
+返回字符串 confidence/复制条件文本、harness 的 `SW_RESTORE` 改变目标几何，以及 page-ready
+后仍使用旧几何。修复均发生在通用工具投影、Verifier 合同和 harness 状态读取层，没有把 case、
+seed、目标位置、布局或成功条件写入生产 Agent。
 
 本文定义什么可以叫“真实客户端 E2E”、什么可以计为通过，以及如何使用 11 个真实
 任务和组合长任务而不把它们写进生产逻辑。
 
 ## 当前基线
 
-2026-07-19 的当前工作树已经通过可见 Electron 客户端执行冷启动 E2E，但尚未完成
+当前工作树已经通过可见 Electron 客户端执行冷启动 E2E，但尚未完成
 11 个真实任务和混合长任务的全量验收。每个结果按实际 oracle 单独记账：
 
 | 场景 | 当前证据 | 结论 |
@@ -28,8 +35,9 @@ invariants and the client-entry evaluation contract.
 | 本地抖音搜索 `kimi k3` | 客户端入口、空 session、`experience_policy=disabled`、准确 trace 绑定；终态可见搜索结果 | 人工视觉核对成功；通用 report 未配置独立业务 oracle，因此自动报告不是 grounded pass |
 | `game-drag-v2` | 同一客户端入口、冷启动隔离和可信真实鼠标事件成立；模型把弯曲通道误读成直角路径 | E2E 失败；独立 oracle 未通过 |
 | 网易云搜索梁静茹、播放第一首并调到最大音量 | 客户端入口与冷启动隔离；新鲜帧可见播放状态和 Windows 音量 100%，用户确认成功 | 用户确认业务结果；harness 未产生 terminal pass，不能记正式终态通过 |
+| vNext `precise-click` seeds `987654` / `424242` | 可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace 和独立 trusted-browser pointer oracle | 两个受控 click-only seed grounded pass；不是 legacy paired、真实应用、11 题或其他原语通过 |
 
-这些证据只覆盖三个样本。它们证明通用主线到达真实软件和游戏式拖拽场景，不证明
+这些证据仍只覆盖少量样本。它们证明通用主线到达真实软件、游戏式拖拽和受控 vNext 点击场景，不证明
 11 题、混合长任务、任意电脑或任意应用全部可用。失败、超时、`ungrounded` 和受干扰
 run 保留原状态。
 
@@ -53,9 +61,36 @@ E2E。
 
 ## vNext 旁路 A/B
 
-`codex/vnext-agent-core` 的未来实现仍必须从同一可见 Electron 客户端进入。
+`codex/vnext-agent-core` 的实现仍必须从同一可见 Electron 客户端进入。
 `legacy/vnext` 只能由每个 run 的显式产品/实验配置选择，不能根据任务文本、应用名、
 Task Profiler 或测试题号暗中切换；同一 run 不能让两个 runtime 交叉操作桌面。
+
+当前客户端已有可见的 `Legacy（默认）` / `vNext（实验）` per-run 选择器。选择 `vnext`
+后，Server 注入 click-only coordinator，并完全绕过 legacy handlers；构造、模型、动作或验证
+失败都不得在同一 run 回退。当前工具面只有通用 `click`、`double_click`、
+`claim_obligation_done` 和 `blocked`；Runtime 在每回合自动捕获最新权威帧，不把等价的
+full-frame `observe` 暴露给 Actor。ExecuteDesktopTask 与 live Runtime state 同时声明
+canonical `visual.interact` 和 `visual.read_text`，因为模型直接读取像素；Catalog 只以
+`visual.interact` 授权点击，`visual.read_text` 不隐式加载 OCR/UIA。投影不包含 case、应用、
+原句或坐标规则。独立视觉 ObligationVerifier 无 mutation 工具，最终完成仍需
+deterministic MissionVerifier 与同一 run-scoped EvidenceRegistry。
+
+当前 coordinator context 是 `/1`：harness/集成测试必须覆盖模型 in-flight 时触发 pause，确认
+非阻塞 `is_paused` 使旧 proposal 在零 Controller 调用下失效；resume 后必须看到新 frame/new
+decision。frame freshness max-age 显式记录（当前默认 30 秒），过龄 frame 在 Broker/admission
+阶段拒绝。turn count 必须来自 canonical ExecuteDesktopTask `max_steps`，与 session 请求冲突时在
+模型前失败；effective budget 还要记录本地 24-turn cap。RawDevice 必须由产品 composition root
+注入，缺失时禁止构造 coordinator 或 fallback 到另一 backend。
+
+Server 目前仍在 vNext composition 前经过 legacy `CapabilityPlanner` admission。扩大 vNext 工具、
+provider/MCP 或多原语的 E2E 前，测试必须证明该 guard 已迁移为 runtime-aware 单一 owner，并覆盖
+legacy/vNext 各自的 missing-capability 负向场景；否则 capability failure 不能归因于 Actor/Broker。
+
+`precise-click` 是这条窄链的第一个随机化受控 oracle，不是产品策略。上述两个 seed 已从
+真实可见 Electron/UIA 入口获得 vNext grounded pass；两次均为冷启动、空 session，且外部
+trusted-browser oracle 独立确认目标鼠标事件。它们尚未包含 legacy paired 对照，也不能满足
+完整 P7。`type_text`、`hotkey`、Actor 可见滚轮、拖拽、绘制、held pointer、ROI observe、
+应用发现、provider/MCP 和 live Profiler 仍不得从这些 case 推断为可用。
 
 vNext 内部的 `direct/standard/orchestrated` 执行深度可以由只读 Task Profiler 提议，
 并由确定性 Execution Policy 校验。这是 vNext 内部认知服务深度，不是第二套产品
@@ -199,6 +234,9 @@ Agent 自己触发的窗口、Shell UI 或弹窗不是外部干扰，必须评�
 6. 模型显式选择辅助能力时，trace 说明来源、当前帧一致性和预期收益；
 7. vNext 模型 proposal 的 runtime envelope 仍绑定当前 revision、obligation 和 frame；
 8. 局部失败没有无理由触发整项任务重新 profiling。
+9. 模型调用期间 pause 会使该 proposal 在 admission 前失效，resume 后不执行旧动作；
+10. frame 超过显式 freshness max-age 时，Controller/backend 调用数为零；
+11. canonical `max_steps` 用尽后稳定失败，不再额外调用模型或设备。
 
 强容错来自“重新观察 -> 模型重新判断 -> 通用动作再执行”，不来自越来越长的 fallback
 cascade。
@@ -224,6 +262,12 @@ npm run e2e:client:all
 
 ```bash
 python scripts/client_visual_e2e_run.py --case dynamic-hold --seed 424242 --fail-fast
+```
+
+vNext click-only canary（harness 必须通过客户端可见控件明确选择实验 runtime；当前已有下述两个 seed 通过记录，但仍不代表完整 P7）：
+
+```bash
+python scripts/client_visual_e2e_run.py --case precise-click --seed 424242 --fail-fast
 ```
 
 常规回归：

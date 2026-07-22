@@ -11,7 +11,7 @@
 
 | 入口 | 当前职责 | 主要运行时事实 |
 | --- | --- | --- |
-| 智能代理 | 输入自然语言目标、设置步骤上限、选择冷启动、停止当前任务、处理人工门 | Task Contract、当前 stage、能力可满足性、模型/Controller 工具、工件、证据、Completion Contract、实时画面和指标 |
+| 智能代理 | 输入自然语言目标、设置步骤上限、选择冷启动和 per-run runtime、停止当前任务、处理人工门 | Task Contract、冻结的 `runtime_version`、当前 stage/Mission、能力可满足性、模型/Controller 工具、工件、证据、Completion Contract、实时画面和指标 |
 | 流程工作台 | 编辑、校验并运行 `automation-ir/1` / `arp/1` 投影 | 前端编译器与后端 capability catalog 的交集、IR fingerprint、真实 ARP 运行 |
 | 运行记录 | 搜索/筛选统一 Agent/ARP run，并按需加载单次完整详情 | run 摘要、timeline、typed stage trace、capabilities、artifacts、evidence、失败分类和完成合同 |
 | 技能与学习 | 区分已验证 Skill、draft/invalid script、trace、长期 Memory 与进程内 session | replay 可信状态、脚本摘要、适用条件、结构化 verification 和 lineage |
@@ -27,12 +27,20 @@
 智能代理输入
   → POST /api/v2/task-contracts/compile
   → task-contract/1 + typed arp/1 graph
-  → POST /api/v2/arp/runs
-  → StageRuntime / Controller / Adapter / bounded AgentRunner
+  → 可见选择 Legacy（默认）或 vNext（实验）
+  → POST /api/v2/arp/runs（顶层 runtime_version）
+  → legacy StageRuntime / AgentRunner
+     或 click-only vNext MissionRuntime / Visual Actor / Broker
+  → 唯一 Controller / RawDevice
   → BUS + WebSocket
   → GET /api/v2/runs/current（活跃详情）
   → GET /api/v2/runs/{run_id}（按需历史详情）
 ```
+
+runtime selector 只决定新 run 的产品 Runtime，不进入 Task Contract、graph、Profiler 或任务
+文本。选择 `vnext` 时 Server 只接 click-only 实验 coordinator；失败不会在同一 run 回退
+legacy。两个随机 seed 已从该可见 Electron/UIA 入口通过独立 trusted-browser oracle；这仍不等于
+P7、paired legacy、多原语、真实任务或默认切换门槛已达到。
 
 前端不会把整句目标直接转换成单个 `agent_goal`。跨应用、工件、通信和实时互动的
 阶段、能力、工具与 verifier 都来自同一个 Task Contract。运行控制始终绑定父 ARP：
@@ -40,6 +48,9 @@
 `POST /api/v2/runs/{run_id}/cancel`。暂停是协作式安全边界：已经开始的单个点击、
 拖拽或工具动作先收尾，下一次模型决策或工具动作才冻结，避免留下按住的鼠标或
 半截拖拽；人工确认门仍使用独立的批准/拒绝流程。
+
+vNext coordinator context `/1` 还提供非阻塞 pause reading：如果模型请求期间用户暂停，返回的
+proposal 在 Controller admission 前失效；继续后从新权威帧重新决策，不排队执行暂停前旧动作。
 
 ## 刷新与延迟策略
 

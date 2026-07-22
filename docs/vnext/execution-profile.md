@@ -53,7 +53,7 @@ Profiler 默认在 Goal Compiler 产生 lossless 初始 MissionDefinition 后调
     {
       "desired_state": "...",
       "depends_on": [],
-      "required_capabilities": ["visual.interact"]
+      "required_capabilities": ["visual.interact", "visual.read_text"]
     }
   ],
   "verified_session_facts": [],
@@ -283,4 +283,7 @@ The shared transport boundary is implemented only for the WinPilot product
 package. Profiler cancellation now propagates from ArpExecution through the
 shadow hook, runtime and provider to `ModelCallRuntime`, with tests. Root legacy
 providers, all-role per-attempt sidecars and the missing legacy-VLM stop-event
-seam remain migration debt; this does not change the P4/P5/P6 status.
+seam remain migration debt. The click-only P4/P5 live path currently uses a
+deterministic safe profile; the real Profiler remains shadow-only and cannot
+select runtime version, enlarge tools, enable Planner/Inspector, or claim
+progress toward the P6 gate.

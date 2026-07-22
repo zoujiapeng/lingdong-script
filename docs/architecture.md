@@ -245,7 +245,7 @@ MCP 是显式可选的 capability source。只有能力、授权、输入输出�
 
 整改优先级见 [GUI Agent 架构审计](GUI_AGENT_ARCHITECTURE_AUDIT.md)。
 
-`codex/vnext-agent-core` 分支正在以旁路方式设计下一代核心：外置 Mission Ledger、逐回合 Capability Broker、单一 Visual Actor、独立只读 Verifier，以及按事件调用的 Planner/Inspector。该设计目前仅有文档，不是已实现事实；详见 [vNext 文档入口](vnext/README.md)。当前运行时行为仍以本文前述实现为准。
+`codex/vnext-agent-core` 分支正在旁路迁移下一代核心：可重放 Mission、逐回合 Capability Broker、单一 Visual Actor、独立只读 Verifier，以及按证据保持禁用的 Planner/Inspector。当前已有默认关闭、按 run 显式选择的 click-only live coordinator，复用唯一 Controller/RawDevice；两个随机 seed 的冷启动、空 session、可见 Electron canary 已通过独立 trusted-browser oracle。legacy 仍默认，完整 P7、其余 GUI 原语、默认切换和 legacy 净删尚未完成。详见 [vNext 文档入口](vnext/README.md)。本文前述仍是 legacy 默认运行时事实，不能把受控点击成功写成通用 GUI 成功。
 
 ## 验收原则
 

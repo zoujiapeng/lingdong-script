@@ -400,3 +400,60 @@
 - rollout: P5 remains injection-only until a live vNext coordinator exists;
   unit/property tests do not establish false-positive improvement or authorize
   deletion of legacy `done`/`DoneVerifierMixin`.
+
+### D027: click-only live canary uses the product selector without fallback
+
+- status: accepted
+- supersedes: D024–D026 的“尚无 live coordinator/model Actor/visual Verifier”仅是当时 rollout
+  快照；其权限、身份、证据和删除门槛不变。
+- product selection: 可见 Electron 客户端只在顶层 run request 提供
+  `Legacy（默认）` / `vNext（实验）`。Runtime version 每 run 冻结一次，不进入 task
+  contract、graph、Profiler 或模型 payload。Server 只为冻结为 `vnext` 的 run 注入具体
+  coordinator；该 run 完全绕过 legacy handlers，任何失败都 fail closed。回滚只能新建独立
+  `legacy` run，禁止 run 内 fallback。
+- actor and mutation: live coordinator 只有一个模型 Visual Actor。Actor 只看无身份
+  MissionCard 投影、当前权威帧和 Broker 小工具面；当前工具为 `click`、`double_click`、
+  `claim_obligation_done`、`blocked`。Runtime 每回合自动捕获最新权威帧，不投影会得到
+  同一 full-frame 的冗余 `observe`。Runtime 绑定全部身份，唯一
+  Controller/RawDevice 链执行 click/double-click。ExecuteDesktopTask 与 live Runtime state
+  同时声明 canonical `visual.interact` 和 `visual.read_text`，后者表示模型直接读取像素；
+  Catalog 只以 `visual.interact` 授权 click/double-click，不能借 `visual.read_text` 隐式加载
+  OCR/UIA。canonical 名称的唯一 owner 是 `vnext/capability_names.py`，兼容 re-export、
+  Catalog 和 Policy 都不得按应用、测试或原句另起名称。
+- verification: claim 进入独立、无 mutation 工具的视觉 ObligationVerifier。视觉许可必须
+  同时满足 EvidencePolicy 与 Registry 中真实 evidence trust；模型只能返回无身份
+  assessment。live provider 只要求模型分类 Runtime 编号后的条件，Runtime 机械重建 canonical
+  assessment；没有可靠 provider confidence 时保存 `None`，不接受字符串或伪造数值。Runtime
+  复核当前 claim/revision/frame 后生成 attested evidence。最终 mission
+  仍只由 paired deterministic MissionVerifier、canonical EvidenceRegistry 和 Reducer 闭合。
+- limits: `type_text`、`hotkey`、Actor 可见 `scroll`、`drag`、`draw_strokes`、held
+  pointer、ROI observe、应用发现、provider/MCP、live Profiler、Planner/Inspector 尚未接入。
+  legacy 仍默认，P6 继续禁用，legacy 删除数为零。
+- evaluation: `precise-click` 只是随机化受控 canary 和独立 browser oracle，不是生产规则。
+  2026-07-22，seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）与 seed
+  `424242`（run `arp-20260722-154447-9329b4`，2 turns）已从冷启动、空 session、可见
+  Electron/UIA 产品入口通过独立 trusted-browser oracle。两个 click-only grounded pass 不包含
+  paired legacy、真实任务、多原语或 Verifier 校准，不能授权 P7 完成、默认切换或 legacy 删除。
+
+### D028: coordinator `/1` freezes pause, freshness, budget and device ownership
+
+- status: accepted
+- pause contract: `desktop-runtime-coordinator-context/1` replaces context `/0` by adding a
+  non-blocking `is_paused` read beside the turn-boundary blocking `wait_if_paused` gate. A pause
+  that begins during a model call invalidates admission; resume starts from a new authoritative
+  frame and decision, never the old proposal. The read cannot acquire or wait on an input lease.
+- freshness: every live Broker reprojection computes frame freshness from an explicit positive
+  max-age (currently default 30 seconds). A stale frame cannot be made admissible by model output,
+  payload metadata or a cached boolean.
+- budget: one full-goal ExecuteDesktopTask `max_steps` is the canonical turn-budget source.
+  Session `requested_max_steps`, when present, must match; invalid/conflicting budgets fail before a
+  model or mutation. The coordinator may only tighten it with its bounded local cap (default 24).
+- device composition: the product composition root constructs and injects the sole
+  `RawDeviceExecutor`; the coordinator rejects a missing device and never creates a fallback
+  backend. Runtime, Broker and Actor remain unable to construct physical input owners.
+- version audit: coordinator result and the other contracts still listed as `/0` have no
+  incompatible field change and remain `/0`; version numbers are not advanced in bulk.
+- remaining debt: Server still applies legacy `CapabilityPlanner` satisfiability assertions before
+  vNext composition. This remains a fail-closed guard for the click canary, but must become one
+  runtime-aware admission owner before expanding vNext tools/provider routes. It must not survive as
+  a second capability planner beside Broker.
