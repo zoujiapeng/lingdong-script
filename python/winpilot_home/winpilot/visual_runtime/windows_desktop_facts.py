@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from ..action.raw_device import FinalClickGuardDecision
+from ..action.raw_device import FinalPointerGuardDecision
 from .commit_admission import (
     CommitAdmissionRequest,
     CommitEnvironment,
@@ -258,7 +258,7 @@ class WindowsDesktopFactsReader:
             hit=hit,
         )
 
-    def read_final_click(self, request: CommitAdmissionRequest) -> WindowsDesktopFacts:
+    def read_final_pointer(self, request: CommitAdmissionRequest) -> WindowsDesktopFacts:
         """Sample only target geometry/identity and point hit around final guard."""
         if not isinstance(request, CommitAdmissionRequest):
             raise TypeError("request must be CommitAdmissionRequest")
@@ -270,7 +270,7 @@ class WindowsDesktopFactsReader:
         second = self._target_sample(expected.hwnd)
         if second != first:
             raise WindowsDesktopFactsError(
-                "target identity changed during final click observation"
+                "target identity changed during final pointer observation"
             )
         return WindowsDesktopFacts(
             target=TargetCommitIdentity(
@@ -287,7 +287,7 @@ class WindowsDesktopFactsReader:
         )
 
 
-class WindowsPhysicalClickFinalGuard:
+class WindowsPhysicalInputFinalGuard:
     """Fail-closed mechanical identity check; never selects or moves a target."""
 
     def __init__(self, reader: WindowsDesktopFactsReader) -> None:
@@ -295,38 +295,38 @@ class WindowsPhysicalClickFinalGuard:
             raise TypeError("reader must be WindowsDesktopFactsReader")
         self._reader = reader
 
-    def check_before_mouse_down(
+    def check_before_pointer_input(
         self, request: CommitAdmissionRequest, screen_point: Point,
-    ) -> FinalClickGuardDecision:
+    ) -> FinalPointerGuardDecision:
         if screen_point != request.screen_point:
-            return FinalClickGuardDecision.HIT_TEST_CHANGED
+            return FinalPointerGuardDecision.HIT_TEST_CHANGED
         try:
-            facts = self._reader.read_final_click(request)
+            facts = self._reader.read_final_pointer(request)
         except Exception:
-            return FinalClickGuardDecision.TARGET_UNAVAILABLE
+            return FinalPointerGuardDecision.TARGET_UNAVAILABLE
         expected, actual = request.target, facts.target
         if actual.root_hwnd != expected.root_hwnd:
-            return FinalClickGuardDecision.TARGET_ROOT_CHANGED
+            return FinalPointerGuardDecision.TARGET_ROOT_CHANGED
         if actual.process_id != expected.process_id:
-            return FinalClickGuardDecision.TARGET_PROCESS_CHANGED
+            return FinalPointerGuardDecision.TARGET_PROCESS_CHANGED
         if actual.window_region != expected.window_region:
-            return FinalClickGuardDecision.TARGET_GEOMETRY_CHANGED
+            return FinalPointerGuardDecision.TARGET_GEOMETRY_CHANGED
         left, top, width, height = expected.window_region
         x, y = request.screen_point
         if not (left <= x < left + width and top <= y < top + height):
-            return FinalClickGuardDecision.POINT_OUTSIDE_TARGET
+            return FinalPointerGuardDecision.POINT_OUTSIDE_TARGET
         if facts.hit is None or facts.hit_test_point != request.screen_point:
-            return FinalClickGuardDecision.HIT_TEST_UNAVAILABLE
+            return FinalPointerGuardDecision.HIT_TEST_UNAVAILABLE
         if (
             facts.hit.root_hwnd != expected.root_hwnd
             or facts.hit.process_id != expected.process_id
         ):
-            return FinalClickGuardDecision.HIT_TEST_CHANGED
-        return FinalClickGuardDecision.ADMITTED
+            return FinalPointerGuardDecision.HIT_TEST_CHANGED
+        return FinalPointerGuardDecision.ADMITTED
 
 
 class WindowsDesktopCommitObservation:
-    """AtomicClickController observation adapter; no mutation or recovery."""
+    """AtomicDesktopController observation adapter; no mutation or recovery."""
 
     def __init__(
         self,
@@ -373,7 +373,7 @@ __all__ = [
     "RuntimeCommitState",
     "RuntimeCommitStatePort",
     "WindowIdentity",
-    "WindowsPhysicalClickFinalGuard",
+    "WindowsPhysicalInputFinalGuard",
     "WindowsDesktopCommitObservation",
     "WindowsDesktopFacts",
     "WindowsDesktopFactsBackend",

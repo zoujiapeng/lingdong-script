@@ -1,7 +1,7 @@
-"""Minimal production ToolCatalog for the click-only vNext canary.
+"""Minimal production ToolCatalog for the live vNext point-input canary.
 
 The catalog describes only contracts that the current MissionRuntime and
-AtomicClickController can actually consume.  It does not infer tools from an
+AtomicDesktopController can actually consume.  It does not infer tools from an
 application, task phrase, or visual layout.
 """
 from __future__ import annotations
@@ -11,19 +11,21 @@ from .contracts import MutationKind, ToolCatalog, ToolRoute, ToolSpec
 from .registry import CapabilityOwner, RuntimeCapabilityRegistry
 
 
-CLICK_LIVE_TOOL_NAMES = (
+LIVE_TOOL_NAMES = (
     "click",
     "double_click",
+    "scroll",
     "claim_obligation_done",
     "blocked",
 )
 
-CLICK_LIVE_CONTROLLER_TOOL_NAMES = (
+LIVE_CONTROLLER_TOOL_NAMES = (
     "click",
     "double_click",
+    "scroll",
 )
 
-CLICK_LIVE_RUNTIME_SERVICES = (
+LIVE_RUNTIME_SERVICES = (
     "authoritative_frame_input",
     "desktop_controller",
     "mission_verifier",
@@ -51,8 +53,22 @@ def _point_schema() -> dict[str, object]:
     }
 
 
-def build_click_live_catalog() -> ToolCatalog:
-    """Return the deterministic, click-only production catalog.
+def _scroll_schema() -> dict[str, object]:
+    schema = _point_schema()
+    properties = dict(schema["properties"])
+    properties["amount"] = {
+        "type": "integer",
+        "minimum": -12,
+        "maximum": 12,
+        "not": {"const": 0},
+    }
+    schema["properties"] = properties
+    schema["required"] = ["image_x", "image_y", "amount"]
+    return schema
+
+
+def build_live_catalog() -> ToolCatalog:
+    """Return the deterministic production catalog for migrated primitives.
 
     ``wait`` and region observation are deliberately absent: P4 MissionRuntime
     has no dedicated wait outcome, and the live RuntimeState does not yet own a
@@ -80,6 +96,15 @@ def build_click_live_catalog() -> ToolCatalog:
             order=20,
         ),
         ToolSpec(
+            name="scroll",
+            schema=_scroll_schema(),
+            route=ToolRoute.VISUAL_ACTOR,
+            mutation_kind=MutationKind.GUI,
+            required_any_capabilities=("visual.interact",),
+            prerequisites=_CLICK_PREREQUISITES,
+            order=30,
+        ),
+        ToolSpec(
             name="claim_obligation_done",
             schema={
                 "type": "object",
@@ -92,7 +117,7 @@ def build_click_live_catalog() -> ToolCatalog:
             route=ToolRoute.VISUAL_ACTOR,
             mutation_kind=MutationKind.NONE,
             prerequisites=_FRAME_PREREQUISITES,
-            order=30,
+            order=40,
         ),
         ToolSpec(
             name="blocked",
@@ -114,26 +139,26 @@ def build_click_live_catalog() -> ToolCatalog:
             },
             route=ToolRoute.VISUAL_ACTOR,
             mutation_kind=MutationKind.NONE,
-            order=40,
+            order=50,
         ),
     ))
 
 
-def build_click_live_runtime_snapshot() -> RuntimeCapabilitySnapshot:
-    """Describe the exact click-only composition assembled in production.
+def build_live_runtime_snapshot() -> RuntimeCapabilitySnapshot:
+    """Describe the exact point-input composition assembled in production.
 
     This is a mechanical inventory, not a task classifier.  The resulting
     immutable object is shared by queue-time admission, ExecutionPolicy,
     RuntimeState, and the CapabilityBroker for the lifetime of a coordinator.
     """
 
-    catalog = build_click_live_catalog()
+    catalog = build_live_catalog()
     return RuntimeCapabilitySnapshot(
         runtime_version="vnext",
         catalog=catalog,
         capability_registry=RuntimeCapabilityRegistry((
             CapabilityOwner(
-                "atomic-click-controller",
+                "atomic-point-input-controller",
                 ("visual.interact",),
             ),
             CapabilityOwner(
@@ -141,15 +166,15 @@ def build_click_live_runtime_snapshot() -> RuntimeCapabilitySnapshot:
                 ("visual.read_text",),
             ),
         )),
-        controller_tool_names=CLICK_LIVE_CONTROLLER_TOOL_NAMES,
-        available_services=CLICK_LIVE_RUNTIME_SERVICES,
+        controller_tool_names=LIVE_CONTROLLER_TOOL_NAMES,
+        available_services=LIVE_RUNTIME_SERVICES,
     )
 
 
 __all__ = [
-    "CLICK_LIVE_CONTROLLER_TOOL_NAMES",
-    "CLICK_LIVE_RUNTIME_SERVICES",
-    "CLICK_LIVE_TOOL_NAMES",
-    "build_click_live_catalog",
-    "build_click_live_runtime_snapshot",
+    "LIVE_CONTROLLER_TOOL_NAMES",
+    "LIVE_RUNTIME_SERVICES",
+    "LIVE_TOOL_NAMES",
+    "build_live_catalog",
+    "build_live_runtime_snapshot",
 ]

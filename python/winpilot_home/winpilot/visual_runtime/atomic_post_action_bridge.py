@@ -1,6 +1,6 @@
 """Opt-in post-action frame/evidence bridge for the atomic Controller.
 
-``AtomicClickController`` calls this port while it still owns the physical
+``AtomicDesktopController`` calls this port while it still owns the physical
 desktop lease but after it releases the authoritative-frame pin.  The bridge
 only captures, CAS-publishes, and registers immutable evidence; it performs no
 GUI mutation, pixel interpretation, BUS publication, or semantic verification.
@@ -115,10 +115,11 @@ class AtomicPostActionBridge:
             )
         if raw_receipt is not None and not isinstance(raw_receipt, RawActionReceipt):
             raise TypeError("raw_receipt must be RawActionReceipt or null")
+        expected_raw_action = "scroll" if proposal.action == "scroll" else "click"
         if admission.status is CommitAdmissionStatus.ADMITTED:
-            if raw_receipt is None or raw_receipt.action != "click":
+            if raw_receipt is None or raw_receipt.action != expected_raw_action:
                 raise AtomicPostActionBridgeError(
-                    "admitted click requires its exact raw receipt"
+                    "admitted point input requires its exact raw receipt"
                 )
         elif raw_receipt is not None:
             raise AtomicPostActionBridgeError(
@@ -153,7 +154,7 @@ class AtomicPostActionBridge:
             raise AtomicPostActionBridgeError("post-action frame capture failed")
 
         # FrameObserver.commit is a CAS against the exact pre-action frame.
-        # AtomicClickController deliberately invokes this outside its frame pin.
+        # AtomicDesktopController deliberately invokes this outside its frame pin.
         post_frame = self._observer.commit(captured)
         frame_identity = self._frame_identity(post_frame)
         payload_hash = frame_identity_payload_hash(frame_identity)

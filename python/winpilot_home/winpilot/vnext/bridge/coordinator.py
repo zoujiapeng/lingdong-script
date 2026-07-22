@@ -1,4 +1,4 @@
-"""Production composition root for the click-only vNext desktop canary.
+"""Production composition root for the incremental vNext desktop canary.
 
 The coordinator does not understand applications or GUI layouts.  It binds
 one client-handoff window, composes the existing typed owners, and advances
@@ -32,17 +32,17 @@ from ...tasking.execution_context import (
     normalize_execution_context,
     validated_handoff_target,
 )
-from ...visual_runtime.atomic_click_controller import AtomicClickController
+from ...visual_runtime.atomic_click_controller import AtomicDesktopController
 from ...visual_runtime.atomic_post_action_bridge import AtomicPostActionBridge
 from ...visual_runtime.frame_observer import FrameObserver
 from ...visual_runtime.windows_desktop_facts import (
     WindowsDesktopCommitObservation,
     WindowsDesktopFactsReader,
-    WindowsPhysicalClickFinalGuard,
+    WindowsPhysicalInputFinalGuard,
 )
 from ..actor.model import OpenAIVisualActor
 from ..capabilities import CapabilityBroker, PointerLeaseState
-from ..capabilities.live_catalog import build_click_live_runtime_snapshot
+from ..capabilities.live_catalog import build_live_runtime_snapshot
 from ..evidence import EvidenceRegistry
 from ..mission import (
     EvidenceRef,
@@ -116,7 +116,7 @@ def _handoff_region(value: Any) -> tuple[int, int, int, int]:
 
 
 class LiveDesktopRuntimeCoordinator:
-    """Compose and run one isolated, click-only vNext Mission."""
+    """Compose and run one isolated vNext Mission over migrated primitives."""
 
     def __init__(
         self,
@@ -179,7 +179,7 @@ class LiveDesktopRuntimeCoordinator:
         self._trace_sidecar = trace_sidecar
         self._action_queue = action_queue
         # vNext owns semantic coordination, not physical-device construction.
-        # AtomicClickController performs the concrete owner validation when the
+        # AtomicDesktopController performs the concrete owner validation when the
         # run is composed; the product composition root supplies that owner.
         self._raw_device = raw_device
         self._runtime_snapshot = runtime_snapshot
@@ -401,12 +401,12 @@ class LiveDesktopRuntimeCoordinator:
             clock=self._clock,
         )
         facts_observation = WindowsDesktopCommitObservation(self._facts, state)
-        controller = AtomicClickController(
+        controller = AtomicDesktopController(
             action_queue=self._action_queue,
             frame_authority=frames,
             permits=permits,
             observation=facts_observation,
-            final_guard=WindowsPhysicalClickFinalGuard(self._facts),
+            final_guard=WindowsPhysicalInputFinalGuard(self._facts),
             raw_device=self._raw_device,
             post_action=AtomicPostActionBridge(
                 frame_authority=frames,
@@ -593,7 +593,7 @@ def build_live_desktop_runtime_coordinator(
 ) -> LiveDesktopRuntimeCoordinator:
     """Build the selected product coordinator without starting a run."""
 
-    runtime_snapshot = build_click_live_runtime_snapshot()
+    runtime_snapshot = build_live_runtime_snapshot()
     return LiveDesktopRuntimeCoordinator(
         api_config=api_config,
         raw_device=raw_device,
