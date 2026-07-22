@@ -203,6 +203,9 @@ def test_fresh_image_judge_receives_full_candidate_frame_actions_and_evidence(mo
 
 
 def test_native_candidate_reply_bypasses_keyword_preclassification_and_reaches_judge(monkeypatch):
+    from winpilot.agent import loop
+
+    monkeypatch.setattr(loop, "_main_model_has_vision", lambda: True)
     runner = _native_desktop_runner("explain how the visible text could be entered")
     runner._candidate_reply_pending = True
     runner._fresh_done_screen = lambda: "fresh-current-frame"
