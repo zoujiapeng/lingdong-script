@@ -1126,6 +1126,7 @@ class ArpRunManager:
         *,
         inputs: dict[str, Any] | None = None,
         desktop_runtime_selection: DesktopRuntimeSelection | None = None,
+        desktop_runtime_coordinator: DesktopRuntimeCoordinatorPort | None = None,
     ) -> ArpExecution:
         """Register a queued execution without creating another runtime thread."""
         validation = validate_graph(graph)
@@ -1136,6 +1137,7 @@ class ArpRunManager:
             handlers,
             inputs=inputs,
             desktop_runtime_selection=desktop_runtime_selection,
+            desktop_runtime_coordinator=desktop_runtime_coordinator,
         )
         with self._lock:
             self._runs[execution.run_id] = execution

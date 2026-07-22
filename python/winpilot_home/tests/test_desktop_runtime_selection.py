@@ -21,7 +21,7 @@ from winpilot.orchestrator.desktop_runtime import (
     DesktopRuntimeCoordinatorResult,
     DesktopRuntimeCoordinatorStatus,
 )
-from winpilot.orchestrator.runtime import ArpExecution, NodeResult
+from winpilot.orchestrator.runtime import ArpExecution, ArpRunManager, NodeResult
 from winpilot.orchestrator.runtime_selection import (
     DesktopRuntimeSelection,
     DesktopRuntimeUnavailable,
@@ -222,6 +222,39 @@ def test_explicit_vnext_coordinator_owns_run_once_and_bypasses_handlers(
         "arp_run_done",
     ]
     assert all(payload["run_id"] == execution.run_id for _event, payload in events)
+
+
+def test_run_manager_prepare_passes_the_exact_vnext_coordinator() -> None:
+    calls: list[DesktopRuntimeCoordinatorContext] = []
+
+    class Coordinator:
+        def run(
+            self, context: DesktopRuntimeCoordinatorContext,
+        ) -> DesktopRuntimeCoordinatorResult:
+            calls.append(context)
+            return DesktopRuntimeCoordinatorResult(
+                status=DesktopRuntimeCoordinatorStatus.DONE,
+                output={"owner": "vnext"},
+            )
+
+    coordinator = Coordinator()
+    manager = ArpRunManager()
+    execution = manager.prepare(
+        _task_stage_graph(),
+        {ArpNodeKind.TASK_STAGE: lambda *_args: pytest.fail(
+            "legacy handler must not run"
+        )},
+        desktop_runtime_selection=DesktopRuntimeSelection.from_config("vnext"),
+        desktop_runtime_coordinator=coordinator,
+    )
+
+    snapshot = manager.run_prepared(execution)
+
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"] == {"owner": "vnext"}
+    assert len(calls) == 1
+    assert calls[0].run_id == execution.run_id
+    assert calls[0].stop_event is execution.stop_event
 
 
 def test_vnext_coordinator_uses_existing_pause_gate() -> None:
