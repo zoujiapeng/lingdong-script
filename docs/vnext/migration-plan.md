@@ -385,6 +385,17 @@ ActionEffect 最终代码已经完成同一真实 Electron 入口的首轮验证
 结果不确定时仍禁止 replay，缺能力时禁止 legacy fallback。门槛未达前 P7 仍未完成，P6 保持禁用，
 P8/P9 不开始。
 
+为避免继续横向扩张，接下来的实施顺序固定为小切片，并在每一片结束后重新判断是否值得继续：
+
+1. **P7a recovery calibration（先测量，不改策略）**：扩展随机 seed、双向边界、静止 no-op、延迟变化、ambient animation、不可比较帧和同 seed legacy/vNext paired；报告 oracle pass、turns、重复动作、`unchanged_frame_streak`、Actor 是否改变策略、false done 与延迟。没有跨 seed 证据前不修改 prompt、不自动反向，也不增加恢复角色。
+2. **P4b.1 keyboard parity**：先迁移 `type_text` 与 `hotkey`，因为它们能显著扩大任务覆盖且不需要跨帧 pointer lease。它们必须复用同一 Runtime envelope、single-use permit、commit admission、唯一 RawDevice mechanism、unknown-no-replay 和 post-action evidence；legacy 先委托共享机械 owner，不复制第二套执行器。
+3. **P4b.2 unbound target acquisition**：把目前分散的已运行窗口、可恢复窗口、进程、Start Menu、StartApps、App Paths 与快捷方式事实收敛到一个只读发现端口。Actor只选择候选或提出 open/switch；Runtime用启动前后因果证据建立 TargetBinding。不得按应用名写路线，也不得在已有实例可复用时无条件新开。
+4. **P4b.3 continuous visual interaction**：按 `atomic drag -> held pointer -> draw_strokes -> ROI observe` 顺序迁移。drag/draw 共享同一有序路径与坐标 owner；held pointer 只有一个 lease/cleanup owner；ROI 是 FrameAuthority 的只读裁剪和坐标变换，不创建第二个视觉状态。
+5. **P7b real-task expansion**：在上述基础能力分别通过同入口 oracle 后，先跑单应用 held-out，再引入可靠的 multi-obligation、artifact/session reference 和跨应用 handoff；无法安全拆分仍保持 full-goal obligation。原始 11 题与组合任务只作为黑盒覆盖，不进入生产规则。
+6. **P2/P3/P6 gate**：只有多个真实任务证明 fixed safe-standard 或当前小工具面造成 over/under-profile、necessary-tool miss 或跨义务结构失败，才让 Profiler 影响 live profile；Planner/Inspector 仍需至少两个 held-out 任务族的独立 A/B uplift。P8/P9 继续等待完整门槛。
+
+每个切片还必须单独报告 production、test/harness 与 docs 的增删规模，指出复用的唯一 owner、准备替换的旧职责和删除证据。新增行数、角色数或合同数本身不算进展；无法说明为何不能复用现有 owner，或无法给出未来净删目标时，停止该切片而不是继续堆层。
+
 P4a 不授权删除任何 legacy 产品职责。`AgentRunner` 的全局 todo、模型直接 `done` 和固定大工具面只能在 paired canary 与真实 Electron E2E 达到 [evaluation.md](evaluation.md) 门槛，且 trace 证明所有 vNext Actor 回合分别由 MissionCard、P5 verification 和 BrokerProjection 接管后删除；单元测试、注入 fake 或一次受控成功都不构成删除证据。
 
 建立最小 Actor loop，只消费 MissionCard、FrameState和BrokerProjection。模型只输出无Runtime身份的 ActorProposal，Runtime构造 ActorDecisionEnvelope。

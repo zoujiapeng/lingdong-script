@@ -8,8 +8,8 @@ prompt or controller rules. See
 [`visual-runtime-principles.md`](visual-runtime-principles.md) for the
 invariants and the client-entry evaluation contract.
 
-最近一次真实验证（2026-07-22）使用 `npm run dev` 启动的可见 Electron 客户端，
-通过 UIA 操作与用户相同的 vNext 选择、冷启动和提交入口，session 为空。随机化
+2026-07-22 的受控 vNext 证据必须按代码代际分别记账。历史基线使用 `npm run dev` 启动的
+可见 Electron 客户端，通过 UIA 操作与用户相同的 vNext 选择、冷启动和提交入口，session 为空。随机化
 `precise-click` seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）、seed
 `424242`（run `arp-20260722-154447-9329b4`，2 turns）和 capability-admission 收敛后的 seed
 `135791`（run `arp-20260722-165702-086da6`，2 turns）均由独立 trusted-browser
@@ -19,8 +19,8 @@ pointer oracle 判定通过。suite report 分别为：
 - `output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json`
 - `output/playwright/client-visual-e2e/20260722-165627-suite/suite-report.json`
 
-最终 direction/notches scroll 合同还通过了同一可见 Electron/UIA、冷启动、空 session 入口的
-双向 `scroll-reveal`：
+ActionEffect 接线前，最终 direction/notches scroll 合同还通过了同一可见 Electron/UIA、冷启动、
+空 session 入口的双向 `scroll-reveal`：
 
 - down seed `20260722`：run `arp-20260722-182113-91882e`，report `output/playwright/client-visual-e2e/20260722-182040-suite/suite-report.json`；
 - up seed `20260723`：run `arp-20260722-181904-2b30b1`，report `output/playwright/client-visual-e2e/20260722-181825-suite/suite-report.json`。
@@ -30,6 +30,18 @@ pointer oracle 判定通过。suite report 分别为：
 `20260722-175451-suite` 暴露浏览器默认滚动采样过早且 Actor 随后振荡；
 `20260722-180448-suite` 的 up seed 在旧 signed 合同下重复错误方向并耗尽 24 turns。修复只改变通用
 scroll tool schema、Controller 机械映射和 oracle settle；没有增加任务、seed、布局或坐标生产规则。
+
+ActionEffect 最终代码必须单独报告，不能用上述历史双向通过覆盖。通用 120 ms post-action settle
+接入后，同入口复测结果为：
+
+- down seed `20260722`：PASS，run `arp-20260722-215529-8af388`，13 次 wheel、总位移 `+693`，report `output/playwright/client-visual-e2e/20260722-215454-suite/suite-report.json`；
+- precise-click seed `135791`：PASS，run `arp-20260722-215751-b82e5c`，3 次 click，report `output/playwright/client-visual-e2e/20260722-215719-suite/suite-report.json`；
+- up seed `20260723`：FAIL，run `arp-20260722-220002-9ddc79`，24 turns 后净位移反为 `+142`，最长 `unchanged_frame_streak=12`，report `output/playwright/client-visual-e2e/20260722-215930-suite/suite-report.json`。
+
+Controller 的方向映射与 Actor proposal 一致；当前 up 失败归因于 Actor 没有利用中性反馈改变策略，
+不能通过自动反向、方向规则或 prompt 教程掩盖。run `arp-20260722-214805-c9faaf` 因用户切换界面使
+target identity 失效，作为外部干扰排除，不计通过或失败。上述最终代码的 2 pass / 1 fail 只是单 seed
+首轮证据，不能换算成功率，也不能证明 ActionEffect 带来恢复 uplift。
 
 此前真实尝试依次暴露了 Actor 对冗余 full-frame `observe` 的循环、视觉 Verifier provider
 返回字符串 confidence/复制条件文本、harness 的 `SW_RESTORE` 改变目标几何，以及 page-ready
@@ -49,8 +61,9 @@ seed、目标位置、布局或成功条件写入生产 Agent。
 | 本地抖音搜索 `kimi k3` | 客户端入口、空 session、`experience_policy=disabled`、准确 trace 绑定；终态可见搜索结果 | 人工视觉核对成功；通用 report 未配置独立业务 oracle，因此自动报告不是 grounded pass |
 | `game-drag-v2` | 同一客户端入口、冷启动隔离和可信真实鼠标事件成立；模型把弯曲通道误读成直角路径 | E2E 失败；独立 oracle 未通过 |
 | 网易云搜索梁静茹、播放第一首并调到最大音量 | 客户端入口与冷启动隔离；新鲜帧可见播放状态和 Windows 音量 100%，用户确认成功 | 用户确认业务结果；harness 未产生 terminal pass，不能记正式终态通过 |
-| vNext `precise-click` seeds `987654` / `424242` / `135791` | 可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace 和独立 trusted-browser pointer oracle | 三个受控 click-only seed grounded pass；不是 legacy paired、真实应用、11 题或其他原语通过 |
-| vNext `scroll-reveal` seeds `20260722` down / `20260723` up | 最终 direction/notches 合同；可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace、trusted wheel/滚动几何独立 oracle | 一对双向受控 grounded pass；不是 paired legacy、多布局、真实应用或完整 P7 |
+| vNext 历史 `precise-click` seeds `987654` / `424242` / `135791` | 可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace 和独立 trusted-browser pointer oracle | 三个受控 click-only seed grounded pass；不是 legacy paired、真实应用、11 题或其他原语通过 |
+| ActionEffect 接线前的 vNext `scroll-reveal` seeds `20260722` down / `20260723` up | 最终 direction/notches 合同；可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace、trusted wheel/滚动几何独立 oracle | 历史一对双向受控 grounded pass；不能代表 ActionEffect 最终代码 |
+| ActionEffect 最终代码：down `20260722` / precise-click `135791` / up `20260723` | 同入口、独立 oracle、可信输入与 replayable frame effect；down/click 通过，up 保留真实失败 | 2 pass / 1 fail 的首轮样本；证据链可达，但 Actor 恢复收益未证明，P7 未达 |
 
 这些证据仍只覆盖少量样本。它们证明通用主线到达真实软件、游戏式拖拽和受控 vNext 点击/滚轮场景，不证明
 11 题、混合长任务、任意电脑或任意应用全部可用。失败、超时、`ungrounded` 和受干扰
@@ -111,12 +124,15 @@ coordinator 的同一不可变 `RuntimeCapabilitySnapshot` 校验 canonical capa
 Controller parity，并将该 snapshot 继续供 `ExecutionPolicy`、live `RuntimeState` 与 Broker 使用。
 回归测试必须覆盖 legacy/vNext missing-capability、缺 contract、runtime/snapshot identity、未知 service、
 Catalog/Controller drift、snapshot fingerprint replay，以及拒绝后 prepare/model/Controller/legacy fallback
-调用数为零。scroll 虽已有最终合同下的一对真实客户端双向证据，上述合同仍不代表其余 GUI 原语可用。
+调用数为零。scroll 虽有 ActionEffect 接线前最终 direction/notches 合同的一对真实客户端双向证据，
+最终代码仍保留一个 up 失败；上述合同也不代表其余 GUI 原语可用。
 
-`precise-click` 是这条窄链的第一个随机化受控 oracle，不是产品策略。上述三个 seed 已从
+`precise-click` 是这条窄链的第一个随机化受控 oracle，不是产品策略。上述三个历史 seed 已从
 真实可见 Electron/UIA 入口获得 vNext grounded pass；三次均为冷启动、空 session，且外部
 trusted-browser oracle 独立确认目标鼠标事件。它们尚未包含 legacy paired 对照，也不能满足
-完整 P7。`scroll-reveal` 的最终 down/up 合同已实际从同一入口通过，但仍缺 paired、多布局和真实任务覆盖。
+完整 P7。`scroll-reveal` 的 direction/notches 合同在 ActionEffect 接线前曾获得 down/up 双向通过；
+最终 ActionEffect 代码的当前证据必须按 down/click 通过、up 失败单独记账，仍缺 paired、多布局、
+动态画面和真实任务覆盖。
 `type_text`、`hotkey`、拖拽、绘制、held pointer、ROI observe、应用发现、provider/MCP 和 live
 Profiler 仍不得从这些 case 推断为可用。
 
