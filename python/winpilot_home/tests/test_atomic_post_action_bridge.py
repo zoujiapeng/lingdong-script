@@ -391,6 +391,42 @@ def test_atomic_controller_turns_real_bridge_failure_into_unknown_without_replay
     assert registry.snapshot() == ()
 
 
+def test_stale_controller_with_real_bridge_preserves_proven_non_execution() -> None:
+    authority, before = _authority()
+    envelope = _envelope(before)
+    authority.commit(
+        epoch=before.epoch,
+        hwnd=before.hwnd,
+        region=before.region,
+        scope=before.scope,
+        reason="newer_observation",
+        submitted_size=before.submitted_size,
+        image_b64="bmV3ZXI=",
+        captured_at=1.5,
+        expected_previous_frame_id=before.frame_id,
+    )
+    registry = EvidenceRegistry("mission-1", "run-1")
+    raw_calls: list[tuple] = []
+    controller = _controller(
+        envelope,
+        authority,
+        DesktopActionQueue(),
+        _bridge(authority, registry),
+        raw_calls,
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.REJECTED
+    assert transition.input_completed is False
+    assert transition.post_frame_id is None
+    assert transition.evidence_refs == ()
+    assert raw_calls == []
+    assert registry.snapshot() == ()
+    assert authority.current is not before
+    assert authority.current.reason == "newer_observation"
+
+
 def test_bridge_rejects_wrong_owner_or_run_before_capture() -> None:
     authority, before = _authority()
     other_authority = FrameAuthority()

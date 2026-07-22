@@ -292,6 +292,40 @@ class AtomicDesktopController:
             post_frame_id=post.post_frame_id,
         )
 
+    @staticmethod
+    def _transition_without_post(
+        envelope: ActorDecisionEnvelope,
+        commit: CommitCallbackResult[RawActionReceipt],
+    ) -> ControllerTransition:
+        """Preserve a proven non-mutation when post observation cannot close.
+
+        Missing post-action evidence is fatal once physical input may have
+        begun.  It must not erase the stronger, independently known fact that
+        an admission or RawDevice receipt proved no input was executed.
+        """
+
+        receipt = commit.value
+        definitely_not_executed = bool(
+            commit.admission.status is CommitAdmissionStatus.NOT_STARTED
+            or (
+                isinstance(receipt, RawActionReceipt)
+                and receipt.outcome in {
+                    MutationOutcome.NOT_STARTED,
+                    MutationOutcome.NOT_APPLIED,
+                }
+            )
+        )
+        return ControllerTransition(
+            outcome=(
+                ControllerOutcome.REJECTED
+                if definitely_not_executed
+                else ControllerOutcome.UNKNOWN
+            ),
+            action_id=envelope.decision_id,
+            action=envelope.proposal.action,
+            input_completed=False if definitely_not_executed else None,
+        )
+
     def execute(
         self,
         envelope: ActorDecisionEnvelope,
@@ -368,12 +402,9 @@ class AtomicDesktopController:
             except Exception:
                 # Input may already have begun.  Never turn a missing post-frame
                 # into a replayable rejection or call RawDevice a second time.
-                return ControllerTransition(
-                    outcome=ControllerOutcome.UNKNOWN,
-                    action_id=envelope.decision_id,
-                    action=envelope.proposal.action,
-                    input_completed=None,
-                )
+                # A separately proven non-execution remains a rejection; the
+                # Runtime will discard that decision and observe afresh.
+                return self._transition_without_post(envelope, commit)
             return self._transition(envelope, commit, post)
 
         return self._queue.run(
