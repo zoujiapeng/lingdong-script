@@ -289,6 +289,15 @@ def test_keyboard_select_all_requires_ordered_trusted_chord_and_release():
     assert server._accepted_success_event(wrong_order, len(wrong_order) - 1) is False
 
 
+def test_keyboard_select_all_does_not_require_layout_specific_dom_code():
+    events = _keyboard_select_events()
+    for event in events:
+        if event["type"] in {"trusted_keydown", "trusted_keyup"}:
+            event["details"]["code"] = ""
+
+    assert server._accepted_success_event(events, len(events) - 1) is True
+
+
 def test_keyboard_select_all_rejects_partial_selection_mutation_and_wrong_target():
     partial = _keyboard_select_events()
     partial[-3]["details"]["selection_end"] = 4
