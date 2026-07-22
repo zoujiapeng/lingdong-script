@@ -1214,6 +1214,17 @@ def test_actor_schema_error_is_recoverable_without_controller_admission() -> Non
     assert len(harness.reducer.events) == before
 
 
+def test_actor_invariant_error_is_terminal_without_controller_admission() -> None:
+    harness = _harness(_click(), actor_error=RuntimeError("actor invariant failed"))
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.ACTOR_ERROR
+    assert "actor invariant failed" in result.detail
+    assert harness.controller.calls == []
+    assert harness.permits.pending_count == 0
+
+
 def test_controller_cannot_report_completed_without_consuming_runtime_permit() -> None:
     harness = _harness(_click(), consume_permit=False)
     before = len(harness.reducer.events)

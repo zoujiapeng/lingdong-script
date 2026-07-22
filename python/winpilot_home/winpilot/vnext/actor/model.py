@@ -20,6 +20,7 @@ from ...modeling import (
 )
 from .proposals import (
     ACTOR_PROPOSAL_FORMAT,
+    ActorContractError,
     InvalidActorProposal,
     actor_proposal_to_json,
     parse_actor_proposal,
@@ -35,8 +36,12 @@ VISUAL_ACTOR_SYSTEM_CONTRACT = (
 )
 
 
-class VisualActorModelError(InvalidActorProposal):
-    """The provider response cannot become one identity-free ActorProposal."""
+class VisualActorModelError(ActorContractError):
+    """The Actor boundary itself is misconfigured or internally inconsistent."""
+
+
+class VisualActorResponseError(InvalidActorProposal, VisualActorModelError):
+    """One provider response cannot become an identity-free ActorProposal."""
 
 
 def _member(value: Any, name: str) -> Any:
@@ -52,40 +57,40 @@ def _one_choice(response: Any) -> Any:
         or not isinstance(choices, Sequence)
         or len(choices) != 1
     ):
-        raise VisualActorModelError("Visual Actor response requires exactly one choice")
+        raise VisualActorResponseError("Visual Actor response requires exactly one choice")
     return choices[0]
 
 
 def _one_tool_call(response: Any) -> tuple[str, Mapping[str, Any]]:
     message = _member(_one_choice(response), "message")
     if message is None:
-        raise VisualActorModelError("Visual Actor response has no message")
+        raise VisualActorResponseError("Visual Actor response has no message")
     content = _member(message, "content")
     if content is not None and (not isinstance(content, str) or content.strip()):
-        raise VisualActorModelError("Visual Actor must not answer with text")
+        raise VisualActorResponseError("Visual Actor must not answer with text")
     calls = _member(message, "tool_calls")
     if (
         isinstance(calls, (str, bytes, Mapping))
         or not isinstance(calls, Sequence)
         or len(calls) != 1
     ):
-        raise VisualActorModelError("Visual Actor must return exactly one tool call")
+        raise VisualActorResponseError("Visual Actor must return exactly one tool call")
     call = calls[0]
     if _member(call, "type") != "function":
-        raise VisualActorModelError("Visual Actor tool call must have type 'function'")
+        raise VisualActorResponseError("Visual Actor tool call must have type 'function'")
     function = _member(call, "function")
     name = _member(function, "name")
     raw_arguments = _member(function, "arguments")
     if type(name) is not str or not name.strip():
-        raise VisualActorModelError("Visual Actor tool call has no valid name")
+        raise VisualActorResponseError("Visual Actor tool call has no valid name")
     if type(raw_arguments) is not str:
-        raise VisualActorModelError("Visual Actor tool arguments must be JSON text")
+        raise VisualActorResponseError("Visual Actor tool arguments must be JSON text")
     try:
         arguments = json.loads(raw_arguments)
     except json.JSONDecodeError as exc:
-        raise VisualActorModelError("Visual Actor tool arguments are invalid JSON") from exc
+        raise VisualActorResponseError("Visual Actor tool arguments are invalid JSON") from exc
     if not isinstance(arguments, dict):
-        raise VisualActorModelError("Visual Actor tool arguments must be one object")
+        raise VisualActorResponseError("Visual Actor tool arguments must be one object")
     return name.strip(), arguments
 
 
@@ -110,7 +115,7 @@ def _validate_arguments(tool: ActorToolView, arguments: Mapping[str, Any]) -> No
     except SchemaError as exc:
         raise VisualActorModelError("Broker supplied an invalid tool schema") from exc
     if errors:
-        raise VisualActorModelError(
+        raise VisualActorResponseError(
             f"Visual Actor arguments do not match Broker schema for {tool.name!r}"
         )
 
@@ -153,7 +158,7 @@ def _proposal_for(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         proposal = parse_actor_proposal(raw)
         return json.loads(actor_proposal_to_json(proposal))
     except InvalidActorProposal as exc:
-        raise VisualActorModelError(str(exc)) from exc
+        raise VisualActorResponseError(str(exc)) from exc
 
 
 def _provider_tools(turn: ActorTurnInput) -> list[dict[str, Any]]:
@@ -324,7 +329,7 @@ class OpenAIVisualActor:
         name, arguments = _one_tool_call(outcome.response)
         tool = projected.get(name)
         if tool is None:
-            raise VisualActorModelError(
+            raise VisualActorResponseError(
                 f"Visual Actor called tool outside Broker projection: {name!r}"
             )
         _validate_arguments(tool, arguments)
@@ -334,6 +339,6 @@ class OpenAIVisualActor:
 __all__ = [
     "VISUAL_ACTOR_ROLE",
     "VISUAL_ACTOR_SYSTEM_CONTRACT",
-    "VisualActorModelError",
+    "VisualActorModelError", "VisualActorResponseError",
     "OpenAIVisualActor",
 ]
