@@ -34,10 +34,11 @@ from ..utils.log import BUS, logger
 from .desktop_queue import queued_desktop_action
 from .raw_device import (
     AdmittedPhysicalClickBackend,
+    AdmittedPhysicalScrollBackend,
     ClickCount,
     ClickMechanism,
-    FinalClickGuard,
-    FinalClickGuardDecision,
+    FinalPointerGuard,
+    FinalPointerGuardDecision,
     MouseButton,
     RawBackendResult,
 )
@@ -555,7 +556,7 @@ def _execute_click_input_unqueued(
     mechanism: ClickMechanism,
     hwnd: int | None = None,
     *,
-    final_guard: FinalClickGuard | None = None,
+    final_guard: FinalPointerGuard | None = None,
 ) -> RawBackendResult:
     """Execute one strict click after the caller has serialized admission."""
     if not (
@@ -585,7 +586,7 @@ def execute_admitted_physical_click(
     mechanism: ClickMechanism,
     hwnd: int | None = None,
     *,
-    final_guard: FinalClickGuard,
+    final_guard: FinalPointerGuard,
 ) -> RawBackendResult:
     """Run an already-queued physical click with a true pre-down guard."""
     if not callable(final_guard) or mechanism is ClickMechanism.BACKGROUND_MESSAGE:
@@ -707,7 +708,7 @@ def _raw_click(
     hwnd: int | None,
     prepositioned: bool = False,
     allow_target_focus: bool = True,
-    final_guard: FinalClickGuard | None = None,
+    final_guard: FinalPointerGuard | None = None,
 ) -> RawBackendResult:
     cooperative_mode = multi_input_cooperation_enabled()
     if hwnd and not cooperative_mode:
@@ -761,19 +762,19 @@ def _raw_click(
                 guard_decision = final_guard(*cursor_before)
                 cursor_after = tuple(map(int, _cursor_pos()))
             except Exception:
-                guard_decision = FinalClickGuardDecision.TARGET_UNAVAILABLE
+                guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
                 cursor_before = cursor_after = ()
-            if not isinstance(guard_decision, FinalClickGuardDecision):
-                guard_decision = FinalClickGuardDecision.TARGET_UNAVAILABLE
+            if not isinstance(guard_decision, FinalPointerGuardDecision):
+                guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
             if (
-                guard_decision is FinalClickGuardDecision.ADMITTED
+                guard_decision is FinalPointerGuardDecision.ADMITTED
                 and (
                     cursor_before != (int(x), int(y))
                     or cursor_after != cursor_before
                 )
             ):
-                guard_decision = FinalClickGuardDecision.POINTER_POSITION_CHANGED
-            if guard_decision is not FinalClickGuardDecision.ADMITTED:
+                guard_decision = FinalPointerGuardDecision.POINTER_POSITION_CHANGED
+            if guard_decision is not FinalPointerGuardDecision.ADMITTED:
                 return _click_progress(
                     False if completed_clicks == 0 else None,
                     completed_clicks,
@@ -1064,6 +1065,111 @@ def _publish_action_fact(action: str, **payload: Any) -> None:
         BUS.publish("action", action=action, **payload)
     except Exception:
         logger.debug("%s action telemetry failed", action, exc_info=True)
+
+
+def _physical_scroll_result(
+    input_completed: bool | None,
+    *,
+    error: str = "",
+    via: str = "physical_sendinput",
+    cursor_restored: bool | None = None,
+) -> RawBackendResult:
+    facts: dict[str, Any] = {"ok": input_completed is True, "via": via}
+    if error:
+        facts.update({"blocked": True, "error": error})
+    if cursor_restored is not None:
+        facts["cursor_restored"] = cursor_restored
+    return RawBackendResult(input_completed, facts)
+
+
+def execute_admitted_physical_scroll(
+    x: int,
+    y: int,
+    amount: int,
+    hwnd: int | None = None,
+    *,
+    final_guard: FinalPointerGuard,
+) -> RawBackendResult:
+    """Send one already-queued physical wheel input after its final guard."""
+
+    if (
+        any(type(value) is not int for value in (x, y, amount))
+        or amount == 0
+        or not callable(final_guard)
+    ):
+        return _physical_scroll_result(False, error="invalid admitted physical scroll")
+    if _dry_run():
+        return RawBackendResult(False, {"ok": True, "dry_run": True})
+
+    try:
+        saved = tuple(map(int, _cursor_pos()))
+    except Exception:
+        return _physical_scroll_result(False, error="scroll cursor position unavailable")
+
+    input_completed: bool | None = False
+    error = ""
+    via = "physical_sendinput"
+    expected = (int(x), int(y))
+    try:
+        try:
+            _raw_move_mouse(*expected)
+            time.sleep(0.04)
+        except Exception:
+            error = "scroll pointer positioning failed"
+        if not error and multi_input_cooperation_enabled() and not (
+            _cooperative_action_still_owned(hwnd, expected_cursor=expected)
+        ):
+            error = "scroll stopped because the user took foreground/cursor ownership"
+        if not error:
+            try:
+                cursor_before = tuple(map(int, _cursor_pos()))
+                guard_decision = final_guard(*cursor_before)
+                cursor_after = tuple(map(int, _cursor_pos()))
+            except Exception:
+                guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
+                cursor_before = cursor_after = ()
+            if not isinstance(guard_decision, FinalPointerGuardDecision):
+                guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
+            if (
+                guard_decision is FinalPointerGuardDecision.ADMITTED
+                and (cursor_before != expected or cursor_after != cursor_before)
+            ):
+                guard_decision = FinalPointerGuardDecision.POINTER_POSITION_CHANGED
+            if guard_decision is not FinalPointerGuardDecision.ADMITTED:
+                via = "final_target_guard"
+                error = f"final pointer guard rejected: {guard_decision.value}"
+        if not error:
+            try:
+                _send_inputs([
+                    _mouse_input(
+                        win32con.MOUSEEVENTF_WHEEL,
+                        data=amount * 120 & 0xFFFFFFFF,
+                    )
+                ])
+            except Exception:
+                input_completed = None
+                error = "scroll wheel outcome unknown"
+            else:
+                input_completed = True
+    finally:
+        cursor_restored = _restore_cursor_after_agent_input(saved, expected, hwnd)
+
+    result = _physical_scroll_result(
+        input_completed,
+        error=error,
+        via=via,
+        cursor_restored=cursor_restored,
+    )
+    if input_completed is True:
+        _publish_action_fact(
+            "scroll", x=x, y=y, amount=amount, via="physical_sendinput",
+        )
+    return result
+
+
+ADMITTED_PHYSICAL_SCROLL_BACKEND = AdmittedPhysicalScrollBackend(
+    execute_admitted_physical_scroll
+)
 
 
 @queued_desktop_action("scroll")
