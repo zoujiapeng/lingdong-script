@@ -104,6 +104,7 @@ def test_execution_context_uses_run_owned_selection_not_untrusted_payloads() -> 
 
     context = execution._context()  # internal handler contract under test
     assert execution.desktop_runtime_selection is selection
+    assert execution.to_dict()["runtime_version"] == "legacy"
     assert context["desktop_runtime_selection"] is selection
     assert context["desktop_runtime_selection"].runtime_version == "legacy"
 

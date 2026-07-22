@@ -364,6 +364,7 @@ class ArpExecution:
                 "kind": "arp",
                 "graph_id": self.graph.id,
                 "graph_name": self.graph.name,
+                "runtime_version": self._desktop_runtime_selection.runtime_version,
                 "status": self.status.value,
                 "manual_paused": self._manual_paused,
                 "current_node_id": self.current_node_id,

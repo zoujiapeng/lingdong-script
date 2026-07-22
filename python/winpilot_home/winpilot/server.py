@@ -1055,6 +1055,15 @@ def _start_arp_execution(
 
     def on_start(started: ArpExecution) -> None:
         trace_mod.RECORDER.start(started.run_id)
+        trace_mod.RECORDER.record_sidecar(
+            {
+                "type": "desktop_runtime_selected",
+                "runtime_version": (
+                    started.desktop_runtime_selection.runtime_version
+                ),
+            },
+            run_id=started.run_id,
+        )
         profiler_record = None
         if profiler_shadow_enabled:
             if profiler_shadow_hook is None or task_contract is None:
