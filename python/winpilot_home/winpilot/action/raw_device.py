@@ -28,6 +28,19 @@ class ClickMechanism(str, Enum):
     PREPOSITIONED_PHYSICAL = "prepositioned_physical"
 
 
+class FinalClickGuardDecision(str, Enum):
+    """Mechanical target verdict sampled immediately before mouse-down."""
+
+    ADMITTED = "admitted"
+    TARGET_UNAVAILABLE = "target_unavailable"
+    TARGET_ROOT_CHANGED = "target_root_changed"
+    TARGET_PROCESS_CHANGED = "target_process_changed"
+    TARGET_GEOMETRY_CHANGED = "target_geometry_changed"
+    POINT_OUTSIDE_TARGET = "point_outside_target"
+    HIT_TEST_UNAVAILABLE = "hit_test_unavailable"
+    HIT_TEST_CHANGED = "hit_test_changed"
+
+
 def _scalar_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
     frozen: dict[str, Any] = {}
     for key, value in facts.items():
@@ -132,18 +145,42 @@ class RawActionReceipt:
 
 
 RawBackend = Callable[..., RawBackendResult]
+FinalClickGuard = Callable[[int, int], FinalClickGuardDecision]
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedPhysicalClickBackend:
+    """Explicitly marks a backend which never acquires DesktopActionQueue."""
+
+    execute: RawBackend
+
+    def __post_init__(self) -> None:
+        if not callable(self.execute):
+            raise TypeError("admitted physical click backend must be callable")
+        if hasattr(self.execute, "__wrapped__"):
+            raise TypeError("admitted physical click backend cannot wrap a decorated entry")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+        return self.execute(*args, **kwargs)
 
 
 @dataclass(frozen=True, slots=True)
 class RawDeviceBackends:
     scroll: RawBackend | None = None
     click: RawBackend | None = None
+    admitted_physical_click: AdmittedPhysicalClickBackend | None = None
 
     def __post_init__(self) -> None:
         for name in ("scroll", "click"):
             backend = getattr(self, name)
             if backend is not None and not callable(backend):
                 raise TypeError(f"{name} backend must be callable or null")
+        if self.admitted_physical_click is not None and not isinstance(
+            self.admitted_physical_click, AdmittedPhysicalClickBackend
+        ):
+            raise TypeError(
+                "admitted_physical_click must be AdmittedPhysicalClickBackend or null"
+            )
 
 
 class RawDeviceExecutor:
@@ -243,6 +280,8 @@ class RawDeviceExecutor:
         button: MouseButton,
         count: ClickCount,
         mechanism: ClickMechanism,
+        *,
+        final_guard: FinalClickGuard | None = None,
     ) -> RawActionReceipt:
         context_error = self._context_error(context)
         if context_error is not None:
@@ -260,13 +299,28 @@ class RawDeviceExecutor:
                 "click", MutationOutcome.NOT_STARTED,
                 error_kind="invalid_args",
             )
+        backend = self._backends.click
+        call_kwargs: dict[str, Any] = {"hwnd": context.target_hwnd}
+        if final_guard is not None:
+            if (
+                not callable(final_guard)
+                or mechanism is ClickMechanism.BACKGROUND_MESSAGE
+            ):
+                return self._receipt(
+                    "click", MutationOutcome.NOT_STARTED,
+                    error_kind="invalid_final_guard",
+                )
+            backend = self._backends.admitted_physical_click
+            call_kwargs["final_guard"] = final_guard
         return self._call(
-            "click", self._backends.click, x, y, button=button, count=count,
-            mechanism=mechanism, hwnd=context.target_hwnd,
+            "click", backend, x, y, button=button, count=count,
+            mechanism=mechanism, **call_kwargs,
         )
 
 
 __all__ = [
-    "ClickCount", "ClickMechanism", "MouseButton", "RawActionContext",
-    "RawActionReceipt", "RawBackendResult", "RawDeviceBackends", "RawDeviceExecutor",
+    "AdmittedPhysicalClickBackend", "ClickCount", "ClickMechanism",
+    "FinalClickGuard", "FinalClickGuardDecision", "MouseButton",
+    "RawActionContext", "RawActionReceipt", "RawBackendResult",
+    "RawDeviceBackends", "RawDeviceExecutor",
 ]

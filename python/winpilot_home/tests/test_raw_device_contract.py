@@ -9,8 +9,10 @@ import random
 import pytest
 
 from winpilot.action.raw_device import (
+    AdmittedPhysicalClickBackend,
     ClickCount,
     ClickMechanism,
+    FinalClickGuardDecision,
     MouseButton,
     RawActionContext,
     RawActionReceipt,
@@ -292,6 +294,121 @@ def test_missing_click_backend_fails_before_input() -> None:
 
     assert receipt.outcome is MutationOutcome.NOT_STARTED
     assert receipt.error_kind == "backend_unavailable"
+
+
+def test_final_guard_uses_only_explicit_admitted_backend() -> None:
+    normal_calls, admitted_calls = [], []
+
+    def admitted(x, y, *, final_guard, **kwargs):
+        admitted_calls.append((x, y, kwargs))
+        assert final_guard(x, y) is FinalClickGuardDecision.ADMITTED
+        return RawBackendResult(True, {"guarded": True})
+
+    raw = RawDeviceExecutor(RawDeviceBackends(
+        click=lambda *args, **kwargs: normal_calls.append((args, kwargs)),
+        admitted_physical_click=AdmittedPhysicalClickBackend(admitted),
+    ))
+    receipt = raw.click(
+        _context(), 10, 20, MouseButton.LEFT, ClickCount.SINGLE,
+        ClickMechanism.PHYSICAL,
+        final_guard=lambda _x, _y: FinalClickGuardDecision.ADMITTED,
+    )
+
+    assert receipt.outcome is MutationOutcome.APPLIED
+    assert len(admitted_calls) == 1
+    assert normal_calls == []
+
+    unavailable = RawDeviceExecutor(RawDeviceBackends()).click(
+        _context(), 10, 20, MouseButton.LEFT, ClickCount.SINGLE,
+        ClickMechanism.PHYSICAL,
+        final_guard=lambda _x, _y: FinalClickGuardDecision.ADMITTED,
+    )
+    assert unavailable.outcome is MutationOutcome.NOT_STARTED
+    assert unavailable.error_kind == "backend_unavailable"
+
+
+def _physical_executor_mocks(monkeypatch, events):
+    from winpilot.action import executor
+
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(executor, "_target_window_still_foreground", lambda _hwnd: True)
+    monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: events.append(("move", x, y)))
+    monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: events.append(("input", inputs[0])))
+    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    return executor
+
+
+def test_admitted_backend_guards_immediately_before_down_without_queue(monkeypatch):
+    events = []
+    executor = _physical_executor_mocks(monkeypatch, events)
+    from winpilot.action import desktop_queue
+
+    monkeypatch.setattr(
+        desktop_queue.DESKTOP_ACTION_QUEUE,
+        "run",
+        lambda *args, **kwargs: pytest.fail("admitted backend queued a second time"),
+    )
+
+    def guard(x, y):
+        assert (x, y) == (10, 20)
+        events.append(("guard",))
+        return FinalClickGuardDecision.ADMITTED
+
+    result = executor.ADMITTED_PHYSICAL_CLICK_BACKEND(
+        10, 20, button=MouseButton.LEFT, count=ClickCount.SINGLE,
+        mechanism=ClickMechanism.PHYSICAL, hwnd=41, final_guard=guard,
+    )
+
+    assert result.input_completed is True
+    assert events[-3:] == [
+        ("guard",),
+        ("input", executor.win32con.MOUSEEVENTF_LEFTDOWN),
+        ("input", executor.win32con.MOUSEEVENTF_LEFTUP),
+    ]
+    assert executor.ADMITTED_PHYSICAL_CLICK_BACKEND.execute is (
+        executor.execute_admitted_physical_click
+    )
+    assert not hasattr(executor.execute_admitted_physical_click, "__wrapped__")
+    assert hasattr(executor.execute_click_input, "__wrapped__")
+    with pytest.raises(TypeError, match="decorated"):
+        AdmittedPhysicalClickBackend(executor.execute_click_input)
+
+
+def test_final_guard_failure_is_certain_before_first_down_and_unknown_after_partial(
+    monkeypatch,
+):
+    events = []
+    executor = _physical_executor_mocks(monkeypatch, events)
+    decisions = iter((
+        FinalClickGuardDecision.ADMITTED,
+        FinalClickGuardDecision.HIT_TEST_CHANGED,
+    ))
+
+    result = executor.ADMITTED_PHYSICAL_CLICK_BACKEND(
+        10, 20, button=MouseButton.LEFT, count=ClickCount.DOUBLE,
+        mechanism=ClickMechanism.PHYSICAL, hwnd=41,
+        final_guard=lambda _x, _y: next(decisions),
+    )
+
+    assert result.input_completed is None
+    assert result.facts["completed_clicks"] == 1
+    assert result.facts["via"] == "final_target_guard"
+    assert [event for event in events if event[0] == "input"] == [
+        ("input", executor.win32con.MOUSEEVENTF_LEFTDOWN),
+        ("input", executor.win32con.MOUSEEVENTF_LEFTUP),
+    ]
+
+    events.clear()
+    rejected = executor.ADMITTED_PHYSICAL_CLICK_BACKEND(
+        10, 20, button=MouseButton.LEFT, count=ClickCount.SINGLE,
+        mechanism=ClickMechanism.PHYSICAL, hwnd=41,
+        final_guard=lambda _x, _y: FinalClickGuardDecision.TARGET_ROOT_CHANGED,
+    )
+    assert rejected.input_completed is False
+    assert not [event for event in events if event[0] == "input"]
 
 
 @pytest.mark.parametrize(

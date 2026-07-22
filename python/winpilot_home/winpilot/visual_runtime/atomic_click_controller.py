@@ -15,6 +15,7 @@ from ..action.desktop_queue import DesktopActionQueue
 from ..action.raw_device import (
     ClickCount,
     ClickMechanism,
+    FinalClickGuardDecision,
     MouseButton,
     RawActionContext,
     RawActionReceipt,
@@ -57,6 +58,15 @@ class DesktopCommitObservation(Protocol):
     """Read current OS facts while the authoritative frame is pinned."""
 
     def observe_commit(self, request: CommitAdmissionRequest) -> CommitEnvironment: ...
+
+
+@runtime_checkable
+class PhysicalClickFinalGuardPort(Protocol):
+    """Read-only final target guard invoked by the admitted physical backend."""
+
+    def check_before_mouse_down(
+        self, request: CommitAdmissionRequest, screen_point: tuple[int, int],
+    ) -> FinalClickGuardDecision: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +126,7 @@ class AtomicClickController:
         frame_authority: FrameAuthority,
         permits: MutationPermitAuthority,
         observation: DesktopCommitObservation,
+        final_guard: PhysicalClickFinalGuardPort,
         raw_device: RawDeviceExecutor,
         post_action: ControllerPostActionPort,
         enabled: bool = False,
@@ -130,6 +141,8 @@ class AtomicClickController:
             raise TypeError("raw_device must be RawDeviceExecutor")
         if not isinstance(observation, DesktopCommitObservation):
             raise TypeError("observation must implement DesktopCommitObservation")
+        if not isinstance(final_guard, PhysicalClickFinalGuardPort):
+            raise TypeError("final_guard must implement PhysicalClickFinalGuardPort")
         if not isinstance(post_action, ControllerPostActionPort):
             raise TypeError("post_action must implement ControllerPostActionPort")
         if type(enabled) is not bool:
@@ -138,6 +151,7 @@ class AtomicClickController:
         self._frames = frame_authority
         self._permits = permits
         self._gate = CommitAdmissionGate(observation.observe_commit)
+        self._final_guard = final_guard
         self._raw = raw_device
         self._post = post_action
         self._enabled = enabled
@@ -277,6 +291,9 @@ class AtomicClickController:
                         MouseButton.LEFT,
                         count,
                         ClickMechanism.PHYSICAL,
+                        final_guard=lambda x, y: self._final_guard.check_before_mouse_down(
+                            request, (x, y)
+                        ),
                     ),
                 )
 
@@ -323,4 +340,5 @@ __all__ = [
     "ControllerPostAction",
     "ControllerPostActionPort",
     "DesktopCommitObservation",
+    "PhysicalClickFinalGuardPort",
 ]

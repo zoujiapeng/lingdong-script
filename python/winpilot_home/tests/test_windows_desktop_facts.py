@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from winpilot.action.raw_device import FinalClickGuardDecision
 from winpilot.visual_runtime.commit_admission import (
     CommitAdmissionGate,
     CommitAdmissionReason,
@@ -18,6 +19,7 @@ from winpilot.visual_runtime.windows_desktop_facts import (
     WindowsDesktopCommitObservation,
     WindowsDesktopFactsError,
     WindowsDesktopFactsReader,
+    WindowsPhysicalClickFinalGuard,
 )
 
 
@@ -181,6 +183,55 @@ def test_target_change_between_samples_fails_closed_before_callback():
     )
     assert result.admission.reason is CommitAdmissionReason.OBSERVATION_FAILED
     assert calls == []
+
+
+def test_final_click_guard_reads_no_foreground_and_admits_exact_target_hit():
+    backend = Backend()
+    guard = WindowsPhysicalClickFinalGuard(WindowsDesktopFactsReader(backend))
+
+    decision = guard.check_before_mouse_down(_request(), (150, 140))
+
+    assert decision is FinalClickGuardDecision.ADMITTED
+    assert guard.check_before_mouse_down(
+        _request(), (151, 140)
+    ) is FinalClickGuardDecision.HIT_TEST_CHANGED
+    assert ("foreground_hwnd",) not in backend.calls
+    assert backend.calls.count(("window_region", 101)) == 2
+    assert backend.calls.count(("window_from_point", (150, 140))) == 1
+
+
+@pytest.mark.parametrize(
+    ("change", "decision"),
+    (
+        ("root", FinalClickGuardDecision.TARGET_ROOT_CHANGED),
+        ("pid", FinalClickGuardDecision.TARGET_PROCESS_CHANGED),
+        ("geometry", FinalClickGuardDecision.TARGET_GEOMETRY_CHANGED),
+        ("hit", FinalClickGuardDecision.HIT_TEST_CHANGED),
+        ("hit_unavailable", FinalClickGuardDecision.HIT_TEST_UNAVAILABLE),
+        ("point", FinalClickGuardDecision.POINT_OUTSIDE_TARGET),
+    ),
+)
+def test_final_click_guard_fails_closed_on_each_mechanical_identity(
+    change, decision,
+):
+    backend = Backend()
+    request = _request()
+    if change == "root":
+        backend.roots[101] = 999
+    elif change == "pid":
+        backend.pids[101] = 999
+    elif change == "geometry":
+        backend.regions[101] = (11, 20, 800, 600)
+    elif change == "hit":
+        backend.roots[111] = 999
+    elif change == "hit_unavailable":
+        backend.hit = 0
+    else:
+        request = replace(request, screen_point=(900, 900))
+
+    assert WindowsPhysicalClickFinalGuard(
+        WindowsDesktopFactsReader(backend)
+    ).check_before_mouse_down(request, request.screen_point) is decision
 
 
 @pytest.mark.parametrize("live", ({100, 111}, {101, 100, 111}))

@@ -8,8 +8,10 @@ import pytest
 
 from winpilot.action.desktop_queue import DesktopActionQueue
 from winpilot.action.raw_device import (
+    AdmittedPhysicalClickBackend,
     ClickCount,
     ClickMechanism,
+    FinalClickGuardDecision,
     MouseButton,
     RawBackendResult,
     RawDeviceBackends,
@@ -108,6 +110,28 @@ class Observation:
         )
 
 
+class FinalGuard:
+    def __init__(self, decision=FinalClickGuardDecision.ADMITTED):
+        self.decision = decision
+        self.requests = []
+
+    def check_before_mouse_down(self, request, screen_point):
+        self.requests.append((request, screen_point))
+        return self.decision
+
+
+def _admitted_backend(backend):
+    def execute(x, y, *, button, count, mechanism, hwnd, final_guard):
+        decision = final_guard(x, y)
+        if decision is not FinalClickGuardDecision.ADMITTED:
+            return RawBackendResult(False, {"final_guard": decision.value})
+        return backend(
+            x, y, button=button, count=count, mechanism=mechanism, hwnd=hwnd,
+        )
+
+    return AdmittedPhysicalClickBackend(execute)
+
+
 class PostAction:
     def __init__(self, *, frame_authority=None, fail=False, log=None):
         self.frame_authority = frame_authority
@@ -148,6 +172,7 @@ def _controller(
     backend,
     *,
     observation=None,
+    final_guard=None,
     post=None,
     queue=None,
     enabled=True,
@@ -161,7 +186,10 @@ def _controller(
         frame_authority=authority,
         permits=permits,
         observation=observation or Observation(),
-        raw_device=RawDeviceExecutor(RawDeviceBackends(click=backend)),
+        final_guard=final_guard or FinalGuard(),
+        raw_device=RawDeviceExecutor(RawDeviceBackends(
+            admitted_physical_click=_admitted_backend(backend),
+        )),
         post_action=post or PostAction(),
         enabled=enabled,
     ), permits
@@ -217,6 +245,26 @@ def test_commit_admission_rejection_never_calls_raw_device():
     assert raw_calls == []
     assert permits.pending_count == 0
     assert observation.requests[0].screen_point == (110, 70)
+
+
+def test_final_guard_rejection_is_not_applied_and_never_calls_input_backend():
+    authority, frame = _authority()
+    envelope = _envelope(frame)
+    raw_calls = []
+    final_guard = FinalGuard(FinalClickGuardDecision.HIT_TEST_CHANGED)
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *args, **kwargs: raw_calls.append((args, kwargs)),
+        final_guard=final_guard,
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.REJECTED
+    assert transition.input_completed is False
+    assert raw_calls == []
+    assert len(final_guard.requests) == 1
 
 
 def test_unknown_raw_outcome_is_not_replayed():
@@ -339,7 +387,10 @@ def test_physical_queue_serializes_raw_through_post_action():
         frame_authority=authority,
         permits=permits,
         observation=Observation(),
-        raw_device=RawDeviceExecutor(RawDeviceBackends(click=backend)),
+        final_guard=FinalGuard(),
+        raw_device=RawDeviceExecutor(RawDeviceBackends(
+            admitted_physical_click=_admitted_backend(backend),
+        )),
         post_action=PostAction(log=log),
         enabled=True,
     )
