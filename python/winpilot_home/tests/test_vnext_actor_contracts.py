@@ -490,7 +490,7 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
     assert raw["mission"]["original_goal"] == "Complete the unknown visible task."
     assert raw["mission"]["active_obligation"]["desired_state"]
     assert raw["mission"]["target_title"] == "Example Surface"
-    assert raw["mission"]["no_progress_streak"] == 2
+    assert raw["mission"]["unchanged_frame_streak"] == 2
     assert raw["mission"]["last_transition"] == {
         "action": "click",
         "input_completed": True,
