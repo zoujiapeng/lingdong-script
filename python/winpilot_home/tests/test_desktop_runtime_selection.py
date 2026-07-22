@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 
 import pytest
+from pydantic import ValidationError
 
 from winpilot.orchestrator.contracts import (
     ArpEdge,
@@ -13,6 +14,7 @@ from winpilot.orchestrator.contracts import (
     ArpNode,
     ArpNodeKind,
     ArpPolicy,
+    ArpRunRequest,
     ArpRunStatus,
 )
 from winpilot.orchestrator.desktop_runtime import (
@@ -72,6 +74,15 @@ def test_runtime_selection_is_strict_immutable_and_defaults_to_legacy() -> None:
 
     with pytest.raises(FrozenInstanceError):
         defaulted.runtime_version = "vnext"  # type: ignore[misc]
+
+
+def test_product_run_request_accepts_only_explicit_runtime_versions() -> None:
+    graph = _task_stage_graph()
+
+    assert ArpRunRequest(graph=graph).runtime_version is None
+    assert ArpRunRequest(graph=graph, runtime_version="vnext").runtime_version == "vnext"
+    with pytest.raises(ValidationError):
+        ArpRunRequest(graph=graph, runtime_version="automatic")
 
 
 def test_execution_context_uses_run_owned_selection_not_untrusted_payloads() -> None:
@@ -534,6 +545,63 @@ def test_server_reads_runtime_config_once_and_freezes_selection(monkeypatch) -> 
             server.STATE.run_jobs.pop(execution.run_id, None)
 
 
+def test_explicit_product_run_selection_is_atomic_and_ignores_semantic_fields(
+    monkeypatch,
+) -> None:
+    import winpilot.server as server
+
+    config_reads = []
+
+    class Config:
+        @staticmethod
+        def get(*path: str, default=None):
+            if path == ("vnext", "runtime_version"):
+                config_reads.append(path)
+                return "legacy"
+            if path in {
+                ("vnext", "profiler_shadow"),
+                ("vnext", "broker_shadow"),
+            }:
+                return {"enabled": False}
+            return default
+
+    captured = {}
+
+    class Runs:
+        @staticmethod
+        def prepare(graph, handlers, *, inputs, desktop_runtime_selection):
+            captured["selection"] = desktop_runtime_selection
+            return ArpExecution(
+                graph,
+                handlers,
+                inputs=inputs,
+                desktop_runtime_selection=desktop_runtime_selection,
+            )
+
+    class Jobs:
+        @staticmethod
+        def submit(*_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(server, "CONFIG", Config())
+    monkeypatch.setattr(server, "ARP_RUNS", Runs())
+    monkeypatch.setattr(server, "RUNTIME_JOBS", Jobs())
+    monkeypatch.setattr(server.human_mod.RECORDER, "is_recording", lambda: False)
+
+    execution = server._start_arp_execution(
+        _task_stage_graph(metadata={"runtime_version": "legacy"}),
+        {"runtime_version": "legacy"},
+        runtime_version="vnext",
+    )
+    try:
+        assert captured["selection"].runtime_version == "vnext"
+        assert execution.desktop_runtime_selection.runtime_version == "vnext"
+        assert config_reads == []
+    finally:
+        with server.STATE.lock:
+            server.STATE.run_jobs.pop(execution.run_id, None)
+
+
 def test_unknown_product_runtime_config_fails_before_prepare_or_job_submit(
     monkeypatch,
 ) -> None:
@@ -595,6 +663,7 @@ def test_runtime_selection_has_one_product_owner_and_no_semantic_selector() -> N
     assert isinstance(owner, ast.FunctionDef)
     assert owner.name == "_start_arp_execution"
     assert len(call.args) == 1
-    assert ast.unparse(call.args[0]) == (
-        "CONFIG.get('vnext', 'runtime_version', default=None)"
-    )
+    assert ast.unparse(call.args[0]) == "selected_runtime_version"
+    owner_source = ast.unparse(owner)
+    assert "CONFIG.get('vnext', 'runtime_version', default=None)" in owner_source
+    assert "runtime_version is None" in owner_source
