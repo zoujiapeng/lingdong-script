@@ -31,6 +31,7 @@ from winpilot.vnext.mission import (
 from winpilot.vnext.runtime import MutationPermitAuthority
 from winpilot.visual_runtime.commit_admission import (
     CommitAdmissionRequest,
+    CommitInputKind,
     CommitRoute,
     FrameCommitIdentity,
     TargetCommitIdentity,
@@ -244,6 +245,7 @@ def _request(envelope: ActorDecisionEnvelope, **changes) -> CommitAdmissionReque
         "frame": envelope.frame,
         "target": envelope.target,
         "route": CommitRoute.PHYSICAL,
+        "input_kind": CommitInputKind.POINT,
         "screen_point": (100, 120),
     }
     values.update(changes)

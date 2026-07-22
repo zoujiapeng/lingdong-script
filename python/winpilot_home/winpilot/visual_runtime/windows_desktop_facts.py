@@ -8,8 +8,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from ..action.raw_device import FinalPointerGuardDecision
+from ..action.raw_device import (
+    FinalKeyboardGuardDecision,
+    FinalPointerGuardDecision,
+)
 from .commit_admission import (
+    CommitInputKind,
     CommitAdmissionRequest,
     CommitEnvironment,
     TargetCommitIdentity,
@@ -235,9 +239,12 @@ class WindowsDesktopFactsReader:
         foreground = self._optional_window(
             self._backend.foreground_hwnd(), "foreground",
         )
-        hit = self._optional_window(
-            self._backend.window_from_point(request.screen_point), "hit",
-        )
+        hit = None
+        if request.input_kind is CommitInputKind.POINT:
+            assert request.screen_point is not None
+            hit = self._optional_window(
+                self._backend.window_from_point(request.screen_point), "hit",
+            )
         second = self._target_sample(expected.hwnd)
         if second != first:
             raise WindowsDesktopFactsError(
@@ -262,6 +269,9 @@ class WindowsDesktopFactsReader:
         """Sample only target geometry/identity and point hit around final guard."""
         if not isinstance(request, CommitAdmissionRequest):
             raise TypeError("request must be CommitAdmissionRequest")
+        if request.input_kind is not CommitInputKind.POINT:
+            raise WindowsDesktopFactsError("final pointer guard requires point input")
+        assert request.screen_point is not None
         expected = request.target
         first = self._target_sample(expected.hwnd)
         hit = self._optional_window(
@@ -323,6 +333,35 @@ class WindowsPhysicalInputFinalGuard:
         ):
             return FinalPointerGuardDecision.HIT_TEST_CHANGED
         return FinalPointerGuardDecision.ADMITTED
+
+    def check_before_keyboard_input(
+        self, request: CommitAdmissionRequest,
+    ) -> FinalKeyboardGuardDecision:
+        if (
+            not isinstance(request, CommitAdmissionRequest)
+            or request.input_kind is not CommitInputKind.KEYBOARD
+            or request.screen_point is not None
+        ):
+            return FinalKeyboardGuardDecision.TARGET_UNAVAILABLE
+        try:
+            facts = self._reader.read(request)
+        except Exception:
+            return FinalKeyboardGuardDecision.TARGET_UNAVAILABLE
+        expected, actual = request.target, facts.target
+        if actual.root_hwnd != expected.root_hwnd:
+            return FinalKeyboardGuardDecision.TARGET_ROOT_CHANGED
+        if actual.process_id != expected.process_id:
+            return FinalKeyboardGuardDecision.TARGET_PROCESS_CHANGED
+        if actual.window_region != expected.window_region:
+            return FinalKeyboardGuardDecision.TARGET_GEOMETRY_CHANGED
+        if facts.foreground is None:
+            return FinalKeyboardGuardDecision.FOREGROUND_UNAVAILABLE
+        if (
+            facts.foreground.root_hwnd != expected.root_hwnd
+            or facts.foreground.process_id != expected.process_id
+        ):
+            return FinalKeyboardGuardDecision.FOREGROUND_CHANGED
+        return FinalKeyboardGuardDecision.ADMITTED
 
 
 class WindowsDesktopCommitObservation:

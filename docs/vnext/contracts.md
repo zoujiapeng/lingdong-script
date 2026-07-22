@@ -771,6 +771,13 @@ Actor 都不得自行创建 backend 或在缺失时 fallback。这样 compositio
 
 该内部 seam 尚未冻结为 vNext `/1` 产品合同。Actor 可见 scroll args 严格为 `{image_x, image_y, direction: "up" | "down", notches: 1..12}`；`up` 表示显露 viewport 上方内容，`down` 表示显露下方内容。旧 signed `amount` 在 Actor 边界不兼容并 fail closed；`AtomicDesktopController` 只机械映射 `up -> +notches`、`down -> -notches` 到既有 RawDevice canonical convention。`AtomicDesktopController` 由 Runtime permit 和权威 frame pin 限定一次 transaction，commit-time 重读 frame/epoch/HWND/PID/region/hit-test，并在 click mouse-down 或 scroll wheel 紧前做 final target guard；后续 `AtomicPostActionBridge` 在同一 physical lease 中 CAS 提交动作后权威帧并写入 exact action/frame evidence。scroll 只调用 unqueued admitted physical SendInput backend，不做机制切换；任一动作后证据缺失都是 `unknown`，不能转成可重放 rejection。当前默认关闭的 live coordinator 接入 `click`/`double_click`/`scroll`；`type_text`、`hotkey`、`drag`、`draw_strokes`、held pointer 与 ROI observe 均未接入。`DesktopRuntimeSelection` 只在 run 开始时冻结；缺失 coordinator 或任一 vNext 端口都必须在 mutation 前拒绝，不能隐式 fallback 到 legacy。
 
+P4b.1 先把共享 commit admission 从 `commit-admission-request/0` 升级为严格的
+`commit-admission-request/1`，显式区分 `input_kind=point|keyboard`。point 必须携带 `screen_point`，并继续
+执行 frame/target containment 与 hit-test；keyboard 必须令 `screen_point=null`、只能走 physical route，
+跳过无意义的 `WindowFromPoint`，但仍核对同一 frame/epoch/target、pointer released、mutation authority、
+stop/cancel 与 foreground root/process。最终 keyboard guard 也只读复核 target/foreground，不选择或聚焦
+窗口。该合同切片尚未向 Actor 暴露 `type_text`/`hotkey`，因此不改变当前产品工具面或动作行为。
+
 ### 11.4 P4c product coordinator 与 per-run selector
 
 `desktop-runtime-coordinator-context/1` 只携带 Runtime 冻结的 run id、任务/contract 只读快照、现有 stop owner、回合入口的 blocking pause gate 与 commit 前的只读 `is_paused`；`desktop-runtime-coordinator-result/0` 只允许严格 terminal 结果。`/1` 不兼容 `/0`，因为新增的非阻塞 pause reading 用于丢弃模型调用期间产生的旧动作，恢复后必须从新权威帧重新决策。客户端只在顶层 ARP run request 发送 `runtime_version`，不把它写入 graph、task contract、Profiler 或模型 payload。`ArpExecution` 仅在 selection 为 `vnext` 且 Server 注入增量 live `DesktopRuntimeCoordinatorPort` 时调用一次 coordinator，并完全绕过 legacy node handlers；结果非法、异常或取消都不得 fallback。缺省/`legacy` run 仍不注入该 coordinator。

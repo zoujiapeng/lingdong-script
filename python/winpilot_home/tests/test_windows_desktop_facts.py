@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import random
 
 import pytest
 
-from winpilot.action.raw_device import FinalPointerGuardDecision
+from winpilot.action.raw_device import (
+    FinalKeyboardGuardDecision,
+    FinalPointerGuardDecision,
+)
 from winpilot.visual_runtime.commit_admission import (
     CommitAdmissionGate,
+    CommitInputKind,
     CommitAdmissionReason,
     CommitAdmissionRequest,
     CommitEnvironment,
@@ -84,9 +89,19 @@ def _request(**changes) -> CommitAdmissionRequest:
             "binding-1", 101, 100, 7, 3, (10, 20, 800, 600),
         ),
         route="physical",
+        input_kind="point",
         screen_point=(150, 140),
     )
     return replace(request, **changes)
+
+
+def _keyboard_request(**changes) -> CommitAdmissionRequest:
+    values = {
+        "input_kind": CommitInputKind.KEYBOARD,
+        "screen_point": None,
+    }
+    values.update(changes)
+    return _request(**values)
 
 
 def test_reader_uses_os_identity_but_only_carries_runtime_binding_and_epoch():
@@ -133,6 +148,19 @@ def test_reader_exposes_stable_target_identity_for_runtime_composition():
     assert not any(call[0] == "window_from_point" for call in backend.calls)
 
 
+def test_keyboard_reader_never_calls_window_from_point_or_fabricates_hit():
+    backend = Backend()
+
+    facts = WindowsDesktopFactsReader(backend).read(_keyboard_request())
+
+    assert facts.hit_test_point is None
+    assert facts.hit is None
+    assert (facts.foreground.hwnd, facts.foreground.root_hwnd,
+            facts.foreground.process_id) == (100, 100, 7)
+    assert not any(call[0] == "window_from_point" for call in backend.calls)
+    assert backend.calls.count(("window_region", 101)) == 2
+
+
 def test_runtime_composition_target_read_fails_closed_on_sample_drift():
     backend = Backend()
     backend.second_target_region = (11, 20, 800, 600)
@@ -162,6 +190,26 @@ def test_adapter_builds_environment_and_gate_admits_once():
     assert result.value == "receipt"
     assert calls == ["raw"]
     assert runtime.requests == [request]
+
+
+def test_keyboard_observation_and_gate_admit_without_hit_test():
+    backend = Backend()
+    runtime = RuntimeState()
+    request = _keyboard_request()
+    observation = WindowsDesktopCommitObservation(
+        WindowsDesktopFactsReader(backend), runtime,
+    )
+    calls = []
+
+    result = CommitAdmissionGate(observation.observe_commit).admit_and_commit(
+        request, lambda: calls.append("keyboard") or "receipt",
+    )
+
+    assert result.admission.reason is CommitAdmissionReason.ADMITTED
+    assert result.value == "receipt"
+    assert calls == ["keyboard"]
+    assert runtime.requests == [request]
+    assert not any(call[0] == "window_from_point" for call in backend.calls)
 
 
 @pytest.mark.parametrize(
@@ -227,6 +275,114 @@ def test_final_pointer_guard_reads_no_foreground_and_admits_exact_target_hit():
     assert ("foreground_hwnd",) not in backend.calls
     assert backend.calls.count(("window_region", 101)) == 2
     assert backend.calls.count(("window_from_point", (150, 140))) == 1
+
+
+def test_final_keyboard_guard_reads_foreground_without_hit_test_and_admits():
+    backend = Backend()
+    guard = WindowsPhysicalInputFinalGuard(WindowsDesktopFactsReader(backend))
+
+    decision = guard.check_before_keyboard_input(_keyboard_request())
+
+    assert decision is FinalKeyboardGuardDecision.ADMITTED
+    assert backend.calls.count(("foreground_hwnd",)) == 1
+    assert backend.calls.count(("window_region", 101)) == 2
+    assert not any(call[0] == "window_from_point" for call in backend.calls)
+
+
+@pytest.mark.parametrize(
+    ("change", "decision"),
+    (
+        ("target_unavailable", FinalKeyboardGuardDecision.TARGET_UNAVAILABLE),
+        ("target_root", FinalKeyboardGuardDecision.TARGET_ROOT_CHANGED),
+        ("target_pid", FinalKeyboardGuardDecision.TARGET_PROCESS_CHANGED),
+        ("target_geometry", FinalKeyboardGuardDecision.TARGET_GEOMETRY_CHANGED),
+        ("foreground_unavailable", FinalKeyboardGuardDecision.FOREGROUND_UNAVAILABLE),
+        ("foreground_root", FinalKeyboardGuardDecision.FOREGROUND_CHANGED),
+        ("foreground_pid", FinalKeyboardGuardDecision.FOREGROUND_CHANGED),
+    ),
+)
+def test_final_keyboard_guard_fails_closed_on_stale_target_or_foreground(
+    change, decision,
+):
+    backend = Backend()
+    if change == "target_unavailable":
+        backend.live.remove(101)
+    elif change == "target_root":
+        backend.roots[101] = 999
+    elif change == "target_pid":
+        backend.pids[101] = 999
+    elif change == "target_geometry":
+        backend.regions[101] = (11, 20, 800, 600)
+    elif change == "foreground_unavailable":
+        backend.foreground = 0
+    elif change == "foreground_root":
+        backend.roots[100] = 999
+    else:
+        backend.pids[100] = 999
+
+    actual = WindowsPhysicalInputFinalGuard(
+        WindowsDesktopFactsReader(backend)
+    ).check_before_keyboard_input(_keyboard_request())
+
+    assert actual is decision
+    assert not any(call[0] == "window_from_point" for call in backend.calls)
+
+
+def test_randomized_final_keyboard_guard_replays_identity_without_hit_testing():
+    rng = random.Random(20260723)
+    for index in range(30):
+        target_hwnd = 1000 + index
+        root_hwnd = 2000 + index
+        process_id = 3000 + index
+        region = (
+            rng.randint(-500, 500),
+            rng.randint(-300, 300),
+            rng.randint(50, 1000),
+            rng.randint(50, 800),
+        )
+        backend = Backend()
+        backend.live = {target_hwnd, root_hwnd}
+        backend.roots = {target_hwnd: root_hwnd, root_hwnd: root_hwnd}
+        backend.pids = {target_hwnd: process_id, root_hwnd: process_id}
+        backend.regions = {target_hwnd: region}
+        backend.foreground = root_hwnd
+        backend.hit = 0
+        request = CommitAdmissionRequest(
+            request_id=f"keyboard-{index}",
+            frame=FrameCommitIdentity(
+                index + 1,
+                index,
+                target_hwnd,
+                region,
+                "target_window",
+                (region[2], region[3]),
+                f"{index + 1:064x}",
+            ),
+            target=TargetCommitIdentity(
+                f"binding-{index}",
+                target_hwnd,
+                root_hwnd,
+                process_id,
+                index,
+                region,
+            ),
+            route="physical",
+            input_kind=CommitInputKind.KEYBOARD,
+            screen_point=None,
+        )
+        guard = WindowsPhysicalInputFinalGuard(
+            WindowsDesktopFactsReader(backend)
+        )
+
+        assert guard.check_before_keyboard_input(
+            request,
+        ) is FinalKeyboardGuardDecision.ADMITTED
+        assert not any(call[0] == "window_from_point" for call in backend.calls)
+
+        backend.pids[root_hwnd] += 1
+        assert guard.check_before_keyboard_input(
+            request,
+        ) is FinalKeyboardGuardDecision.FOREGROUND_CHANGED
 
 
 @pytest.mark.parametrize(
