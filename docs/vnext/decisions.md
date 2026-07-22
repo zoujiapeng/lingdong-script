@@ -515,3 +515,54 @@
   parity. Broker enforce/necessary-tool recall, P7, default selection and legacy deletion gates are
   not met; P6 remains disabled and no legacy product responsibility is deleted. Explicit no-progress
   feedback for an unchanged post-scroll frame remains a separate recovery slice.
+
+### D031: action effect is replayable frame evidence, not a recovery planner
+
+- status: accepted
+- supersedes: D026 and D030 remain authoritative for verification ownership, scroll execution and
+  historical canary evidence. This decision supersedes only their then-current statement that an
+  ActionEffectVerifier and unchanged-frame feedback were not implemented. It also supersedes D028's
+  version snapshot for the five contracts changed below.
+- owner: after the sole Controller has closed an action and its post frame, Runtime may invoke one
+  read-only `DeterministicActionEffectVerifier`. It cannot read task/application labels, mutate the
+  desktop or Mission, choose a target, retry, reverse direction, or start OCR/UIA/MCP. The Controller
+  continues to own only input execution and post-action observation facts.
+- evidence: one `action-effect/0` summary binds the exact action, before/after frame identities,
+  deterministic Registry evidence, frame payload hashes and its canonical content hash. Runtime
+  appends and reads back the attestation before including it in the same accepted
+  `transition_recorded` event; Reducer independently rechecks real Registry kind, trust, obligation,
+  action, frame and hash. Payload self-report is never sufficient.
+- classification: `unchanged` requires decoded pixels to be exactly equal. Any non-zero decoded
+  pixel delta is only the neutral fact `changed`; identity, target, decode or size uncertainty is
+  `unknown`. `semantic_completion` is always `unknown`. Full-frame animation or video may therefore
+  report `changed` and mask a no-op; that is an explicit recall limitation, not progress evidence.
+- replay and Actor boundary: Reducer derives the per-obligation streak only from accepted events:
+  executed+unchanged increments, executed+changed clears it, and unknown/unexecuted/missing comparison
+  preserves it. MissionCard keeps the internal metric with the obligation state; the model-visible
+  `/1` view names it `unchanged_frame_streak` and carries no frame, evidence, action or Runtime identity.
+  No local component converts the streak into an automatic tactic or completion decision.
+- non-execution: `controller-transition/1` permits `rejected/input_completed=false` with both post
+  frame and evidence present or both absent. The absent form is valid only when admission/RawDevice
+  proved `NOT_STARTED/NOT_APPLIED`; Runtime returns `stale_discarded`, accepts no transition and starts
+  from a fresh observation. A possibly executed mutation remains `unknown`, blocks and is never replayed.
+- versions: `mission-projection/1`, `mission-card/1`, `actor-mission-view/1`, `actor-turn-input/1` and
+  `controller-transition/1` replace their `/0` forms; `action-effect/0` is new. Other contracts do not
+  change version merely for alignment.
+- rollout: this slice adds no model call, prompt text, model tool, GUI primitive, application rule or
+  second state owner. Unit/property/replay tests do not prove dynamic-scene calibration or a product
+  success uplift. P7/P8/P9 remain unmet, legacy stays default, P6 stays disabled and no legacy product
+  responsibility is deleted.
+- observation timing: the first same-entry run (`arp-20260722-213219-2ca40d`) moved the trusted browser
+  by `+693` while all seven immediate post frames were classified `unchanged`. This proved a generic
+  sampling defect, not an Actor strategy defect. `AtomicPostActionBridge` now performs one bounded
+  120 ms settle after a raw receipt proves input completion and before its single post-frame capture;
+  known non-execution does not wait, and unknown execution is still never replayed.
+- live evidence: with the final settle implementation, down run `arp-20260722-215529-8af388` passed
+  after 13 wheel actions (`11 changed`, with one two-observation consecutive `unchanged` segment),
+  and precise-click run `arp-20260722-215751-b82e5c` passed after three clicks with effects
+  `changed/unchanged/unchanged`. Up run `arp-20260722-220002-9ddc79` failed after 24 turns: the trace
+  reached an unchanged streak of 12, but the Actor kept proposing the wrong direction and ended `+142`
+  below its initial scroll position. Controller mapping matched every proposal. The click run
+  `arp-20260722-214805-c9faaf` is excluded because the user switched windows and invalidated target
+  identity. These outcomes preserve the failure, do not establish uplift and do not authorize an
+  automatic direction rule or prompt expansion.

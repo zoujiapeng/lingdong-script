@@ -63,7 +63,7 @@ Electron「智能代理」
 - run 级冷启动、session 引用、可选 MCP、Memory Graph 和已验证 Skill replay；
 - 真实 Electron 客户端 E2E harness 与浏览器侧可信指针 oracle。
 - WinPilot product package 的模型请求由统一 Runtime 冻结并标识；provider SDK 隐式重试关闭，request retry、poll、redecision 与桌面 action replay 使用不同合同。
-- vNext 已有默认关闭、按 run 显式选择的增量 live 实验链：一个 Visual Actor、Broker 小工具面、唯一 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。当前 Actor 工具面为 `click`、`double_click`、`scroll`、`claim_obligation_done`、`blocked`。客户端默认仍为 legacy；2026-07-22 三个 `precise-click` seed，以及最终 direction/notches 合同下各一个 down/up `scroll-reveal` seed，已从冷启动、空 session、可见 Electron/UIA 入口通过独立 trusted-browser oracle，但只证明这两种受控原语闭环。
+- vNext 已有默认关闭、按 run 显式选择的增量 live 实验链：一个 Visual Actor、Broker 小工具面、唯一 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。当前 Actor 工具面为 `click`、`double_click`、`scroll`、`claim_obligation_done`、`blocked`。客户端默认仍为 legacy；2026-07-22 三个 `precise-click` seed，以及 ActionEffect 接线前 direction/notches 合同下各一个 down/up `scroll-reveal` seed，已从冷启动、空 session、可见 Electron/UIA 入口通过独立 trusted-browser oracle，但只证明当时这两种受控原语闭环。
 - vNext coordinator context `/1` 分离回合边界 pause wait 与非阻塞 pause reading，明确用 frame max-age（默认 30 秒）拒绝旧帧，并只从 canonical ExecuteDesktopTask `max_steps` 取得回合预算；物理 RawDevice 由产品 composition root 注入。queue-time capability admission 已收敛为唯一 `DesktopRuntimeAdmission`：legacy 保留原 preflight，vNext 从一个不可变 `RuntimeCapabilitySnapshot` 机械准入，同一 snapshot 供 `ExecutionPolicy`、live `RuntimeState` 与 Broker 使用。该收敛没有扩写 prompt、工具面或 Controller；下一门槛仍是多原语 parity 与同入口 E2E。
 
 原生视觉配置默认关闭 UIA、OCR 和 predictive OCR；这些结构化 provider 仍可在来源、当前帧和预期收益明确时显式启用，但动作失败不会自动触发它们。
@@ -74,7 +74,8 @@ Electron「智能代理」
 - 最近一次 `game-drag-v2` 已通过真实 Electron 客户端入口、冷启动和空 session 进入 Agent，并产生了可信的真实鼠标事件；但模型把弯曲通道误读成直角路径，独立 trusted-browser pointer oracle 判定失败。因此这次只能证明入口、记忆隔离和真实输入链路有效，不能记为任务成功。报告保存在 `output/playwright/client-visual-e2e/20260719-213401-suite/`。
 - 网易云任务已在真实客户端达到“播放请求歌曲、Windows 音量 100%”，并由用户确认成功；随后按用户要求停止声音与测试，因此不伪称 harness 已产生 formal terminal pass。
 - 2026-07-22 的 vNext click-only canary 从同一可见 Electron 客户端选择器进入，冷启动且 session 为空。seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）、seed `424242`（run `arp-20260722-154447-9329b4`，2 turns）和 capability-admission 收敛后的 seed `135791`（run `arp-20260722-165702-086da6`，2 turns）均通过独立 trusted-browser pointer oracle；这不是 legacy paired、11 题、真实应用或其他 GUI 原语的通过证据。
-- vNext `scroll` 已接入与点击相同的 `AtomicDesktopController` 事务和 admitted physical SendInput 单机制：commit 前做最终 target guard，输入结果不确定时阻塞且不自动重放。独立随机化 `scroll-reveal` oracle 核对可信 wheel 事件、滚动方向、实际 `scrollTop` 变化、目标窗口区域和目标完全可见；最终 direction/notches 合同下 seed `20260722`（down）与 `20260723`（up）均已通过真实 Electron E2E。此前失败分别暴露 signed amount 语义不清、浏览器延迟滚动采样和反向任务重复错误方向；修复落在通用 tool schema、Controller 映射和 oracle settle，没有加入任务或布局规则。
+- vNext `scroll` 已接入与点击相同的 `AtomicDesktopController` 事务和 admitted physical SendInput 单机制：commit 前做最终 target guard，输入结果不确定时阻塞且不自动重放。独立随机化 `scroll-reveal` oracle 核对可信 wheel 事件、滚动方向、实际 `scrollTop` 变化、目标窗口区域和目标完全可见；ActionEffect 接线前的 direction/notches 基线中 seed `20260722`（down）与 `20260723`（up）均通过真实 Electron E2E。更早失败分别暴露 signed amount 语义不清、浏览器延迟滚动采样和反向任务重复错误方向；修复落在通用 tool schema、Controller 映射和 oracle settle，没有加入任务或布局规则。
+- vNext 动作闭合后已有只读 deterministic ActionEffectVerifier：它从真实 Registry 核对前后权威帧和内容 hash，只把 exact decoded-pixel equality 记为 `unchanged`，并由 Mission replay 逐义务派生 streak；Actor 看到的是中性 `unchanged_frame_streak`，不会自动重试、换方向或切换 UIA/OCR/MCP。真实同入口复测先发现 post-action 截图早于浏览器完成滚动，现由同一 post-action bridge 在已确认输入完成后做通用、有界的 120 ms settle，再只捕获一帧。最终代码下 down seed `20260722` 与 click seed `135791` 通过独立 oracle，up seed `20260723` 则在 24 个回合后失败：Controller 方向映射与 trace 一致，但 Actor 在长达 12 次的连续 `unchanged` 反馈中仍反复选择错误方向。该失败被保留为 P7 未达证据；`changed` 仍不代表动作因果、进展或完成，动态全帧也可能掩盖 no-op。
 
 单次样本不能换算为成功率；11 个真实任务和混合长任务仍需继续逐项验收。
 
@@ -86,7 +87,7 @@ Electron「智能代理」
 - UIA/OCR 的旧融合路径仍然较重；失败后应先废弃旧依据、重新观察并让模型判断，而不是自动切到结构化感知或 MCP；
 - 真实消费软件、多窗口、托盘、弹窗、动画目标、游戏、高 DPI 和多显示器的覆盖不足；
 - 当前整改版本尚未完成 11 个真实任务及其混合长任务的真实客户端全量验收；不能把历史单次通过或受控拖拽描述为当前通用 computer-use 成功率。
-- vNext 实验链尚未覆盖 `type_text`、`hotkey`、拖拽、绘制、held pointer、ROI observe、应用发现、provider/MCP 或 live Profiler；scroll 已有最终合同下的双向受控 grounded pass，但多布局、paired legacy 和真实任务覆盖仍不足。Planner/Inspector 继续禁用，P7、默认切换和 legacy 删除门槛均未达到。
+- vNext 实验链尚未覆盖 `type_text`、`hotkey`、拖拽、绘制、held pointer、ROI observe、应用发现、provider/MCP 或 live Profiler；ActionEffect/no-progress 已接入但尚无动画/真实任务校准，scroll 只有接线前的双向受控基线与当前 2 pass / 1 fail 的首轮复测，多布局、paired legacy 和真实任务覆盖仍不足。Planner/Inspector 继续禁用，P7、默认切换和 legacy 删除门槛均未达到。
 - `python/winpilot_home/winpilot/` 的模型 request-retry owner 已收敛，Profiler stop_event 链和精确 transport AST guard 已有测试；但外围 `python/providers/` legacy Flow/feature provider 仍有独立 SDK/HTTP 重试，全角色逐 attempt sidecar 尚未闭合，legacy VLM helper 也缺少 stop_event seam。迁移前先审计生产可达性，不能把外围路径保留成第二个 Runtime。
 
 最新代码审计和整改顺序见 [GUI Agent 架构审计](docs/GUI_AGENT_ARCHITECTURE_AUDIT.md)。
@@ -149,7 +150,7 @@ npm run e2e:client:mixed
 - [文档索引](docs/README.md)
 - [架构与运行原理](docs/architecture.md)
 - [视觉运行时原则](docs/visual-runtime-principles.md)
-- [vNext Agent 核心旁路设计](docs/vnext/README.md)（P4/P5 增量 live 链已接到同一 per-run 客户端入口；点击有三个、最终 scroll 合同有一对双向受控 Electron grounded pass；legacy 默认，P7、其余原语、P6、默认切换和 legacy 删除尚未完成）
+- [vNext Agent 核心旁路设计](docs/vnext/README.md)（P4/P5 增量 live 链和中性 ActionEffect/no-progress 已接到同一 per-run 客户端入口；最终代码的 ActionEffect 同入口复测为 down/click 通过、up 失败；legacy 默认，P7、其余原语、P6、默认切换和 legacy 删除尚未完成）
 - [vNext Task Profiler 与执行深度](docs/vnext/execution-profile.md)（P2b 真实 Profiler 已默认关闭地接入 trace-only shadow，不参与 legacy 执行）
 - [端到端测试规范](docs/testing.md)
 - [WinPilot Agent 细节](docs/winpilot-agent.md)
