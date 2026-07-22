@@ -1,6 +1,7 @@
 """P0/P1 sidecar tests; none of these tests start a model or touch a desktop."""
 from __future__ import annotations
 
+import hashlib
 import random
 
 import pytest
@@ -50,6 +51,28 @@ def _evidence(
         kind="oracle",
         trust="deterministic",
         payload_hash=f"hash-{evidence_id}",
+    )
+
+
+def _mission_evidence(
+    evidence_id: str,
+    *,
+    mission_id: str = "m1",
+    run_id: str = "r1",
+) -> EvidenceRef:
+    payload_hash = hashlib.sha256(
+        f"mission-completion:{evidence_id}".encode("utf-8")
+    ).hexdigest()
+    canonical_id = "evidence-mission-" + hashlib.sha256(
+        ("evidence|" + payload_hash).encode("utf-8")
+    ).hexdigest()[:24]
+    return EvidenceRef(
+        id=canonical_id,
+        mission_id=mission_id,
+        run_id=run_id,
+        kind="mission_completion_aggregate",
+        trust="deterministic",
+        payload_hash=payload_hash,
     )
 
 
@@ -116,11 +139,24 @@ def _mission_verification_payload(
     verification_id: str | None = None,
 ) -> dict[str, object]:
     accepted_ids, obligation_evidence_ids = _required_verification_identity(reducer)
+    aggregate = reducer.evidence_scope.refs.get(evidence_id)
+    if aggregate is None:
+        candidate = _mission_evidence(
+            evidence_id,
+            mission_id=reducer.definition.mission_id,
+            run_id=reducer.definition.run_id,
+        )
+        aggregate = reducer.evidence_scope.require((candidate.id,))[0]
+    expected_verification_id = "mission-verification-" + hashlib.sha256(
+        ("verification|" + aggregate.payload_hash).encode("utf-8")
+    ).hexdigest()[:24]
     return {
         "verified": True,
-        "verification_id": verification_id or f"mission-verification-{evidence_id}",
+        "verification_id": verification_id or expected_verification_id,
         "accepted_obligation_verification_ids": list(accepted_ids),
-        "evidence_refs": [*obligation_evidence_ids, evidence_id],
+        "evidence_refs": [*obligation_evidence_ids, aggregate.id],
+        "aggregate_evidence_id": aggregate.id,
+        "aggregate_payload_hash": aggregate.payload_hash,
     }
 
 
@@ -168,7 +204,7 @@ def _verified_two_obligation_reducer(
     evidence = (
         _evidence("first-proof", "first"),
         _evidence("second-proof", "second"),
-        _evidence("mission-proof"),
+        _mission_evidence("mission-proof"),
     )
     reducer = MissionReducer(definition, evidence=evidence)
     for obligation_id, evidence_id in (
@@ -424,7 +460,7 @@ def test_reducer_derives_active_obligation_and_completion_from_evidence() -> Non
             artifact_id="artifact-1",
             content_sha256=ARTIFACT_SHA256,
         ),
-        _evidence("mission-proof"),
+        _mission_evidence("mission-proof"),
     ]
     reducer = MissionReducer(definition, evidence=evidence)
     assert reducer.projection.active_obligation_id == "capture"
@@ -630,7 +666,7 @@ def test_verified_mission_is_terminal_and_blocked_status_is_not_recomputed_away(
         definition,
         evidence=[
             _evidence("verified-proof", "obligation-1"),
-            _evidence("mission-proof"),
+            _mission_evidence("mission-proof"),
         ],
     )
     reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "obligation-1"}))
@@ -787,8 +823,8 @@ def test_randomized_dag_replay_is_stable() -> None:
             )
             for item in ids
         ] + [
-            _evidence(
-                f"mission-proof-{sample}", None,
+            _mission_evidence(
+                f"mission-proof-{sample}",
                 mission_id=f"m-{sample}", run_id=f"r-{sample}",
             )
         ]
@@ -991,7 +1027,7 @@ def test_raw_mission_verification_requires_every_obligation_evidence() -> None:
     payload["evidence_refs"] = ["first-proof", "mission-proof"]
     before = reducer.projection.to_dict()
 
-    with pytest.raises(EvidenceScopeError, match="every required obligation"):
+    with pytest.raises(EvidenceScopeError, match="exactly cover"):
         reducer.apply(_raw_event(reducer, "mission_verified", payload))
 
     assert reducer.projection.to_dict() == before
@@ -1003,7 +1039,30 @@ def test_raw_mission_verification_requires_independent_mission_level_evidence() 
     payload["evidence_refs"] = ["first-proof", "second-proof"]
     before = reducer.projection.to_dict()
 
-    with pytest.raises(EvidenceScopeError, match="mission-level evidence"):
+    with pytest.raises(EvidenceScopeError, match="exactly cover"):
+        reducer.apply(_raw_event(reducer, "mission_verified", payload))
+
+    assert reducer.projection.to_dict() == before
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("aggregate_id", "payload_hash", "malformed_hash", "verification_id"),
+)
+def test_mission_completion_rejects_random_aggregate_identity(tamper: str) -> None:
+    reducer, _evidence_registry = _verified_two_obligation_reducer()
+    payload = _mission_verification_payload(reducer, "mission-proof")
+    if tamper == "aggregate_id":
+        payload["aggregate_evidence_id"] = "random-mission-evidence"
+    elif tamper == "payload_hash":
+        payload["aggregate_payload_hash"] = "0" * 64
+    elif tamper == "malformed_hash":
+        payload["aggregate_payload_hash"] = "not-a-sha256"
+    else:
+        payload["verification_id"] = "random-mission-verification"
+    before = reducer.projection.to_dict()
+
+    with pytest.raises(EvidenceScopeError, match="aggregate|exactly cover"):
         reducer.apply(_raw_event(reducer, "mission_verified", payload))
 
     assert reducer.projection.to_dict() == before
@@ -1030,7 +1089,6 @@ def test_mission_verification_identities_are_stable_across_full_wire_replay() ->
         _mission_verification_payload(
             reducer,
             "mission-proof",
-            verification_id="mission-verification",
         ),
     )
     reducer.apply(mission_event)
@@ -1042,7 +1100,9 @@ def test_mission_verification_identities_are_stable_across_full_wire_replay() ->
     assert [event.event_id for event in replayed.events] == [
         event.event_id for event in reducer.events
     ]
-    assert replayed.projection.mission_verification_id == "mission-verification"
+    assert replayed.projection.mission_verification_id == mission_event.payload[
+        "verification_id"
+    ]
     for obligation_id in ("first", "second"):
         expected = reducer.projection.obligation_state(obligation_id)
         actual = replayed.projection.obligation_state(obligation_id)
@@ -1055,7 +1115,7 @@ def test_mission_verification_identities_are_stable_across_full_wire_replay() ->
 def test_mission_completion_requires_independent_run_scoped_verification() -> None:
     definition = MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1")
     obligation_proof = _evidence("obligation-proof", "obligation-1")
-    mission_proof = _evidence("mission-proof")
+    mission_proof = _mission_evidence("mission-proof")
     reducer = MissionReducer(definition, evidence=[obligation_proof, mission_proof])
     reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "obligation-1"}))
     reducer.apply(reducer.event(
@@ -1086,12 +1146,11 @@ def test_mission_completion_requires_independent_run_scoped_verification() -> No
             payload=_mission_verification_payload(
                 reducer,
                 mission_proof.id,
-                verification_id="mission-verification",
             ),
         )
     )
     assert reducer.projection.status is MissionStatus.VERIFIED
-    assert reducer.projection.mission_verification_id == "mission-verification"
+    assert reducer.projection.mission_verification_id is not None
     with pytest.raises(IllegalTransitionError):
         reducer.apply(
             _raw_event(
@@ -1121,7 +1180,7 @@ def test_claim_fingerprint_prevents_duplicate_verification_and_replay_is_stable(
         ),),
     )
     proof = _evidence("goal-proof", "goal")
-    mission_proof = _evidence("mission-proof")
+    mission_proof = _mission_evidence("mission-proof")
     reducer = MissionReducer(definition, evidence=[proof, mission_proof])
     reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "goal"}))
     first_state = reducer.projection.obligation_state("goal")
@@ -1173,7 +1232,6 @@ def test_claim_fingerprint_prevents_duplicate_verification_and_replay_is_stable(
             payload=_mission_verification_payload(
                 reducer,
                 mission_proof.id,
-                verification_id="mission-verification",
             ),
         )
     )

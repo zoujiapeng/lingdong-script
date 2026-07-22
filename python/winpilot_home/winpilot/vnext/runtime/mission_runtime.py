@@ -34,10 +34,21 @@ from ..capabilities import (
     ToolArgumentValidator,
     ToolRoute,
 )
-from ..mission import MissionError, MissionReducer, ObligationStatus
+from ..evidence.registry import EvidenceRegistry
+from ..mission import (
+    MissionError,
+    MissionReducer,
+    MissionStatus,
+    ObligationStatus,
+    StaleRevisionError,
+)
 from ..profiling import ExecutionProfile
 from ..verification import (
+    AcceptedObligationVerification,
+    DeterministicMissionCompletionVerifier,
     InvalidVerificationSchema,
+    MissionCompletionVerificationRequest,
+    MissionCompletionVerificationResult,
     ObligationVerificationRequest,
     ObligationVerificationResult,
     ObligationVerifierPort,
@@ -81,6 +92,10 @@ class MissionRuntime:
         pointer_cleanup: PointerCleanupPort | None = None,
         mutation_permits: MutationPermitAuthority | None = None,
         obligation_verifier: ObligationVerifierPort | None = None,
+        mission_completion_verifier: (
+            DeterministicMissionCompletionVerifier | None
+        ) = None,
+        evidence_registry: EvidenceRegistry | None = None,
     ) -> None:
         if not isinstance(reducer, MissionReducer):
             raise TypeError("reducer must be MissionReducer")
@@ -102,6 +117,30 @@ class MissionRuntime:
         ):
             raise TypeError("obligation_verifier must provide verify()")
         self._obligation_verifier = obligation_verifier
+        if (mission_completion_verifier is None) != (evidence_registry is None):
+            raise TypeError(
+                "mission completion verifier and evidence registry must be injected together"
+            )
+        if mission_completion_verifier is not None:
+            if type(mission_completion_verifier) is not DeterministicMissionCompletionVerifier:
+                raise TypeError(
+                    "mission completion requires DeterministicMissionCompletionVerifier"
+                )
+            if type(evidence_registry) is not EvidenceRegistry:
+                raise TypeError("mission completion requires canonical EvidenceRegistry")
+            if reducer.evidence_source is not evidence_registry:
+                raise TypeError(
+                    "mission completion and MissionReducer must share one EvidenceRegistry"
+                )
+            if (
+                evidence_registry.mission_id != reducer.definition.mission_id
+                or evidence_registry.run_id != reducer.definition.run_id
+            ):
+                raise TypeError(
+                    "mission completion EvidenceRegistry must match Runtime mission/run"
+                )
+        self._mission_completion_verifier = mission_completion_verifier
+        self._evidence_registry = evidence_registry
         self._mutation_permits = mutation_permits or MutationPermitAuthority(
             reducer.definition.mission_id,
             reducer.definition.run_id,
@@ -640,10 +679,220 @@ class MissionRuntime:
                     RuntimeStatus.STATE_REJECTED,
                     str(fallback_error),
                 )
+        accepted_ids = claim_event_ids + verification_event_ids
+        completion = self._maybe_verify_mission(
+            turn_index=turn_index,
+            stop_event=stop_event,
+            route=route,
+            proposal_kind=proposal_kind,
+            decision_id=decision_id,
+            prior_event_ids=accepted_ids,
+        )
+        if completion is not None:
+            return completion
         return finish(
             RuntimeStatus.VERIFICATION_RECORDED,
             assessment.concise_reason,
-            claim_event_ids + verification_event_ids,
+            accepted_ids,
+        )
+
+    def _freeze_mission_completion_request(
+        self,
+    ) -> MissionCompletionVerificationRequest:
+        """Freeze required verified obligations from one current revision."""
+
+        projection = self._reducer.projection
+        if projection.status is not MissionStatus.AWAITING_MISSION_VERIFICATION:
+            raise InvalidVerificationSchema(
+                "mission completion requires awaiting_mission_verification"
+            )
+        required: list[AcceptedObligationVerification] = []
+        scope = self._reducer.evidence_scope
+        for obligation_id in projection.definition.stable_topological_order:
+            definition = projection.obligation_definition(obligation_id)
+            if not definition.required:
+                continue
+            state = projection.obligation_state(obligation_id)
+            if (
+                state.status is not ObligationStatus.VERIFIED
+                or not state.verification_id
+                or not state.verified_evidence_refs
+            ):
+                raise InvalidVerificationSchema(
+                    f"required obligation {obligation_id!r} is not exactly verified"
+                )
+            refs = scope.require(
+                state.verified_evidence_refs,
+                obligation_id=obligation_id,
+            )
+            required.append(AcceptedObligationVerification(
+                obligation_id=obligation_id,
+                accepted_verification_id=state.verification_id,
+                verified_evidence_refs=state.verified_evidence_refs,
+                evidence_refs=refs,
+            ))
+        return MissionCompletionVerificationRequest(
+            mission_id=projection.mission_id,
+            run_id=projection.run_id,
+            mission_revision=projection.revision,
+            required_obligations=tuple(required),
+        )
+
+    def _mission_completion_is_current(
+        self,
+        request: MissionCompletionVerificationRequest,
+    ) -> bool:
+        projection = self._reducer.projection
+        if (
+            projection.mission_id != request.mission_id
+            or projection.run_id != request.run_id
+            or projection.revision != request.mission_revision
+            or projection.status is not MissionStatus.AWAITING_MISSION_VERIFICATION
+        ):
+            return False
+        expected_ids = tuple(
+            obligation_id
+            for obligation_id in projection.definition.stable_topological_order
+            if projection.obligation_definition(obligation_id).required
+        )
+        if expected_ids != tuple(
+            item.obligation_id for item in request.required_obligations
+        ):
+            return False
+        try:
+            for accepted in request.required_obligations:
+                state = projection.obligation_state(accepted.obligation_id)
+                refs = self._reducer.evidence_scope.require(
+                    accepted.verified_evidence_refs,
+                    obligation_id=accepted.obligation_id,
+                )
+                if (
+                    state.status is not ObligationStatus.VERIFIED
+                    or state.verification_id != accepted.accepted_verification_id
+                    or state.verified_evidence_refs
+                    != accepted.verified_evidence_refs
+                    or refs != accepted.evidence_refs
+                ):
+                    return False
+        except (KeyError, MissionError):
+            return False
+        return True
+
+    def _maybe_verify_mission(
+        self,
+        *,
+        turn_index: int,
+        stop_event: threading.Event | None,
+        route: ExecutionRoute | None = None,
+        proposal_kind: str | None = None,
+        decision_id: str | None = None,
+        prior_event_ids: tuple[str, ...] = (),
+    ) -> MissionRuntimeResult | None:
+        """Mechanically close an awaiting mission using the canonical registry."""
+
+        if self._mission_completion_verifier is None:
+            return None
+        projection = self._reducer.projection
+        if projection.status is MissionStatus.VERIFIED:
+            return self._result(
+                RuntimeStatus.MISSION_VERIFIED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                event_ids=prior_event_ids,
+                detail="mission was already independently verified",
+            )
+        if projection.status is not MissionStatus.AWAITING_MISSION_VERIFICATION:
+            return None
+
+        def finish(status: RuntimeStatus, detail: str) -> MissionRuntimeResult:
+            return self._result(
+                status,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                event_ids=prior_event_ids,
+                detail=detail,
+            )
+
+        if self._stopped(stop_event):
+            return self._canceled(turn_index, event_ids=prior_event_ids)
+        try:
+            request = self._freeze_mission_completion_request()
+            assessment = self._mission_completion_verifier.verify(request)
+            result = MissionCompletionVerificationResult.bind(request, assessment)
+            result = MissionCompletionVerificationResult.from_dict(result.to_dict())
+        except Exception as exc:
+            return finish(
+                RuntimeStatus.STATE_REJECTED,
+                f"mission completion verification failed closed: {exc}",
+            )
+        if self._stopped(stop_event):
+            return self._canceled(turn_index, event_ids=prior_event_ids)
+        if not self._mission_completion_is_current(request):
+            return finish(
+                RuntimeStatus.STALE_DISCARDED,
+                "Mission verification input changed while verifier was running",
+            )
+
+        registry = self._evidence_registry
+        assert registry is not None
+        try:
+            registry.append(result.aggregate_evidence)
+            accepted = self._reducer.evidence_scope.require(
+                (result.aggregate_evidence.id,)
+            )
+            if accepted != (result.aggregate_evidence,):
+                raise InvalidVerificationSchema(
+                    "Reducer did not read back the exact aggregate evidence"
+                )
+        except Exception as exc:
+            return finish(
+                RuntimeStatus.STATE_REJECTED,
+                f"mission completion aggregate was not accepted: {exc}",
+            )
+        if self._stopped(stop_event):
+            return self._canceled(turn_index, event_ids=prior_event_ids)
+        if not self._mission_completion_is_current(request):
+            return finish(
+                RuntimeStatus.STALE_DISCARDED,
+                "Mission identity changed before completion commit",
+            )
+        try:
+            event_ids = self._accept(
+                "mission_verified",
+                payload=result.to_mission_event_payload(),
+                evidence_refs=result.event_evidence_refs,
+                base_revision=request.mission_revision,
+            )
+        except StaleRevisionError as exc:
+            return finish(RuntimeStatus.STALE_DISCARDED, str(exc))
+        except MissionError as exc:
+            # The aggregate is immutable and deterministically identified. A
+            # later turn recreates the same result and idempotently retries the
+            # event; no pending-completion cache is needed.
+            return finish(RuntimeStatus.STATE_REJECTED, str(exc))
+        except Exception as exc:
+            return finish(
+                RuntimeStatus.STATE_REJECTED,
+                f"mission completion event was not accepted: {exc}",
+            )
+        final = self._reducer.projection
+        if (
+            final.status is not MissionStatus.VERIFIED
+            or final.mission_verification_id != result.verification_id
+        ):
+            return finish(
+                RuntimeStatus.STATE_REJECTED,
+                "Reducer did not derive the accepted mission verification",
+            )
+        return self._result(
+            RuntimeStatus.MISSION_VERIFIED,
+            route=route,
+            proposal_kind=proposal_kind,
+            decision_id=decision_id,
+            event_ids=prior_event_ids + event_ids,
+            detail="all required obligations and mission aggregate are verified",
         )
 
     def _block_unknown(
@@ -738,8 +987,25 @@ class MissionRuntime:
         grants: tuple[CapabilityGrant, ...],
         stop_event: threading.Event | None,
     ) -> MissionRuntimeResult:
+        terminal_status = self._reducer.projection.status
+        if terminal_status is MissionStatus.VERIFIED:
+            return self._result(
+                RuntimeStatus.MISSION_VERIFIED,
+                detail="mission was already independently verified",
+            )
+        if terminal_status in {MissionStatus.FAILED, MissionStatus.CANCELED}:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                detail=f"mission is terminal: {terminal_status.value}",
+            )
         if self._stopped(stop_event):
             return self._canceled(turn_index)
+        completion = self._maybe_verify_mission(
+            turn_index=turn_index,
+            stop_event=stop_event,
+        )
+        if completion is not None:
+            return completion
         try:
             initial = self._state.observe(
                 self._reducer.projection,

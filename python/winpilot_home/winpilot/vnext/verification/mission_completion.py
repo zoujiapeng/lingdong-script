@@ -323,6 +323,8 @@ class MissionCompletionVerificationResult(_WireModel):
                 self.accepted_obligation_verification_ids
             ),
             "evidence_refs": list(self.event_evidence_refs),
+            "aggregate_evidence_id": self.aggregate_evidence.id,
+            "aggregate_payload_hash": self.aggregate_payload_hash,
         }
 
     def to_dict(self) -> dict[str, Any]:

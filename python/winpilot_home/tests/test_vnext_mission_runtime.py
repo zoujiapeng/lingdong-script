@@ -32,6 +32,7 @@ from winpilot.vnext.capabilities import (
     ToolRoute,
     build_tool_catalog,
 )
+from winpilot.vnext.evidence import EvidenceRegistry as CanonicalEvidenceRegistry
 from winpilot.vnext.mission import (
     EvidencePolicy,
     EvidenceRef,
@@ -55,6 +56,7 @@ from winpilot.vnext.runtime import (
     RuntimeStatus,
 )
 from winpilot.vnext.verification import (
+    DeterministicMissionCompletionVerifier,
     ObligationVerificationRequest,
     VerifierAssessment,
     forbidden_effect_condition,
@@ -324,6 +326,33 @@ class Harness:
     catalog: ToolCatalog
     permits: MutationPermitAuthority
     verifier: ScriptedVerifier | None
+
+
+@dataclass
+class CompletionHarness:
+    reducer: MissionReducer
+    registry: CanonicalEvidenceRegistry
+    actor: ScriptedActor
+    state: ScriptedState
+    controller: SpyController
+    runtime: MissionRuntime
+    verifier: DeterministicMissionCompletionVerifier
+    profile: Any
+    catalog: ToolCatalog
+    permits: MutationPermitAuthority
+
+
+class FailOnceMissionCompletionReducer(MissionReducer):
+    def __init__(self, definition: MissionDefinition, *, evidence: Any) -> None:
+        super().__init__(definition, evidence=evidence)
+        self.reject_next_completion = True
+
+    def apply(self, event):
+        kind = event.kind if hasattr(event, "kind") else event.get("kind")
+        if kind == "mission_verified" and self.reject_next_completion:
+            self.reject_next_completion = False
+            raise RuntimeError("simulated event persistence failure")
+        return super().apply(event)
 
 
 def _schema(name: str, properties: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -596,6 +625,117 @@ def _harness(
     return Harness(
         reducer, registry, actor, state, controller, runtime, profile, catalog, permits,
         obligation_verifier,
+    )
+
+
+def _completion_harness(
+    *,
+    awaiting: bool = True,
+    fail_once: bool = False,
+) -> CompletionHarness:
+    mission = _definition()
+    registry = CanonicalEvidenceRegistry(mission.mission_id, mission.run_id)
+    reducer_type = FailOnceMissionCompletionReducer if fail_once else MissionReducer
+    reducer = reducer_type(mission, evidence=registry)
+    target_proof = EvidenceRef(
+        id="target-proof",
+        mission_id=mission.mission_id,
+        run_id=mission.run_id,
+        kind="target",
+        trust="deterministic",
+        payload_hash="target-proof-payload",
+    )
+    registry.append(target_proof)
+    reducer.apply(reducer.event(
+        "target_bound",
+        payload=TargetBinding(
+            binding_id="target-1",
+            hwnd=101,
+            process_id=7,
+            executable_identity="opaque-process",
+            title_snapshot="Current application",
+            established_by_evidence_ref=target_proof.id,
+            epoch=3,
+        ).to_dict(),
+        evidence_refs=(target_proof.id,),
+    ))
+    frame = _frame(9)
+    frame_proof = EvidenceRef(
+        id=frame.evidence_refs[0],
+        mission_id=mission.mission_id,
+        run_id=mission.run_id,
+        obligation_id="o1",
+        kind="frame",
+        trust="deterministic",
+        payload_hash=f"payload-{frame.evidence_refs[0]}",
+        frame_id=frame.frame_id,
+    )
+    registry.append(frame_proof)
+    if awaiting:
+        reducer.apply(reducer.event(
+            "obligation_claimed",
+            payload={"obligation_id": "o1"},
+            evidence_refs=(frame_proof.id,),
+        ))
+        reducer.apply(reducer.event(
+            "verification_recorded",
+            payload={
+                "obligation_id": "o1",
+                "verified": True,
+                "verification_id": "verification-o1",
+                "satisfied_criteria": ["the requested state is visibly confirmed"],
+                "evidence_refs": [frame_proof.id],
+            },
+            evidence_refs=(frame_proof.id,),
+        ))
+        assert reducer.projection.status is MissionStatus.AWAITING_MISSION_VERIFICATION
+    snapshot = _snapshot(frame)
+    state = ScriptedState(snapshot)
+    actor = ScriptedActor(_claim())
+    catalog = _catalog()
+    profile = ExecutionPolicy().safe_default(
+        mission.mission_id,
+        mission.goal_revision,
+        available_capabilities=ALL_CAPABILITIES,
+    )
+    if not awaiting:
+        profile = replace(
+            profile,
+            services=replace(profile.services, obligation_verifier=True),
+        )
+    permits = MutationPermitAuthority(mission.mission_id, mission.run_id)
+    controller = SpyController(state, registry, permits)
+    obligation_verifier = (
+        ScriptedVerifier(_verified_assessment(
+            "the requested state is visibly confirmed"
+        ))
+        if not awaiting else None
+    )
+    verifier = DeterministicMissionCompletionVerifier()
+    runtime = MissionRuntime(
+        reducer=reducer,
+        profile=profile,
+        broker=CapabilityBroker(catalog),
+        catalog=catalog,
+        actor=actor,
+        state=state,
+        controller=controller,
+        mutation_permits=permits,
+        obligation_verifier=obligation_verifier,
+        mission_completion_verifier=verifier,
+        evidence_registry=registry,
+    )
+    return CompletionHarness(
+        reducer=reducer,
+        registry=registry,
+        actor=actor,
+        state=state,
+        controller=controller,
+        runtime=runtime,
+        verifier=verifier,
+        profile=profile,
+        catalog=catalog,
+        permits=permits,
     )
 
 
@@ -1246,6 +1386,250 @@ def test_stop_during_verifier_discards_late_result_without_verification_event() 
     assert set(result.accepted_event_ids) == {accepted[0].event_id}
     assert harness.reducer.projection.obligation_state("o1").status is ObligationStatus.CLAIMED
     assert all(event.kind != "verification_recorded" for event in harness.reducer.events)
+
+
+def test_mission_completion_requires_concrete_verifier_and_shared_registry() -> None:
+    harness = _harness(_claim())
+    verifier = DeterministicMissionCompletionVerifier()
+    canonical = CanonicalEvidenceRegistry("mission-1", "run-1")
+    common = dict(
+        reducer=harness.reducer,
+        profile=harness.profile,
+        broker=CapabilityBroker(harness.catalog),
+        catalog=harness.catalog,
+        actor=harness.actor,
+        state=harness.state,
+        controller=harness.controller,
+        mutation_permits=harness.permits,
+    )
+
+    with pytest.raises(TypeError, match="injected together"):
+        MissionRuntime(**common, mission_completion_verifier=verifier)
+    with pytest.raises(TypeError, match="injected together"):
+        MissionRuntime(**common, evidence_registry=canonical)
+    with pytest.raises(TypeError, match="canonical EvidenceRegistry"):
+        MissionRuntime(
+            **common,
+            mission_completion_verifier=verifier,
+            evidence_registry=harness.registry,
+        )
+    with pytest.raises(TypeError, match="share one EvidenceRegistry"):
+        MissionRuntime(
+            **common,
+            mission_completion_verifier=verifier,
+            evidence_registry=canonical,
+        )
+
+    class PretendVerifier(DeterministicMissionCompletionVerifier):
+        pass
+
+    completed = _completion_harness()
+    catalog = _catalog()
+    with pytest.raises(TypeError, match="DeterministicMissionCompletionVerifier"):
+        MissionRuntime(
+            reducer=completed.reducer,
+            profile=completed.profile,
+            broker=CapabilityBroker(catalog),
+            catalog=catalog,
+            actor=completed.actor,
+            state=completed.state,
+            controller=harness.controller,
+            mission_completion_verifier=PretendVerifier(),
+            evidence_registry=completed.registry,
+        )
+
+
+def test_awaiting_mission_is_verified_before_state_broker_or_actor() -> None:
+    harness = _completion_harness()
+    assert harness.profile.services.mission_verifier is False
+    before_events = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.MISSION_VERIFIED
+    assert harness.state.observe_calls == []
+    assert harness.state.current_calls == []
+    assert harness.actor.calls == []
+    assert len(harness.reducer.events) == before_events + 1
+    event = harness.reducer.events[-1]
+    assert event.kind == "mission_verified"
+    aggregate_id = event.payload["aggregate_evidence_id"]
+    aggregate_hash = event.payload["aggregate_payload_hash"]
+    aggregate = harness.reducer.evidence_scope.require((aggregate_id,))[0]
+    assert aggregate.kind == "mission_completion_aggregate"
+    assert aggregate.trust == "deterministic"
+    assert aggregate.payload_hash == aggregate_hash
+    assert event.evidence_refs == ("frame-proof-9-base", aggregate_id)
+    assert harness.reducer.projection.status is MissionStatus.VERIFIED
+
+    replayed = MissionReducer.replay(
+        harness.reducer.definition,
+        harness.reducer.events,
+        evidence=harness.registry,
+    )
+    assert replayed.projection.to_dict() == harness.reducer.projection.to_dict()
+
+
+def test_last_obligation_verification_reuses_completion_helper_without_profile_gate() -> None:
+    harness = _completion_harness(awaiting=False)
+    assert harness.profile.services.obligation_verifier is True
+    assert harness.profile.services.mission_verifier is False
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.MISSION_VERIFIED
+    assert [event.kind for event in harness.reducer.events[before:]] == [
+        "obligation_claimed",
+        "verification_recorded",
+        "mission_verified",
+    ]
+    assert len(harness.actor.calls) == 1
+    assert harness.reducer.projection.status is MissionStatus.VERIFIED
+    assert set(result.accepted_event_ids) == {
+        event.event_id for event in harness.reducer.events[before:]
+    }
+
+
+def test_completion_event_apply_failure_recovers_from_same_orphan_aggregate() -> None:
+    harness = _completion_harness(fail_once=True)
+    before_registry = len(harness.registry)
+    before_events = len(harness.reducer.events)
+
+    first = harness.runtime.run_one_turn(turn_index=4)
+
+    assert first.status is RuntimeStatus.STATE_REJECTED
+    assert "simulated event persistence failure" in first.detail
+    assert len(harness.registry) == before_registry + 1
+    assert len(harness.reducer.events) == before_events
+    assert harness.reducer.projection.status is MissionStatus.AWAITING_MISSION_VERIFICATION
+    assert harness.actor.calls == []
+    assert harness.state.observe_calls == []
+
+    second = harness.runtime.run_one_turn(turn_index=5)
+
+    assert second.status is RuntimeStatus.MISSION_VERIFIED
+    assert len(harness.registry) == before_registry + 1
+    assert harness.reducer.projection.status is MissionStatus.VERIFIED
+    assert [event.kind for event in harness.reducer.events[before_events:]] == [
+        "mission_verified"
+    ]
+
+
+@pytest.mark.parametrize("race", ("exception", "stale", "canceled"))
+def test_completion_failure_never_commits_a_late_or_invalid_result(race: str) -> None:
+    harness = _completion_harness()
+    original = harness.verifier.verify
+    stop = Event()
+
+    def raced(request):
+        if race == "exception":
+            raise RuntimeError("completion verifier failed")
+        assessment = original(request)
+        if race == "stale":
+            harness.reducer._projection = replace(
+                harness.reducer.projection,
+                revision=harness.reducer.projection.revision + 1,
+            )
+        else:
+            stop.set()
+        return assessment
+
+    harness.verifier.verify = raced
+    before_registry = len(harness.registry)
+    before_events = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(
+        turn_index=4,
+        stop_event=(stop if race == "canceled" else None),
+    )
+
+    expected = {
+        "exception": RuntimeStatus.STATE_REJECTED,
+        "stale": RuntimeStatus.STALE_DISCARDED,
+        "canceled": RuntimeStatus.CANCELED,
+    }[race]
+    assert result.status is expected
+    assert len(harness.registry) == before_registry
+    assert len(harness.reducer.events) == before_events
+    assert harness.actor.calls == []
+
+
+def test_orphan_evidence_is_not_added_to_completion_event_and_terminal_is_idempotent() -> None:
+    harness = _completion_harness()
+    orphan = EvidenceRef(
+        id="unrelated-mission-proof",
+        mission_id="mission-1",
+        run_id="run-1",
+        kind="oracle",
+        trust="deterministic",
+        payload_hash="unrelated",
+    )
+    harness.registry.append(orphan)
+
+    first = harness.runtime.run_one_turn(turn_index=4)
+
+    assert first.status is RuntimeStatus.MISSION_VERIFIED
+    assert orphan.id not in harness.reducer.events[-1].evidence_refs
+    event_count = len(harness.reducer.events)
+    registry_count = len(harness.registry)
+
+    second = harness.runtime.run_one_turn(turn_index=5)
+
+    assert second.status is RuntimeStatus.MISSION_VERIFIED
+    assert len(harness.reducer.events) == event_count
+    assert len(harness.registry) == registry_count
+    assert harness.actor.calls == []
+
+
+@pytest.mark.parametrize("with_completion", (False, True))
+@pytest.mark.parametrize(
+    ("terminal", "expected"),
+    (
+        (MissionStatus.VERIFIED, RuntimeStatus.MISSION_VERIFIED),
+        (MissionStatus.FAILED, RuntimeStatus.STATE_REJECTED),
+        (MissionStatus.CANCELED, RuntimeStatus.STATE_REJECTED),
+    ),
+)
+def test_terminal_mission_never_observes_or_mutates_desktop(
+    with_completion: bool,
+    terminal: MissionStatus,
+    expected: RuntimeStatus,
+) -> None:
+    harness = _completion_harness(awaiting=terminal is MissionStatus.VERIFIED)
+    if terminal is MissionStatus.VERIFIED:
+        assert harness.runtime.run_one_turn(turn_index=3).status is RuntimeStatus.MISSION_VERIFIED
+    else:
+        harness.reducer.apply(harness.reducer.event(
+            f"mission_{terminal.value}", payload={"reason": "terminal test"}
+        ))
+    if with_completion:
+        runtime = harness.runtime
+    else:
+        runtime = MissionRuntime(
+            reducer=harness.reducer,
+            profile=harness.profile,
+            broker=CapabilityBroker(harness.catalog),
+            catalog=harness.catalog,
+            actor=harness.actor,
+            state=harness.state,
+            controller=harness.controller,
+            mutation_permits=harness.permits,
+        )
+    observe_count = len(harness.state.observe_calls)
+    current_count = len(harness.state.current_calls)
+    actor_count = len(harness.actor.calls)
+    controller_count = len(harness.controller.calls)
+    event_count = len(harness.reducer.events)
+
+    result = runtime.run_one_turn(turn_index=4)
+
+    assert result.status is expected
+    assert len(harness.state.observe_calls) == observe_count
+    assert len(harness.state.current_calls) == current_count
+    assert len(harness.actor.calls) == actor_count
+    assert len(harness.controller.calls) == controller_count
+    assert len(harness.reducer.events) == event_count
 
 
 @pytest.mark.parametrize("invalid_scope", ("missing", "other_run", "other_obligation"))
