@@ -56,14 +56,22 @@ def _point_schema() -> dict[str, object]:
 def _scroll_schema() -> dict[str, object]:
     schema = _point_schema()
     properties = dict(schema["properties"])
-    properties["amount"] = {
+    properties["direction"] = {
+        "type": "string",
+        "enum": ["up", "down"],
+        "description": (
+            "Viewport navigation direction: up reveals content above; "
+            "down reveals content below."
+        ),
+    }
+    properties["notches"] = {
         "type": "integer",
-        "minimum": -12,
+        "minimum": 1,
         "maximum": 12,
-        "not": {"const": 0},
+        "description": "Positive wheel-notch magnitude; larger moves farther.",
     }
     schema["properties"] = properties
-    schema["required"] = ["image_x", "image_y", "amount"]
+    schema["required"] = ["image_x", "image_y", "direction", "notches"]
     return schema
 
 

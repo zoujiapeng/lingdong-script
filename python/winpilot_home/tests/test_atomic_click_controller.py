@@ -243,12 +243,23 @@ def test_success_maps_submitted_pixels_and_posts_outside_frame_pin(
     assert len(post.calls) == 1
 
 
-def test_scroll_maps_submitted_pixels_and_uses_one_admitted_backend_call():
+@pytest.mark.parametrize(
+    ("direction", "notches", "expected_amount"),
+    (("down", 12, -12), ("down", 1, -1), ("up", 1, 1), ("up", 12, 12)),
+)
+def test_scroll_maps_explicit_direction_to_one_canonical_backend_call(
+    direction, notches, expected_amount,
+):
     authority, frame = _authority()
     envelope = _envelope(
         frame,
         action="scroll",
-        args={"image_x": 10, "image_y": 5, "amount": -4},
+        args={
+            "image_x": 10,
+            "image_y": 5,
+            "direction": direction,
+            "notches": notches,
+        },
     )
     raw_calls = []
 
@@ -272,7 +283,7 @@ def test_scroll_maps_submitted_pixels_and_uses_one_admitted_backend_call():
     assert transition.outcome is ControllerOutcome.COMPLETED
     assert transition.input_completed is True
     assert transition.action == "scroll"
-    assert raw_calls == [(110, 70, -4, 101)]
+    assert raw_calls == [(110, 70, expected_amount, 101)]
     assert len(final_guard.requests) == 1
     assert len(post.calls) == 1
 
@@ -281,10 +292,16 @@ def test_scroll_maps_submitted_pixels_and_uses_one_admitted_backend_call():
     "args",
     (
         {"image_x": 10, "image_y": 5},
-        {"image_x": 10, "image_y": 5, "amount": 0},
-        {"image_x": 10, "image_y": 5, "amount": True},
-        {"image_x": 10, "image_y": 5, "amount": 13},
-        {"image_x": 10, "image_y": 5, "amount": -13},
+        {"image_x": 10, "image_y": 5, "direction": "up"},
+        {"image_x": 10, "image_y": 5, "direction": "left", "notches": 1},
+        {"image_x": 10, "image_y": 5, "direction": "up", "notches": 0},
+        {"image_x": 10, "image_y": 5, "direction": "up", "notches": True},
+        {"image_x": 10, "image_y": 5, "direction": "up", "notches": 13},
+        {"image_x": 10, "image_y": 5, "direction": "down", "notches": -1},
+        {
+            "image_x": 10, "image_y": 5, "direction": "down", "notches": 1,
+            "amount": -1,
+        },
     ),
 )
 def test_scroll_rejects_noncanonical_args_before_queue_or_raw(args):
@@ -309,7 +326,12 @@ def test_uncertain_scroll_backend_is_called_once_and_never_replayed():
     envelope = _envelope(
         frame,
         action="scroll",
-        args={"image_x": 10, "image_y": 5, "amount": 3},
+        args={
+            "image_x": 10,
+            "image_y": 5,
+            "direction": "up",
+            "notches": 3,
+        },
     )
     raw_calls = []
 

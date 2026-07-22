@@ -109,7 +109,11 @@ def _envelope(
             "args": {
                 "image_x": 400,
                 "image_y": 300,
-                **({"amount": -3} if action == "scroll" else {}),
+                **(
+                    {"direction": "down", "notches": 3}
+                    if action == "scroll"
+                    else {}
+                ),
             },
             "local_intent": "activate the visible semantic target",
         }),

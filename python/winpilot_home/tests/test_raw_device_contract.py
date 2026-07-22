@@ -415,7 +415,10 @@ def test_admitted_backend_guards_immediately_before_down_without_queue(monkeypat
         AdmittedPhysicalClickBackend(executor.execute_click_input)
 
 
-def test_admitted_scroll_is_single_mechanism_unqueued_and_guarded(monkeypatch):
+@pytest.mark.parametrize("amount", (-12, -1, 1, 12))
+def test_admitted_scroll_is_single_mechanism_unqueued_and_guarded(
+    monkeypatch, amount,
+):
     from winpilot.action import desktop_queue
     from winpilot.action.desktop_queue import DesktopActionQueue
 
@@ -447,7 +450,7 @@ def test_admitted_scroll_is_single_mechanism_unqueued_and_guarded(monkeypatch):
     result = outer.run(
         "scroll",
         lambda: executor.ADMITTED_PHYSICAL_SCROLL_BACKEND(
-            10, 20, -3, hwnd=41, final_guard=guard,
+            10, 20, amount, hwnd=41, final_guard=guard,
         ),
         target_hwnd=41,
         scope="physical",
@@ -457,7 +460,7 @@ def test_admitted_scroll_is_single_mechanism_unqueued_and_guarded(monkeypatch):
     assert [event[0] for event in events] == ["move", "guard", "input", "restore"]
     assert events[2] == (
         "input",
-        (executor.win32con.MOUSEEVENTF_WHEEL, (-3 * 120) & 0xFFFFFFFF),
+        (executor.win32con.MOUSEEVENTF_WHEEL, (amount * 120) & 0xFFFFFFFF),
     )
     assert outer.status()["submitted"] == 1
     assert executor.ADMITTED_PHYSICAL_SCROLL_BACKEND.execute is (

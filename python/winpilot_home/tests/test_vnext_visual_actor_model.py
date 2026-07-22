@@ -202,6 +202,48 @@ def test_visual_actor_transport_retry_reuses_exact_frozen_image_request() -> Non
     assert actor.last_outcome.request_retry_count == 1
 
 
+def test_explicit_scroll_contract_reaches_the_provider_tool_schema() -> None:
+    requests = []
+
+    def create(**request):
+        requests.append(request)
+        return _response(_tool_call(
+            "scroll", {
+                "image_x": 40,
+                "image_y": 50,
+                "direction": "up",
+                "notches": 3,
+            },
+        ))
+
+    proposal = parse_actor_proposal(_actor(create).propose(
+        _turn("scroll"),
+        image_b64="AAAA",
+        submitted_size=(100, 100),
+    ))
+
+    assert proposal.action == "scroll"
+    properties = requests[0]["tools"][0]["function"]["parameters"][
+        "properties"
+    ]
+    assert properties["direction"]["enum"] == ["up", "down"]
+    assert properties["notches"]["minimum"] == 1
+    assert properties["notches"]["maximum"] == 12
+
+
+def test_visual_actor_rejects_legacy_signed_scroll_amount() -> None:
+    actor = _actor(lambda **_request: _response(_tool_call(
+        "scroll", {"image_x": 40, "image_y": 50, "amount": 3},
+    )))
+
+    with pytest.raises(VisualActorModelError, match="Broker schema"):
+        actor.propose(
+            _turn("scroll"),
+            image_b64="AAAA",
+            submitted_size=(100, 100),
+        )
+
+
 @pytest.mark.parametrize(
     "response,error",
     (

@@ -252,12 +252,17 @@ def _claim():
     }
 
 
-def _scroll(*, amount=-4):
+def _scroll(*, direction="down", notches=4):
     return {
         "format": "actor-proposal/0",
         "kind": "desktop_action",
         "action": "scroll",
-        "args": {"image_x": 100, "image_y": 100, "amount": amount},
+        "args": {
+            "image_x": 100,
+            "image_y": 100,
+            "direction": direction,
+            "notches": notches,
+        },
         "local_intent": "move the visible content in the intended direction",
     }
 
@@ -301,7 +306,7 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
 
 
 def test_live_coordinator_scroll_uses_same_actor_controller_and_verifier_chain():
-    actor = ScriptedActor([_scroll(amount=-5), _claim()])
+    actor = ScriptedActor([_scroll(direction="down", notches=5), _claim()])
     verifier = PositiveVisualModel()
     raw_scroll_calls = []
 
@@ -323,7 +328,7 @@ def test_live_coordinator_scroll_uses_same_actor_controller_and_verifier_chain()
 
 
 def test_uncertain_scroll_blocks_without_retry_claim_or_verifier_call():
-    actor = ScriptedActor([_scroll(amount=4), _claim()])
+    actor = ScriptedActor([_scroll(direction="up", notches=4), _claim()])
     verifier = PositiveVisualModel()
     raw_scroll_calls = []
 
