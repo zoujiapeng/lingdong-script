@@ -1,6 +1,6 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的 click-only live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、Broker 小工具面、共享 atomic click/double-click 执行链、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认；三个随机 seed 的真实 Electron click-only canary 已通过独立 oracle，但完整 P7 未达，ActionEffectVerifier、其他 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
+本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、`click/double_click/scroll/claim/blocked` 小工具面、共享 atomic Controller 执行链、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认；三个随机 seed 的真实 Electron click canary，以及最终 scroll 合同的一对 down/up canary，已通过独立 oracle。完整 P7 未达，ActionEffectVerifier、其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
 
 ## 1. 版本与基本规则
 
@@ -287,9 +287,9 @@ benchmark.game_drag_route
 
 canonical 名称的唯一代码 owner 是 `vnext/capability_names.py`；
 `vnext/capabilities/names.py` 只做兼容 re-export。当前真实 Compiler 的 ExecuteDesktopTask
-required capabilities 包含 `visual.interact` 和 `visual.read_text`，click-only live Runtime state
+required capabilities 包含 `visual.interact` 和 `visual.read_text`，live Runtime state
 也声明同一集合：`visual.read_text` 表示 Visual Actor 直接读取当前像素，不等于启用结构化文字
-provider；Catalog 仍只用 `visual.interact` 授权 `click`/`double_click`。
+provider；Catalog 仍只用 `visual.interact` 授权 `click`/`double_click`/`scroll`。
 
 ### 5.2 EvidencePolicy
 
@@ -552,7 +552,7 @@ P4a 不把带 Runtime 身份的 `MissionCard` 或 `BrokerProjection` 原样交�
 - `ActorToolView`：只包含当前 BrokerProjection 允许的 Visual Actor 工具名和严格 JSON schema；
 - `ActorTurnInput`：组合上述三种 view，图片字节和 submitted size 通过注入的 `ActorPort` 单独传递。
 
-这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前 click-only live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
+这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前增量 live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
 
 ## 10. 模型输出：ActorProposal
 
@@ -706,7 +706,7 @@ unknown
 
 `ObserveProposal` 只刷新观察；`BlockedReport` 只产生当前义务的 blocked event，其自然语言事实不会升级为 `VerifiedFact`。`CapabilityRequest`、`InspectionRequest` 和 `ReplanRequest` 在 P4a 均返回 `unavailable`；尤其 P6 Planner/Inspector 未启用时必须 fail closed。
 
-当前产品接线只对显式 `vnext` run 组装 click-only Actor、Broker、Frame/Controller bridge 与验证端口。三个随机 seed 已通过真实 Electron 与独立 oracle，但这不等于全局 Broker enforce 或完整 P7 已通过；P3 的 necessary-tool recall 门槛仍未达到。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
+当前产品接线只对显式 `vnext` run 组装增量 Actor、Broker、Frame/Controller bridge 与验证端口，工具面为 `click/double_click/scroll/claim/blocked`。三个 click seed 与最终 scroll 合同的一对 down/up seed 已通过真实 Electron 与独立 oracle。这不等于全局 Broker enforce 或完整 P7 已通过；P3 的 necessary-tool recall 门槛仍未达到。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
 
 ### 11.2 P4a ControllerTransition
 
@@ -714,25 +714,25 @@ unknown
 
 ### 11.3 P4b 内部机械输入合同（partial）
 
-当前 scroll seam 与 atomic click/double-click 切片使用 typed `RawBackendResult` 和 `RawActionReceipt`，机械完成三态固定映射为：`APPLIED -> true`、`NOT_APPLIED/NOT_STARTED -> false`、`OUTCOME_UNKNOWN -> null`。backend 必须显式报告 `input_completed`；泛型 `ok:true` 不能升级为已执行。设备调用后的异常、非法 backend result 或 PostMessage 不确定结果都进入 `OUTCOME_UNKNOWN`，上层只能重新观察、对账或阻塞，不能自动重放。
+当前 admitted physical scroll 与 atomic click/double-click 使用 typed `RawBackendResult` 和 `RawActionReceipt`，机械完成三态固定映射为：`APPLIED -> true`、`NOT_APPLIED/NOT_STARTED -> false`、`OUTCOME_UNKNOWN -> null`。backend 必须显式报告 `input_completed`；泛型 `ok:true` 不能升级为已执行。设备调用后的异常或非法 backend result 都进入 `OUTCOME_UNKNOWN`，上层只能重新观察、对账或阻塞，不能自动重放。legacy PostMessage 不确定语义仍保持同一 no-replay 边界。
 
 RawDevice 接收 Controller 已解析的 typed scroll/click 参数，不接收 `action + args`，因此不是第二个 action parser。它不读取 session、截图、OCR/UIA、任务、应用名或恢复状态。Receipt 的 backend facts 是可序列化的只读诊断，不是 run-scoped evidence，`APPLIED` 也不证明像素变化或语义完成。
 
 具体 live coordinator 的 `raw_device` 是必需注入项。产品 composition root 构造
-`RawDeviceExecutor` 与 admitted physical click backend 后注入；coordinator、MissionRuntime 和
+`RawDeviceExecutor` 与 admitted physical click/scroll backend 后注入；coordinator、MissionRuntime 和
 Actor 都不得自行创建 backend 或在缺失时 fallback。这样 composition 与执行仍只有一个物理 owner。
 
-该内部 seam 尚未冻结为 vNext `/1` 产品合同。atomic click 由 Runtime permit 和权威 frame pin 限定一次 transaction，commit-time 重读 frame/epoch/HWND/PID/region/hit-test，每次 physical mouse-down 紧前再做 final guard；后续 `AtomicPostActionBridge` 在同一 physical lease 中 CAS 提交动作后权威帧并写入 exact action/frame evidence。任一动作后证据缺失都是 `unknown`，不能转成可重放 rejection。当前默认关闭的 live coordinator 只接入 `click`/`double_click`；`type_text`、`hotkey`、Actor 可见 `scroll`、`drag`、`draw_strokes`、held pointer 与 ROI observe 均未接入。`DesktopRuntimeSelection` 只在 run 开始时冻结；缺失 coordinator 或任一 vNext 端口都必须在 mutation 前拒绝，不能隐式 fallback 到 legacy。
+该内部 seam 尚未冻结为 vNext `/1` 产品合同。Actor 可见 scroll args 严格为 `{image_x, image_y, direction: "up" | "down", notches: 1..12}`；`up` 表示显露 viewport 上方内容，`down` 表示显露下方内容。旧 signed `amount` 在 Actor 边界不兼容并 fail closed；`AtomicDesktopController` 只机械映射 `up -> +notches`、`down -> -notches` 到既有 RawDevice canonical convention。`AtomicDesktopController` 由 Runtime permit 和权威 frame pin 限定一次 transaction，commit-time 重读 frame/epoch/HWND/PID/region/hit-test，并在 click mouse-down 或 scroll wheel 紧前做 final target guard；后续 `AtomicPostActionBridge` 在同一 physical lease 中 CAS 提交动作后权威帧并写入 exact action/frame evidence。scroll 只调用 unqueued admitted physical SendInput backend，不做机制切换；任一动作后证据缺失都是 `unknown`，不能转成可重放 rejection。当前默认关闭的 live coordinator 接入 `click`/`double_click`/`scroll`；`type_text`、`hotkey`、`drag`、`draw_strokes`、held pointer 与 ROI observe 均未接入。`DesktopRuntimeSelection` 只在 run 开始时冻结；缺失 coordinator 或任一 vNext 端口都必须在 mutation 前拒绝，不能隐式 fallback 到 legacy。
 
 ### 11.4 P4c product coordinator 与 per-run selector
 
-`desktop-runtime-coordinator-context/1` 只携带 Runtime 冻结的 run id、任务/contract 只读快照、现有 stop owner、回合入口的 blocking pause gate 与 commit 前的只读 `is_paused`；`desktop-runtime-coordinator-result/0` 只允许严格 terminal 结果。`/1` 不兼容 `/0`，因为新增的非阻塞 pause reading 用于丢弃模型调用期间产生的旧动作，恢复后必须从新权威帧重新决策。客户端只在顶层 ARP run request 发送 `runtime_version`，不把它写入 graph、task contract、Profiler 或模型 payload。`ArpExecution` 仅在 selection 为 `vnext` 且 Server 注入 click-only `DesktopRuntimeCoordinatorPort` 时调用一次 coordinator，并完全绕过 legacy node handlers；结果非法、异常或取消都不得 fallback。缺省/`legacy` run 仍不注入该 coordinator。
+`desktop-runtime-coordinator-context/1` 只携带 Runtime 冻结的 run id、任务/contract 只读快照、现有 stop owner、回合入口的 blocking pause gate 与 commit 前的只读 `is_paused`；`desktop-runtime-coordinator-result/0` 只允许严格 terminal 结果。`/1` 不兼容 `/0`，因为新增的非阻塞 pause reading 用于丢弃模型调用期间产生的旧动作，恢复后必须从新权威帧重新决策。客户端只在顶层 ARP run request 发送 `runtime_version`，不把它写入 graph、task contract、Profiler 或模型 payload。`ArpExecution` 仅在 selection 为 `vnext` 且 Server 注入增量 live `DesktopRuntimeCoordinatorPort` 时调用一次 coordinator，并完全绕过 legacy node handlers；结果非法、异常或取消都不得 fallback。缺省/`legacy` run 仍不注入该 coordinator。
 
 `is_paused` 必须是非阻塞 snapshot read，不得调用 pause wait 或持有 Controller/RawDevice lease。
 coordinator 只在每个 turn 入口调用 blocking `wait_if_paused`；Actor 返回后的 authority/Broker
 reprojection读取 `is_paused`，暂停则 proposal 失去 admission，resume 后开启新 turn。
 
-click-only live bridge 另有两个机械 contract：权威 frame freshness 使用显式正数
+live bridge 另有两个机械 contract：权威 frame freshness 使用显式正数
 `frame_max_age_s`（默认 30 秒）在每次 projection 时重新计算；canonical turn budget 来自唯一
 full-goal ExecuteDesktopTask 的整数 `max_steps`（1..400），session `requested_max_steps` 若存在必须
 与之相等，effective budget 为它与 coordinator 上限（默认 24）的较小值。缺失、冲突或非法值均在
@@ -848,7 +848,7 @@ class TransitionRecord:
 
 ## 14. VerifierAssessment 与 VerificationResult
 
-当前 P5 实现是进程内的 evidence-first 闭合：P5a 提供严格的 `ObligationVerificationRequest`、无 Runtime 身份的 `VerifierAssessment`、Runtime-bound `ObligationVerificationResult` 和 deterministic-first dispatcher；click-only live coordinator 还注入隔离、只读的视觉模型 Verifier。P5b 提供 `AcceptedObligationVerification`、`MissionCompletionVerificationRequest/Result` 和内容哈希绑定的 mission aggregate evidence。
+当前 P5 实现是进程内的 evidence-first 闭合：P5a 提供严格的 `ObligationVerificationRequest`、无 Runtime 身份的 `VerifierAssessment`、Runtime-bound `ObligationVerificationResult` 和 deterministic-first dispatcher；live coordinator 还注入隔离、只读的视觉模型 Verifier。P5b 提供 `AcceptedObligationVerification`、`MissionCompletionVerificationRequest/Result` 和内容哈希绑定的 mission aggregate evidence。
 
 P5b 构造时必须同时注入 `DeterministicMissionCompletionVerifier` 和 canonical `EvidenceRegistry`，且 `MissionReducer.evidence_source` 必须是该同一 registry。Runtime 先 append/read-back aggregate evidence，再提交 exact `mission_verified` event；Reducer 独立校验 accepted obligation verification ids、证据顺序、aggregate id/hash/kind/trust 和 canonical mission verification id。视觉模型只返回无身份 assessment；许可同时依赖 EvidencePolicy 与 Registry 中真实 evidence trust，Runtime 复核 claim/revision/current authoritative frame 后才写入本地 attested `independent_visual_model` evidence。payload 自报 trust 或 evidence identity 无效。当前仍无 `ActionEffectVerifier`、跨进程 WAL 或已证明的 exactly-once 恢复。
 

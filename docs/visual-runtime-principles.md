@@ -13,12 +13,14 @@ Policy decides what is accepted. Mission progress is a replayable projection
 of mission definition, accepted events, and immutable run-scoped evidence;
 tool exposure comes from a deterministic capability broker; verifier, planner,
 and inspector roles are read-only and event-triggered. See
-[`vnext/README.md`](vnext/README.md). A default-off click-only vNext live path
-now implements this ownership shape with one Visual Actor and an independent
-visual ObligationVerifier. Legacy remains the default; the real Electron
-click-only canary has passed two randomized seeds through the visible client
-and an independent trusted-browser oracle, while the broader architecture is
-still a migration target.
+[`vnext/README.md`](vnext/README.md). A default-off incremental vNext live path
+now implements this ownership shape with one Visual Actor, an independent
+visual ObligationVerifier, and a `click/double_click/scroll/claim/blocked`
+tool surface. Legacy remains the default; three real Electron click seeds have
+passed through the visible client and an independent trusted-browser oracle.
+With the final explicit direction/notches contract, one down and one up
+randomized scroll seed have also passed that same entry and independent oracle.
+These controlled cases do not establish broader parity.
 
 Models submit semantic proposals, not runtime identity. Mission revision,
 active obligation, authoritative frame, evidence scope, and broker projection
@@ -48,7 +50,7 @@ This unified request boundary currently covers the WinPilot product package.
 Profiler cancellation is already propagated from ArpExecution through the
 shadow runtime/provider into the model-call Runtime. Root legacy providers,
 all-role per-attempt sidecars, and the missing stop-event seam in the legacy VLM
-helper remain migration debt. The click-only vNext Actor and ObligationVerifier
+helper remain migration debt. The incremental vNext Actor and ObligationVerifier
 use the shared transport boundary, but this does not implement live Profiler,
 Planner, Inspector, ActionEffectVerifier, or the remaining GUI primitives.
 
@@ -62,17 +64,26 @@ authoritative frame. Actions then use the crop's own image coordinates. This is
 a generic zoom primitive, not a board/canvas/browser heuristic.
 
 That ROI contract is available in the legacy visual runtime, but is currently
-fail-closed in the click-only vNext live catalog until its authoritative crop
+fail-closed in the incremental vNext live catalog until its authoritative crop
 state has equivalent ownership and replay evidence. The vNext Runtime already
 captures a fresh authoritative full frame at every turn, so it does not expose
 a redundant full-frame `observe` tool. This limitation must not be hidden by a
 legacy fallback.
 
-The click-only live bridge recomputes freshness with an explicit injectable
+The live bridge recomputes freshness with an explicit injectable
 maximum age (currently 30 seconds) after the model returns. A cached `fresh`
 flag cannot admit an old frame. Pause state is also re-read without blocking at
 admission; a proposal produced while the run becomes paused is discarded, not
 queued for execution after resume.
+
+Click, double-click, and scroll use the same `AtomicDesktopController`
+transaction. Scroll is executed by one admitted physical SendInput backend,
+with the final target guard immediately before the wheel input. An uncertain
+mutation result never triggers a second mechanism or automatic action replay.
+The Actor names viewport direction (`up` reveals content above, `down` below)
+and a positive notch magnitude; the Controller alone maps that to RawDevice's
+signed convention. Generic unchanged-frame/no-progress feedback remains a
+separate recovery slice.
 
 UIA, OCR, CV, and MCP are secondary probes. They are used only when the model
 or an accepted capability contract explicitly asks for structured evidence;
@@ -87,7 +98,7 @@ external transition was observed. Typed interaction stages may use the same
 watcher through their persistent `WAIT_FOR_EXTERNAL_CHANGE` stage. No app- or
 conversation-specific waiting rule belongs in the Agent prompt.
 
-The click-only vNext live path does not expose `wait` yet. Existing legacy
+The incremental vNext live path does not expose `wait` yet. Existing legacy
 watcher support is not evidence of vNext parity.
 
 ## Evaluation

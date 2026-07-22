@@ -25,10 +25,12 @@ Goal Compiler
 
 当前 legacy 仍是默认 runtime。vNext 已完成 P0/P1/P1.5、P2a/P2b Profiler shadow、
 P3a/P3b partial Broker shadow和统一模型请求/重试边界；P4/P5 已有默认关闭、由客户端按 run
-显式选择的 click-only live coordinator。它组装唯一模型 Visual Actor、Broker 小工具面、共享
-Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier，失败不回退 legacy。
-两个冷启动、空 session、可见 Electron/UIA `precise-click` seed 已由独立 trusted-browser oracle
-通过，但这只证明 click-only 受控闭环；type/scroll/drag/draw/app resolve/provider/MCP、live
+显式选择的增量 live coordinator。它组装唯一模型 Visual Actor、Broker 小工具面、共享
+Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier，失败不回退 legacy；
+当前工具面为 `click`、`double_click`、`scroll`、`claim_obligation_done`、`blocked`。三个冷启动、
+空 session、可见 Electron/UIA `precise-click` seed 已由独立 trusted-browser oracle 通过，但这只证明
+受控点击闭环。`scroll` 已接入同一 atomic transaction，使用明确 direction/notches 合同；最终合同下
+各一个 down/up seed 已通过同入口独立 oracle，但仍只是受控闭环。type/hotkey/drag/draw/app resolve/provider/MCP、live
 Profiler、P6 Planner/Inspector、paired/真实任务门槛、默认切换和 legacy 删除均未完成。后续工作必须遵守：
 
 - 只有 Visual Actor 可以提出 GUI mutation；
@@ -45,7 +47,7 @@ Profiler、P6 Planner/Inspector、paired/真实任务门槛、默认切换和 le
 - provider SDK 隐式重试必须关闭；`ModelCallRuntime` 只可重试同一冻结 request。poll、redecision 和 action replay 是不同合同，mutation 结果不确定时禁止自动重放；
 - coordinator context `/1` 的 `is_paused` 只能非阻塞读取；模型期间 pause 必须让旧 proposal 在 admission 前失效。frame freshness 使用显式 max-age，回合预算来自 canonical ExecuteDesktopTask `max_steps`，RawDevice 只由产品 composition root 注入；
 - queue-time capability admission 只有 `DesktopRuntimeAdmission` 一个 owner；legacy 保留原 preflight，vNext 只从 composition root 的不可变 `RuntimeCapabilitySnapshot` 准入，并让 `ExecutionPolicy`、live `RuntimeState` 与 Broker 复用同一 snapshot，禁止复制 availability 常量；
-- 下一能力门槛是把 type/hotkey/scroll/drag/draw/held-pointer/ROI observe 逐项接入同一 snapshot/Catalog/Broker/Controller parity 合同并做同入口 E2E，不通过 prompt 扩写或 legacy fallback 补齐；
+- 下一能力门槛是扩大 scroll 多布局/paired 覆盖，并把 type/hotkey/drag/draw/held-pointer/ROI observe 逐项接入同一 snapshot/Catalog/Broker/Controller parity 合同并做同入口 E2E，不通过 prompt 扩写或 legacy fallback 补齐；
 - 基础工具、Frame/Controller、应用发现和调度骨架未经证明前，不通过 prompt 或新增模型角色修单例；
 - vNext 共用当前 Electron 入口和 E2E，不能形成第二套产品链；
 - 每个迁移切片必须列出未来删除的旧职责。
@@ -57,7 +59,7 @@ Electron「智能代理」
   -> /api/v2/task-contracts/compile
   -> /api/v2/arp/runs（per-run Legacy 默认 / vNext 实验）
   -> legacy StageRuntime / AgentRunner
-     或 vNext click-only MissionRuntime / Visual Actor / Broker
+     或 vNext incremental MissionRuntime / Visual Actor / Broker
   -> 唯一 Controller / RawDevice / deterministic capability
   -> evidence / completion gate / trace
 ```

@@ -30,7 +30,7 @@
   → 可见选择 Legacy（默认）或 vNext（实验）
   → POST /api/v2/arp/runs（顶层 runtime_version）
   → legacy StageRuntime / AgentRunner
-     或 click-only vNext MissionRuntime / Visual Actor / Broker
+     或 incremental vNext MissionRuntime / Visual Actor / Broker
   → 唯一 Controller / RawDevice
   → BUS + WebSocket
   → GET /api/v2/runs/current（活跃详情）
@@ -38,9 +38,11 @@
 ```
 
 runtime selector 只决定新 run 的产品 Runtime，不进入 Task Contract、graph、Profiler 或任务
-文本。选择 `vnext` 时 Server 只接 click-only 实验 coordinator；失败不会在同一 run 回退
-legacy。两个随机 seed 已从该可见 Electron/UIA 入口通过独立 trusted-browser oracle；这仍不等于
-P7、paired legacy、多原语、真实任务或默认切换门槛已达到。
+文本。选择 `vnext` 时 Server 只接默认关闭的增量实验 coordinator；当前工具面为
+`click/double_click/scroll/claim/blocked`，失败不会在同一 run 回退 legacy。三个
+`precise-click` seed 和最终 direction/notches 合同下的一对双向 `scroll-reveal` seed 已从该可见 Electron/UIA 入口通过独立
+trusted-browser oracle。这仍不等于 P7、paired legacy、其余原语、真实任务或
+默认切换门槛已达到。
 
 前端不会把整句目标直接转换成单个 `agent_goal`。跨应用、工件、通信和实时互动的
 阶段、能力、工具与 verifier 都来自同一个 Task Contract。运行控制始终绑定父 ARP：
