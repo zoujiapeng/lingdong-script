@@ -162,12 +162,16 @@ def test_native_point_scope_guard_requires_fresh_crop_after_target_rebound(
     assert blocked["action_executed"] is False
 
 
-def test_native_visual_observe_skips_lossy_structured_stack(monkeypatch):
+def test_native_visual_observe_skips_lossy_structured_stack(
+    monkeypatch,
+    isolated_config,
+):
     from winpilot.agent import perception_tools
     from winpilot.agent.tools import ToolSession
     from winpilot.utils.image_capture import VisualCaptureScope
     from winpilot.utils.screenshot import Region
 
+    isolated_config({"perception": {"uia": {"enabled": True}}})
     # This task is intentionally not tagged as chat/canvas/visual. Native
     # vision should still receive the whole frame directly for an unqueried
     # observe instead of paying the generic structured stack first.
