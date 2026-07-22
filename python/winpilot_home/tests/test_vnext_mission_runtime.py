@@ -32,7 +32,13 @@ from winpilot.vnext.capabilities import (
     ToolRoute,
     build_tool_catalog,
 )
-from winpilot.vnext.evidence import EvidenceRegistry as CanonicalEvidenceRegistry
+from winpilot.vnext.evidence import (
+    CURRENT_FRAME_EVIDENCE_KIND,
+    POST_ACTION_FRAME_EVIDENCE_KIND,
+    EvidenceRegistry as CanonicalEvidenceRegistry,
+    current_frame_payload_hash,
+    frame_identity_payload_hash,
+)
 from winpilot.vnext.mission import (
     EvidencePolicy,
     EvidenceRef,
@@ -60,6 +66,10 @@ from winpilot.vnext.verification import (
     ObligationVerificationRequest,
     VerifierAssessment,
     forbidden_effect_condition,
+)
+from winpilot.vnext.verification.visual_model import (
+    ReadOnlyVisualVerifierAdapter,
+    VisualVerifierModelRequest,
 )
 from winpilot.visual_runtime.commit_admission import TargetCommitIdentity
 
@@ -128,6 +138,33 @@ class ScriptedVerifier:
         self.calls.append((request, stop_event))
         if self.after_verify is not None:
             self.after_verify()
+        if self.raises is not None:
+            raise self.raises
+        return self.response
+
+
+class ScriptedVisualModel:
+    def __init__(
+        self,
+        response: VerifierAssessment | Mapping[str, Any] | object,
+        *,
+        after_assess: Callable[[], None] | None = None,
+        raises: Exception | None = None,
+    ) -> None:
+        self.response = response
+        self.after_assess = after_assess
+        self.raises = raises
+        self.calls: list[tuple[VisualVerifierModelRequest, Event | None]] = []
+
+    def assess(
+        self,
+        request: VisualVerifierModelRequest,
+        *,
+        stop_event: Event | None = None,
+    ) -> VerifierAssessment | Mapping[str, Any] | object:
+        self.calls.append((request, stop_event))
+        if self.after_assess is not None:
+            self.after_assess()
         if self.raises is not None:
             raise self.raises
         return self.response
@@ -337,6 +374,22 @@ class CompletionHarness:
     controller: SpyController
     runtime: MissionRuntime
     verifier: DeterministicMissionCompletionVerifier
+    profile: Any
+    catalog: ToolCatalog
+    permits: MutationPermitAuthority
+
+
+@dataclass
+class VisualHarness:
+    reducer: MissionReducer
+    registry: CanonicalEvidenceRegistry
+    actor: ScriptedActor
+    state: ScriptedState
+    controller: SpyController
+    runtime: MissionRuntime
+    model: ScriptedVisualModel
+    adapter: ReadOnlyVisualVerifierAdapter
+    frame: RuntimeFrame
     profile: Any
     catalog: ToolCatalog
     permits: MutationPermitAuthority
@@ -625,6 +678,124 @@ def _harness(
     return Harness(
         reducer, registry, actor, state, controller, runtime, profile, catalog, permits,
         obligation_verifier,
+    )
+
+
+def _visual_harness(
+    *,
+    evidence_mode: str = "current_frame",
+    allow_visual: bool = True,
+    uncertain_policy: str = "blocked",
+    response: VerifierAssessment | Mapping[str, Any] | object | None = None,
+    model_hook: Callable[[], None] | None = None,
+    model_error: Exception | None = None,
+) -> VisualHarness:
+    base = _definition()
+    policy = EvidencePolicy(
+        allow_independent_visual_verifier=allow_visual,
+        uncertain_policy=uncertain_policy,
+    )
+    definition = replace(
+        base,
+        obligations=(replace(base.obligations[0], evidence_policy=policy),),
+    )
+    registry = CanonicalEvidenceRegistry(
+        definition.mission_id, definition.run_id
+    )
+    reducer = MissionReducer(definition, evidence=registry)
+    target_proof = EvidenceRef(
+        id="target-proof",
+        mission_id=definition.mission_id,
+        run_id=definition.run_id,
+        kind="target",
+        trust="deterministic",
+        payload_hash="target-proof-payload",
+    )
+    registry.append(target_proof)
+    reducer.apply(reducer.event(
+        "target_bound",
+        payload=TargetBinding(
+            binding_id="target-1",
+            hwnd=101,
+            process_id=7,
+            executable_identity="opaque-process",
+            title_snapshot="Current application",
+            established_by_evidence_ref=target_proof.id,
+            epoch=3,
+        ).to_dict(),
+        evidence_refs=(target_proof.id,),
+    ))
+    frame = _frame(9, salt=evidence_mode)
+    if evidence_mode == "current_frame":
+        frame_kind = CURRENT_FRAME_EVIDENCE_KIND
+        frame_hash = current_frame_payload_hash(frame.commit_identity)
+        action_id = None
+    elif evidence_mode == "post_action":
+        frame_kind = POST_ACTION_FRAME_EVIDENCE_KIND
+        frame_hash = frame_identity_payload_hash(frame.commit_identity)
+        action_id = "decision-before-claim"
+    else:
+        raise AssertionError(evidence_mode)
+    registry.append(EvidenceRef(
+        id=frame.evidence_refs[0],
+        mission_id=definition.mission_id,
+        run_id=definition.run_id,
+        obligation_id="o1",
+        kind=frame_kind,
+        trust="deterministic",
+        payload_hash=frame_hash,
+        frame_id=frame.frame_id,
+        action_id=action_id,
+    ))
+    snapshot = _snapshot(frame)
+    state = ScriptedState(snapshot)
+    actor = ScriptedActor(_claim())
+    permits = MutationPermitAuthority(definition.mission_id, definition.run_id)
+    controller = SpyController(state, EvidenceRegistry(), permits)
+    catalog = _catalog()
+    profile = ExecutionPolicy().safe_default(
+        definition.mission_id,
+        definition.goal_revision,
+        available_capabilities=ALL_CAPABILITIES,
+    )
+    profile = replace(
+        profile,
+        services=replace(profile.services, obligation_verifier=True),
+    )
+    visual_response = response if response is not None else _verified_assessment(
+        "the requested state is visibly confirmed"
+    )
+    model = ScriptedVisualModel(
+        visual_response,
+        after_assess=model_hook,
+        raises=model_error,
+    )
+    adapter = ReadOnlyVisualVerifierAdapter(model)
+    runtime = MissionRuntime(
+        reducer=reducer,
+        profile=profile,
+        broker=CapabilityBroker(catalog),
+        catalog=catalog,
+        actor=actor,
+        state=state,
+        controller=controller,
+        mutation_permits=permits,
+        attested_visual_verifier=adapter,
+        evidence_registry=registry,
+    )
+    return VisualHarness(
+        reducer=reducer,
+        registry=registry,
+        actor=actor,
+        state=state,
+        controller=controller,
+        runtime=runtime,
+        model=model,
+        adapter=adapter,
+        frame=frame,
+        profile=profile,
+        catalog=catalog,
+        permits=permits,
     )
 
 
@@ -1386,6 +1557,236 @@ def test_stop_during_verifier_discards_late_result_without_verification_event() 
     assert set(result.accepted_event_ids) == {accepted[0].event_id}
     assert harness.reducer.projection.obligation_state("o1").status is ObligationStatus.CLAIMED
     assert all(event.kind != "verification_recorded" for event in harness.reducer.events)
+
+
+@pytest.mark.parametrize("evidence_mode", ("current_frame", "post_action"))
+def test_attested_visual_verifier_commits_only_real_visual_evidence_and_replays(
+    evidence_mode: str,
+) -> None:
+    harness = _visual_harness(evidence_mode=evidence_mode)
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.VERIFICATION_RECORDED
+    assert len(harness.model.calls) == 1
+    assert harness.controller.calls == []
+    accepted = harness.reducer.events[before:]
+    assert [event.kind for event in accepted] == [
+        "obligation_claimed",
+        "verification_recorded",
+    ]
+    claim_event, verification_event = accepted
+    assert claim_event.evidence_refs == harness.frame.evidence_refs
+    assert len(verification_event.evidence_refs) == 1
+    visual_id = verification_event.evidence_refs[0]
+    assert visual_id not in claim_event.evidence_refs
+    visual_ref = harness.reducer.evidence_scope.require((visual_id,))[0]
+    assert visual_ref.trust == "independent_visual_model"
+    assert visual_ref.kind == "visual_verifier_assessment"
+    assert verification_event.payload["verifier_kind"] == "independent_visual_model"
+    assert verification_event.payload["evidence_refs"] == (visual_id,)
+    state = harness.reducer.projection.obligation_state("o1")
+    assert state.status is ObligationStatus.VERIFIED
+    assert state.claim_evidence_refs == harness.frame.evidence_refs
+    assert state.verified_evidence_refs == (visual_id,)
+    frame_ref = harness.reducer.evidence_scope.require(harness.frame.evidence_refs)[0]
+    if evidence_mode == "current_frame":
+        assert frame_ref.kind == CURRENT_FRAME_EVIDENCE_KIND
+        assert frame_ref.action_id is None
+    else:
+        assert frame_ref.kind == POST_ACTION_FRAME_EVIDENCE_KIND
+        assert frame_ref.action_id == "decision-before-claim"
+
+    replayed = MissionReducer.replay(
+        harness.reducer.definition,
+        harness.reducer.events,
+        evidence=harness.registry,
+    )
+    assert replayed.projection.to_dict() == harness.reducer.projection.to_dict()
+    event_count = len(harness.reducer.events)
+    harness.runtime.run_one_turn(turn_index=5)
+    assert len(harness.model.calls) == 1
+    assert len(harness.reducer.events) == event_count
+
+
+def test_visual_policy_denial_fails_before_model_and_consumes_claim_once() -> None:
+    harness = _visual_harness(allow_visual=False)
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.VERIFICATION_RECORDED
+    assert harness.model.calls == []
+    accepted = harness.reducer.events[before:]
+    assert [event.kind for event in accepted] == [
+        "obligation_claimed",
+        "verification_recorded",
+    ]
+    assert accepted[-1].payload["verified"] is False
+    assert accepted[-1].payload["failure_kind"] == "visual_verifier_not_permitted"
+    assert accepted[-1].evidence_refs == ()
+    assert all(
+        ref.trust != "independent_visual_model"
+        for ref in harness.registry.snapshot()
+    )
+    harness.runtime.run_one_turn(turn_index=5)
+    assert harness.model.calls == []
+
+
+def test_stale_frame_discards_visual_result_without_verification_or_evidence() -> None:
+    holder: dict[str, VisualHarness] = {}
+
+    def change_frame() -> None:
+        harness = holder["harness"]
+        harness.state.current_snapshot = _snapshot(_frame(11, salt="replacement"))
+
+    harness = _visual_harness(model_hook=change_frame)
+    holder["harness"] = harness
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.STALE_DISCARDED
+    assert len(harness.model.calls) == 1
+    assert [event.kind for event in harness.reducer.events[before:]] == [
+        "obligation_claimed"
+    ]
+    assert all(
+        ref.trust != "independent_visual_model"
+        for ref in harness.registry.snapshot()
+    )
+
+
+@pytest.mark.parametrize("failure", ("malformed", "exception", "append_conflict"))
+def test_visual_failure_is_recorded_once_and_enters_uncertain_policy(
+    failure: str,
+    monkeypatch,
+) -> None:
+    from winpilot.vnext.runtime import mission_runtime as runtime_module
+
+    if failure == "append_conflict":
+        def reject_append(*_args, **_kwargs):
+            raise ValueError("conflicting visual evidence identity")
+
+        monkeypatch.setattr(
+            runtime_module,
+            "append_visual_verifier_evidence",
+            reject_append,
+        )
+
+    response: VerifierAssessment | Mapping[str, Any] | object = {
+        **_verified_assessment(
+            "the requested state is visibly confirmed"
+        ).to_dict(),
+        "mission_id": "invented",
+    }
+    harness = _visual_harness(
+        response=(response if failure == "malformed" else None),
+        model_error=(RuntimeError("model rejected") if failure == "exception" else None),
+    )
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.VERIFICATION_RECORDED
+    assert len(harness.model.calls) == 1
+    accepted = harness.reducer.events[before:]
+    assert [event.kind for event in accepted] == [
+        "obligation_claimed",
+        "verification_recorded",
+    ]
+    assert accepted[-1].payload["verified"] is False
+    assert accepted[-1].payload["failure_kind"] in {
+        "visual_verifier_error",
+        "visual_evidence_append_failed",
+    }
+    assert accepted[-1].evidence_refs == ()
+    assert harness.reducer.projection.status is MissionStatus.BLOCKED
+    event_count = len(harness.reducer.events)
+    harness.runtime.run_one_turn(turn_index=5)
+    assert len(harness.model.calls) == 1
+    assert len(harness.reducer.events) == event_count
+
+
+def test_negative_visual_assessment_uses_real_evidence_and_fail_policy() -> None:
+    assessment = VerifierAssessment(
+        verified=False,
+        satisfied_conditions=(),
+        missing_conditions=("the requested state is visibly confirmed",),
+        contradictions=(),
+        confidence=0.9,
+        concise_reason="the visible result is not present",
+    )
+    harness = _visual_harness(
+        response=assessment,
+        uncertain_policy="fail",
+    )
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.VERIFICATION_RECORDED
+    assert len(harness.model.calls) == 1
+    event = harness.reducer.events[before + 1]
+    assert event.kind == "verification_recorded"
+    assert event.payload["verified"] is False
+    assert event.payload["verifier_kind"] == "independent_visual_model"
+    assert len(event.evidence_refs) == 1
+    assert harness.reducer.evidence_scope.require(event.evidence_refs)[0].trust == (
+        "independent_visual_model"
+    )
+    assert harness.reducer.projection.status is MissionStatus.FAILED
+    harness.runtime.run_one_turn(turn_index=5)
+    assert len(harness.model.calls) == 1
+
+
+def test_stop_during_visual_verifier_accepts_only_the_claim() -> None:
+    stop = Event()
+    harness = _visual_harness(model_hook=stop.set)
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4, stop_event=stop)
+
+    assert result.status is RuntimeStatus.CANCELED
+    assert len(harness.model.calls) == 1
+    assert [event.kind for event in harness.reducer.events[before:]] == [
+        "obligation_claimed"
+    ]
+    assert all(
+        ref.trust != "independent_visual_model"
+        for ref in harness.registry.snapshot()
+    )
+
+
+def test_visual_and_generic_verifiers_cannot_be_injected_together() -> None:
+    harness = _visual_harness()
+    common = dict(
+        reducer=harness.reducer,
+        profile=harness.profile,
+        broker=CapabilityBroker(harness.catalog),
+        catalog=harness.catalog,
+        actor=harness.actor,
+        state=harness.state,
+        controller=harness.controller,
+        mutation_permits=harness.permits,
+    )
+    generic = ScriptedVerifier(_verified_assessment(
+        "the requested state is visibly confirmed"
+    ))
+
+    with pytest.raises(TypeError, match="mutually exclusive"):
+        MissionRuntime(
+            **common,
+            obligation_verifier=generic,
+            attested_visual_verifier=harness.adapter,
+            evidence_registry=harness.registry,
+        )
+    with pytest.raises(TypeError, match="injected together"):
+        MissionRuntime(
+            **common,
+            attested_visual_verifier=harness.adapter,
+        )
 
 
 def test_mission_completion_requires_concrete_verifier_and_shared_registry() -> None:
