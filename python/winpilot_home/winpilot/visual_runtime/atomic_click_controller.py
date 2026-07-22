@@ -277,6 +277,14 @@ class AtomicClickController:
         target = envelope.target
         assert target is not None  # established by _request
 
+        def final_guard(x: int, y: int) -> FinalClickGuardDecision:
+            if stop_event is not None and stop_event.is_set():
+                return FinalClickGuardDecision.STOP_REQUESTED
+            decision = self._final_guard.check_before_mouse_down(request, (x, y))
+            if stop_event is not None and stop_event.is_set():
+                return FinalClickGuardDecision.STOP_REQUESTED
+            return decision
+
         def under_physical_lease() -> ControllerTransition:
             def under_frame_pin() -> CommitCallbackResult[RawActionReceipt]:
                 permit = self._permits.consume(envelope)
@@ -291,9 +299,7 @@ class AtomicClickController:
                         MouseButton.LEFT,
                         count,
                         ClickMechanism.PHYSICAL,
-                        final_guard=lambda x, y: self._final_guard.check_before_mouse_down(
-                            request, (x, y)
-                        ),
+                        final_guard=final_guard,
                     ),
                 )
 
