@@ -651,7 +651,8 @@ def _keyboard_select_all_errors(
         zip(keys, expected_phases, strict=True),
     ):
         value = event.get("details") or {}
-        code = str(value.get("code") or "")
+        # Validate logical shortcut identity; DOM ``code`` is a physical,
+        # layout-dependent diagnostic and can be empty for VK SendInput.
         valid = bool(
             event.get("type") == event_type
             and event.get("trusted") is True
@@ -663,10 +664,6 @@ def _keyboard_select_all_errors(
             and value.get("shift_key") is False
             and value.get("meta_key") is False
             and value.get("repeat") is False
-            and (
-                code == "KeyA" if key == "a"
-                else code in {"ControlLeft", "ControlRight"}
-            )
         )
         if index >= 2:
             valid = bool(

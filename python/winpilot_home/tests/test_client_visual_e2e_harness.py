@@ -927,6 +927,19 @@ def test_external_verdict_accepts_complete_trusted_select_all_chord():
     assert verdict["passed"] is True
 
 
+def test_external_verdict_accepts_logical_chord_without_dom_code():
+    harness = _load_harness()
+    state = _keyboard_select_all_state()
+    for event in state["events"]:
+        if event["type"] in {"trusted_keydown", "trusted_keyup"}:
+            event["details"]["code"] = ""
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="keyboard_select_all", seed=17,
+    )
+    assert verdict["passed"] is True
+
+
 @pytest.mark.parametrize(
     "mutation",
     (

@@ -187,6 +187,8 @@ def _accepted_keyboard_select_success(
         if item.get("type") not in {"trusted_keydown", "trusted_keyup"}:
             continue
         event_details = item.get("details") or {}
+        # ``key`` carries shortcut semantics. ``code`` is a layout-dependent
+        # physical position and may be empty for a valid VK-based SendInput.
         key = str(event_details.get("key") or "").casefold()
         if key not in {"control", "a"}:
             continue
@@ -201,12 +203,6 @@ def _accepted_keyboard_select_success(
         ):
             return False
         event_type = item.get("type")
-        code = event_details.get("code")
-        if (
-            (key == "a" and code != "KeyA")
-            or (key == "control" and code not in {"ControlLeft", "ControlRight"})
-        ):
-            return False
         if (
             phase == 0 and event_type == "trusted_keydown"
             and key == "control" and event_details.get("ctrl_key") is True
