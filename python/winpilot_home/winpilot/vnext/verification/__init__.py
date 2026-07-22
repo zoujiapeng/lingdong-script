@@ -1,6 +1,7 @@
 """Pure P5a verification contracts and deterministic-first dispatcher."""
 
 from .contracts import *
+from .action_effect import *
 from .dispatcher import DeterministicFirstVerifier, EvidenceEvaluator
 from .mission_completion import *
 from .ports import ObligationVerifierPort
