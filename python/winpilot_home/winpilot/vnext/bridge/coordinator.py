@@ -58,7 +58,7 @@ from .runtime_state import RuntimeReadState, RuntimeStateBridge
 
 
 DEFAULT_MAX_TURNS = 24
-_LIVE_CAPABILITIES = ("visual.interact",)
+_LIVE_CAPABILITIES = ("visual.interact", "visual.read_text")
 _RECOVERABLE_TURN_STATUSES = frozenset({
     RuntimeStatus.ACTION_RECORDED,
     RuntimeStatus.INVALID_PROPOSAL,

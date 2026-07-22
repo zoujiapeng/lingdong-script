@@ -18,15 +18,7 @@ from winpilot.orchestrator.desktop_runtime import (
     DesktopRuntimeCoordinatorContext,
     DesktopRuntimeCoordinatorStatus,
 )
-from winpilot.tasking.contracts import (
-    CapabilitySelection,
-    CompletionObligation,
-    EvidenceProviderSpec,
-    StageType,
-    TaskContract,
-    TaskIntent,
-    TaskStage,
-)
+from winpilot.tasking.compiler import TaskContractCompiler
 from winpilot.utils.image_capture import VisualCaptureScope
 from winpilot.utils.screenshot import Region
 from winpilot.visual_runtime.frame_observer import FrameObserver
@@ -102,36 +94,11 @@ class Trace:
 
 def _task_contract() -> dict:
     goal = "Complete the currently visible unknown interface task"
-    provider = EvidenceProviderSpec(
-        id="closed-loop",
-        capabilities=["visual.observe", "visual.semantic_verify"],
-    )
-    obligation = CompletionObligation(
-        id="desktop.full_goal_verified",
-        description="the complete desktop goal is visibly satisfied",
-        predicate="desktop.full_goal_verified",
-        stage_id="desktop",
-        evidence_providers=[provider],
-    )
-    stage = TaskStage(
-        id="desktop",
-        type=StageType.EXECUTE_DESKTOP_TASK,
-        name="generic desktop task",
-        required_capabilities=["visual.adaptive_interaction"],
-        obligations=[obligation],
-        execution=CapabilitySelection(
-            required_capabilities=["visual.adaptive_interaction"],
-            verifier_requirements=["visual.observe", "visual.semantic_verify"],
-        ),
-    )
-    return TaskContract(
-        task_id="generic-live-task",
-        task=goal,
-        intent=TaskIntent(original_text=goal),
-        stages=[stage],
-        obligations=[obligation],
-        final_conditions=[obligation.id],
-        experience_policy="disabled",
+    return TaskContractCompiler().compile(
+        goal,
+        max_steps=18,
+        cold_start=True,
+        require_gui=True,
     ).model_dump(mode="json")
 
 
