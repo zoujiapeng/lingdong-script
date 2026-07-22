@@ -62,6 +62,12 @@ class FrameObserver:
         self._captured_at = captured_at
         self._max_submitted_side = max(1, int(max_submitted_side))
 
+    @property
+    def authority(self) -> FrameAuthority:
+        """Return the single authority this observer can publish into."""
+
+        return self._authority
+
     def capture(
         self,
         *,
