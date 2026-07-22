@@ -109,7 +109,6 @@ class MissionCompletionVerificationRequest(_WireModel):
         verification_ids = tuple(
             item.accepted_verification_id for item in self.required_obligations
         )
-        evidence_ids: list[str] = []
         if len(obligation_ids) != len(set(obligation_ids)):
             raise ValueError("required obligation ids must be unique")
         if len(verification_ids) != len(set(verification_ids)):
@@ -120,9 +119,6 @@ class MissionCompletionVerificationRequest(_WireModel):
                     raise ValueError(
                         f"evidence {ref.id!r} is outside the request mission/run"
                     )
-                evidence_ids.append(ref.id)
-        if len(evidence_ids) != len(set(evidence_ids)):
-            raise ValueError("required obligation evidence ids must be globally unique")
         return self
 
     @property
@@ -139,11 +135,15 @@ class MissionCompletionVerificationRequest(_WireModel):
 
     @property
     def obligation_evidence_ids(self) -> tuple[str, ...]:
-        return tuple(
+        # A mission-level fact may legitimately prove more than one
+        # obligation. Keep each obligation's exact evidence list in the
+        # aggregate payload, but bind the Mission event to one stable copy of
+        # each immutable evidence identity.
+        return tuple(dict.fromkeys(
             ref.id
             for item in self.required_obligations
             for ref in item.evidence_refs
-        )
+        ))
 
     def to_dict(self) -> dict[str, Any]:
         return {
