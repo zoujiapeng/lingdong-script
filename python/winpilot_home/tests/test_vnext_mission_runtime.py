@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import random
 from dataclasses import dataclass, replace
 from threading import Event
@@ -32,6 +33,7 @@ from winpilot.vnext.capabilities import (
     ToolRoute,
     build_tool_catalog,
 )
+from winpilot.vnext.capabilities.live_catalog import build_live_catalog
 from winpilot.vnext.evidence import (
     CURRENT_FRAME_EVIDENCE_KIND,
     POST_ACTION_FRAME_EVIDENCE_KIND,
@@ -61,6 +63,7 @@ from winpilot.vnext.runtime import (
     RuntimeSnapshot,
     RuntimeStatus,
 )
+from winpilot.vnext.runtime import mission_runtime as mission_runtime_module
 from winpilot.vnext.verification import (
     DeterministicActionEffectVerifier,
     DeterministicMissionCompletionVerifier,
@@ -623,6 +626,20 @@ def _snapshot(
     )
 
 
+def _set_harness_turn(harness: Harness, turn_index: int) -> None:
+    """Advance the injected RuntimeState without inventing any OS semantics."""
+
+    def advance(snapshot: RuntimeSnapshot) -> RuntimeSnapshot:
+        return replace(
+            snapshot,
+            broker_state=replace(snapshot.broker_state, turn_index=turn_index),
+        )
+
+    harness.state.initial = advance(harness.state.initial)
+    harness.state.current_snapshot = advance(harness.state.current_snapshot)
+    harness.state.post_action = advance(harness.state.post_action)
+
+
 def _add_frame_evidence(registry: EvidenceRegistry, frame: RuntimeFrame) -> None:
     for evidence_id in frame.evidence_refs:
         registry.add(EvidenceRef(
@@ -644,6 +661,36 @@ def _click(x: int = 320, y: int = 240) -> dict[str, Any]:
         "action": "click",
         "args": {"x": x, "y": y},
         "local_intent": "activate the visible semantic target",
+    }
+
+
+def _live_click(x: int = 320, y: int = 240) -> dict[str, Any]:
+    return {
+        "format": "actor-proposal/0",
+        "kind": "desktop_action",
+        "action": "click",
+        "args": {"image_x": x, "image_y": y},
+        "local_intent": "activate the visible semantic target",
+    }
+
+
+def _type_text(text: str) -> dict[str, Any]:
+    return {
+        "format": "actor-proposal/0",
+        "kind": "desktop_action",
+        "action": "type_text",
+        "args": {"text": text},
+        "local_intent": "enter text into the currently focused control",
+    }
+
+
+def _hotkey(*modifiers: str, key: str) -> dict[str, Any]:
+    return {
+        "format": "actor-proposal/0",
+        "kind": "desktop_action",
+        "action": "hotkey",
+        "args": {"modifiers": list(modifiers), "key": key},
+        "local_intent": "apply the selected keyboard command to the focused control",
     }
 
 
@@ -683,6 +730,7 @@ def _harness(
     controller_outcome: ControllerOutcome = ControllerOutcome.COMPLETED,
     controller_error: Exception | None = None,
     broker_factory: Callable[[ToolCatalog], CapabilityBroker] | None = None,
+    catalog: ToolCatalog | None = None,
     pointer_cleanup: Any = None,
     consume_permit: bool = True,
     obligation_verifier: ScriptedVerifier | None = None,
@@ -710,7 +758,7 @@ def _harness(
         state, registry, permits, outcome=controller_outcome, raises=controller_error,
         consume_permit=consume_permit,
     )
-    catalog = _catalog()
+    catalog = catalog or _catalog()
     profile = ExecutionPolicy().safe_default(
         mission.mission_id,
         mission.goal_revision,
@@ -740,7 +788,11 @@ def _harness(
     )
 
 
-def _action_effect_harness():
+def _canonical_action_harness(
+    proposal: Mapping[str, Any],
+    *,
+    catalog: ToolCatalog,
+) -> Harness:
     mission = _definition()
     registry = CanonicalEvidenceRegistry(mission.mission_id, mission.run_id)
     reducer = MissionReducer(mission, evidence=registry)
@@ -797,10 +849,9 @@ def _action_effect_harness():
     pre = _snapshot(pre_frame)
     post = _snapshot(pixel_frame(10))
     state = ScriptedState(pre, post_action=post)
-    actor = ScriptedActor(_click())
+    actor = ScriptedActor(proposal)
     permits = MutationPermitAuthority(mission.mission_id, mission.run_id)
     controller = CanonicalPostFrameController(state, registry, permits)
-    catalog = _catalog()
     profile = ExecutionPolicy().safe_default(
         mission.mission_id,
         mission.goal_revision,
@@ -818,7 +869,22 @@ def _action_effect_harness():
         action_effect_verifier=DeterministicActionEffectVerifier(),
         evidence_registry=registry,
     )
-    return runtime, reducer, registry, actor, state, controller
+    return Harness(
+        reducer, registry, actor, state, controller, runtime, profile, catalog,
+        permits, None,
+    )
+
+
+def _action_effect_harness():
+    harness = _canonical_action_harness(_click(), catalog=_catalog())
+    return (
+        harness.runtime,
+        harness.reducer,
+        harness.registry,
+        harness.actor,
+        harness.state,
+        harness.controller,
+    )
 
 
 def _visual_harness(
@@ -1198,6 +1264,423 @@ def test_action_effect_failure_does_not_erase_or_replay_closed_action(
     assert reducer.projection.last_transition is not None
     assert reducer.projection.last_transition.action_effect is None
     assert reducer.projection.obligation_state("o1").no_progress_streak == 0
+
+
+def test_accepted_transition_projects_exactly_one_run_local_previous_action() -> None:
+    first = _live_click(111, 222)
+    first["local_intent"] = "activate the first currently visible target"
+    harness = _canonical_action_harness(first, catalog=build_live_catalog())
+    before = len(harness.reducer.events)
+
+    first_result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert first_result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.actor.calls[0][0].previous_action is None
+    accepted = harness.reducer.events[before:]
+    assert [event.kind for event in accepted] == ["transition_recorded"]
+    # The previous-action view is an ephemeral Runtime aid, never Mission truth.
+    payload = accepted[0].payload
+    assert "local_intent" not in payload
+    assert "args" not in payload
+    assert "arguments" not in payload
+    assert first["local_intent"] not in json.dumps(
+        accepted[0].to_dict(), ensure_ascii=False, sort_keys=True,
+    )
+
+    second = _live_click(333, 444)
+    second["local_intent"] = "activate the second currently visible target"
+    harness.actor.proposal = second
+    _set_harness_turn(harness, 5)
+    second_result = harness.runtime.run_one_turn(turn_index=5)
+
+    assert second_result.status is RuntimeStatus.ACTION_RECORDED
+    receipt = harness.actor.calls[1][0].previous_action
+    assert receipt is not None
+    assert receipt.action == "click"
+    assert receipt.local_intent == first["local_intent"]
+    assert dict(receipt.arguments) == {"image_x": 111, "image_y": 222}
+    assert receipt.input_completed is True
+    assert receipt.post_action_frame_reconciled is True
+    assert receipt.visible_effect == ""
+
+
+def test_transient_observation_failure_does_not_consume_previous_action() -> None:
+    first = _live_click(111, 222)
+    first["local_intent"] = "activate the first currently visible target"
+    harness = _canonical_action_harness(first, catalog=build_live_catalog())
+    assert harness.runtime.run_one_turn(turn_index=4).status is RuntimeStatus.ACTION_RECORDED
+    pending = harness.runtime._pending_actor_action
+    assert pending is not None
+
+    original_observe = harness.state.observe
+
+    def fail_observe_once(*_args, **_kwargs):
+        raise RuntimeError("transient frame observation failure")
+
+    harness.state.observe = fail_observe_once  # type: ignore[method-assign]
+    _set_harness_turn(harness, 5)
+    rejected = harness.runtime.run_one_turn(turn_index=5)
+
+    assert rejected.status is RuntimeStatus.STATE_REJECTED
+    assert len(harness.actor.calls) == 1
+    assert harness.runtime._pending_actor_action is pending
+
+    harness.state.observe = original_observe  # type: ignore[method-assign]
+    harness.actor.proposal = _live_click(333, 444)
+    _set_harness_turn(harness, 6)
+    resumed = harness.runtime.run_one_turn(turn_index=6)
+
+    assert resumed.status is RuntimeStatus.ACTION_RECORDED
+    receipt = harness.actor.calls[1][0].previous_action
+    assert receipt is not None
+    assert receipt.local_intent == first["local_intent"]
+
+
+def test_mission_replay_or_a_new_runtime_does_not_reconstruct_previous_action() -> None:
+    harness = _canonical_action_harness(
+        _live_click(), catalog=build_live_catalog(),
+    )
+    assert harness.runtime.run_one_turn(turn_index=4).status is RuntimeStatus.ACTION_RECORDED
+    assert harness.runtime._pending_actor_action is not None
+    replayed = MissionReducer.replay(
+        harness.reducer.definition,
+        harness.reducer.events,
+        evidence=harness.registry,
+    )
+    actor = ScriptedActor(_claim())
+    permits = MutationPermitAuthority("mission-1", "run-1")
+    controller = SpyController(harness.state, harness.registry, permits)
+    runtime = MissionRuntime(
+        reducer=replayed,
+        profile=harness.profile,
+        broker=CapabilityBroker(harness.catalog),
+        catalog=harness.catalog,
+        actor=actor,
+        state=harness.state,
+        controller=controller,
+        mutation_permits=permits,
+    )
+
+    _set_harness_turn(harness, 5)
+    runtime.run_one_turn(turn_index=5)
+
+    assert len(actor.calls) == 1
+    assert actor.calls[0][0].previous_action is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("unknown", "reconciliation_failed", "proved_not_executed"),
+)
+def test_unaccepted_controller_outcome_never_reaches_a_later_actor_turn(
+    failure: str,
+) -> None:
+    outcome = (
+        ControllerOutcome.UNKNOWN
+        if failure == "unknown"
+        else ControllerOutcome.REJECTED
+        if failure == "proved_not_executed"
+        else ControllerOutcome.COMPLETED
+    )
+    harness = _harness(_click(), controller_outcome=outcome)
+
+    if failure == "reconciliation_failed":
+        harness.controller.transition_mutator = lambda _envelope, transition: replace(
+            transition, post_frame_id=transition.post_frame_id + 100,
+        )
+    elif failure == "proved_not_executed":
+        harness.controller.transition_mutator = lambda _envelope, transition: replace(
+            transition,
+            input_completed=False,
+            evidence_refs=(),
+            post_frame_id=None,
+            visible_effect="",
+        )
+
+    first = harness.runtime.run_one_turn(turn_index=4)
+
+    expected = (
+        RuntimeStatus.STALE_DISCARDED
+        if failure == "proved_not_executed" else RuntimeStatus.BLOCKED
+    )
+    assert first.status is expected
+    assert all(event.kind != "transition_recorded" for event in harness.reducer.events)
+    assert harness.runtime._pending_actor_action is None
+
+    if harness.reducer.projection.status is MissionStatus.BLOCKED:
+        harness.reducer.apply(harness.reducer.event(
+            "obligation_unblocked", payload={"obligation_id": "o1"},
+        ))
+    harness.actor.proposal = _click(601, 402)
+    _set_harness_turn(harness, 5)
+    harness.runtime.run_one_turn(turn_index=5)
+
+    assert len(harness.actor.calls) == 2
+    assert harness.actor.calls[1][0].previous_action is None
+
+
+@pytest.mark.parametrize("terminal", (MissionStatus.FAILED, MissionStatus.CANCELED))
+def test_terminal_turn_consumes_pending_actor_action_without_projection(
+    terminal: MissionStatus,
+) -> None:
+    harness = _canonical_action_harness(
+        _live_click(), catalog=build_live_catalog(),
+    )
+    assert harness.runtime.run_one_turn(turn_index=4).status is RuntimeStatus.ACTION_RECORDED
+    assert harness.runtime._pending_actor_action is not None
+    actor_calls = len(harness.actor.calls)
+    harness.reducer.apply(harness.reducer.event(
+        f"mission_{terminal.value}", payload={"reason": "terminal test"},
+    ))
+
+    result = harness.runtime.run_one_turn(turn_index=5)
+
+    assert result.status is RuntimeStatus.STATE_REJECTED
+    assert len(harness.actor.calls) == actor_calls
+    assert harness.runtime._pending_actor_action is None
+
+
+def test_canceled_turn_consumes_previous_action_instead_of_delaying_it() -> None:
+    harness = _canonical_action_harness(
+        _live_click(), catalog=build_live_catalog(),
+    )
+    assert harness.runtime.run_one_turn(turn_index=4).status is RuntimeStatus.ACTION_RECORDED
+    assert harness.runtime._pending_actor_action is not None
+    stop = Event()
+    stop.set()
+
+    canceled = harness.runtime.run_one_turn(turn_index=5, stop_event=stop)
+
+    assert canceled.status is RuntimeStatus.CANCELED
+    assert len(harness.actor.calls) == 1
+    harness.actor.proposal = _live_click(610, 410)
+    _set_harness_turn(harness, 6)
+    resumed = harness.runtime.run_one_turn(turn_index=6)
+    assert resumed.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.actor.calls[1][0].previous_action is None
+
+
+def test_mission_revision_change_invalidates_previous_action() -> None:
+    harness = _canonical_action_harness(
+        _live_click(), catalog=build_live_catalog(),
+    )
+    assert harness.runtime.run_one_turn(turn_index=4).status is RuntimeStatus.ACTION_RECORDED
+    assert harness.runtime._pending_actor_action is not None
+    harness.reducer.apply(harness.reducer.event(
+        "obligation_blocked",
+        payload={
+            "obligation_id": "o1",
+            "blocker_kind": "transient_test",
+            "reason": "advance only the accepted Mission revision",
+        },
+    ))
+    harness.reducer.apply(harness.reducer.event(
+        "obligation_unblocked", payload={"obligation_id": "o1"},
+    ))
+    harness.actor.proposal = _live_click(620, 420)
+    _set_harness_turn(harness, 5)
+
+    harness.runtime.run_one_turn(turn_index=5)
+
+    assert harness.actor.calls[1][0].previous_action is None
+
+
+def test_target_change_does_not_cross_project_previous_action() -> None:
+    harness = _canonical_action_harness(
+        _live_click(), catalog=build_live_catalog(),
+    )
+    assert harness.runtime.run_one_turn(turn_index=4).status is RuntimeStatus.ACTION_RECORDED
+    assert harness.runtime._pending_actor_action is not None
+    harness.reducer.apply(harness.reducer.event(
+        "target_invalidated", payload={"reason": "window identity changed"},
+    ))
+    harness.registry.append(EvidenceRef(
+        id="target-proof-2",
+        mission_id="mission-1",
+        run_id="run-1",
+        kind="target",
+        trust="deterministic",
+        payload_hash="target-proof-payload-2",
+    ))
+    harness.reducer.apply(harness.reducer.event(
+        "target_bound",
+        payload=TargetBinding(
+            binding_id="target-2",
+            hwnd=202,
+            process_id=7,
+            executable_identity="replacement-process",
+            title_snapshot="Replacement application",
+            established_by_evidence_ref="target-proof-2",
+            epoch=4,
+        ).to_dict(),
+        evidence_refs=("target-proof-2",),
+    ))
+    frame = _frame(12, hwnd=202, epoch=4)
+    harness.state.post_action = _snapshot(
+        frame,
+        turn_index=5,
+        target=TargetState("target-2", 202, 4, True),
+    )
+    harness.actor.proposal = _live_click(630, 430)
+
+    harness.runtime.run_one_turn(turn_index=5)
+
+    assert len(harness.actor.calls) == 2
+    assert harness.actor.calls[1][0].mission.target_title == "Replacement application"
+    assert harness.actor.calls[1][0].previous_action is None
+
+
+def test_previous_action_must_still_be_in_the_current_broker_tool_surface() -> None:
+    harness = _canonical_action_harness(
+        _live_click(), catalog=build_live_catalog(),
+    )
+    assert harness.runtime.run_one_turn(turn_index=4).status is RuntimeStatus.ACTION_RECORDED
+    assert harness.runtime._pending_actor_action is not None
+    post_frame = harness.state.post_action.frame
+    assert post_frame is not None
+    harness.state.post_action = _snapshot(
+        post_frame,
+        turn_index=5,
+        pointer=PointerLeaseState(PointerDisposition.HELD, "lease-2", True),
+    )
+    harness.actor.proposal = _live_click(640, 440)
+
+    result = harness.runtime.run_one_turn(turn_index=5)
+
+    assert result.status is RuntimeStatus.UNAVAILABLE
+    assert len(harness.actor.calls) == 2
+    assert "click" not in tuple(tool.name for tool in harness.actor.calls[1][0].tools)
+    assert harness.actor.calls[1][0].previous_action is None
+
+
+def test_history_sidecar_exception_cannot_change_or_replay_accepted_action(
+    monkeypatch,
+) -> None:
+    harness = _harness(_click())
+
+    def reject_history(*_args, **_kwargs):
+        raise RuntimeError("optional history adapter failed")
+
+    monkeypatch.setattr(
+        mission_runtime_module,
+        "try_project_action_history_args",
+        reject_history,
+    )
+    before = len(harness.reducer.events)
+
+    first = harness.runtime.run_one_turn(turn_index=4)
+
+    assert first.status is RuntimeStatus.ACTION_RECORDED
+    assert len(harness.controller.calls) == 1
+    assert [event.kind for event in harness.reducer.events[before:]] == [
+        "transition_recorded"
+    ]
+    assert harness.reducer.projection.status is MissionStatus.RUNNING
+    assert harness.runtime._pending_actor_action is None
+
+    harness.actor.proposal = _click(650, 450)
+    _set_harness_turn(harness, 5)
+    second = harness.runtime.run_one_turn(turn_index=5)
+    assert second.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.actor.calls[1][0].previous_action is None
+    assert len(harness.controller.calls) == 2
+    assert harness.controller.calls[0].decision_id != harness.controller.calls[1].decision_id
+
+
+def test_actor_error_consumes_previous_action_instead_of_replaying_context() -> None:
+    harness = _canonical_action_harness(
+        _live_click(), catalog=build_live_catalog(),
+    )
+    assert harness.runtime.run_one_turn(turn_index=4).status is RuntimeStatus.ACTION_RECORDED
+    assert harness.runtime._pending_actor_action is not None
+
+    harness.actor.raises = RuntimeError("provider failed after request admission")
+    _set_harness_turn(harness, 5)
+    failed = harness.runtime.run_one_turn(turn_index=5)
+
+    assert failed.status is RuntimeStatus.ACTOR_ERROR
+    assert harness.actor.calls[1][0].previous_action is not None
+    assert harness.runtime._pending_actor_action is None
+
+    harness.actor.raises = None
+    harness.actor.proposal = _claim()
+    _set_harness_turn(harness, 6)
+    harness.runtime.run_one_turn(turn_index=6)
+    assert harness.actor.calls[2][0].previous_action is None
+
+
+def test_oversized_injected_local_intent_cannot_poison_following_turn() -> None:
+    proposal = _live_click()
+    proposal["local_intent"] = "x" * 241
+    harness = _canonical_action_harness(
+        proposal, catalog=build_live_catalog(),
+    )
+
+    first = harness.runtime.run_one_turn(turn_index=4)
+
+    assert first.status is RuntimeStatus.ACTION_RECORDED
+    harness.actor.proposal = _claim()
+    _set_harness_turn(harness, 5)
+    harness.runtime.run_one_turn(turn_index=5)
+    assert len(harness.actor.calls) == 2
+    assert harness.actor.calls[1][0].previous_action is None
+    assert harness.runtime._pending_actor_action is None
+
+
+def test_missing_action_effect_proof_omits_previous_action_context(
+    monkeypatch,
+) -> None:
+    harness = _canonical_action_harness(
+        _live_click(), catalog=build_live_catalog(),
+    )
+    monkeypatch.setattr(
+        DeterministicActionEffectVerifier,
+        "verify",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("comparison unavailable")
+        ),
+    )
+    assert harness.runtime.run_one_turn(turn_index=4).status is RuntimeStatus.ACTION_RECORDED
+
+    harness.actor.proposal = _claim()
+    _set_harness_turn(harness, 5)
+    harness.runtime.run_one_turn(turn_index=5)
+
+    assert harness.reducer.projection.last_transition is not None
+    assert harness.reducer.projection.last_transition.action_effect is None
+    assert harness.actor.calls[1][0].previous_action is None
+
+
+@pytest.mark.parametrize(
+    "proposal,raw_values",
+    (
+        (_type_text("private-message-934781"), ("private-message-934781",)),
+        (_hotkey("ctrl", "shift", key="f12"), ("ctrl", "shift", "f12")),
+    ),
+)
+def test_keyboard_argument_values_omit_the_entire_previous_action(
+    proposal: Mapping[str, Any],
+    raw_values: tuple[str, ...],
+) -> None:
+    harness = _harness(proposal, catalog=build_live_catalog())
+    before = len(harness.reducer.events)
+
+    first = harness.runtime.run_one_turn(turn_index=4)
+
+    assert first.status is RuntimeStatus.ACTION_RECORDED
+    transition = harness.reducer.events[before]
+    assert transition.kind == "transition_recorded"
+    encoded_event = json.dumps(
+        transition.to_dict(), ensure_ascii=False, sort_keys=True,
+    )
+    for raw in raw_values:
+        assert raw not in encoded_event
+
+    harness.actor.proposal = _claim()
+    _set_harness_turn(harness, 5)
+    harness.runtime.run_one_turn(turn_index=5)
+    assert harness.actor.calls[1][0].previous_action is None
+    assert harness.runtime._pending_actor_action is None
 
 
 def test_proven_rejection_without_post_observation_is_stale_not_unknown() -> None:
