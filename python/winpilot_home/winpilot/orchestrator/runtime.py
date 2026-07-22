@@ -10,6 +10,12 @@ from typing import Any, Callable
 
 from ..utils.log import BUS, logger
 from .contracts import ArpGraph, ArpNode, ArpNodeKind, ArpRunStatus, validate_graph
+from .desktop_runtime import (
+    DesktopRuntimeCoordinatorContext,
+    DesktopRuntimeCoordinatorPort,
+    DesktopRuntimeCoordinatorResult,
+    DesktopRuntimeCoordinatorStatus,
+)
 from .evidence import evidence_matches, has_verified_evidence, normalize_evidence, parse_requirement
 from .runtime_selection import DesktopRuntimeSelection, DesktopRuntimeUnavailable
 
@@ -239,6 +245,7 @@ class ArpExecution:
         inputs: dict[str, Any] | None = None,
         run_id: str | None = None,
         desktop_runtime_selection: DesktopRuntimeSelection | None = None,
+        desktop_runtime_coordinator: DesktopRuntimeCoordinatorPort | None = None,
     ) -> None:
         self.graph = graph
         self.handlers = handlers or {}
@@ -252,6 +259,18 @@ class ArpExecution:
         self._desktop_runtime_selection = (
             desktop_runtime_selection or DesktopRuntimeSelection()
         )
+        if desktop_runtime_coordinator is not None and not isinstance(
+            desktop_runtime_coordinator, DesktopRuntimeCoordinatorPort
+        ):
+            raise TypeError(
+                "desktop_runtime_coordinator must implement DesktopRuntimeCoordinatorPort"
+            )
+        if (
+            desktop_runtime_coordinator is not None
+            and self._desktop_runtime_selection.runtime_version != "vnext"
+        ):
+            raise ValueError("desktop runtime coordinator requires vnext selection")
+        self._desktop_runtime_coordinator = desktop_runtime_coordinator
         self.status = ArpRunStatus.QUEUED
         self.current_node_id: str | None = None
         self.variables = {**graph.variables, **self.inputs}
@@ -826,6 +845,30 @@ class ArpExecution:
         default = next((edge for edge in outgoing if edge.branch in {"next", "default", "output"}), None)
         return default.target if default else None
 
+    def _run_desktop_coordinator(self) -> None:
+        coordinator = self._desktop_runtime_coordinator
+        if coordinator is None:
+            raise DesktopRuntimeUnavailable()
+        outcome = coordinator.run(DesktopRuntimeCoordinatorContext(
+            run_id=self.run_id,
+            graph=self.graph.model_dump(mode="json"),
+            inputs=self.inputs,
+            stop_event=self.stop_event,
+            wait_if_paused=self._wait_if_paused,
+        ))
+        if not isinstance(outcome, DesktopRuntimeCoordinatorResult):
+            raise TypeError("desktop runtime coordinator returned an invalid result")
+        if outcome.status is DesktopRuntimeCoordinatorStatus.DONE:
+            self.status = ArpRunStatus.DONE
+            self.result = outcome.output_copy()
+            self.error = ""
+        elif outcome.status is DesktopRuntimeCoordinatorStatus.CANCELED:
+            self.status = ArpRunStatus.CANCELED
+            self.error = outcome.error
+        else:
+            self.status = ArpRunStatus.FAILED
+            self.error = outcome.error
+
     def run(self) -> dict[str, Any]:
         validation = validate_graph(self.graph)
         if not validation.valid:
@@ -836,7 +879,8 @@ class ArpExecution:
             return self.to_dict()
 
         try:
-            self._desktop_runtime_selection.require_live_coordinator()
+            if self._desktop_runtime_coordinator is None:
+                self._desktop_runtime_selection.require_live_coordinator()
         except DesktopRuntimeUnavailable as exc:
             self.status = ArpRunStatus.FAILED
             self.error = str(exc)
@@ -870,6 +914,13 @@ class ArpExecution:
         )
 
         try:
+            if self._desktop_runtime_selection.runtime_version == "vnext":
+                if not self._wait_if_paused():
+                    self.status = ArpRunStatus.CANCELED
+                    self.error = "run canceled"
+                else:
+                    self._run_desktop_coordinator()
+                current = None
             while current:
                 if self.stop_event.is_set():
                     self.status = ArpRunStatus.CANCELED
