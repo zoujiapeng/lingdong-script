@@ -338,7 +338,6 @@ def test_invalid_handoff_fails_closed_without_model_or_legacy_fallback():
     (
         ("foreground_verified", False),
         ("process_id", 8),
-        ("rect", [11, 20, 810, 620]),
     ),
 )
 def test_handoff_identity_mismatch_fails_before_actor(field, value):
@@ -349,6 +348,54 @@ def test_handoff_identity_mismatch_fails_before_actor(field, value):
     execution_context = dict(inputs["execution_context"])
     target_window = dict(execution_context["target_window"])
     target_window[field] = value
+    execution_context["target_window"] = target_window
+    inputs["execution_context"] = execution_context
+    context = DesktopRuntimeCoordinatorContext(
+        run_id=context.run_id,
+        graph=context.graph,
+        inputs=inputs,
+        stop_event=context.stop_event,
+        wait_if_paused=context.wait_if_paused,
+    )
+
+    result = _coordinator(actor, verifier).run(context)
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert actor.calls == []
+    assert verifier.calls == []
+
+
+def test_getwindowrect_and_dwm_geometry_may_differ_before_current_binding():
+    actor = ScriptedActor([_click(), _claim()])
+    verifier = PositiveVisualModel()
+    context = _context()
+    inputs = dict(context.inputs)
+    execution_context = dict(inputs["execution_context"])
+    target_window = dict(execution_context["target_window"])
+    target_window["rect"] = [5, 15, 815, 625]
+    execution_context["target_window"] = target_window
+    inputs["execution_context"] = execution_context
+    context = DesktopRuntimeCoordinatorContext(
+        run_id=context.run_id,
+        graph=context.graph,
+        inputs=inputs,
+        stop_event=context.stop_event,
+        wait_if_paused=context.wait_if_paused,
+    )
+
+    result = _coordinator(actor, verifier).run(context)
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+
+
+def test_malformed_handoff_geometry_fails_before_actor():
+    actor = ScriptedActor([_click()])
+    verifier = PositiveVisualModel()
+    context = _context()
+    inputs = dict(context.inputs)
+    execution_context = dict(inputs["execution_context"])
+    target_window = dict(execution_context["target_window"])
+    target_window["rect"] = [10, 20, 10, 620]
     execution_context["target_window"] = target_window
     inputs["execution_context"] = execution_context
     context = DesktopRuntimeCoordinatorContext(
