@@ -15,6 +15,12 @@ from winpilot.orchestrator.contracts import (
     ArpPolicy,
     ArpRunStatus,
 )
+from winpilot.orchestrator.desktop_runtime import (
+    DesktopRuntimeCoordinatorContractError,
+    DesktopRuntimeCoordinatorContext,
+    DesktopRuntimeCoordinatorResult,
+    DesktopRuntimeCoordinatorStatus,
+)
 from winpilot.orchestrator.runtime import ArpExecution, NodeResult
 from winpilot.orchestrator.runtime_selection import (
     DesktopRuntimeSelection,
@@ -117,8 +123,262 @@ def test_explicit_vnext_fails_before_any_graph_handler_or_task_stage_mutation() 
     assert execution.runtime_state == {}
 
 
-def test_default_legacy_selection_preserves_existing_handler_execution() -> None:
+def test_coordinator_contracts_reject_malformed_or_non_json_values() -> None:
+    stop = threading.Event()
+    with pytest.raises(DesktopRuntimeCoordinatorContractError, match="format"):
+        DesktopRuntimeCoordinatorContext(
+            run_id="run-1",
+            graph={},
+            inputs={},
+            stop_event=stop,
+            wait_if_paused=lambda: True,
+            format="desktop-runtime-coordinator-context/9",
+        )
+    with pytest.raises(DesktopRuntimeCoordinatorContractError, match="JSON"):
+        DesktopRuntimeCoordinatorContext(
+            run_id="run-1",
+            graph={},
+            inputs={"opaque": object()},
+            stop_event=stop,
+            wait_if_paused=lambda: True,
+        )
+    with pytest.raises(DesktopRuntimeCoordinatorContractError, match="requires an error"):
+        DesktopRuntimeCoordinatorResult(
+            status=DesktopRuntimeCoordinatorStatus.FAILED,
+        )
+    with pytest.raises(DesktopRuntimeCoordinatorContractError, match="cannot carry an error"):
+        DesktopRuntimeCoordinatorResult(
+            status=DesktopRuntimeCoordinatorStatus.DONE,
+            error="contradiction",
+        )
+
+
+def test_coordinator_cannot_be_injected_into_legacy_selection() -> None:
+    class Coordinator:
+        def run(self, _context):
+            return DesktopRuntimeCoordinatorResult(
+                status=DesktopRuntimeCoordinatorStatus.DONE,
+            )
+
+    with pytest.raises(ValueError, match="requires vnext"):
+        ArpExecution(
+            _task_stage_graph(),
+            desktop_runtime_coordinator=Coordinator(),
+        )
+
+
+def test_explicit_vnext_coordinator_owns_run_once_and_bypasses_handlers(
+    monkeypatch,
+) -> None:
+    import winpilot.orchestrator.runtime as runtime_module
+
+    coordinator_calls: list[DesktopRuntimeCoordinatorContext] = []
+    handler_calls: list[str] = []
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        runtime_module.BUS,
+        "publish",
+        lambda event, **payload: events.append((event, payload)),
+    )
+
+    def forbidden_handler(_node, _context, _stop_event) -> NodeResult:
+        handler_calls.append("legacy_task_stage")
+        return NodeResult(ok=True)
+
+    class Coordinator:
+        def run(
+            self, context: DesktopRuntimeCoordinatorContext,
+        ) -> DesktopRuntimeCoordinatorResult:
+            coordinator_calls.append(context)
+            assert context.run_id == execution.run_id
+            assert context.stop_event is execution.stop_event
+            assert context.wait_if_paused() is True
+            with pytest.raises(TypeError):
+                context.inputs["runtime_version"] = "legacy"  # type: ignore[index]
+            return DesktopRuntimeCoordinatorResult(
+                status=DesktopRuntimeCoordinatorStatus.DONE,
+                output={"runtime": "vnext"},
+            )
+
+    execution = ArpExecution(
+        _task_stage_graph(),
+        {ArpNodeKind.TASK_STAGE: forbidden_handler},
+        inputs={"runtime_version": "untrusted"},
+        run_id="vnext-coordinator-once",
+        desktop_runtime_selection=DesktopRuntimeSelection.from_config("vnext"),
+        desktop_runtime_coordinator=Coordinator(),
+    )
+
+    snapshot = execution.run()
+
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"] == {"runtime": "vnext"}
+    assert len(coordinator_calls) == 1
+    assert handler_calls == []
+    assert execution.history == []
+    assert execution.outputs == {}
+    assert [event for event, _payload in events] == [
+        "arp_run_start",
+        "arp_run_done",
+    ]
+    assert all(payload["run_id"] == execution.run_id for _event, payload in events)
+
+
+def test_vnext_coordinator_uses_existing_pause_gate() -> None:
+    entered = threading.Event()
+    coordinator_calls: list[str] = []
+    finished: list[dict] = []
+
+    class Coordinator:
+        def run(
+            self, context: DesktopRuntimeCoordinatorContext,
+        ) -> DesktopRuntimeCoordinatorResult:
+            coordinator_calls.append("vnext")
+            entered.set()
+            assert context.wait_if_paused() is True
+            return DesktopRuntimeCoordinatorResult(
+                status=DesktopRuntimeCoordinatorStatus.DONE,
+                output={"resumed": True},
+            )
+
+    execution = ArpExecution(
+        _task_stage_graph(),
+        run_id="vnext-shared-pause",
+        desktop_runtime_selection=DesktopRuntimeSelection.from_config("vnext"),
+        desktop_runtime_coordinator=Coordinator(),
+    )
+    assert execution.pause() is True
+    thread = threading.Thread(target=lambda: finished.append(execution.run()))
+    thread.start()
+    assert not entered.wait(0.05)
+    assert execution.resume() is True
+    assert entered.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert coordinator_calls == ["vnext"]
+    assert finished[0]["status"] == ArpRunStatus.DONE.value
+
+
+def test_cancel_while_vnext_is_paused_never_enters_coordinator() -> None:
+    coordinator_calls: list[str] = []
+    finished: list[dict] = []
+
+    class Coordinator:
+        def run(
+            self, _context: DesktopRuntimeCoordinatorContext,
+        ) -> DesktopRuntimeCoordinatorResult:
+            coordinator_calls.append("vnext")
+            return DesktopRuntimeCoordinatorResult(
+                status=DesktopRuntimeCoordinatorStatus.DONE,
+            )
+
+    execution = ArpExecution(
+        _task_stage_graph(),
+        run_id="vnext-cancel-before-entry",
+        desktop_runtime_selection=DesktopRuntimeSelection.from_config("vnext"),
+        desktop_runtime_coordinator=Coordinator(),
+    )
+    assert execution.pause() is True
+    thread = threading.Thread(target=lambda: finished.append(execution.run()))
+    thread.start()
+    assert not coordinator_calls
+    execution.cancel()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert coordinator_calls == []
+    assert finished[0]["status"] == ArpRunStatus.CANCELED.value
+    assert finished[0]["error"] == "run canceled"
+
+
+@pytest.mark.parametrize(
+    ("coordinator_result", "error"),
+    [
+        (
+            DesktopRuntimeCoordinatorResult(
+                status=DesktopRuntimeCoordinatorStatus.UNAVAILABLE,
+                error="vNext owner unavailable",
+            ),
+            "vNext owner unavailable",
+        ),
+        (RuntimeError("coordinator exploded"), "coordinator exploded"),
+    ],
+)
+def test_vnext_coordinator_failure_never_falls_back_to_legacy(
+    coordinator_result: DesktopRuntimeCoordinatorResult | Exception,
+    error: str,
+) -> None:
+    handler_calls: list[str] = []
+    coordinator_calls: list[str] = []
+
+    class Coordinator:
+        def run(
+            self, _context: DesktopRuntimeCoordinatorContext,
+        ) -> DesktopRuntimeCoordinatorResult:
+            coordinator_calls.append("vnext")
+            if isinstance(coordinator_result, Exception):
+                raise coordinator_result
+            return coordinator_result
+
+    execution = ArpExecution(
+        _task_stage_graph(),
+        {
+            ArpNodeKind.TASK_STAGE: lambda *_args: (
+                handler_calls.append("legacy") or NodeResult(ok=True)
+            ),
+        },
+        desktop_runtime_selection=DesktopRuntimeSelection.from_config("vnext"),
+        desktop_runtime_coordinator=Coordinator(),
+    )
+
+    snapshot = execution.run()
+
+    assert snapshot["status"] == ArpRunStatus.FAILED.value
+    assert snapshot["error"] == error
+    assert coordinator_calls == ["vnext"]
+    assert handler_calls == []
+    assert execution.history == []
+    assert execution.outputs == {}
+
+
+def test_malformed_coordinator_result_fails_without_legacy_fallback() -> None:
+    handler_calls: list[str] = []
+
+    class Coordinator:
+        def run(self, _context):
+            return {"status": "done"}
+
+    execution = ArpExecution(
+        _task_stage_graph(),
+        {
+            ArpNodeKind.TASK_STAGE: lambda *_args: (
+                handler_calls.append("legacy") or NodeResult(ok=True)
+            ),
+        },
+        desktop_runtime_selection=DesktopRuntimeSelection.from_config("vnext"),
+        desktop_runtime_coordinator=Coordinator(),
+    )
+
+    snapshot = execution.run()
+
+    assert snapshot["status"] == ArpRunStatus.FAILED.value
+    assert "invalid result" in snapshot["error"]
+    assert handler_calls == []
+
+
+def test_default_legacy_selection_preserves_existing_handler_execution(
+    monkeypatch,
+) -> None:
+    import winpilot.orchestrator.runtime as runtime_module
+
     calls: list[str] = []
+    events: list[str] = []
+    monkeypatch.setattr(
+        runtime_module.BUS,
+        "publish",
+        lambda event, **_payload: events.append(event),
+    )
 
     def handler(_node, context, _stop_event) -> NodeResult:
         calls.append(context["desktop_runtime_selection"].runtime_version)
@@ -133,6 +393,16 @@ def test_default_legacy_selection_preserves_existing_handler_execution() -> None
 
     assert snapshot["status"] == ArpRunStatus.DONE.value
     assert calls == ["legacy"]
+    assert events == [
+        "arp_run_start",
+        "arp_node_start",
+        "arp_node_done",
+        "arp_node_start",
+        "arp_node_done",
+        "arp_node_start",
+        "arp_node_done",
+        "arp_run_done",
+    ]
 
 
 def test_stage_runtime_defence_rejects_vnext_before_build_runner_or_state_write(
