@@ -163,7 +163,7 @@ Electron task input
 
 直接调用 Reducer、Profiler、Policy、Broker、Actor 或 `/api/v2` 只是 unit/integration。vNext不能获得额外截图、预置计划、特殊 max steps 或后门工具。
 
-当前可见 Electron 客户端提供按 run 的 `Legacy（默认）` / `vNext（实验）` 选择器。冻结为 `vnext` 时，Server 注入增量 live coordinator，当前工具面为 `click/double_click/scroll/type_text/hotkey/claim/blocked`；`ArpExecution` 完全绕过 legacy handlers，失败不得在同一 run 回退。keyboard 代码合同已闭合但同入口 Electron oracle 尚未运行。2026-07-22，`precise-click` seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）、seed `424242`（run `arp-20260722-154447-9329b4`，2 turns）与 capability-admission 收敛后的 seed `135791`（run `arp-20260722-165702-086da6`，2 turns）已从冷启动、空 session、可见 Electron/UIA 入口通过独立 trusted-browser oracle。suite report 为 `output/playwright/client-visual-e2e/20260722-154302-suite/suite-report.json`、`output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json` 与 `output/playwright/client-visual-e2e/20260722-165627-suite/suite-report.json`。这三例只进入受控点击 grounded-pass 记录。
+当前可见 Electron 客户端提供按 run 的 `Legacy（默认）` / `vNext（实验）` 选择器。冻结为 `vnext` 时，Server 注入增量 live coordinator，当前工具面为 `click/double_click/scroll/type_text/hotkey/claim/blocked`；`ArpExecution` 完全绕过 legacy handlers，失败不得在同一 run 回退。2026-07-22，`precise-click` seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）、seed `424242`（run `arp-20260722-154447-9329b4`，2 turns）与 capability-admission 收敛后的 seed `135791`（run `arp-20260722-165702-086da6`，2 turns）已从冷启动、空 session、可见 Electron/UIA 入口通过独立 trusted-browser oracle。suite report 为 `output/playwright/client-visual-e2e/20260722-154302-suite/suite-report.json`、`output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json` 与 `output/playwright/client-visual-e2e/20260722-165627-suite/suite-report.json`。这三例只进入受控点击 grounded-pass 记录。
 
 ActionEffect 接线前，最终 direction/notches scroll 合同也从同一入口获得一对双向 grounded pass：down seed `20260722`，run `arp-20260722-182113-91882e`，report `output/playwright/client-visual-e2e/20260722-182040-suite/suite-report.json`；up seed `20260723`，run `arp-20260722-181904-2b30b1`，report `output/playwright/client-visual-e2e/20260722-181825-suite/suite-report.json`。随机化 oracle 独立核对 trusted wheel、方向、实际滚动、pane 坐标与目标完全显露。`20260722-174712-suite`、`20260722-175451-suite`、`20260722-180448-suite` 的符号含糊、oracle 过早采样/振荡与旧 signed 合同反向失败仍保留为失败记录；中间 signed-schema down pass 不作为最终合同的主门槛证据。protocol、fake port、单元测试或 legacy shadow 仍不得计入 grounded pass。
 
@@ -191,6 +191,23 @@ ActionEffect 接线后的同入口复测必须单独报告，不能覆盖上述�
 用户在 run `arp-20260722-214805-c9faaf` 期间切换界面，导致 target identity unavailable；该 run 明确
 标记为外部干扰并排除，不计入产品通过或失败。最终 2 pass / 1 fail 的单 seed 结果不能换算成功率，
 也不能证明 ActionEffect 提升了恢复能力。
+
+2026-07-23 的 keyboard 冷启动、空 session、同一可见 Electron/UIA 入口补齐了窄范围真实证据。
+无动作连续性时的 baseline `20260723-053146-suite`（run `arp-20260723-053225-58685a`）连续
+24 次点击已正确取得同一输入框焦点，却从未提出 `type_text`，由 trusted browser event 证明失败
+位于 Actor 回合上下文而非点击或焦点。加入一次性、Runtime 派生的 bounded previous-action view 后，
+`20260723-070921-suite`（run `arp-20260723-071001-9b5a7c`）以 click -> type_text -> claim 的
+3 turns / 2 actions 输入精确随机文本；`20260723-071108-suite` 的 seeds `31001/31002/31003`
+也全部以 3 turns / 2 actions 通过，且 `false_done=0`。这些不是同配置 paired A/B，只证明当前
+键盘输入链可达，不能换算一般能力提升。
+
+`keyboard-select-all` 首轮 `20260723-071428-suite` 的产品动作实际上产生了可信的
+Control-down -> a-down -> a-up -> Control-up、正确目标、精确 `0..44` 选区、内容不变和 modifier
+释放；失败来自独立 server/runner 额外要求 US 物理键位 `KeyA/ControlLeft`。oracle 随后保留逻辑
+key、modifier、顺序、target、selection、无 mutation/clipboard/input 与 cleanup 的严格检查，只移除
+布局相关的 DOM `code` 等值条件。复测 `20260723-072628-suite`（run
+`arp-20260723-072705-9dbc00`）以 3 turns / 2 actions、`false_done=0` 获得 conclusive pass。
+这次改动只修正测试判定，不算产品能力增量，也不能与旧 oracle 的结论混算。
 
 P7a measurement-only harness 已完成本轮审计并开始真实校准：真实失败不再因“等不到 success”退化为
 异常字符串，而会保存最后一份浏览器状态，并把结果分为 conclusive pass、conclusive fail 与 oracle
@@ -297,7 +314,7 @@ paired scroll 失败 arm `20260723-024625` 的 24 次 wheel 均为 trusted 且�
 - Raw receipt的机械三态与`input_completed=true/false/null`一致；
 - legacy scroll正常输出保持兼容，安全修正只禁止不确定后的第二种输入机制。
 
-以上 RawDevice 项大多仍只有 unit/characterization 证据。P4 live 路径已用同一个 `AtomicDesktopController` 组装 click/double-click/scroll/type-text/hotkey，覆盖 Runtime permit、commit-time Windows identity、对应的 pointer/keyboard final guard、post-action authoritative frame/evidence 以及 unknown-no-replay。keyboard 的 Catalog/Controller/RawDevice inventory、无假坐标 admission、部分输入 unknown、按键 cleanup 和 sidecar 不泄露内容已有负向/property/注入式测试，但尚未运行真实 Electron keyboard oracle。三个随机 seed 的历史 Electron/UIA click 与 ActionEffect 接线前最终 scroll 合同的一对 down/up seed 已通过独立 oracle；ActionEffect 最终代码的同入口复测则是 down/click 通过、up 失败。P7a 已补充窄范围 legacy/vNext paired 对照，但 precise-click 仅 1 pair，scroll 的 vNext 1/2 又低于 legacy 2/2，因此仍不代表多原语门槛通过；`drag`、`draw_strokes`、held pointer 和 ROI observe 仍没有 live parity。权威前后帧的通用 `changed/unchanged/unknown` 与 replay-derived per-obligation streak 已进入 Actor 的中性 `unchanged_frame_streak` 反馈。
+以上 RawDevice 项大多仍只有 unit/characterization 证据。P4 live 路径已用同一个 `AtomicDesktopController` 组装 click/double-click/scroll/type-text/hotkey，覆盖 Runtime permit、commit-time Windows identity、对应的 pointer/keyboard final guard、post-action authoritative frame/evidence 以及 unknown-no-replay。keyboard 的 Catalog/Controller/RawDevice inventory、无假坐标 admission、部分输入 unknown、按键 cleanup 和 sidecar 不泄露内容已有负向/property/注入式测试；`type_text` 三个随机 seed 与 `hotkey` 的 select-all 场景现已通过真实 Electron trusted-browser oracle。三个随机 seed 的历史 Electron/UIA click 与 ActionEffect 接线前最终 scroll 合同的一对 down/up seed 已通过独立 oracle；ActionEffect 最终代码的同入口复测则是 down/click 通过、up 失败。P7a 已补充窄范围 legacy/vNext paired 对照，但 precise-click 仅 1 pair，scroll 的 vNext 1/2 又低于 legacy 2/2，因此仍不代表多原语门槛通过；`drag`、`draw_strokes`、held pointer 和 ROI observe 仍没有 live parity。权威前后帧的通用 `changed/unchanged/unknown` 与 replay-derived per-obligation streak 已进入 Actor 的中性 `unchanged_frame_streak` 反馈。
 
 ActionEffect 评测必须把 frame fact 与最终 oracle 分开报告，至少覆盖：静止 no-op、滚动边界、
 ambient animation、视频、短暂动画、错误 target binding 和不可比较帧。只有解码后像素完全一致才记
@@ -521,7 +538,7 @@ sidecar，以及 legacy VLM helper 的 stop_event seam。因此“全角色可�
 -受控任务不低于legacy；
 -保留真实oracle失败。
 
-当前已有增量 live coordinator、具体模型 Visual Actor、`click/double_click/scroll/type_text/hotkey/claim/blocked` 小工具面和共享 `AtomicDesktopController` 链；客户端可显式选择实验 runtime，legacy 仍默认。历史三个 `precise-click` 与 ActionEffect 接线前最终 scroll 合同的一对 down/up `scroll-reveal` 已通过独立 trusted-browser oracle。keyboard 只有代码/注入式闭环，尚不计作 live parity。commit `f8fa2a7` 的 P7a precise-click 产生 1 个两侧均通过的 eligible pair，但 scroll-reveal 的 2 个 eligible pairs 中 vNext 为 1/2、legacy 为 2/2。外部 oracle 不进入产品上下文；没有真实任务、多布局、其余原语或规模化 held-out 对照，所以该门槛未达。
+当前已有增量 live coordinator、具体模型 Visual Actor、`click/double_click/scroll/type_text/hotkey/claim/blocked` 小工具面和共享 `AtomicDesktopController` 链；客户端可显式选择实验 runtime，legacy 仍默认。历史三个 `precise-click` 与 ActionEffect 接线前最终 scroll 合同的一对 down/up `scroll-reveal`，以及当前 `type_text` 三 seed 与 `hotkey` select-all，已通过独立 trusted-browser oracle。keyboard 结果是非 paired 的原语可达性证据；commit `f8fa2a7` 的 P7a precise-click 产生 1 个两侧均通过的 eligible pair，但 scroll-reveal 的 2 个 eligible pairs 中 vNext 为 1/2、legacy 为 2/2。外部 oracle 不进入产品上下文；没有真实任务、多布局、其余原语或规模化 held-out 对照，所以该门槛未达。
 
 queue-time capability admission 门槛已经结构性闭合：同一冻结 runtime 只有一个
 `DesktopRuntimeAdmission` owner；vNext 从不可变 `RuntimeCapabilitySnapshot` 核对 canonical
@@ -530,7 +547,7 @@ capability/service 与 Catalog/Controller parity，同一 snapshot 继续供 `Ex
 两边 missing-capability、snapshot/runtime identity、Catalog/Controller drift，以及 admission 失败时
 prepare/model/Controller/legacy fallback 调用数为零。仅有 snapshot 单元测试仍不能替代真实入口证据。
 
-P7a 的 multi-seed/paired runner 与 fail-closed 报告合同已产生首批真实 grounded 和 eligible A/B 校准样本，但 paired scroll 的 vNext 1/2 对 legacy 2/2 使 recovery gate 未达。下一门槛是让已接线的 `type_text`/`hotkey` 通过同入口 Electron oracle，并继续扩大通用 ActionEffect/unchanged-frame 的随机 seed、滚动边界、动态画面、多布局与 paired 覆盖；是否稳定利用中性反馈必须由后续独立任务结果判断，不能靠扩写 prompt、增加方向规则或提前启用 Inspector。`drag`、`draw_strokes`、held pointer 和 ROI observe 必须逐项进入同一 snapshot/Catalog/Broker/Controller owner，
+P7a 的 multi-seed/paired runner 与 fail-closed 报告合同已产生首批真实 grounded 和 eligible A/B 校准样本，但 paired scroll 的 vNext 1/2 对 legacy 2/2 使 recovery gate 未达。`type_text`/`hotkey` 已通过同入口 Electron oracle；下一门槛是实现通用 unbound target acquisition，并继续扩大 ActionEffect/unchanged-frame 的随机 seed、滚动边界、动态画面、多布局与 paired 覆盖。是否稳定利用中性反馈必须由后续独立任务结果判断，不能靠扩写 prompt、增加方向规则或提前启用 Inspector。`drag`、`draw_strokes`、held pointer 和 ROI observe 必须逐项进入同一 snapshot/Catalog/Broker/Controller owner，
 并通过必要工具 recall、unknown-no-replay、负向/property 与同入口 Electron oracle。完成这些之前，
 现有受控 canary 仍不参与默认切换判定。
 

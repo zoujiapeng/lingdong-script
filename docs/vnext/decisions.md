@@ -619,3 +619,47 @@
   primitive coverage and real Electron oracle evidence. This slice deletes no legacy product owner,
   does not switch the default runtime and does not satisfy P7/P8/P9. Drag, drawing, held pointer and
   ROI observation remain later slices; P6 stays disabled.
+
+### D034: one trusted previous action is Actor context, not Mission truth
+
+- status: accepted contract with bounded same-entry keyboard evidence; no general uplift or P7 claim.
+- versions and local intent: `actor-tool-view/1` adds the strict Boolean `requires_local_intent` and
+  `actor-turn-input/3` adds at most one optional `actor-previous-action/0`. For every GUI mutation the
+  provider requires one bounded non-empty `local_intent`, validates it with the function arguments,
+  then removes it before Controller execution. It is local semantic context, not a plan, identity,
+  completion claim or recovery command. No application, task phrase, coordinate rule or system-prompt
+  instruction was added.
+- eligibility: Runtime creates the sidecar only after reading back the accepted canonical transition.
+  Projection requires the same mission revision, active obligation, target binding and still-granted
+  action tool; the route must remain a Visual Actor GUI mutation and canonical ActionEffect must exist
+  with `target_binding_valid=true`. The provider additionally requires completed input, reconciled
+  post-action frame and exact agreement with the flat canonical transition. Any mismatch omits it.
+- argument boundary: history is default-deny and all-or-nothing. Only complete closed top-level
+  objects whose actual arguments are explicitly `historyVisible=true` finite JSON scalars can cross
+  the turn boundary; ambiguous, partial, unmarked or oversized projections are omitted. The current
+  eligible actions are `click`, `double_click` and `scroll`. `type_text` and `hotkey` are deliberately
+  unmarked, so their entire native previous-action history is omitted rather than leaking text or a
+  chord.
+- provider representation: an eligible action becomes one native assistant tool-call plus one tool
+  result immediately before the latest user image. The duplicate flat `last_transition` is omitted.
+  The result reports neutral reconciled facts including `temporal_full_frame_change`; both
+  `semantic_completion` and `causal_attribution` are always `unknown`, so animation or temporal pixel
+  delta cannot masquerade as semantic progress or causality.
+- lifetime and authority: the sidecar is process-local and one-shot. It is consumed immediately before
+  an actual Actor request and remains consumed when the provider errors; a pre-request observation
+  failure does not claim consumption, while cancellation/terminal state clears it and restart loses it.
+  It never enters MissionDefinition, MissionEvent, MissionProjection, EvidenceRegistry, BUS/WebSocket,
+  replay, claim, Verifier or completion truth, and it cannot replay an action. The private turn trace
+  adds only `previous_action_projected: bool | null`; it records no intent, arguments, image or message.
+- keyboard evidence: before this contract, commit `f26b7de` failed `keyboard-entry` in suite
+  `20260723-053146-suite`, run `arp-20260723-053225-58685a`, with 24 clicks and zero `type_text` calls.
+  Final contract commit `515b286` first passed suite `20260723-070921-suite`, run
+  `arp-20260723-071001-9b5a7c`, then passed all three `keyboard-entry` cases in suite
+  `20260723-071108-suite`: runs `arp-20260723-071141-0f75a0`, `arp-20260723-071245-fa6469` and
+  `arp-20260723-071350-e03585`.
+- oracle correction: `keyboard-select-all` suite `20260723-071428-suite`, run
+  `arp-20260723-071500-ae5d4c`, was an oracle false negative. After commit `a5c0c95` changed the
+  verifier to layout-independent logical-hotkey semantics, suite `20260723-072628-suite`, run
+  `arp-20260723-072705-9dbc00`, passed. The baseline, final Actor contract and corrected oracle are
+  different configurations; these runs establish diagnosis and same-entry reachability, not a
+  controlled general-agent uplift, full P7, default switch or legacy-deletion gate.
