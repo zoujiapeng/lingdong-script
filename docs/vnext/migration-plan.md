@@ -336,19 +336,21 @@ P3b 的同入口接线只在 `vnext.broker_shadow.enabled=true` 时启用：模�
 
 ## 8. P4：Visual Actor 受控旁路
 
-状态：**P4a 纯 Actor 合同与注入式单回合 MissionRuntime 已完成；P4b 已进入共享 owner 的早期抽取，完整 admission/controller bridge、live Actor 和产品 canary 尚未实现。**
+状态：**P4a 注入式 MissionRuntime、P4b 默认关闭的 atomic click/double-click 机械链和 P4c 可注入 product coordinator protocol/seam 已完成；Server 默认未注入 coordinator，live Actor/coordinator 实现和 canary 尚未实现。**
 
 P4a 已在独立 `vnext/actor/` 和 `vnext/runtime/` 中实现严格版本化的 Actor 可见 view、无 Runtime 身份 proposal、Runtime-bound envelope、注入端口与单回合协调器。它不直接调用模型或设备，不导入 legacy AgentRunner/ToolSession/RawDevice，不接 Electron/StageRuntime，也不选择 runtime version。legacy 仍是默认且唯一产品桌面执行 runtime，Broker 仍未 enforce，因此本阶段保持产品行为不变。
 
 P4a admission 在 Actor 返回后重新读取 Mission revision/active obligation、完整权威 frame/target/pointer 状态并重新投影 Broker。TOCTOU 不一致或动作不在最新小工具面时丢弃 proposal；每回合至多向注入 ControllerPort 提交一笔 Runtime-bound transaction。Controller 结果严格区分 `completed`、`rejected`、`unknown`；`unknown`、执行后异常或无法对账的结果只会阻塞当前义务，不会自动 action replay。
 
-`claim_obligation_done` 在 P4a 只接受 `obligation_claimed` 并进入 `CLAIMED`/`verification_required`，不能 verified 或结束 mission，必须等 P5 独立 Verifier。Capability/Inspector/Planner 等尚未接入的请求返回 unavailable；P6 Planner/Inspector 没有跨任务 A/B 证据前继续 fail closed。
+`claim_obligation_done` 本身只接受 `obligation_claimed` 并进入 `CLAIMED`。P5a 只有在 ExecutionProfile 允许且注入只读 ObligationVerifier 时才继续验证；P5b 只有在本地 MissionCompletionVerifier 与 Reducer 共用同一 EvidenceRegistry 时才机械关闭 mission。Capability/Inspector/Planner 等未接服务仍返回 unavailable；P6 在没有跨任务 A/B 证据前继续 fail closed。
 
-P4b 才能把这些合同接到现有唯一 FrameAuthority、admission/坐标校验和 Controller/RawDevice 链，并以默认关闭的 live Actor canary 从同一 Electron 入口运行。Bridge 必须先让 legacy 委托共享 owner，不能复制 capture、action parser、pointer owner 或执行器。
+P4b 按原语把这些合同接到现有唯一 FrameAuthority、admission/坐标校验和 Controller/RawDevice 链。Bridge 必须先让 legacy 委托共享 owner，不能复制 capture、action parser、pointer owner 或执行器；当前窄切片不是 live Actor canary。
 
-P4b 当前只完成四个可独立回退的基础切片：legacy 委托两阶段 `FrameObserver`；submitted-image 坐标通过纯 mapper 转为 normalized-frame 坐标；每个 run 的 `DesktopRuntimeSelection` 只从 Runtime 配置冻结一次；scroll 通过唯一 DesktopActionQueue owner 产生 typed mechanical result，并可由 session-free、无 action parser 的 `RawDeviceExecutor.scroll(...)` 调用。每个坐标空间边界只转换一次并保留 provenance；第二段 normalized-frame 到物理坐标仍未共享。
+P4b 当前完成的可独立回退切片包括：legacy 委托两阶段 `FrameObserver`；submitted-image -> normalized-frame -> physical-screen 的单次 typed 坐标映射；每 run 冻结一次的 `DesktopRuntimeSelection`；typed scroll RawDevice seam；以及默认关闭的 `AtomicClickController`。该 Controller 仅接受 `click`/`double_click`，在唯一 physical lease 中消费 Runtime mutation permit、pin 权威 frame、核对 commit-time HWND/PID/epoch/region/hit-test，并在每次 mouse-down 紧前做 final target guard。动作后释放 frame pin 但保持同一 physical lease，再由 `AtomicPostActionBridge` CAS 提交新权威帧并向 run-scoped EvidenceRegistry 写入对应 evidence。
 
-这些切片不构成 live bridge。当前 scroll context 只核对调用方提供的 target/current HWND，尚未在 commit time 重新读取 foreground、frame、epoch、PID 和 capture region；FastGuiController 仍通过显式 legacy adapter 处理未迁移原语。选择 `vnext` 只会在桌面 mutation 前安全拒绝，不会运行 Actor，也不会回退 legacy。PostMessage 调用结果不确定时禁止 SendInput fallback，是统一 no-uncertain-replay 合同的刻意安全修正，不应描述为完全行为不变。
+这些切片不构成 live bridge。`AtomicClickController` 只由注入代码/测试组装，无具体 Visual Actor model port 或 live Electron coordinator 实现，也未覆盖 type/hotkey/drag/draw/held-pointer。FastGuiController 仍通过显式 legacy adapter 处理产品原语。Server 默认选择 `vnext` 会在桌面 mutation 前安全拒绝，不会运行 Actor，也不会回退 legacy。PostMessage 结果不确定时禁止 SendInput fallback，是 no-uncertain-replay 合同的刻意安全修正。
+
+P4c 只定义 product coordinator 的严格注入 seam。`ArpExecution` 仅在 runtime selection 已冻结为 `vnext` 且显式注入 coordinator 时绕过 legacy handlers，并复用同一 run id、BUS、stop 与 pause gate；coordinator 失败不得回退 legacy。Server 目前不注入该 port，也没有可运行的 live implementation，所以该 seam 不是 Electron vNext 路径已可用的证据。
 
 P4a 不授权删除任何 legacy 产品职责。`AgentRunner` 的全局 todo、模型直接 `done` 和固定大工具面只能在 paired canary 与真实 Electron E2E 达到 [evaluation.md](evaluation.md) 门槛，且 trace 证明所有 vNext Actor 回合分别由 MissionCard、P5 verification 和 BrokerProjection 接管后删除；单元测试、注入 fake 或一次受控成功都不构成删除证据。
 
@@ -377,6 +379,12 @@ P4a 不授权删除任何 legacy 产品职责。`AgentRunner` 的全局 todo、�
 -失败保留真实oracle结论。
 
 ## 9. P5：claim 与独立 Verifier
+
+状态：**P5a 注入式 ObligationVerifier 和 P5b 本地 deterministic MissionCompletionVerifier 已接入注入式 MissionRuntime；模型/视觉 Verifier、ActionEffectVerifier、产品接线和跨进程 exactly-once 尚未实现。**
+
+P5a 冻结 accepted claim fingerprint、attempt 和当前 run-scoped evidence，只把无 Runtime 身份的 assessment 交回 Runtime；不可用、异常、malformed、stale 或证据变化都 fail closed，最终只能由 Reducer 接受 verification event。当前 port 是注入式，没有另一个真实视觉模型调用。
+
+P5b 是进程内 evidence-first 闭合：`DeterministicMissionCompletionVerifier` 和 canonical `EvidenceRegistry` 必须成对注入，且 Reducer 必须读取同一 registry。Runtime 冻结全部 required obligation 的 accepted verification identity 与完整证据，生成内容哈希绑定的 mission aggregate，先写 evidence，重读确认后再接受 `mission_verified`。这不是可持久 WAL；进程在 evidence 与 event 之间崩溃时没有已证明的跨进程恢复/exactly-once 语义。
 
 拆分当前混合 DoneVerifier：
 
@@ -407,6 +415,8 @@ MissionVerifier
 
 ## 10. P6：Planner 与 Inspector 按证据引入
 
+状态：**禁用。尚无至少两个 held-out 任务族的 external-oracle A/B 收益证据，因此不实现常驻或可写 Planner/Inspector。**
+
 Planner/Inspector不是P1-P5前置条件。
 
 Planner引入判据：
@@ -429,6 +439,8 @@ Inspector引入判据：
 
 ## 11. P7：真实任务 canary
 
+状态：**未开始。当前只有可注入 coordinator protocol/seam，Server 默认未注入且无 live vNext coordinator/Actor 实现，不能以注入测试或 legacy shadow 冒充 canary。**
+
 在受控场景稳定后运行：
 
 - 11个黑盒任务；
@@ -444,6 +456,8 @@ Inspector引入判据：
 Canary失败不在同一run偷切legacy。可以另开独立run对照。
 
 ## 12. P8：默认切换
+
+状态：**未开始；P2/P3 评测门槛、P4 live canary、P5 false-positive 校准和 P7 真实报告均未满足。**
 
 默认切换必须同时满足：
 
@@ -463,6 +477,8 @@ Canary失败不在同一run偷切legacy。可以另开独立run对照。
 先做小比例canary，再扩大。回退是下一个独立run显式选择legacy，不在运行中切回旧Agent。
 
 ## 13. P9：删除 legacy 职责
+
+状态：**未开始；当前可删 legacy 产品职责为 0。**
 
 切换不是完成，净删旧代码才是完成。每项删除需满足：
 
@@ -491,7 +507,7 @@ Canary失败不在同一run偷切legacy。可以另开独立run对照。
 | UIA/OCR自动语义升级 | 显式probe capability | provenance/frame gate | negative eval通过 |
 | 各模型调用点/SDK自行重试 | `modeling/ModelCallRuntime` | adapter prepare一次，冻结request后仅做精确transport retry | product package无绕过；逐attempt trace与cancel闭合 |
 | mutation-capable node通用retry | mutation replay policy + 新Actor决策 | unknown outcome reconcile/block；仅确定未执行且显式幂等授权才可replay | 所有桌面mutation经同一transaction/evidence合同 |
-| session-bound raw action reflection | typed RawDevice primitive + 临时 legacy adapter | 按 primitive 先共享物理 owner；当前仅 scroll | click/type/hotkey/drag/draw 完成 parity、partial-input 与真实 E2E 后删除 adapter |
+| session-bound raw action reflection | typed RawDevice primitive + 临时 legacy adapter | 按 primitive 先共享物理 owner；当前有 scroll seam 和默认关闭的 atomic click/double-click 切片 | type/hotkey/drag/draw/held pointer 完成 parity、partial-input 与真实 E2E 后删除 adapter |
 | `python/providers/` legacy retry loop | 删除或单独迁移 | 先审计产品可达性，不接成第二个Runtime | P9观察窗口内生产调用为零或等价迁移通过 |
 
 ## 15. Bridge纪律

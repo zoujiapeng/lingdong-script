@@ -1,7 +1,6 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和
-legacy shadow；P2a 已实现纯 Task Profile 合同与确定性 Execution Policy，P2b 已增加默认关闭、无工具的真实 Profiler shadow；P3a Broker 合同与 P3b single-obligation partial shadow 已实现，但尚未 enforce。P4a 已实现严格 Actor proposal/view/envelope 合同与注入式单回合 MissionRuntime；它不直接调用模型或设备，也未接入产品或 legacy 执行。P4b 已开始抽取 shared frame/coordinate/runtime-selection/scroll raw seam，但 live Actor、完整 admission/Controller bridge、P5 Verifier 与 P6 Planner/Inspector 仍未实现。任何产品接线都必须经过迁移计划的后续阶段门槛。
+本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达。P4a 已实现严格 Actor proposal/view/envelope 与注入式 MissionRuntime；P4b 已有默认关闭的 atomic click/double-click、final mouse-down guard 和 post-action frame evidence 切片；P4c 已有可注入 product coordinator protocol/seam，但 Server 默认未注入且没有 live Actor/coordinator 实现。P5a 注入式 ObligationVerifier 与 P5b 本地 deterministic MissionCompletionVerifier 已接入该 Runtime；没有模型/视觉 Verifier、ActionEffectVerifier 或跨进程 exactly-once。P6 保持禁用，P7–P9 未开始。
 
 ## 1. 版本与基本规则
 
@@ -26,9 +25,17 @@ runtime-frame/0
 runtime-snapshot/0
 controller-transition/0
 mission-runtime-result/0
+desktop-runtime-coordinator-context/0
+desktop-runtime-coordinator-result/0
 transition-record/0
 verifier-assessment/0
 verification-result/0
+obligation-verification-request/0
+obligation-verification-result/0
+accepted-obligation-verification/0
+mission-completion-verification-request/0
+mission-completion-verification-result/0
+mission-completion-aggregate/0
 mission-patch-proposal/0
 inspection-report/0
 ```
@@ -605,7 +612,7 @@ class ClaimObligationDone:
     concise_claim: str
 ```
 
-模型不提交 obligation id、revision 或 evidence refs。Runtime 绑定 active obligation 和当前可引用的 run-scoped frame evidence，接受 `obligation_claimed` 后义务只进入 `CLAIMED`，单回合结果为 `verification_required`。它不会进入 `VERIFIED` 或结束 mission；P5 独立 ObligationVerifier 尚未接入。
+模型不提交 obligation id、revision 或 evidence refs。Runtime 绑定 active obligation 和当前可引用的 run-scoped frame evidence；`obligation_claimed` 本身只让义务进入 `CLAIMED`。只有 ExecutionProfile 允许且注入了只读 ObligationVerifier 时，Runtime 才紧接着冻结 claim fingerprint/attempt/evidence 并接受 verification event；否则返回 `verification_required`。Actor claim 永远不能直接进入 `VERIFIED` 或结束 mission。
 
 ### 10.6 BlockedReport
 
@@ -695,11 +702,15 @@ unknown
 
 ### 11.3 P4b 内部机械输入合同（partial）
 
-当前 scroll-only seam 使用 typed `RawBackendResult` 和 `RawActionReceipt`，机械完成三态固定映射为：`APPLIED -> true`、`NOT_APPLIED/NOT_STARTED -> false`、`OUTCOME_UNKNOWN -> null`。backend 必须显式报告 `input_completed`；泛型 `ok:true` 不能升级为已执行。设备调用后的异常、非法 backend result 或 PostMessage 不确定结果都进入 `OUTCOME_UNKNOWN`，上层只能重新观察、对账或阻塞，不能自动重放。
+当前 scroll seam 与 atomic click/double-click 切片使用 typed `RawBackendResult` 和 `RawActionReceipt`，机械完成三态固定映射为：`APPLIED -> true`、`NOT_APPLIED/NOT_STARTED -> false`、`OUTCOME_UNKNOWN -> null`。backend 必须显式报告 `input_completed`；泛型 `ok:true` 不能升级为已执行。设备调用后的异常、非法 backend result 或 PostMessage 不确定结果都进入 `OUTCOME_UNKNOWN`，上层只能重新观察、对账或阻塞，不能自动重放。
 
-RawDevice 接收 Controller 已解析的 `scroll(context, x, y, amount)`，不再接收 `action + args`，因此不是第二个 action parser。它不读取 session、截图、OCR/UIA、任务、应用名或恢复状态。Receipt 的 backend facts 是可序列化的只读诊断，不是 run-scoped evidence，`APPLIED` 也不证明像素变化或语义完成。
+RawDevice 接收 Controller 已解析的 typed scroll/click 参数，不接收 `action + args`，因此不是第二个 action parser。它不读取 session、截图、OCR/UIA、任务、应用名或恢复状态。Receipt 的 backend facts 是可序列化的只读诊断，不是 run-scoped evidence，`APPLIED` 也不证明像素变化或语义完成。
 
-该内部 seam 尚未冻结为 vNext `/0` 产品合同。当前 `RawActionContext` 只校验正 HWND 与 target/current 一致；完整 frame/epoch/PID/foreground/region admission、动作后权威帧和 `ControllerTransition` 对账仍是后续 P4b 门槛。`DesktopRuntimeSelection` 只由 Runtime 配置在 run 开始时产生；显式 vNext unavailable 时必须在 mutation 前拒绝，不能隐式 fallback 到 legacy。
+该内部 seam 尚未冻结为 vNext `/1` 产品合同。atomic click 由 Runtime permit 和权威 frame pin 限定一次 transaction，commit-time 重读 frame/epoch/HWND/PID/region/hit-test，每次 physical mouse-down 紧前再做 final guard；后续 `AtomicPostActionBridge` 在同一 physical lease 中 CAS 提交动作后权威帧并写入 exact action/frame evidence。任一动作后证据缺失都是 `unknown`，不能转成可重放 rejection。这仅适用于默认关闭的注入式 click/double-click 切片；其他原语、live Actor 和 live Electron coordinator 实现仍未接入。`DesktopRuntimeSelection` 只由 Runtime 配置在 run 开始时产生；Server 未注入 coordinator 时必须在 mutation 前拒绝 vNext，不能隐式 fallback 到 legacy。
+
+### 11.4 P4c product coordinator seam（injected only）
+
+`desktop-runtime-coordinator-context/0` 只携带 Runtime 冻结的 run id、任务/contract 只读快照与现有 stop/pause owner；`desktop-runtime-coordinator-result/0` 只允许严格 terminal 结果。`ArpExecution` 仅在 selection 为 `vnext` 且显式注入 `DesktopRuntimeCoordinatorPort` 时调用一次 coordinator，并完全绕过 legacy node handlers；结果非法、异常或取消都不得 fallback。Server 默认不注入该 port，因此这是 product protocol seam，不是 live coordinator 或 Electron E2E 已可用的声明。
 
 ## 12. BrokerProjection 与 CapabilityGrant
 
@@ -780,6 +791,10 @@ class TransitionRecord:
 `visible_effect_summary` 只能写可审计局部事实，不能写“任务完成”。
 
 ## 14. VerifierAssessment 与 VerificationResult
+
+当前 P5 实现是注入式、进程内的 evidence-first 闭合：P5a 提供严格的 `ObligationVerificationRequest`、无 Runtime 身份的 `VerifierAssessment`、Runtime-bound `ObligationVerificationResult` 和 deterministic-first dispatcher；P5b 提供 `AcceptedObligationVerification`、`MissionCompletionVerificationRequest/Result` 和内容哈希绑定的 mission aggregate evidence。
+
+P5b 构造时必须同时注入 `DeterministicMissionCompletionVerifier` 和 canonical `EvidenceRegistry`，且 `MissionReducer.evidence_source` 必须是该同一 registry。Runtime 先 append/read-back aggregate evidence，再提交 exact `mission_verified` event；Reducer 独立校验 accepted obligation verification ids、证据顺序、aggregate id/hash/kind/trust 和 canonical mission verification id。当前无模型/视觉 Verifier、无 `ActionEffectVerifier`、无跨进程 WAL 或已证明的 exactly-once 恢复。
 
 视觉/模型 Verifier 只输出 assessment，不回填 subject 或 evidence identity：
 
