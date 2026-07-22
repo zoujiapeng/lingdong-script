@@ -226,6 +226,36 @@ def test_success_maps_submitted_pixels_and_posts_outside_frame_pin(
     assert len(post.calls) == 1
 
 
+def test_commit_observation_reads_the_same_transient_permit_owner() -> None:
+    authority, frame = _authority()
+    envelope = _envelope(frame)
+    permits = MutationPermitAuthority(envelope.mission_id, envelope.run_id)
+
+    class PermitBackedObservation(Observation):
+        def observe_commit(self, request):
+            assert permits.active_admission_matches(
+                request.request_id,
+                frame=request.frame,
+                target=request.target,
+                pointer=envelope.pointer,
+            ) is True
+            return super().observe_commit(request)
+
+    controller, _ = _controller(
+        envelope,
+        authority,
+        lambda *_args, **_kwargs: RawBackendResult(True, {}),
+        observation=PermitBackedObservation(),
+        permits=permits,
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.COMPLETED
+    assert permits.active_count == 0
+    assert permits.consumed_count == 1
+
+
 def test_commit_admission_rejection_never_calls_raw_device():
     authority, frame = _authority()
     envelope = _envelope(frame)
