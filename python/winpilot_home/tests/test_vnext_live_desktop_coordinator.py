@@ -6,6 +6,8 @@ import time
 
 import pytest
 
+import winpilot.vnext.bridge.coordinator as coordinator_module
+
 from winpilot.action.desktop_queue import DesktopActionQueue
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
@@ -28,6 +30,9 @@ from winpilot.vnext.verification.visual_model import ReadOnlyVisualVerifierAdapt
 from winpilot.vnext.bridge.coordinator import (
     LiveDesktopRuntimeCoordinator,
     build_live_desktop_runtime_coordinator,
+)
+from winpilot.vnext.capabilities.live_catalog import (
+    build_click_live_runtime_snapshot,
 )
 
 
@@ -168,6 +173,7 @@ def _coordinator(
     actor,
     verifier_model,
     *,
+    runtime_snapshot=None,
     trace=None,
     raw_calls=None,
     max_turns=6,
@@ -175,6 +181,11 @@ def _coordinator(
     clock=lambda: 10.0,
 ):
     calls = raw_calls if raw_calls is not None else []
+    snapshot = (
+        build_click_live_runtime_snapshot()
+        if runtime_snapshot is None
+        else runtime_snapshot
+    )
 
     def raw_click(x, y, button, count, mechanism, hwnd=None, *, final_guard):
         decision = final_guard(x, y)
@@ -186,6 +197,7 @@ def _coordinator(
 
     return LiveDesktopRuntimeCoordinator(
         api_config={"unused": True},
+        runtime_snapshot=snapshot,
         trace_sidecar=trace,
         action_queue=DesktopActionQueue(),
         raw_device=RawDeviceExecutor(RawDeviceBackends(
@@ -258,6 +270,83 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
         "vnext_mission_runtime_finished",
     ]
     assert all(run_id == "arp-run-1" for run_id, _record in trace.records)
+
+
+def test_one_runtime_snapshot_drives_state_profile_broker_and_trace(monkeypatch):
+    snapshot = build_click_live_runtime_snapshot()
+    trace = Trace()
+    observed = {
+        "profile_available": None,
+        "profile_providers": None,
+        "broker_inputs": [],
+    }
+
+    original_safe_default = coordinator_module.ExecutionPolicy.safe_default
+    original_project = coordinator_module.CapabilityBroker.project
+
+    def safe_default(policy, *args, **kwargs):
+        observed["profile_available"] = tuple(
+            kwargs["available_capabilities"]
+        )
+        observed["profile_providers"] = tuple(
+            kwargs["provider_availability"]
+        )
+        return original_safe_default(policy, *args, **kwargs)
+
+    def project(broker, mission, profile, state, grants=()):
+        observed["broker_inputs"].append((
+            broker.catalog,
+            state.available_capabilities,
+            profile.accepted_capabilities,
+            profile.services.obligation_verifier,
+        ))
+        return original_project(broker, mission, profile, state, grants)
+
+    monkeypatch.setattr(
+        coordinator_module.ExecutionPolicy, "safe_default", safe_default,
+    )
+    monkeypatch.setattr(
+        coordinator_module.CapabilityBroker, "project", project,
+    )
+
+    coordinator = _coordinator(
+        ScriptedActor([_click(), _claim()]),
+        PositiveVisualModel(),
+        runtime_snapshot=snapshot,
+        trace=trace,
+    )
+    result = coordinator.run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    assert coordinator.runtime_capability_snapshot is snapshot
+    expected_capabilities = snapshot.available_capabilities
+    expected_providers = (
+        ("obligation_verifier",)
+        if "obligation_verifier" in snapshot.available_services
+        else ()
+    )
+    expected_profile_capabilities = tuple(sorted(
+        {"visual.interact"} & set(expected_capabilities)
+    ))
+    assert observed["profile_available"] == expected_capabilities
+    assert observed["profile_providers"] == expected_providers
+    assert observed["broker_inputs"]
+    assert all(
+        catalog is snapshot.catalog
+        and available == expected_capabilities
+        and accepted == expected_profile_capabilities
+        and verifier_enabled == bool(expected_providers)
+        for catalog, available, accepted, verifier_enabled
+        in observed["broker_inputs"]
+    )
+    started = trace.records[0][1]
+    assert started["runtime_capability_snapshot_fingerprint"] == (
+        snapshot.fingerprint
+    )
+    assert started["tool_catalog_fingerprint"] == snapshot.catalog.fingerprint
+    assert started["tool_names"] == [
+        tool.name for tool in snapshot.catalog.tools
+    ]
 
 
 def test_missing_contract_fails_before_actor_or_raw_device():
@@ -582,6 +671,11 @@ def test_factory_accepts_only_injected_physical_owner() -> None:
     )
 
     assert isinstance(coordinator, LiveDesktopRuntimeCoordinator)
+    expected_snapshot = build_click_live_runtime_snapshot()
+    assert type(coordinator.runtime_capability_snapshot) is type(expected_snapshot)
+    assert coordinator.runtime_capability_snapshot.to_dict() == (
+        expected_snapshot.to_dict()
+    )
     with pytest.raises(TypeError, match="composition root"):
         build_live_desktop_runtime_coordinator(api_config={}, raw_device=None)
 

@@ -22,7 +22,11 @@ from ...orchestrator.desktop_runtime import (
     DesktopRuntimeCoordinatorResult,
     DesktopRuntimeCoordinatorStatus,
 )
-from ...tasking.contracts import StageType, TaskContract
+from ...orchestrator.runtime_admission import (
+    RuntimeCapabilitySnapshot,
+    vnext_full_goal_stage,
+)
+from ...tasking.contracts import TaskContract
 from ...tasking.execution_context import (
     foreground_handoff_conflict,
     normalize_execution_context,
@@ -38,7 +42,7 @@ from ...visual_runtime.windows_desktop_facts import (
 )
 from ..actor.model import OpenAIVisualActor
 from ..capabilities import CapabilityBroker, PointerLeaseState
-from ..capabilities.live_catalog import build_click_live_catalog
+from ..capabilities.live_catalog import build_click_live_runtime_snapshot
 from ..evidence import EvidenceRegistry
 from ..mission import (
     EvidenceRef,
@@ -57,7 +61,6 @@ from .runtime_state import RuntimeReadState, RuntimeStateBridge
 
 DEFAULT_MAX_TURNS = 24
 DEFAULT_FRAME_MAX_AGE_S = 30.0
-_LIVE_CAPABILITIES = ("visual.interact", "visual.read_text")
 _RECOVERABLE_TURN_STATUSES = frozenset({
     RuntimeStatus.ACTION_RECORDED,
     RuntimeStatus.INVALID_PROPOSAL,
@@ -120,6 +123,7 @@ class LiveDesktopRuntimeCoordinator:
         *,
         api_config: Mapping[str, Any],
         raw_device: Any,
+        runtime_snapshot: RuntimeCapabilitySnapshot,
         trace_sidecar: TraceSidecarPort | None = None,
         action_queue: DesktopActionQueue = DESKTOP_ACTION_QUEUE,
         facts_reader: WindowsDesktopFactsReader | None = None,
@@ -141,6 +145,10 @@ class LiveDesktopRuntimeCoordinator:
             raise TypeError("action_queue must be DesktopActionQueue")
         if raw_device is None:
             raise TypeError("raw_device must be supplied by the product composition root")
+        if not isinstance(runtime_snapshot, RuntimeCapabilitySnapshot):
+            raise TypeError("runtime_snapshot must be RuntimeCapabilitySnapshot")
+        if runtime_snapshot.runtime_version != "vnext":
+            raise ValueError("live coordinator requires a vNext capability snapshot")
         if facts_reader is not None and not isinstance(
             facts_reader, WindowsDesktopFactsReader
         ):
@@ -174,6 +182,7 @@ class LiveDesktopRuntimeCoordinator:
         # AtomicClickController performs the concrete owner validation when the
         # run is composed; the product composition root supplies that owner.
         self._raw_device = raw_device
+        self._runtime_snapshot = runtime_snapshot
         self._facts = facts_reader or WindowsDesktopFactsReader()
         self._observer_factory = observer_factory or FrameObserver
         self._actor_factory = actor_factory or OpenAIVisualActor.from_api_config
@@ -187,18 +196,20 @@ class LiveDesktopRuntimeCoordinator:
         self._frame_max_age_s = float(frame_max_age_s)
         self._clock = clock
 
+    @property
+    def runtime_capability_snapshot(self) -> RuntimeCapabilitySnapshot:
+        """The one immutable composition inventory used for this coordinator."""
+
+        return self._runtime_snapshot
+
     def _turn_budget(self, contract: TaskContract) -> int:
         """Read one canonical full-goal budget and cap it locally."""
 
-        desktop_stages = tuple(
-            stage for stage in contract.stages
-            if stage.type is StageType.EXECUTE_DESKTOP_TASK
-        )
-        if len(desktop_stages) != 1 or len(contract.stages) != 1:
-            raise LiveDesktopCoordinatorError(
-                "selected vNext run requires one full-goal ExecuteDesktopTask"
-            )
-        raw_stage_budget = desktop_stages[0].parameters.get("max_steps")
+        try:
+            desktop_stage = vnext_full_goal_stage(contract)
+        except (TypeError, ValueError) as exc:
+            raise LiveDesktopCoordinatorError(str(exc)) from exc
+        raw_stage_budget = desktop_stage.parameters.get("max_steps")
         if type(raw_stage_budget) is not int or not 1 <= raw_stage_budget <= 400:
             raise LiveDesktopCoordinatorError(
                 "selected vNext run has no valid canonical turn budget"
@@ -368,7 +379,9 @@ class LiveDesktopRuntimeCoordinator:
         def read_runtime_state() -> RuntimeReadState:
             stopped = context.stop_event.is_set()
             return RuntimeReadState(
-                available_capabilities=_LIVE_CAPABILITIES,
+                available_capabilities=(
+                    self._runtime_snapshot.available_capabilities
+                ),
                 pointer=PointerLeaseState(),
                 runtime_healthy=not stopped,
                 paused=bool(context.is_paused()),
@@ -402,15 +415,22 @@ class LiveDesktopRuntimeCoordinator:
             ),
             enabled=True,
         )
-        catalog = build_click_live_catalog()
+        catalog = self._runtime_snapshot.catalog
+        provider_availability = (
+            ("obligation_verifier",)
+            if "obligation_verifier" in self._runtime_snapshot.available_services
+            else ()
+        )
         profile = ExecutionPolicy(
-            provider_availability=("obligation_verifier",),
+            provider_availability=provider_availability,
         ).safe_default(
             reducer.definition.mission_id,
             reducer.definition.goal_revision,
             reason="live_runtime_profiler_not_connected",
-            available_capabilities=_LIVE_CAPABILITIES,
-            provider_availability=("obligation_verifier",),
+            available_capabilities=(
+                self._runtime_snapshot.available_capabilities
+            ),
+            provider_availability=provider_availability,
         )
         runtime = MissionRuntime(
             reducer=reducer,
@@ -473,6 +493,12 @@ class LiveDesktopRuntimeCoordinator:
                 "mission_revision": reducer.projection.revision,
                 "active_obligation_id": reducer.projection.active_obligation_id,
                 "tool_names": list(tool_names),
+                "runtime_capability_snapshot_fingerprint": (
+                    self._runtime_snapshot.fingerprint
+                ),
+                "tool_catalog_fingerprint": (
+                    self._runtime_snapshot.catalog.fingerprint
+                ),
                 "profile_source": "safe_default",
                 "turn_budget": turn_budget,
             })
@@ -567,9 +593,11 @@ def build_live_desktop_runtime_coordinator(
 ) -> LiveDesktopRuntimeCoordinator:
     """Build the selected product coordinator without starting a run."""
 
+    runtime_snapshot = build_click_live_runtime_snapshot()
     return LiveDesktopRuntimeCoordinator(
         api_config=api_config,
         raw_device=raw_device,
+        runtime_snapshot=runtime_snapshot,
         trace_sidecar=trace_sidecar,
     )
 

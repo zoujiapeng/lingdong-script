@@ -64,9 +64,12 @@ from .orchestrator.contracts import (
 )
 from .orchestrator.projection import RUN_PROJECTIONS
 from .orchestrator.runtime import ARP_RUNS, ArpExecution
+from .orchestrator.runtime_admission import (
+    DesktopRuntimeAdmission,
+    RuntimeCapabilitySnapshot,
+)
 from .orchestrator.runtime_selection import DesktopRuntimeSelection
 from .orchestrator.graph_compiler import legacy_goal_graph_task
-from .tasking.capability import CapabilityPlanner
 from .tasking.artifacts import ArtifactStore
 from .tasking.compiler import TaskContractCompiler
 from .tasking.contracts import ContractCompileRequest
@@ -995,8 +998,6 @@ def _start_arp_execution(
         from .tasking.contracts import TaskContract
 
         task_contract = TaskContract.model_validate(contract_data)
-        CapabilityPlanner.assert_satisfiable(task_contract)
-        CapabilityPlanner.assert_runtime_satisfiable(task_contract)
     validation = validate_graph(graph)
     if not validation.valid:
         raise ValueError("; ".join(validation.errors))
@@ -1005,6 +1006,7 @@ def _start_arp_execution(
 
     is_legacy_runtime = desktop_runtime_selection.runtime_version == "legacy"
     desktop_runtime_coordinator = None
+    runtime_snapshot = None
     if not is_legacy_runtime:
         try:
             from .orchestrator.desktop_runtime import DesktopRuntimeCoordinatorPort
@@ -1025,6 +1027,13 @@ def _start_arp_execution(
                 desktop_runtime_coordinator, DesktopRuntimeCoordinatorPort,
             ):
                 raise TypeError("factory returned an invalid coordinator")
+            runtime_snapshot = getattr(
+                desktop_runtime_coordinator,
+                "runtime_capability_snapshot",
+                None,
+            )
+            if not isinstance(runtime_snapshot, RuntimeCapabilitySnapshot):
+                raise TypeError("coordinator has no runtime capability snapshot")
         except Exception as exc:
             # A selected vNext run has no legacy fallback.  Keep provider or
             # configuration detail out of the product error because it may
@@ -1033,6 +1042,12 @@ def _start_arp_execution(
                 "vNext desktop runtime coordinator construction failed "
                 f"({type(exc).__name__})"
             ) from exc
+
+    runtime_admission = DesktopRuntimeAdmission.admit(
+        desktop_runtime_selection,
+        task_contract,
+        runtime_snapshot=runtime_snapshot,
+    )
 
     shadow_config = (
         CONFIG.get("vnext", "profiler_shadow", default={}) or {}
@@ -1100,6 +1115,13 @@ def _start_arp_execution(
                 "runtime_version": (
                     started.desktop_runtime_selection.runtime_version
                 ),
+            },
+            run_id=started.run_id,
+        )
+        trace_mod.RECORDER.record_sidecar(
+            {
+                "type": "desktop_runtime_capability_admission",
+                **runtime_admission.to_dict(),
             },
             run_id=started.run_id,
         )
