@@ -367,7 +367,7 @@ def _call_keyboard(raw, action, argument, guard=None):
 
 
 @pytest.mark.parametrize("keys", [
-    (), ("ctrl",) * 7, ("ctrl", "ctrl"), ("control", "s"),
+    (), ("ctrl",), ("ctrl",) * 7, ("ctrl", "ctrl"), ("control", "s"),
     ("CTRL", "s"), (" ctrl", "s"), ("unknown",), (1,),
     ("s", "ctrl"), ("shift", "ctrl", "s"), ("ctrl", "s", "a"),
     ("ctrl", "alt"), ("a", "b"), "ctrl+s", ["ctrl", "s"], b"ctrl+s",

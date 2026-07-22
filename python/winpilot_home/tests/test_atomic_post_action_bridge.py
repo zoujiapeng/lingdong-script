@@ -9,6 +9,7 @@ import pytest
 from winpilot.action.desktop_queue import DesktopActionQueue
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
+    FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
     RawActionReceipt,
     RawBackendResult,
@@ -88,6 +89,16 @@ def _envelope(
     run_id: str = "run-1",
     action: str = "click",
 ) -> ActorDecisionEnvelope:
+    args = {
+        "click": {"image_x": 400, "image_y": 300},
+        "double_click": {"image_x": 400, "image_y": 300},
+        "scroll": {
+            "image_x": 400, "image_y": 300,
+            "direction": "down", "notches": 3,
+        },
+        "type_text": {"text": "Hello, 世界"},
+        "hotkey": {"modifiers": ["ctrl", "shift"], "key": "a"},
+    }[action]
     return ActorDecisionEnvelope(
         decision_id="decision-1",
         mission_id="mission-1",
@@ -106,15 +117,7 @@ def _envelope(
             "format": "actor-proposal/0",
             "kind": "desktop_action",
             "action": action,
-            "args": {
-                "image_x": 400,
-                "image_y": 300,
-                **(
-                    {"direction": "down", "notches": 3}
-                    if action == "scroll"
-                    else {}
-                ),
-            },
+            "args": args,
             "local_intent": "activate the visible semantic target",
         }),
     )
@@ -142,6 +145,15 @@ def _scroll_receipt() -> RawActionReceipt:
         "scroll",
         MutationOutcome.APPLIED,
         RawBackendResult(True, {"sent_notches": -3}),
+    )
+
+
+def _receipt_for(action: str) -> RawActionReceipt:
+    raw_action = "click" if action in {"click", "double_click"} else action
+    return RawActionReceipt(
+        raw_action,
+        MutationOutcome.APPLIED,
+        RawBackendResult(True, {"ok": True}),
     )
 
 
@@ -201,6 +213,9 @@ class _Observation:
 class _FinalGuard:
     def check_before_pointer_input(self, _request, _screen_point):
         return FinalPointerGuardDecision.ADMITTED
+
+    def check_before_keyboard_input(self, _request):
+        return FinalKeyboardGuardDecision.ADMITTED
 
 
 def _admitted_backend(calls: list[tuple]) -> AdmittedPhysicalClickBackend:
@@ -288,32 +303,53 @@ def test_bridge_cas_commits_and_registers_exact_projectable_frame_evidence() -> 
     assert runtime_frame.evidence_refs == post.evidence_refs
 
 
-def test_bridge_accepts_the_exact_scroll_receipt_for_a_scroll_action() -> None:
+@pytest.mark.parametrize(
+    "action", ("click", "double_click", "scroll", "type_text", "hotkey"),
+)
+def test_bridge_requires_the_exact_raw_action_mapping(action: str) -> None:
     authority, before = _authority()
-    envelope = _envelope(before, action="scroll")
+    envelope = _envelope(before, action=action)
     registry = EvidenceRegistry("mission-1", "run-1")
     bridge = _bridge(authority, registry)
 
     post = bridge.observe_after(
         envelope,
         admission=_admission(envelope),
-        raw_receipt=_scroll_receipt(),
+        raw_receipt=_receipt_for(action),
     )
 
     evidence, = registry.snapshot()
     assert post.post_frame_id == before.frame_id + 1
     assert evidence.action_id == envelope.decision_id
+
+
+@pytest.mark.parametrize(
+    ("action", "wrong_raw_action"),
+    (
+        ("click", "scroll"),
+        ("double_click", "scroll"),
+        ("scroll", "click"),
+        ("type_text", "hotkey"),
+        ("hotkey", "type_text"),
+    ),
+)
+def test_bridge_fails_closed_on_wrong_raw_action(
+    action: str,
+    wrong_raw_action: str,
+) -> None:
+    authority, before = _authority()
+    envelope = _envelope(before, action=action)
+    bridge = _bridge(authority, EvidenceRegistry("mission-1", "run-1"))
+
     with pytest.raises(AtomicPostActionBridgeError, match="exact raw receipt"):
-        next_authority, next_before = _authority()
-        wrong = _envelope(next_before, action="scroll")
-        AtomicPostActionBridge(
-            frame_authority=next_authority,
-            observer=_observer(next_authority),
-            evidence=EvidenceRegistry("mission-1", "run-1"),
-        ).observe_after(
-            wrong,
-            admission=_admission(wrong),
-            raw_receipt=_receipt(),
+        bridge.observe_after(
+            envelope,
+            admission=_admission(envelope),
+            raw_receipt=RawActionReceipt(
+                wrong_raw_action,
+                MutationOutcome.APPLIED,
+                RawBackendResult(True, {"ok": True}),
+            ),
         )
 
 

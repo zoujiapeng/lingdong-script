@@ -1,6 +1,6 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、`click/double_click/scroll/claim/blocked` 小工具面、共享 atomic Controller 执行链、deterministic ActionEffectVerifier、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认。ActionEffect 最终代码的同入口 canary 为 down/click 通过、up 失败；完整 P7、其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
+本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、`click/double_click/scroll/type_text/hotkey/claim/blocked` 小工具面、共享 atomic Controller 执行链、deterministic ActionEffectVerifier、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认。P4b.1 keyboard 只有代码与注入式测试闭环，尚无真实 Electron oracle；ActionEffect 最终代码的同入口 canary 为 down/click 通过、up 失败；完整 P7、其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
 
 ## 1. 版本与基本规则
 
@@ -714,7 +714,7 @@ unknown
 
 `ObserveProposal` 只刷新观察；`BlockedReport` 只产生当前义务的 blocked event，其自然语言事实不会升级为 `VerifiedFact`。`CapabilityRequest`、`InspectionRequest` 和 `ReplanRequest` 在 P4a 均返回 `unavailable`；尤其 P6 Planner/Inspector 未启用时必须 fail closed。
 
-当前产品接线只对显式 `vnext` run 组装增量 Actor、Broker、Frame/Controller bridge 与验证端口，工具面为 `click/double_click/scroll/claim/blocked`。三个 click seed 与 ActionEffect 接线前最终 scroll 合同的一对 down/up seed 已通过真实 Electron 与独立 oracle；ActionEffect 最终代码的首轮复测为 down/click 通过、up 失败。这不等于全局 Broker enforce 或完整 P7 已通过；P3 的 necessary-tool recall 门槛仍未达到。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
+当前产品接线只对显式 `vnext` run 组装增量 Actor、Broker、Frame/Controller bridge 与验证端口，工具面为 `click/double_click/scroll/type_text/hotkey/claim/blocked`。三个 click seed 与 ActionEffect 接线前最终 scroll 合同的一对 down/up seed 已通过真实 Electron 与独立 oracle；keyboard 尚无同入口 oracle；ActionEffect 最终代码的首轮复测为 down/click 通过、up 失败。这不等于全局 Broker enforce 或完整 P7 已通过；P3 的 necessary-tool recall 门槛仍未达到。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
 
 ### 11.2 P4a ControllerTransition
 
@@ -765,20 +765,16 @@ hash，不能信任 event payload 自报。只有 `input_completed=true + unchan
 
 RawDevice 接收 Controller 已解析的 typed scroll/click 参数、bounded text 或 canonical `HotkeyChord`，不接收 `action + args`，因此不是第二个 action parser。它不读取 session、截图、OCR/UIA、clipboard、任务、应用名或恢复状态。Keyboard backend 只走 SendInput；每个字符和 chord 都由调用方提供的只读 final guard 限定，部分输入、down/release 异常或 guard 在输入后变化均为 unknown，不能重放。Hotkey 一旦尝试 down 就必须逆序尝试 release。Receipt facts 只允许 codepoint/key 数量和 cleanup 状态，不得保存原始文本或 chord；这些 facts 只是可序列化诊断，不是 run-scoped evidence，`APPLIED` 也不证明像素变化或语义完成。
 
-具体 live coordinator 的 `raw_device` 是必需注入项。产品 composition root 当前仍只构造并注入
-admitted physical click/scroll backend；P4b.1 已让 legacy `type_text`/`press_keys` 在原有单一 queue
-入口内委托同一个 unqueued keyboard mechanical owner，但 keyboard backend 尚未接入 live composition。
-coordinator、MissionRuntime 和
-Actor 都不得自行创建 backend 或在缺失时 fallback。这样 composition 与执行仍只有一个物理 owner。
+具体 live coordinator 的 `raw_device` 是必需注入项。产品 composition root 构造并注入 admitted physical click/scroll/type-text/hotkey backend；coordinator 在 Actor 创建前机械核对 Catalog GUI tools、Controller supported tools、Controller required raw primitives 与 RawDevice 实际 inventory，任何缺失或漂移都 fail closed。legacy `type_text`/`press_keys` 仍在原有单一 queue 入口内委托同一个 unqueued keyboard mechanical owner。coordinator、MissionRuntime 和 Actor 都不得自行创建 backend 或在缺失时 fallback。这样 composition 与执行仍只有一个物理 owner。
 
-该内部 seam 尚未冻结为 vNext `/1` 产品合同。Actor 可见 scroll args 严格为 `{image_x, image_y, direction: "up" | "down", notches: 1..12}`；`up` 表示显露 viewport 上方内容，`down` 表示显露下方内容。旧 signed `amount` 在 Actor 边界不兼容并 fail closed；`AtomicDesktopController` 只机械映射 `up -> +notches`、`down -> -notches` 到既有 RawDevice canonical convention。`AtomicDesktopController` 由 Runtime permit 和权威 frame pin 限定一次 transaction，commit-time 重读 frame/epoch/HWND/PID/region/hit-test，并在 click mouse-down 或 scroll wheel 紧前做 final target guard；后续 `AtomicPostActionBridge` 在同一 physical lease 中 CAS 提交动作后权威帧并写入 exact action/frame evidence。scroll 只调用 unqueued admitted physical SendInput backend，不做机制切换；任一动作后证据缺失都是 `unknown`，不能转成可重放 rejection。当前默认关闭的 live coordinator 接入 `click`/`double_click`/`scroll`；`type_text`、`hotkey`、`drag`、`draw_strokes`、held pointer 与 ROI observe 均未接入。`DesktopRuntimeSelection` 只在 run 开始时冻结；缺失 coordinator 或任一 vNext 端口都必须在 mutation 前拒绝，不能隐式 fallback 到 legacy。
+Actor 可见 scroll args 严格为 `{image_x, image_y, direction: "up" | "down", notches: 1..12}`；`up` 表示显露 viewport 上方内容，`down` 表示显露下方内容。Actor 可见 keyboard args 严格为 `type_text:{text: 1..4096 codepoints}` 和 `hotkey:{modifiers: unique subset of ctrl/alt/shift/win, key: one canonical non-modifier}`；Runtime 先按 Catalog schema 验证，Controller 再以固定 modifier 顺序构造 `HotkeyChord`。keyboard 的 `CommitAdmissionRequest` 使用 `input_kind=keyboard` 与 `screen_point=null`，不调用坐标 mapper 或 hit-test；它仍共享 Runtime permit、权威 frame pin、target/foreground 复核、唯一 physical lease、post-action frame/evidence 和 unknown-no-replay。sidecar、evidence 与 raw facts 不保存文本或 chord 内容。`DesktopRuntimeSelection` 只在 run 开始时冻结；缺失 coordinator、任一端口或任一 raw primitive 都必须在 Actor/mutation 前拒绝，不能隐式 fallback 到 legacy。真实 Electron keyboard oracle 尚未运行；`drag`、`draw_strokes`、held pointer 与 ROI observe 仍未接入。
 
 P4b.1 先把共享 commit admission 从 `commit-admission-request/0` 升级为严格的
 `commit-admission-request/1`，显式区分 `input_kind=point|keyboard`。point 必须携带 `screen_point`，并继续
 执行 frame/target containment 与 hit-test；keyboard 必须令 `screen_point=null`、只能走 physical route，
 跳过无意义的 `WindowFromPoint`，但仍核对同一 frame/epoch/target、pointer released、mutation authority、
 stop/cancel 与 foreground root/process。最终 keyboard guard 也只读复核 target/foreground，不选择或聚焦
-窗口。该合同切片尚未向 Actor 暴露 `type_text`/`hotkey`，因此不改变当前产品工具面或动作行为。
+窗口。P4b.1 后续切片已在不改 prompt 的前提下向显式 vNext run 暴露 `type_text`/`hotkey`；legacy 默认与其既有工具面、done 语义和执行入口保持不变。
 
 ### 11.4 P4c product coordinator 与 per-run selector
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 import threading
 import time
@@ -14,8 +15,12 @@ import winpilot.vnext.bridge.coordinator as coordinator_module
 from winpilot.action.desktop_queue import DesktopActionQueue
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
+    AdmittedPhysicalHotkeyBackend,
     AdmittedPhysicalScrollBackend,
+    AdmittedPhysicalTypeTextBackend,
+    FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
+    HotkeyChord,
     RawBackendResult,
     RawDeviceBackends,
     RawDeviceExecutor,
@@ -27,11 +32,15 @@ from winpilot.orchestrator.desktop_runtime import (
 from winpilot.tasking.compiler import TaskContractCompiler
 from winpilot.utils.image_capture import VisualCaptureScope
 from winpilot.utils.screenshot import Region
+from winpilot.visual_runtime.atomic_click_controller import (
+    AtomicDesktopController,
+)
 from winpilot.visual_runtime.frame_observer import FrameObserver
 from winpilot.visual_runtime.windows_desktop_facts import WindowsDesktopFactsReader
 from winpilot.vnext.verification import VerifierAssessment
 from winpilot.vnext.verification.visual_model import ReadOnlyVisualVerifierAdapter
 from winpilot.vnext.bridge.coordinator import (
+    LiveDesktopCoordinatorError,
     LiveDesktopRuntimeCoordinator,
     build_live_desktop_runtime_coordinator,
 )
@@ -187,6 +196,9 @@ def _coordinator(
     raw_calls=None,
     raw_scroll_calls=None,
     raw_scroll_completed=True,
+    raw_type_calls=None,
+    raw_hotkey_calls=None,
+    omit_admitted_backend=None,
     max_turns=6,
     frame_max_age_s=30.0,
     clock=lambda: 10.0,
@@ -220,14 +232,47 @@ def _coordinator(
             {"final_guard": decision.value},
         )
 
+    type_calls = raw_type_calls if raw_type_calls is not None else []
+
+    def raw_type_text(text, hwnd=None, *, final_guard):
+        decision = final_guard()
+        type_calls.append((text, hwnd, decision))
+        completed = decision is FinalKeyboardGuardDecision.ADMITTED
+        return RawBackendResult(completed, {
+            "guard_decision": decision.value,
+            "requested_codepoints": len(text),
+            "completed_codepoints": len(text) if completed else 0,
+        })
+
+    hotkey_calls = raw_hotkey_calls if raw_hotkey_calls is not None else []
+
+    def raw_hotkey(chord, hwnd=None, *, final_guard):
+        decision = final_guard()
+        hotkey_calls.append((chord, hwnd, decision))
+        return RawBackendResult(
+            decision is FinalKeyboardGuardDecision.ADMITTED,
+            {"guard_decision": decision.value, "key_count": len(chord.keys)},
+        )
+
+    backends = {
+        "click": AdmittedPhysicalClickBackend(raw_click),
+        "scroll": AdmittedPhysicalScrollBackend(raw_scroll),
+        "type_text": AdmittedPhysicalTypeTextBackend(raw_type_text),
+        "hotkey": AdmittedPhysicalHotkeyBackend(raw_hotkey),
+    }
+    if omit_admitted_backend is not None:
+        backends[omit_admitted_backend] = None
+
     return LiveDesktopRuntimeCoordinator(
         api_config={"unused": True},
         runtime_snapshot=snapshot,
         trace_sidecar=trace,
         action_queue=DesktopActionQueue(),
         raw_device=RawDeviceExecutor(RawDeviceBackends(
-            admitted_physical_click=AdmittedPhysicalClickBackend(raw_click),
-            admitted_physical_scroll=AdmittedPhysicalScrollBackend(raw_scroll),
+            admitted_physical_click=backends["click"],
+            admitted_physical_scroll=backends["scroll"],
+            admitted_physical_type_text=backends["type_text"],
+            admitted_physical_hotkey=backends["hotkey"],
         )),
         facts_reader=WindowsDesktopFactsReader(Backend()),
         observer_factory=_observer,
@@ -284,6 +329,26 @@ def _scroll(*, direction="down", notches=4):
     }
 
 
+def _type_text(text):
+    return {
+        "format": "actor-proposal/0",
+        "kind": "desktop_action",
+        "action": "type_text",
+        "args": {"text": text},
+        "local_intent": "enter the exact requested content in the focused field",
+    }
+
+
+def _hotkey(*, modifiers, key):
+    return {
+        "format": "actor-proposal/0",
+        "kind": "desktop_action",
+        "action": "hotkey",
+        "args": {"modifiers": list(modifiers), "key": key},
+        "local_intent": "apply the selected keyboard chord to the focused field",
+    }
+
+
 def _invalid_click():
     proposal = _click()
     proposal["args"] = {"image_x": "not-a-coordinate", "image_y": 100}
@@ -306,7 +371,7 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     assert output["mission_status"] == "verified"
     assert output["turn_count"] == 2
     assert output["tool_names"] == [
-        "click", "double_click", "scroll", "claim_obligation_done", "blocked",
+        tool.name for tool in build_live_runtime_snapshot().catalog.tools
     ]
     assert len(actor.calls) == 2
     assert len(verifier.calls) == 1
@@ -470,8 +535,6 @@ def test_turn_rejected_before_actor_has_no_model_role_or_selected_tool() -> None
 def test_live_turn_sidecar_uses_real_trace_recorder_without_product_bus_events(
     tmp_path, monkeypatch,
 ) -> None:
-    import json
-
     from winpilot.recorder import trace as trace_module
     from winpilot.utils.log import BUS
 
@@ -572,6 +635,76 @@ def test_uncertain_scroll_blocks_without_retry_claim_or_verifier_call():
     assert len(raw_scroll_calls) == 1
     assert len(actor.calls) == 1
     assert verifier.calls == []
+
+
+def test_live_controller_catalog_and_raw_inventory_are_exact() -> None:
+    raw = RawDeviceExecutor(RawDeviceBackends(
+        admitted_physical_click=AdmittedPhysicalClickBackend(lambda: None),
+        admitted_physical_scroll=AdmittedPhysicalScrollBackend(lambda: None),
+        admitted_physical_type_text=AdmittedPhysicalTypeTextBackend(lambda: None),
+        admitted_physical_hotkey=AdmittedPhysicalHotkeyBackend(lambda: None),
+    ))
+    snapshot = build_live_runtime_snapshot()
+
+    assert frozenset(snapshot.controller_tool_names) == frozenset(
+        AtomicDesktopController.supported_tool_names
+    )
+    assert raw.admitted_action_names == tuple(sorted(
+        AtomicDesktopController.required_raw_action_names
+    ))
+
+
+@pytest.mark.parametrize("missing", ["click", "scroll", "type_text", "hotkey"])
+def test_live_coordinator_rejects_incomplete_raw_inventory_before_actor(
+    missing,
+) -> None:
+    actor = ScriptedActor([_click()])
+
+    with pytest.raises(
+        LiveDesktopCoordinatorError, match="raw backend inventory"
+    ):
+        _coordinator(
+            actor,
+            PositiveVisualModel(),
+            omit_admitted_backend=missing,
+        )
+
+    assert actor.calls == []
+
+
+def test_keyboard_turn_sidecar_records_only_tool_identity_not_content() -> None:
+    secret_text = "p4b1-private-text-7419"
+    type_calls = []
+    hotkey_calls = []
+    trace = Trace()
+    actor = ScriptedActor([
+        _type_text(secret_text),
+        _hotkey(modifiers=("ctrl", "shift"), key="q"),
+        _claim(),
+    ])
+
+    result = _coordinator(
+        actor,
+        PositiveVisualModel(),
+        trace=trace,
+        raw_type_calls=type_calls,
+        raw_hotkey_calls=hotkey_calls,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    assert type_calls[0][0] == secret_text
+    assert hotkey_calls[0][0] == HotkeyChord(("ctrl", "shift", "q"))
+    turns = [
+        event for _run_id, event in trace.records
+        if event["type"] == "vnext_mission_runtime_turn"
+    ]
+    assert [turn["accepted_tool_name"] for turn in turns] == [
+        "type_text", "hotkey", "claim_obligation_done",
+    ]
+    wire = json.dumps(turns, ensure_ascii=False)
+    assert secret_text not in wire
+    for forbidden in ('"modifiers"', '"key"', '"ctrl"', '"shift"'):
+        assert forbidden not in wire
 
 
 def test_one_runtime_snapshot_drives_state_profile_broker_and_trace(monkeypatch):
@@ -967,7 +1100,12 @@ def test_pause_during_actor_decision_discards_click_before_raw_device() -> None:
 
 
 def test_factory_accepts_only_injected_physical_owner() -> None:
-    raw = RawDeviceExecutor(RawDeviceBackends())
+    raw = RawDeviceExecutor(RawDeviceBackends(
+        admitted_physical_click=AdmittedPhysicalClickBackend(lambda: None),
+        admitted_physical_scroll=AdmittedPhysicalScrollBackend(lambda: None),
+        admitted_physical_type_text=AdmittedPhysicalTypeTextBackend(lambda: None),
+        admitted_physical_hotkey=AdmittedPhysicalHotkeyBackend(lambda: None),
+    ))
     coordinator = build_live_desktop_runtime_coordinator(
         api_config={}, raw_device=raw,
     )
@@ -978,6 +1116,10 @@ def test_factory_accepts_only_injected_physical_owner() -> None:
     assert coordinator.runtime_capability_snapshot.to_dict() == (
         expected_snapshot.to_dict()
     )
+    with pytest.raises(LiveDesktopCoordinatorError, match="raw backend inventory"):
+        build_live_desktop_runtime_coordinator(
+            api_config={}, raw_device=RawDeviceExecutor(RawDeviceBackends()),
+        )
     with pytest.raises(TypeError, match="composition root"):
         build_live_desktop_runtime_coordinator(api_config={}, raw_device=None)
 

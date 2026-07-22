@@ -1,4 +1,4 @@
-"""Minimal production ToolCatalog for the live vNext point-input canary.
+"""Minimal production ToolCatalog for the live vNext input canary.
 
 The catalog describes only contracts that the current MissionRuntime and
 AtomicDesktopController can actually consume.  It does not infer tools from an
@@ -6,6 +6,11 @@ application, task phrase, or visual layout.
 """
 from __future__ import annotations
 
+from ...visual_runtime.keyboard_contracts import (
+    CANONICAL_HOTKEY_KEYS,
+    CANONICAL_HOTKEY_MODIFIERS,
+    MAX_TYPE_TEXT_CODEPOINTS,
+)
 from ...orchestrator.runtime_admission import RuntimeCapabilitySnapshot
 from .contracts import MutationKind, ToolCatalog, ToolRoute, ToolSpec
 from .registry import CapabilityOwner, RuntimeCapabilityRegistry
@@ -15,6 +20,8 @@ LIVE_TOOL_NAMES = (
     "click",
     "double_click",
     "scroll",
+    "type_text",
+    "hotkey",
     "claim_obligation_done",
     "blocked",
 )
@@ -23,6 +30,8 @@ LIVE_CONTROLLER_TOOL_NAMES = (
     "click",
     "double_click",
     "scroll",
+    "type_text",
+    "hotkey",
 )
 
 LIVE_RUNTIME_SERVICES = (
@@ -75,6 +84,44 @@ def _scroll_schema() -> dict[str, object]:
     return schema
 
 
+def _type_text_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_TYPE_TEXT_CODEPOINTS,
+            },
+        },
+        "required": ["text"],
+    }
+
+
+def _hotkey_schema() -> dict[str, object]:
+    primary_keys = tuple(sorted(
+        CANONICAL_HOTKEY_KEYS - set(CANONICAL_HOTKEY_MODIFIERS)
+    ))
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "modifiers": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": list(CANONICAL_HOTKEY_MODIFIERS),
+                },
+                "uniqueItems": True,
+                "maxItems": len(CANONICAL_HOTKEY_MODIFIERS),
+            },
+            "key": {"type": "string", "enum": list(primary_keys)},
+        },
+        "required": ["modifiers", "key"],
+    }
+
+
 def build_live_catalog() -> ToolCatalog:
     """Return the deterministic production catalog for migrated primitives.
 
@@ -113,6 +160,24 @@ def build_live_catalog() -> ToolCatalog:
             order=30,
         ),
         ToolSpec(
+            name="type_text",
+            schema=_type_text_schema(),
+            route=ToolRoute.VISUAL_ACTOR,
+            mutation_kind=MutationKind.GUI,
+            required_any_capabilities=("visual.interact",),
+            prerequisites=_CLICK_PREREQUISITES,
+            order=40,
+        ),
+        ToolSpec(
+            name="hotkey",
+            schema=_hotkey_schema(),
+            route=ToolRoute.VISUAL_ACTOR,
+            mutation_kind=MutationKind.GUI,
+            required_any_capabilities=("visual.interact",),
+            prerequisites=_CLICK_PREREQUISITES,
+            order=50,
+        ),
+        ToolSpec(
             name="claim_obligation_done",
             schema={
                 "type": "object",
@@ -131,7 +196,7 @@ def build_live_catalog() -> ToolCatalog:
             route=ToolRoute.VISUAL_ACTOR,
             mutation_kind=MutationKind.NONE,
             prerequisites=_FRAME_PREREQUISITES,
-            order=40,
+            order=60,
         ),
         ToolSpec(
             name="blocked",
@@ -153,13 +218,13 @@ def build_live_catalog() -> ToolCatalog:
             },
             route=ToolRoute.VISUAL_ACTOR,
             mutation_kind=MutationKind.NONE,
-            order=50,
+            order=70,
         ),
     ))
 
 
 def build_live_runtime_snapshot() -> RuntimeCapabilitySnapshot:
-    """Describe the exact point-input composition assembled in production.
+    """Describe the exact desktop-input composition assembled in production.
 
     This is a mechanical inventory, not a task classifier.  The resulting
     immutable object is shared by queue-time admission, ExecutionPolicy,
@@ -172,7 +237,7 @@ def build_live_runtime_snapshot() -> RuntimeCapabilitySnapshot:
         catalog=catalog,
         capability_registry=RuntimeCapabilityRegistry((
             CapabilityOwner(
-                "atomic-point-input-controller",
+                "atomic-desktop-input-controller",
                 ("visual.interact",),
             ),
             CapabilityOwner(

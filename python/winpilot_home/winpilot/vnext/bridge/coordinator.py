@@ -32,7 +32,12 @@ from ...tasking.execution_context import (
     normalize_execution_context,
     validated_handoff_target,
 )
-from ...visual_runtime.atomic_click_controller import AtomicDesktopController
+from ...visual_runtime.atomic_click_controller import (
+    AdmittedRawDeviceInventoryPort,
+    AtomicDesktopController,
+    REQUIRED_RAW_ACTION_NAMES,
+    SUPPORTED_DESKTOP_TOOL_NAMES,
+)
 from ...visual_runtime.atomic_post_action_bridge import AtomicPostActionBridge
 from ...visual_runtime.frame_observer import FrameObserver
 from ...visual_runtime.windows_desktop_facts import (
@@ -213,12 +218,22 @@ class LiveDesktopRuntimeCoordinator:
             raise TypeError("trace_sidecar must provide record_sidecar()")
         if not isinstance(action_queue, DesktopActionQueue):
             raise TypeError("action_queue must be DesktopActionQueue")
-        if raw_device is None:
-            raise TypeError("raw_device must be supplied by the product composition root")
+        if not isinstance(raw_device, AdmittedRawDeviceInventoryPort):
+            raise TypeError(
+                "raw_device must be supplied by the product composition root"
+            )
         if not isinstance(runtime_snapshot, RuntimeCapabilitySnapshot):
             raise TypeError("runtime_snapshot must be RuntimeCapabilitySnapshot")
         if runtime_snapshot.runtime_version != "vnext":
             raise ValueError("live coordinator requires a vNext capability snapshot")
+        if runtime_snapshot.controller_tool_names != SUPPORTED_DESKTOP_TOOL_NAMES:
+            raise LiveDesktopCoordinatorError(
+                "live capability snapshot and Controller tools differ"
+            )
+        if raw_device.admitted_action_names != REQUIRED_RAW_ACTION_NAMES:
+            raise LiveDesktopCoordinatorError(
+                "live Controller has no exact raw backend inventory"
+            )
         if facts_reader is not None and not isinstance(
             facts_reader, WindowsDesktopFactsReader
         ):
@@ -249,8 +264,8 @@ class LiveDesktopRuntimeCoordinator:
         self._trace_sidecar = trace_sidecar
         self._action_queue = action_queue
         # vNext owns semantic coordination, not physical-device construction.
-        # AtomicDesktopController performs the concrete owner validation when the
-        # run is composed; the product composition root supplies that owner.
+        # The exact name-only inventory was proven above before any Actor exists;
+        # the product composition root still supplies the sole physical owner.
         self._raw_device = raw_device
         self._runtime_snapshot = runtime_snapshot
         self._facts = facts_reader or WindowsDesktopFactsReader()

@@ -4,7 +4,7 @@
 capability admission 已收敛为一个 runtime-aware owner；P4/P5 现有一条默认关闭、按 run 显式选择的
 增量实验链，已经从同一产品入口接到唯一 Visual Actor、
 Capability Broker、共享 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。
-当前 live 工具面为 `click/double_click/scroll/claim/blocked`。legacy 仍默认；三个随机 seed 的
+当前 live 工具面为 `click/double_click/scroll/type_text/hotkey/claim/blocked`。keyboard 代码合同已闭合但同入口 Electron oracle 尚未运行。legacy 仍默认；三个随机 seed 的
 冷启动、空 session、可见 Electron click canary，以及 ActionEffect 接线前 direction/notches 合同下各一个
 down/up scroll canary，已通过独立 trusted-browser oracle。ActionEffect 最终代码的首轮复测为 down/click
 通过、up 失败；完整 P7、其他 GUI 原语和默认切换均未完成。完整 legacy
@@ -263,12 +263,12 @@ request_capability  claim_obligation_done  blocked
 
 工具目标通常小于十个。数字是认知预算，不是为凑数而硬编码；新增工具必须说明替代哪个旧入口。
 
-当前 live 实验投影更窄：已绑定窗口时只允许 `click`、`double_click`、`scroll`、
-`claim_obligation_done` 和 `blocked`。Runtime 每回合自动捕获最新权威帧，所以不向 Actor 暴露
+当前 live 实验投影更窄：已绑定窗口时只允许 `click`、`double_click`、`scroll`、`type_text`、
+`hotkey`、`claim_obligation_done` 和 `blocked`。Runtime 每回合自动捕获最新权威帧，所以不向 Actor 暴露
 等价的 full-frame `observe`。这是能力尚未迁移完整的增量 canary 边界，不是按应用、
 任务句或 canary 名称形成的规则。ExecuteDesktopTask contract 与 live Runtime state 同时声明
 `visual.interact` 和 `visual.read_text`：后者表示 Actor 可直接读取当前像素，不意味着加载 OCR/UIA；
-Catalog 只用 `visual.interact` 授权 click/double-click/scroll。canonical 名称统一由
+Catalog 只用 `visual.interact` 授权 click/double-click/scroll/type-text/hotkey。canonical 名称统一由
 `vnext/capability_names.py` 持有，兼容 re-export 不能成为第二 owner。
 
 ### 9.2 CapabilityRequest
@@ -475,11 +475,10 @@ vNext 复用：
 grounding、恢复和 adapter 行为；P4b 只能逐项抽取机械 owner，让 legacy 先委托同一
 Frame、坐标、admission 与 RawDevice primitive，再由 Runtime-bound ControllerPort
 调用。当前增量 live coordinator 已复用 shared frame、两段坐标映射、atomic admission、run selection
-和 RawDevice primitive；click/double-click/scroll 进入同一个 `AtomicDesktopController` transaction，
-在紧邻物理输入前执行 final target guard。scroll 只走 unqueued admitted physical SendInput backend，
+和 RawDevice primitive；click/double-click/scroll/type-text/hotkey 进入同一个 `AtomicDesktopController` transaction，
+在紧邻物理输入前执行对应的 pointer 或 keyboard final target guard。scroll 与 keyboard 只走 unqueued admitted physical SendInput backend，
 Actor 以明确 direction/notches 表达 viewport 导航，Controller 才机械映射到 RawDevice signed amount；
-结果不确定时不切换机制也不自动重放。`type_text`、`hotkey`、`drag`、`draw_strokes` 和 held pointer
-必须逐项完成相同 owner/parity/unknown-no-replay 合同，不能通过 legacy fallback 补齐。
+结果不确定时不切换机制也不自动重放。keyboard 已完成 owner/parity 的代码合同但尚无真实 Electron oracle；`drag`、`draw_strokes` 和 held pointer 必须逐项完成相同 owner/parity/unknown-no-replay 合同，不能通过 legacy fallback 补齐。
 
 live bridge 对 frame freshness 使用显式 max-age（默认 30 秒），并在 Actor 返回后的 Broker
 reprojection 中重新计算；过龄帧不能进入 click admission。任务回合数来自 canonical

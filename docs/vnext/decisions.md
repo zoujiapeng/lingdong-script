@@ -595,3 +595,27 @@
   injection, retry, application rule or legacy behavior changed. P7 remains unmet until the same
   Electron entry demonstrates both improved true completion and no increase in false claims across
   randomized positive and negative held-out scenes. P6, P8 and P9 remain disabled.
+
+### D033: keyboard primitives extend the same input transaction without fake coordinates
+
+- status: code and injected-test contract accepted; same-entry Electron evidence pending
+- surface: the explicit vNext Catalog adds `type_text:{text}` with a 1..4096-codepoint bound and
+  `hotkey:{modifiers,key}` with unique canonical modifiers plus one non-modifier primary key. A pure
+  owner-neutral keyboard contract is shared by Catalog, Controller and RawDevice; vNext does not
+  import the concrete RawDevice owner. No task, application, benchmark, layout, coordinate, prompt or
+  additional model rule is introduced.
+- transaction: the existing `AtomicDesktopController` remains the only Controller. Keyboard admission
+  carries `input_kind=keyboard` and `screen_point=null`, so it does not fabricate image coordinates or
+  run a point hit-test. It still holds the same queue lease, Runtime permit and authoritative frame pin,
+  and rechecks target/foreground through a keyboard final guard immediately around SendInput.
+- composition: the product root injects admitted click, scroll, type-text and hotkey backends. Before
+  constructing the Actor, the coordinator proves Catalog/Controller parity and exact name-only
+  Controller/RawDevice primitive inventory. Missing routes fail closed and never fall back to legacy.
+- uncertainty and privacy: partial text, key-down/release failure, target drift, backend exception or
+  missing post evidence remain unknown and are never automatically replayed. Raw facts and private
+  turn sidecars retain bounded counts and tool identity only; they do not serialize text or chord
+  arguments.
+- deletion target: legacy `type_text`/`press_keys` adapters remain until both runtimes have equivalent
+  primitive coverage and real Electron oracle evidence. This slice deletes no legacy product owner,
+  does not switch the default runtime and does not satisfy P7/P8/P9. Drag, drawing, held pointer and
+  ROI observation remain later slices; P6 stays disabled.

@@ -47,7 +47,9 @@ def _snapshot(
         capability_registry=RuntimeCapabilityRegistry((
             CapabilityOwner("live-visual-runtime", capabilities),
         )),
-        controller_tool_names=("click", "double_click", "scroll"),
+        controller_tool_names=(
+            "click", "double_click", "scroll", "type_text", "hotkey",
+        ),
         available_services=(
             tuple(sorted(CANONICAL_RUNTIME_SERVICES))
             if services is None
