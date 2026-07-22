@@ -2,6 +2,7 @@
 
 from .contracts import *
 from .dispatcher import DeterministicFirstVerifier, EvidenceEvaluator
+from .mission_completion import *
 from .ports import ObligationVerifierPort
 
 __all__ = [name for name in globals() if not name.startswith("_")]
