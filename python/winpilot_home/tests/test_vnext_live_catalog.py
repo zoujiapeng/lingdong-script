@@ -70,15 +70,14 @@ def test_click_contract_is_exactly_submitted_image_xy() -> None:
 def test_non_mutating_contracts_are_strict_and_executable() -> None:
     validator = ToolArgumentValidator(build_click_live_catalog())
 
+    assert validator.validate("observe", {}) == {}
     assert validator.validate("observe", {
-        "observation_kind": "full",
-        "image_region": None,
         "question": "What changed?",
-    })["observation_kind"] == "full"
+    }) == {"question": "What changed?"}
     invalid_observations = (
         {
             "observation_kind": "full",
-            "image_region": {"x": 1, "y": 2, "width": 3, "height": 4},
+            "image_region": None,
             "question": "Mismatch",
         },
         {
@@ -87,8 +86,6 @@ def test_non_mutating_contracts_are_strict_and_executable() -> None:
             "question": "RuntimeState cannot execute this crop yet",
         },
         {
-            "observation_kind": "full",
-            "image_region": None,
             "question": "",
         },
     )

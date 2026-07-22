@@ -1384,6 +1384,12 @@ class MissionRuntime:
                 submitted_size=initial.frame.submitted_size,
                 stop_event=stop_event,
             )
+        except InvalidActorProposal as exc:
+            return self._result(
+                RuntimeStatus.INVALID_PROPOSAL,
+                route=route,
+                detail=str(exc),
+            )
         except Exception as exc:
             return self._result(RuntimeStatus.ACTOR_ERROR, route=route, detail=str(exc))
         if self._stopped(stop_event):

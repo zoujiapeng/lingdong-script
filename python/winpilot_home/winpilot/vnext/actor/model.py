@@ -120,7 +120,12 @@ def _proposal_for(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         raw = {
             "format": ACTOR_PROPOSAL_FORMAT,
             "kind": "observe",
-            **dict(arguments),
+            "observation_kind": "full",
+            "image_region": None,
+            "question": str(
+                arguments.get("question")
+                or "refresh the current authoritative frame"
+            ),
         }
     elif name == "claim_obligation_done":
         raw = {

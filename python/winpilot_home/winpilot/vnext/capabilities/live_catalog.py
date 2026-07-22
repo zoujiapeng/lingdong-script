@@ -42,11 +42,8 @@ def _observe_schema() -> dict[str, object]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "observation_kind": {"const": "full"},
-            "image_region": {"type": "null"},
             "question": {"type": "string", "minLength": 1},
         },
-        "required": ["observation_kind", "image_region", "question"],
     }
 
 
