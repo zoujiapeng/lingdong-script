@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import time
 from collections.abc import Callable
 
 from ..action.raw_device import RawActionReceipt
@@ -43,6 +45,8 @@ class AtomicPostActionBridge:
         observer: FrameObserver,
         evidence: EvidenceRegistry,
         related_window: Callable[[int | None, int | None], bool] | None = None,
+        post_input_settle_delay_s: float = 0.12,
+        wait: Callable[[float], None] = time.sleep,
     ) -> None:
         if not isinstance(frame_authority, FrameAuthority):
             raise TypeError("frame_authority must be FrameAuthority")
@@ -54,9 +58,22 @@ class AtomicPostActionBridge:
             raise TypeError("evidence must be EvidenceRegistry")
         if related_window is not None and not callable(related_window):
             raise TypeError("related_window must be callable or null")
+        if (
+            isinstance(post_input_settle_delay_s, bool)
+            or not isinstance(post_input_settle_delay_s, (int, float))
+            or not math.isfinite(float(post_input_settle_delay_s))
+            or not 0.0 <= float(post_input_settle_delay_s) <= 1.0
+        ):
+            raise ValueError(
+                "post_input_settle_delay_s must be finite and in [0, 1]"
+            )
+        if not callable(wait):
+            raise TypeError("wait must be callable")
         self._observer = observer
         self._evidence = evidence
         self._related_window = related_window
+        self._post_input_settle_delay_s = float(post_input_settle_delay_s)
+        self._wait = wait
 
     @staticmethod
     def _frame_identity(state: FrameState) -> FrameCommitIdentity:
@@ -142,6 +159,15 @@ class AtomicPostActionBridge:
         raw_receipt: RawActionReceipt | None,
     ) -> ControllerPostAction:
         proposal = self._validate_call(envelope, admission, raw_receipt)
+        if (
+            raw_receipt is not None
+            and raw_receipt.input_completed is True
+            and self._post_input_settle_delay_s > 0.0
+        ):
+            # Input dispatch and visible paint are asynchronous on many desktop
+            # surfaces.  Observe only after one bounded generic settle window;
+            # this is neither action replay nor an application-specific wait.
+            self._wait(self._post_input_settle_delay_s)
         captured = self._observer.capture(
             epoch=envelope.frame.epoch,
             hwnd=envelope.frame.hwnd,
