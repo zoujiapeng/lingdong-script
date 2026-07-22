@@ -116,6 +116,12 @@ def build_live_catalog() -> ToolCatalog:
             name="claim_obligation_done",
             schema={
                 "type": "object",
+                "description": (
+                    "Request independent verification of whether the active obligation "
+                    "satisfies its acceptance criteria using the current authoritative "
+                    "frame and accepted evidence. Calling this tool does not mark the "
+                    "obligation or mission complete."
+                ),
                 "additionalProperties": False,
                 "properties": {
                     "concise_claim": {"type": "string", "minLength": 1},

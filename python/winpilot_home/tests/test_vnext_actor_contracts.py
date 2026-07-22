@@ -468,6 +468,8 @@ def test_envelope_rejects_frame_target_identity_disagreement() -> None:
 
 
 def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> None:
+    assert ACTOR_TURN_INPUT_FORMAT == "actor-turn-input/2"
+    assert ACTOR_MISSION_VIEW_FORMAT == "actor-mission-view/2"
     turn = project_actor_turn_input(_card(), _frame(), _catalog(), _projection())
     raw = json.loads(turn.to_json())
     assert raw["format"] == ACTOR_TURN_INPUT_FORMAT
@@ -498,8 +500,8 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
         "local_visual_change": "unchanged",
         "frame_comparable": True,
         "target_binding_valid": True,
-        "semantic_completion": "unknown",
     }
+    assert _card().last_transition.action_effect.semantic_completion == "unknown"
     for runtime_identity in (
         "decision-runtime-1",
         "evidence-frame-before-1",
@@ -510,6 +512,26 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
     ):
         assert runtime_identity not in text
     assert ActorTurnInput.from_dict(raw).to_json() == turn.to_json()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda raw: raw.update(format="actor-turn-input/1"),
+        lambda raw: raw["mission"].update(format="actor-mission-view/1"),
+        lambda raw: raw["mission"]["last_transition"].update(
+            semantic_completion="unknown"
+        ),
+    ),
+)
+def test_actor_turn_v2_rejects_stale_formats_and_removed_completion_hint(mutate) -> None:
+    raw = json.loads(
+        project_actor_turn_input(_card(), _frame(), _catalog(), _projection()).to_json()
+    )
+    mutate(raw)
+
+    with pytest.raises(InvalidActorView):
+        ActorTurnInput.from_dict(raw)
 
 
 @pytest.mark.parametrize(

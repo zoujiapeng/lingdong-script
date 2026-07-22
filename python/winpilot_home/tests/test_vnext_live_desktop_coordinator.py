@@ -260,6 +260,15 @@ def _claim():
     }
 
 
+def _blocked():
+    return {
+        "format": "actor-proposal/0",
+        "kind": "blocked",
+        "blocker_kind": "visual_uncertainty",
+        "observed_facts": ["the current pixels do not identify one safe action"],
+    }
+
+
 def _scroll(*, direction="down", notches=4):
     return {
         "format": "actor-proposal/0",
@@ -306,7 +315,7 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     assert second_turn.mission.unchanged_frame_streak == 1
     assert second_turn.mission.last_transition.local_visual_change == "unchanged"
     assert second_turn.mission.last_transition.frame_comparable is True
-    assert second_turn.mission.last_transition.semantic_completion == "unknown"
+    assert "semantic_completion" not in second_turn.mission.last_transition.model_dump()
     assert raw_calls[0][0:2] == (110, 120)
     assert raw_calls[0][-1] is FinalPointerGuardDecision.ADMITTED
     assert [record[1]["type"] for record in trace.records] == [
@@ -317,9 +326,28 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     ]
     assert all(run_id == "arp-run-1" for run_id, _record in trace.records)
     action_trace = trace.records[1][1]
+    assert action_trace["step"] == 1
+    assert action_trace["model_role"] == "visual_actor"
+    assert action_trace["accepted_tool_name"] == "click"
+    assert action_trace["accepted_events"] == [{
+        "event_id": action_trace["accepted_event_ids"][0],
+        "kind": "transition_recorded",
+    }]
     assert action_trace["local_visual_change"] == "unchanged"
     assert action_trace["frame_comparable"] is True
     assert action_trace["no_progress_streak"] == 1
+    claim_trace = trace.records[2][1]
+    assert claim_trace["step"] == 2
+    assert claim_trace["model_role"] == "visual_actor"
+    assert claim_trace["accepted_tool_name"] == "claim_obligation_done"
+    assert [item["kind"] for item in claim_trace["accepted_events"]] == [
+        "obligation_claimed",
+        "verification_recorded",
+        "mission_verified",
+    ]
+    assert {
+        item["event_id"] for item in claim_trace["accepted_events"]
+    } == set(claim_trace["accepted_event_ids"])
 
 
 def test_repeated_unchanged_actions_are_replay_derived_actor_feedback() -> None:
@@ -350,6 +378,40 @@ def test_repeated_unchanged_actions_are_replay_derived_actor_feedback() -> None:
         2,
         None,
     ]
+    assert [record["step"] for record in turn_records] == [1, 2, 3]
+    assert [record["model_role"] for record in turn_records] == [
+        "visual_actor", "visual_actor", "visual_actor",
+    ]
+    assert [record["accepted_tool_name"] for record in turn_records] == [
+        "click", "click", "claim_obligation_done",
+    ]
+
+
+def test_accepted_blocked_report_is_the_only_proof_of_accepted_blocked_tool() -> None:
+    actor = ScriptedActor([_blocked()])
+    verifier = PositiveVisualModel()
+    trace = Trace()
+    raw_calls = []
+
+    result = _coordinator(
+        actor, verifier, trace=trace, raw_calls=raw_calls,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert raw_calls == []
+    assert verifier.calls == []
+    turn = next(
+        record for _run_id, record in trace.records
+        if record["type"] == "vnext_mission_runtime_turn"
+    )
+    assert turn["step"] == 1
+    assert turn["model_role"] == "visual_actor"
+    assert turn["proposal_kind"] == "blocked"
+    assert turn["accepted_tool_name"] == "blocked"
+    assert turn["accepted_events"] == [{
+        "event_id": turn["accepted_event_ids"][0],
+        "kind": "obligation_blocked",
+    }]
 
 
 def test_turn_trace_never_reattributes_a_previous_action_effect() -> None:
@@ -370,9 +432,106 @@ def test_turn_trace_never_reattributes_a_previous_action_effect() -> None:
     assert turns[0]["local_visual_change"] == "unchanged"
     assert turns[0]["no_progress_streak"] == 1
     assert turns[1]["status"] == "invalid_proposal"
+    assert turns[1]["step"] == 2
+    assert turns[1]["model_role"] == "visual_actor"
+    assert turns[1]["accepted_tool_name"] is None
+    assert turns[1]["accepted_event_ids"] == []
+    assert turns[1]["accepted_events"] == []
     assert turns[1]["local_visual_change"] is None
     assert turns[1]["frame_comparable"] is None
     assert turns[1]["no_progress_streak"] is None
+
+
+def test_turn_rejected_before_actor_has_no_model_role_or_selected_tool() -> None:
+    actor = ScriptedActor([_click()])
+    trace = Trace()
+
+    result = _coordinator(
+        actor,
+        PositiveVisualModel(),
+        trace=trace,
+        frame_max_age_s=0.5,
+        clock=lambda: 100.0,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert actor.calls == []
+    turn = next(
+        record for _run_id, record in trace.records
+        if record["type"] == "vnext_mission_runtime_turn"
+    )
+    assert turn["proposal_kind"] is None
+    assert turn["model_role"] is None
+    assert turn["accepted_tool_name"] is None
+    assert turn["accepted_event_ids"] == []
+    assert turn["accepted_events"] == []
+
+
+def test_live_turn_sidecar_uses_real_trace_recorder_without_product_bus_events(
+    tmp_path, monkeypatch,
+) -> None:
+    import json
+
+    from winpilot.recorder import trace as trace_module
+    from winpilot.utils.log import BUS
+
+    monkeypatch.setattr(trace_module, "TRACES_DIR", tmp_path)
+    recorder = trace_module.TraceRecorder()
+    product_events = None
+    raw_calls = []
+    verifier = PositiveVisualModel()
+    try:
+        recorder.start("arp-run-1")
+        product_events = BUS.subscribe()
+        result = _coordinator(
+            ScriptedActor([_click(), _claim()]),
+            verifier,
+            trace=recorder,
+            raw_calls=raw_calls,
+        ).run(_context())
+        recorder.stop()
+        published = []
+        while not product_events.empty():
+            published.append(product_events.get_nowait())
+    finally:
+        if product_events is not None:
+            BUS.unsubscribe(product_events)
+        BUS.remove_sink(recorder._on_event)
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    assert len(raw_calls) == 1
+    assert len(verifier.calls) == 1
+    assert all(
+        event.get("type") != "vnext_mission_runtime_turn"
+        for event in published
+    )
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "arp-run-1.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+    turns = [
+        record for record in records
+        if record.get("type") == "vnext_mission_runtime_turn"
+    ]
+    assert [turn["step"] for turn in turns] == [1, 2]
+    assert [turn["model_role"] for turn in turns] == [
+        "visual_actor", "visual_actor",
+    ]
+    assert [turn["accepted_tool_name"] for turn in turns] == [
+        "click", "claim_obligation_done",
+    ]
+    assert [item["kind"] for item in turns[0]["accepted_events"]] == [
+        "transition_recorded",
+    ]
+    assert [item["kind"] for item in turns[1]["accepted_events"]] == [
+        "obligation_claimed", "verification_recorded", "mission_verified",
+    ]
+    serialized = json.dumps(turns, ensure_ascii=False)
+    for forbidden in ("messages", "image_b64", "image_url", "image_x", "image_y"):
+        assert forbidden not in serialized
 
 
 def test_live_coordinator_scroll_uses_same_actor_controller_and_verifier_chain():

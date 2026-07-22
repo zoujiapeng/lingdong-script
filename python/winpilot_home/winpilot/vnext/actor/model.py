@@ -163,13 +163,27 @@ def _proposal_for(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
 
 def _provider_tools(turn: ActorTurnInput) -> list[dict[str, Any]]:
     result = []
+    missing_description = object()
     for tool in turn.tools:
+        parameters = _plain_schema(tool)
+        description = parameters.pop("description", missing_description)
+        if description is not missing_description and (
+            type(description) is not str
+            or not description.strip()
+            or description != description.strip()
+        ):
+            raise VisualActorModelError(
+                f"Broker tool description for {tool.name!r} must be canonical non-empty text"
+            )
+        function = {
+            "name": tool.name,
+            "parameters": parameters,
+        }
+        if description is not missing_description:
+            function["description"] = description
         result.append({
             "type": "function",
-            "function": {
-                "name": tool.name,
-                "parameters": _plain_schema(tool),
-            },
+            "function": function,
         })
     return result
 

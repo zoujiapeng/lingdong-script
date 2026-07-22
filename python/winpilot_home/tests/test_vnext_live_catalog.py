@@ -110,7 +110,21 @@ def test_scroll_contract_is_explicit_strict_and_bounded() -> None:
 
 
 def test_non_mutating_contracts_are_strict_and_executable() -> None:
-    validator = ToolArgumentValidator(build_live_catalog())
+    catalog = build_live_catalog()
+    validator = ToolArgumentValidator(catalog)
+
+    claim = catalog.get("claim_obligation_done")
+    assert claim.mutation_kind is MutationKind.NONE
+    description = claim.schema["description"]
+    assert isinstance(description, str) and description.strip()
+    assert "independent verification" in description.lower()
+    assert "does not mark the obligation or mission complete" in description.lower()
+    for forbidden in (
+        "qq", "paint", "netease", "douyin", "benchmark", "test case",
+        "image_x", "image_y", "coordinate", "mission_id", "run_id",
+        "frame_id", "evidence_id", "verification_id",
+    ):
+        assert forbidden not in description.lower()
 
     with pytest.raises(ToolArgumentValidationError):
         validator.validate("claim_obligation_done", {
