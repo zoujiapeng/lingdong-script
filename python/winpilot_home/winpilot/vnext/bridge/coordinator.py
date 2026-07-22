@@ -268,10 +268,6 @@ class LiveDesktopRuntimeCoordinator:
             raise LiveDesktopCoordinatorError(
                 "desktop handoff process identity changed"
             )
-        if handoff_region != target.window_region:
-            raise LiveDesktopCoordinatorError(
-                "desktop handoff target geometry changed"
-            )
         binding_core = {
             "binding_id": binding_id,
             "hwnd": target.hwnd,
@@ -285,6 +281,10 @@ class LiveDesktopRuntimeCoordinator:
             "mission_id": definition.mission_id,
             "run_id": definition.run_id,
             "target": target.to_dict(),
+            # The client snapshot uses GetWindowRect endpoints while the
+            # commit owner uses DWM visible bounds.  Preserve both identities;
+            # only the freshly double-sampled DWM region is actionable.
+            "handoff_region": list(handoff_region),
             "binding": binding_core,
         })
         evidence_id = "evidence-target-" + evidence_hash[:24]
