@@ -168,11 +168,15 @@ def _bridge(
     registry: EvidenceRegistry,
     *,
     capture=lambda _hwnd, **_kwargs: IMAGE_AFTER,
+    post_input_settle_delay_s: float = 0.0,
+    wait=lambda _seconds: None,
 ) -> AtomicPostActionBridge:
     return AtomicPostActionBridge(
         frame_authority=authority,
         observer=_observer(authority, capture=capture),
         evidence=registry,
+        post_input_settle_delay_s=post_input_settle_delay_s,
+        wait=wait,
     )
 
 
@@ -311,6 +315,71 @@ def test_bridge_accepts_the_exact_scroll_receipt_for_a_scroll_action() -> None:
             admission=_admission(wrong),
             raw_receipt=_receipt(),
         )
+
+
+def test_bridge_waits_once_before_capturing_completed_input() -> None:
+    authority, before = _authority()
+    envelope = _envelope(before, action="scroll")
+    registry = EvidenceRegistry("mission-1", "run-1")
+    ordering: list[str] = []
+
+    def capture(_hwnd, **_kwargs):
+        ordering.append("capture")
+        return IMAGE_AFTER
+
+    def wait(seconds: float) -> None:
+        assert seconds == 0.12
+        ordering.append("wait")
+
+    bridge = _bridge(
+        authority,
+        registry,
+        capture=capture,
+        post_input_settle_delay_s=0.12,
+        wait=wait,
+    )
+
+    post = bridge.observe_after(
+        envelope,
+        admission=_admission(envelope),
+        raw_receipt=_scroll_receipt(),
+    )
+
+    assert ordering == ["wait", "capture"]
+    assert authority.current is not None
+    assert authority.current.image_b64 == IMAGE_AFTER
+    assert post.post_frame_id == authority.current.frame_id
+
+
+def test_bridge_does_not_wait_when_input_did_not_execute() -> None:
+    authority, before = _authority()
+    envelope = _envelope(before)
+    registry = EvidenceRegistry("mission-1", "run-1")
+    capture_calls: list[bool] = []
+    waits: list[float] = []
+    bridge = _bridge(
+        authority,
+        registry,
+        capture=lambda _hwnd, **_kwargs: capture_calls.append(True) or IMAGE_AFTER,
+        post_input_settle_delay_s=0.12,
+        wait=waits.append,
+    )
+
+    rejected = CommitAdmissionResult(
+        envelope.decision_id,
+        CommitAdmissionStatus.NOT_STARTED,
+        CommitAdmissionReason.POINTER_NOT_RELEASED,
+        False,
+    )
+
+    bridge.observe_after(
+        envelope,
+        admission=rejected,
+        raw_receipt=None,
+    )
+
+    assert capture_calls == [True]
+    assert waits == []
 
 
 def test_not_started_admission_still_gets_a_fresh_bound_frame_without_receipt() -> None:
