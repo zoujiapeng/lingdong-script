@@ -474,7 +474,14 @@ class CapabilityPlanner:
         })
 
     @staticmethod
-    def assert_satisfiable(contract: TaskContract) -> None:
+    def assert_requirement_coverage(contract: TaskContract) -> None:
+        """Validate compiler-owned user-requirement coverage only.
+
+        This check is runtime-neutral.  Legacy capability/component
+        satisfiability remains below, while the selected vNext runtime may
+        reuse the same lossless coverage guard without interpreting legacy
+        component exposure as its own executable surface.
+        """
         if (
             contract.compiler_version == "typed-stage-5"
             and (
@@ -489,6 +496,10 @@ class CapabilityPlanner:
                     or ["unknown"]
                 )
             )
+
+    @staticmethod
+    def assert_satisfiable(contract: TaskContract) -> None:
+        CapabilityPlanner.assert_requirement_coverage(contract)
         missing = set(contract.missing_capabilities)
         for stage in contract.stages:
             if stage.execution:
