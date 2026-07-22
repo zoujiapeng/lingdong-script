@@ -231,6 +231,15 @@ def test_keyboard_entry_success_requires_complete_trusted_prefix_chain():
 
     assert server._accepted_success_event(events, len(events) - 1) is True
 
+    focus_diagnostic = copy.deepcopy(events)
+    focus_diagnostic.insert(1, _keyboard_event("keyboard_entry", "trusted_focus", {
+        "target_id": "entry-field-1", "active_target_id": "entry-field-1",
+        "value_length": 0, "selection_start": 0, "selection_end": 0,
+    }, trusted=True))
+    assert server._accepted_success_event(
+        focus_diagnostic, len(focus_diagnostic) - 1,
+    ) is True
+
     missing_beforeinput = copy.deepcopy(events)
     del missing_beforeinput[1]
     assert server._accepted_success_event(

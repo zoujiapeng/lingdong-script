@@ -433,11 +433,23 @@
       const target=fields[targetIndex],targetId=target.dataset.targetId;
       let acceptedPrefix='',pendingBefore=null,beforeinputCount=0,inputCount=0;
       let wrongTargetActivity=false,sequenceValid=target.value==='';
+      function focusDetails(field){const active=document.activeElement;
+        return{target_id:field.dataset.targetId,
+          active_target_id:active&&active.dataset?active.dataset.targetId||null:null,
+          value_length:field.value.length,
+          selection_start:typeof field.selectionStart==='number'?field.selectionStart:null,
+          selection_end:typeof field.selectionEnd==='number'?field.selectionEnd:null};}
       function activityDetails(field,event,extra={}){return{
         target_id:field.dataset.targetId,input_type:event.inputType||'',
         data:typeof event.data==='string'?event.data:'',is_composing:Boolean(event.isComposing),...extra,
       };}
       fields.forEach(field=>{
+        for(const eventName of ['pointerdown','click','focus','blur']){
+          field.addEventListener(eventName,event=>{
+            report(`${event.isTrusted?'trusted':'untrusted'}_${eventName}`,event,
+              focusDetails(field));
+          });
+        }
         for(const eventName of ['compositionstart','compositionupdate','compositionend']){
           field.addEventListener(eventName,event=>{
             if(field!==target)wrongTargetActivity=true;sequenceValid=false;
@@ -510,6 +522,12 @@
       }
       const target=editors[targetIndex],targetId=target.dataset.targetId,originalText=target.value;
       let phase=0,mutationCount=0,wrongTargetActivity=false,sequenceValid=true;
+      function focusDetails(editor){const active=document.activeElement;
+        return{target_id:editor.dataset.targetId,
+          active_target_id:active&&active.dataset?active.dataset.targetId||null:null,
+          value_length:editor.value.length,
+          selection_start:typeof editor.selectionStart==='number'?editor.selectionStart:null,
+          selection_end:typeof editor.selectionEnd==='number'?editor.selectionEnd:null};}
       function keyDetails(editor,event){return{
         target_id:editor.dataset.targetId,key:event.key||'',code:event.code||'',
         ctrl_key:Boolean(event.ctrlKey),alt_key:Boolean(event.altKey),
@@ -518,6 +536,12 @@
         selection_start:editor.selectionStart,selection_end:editor.selectionEnd,content:editor.value,
       };}
       editors.forEach(editor=>{
+        for(const eventName of ['pointerdown','click','focus','blur']){
+          editor.addEventListener(eventName,event=>{
+            report(`${event.isTrusted?'trusted':'untrusted'}_${eventName}`,event,
+              focusDetails(editor));
+          });
+        }
         for(const eventName of ['cut','paste','drop']){
           editor.addEventListener(eventName,event=>{
             sequenceValid=false;if(editor!==target)wrongTargetActivity=true;
