@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
+from ..capability_names import CANONICAL_CAPABILITIES
 from .contracts import (
     EvidencePolicy,
     EvidenceRef,
@@ -36,30 +37,14 @@ def _items(value: Any) -> tuple[Any, ...]:
         return (value,)
 
 
-_KNOWN_CAPABILITIES = {
-    # These are capability classes, not application or task rules.  Unknown
-    # legacy labels remain metadata and can never silently become requirements.
-    "visual.interact",
-    "visual.observe",
-    "visual.read",
-    "visual.read_text",
-    "visual.spatial",
-    "pointer.dynamic",
-    "artifact.capture",
-    "artifact.read",
-    "artifact.transform",
-    "application.resolve",
-    "application.open",
-    "communication.send_text",
-    "communication.send_artifact",
-    "mcp.discover",
-    "mcp.office",
-    "external.wait",
-}
+# The Broker's registry is the one canonical owner.  Legacy verifier labels
+# such as ``visual.observe`` are metadata/EvidencePolicy inputs, not executable
+# capabilities that may bypass Broker validation.
+_KNOWN_CAPABILITIES = CANONICAL_CAPABILITIES
 
 
 def _partition_capabilities(values: Iterable[Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return known broad capabilities and isolate unknown legacy metadata."""
+    """Return canonical capabilities and isolate every legacy-only label."""
     aliases = {
         "visual.adaptive_interaction": "visual.interact",
         "visual.execute": "visual.interact",

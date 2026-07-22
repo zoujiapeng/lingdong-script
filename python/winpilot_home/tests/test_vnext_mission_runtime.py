@@ -1663,14 +1663,14 @@ def test_visual_failure_is_recorded_once_and_enters_uncertain_policy(
     failure: str,
     monkeypatch,
 ) -> None:
-    from winpilot.vnext.runtime import mission_runtime as runtime_module
+    from winpilot.vnext.verification import visual_model as visual_model_module
 
     if failure == "append_conflict":
         def reject_append(*_args, **_kwargs):
             raise ValueError("conflicting visual evidence identity")
 
         monkeypatch.setattr(
-            runtime_module,
+            visual_model_module,
             "append_visual_verifier_evidence",
             reject_append,
         )

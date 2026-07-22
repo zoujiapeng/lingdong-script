@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from typing import Any, Iterable, Mapping, Protocol
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol
 
 from ..actor import (
     ActorDecisionEnvelope,
@@ -54,10 +54,6 @@ from ..verification import (
     ObligationVerifierPort,
     VerifierAssessment,
 )
-from ..verification.visual_model import (
-    VisualVerifierAttestation,
-    append_visual_verifier_evidence,
-)
 from .contracts import (
     ControllerOutcome,
     ControllerTransition,
@@ -68,6 +64,9 @@ from .contracts import (
 )
 from .ports import ActorPort, ControllerPort, PointerCleanupPort, RuntimeStatePort
 from .mutation_permits import MutationPermitAuthority, MutationPermitError
+
+if TYPE_CHECKING:
+    from ..verification.visual_model import VisualVerifierAttestation
 
 
 _PROPOSAL_TOOL = {
@@ -91,7 +90,7 @@ class AttestedVisualVerifierPort(Protocol):
         frame: RuntimeFrame,
         *,
         stop_event: threading.Event | None = None,
-    ) -> VisualVerifierAttestation: ...
+    ) -> "VisualVerifierAttestation": ...
 
 
 class MissionRuntime:
@@ -792,6 +791,15 @@ class MissionRuntime:
         stop_event: threading.Event | None,
     ) -> MissionRuntimeResult:
         """Attest one claim/frame pair and commit only Runtime-bound evidence."""
+
+        # Keep the concrete visual implementation outside MissionRuntime's
+        # import graph.  ``visual_model`` itself imports RuntimeFrame, so an
+        # eager import here makes direct verifier loading circular through the
+        # runtime package initializer.
+        from ..verification.visual_model import (
+            VisualVerifierAttestation,
+            append_visual_verifier_evidence,
+        )
 
         def finish(
             status: RuntimeStatus,

@@ -10,7 +10,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
-from .names import canonical_capabilities, canonical_capability
+from ..capability_names import canonical_capabilities, canonical_capability
 
 
 TOOL_SPEC_FORMAT = "tool-spec/0"

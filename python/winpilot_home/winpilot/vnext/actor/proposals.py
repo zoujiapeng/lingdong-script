@@ -17,7 +17,7 @@ from pydantic import (
     model_validator,
 )
 
-from ..capabilities.names import InvalidCapability, canonical_capability
+from ..capability_names import InvalidCapability, canonical_capability
 
 
 ACTOR_PROPOSAL_FORMAT = "actor-proposal/0"

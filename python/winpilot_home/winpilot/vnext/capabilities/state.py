@@ -18,7 +18,7 @@ from .contracts import (
     _strict,
     _strings,
 )
-from .names import canonical_capabilities
+from ..capability_names import canonical_capabilities
 
 
 @dataclass(frozen=True, slots=True)

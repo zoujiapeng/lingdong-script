@@ -10,7 +10,7 @@ import hashlib
 import json
 from typing import Any, Iterable, Mapping
 
-from ..capabilities.names import CAPABILITY_PATTERN, CANONICAL_CAPABILITIES
+from ..capability_names import CAPABILITY_PATTERN, CANONICAL_CAPABILITIES
 
 from .contracts import (
     CognitiveServices,
