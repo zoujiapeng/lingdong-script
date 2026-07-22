@@ -90,7 +90,11 @@
     const instruction = document.getElementById('instruction');
     const heading = document.getElementById('heading');
     const status = document.getElementById('status');
-    let readyDetails = {};
+    // Defer geometry reads until the page-ready animation frame.  App-window
+    // placement can change between setup and first paint; caching boxes here
+    // would make the independent oracle compare against geometry the Agent
+    // never observed.
+    let readyDetails = () => ({});
     let moveCount = 0;
 
     function rngFactory(value) {
@@ -155,7 +159,7 @@
         const details={succeeded,token:box(token),target:box(target)};
         if(succeeded){target.classList.add('success');markSuccess('DRAG_SUCCEEDED',event,details);}else markFailure(canceled?'DRAG_CANCELED':'DROP_MISSED_TARGET',event,details); }
       token.addEventListener('pointerup',e=>finish(e,false)); token.addEventListener('pointercancel',e=>finish(e,true));
-      readyDetails={token:box(token),target:box(target)};
+      readyDetails=()=>({token:box(token),target:box(target)});
     }
 
     function setupPreciseClick() {
@@ -170,7 +174,7 @@
           if(target)markSuccess('CLICK_SUCCEEDED',event,{succeeded:true,target_index:targetIndex,target:box(el)});
           else markFailure('WRONG_OBJECT_CLICKED',event,{succeeded:false,clicked_index:i,target_index:targetIndex}); }); arena.append(el);
       }
-      const target=arena.querySelector('.target-shape'); readyDetails={target_index:targetIndex,target:box(target),candidate_count:cols*rows,distractor_count:cols*rows-1};
+      const target=arena.querySelector('.target-shape'); readyDetails=()=>({target_index:targetIndex,target:box(target),candidate_count:cols*rows,distractor_count:cols*rows-1});
     }
 
     function setupOrderedClicks() {
@@ -203,7 +207,7 @@
         });
         if(numbered)targets.push(marker);
       });
-      readyDetails={required_sequence:required,targets:targets.map(box),distractor_count:3};
+      readyDetails=()=>({required_sequence:required,targets:targets.map(box),distractor_count:3});
     }
 
     function setupSlider() {
@@ -224,7 +228,7 @@
         const succeeded=event.isTrusted&&moveCount>=2&&cx>=g.left&&cx<=g.right;
         const details={succeeded,knob:box(knob),goal:box(band),center_x:Math.round(cx)};
         if(succeeded)markSuccess('SLIDER_SUCCEEDED',event,details);else markFailure('SLIDER_MISSED_GOAL',event,details);});
-      readyDetails={knob:box(knob),goal:box(band)};
+      readyDetails=()=>({knob:box(knob),goal:box(band)});
     }
 
     function distanceToSegment(p,a,b){const dx=b.x-a.x,dy=b.y-a.y,l2=dx*dx+dy*dy||1;
@@ -252,7 +256,7 @@
         const succeeded=event.isTrusted&&moveCount>=3&&pathValid&&Math.hypot(cx-(g.left+g.right)/2,cy-(g.top+g.bottom)/2)<=30;
         const details={succeeded,path_valid:pathValid,min_clearance:Math.round(minClearance),token:box(token),goal:box(goal),path_points:points};
         if(succeeded)markSuccess('CORRIDOR_SUCCEEDED',event,details);else markFailure(pathValid?'GOAL_MISSED':'LEFT_CORRIDOR',event,details);});
-      readyDetails={token:box(token),goal:box(goal),path_points:points,variant};
+      readyDetails=()=>({token:box(token),goal:box(goal),path_points:points,variant});
     }
 
     function setupDynamicHold() {
@@ -303,7 +307,7 @@
         if(succeeded){goal.classList.add('success');markSuccess('DYNAMIC_HOLD_SUCCEEDED',event,details);}
         else markFailure('DYNAMIC_HOLD_RELEASED_TOO_EARLY_OR_OUTSIDE_GOAL',event,details);
       });
-      readyDetails={token:box(token),checkpoint:box(checkpointEl),goal_initially_hidden:true};
+      readyDetails=()=>({token:box(token),checkpoint:box(checkpointEl),goal_initially_hidden:true});
     }
 
     function setupSharedTurn() {
@@ -331,13 +335,13 @@
           if(a.cell===b.cell&&a.sign!==b.sign&&Math.hypot(a.mid.x-b.mid.x,a.mid.y-b.mid.y)<cell*.34)selected=a.cell;}
         const succeeded=event.isTrusted&&selected>=0;const details={succeeded,user_cell:userCell,selected_cell:selected,valid_stroke_count:strokes.length,board:box(canvas)};
         if(succeeded)markSuccess('TURN_SUCCEEDED',event,details);else report('pointerup',event,details);current=[];});
-      readyDetails={board:box(canvas),user_cell:userCell,cell_size:cell,legend:box(legend)};
+      readyDetails=()=>({board:box(canvas),user_cell:userCell,cell_size:cell,legend:box(legend)});
     }
 
     const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn};
     (setups[scenario]||setupDragFit)();
     requestAnimationFrame(()=>requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
-      viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails})));
+      viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails()})));
   </script>
 </body>
 </html>
