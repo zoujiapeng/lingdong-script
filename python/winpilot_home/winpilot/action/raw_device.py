@@ -28,8 +28,8 @@ class ClickMechanism(str, Enum):
     PREPOSITIONED_PHYSICAL = "prepositioned_physical"
 
 
-class FinalClickGuardDecision(str, Enum):
-    """Mechanical target verdict sampled immediately before mouse-down."""
+class FinalPointerGuardDecision(str, Enum):
+    """Mechanical target verdict sampled immediately before pointer input."""
 
     ADMITTED = "admitted"
     TARGET_UNAVAILABLE = "target_unavailable"
@@ -147,7 +147,7 @@ class RawActionReceipt:
 
 
 RawBackend = Callable[..., RawBackendResult]
-FinalClickGuard = Callable[[int, int], FinalClickGuardDecision]
+FinalPointerGuard = Callable[[int, int], FinalPointerGuardDecision]
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,10 +167,27 @@ class AdmittedPhysicalClickBackend:
 
 
 @dataclass(frozen=True, slots=True)
+class AdmittedPhysicalScrollBackend:
+    """Explicitly marks a physical wheel backend which never acquires the queue."""
+
+    execute: RawBackend
+
+    def __post_init__(self) -> None:
+        if not callable(self.execute):
+            raise TypeError("admitted physical scroll backend must be callable")
+        if hasattr(self.execute, "__wrapped__"):
+            raise TypeError("admitted physical scroll backend cannot wrap a decorated entry")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+        return self.execute(*args, **kwargs)
+
+
+@dataclass(frozen=True, slots=True)
 class RawDeviceBackends:
     scroll: RawBackend | None = None
     click: RawBackend | None = None
     admitted_physical_click: AdmittedPhysicalClickBackend | None = None
+    admitted_physical_scroll: AdmittedPhysicalScrollBackend | None = None
 
     def __post_init__(self) -> None:
         for name in ("scroll", "click"):
@@ -182,6 +199,12 @@ class RawDeviceBackends:
         ):
             raise TypeError(
                 "admitted_physical_click must be AdmittedPhysicalClickBackend or null"
+            )
+        if self.admitted_physical_scroll is not None and not isinstance(
+            self.admitted_physical_scroll, AdmittedPhysicalScrollBackend
+        ):
+            raise TypeError(
+                "admitted_physical_scroll must be AdmittedPhysicalScrollBackend or null"
             )
 
 
@@ -257,6 +280,8 @@ class RawDeviceExecutor:
         x: int,
         y: int,
         amount: int,
+        *,
+        final_guard: FinalPointerGuard | None = None,
     ) -> RawActionReceipt:
         context_error = self._context_error(context)
         if context_error is not None:
@@ -269,9 +294,18 @@ class RawDeviceExecutor:
                 "scroll", MutationOutcome.NOT_STARTED,
                 error_kind="invalid_args",
             )
+        backend = self._backends.scroll
+        call_kwargs: dict[str, Any] = {"hwnd": context.target_hwnd}
+        if final_guard is not None:
+            if not callable(final_guard):
+                return self._receipt(
+                    "scroll", MutationOutcome.NOT_STARTED,
+                    error_kind="invalid_final_guard",
+                )
+            backend = self._backends.admitted_physical_scroll
+            call_kwargs["final_guard"] = final_guard
         return self._call(
-            "scroll", self._backends.scroll,
-            x, y, amount, hwnd=context.target_hwnd,
+            "scroll", backend, x, y, amount, **call_kwargs,
         )
 
     def click(
@@ -283,7 +317,7 @@ class RawDeviceExecutor:
         count: ClickCount,
         mechanism: ClickMechanism,
         *,
-        final_guard: FinalClickGuard | None = None,
+        final_guard: FinalPointerGuard | None = None,
     ) -> RawActionReceipt:
         context_error = self._context_error(context)
         if context_error is not None:
@@ -321,8 +355,9 @@ class RawDeviceExecutor:
 
 
 __all__ = [
-    "AdmittedPhysicalClickBackend", "ClickCount", "ClickMechanism",
-    "FinalClickGuard", "FinalClickGuardDecision", "MouseButton",
+    "AdmittedPhysicalClickBackend", "AdmittedPhysicalScrollBackend",
+    "ClickCount", "ClickMechanism",
+    "FinalPointerGuard", "FinalPointerGuardDecision", "MouseButton",
     "RawActionContext", "RawActionReceipt", "RawBackendResult",
     "RawDeviceBackends", "RawDeviceExecutor",
 ]

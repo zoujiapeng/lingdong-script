@@ -10,9 +10,10 @@ import pytest
 
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
+    AdmittedPhysicalScrollBackend,
     ClickCount,
     ClickMechanism,
-    FinalClickGuardDecision,
+    FinalPointerGuardDecision,
     MouseButton,
     RawActionContext,
     RawActionReceipt,
@@ -56,6 +57,8 @@ def test_raw_device_requires_an_explicit_typed_backend() -> None:
         RawDeviceExecutor(None)
     with pytest.raises(TypeError, match="callable"):
         RawDeviceBackends(scroll=object())
+    with pytest.raises(TypeError, match="AdmittedPhysicalScrollBackend"):
+        RawDeviceBackends(admitted_physical_scroll=object())
 
 
 @pytest.mark.parametrize(
@@ -229,6 +232,40 @@ def test_scroll_property_preserves_signed_coordinates_and_single_call() -> None:
     assert calls == expected
 
 
+def test_guarded_scroll_uses_only_explicit_admitted_backend() -> None:
+    normal_calls, admitted_calls = [], []
+
+    def admitted(x, y, amount, *, hwnd=None, final_guard):
+        admitted_calls.append((x, y, amount, hwnd))
+        assert final_guard(x, y) is FinalPointerGuardDecision.ADMITTED
+        return RawBackendResult(True, {"guarded": True})
+
+    raw = RawDeviceExecutor(RawDeviceBackends(
+        scroll=lambda *args, **kwargs: normal_calls.append((args, kwargs)),
+        admitted_physical_scroll=AdmittedPhysicalScrollBackend(admitted),
+    ))
+    receipt = raw.scroll(
+        _context(), 10, 20, -3,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+
+    assert receipt.outcome is MutationOutcome.APPLIED
+    assert admitted_calls == [(10, 20, -3, 41)]
+    assert normal_calls == []
+
+    unavailable = RawDeviceExecutor(RawDeviceBackends()).scroll(
+        _context(), 10, 20, -3,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+    assert unavailable.outcome is MutationOutcome.NOT_STARTED
+    assert unavailable.error_kind == "backend_unavailable"
+
+    invalid_guard = raw.scroll(_context(), 10, 20, -3, final_guard=object())
+    assert invalid_guard.outcome is MutationOutcome.NOT_STARTED
+    assert invalid_guard.error_kind == "invalid_final_guard"
+    assert admitted_calls == [(10, 20, -3, 41)]
+
+
 def test_click_uses_typed_single_mechanism_backend() -> None:
     calls: list = []
 
@@ -301,7 +338,7 @@ def test_final_guard_uses_only_explicit_admitted_backend() -> None:
 
     def admitted(x, y, *, final_guard, **kwargs):
         admitted_calls.append((x, y, kwargs))
-        assert final_guard(x, y) is FinalClickGuardDecision.ADMITTED
+        assert final_guard(x, y) is FinalPointerGuardDecision.ADMITTED
         return RawBackendResult(True, {"guarded": True})
 
     raw = RawDeviceExecutor(RawDeviceBackends(
@@ -311,7 +348,7 @@ def test_final_guard_uses_only_explicit_admitted_backend() -> None:
     receipt = raw.click(
         _context(), 10, 20, MouseButton.LEFT, ClickCount.SINGLE,
         ClickMechanism.PHYSICAL,
-        final_guard=lambda _x, _y: FinalClickGuardDecision.ADMITTED,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
     )
 
     assert receipt.outcome is MutationOutcome.APPLIED
@@ -321,7 +358,7 @@ def test_final_guard_uses_only_explicit_admitted_backend() -> None:
     unavailable = RawDeviceExecutor(RawDeviceBackends()).click(
         _context(), 10, 20, MouseButton.LEFT, ClickCount.SINGLE,
         ClickMechanism.PHYSICAL,
-        final_guard=lambda _x, _y: FinalClickGuardDecision.ADMITTED,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
     )
     assert unavailable.outcome is MutationOutcome.NOT_STARTED
     assert unavailable.error_kind == "backend_unavailable"
@@ -356,7 +393,7 @@ def test_admitted_backend_guards_immediately_before_down_without_queue(monkeypat
     def guard(x, y):
         assert (x, y) == (10, 20)
         events.append(("guard",))
-        return FinalClickGuardDecision.ADMITTED
+        return FinalPointerGuardDecision.ADMITTED
 
     result = executor.ADMITTED_PHYSICAL_CLICK_BACKEND(
         10, 20, button=MouseButton.LEFT, count=ClickCount.SINGLE,
@@ -378,14 +415,159 @@ def test_admitted_backend_guards_immediately_before_down_without_queue(monkeypat
         AdmittedPhysicalClickBackend(executor.execute_click_input)
 
 
+def test_admitted_scroll_is_single_mechanism_unqueued_and_guarded(monkeypatch):
+    from winpilot.action import desktop_queue
+    from winpilot.action.desktop_queue import DesktopActionQueue
+
+    events = []
+    executor = _physical_executor_mocks(monkeypatch, events)
+    monkeypatch.setattr(
+        executor,
+        "_mouse_input",
+        lambda flags, **kwargs: (flags, kwargs.get("data")),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_restore_cursor_after_agent_input",
+        lambda saved, expected, hwnd: (
+            events.append(("restore", saved, expected, hwnd)) or True
+        ),
+    )
+    monkeypatch.setattr(
+        desktop_queue.DESKTOP_ACTION_QUEUE,
+        "run",
+        lambda *args, **kwargs: pytest.fail("admitted scroll queued a second time"),
+    )
+
+    def guard(x, y):
+        events.append(("guard", x, y))
+        return FinalPointerGuardDecision.ADMITTED
+
+    outer = DesktopActionQueue()
+    result = outer.run(
+        "scroll",
+        lambda: executor.ADMITTED_PHYSICAL_SCROLL_BACKEND(
+            10, 20, -3, hwnd=41, final_guard=guard,
+        ),
+        target_hwnd=41,
+        scope="physical",
+    )
+
+    assert result.input_completed is True
+    assert [event[0] for event in events] == ["move", "guard", "input", "restore"]
+    assert events[2] == (
+        "input",
+        (executor.win32con.MOUSEEVENTF_WHEEL, (-3 * 120) & 0xFFFFFFFF),
+    )
+    assert outer.status()["submitted"] == 1
+    assert executor.ADMITTED_PHYSICAL_SCROLL_BACKEND.execute is (
+        executor.execute_admitted_physical_scroll
+    )
+    assert not hasattr(executor.execute_admitted_physical_scroll, "__wrapped__")
+    assert hasattr(executor.execute_scroll_input, "__wrapped__")
+    with pytest.raises(TypeError, match="decorated"):
+        AdmittedPhysicalScrollBackend(executor.execute_scroll_input)
+
+
+def test_admitted_scroll_guard_rejects_before_wheel(monkeypatch):
+    events = []
+    executor = _physical_executor_mocks(monkeypatch, events)
+    monkeypatch.setattr(
+        executor,
+        "_restore_cursor_after_agent_input",
+        lambda *_args: True,
+    )
+
+    result = executor.ADMITTED_PHYSICAL_SCROLL_BACKEND(
+        10, 20, 2, hwnd=41,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.HIT_TEST_CHANGED,
+    )
+
+    assert result.input_completed is False
+    assert result.facts["via"] == "final_target_guard"
+    assert "hit_test_changed" in result.facts["error"]
+    assert not [event for event in events if event[0] == "input"]
+
+
+@pytest.mark.parametrize("amount", (0, True, 1.5, "-3"))
+def test_admitted_scroll_rejects_untyped_or_zero_amount_before_input(
+    monkeypatch, amount,
+) -> None:
+    events = []
+    executor = _physical_executor_mocks(monkeypatch, events)
+
+    result = executor.execute_admitted_physical_scroll(
+        10, 20, amount, hwnd=41,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+
+    assert result.input_completed is False
+    assert result.facts["error"] == "invalid admitted physical scroll"
+    assert events == []
+
+
+def test_admitted_scroll_send_exception_is_unknown_without_fallback(monkeypatch):
+    events = []
+    executor = _physical_executor_mocks(monkeypatch, events)
+    monkeypatch.setattr(
+        executor,
+        "_restore_cursor_after_agent_input",
+        lambda *_args: True,
+    )
+
+    def uncertain_send(inputs):
+        events.append(("input_attempt", len(inputs)))
+        raise OSError("injected uncertain SendInput")
+
+    monkeypatch.setattr(executor, "_send_inputs", uncertain_send)
+    receipt = RawDeviceExecutor(RawDeviceBackends(
+        admitted_physical_scroll=executor.ADMITTED_PHYSICAL_SCROLL_BACKEND,
+    )).scroll(
+        _context(), 10, 20, -4,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+
+    assert receipt.outcome is MutationOutcome.OUTCOME_UNKNOWN
+    assert receipt.input_completed is None
+    assert receipt.backend_result.facts["error"] == "scroll wheel outcome unknown"
+    assert [event for event in events if event[0] == "input_attempt"] == [
+        ("input_attempt", 1),
+    ]
+
+
+def test_admitted_scroll_telemetry_failure_cannot_change_completion(monkeypatch):
+    events = []
+    executor = _physical_executor_mocks(monkeypatch, events)
+    monkeypatch.setattr(
+        executor,
+        "_restore_cursor_after_agent_input",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        executor.BUS,
+        "publish",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected telemetry failure")
+        ),
+    )
+
+    result = executor.ADMITTED_PHYSICAL_SCROLL_BACKEND(
+        10, 20, -2, hwnd=41,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+
+    assert result.input_completed is True
+    assert len([event for event in events if event[0] == "input"]) == 1
+
+
 def test_final_guard_failure_is_certain_before_first_down_and_unknown_after_partial(
     monkeypatch,
 ):
     events = []
     executor = _physical_executor_mocks(monkeypatch, events)
     decisions = iter((
-        FinalClickGuardDecision.ADMITTED,
-        FinalClickGuardDecision.HIT_TEST_CHANGED,
+        FinalPointerGuardDecision.ADMITTED,
+        FinalPointerGuardDecision.HIT_TEST_CHANGED,
     ))
 
     result = executor.ADMITTED_PHYSICAL_CLICK_BACKEND(
@@ -406,7 +588,7 @@ def test_final_guard_failure_is_certain_before_first_down_and_unknown_after_part
     rejected = executor.ADMITTED_PHYSICAL_CLICK_BACKEND(
         10, 20, button=MouseButton.LEFT, count=ClickCount.SINGLE,
         mechanism=ClickMechanism.PHYSICAL, hwnd=41,
-        final_guard=lambda _x, _y: FinalClickGuardDecision.TARGET_ROOT_CHANGED,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.TARGET_ROOT_CHANGED,
     )
     assert rejected.input_completed is False
     assert not [event for event in events if event[0] == "input"]
@@ -421,7 +603,7 @@ def test_admitted_backend_rejects_pointer_motion_during_final_guard(monkeypatch)
     result = executor.ADMITTED_PHYSICAL_CLICK_BACKEND(
         10, 20, button=MouseButton.LEFT, count=ClickCount.SINGLE,
         mechanism=ClickMechanism.PHYSICAL, hwnd=41,
-        final_guard=lambda _x, _y: FinalClickGuardDecision.ADMITTED,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
     )
 
     assert result.input_completed is False
