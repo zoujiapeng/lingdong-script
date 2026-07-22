@@ -104,13 +104,19 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
         item["scenario"] for item in harness.VISUAL_CASES.values()
     } == {
         "precise_click", "scroll_reveal", "drag_fit", "slider",
-        "corridor_drag", "dynamic_hold",
+        "corridor_drag", "dynamic_hold", "keyboard_entry",
+        "keyboard_select_all",
     }
     assert harness.SUITES["vnext-canary"] == ("precise-click",)
     assert harness.SUITES["vnext-scroll"] == ("scroll-reveal",)
+    assert harness.SUITES["vnext-keyboard"] == (
+        "keyboard-entry", "keyboard-select-all",
+    )
     assert "scroll-reveal" not in harness.SUITES["vnext-canary"]
     assert harness.VISUAL_CASES["precise-click"]["runtime_version"] == "vnext"
     assert harness.VISUAL_CASES["scroll-reveal"]["runtime_version"] == "vnext"
+    assert harness.VISUAL_CASES["keyboard-entry"]["runtime_version"] == "vnext"
+    assert harness.VISUAL_CASES["keyboard-select-all"]["runtime_version"] == "vnext"
     assert {
         harness.VISUAL_CASES[name]["expected_variant"]
         for name in ("corridor-v0", "corridor-v1", "game-drag-v2", "corridor-v3")
@@ -297,6 +303,10 @@ def test_visual_run_matrix_rejects_seed_aliases_and_missing_primitive_parity():
         harness.build_run_matrix(("precise-click",), seeds=(-1,))
     with pytest.raises(ValueError, match="primitive parity"):
         harness.build_run_matrix(("drag-fit",), paired=True)
+    with pytest.raises(ValueError, match="primitive parity"):
+        harness.build_run_matrix(("keyboard-entry",), paired=True)
+    with pytest.raises(ValueError, match="primitive parity"):
+        harness.build_run_matrix(("keyboard-select-all",), paired=True)
 
 
 def test_recovery_aggregate_marks_incomplete_pairs_without_inventing_metrics():
@@ -638,6 +648,59 @@ def test_focus_preserves_visible_target_geometry_and_only_restores_minimized(
     assert restored == [(hwnd, harness.win32con.SW_RESTORE)]
 
 
+def test_target_window_lookup_requires_exact_title_and_launched_process_owner(
+    monkeypatch,
+):
+    harness = _load_harness()
+    titles = {
+        10: "WinPilot Visual Interaction Target stale",
+        20: "WinPilot Visual Interaction Target",
+        30: "WinPilot Visual Interaction Target",
+    }
+    process_ids = {10: 700, 20: 701, 30: 702}
+
+    def enum_windows(visitor, argument):
+        for hwnd in titles:
+            visitor(hwnd, argument)
+
+    monkeypatch.setattr(harness, "_process_tree_pids", lambda _root: {702})
+    monkeypatch.setattr(harness.win32gui, "EnumWindows", enum_windows)
+    monkeypatch.setattr(harness.win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(
+        harness.win32gui,
+        "GetWindowText",
+        lambda hwnd: titles[hwnd],
+    )
+    monkeypatch.setattr(
+        harness.win32process,
+        "GetWindowThreadProcessId",
+        lambda hwnd: (1, process_ids[hwnd]),
+    )
+
+    assert harness._find_window(
+        "WinPilot Visual Interaction Target",
+        owner_root_pid=999,
+        timeout=0.1,
+    ) == 30
+
+
+def test_modifier_state_reports_observed_keys_without_mutation(monkeypatch):
+    harness = _load_harness()
+    calls = []
+
+    def get_state(virtual_key):
+        calls.append(virtual_key)
+        return 0x8000 if virtual_key == harness.win32con.VK_LCONTROL else 0
+
+    monkeypatch.setattr(harness.win32api, "GetAsyncKeyState", get_state)
+
+    observed = harness._modifier_state()
+
+    assert observed["left_ctrl"] is True
+    assert sum(observed.values()) == 1
+    assert set(calls) == set(harness.MODIFIER_KEYS.values())
+
+
 def test_visual_target_defers_ready_geometry_until_first_painted_frame():
     source = (
         Path(__file__).resolve().parents[1]
@@ -646,12 +709,272 @@ def test_visual_target_defers_ready_geometry_until_first_painted_frame():
     ).read_text(encoding="utf-8")
 
     assert "let readyDetails = () => ({})" in source
-    assert source.count("readyDetails=()=>") == 8
+    assert source.count("readyDetails=()=>") == 10
     assert "...readyDetails()" in source
+    assert "document.title = 'WinPilot Visual Interaction Target'" in source
+    assert "class=\"case-id\"" not in source
+    assert "scenario=${scenario}" not in source
+    assert "seed=${seed}" not in source
     scroll_setup = source[source.index("function setupScrollReveal()") :]
     assert "const direction=rng()<.5?'up':'down'" in scroll_setup
     assert "initialScrollTop=direction==='down'" in scroll_setup
     assert "if(!event.isTrusted)return" in scroll_setup
+
+
+def _keyboard_entry_state() -> dict:
+    target_id = "entry-field-1"
+    expected = "A7"
+
+    def item(event_type, details, *, trusted=False, succeeded=False):
+        return {
+            "case_id": "case-1", "scenario": "keyboard_entry", "seed": 17,
+            "type": event_type, "trusted": trusted, "succeeded": succeeded,
+            "details": {"succeeded": succeeded, **details},
+        }
+
+    events = [item("page_ready", {
+        "target_id": target_id, "expected_text": expected,
+        "candidate_count": 3, "initial_value": "",
+    })]
+    prefix = ""
+    for character in expected:
+        events.append(item("trusted_beforeinput", {
+            "target_id": target_id, "input_type": "insertText",
+            "data": character, "is_composing": False,
+            "value_before": prefix,
+        }, trusted=True))
+        prefix += character
+        events.append(item("trusted_input", {
+            "target_id": target_id, "input_type": "insertText",
+            "data": character, "is_composing": False, "value": prefix,
+        }, trusted=True))
+    success = item("scenario_success", {
+        "target_id": target_id, "expected_text": expected,
+        "final_value": expected, "beforeinput_count": len(expected),
+        "input_count": len(expected), "wrong_target_activity": False,
+        "sequence_valid": True,
+    }, trusted=True, succeeded=True)
+    events.append(success)
+    return {
+        "ready": True, "success": True, "case_id": "case-1",
+        "scenario": "keyboard_entry", "seed": 17,
+        "events": events, "success_event": success,
+    }
+
+
+def _keyboard_select_all_state() -> dict:
+    target_id = "selection-editor-2"
+    original = "amber cedar"
+
+    def item(event_type, details, *, trusted=False, succeeded=False):
+        return {
+            "case_id": "case-1", "scenario": "keyboard_select_all", "seed": 17,
+            "type": event_type, "trusted": trusted, "succeeded": succeeded,
+            "details": {"succeeded": succeeded, **details},
+        }
+
+    def key(event_type, name, code, ctrl, *, selected=False):
+        return item(event_type, {
+            "target_id": target_id, "key": name, "code": code,
+            "ctrl_key": ctrl, "alt_key": False, "shift_key": False,
+            "meta_key": False, "repeat": False,
+            "selection_start": 0,
+            "selection_end": len(original) if selected else 0,
+            "content": original,
+        }, trusted=True)
+
+    events = [item("page_ready", {
+        "target_id": target_id, "original_text": original,
+        "candidate_count": 3, "selection_start": 0, "selection_end": 0,
+    })]
+    events.extend((
+        key("trusted_keydown", "Control", "ControlLeft", True),
+        key("trusted_keydown", "a", "KeyA", True),
+        key("trusted_keyup", "a", "KeyA", True, selected=True),
+        key("trusted_keyup", "Control", "ControlLeft", False, selected=True),
+    ))
+    success = item("scenario_success", {
+        "target_id": target_id, "original_text": original,
+        "final_text": original, "selection_start": 0,
+        "selection_end": len(original), "modifier_released": True,
+        "mutation_count": 0, "wrong_target_activity": False,
+        "sequence_valid": True,
+    }, trusted=True, succeeded=True)
+    events.append(success)
+    return {
+        "ready": True, "success": True, "case_id": "case-1",
+        "scenario": "keyboard_select_all", "seed": 17,
+        "events": events, "success_event": success,
+    }
+
+
+def test_external_verdict_accepts_exact_trusted_keyboard_entry_chain():
+    harness = _load_harness()
+    verdict = harness.external_verdict(
+        _keyboard_entry_state(),
+        case_id="case-1", scenario="keyboard_entry", seed=17,
+    )
+    assert verdict["passed"] is True
+
+
+def test_external_observation_drains_reports_queued_after_success(monkeypatch):
+    harness = _load_harness()
+    initial = _keyboard_entry_state()
+    settled = copy.deepcopy(initial)
+    settled["events"].append(copy.deepcopy(settled["events"][1]))
+    monkeypatch.setattr(
+        harness,
+        "_poll_json",
+        lambda *_args, **_kwargs: (initial, True, True, None),
+    )
+    monkeypatch.setattr(
+        harness,
+        "_settle_external_state",
+        lambda *_args, **_kwargs: (settled, True, True, None),
+    )
+
+    observed, verdict = harness.observe_external_verdict(
+        "http://example.invalid/state",
+        case_id="case-1", scenario="keyboard_entry", seed=17,
+    )
+
+    assert observed is settled
+    assert verdict["event_stream_quiet"] is True
+    assert verdict["passed"] is False
+    assert "keyboard entry changed after terminal success" in verdict["errors"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "paste",
+        "wrong_target",
+        "untrusted",
+        "composing",
+        "append",
+        "after_success",
+        "causal_before_ready",
+        "duplicate_ready",
+    ),
+)
+def test_external_verdict_rejects_unsafe_keyboard_entry_chains(mutation):
+    harness = _load_harness()
+    state = _keyboard_entry_state()
+    if mutation == "paste":
+        state["events"].insert(1, {
+            **copy.deepcopy(state["events"][1]), "type": "trusted_paste",
+        })
+    elif mutation == "wrong_target":
+        state["events"][1]["details"]["target_id"] = "entry-field-0"
+    elif mutation == "untrusted":
+        state["events"][1]["trusted"] = False
+    elif mutation == "composing":
+        state["events"][1]["details"]["is_composing"] = True
+    elif mutation == "append":
+        state["events"][0]["details"]["initial_value"] = "old"
+    elif mutation == "causal_before_ready":
+        state["events"][0], state["events"][1] = (
+            state["events"][1], state["events"][0],
+        )
+    elif mutation == "duplicate_ready":
+        state["events"].insert(1, copy.deepcopy(state["events"][0]))
+    else:
+        state["events"].append(copy.deepcopy(state["events"][1]))
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="keyboard_entry", seed=17,
+    )
+    assert verdict["passed"] is False
+
+
+def test_external_verdict_accepts_complete_trusted_select_all_chord():
+    harness = _load_harness()
+    verdict = harness.external_verdict(
+        _keyboard_select_all_state(),
+        case_id="case-1", scenario="keyboard_select_all", seed=17,
+    )
+    assert verdict["passed"] is True
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_release",
+        "wrong_target",
+        "repeat",
+        "partial_selection",
+        "content_changed",
+        "clipboard",
+        "untrusted",
+        "causal_before_ready",
+        "duplicate_ready",
+        "missing_ready_selection",
+        "non_integer_selection",
+    ),
+)
+def test_external_verdict_rejects_invalid_select_all_chains(mutation):
+    harness = _load_harness()
+    state = _keyboard_select_all_state()
+    if mutation == "missing_release":
+        del state["events"][-2]
+    elif mutation == "wrong_target":
+        state["events"][2]["details"]["target_id"] = "selection-editor-0"
+    elif mutation == "repeat":
+        state["events"][2]["details"]["repeat"] = True
+    elif mutation == "partial_selection":
+        state["events"][3]["details"]["selection_end"] -= 1
+    elif mutation == "content_changed":
+        state["success_event"]["details"]["final_text"] += "!"
+    elif mutation == "clipboard":
+        state["events"].insert(1, {
+            **copy.deepcopy(state["events"][1]), "type": "trusted_paste",
+        })
+    elif mutation == "causal_before_ready":
+        state["events"][0], state["events"][1] = (
+            state["events"][1], state["events"][0],
+        )
+    elif mutation == "duplicate_ready":
+        state["events"].insert(1, copy.deepcopy(state["events"][0]))
+    elif mutation == "missing_ready_selection":
+        state["events"][0]["details"].pop("selection_start")
+        state["events"][0]["details"].pop("selection_end")
+    elif mutation == "non_integer_selection":
+        state["events"][3]["details"]["selection_start"] = False
+        state["events"][3]["details"]["selection_end"] = float(
+            state["events"][3]["details"]["selection_end"],
+        )
+    else:
+        state["events"][2]["trusted"] = False
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="keyboard_select_all", seed=17,
+    )
+    assert verdict["passed"] is False
+
+
+@pytest.mark.parametrize(
+    ("build", "scenario", "field", "value"),
+    (
+        (_keyboard_entry_state, "keyboard_entry", "case_id", "other-case"),
+        (_keyboard_entry_state, "keyboard_entry", "scenario", "other_scenario"),
+        (_keyboard_entry_state, "keyboard_entry", "seed", 18),
+        (_keyboard_select_all_state, "keyboard_select_all", "case_id", "other-case"),
+        (_keyboard_select_all_state, "keyboard_select_all", "scenario", "other_scenario"),
+        (_keyboard_select_all_state, "keyboard_select_all", "seed", 18),
+    ),
+)
+def test_keyboard_causal_evidence_cannot_cross_runtime_identity(
+    build, scenario, field, value,
+):
+    harness = _load_harness()
+    state = build()
+    state["events"][1][field] = value
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario=scenario, seed=17,
+    )
+
+    assert verdict["passed"] is False
 
 
 def _scroll_reveal_state() -> dict:

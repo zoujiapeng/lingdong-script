@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run generic visual gestures through the visible Electron client.
+"""Run generic visual interactions through the visible Electron client.
 
 The task is entered through the real client with cold start enabled.  After the
 Run button is clicked, the controlled browser target is returned to the
 foreground so the desktop agent receives the same visible scene a user would.
-Success is decided by trusted browser pointer events, never by the agent's own
+Success is decided by trusted browser input events, never by the agent's own
 completion text or by a direct backend invocation.
 """
 
@@ -32,6 +32,7 @@ import psutil
 import win32api
 import win32con
 import win32gui
+import win32process
 from PIL import ImageGrab
 
 
@@ -70,6 +71,22 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "scenario": "scroll_reveal",
         "task": VISUAL_TEST_TASK,
         "seed": 20260722,
+        "max_steps": 24,
+        "timeout": 360,
+        "runtime_version": "vnext",
+    },
+    "keyboard-entry": {
+        "scenario": "keyboard_entry",
+        "task": VISUAL_TEST_TASK,
+        "seed": 31001,
+        "max_steps": 24,
+        "timeout": 360,
+        "runtime_version": "vnext",
+    },
+    "keyboard-select-all": {
+        "scenario": "keyboard_select_all",
+        "task": VISUAL_TEST_TASK,
+        "seed": 32001,
         "max_steps": 24,
         "timeout": 360,
         "runtime_version": "vnext",
@@ -134,6 +151,7 @@ SUITES = {
     "smoke": ("drag-fit", "slider", "dynamic-hold", "game-drag-v2"),
     "vnext-canary": ("precise-click",),
     "vnext-scroll": ("scroll-reveal",),
+    "vnext-keyboard": ("keyboard-entry", "keyboard-select-all"),
     "all": tuple(VISUAL_CASES),
 }
 
@@ -145,6 +163,16 @@ VNEXT_TURN_STATUSES = frozenset({
     "route_deferred", "stale_discarded", "canceled", "invalid_proposal",
     "actor_error", "state_rejected", "busy",
 })
+MODIFIER_KEYS = {
+    "left_ctrl": win32con.VK_LCONTROL,
+    "right_ctrl": win32con.VK_RCONTROL,
+    "left_shift": win32con.VK_LSHIFT,
+    "right_shift": win32con.VK_RSHIFT,
+    "left_alt": win32con.VK_LMENU,
+    "right_alt": win32con.VK_RMENU,
+    "left_win": win32con.VK_LWIN,
+    "right_win": win32con.VK_RWIN,
+}
 
 
 def _free_port() -> int:
@@ -202,10 +230,65 @@ def _poll_json(
         return last, False, False, last_error
 
 
+def _event_stream_marker(state: dict[str, Any]) -> tuple[int, Any, Any]:
+    events = state.get("events") or []
+    if not isinstance(events, list) or not events:
+        return (0, None, None)
+    tail = events[-1] if isinstance(events[-1], dict) else {}
+    return (len(events), tail.get("received_at"), tail.get("type"))
+
+
+def _settle_external_state(
+    url: str,
+    initial: dict[str, Any],
+    *,
+    quiet_seconds: float = 0.6,
+    timeout: float = 3.0,
+) -> tuple[dict[str, Any], bool, bool, str | None]:
+    """Wait for queued browser reports to drain before terminal validation."""
+
+    latest = initial
+    marker = _event_stream_marker(latest)
+    quiet_since = time.monotonic()
+    deadline = quiet_since + timeout
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        time.sleep(0.1)
+        try:
+            observed = _json_get(url)
+        except Exception as error:
+            quiet_since = time.monotonic()
+            last_error = f"{type(error).__name__}: {error}"
+            continue
+        last_error = None
+        latest = observed
+        observed_marker = _event_stream_marker(observed)
+        if observed_marker != marker:
+            marker = observed_marker
+            quiet_since = time.monotonic()
+            continue
+        if time.monotonic() - quiet_since >= quiet_seconds:
+            return latest, True, True, None
+    try:
+        latest = _json_get(url)
+        return latest, False, True, None
+    except Exception as error:
+        return latest, False, False, f"{type(error).__name__}: {error}"
+
+
 def _trusted_scenario_succeeded(state: dict[str, Any]) -> bool:
     """Wait for persisted browser success, never merely ``page_ready``."""
 
     return state.get("success") is True
+
+
+def _modifier_state() -> dict[str, bool]:
+    """Read physical modifier state without changing the desktop."""
+
+    return {
+        name: bool(win32api.GetAsyncKeyState(virtual_key) & 0x8000)
+        for name, virtual_key in MODIFIER_KEYS.items()
+    }
 
 
 def _browser_executable() -> Path:
@@ -226,20 +309,46 @@ def _browser_executable() -> Path:
     raise RuntimeError("Edge or Chrome was not found")
 
 
-def _find_window(title: str, *, timeout: float = 25.0) -> int:
+def _process_tree_pids(root_pid: int) -> set[int]:
+    """Return the currently live process tree without broad title fallback."""
+
+    try:
+        root = psutil.Process(root_pid)
+        return {root.pid, *(child.pid for child in root.children(recursive=True))}
+    except psutil.Error:
+        return set()
+
+
+def _find_window(
+    title: str,
+    *,
+    owner_root_pid: int,
+    timeout: float = 25.0,
+) -> int:
+    """Find an exact-title window owned by the newly launched process tree."""
+
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         matches: list[int] = []
+        owner_pids = _process_tree_pids(owner_root_pid)
 
         def visit(hwnd: int, _unused: Any) -> None:
-            if win32gui.IsWindowVisible(hwnd) and title in win32gui.GetWindowText(hwnd):
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            if win32gui.GetWindowText(hwnd) != title:
+                return
+            _thread_id, process_id = win32process.GetWindowThreadProcessId(hwnd)
+            if int(process_id) in owner_pids:
                 matches.append(int(hwnd))
 
         win32gui.EnumWindows(visit, None)
         if matches:
             return matches[-1]
         time.sleep(0.2)
-    raise RuntimeError(f"visible target window was not found: {title}")
+    raise RuntimeError(
+        f"owned visible target window was not found: title={title!r} "
+        f"root_pid={owner_root_pid}",
+    )
 
 
 def _focus_window(hwnd: int) -> dict[str, Any]:
@@ -313,6 +422,267 @@ def _terminate_tree(process: subprocess.Popen[Any] | None) -> None:
             pass
 
 
+def _case_events(
+    state: dict[str, Any],
+    *,
+    case_id: str,
+    scenario: str,
+    seed: int,
+) -> list[dict[str, Any]]:
+    """Return only well-formed events bound to the requested oracle case."""
+
+    return [
+        item for item in (state.get("events") or [])
+        if isinstance(item, dict)
+        and item.get("case_id") == case_id
+        and item.get("scenario") == scenario
+        and type(item.get("seed")) is int
+        and item.get("seed") == seed
+    ]
+
+
+def _keyboard_entry_errors(
+    state: dict[str, Any],
+    success: dict[str, Any],
+    *,
+    case_id: str,
+    scenario: str,
+    seed: int,
+) -> list[str]:
+    """Independently rebuild a trusted, non-paste text insertion chain."""
+
+    errors: list[str] = []
+    events = _case_events(
+        state, case_id=case_id, scenario=scenario, seed=seed,
+    )
+    ready_events = [item for item in events if item.get("type") == "page_ready"]
+    successes = [item for item in events if item.get("type") == "scenario_success"]
+    if len(ready_events) != 1:
+        return ["keyboard entry requires exactly one page-ready identity"]
+    if len(successes) != 1 or successes[0] != success:
+        errors.append("keyboard entry has no unique matching terminal event")
+    terminal_index = events.index(successes[0]) if len(successes) == 1 else len(events)
+    ready_index = events.index(ready_events[0])
+    if ready_index >= terminal_index:
+        return [*errors, "keyboard entry page-ready does not precede success"]
+    before_ready = events[:ready_index]
+    before_terminal = events[ready_index + 1:terminal_index]
+    after_terminal = events[terminal_index + 1:] if terminal_index < len(events) else []
+    ready = ready_events[0].get("details") or {}
+    details = success.get("details") or {}
+    target_id = ready.get("target_id")
+    expected = ready.get("expected_text")
+    if not (
+        isinstance(target_id, str) and target_id
+        and isinstance(expected, str) and expected
+        and ready.get("initial_value") == ""
+        and type(ready.get("candidate_count")) is int
+        and ready["candidate_count"] >= 2
+    ):
+        errors.append("keyboard entry page-ready identity is incomplete")
+    if not (
+        details.get("target_id") == target_id
+        and details.get("expected_text") == expected
+        and details.get("final_value") == expected
+        and details.get("wrong_target_activity") is False
+        and details.get("sequence_valid") is True
+    ):
+        errors.append("keyboard entry terminal state does not match page-ready identity")
+
+    forbidden = {
+        "trusted_paste", "trusted_drop", "trusted_cut",
+        "untrusted_paste", "untrusted_drop", "untrusted_cut",
+        "untrusted_beforeinput", "untrusted_input",
+        "compositionstart", "compositionupdate", "compositionend",
+    }
+    causal_types = forbidden | {"trusted_beforeinput", "trusted_input"}
+    if any(item.get("type") in causal_types for item in before_ready):
+        errors.append("keyboard entry evidence predates page-ready")
+    if any(item.get("type") in forbidden for item in before_terminal):
+        errors.append("keyboard entry used an untrusted, clipboard, drop, or composition path")
+    if any(
+        item.get("type") in forbidden | {"trusted_beforeinput", "trusted_input"}
+        for item in after_terminal
+    ):
+        errors.append("keyboard entry changed after terminal success")
+
+    insertion_events = [
+        item for item in before_terminal
+        if item.get("type") in {"trusted_beforeinput", "trusted_input"}
+    ]
+    if not insertion_events or len(insertion_events) % 2:
+        errors.append("keyboard entry evidence is not paired")
+        return errors
+    prefix = ""
+    for index in range(0, len(insertion_events), 2):
+        before, inserted = insertion_events[index:index + 2]
+        before_details = before.get("details") or {}
+        inserted_details = inserted.get("details") or {}
+        data = before_details.get("data")
+        valid = bool(
+            before.get("type") == "trusted_beforeinput"
+            and inserted.get("type") == "trusted_input"
+            and before.get("trusted") is True
+            and inserted.get("trusted") is True
+            and before_details.get("target_id") == target_id
+            and inserted_details.get("target_id") == target_id
+            and before_details.get("input_type") == "insertText"
+            and inserted_details.get("input_type") == "insertText"
+            and before_details.get("is_composing") is False
+            and inserted_details.get("is_composing") is False
+            and isinstance(data, str) and data
+            and inserted_details.get("data") == data
+            and before_details.get("value_before") == prefix
+        )
+        if valid:
+            prefix += data
+            valid = bool(
+                inserted_details.get("value") == prefix
+                and isinstance(expected, str)
+                and expected.startswith(prefix)
+            )
+        if not valid:
+            errors.append("keyboard entry trusted insertion chain is invalid")
+            break
+    pair_count = len(insertion_events) // 2
+    if (
+        prefix != expected
+        or type(details.get("beforeinput_count")) is not int
+        or details.get("beforeinput_count") != pair_count
+        or type(details.get("input_count")) is not int
+        or details.get("input_count") != pair_count
+    ):
+        errors.append("keyboard entry does not reconstruct the exact visible code")
+    return errors
+
+
+def _keyboard_select_all_errors(
+    state: dict[str, Any],
+    success: dict[str, Any],
+    *,
+    case_id: str,
+    scenario: str,
+    seed: int,
+) -> list[str]:
+    """Independently prove the complete trusted shortcut and unchanged text."""
+
+    errors: list[str] = []
+    events = _case_events(
+        state, case_id=case_id, scenario=scenario, seed=seed,
+    )
+    ready_events = [item for item in events if item.get("type") == "page_ready"]
+    successes = [item for item in events if item.get("type") == "scenario_success"]
+    if len(ready_events) != 1:
+        return ["keyboard selection requires exactly one page-ready identity"]
+    if len(successes) != 1 or successes[0] != success:
+        errors.append("keyboard selection has no unique matching terminal event")
+    terminal_index = events.index(successes[0]) if len(successes) == 1 else len(events)
+    ready_index = events.index(ready_events[0])
+    if ready_index >= terminal_index:
+        return [*errors, "keyboard selection page-ready does not precede success"]
+    before_ready = events[:ready_index]
+    before_terminal = events[ready_index + 1:terminal_index]
+    after_terminal = events[terminal_index + 1:] if terminal_index < len(events) else []
+    ready = ready_events[0].get("details") or {}
+    details = success.get("details") or {}
+    target_id = ready.get("target_id")
+    original = ready.get("original_text")
+    if not (
+        isinstance(target_id, str) and target_id
+        and isinstance(original, str) and original
+        and type(ready.get("candidate_count")) is int
+        and ready["candidate_count"] >= 2
+        and type(ready.get("selection_start")) is int
+        and type(ready.get("selection_end")) is int
+        and ready["selection_start"] == ready["selection_end"]
+        and 0 <= ready["selection_start"] <= len(original)
+    ):
+        errors.append("keyboard selection page-ready identity is incomplete")
+    if not (
+        details.get("target_id") == target_id
+        and details.get("original_text") == original
+        and details.get("final_text") == original
+        and type(details.get("selection_start")) is int
+        and details.get("selection_start") == 0
+        and isinstance(original, str)
+        and type(details.get("selection_end")) is int
+        and details.get("selection_end") == len(original)
+        and details.get("modifier_released") is True
+        and type(details.get("mutation_count")) is int
+        and details.get("mutation_count") == 0
+        and details.get("wrong_target_activity") is False
+        and details.get("sequence_valid") is True
+    ):
+        errors.append("keyboard selection terminal state is not exact")
+
+    forbidden = {
+        "trusted_beforeinput", "trusted_input", "trusted_cut",
+        "trusted_paste", "trusted_drop", "untrusted_beforeinput",
+        "untrusted_input", "untrusted_cut", "untrusted_paste",
+        "untrusted_drop", "untrusted_keydown", "untrusted_keyup",
+    }
+    causal_types = forbidden | {"trusted_keydown", "trusted_keyup"}
+    if any(item.get("type") in causal_types for item in before_ready):
+        errors.append("keyboard selection evidence predates page-ready")
+    if any(item.get("type") in forbidden for item in before_terminal):
+        errors.append("keyboard selection used mutation, clipboard, drop, or untrusted input")
+    if any(
+        item.get("type") in forbidden | {"trusted_keydown", "trusted_keyup"}
+        for item in after_terminal
+    ):
+        errors.append("keyboard selection changed after terminal success")
+
+    keys = [
+        item for item in before_terminal
+        if item.get("type") in {"trusted_keydown", "trusted_keyup"}
+        and str((item.get("details") or {}).get("key") or "").casefold()
+        in {"control", "a"}
+    ]
+    expected_phases = (
+        ("trusted_keydown", "control", True),
+        ("trusted_keydown", "a", True),
+        ("trusted_keyup", "a", True),
+        ("trusted_keyup", "control", False),
+    )
+    if len(keys) != len(expected_phases):
+        errors.append("keyboard selection lacks one complete shortcut sequence")
+        return errors
+    for index, (event, (event_type, key, ctrl)) in enumerate(
+        zip(keys, expected_phases, strict=True),
+    ):
+        value = event.get("details") or {}
+        code = str(value.get("code") or "")
+        valid = bool(
+            event.get("type") == event_type
+            and event.get("trusted") is True
+            and str(value.get("key") or "").casefold() == key
+            and value.get("target_id") == target_id
+            and value.get("content") == original
+            and value.get("ctrl_key") is ctrl
+            and value.get("alt_key") is False
+            and value.get("shift_key") is False
+            and value.get("meta_key") is False
+            and value.get("repeat") is False
+            and (
+                code == "KeyA" if key == "a"
+                else code in {"ControlLeft", "ControlRight"}
+            )
+        )
+        if index >= 2:
+            valid = bool(
+                valid
+                and type(value.get("selection_start")) is int
+                and value.get("selection_start") == 0
+                and isinstance(original, str)
+                and type(value.get("selection_end")) is int
+                and value.get("selection_end") == len(original)
+            )
+        if not valid:
+            errors.append("keyboard selection trusted shortcut sequence is invalid")
+            break
+    return errors
+
+
 def external_verdict(
     state: dict[str, Any],
     *,
@@ -321,7 +691,7 @@ def external_verdict(
     seed: int,
     expected_variant: int | None = None,
 ) -> dict[str, Any]:
-    """Validate ground truth produced by real browser pointer events."""
+    """Validate ground truth produced by trusted real browser input events."""
 
     errors: list[str] = []
     event = state.get("success_event") or {}
@@ -613,6 +983,22 @@ def external_verdict(
                 or abs((ready_target["bottom"] - total_delta) - target["bottom"]) > 1
             ):
                 errors.append("target geometry does not agree with the scrollTop delta")
+    elif scenario == "keyboard_entry":
+        errors.extend(_keyboard_entry_errors(
+            state,
+            event,
+            case_id=case_id,
+            scenario=scenario,
+            seed=seed,
+        ))
+    elif scenario == "keyboard_select_all":
+        errors.extend(_keyboard_select_all_errors(
+            state,
+            event,
+            case_id=case_id,
+            scenario=scenario,
+            seed=seed,
+        ))
     else:
         errors.append(f"unsupported scenario: {scenario}")
 
@@ -643,6 +1029,11 @@ def observe_external_verdict(
         _trusted_scenario_succeeded,
         timeout=timeout,
     )
+    stream_quiet: bool | None = None
+    if success_observed and state.get("success") is True:
+        state, stream_quiet, final_read_ok, final_read_error = (
+            _settle_external_state(state_url, state)
+        )
     verdict = external_verdict(
         state,
         case_id=case_id,
@@ -652,6 +1043,7 @@ def observe_external_verdict(
     )
     identity_conclusive = bool(
         final_read_ok
+        and stream_quiet is not False
         and state.get("ready") is True
         and state.get("case_id") == case_id
         and state.get("scenario") == scenario
@@ -665,6 +1057,7 @@ def observe_external_verdict(
         0, round((time.monotonic() - observed_at) * 1000),
     )
     verdict["success_observed_before_timeout"] = success_observed
+    verdict["event_stream_quiet"] = stream_quiet
     if final_read_error:
         verdict["oracle_read_error"] = final_read_error
     if not identity_conclusive:
@@ -1235,7 +1628,7 @@ def run_visual_case(
         "expected_variant": source.get("expected_variant"),
         "entrypoint": "electron_client_windows_uia",
         "cold_start_required": True,
-        "ground_truth": "trusted_browser_pointer_events",
+        "ground_truth": "trusted_browser_input_events",
     }
     result: dict[str, Any] = {
         "name": name,
@@ -1245,7 +1638,7 @@ def run_visual_case(
         "task": source["task"],
         "entrypoint": "electron_client_windows_uia",
         "cold_start_required": True,
-        "ground_truth": "trusted_browser_pointer_events",
+        "ground_truth": "trusted_browser_input_events",
         "runtime_version": str(source.get("runtime_version") or "legacy"),
         "group_id": group_id or f"{name}:seed-{seed}",
         "pair_id": pair_id,
@@ -1286,8 +1679,11 @@ def run_visual_case(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        title = f"WinPilot Visual Interaction Target {case_id}"
-        target_hwnd = _find_window(title)
+        title = "WinPilot Visual Interaction Target"
+        target_hwnd = _find_window(
+            title,
+            owner_root_pid=int(browser_process.pid),
+        )
         ready_state = _wait_json(
             state_url,
             lambda value: any(
@@ -1328,6 +1724,11 @@ def run_visual_case(
             oracle_result.update({"state": state, "verdict": verdict})
             return verdict
 
+        result["modifier_state_before"] = _modifier_state()
+        if any(result["modifier_state_before"].values()):
+            raise RuntimeError(
+                "modifier key was already pressed before the product run",
+            )
         client_result = client_harness.run_case(
             name,
             {
@@ -1374,7 +1775,16 @@ def run_visual_case(
         result["external_state"] = state
         verdict = dict(oracle_result.get("verdict") or {})
         result["external_verdict"] = verdict
-        result["passed"] = client_result.get("passed") is True
+        result["modifier_state_after"] = _modifier_state()
+        modifiers_released = not any(result["modifier_state_after"].values())
+        result["modifiers_released"] = modifiers_released
+        result["passed"] = bool(
+            client_result.get("passed") is True and modifiers_released
+        )
+        if not modifiers_released:
+            result.setdefault("evaluation_errors", []).append(
+                "a physical modifier remained pressed after the product run",
+            )
     except Exception as error:
         result["runner_error"] = f"{type(error).__name__}: {error}"
         result["passed"] = False
@@ -1383,6 +1793,14 @@ def run_visual_case(
         except Exception:
             pass
     finally:
+        if "modifier_state_after" not in result:
+            try:
+                result["modifier_state_after"] = _modifier_state()
+                result["modifiers_released"] = not any(
+                    result["modifier_state_after"].values()
+                )
+            except Exception:
+                pass
         if target_hwnd and win32gui.IsWindow(target_hwnd):
             try:
                 win32gui.PostMessage(target_hwnd, win32con.WM_CLOSE, 0, 0)
