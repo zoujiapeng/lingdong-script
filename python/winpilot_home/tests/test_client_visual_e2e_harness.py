@@ -3,8 +3,11 @@ from __future__ import annotations
 import copy
 import importlib.util
 import inspect
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 
 def _load_harness():
@@ -37,6 +40,57 @@ def _state(scenario: str, details: dict, *, moves: int) -> dict:
         "seed": 17,
         "events": [success],
         "success_event": success,
+    }
+
+
+def _aggregate_arm(
+    runtime: str,
+    *,
+    pair_id: str | None = "case:seed-1",
+    fingerprint: str = "same",
+    oracle_pass: bool | None = None,
+) -> dict:
+    if oracle_pass is None:
+        oracle_pass = runtime == "vnext"
+    runtime_identity = {
+        "contract_version": 2,
+        "pid": 42,
+        "repo_root": "C:/repo",
+        "git": {
+            "loaded_commit": "abc",
+            "current_commit": "abc",
+            "dirty": False,
+        },
+        "source": {
+            "loaded_stamp": "source-1",
+            "current_stamp": "source-1",
+            "drifted": False,
+        },
+    }
+    return {
+        "pair_id": pair_id,
+        "runtime_version": runtime,
+        "passed": oracle_pass,
+        "evaluation_config_fingerprint": fingerprint,
+        "model_configuration_identity": {
+            "provider": "provider", "model": "model",
+        },
+        "runtime_service_identity": {
+            "before": runtime_identity,
+            "after": copy.deepcopy(runtime_identity),
+        },
+        "client_result": {
+            "trace_binding": {"passed": True, "parse_errors": []},
+            "memory_isolation": {"passed": True},
+        },
+        "recovery_evidence": {
+            "trace_complete": True,
+            "turn_trace_complete": runtime == "vnext",
+            "oracle_status": "conclusive",
+            "external_oracle_pass": oracle_pass,
+            "wall_elapsed_ms": 100 if runtime == "legacy" else 120,
+            "false_done_count": 0,
+        },
     }
 
 
@@ -96,6 +150,462 @@ def test_oracle_wait_ignores_page_ready_until_success_is_persisted():
             {"type": "scenario_success", "trusted": True},
         ],
     }) is True
+
+
+def test_failed_external_observation_returns_final_state_instead_of_raising(
+    monkeypatch,
+):
+    harness = _load_harness()
+    state = {
+        "ready": True,
+        "success": False,
+        "case_id": "case-1",
+        "scenario": "precise_click",
+        "seed": 17,
+        "events": [],
+    }
+    monkeypatch.setattr(
+        harness,
+        "_poll_json",
+        lambda *_args, **_kwargs: (state, False, True, None),
+    )
+
+    observed, verdict = harness.observe_external_verdict(
+        "http://example.invalid/state",
+        case_id="case-1",
+        scenario="precise_click",
+        seed=17,
+    )
+
+    assert observed is state
+    assert verdict["passed"] is False
+    assert verdict["oracle_status"] == "conclusive"
+    assert verdict["success_observed_before_timeout"] is False
+    assert verdict["errors"][0] == (
+        "trusted scenario success was not observed before timeout"
+    )
+
+
+def test_failed_external_observation_is_unavailable_after_transport_loss(
+    monkeypatch,
+):
+    harness = _load_harness()
+    stale_state = {
+        "ready": True,
+        "success": False,
+        "case_id": "case-1",
+        "scenario": "precise_click",
+        "seed": 17,
+        "events": [],
+    }
+    monkeypatch.setattr(
+        harness,
+        "_poll_json",
+        lambda *_args, **_kwargs: (
+            stale_state,
+            False,
+            False,
+            "ConnectionError: unavailable",
+        ),
+    )
+
+    _observed, verdict = harness.observe_external_verdict(
+        "http://example.invalid/state",
+        case_id="case-1",
+        scenario="precise_click",
+        seed=17,
+    )
+
+    assert verdict["oracle_status"] == "unavailable"
+    assert verdict["oracle_read_error"] == "ConnectionError: unavailable"
+
+
+def test_unavailable_oracle_cannot_retain_a_positive_verdict(monkeypatch):
+    harness = _load_harness()
+    monkeypatch.setattr(
+        harness,
+        "_poll_json",
+        lambda *_args, **_kwargs: ({}, True, True, None),
+    )
+    monkeypatch.setattr(
+        harness,
+        "external_verdict",
+        lambda *_args, **_kwargs: {"passed": True, "errors": []},
+    )
+
+    _state_value, verdict = harness.observe_external_verdict(
+        "http://example.invalid/state",
+        case_id="case-1",
+        scenario="precise_click",
+        seed=17,
+    )
+
+    assert verdict["oracle_status"] == "unavailable"
+    assert verdict["passed"] is False
+
+
+def test_visual_run_matrix_is_deterministic_paired_and_counterbalanced():
+    harness = _load_harness()
+
+    matrix = harness.build_run_matrix(
+        ("precise-click",),
+        seeds=(101, 202),
+        paired=True,
+    )
+
+    assert matrix == harness.build_run_matrix(
+        ("precise-click",),
+        seeds=(101, 202),
+        paired=True,
+    )
+    assert [item["pair_id"] for item in matrix] == [
+        "precise-click:seed-101",
+        "precise-click:seed-101",
+        "precise-click:seed-202",
+        "precise-click:seed-202",
+    ]
+    assert [item["runtime_version"] for item in matrix] == [
+        "legacy", "vnext", "vnext", "legacy",
+    ]
+    assert harness._parse_seed_csv("101, 202,101") == (101, 202)
+
+
+def test_visual_run_matrix_preserves_existing_single_runtime_defaults():
+    harness = _load_harness()
+
+    default = harness.build_run_matrix(("precise-click",))
+    forced = harness.build_run_matrix(
+        ("precise-click",),
+        seeds=(99,),
+        runtime_version="legacy",
+    )
+
+    assert len(default) == 1
+    assert default[0]["runtime_version"] == "vnext"
+    assert default[0]["seed"] == harness.VISUAL_CASES["precise-click"]["seed"]
+    assert default[0]["pair_id"] is None
+    assert default[0]["group_id"].startswith("precise-click:seed-")
+    assert len(forced) == 1
+    assert forced[0]["runtime_version"] == "legacy"
+    assert forced[0]["seed"] == 99
+
+
+def test_visual_run_matrix_rejects_seed_aliases_and_missing_primitive_parity():
+    harness = _load_harness()
+
+    with pytest.raises(ValueError, match="4294967295"):
+        harness.build_run_matrix(("precise-click",), seeds=(-1,))
+    with pytest.raises(ValueError, match="primitive parity"):
+        harness.build_run_matrix(("drag-fit",), paired=True)
+
+
+def test_recovery_aggregate_marks_incomplete_pairs_without_inventing_metrics():
+    harness = _load_harness()
+    summary = harness.aggregate_recovery_evidence(
+        [_aggregate_arm("legacy", oracle_pass=True)],
+        git_identity={"revision": "abc", "dirty": False},
+    )
+
+    runtime = summary["by_runtime"]["legacy"]
+    assert runtime["actor_turn_count"] == {
+        "observed_count": 0, "p50": None, "p95": None,
+    }
+    comparison = summary["paired_comparisons"][0]
+    assert comparison["arm_counts"] == {"legacy": 1, "vnext": 0}
+    assert comparison["arms_present"] is False
+    assert comparison["eligible_for_ab"] is False
+    assert comparison["legacy_passed"] is None
+    assert summary["eligible_paired_comparison_count"] == 0
+
+
+def test_recovery_aggregate_does_not_create_pairs_or_fail_denominators():
+    harness = _load_harness()
+    results = [{
+        "pair_id": None,
+        "runtime_version": "vnext",
+        "passed": True,
+        "runner_error": "client unavailable",
+        "recovery_evidence": {
+            "trace_complete": False,
+            "oracle_status": "unavailable",
+            "external_oracle_pass": None,
+            "wall_elapsed_ms": 1200,
+        },
+    }]
+
+    summary = harness.aggregate_recovery_evidence(results)
+
+    assert summary["paired_comparisons"] == []
+    runtime = summary["by_runtime"]["vnext"]
+    assert runtime["attempted_arm_count"] == 1
+    assert runtime["runner_error_count"] == 1
+    assert runtime["grounded_product_pass_count"] == 0
+    assert runtime["oracle"] == {
+        "conclusive_count": 0,
+        "unavailable_count": 1,
+        "pass_count": 0,
+        "fail_count": 0,
+    }
+
+
+def test_recovery_aggregate_requires_exact_identity_and_unique_arms():
+    harness = _load_harness()
+
+    clean_git = {"revision": "abc", "dirty": False}
+    eligible = harness.aggregate_recovery_evidence(
+        [_aggregate_arm("legacy"), _aggregate_arm("vnext")],
+        git_identity=clean_git,
+    )["paired_comparisons"][0]
+    assert eligible["eligible_for_ab"] is True
+    assert eligible["wall_elapsed_delta_vnext_minus_legacy"] == 20
+
+    mismatched = harness.aggregate_recovery_evidence(
+        [
+            _aggregate_arm("legacy"),
+            _aggregate_arm("vnext", fingerprint="different"),
+        ],
+        git_identity=clean_git,
+    )["paired_comparisons"][0]
+    assert mismatched["eligible_for_ab"] is False
+    assert mismatched["legacy_passed"] is None
+
+    repeated = harness.aggregate_recovery_evidence(
+        [
+            _aggregate_arm("legacy"),
+            _aggregate_arm("legacy"),
+            _aggregate_arm("vnext"),
+        ],
+        git_identity=clean_git,
+    )["paired_comparisons"][0]
+    assert repeated["arm_counts"] == {"legacy": 2, "vnext": 1}
+    assert repeated["eligible_for_ab"] is False
+
+    missing_stamp = [_aggregate_arm("legacy"), _aggregate_arm("vnext")]
+    for arm in missing_stamp:
+        for phase in ("before", "after"):
+            arm["runtime_service_identity"][phase]["source"].pop(
+                "loaded_stamp",
+            )
+    invalid_runtime = harness.aggregate_recovery_evidence(
+        missing_stamp,
+        git_identity=clean_git,
+    )["paired_comparisons"][0]
+    assert invalid_runtime["eligible_for_ab"] is False
+
+
+def test_trace_recovery_evidence_reads_only_complete_run_scoped_facts(tmp_path):
+    harness = _load_harness()
+    run_id = "arp-recovery"
+
+    def turn(index, effect, streak):
+        return {
+            "type": "vnext_mission_runtime_turn",
+            "run_id": run_id,
+            "turn_index": index,
+            "status": "action_recorded",
+            "local_visual_change": effect,
+            "frame_comparable": True,
+            "no_progress_streak": streak,
+        }
+
+    events = [
+        turn(0, "changed", 0),
+        turn(1, "unchanged", 1),
+        turn(2, "unknown", 1),
+    ]
+    events += [{
+        "type": "arp_run_done",
+        "run_id": run_id,
+        "status": "done",
+    }]
+    trace = tmp_path / "arp-recovery.jsonl"
+    trace.write_text(
+        "\n".join(json.dumps(item) for item in events) + "\n",
+        encoding="utf-8",
+    )
+    client_result = {
+        "trace_binding": {
+            "passed": True,
+            "run_id": run_id,
+            "trace_file": str(trace),
+            "parse_errors": [],
+        },
+        "configuration": {"runtime_version": "vnext"},
+        "task_verdict": {"oracle_status": "conclusive", "passed": False},
+        "passed": False,
+        "duration_seconds": 1.25,
+    }
+
+    evidence = harness.trace_recovery_evidence(client_result)
+
+    assert evidence["actor_turn_count"] == 3
+    assert evidence["turn_trace_complete"] is True
+    assert evidence["effect_counts"] == {
+        "changed": 1, "unchanged": 1, "unknown": 1,
+    }
+    assert evidence["max_unchanged_frame_streak"] == 1
+    assert evidence["false_done_count"] == 1
+    assert evidence["wall_elapsed_ms"] == 1250
+
+    client_result["task_verdict"]["passed"] = True
+    assert harness.trace_recovery_evidence(client_result)["false_done_count"] == 0
+
+
+def test_trace_recovery_evidence_keeps_unavailable_oracle_three_state(tmp_path):
+    harness = _load_harness()
+    run_id = "arp-incomplete"
+    trace = tmp_path / "arp-incomplete.jsonl"
+    trace.write_text("\n".join(json.dumps(item) for item in (
+        {
+            "type": "vnext_mission_runtime_turn",
+            "run_id": run_id,
+            "turn_index": 0,
+            "status": "action_recorded",
+            "local_visual_change": "unchanged",
+            "frame_comparable": False,
+            "no_progress_streak": 1,
+        },
+        {
+            "type": "arp_run_done",
+            "run_id": run_id,
+            "status": "done",
+        },
+    )) + "\n", encoding="utf-8")
+
+    evidence = harness.trace_recovery_evidence({
+        "trace_binding": {
+            "passed": True,
+            "run_id": run_id,
+            "trace_file": str(trace),
+            "parse_errors": [],
+        },
+        "configuration": {"runtime_version": "vnext"},
+        "task_verdict": {"oracle_status": "unavailable", "passed": False},
+    })
+
+    assert evidence["external_oracle_pass"] is None
+    assert evidence["false_done_count"] is None
+    assert evidence["frame_incomparable_count"] == 1
+
+
+def test_trace_recovery_evidence_parse_error_nulls_trace_metrics(tmp_path):
+    harness = _load_harness()
+    trace = tmp_path / "arp-broken.jsonl"
+    trace.write_text(
+        '{"type":"arp_run_done","run_id":"run-1","status":"done"}\n{',
+        encoding="utf-8",
+    )
+
+    evidence = harness.trace_recovery_evidence({
+        "trace_binding": {
+            "passed": True,
+            "run_id": "run-1",
+            "trace_file": str(trace),
+            "parse_errors": [],
+        },
+        "configuration": {"runtime_version": "vnext"},
+        "task_verdict": {"oracle_status": "conclusive", "passed": False},
+    })
+
+    assert evidence["trace_complete"] is False
+    assert evidence["actor_turn_count"] is None
+    assert evidence["false_done_count"] is None
+    assert evidence["parse_errors"]
+
+
+@pytest.mark.parametrize(
+    "events",
+    (
+        [
+            {"turn_index": 0, "status": "observed"},
+            {"turn_index": 2, "status": "observed"},
+        ],
+        [{"turn_index": 0, "status": "unknown_status"}],
+        [
+            {"type": "arp_run_done", "status": "failed"},
+            {"turn_index": 0, "status": "observed"},
+        ],
+    ),
+)
+def test_turn_trace_rejects_gaps_unknown_status_and_post_terminal_turns(
+    tmp_path,
+    events,
+):
+    harness = _load_harness()
+    run_id = "run-invalid-turns"
+    normalized = []
+    for event in events:
+        item = dict(event)
+        item.setdefault("type", "vnext_mission_runtime_turn")
+        item["run_id"] = run_id
+        normalized.append(item)
+    if not any(item["type"] == "arp_run_done" for item in normalized):
+        normalized.append({
+            "type": "arp_run_done", "run_id": run_id, "status": "failed",
+        })
+    trace = tmp_path / "invalid-turns.jsonl"
+    trace.write_text(
+        "\n".join(json.dumps(item) for item in normalized) + "\n",
+        encoding="utf-8",
+    )
+
+    evidence = harness.trace_recovery_evidence({
+        "trace_binding": {
+            "passed": True,
+            "run_id": run_id,
+            "trace_file": str(trace),
+            "parse_errors": [],
+        },
+        "configuration": {"runtime_version": "vnext"},
+        "task_verdict": {"oracle_status": "conclusive", "passed": False},
+    })
+
+    assert evidence["trace_complete"] is True
+    assert evidence["turn_trace_complete"] is False
+    assert evidence["actor_turn_count"] is None
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "oracle_status", "oracle_pass", "expected"),
+    (
+        ("done", "conclusive", False, 1),
+        ("done", "conclusive", True, 0),
+        ("failed", "conclusive", False, 0),
+        ("done", "unavailable", False, None),
+        ("done", "conclusive", None, None),
+    ),
+)
+def test_false_done_uses_exact_trace_terminal_and_three_state_oracle(
+    tmp_path,
+    terminal_status,
+    oracle_status,
+    oracle_pass,
+    expected,
+):
+    harness = _load_harness()
+    run_id = f"run-{terminal_status}-{oracle_status}"
+    trace = tmp_path / f"{run_id}.jsonl"
+    trace.write_text(json.dumps({
+        "type": "arp_run_done",
+        "run_id": run_id,
+        "status": terminal_status,
+    }) + "\n", encoding="utf-8")
+
+    evidence = harness.trace_recovery_evidence({
+        "trace_binding": {
+            "passed": True,
+            "run_id": run_id,
+            "trace_file": str(trace),
+            "parse_errors": [],
+        },
+        "configuration": {"runtime_version": "legacy"},
+        "task_verdict": {
+            "oracle_status": oracle_status,
+            "passed": oracle_pass,
+        },
+    })
+
+    assert evidence["false_done_count"] == expected
 
 
 def test_focus_preserves_visible_target_geometry_and_only_restores_minimized(

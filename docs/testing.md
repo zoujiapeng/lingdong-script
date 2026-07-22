@@ -321,6 +321,31 @@ python scripts/client_visual_e2e_run.py --case scroll-reveal --seed 20260722 --f
 python scripts/client_visual_e2e_run.py --case scroll-reveal --seed 20260723 --fail-fast
 ```
 
+P7a 多 seed 与同 seed paired 评测目前只允许已具备两侧原语 parity 的 `precise-click` 和
+`scroll-reveal`。legacy/vNext 串行运行，各自冷启动并绑定独立 run/trace；其他 case 请求
+`--paired` 必须在运行前 fail closed。`--fail-fast` 也会先跑完整一对，避免半对被误作 A/B：
+
+```bash
+python scripts/client_visual_e2e_run.py --case precise-click --seeds 101,202 --paired
+python scripts/client_visual_e2e_run.py --case scroll-reveal --seeds 20260722,20260723 --paired
+```
+
+不传 `--seeds`、`--runtime-version` 或 `--paired` 时，原有单 case、单 runtime 行为不变。非 paired
+run 只有 `group_id`，`pair_id` 必须为 `null`，不得出现在 paired comparison 中。
+
+paired 报告保存稳定 `pair_id`、交替执行顺序和准确 trace。只有 run identity、terminal event 与
+vNext turn 全部闭合时，才报告 ActionEffect 分布和最大 unchanged streak；来源不完整的指标必须
+为 `None`。当前 trace 不足以
+可靠推导机械动作重复、Actor 是否改变语义策略或模型耗时，因此这些字段不进入当前报告，不能作为
+恢复收益证据。
+
+oracle 结果按三态记录：conclusive pass、conclusive fail、unavailable；runner error 另行记录。
+只有 runtime terminal 为 done 且 oracle 为 conclusive fail 时才能计一次 false-done，oracle
+unavailable 时该值必须为 `None`。报告还必须区分 attempted arm/pair 与 eligible A/B：只有恰好
+一条 legacy 和一条 vNext、评测配置与 provider/model 身份一致、同一个 Runtime 服务的前后身份
+一致且无 source drift、两侧 run-scoped evidence 均完整且 oracle conclusive、评测开始时 git
+revision 已知且工作区干净，才可进入 A/B；其余只保留尝试记录。
+
 常规回归：
 
 ```bash

@@ -387,7 +387,7 @@ P8/P9 不开始。
 
 为避免继续横向扩张，接下来的实施顺序固定为小切片，并在每一片结束后重新判断是否值得继续：
 
-1. **P7a recovery calibration（先测量，不改策略）**：扩展随机 seed、双向边界、静止 no-op、延迟变化、ambient animation、不可比较帧和同 seed legacy/vNext paired；报告 oracle pass、turns、重复动作、`unchanged_frame_streak`、Actor 是否改变策略、false done 与延迟。没有跨 seed 证据前不修改 prompt、不自动反向，也不增加恢复角色。
+1. **P7a recovery calibration（审计中，先测量，不改策略）**：同一客户端 harness 已加入 multi-seed matrix、失败状态保留、oracle 的 conclusive pass/conclusive fail/unavailable 三态，以及 trace-bound ActionEffect/streak、false-done 与 wall latency 报告；默认单 case 行为不变，非 paired run 不生成 `pair_id`。paired 只允许已具备两侧原语 parity 的 `precise-click` 和 `scroll-reveal`，其他 case fail closed。attempted arm/pair 与 `eligible_for_ab` 分开统计，只有身份、配置、完整 run-scoped evidence、conclusive oracle 和 clean revision 均闭合的一对才可进入 A/B。当前 trace 不能可靠测量机械动作重复、Actor 语义策略变化或细分 Controller/queue latency，相关结论不得生成；无可靠来源的指标保持 `None`。该底座尚无新的真实 grounded 或 eligible A/B 样本。审计完成后的下一小片才扩展双向边界、静止 no-op、延迟变化、ambient animation 和不可比较帧。没有跨 seed 证据前不修改 prompt、不自动反向，也不增加恢复角色。
 2. **P4b.1 keyboard parity**：先迁移 `type_text` 与 `hotkey`，因为它们能显著扩大任务覆盖且不需要跨帧 pointer lease。它们必须复用同一 Runtime envelope、single-use permit、commit admission、唯一 RawDevice mechanism、unknown-no-replay 和 post-action evidence；legacy 先委托共享机械 owner，不复制第二套执行器。
 3. **P4b.2 unbound target acquisition**：把目前分散的已运行窗口、可恢复窗口、进程、Start Menu、StartApps、App Paths 与快捷方式事实收敛到一个只读发现端口。Actor只选择候选或提出 open/switch；Runtime用启动前后因果证据建立 TargetBinding。不得按应用名写路线，也不得在已有实例可复用时无条件新开。
 4. **P4b.3 continuous visual interaction**：按 `atomic drag -> held pointer -> draw_strokes -> ROI observe` 顺序迁移。drag/draw 共享同一有序路径与坐标 owner；held pointer 只有一个 lease/cleanup owner；ROI 是 FrameAuthority 的只读裁剪和坐标变换，不创建第二个视觉状态。

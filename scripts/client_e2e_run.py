@@ -273,10 +273,29 @@ class ElectronClientDriver:
                     "current_node_id", "current_tool", "runtime_version", "error",
                 )
             }
+        runtime = payload.get("runtime") or {}
+        runtime_git = runtime.get("git") or {}
+        runtime_source = runtime.get("source") or {}
         return {
             "running": bool(payload.get("running")),
             "arp_running": bool(payload.get("arp_running")),
             "current_run": compact_current,
+            "model_profile": dict(payload.get("model_profile") or {}),
+            "runtime_identity": {
+                "contract_version": runtime.get("contract_version"),
+                "pid": runtime.get("pid"),
+                "repo_root": runtime.get("repo_root"),
+                "git": {
+                    key: runtime_git.get(key)
+                    for key in (
+                        "branch", "loaded_commit", "current_commit", "dirty",
+                    )
+                },
+                "source": {
+                    key: runtime_source.get(key)
+                    for key in ("loaded_stamp", "current_stamp", "drifted")
+                },
+            },
         }
 
     def restore_and_focus(self) -> None:
