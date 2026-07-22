@@ -5,8 +5,9 @@ capability admission 已收敛为一个 runtime-aware owner；P4/P5 现有一条
 增量实验链，已经从同一产品入口接到唯一 Visual Actor、
 Capability Broker、共享 Controller/RawDevice、独立视觉 ObligationVerifier 和确定性 MissionVerifier。
 当前 live 工具面为 `click/double_click/scroll/claim/blocked`。legacy 仍默认；三个随机 seed 的
-冷启动、空 session、可见 Electron click canary，以及最终 direction/notches 合同下各一个 down/up
-scroll canary，已通过独立 trusted-browser oracle。完整 P7、其他 GUI 原语和默认切换均未完成。完整 legacy
+冷启动、空 session、可见 Electron click canary，以及 ActionEffect 接线前 direction/notches 合同下各一个
+down/up scroll canary，已通过独立 trusted-browser oracle。ActionEffect 最终代码的首轮复测为 down/click
+通过、up 失败；完整 P7、其他 GUI 原语和默认切换均未完成。完整 legacy
 运行时事实仍以 [../architecture.md](../architecture.md) 和 [../winpilot-agent.md](../winpilot-agent.md) 为准。
 
 ## 1. 设计目标
@@ -308,7 +309,7 @@ Controller 负责：
 - SendInput 的 down/up、滚轮、按键与路径插值；
 - 取消、超时、失焦和异常时释放输入；
 - 动作后 settle、截图和实际执行点记录；
-- 返回局部像素变化与确定性执行事实。
+- 返回机械执行事实与 post-action frame/evidence。
 
 Controller 不得：
 
@@ -335,7 +336,7 @@ Verifier 是有价值的第二个模型角色，但不是第二个 Agent。它�
 
 三层验证：
 
-1. `ActionEffectVerifier`：输入是否执行、目标区域是否有可比较局部效果，尽量确定性完成。
+1. `ActionEffectVerifier`：在 Controller 闭合动作后，只读比较身份一致的完整权威前后帧并给出 `changed/unchanged/unknown`；不判断因果、进展或完成。
 2. `ObligationVerifier`：acceptance criteria 是否由证据满足，必要时调用独立视觉请求。
 3. `MissionVerifier`：所有 required obligation、依赖、artifact identity、forbidden effects 和 approval 是否闭合。
 

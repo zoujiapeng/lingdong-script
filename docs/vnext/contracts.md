@@ -1,6 +1,6 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、`click/double_click/scroll/claim/blocked` 小工具面、共享 atomic Controller 执行链、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认；三个随机 seed 的真实 Electron click canary，以及最终 scroll 合同的一对 down/up canary，已通过独立 oracle。完整 P7 未达，ActionEffectVerifier、其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
+本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、`click/double_click/scroll/claim/blocked` 小工具面、共享 atomic Controller 执行链、deterministic ActionEffectVerifier、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认。ActionEffect 最终代码的同入口 canary 为 down/click 通过、up 失败；完整 P7、其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
 
 ## 1. 版本与基本规则
 
@@ -12,18 +12,19 @@ task-profile-proposal/0
 execution-profile/0
 mission-definition/0
 mission-event/0
-mission-projection/0
-mission-card/0
-actor-mission-view/0
+mission-projection/1
+mission-card/1
+action-effect/0
+actor-mission-view/1
 actor-frame-view/0
 actor-tool-view/0
-actor-turn-input/0
+actor-turn-input/1
 actor-proposal/0
 actor-envelope/0
 broker-projection/0
 runtime-frame/0
 runtime-snapshot/0
-controller-transition/0
+controller-transition/1
 mission-runtime-result/0
 desktop-runtime-coordinator-context/1
 desktop-runtime-coordinator-result/0
@@ -44,9 +45,11 @@ inspection-report/0
 
 `/0` 表示尚未发生首个不兼容升级的旁路实验合同；单个合同只有在真实字段边界变化时才升版，
 不是等到默认切换时统一改号。
-以上版本已按当前代码逐项核对：只有 coordinator context 因新增非阻塞 pause reading 升为
-`desktop-runtime-coordinator-context/1`，旧 context `/0` 不再接受；coordinator result 与其余仍列为
-`/0` 的合同尚未发生不兼容字段变化，不能为追求版本号整齐而批量改成 `/1`。
+以上版本已按当前代码逐项核对：coordinator context 因新增非阻塞 pause reading 升为
+`desktop-runtime-coordinator-context/1`；ActionEffect/no-progress 切片使
+`mission-projection`、`mission-card`、`actor-mission-view`、`actor-turn-input` 和
+`controller-transition` 各自升为 `/1`，旧版本均不再接受。`action-effect/0` 是新合同；其余仍列为
+`/0` 的合同尚未发生不兼容字段变化，不能为追求版本号整齐而批量改号。
 
 基本规则：
 
@@ -379,6 +382,7 @@ class ObligationLifecycle:
     verified_claim_fingerprint: str | None
     accepted_verification_id: str | None
     failure_budget_key: str | None
+    no_progress_streak: int
 ```
 
 ### 6.3 MissionProjection
@@ -530,6 +534,7 @@ class MissionCard:
     mission_guardrails: MissionGuardrails
     last_transition: TransitionSummary | None
     failure_summary: FailureSummary | None
+    no_progress_streak: int
 ```
 
 构建规则：
@@ -539,6 +544,7 @@ class MissionCard:
 - 只投影相关 verified facts/artifacts；
 - 提供少量 preserve/future-dependency guardrails，避免局部最优破坏后续状态；
 - 最多一个最新 transition 和有界 failure/verifier feedback；
+- `no_progress_streak` 只来自 active obligation 的可重放状态，不携带上一义务的反馈；
 - 不包含其他 obligation 的 GUI 细节；
 - 不包含旧帧；
 - 不包含其他角色隐藏推理。
@@ -547,7 +553,7 @@ class MissionCard:
 
 P4a 不把带 Runtime 身份的 `MissionCard` 或 `BrokerProjection` 原样交给 Actor。Runtime 机械投影：
 
-- `ActorMissionView`：完整 `original_goal`、当前义务的语义字段、相关事实/工件摘要、target 标题及当前义务自己的 transition/failure 摘要；
+- `ActorMissionView`：完整 `original_goal`、当前义务的语义字段、相关事实/工件摘要、target 标题、当前义务自己的 transition/failure 摘要，以及中性的 `unchanged_frame_streak`；
 - `ActorFrameView`：只说明图片是否可用、是否权威/新鲜，以及 `submitted_image_pixels` 坐标系；
 - `ActorToolView`：只包含当前 BrokerProjection 允许的 Visual Actor 工具名和严格 JSON schema；
 - `ActorTurnInput`：组合上述三种 view，图片字节和 submitted size 通过注入的 `ActorPort` 单独传递。
@@ -702,15 +708,54 @@ rejected
 unknown
 ```
 
-`completed` 与 `rejected` 只有在 action identity、当前 post frame 和 evidence 能对账时才可产生 `transition_recorded`。`unknown`、Controller 执行后异常、身份不一致或 post-frame/evidence 无法对账时，Runtime 接受 `obligation_blocked`，且不自动重放 mutation。取消后的迟到 Actor 结果也不会进入 Controller；若 Runtime 已持有物理 pointer lease，只允许注入的确定性 release cleanup。
+`completed` 与带 post observation 的 `rejected` 只有在 action identity、当前 post frame 和 evidence 能对账时才可产生 `transition_recorded`。若 admission 或 RawDevice 已明确证明输入为 `NOT_STARTED/NOT_APPLIED`，即使 post capture/CAS 随后失败，Controller 仍可返回不带 post observation 的 `rejected/input_completed=false`；Runtime 将该旧 decision 记为 `stale_discarded`，不写 transition，也不重放动作。任何可能已执行的结果、Controller 执行后异常、身份不一致或 post-frame/evidence 无法对账仍为 `unknown`，Runtime 接受 `obligation_blocked`，且不自动重放 mutation。取消后的迟到 Actor 结果也不会进入 Controller；若 Runtime 已持有物理 pointer lease，只允许注入的确定性 release cleanup。
 
 `ObserveProposal` 只刷新观察；`BlockedReport` 只产生当前义务的 blocked event，其自然语言事实不会升级为 `VerifiedFact`。`CapabilityRequest`、`InspectionRequest` 和 `ReplanRequest` 在 P4a 均返回 `unavailable`；尤其 P6 Planner/Inspector 未启用时必须 fail closed。
 
-当前产品接线只对显式 `vnext` run 组装增量 Actor、Broker、Frame/Controller bridge 与验证端口，工具面为 `click/double_click/scroll/claim/blocked`。三个 click seed 与最终 scroll 合同的一对 down/up seed 已通过真实 Electron 与独立 oracle。这不等于全局 Broker enforce 或完整 P7 已通过；P3 的 necessary-tool recall 门槛仍未达到。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
+当前产品接线只对显式 `vnext` run 组装增量 Actor、Broker、Frame/Controller bridge 与验证端口，工具面为 `click/double_click/scroll/claim/blocked`。三个 click seed 与 ActionEffect 接线前最终 scroll 合同的一对 down/up seed 已通过真实 Electron 与独立 oracle；ActionEffect 最终代码的首轮复测为 down/click 通过、up 失败。这不等于全局 Broker enforce 或完整 P7 已通过；P3 的 necessary-tool recall 门槛仍未达到。任何后续原语仍必须复用现有唯一 frame/admission/execution owner，不能把注入端口实现成第二套执行链。
 
 ### 11.2 P4a ControllerTransition
 
-注入式 ControllerPort 返回 `controller-transition/0`，至少绑定 `action_id`、`action`、三态 outcome、`input_completed`、post frame 和 evidence refs。`completed` 必须明确 `input_completed=true` 且带当前 post frame/evidence；`rejected` 必须明确 `input_completed=false` 且带 post frame；`unknown` 必须保持 `input_completed=null`，不能伪装成“确定未执行”。该边界是 Controller 事实回执，不拥有语义恢复或任务完成权限。
+注入式 ControllerPort 返回 `controller-transition/1`，至少绑定 `action_id`、`action`、三态 outcome、`input_completed`、可选 post frame 和 evidence refs。`completed` 必须明确 `input_completed=true` 且带当前 post frame/evidence；`rejected` 必须明确 `input_completed=false`，其 `post_frame_id` 与 evidence 必须同时存在或同时缺失，只有机械 owner 明确证明未执行时才允许后一种形式；`unknown` 必须保持 `input_completed=null`，不能伪装成“确定未执行”。该边界是 Controller 事实回执，不拥有语义恢复或任务完成权限。
+
+### 11.2.1 deterministic ActionEffect
+
+动作输入与 post frame 已闭合后，Runtime 可以调用独立、只读的
+`DeterministicActionEffectVerifier`。它不属于 Controller，不读取任务文本、应用名、OCR/UIA/MCP，
+也不选择恢复策略。`action-effect/0` 的 canonical summary 至少绑定：
+
+```text
+action_id
+input_completed
+before_frame_id / after_frame_id
+before_frame_evidence_ref / after_frame_evidence_ref
+before_frame_payload_hash / after_frame_payload_hash
+target_binding_valid
+frame_comparable
+local_visual_change = changed | unchanged | unknown
+change_ratio
+reason
+semantic_completion = unknown
+evidence_ref
+payload_hash
+```
+
+只有 HWND、epoch、capture region、scope、submitted size 一致，两个权威帧均可解码且尺寸正确时才可比较。
+解码后像素完全一致才是 `unchanged`；任一像素不同只产生中性的 `changed`；身份、目标、解码或尺寸
+不可靠时为 `unknown`。`changed` 不证明该动作造成变化，不证明任务进展，更不能证明 obligation 完成；
+动画或视频可能持续产生 `changed` 并掩盖 no-op。
+
+post frame 必须代表一个合理的动作后观测点。当前唯一 `AtomicPostActionBridge` 在 raw receipt 明确
+`input_completed=true` 后执行一次通用、有界的 120 ms settle，再捕获唯一 post frame；明确未执行时
+不等待，可能已执行但结果未知时仍按 unknown-no-replay 合同阻塞。该时间边界不读取应用、任务、动作
+方向或画面语义，也不允许二次动作或由 ActionEffectVerifier 自行补拍。
+
+ActionEffect 与 transition 写入同一个 accepted `transition_recorded` event。Reducer 必须从当前
+`EvidenceRegistry` 复核前后 frame 和 attestation 的真实 kind、trust、obligation、action、frame 与内容
+hash，不能信任 event payload 自报。只有 `input_completed=true + unchanged` 才递增当前 obligation 的
+内部 `no_progress_streak`；`changed` 将该义务的 streak 清零；`unknown`、未执行或缺少 comparison 保留既有值，
+不伪造进展。Actor 只看到无身份的分类、可比较性、target binding 事实和名为
+`unchanged_frame_streak` 的中性计数；它仍自行选择下一步。
 
 ### 11.3 P4b 内部机械输入合同（partial）
 
@@ -850,7 +895,7 @@ class TransitionRecord:
 
 当前 P5 实现是进程内的 evidence-first 闭合：P5a 提供严格的 `ObligationVerificationRequest`、无 Runtime 身份的 `VerifierAssessment`、Runtime-bound `ObligationVerificationResult` 和 deterministic-first dispatcher；live coordinator 还注入隔离、只读的视觉模型 Verifier。P5b 提供 `AcceptedObligationVerification`、`MissionCompletionVerificationRequest/Result` 和内容哈希绑定的 mission aggregate evidence。
 
-P5b 构造时必须同时注入 `DeterministicMissionCompletionVerifier` 和 canonical `EvidenceRegistry`，且 `MissionReducer.evidence_source` 必须是该同一 registry。Runtime 先 append/read-back aggregate evidence，再提交 exact `mission_verified` event；Reducer 独立校验 accepted obligation verification ids、证据顺序、aggregate id/hash/kind/trust 和 canonical mission verification id。视觉模型只返回无身份 assessment；许可同时依赖 EvidencePolicy 与 Registry 中真实 evidence trust，Runtime 复核 claim/revision/current authoritative frame 后才写入本地 attested `independent_visual_model` evidence。payload 自报 trust 或 evidence identity 无效。当前仍无 `ActionEffectVerifier`、跨进程 WAL 或已证明的 exactly-once 恢复。
+P5b 构造时必须同时注入 `DeterministicMissionCompletionVerifier` 和 canonical `EvidenceRegistry`，且 `MissionReducer.evidence_source` 必须是该同一 registry。Runtime 先 append/read-back aggregate evidence，再提交 exact `mission_verified` event；Reducer 独立校验 accepted obligation verification ids、证据顺序、aggregate id/hash/kind/trust 和 canonical mission verification id。视觉模型只返回无身份 assessment；许可同时依赖 EvidencePolicy 与 Registry 中真实 evidence trust，Runtime 复核 claim/revision/current authoritative frame 后才写入本地 attested `independent_visual_model` evidence。payload 自报 trust 或 evidence identity 无效。当前仍无跨进程 WAL 或已证明的 exactly-once 恢复，ActionEffect 也尚无动画场景和真实任务的校准结果。
 
 视觉/模型 Verifier 只输出 assessment，不回填 subject 或 evidence identity。当前 live provider
 schema 让模型按 Runtime 编号后的条件返回分类，Runtime 再机械映射回 canonical acceptance

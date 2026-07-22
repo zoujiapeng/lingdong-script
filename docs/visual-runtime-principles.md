@@ -51,8 +51,9 @@ Profiler cancellation is already propagated from ArpExecution through the
 shadow runtime/provider into the model-call Runtime. Root legacy providers,
 all-role per-attempt sidecars, and the missing stop-event seam in the legacy VLM
 helper remain migration debt. The incremental vNext Actor and ObligationVerifier
-use the shared transport boundary, but this does not implement live Profiler,
-Planner, Inspector, ActionEffectVerifier, or the remaining GUI primitives.
+use the shared transport boundary; a deterministic ActionEffectVerifier now
+provides replayable, non-semantic frame facts. This does not implement live
+Profiler, Planner, Inspector, or the remaining GUI primitives.
 
 ## Visual observation
 
@@ -82,8 +83,14 @@ with the final target guard immediately before the wheel input. An uncertain
 mutation result never triggers a second mechanism or automatic action replay.
 The Actor names viewport direction (`up` reveals content above, `down` below)
 and a positive notch magnitude; the Controller alone maps that to RawDevice's
-signed convention. Generic unchanged-frame/no-progress feedback remains a
-separate recovery slice.
+signed convention. vNext now exposes neutral frame-comparison facts and a
+per-obligation `unchanged_frame_streak` to the Actor. Only exact decoded-pixel
+equality counts as unchanged; any pixel difference is merely `changed`, never
+semantic success. The feedback chooses no recovery tactic. Full-frame animation
+or video can still mask a no-op and requires held-out calibration. The sole
+post-action bridge uses one generic, bounded 120 ms settle after confirmed input
+completion before it captures the only post frame; this is observation timing,
+not an application rule, semantic retry, or permission to replay an action.
 
 UIA, OCR, CV, and MCP are secondary probes. They are used only when the model
 or an accepted capability contract explicitly asks for structured evidence;
