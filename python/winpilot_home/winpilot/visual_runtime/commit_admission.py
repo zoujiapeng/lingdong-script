@@ -1,4 +1,4 @@
-"""Pure mechanical admission for one already-selected click route.
+"""Pure mechanical admission for one already-selected desktop input route.
 
 Callers must run this gate inside the existing desktop-action queue and
 ``FrameAuthority.run_if_current`` pin.  It owns no Windows API, frame state,
@@ -13,7 +13,7 @@ import re
 from typing import Any, Generic, TypeVar
 
 
-COMMIT_ADMISSION_REQUEST_FORMAT = "commit-admission-request/0"
+COMMIT_ADMISSION_REQUEST_FORMAT = "commit-admission-request/1"
 COMMIT_ENVIRONMENT_FORMAT = "commit-environment/0"
 COMMIT_ADMISSION_RESULT_FORMAT = "commit-admission-result/0"
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
@@ -32,6 +32,13 @@ class CommitAdmissionError(ValueError):
 class CommitRoute(str, Enum):
     PHYSICAL = "physical"
     BACKGROUND_WINDOW = "background_window"
+
+
+class CommitInputKind(str, Enum):
+    """Mechanical constraints required by the selected input primitive."""
+
+    POINT = "point"
+    KEYBOARD = "keyboard"
 
 
 class CommitAdmissionStatus(str, Enum):
@@ -197,7 +204,8 @@ class CommitAdmissionRequest:
     frame: FrameCommitIdentity
     target: TargetCommitIdentity
     route: CommitRoute | str
-    screen_point: Point
+    input_kind: CommitInputKind | str
+    screen_point: Point | None
     format: str = COMMIT_ADMISSION_REQUEST_FORMAT
 
     def __post_init__(self) -> None:
@@ -210,9 +218,18 @@ class CommitAdmissionRequest:
             raise CommitAdmissionError("target must be TargetCommitIdentity")
         try:
             object.__setattr__(self, "route", CommitRoute(self.route))
+            object.__setattr__(self, "input_kind", CommitInputKind(self.input_kind))
         except (TypeError, ValueError) as exc:
             raise CommitAdmissionError(str(exc)) from exc
-        object.__setattr__(self, "screen_point", _point(self.screen_point))
+        if self.input_kind is CommitInputKind.POINT:
+            object.__setattr__(self, "screen_point", _point(self.screen_point))
+        elif self.screen_point is not None:
+            raise CommitAdmissionError("keyboard input must not contain screen_point")
+        if (
+            self.input_kind is CommitInputKind.KEYBOARD
+            and self.route is not CommitRoute.PHYSICAL
+        ):
+            raise CommitAdmissionError("keyboard input requires the physical route")
         if self.frame.hwnd != self.target.hwnd or self.frame.epoch != self.target.epoch:
             raise CommitAdmissionError("frame and target identity disagree")
 
@@ -220,13 +237,17 @@ class CommitAdmissionRequest:
         return {
             "format": self.format, "request_id": self.request_id,
             "frame": self.frame.to_dict(), "target": self.target.to_dict(),
-            "route": self.route.value, "screen_point": list(self.screen_point),
+            "route": self.route.value, "input_kind": self.input_kind.value,
+            "screen_point": (
+                None if self.screen_point is None else list(self.screen_point)
+            ),
         }
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "CommitAdmissionRequest":
         value = _strict(raw, (
-            "format", "request_id", "frame", "target", "route", "screen_point",
+            "format", "request_id", "frame", "target", "route", "input_kind",
+            "screen_point",
         ), "CommitAdmissionRequest")
         value["frame"] = FrameCommitIdentity.from_dict(value["frame"])
         value["target"] = TargetCommitIdentity.from_dict(value["target"])
@@ -359,10 +380,12 @@ class CommitAdmissionGate:
             return CommitAdmissionReason.TARGET_GEOMETRY_CHANGED
         if actual != expected:
             return CommitAdmissionReason.TARGET_CHANGED
-        if not _contains(request.frame.region, request.screen_point):
-            return CommitAdmissionReason.POINT_OUTSIDE_FRAME
-        if not _contains(expected.window_region, request.screen_point):
-            return CommitAdmissionReason.POINT_OUTSIDE_TARGET
+        if request.input_kind is CommitInputKind.POINT:
+            assert request.screen_point is not None
+            if not _contains(request.frame.region, request.screen_point):
+                return CommitAdmissionReason.POINT_OUTSIDE_FRAME
+            if not _contains(expected.window_region, request.screen_point):
+                return CommitAdmissionReason.POINT_OUTSIDE_TARGET
 
         if request.route is CommitRoute.PHYSICAL:
             foreground = (
@@ -378,15 +401,16 @@ class CommitAdmissionGate:
             ):
                 return CommitAdmissionReason.FOREGROUND_CHANGED
 
-        hit = (observed.hit_hwnd, observed.hit_root_hwnd, observed.hit_process_id)
-        if observed.hit_test_point is None or any(value is None for value in hit):
-            return CommitAdmissionReason.HIT_TEST_UNAVAILABLE
-        if (
-            observed.hit_test_point != request.screen_point
-            or observed.hit_root_hwnd != expected.root_hwnd
-            or observed.hit_process_id != expected.process_id
-        ):
-            return CommitAdmissionReason.HIT_TEST_CHANGED
+        if request.input_kind is CommitInputKind.POINT:
+            hit = (observed.hit_hwnd, observed.hit_root_hwnd, observed.hit_process_id)
+            if observed.hit_test_point is None or any(value is None for value in hit):
+                return CommitAdmissionReason.HIT_TEST_UNAVAILABLE
+            if (
+                observed.hit_test_point != request.screen_point
+                or observed.hit_root_hwnd != expected.root_hwnd
+                or observed.hit_process_id != expected.process_id
+            ):
+                return CommitAdmissionReason.HIT_TEST_CHANGED
         return None
 
     def admit_and_commit(
@@ -435,7 +459,8 @@ class CommitAdmissionGate:
 
 __all__ = [
     "COMMIT_ADMISSION_REQUEST_FORMAT", "COMMIT_ENVIRONMENT_FORMAT",
-    "COMMIT_ADMISSION_RESULT_FORMAT", "CommitAdmissionError", "CommitRoute",
+    "COMMIT_ADMISSION_RESULT_FORMAT", "CommitAdmissionError", "CommitInputKind",
+    "CommitRoute",
     "CommitAdmissionStatus", "CommitAdmissionReason", "FrameCommitIdentity",
     "TargetCommitIdentity", "CommitAdmissionRequest", "CommitEnvironment",
     "CommitAdmissionResult", "CommitCallbackResult", "CommitAdmissionGate",

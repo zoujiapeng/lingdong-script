@@ -34,6 +34,7 @@ from ..vnext.runtime.mutation_permits import (
 )
 from .commit_admission import (
     CommitAdmissionGate,
+    CommitInputKind,
     CommitAdmissionReason,
     CommitAdmissionRequest,
     CommitAdmissionResult,
@@ -217,6 +218,7 @@ class AtomicDesktopController:
                 frame=envelope.frame,
                 target=envelope.target,
                 route=CommitRoute.PHYSICAL,
+                input_kind=CommitInputKind.POINT,
                 screen_point=point,
             )
         except ValueError as exc:

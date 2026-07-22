@@ -43,6 +43,19 @@ class FinalPointerGuardDecision(str, Enum):
     HIT_TEST_CHANGED = "hit_test_changed"
 
 
+class FinalKeyboardGuardDecision(str, Enum):
+    """Mechanical target verdict sampled immediately before keyboard input."""
+
+    ADMITTED = "admitted"
+    TARGET_UNAVAILABLE = "target_unavailable"
+    TARGET_ROOT_CHANGED = "target_root_changed"
+    TARGET_PROCESS_CHANGED = "target_process_changed"
+    TARGET_GEOMETRY_CHANGED = "target_geometry_changed"
+    FOREGROUND_UNAVAILABLE = "foreground_unavailable"
+    FOREGROUND_CHANGED = "foreground_changed"
+    STOP_REQUESTED = "stop_requested"
+
+
 def _scalar_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
     frozen: dict[str, Any] = {}
     for key, value in facts.items():
@@ -357,7 +370,8 @@ class RawDeviceExecutor:
 __all__ = [
     "AdmittedPhysicalClickBackend", "AdmittedPhysicalScrollBackend",
     "ClickCount", "ClickMechanism",
-    "FinalPointerGuard", "FinalPointerGuardDecision", "MouseButton",
+    "FinalKeyboardGuardDecision", "FinalPointerGuard", "FinalPointerGuardDecision",
+    "MouseButton",
     "RawActionContext", "RawActionReceipt", "RawBackendResult",
     "RawDeviceBackends", "RawDeviceExecutor",
 ]
