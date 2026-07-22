@@ -548,6 +548,49 @@ def test_post_action_failure_returns_unknown_without_repeating_raw():
     assert len(raw_calls) == 1
 
 
+def test_post_action_failure_preserves_proven_admission_rejection():
+    authority, frame = _authority()
+    envelope = _envelope(frame)
+    raw_calls = []
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *args, **kwargs: raw_calls.append((args, kwargs)),
+        observation=Observation(pointer_released=False),
+        post=PostAction(fail=True),
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.REJECTED
+    assert transition.input_completed is False
+    assert transition.post_frame_id is None
+    assert transition.evidence_refs == ()
+    assert raw_calls == []
+
+
+def test_post_action_failure_preserves_proven_raw_non_execution():
+    authority, frame = _authority()
+    envelope = _envelope(frame)
+    raw_calls = []
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *args, **kwargs: (
+            raw_calls.append((args, kwargs)) or RawBackendResult(False, {})
+        ),
+        post=PostAction(fail=True),
+    )
+
+    transition = controller.execute(envelope)
+
+    assert transition.outcome is ControllerOutcome.REJECTED
+    assert transition.input_completed is False
+    assert transition.post_frame_id is None
+    assert transition.evidence_refs == ()
+    assert len(raw_calls) == 1
+
+
 def test_physical_queue_serializes_raw_through_post_action():
     authority, frame = _authority()
     first = _envelope(frame, decision_id="decision-1")

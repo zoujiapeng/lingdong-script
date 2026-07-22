@@ -221,13 +221,19 @@ class ControllerTransition:
                     "completed transition requires input, evidence, and a post frame"
                 )
         elif self.outcome is ControllerOutcome.REJECTED:
-            if (
-                self.input_completed is not False
-                or self.post_frame_id is None
-                or not self.evidence_refs
-            ):
+            if self.input_completed is not False:
                 raise RuntimeContractError(
-                    "rejected transition requires evidence, a post frame, and no input"
+                    "rejected transition must prove that input did not execute"
+                )
+            has_post_frame = self.post_frame_id is not None
+            has_evidence = bool(self.evidence_refs)
+            if has_post_frame != has_evidence:
+                raise RuntimeContractError(
+                    "rejected transition post frame and evidence must be present together"
+                )
+            if not has_post_frame and self.visible_effect:
+                raise RuntimeContractError(
+                    "rejected transition without post observation cannot report a visible effect"
                 )
         elif self.input_completed is not None:
             raise RuntimeContractError("unknown transition cannot claim whether input executed")

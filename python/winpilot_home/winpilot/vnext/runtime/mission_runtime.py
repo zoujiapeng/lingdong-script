@@ -1651,6 +1651,22 @@ class MissionRuntime:
                 decision_id=decision_id,
                 detail="Controller could not prove the mutation outcome",
             )
+        if (
+            transition.outcome is ControllerOutcome.REJECTED
+            and transition.input_completed is False
+            and transition.post_frame_id is None
+            and not transition.evidence_refs
+        ):
+            return self._result(
+                RuntimeStatus.STALE_DISCARDED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                detail=(
+                    "Controller proved that input did not execute; "
+                    "the decision was discarded without action replay"
+                ),
+            )
         try:
             post = self._state.current(self._reducer.projection, turn_index=turn_index)
             if post.frame is None or post.frame.frame_id != transition.post_frame_id:

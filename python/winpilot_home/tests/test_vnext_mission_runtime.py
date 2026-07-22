@@ -1019,6 +1019,32 @@ def test_action_records_transition_but_never_claims_or_completes(outcome: Contro
     )
 
 
+def test_proven_rejection_without_post_observation_is_stale_not_unknown() -> None:
+    harness = _harness(_click(), controller_outcome=ControllerOutcome.REJECTED)
+
+    def remove_post_observation(
+        _envelope: ActorDecisionEnvelope,
+        transition: ControllerTransition,
+    ) -> ControllerTransition:
+        return replace(
+            transition,
+            evidence_refs=(),
+            post_frame_id=None,
+            visible_effect="",
+        )
+
+    harness.controller.transition_mutator = remove_post_observation
+    before = len(harness.reducer.events)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.STALE_DISCARDED
+    assert "did not execute" in result.detail
+    assert len(harness.controller.calls) == 1
+    assert len(harness.reducer.events) == before
+    assert harness.reducer.projection.status is MissionStatus.RUNNING
+
+
 @pytest.mark.parametrize(
     "race",
     (
