@@ -336,7 +336,7 @@ P3b 的同入口接线只在 `vnext.broker_shadow.enabled=true` 时启用：模�
 
 ## 8. P4：Visual Actor 受控旁路
 
-状态：**P4 的 click-only 实验闭环已接到同一产品入口：Server 按冻结的 per-run selection 注入具体 coordinator，唯一模型 Visual Actor 通过 Broker 小工具面提出 click/double-click/claim/blocked，动作复用唯一 Controller/RawDevice 链；两个随机 seed 的真实 Electron/UIA canary 已通过独立 oracle，legacy 仍默认，完整 P7 未达。**
+状态：**P4 的 click-only 实验闭环已接到同一产品入口：Server 按冻结的 per-run selection 注入具体 coordinator，唯一模型 Visual Actor 通过 Broker 小工具面提出 click/double-click/claim/blocked，动作复用唯一 Controller/RawDevice 链；三个随机 seed 的真实 Electron/UIA canary 已通过独立 oracle，legacy 仍默认，完整 P7 未达。**
 
 P4a 先在独立 `vnext/actor/` 和 `vnext/runtime/` 中实现严格版本化的 Actor 可见 view、无 Runtime 身份 proposal、Runtime-bound envelope、注入端口与单回合协调器。当前 click-only live coordinator 在这些端口之外组装隔离模型 Actor、RuntimeState bridge、Broker 与 atomic Controller；MissionRuntime 本身仍不导入 legacy AgentRunner/ToolSession，也不选择 runtime version。legacy 仍是默认，P3 全量 Broker enforce 门槛仍未达到。
 
@@ -344,7 +344,7 @@ P4a admission 在 Actor 返回后重新读取 Mission revision/active obligation
 
 `claim_obligation_done` 本身只接受 `obligation_claimed` 并进入 `CLAIMED`。P5a 只有在 ExecutionProfile 允许且注入只读 ObligationVerifier 时才继续验证；P5b 只有在本地 MissionCompletionVerifier 与 Reducer 共用同一 EvidenceRegistry 时才机械关闭 mission。Capability/Inspector/Planner 等未接服务仍返回 unavailable；P6 在没有跨任务 A/B 证据前继续 fail closed。
 
-P4b 按原语把这些合同接到现有唯一 FrameAuthority、admission/坐标校验和 Controller/RawDevice 链。Bridge 必须先让 legacy 委托共享 owner，不能复制 capture、action parser、pointer owner 或执行器。当前只有 click/double-click 进入 live 实验链；两个受控 seed 证明该窄链可达，不证明其他原语或真实任务。
+P4b 按原语把这些合同接到现有唯一 FrameAuthority、admission/坐标校验和 Controller/RawDevice 链。Bridge 必须先让 legacy 委托共享 owner，不能复制 capture、action parser、pointer owner 或执行器。当前只有 click/double-click 进入 live 实验链；三个受控 seed 证明该窄链可达，不证明其他原语或真实任务。
 
 P4b 当前完成的可独立回退切片包括：legacy 委托两阶段 `FrameObserver`；submitted-image -> normalized-frame -> physical-screen 的单次 typed 坐标映射；每 run 冻结一次的 `DesktopRuntimeSelection`；typed scroll RawDevice seam；以及默认关闭的 `AtomicClickController`。该 Controller 仅接受 `click`/`double_click`，在唯一 physical lease 中消费 Runtime mutation permit、pin 权威 frame、核对 commit-time HWND/PID/epoch/region/hit-test，并在每次 mouse-down 紧前做 final target guard。动作后释放 frame pin 但保持同一 physical lease，再由 `AtomicPostActionBridge` CAS 提交新权威帧并向 run-scoped EvidenceRegistry 写入对应 evidence。
 
@@ -364,10 +364,19 @@ post-model reprojection 重算；turn budget 只接受唯一 full-goal ExecuteDe
 上限收紧；`RawDeviceExecutor` 只由 Server product composition root 构造并注入，coordinator 缺失
 该依赖就拒绝构造，不复制 backend owner。
 
-仍未迁移的 admission 债务：Server 在选择/组装 coordinator 前继续调用 legacy
-`CapabilityPlanner.assert_satisfiable()` 与 `assert_runtime_satisfiable()`。扩大 vNext capability、
-provider/MCP 或多原语之前，必须把它拆成 runtime-aware 的单一 admission owner，并证明 legacy 与
-vNext 各自的 missing-capability 负向场景不被放宽；不能长期让它在 Broker 外再次解释 vNext 工具面。
+queue-time capability admission 债务已闭合：Server 冻结 runtime selection，vNext composition root
+构造一个不可变 `RuntimeCapabilitySnapshot`，随后在 prepare/model/mutation 前只调用一次
+`DesktopRuntimeAdmission`。vNext admission 机械核对单个 lossless full-goal obligation 的 canonical
+capabilities、required services 和 snapshot identity；同一 snapshot 继续供 `ExecutionPolicy`、live
+`RuntimeState` 与 Broker 使用。legacy 分支仍按原顺序保留既有 static/runtime preflight，无 contract
+兼容行为不变。该切片没有修改 prompt、模型工具面、Controller、GUI action、done/Verifier、前端或
+task-contract/1，也没有扩大 click-only 工具面。
+
+下一迁移门槛是多原语 parity：按小切片将 `type_text`、`hotkey`、Actor 可见 `scroll`、`drag`、
+`draw_strokes`、held pointer 与 ROI observe 接入同一个 snapshot/Catalog/Broker/Controller owner。每个
+原语都必须先补 capability/service/parity 负向与 property 测试，再做同入口 Electron oracle；mutation
+结果不确定时仍禁止 replay，缺能力时禁止 legacy fallback。门槛未达前 P7 仍未完成，P6 保持禁用，
+P8/P9 不开始。
 
 P4a 不授权删除任何 legacy 产品职责。`AgentRunner` 的全局 todo、模型直接 `done` 和固定大工具面只能在 paired canary 与真实 Electron E2E 达到 [evaluation.md](evaluation.md) 门槛，且 trace 证明所有 vNext Actor 回合分别由 MissionCard、P5 verification 和 BrokerProjection 接管后删除；单元测试、注入 fake 或一次受控成功都不构成删除证据。
 
@@ -456,7 +465,7 @@ Inspector引入判据：
 
 ## 11. P7：真实任务 canary
 
-状态：**P7 已开始：同入口 click-only canary 的 seed `987654` 与 `424242` 已从冷启动、空 session、可见 Electron/UIA 客户端通过独立 trusted-browser oracle；paired legacy、真实 11 题、mixed/held-out、多布局和多原语矩阵仍未完成，因此 P7 未达标。**
+状态：**P7 已开始：同入口 click-only canary 的 seed `987654`、`424242` 与 `135791` 已从冷启动、空 session、可见 Electron/UIA 客户端通过独立 trusted-browser oracle；paired legacy、真实 11 题、mixed/held-out、多布局和多原语矩阵仍未完成，因此 P7 未达标。**
 
 第一步只用随机化 `precise-click` 验证“客户端选择 -> runtime 冻结 -> Actor proposal -> Broker
 admission -> 唯一 Controller/RawDevice -> 新权威帧 -> 独立 obligation/mission 验证 -> external
@@ -464,7 +473,8 @@ oracle”这一条 click 链。case 名、几何和成功条件只存在于 harn
 Actor 和 Verifier 不读取它们。当前通过记录：
 
 - seed `987654`：run `arp-20260722-154335-a9e64b`，3 turns，`output/playwright/client-visual-e2e/20260722-154302-suite/suite-report.json`；
-- seed `424242`：run `arp-20260722-154447-9329b4`，2 turns，`output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json`。
+- seed `424242`：run `arp-20260722-154447-9329b4`，2 turns，`output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json`；
+- seed `135791`：run `arp-20260722-165702-086da6`，2 turns，`output/playwright/client-visual-e2e/20260722-165627-suite/suite-report.json`。
 
 它们只证明对应 seed 的 click-only 闭环，不证明其他原语或真实任务。此前失败尝试暴露的
 冗余 observe 循环、Verifier schema、`SW_RESTORE` 几何变化和 page-ready stale geometry 均以
@@ -522,7 +532,7 @@ Canary失败不在同一run偷切legacy。可以另开独立run对照。
 | 当前职责 | vNext owner | 迁移方式 | 删除门槛 |
 | --- | --- | --- | --- |
 | `TaskContractCompiler` 对GUI任务族解释 | Goal Compiler | 只保留可靠obligation/artifact dependency，未知目标单obligation | coverage/cold-start E2E |
-| Server 的 legacy `CapabilityPlanner` 通用 admission | runtime-aware capability admission | 保留 fail-closed satisfiability，但按已冻结 runtime 使用 canonical catalog/offer；不解释 GUI 路线 | vNext 多原语/provider 扩展前完成 paired missing-capability 负向测试，且 trace 只有一个 admission owner |
+| Server 的 legacy `CapabilityPlanner` 通用 admission | `DesktopRuntimeAdmission` + immutable `RuntimeCapabilitySnapshot` | **已迁移**：一个 queue-time owner 按冻结 runtime 分派；legacy 保留原 preflight，vNext 使用 canonical catalog/service/controller inventory，不解释 GUI 路线 | 持续回归 paired missing-capability、identity/parity、admission 前零副作用；旧 Server 直调 owner 已删除 |
 | Actor自行判断任务复杂度 | TaskProfiler + ExecutionPolicy | 先shadow，再accept profile | over/under-profile达标 |
 | `_EXECUTE_DESKTOP_MODEL_TOOLS` 固定大工具面 | ToolCatalog + Broker | shadow后按run投影 | paired canary/真实E2E达标，所有Actor回合取BrokerProjection且必要工具recall门槛通过 |
 | `AgentRunner`全局todo | MissionProjection + Runtime | Actor只消费MissionCard | paired canary/真实E2E达标且trace无legacy plan读取 |

@@ -10,12 +10,14 @@ invariants and the client-entry evaluation contract.
 
 最近一次真实验证（2026-07-22）使用 `npm run dev` 启动的可见 Electron 客户端，
 通过 UIA 操作与用户相同的 vNext 选择、冷启动和提交入口，session 为空。随机化
-`precise-click` seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）和 seed
-`424242`（run `arp-20260722-154447-9329b4`，2 turns）均由独立 trusted-browser
+`precise-click` seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）、seed
+`424242`（run `arp-20260722-154447-9329b4`，2 turns）和 capability-admission 收敛后的 seed
+`135791`（run `arp-20260722-165702-086da6`，2 turns）均由独立 trusted-browser
 pointer oracle 判定通过。suite report 分别为：
 
 - `output/playwright/client-visual-e2e/20260722-154302-suite/suite-report.json`
 - `output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json`
+- `output/playwright/client-visual-e2e/20260722-165627-suite/suite-report.json`
 
 此前真实尝试依次暴露了 Actor 对冗余 full-frame `observe` 的循环、视觉 Verifier provider
 返回字符串 confidence/复制条件文本、harness 的 `SW_RESTORE` 改变目标几何，以及 page-ready
@@ -35,15 +37,15 @@ seed、目标位置、布局或成功条件写入生产 Agent。
 | 本地抖音搜索 `kimi k3` | 客户端入口、空 session、`experience_policy=disabled`、准确 trace 绑定；终态可见搜索结果 | 人工视觉核对成功；通用 report 未配置独立业务 oracle，因此自动报告不是 grounded pass |
 | `game-drag-v2` | 同一客户端入口、冷启动隔离和可信真实鼠标事件成立；模型把弯曲通道误读成直角路径 | E2E 失败；独立 oracle 未通过 |
 | 网易云搜索梁静茹、播放第一首并调到最大音量 | 客户端入口与冷启动隔离；新鲜帧可见播放状态和 Windows 音量 100%，用户确认成功 | 用户确认业务结果；harness 未产生 terminal pass，不能记正式终态通过 |
-| vNext `precise-click` seeds `987654` / `424242` | 可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace 和独立 trusted-browser pointer oracle | 两个受控 click-only seed grounded pass；不是 legacy paired、真实应用、11 题或其他原语通过 |
+| vNext `precise-click` seeds `987654` / `424242` / `135791` | 可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace 和独立 trusted-browser pointer oracle | 三个受控 click-only seed grounded pass；不是 legacy paired、真实应用、11 题或其他原语通过 |
 
 这些证据仍只覆盖少量样本。它们证明通用主线到达真实软件、游戏式拖拽和受控 vNext 点击场景，不证明
 11 题、混合长任务、任意电脑或任意应用全部可用。失败、超时、`ungrounded` 和受干扰
 run 保留原状态。
 
-同一工作树回归为 WinPilot `1884 passed, 13 skipped, 1 deprecation warning`；
-TypeScript 全量检查和 production renderer/Electron build 通过。本轮真实客户端靶场
-只运行上表 `game-drag-v2`，没有把历史结果冒充本轮通过。回归证明代码合同未破坏，
+同一工作树回归为 WinPilot `2732 passed, 13 skipped, 1 deprecation warning`、根目录 Python
+`2508 passed` 和 renderer `218 passed`；TypeScript 全量检查和 production renderer/Electron build
+通过。本轮真实客户端靶场运行上表 seed `135791`，没有把历史结果冒充本轮通过。回归证明代码合同未破坏，
 不能替代真实 GUI oracle。
 
 ## 测试分层
@@ -82,12 +84,16 @@ decision。frame freshness max-age 显式记录（当前默认 30 秒），过�
 模型前失败；effective budget 还要记录本地 24-turn cap。RawDevice 必须由产品 composition root
 注入，缺失时禁止构造 coordinator 或 fallback 到另一 backend。
 
-Server 目前仍在 vNext composition 前经过 legacy `CapabilityPlanner` admission。扩大 vNext 工具、
-provider/MCP 或多原语的 E2E 前，测试必须证明该 guard 已迁移为 runtime-aware 单一 owner，并覆盖
-legacy/vNext 各自的 missing-capability 负向场景；否则 capability failure 不能归因于 Actor/Broker。
+Server 在 queue prepare、模型调用和桌面 mutation 前只经过一次 runtime-aware
+`DesktopRuntimeAdmission`。legacy 必须保持原顺序的 static/runtime preflight；vNext 必须从
+coordinator 的同一不可变 `RuntimeCapabilitySnapshot` 校验 canonical capability/service、Catalog 与
+Controller parity，并将该 snapshot 继续供 `ExecutionPolicy`、live `RuntimeState` 与 Broker 使用。
+回归测试必须覆盖 legacy/vNext missing-capability、缺 contract、runtime/snapshot identity、未知 service、
+Catalog/Controller drift、snapshot fingerprint replay，以及拒绝后 prepare/model/Controller/legacy fallback
+调用数为零。上述合同通过不代表 click-only 以外的 GUI 原语可用。
 
 `precise-click` 是这条窄链的第一个随机化受控 oracle，不是产品策略。上述两个 seed 已从
-真实可见 Electron/UIA 入口获得 vNext grounded pass；两次均为冷启动、空 session，且外部
+真实可见 Electron/UIA 入口获得 vNext grounded pass；三次均为冷启动、空 session，且外部
 trusted-browser oracle 独立确认目标鼠标事件。它们尚未包含 legacy paired 对照，也不能满足
 完整 P7。`type_text`、`hotkey`、Actor 可见滚轮、拖拽、绘制、held pointer、ROI observe、
 应用发现、provider/MCP 和 live Profiler 仍不得从这些 case 推断为可用。

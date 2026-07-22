@@ -453,7 +453,29 @@
   backend. Runtime, Broker and Actor remain unable to construct physical input owners.
 - version audit: coordinator result and the other contracts still listed as `/0` have no
   incompatible field change and remain `/0`; version numbers are not advanced in bulk.
-- remaining debt: Server still applies legacy `CapabilityPlanner` satisfiability assertions before
-  vNext composition. This remains a fail-closed guard for the click canary, but must become one
-  runtime-aware admission owner before expanding vNext tools/provider routes. It must not survive as
-  a second capability planner beside Broker.
+- admission follow-up: the duplicate legacy capability interpretation at the vNext boundary is
+  superseded by D029. The pause, freshness, budget and device-ownership decisions above are unchanged.
+
+### D029: one queue-time admission consumes one immutable runtime capability snapshot
+
+- status: accepted
+- owner: `DesktopRuntimeAdmission` is the only product-level queue-time capability admission owner.
+  Server calls it once after freezing `DesktopRuntimeSelection` and, for vNext, composing the concrete
+  runtime snapshot, but before run prepare, model invocation or desktop mutation. It does not choose a
+  GUI route, tool, target, coordinate or recovery tactic.
+- vNext inventory: the product composition root builds one immutable `RuntimeCapabilitySnapshot` from
+  the canonical capability registry, ToolCatalog, Controller GUI tool names and available services.
+  Constructor validation rejects catalog/controller drift, unknown services and unbacked capabilities.
+  Admission mechanically projects canonical full-goal Mission requirements and fails closed on a
+  missing contract, capability, service or runtime identity mismatch.
+- one fact source: the exact same snapshot is consumed by queue-time admission, the safe
+  `ExecutionPolicy` profile, live `RuntimeState` and `CapabilityBroker`. Its fingerprint is observable
+  through a private trace sidecar; it is not model input, a mutable ledger or a second Runtime state.
+- legacy preservation: the legacy branch remains inside the same admission owner and executes the
+  existing static then runtime preflight in their previous order. Legacy graphs without TaskContract
+  preserve their compatibility behavior. vNext never runs those legacy capability assumptions and
+  never falls back to legacy after rejection.
+- scope: this slice does not change prompts, model tools, Controller, GUI actions, done/Verifier
+  semantics, front end or task-contract schema. It does not make Broker globally enforced, expand the
+  click-only Catalog or satisfy P7/P8/P9. P6 remains disabled. The next capability gate is incremental
+  multi-primitive parity and same-entry evidence, not application- or benchmark-specific rules.

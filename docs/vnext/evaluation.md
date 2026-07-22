@@ -163,7 +163,7 @@ Electron task input
 
 直接调用 Reducer、Profiler、Policy、Broker、Actor 或 `/api/v2` 只是 unit/integration。vNext不能获得额外截图、预置计划、特殊 max steps 或后门工具。
 
-当前可见 Electron 客户端提供按 run 的 `Legacy（默认）` / `vNext（实验）` 选择器。冻结为 `vnext` 时，Server 注入 click-only live coordinator，`ArpExecution` 完全绕过 legacy handlers；失败不得在同一 run 回退。2026-07-22，`precise-click` seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）与 seed `424242`（run `arp-20260722-154447-9329b4`，2 turns）已从冷启动、空 session、可见 Electron/UIA 入口通过独立 trusted-browser oracle。suite report 为 `output/playwright/client-visual-e2e/20260722-154302-suite/suite-report.json` 与 `output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json`。这两例只进入受控 click-only grounded-pass 记录；protocol、fake port、单元测试或 legacy shadow 仍不得计入。
+当前可见 Electron 客户端提供按 run 的 `Legacy（默认）` / `vNext（实验）` 选择器。冻结为 `vnext` 时，Server 注入 click-only live coordinator，`ArpExecution` 完全绕过 legacy handlers；失败不得在同一 run 回退。2026-07-22，`precise-click` seed `987654`（run `arp-20260722-154335-a9e64b`，3 turns）、seed `424242`（run `arp-20260722-154447-9329b4`，2 turns）与 capability-admission 收敛后的 seed `135791`（run `arp-20260722-165702-086da6`，2 turns）已从冷启动、空 session、可见 Electron/UIA 入口通过独立 trusted-browser oracle。suite report 为 `output/playwright/client-visual-e2e/20260722-154302-suite/suite-report.json`、`output/playwright/client-visual-e2e/20260722-154415-suite/suite-report.json` 与 `output/playwright/client-visual-e2e/20260722-165627-suite/suite-report.json`。这三例只进入受控 click-only grounded-pass 记录；protocol、fake port、单元测试或 legacy shadow 仍不得计入。
 
 早期真实尝试分别暴露了冗余 full-frame `observe` 循环、Verifier provider 的字符串 confidence 与条件文本复制、harness `SW_RESTORE` 引起的目标几何变化，以及 page-ready 后复用旧几何。修复位于通用 Catalog/Runtime、Verifier schema 和 harness 状态读取层，没有把 case、seed、布局、坐标或成功条件加入生产 Agent。
 
@@ -234,7 +234,7 @@ Electron task input
 - Raw receipt的机械三态与`input_completed=true/false/null`一致；
 - legacy scroll正常输出保持兼容，安全修正只禁止不确定后的第二种输入机制。
 
-以上 RawDevice 项大多仍只有 unit/characterization 证据。P4 click-only live 路径已组装 atomic click/double-click，覆盖 Runtime permit、双段坐标映射、commit-time Windows identity、每次 mouse-down 紧前 final guard、post-action authoritative frame/evidence 以及 unknown-no-replay。两个随机 seed 的真实 Electron/UIA click 已通过独立 pointer oracle，但没有 paired legacy 对照，也不代表多原语门槛通过；`type_text`、`hotkey`、Actor 可见 `scroll`、`drag`、`draw_strokes`、held pointer 和 ROI observe 仍没有 live parity。
+以上 RawDevice 项大多仍只有 unit/characterization 证据。P4 click-only live 路径已组装 atomic click/double-click，覆盖 Runtime permit、双段坐标映射、commit-time Windows identity、每次 mouse-down 紧前 final guard、post-action authoritative frame/evidence 以及 unknown-no-replay。三个随机 seed 的真实 Electron/UIA click 已通过独立 pointer oracle，但没有 paired legacy 对照，也不代表多原语门槛通过；`type_text`、`hotkey`、Actor 可见 `scroll`、`drag`、`draw_strokes`、held pointer 和 ROI observe 仍没有 live parity。
 
 ### 5.5 Broker
 
@@ -453,12 +453,19 @@ sidecar，以及 legacy VLM helper 的 stop_event seam。因此“全角色可�
 -受控任务不低于legacy；
 -保留真实oracle失败。
 
-当前已有 click-only live coordinator、具体模型 Visual Actor、Broker 小工具面和共享 atomic click/double-click 链；客户端可显式选择实验 runtime，legacy 仍默认。两个随机 seed 的真实可见 Electron/UIA `precise-click` 已通过独立 trusted-browser oracle，但没有 paired legacy、真实任务、多原语或规模化 held-out 对照，所以该门槛未达。
+当前已有 click-only live coordinator、具体模型 Visual Actor、Broker 小工具面和共享 atomic click/double-click 链；客户端可显式选择实验 runtime，legacy 仍默认。三个随机 seed 的真实可见 Electron/UIA `precise-click` 已通过独立 trusted-browser oracle，但没有 paired legacy、真实任务、多原语或规模化 held-out 对照，所以该门槛未达。
 
-扩大该工具面前还必须迁移 Server 的 legacy `CapabilityPlanner` admission：当前它在
-runtime-specific composition 前执行，仍可能用 legacy capability 假设拒绝 vNext。门槛要求同一
-冻结 runtime 只有一个 capability admission owner，并以 paired missing-capability 负向测试证明没有
-静默放宽；仅让 Broker 单元测试通过不满足该门槛。
+queue-time capability admission 门槛已经结构性闭合：同一冻结 runtime 只有一个
+`DesktopRuntimeAdmission` owner；vNext 从不可变 `RuntimeCapabilitySnapshot` 核对 canonical
+capability/service 与 Catalog/Controller parity，同一 snapshot 继续供 `ExecutionPolicy`、live
+`RuntimeState` 和 Broker 使用；legacy 仍保留原顺序的 static/runtime preflight。后续回归必须持续覆盖
+两边 missing-capability、snapshot/runtime identity、Catalog/Controller drift，以及 admission 失败时
+prepare/model/Controller/legacy fallback 调用数为零。仅有 snapshot 单元测试仍不能替代真实入口证据。
+
+下一门槛是多原语，而不是扩写 prompt：`type_text`、`hotkey`、Actor 可见 `scroll`、`drag`、
+`draw_strokes`、held pointer 和 ROI observe 必须逐项进入同一 snapshot/Catalog/Broker/Controller owner，
+并通过必要工具 recall、unknown-no-replay、负向/property 与同入口 Electron oracle。完成这些之前，
+click-only canary 仍不参与默认切换判定。
 
 ### Verifier
 
@@ -488,7 +495,7 @@ runtime-specific composition 前执行，仍可能用 legacy capability 假设�
 -停止、暂停、取消、外部等待和输入清理无回归；
 -legacy删除计划可执行，不是无限双栈。
 
-P7 已开始并获得两个随机 seed 的 click-only grounded pass，但 paired legacy、11 个真实任务、mixed/held-out、多布局和多原语矩阵均未完成，因此 P7 仍未达标；P8 默认切换和 P9 净删未开始，legacy 产品职责删除数为 0。这些 `precise-click` 通过不能越过 Verifier 校准、Profiler/Broker 或多原语门槛。
+P7 已开始并获得三个随机 seed 的 click-only grounded pass，但 paired legacy、11 个真实任务、mixed/held-out、多布局和多原语矩阵均未完成，因此 P7 仍未达标；P8 默认切换和 P9 净删未开始，legacy 产品职责删除数为 0。这些 `precise-click` 通过不能越过 Verifier 校准、Profiler/Broker 或多原语门槛。
 
 ## 11. 报告格式
 
