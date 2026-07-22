@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { FlowScript, NodeType } from '../types';
 import {
   ControlPlaneClient,
+  type DesktopRuntimeVersion,
   EXPECTED_RUNTIME_CONTRACT_VERSION,
   normalizeBaseUrl,
   resolveControlPlaneConnection,
@@ -62,6 +63,41 @@ function scriptFixture(): FlowScript {
 }
 
 describe('control plane client contracts', () => {
+  it('sends the desktop runtime only as a typed top-level run product field', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      run_id: 'arp-1',
+      run: { run_id: 'arp-1' },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const client = new ControlPlaneClient('http://127.0.0.1:8765');
+      const graph = { format: 'arp/1', id: 'graph-1' } as any;
+      const inputs = { execution_context: { format: 'execution-context/1' } };
+      await client.startGraph(graph, inputs, 'vnext');
+
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [URL, RequestInit];
+      expect(String(url)).toContain('/api/v2/arp/runs');
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(String(init.body))).toEqual({
+        graph,
+        inputs,
+        runtime_version: 'vnext',
+      });
+      expect(JSON.stringify(graph)).not.toContain('runtime_version');
+      expect(JSON.stringify(inputs)).not.toContain('runtime_version');
+      await expect(
+        client.startGraph(graph, inputs, 'future' as DesktopRuntimeVersion),
+      ).rejects.toThrow('不支持的桌面运行时');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('fails closed for missing, stale, or mismatched controller identity', () => {
     const current = {
       api_version: '2',

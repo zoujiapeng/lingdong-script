@@ -47,7 +47,7 @@ import { PropertyPanel } from '../PropertyPanel/PropertyPanel';
 import { useStore } from '../../store';
 import type { UIState } from '../../types';
 import { useControlPlane } from '../../platform/useControlPlane';
-import { TaskClarificationRequired } from '../../platform/client';
+import { TaskClarificationRequired, type DesktopRuntimeVersion } from '../../platform/client';
 import type {
   AgentSchedule,
   ArpExecutionSnapshot,
@@ -868,10 +868,11 @@ function TaskContractRuntimeSection({
   );
 }
 
-function AgentCockpit({ plane }: { plane: Plane }) {
+export function AgentCockpit({ plane }: { plane: Plane }) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
   const [maxSteps, setMaxSteps] = useState(40);
   const [coldStart, setColdStart] = useState(() => localStorage.getItem('arp-cold-start') === '1');
+  const [runtimeVersion, setRuntimeVersion] = useState<DesktopRuntimeVersion>('legacy');
   const [submitting, setSubmitting] = useState(false);
   const [controlling, setControlling] = useState(false);
   const [actionError, setActionError] = useState('');
@@ -904,7 +905,7 @@ function AgentCockpit({ plane }: { plane: Plane }) {
     try {
       localStorage.setItem('arp-last-goal', goal.trim());
       localStorage.setItem('arp-cold-start', coldStart ? '1' : '0');
-      await plane.startGoal(goal.trim(), maxSteps, coldStart);
+      await plane.startGoal(goal.trim(), maxSteps, coldStart, runtimeVersion);
     } catch (error) {
       if (error instanceof TaskClarificationRequired) {
         setClarificationQuestions(error.questions);
@@ -958,6 +959,18 @@ function AgentCockpit({ plane }: { plane: Plane }) {
         />
         <div className="arp-command-actions">
           <label className="arp-step-control">步骤上限<input type="number" min={1} max={400} value={maxSteps} onChange={(event) => setMaxSteps(Number(event.target.value) || 40)} disabled={active} /></label>
+          <label className="arp-runtime-control" title="按本次运行显式选择桌面运行时；vNext 仍处于实验阶段">
+            实验运行时
+            <select
+              aria-label="实验运行时"
+              value={runtimeVersion}
+              onChange={(event) => setRuntimeVersion(event.target.value as DesktopRuntimeVersion)}
+              disabled={active || submitting}
+            >
+              <option value="legacy">Legacy（默认）</option>
+              <option value="vnext">vNext（实验）</option>
+            </select>
+          </label>
           <label className="arp-cold-start-control" title="禁用 Skill 重放与长期经验提示；仍保留当前对话中的短期指代，用于真实冷启动验收">
             <input type="checkbox" checked={coldStart} onChange={(event) => setColdStart(event.target.checked)} disabled={active} />
             冷启动（禁用 Skill/长期经验）

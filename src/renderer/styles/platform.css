@@ -293,6 +293,8 @@
 .arp-command-actions { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
 .arp-step-control { display: flex; align-items: center; gap: 7px; font-size: 10px; color: var(--arp-text-muted); }
 .arp-step-control input { width: 61px; height: 29px; padding: 0 7px; border: 1px solid var(--arp-line); border-radius: 4px; color: var(--arp-text); background: var(--arp-surface); font: 11px "Cascadia Code", Consolas, monospace; outline: none; }
+.arp-runtime-control { display: flex; align-items: center; gap: 7px; font-size: 10px; color: var(--arp-text-muted); }
+.arp-runtime-control select { height: 29px; padding: 0 24px 0 8px; border: 1px solid var(--arp-line); border-radius: 4px; color: var(--arp-text); background: var(--arp-surface); font: 11px "Cascadia Code", Consolas, monospace; outline: none; }
 .arp-cold-start-control { display: flex; align-items: center; gap: 7px; font-size: 10px; color: var(--arp-text-muted); cursor: pointer; }
 .arp-cold-start-control input { width: 14px; height: 14px; accent-color: var(--arp-accent); }
 
