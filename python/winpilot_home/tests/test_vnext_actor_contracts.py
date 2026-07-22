@@ -49,6 +49,8 @@ from winpilot.vnext.capabilities.state import (
 )
 from winpilot.vnext.mission.contracts import (
     ActiveObligationCard,
+    ActionEffectReason,
+    ActionEffectSummary,
     ArtifactRef,
     FailureSummary,
     MissionCard,
@@ -75,6 +77,22 @@ def _action(**overrides) -> DesktopActionProposal:
 
 
 def _card() -> MissionCard:
+    effect = ActionEffectSummary(
+        action_id="decision-runtime-1",
+        input_completed=True,
+        before_frame_id=80,
+        after_frame_id=81,
+        before_frame_evidence_ref="evidence-frame-before-1",
+        after_frame_evidence_ref="evidence-frame-after-1",
+        before_frame_payload_hash="a" * 64,
+        after_frame_payload_hash="b" * 64,
+        target_binding_valid=True,
+        frame_comparable=True,
+        local_visual_change="unchanged",
+        change_ratio=0.0,
+        reason=ActionEffectReason.EXACT_PAYLOAD,
+        evidence_ref="evidence-action-effect-1",
+    )
     return MissionCard(
         mission_id="mission-actor-test",
         mission_revision=4,
@@ -118,9 +136,15 @@ def _card() -> MissionCard:
             action="click",
             input_completed=True,
             visible_effect="The visible surface changed locally",
-            evidence_refs=("evidence-transition-1",),
+            evidence_refs=(
+                effect.before_frame_evidence_ref,
+                effect.after_frame_evidence_ref,
+                effect.evidence_ref,
+            ),
             frame_id=81,
             obligation_id="obligation-current",
+            action_id=effect.action_id,
+            action_effect=effect,
         ),
         failure_summary=FailureSummary(
             kind="no_visible_effect",
@@ -129,6 +153,7 @@ def _card() -> MissionCard:
             count=1,
             obligation_id="obligation-current",
         ),
+        no_progress_streak=2,
     )
 
 
@@ -465,6 +490,25 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
     assert raw["mission"]["original_goal"] == "Complete the unknown visible task."
     assert raw["mission"]["active_obligation"]["desired_state"]
     assert raw["mission"]["target_title"] == "Example Surface"
+    assert raw["mission"]["no_progress_streak"] == 2
+    assert raw["mission"]["last_transition"] == {
+        "action": "click",
+        "input_completed": True,
+        "visible_effect": "The visible surface changed locally",
+        "local_visual_change": "unchanged",
+        "frame_comparable": True,
+        "target_binding_valid": True,
+        "semantic_completion": "unknown",
+    }
+    for runtime_identity in (
+        "decision-runtime-1",
+        "evidence-frame-before-1",
+        "evidence-frame-after-1",
+        "evidence-action-effect-1",
+        "80",
+        "81",
+    ):
+        assert runtime_identity not in text
     assert ActorTurnInput.from_dict(raw).to_json() == turn.to_json()
 
 

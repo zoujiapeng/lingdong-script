@@ -62,6 +62,7 @@ from winpilot.vnext.runtime import (
     RuntimeStatus,
 )
 from winpilot.vnext.verification import (
+    DeterministicActionEffectVerifier,
     DeterministicMissionCompletionVerifier,
     ObligationVerificationRequest,
     VerifierAssessment,
@@ -75,6 +76,9 @@ from winpilot.visual_runtime.commit_admission import TargetCommitIdentity
 
 
 ALL_CAPABILITIES = tuple(sorted(DEFAULT_CAPABILITY_CATALOG))
+VALID_PIXEL_IMAGE = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACklEQVQIHWMAAgAABAABDTukuQAAAABJRU5ErkJggg=="
+)
 
 
 class EvidenceRegistry:
@@ -286,6 +290,54 @@ class SpyController:
         return (
             self.transition_mutator(envelope, transition)
             if self.transition_mutator is not None else transition
+        )
+
+
+class CanonicalPostFrameController:
+    """Test double that emits the same post-frame evidence as the live bridge."""
+
+    def __init__(
+        self,
+        state: ScriptedState,
+        registry: CanonicalEvidenceRegistry,
+        permits: MutationPermitAuthority,
+    ) -> None:
+        self.state = state
+        self.registry = registry
+        self.permits = permits
+        self.calls: list[ActorDecisionEnvelope] = []
+
+    def execute(self, envelope, *, stop_event=None):
+        self.calls.append(envelope)
+        permit = self.permits.consume(envelope)
+        assert permit.allowed is True
+        post = self.state.post_action.frame
+        assert post is not None
+        payload_hash = frame_identity_payload_hash(post.commit_identity)
+        evidence = EvidenceRef(
+            id=f"post-action-{envelope.decision_id}",
+            mission_id=envelope.mission_id,
+            run_id=envelope.run_id,
+            obligation_id=envelope.obligation_id,
+            kind=POST_ACTION_FRAME_EVIDENCE_KIND,
+            trust="deterministic",
+            payload_hash=payload_hash,
+            frame_id=post.frame_id,
+            action_id=envelope.decision_id,
+        )
+        self.registry.append(evidence)
+        self.state.post_action = replace(
+            self.state.post_action,
+            frame=replace(post, evidence_refs=(evidence.id,)),
+        )
+        self.state.action_executed = True
+        return ControllerTransition(
+            outcome=ControllerOutcome.COMPLETED,
+            action_id=envelope.decision_id,
+            action=envelope.proposal.action,
+            input_completed=True,
+            evidence_refs=(evidence.id,),
+            post_frame_id=post.frame_id,
         )
 
 
@@ -688,6 +740,87 @@ def _harness(
     )
 
 
+def _action_effect_harness():
+    mission = _definition()
+    registry = CanonicalEvidenceRegistry(mission.mission_id, mission.run_id)
+    reducer = MissionReducer(mission, evidence=registry)
+    target_proof = EvidenceRef(
+        id="target-proof",
+        mission_id=mission.mission_id,
+        run_id=mission.run_id,
+        kind="target",
+        trust="deterministic",
+        payload_hash="target-proof-payload",
+    )
+    registry.append(target_proof)
+    reducer.apply(reducer.event(
+        "target_bound",
+        payload=TargetBinding(
+            binding_id="target-1",
+            hwnd=101,
+            process_id=7,
+            executable_identity="opaque-process",
+            title_snapshot="Current application",
+            established_by_evidence_ref=target_proof.id,
+            epoch=3,
+        ).to_dict(),
+        evidence_refs=(target_proof.id,),
+    ))
+
+    def pixel_frame(frame_id: int, evidence_refs=()):
+        return RuntimeFrame(
+            frame_id=frame_id,
+            epoch=3,
+            hwnd=101,
+            region=(0, 0, 1280, 720),
+            scope="target_window",
+            submitted_size=(1, 1),
+            image_b64=VALID_PIXEL_IMAGE,
+            image_sha256=hashlib.sha256(
+                VALID_PIXEL_IMAGE.encode("ascii")
+            ).hexdigest(),
+            evidence_refs=evidence_refs,
+        )
+
+    current_id = "current-frame-9"
+    pre_frame = pixel_frame(9, (current_id,))
+    registry.append(EvidenceRef(
+        id=current_id,
+        mission_id=mission.mission_id,
+        run_id=mission.run_id,
+        obligation_id="o1",
+        kind=CURRENT_FRAME_EVIDENCE_KIND,
+        trust="deterministic",
+        payload_hash=current_frame_payload_hash(pre_frame.commit_identity),
+        frame_id=pre_frame.frame_id,
+    ))
+    pre = _snapshot(pre_frame)
+    post = _snapshot(pixel_frame(10))
+    state = ScriptedState(pre, post_action=post)
+    actor = ScriptedActor(_click())
+    permits = MutationPermitAuthority(mission.mission_id, mission.run_id)
+    controller = CanonicalPostFrameController(state, registry, permits)
+    catalog = _catalog()
+    profile = ExecutionPolicy().safe_default(
+        mission.mission_id,
+        mission.goal_revision,
+        available_capabilities=ALL_CAPABILITIES,
+    )
+    runtime = MissionRuntime(
+        reducer=reducer,
+        profile=profile,
+        broker=CapabilityBroker(catalog),
+        catalog=catalog,
+        actor=actor,
+        state=state,
+        controller=controller,
+        mutation_permits=permits,
+        action_effect_verifier=DeterministicActionEffectVerifier(),
+        evidence_registry=registry,
+    )
+    return runtime, reducer, registry, actor, state, controller
+
+
 def _visual_harness(
     *,
     evidence_mode: str = "current_frame",
@@ -1017,6 +1150,54 @@ def test_action_records_transition_but_never_claims_or_completes(outcome: Contro
     assert harness.reducer.projection.last_transition.input_completed is (
         outcome is ControllerOutcome.COMPLETED
     )
+
+
+def test_runtime_registers_action_effect_in_the_same_transition_event() -> None:
+    runtime, reducer, registry, actor, _state, controller = _action_effect_harness()
+    before = len(reducer.events)
+
+    result = runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert len(actor.calls) == 1
+    assert len(controller.calls) == 1
+    accepted = reducer.events[before:]
+    assert [event.kind for event in accepted] == ["transition_recorded"]
+    transition = reducer.projection.last_transition
+    assert transition is not None
+    assert transition.action_effect is not None
+    assert transition.action_effect.local_visual_change.value == "unchanged"
+    assert transition.action_effect.semantic_completion == "unknown"
+    assert reducer.projection.obligation_state("o1").no_progress_streak == 1
+    assert transition.action_effect.evidence_ref in {
+        ref.id for ref in registry.snapshot()
+    }
+
+
+def test_action_effect_failure_does_not_erase_or_replay_closed_action(
+    monkeypatch,
+) -> None:
+    runtime, reducer, _registry, actor, _state, controller = _action_effect_harness()
+    monkeypatch.setattr(
+        DeterministicActionEffectVerifier,
+        "verify",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("comparison unavailable")
+        ),
+    )
+    before = len(reducer.events)
+
+    result = runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert len(actor.calls) == 1
+    assert len(controller.calls) == 1
+    assert [event.kind for event in reducer.events[before:]] == [
+        "transition_recorded"
+    ]
+    assert reducer.projection.last_transition is not None
+    assert reducer.projection.last_transition.action_effect is None
+    assert reducer.projection.obligation_state("o1").no_progress_streak == 0
 
 
 def test_proven_rejection_without_post_observation_is_stale_not_unknown() -> None:
@@ -1898,6 +2079,29 @@ def test_mission_completion_requires_concrete_verifier_and_shared_registry() -> 
             controller=harness.controller,
             mission_completion_verifier=PretendVerifier(),
             evidence_registry=completed.registry,
+        )
+
+
+def test_action_effect_verifier_requires_the_reducer_shared_registry() -> None:
+    harness = _harness(_click())
+    common = dict(
+        reducer=harness.reducer,
+        profile=harness.profile,
+        broker=CapabilityBroker(harness.catalog),
+        catalog=harness.catalog,
+        actor=harness.actor,
+        state=harness.state,
+        controller=harness.controller,
+        mutation_permits=harness.permits,
+        action_effect_verifier=DeterministicActionEffectVerifier(),
+    )
+
+    with pytest.raises(TypeError, match="injected together"):
+        MissionRuntime(**common)
+    with pytest.raises(TypeError, match="share one EvidenceRegistry"):
+        MissionRuntime(
+            **common,
+            evidence_registry=CanonicalEvidenceRegistry("mission-1", "run-1"),
         )
 
 

@@ -53,7 +53,10 @@ from ..mission import (
 )
 from ..profiling import ExecutionPolicy
 from ..runtime import MissionRuntime, MutationPermitAuthority, RuntimeStatus
-from ..verification import DeterministicMissionCompletionVerifier
+from ..verification import (
+    DeterministicActionEffectVerifier,
+    DeterministicMissionCompletionVerifier,
+)
 from ..verification.model_provider import OpenAIVisualVerifierModel
 from ..verification.visual_model import ReadOnlyVisualVerifierAdapter
 from .runtime_state import RuntimeReadState, RuntimeStateBridge
@@ -443,6 +446,7 @@ class LiveDesktopRuntimeCoordinator:
             mutation_permits=permits,
             attested_visual_verifier=self._verifier_factory(self._api_config),
             mission_completion_verifier=DeterministicMissionCompletionVerifier(),
+            action_effect_verifier=DeterministicActionEffectVerifier(),
             evidence_registry=evidence,
         )
         return runtime, tuple(tool.name for tool in catalog.tools)
@@ -514,6 +518,20 @@ class LiveDesktopRuntimeCoordinator:
                     stop_event=context.stop_event,
                 )
                 projection = reducer.projection
+                transition = projection.last_transition
+                effect = (
+                    transition.action_effect
+                    if result.status is RuntimeStatus.ACTION_RECORDED
+                    and transition is not None
+                    and transition.obligation_id == projection.active_obligation_id
+                    and transition.action_id == result.decision_id
+                    else None
+                )
+                active_state = (
+                    projection.obligation_state(projection.active_obligation_id)
+                    if projection.active_obligation_id is not None
+                    else None
+                )
                 self._trace(context.run_id, {
                     "type": "vnext_mission_runtime_turn",
                     "runtime_version": "vnext",
@@ -526,6 +544,19 @@ class LiveDesktopRuntimeCoordinator:
                     "mission_revision": projection.revision,
                     "mission_status": projection.status.value,
                     "active_obligation_id": projection.active_obligation_id,
+                    "local_visual_change": (
+                        effect.local_visual_change.value
+                        if effect is not None
+                        else None
+                    ),
+                    "frame_comparable": (
+                        effect.frame_comparable if effect is not None else None
+                    ),
+                    "no_progress_streak": (
+                        active_state.no_progress_streak
+                        if effect is not None and active_state is not None
+                        else None
+                    ),
                     "detail": result.detail[:512],
                 })
                 if (
