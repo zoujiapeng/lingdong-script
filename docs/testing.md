@@ -43,6 +43,24 @@ Controller 的方向映射与 Actor proposal 一致；当前 up 失败归因于 
 target identity 失效，作为外部干扰排除，不计通过或失败。上述最终代码的 2 pass / 1 fail 只是单 seed
 首轮证据，不能换算成功率，也不能证明 ActionEffect 带来恢复 uplift。
 
+commit `f8fa2a7` 上的 P7a runner 随后产生了首批 measurement-only 校准结果：
+
+- paired `precise-click` suite `20260723-023658` 有 1 个 `eligible_for_ab` pair，两侧均由独立
+  oracle 判定通过；vNext 为 2 turns / 1 action / 17.406 s，legacy 总耗时为 21.702 s。单个 pair
+  只能证明比较链闭合，不能称为 latency 或能力 uplift；同一底层模型在不同 run 之间仍有随机性。
+- 修复后的 vNext `precise-click` seeds `135791`、`135792`、`135793` 均为 2 turns / 1 action
+  grounded pass；修复前同三 seed 为 2/3 pass、合计 25 次 click。这是有价值的前后校准样本，
+  但不是足以消除模型随机性、初态漂移和样本量影响的受控 uplift 结论。
+- unpaired `scroll-reveal` suite `20260723-024131` 的两个 seed 均通过：down 为 2 turns / 1 action，
+  up 为 3 turns / 2 actions。它们不进入 paired comparison。
+- paired `scroll-reveal` suite `20260723-024333` 有 2 个 eligible pairs；legacy 为 2/2 pass，
+  vNext 仅 1/2 pass，其中 up 在 24 actions 后失败。因此 recovery gate 明确未达，不能以此前
+  unpaired pass 覆盖该失败。
+
+这些 suite 使用的 trusted-browser oracle 是测试 harness 外部 oracle，不会把答案、几何或完成信号
+注入产品 Runtime、Visual Actor 或 Verifier。当前仍未完成 P7；P6 继续禁用，P8/P9 未开始，legacy
+产品职责删除数仍为 0。
+
 此前真实尝试依次暴露了 Actor 对冗余 full-frame `observe` 的循环、视觉 Verifier provider
 返回字符串 confidence/复制条件文本、harness 的 `SW_RESTORE` 改变目标几何，以及 page-ready
 后仍使用旧几何。修复均发生在通用工具投影、Verifier 合同和 harness 状态读取层，没有把 case、
@@ -64,6 +82,8 @@ seed、目标位置、布局或成功条件写入生产 Agent。
 | vNext 历史 `precise-click` seeds `987654` / `424242` / `135791` | 可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace 和独立 trusted-browser pointer oracle | 三个受控 click-only seed grounded pass；不是 legacy paired、真实应用、11 题或其他原语通过 |
 | ActionEffect 接线前的 vNext `scroll-reveal` seeds `20260722` down / `20260723` up | 最终 direction/notches 合同；可见 Electron/UIA 同入口、显式 vNext、冷启动、空 session、准确 run/trace、trusted wheel/滚动几何独立 oracle | 历史一对双向受控 grounded pass；不能代表 ActionEffect 最终代码 |
 | ActionEffect 最终代码：down `20260722` / precise-click `135791` / up `20260723` | 同入口、独立 oracle、可信输入与 replayable frame effect；down/click 通过，up 保留真实失败 | 2 pass / 1 fail 的首轮样本；证据链可达，但 Actor 恢复收益未证明，P7 未达 |
+| P7a `precise-click`（`f8fa2a7`） | suite `20260723-023658` 的 1 个 eligible pair 两侧均通过；另一次 vNext 三 seed 复测均为 2 turns / 1 action pass，修复前同三 seed 为 2/3、共 25 clicks | 比较链与窄点击链可达；单 pair 和非确定模型前后样本均不能称 uplift |
+| P7a `scroll-reveal`（`f8fa2a7`） | unpaired suite `20260723-024131` 两 seed 均通过；paired suite `20260723-024333` 中 legacy 2/2、vNext 1/2，vNext up 24 actions 后失败 | paired 恢复门槛未达；unpaired pass 不覆盖 eligible pair 的失败 |
 
 这些证据仍只覆盖少量样本。它们证明通用主线到达真实软件、游戏式拖拽和受控 vNext 点击/滚轮场景，不证明
 11 题、混合长任务、任意电脑或任意应用全部可用。失败、超时、`ungrounded` 和受干扰
@@ -345,6 +365,13 @@ unavailable 时该值必须为 `None`。报告还必须区分 attempted arm/pair
 一条 legacy 和一条 vNext、评测配置与 provider/model 身份一致、同一个 Runtime 服务的前后身份
 一致且无 source drift、两侧 run-scoped evidence 均完整且 oracle conclusive、评测开始时 git
 revision 已知且工作区干净，才可进入 A/B；其余只保留尝试记录。
+
+commit `f8fa2a7` 的首批运行已验证上述报告合同可落地：`20260723-023658` 产生 1 个 eligible
+`precise-click` pair 且两侧通过；`20260723-024333` 产生 2 个 eligible `scroll-reveal` pairs，
+但 vNext 仅通过 1 个而 legacy 通过 2 个，失败的 vNext up 消耗 24 actions。另一个 unpaired scroll
+suite `20260723-024131` 的 down/up 虽均通过，也不能进入 A/B 或抵消 paired fail。所有数字只用于
+校准当前实现；同一模型具有 run-to-run 随机性，单样本不得写成 uplift，外部 oracle 也不进入产品
+Runtime、Actor 或 Verifier 输入。
 
 常规回归：
 
