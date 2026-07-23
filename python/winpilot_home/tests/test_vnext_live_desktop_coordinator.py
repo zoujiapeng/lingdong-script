@@ -112,6 +112,14 @@ class Backend:
     def foreground_hwnd(self):
         return self.foreground
 
+    @staticmethod
+    def shell_hwnd():
+        return 0
+
+    @staticmethod
+    def desktop_hwnd():
+        return 0
+
     def window_from_point(self, _point):
         return self.hit
 
@@ -1750,18 +1758,10 @@ def test_handoff_identity_mismatch_fails_before_actor(field, value):
 
 def test_capture_to_bind_process_reuse_fails_before_any_model_or_raw_call():
     backend = Backend()
+    backend.foreground = 101
     captured = capture_foreground_window_context(
         999,
-        foreground_resolver=lambda: 101,
-        root_hwnd_resolver=lambda _hwnd: 100,
-        process_id_resolver=lambda _hwnd: 7,
-        process_identity_resolver=lambda _pid: TEST_PROCESS_IDENTITY,
-        windows_provider=lambda: [{
-            "hwnd": 101,
-            "title": "Unknown visual surface",
-            "class_name": "Surface",
-            "rect": [10, 20, 810, 620],
-        }],
+        facts_backend=backend,
         time_provider=time.time,
     )
     assert captured["usable"] is True

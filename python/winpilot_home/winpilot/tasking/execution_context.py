@@ -14,7 +14,6 @@ from typing import Any, Callable
 from ..process_identity import (
     ProcessIdentityError,
     canonical_process_identity,
-    process_identity_for,
 )
 
 
@@ -116,146 +115,202 @@ def window_process_id(hwnd: int) -> int:
     return int(process_id.value or 0)
 
 
-def window_root_hwnd(hwnd: int) -> int:
-    if type(hwnd) is not int or hwnd <= 0:
-        return 0
-    try:
-        value = int(ctypes.windll.user32.GetAncestor(hwnd, 2) or 0)
-    except Exception:
-        return 0
-    return value or hwnd
-
-
-def window_process_identity(process_id: int) -> str:
-    """Read one canonical Windows process-instance identity.
-
-    The OS reader remains behind this injectable transport boundary. Identity
-    derivation is shared with commit admission, so capture and bind compare the
-    same canonical fact without introducing another target owner.
-    """
-
-    if type(process_id) is not int or process_id <= 0:
-        raise ProcessIdentityError("process_id must be a positive integer")
-    from ..visual_runtime.windows_desktop_facts import (
-        PyWin32DesktopFactsBackend,
-    )
-
-    backend = PyWin32DesktopFactsBackend()
-    return process_identity_for(
-        process_id=process_id,
-        creation_time_ns=backend.process_creation_time_ns(process_id),
-        executable_path=backend.process_executable_path(process_id),
-    )
-
-
 def capture_foreground_window_context(
     exclude_process_id: int = 0,
     *,
-    foreground_resolver: Callable[[], int] | None = None,
-    root_hwnd_resolver: Callable[[int], int] = window_root_hwnd,
-    process_id_resolver: Callable[[int], int] = window_process_id,
-    process_identity_resolver: Callable[[int], str] = window_process_identity,
-    windows_provider: Callable[[], list[dict[str, Any]]] | None = None,
+    facts_backend: Any | None = None,
     time_provider: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
-    """Capture the foreground target immediately after a control-surface yield."""
-    if foreground_resolver is None:
-        foreground_resolver = lambda: int(
-            ctypes.windll.user32.GetForegroundWindow() or 0
+    """Capture one strict foreground target after a control-surface yield.
+
+    The exact foreground HWND is read through the existing Windows desktop
+    facts authority.  Filtered window inventory is never binding or absence
+    evidence.
+    """
+
+    def result(
+        *,
+        hwnd: int,
+        root_hwnd: int = 0,
+        title: str = "",
+        process_id: int = 0,
+        process_identity: str = "",
+        class_name: str = "",
+        rect: list[int] | None = None,
+        foreground_verified: bool = False,
+        usable: bool = False,
+        failure_type: str = "",
+        reason: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "format": "desktop-target/2",
+            "hwnd": int(hwnd),
+            "root_hwnd": int(root_hwnd),
+            "title": str(title),
+            "process_id": int(process_id),
+            "process_identity": str(process_identity),
+            "class_name": str(class_name),
+            "rect": list(rect or []),
+            # Completion time, not observation-start time.
+            "captured_at": int(time_provider() * 1000),
+            "foreground_verified": bool(foreground_verified),
+            "usable": bool(usable),
+            "failure_type": str(failure_type),
+            "reason": str(reason),
+        }
+
+    from ..visual_runtime.windows_desktop_facts import (
+        PyWin32DesktopFactsBackend,
+        WindowsDesktopFactsDriftError,
+        WindowsDesktopFactsError,
+        WindowsDesktopFactsReader,
+        WindowsDesktopFactsSourceError,
+    )
+
+    backend = (
+        facts_backend
+        if facts_backend is not None
+        else PyWin32DesktopFactsBackend()
+    )
+    facts_reader = WindowsDesktopFactsReader(backend)
+    foreground_resolver = backend.foreground_hwnd
+    shell_resolver = getattr(backend, "shell_hwnd", None)
+    desktop_resolver = getattr(backend, "desktop_hwnd", None)
+    if not callable(shell_resolver) or not callable(desktop_resolver):
+        return result(
+            hwnd=0,
+            failure_type="target_observation_source_unavailable",
+            reason="foreground shell identity source is unavailable",
         )
-    if windows_provider is None:
-        from ..perception import win32
 
-        windows_provider = win32.list_windows
+    def surface_snapshot() -> tuple[int, int, int]:
+        return (
+            int(foreground_resolver() or 0),
+            int(shell_resolver() or 0),
+            int(desktop_resolver() or 0),
+        )
 
-    captured_at = int(time_provider() * 1000)
+    observed_hwnd = 0
     try:
-        hwnd = int(foreground_resolver() or 0)
+        observed_hwnd = int(foreground_resolver() or 0)
+        initial_surface = (
+            observed_hwnd,
+            int(shell_resolver() or 0),
+            int(desktop_resolver() or 0),
+        )
     except Exception:
-        hwnd = 0
-    try:
-        root_hwnd = int(root_hwnd_resolver(hwnd) or 0) if hwnd else 0
-    except Exception:
-        root_hwnd = 0
-    try:
-        process_id = int(process_id_resolver(hwnd) or 0) if hwnd else 0
-    except Exception:
-        process_id = 0
-    process_identity = ""
-    if process_id > 0:
+        return result(
+            hwnd=observed_hwnd,
+            failure_type="target_observation_source_unavailable",
+            reason="foreground shell identity source is unavailable",
+        )
+    hwnd, shell_hwnd, desktop_hwnd = initial_surface
+    if not hwnd:
         try:
-            process_identity = canonical_process_identity(
-                process_identity_resolver(process_id)
+            final_surface = surface_snapshot()
+        except Exception:
+            return result(
+                hwnd=0,
+                failure_type="target_observation_source_unavailable",
+                reason="foreground shell identity source is unavailable",
             )
-        except (ImportError, OSError, RuntimeError, ValueError):
-            process_identity = ""
+        if final_surface != initial_surface:
+            return result(
+                hwnd=final_surface[0],
+                failure_type="target_identity_changed_during_capture",
+                reason="foreground or shell identity changed while it was captured",
+            )
+        return result(
+            hwnd=0,
+            failure_type="target_binding_missing",
+            reason="no foreground application was present after handoff",
+        )
+    if hwnd in {value for value in (shell_hwnd, desktop_hwnd) if value > 0}:
+        try:
+            final_surface = surface_snapshot()
+        except Exception:
+            return result(
+                hwnd=hwnd,
+                failure_type="target_observation_source_unavailable",
+                reason="foreground shell identity source is unavailable",
+            )
+        if final_surface != initial_surface:
+            return result(
+                hwnd=final_surface[0] or hwnd,
+                failure_type="target_identity_changed_during_capture",
+                reason="foreground or shell identity changed while it was captured",
+            )
+        return result(
+            hwnd=0,
+            failure_type="target_binding_missing",
+            reason="Windows shell or desktop owns foreground after handoff",
+        )
+
     try:
-        windows = windows_provider() if hwnd else []
+        facts = facts_reader.read_activation_facts(
+            hwnd,
+            strict_foreground=True,
+        )
+        final_surface = surface_snapshot()
+    except WindowsDesktopFactsSourceError:
+        return result(
+            hwnd=hwnd,
+            failure_type="target_observation_source_unavailable",
+            reason="foreground target facts source is unavailable",
+        )
+    except WindowsDesktopFactsDriftError:
+        return result(
+            hwnd=hwnd,
+            failure_type="target_identity_changed_during_capture",
+            reason="foreground target identity changed while it was captured",
+        )
+    except WindowsDesktopFactsError:
+        return result(
+            hwnd=hwnd,
+            failure_type="target_binding_unverified",
+            reason="nonzero foreground window could not be bound",
+        )
     except Exception:
-        windows = []
-    window = next((
-        item for item in windows
-        if isinstance(item, dict) and int(item.get("hwnd") or 0) == hwnd
-    ), {})
-    rect = _normalized_rect(window.get("rect"))
-    failure_type = ""
-    reason = ""
-    if not hwnd or not window:
-        failure_type = "target_binding_missing"
-        reason = "no usable foreground application was visible after handoff"
-    elif (
-        len(rect) != 4
-        or rect[2] <= rect[0]
-        or rect[3] <= rect[1]
+        return result(
+            hwnd=hwnd,
+            failure_type="target_observation_source_unavailable",
+            reason="foreground target facts source is unavailable",
+        )
+    final_foreground, final_shell, final_desktop = final_surface
+    if (
+        final_surface != initial_surface
+        or final_foreground != hwnd
+        or final_foreground in {
+            value for value in (final_shell, final_desktop) if value > 0
+        }
+        or not facts.exact_foreground
     ):
-        failure_type = "target_binding_contract_invalid"
-        reason = "foreground target geometry could not be established"
-    elif exclude_process_id and process_id == int(exclude_process_id):
-        failure_type = "control_surface_handoff_failed"
-        reason = "native control surface still owns foreground"
-    elif root_hwnd <= 0 or process_id <= 0 or not process_identity:
-        failure_type = "target_process_identity_unavailable"
-        reason = "foreground process instance identity could not be established"
-    else:
-        try:
-            confirmed_hwnd = int(foreground_resolver() or 0)
-            confirmed_root_hwnd = int(
-                root_hwnd_resolver(confirmed_hwnd) or 0
-            )
-            confirmed_process_id = int(
-                process_id_resolver(confirmed_hwnd) or 0
-            )
-            confirmed_process_identity = canonical_process_identity(
-                process_identity_resolver(confirmed_process_id)
-            )
-        except (ImportError, OSError, RuntimeError, ValueError):
-            confirmed_hwnd = 0
-            confirmed_root_hwnd = 0
-            confirmed_process_id = 0
-            confirmed_process_identity = ""
-        if (
-            confirmed_hwnd != hwnd
-            or confirmed_root_hwnd != root_hwnd
-            or confirmed_process_id != process_id
-            or confirmed_process_identity != process_identity
-        ):
-            failure_type = "target_identity_changed_during_capture"
-            reason = "foreground target identity changed while it was captured"
-    return {
-        "format": "desktop-target/2",
-        "hwnd": hwnd,
-        "root_hwnd": root_hwnd,
-        "title": str(window.get("title") or ""),
-        "process_id": process_id,
-        "process_identity": process_identity,
-        "class_name": str(window.get("class_name") or ""),
-        "rect": rect,
-        "captured_at": captured_at,
-        "foreground_verified": bool(hwnd and window),
-        "usable": not failure_type,
-        "failure_type": failure_type,
-        "reason": reason,
+        return result(
+            hwnd=final_foreground or hwnd,
+            failure_type="target_identity_changed_during_capture",
+            reason="foreground or shell identity changed while it was captured",
+        )
+    target = facts.target
+    left, top, width, height = facts.window_region
+    common = {
+        "hwnd": target.hwnd,
+        "root_hwnd": target.root_hwnd,
+        "title": facts.title_snapshot,
+        "process_id": target.process_id,
+        "process_identity": target.process_identity,
+        "rect": [left, top, left + width, top + height],
     }
+    if exclude_process_id and target.process_id == int(exclude_process_id):
+        return result(
+            **common,
+            failure_type="control_surface_handoff_failed",
+            reason="native control surface still owns foreground",
+        )
+    return result(
+        **common,
+        foreground_verified=True,
+        usable=True,
+    )
 
 
 def validated_handoff_target(
