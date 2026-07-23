@@ -563,6 +563,13 @@ def test_active_activation_admission_requires_exact_private_authority() -> None:
         candidate_fingerprint=envelope.candidate_fingerprint,
         candidate=envelope.candidate,
     ) is True
+    assert authority.active_launch_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        pointer=envelope.pointer,
+        candidate_fingerprint=envelope.candidate_fingerprint,
+        candidate=envelope.candidate,
+    ) is False
     assert authority.active_admission_matches(
         envelope.decision_id,
         frame=envelope.frame,
