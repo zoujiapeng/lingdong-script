@@ -12,12 +12,14 @@ from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
     AdmittedPhysicalHotkeyBackend,
     AdmittedPhysicalScrollBackend,
+    AdmittedPhysicalTargetActivationBackend,
     AdmittedPhysicalTypeTextBackend,
     CANONICAL_HOTKEY_KEYS,
     ClickCount,
     ClickMechanism,
     FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
+    FinalTargetActivationGuardDecision,
     HotkeyChord,
     MAX_TYPE_TEXT_CODEPOINTS,
     MouseButton,
@@ -26,6 +28,7 @@ from winpilot.action.raw_device import (
     RawBackendResult,
     RawDeviceBackends,
     RawDeviceExecutor,
+    RawTargetActivationContext,
 )
 from winpilot.action.replay_policy import MutationOutcome
 from winpilot.fast.legacy_session_actions import LegacyToolSessionActionAdapter
@@ -33,6 +36,21 @@ from winpilot.fast.legacy_session_actions import LegacyToolSessionActionAdapter
 
 def _context(*, target: int = 41, current: int = 41) -> RawActionContext:
     return RawActionContext(target_hwnd=target, current_hwnd=current)
+
+
+def _activation_context(
+    *,
+    hwnd: int = 41,
+    root_hwnd: int = 41,
+    process_id: int = 314,
+    process_identity: str = "process-" + "a" * 32,
+) -> RawTargetActivationContext:
+    return RawTargetActivationContext(
+        target_hwnd=hwnd,
+        target_root_hwnd=root_hwnd,
+        target_process_id=process_id,
+        target_process_identity=process_identity,
+    )
 
 
 def _executor(calls: list, *, completed: bool | None = True) -> RawDeviceExecutor:
@@ -69,6 +87,10 @@ def test_raw_device_requires_an_explicit_typed_backend() -> None:
         RawDeviceBackends(admitted_physical_type_text=object())
     with pytest.raises(TypeError, match="AdmittedPhysicalHotkeyBackend"):
         RawDeviceBackends(admitted_physical_hotkey=object())
+    with pytest.raises(
+        TypeError, match="AdmittedPhysicalTargetActivationBackend",
+    ):
+        RawDeviceBackends(admitted_physical_target_activation=object())
 
 
 @pytest.mark.parametrize(
@@ -341,6 +363,162 @@ def test_missing_click_backend_fails_before_input() -> None:
 
     assert receipt.outcome is MutationOutcome.NOT_STARTED
     assert receipt.error_kind == "backend_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("target_hwnd", 0, "target_hwnd"),
+        ("target_hwnd", True, "target_hwnd"),
+        ("target_root_hwnd", 0, "target_root_hwnd"),
+        ("target_root_hwnd", True, "target_root_hwnd"),
+        ("target_process_id", 0, "target_process_id"),
+        ("target_process_id", True, "target_process_id"),
+        ("target_process_identity", "process-" + "g" * 32, "canonical"),
+        ("target_process_identity", None, "canonical"),
+    ],
+)
+def test_target_activation_context_requires_strong_identity(
+    field, value, error,
+) -> None:
+    values = {
+        "target_hwnd": 41,
+        "target_root_hwnd": 41,
+        "target_process_id": 314,
+        "target_process_identity": "process-" + "a" * 32,
+    }
+    values[field] = value
+
+    with pytest.raises(ValueError, match=error):
+        RawTargetActivationContext(**values)
+
+
+def test_target_activation_rejects_invalid_context_guard_and_backend() -> None:
+    calls: list[tuple] = []
+    raw = RawDeviceExecutor(RawDeviceBackends(
+        admitted_physical_target_activation=AdmittedPhysicalTargetActivationBackend(
+            lambda *args, **kwargs: calls.append((args, kwargs))
+        ),
+    ))
+
+    invalid_context = raw.activate_target(
+        object(),
+        final_guard=lambda: FinalTargetActivationGuardDecision.ADMITTED,
+    )
+    invalid_guard = raw.activate_target(
+        _activation_context(),
+        final_guard=object(),
+    )
+    unavailable = RawDeviceExecutor(RawDeviceBackends()).activate_target(
+        _activation_context(),
+        final_guard=lambda: FinalTargetActivationGuardDecision.ADMITTED,
+    )
+
+    assert (invalid_context.outcome, invalid_context.error_kind) == (
+        MutationOutcome.NOT_STARTED, "invalid_context",
+    )
+    assert (invalid_guard.outcome, invalid_guard.error_kind) == (
+        MutationOutcome.NOT_STARTED, "invalid_final_guard",
+    )
+    assert (unavailable.outcome, unavailable.error_kind) == (
+        MutationOutcome.NOT_STARTED, "backend_unavailable",
+    )
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("completed", "outcome"),
+    [
+        (True, MutationOutcome.APPLIED),
+        (False, MutationOutcome.NOT_APPLIED),
+        (None, MutationOutcome.OUTCOME_UNKNOWN),
+    ],
+)
+def test_target_activation_uses_exact_admitted_backend_once(
+    completed, outcome,
+) -> None:
+    calls: list[RawTargetActivationContext] = []
+    guard_calls: list[str] = []
+    context = _activation_context()
+
+    def guard() -> FinalTargetActivationGuardDecision:
+        guard_calls.append("guard")
+        return FinalTargetActivationGuardDecision.ADMITTED
+
+    def backend(
+        actual_context: RawTargetActivationContext,
+        *,
+        final_guard,
+    ) -> RawBackendResult:
+        calls.append(actual_context)
+        assert final_guard() is FinalTargetActivationGuardDecision.ADMITTED
+        return RawBackendResult(completed, {"via": "set_foreground_window"})
+
+    receipt = RawDeviceExecutor(RawDeviceBackends(
+        admitted_physical_target_activation=AdmittedPhysicalTargetActivationBackend(
+            backend
+        ),
+    )).activate_target(context, final_guard=guard)
+
+    assert calls == [context]
+    assert guard_calls == ["guard"]
+    assert receipt.action == "activate_target"
+    assert (receipt.outcome, receipt.input_completed) == (outcome, completed)
+    assert receipt.error_kind == (
+        "backend_result_uncertain" if completed is None else None
+    )
+
+
+def test_target_activation_backend_exception_is_unknown_and_never_replayed() -> None:
+    calls: list[RawTargetActivationContext] = []
+
+    def backend(context, *, final_guard):
+        calls.append(context)
+        assert final_guard() is FinalTargetActivationGuardDecision.ADMITTED
+        raise OSError("injected uncertain SetForegroundWindow")
+
+    receipt = RawDeviceExecutor(RawDeviceBackends(
+        admitted_physical_target_activation=AdmittedPhysicalTargetActivationBackend(
+            backend
+        ),
+    )).activate_target(
+        _activation_context(),
+        final_guard=lambda: FinalTargetActivationGuardDecision.ADMITTED,
+    )
+
+    assert len(calls) == 1
+    assert (receipt.outcome, receipt.input_completed, receipt.error_kind) == (
+        MutationOutcome.OUTCOME_UNKNOWN, None, "backend_exception",
+    )
+
+
+def test_target_activation_backend_wrapper_is_explicit_and_undecorated() -> None:
+    def backend(context, *, final_guard):
+        return RawBackendResult(
+            final_guard() is FinalTargetActivationGuardDecision.ADMITTED,
+            {"target_hwnd": context.target_hwnd},
+        )
+
+    wrapper = AdmittedPhysicalTargetActivationBackend(backend)
+    assert wrapper.execute is backend
+    assert not hasattr(wrapper.execute, "__wrapped__")
+
+    backend.__wrapped__ = backend
+    with pytest.raises(TypeError, match="decorated"):
+        AdmittedPhysicalTargetActivationBackend(backend)
+
+
+def test_target_activation_is_reported_in_admitted_inventory_only_when_bound() -> None:
+    assert "activate_target" not in RawDeviceExecutor(
+        RawDeviceBackends()
+    ).admitted_action_names
+    raw = RawDeviceExecutor(RawDeviceBackends(
+        admitted_physical_target_activation=AdmittedPhysicalTargetActivationBackend(
+            lambda *_args, **_kwargs: RawBackendResult(True, {}),
+        ),
+    ))
+
+    assert "activate_target" in raw.admitted_action_names
 
 
 _KEYBOARD_INPUTS = (
