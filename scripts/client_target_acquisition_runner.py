@@ -56,32 +56,45 @@ def _wait_for_submitted_run(
             detail = driver.run_detail(run_id)
             projection = detail.get("run") or {}
             execution = detail.get("arp") or {}
-            if (
-                runtime.get("running") is not True
-                or status != "paused"
-                or current.get("manual_paused") is not True
-                or projection.get("run_id") != run_id
-                or projection.get("status") != "paused"
-                or projection.get("manual_paused") is not True
-                or execution.get("run_id") != run_id
-                or execution.get("status") != "paused"
-                or execution.get("manual_paused") is not True
-                or execution.get("started_at") is not None
+            pause_ready = (
+                runtime.get("running") is True
+                and status == "paused"
+                and current.get("manual_paused") is True
+                and projection.get("run_id") == run_id
+                and projection.get("status") == "paused"
+                and projection.get("manual_paused") is True
+                and execution.get("run_id") == run_id
+                and execution.get("status") == "paused"
+                and execution.get("manual_paused") is True
+                and execution.get("started_at") is None
+                and not list(execution.get("history") or [])
+            )
+            execution_is_exact = execution.get("run_id") == run_id
+            if execution_is_exact and (
+                execution.get("started_at") is not None
                 or list(execution.get("history") or [])
             ):
                 raise FixtureUnavailable(
+                    "submitted run crossed the atomic pause barrier before handoff",
+                )
+            terminal = {
+                "done", "fail", "failed", "error", "canceled", "cancelled",
+            }
+            if status in terminal or str(execution.get("status") or "") in terminal:
+                raise FixtureUnavailable(
                     "submitted run did not enter the atomic pause barrier",
                 )
-            return {
-                "run_id": run_id,
-                "status": status,
-                "manual_paused": True,
-                "started_at": None,
-                "history_count": 0,
-                "desktop_action_queue": dict(
-                    runtime.get("desktop_action_queue") or {}
-                ),
-            }
+            if pause_ready:
+                return {
+                    "run_id": run_id,
+                    "status": status,
+                    "manual_paused": True,
+                    "started_at": None,
+                    "history_count": 0,
+                    "desktop_action_queue": dict(
+                        runtime.get("desktop_action_queue") or {}
+                    ),
+                }
         time.sleep(0.05)
     raise FixtureUnavailable("submitted run did not reach the handoff barrier")
 
