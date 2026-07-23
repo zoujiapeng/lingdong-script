@@ -249,7 +249,8 @@ def _client_result(trace: Path, *, mode: str) -> dict[str, Any]:
             "resume_barrier": {
                 "run_id": RUN_ID, "status": "running",
                 "manual_paused": False, "control_method": "click",
-                "control_surface_iconic": True, "foreground_hwnd": 7,
+                "control_surface_iconic": True,
+                "foreground_hwnd": fixture_hwnds[0] if fixture_hwnds else 7,
             },
         },
         "trace_binding": {
@@ -392,7 +393,8 @@ def test_target_acquisition_verdict_rejects_handoff_identity_drift(
 
 @pytest.mark.parametrize("mutation", [
     "pause_status", "pause_manual", "pause_history", "queue_changed",
-    "resume_manual", "resume_foreground", "missing_start_paused",
+    "resume_manual", "resume_foreground", "unverified_foreground",
+    "missing_start_paused",
 ])
 def test_target_acquisition_verdict_rejects_forged_pause_or_resume_proof(
     tmp_path, mutation,
@@ -418,6 +420,8 @@ def test_target_acquisition_verdict_rejects_forged_pause_or_resume_proof(
         client["after_submit_handoff"]["resume_barrier"]["manual_paused"] = True
     elif mutation == "resume_foreground":
         client["after_submit_handoff"]["resume_barrier"]["foreground_hwnd"] = 901
+    elif mutation == "unverified_foreground":
+        client["after_submit_handoff"]["resume_barrier"]["foreground_hwnd"] = 802
     else:
         client["configuration"]["start_paused_toggle"] = 0
 

@@ -4,11 +4,13 @@ from dataclasses import FrozenInstanceError, replace
 import random
 
 import pytest
+import psutil
 
 from winpilot.vnext.targeting.contracts import process_identity_for
 from winpilot.vnext.targeting.discovery import TargetDiscovery
 from winpilot.vnext.targeting.windows_facts import (
     ProcessTargetFact,
+    PsutilWin32TargetFactsBackend,
     WINDOWS_TARGET_FACTS_FORMAT,
     WindowTargetFact,
     WindowsTargetFactsAdapter,
@@ -87,6 +89,40 @@ def test_reader_samples_each_os_catalog_once_and_builds_typed_snapshot():
     assert snapshot.windows == (
         WindowTargetFact(101, 31, "Orbit document", True),
     )
+
+
+def test_production_process_source_omits_pseudo_process_names(monkeypatch):
+    class Process:
+        def __init__(self, process_id, executable):
+            self.info = {
+                "pid": process_id,
+                "create_time": 1_700_000_000.25,
+                "exe": executable,
+            }
+
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        lambda _attrs: (
+            Process(4, "Registry"),
+            Process(5, "MemCompression"),
+            Process(6, r"C:relative.exe"),
+            Process(7, r"\Windows\root-relative.exe"),
+            Process(31, r"C:\Apps\Orbit\orbit.exe"),
+        ),
+    )
+
+    rows = PsutilWin32TargetFactsBackend.read_processes()
+    assert tuple(row["process_id"] for row in rows) == (31,)
+
+    _, snapshot = _read(
+        processes=rows,
+        windows=(
+            _window(101, process_id=4),
+            _window(102, process_id=31),
+        ),
+    )
+    assert tuple(item.hwnd for item in snapshot.windows) == (102,)
 
 
 def test_adapter_reuses_one_snapshot_for_many_alias_queries():
