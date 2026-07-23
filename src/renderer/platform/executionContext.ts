@@ -1,4 +1,5 @@
 import type { DesktopTargetContext, TaskContract, TaskStageType } from './contracts';
+import type { DesktopRuntimeVersion } from './client';
 
 export interface DesktopHandoffResult {
   yielded: boolean;
@@ -45,6 +46,70 @@ function isDesktopCapability(capability: string): boolean {
   return DESKTOP_CAPABILITY_PREFIXES.some((prefix) => capability.startsWith(prefix));
 }
 
+const DESKTOP_TARGET_FIELDS = new Set([
+  'format',
+  'hwnd',
+  'root_hwnd',
+  'title',
+  'process_id',
+  'process_identity',
+  'class_name',
+  'rect',
+  'captured_at',
+  'foreground_verified',
+  'usable',
+  'failure_type',
+  'reason',
+]);
+const TARGET_CONTEXT_MAX_AGE_MS = 15_000;
+
+function isZeroSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && value === 0;
+}
+
+function isCanonicalTargetAbsence(
+  target: DesktopTargetContext,
+  preparedAt: number,
+  now: number,
+): boolean {
+  if (
+    typeof target !== 'object'
+    || target === null
+    || Array.isArray(target)
+    || Object.keys(target).length !== DESKTOP_TARGET_FIELDS.size
+    || Object.keys(target).some((field) => !DESKTOP_TARGET_FIELDS.has(field))
+  ) {
+    return false;
+  }
+  return (
+    target.format === 'desktop-target/2'
+    && isZeroSafeInteger(target.hwnd)
+    && isZeroSafeInteger(target.root_hwnd)
+    && target.title === ''
+    && isZeroSafeInteger(target.process_id)
+    && target.process_identity === ''
+    && target.class_name === ''
+    && Array.isArray(target.rect)
+    && target.rect.length === 0
+    && Number.isSafeInteger(target.captured_at)
+    && target.captured_at > 0
+    && Number.isSafeInteger(preparedAt)
+    && preparedAt > 0
+    && Number.isSafeInteger(now)
+    && now > 0
+    && target.captured_at >= preparedAt
+    && preparedAt <= now
+    && target.captured_at <= now
+    && now - preparedAt <= TARGET_CONTEXT_MAX_AGE_MS
+    && now - target.captured_at <= TARGET_CONTEXT_MAX_AGE_MS
+    && target.foreground_verified === false
+    && target.usable === false
+    && target.failure_type === 'target_binding_missing'
+    && typeof target.reason === 'string'
+    && target.reason.length <= 512
+  );
+}
+
 /**
  * Decide from the compiler-owned contract whether the native workbench must
  * yield foreground ownership before execution.  This deliberately consumes
@@ -67,6 +132,7 @@ export async function buildClientRunInputs(
   contract: TaskContract,
   submittedAt = Date.now(),
   captureTarget?: (handoff: DesktopHandoffResult) => Promise<DesktopTargetContext>,
+  runtimeVersion: DesktopRuntimeVersion = 'legacy',
 ): Promise<Record<string, unknown>> {
   const desktopHandoffRequired = requiresDesktopHandoff(contract);
   const bridge = window.electronAPI;
@@ -84,7 +150,11 @@ export async function buildClientRunInputs(
       throw new Error('客户端已让出前台，但没有可用的桌面目标捕获器。');
     }
     targetWindow = await captureTarget(handoff);
-    if (!targetWindow.usable || !targetWindow.hwnd) {
+    const targetlessVnext = (
+      runtimeVersion === 'vnext'
+      && isCanonicalTargetAbsence(targetWindow, handoff.prepared_at, Date.now())
+    );
+    if ((!targetWindow.usable || !targetWindow.hwnd) && !targetlessVnext) {
       throw new Error(
         `客户端未能绑定让出前台后的目标窗口：${targetWindow.reason || targetWindow.failure_type || 'target unavailable'}`,
       );

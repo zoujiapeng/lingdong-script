@@ -27,6 +27,7 @@ export async function submitGoalThroughControlPlane(
     compiled.contract,
     Date.now(),
     (handoff) => client.captureDesktopContext(handoff.control_surface_pid),
+    runtimeVersion,
   );
   return client.startGraph(compiled.graph, inputs, runtimeVersion);
 }
