@@ -153,6 +153,14 @@ class PyWin32DesktopFactsBackend:
         return int(win32gui.GetForegroundWindow() or 0)
 
     @staticmethod
+    def window_title(hwnd: int) -> str:
+        """Return optional display text; title is never an identity fact."""
+
+        import win32gui
+
+        return str(win32gui.GetWindowText(int(hwnd)) or "")
+
+    @staticmethod
     def window_from_point(point: Point) -> int:
         import win32gui
 
@@ -201,6 +209,41 @@ class WindowsDesktopFacts:
             or any(type(value) is not int for value in self.hit_test_point)
         ):
             raise WindowsDesktopFactsError("hit_test_point must contain two integers")
+
+
+@dataclass(frozen=True, slots=True)
+class TargetActivationFacts:
+    """Fresh strong facts for one unbound existing-window candidate."""
+
+    target: WindowIdentity
+    window_region: Region
+    foreground: WindowIdentity | None
+    title_snapshot: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, WindowIdentity):
+            raise WindowsDesktopFactsError("activation target identity is invalid")
+        if (
+            not isinstance(self.window_region, tuple)
+            or len(self.window_region) != 4
+            or any(type(value) is not int for value in self.window_region)
+            or self.window_region[2] <= 0
+            or self.window_region[3] <= 0
+        ):
+            raise WindowsDesktopFactsError("activation target region is invalid")
+        if self.foreground is not None and not isinstance(
+            self.foreground, WindowIdentity
+        ):
+            raise WindowsDesktopFactsError("activation foreground identity is invalid")
+        if type(self.title_snapshot) is not str or len(self.title_snapshot) > 4096:
+            raise WindowsDesktopFactsError("activation title snapshot is invalid")
+
+    @property
+    def exact_foreground(self) -> bool:
+        return bool(
+            self.foreground is not None
+            and self.foreground == self.target
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +349,39 @@ class WindowsDesktopFactsReader:
             process_identity=first.window.process_identity,
             epoch=epoch,
             window_region=first.region,
+        )
+
+    def read_activation_facts(self, hwnd: int) -> TargetActivationFacts:
+        """Read stable unbound target and foreground facts without mutation.
+
+        The target is sampled on both sides of the foreground read.  An
+        optional title read is informational only; failure yields an honest
+        empty snapshot and never weakens the strong HWND/process checks.
+        """
+
+        first = self._target_sample(hwnd)
+        foreground = self._optional_window(
+            self._backend.foreground_hwnd(), "foreground",
+        )
+        title = ""
+        read_title = getattr(self._backend, "window_title", None)
+        if callable(read_title):
+            try:
+                raw_title = read_title(hwnd)
+                if type(raw_title) is str and len(raw_title) <= 4096:
+                    title = raw_title
+            except Exception:
+                title = ""
+        second = self._target_sample(hwnd)
+        if second != first:
+            raise WindowsDesktopFactsError(
+                "activation target changed during Windows observation"
+            )
+        return TargetActivationFacts(
+            target=first.window,
+            window_region=first.region,
+            foreground=foreground,
+            title_snapshot=title,
         )
 
     def read(self, request: CommitAdmissionRequest) -> WindowsDesktopFacts:
@@ -500,6 +576,7 @@ __all__ = [
     "PyWin32DesktopFactsBackend",
     "RuntimeCommitState",
     "RuntimeCommitStatePort",
+    "TargetActivationFacts",
     "WindowIdentity",
     "WindowsPhysicalInputFinalGuard",
     "WindowsDesktopCommitObservation",

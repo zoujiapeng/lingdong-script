@@ -30,6 +30,7 @@ from winpilot.process_identity import (
 from winpilot.visual_runtime.windows_desktop_facts import (
     PyWin32DesktopFactsBackend,
     RuntimeCommitState,
+    TargetActivationFacts,
     WindowsDesktopCommitObservation,
     WindowsDesktopFactsError,
     WindowsDesktopFactsReader,
@@ -47,6 +48,7 @@ class Backend:
         self.regions = {101: (10, 20, 800, 600)}
         self.foreground = 100
         self.hit = 111
+        self.titles = {101: "Workspace"}
         self.calls = []
         self.target_sample_count = 0
         self.second_target_region = None
@@ -92,6 +94,10 @@ class Backend:
     def foreground_hwnd(self):
         self.calls.append(("foreground_hwnd",))
         return self.foreground
+
+    def window_title(self, hwnd):
+        self.calls.append(("window_title", hwnd))
+        return self.titles.get(hwnd, "")
 
     def window_from_point(self, point):
         self.calls.append(("window_from_point", point))
@@ -293,6 +299,59 @@ def test_reader_exposes_stable_target_identity_for_runtime_composition():
     assert backend.calls.count(("window_region", 101)) == 2
     assert ("foreground_hwnd",) not in backend.calls
     assert not any(call[0] == "window_from_point" for call in backend.calls)
+
+
+def test_activation_facts_double_sample_exact_target_and_foreground() -> None:
+    backend = Backend()
+    backend.foreground = 101
+
+    facts = WindowsDesktopFactsReader(backend).read_activation_facts(101)
+
+    assert facts == TargetActivationFacts(
+        target=facts.target,
+        window_region=(10, 20, 800, 600),
+        foreground=facts.target,
+        title_snapshot="Workspace",
+    )
+    assert facts.target == facts.foreground
+    assert facts.exact_foreground is True
+    region_reads = [
+        index for index, call in enumerate(backend.calls)
+        if call == ("window_region", 101)
+    ]
+    assert len(region_reads) == 2
+    foreground_read = backend.calls.index(("foreground_hwnd",))
+    assert region_reads[0] < foreground_read < region_reads[1]
+
+
+def test_activation_facts_do_not_treat_same_root_sibling_as_exact_foreground() -> None:
+    backend = Backend()
+    backend.foreground = 100
+
+    facts = WindowsDesktopFactsReader(backend).read_activation_facts(101)
+
+    assert facts.foreground is not None
+    assert facts.foreground.root_hwnd == facts.target.root_hwnd
+    assert facts.foreground.hwnd != facts.target.hwnd
+    assert facts.exact_foreground is False
+
+
+def test_activation_facts_fail_closed_on_identity_or_region_drift() -> None:
+    backend = Backend()
+    backend.second_target_region = (11, 20, 800, 600)
+
+    with pytest.raises(WindowsDesktopFactsError, match="activation target changed"):
+        WindowsDesktopFactsReader(backend).read_activation_facts(101)
+
+
+def test_activation_title_is_optional_and_never_substitutes_for_identity() -> None:
+    backend = Backend()
+    backend.window_title = None
+
+    facts = WindowsDesktopFactsReader(backend).read_activation_facts(101)
+
+    assert facts.title_snapshot == ""
+    assert facts.target.process_identity == _process_identity()
 
 
 def test_keyboard_reader_never_calls_window_from_point_or_fabricates_hit():
