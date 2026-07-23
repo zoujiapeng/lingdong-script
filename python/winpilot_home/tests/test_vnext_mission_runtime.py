@@ -828,6 +828,11 @@ def _harness(
             if any(tool.name == "discover_target" for tool in catalog.tools)
             else None
         ),
+        supported_launch_kinds=(
+            ("exe",)
+            if any(tool.name == "discover_target" for tool in catalog.tools)
+            else None
+        ),
         pointer_cleanup=pointer_cleanup,
         mutation_permits=permits,
         obligation_verifier=obligation_verifier,
@@ -903,6 +908,11 @@ def _canonical_action_harness(
         controller=controller,
         target_discovery=(
             NoCallTargetDiscovery()
+            if any(tool.name == "discover_target" for tool in catalog.tools)
+            else None
+        ),
+        supported_launch_kinds=(
+            ("exe",)
             if any(tool.name == "discover_target" for tool in catalog.tools)
             else None
         ),
@@ -1402,6 +1412,7 @@ def test_mission_replay_or_a_new_runtime_does_not_reconstruct_previous_action() 
         state=harness.state,
         controller=controller,
         target_discovery=NoCallTargetDiscovery(),
+        supported_launch_kinds=("exe",),
         mutation_permits=permits,
     )
 

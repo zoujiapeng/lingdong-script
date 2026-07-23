@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import random
 from types import SimpleNamespace
+
+import pytest
 
 
 def test_app_alias_expansion_returns_only_the_normalized_literal():
@@ -55,6 +58,87 @@ def test_resolve_fictional_app_by_discovered_display_name(monkeypatch):
     assert result[0]["name"] == "Nebula Desk"
     assert result[0]["target"] == "Fictional.NebulaDesk_123!App"
     assert result[0]["match_kind"] == "literal_or_alias"
+
+
+def test_resolve_kind_filter_applies_before_ranking_and_result_limit(
+    monkeypatch,
+):
+    from winpilot.perception import apps
+
+    unsupported = [
+        {
+            "name": "Orbit",
+            "target": f"Vendor.Orbit{index}!App",
+            "kind": "appid",
+        }
+        for index in range(20)
+    ]
+    executable = {
+        "name": "Orbit Native Utility",
+        "target": r"C:\Apps\Orbit.exe",
+        "kind": "exe",
+    }
+    monkeypatch.setattr(apps, "_index", lambda: [*unsupported, executable])
+
+    general = apps.resolve("Orbit", max_results=16)
+    supported = apps.resolve(
+        "Orbit",
+        max_results=16,
+        launch_kinds=("exe",),
+    )
+
+    assert len(general) == 16
+    assert {item["kind"] for item in general} == {"appid"}
+    assert [(item["kind"], item["target"]) for item in supported] == [
+        ("exe", r"C:\Apps\Orbit.exe"),
+    ]
+
+
+def test_supported_lane_order_is_stable_before_truncation(monkeypatch) -> None:
+    from winpilot.perception import apps
+
+    entries = [
+        {
+            "name": "Orbit",
+            "target": rf"C:\Apps\Orbit-{index:02d}.exe",
+            "kind": "exe",
+        }
+        for index in range(24)
+    ]
+    expected = tuple(item["target"] for item in entries[:16])
+    rng = random.Random(1267)
+
+    for _ in range(30):
+        shuffled = list(entries)
+        rng.shuffle(shuffled)
+        monkeypatch.setattr(apps, "_index", lambda rows=shuffled: rows)
+        actual = tuple(
+            item["target"]
+            for item in apps.resolve(
+                "Orbit",
+                max_results=16,
+                launch_kinds=("exe",),
+            )
+        )
+        assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "launch_kinds",
+    (
+        ["exe"],
+        ("EXE",),
+        ("lnk", "exe"),
+        ("exe", "exe"),
+        ("shell",),
+        (1,),
+    ),
+)
+def test_resolve_rejects_noncanonical_kind_filters(launch_kinds) -> None:
+    from winpilot.perception import apps
+
+    with pytest.raises(ValueError, match="launch_kinds"):
+        apps.resolve("Orbit", launch_kinds=launch_kinds)
 
 
 def test_resolve_fictional_app_by_discovered_shortcut_alias(monkeypatch):

@@ -601,6 +601,7 @@ def _runtime(
         state=state,
         controller=controller,
         target_discovery=discovery,
+        supported_launch_kinds=("exe",),
         mutation_permits=permits,
     )
     return runtime, reducer, evidence, permits, controller
@@ -644,6 +645,7 @@ def _target_acquisition_runtime(
             candidates=candidates,
             captured_at=1.0,
         )),
+        supported_launch_kinds=("exe",),
         mutation_permits=permits,
     )
     return runtime, reducer, evidence, permits, state, controller
@@ -706,6 +708,37 @@ def test_catalog_discovery_requires_an_injected_read_only_port() -> None:
         )
 
 
+def test_target_discovery_requires_explicit_runtime_launch_capabilities() -> None:
+    definition = _definition()
+    evidence = EvidenceRegistry(definition.mission_id, definition.run_id)
+    reducer = MissionReducer(definition, evidence=evidence)
+    catalog = _catalog()
+    profile = ExecutionPolicy().safe_default(
+        definition.mission_id,
+        definition.goal_revision,
+        available_capabilities=("visual.interact",),
+    )
+    discovery = _Discovery(TargetDiscoverySnapshot(
+        query="Orbit",
+        candidates=(),
+        captured_at=1.0,
+    ))
+
+    with pytest.raises(TypeError, match="explicit supported_launch_kinds"):
+        MissionRuntime(
+            reducer=reducer,
+            profile=profile,
+            broker=CapabilityBroker(catalog),
+            catalog=catalog,
+            actor=_Actor(_discover()),
+            state=_State({0: _snapshot(10, turn_index=0)}),
+            controller=_Controller(),
+            target_discovery=discovery,
+        )
+
+    assert discovery.calls == []
+
+
 def test_activation_catalog_requires_reducers_canonical_evidence_registry() -> None:
     definition = _definition()
     reducer = MissionReducer(definition)
@@ -730,6 +763,7 @@ def test_activation_catalog_requires_reducers_canonical_evidence_registry() -> N
                 candidates=(),
                 captured_at=1.0,
             )),
+            supported_launch_kinds=("exe",),
         )
 
 
@@ -1168,9 +1202,10 @@ def test_installed_exe_launch_uses_same_owner_and_replays_binding() -> None:
     (
         ("appid", "Contoso.Orbit_123!Main"),
         ("lnk", r"C:\ProgramData\Microsoft\Windows\Start Menu\Orbit.lnk"),
+        ("exe", r"Apps\relative.exe"),
     ),
 )
-def test_non_exe_installed_candidate_fails_before_controller(
+def test_unexecutable_injected_candidate_fails_before_controller(
     kind: str,
     target: str,
 ) -> None:
@@ -1190,10 +1225,11 @@ def test_non_exe_installed_candidate_fails_before_controller(
         _launch_runtime(candidate=candidate)
     )
 
-    assert runtime.run_one_turn(turn_index=0).status is RuntimeStatus.OBSERVED
-    result = runtime.run_one_turn(turn_index=1)
+    result = runtime.run_one_turn(turn_index=0)
 
     assert result.status is RuntimeStatus.STATE_REJECTED
+    assert "launch" in result.detail
+    assert runtime._pending_target_discovery is None
     assert controller.calls == []
     assert reducer.projection.accepted_event_ids == ()
     assert reducer.projection.target_binding is None

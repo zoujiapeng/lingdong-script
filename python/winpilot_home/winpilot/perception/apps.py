@@ -33,6 +33,7 @@ _START_MENU_DIRS = [
     Path(os.environ.get("PROGRAMDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
 ]
 _SKIP_WORDS = ("卸载", "uninstall", "帮助", "help", "网站", "website", "readme")
+_LAUNCH_KINDS = frozenset(("appid", "exe", "lnk"))
 
 
 def _unique_text(values) -> list[str]:
@@ -369,15 +370,46 @@ def _score_entry(entry: dict, variants: list[str], literal_query: str) -> tuple[
     return best, literal, matched_term
 
 
+def _launch_sort_identity(entry: dict) -> tuple[str, str]:
+    """Stable final ranking key for equally relevant catalog entries."""
+
+    kind = str(entry.get("kind") or "").strip().casefold()
+    target = os.path.expandvars(
+        str(entry.get("target") or "").strip().strip('"')
+    )
+    normalized = (
+        target.casefold()
+        if kind == "appid"
+        else os.path.normcase(os.path.normpath(target)).casefold()
+    )
+    return kind, normalized
+
+
 def resolve(
     query: str,
     max_results: int = 5,
     *,
     force_refresh: bool = False,
+    launch_kinds: tuple[str, ...] | None = None,
 ) -> list[dict]:
     """Installed-app candidates for a human name, best match first."""
+    if launch_kinds is not None:
+        if type(launch_kinds) is not tuple or any(
+            type(kind) is not str for kind in launch_kinds
+        ):
+            raise ValueError(
+                "launch_kinds must contain unique canonical launch kinds"
+            )
+        if (
+            tuple(sorted(launch_kinds)) != launch_kinds
+            or len(launch_kinds) != len(set(launch_kinds))
+            or any(kind not in _LAUNCH_KINDS for kind in launch_kinds)
+        ):
+            raise ValueError(
+                "launch_kinds must contain unique canonical launch kinds"
+            )
     q = (query or "").strip().lower()
-    if not q:
+    if not q or launch_kinds == ():
         return []
     from .app_aliases import expand as expand_app_aliases
 
@@ -386,6 +418,11 @@ def resolve(
     def candidates(entries: list[dict]) -> list[dict]:
         scored = []
         for entry in entries:
+            if (
+                launch_kinds is not None
+                and entry.get("kind") not in launch_kinds
+            ):
+                continue
             score, literal_score, matched_term = _score_entry(
                 entry, query_variants, q,
             )
@@ -397,6 +434,7 @@ def resolve(
             -item[0],
             -item[1],
             str(item[3].get("name") or "").casefold(),
+            _launch_sort_identity(item[3]),
         ))
         return [
             {
@@ -431,6 +469,8 @@ def resolve(
         results = candidates(_index(force_refresh=True))
     if results:
         return results
+    if launch_kinds is not None and "exe" not in launch_kinds:
+        return []
     # Last resort: search executable filenames without routing an app lookup
     # through the public ``*.exe`` file-search guard.  The structured filters
     # work for both Everything and the bounded native fallback.

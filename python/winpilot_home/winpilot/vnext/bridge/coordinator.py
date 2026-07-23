@@ -92,6 +92,7 @@ from .initial_target import (
 
 DEFAULT_MAX_TURNS = 24
 DEFAULT_FRAME_MAX_AGE_S = 30.0
+_PRODUCT_SUPPORTED_LAUNCH_KINDS = ("exe",)
 _RECOVERABLE_TURN_STATUSES = frozenset({
     RuntimeStatus.ACTION_RECORDED,
     RuntimeStatus.INVALID_PROPOSAL,
@@ -382,6 +383,7 @@ class LiveDesktopRuntimeCoordinator:
             desktop_identity_reader or _windows_desktop_identity
         )
         self._target_discovery = target_discovery or FreshWindowsTargetDiscovery(
+            supported_launch_kinds=_PRODUCT_SUPPORTED_LAUNCH_KINDS,
             clock=clock,
         )
         self._launch_presence = (
@@ -668,6 +670,7 @@ class LiveDesktopRuntimeCoordinator:
             state=state,
             controller=controller,
             target_discovery=self._target_discovery,
+            supported_launch_kinds=_PRODUCT_SUPPORTED_LAUNCH_KINDS,
             mutation_permits=permits,
             attested_visual_verifier=self._verifier_factory(self._api_config),
             mission_completion_verifier=DeterministicMissionCompletionVerifier(),
