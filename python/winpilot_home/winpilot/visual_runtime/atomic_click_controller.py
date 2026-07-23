@@ -6,10 +6,11 @@ must inject every existing owner explicitly and enable it deliberately.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import re
 from threading import Event
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeVar, runtime_checkable
 
 from ..action.desktop_queue import DesktopActionQueue
 from ..action.raw_device import (
@@ -32,6 +33,7 @@ from ..vnext.runtime.contracts import (
     ControllerTransition,
 )
 from ..vnext.runtime.mutation_permits import (
+    MutationEnvelope,
     MutationPermitAuthority,
     RuntimeMutationPermit,
 )
@@ -64,6 +66,7 @@ from .submitted_image_coordinates import SubmittedImageCoordinateMapper
 
 
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
+_AcquisitionResult = TypeVar("_AcquisitionResult")
 SUPPORTED_DESKTOP_TOOL_NAMES = tuple(sorted((
     "click", "double_click", "scroll", "type_text", "hotkey",
 )))
@@ -595,6 +598,41 @@ class AtomicDesktopController:
             failure_reason="",
         )
 
+    def _run_acquisition_transaction(
+        self,
+        envelope: MutationEnvelope,
+        *,
+        target_hwnd: int | None, stop_event: Event | None,
+        under_admission: Callable[[RuntimeMutationPermit], object],
+        frame_changed: Callable[[], _AcquisitionResult],
+        after_pin: Callable[[object], _AcquisitionResult],
+    ) -> _AcquisitionResult:
+        """Own one queue/pin/permit/post target-acquisition transaction."""
+        def under_physical_lease() -> _AcquisitionResult:
+            def under_frame_pin() -> object:
+                permit = self._permits.begin_admission(envelope)
+                try:
+                    return under_admission(permit)
+                finally:
+                    if permit.allowed:
+                        self._permits.finish_admission(envelope.decision_id)
+
+            pinned, attempt = self._frames.run_if_current(
+                envelope.frame, under_frame_pin,
+            )
+            if not pinned:
+                return frame_changed()
+            return after_pin(attempt)
+
+        return self._queue.run(
+            envelope.proposal.action,
+            under_physical_lease,
+            target_hwnd=target_hwnd,
+            scope="physical",
+            cancel_event=stop_event,
+            metadata={"owner": "vnext_atomic_desktop_controller"},
+        )
+
     def _execute_target_activation(
         self,
         envelope: TargetActivationEnvelope,
@@ -653,75 +691,58 @@ class AtomicDesktopController:
             decision, _observation = read_current()
             return decision
 
-        def under_physical_lease() -> TargetActivationTransition:
-            def under_frame_pin() -> _TargetActivationAttempt:
-                permit = self._permits.begin_admission(envelope)
-                try:
-                    if not isinstance(permit, RuntimeMutationPermit) or not permit.allowed:
-                        reason = getattr(permit, "reason", None)
-                        value = getattr(reason, "value", "invalid")
-                        return _TargetActivationAttempt(
-                            failure_reason=f"mutation_permit_{value}"
-                        )
-                    if envelope.candidate.state is not TargetState.VISIBLE:
-                        return _TargetActivationAttempt(
-                            failure_reason="candidate_requires_recovery"
-                        )
-                    decision, observed = read_current()
-                    if decision is not FinalTargetActivationGuardDecision.ADMITTED:
-                        return _TargetActivationAttempt(
-                            failure_reason=decision.value
-                        )
-                    assert observed is not None
-                    nonlocal activation_expected_target
-                    activation_expected_target = observed.activated_target
-                    if observed.exact_foreground:
-                        # A zero-mutation completion still requires a final
-                        # strong identity/foreground read under active authority.
-                        decision, observed = read_current()
-                        if (
-                            decision
-                            is not FinalTargetActivationGuardDecision.ADMITTED
-                        ):
-                            return _TargetActivationAttempt(
-                                failure_reason=decision.value
-                            )
-                        assert observed is not None
-                        if observed.exact_foreground:
-                            return _TargetActivationAttempt(
-                                already_foreground=True
-                            )
-
-                    candidate = envelope.candidate
-                    assert candidate.hwnd is not None
-                    assert candidate.process_id is not None
-                    assert candidate.process_identity is not None
-                    context = RawTargetActivationContext(
-                        target_hwnd=candidate.hwnd,
-                        target_root_hwnd=(
-                            activation_expected_target.root_hwnd
-                        ),
-                        target_process_id=candidate.process_id,
-                        target_process_identity=candidate.process_identity,
-                    )
-                    receipt = self._raw.activate_target(
-                        context,
-                        final_guard=final_activation_guard,
-                    )
-                    return _TargetActivationAttempt(raw_receipt=receipt)
-                finally:
-                    if permit.allowed:
-                        self._permits.finish_admission(envelope.decision_id)
-
-            pinned, attempt = self._frames.run_if_current(
-                envelope.frame, under_frame_pin,
-            )
-            if not pinned:
-                return self._activation_failure(
-                    envelope,
-                    unknown=False,
-                    reason="frame_changed",
+        def under_admission(
+            permit: RuntimeMutationPermit,
+        ) -> _TargetActivationAttempt:
+            if not isinstance(permit, RuntimeMutationPermit) or not permit.allowed:
+                reason = getattr(permit, "reason", None)
+                value = getattr(reason, "value", "invalid")
+                return _TargetActivationAttempt(
+                    failure_reason=f"mutation_permit_{value}"
                 )
+            if envelope.candidate.state is not TargetState.VISIBLE:
+                return _TargetActivationAttempt(
+                    failure_reason="candidate_requires_recovery"
+                )
+            decision, observed = read_current()
+            if decision is not FinalTargetActivationGuardDecision.ADMITTED:
+                return _TargetActivationAttempt(
+                    failure_reason=decision.value
+                )
+            assert observed is not None
+            nonlocal activation_expected_target
+            activation_expected_target = observed.activated_target
+            if observed.exact_foreground:
+                # A zero-mutation completion still requires a final strong
+                # identity/foreground read under active authority.
+                decision, observed = read_current()
+                if decision is not FinalTargetActivationGuardDecision.ADMITTED:
+                    return _TargetActivationAttempt(
+                        failure_reason=decision.value
+                    )
+                assert observed is not None
+                if observed.exact_foreground:
+                    return _TargetActivationAttempt(
+                        already_foreground=True
+                    )
+
+            candidate = envelope.candidate
+            assert candidate.hwnd is not None
+            assert candidate.process_id is not None
+            assert candidate.process_identity is not None
+            context = RawTargetActivationContext(
+                target_hwnd=candidate.hwnd,
+                target_root_hwnd=activation_expected_target.root_hwnd,
+                target_process_id=candidate.process_id,
+                target_process_identity=candidate.process_identity,
+            )
+            receipt = self._raw.activate_target(
+                context,
+                final_guard=final_activation_guard,
+            )
+            return _TargetActivationAttempt(raw_receipt=receipt)
+
+        def after_pin(attempt: object) -> TargetActivationTransition:
             assert isinstance(attempt, _TargetActivationAttempt)
             if attempt.failure_reason:
                 return self._activation_failure(
@@ -793,13 +814,17 @@ class AtomicDesktopController:
 
         candidate_hwnd = envelope.candidate.hwnd
         assert candidate_hwnd is not None
-        return self._queue.run(
-            envelope.proposal.action,
-            under_physical_lease,
+        return self._run_acquisition_transaction(
+            envelope,
             target_hwnd=candidate_hwnd,
-            scope="physical",
-            cancel_event=stop_event,
-            metadata={"owner": "vnext_atomic_desktop_controller"},
+            stop_event=stop_event,
+            under_admission=under_admission,
+            frame_changed=lambda: self._activation_failure(
+                envelope,
+                unknown=False,
+                reason="frame_changed",
+            ),
+            after_pin=after_pin,
         )
 
     def execute(
