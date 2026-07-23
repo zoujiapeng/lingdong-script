@@ -289,6 +289,33 @@ def test_launch_envelope_accepts_only_installed_open_app_candidate() -> None:
         TargetLaunchEnvelope.from_dict(raw)
 
 
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        _candidate(
+            kind="appid",
+            target="Contoso.App_123!Main",
+        ),
+        _candidate(
+            kind="lnk",
+            target=r"C:\ProgramData\Microsoft\Windows\Start Menu\App.lnk",
+        ),
+        _candidate(kind="exe", target=r"Apps\Workspace.exe"),
+        _candidate(kind="exe", target=r"C:\Apps\Workspace.com"),
+    ),
+)
+def test_launch_envelope_fails_closed_outside_canonical_absolute_exe(
+    candidate: TargetCandidate,
+) -> None:
+    with pytest.raises(ValueError, match=r"canonical absolute \.exe"):
+        _envelope(candidate=candidate)
+
+
+def test_launch_envelope_accepts_case_insensitive_exe_suffix() -> None:
+    candidate = _candidate(target=r"C:\Apps\Workspace.EXE")
+    assert _envelope(candidate=candidate).candidate == candidate
+
+
 def test_launch_envelope_rejects_weak_private_candidate_wire_identity() -> None:
     raw = _envelope().to_dict()
     raw["candidate"]["candidate_ref"] = "target-invented"

@@ -14,6 +14,7 @@ from pydantic import Field, field_validator, model_validator
 
 from ...process_identity import (
     ProcessIdentityError,
+    canonical_executable_path,
     canonical_process_identity,
 )
 from ..targeting import TargetActivation, TargetState
@@ -57,6 +58,11 @@ class TargetLaunchEnvelope(TargetAcquisitionEnvelopeBase):
             raise ValueError(
                 "this contract accepts only an installed open-app candidate"
             )
+        if self.candidate.launch_kind != "exe":
+            raise ValueError(
+                "target launch requires a canonical absolute .exe candidate"
+            )
+        canonical_executable_path(self.candidate.launch_target)
 
     @classmethod
     def from_dict(
