@@ -149,6 +149,10 @@ class ExecutablePresenceSnapshot:
 
 class PsutilExecutablePresenceBackend:
     @staticmethod
+    def _text(value: object) -> str | None:
+        return value.strip() if type(value) is str and value.strip() else None
+
+    @staticmethod
     def read_processes() -> tuple[Mapping[str, object], ...]:
         import psutil
 
@@ -168,8 +172,12 @@ class PsutilExecutablePresenceBackend:
                     {
                         "process_id": pid,
                         "creation_time_ns": created_ns,
-                        "executable_path": info.get("exe"),
-                        "process_name": info.get("name"),
+                        "executable_path": PsutilExecutablePresenceBackend._text(
+                            info.get("exe")
+                        ),
+                        "process_name": PsutilExecutablePresenceBackend._text(
+                            info.get("name")
+                        ),
                     }
                 )
             except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):

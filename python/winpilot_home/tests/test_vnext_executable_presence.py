@@ -251,6 +251,22 @@ def test_psutil_backend_is_one_read_only_walk(monkeypatch) -> None:
                     "name": "Orbit.exe",
                 }
             ),
+            Process(
+                {
+                    "pid": 9,
+                    "create_time": 2.0,
+                    "exe": "",
+                    "name": "Orbit.exe",
+                }
+            ),
+            Process(
+                {
+                    "pid": 10,
+                    "create_time": 2.5,
+                    "exe": " ",
+                    "name": "\t",
+                }
+            ),
         )
 
     fake = SimpleNamespace(
@@ -267,4 +283,6 @@ def test_psutil_backend_is_one_read_only_walk(monkeypatch) -> None:
     assert rows == (
         _row(7, created=1_500_000_000),
         _row(8, path=None, created=None),
+        _row(9, path=None, created=2_000_000_000),
+        _row(10, path=None, created=2_500_000_000, name=None),
     )
