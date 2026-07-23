@@ -147,6 +147,7 @@ def _install_server_run_capture(monkeypatch, server, *, calls=None):
             handlers,
             *,
             inputs,
+            start_paused,
             desktop_runtime_selection,
             desktop_runtime_coordinator,
         ):
@@ -160,6 +161,7 @@ def _install_server_run_capture(monkeypatch, server, *, calls=None):
                 graph,
                 handlers,
                 inputs=inputs,
+                start_paused=start_paused,
                 desktop_runtime_selection=desktop_runtime_selection,
                 desktop_runtime_coordinator=desktop_runtime_coordinator,
             )
@@ -196,9 +198,14 @@ def test_product_run_request_accepts_only_explicit_runtime_versions() -> None:
     graph = _task_stage_graph()
 
     assert ArpRunRequest(graph=graph).runtime_version is None
+    assert ArpRunRequest(graph=graph).start_paused is False
     assert ArpRunRequest(graph=graph, runtime_version="vnext").runtime_version == "vnext"
+    assert ArpRunRequest(graph=graph, start_paused=True).start_paused is True
     with pytest.raises(ValidationError):
         ArpRunRequest(graph=graph, runtime_version="automatic")
+    for value in (0, 1, "true", "false", None):
+        with pytest.raises(ValidationError):
+            ArpRunRequest(graph=graph, start_paused=value)
 
 
 def test_execution_context_uses_run_owned_selection_not_untrusted_payloads() -> None:
@@ -396,6 +403,81 @@ def test_run_manager_prepare_passes_the_exact_vnext_coordinator() -> None:
     assert len(calls) == 1
     assert calls[0].run_id == execution.run_id
     assert calls[0].stop_event is execution.stop_event
+
+
+def test_start_paused_blocks_on_start_and_vnext_coordinator_until_resume() -> None:
+    coordinator_calls: list[DesktopRuntimeCoordinatorContext] = []
+    on_start_calls: list[str] = []
+    finished: list[dict] = []
+
+    class Coordinator:
+        def run(
+            self, context: DesktopRuntimeCoordinatorContext,
+        ) -> DesktopRuntimeCoordinatorResult:
+            coordinator_calls.append(context)
+            return DesktopRuntimeCoordinatorResult(
+                status=DesktopRuntimeCoordinatorStatus.DONE,
+                output={"resumed": True},
+            )
+
+    manager = ArpRunManager()
+    execution = manager.prepare(
+        _task_stage_graph(),
+        start_paused=True,
+        desktop_runtime_selection=DesktopRuntimeSelection.from_config("vnext"),
+        desktop_runtime_coordinator=Coordinator(),
+    )
+    thread = threading.Thread(
+        target=lambda: finished.append(manager.run_prepared(
+            execution,
+            on_start=lambda _run: on_start_calls.append("started"),
+        )),
+    )
+    thread.start()
+
+    assert execution.status is ArpRunStatus.PAUSED
+    assert execution.to_dict()["manual_paused"] is True
+    assert execution.started_at is None
+    assert not coordinator_calls
+    assert not on_start_calls
+    assert not execution.history
+
+    assert execution.resume() is True
+    thread.join(2)
+    assert not thread.is_alive()
+    assert on_start_calls == ["started"]
+    assert len(coordinator_calls) == 1
+    assert finished[0]["status"] == ArpRunStatus.DONE.value
+
+
+def test_start_paused_cancel_before_resume_never_calls_vnext_coordinator() -> None:
+    coordinator_calls: list[DesktopRuntimeCoordinatorContext] = []
+
+    class Coordinator:
+        def run(
+            self, context: DesktopRuntimeCoordinatorContext,
+        ) -> DesktopRuntimeCoordinatorResult:
+            coordinator_calls.append(context)
+            return DesktopRuntimeCoordinatorResult(
+                status=DesktopRuntimeCoordinatorStatus.DONE,
+            )
+
+    manager = ArpRunManager()
+    execution = manager.prepare(
+        _task_stage_graph(),
+        start_paused=True,
+        desktop_runtime_selection=DesktopRuntimeSelection.from_config("vnext"),
+        desktop_runtime_coordinator=Coordinator(),
+    )
+    thread = threading.Thread(target=lambda: manager.run_prepared(execution))
+    thread.start()
+    execution.cancel()
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert coordinator_calls == []
+    assert execution.history == []
+    assert execution.status is ArpRunStatus.CANCELED
 
 
 def test_vnext_coordinator_uses_existing_pause_gate() -> None:
@@ -644,6 +726,7 @@ def test_server_reads_runtime_config_once_and_freezes_selection(
             handlers,
             *,
             inputs,
+            start_paused,
             desktop_runtime_selection,
             desktop_runtime_coordinator,
         ):
@@ -654,6 +737,7 @@ def test_server_reads_runtime_config_once_and_freezes_selection(
                 graph,
                 handlers,
                 inputs=inputs,
+                start_paused=start_paused,
                 desktop_runtime_selection=desktop_runtime_selection,
                 desktop_runtime_coordinator=desktop_runtime_coordinator,
             )
@@ -739,6 +823,7 @@ def test_explicit_product_run_selection_is_atomic_and_ignores_semantic_fields(
             handlers,
             *,
             inputs,
+            start_paused,
             desktop_runtime_selection,
             desktop_runtime_coordinator,
         ):
@@ -749,6 +834,7 @@ def test_explicit_product_run_selection_is_atomic_and_ignores_semantic_fields(
                 graph,
                 handlers,
                 inputs=inputs,
+                start_paused=start_paused,
                 desktop_runtime_selection=desktop_runtime_selection,
                 desktop_runtime_coordinator=desktop_runtime_coordinator,
             )

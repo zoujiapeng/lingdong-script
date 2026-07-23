@@ -6,7 +6,7 @@ import time
 from typing import Any, Literal
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from ..fast.action_contract import validate_batch_actions
 
@@ -144,6 +144,7 @@ class ArpRunRequest(BaseModel):
     graph: ArpGraph
     inputs: dict[str, Any] = Field(default_factory=dict)
     runtime_version: Literal["legacy", "vnext"] | None = None
+    start_paused: StrictBool = False
 
 
 def _validate_node_config(node: ArpNode) -> list[str]:
