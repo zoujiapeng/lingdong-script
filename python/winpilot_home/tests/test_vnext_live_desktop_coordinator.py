@@ -226,6 +226,7 @@ def _coordinator(
     frame_max_age_s=30.0,
     clock=lambda: 10.0,
     facts_backend=None,
+    desktop_identity_reader=None,
 ):
     calls = raw_calls if raw_calls is not None else []
     snapshot = (
@@ -305,6 +306,7 @@ def _coordinator(
             verifier_model
         ),
         window_exists_resolver=lambda hwnd: hwnd == 101,
+        desktop_identity_reader=desktop_identity_reader,
         max_turns=max_turns,
         frame_max_age_s=frame_max_age_s,
         clock=clock,
@@ -456,6 +458,23 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     assert {
         item["event_id"] for item in claim_trace["accepted_events"]
     } == set(claim_trace["accepted_event_ids"])
+
+
+def test_bound_handoff_never_reads_targetless_desktop_identity() -> None:
+    calls = []
+
+    def forbidden_desktop_read():
+        calls.append(True)
+        raise AssertionError("bound runtime must not read targetless desktop identity")
+
+    result = _coordinator(
+        ScriptedActor([_click(), _claim()]),
+        PositiveVisualModel(),
+        desktop_identity_reader=forbidden_desktop_read,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    assert calls == []
 
 
 def test_live_coordinator_projects_previous_action_into_provider_request() -> None:

@@ -32,6 +32,7 @@ from ...tasking.execution_context import (
     normalize_execution_context,
     validated_handoff_target,
 )
+from ...utils.screenshot import virtual_screen_region
 from ...visual_runtime.atomic_click_controller import (
     AdmittedRawDeviceInventoryPort,
     AtomicDesktopController,
@@ -65,7 +66,11 @@ from ..verification import (
 )
 from ..verification.model_provider import OpenAIVisualVerifierModel
 from ..verification.visual_model import ReadOnlyVisualVerifierAdapter
-from .runtime_state import RuntimeReadState, RuntimeStateBridge
+from .runtime_state import (
+    DesktopObservationIdentity,
+    RuntimeReadState,
+    RuntimeStateBridge,
+)
 
 
 DEFAULT_MAX_TURNS = 24
@@ -121,6 +126,17 @@ def _digest(value: Mapping[str, Any]) -> str:
         allow_nan=False,
     )
     return hashlib.sha256(wire.encode("utf-8")).hexdigest()
+
+
+def _windows_desktop_identity() -> DesktopObservationIdentity:
+    """Read the physical desktop surface without acquiring a second owner."""
+
+    import win32gui
+
+    return DesktopObservationIdentity(
+        hwnd=int(win32gui.GetDesktopWindow()),
+        region=virtual_screen_region(),
+    )
 
 
 def _accepted_turn_events(
@@ -206,6 +222,7 @@ class LiveDesktopRuntimeCoordinator:
         actor_factory: Callable[[Mapping[str, Any]], Any] | None = None,
         verifier_factory: Callable[[Mapping[str, Any]], Any] | None = None,
         window_exists_resolver: Callable[[int], bool] | None = None,
+        desktop_identity_reader: Callable[[], DesktopObservationIdentity] | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         frame_max_age_s: float = DEFAULT_FRAME_MAX_AGE_S,
         clock: Callable[[], float] = time.time,
@@ -257,6 +274,10 @@ class LiveDesktopRuntimeCoordinator:
             window_exists_resolver
         ):
             raise TypeError("window_exists_resolver must be callable or null")
+        if desktop_identity_reader is not None and not callable(
+            desktop_identity_reader
+        ):
+            raise TypeError("desktop_identity_reader must be callable or null")
         if not callable(clock):
             raise TypeError("clock must be callable")
 
@@ -277,6 +298,9 @@ class LiveDesktopRuntimeCoordinator:
             )
         )
         self._window_exists = window_exists_resolver
+        self._read_desktop_identity = (
+            desktop_identity_reader or _windows_desktop_identity
+        )
         self._max_turns = max_turns
         self._frame_max_age_s = float(frame_max_age_s)
         self._clock = clock
@@ -460,7 +484,6 @@ class LiveDesktopRuntimeCoordinator:
         context: DesktopRuntimeCoordinatorContext,
         reducer: MissionReducer,
         evidence: EvidenceRegistry,
-        target: TargetCommitIdentity,
     ) -> tuple[MissionRuntime, tuple[str, ...], _ActorProjectionProbe]:
         frames = FrameAuthority()
         observer = self._observer_factory(frames)
@@ -471,11 +494,15 @@ class LiveDesktopRuntimeCoordinator:
             reducer.definition.run_id,
         )
 
-        def current_target():
+        def current_target(
+            hwnd: int,
+            binding_id: str,
+            epoch: int,
+        ) -> TargetCommitIdentity | None:
             return self._facts.read_target_identity(
-                target.hwnd,
-                binding_id=target.binding_id,
-                epoch=target.epoch,
+                hwnd,
+                binding_id=binding_id,
+                epoch=epoch,
             )
 
         def read_runtime_state() -> RuntimeReadState:
@@ -495,9 +522,9 @@ class LiveDesktopRuntimeCoordinator:
             frame_authority=frames,
             observer=observer,
             evidence=evidence,
-            target=target,
             mutation_permits=permits,
             read_target_identity=current_target,
+            read_desktop_identity=self._read_desktop_identity,
             read_runtime_state=read_runtime_state,
             frame_max_age_s=self._frame_max_age_s,
             clock=self._clock,
@@ -581,14 +608,14 @@ class LiveDesktopRuntimeCoordinator:
             evidence = EvidenceRegistry(definition.mission_id, definition.run_id)
             reducer = MissionReducer(definition, evidence=evidence)
             hwnd, handoff = self._handoff_target(context)
-            target = self._bind_target(
+            self._bind_target(
                 reducer=reducer,
                 evidence=evidence,
                 handoff_hwnd=hwnd,
                 handoff=handoff,
             )
             runtime, tool_names, actor_probe = self._runtime(
-                context, reducer, evidence, target,
+                context, reducer, evidence,
             )
             self._trace(context.run_id, {
                 "type": "vnext_mission_runtime_started",
