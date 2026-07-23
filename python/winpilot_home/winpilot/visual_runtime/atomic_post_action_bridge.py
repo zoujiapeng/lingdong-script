@@ -12,6 +12,7 @@ import json
 import math
 import time
 from collections.abc import Callable
+from typing import Protocol
 
 from ..action.raw_device import RawActionReceipt
 from ..agent.frame_authority import FrameAuthority, FrameState
@@ -40,6 +41,14 @@ from .frame_observer import FrameObserver
 
 class AtomicPostActionBridgeError(RuntimeError):
     """Post-action authority or evidence could not be closed mechanically."""
+
+
+class _PostActionEnvelope(Protocol):
+    decision_id: str
+    mission_id: str
+    run_id: str
+    obligation_id: str
+    frame: FrameCommitIdentity
 
 
 class AtomicPostActionBridge:
@@ -105,7 +114,7 @@ class AtomicPostActionBridge:
 
     @staticmethod
     def _evidence_id(
-        envelope: ActorDecisionEnvelope | TargetActivationEnvelope,
+        envelope: _PostActionEnvelope,
         payload_hash: str,
     ) -> str:
         identity = {
@@ -126,6 +135,28 @@ class AtomicPostActionBridge:
             ).encode("utf-8")
         ).hexdigest()
         return f"evidence-post-action-{digest}"
+
+    def _register_evidence(
+        self,
+        envelope: _PostActionEnvelope,
+        post_frame: FrameState,
+    ) -> EvidenceRef:
+        payload_hash = frame_identity_payload_hash(
+            self._frame_identity(post_frame)
+        )
+        evidence = EvidenceRef(
+            id=self._evidence_id(envelope, payload_hash),
+            mission_id=envelope.mission_id,
+            run_id=envelope.run_id,
+            obligation_id=envelope.obligation_id,
+            kind=POST_ACTION_FRAME_EVIDENCE_KIND,
+            trust="deterministic",
+            payload_hash=payload_hash,
+            frame_id=post_frame.frame_id,
+            action_id=envelope.decision_id,
+            created_at=post_frame.committed_at,
+        )
+        return self._evidence.append(evidence)
 
     def _validate_call(
         self,
@@ -210,21 +241,7 @@ class AtomicPostActionBridge:
         # FrameObserver.commit is a CAS against the exact pre-action frame.
         # AtomicDesktopController deliberately invokes this outside its frame pin.
         post_frame = self._observer.commit(captured)
-        frame_identity = self._frame_identity(post_frame)
-        payload_hash = frame_identity_payload_hash(frame_identity)
-        evidence = EvidenceRef(
-            id=self._evidence_id(envelope, payload_hash),
-            mission_id=envelope.mission_id,
-            run_id=envelope.run_id,
-            obligation_id=envelope.obligation_id,
-            kind=POST_ACTION_FRAME_EVIDENCE_KIND,
-            trust="deterministic",
-            payload_hash=payload_hash,
-            frame_id=post_frame.frame_id,
-            action_id=envelope.decision_id,
-            created_at=post_frame.committed_at,
-        )
-        self._evidence.append(evidence)
+        evidence = self._register_evidence(envelope, post_frame)
         return ControllerPostAction(
             post_frame_id=post_frame.frame_id,
             evidence_refs=(evidence.id,),
@@ -232,7 +249,7 @@ class AtomicPostActionBridge:
         )
 
     @staticmethod
-    def _activation_identity_key(
+    def _acquired_target_key(
         observation: TargetActivationObservation,
     ) -> tuple[object, ...]:
         target = observation.activated_target
@@ -245,29 +262,89 @@ class AtomicPostActionBridge:
         )
 
     @staticmethod
-    def _validate_activation_observation(
-        envelope: TargetActivationEnvelope,
+    def _validate_acquired_target(
         observation: object,
+        *,
+        expected_target: tuple[object, object, object],
+        error_prefix: str,
     ) -> TargetActivationObservation:
         if not isinstance(observation, TargetActivationObservation):
             raise AtomicPostActionBridgeError(
-                "activation observation returned an invalid result"
+                f"{error_prefix} observation returned an invalid result"
             )
         target = observation.activated_target
-        candidate = envelope.candidate
         if (
-            target.hwnd != candidate.hwnd
-            or target.process_id != candidate.process_id
-            or target.process_identity != candidate.process_identity
+            (target.hwnd, target.process_id, target.process_identity)
+            != expected_target
         ):
             raise AtomicPostActionBridgeError(
-                "activation observation does not identify the selected candidate"
+                f"{error_prefix} observation does not identify the selected "
+                "candidate"
             )
         if not observation.exact_foreground:
             raise AtomicPostActionBridgeError(
-                "selected activation target is not exact foreground"
+                f"selected {error_prefix} target is not exact foreground"
             )
         return observation
+
+    def _observe_after_acquisition(
+        self,
+        envelope: _PostActionEnvelope,
+        *,
+        action: str,
+        expected_target: tuple[object, object, object],
+        observe_target: Callable[[], object],
+        error_prefix: str,
+    ) -> tuple[TargetActivationObservation, FrameState, EvidenceRef]:
+        def validate() -> TargetActivationObservation:
+            return self._validate_acquired_target(
+                observe_target(),
+                expected_target=expected_target,
+                error_prefix=error_prefix,
+            )
+
+        before = validate()
+        target = before.activated_target
+        left, top, width, height = target.window_region
+        captured = self._observer.capture(
+            epoch=envelope.frame.epoch,
+            hwnd=target.hwnd,
+            phase="post_action",
+            action=action,
+            provided_region=Region(left, top, width, height),
+            expected_previous_frame_id=envelope.frame.frame_id,
+        )
+        if captured is None:
+            raise AtomicPostActionBridgeError(
+                f"{error_prefix} post-action frame capture failed"
+            )
+        before_commit = validate()
+        if self._acquired_target_key(before_commit) != (
+            self._acquired_target_key(before)
+        ):
+            raise AtomicPostActionBridgeError(
+                f"{error_prefix} target changed during frame capture"
+            )
+        post_frame = self._observer.commit(captured)
+        after_commit = validate()
+        if self._acquired_target_key(after_commit) != (
+            self._acquired_target_key(before_commit)
+        ):
+            raise AtomicPostActionBridgeError(
+                f"{error_prefix} target changed after frame commit"
+            )
+        frame_identity = self._frame_identity(post_frame)
+        if (
+            frame_identity.hwnd != after_commit.activated_target.hwnd
+            or frame_identity.region
+            != after_commit.activated_target.window_region
+            or frame_identity.scope != "target_window"
+        ):
+            raise AtomicPostActionBridgeError(
+                f"{error_prefix} frame does not match the proved target"
+            )
+        evidence = self._register_evidence(envelope, post_frame)
+        return after_commit, post_frame, evidence
 
     def observe_after_activation(
         self,
@@ -302,70 +379,20 @@ class AtomicPostActionBridge:
         if raw_receipt is not None and self._post_input_settle_delay_s > 0.0:
             self._wait(self._post_input_settle_delay_s)
 
-        before = self._validate_activation_observation(
+        candidate = envelope.candidate
+        after_commit, post_frame, evidence = self._observe_after_acquisition(
             envelope,
-            observation_port.observe_activation(envelope),
-        )
-        target = before.activated_target
-        left, top, width, height = target.window_region
-        captured = self._observer.capture(
-            epoch=envelope.frame.epoch,
-            hwnd=target.hwnd,
-            phase="post_action",
             action="activate_target",
-            provided_region=Region(left, top, width, height),
-            expected_previous_frame_id=envelope.frame.frame_id,
+            expected_target=(
+                candidate.hwnd,
+                candidate.process_id,
+                candidate.process_identity,
+            ),
+            observe_target=lambda: observation_port.observe_activation(
+                envelope
+            ),
+            error_prefix="activation",
         )
-        if captured is None:
-            raise AtomicPostActionBridgeError(
-                "activation post-action frame capture failed"
-            )
-        before_commit = self._validate_activation_observation(
-            envelope,
-            observation_port.observe_activation(envelope),
-        )
-        if self._activation_identity_key(before_commit) != (
-            self._activation_identity_key(before)
-        ):
-            raise AtomicPostActionBridgeError(
-                "activation target changed during frame capture"
-            )
-
-        post_frame = self._observer.commit(captured)
-        after_commit = self._validate_activation_observation(
-            envelope,
-            observation_port.observe_activation(envelope),
-        )
-        if self._activation_identity_key(after_commit) != (
-            self._activation_identity_key(before_commit)
-        ):
-            raise AtomicPostActionBridgeError(
-                "activation target changed after frame commit"
-            )
-        frame_identity = self._frame_identity(post_frame)
-        if (
-            frame_identity.hwnd != after_commit.activated_target.hwnd
-            or frame_identity.region
-            != after_commit.activated_target.window_region
-            or frame_identity.scope != "target_window"
-        ):
-            raise AtomicPostActionBridgeError(
-                "activation frame does not match the proved target"
-            )
-        payload_hash = frame_identity_payload_hash(frame_identity)
-        evidence = EvidenceRef(
-            id=self._evidence_id(envelope, payload_hash),
-            mission_id=envelope.mission_id,
-            run_id=envelope.run_id,
-            obligation_id=envelope.obligation_id,
-            kind=POST_ACTION_FRAME_EVIDENCE_KIND,
-            trust="deterministic",
-            payload_hash=payload_hash,
-            frame_id=post_frame.frame_id,
-            action_id=envelope.decision_id,
-            created_at=post_frame.committed_at,
-        )
-        self._evidence.append(evidence)
         return TargetActivationPostAction(
             activated_target=after_commit.activated_target,
             exact_foreground=True,
