@@ -12,13 +12,14 @@ from .target_activation import (
     TargetActivationEnvelope,
     TargetActivationTransition,
 )
+from .target_launch import TargetLaunchEnvelope, TargetLaunchTransition
 
 
 ControllerEnvelope: TypeAlias = (
-    ActorDecisionEnvelope | TargetActivationEnvelope
+    ActorDecisionEnvelope | TargetActivationEnvelope | TargetLaunchEnvelope
 )
 ControllerResult: TypeAlias = (
-    ControllerTransition | TargetActivationTransition
+    ControllerTransition | TargetActivationTransition | TargetLaunchTransition
 )
 
 
