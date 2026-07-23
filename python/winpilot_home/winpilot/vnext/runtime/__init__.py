@@ -1,6 +1,7 @@
 """P4a pure Mission Runtime contracts and injected coordinator."""
 
 from .contracts import *
+from .target_activation import *
 from .ports import (
     ActorPort,
     ControllerPort,

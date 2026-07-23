@@ -1,9 +1,10 @@
 """Run-scoped, single-use admission permits for GUI mutation.
 
 The permit owner is ephemeral execution state, not Mission completion truth.
-Runtime issues one permit for one already-bound Actor envelope.  A Controller
-may consume it exactly once after acquiring the desktop queue and before raw
-input.  Rejection never restores the permit; recovery requires a new decision.
+Runtime issues one permit for one exact Actor mutation or target-activation
+envelope.  A Controller may consume it exactly once after acquiring the
+desktop queue and before raw input.  Rejection never restores the permit;
+recovery requires a new decision.
 """
 from __future__ import annotations
 
@@ -13,8 +14,16 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import threading
+from typing import TypeAlias
 
 from ..actor import ActorDecisionEnvelope
+from ..targeting import TargetCandidate
+from .target_activation import TargetActivationEnvelope
+
+
+MutationEnvelope: TypeAlias = (
+    ActorDecisionEnvelope | TargetActivationEnvelope
+)
 
 
 class MutationPermitError(ValueError):
@@ -46,7 +55,7 @@ class RuntimeMutationPermit:
 @dataclass(frozen=True, slots=True)
 class _PendingPermit:
     permit_id: str
-    envelope: ActorDecisionEnvelope
+    envelope: MutationEnvelope
     envelope_sha256: str
     turn_index: int
     still_current: Callable[[], bool]
@@ -79,18 +88,22 @@ class MutationPermitAuthority:
         self._lock = threading.RLock()
 
     @staticmethod
-    def _fingerprint(envelope: ActorDecisionEnvelope) -> str:
+    def _fingerprint(envelope: MutationEnvelope) -> str:
         return hashlib.sha256(envelope.to_json().encode("utf-8")).hexdigest()
 
     def issue(
         self,
-        envelope: ActorDecisionEnvelope,
+        envelope: MutationEnvelope,
         *,
         turn_index: int,
         still_current: Callable[[], bool],
     ) -> str:
-        if not isinstance(envelope, ActorDecisionEnvelope):
-            raise MutationPermitError("envelope must be ActorDecisionEnvelope")
+        if not isinstance(
+            envelope, (ActorDecisionEnvelope, TargetActivationEnvelope)
+        ):
+            raise MutationPermitError(
+                "envelope must be a supported mutation envelope"
+            )
         if envelope.mission_id != self.mission_id or envelope.run_id != self.run_id:
             raise MutationPermitError("envelope is outside permit mission/run scope")
         if type(turn_index) is not int or turn_index < 0:
@@ -124,14 +137,18 @@ class MutationPermitAuthority:
 
     def _consume(
         self,
-        envelope: ActorDecisionEnvelope,
+        envelope: MutationEnvelope,
         *,
         activate: bool,
     ) -> RuntimeMutationPermit:
         """Retire one pending permit and optionally hold its commit admission."""
 
-        if not isinstance(envelope, ActorDecisionEnvelope):
-            raise MutationPermitError("envelope must be ActorDecisionEnvelope")
+        if not isinstance(
+            envelope, (ActorDecisionEnvelope, TargetActivationEnvelope)
+        ):
+            raise MutationPermitError(
+                "envelope must be a supported mutation envelope"
+            )
         fingerprint = self._fingerprint(envelope)
         with self._lock:
             if self._closed:
@@ -182,13 +199,13 @@ class MutationPermitAuthority:
                 self._active[envelope.decision_id] = pending
         return result
 
-    def consume(self, envelope: ActorDecisionEnvelope) -> RuntimeMutationPermit:
+    def consume(self, envelope: MutationEnvelope) -> RuntimeMutationPermit:
         """Consume once without opening a Controller commit admission."""
 
         return self._consume(envelope, activate=False)
 
     def begin_admission(
-        self, envelope: ActorDecisionEnvelope,
+        self, envelope: MutationEnvelope,
     ) -> RuntimeMutationPermit:
         """Consume once and expose exact authorization until ``finish_admission``.
 
@@ -216,11 +233,42 @@ class MutationPermitAuthority:
             if pending is None:
                 return False
             envelope = pending.envelope
+            if not isinstance(envelope, ActorDecisionEnvelope):
+                return False
             return bool(
                 envelope.decision_id == decision_id
                 and envelope.frame == frame
                 and envelope.target == target
                 and envelope.pointer == pointer
+            )
+
+    def active_activation_admission_matches(
+        self,
+        decision_id: str,
+        *,
+        frame: object,
+        pointer: object,
+        candidate_fingerprint: object,
+        candidate: object,
+    ) -> bool:
+        """Read whether one exact private target activation owns admission."""
+
+        with self._lock:
+            if self._closed:
+                return False
+            pending = self._active.get(str(decision_id))
+            if pending is None:
+                return False
+            envelope = pending.envelope
+            if not isinstance(envelope, TargetActivationEnvelope):
+                return False
+            return bool(
+                envelope.decision_id == decision_id
+                and envelope.frame == frame
+                and envelope.pointer == pointer
+                and envelope.candidate_fingerprint == candidate_fingerprint
+                and isinstance(candidate, TargetCandidate)
+                and envelope.candidate == candidate
             )
 
     def finish_admission(self, decision_id: str) -> bool:
@@ -270,7 +318,7 @@ class MutationPermitAuthority:
 
     @staticmethod
     def _result(
-        envelope: ActorDecisionEnvelope,
+        envelope: MutationEnvelope,
         fingerprint: str,
         pending: _PendingPermit | None,
         reason: MutationPermitReason,
@@ -286,6 +334,7 @@ class MutationPermitAuthority:
 
 
 __all__ = [
+    "MutationEnvelope",
     "MutationPermitAuthority",
     "MutationPermitError",
     "MutationPermitReason",
