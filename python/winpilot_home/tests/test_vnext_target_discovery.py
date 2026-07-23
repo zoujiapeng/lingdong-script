@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import random
 
 import pytest
@@ -56,7 +55,7 @@ def _discovery(*, installed=(), visible=(), running=None):
     )
 
 
-def test_candidate_contract_redacts_runtime_and_launch_identity_from_actor_view():
+def test_candidate_contract_keeps_launch_identity_runtime_private():
     identity = launch_identity_for(
         kind="exe", target=r"C:\Apps\Orbit\orbit.exe",
     )
@@ -72,19 +71,9 @@ def test_candidate_contract_redacts_runtime_and_launch_identity_from_actor_view(
         launch_target=r"C:\Apps\Orbit\orbit.exe",
     )
 
-    view = candidate.actor_view()
-
-    assert view == {
-        "candidate_ref": candidate.candidate_ref,
-        "activation": "open_app",
-        "state": "installed",
-        "label": "Orbit Workspace",
-        "window_title": None,
-        "provenance": ["installed_catalog"],
-    }
-    wire = json.dumps(view)
-    assert "orbit.exe" not in wire.casefold()
-    assert "hwnd" not in wire and "process_id" not in wire
+    assert candidate.label == "Orbit Workspace"
+    assert candidate.launch_target == r"C:\Apps\Orbit\orbit.exe"
+    assert not hasattr(candidate, "actor_view")
 
 
 def test_open_candidate_ref_cannot_be_reused_for_another_launch_target():
@@ -297,17 +286,14 @@ def test_switch_candidate_ref_detects_process_reuse_with_same_hwnd_and_pid():
     assert first.candidate_ref != second.candidate_ref
 
 
-def test_switch_actor_view_omits_all_private_window_and_process_identity():
+def test_private_candidate_has_no_model_projection_method():
     candidate = _discovery(visible=({
         "hwnd": 105, "pid": 46, "title": "Orbit", "visible": True,
     },)).discover("Orbit").candidates[0]
 
-    wire = json.dumps(candidate.actor_view())
-
-    for private_field in (
-        "hwnd", "process_id", "process_identity", "launch_kind", "launch_target",
-    ):
-        assert private_field not in wire
+    assert candidate.hwnd == 105
+    assert candidate.process_id == 46
+    assert not hasattr(candidate, "actor_view")
 
 
 def test_hidden_running_window_is_recoverable_and_suppresses_duplicate_launch():
@@ -520,12 +506,38 @@ def test_random_source_order_does_not_change_actor_projection():
         {"name": "Orbit B", "kind": "appid", "target": "Vendor.Orbit!B"},
         {"name": "Orbit C", "kind": "lnk", "target": r"C:\Start\C.lnk"},
     ]
-    expected = _discovery(installed=installed).discover("Orbit").to_json()
+    def signature(snapshot):
+        return tuple(
+            (item.candidate_ref, item.activation, item.state, item.label)
+            for item in snapshot.candidates
+        )
+
+    expected = signature(_discovery(installed=installed).discover("Orbit"))
     rng = random.Random(8128)
     for _ in range(50):
         shuffled = list(installed)
         rng.shuffle(shuffled)
-        assert _discovery(installed=shuffled).discover("Orbit").to_json() == expected
+        assert signature(_discovery(installed=shuffled).discover("Orbit")) == expected
+
+
+def test_candidate_fingerprint_binds_order_and_visible_semantics() -> None:
+    first = _discovery(installed=(
+        {"name": "Orbit A", "kind": "exe", "target": r"C:\Apps\A.exe"},
+        {"name": "Orbit B", "kind": "exe", "target": r"C:\Apps\B.exe"},
+    )).discover("Orbit")
+    replay = TargetDiscoverySnapshot(
+        query="different query",
+        candidates=first.candidates,
+        captured_at=999,
+    )
+    reordered = TargetDiscoverySnapshot(
+        query="Orbit",
+        candidates=tuple(reversed(first.candidates)),
+        captured_at=1,
+    )
+
+    assert replay.candidate_fingerprint == first.candidate_fingerprint
+    assert reordered.candidate_fingerprint != first.candidate_fingerprint
 
 
 def test_source_failure_is_explicit_and_does_not_fabricate_empty_success():
@@ -545,7 +557,7 @@ def test_source_failure_is_explicit_and_does_not_fabricate_empty_success():
     )
 
 
-def test_snapshot_lookup_is_fail_closed_and_not_a_replay_ledger():
+def test_snapshot_is_private_data_and_not_a_selection_or_replay_ledger():
     candidate = _discovery(installed=({
         "name": "Orbit", "kind": "exe", "target": r"C:\Orbit.exe",
     },)).discover("Orbit").candidates[0]
@@ -553,11 +565,10 @@ def test_snapshot_lookup_is_fail_closed_and_not_a_replay_ledger():
         query="Orbit", candidates=(candidate,), captured_at=1,
     )
 
-    assert snapshot.candidate(candidate.candidate_ref) == candidate
-    with pytest.raises(TargetContractError):
-        snapshot.candidate("target-000000000000000000000000")
-
-    assert "captured_at" not in snapshot.actor_view()
+    assert snapshot.candidates == (candidate,)
+    assert not hasattr(snapshot, "candidate")
+    assert not hasattr(snapshot, "actor_view")
+    assert not hasattr(snapshot, "to_json")
 
 
 @pytest.mark.parametrize("query", ["", "   ", "x" * 257])

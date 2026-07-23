@@ -1,14 +1,14 @@
 """Strict, immutable contracts for read-only desktop target discovery."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
 import math
 import os
 import re
-from typing import Any, Iterable
+from typing import Iterable
 
 from ...process_identity import (
     ProcessIdentityError,
@@ -24,6 +24,8 @@ _TOKEN = re.compile(r"[a-z][a-z0-9_]{0,63}")
 MAX_TARGET_CANDIDATES = 16
 MAX_TARGET_QUERY_CHARS = 256
 MAX_TARGET_TEXT_CHARS = 512
+ACTIVATE_TARGET_TOOL_NAME = "activate_target"
+_CANDIDATE_FINGERPRINT = re.compile(r"target-candidates-[0-9a-f]{64}")
 
 
 class TargetContractError(ValueError):
@@ -39,6 +41,23 @@ class TargetState(str, Enum):
     VISIBLE = "visible"
     RECOVERABLE = "recoverable"
     INSTALLED = "installed"
+
+
+def activate_target_tool_schema() -> dict[str, object]:
+    """Canonical Actor schema for choosing one current private candidate."""
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "candidate_ordinal": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_TARGET_CANDIDATES,
+            },
+        },
+        "required": ["candidate_ordinal"],
+    }
 
 
 def _text(value: object, name: str, *, maximum: int = MAX_TARGET_TEXT_CHARS) -> str:
@@ -187,18 +206,40 @@ class TargetCandidate:
             object.__setattr__(self, "launch_kind", kind)
             object.__setattr__(self, "launch_target", target)
 
-    def actor_view(self) -> dict[str, Any]:
-        """Return only semantic selection facts, never HWND/PID/path/AppID."""
 
-        return {
-            "candidate_ref": self.candidate_ref,
-            "activation": self.activation.value,
-            "state": self.state.value,
-            "label": self.label,
-            "window_title": self.window_title or None,
-            "provenance": list(self.provenance),
+def candidate_fingerprint_for(candidates: tuple[TargetCandidate, ...]) -> str:
+    """Hash the exact ordered private mapping and its model-visible semantics."""
+
+    if (
+        not isinstance(candidates, tuple)
+        or len(candidates) > MAX_TARGET_CANDIDATES
+        or any(not isinstance(item, TargetCandidate) for item in candidates)
+    ):
+        raise TargetContractError("candidate fingerprint requires a bounded tuple")
+    material = [
+        {
+            "candidate_ref": item.candidate_ref,
+            "activation": item.activation.value,
+            "state": item.state.value,
+            "label": item.label,
+            "window_title": item.window_title,
         }
+        for item in candidates
+    ]
+    encoded = json.dumps(
+        material,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "target-candidates-" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
+
+def canonical_candidate_fingerprint(value: object) -> str:
+    if type(value) is not str or not _CANDIDATE_FINGERPRINT.fullmatch(value):
+        raise TargetContractError("candidate fingerprint is invalid")
+    return value
 
 @dataclass(frozen=True, slots=True)
 class TargetDiscoverySnapshot:
@@ -207,6 +248,7 @@ class TargetDiscoverySnapshot:
     captured_at: float
     notices: tuple[str, ...] = ()
     format: str = TARGET_DISCOVERY_FORMAT
+    candidate_fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
         if self.format != TARGET_DISCOVERY_FORMAT:
@@ -240,37 +282,17 @@ class TargetDiscoverySnapshot:
         object.__setattr__(self, "query", query)
         object.__setattr__(self, "captured_at", float(self.captured_at))
         object.__setattr__(self, "notices", notices)
-
-    def candidate(self, candidate_ref: str) -> TargetCandidate:
-        matches = tuple(
-            item for item in self.candidates if item.candidate_ref == candidate_ref
+        fingerprint = candidate_fingerprint_for(self.candidates)
+        object.__setattr__(
+            self, "candidate_fingerprint", canonical_candidate_fingerprint(fingerprint),
         )
-        if len(matches) != 1:
-            raise TargetContractError("candidate_ref is absent or ambiguous")
-        return matches[0]
-
-    def actor_view(self) -> dict[str, Any]:
-        return {
-            "format": self.format,
-            "query": self.query,
-            "candidates": [item.actor_view() for item in self.candidates],
-            "notices": list(self.notices),
-        }
-
-    def to_json(self) -> str:
-        return json.dumps(
-            self.actor_view(),
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
 
 __all__ = [
-    "MAX_TARGET_CANDIDATES", "MAX_TARGET_QUERY_CHARS",
+    "ACTIVATE_TARGET_TOOL_NAME", "MAX_TARGET_CANDIDATES", "MAX_TARGET_QUERY_CHARS",
     "TARGET_CANDIDATE_FORMAT", "TARGET_DISCOVERY_FORMAT",
     "TargetActivation", "TargetCandidate", "TargetContractError",
-    "TargetDiscoverySnapshot", "TargetState", "candidate_ref_for",
+    "TargetDiscoverySnapshot", "TargetState", "activate_target_tool_schema",
+    "candidate_fingerprint_for", "canonical_candidate_fingerprint",
+    "candidate_ref_for",
     "launch_identity_for", "process_identity_for",
 ]

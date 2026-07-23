@@ -1,6 +1,7 @@
 """Read-only vNext desktop target discovery contracts."""
 
 from .contracts import (
+    ACTIVATE_TARGET_TOOL_NAME,
     MAX_TARGET_CANDIDATES,
     MAX_TARGET_QUERY_CHARS,
     TARGET_CANDIDATE_FORMAT,
@@ -10,11 +11,20 @@ from .contracts import (
     TargetContractError,
     TargetDiscoverySnapshot,
     TargetState,
+    activate_target_tool_schema,
+    candidate_fingerprint_for,
+    canonical_candidate_fingerprint,
     candidate_ref_for,
     launch_identity_for,
     process_identity_for,
 )
 from .discovery import TargetDiscovery
+from .lease import (
+    TargetChoiceFact,
+    TargetSelectionLease,
+    TargetSelectionLeaseError,
+    TargetSelectionScope,
+)
 from .windows_facts import (
     ProcessTargetFact,
     PsutilWin32TargetFactsBackend,
@@ -27,13 +37,17 @@ from .windows_facts import (
 )
 
 __all__ = [
-    "MAX_TARGET_CANDIDATES", "MAX_TARGET_QUERY_CHARS",
+    "ACTIVATE_TARGET_TOOL_NAME", "MAX_TARGET_CANDIDATES", "MAX_TARGET_QUERY_CHARS",
     "TARGET_CANDIDATE_FORMAT", "TARGET_DISCOVERY_FORMAT",
     "TargetActivation", "TargetCandidate", "TargetContractError",
     "TargetDiscovery", "TargetDiscoverySnapshot", "TargetState",
+    "TargetChoiceFact", "TargetSelectionLease", "TargetSelectionLeaseError",
+    "TargetSelectionScope",
     "ProcessTargetFact", "PsutilWin32TargetFactsBackend", "WindowTargetFact",
     "WindowsTargetFactsAdapter", "WindowsTargetFactsBackend",
     "WindowsTargetFactsError", "WindowsTargetFactsReader",
     "WindowsTargetFactsSnapshot",
-    "candidate_ref_for", "launch_identity_for", "process_identity_for",
+    "activate_target_tool_schema", "candidate_fingerprint_for",
+    "canonical_candidate_fingerprint", "candidate_ref_for",
+    "launch_identity_for", "process_identity_for",
 ]
