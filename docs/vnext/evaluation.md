@@ -331,8 +331,9 @@ P4b.2 target acquisition 必须单独通过同入口、独立 oracle，至少覆
 - 最终 accepted TargetBinding 的 root HWND、process identity、acquisition action 与唯一 evidence 可从
   Mission events + registry 完整 replay。
 
-当前只有纯 discovery、Windows facts 和 strict TargetBinding 合同测试；没有 targetless live activation
-和上述 Electron oracle，因此这些条目均不得记为 pass。
+当前已有纯 discovery、Windows facts、strict TargetBinding，以及 targetless Runtime/Broker
+full-desktop scope 与 candidate summary 的注入式合同测试；live coordinator 仍未 dispatch discovery，
+也没有 targetless activation 和上述 Electron oracle，因此这些条目均不得记为 pass。
 
 ### 5.5 Broker
 

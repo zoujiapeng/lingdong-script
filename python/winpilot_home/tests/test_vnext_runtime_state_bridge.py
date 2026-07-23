@@ -13,6 +13,7 @@ from winpilot.utils.screenshot import Region
 from winpilot.vnext.actor import ActorDecisionEnvelope, ImageRegion, parse_actor_proposal
 from winpilot.vnext.bridge.runtime_state import (
     CURRENT_FRAME_EVIDENCE_KIND,
+    DesktopObservationIdentity,
     RuntimeReadState,
     RuntimeStateBridge,
     RuntimeStateBridgeError,
@@ -56,7 +57,12 @@ class _TargetReader:
         with self._lock:
             self._target = target
 
-    def read(self) -> TargetCommitIdentity | None:
+    def read(
+        self,
+        _hwnd: int,
+        _binding_id: str,
+        _epoch: int,
+    ) -> TargetCommitIdentity | None:
         with self._lock:
             return self._target
 
@@ -238,9 +244,12 @@ def _bridge(
         frame_authority=resolved_authority,
         observer=observer,
         evidence=resolved_registry,
-        target=resolved_target,
         mutation_permits=permits,
         read_target_identity=resolved_reader.read,
+        read_desktop_identity=lambda: DesktopObservationIdentity(
+            hwnd=1,
+            region=Region(0, 0, 1920, 1080),
+        ),
         read_runtime_state=runtime_state or (lambda: _read_state()),
         frame_max_age_s=frame_max_age_s,
         clock=clock,
@@ -396,7 +405,11 @@ def test_live_target_drift_fails_closed_and_never_switches_target(changed) -> No
     with pytest.raises(RuntimeStateBridgeError, match="changed"):
         bridge.observe(projection, turn_index=0)
 
-    assert observer.capture_calls == observer.commit_calls == 0
+    if "window_region" in changed:
+        assert observer.capture_calls == 1
+        assert observer.commit_calls == 0
+    else:
+        assert observer.capture_calls == observer.commit_calls == 0
     assert len(registry) == 0
     reader.set(target)
     assert bridge.observe(projection, turn_index=1).target is target
@@ -417,26 +430,28 @@ def test_projection_target_mismatch_fails_before_capture(binding_change) -> None
     changed_target = _target(**binding_change)
     bridge, observer, _permits, registry, _reader = _bridge(target=target)
 
-    with pytest.raises(RuntimeStateBridgeError, match="accepted Mission target"):
+    with pytest.raises(RuntimeStateBridgeError, match="target .*changed"):
         bridge.observe(_projection(changed_target), turn_index=0)
 
     assert observer.capture_calls == observer.commit_calls == 0
     assert len(registry) == 0
 
 
-def test_missing_target_and_wrong_mission_scope_fail_closed() -> None:
+def test_targetless_current_and_wrong_mission_scope_are_distinct() -> None:
     target = _target()
     bridge, observer, _permits, registry, _reader = _bridge(target=target)
 
-    with pytest.raises(RuntimeStateBridgeError, match="target is unavailable"):
-        bridge.current(_projection(None), turn_index=0)
+    snapshot = bridge.observe(_projection(None), turn_index=0)
+    assert snapshot.target is None
+    assert snapshot.frame is not None
+    assert snapshot.frame.scope == "full_desktop"
     with pytest.raises(RuntimeStateBridgeError, match="mission/run"):
         bridge.current(
             _projection(target, mission_id="mission-other", run_id="run-other"),
             turn_index=0,
         )
-    assert observer.capture_calls == observer.commit_calls == 0
-    assert len(registry) == 0
+    assert observer.capture_calls == observer.commit_calls == 1
+    assert len(registry) == 1
 
 
 def test_target_change_during_capture_does_not_commit_or_write_evidence() -> None:
@@ -597,9 +612,12 @@ def test_randomized_frame_geometry_replays_deterministically() -> None:
             frame_authority=authority,
             observer=observer,
             evidence=registry,
-            target=target,
             mutation_permits=MutationPermitAuthority("mission-1", "run-1"),
             read_target_identity=reader.read,
+            read_desktop_identity=lambda: DesktopObservationIdentity(
+                hwnd=1,
+                region=Region(0, 0, 1920, 1080),
+            ),
             read_runtime_state=lambda: _read_state(),
             frame_max_age_s=30.0,
             clock=lambda: 123.0,
@@ -727,9 +745,12 @@ def test_constructor_rejects_duplicate_owners_and_scope_mismatch() -> None:
             frame_authority=second,
             observer=observer,
             evidence=registry,
-            target=target,
             mutation_permits=MutationPermitAuthority("mission-1", "run-1"),
-            read_target_identity=lambda: target,
+            read_target_identity=lambda *_args: target,
+            read_desktop_identity=lambda: DesktopObservationIdentity(
+                hwnd=1,
+                region=Region(0, 0, 1920, 1080),
+            ),
             read_runtime_state=lambda: _read_state(),
             frame_max_age_s=30.0,
             clock=lambda: 123.0,
@@ -739,9 +760,12 @@ def test_constructor_rejects_duplicate_owners_and_scope_mismatch() -> None:
             frame_authority=first,
             observer=observer,
             evidence=registry,
-            target=target,
             mutation_permits=permits,
-            read_target_identity=lambda: target,
+            read_target_identity=lambda *_args: target,
+            read_desktop_identity=lambda: DesktopObservationIdentity(
+                hwnd=1,
+                region=Region(0, 0, 1920, 1080),
+            ),
             read_runtime_state=lambda: _read_state(),
             frame_max_age_s=30.0,
             clock=lambda: 123.0,

@@ -24,6 +24,7 @@ from ...visual_runtime.commit_admission import (
 )
 from ...visual_runtime.frame_observer import FrameObserver
 from ...visual_runtime.windows_desktop_facts import RuntimeCommitState
+from ...utils.screenshot import Region
 from ..actor import ImageRegion
 from ..capabilities import (
     ArtifactState,
@@ -49,6 +50,35 @@ from ..runtime.mutation_permits import MutationPermitAuthority
 
 class RuntimeStateBridgeError(RuntimeError):
     """A canonical identity or read-only runtime fact could not be proved."""
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopObservationIdentity:
+    """Exact non-semantic desktop surface used for targetless observation."""
+
+    hwnd: int
+    region: Region
+    epoch: int = 0
+
+    def __post_init__(self) -> None:
+        if type(self.hwnd) is not int or self.hwnd <= 0:
+            raise TypeError("desktop hwnd must be a positive integer")
+        if not isinstance(self.region, Region):
+            raise TypeError("desktop region must be Region")
+        if any(
+            type(value) is not int
+            for value in (
+                self.region.left,
+                self.region.top,
+                self.region.width,
+                self.region.height,
+            )
+        ):
+            raise TypeError("desktop region coordinates must be integers")
+        if self.region.width <= 0 or self.region.height <= 0:
+            raise TypeError("desktop region must have positive dimensions")
+        if type(self.epoch) is not int or self.epoch != 0:
+            raise TypeError("targetless desktop epoch must be zero")
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,10 +143,10 @@ class RuntimeReadState:
 class RuntimeStateBridge:
     """Implement RuntimeStatePort and RuntimeCommitStatePort without ownership.
 
-    ``target`` is the immutable target accepted for this run.  The injected
-    ``read_target_identity`` must re-read the current exact HWND/root/PID/
-    epoch/geometry identity; a mismatch rejects the operation and never
-    replaces ``target``.
+    The accepted Mission projection is the only target-binding owner.  The
+    injected readers re-read either that exact window/process identity or the
+    exact full-desktop surface; a mismatch rejects the operation and never
+    creates a replacement binding.
     """
 
     def __init__(
@@ -125,9 +155,11 @@ class RuntimeStateBridge:
         frame_authority: FrameAuthority,
         observer: FrameObserver,
         evidence: EvidenceRegistry,
-        target: TargetCommitIdentity,
         mutation_permits: MutationPermitAuthority,
-        read_target_identity: Callable[[], TargetCommitIdentity | None],
+        read_target_identity: Callable[
+            [int, str, int], TargetCommitIdentity | None
+        ],
+        read_desktop_identity: Callable[[], DesktopObservationIdentity],
         read_runtime_state: Callable[[], RuntimeReadState],
         frame_max_age_s: float,
         clock: Callable[[], float] = time.time,
@@ -140,8 +172,6 @@ class RuntimeStateBridge:
             raise TypeError("observer and bridge must share one FrameAuthority")
         if not isinstance(evidence, EvidenceRegistry):
             raise TypeError("evidence must be EvidenceRegistry")
-        if not isinstance(target, TargetCommitIdentity):
-            raise TypeError("target must be TargetCommitIdentity")
         if not isinstance(mutation_permits, MutationPermitAuthority):
             raise TypeError("mutation_permits must be MutationPermitAuthority")
         if (
@@ -153,6 +183,8 @@ class RuntimeStateBridge:
             )
         if not callable(read_target_identity):
             raise TypeError("read_target_identity must be callable")
+        if not callable(read_desktop_identity):
+            raise TypeError("read_desktop_identity must be callable")
         if not callable(read_runtime_state):
             raise TypeError("read_runtime_state must be callable")
         if (
@@ -166,9 +198,9 @@ class RuntimeStateBridge:
         self._frames = frame_authority
         self._observer = observer
         self._evidence = evidence
-        self._target = target
         self._permits = mutation_permits
         self._read_target_identity = read_target_identity
+        self._read_desktop_identity = read_desktop_identity
         self._read_runtime_state = read_runtime_state
         self._frame_max_age_s = float(frame_max_age_s)
         self._clock = clock
@@ -194,7 +226,10 @@ class RuntimeStateBridge:
             )
         return state
 
-    def _validate_projection(self, projection: MissionProjection) -> TargetBinding:
+    def _validate_projection(
+        self,
+        projection: MissionProjection,
+    ) -> TargetBinding | None:
         if not isinstance(projection, MissionProjection):
             raise TypeError("projection must be MissionProjection")
         if (
@@ -205,41 +240,74 @@ class RuntimeStateBridge:
                 "Mission projection is outside bridge mission/run scope"
             )
         binding = projection.target_binding
-        if binding is None:
-            raise RuntimeStateBridgeError("accepted Mission target is unavailable")
-        target = self._target
-        if (
-            binding.binding_id != target.binding_id
-            or binding.hwnd != target.hwnd
-            or binding.root_hwnd != target.root_hwnd
-            or binding.process_id != target.process_id
-            or binding.process_identity != target.process_identity
-            or binding.epoch != target.epoch
-        ):
-            raise RuntimeStateBridgeError(
-                "accepted Mission target does not match the frozen Runtime target"
-            )
         return binding
 
-    def _current_target(self) -> TargetCommitIdentity:
+    def _current_target(self, binding: TargetBinding) -> TargetCommitIdentity:
         try:
-            current = self._read_target_identity()
+            current = self._read_target_identity(
+                binding.hwnd,
+                binding.binding_id,
+                binding.epoch,
+            )
         except Exception as exc:
             raise RuntimeStateBridgeError(
                 "current target identity is unavailable"
             ) from exc
         if not isinstance(current, TargetCommitIdentity):
             raise RuntimeStateBridgeError("current target identity is unavailable")
-        if current != self._target:
+        if (
+            current.binding_id != binding.binding_id
+            or current.hwnd != binding.hwnd
+            or current.root_hwnd != binding.root_hwnd
+            or current.process_id != binding.process_id
+            or current.process_identity != binding.process_identity
+            or current.epoch != binding.epoch
+        ):
             raise RuntimeStateBridgeError(
                 "target HWND, root, process identity, epoch, or geometry changed"
             )
-        return self._target
+        return current
 
-    def _validate_frame(self, state: FrameState, target: TargetCommitIdentity) -> None:
+    def _desktop_identity(self) -> DesktopObservationIdentity:
+        try:
+            current = self._read_desktop_identity()
+        except Exception as exc:
+            raise RuntimeStateBridgeError(
+                "current desktop identity is unavailable"
+            ) from exc
+        if not isinstance(current, DesktopObservationIdentity):
+            raise RuntimeStateBridgeError(
+                "current desktop identity is unavailable"
+            )
+        return current
+
+    def _validate_frame(
+        self,
+        state: FrameState,
+        *,
+        target: TargetCommitIdentity | None,
+        desktop: DesktopObservationIdentity | None = None,
+    ) -> None:
+        if target is None:
+            current = desktop or self._desktop_identity()
+            if (
+                state.hwnd != current.hwnd
+                or state.epoch != current.epoch
+                or state.scope != "full_desktop"
+                or state.region != (
+                    current.region.left,
+                    current.region.top,
+                    current.region.width,
+                    current.region.height,
+                )
+            ):
+                raise RuntimeStateBridgeError(
+                    "authoritative frame does not match the current full desktop"
+                )
+            return
         if state.hwnd != target.hwnd or state.epoch != target.epoch:
             raise RuntimeStateBridgeError(
-                "authoritative frame does not belong to the frozen target epoch"
+                "authoritative frame does not belong to the accepted target epoch"
             )
         if state.scope == "target_window" and state.region != target.window_region:
             raise RuntimeStateBridgeError(
@@ -336,12 +404,17 @@ class RuntimeStateBridge:
             raise RuntimeStateBridgeError(
                 "turn_index must be a non-negative integer"
             )
-        self._validate_projection(projection)
-        target = self._current_target()
+        binding = self._validate_projection(projection)
+        target = self._current_target(binding) if binding is not None else None
+        desktop = self._desktop_identity() if target is None else None
         read_state = self._runtime_state()
         runtime_frame = None
         if frame_state is not None:
-            self._validate_frame(frame_state, target)
+            self._validate_frame(
+                frame_state,
+                target=target,
+                desktop=desktop,
+            )
             identity = self._frame_identity(frame_state)
             runtime_frame = RuntimeFrame(
                 frame_id=frame_state.frame_id,
@@ -358,15 +431,19 @@ class RuntimeStateBridge:
             broker_state=BrokerRuntimeState(
                 turn_index=turn_index,
                 available_capabilities=read_state.available_capabilities,
-                target=TargetState(
-                    binding_id=target.binding_id,
-                    hwnd=target.hwnd,
-                    epoch=target.epoch,
-                    live=True,
+                target=(
+                    TargetState(
+                        binding_id=target.binding_id,
+                        hwnd=target.hwnd,
+                        epoch=target.epoch,
+                        live=True,
+                    )
+                    if target is not None
+                    else TargetState()
                 ),
                 frame=(
                     runtime_frame.broker_frame(fresh=frame_state.is_fresh_for(
-                        epoch=target.epoch,
+                        epoch=(target.epoch if target is not None else 0),
                         max_age_s=self._frame_max_age_s,
                         now=self._clock(),
                     ))
@@ -397,39 +474,78 @@ class RuntimeStateBridge:
                 "image_region observation is not implemented by this bridge"
             )
         with self._observe_lock:
-            self._validate_projection(projection)
-            target = self._current_target()
+            binding = self._validate_projection(projection)
+            target = self._current_target(binding) if binding is not None else None
+            desktop = self._desktop_identity() if target is None else None
             previous = self._frames.current
             previous_id = previous.frame_id if previous is not None else 0
             captured = self._observer.capture(
-                epoch=target.epoch,
-                hwnd=target.hwnd,
+                epoch=(target.epoch if target is not None else desktop.epoch),
+                hwnd=(target.hwnd if target is not None else desktop.hwnd),
                 phase="runtime_observe",
                 action="observe",
+                provided_region=(None if target is not None else desktop.region),
                 expected_previous_frame_id=previous_id,
             )
             if captured is None:
                 raise RuntimeStateBridgeError("authoritative frame capture failed")
-            if captured.hwnd != target.hwnd or captured.epoch != target.epoch:
-                raise RuntimeStateBridgeError(
-                    "captured frame does not belong to the frozen target epoch"
-                )
             capture_region = (
                 captured.region.left,
                 captured.region.top,
                 captured.region.width,
                 captured.region.height,
             )
-            if captured.scope == "target_window" and capture_region != target.window_region:
-                raise RuntimeStateBridgeError("captured target geometry changed")
-            self._current_target()
+            if target is not None:
+                if captured.hwnd != target.hwnd or captured.epoch != target.epoch:
+                    raise RuntimeStateBridgeError(
+                        "captured frame does not belong to the accepted target epoch"
+                    )
+                if (
+                    captured.scope == "target_window"
+                    and capture_region != target.window_region
+                ):
+                    raise RuntimeStateBridgeError("captured target geometry changed")
+                assert binding is not None
+                if self._current_target(binding) != target:
+                    raise RuntimeStateBridgeError(
+                        "target geometry changed during frame capture"
+                    )
+            else:
+                assert desktop is not None
+                if (
+                    captured.hwnd != desktop.hwnd
+                    or captured.epoch != desktop.epoch
+                    or captured.scope != "full_desktop"
+                    or capture_region != (
+                        desktop.region.left,
+                        desktop.region.top,
+                        desktop.region.width,
+                        desktop.region.height,
+                    )
+                ):
+                    raise RuntimeStateBridgeError(
+                        "captured frame does not match the current full desktop"
+                    )
+                if self._desktop_identity() != desktop:
+                    raise RuntimeStateBridgeError(
+                        "desktop identity changed during frame capture"
+                    )
             try:
                 committed = self._observer.commit(captured)
             except Exception as exc:
                 raise RuntimeStateBridgeError(
                     "authoritative frame changed before CAS commit"
                 ) from exc
-            self._current_target()
+            if target is not None:
+                assert binding is not None
+                if self._current_target(binding) != target:
+                    raise RuntimeStateBridgeError(
+                        "target geometry changed during frame commit"
+                    )
+            elif self._desktop_identity() != desktop:
+                raise RuntimeStateBridgeError(
+                    "desktop identity changed during frame commit"
+                )
             self._register_current_frame(projection, committed)
             return self._snapshot(
                 projection,
@@ -472,11 +588,16 @@ class RuntimeStateBridge:
             raise TypeError("request must be CommitAdmissionRequest")
         state = self._runtime_state()
         try:
-            target_current = (
-                request.target == self._target
-                and self._current_target() == self._target
+            current = self._read_target_identity(
+                request.target.hwnd,
+                request.target.binding_id,
+                request.target.epoch,
             )
-        except RuntimeStateBridgeError:
+            target_current = (
+                isinstance(current, TargetCommitIdentity)
+                and current == request.target
+            )
+        except Exception:
             target_current = False
         return RuntimeCommitState(
             pointer_released=state.pointer_released,
@@ -491,6 +612,7 @@ class RuntimeStateBridge:
 __all__ = [
     "CURRENT_FRAME_EVIDENCE_FORMAT",
     "CURRENT_FRAME_EVIDENCE_KIND",
+    "DesktopObservationIdentity",
     "RuntimeReadState",
     "RuntimeStateBridge",
     "RuntimeStateBridgeError",

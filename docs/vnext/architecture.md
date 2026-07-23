@@ -286,7 +286,10 @@ P4b.2 当前完成 target acquisition 的只读事实基础和 ordinal/one-shot 
 只接受由 Runtime action 与 deterministic evidence 共同证明的 strict `TargetBinding`。这些 owner 均不
 选择候选、不聚焦窗口、不启动应用。`actor-turn-input/4` 已成为唯一 target choice 模型边界，只投影连续
 序号、语义名称、可见标题和状态；`TargetSelectionLease` 在 Runtime 私有 sidecar 中冻结原候选映射并
-保证一次性消费。live Actor/Broker 尚未接入 targetless 输入；下一切片仍需解析并重新验证候选，再通过
+保证一次性消费。`RuntimeStateBridge` 现已能在没有 accepted target 时，复用同一个 `FrameObserver` 和
+`FrameAuthority` 捕获经 desktop HWND、epoch 与 virtual region 前后核对的权威全桌面帧；Broker 严格
+保留 frame scope 以及 Runtime-private candidate fingerprint/count，但 live coordinator 仍要求 foreground
+handoff，尚未把 targetless 输入交给 Actor。下一切片仍需接通只读 discovery、解析并重新验证候选，再通过
 同一个 Controller/ActionQueue 执行精确 `switch/open`。
 在 existing-instance reuse 与 cold-launch 的同入口 oracle 闭合前，上面的未绑定工具面仍是目标设计，
 不是当前产品能力。
