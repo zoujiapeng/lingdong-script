@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from pathlib import Path
 import threading
@@ -179,7 +180,9 @@ class FixedTargetDiscovery:
     def __init__(self, query, candidate) -> None:
         self.calls = []
         self.snapshot = TargetDiscoverySnapshot(
-            query=query, candidates=(candidate,), captured_at=10.0,
+            query=query,
+            candidates=() if candidate is None else (candidate,),
+            captured_at=10.0,
         )
 
     def discover(self, query, *, stop_event=None):
@@ -996,6 +999,22 @@ def test_targetless_existing_window_runs_discover_activate_and_proved_bind(
     ) == (candidate.hwnd, candidate.process_id, candidate.process_identity)
     assert launch_calls == []
     _assert_one_proved_target_turn(trace, registries)
+    turns = [
+        record for _run_id, record in trace.records
+        if record.get("type") == "vnext_mission_runtime_turn"
+    ]
+    query_sha256 = hashlib.sha256(b"Surface").hexdigest()
+    assert turns[0]["actor_input_target_choice_count"] == 0
+    assert turns[0]["actor_input_had_discovery_feedback"] is False
+    assert turns[0]["proposal_discovery_query_sha256"] == query_sha256
+    assert turns[0]["proposal_discovery_query_chars"] == len("Surface")
+    assert "activate_target" not in turns[0]["actor_input_tool_names"]
+    assert turns[1]["actor_input_target_choice_count"] == 1
+    assert turns[1]["actor_input_had_discovery_feedback"] is False
+    assert turns[1]["actor_input_feedback_query_sha256"] is None
+    assert "activate_target" in turns[1]["actor_input_tool_names"]
+    assert turns[2]["actor_input_target_choice_count"] == 0
+    assert "discover_target" not in turns[2]["actor_input_tool_names"]
     _assert_final_bound_observation(
         observations,
         identity=(
@@ -1004,6 +1023,35 @@ def test_targetless_existing_window_runs_discover_activate_and_proved_bind(
         ),
         region=backend.region,
     )
+
+
+def test_empty_target_discovery_trace_is_bounded_and_query_redacted() -> None:
+    query = "Surface private query"
+    trace = Trace()
+    result = _coordinator(
+        ScriptedActor([_discover_target(query), _blocked()]),
+        PositiveVisualModel(),
+        desktop_identity_reader=lambda: DesktopObservationIdentity(
+            hwnd=1,
+            region=Region(10, 20, 800, 600),
+        ),
+        target_discovery=FixedTargetDiscovery(query, None),
+        trace=trace,
+    ).run(_targetless_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    turns = [
+        record for _run_id, record in trace.records
+        if record.get("type") == "vnext_mission_runtime_turn"
+    ]
+    query_sha256 = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    assert turns[0]["proposal_discovery_query_sha256"] == query_sha256
+    assert turns[0]["proposal_discovery_query_chars"] == len(query)
+    assert turns[1]["actor_input_target_choice_count"] == 0
+    assert turns[1]["actor_input_had_discovery_feedback"] is True
+    assert turns[1]["actor_input_feedback_query_sha256"] == query_sha256
+    assert "activate_target" not in turns[1]["actor_input_tool_names"]
+    assert query not in json.dumps(turns, ensure_ascii=False)
 
 
 def test_targetless_binding_acceptance_is_one_private_serializable_trace_event(
