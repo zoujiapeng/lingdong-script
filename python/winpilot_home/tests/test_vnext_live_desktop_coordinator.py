@@ -1006,6 +1006,127 @@ def test_targetless_existing_window_runs_discover_activate_and_proved_bind(
     )
 
 
+def test_targetless_binding_acceptance_is_one_private_serializable_trace_event(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from winpilot.recorder import trace as trace_module
+    from winpilot.utils.log import BUS
+
+    monkeypatch.setattr(trace_module, "TRACES_DIR", tmp_path)
+    backend = Backend()
+    backend.region = (30, 40, 800, 600)
+    candidate = _activation_envelope().candidate
+    discovery = FixedTargetDiscovery("Surface", candidate)
+    recorder = trace_module.TraceRecorder()
+    product_events = None
+
+    def raw_activate(context, *, final_guard):
+        decision = final_guard()
+        if decision is FinalTargetActivationGuardDecision.ADMITTED:
+            backend.foreground = candidate.hwnd
+        return RawBackendResult(
+            decision is FinalTargetActivationGuardDecision.ADMITTED,
+            {"final_guard": decision.value},
+        )
+
+    try:
+        recorder.start("arp-run-1")
+        product_events = BUS.subscribe()
+        result = _coordinator(
+            ScriptedActor([
+                _discover_target("Surface"),
+                _activate_target(),
+                _claim(),
+            ]),
+            PositiveVisualModel(),
+            facts_backend=backend,
+            desktop_identity_reader=lambda: DesktopObservationIdentity(
+                hwnd=1,
+                region=Region(10, 20, 800, 600),
+            ),
+            target_discovery=discovery,
+            observer_factory=lambda authority: _observer(
+                authority,
+                target_regions={candidate.hwnd: Region(*backend.region)},
+            ),
+            raw_target_activation=raw_activate,
+            trace=recorder,
+        ).run(_targetless_context())
+        recorder.stop()
+        published = []
+        while not product_events.empty():
+            published.append(product_events.get_nowait())
+    finally:
+        if product_events is not None:
+            BUS.unsubscribe(product_events)
+        BUS.remove_sink(recorder._on_event)
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "arp-run-1.jsonl").read_text(
+            encoding="utf-8",
+        ).splitlines()
+        if line.strip()
+    ]
+    accepted = [
+        record for record in records
+        if record.get("type") == "vnext_target_binding_accepted"
+    ]
+    assert len(accepted) == 1
+    binding = accepted[0]
+    assert binding["format"] == "vnext-target-binding-accepted/1"
+    assert binding["runtime_version"] == "vnext"
+    assert binding["mission_id"] == "mission-arp-run-1"
+    assert binding["run_id"] == "arp-run-1"
+    assert binding["obligation_id"]
+    assert binding["binding_id"].startswith("target-")
+    assert (
+        binding["hwnd"],
+        binding["root_hwnd"],
+        binding["process_id"],
+        binding["process_identity"],
+    ) == (
+        candidate.hwnd,
+        backend.roots[candidate.hwnd],
+        candidate.process_id,
+        candidate.process_identity,
+    )
+    assert binding["canonical_identity_sha256"]
+    assert binding["epoch"] == 0
+    assert binding["frame_id"] > 0
+    assert binding["region"] == list(backend.region)
+    assert binding["acquisition_action_id"]
+    assert len(binding["evidence_refs"]) == 1
+    assert binding["evidence_trust"] == [{
+        "evidence_id": binding["evidence_refs"][0],
+        "kind": "authoritative_target_binding",
+        "trust": "deterministic",
+    }]
+    target_turn = next(
+        record for record in records
+        if record.get("type") == "vnext_mission_runtime_turn"
+        and any(
+            event["kind"] == "target_bound"
+            for event in record["accepted_events"]
+        )
+    )
+    assert binding["event_id"] in target_turn["accepted_event_ids"]
+    started = next(
+        record for record in records
+        if record.get("type") == "vnext_mission_runtime_started"
+    )
+    assert started["initial_target_mode"] == "targetless"
+    assert started["initial_target_reason"] == "absent"
+    assert started["run_id"] == "arp-run-1"
+    assert binding == json.loads(json.dumps(binding, ensure_ascii=False))
+    assert all(
+        event.get("type") != "vnext_target_binding_accepted"
+        for event in published
+    )
+
+
 def test_targetless_executable_runs_discover_single_launch_and_proved_bind(
     monkeypatch,
 ) -> None:
@@ -1113,6 +1234,10 @@ def test_targetless_uncertain_launch_never_replays_or_binds(
     assert all(
         ref.kind != "authoritative_target_binding"
         for ref in registries[0].snapshot()
+    )
+    assert all(
+        event["type"] != "vnext_target_binding_accepted"
+        for _run_id, event in trace.records
     )
 
 
