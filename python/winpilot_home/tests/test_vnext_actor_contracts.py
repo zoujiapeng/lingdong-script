@@ -183,6 +183,7 @@ def _frame(**overrides) -> AuthoritativeFrameState:
         "frame_id": 82,
         "hwnd": 9123,
         "epoch": 7,
+        "scope": "target_window",
         "authoritative": True,
         "fresh": True,
     }
@@ -264,6 +265,7 @@ def _target_lease(
     candidates: tuple[TargetCandidate, ...],
     *,
     frame_scope: str = "full_desktop",
+    run_id: str = "run-actor-test",
 ) -> TargetSelectionLease:
     snapshot = TargetDiscoverySnapshot(
         query="Orbit", candidates=candidates, captured_at=1,
@@ -271,7 +273,7 @@ def _target_lease(
     return TargetSelectionLease(
         scope=TargetSelectionScope(
             mission_id="mission-actor-test",
-            run_id="run-actor-test",
+            run_id=run_id,
             mission_revision=4,
             obligation_id="obligation-current",
             turn_index=1,
@@ -295,13 +297,19 @@ def _project_target_turn(
     projection: BrokerProjection | None = None,
     current_scope: TargetSelectionScope | None = None,
 ) -> ActorTurnInput:
+    resolved_projection = projection or replace(
+        _target_projection(),
+        candidate_fingerprint=lease.scope.candidate_fingerprint,
+        candidate_count=len(lease.choice_facts()),
+    )
     return project_actor_turn_input(
         card or replace(_card(), target_binding=None),
-        frame or _frame(hwnd=1, epoch=0),
+        frame or _frame(hwnd=1, epoch=0, scope="full_desktop"),
         catalog or _target_catalog(),
-        projection or _target_projection(),
+        resolved_projection,
         target_selection_lease=lease,
         current_target_selection_scope=current_scope or lease.scope,
+        current_run_id="run-actor-test",
     )
 
 
@@ -721,16 +729,21 @@ def test_target_choices_and_activation_tool_must_be_projected_together() -> None
     with pytest.raises(InvalidActorView, match="projected together"):
         project_actor_turn_input(
             targetless_card,
-            _frame(hwnd=1, epoch=0),
+            _frame(hwnd=1, epoch=0, scope="full_desktop"),
             _target_catalog(),
             _target_projection(),
         )
     with pytest.raises(InvalidActorView, match="projected together"):
+        lease = _target_lease((_target_candidate(),))
         _project_target_turn(
-            _target_lease((_target_candidate(),)),
+            lease,
             card=targetless_card,
             catalog=_catalog(),
-            projection=_projection(target_binding_id=None),
+            projection=_projection(
+                target_binding_id=None,
+                candidate_fingerprint=lease.scope.candidate_fingerprint,
+                candidate_count=1,
+            ),
         )
 
 
@@ -762,7 +775,15 @@ def test_activate_target_requires_canonical_ordinal_schema_and_local_intent(
 @pytest.mark.parametrize(
     "frame,lease",
     (
-        (_frame(frame_id=83, hwnd=1, epoch=0), _target_lease((_target_candidate(),))),
+        (
+            _frame(
+                frame_id=83,
+                hwnd=1,
+                epoch=0,
+                scope="full_desktop",
+            ),
+            _target_lease((_target_candidate(),)),
+        ),
         (
             _frame(hwnd=1, epoch=0),
             _target_lease((_target_candidate(),), frame_scope="target_window"),
@@ -770,7 +791,7 @@ def test_activate_target_requires_canonical_ordinal_schema_and_local_intent(
     ),
 )
 def test_target_choices_require_exact_full_desktop_frame(frame, lease) -> None:
-    with pytest.raises(InvalidActorView, match="exact full-desktop"):
+    with pytest.raises(InvalidActorView, match="full-desktop"):
         _project_target_turn(lease, frame=frame)
 
 
@@ -804,11 +825,39 @@ def test_target_selection_lease_requires_independent_current_scope() -> None:
     with pytest.raises(InvalidActorView, match="projected together"):
         project_actor_turn_input(
             replace(_card(), target_binding=None),
-            _frame(hwnd=1, epoch=0),
+            _frame(hwnd=1, epoch=0, scope="full_desktop"),
             _target_catalog(),
             _target_projection(),
             target_selection_lease=lease,
+            current_run_id="run-actor-test",
         )
+
+
+def test_target_selection_lease_rejects_wrong_run_on_both_scope_inputs() -> None:
+    lease = _target_lease((_target_candidate(),), run_id="another-run")
+    with pytest.raises(InvalidActorView, match="current turn"):
+        _project_target_turn(lease, current_scope=lease.scope)
+
+
+@pytest.mark.parametrize(
+    "projection_change",
+    (
+        {"candidate_fingerprint": "target-candidates-" + "a" * 64},
+        {"candidate_count": 2},
+    ),
+)
+def test_target_choices_require_exact_broker_candidate_summary(
+    projection_change,
+) -> None:
+    lease = _target_lease((_target_candidate(),))
+    changes = {
+        "candidate_fingerprint": lease.scope.candidate_fingerprint,
+        "candidate_count": 1,
+    }
+    changes.update(projection_change)
+    projection = replace(_target_projection(), **changes)
+    with pytest.raises(InvalidActorView, match="identify.*lease"):
+        _project_target_turn(lease, projection=projection)
 
 
 def test_bound_target_cannot_project_acquisition_candidates() -> None:

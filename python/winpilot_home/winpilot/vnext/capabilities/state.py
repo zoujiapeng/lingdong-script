@@ -19,6 +19,17 @@ from .contracts import (
     _strings,
 )
 from ..capability_names import canonical_capabilities
+from ..targeting.contracts import (
+    TargetContractError,
+    canonical_candidate_fingerprint,
+)
+
+
+def _candidate_fingerprint(value: object, name: str) -> str:
+    try:
+        return canonical_candidate_fingerprint(value)
+    except TargetContractError as exc:
+        raise CapabilityContractError(f"{name} is invalid") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +51,13 @@ class TargetState:
             self.binding_id is None or self.hwnd is None or self.epoch is None
         ):
             raise CapabilityContractError("live target requires binding_id, hwnd, and epoch")
+        if not self.live and any(
+            value is not None
+            for value in (self.binding_id, self.hwnd, self.epoch)
+        ):
+            raise CapabilityContractError(
+                "unbound target cannot retain target identity"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {"binding_id": self.binding_id, "hwnd": self.hwnd, "epoch": self.epoch, "live": self.live}
@@ -54,6 +72,7 @@ class AuthoritativeFrameState:
     frame_id: int | None = None
     hwnd: int | None = None
     epoch: int | None = None
+    scope: str | None = None
     authoritative: bool = False
     fresh: bool = False
 
@@ -62,26 +81,45 @@ class AuthoritativeFrameState:
             self, "authoritative", _boolean(self.authoritative, "frame.authoritative")
         )
         object.__setattr__(self, "fresh", _boolean(self.fresh, "frame.fresh"))
-        for name in ("frame_id", "epoch"):
-            value = getattr(self, name)
-            if value is not None and (type(value) is not int or value < 0):
-                raise CapabilityContractError(f"frame {name} must be non-negative integer")
+        if self.frame_id is not None and (
+            type(self.frame_id) is not int or self.frame_id <= 0
+        ):
+            raise CapabilityContractError("frame frame_id must be positive integer")
+        if self.epoch is not None and (
+            type(self.epoch) is not int or self.epoch < 0
+        ):
+            raise CapabilityContractError("frame epoch must be non-negative integer")
         if self.hwnd is not None and (type(self.hwnd) is not int or self.hwnd <= 0):
             raise CapabilityContractError("frame hwnd must be positive integer")
+        if self.scope is not None and self.scope not in {
+            "target_window", "full_desktop",
+        }:
+            raise CapabilityContractError("frame scope is invalid")
+        identity = (self.frame_id, self.hwnd, self.epoch, self.scope)
+        if any(value is not None for value in identity) and not all(
+            value is not None for value in identity
+        ):
+            raise CapabilityContractError(
+                "frame identity must be entirely present or absent"
+            )
         if (self.authoritative or self.fresh) and (
-            self.frame_id is None or self.hwnd is None or self.epoch is None
+            self.frame_id is None
+            or self.hwnd is None
+            or self.epoch is None
+            or self.scope is None
         ):
             raise CapabilityContractError("authoritative/fresh frame requires complete identity")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "frame_id": self.frame_id, "hwnd": self.hwnd, "epoch": self.epoch,
+            "scope": self.scope,
             "authoritative": self.authoritative, "fresh": self.fresh,
         }
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "AuthoritativeFrameState":
-        fields = ("frame_id", "hwnd", "epoch", "authoritative", "fresh")
+        fields = ("frame_id", "hwnd", "epoch", "scope", "authoritative", "fresh")
         return cls(**_strict(raw, fields, "AuthoritativeFrameState"))
 
 
@@ -204,6 +242,8 @@ class BrokerRuntimeState:
     available_capabilities: tuple[str, ...]
     target: TargetState = field(default_factory=TargetState)
     frame: AuthoritativeFrameState = field(default_factory=AuthoritativeFrameState)
+    candidate_fingerprint: str | None = None
+    candidate_count: int | None = None
     pointer: PointerLeaseState = field(default_factory=PointerLeaseState)
     artifacts: tuple[ArtifactState, ...] = ()
     executor_offers: tuple[ExecutorOffer, ...] = ()
@@ -229,6 +269,37 @@ class BrokerRuntimeState:
             if isinstance(self.frame, AuthoritativeFrameState)
             else AuthoritativeFrameState.from_dict(self.frame),
         )
+        if (self.candidate_fingerprint is None) != (self.candidate_count is None):
+            raise CapabilityContractError(
+                "candidate fingerprint and count must be present together"
+            )
+        if self.candidate_fingerprint is not None:
+            object.__setattr__(
+                self,
+                "candidate_fingerprint",
+                _candidate_fingerprint(
+                    self.candidate_fingerprint,
+                    "candidate fingerprint",
+                ),
+            )
+            if (
+                type(self.candidate_count) is not int
+                or not 0 <= self.candidate_count <= 16
+            ):
+                raise CapabilityContractError(
+                    "candidate count must be an integer from 0 through 16"
+                )
+            if (
+                self.target.live
+                or self.frame.scope != "full_desktop"
+                or self.frame.epoch != 0
+                or not self.frame.authoritative
+                or not self.frame.fresh
+            ):
+                raise CapabilityContractError(
+                    "target candidates require a fresh authoritative unbound "
+                    "full-desktop frame"
+                )
         object.__setattr__(
             self,
             "pointer",
@@ -256,6 +327,8 @@ class BrokerRuntimeState:
             "format": self.format, "turn_index": self.turn_index,
             "available_capabilities": list(self.available_capabilities),
             "target": self.target.to_dict(), "frame": self.frame.to_dict(),
+            "candidate_fingerprint": self.candidate_fingerprint,
+            "candidate_count": self.candidate_count,
             "pointer": self.pointer.to_dict(),
             "artifacts": [item.to_dict() for item in self.artifacts],
             "executor_offers": [item.to_dict() for item in self.executor_offers],
@@ -268,6 +341,7 @@ class BrokerRuntimeState:
     def from_dict(cls, raw: Mapping[str, Any]) -> "BrokerRuntimeState":
         fields = (
             "format", "turn_index", "available_capabilities", "target", "frame",
+            "candidate_fingerprint", "candidate_count",
             "pointer", "artifacts", "executor_offers", "authorization_scopes",
             "runtime_healthy", "paused", "canceled",
         )
@@ -291,6 +365,8 @@ class BrokerProjection:
     executor_id: str | None = None
     target_binding_id: str | None = None
     pointer_lease_id: str | None = None
+    candidate_fingerprint: str | None = None
+    candidate_count: int | None = None
     format: str = BROKER_PROJECTION_FORMAT
 
     def __post_init__(self) -> None:
@@ -323,6 +399,30 @@ class BrokerProjection:
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, _identity(value, name))
+        if (self.candidate_fingerprint is None) != (self.candidate_count is None):
+            raise CapabilityContractError(
+                "projection candidate fingerprint and count must be present together"
+            )
+        if self.candidate_fingerprint is not None:
+            object.__setattr__(
+                self,
+                "candidate_fingerprint",
+                _candidate_fingerprint(
+                    self.candidate_fingerprint,
+                    "projection candidate fingerprint",
+                ),
+            )
+            if (
+                type(self.candidate_count) is not int
+                or not 0 <= self.candidate_count <= 16
+            ):
+                raise CapabilityContractError(
+                    "projection candidate count must be an integer from 0 through 16"
+                )
+            if self.target_binding_id is not None:
+                raise CapabilityContractError(
+                    "target candidates cannot accompany a bound target"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -330,6 +430,8 @@ class BrokerProjection:
             "mission_revision": self.mission_revision, "obligation_id": self.obligation_id,
             "execution_route": self.execution_route.value, "executor_id": self.executor_id,
             "target_binding_id": self.target_binding_id, "pointer_lease_id": self.pointer_lease_id,
+            "candidate_fingerprint": self.candidate_fingerprint,
+            "candidate_count": self.candidate_count,
             "tool_names": list(self.tool_names),
             "active_grants": [item.to_dict() for item in self.active_grants],
             "missing_capabilities": list(self.missing_capabilities),
@@ -341,6 +443,7 @@ class BrokerProjection:
         fields = (
             "format", "projection_id", "mission_revision", "obligation_id",
             "execution_route", "executor_id", "target_binding_id", "pointer_lease_id",
+            "candidate_fingerprint", "candidate_count",
             "tool_names", "active_grants", "missing_capabilities", "projection_reasons",
         )
         value = _strict(raw, fields, "BrokerProjection")

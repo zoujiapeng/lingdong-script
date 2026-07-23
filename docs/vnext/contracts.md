@@ -22,9 +22,12 @@ actor-turn-input/4
 actor-previous-action/0
 actor-proposal/0
 actor-envelope/1
-broker-projection/0
+tool-spec/1
+tool-catalog/1
+broker-runtime-state/1
+broker-projection/1
 runtime-frame/0
-runtime-snapshot/1
+runtime-snapshot/2
 controller-transition/1
 mission-runtime-result/0
 desktop-runtime-coordinator-context/1
@@ -52,9 +55,12 @@ desktop-target/2
 `desktop-runtime-coordinator-context/1`；ActionEffect/no-progress 切片先使 `mission-projection`、
 `mission-card` 和 `controller-transition` 升为 `/1`，严格 TargetBinding 又使前两者升为 `/2`，
 并使承载 target payload 的 `mission-event` 升为 `/1`。completion handoff 后 `actor-mission-view`
-为 `/2`、`actor-turn-input` 为 `/2`；本轮因 tool 增加 `requires_local_intent` 将
+为 `/2`、`actor-turn-input` 为 `/2`；后续因 tool 增加 `requires_local_intent` 将
 `actor-tool-view` 升为 `/1`，因 turn 增加可选 `previous_action` 将 `actor-turn-input`
-升为 `/3`，并新增 `actor-previous-action/0`。这些旧版本均不再接受；
+升为 `/3`，再因 ordinal-only target choices 升为 `/4`，并新增 `actor-previous-action/0`。
+targetless observation 又将 `tool-spec` / `tool-catalog` 升为 `/1`（新增严格 prerequisite 名）、
+将 `broker-runtime-state` / `broker-projection` 升为 `/1`（frame scope 与 candidate pair），并将
+`runtime-snapshot` 升为 `/2`（targetless frame 必须为 full desktop）。这些旧版本均不再接受；
 `action-effect/0` 与 `actor-previous-action/0` 是新合同。其他仍列为 `/0` 的合同未发生
 不兼容字段变化，不能为追求版本号整齐而批量改号。
 
@@ -610,6 +616,8 @@ P4a 不把带 Runtime 身份的 `MissionCard` 或 `BrokerProjection` 原样交�
 
 Target discovery snapshot 与 candidate 是 Runtime-private typed data，不再提供 Actor serialization 或 candidate-ref lookup。`TargetSelectionLease` 是线程安全、进程内、不可序列化的一次性 sidecar：它冻结 ordered candidates，并精确绑定 mission/run/revision/obligation/turn/frame authority/Broker projection；第一次 consume 尝试无论成功、越界或 stale 都耗尽，restart 即丢失。它不是 Mission、Evidence、BUS、trace、Verifier 或 replay 的一部分，也不能形成第二份 target ledger。当前切片只建立该合同，尚未把 `activate_target` 加入 live Catalog。
 
+无 target 的 Runtime 现在可以通过同一个 `FrameObserver -> FrameAuthority` 捕获权威全桌面帧。`runtime-snapshot/2` 要求 targetless frame 的 `scope` 必须为 `full_desktop`；真实 desktop HWND、epoch 0 与 virtual desktop region 在 capture 前、commit 前和 commit 后都必须保持一致。窗口帧和桌面帧不建立第二个 frame owner。`broker-runtime-state/1` 保留同一 frame scope，并用成对的 `candidate_fingerprint` / `candidate_count` 区分“尚未发现”“发现为空”和“存在候选”；candidate pair 存在时（包括 count 为 0）必须是 unbound full-desktop 状态。`broker-projection/1` 的 identity 同时绑定完整 frame state 与候选集合摘要，但这些摘要不进入 Actor view。当前 live coordinator 仍要求 foreground handoff，因此这只是可测试的 Runtime seam，不代表客户端已经能从未绑定状态发现或激活应用。
+
 ### 9.2 上一笔 Actor 动作的有界上下文
 
 `actor-previous-action/0` 不是动作历史或新 ledger，而是只供下一次合格 Actor request
@@ -850,7 +858,7 @@ Actor 可见 scroll args 严格为 `{image_x, image_y, direction: "up" | "down",
 P4b.1 先把共享 commit admission 从 `commit-admission-request/0` 升级为严格的
 `commit-admission-request/1`，显式区分 `input_kind=point|keyboard`。P4b.2 又因 target、foreground 与
 hit-test 增加必需的强 `process_identity`，将其升级为 `commit-admission-request/2`，并将内部观察合同升级为
-`commit-environment/1`；携带同一嵌套身份的 `actor-envelope/1` 与 `runtime-snapshot/1` 也拒绝旧版本。
+`commit-environment/1`；携带同一嵌套身份的 `actor-envelope/1` 与 `runtime-snapshot/2` 也拒绝旧版本。`runtime-snapshot/2` 同时把 `RuntimeFrame.scope` 机械投影到 `broker-runtime-state/1`，并拒绝 targetless 非全桌面帧。
 point 必须携带 `screen_point`，并继续
 执行 frame/target containment 与 hit-test；keyboard 必须令 `screen_point=null`、只能走 physical route，
 跳过无意义的 `WindowFromPoint`，但仍核对同一 frame/epoch/target、pointer released、mutation authority、
@@ -927,6 +935,7 @@ preflight，无 TaskContract 的兼容 graph 仍保持原行为。private trace 
 ```python
 @dataclass(frozen=True, slots=True)
 class BrokerProjection:
+    format: Literal["broker-projection/1"]
     projection_id: str
     mission_revision: int
     obligation_id: str
@@ -936,11 +945,27 @@ class BrokerProjection:
     executor_id: str | None
     target_binding_id: str | None
     pointer_lease_id: str | None
+    candidate_fingerprint: str | None
+    candidate_count: int | None
     tool_names: tuple[str, ...]
     active_grants: tuple[CapabilityGrant, ...]
     missing_capabilities: tuple[str, ...]
     projection_reasons: tuple[str, ...]
 ```
+
+`broker-runtime-state/1` 的 `AuthoritativeFrameState` 必须显式携带
+`scope: target_window | full_desktop | None`；authoritative/fresh frame 不能省略 scope。
+`candidate_fingerprint` 与 `candidate_count` 必须同时出现或同时缺失，count 为严格整数 `0..16`：
+
+- pair 缺失：当前状态没有已接受的 discovery 结果；
+- count 为 0：discovery 已完成但没有候选；
+- count 大于 0：存在有界候选，才满足 `target_candidates_available`；
+- 任何 pair（包括 count 为 0）都只能伴随 unbound `full_desktop` frame；
+- BrokerProjection 携带 pair 时 `target_binding_id` 必须为 `None`；
+- projection id digest 绑定完整 frame state 与 pair；Actor view 不接收 fingerprint、count 或 frame scope identity。
+
+这些字段是 Runtime-private authorization facts，不是第二份 target ledger。真实 snapshot/lease 与 count、
+fingerprint、来源 turn/frame 的一致性由 Runtime 在投影和消费时机械核对。
 
 ```python
 @dataclass(frozen=True, slots=True)

@@ -39,6 +39,14 @@ from winpilot.vnext.mission import (
     target_binding_attestation,
 )
 from winpilot.vnext.profiling import DEFAULT_CAPABILITY_CATALOG, ExecutionPolicy
+from winpilot.vnext.targeting import (
+    TargetActivation,
+    TargetCandidate,
+    TargetState as DiscoveredTargetState,
+    candidate_fingerprint_for,
+    candidate_ref_for,
+    launch_identity_for,
+)
 
 
 ALL_CAPABILITIES = tuple(sorted(DEFAULT_CAPABILITY_CATALOG))
@@ -47,6 +55,21 @@ GUI_CAPABILITIES = (
     "communication.bind_recipient", "communication.send_artifact",
     "communication.send_text", "communication.verify_delivery", "mcp.office",
 )
+TARGET_FP_EMPTY = candidate_fingerprint_for(())
+_TARGET_EXE = r"C:\GenericApps\Example\example.exe"
+_TARGET_CANDIDATE = TargetCandidate(
+    candidate_ref=candidate_ref_for(
+        activation=TargetActivation.OPEN_APP,
+        identity=launch_identity_for(kind="exe", target=_TARGET_EXE),
+    ),
+    activation=TargetActivation.OPEN_APP,
+    state=DiscoveredTargetState.INSTALLED,
+    label="Example",
+    provenance=("installed_catalog",),
+    launch_kind="exe",
+    launch_target=_TARGET_EXE,
+)
+TARGET_FP_ONE = candidate_fingerprint_for((_TARGET_CANDIDATE,))
 
 
 def _schema(name: str) -> dict:
@@ -216,7 +239,14 @@ def _state(**overrides):
         "target": TargetState(
             _target_attestation()[0].binding_id, 101, 3, True,
         ),
-        "frame": AuthoritativeFrameState(9, 101, 3, True, True),
+        "frame": AuthoritativeFrameState(
+            frame_id=9,
+            hwnd=101,
+            epoch=3,
+            scope="target_window",
+            authoritative=True,
+            fresh=True,
+        ),
         "pointer": PointerLeaseState(PointerDisposition.RELEASED),
     }
     values.update(overrides)
@@ -231,12 +261,229 @@ def test_catalog_is_strict_versioned_and_order_deterministic() -> None:
     with pytest.raises(CapabilityContractError):
         ToolSpec("done", {"type": "object"}, ToolRoute.VISUAL_ACTOR, MutationKind.NONE)
     raw = catalog.tools[0].to_dict()
+    with pytest.raises(CapabilityContractError, match="format"):
+        ToolSpec.from_dict({**raw, "format": "tool-spec/0"})
+    with pytest.raises(CapabilityContractError, match="format"):
+        ToolCatalog.from_dict({**catalog.to_dict(), "format": "tool-catalog/0"})
     with pytest.raises(CapabilityContractError):
         ToolSpec.from_dict({**raw, "application_name": "anything"})
     state = _state()
     assert BrokerRuntimeState.from_dict(state.to_dict()) == state
     with pytest.raises(CapabilityContractError):
         BrokerRuntimeState.from_dict({**state.to_dict(), "task_text": "benchmark case"})
+    projection = CapabilityBroker(catalog).project(
+        _mission(), _profile(_mission()), state,
+    )
+    with pytest.raises(CapabilityContractError, match="format"):
+        type(projection).from_dict({
+            **projection.to_dict(),
+            "format": "broker-projection/0",
+        })
+
+
+def test_scope_and_candidate_contracts_reject_old_or_ambiguous_wire_state() -> None:
+    state = _state()
+    raw = state.to_dict()
+    for old_format in ("broker-runtime-state/0", "broker-runtime-state/2"):
+        with pytest.raises(CapabilityContractError, match="runtime state"):
+            BrokerRuntimeState.from_dict({**raw, "format": old_format})
+    old_frame = dict(raw["frame"])
+    old_frame.pop("scope")
+    with pytest.raises(CapabilityContractError, match="fields mismatch"):
+        BrokerRuntimeState.from_dict({**raw, "frame": old_frame})
+    with pytest.raises(CapabilityContractError, match="entirely present"):
+        AuthoritativeFrameState(
+            frame_id=9,
+            hwnd=101,
+            epoch=3,
+            authoritative=True,
+            fresh=True,
+        )
+    with pytest.raises(CapabilityContractError, match="positive"):
+        AuthoritativeFrameState(
+            frame_id=0,
+            hwnd=1,
+            epoch=0,
+            scope="full_desktop",
+            authoritative=True,
+            fresh=True,
+        )
+    with pytest.raises(CapabilityContractError, match="cannot retain"):
+        TargetState(binding_id="target-stale", live=False)
+
+    desktop = AuthoritativeFrameState(
+        frame_id=11,
+        hwnd=1,
+        epoch=0,
+        scope="full_desktop",
+        authoritative=True,
+        fresh=True,
+    )
+    base = dict(
+        turn_index=2,
+        available_capabilities=ALL_CAPABILITIES,
+        target=TargetState(),
+        frame=desktop,
+    )
+    with pytest.raises(CapabilityContractError, match="present together"):
+        BrokerRuntimeState(candidate_fingerprint=TARGET_FP_EMPTY, **base)
+    with pytest.raises(CapabilityContractError, match="present together"):
+        BrokerRuntimeState(candidate_count=1, **base)
+    with pytest.raises(CapabilityContractError, match="count"):
+        BrokerRuntimeState(
+            candidate_fingerprint=TARGET_FP_EMPTY,
+            candidate_count=17,
+            **base,
+        )
+    with pytest.raises(CapabilityContractError, match="unbound full-desktop"):
+        _state(candidate_fingerprint=TARGET_FP_ONE, candidate_count=1)
+
+
+def test_projection_identity_binds_frame_scope_and_candidate_set() -> None:
+    mission = _mission(bound=False)
+    profile = _profile(mission)
+    broker = CapabilityBroker(_catalog())
+
+    def project(*, frame_id: int, fingerprint: str | None, count: int | None):
+        return broker.project(
+            mission,
+            profile,
+            BrokerRuntimeState(
+                turn_index=2,
+                available_capabilities=ALL_CAPABILITIES,
+                target=TargetState(),
+                frame=AuthoritativeFrameState(
+                    frame_id=frame_id,
+                    hwnd=1,
+                    epoch=0,
+                    scope="full_desktop",
+                    authoritative=True,
+                    fresh=True,
+                ),
+                candidate_fingerprint=fingerprint,
+                candidate_count=count,
+            ),
+        )
+
+    baseline = project(frame_id=11, fingerprint=None, count=None)
+    discovered_empty = project(
+        frame_id=11,
+        fingerprint=TARGET_FP_EMPTY,
+        count=0,
+    )
+    discovered_one = project(
+        frame_id=11,
+        fingerprint=TARGET_FP_ONE,
+        count=1,
+    )
+    next_frame = project(frame_id=12, fingerprint=TARGET_FP_ONE, count=1)
+
+    assert len({
+        baseline.projection_id,
+        discovered_empty.projection_id,
+        discovered_one.projection_id,
+        next_frame.projection_id,
+    }) == 4
+    assert discovered_one.candidate_fingerprint == TARGET_FP_ONE
+    assert discovered_one.candidate_count == 1
+
+
+def test_target_acquisition_prerequisites_require_real_desktop_and_candidates() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+        "required": [],
+    }
+    catalog = ToolCatalog((
+        ToolSpec(
+            name="discover_target",
+            schema=schema,
+            route=ToolRoute.VISUAL_ACTOR,
+            mutation_kind=MutationKind.NONE,
+            required_any_capabilities=("visual.interact",),
+            prerequisites=(
+                "target_unbound",
+                "authoritative_full_desktop_frame",
+                "pointer_released",
+                "runtime_healthy",
+            ),
+            order=1,
+        ),
+        ToolSpec(
+            name="activate_target",
+            schema=schema,
+            route=ToolRoute.VISUAL_ACTOR,
+            mutation_kind=MutationKind.GUI,
+            required_any_capabilities=("visual.interact",),
+            prerequisites=(
+                "target_unbound",
+                "authoritative_full_desktop_frame",
+                "target_candidates_available",
+                "pointer_released",
+                "runtime_healthy",
+            ),
+            order=2,
+        ),
+    ))
+    mission = _mission(bound=False)
+    profile = _profile(mission)
+    broker = CapabilityBroker(catalog)
+    desktop = AuthoritativeFrameState(
+        frame_id=11,
+        hwnd=1,
+        epoch=0,
+        scope="full_desktop",
+        authoritative=True,
+        fresh=True,
+    )
+
+    undiscovered = BrokerRuntimeState(
+        turn_index=0,
+        available_capabilities=ALL_CAPABILITIES,
+        frame=desktop,
+    )
+    empty = replace(
+        undiscovered,
+        candidate_fingerprint=TARGET_FP_EMPTY,
+        candidate_count=0,
+    )
+    selectable = replace(
+        undiscovered,
+        candidate_fingerprint=TARGET_FP_ONE,
+        candidate_count=1,
+    )
+    assert BrokerRuntimeState.from_dict(selectable.to_dict()) == selectable
+
+    assert broker.project(
+        mission, profile, undiscovered,
+    ).tool_names == ("discover_target",)
+    assert broker.project(mission, profile, empty).tool_names == (
+        "discover_target",
+    )
+    selectable_projection = broker.project(mission, profile, selectable)
+    assert type(selectable_projection).from_dict(
+        selectable_projection.to_dict()
+    ) == selectable_projection
+    assert selectable_projection.tool_names == (
+        "discover_target", "activate_target",
+    )
+    assert "activate_target" not in broker.project(
+        _mission(),
+        _profile(_mission()),
+        _state(),
+    ).tool_names
+
+    for invalid_frame in (
+        replace(desktop, epoch=1),
+        replace(desktop, scope="target_window"),
+        replace(desktop, authoritative=False),
+        replace(desktop, fresh=False),
+    ):
+        state = replace(undiscovered, frame=invalid_frame)
+        assert broker.project(mission, profile, state).tool_names == ()
+        with pytest.raises(CapabilityContractError, match="fresh authoritative"):
+            replace(selectable, frame=invalid_frame)
 
 
 def test_runtime_capability_availability_has_one_owner_scoped_registry() -> None:
@@ -295,7 +542,10 @@ def test_tool_route_cannot_create_a_second_gui_writer(route, mutation_kind) -> N
     ("factory", "values"),
     (
         (TargetState, ("target-1", 101, 3, "true")),
-        (AuthoritativeFrameState, (9, 101, 3, 1, True)),
+        (
+            AuthoritativeFrameState,
+            (9, 101, 3, "target_window", 1, True),
+        ),
         (PointerLeaseState, (PointerDisposition.RELEASED, None, "false")),
         (ArtifactState, ("artifact-1", "r1", "a" * 64, "binding", 1)),
     ),
@@ -381,10 +631,10 @@ def test_bound_fresh_visual_surface_is_small_and_generic() -> None:
 @pytest.mark.parametrize(
     "frame",
     (
-        AuthoritativeFrameState(9, 999, 3, True, True),
-        AuthoritativeFrameState(9, 101, 4, True, True),
-        AuthoritativeFrameState(9, 101, 3, False, True),
-        AuthoritativeFrameState(9, 101, 3, True, False),
+        AuthoritativeFrameState(9, 999, 3, "target_window", True, True),
+        AuthoritativeFrameState(9, 101, 4, "target_window", True, True),
+        AuthoritativeFrameState(9, 101, 3, "target_window", False, True),
+        AuthoritativeFrameState(9, 101, 3, "target_window", True, False),
     ),
 )
 def test_stale_or_mismatched_frame_removes_all_gui_mutations(frame) -> None:

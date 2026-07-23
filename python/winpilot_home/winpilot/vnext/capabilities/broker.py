@@ -63,6 +63,23 @@ class CapabilityBroker:
         )
 
     @staticmethod
+    def _full_desktop_frame_valid(
+        mission: MissionProjection,
+        state: BrokerRuntimeState,
+    ) -> bool:
+        frame = state.frame
+        return bool(
+            mission.target_binding is None
+            and not state.target.live
+            and frame.authoritative
+            and frame.fresh
+            and frame.frame_id is not None
+            and frame.hwnd is not None
+            and frame.epoch == 0
+            and frame.scope == "full_desktop"
+        )
+
+    @staticmethod
     def _valid_artifacts(
         mission: MissionProjection,
         state: BrokerRuntimeState,
@@ -89,6 +106,7 @@ class CapabilityBroker:
     ) -> bool:
         bound = cls._target_bound(mission, state)
         frame = cls._frame_valid(mission, state)
+        desktop_frame = cls._full_desktop_frame_valid(mission, state)
         valid_artifacts = cls._valid_artifacts(mission, state)
         live_offers = tuple(
             item for item in state.executor_offers if item.available and item.live
@@ -97,6 +115,13 @@ class CapabilityBroker:
             "target_unbound": not bound,
             "target_bound": bound,
             "authoritative_frame": frame,
+            "authoritative_full_desktop_frame": desktop_frame,
+            "target_candidates_available": bool(
+                desktop_frame
+                and state.candidate_fingerprint is not None
+                and state.candidate_count is not None
+                and state.candidate_count > 0
+            ),
             "pointer_released": state.pointer.disposition is PointerDisposition.RELEASED,
             "pointer_held": (
                 state.pointer.disposition is PointerDisposition.HELD
@@ -139,6 +164,9 @@ class CapabilityBroker:
             "executor_id": executor_id,
             "target_binding_id": state.target.binding_id,
             "pointer_lease_id": state.pointer.lease_id,
+            "frame": state.frame.to_dict(),
+            "candidate_fingerprint": state.candidate_fingerprint,
+            "candidate_count": state.candidate_count,
             "turn_index": state.turn_index,
             "tools": names,
             "grants": tuple(item.grant_id for item in grants),
@@ -153,6 +181,8 @@ class CapabilityBroker:
             executor_id=executor_id,
             target_binding_id=state.target.binding_id,
             pointer_lease_id=state.pointer.lease_id,
+            candidate_fingerprint=state.candidate_fingerprint,
+            candidate_count=state.candidate_count,
             tool_names=names,
             active_grants=grants,
             missing_capabilities=missing,

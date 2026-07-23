@@ -13,11 +13,11 @@ from typing import Any, Iterable, Mapping
 from ..capability_names import canonical_capabilities, canonical_capability
 
 
-TOOL_SPEC_FORMAT = "tool-spec/0"
-TOOL_CATALOG_FORMAT = "tool-catalog/0"
+TOOL_SPEC_FORMAT = "tool-spec/1"
+TOOL_CATALOG_FORMAT = "tool-catalog/1"
 CAPABILITY_GRANT_FORMAT = "capability-grant/0"
-BROKER_STATE_FORMAT = "broker-runtime-state/0"
-BROKER_PROJECTION_FORMAT = "broker-projection/0"
+BROKER_STATE_FORMAT = "broker-runtime-state/1"
+BROKER_PROJECTION_FORMAT = "broker-projection/1"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _TOOL = re.compile(r"[a-z][a-z0-9_]{1,63}")
 _SHA = re.compile(r"[0-9a-f]{64}")
@@ -56,6 +56,8 @@ TOOL_PREREQUISITES = frozenset({
     "target_unbound",
     "target_bound",
     "authoritative_frame",
+    "authoritative_full_desktop_frame",
+    "target_candidates_available",
     "pointer_released",
     "pointer_held",
     "current_run_artifact",
