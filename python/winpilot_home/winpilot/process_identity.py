@@ -29,6 +29,33 @@ def canonical_process_identity(
     return value
 
 
+def canonical_executable_path(
+    value: object,
+    name: str = "executable_path",
+) -> str:
+    """Validate one already-canonical absolute Windows ``.exe`` path."""
+
+    if type(value) is not str:
+        raise ProcessIdentityError(
+            f"{name} must be a canonical absolute .exe path"
+        )
+    drive, _tail = ntpath.splitdrive(value)
+    if (
+        not value
+        or value != value.strip()
+        or len(value) > MAX_PROCESS_EXECUTABLE_PATH_CHARS
+        or any(character in value for character in ('"', "\x00", "\r", "\n"))
+        or not drive
+        or not ntpath.isabs(value)
+        or ntpath.normpath(value) != value
+        or ntpath.splitext(ntpath.basename(value))[1].casefold() != ".exe"
+    ):
+        raise ProcessIdentityError(
+            f"{name} must be a canonical absolute .exe path"
+        )
+    return value
+
+
 def process_identity_for(
     *,
     process_id: int,
@@ -70,6 +97,7 @@ def process_identity_for(
 __all__ = [
     "MAX_PROCESS_EXECUTABLE_PATH_CHARS",
     "ProcessIdentityError",
+    "canonical_executable_path",
     "canonical_process_identity",
     "process_identity_for",
 ]
