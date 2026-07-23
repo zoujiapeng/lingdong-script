@@ -8,7 +8,11 @@ import math
 from types import MappingProxyType
 from typing import Any
 
-from ..process_identity import ProcessIdentityError, canonical_process_identity
+from ..process_identity import (
+    ProcessIdentityError,
+    canonical_executable_path,
+    canonical_process_identity,
+)
 from ..visual_runtime.keyboard_contracts import (
     CANONICAL_HOTKEY_KEYS,
     CANONICAL_HOTKEY_MODIFIERS,
@@ -74,6 +78,16 @@ class FinalTargetActivationGuardDecision(str, Enum):
     STOP_REQUESTED = "stop_requested"
 
 
+class FinalTargetLaunchGuardDecision(str, Enum):
+    """Mechanical authority verdict immediately before one EXE launch."""
+
+    ADMITTED = "admitted"
+    AUTHORITY_CHANGED = "authority_changed"
+    EXISTING_PROCESS = "existing_process"
+    PROCESS_STATE_UNKNOWN = "process_state_unknown"
+    STOP_REQUESTED = "stop_requested"
+
+
 def _scalar_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
     frozen: dict[str, Any] = {}
     for key, value in facts.items():
@@ -116,6 +130,20 @@ class RawTargetActivationContext:
         except ProcessIdentityError as exc:
             raise ValueError("target_process_identity must be canonical") from exc
         object.__setattr__(self, "target_process_identity", identity)
+
+
+@dataclass(frozen=True, slots=True)
+class RawTargetLaunchContext:
+    """One exact executable path; arguments and Runtime identities are absent."""
+
+    executable_path: str
+
+    def __post_init__(self) -> None:
+        try:
+            path = canonical_executable_path(self.executable_path)
+        except ProcessIdentityError as exc:
+            raise ValueError("executable_path must be an absolute .exe path") from exc
+        object.__setattr__(self, "executable_path", path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,95 +230,106 @@ class RawActionReceipt:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RawTargetLaunchReceipt:
+    """Strict result of at most one CreateProcessW request."""
+
+    outcome: MutationOutcome
+    launch_request_count: int | None
+    process_id: int | None = None
+    process_identity: str | None = None
+    error_kind: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.outcome, MutationOutcome):
+            raise ValueError("launch outcome must be MutationOutcome")
+        if self.launch_request_count is not None and (
+            type(self.launch_request_count) is not int
+            or self.launch_request_count not in {0, 1}
+        ):
+            raise ValueError("launch_request_count must be zero, one, or null")
+        paired = self.process_id is not None or self.process_identity is not None
+        if paired:
+            if type(self.process_id) is not int or self.process_id <= 0:
+                raise ValueError("launch process_id must be positive")
+            try:
+                identity = canonical_process_identity(self.process_identity)
+            except ProcessIdentityError as exc:
+                raise ValueError("launch process_identity must be canonical") from exc
+            object.__setattr__(self, "process_identity", identity)
+        error = self.error_kind
+        if error is not None and (
+            type(error) is not str or not error.strip() or len(error) > 192
+        ):
+            raise ValueError("error_kind must be bounded non-empty text or null")
+        object.__setattr__(self, "error_kind", None if error is None else error.strip())
+        if self.outcome is MutationOutcome.APPLIED:
+            valid = self.launch_request_count == 1 and paired and error is None
+        elif self.outcome is MutationOutcome.NOT_STARTED:
+            valid = self.launch_request_count == 0 and not paired and error is not None
+        elif self.outcome is MutationOutcome.OUTCOME_UNKNOWN:
+            valid = self.launch_request_count in {None, 1} and not paired and error is not None
+        else:
+            valid = False
+        if not valid:
+            raise ValueError("launch receipt fields contradict its outcome")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "outcome": self.outcome.value,
+            "launch_request_count": self.launch_request_count,
+            "process_id": self.process_id,
+            "process_identity": self.process_identity,
+            "error_kind": self.error_kind,
+        }
+
+
 RawBackend = Callable[..., RawBackendResult]
 FinalPointerGuard = Callable[[int, int], FinalPointerGuardDecision]
 FinalKeyboardGuard = Callable[[], FinalKeyboardGuardDecision]
 FinalTargetActivationGuard = Callable[[], FinalTargetActivationGuardDecision]
+FinalTargetLaunchGuard = Callable[[], FinalTargetLaunchGuardDecision]
 
 
 @dataclass(frozen=True, slots=True)
-class AdmittedPhysicalClickBackend:
-    """Explicitly marks a backend which never acquires DesktopActionQueue."""
+class _AdmittedBackend:
+    """Queue-free backend marker shared by the typed raw primitives."""
 
-    execute: RawBackend
-
-    def __post_init__(self) -> None:
-        if not callable(self.execute):
-            raise TypeError("admitted physical click backend must be callable")
-        if hasattr(self.execute, "__wrapped__"):
-            raise TypeError("admitted physical click backend cannot wrap a decorated entry")
-
-    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
-        return self.execute(*args, **kwargs)
-
-
-@dataclass(frozen=True, slots=True)
-class AdmittedPhysicalScrollBackend:
-    """Explicitly marks a physical wheel backend which never acquires the queue."""
-
-    execute: RawBackend
+    execute: Callable[..., Any]
+    description = "admitted physical backend"
 
     def __post_init__(self) -> None:
         if not callable(self.execute):
-            raise TypeError("admitted physical scroll backend must be callable")
+            raise TypeError(f"{self.description} must be callable")
         if hasattr(self.execute, "__wrapped__"):
-            raise TypeError("admitted physical scroll backend cannot wrap a decorated entry")
+            raise TypeError(f"{self.description} cannot wrap a decorated entry")
 
-    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.execute(*args, **kwargs)
 
 
-@dataclass(frozen=True, slots=True)
-class AdmittedPhysicalTypeTextBackend:
-    """Marks an unqueued, single-mechanism physical text backend."""
-
-    execute: RawBackend
-
-    def __post_init__(self) -> None:
-        if not callable(self.execute):
-            raise TypeError("admitted physical type-text backend must be callable")
-        if hasattr(self.execute, "__wrapped__"):
-            raise TypeError("admitted physical type-text backend cannot wrap a decorated entry")
-
-    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
-        return self.execute(*args, **kwargs)
+class AdmittedPhysicalClickBackend(_AdmittedBackend):
+    description = "admitted physical click backend"
 
 
-@dataclass(frozen=True, slots=True)
-class AdmittedPhysicalHotkeyBackend:
-    """Marks an unqueued, single-mechanism physical hotkey backend."""
-
-    execute: RawBackend
-
-    def __post_init__(self) -> None:
-        if not callable(self.execute):
-            raise TypeError("admitted physical hotkey backend must be callable")
-        if hasattr(self.execute, "__wrapped__"):
-            raise TypeError("admitted physical hotkey backend cannot wrap a decorated entry")
-
-    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
-        return self.execute(*args, **kwargs)
+class AdmittedPhysicalScrollBackend(_AdmittedBackend):
+    description = "admitted physical scroll backend"
 
 
-@dataclass(frozen=True, slots=True)
-class AdmittedPhysicalTargetActivationBackend:
-    """Marks one unqueued existing-window activation mechanism."""
+class AdmittedPhysicalTypeTextBackend(_AdmittedBackend):
+    description = "admitted physical type-text backend"
 
-    execute: RawBackend
 
-    def __post_init__(self) -> None:
-        if not callable(self.execute):
-            raise TypeError(
-                "admitted physical target activation backend must be callable"
-            )
-        if hasattr(self.execute, "__wrapped__"):
-            raise TypeError(
-                "admitted physical target activation backend cannot wrap "
-                "a decorated entry"
-            )
+class AdmittedPhysicalHotkeyBackend(_AdmittedBackend):
+    description = "admitted physical hotkey backend"
 
-    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
-        return self.execute(*args, **kwargs)
+
+class AdmittedPhysicalTargetActivationBackend(_AdmittedBackend):
+    description = "admitted physical target activation backend"
+
+
+class AdmittedPhysicalTargetLaunchBackend(_AdmittedBackend):
+    description = "admitted physical target launch backend"
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,48 +343,28 @@ class RawDeviceBackends:
     admitted_physical_target_activation: (
         AdmittedPhysicalTargetActivationBackend | None
     ) = None
+    admitted_physical_target_launch: AdmittedPhysicalTargetLaunchBackend | None = None
 
     def __post_init__(self) -> None:
         for name in ("scroll", "click"):
             backend = getattr(self, name)
             if backend is not None and not callable(backend):
                 raise TypeError(f"{name} backend must be callable or null")
-        if self.admitted_physical_click is not None and not isinstance(
-            self.admitted_physical_click, AdmittedPhysicalClickBackend
-        ):
-            raise TypeError(
-                "admitted_physical_click must be AdmittedPhysicalClickBackend or null"
-            )
-        if self.admitted_physical_scroll is not None and not isinstance(
-            self.admitted_physical_scroll, AdmittedPhysicalScrollBackend
-        ):
-            raise TypeError(
-                "admitted_physical_scroll must be AdmittedPhysicalScrollBackend or null"
-            )
-        if self.admitted_physical_type_text is not None and not isinstance(
-            self.admitted_physical_type_text, AdmittedPhysicalTypeTextBackend
-        ):
-            raise TypeError(
-                "admitted_physical_type_text must be "
-                "AdmittedPhysicalTypeTextBackend or null"
-            )
-        if self.admitted_physical_hotkey is not None and not isinstance(
-            self.admitted_physical_hotkey, AdmittedPhysicalHotkeyBackend
-        ):
-            raise TypeError(
-                "admitted_physical_hotkey must be AdmittedPhysicalHotkeyBackend or null"
-            )
-        if (
-            self.admitted_physical_target_activation is not None
-            and not isinstance(
-                self.admitted_physical_target_activation,
+        admitted_types = (
+            ("admitted_physical_click", AdmittedPhysicalClickBackend),
+            ("admitted_physical_scroll", AdmittedPhysicalScrollBackend),
+            ("admitted_physical_type_text", AdmittedPhysicalTypeTextBackend),
+            ("admitted_physical_hotkey", AdmittedPhysicalHotkeyBackend),
+            (
+                "admitted_physical_target_activation",
                 AdmittedPhysicalTargetActivationBackend,
-            )
-        ):
-            raise TypeError(
-                "admitted_physical_target_activation must be "
-                "AdmittedPhysicalTargetActivationBackend or null"
-            )
+            ),
+            ("admitted_physical_target_launch", AdmittedPhysicalTargetLaunchBackend),
+        )
+        for name, expected in admitted_types:
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, expected):
+                raise TypeError(f"{name} must be {expected.__name__} or null")
 
 
 class RawDeviceExecutor:
@@ -374,6 +393,7 @@ class RawDeviceExecutor:
                 "activate_target",
                 self._backends.admitted_physical_target_activation,
             ),
+            ("launch_target", self._backends.admitted_physical_target_launch),
         )
         return tuple(sorted(name for name, backend in pairs if backend is not None))
 
@@ -632,18 +652,58 @@ class RawDeviceExecutor:
             final_guard=final_guard,
         )
 
+    def launch_target(
+        self,
+        context: RawTargetLaunchContext,
+        *,
+        final_guard: FinalTargetLaunchGuard,
+    ) -> RawTargetLaunchReceipt:
+        """Invoke one exact EXE backend without fallback or replay."""
+
+        if not isinstance(context, RawTargetLaunchContext):
+            return RawTargetLaunchReceipt(
+                MutationOutcome.NOT_STARTED, 0, error_kind="invalid_context"
+            )
+        if not callable(final_guard):
+            return RawTargetLaunchReceipt(
+                MutationOutcome.NOT_STARTED, 0, error_kind="invalid_final_guard"
+            )
+        backend = self._backends.admitted_physical_target_launch
+        if backend is None:
+            return RawTargetLaunchReceipt(
+                MutationOutcome.NOT_STARTED, 0, error_kind="backend_unavailable"
+            )
+        try:
+            result = backend(context, final_guard=final_guard)
+        except Exception:
+            return RawTargetLaunchReceipt(
+                MutationOutcome.OUTCOME_UNKNOWN,
+                None,
+                error_kind="backend_exception",
+            )
+        if not isinstance(result, RawTargetLaunchReceipt):
+            return RawTargetLaunchReceipt(
+                MutationOutcome.OUTCOME_UNKNOWN,
+                None,
+                error_kind="backend_result_uncertain",
+            )
+        return result
+
 
 __all__ = [
     "AdmittedPhysicalClickBackend", "AdmittedPhysicalHotkeyBackend",
     "AdmittedPhysicalScrollBackend", "AdmittedPhysicalTargetActivationBackend",
+    "AdmittedPhysicalTargetLaunchBackend",
     "AdmittedPhysicalTypeTextBackend",
     "CANONICAL_HOTKEY_KEYS", "CANONICAL_HOTKEY_MODIFIERS",
     "ClickCount", "ClickMechanism",
     "FinalKeyboardGuard", "FinalKeyboardGuardDecision", "FinalPointerGuard",
     "FinalPointerGuardDecision", "FinalTargetActivationGuard",
-    "FinalTargetActivationGuardDecision", "HotkeyChord",
+    "FinalTargetActivationGuardDecision", "FinalTargetLaunchGuard",
+    "FinalTargetLaunchGuardDecision", "HotkeyChord",
     "MAX_TYPE_TEXT_CODEPOINTS",
     "MouseButton",
     "RawActionContext", "RawActionReceipt", "RawBackendResult",
     "RawDeviceBackends", "RawDeviceExecutor", "RawTargetActivationContext",
+    "RawTargetLaunchContext", "RawTargetLaunchReceipt",
 ]
