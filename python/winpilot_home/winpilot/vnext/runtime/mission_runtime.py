@@ -6,6 +6,7 @@ never performs desktop input itself.
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol
@@ -55,11 +56,14 @@ from ..mission import (
     MissionStatus,
     ObligationStatus,
     StaleRevisionError,
+    target_binding_attestation,
 )
 from ..profiling import ExecutionProfile
 from ..targeting import (
     ACTIVATE_TARGET_TOOL_NAME,
     DISCOVER_TARGET_TOOL_NAME,
+    TargetActivation,
+    TargetCandidate,
     TargetDiscoverySnapshot,
     TargetSelectionLease,
     TargetSelectionLeaseError,
@@ -95,6 +99,11 @@ from .ports import (
     TargetDiscoveryPort,
 )
 from .mutation_permits import MutationPermitAuthority, MutationPermitError
+from .target_activation import (
+    TargetActivationEnvelope,
+    TargetActivationOutcome,
+    TargetActivationTransition,
+)
 
 if TYPE_CHECKING:
     from ..verification.visual_model import VisualVerifierAttestation
@@ -190,6 +199,10 @@ class MissionRuntime:
             discovery_tool = catalog.get(DISCOVER_TARGET_TOOL_NAME)
         except KeyError:
             discovery_tool = None
+        try:
+            activation_tool = catalog.get(ACTIVATE_TARGET_TOOL_NAME)
+        except KeyError:
+            activation_tool = None
         if discovery_tool is not None and target_discovery is None:
             raise TypeError(
                 "Catalog discover_target requires one read-only target_discovery port"
@@ -204,6 +217,13 @@ class MissionRuntime:
         ):
             raise TypeError(
                 "discover_target must be a read-only Visual Actor tool"
+            )
+        if activation_tool is not None and (
+            activation_tool.route is not ToolRoute.VISUAL_ACTOR
+            or activation_tool.mutation_kind is not MutationKind.GUI
+        ):
+            raise TypeError(
+                "activate_target must be a GUI-mutating Visual Actor tool"
             )
         self._target_discovery = target_discovery
         self._pointer_cleanup = pointer_cleanup
@@ -225,6 +245,16 @@ class MissionRuntime:
             )
         self._obligation_verifier = obligation_verifier
         self._attested_visual_verifier = attested_visual_verifier
+        if activation_tool is not None:
+            if type(reducer.evidence_source) is not EvidenceRegistry:
+                raise TypeError(
+                    "activate_target requires the Reducer's canonical "
+                    "EvidenceRegistry"
+                )
+            if evidence_registry is None:
+                # Target activation adds no evidence owner.  It reuses the
+                # exact registry already owned by the event-sourced Reducer.
+                evidence_registry = reducer.evidence_source
         if mission_completion_verifier is not None and evidence_registry is None:
             raise TypeError(
                 "mission completion verifier and evidence registry must be injected together"
@@ -242,6 +272,7 @@ class MissionRuntime:
             and mission_completion_verifier is None
             and attested_visual_verifier is None
             and action_effect_verifier is None
+            and activation_tool is None
         ):
             raise TypeError(
                 "Runtime verification owner and evidence registry must be injected together"
@@ -623,6 +654,287 @@ class MissionRuntime:
             == envelope.capability_grant_ids
             and self._tool_admitted(tool_name, broker)
         )
+
+    def _activation_envelope(
+        self,
+        *,
+        decision_id: str,
+        snapshot: RuntimeSnapshot,
+        projection: BrokerProjection,
+        discovery: TargetDiscoverySnapshot,
+        proposal: DesktopActionProposal,
+        candidate: TargetCandidate,
+    ) -> TargetActivationEnvelope:
+        frame = snapshot.frame
+        if (
+            frame is None
+            or snapshot.target is not None
+            or self._reducer.projection.target_binding is not None
+        ):
+            raise ValueError(
+                "target activation requires an unbound authoritative frame"
+            )
+        return TargetActivationEnvelope(
+            decision_id=decision_id,
+            mission_id=self._reducer.definition.mission_id,
+            run_id=self._reducer.definition.run_id,
+            mission_revision=self._reducer.projection.revision,
+            obligation_id=str(
+                self._reducer.projection.active_obligation_id or ""
+            ),
+            frame=frame.commit_identity,
+            pointer=snapshot.broker_state.pointer,
+            broker_projection_id=projection.projection_id,
+            capability_grant_ids=tuple(
+                grant.grant_id for grant in projection.active_grants
+            ),
+            allowed_evidence_scope=frame.evidence_refs,
+            candidate_fingerprint=discovery.candidate_fingerprint,
+            proposal=proposal,
+            candidate=candidate,
+        )
+
+    def _activation_still_current(
+        self,
+        envelope: TargetActivationEnvelope,
+        *,
+        lease: TargetSelectionLease,
+        discovery: TargetDiscoverySnapshot,
+        turn_index: int,
+        grants: tuple[CapabilityGrant, ...],
+        stop_event: threading.Event | None,
+    ) -> bool:
+        """Revalidate one consumed ordinal mapping at permit consumption."""
+
+        if (
+            self._stopped(stop_event)
+            or self._active_target_selection_lease is not lease
+            or not lease.consumed
+            or lease.scope.candidate_fingerprint
+            != envelope.candidate_fingerprint
+        ):
+            return False
+        mission = self._reducer.projection
+        if (
+            mission.mission_id != envelope.mission_id
+            or mission.run_id != envelope.run_id
+            or mission.revision != envelope.mission_revision
+            or mission.active_obligation_id != envelope.obligation_id
+            or mission.target_binding is not None
+        ):
+            return False
+        try:
+            latest = self._with_target_candidates(
+                self._state.current(mission, turn_index=turn_index),
+                discovery,
+            )
+            if (
+                latest.broker_state.turn_index != turn_index
+                or not self._snapshot_matches_mission(latest)
+                or latest.frame is None
+                or latest.frame.commit_identity != envelope.frame
+                or latest.frame.evidence_refs
+                != envelope.allowed_evidence_scope
+                or latest.broker_state.pointer != envelope.pointer
+            ):
+                return False
+            broker = self._project(latest, grants)
+            current_scope = self._target_selection_scope(
+                latest,
+                broker,
+                discovery,
+                turn_index=turn_index,
+            )
+        except Exception:
+            return False
+        return bool(
+            current_scope == lease.scope
+            and broker.execution_route is ExecutionRoute.VISUAL_ACTOR
+            and broker.projection_id == envelope.broker_projection_id
+            and tuple(
+                grant.grant_id for grant in broker.active_grants
+            ) == envelope.capability_grant_ids
+            and self._tool_admitted(ACTIVATE_TARGET_TOOL_NAME, broker)
+        )
+
+    @staticmethod
+    def _target_binding_evidence_id(
+        envelope: TargetActivationEnvelope,
+        transition: TargetActivationTransition,
+    ) -> str:
+        target = transition.activated_target
+        if target is None:
+            raise ValueError(
+                "completed target activation has no activated identity"
+            )
+        material = {
+            "format": "vnext-target-binding-evidence-id/1",
+            "mission_id": envelope.mission_id,
+            "run_id": envelope.run_id,
+            "acquisition_action_id": envelope.decision_id,
+            "hwnd": target.hwnd,
+            "root_hwnd": target.root_hwnd,
+            "process_id": target.process_id,
+            "process_identity": target.process_identity,
+        }
+        encoded = json.dumps(
+            material,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return (
+            "evidence-target-"
+            + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+        )
+
+    def _commit_activated_target(
+        self,
+        envelope: TargetActivationEnvelope,
+        transition: TargetActivationTransition,
+        *,
+        turn_index: int,
+    ) -> tuple[str, ...]:
+        """Reconcile Controller facts, then accept the sole binding event."""
+
+        registry = self._evidence_registry
+        if registry is None or registry is not self._reducer.evidence_source:
+            raise ValueError(
+                "target activation requires the Reducer's canonical EvidenceRegistry"
+            )
+        mission = self._reducer.projection
+        if (
+            mission.mission_id != envelope.mission_id
+            or mission.run_id != envelope.run_id
+            or mission.revision != envelope.mission_revision
+            or mission.active_obligation_id != envelope.obligation_id
+            or mission.target_binding is not None
+        ):
+            raise ValueError(
+                "Mission authority changed before target binding reconciliation"
+            )
+        activated = transition.activated_target
+        if activated is None:
+            raise ValueError("completed activation omitted target identity")
+        candidate = envelope.candidate
+        if (
+            activated.hwnd != candidate.hwnd
+            or activated.process_id != candidate.process_id
+            or activated.process_identity != candidate.process_identity
+        ):
+            raise ValueError(
+                "activated identity does not match the selected candidate"
+            )
+        binding, binding_evidence = target_binding_attestation(
+            mission_id=envelope.mission_id,
+            run_id=envelope.run_id,
+            obligation_id=envelope.obligation_id,
+            evidence_id=self._target_binding_evidence_id(
+                envelope,
+                transition,
+            ),
+            acquisition_action_id=envelope.decision_id,
+            hwnd=activated.hwnd,
+            root_hwnd=activated.root_hwnd,
+            process_id=activated.process_id,
+            process_identity=activated.process_identity,
+            title_snapshot=activated.title_snapshot,
+            epoch=envelope.frame.epoch,
+            frame_id=transition.post_frame_id,
+        )
+
+        # RuntimeStateBridge accepts this ephemeral projection only as a
+        # read probe.  Mission truth remains unchanged until target_bound is
+        # accepted below.
+        post = self._state.current(
+            replace(mission, target_binding=binding),
+            turn_index=turn_index,
+        )
+        post_frame = post.frame
+        post_target = post.target
+        if (
+            post.broker_state.turn_index != turn_index
+            or not post.broker_state.frame.authoritative
+            or not post.broker_state.frame.fresh
+            or post_frame is None
+            or post_target is None
+            or post_frame.frame_id != transition.post_frame_id
+            or post_frame.hwnd != activated.hwnd
+            or post_frame.epoch != envelope.frame.epoch
+            or post_frame.scope != "target_window"
+            or post_frame.region != activated.window_region
+            or post_target.binding_id != binding.binding_id
+            or post_target.hwnd != activated.hwnd
+            or post_target.root_hwnd != activated.root_hwnd
+            or post_target.process_id != activated.process_id
+            or post_target.process_identity != activated.process_identity
+            or post_target.epoch != envelope.frame.epoch
+            or post_target.window_region != activated.window_region
+        ):
+            raise ValueError(
+                "Controller post frame is not current activated-target authority"
+            )
+        evidence_ids = transition.evidence_refs
+        if (
+            not evidence_ids
+            or tuple(sorted(evidence_ids))
+            != tuple(sorted(post_frame.evidence_refs))
+        ):
+            raise ValueError(
+                "activation post frame does not carry Controller evidence"
+            )
+        refs = self._reducer.evidence_scope.require(
+            evidence_ids,
+            obligation_id=envelope.obligation_id,
+        )
+        expected_frame_hash = frame_identity_payload_hash(
+            post_frame.commit_identity
+        )
+        if len(refs) != len(evidence_ids) or any(
+            ref.kind != POST_ACTION_FRAME_EVIDENCE_KIND
+            or ref.trust != "deterministic"
+            or ref.mission_id != envelope.mission_id
+            or ref.run_id != envelope.run_id
+            or ref.obligation_id != envelope.obligation_id
+            or ref.action_id != envelope.decision_id
+            or ref.frame_id != post_frame.frame_id
+            or ref.payload_hash != expected_frame_hash
+            or ref.artifact_id is not None
+            or ref.content_sha256 is not None
+            for ref in refs
+        ):
+            raise ValueError(
+                "activation transition evidence does not bind the current post frame"
+            )
+
+        # Recheck Mission immediately before the immutable side effect.  A
+        # race may leave an orphan evidence object, but can never accept a
+        # stale or second target binding.
+        current = self._reducer.projection
+        if (
+            current.revision != envelope.mission_revision
+            or current.active_obligation_id != envelope.obligation_id
+            or current.target_binding is not None
+        ):
+            raise ValueError(
+                "Mission authority changed during target binding reconciliation"
+            )
+        registry.append(binding_evidence)
+        event_ids = self._accept(
+            "target_bound",
+            payload={"target_binding": binding.to_dict()},
+            evidence_refs=(binding_evidence.id,),
+            base_revision=envelope.mission_revision,
+        )
+        if (
+            len(event_ids) != 1
+            or self._reducer.projection.target_binding != binding
+        ):
+            raise ValueError(
+                "Reducer did not derive the accepted target binding"
+            )
+        return event_ids
 
     @staticmethod
     def _proposal_tool(proposal: object) -> str:
@@ -2066,14 +2378,38 @@ class MissionRuntime:
             isinstance(proposal, DesktopActionProposal)
             and proposal.action == ACTIVATE_TARGET_TOOL_NAME
         ):
-            lease = self._active_target_selection_lease
-            if lease is None or active_target_discovery is None:
+            activation_obligation_id = str(
+                self._reducer.projection.active_obligation_id or ""
+            )
+
+            def finish_activation(
+                status: RuntimeStatus,
+                detail: str,
+                event_ids: Iterable[str] = (),
+            ) -> MissionRuntimeResult:
                 return self._result(
-                    RuntimeStatus.STALE_DISCARDED,
+                    status,
                     route=route,
                     proposal_kind=proposal_kind,
                     decision_id=decision_id,
-                    detail="activate_target has no current candidate lease",
+                    event_ids=event_ids,
+                    detail=detail,
+                )
+
+            def activation_unknown(detail: str) -> MissionRuntimeResult:
+                return self._block_unknown(
+                    activation_obligation_id,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    detail=detail,
+                )
+
+            lease = self._active_target_selection_lease
+            if lease is None or active_target_discovery is None:
+                return finish_activation(
+                    RuntimeStatus.STALE_DISCARDED,
+                    "activate_target has no current candidate lease",
                 )
             try:
                 current_scope = self._target_selection_scope(
@@ -2082,38 +2418,149 @@ class MissionRuntime:
                     active_target_discovery,
                     turn_index=turn_index,
                 )
-                lease.consume(
+                selected_candidate = lease.consume(
                     scope=current_scope,
                     candidate_ordinal=proposal.args.get("candidate_ordinal"),
                 )
             except TargetSelectionLeaseError as exc:
-                return self._result(
+                self._discard_active_target_selection()
+                return finish_activation(
                     RuntimeStatus.STALE_DISCARDED,
-                    route=route,
-                    proposal_kind=proposal_kind,
-                    decision_id=decision_id,
-                    detail=str(exc),
+                    str(exc),
                 )
             except Exception as exc:
-                return self._result(
+                self._discard_active_target_selection()
+                return finish_activation(
                     RuntimeStatus.STATE_REJECTED,
-                    route=route,
-                    proposal_kind=proposal_kind,
-                    decision_id=decision_id,
-                    detail=str(exc),
+                    str(exc),
                 )
-            finally:
-                lease.discard()
-                self._active_target_selection_lease = None
-            return self._result(
-                RuntimeStatus.UNAVAILABLE,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=decision_id,
-                detail=(
-                    "target candidate selection was consumed, but the "
-                    "activation owner is not connected"
-                ),
+            if selected_candidate.activation is not TargetActivation.SWITCH_WINDOW:
+                self._discard_active_target_selection()
+                return finish_activation(
+                    RuntimeStatus.UNAVAILABLE,
+                    (
+                        "target candidate selection was consumed, but the "
+                        "cold-launch owner is not connected"
+                    ),
+                )
+            try:
+                activation_envelope = self._activation_envelope(
+                    decision_id=decision_id,
+                    snapshot=latest,
+                    projection=latest_broker,
+                    discovery=active_target_discovery,
+                    proposal=proposal,
+                    candidate=selected_candidate,
+                )
+                self._mutation_permits.issue(
+                    activation_envelope,
+                    turn_index=turn_index,
+                    still_current=lambda: self._activation_still_current(
+                        activation_envelope,
+                        lease=lease,
+                        discovery=active_target_discovery,
+                        turn_index=turn_index,
+                        grants=grants,
+                        stop_event=stop_event,
+                    ),
+                )
+            except (MutationPermitError, ValueError) as exc:
+                self._discard_active_target_selection()
+                return finish_activation(
+                    RuntimeStatus.STATE_REJECTED,
+                    str(exc),
+                )
+            permit_was_pending = False
+            try:
+                activation_transition = self._controller.execute(
+                    activation_envelope,
+                    stop_event=stop_event,
+                )
+            except Exception as exc:
+                self._mutation_permits.revoke(decision_id)
+                self._mutation_permits.finish_admission(decision_id)
+                self._discard_active_target_selection()
+                return activation_unknown(
+                    f"Controller raised after activation admission: {exc}"
+                )
+            else:
+                permit_was_pending = self._mutation_permits.revoke(
+                    decision_id
+                )
+                self._mutation_permits.finish_admission(decision_id)
+                self._discard_active_target_selection()
+            if not isinstance(
+                activation_transition,
+                TargetActivationTransition,
+            ):
+                return activation_unknown(
+                    (
+                        "Controller returned an invalid target activation "
+                        "transition"
+                    )
+                )
+            if (
+                activation_transition.action_id != decision_id
+                or activation_transition.action
+                != ACTIVATE_TARGET_TOOL_NAME
+                or activation_transition.candidate_ref
+                != selected_candidate.candidate_ref
+            ):
+                return activation_unknown(
+                    (
+                        "Controller target activation identity did not "
+                        "match Runtime authority"
+                    )
+                )
+            if (
+                permit_was_pending
+                and activation_transition.outcome
+                is not TargetActivationOutcome.REJECTED
+            ):
+                return activation_unknown(
+                    (
+                        "Controller returned an activation outcome without "
+                        "consuming the Runtime permit"
+                    )
+                )
+            if (
+                activation_transition.outcome
+                is TargetActivationOutcome.UNKNOWN
+            ):
+                return activation_unknown(
+                    (
+                        "Controller could not prove the target activation "
+                        "outcome"
+                    )
+                )
+            if (
+                activation_transition.outcome
+                is TargetActivationOutcome.REJECTED
+            ):
+                return finish_activation(
+                    RuntimeStatus.STALE_DISCARDED,
+                    (
+                        "Controller proved that target activation did not "
+                        "execute; the decision was not replayed"
+                    ),
+                )
+            try:
+                event_ids = self._commit_activated_target(
+                    activation_envelope,
+                    activation_transition,
+                    turn_index=turn_index,
+                )
+            except Exception as exc:
+                return activation_unknown(
+                    (
+                        "Controller target activation could not be "
+                        f"reconciled: {exc}"
+                    )
+                )
+            return finish_activation(
+                RuntimeStatus.ACTION_RECORDED,
+                "existing target was bound from deterministic evidence",
+                event_ids,
             )
 
         try:
