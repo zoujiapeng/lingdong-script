@@ -244,6 +244,7 @@ class ArpExecution:
         *,
         inputs: dict[str, Any] | None = None,
         run_id: str | None = None,
+        start_paused: bool = False,
         desktop_runtime_selection: DesktopRuntimeSelection | None = None,
         desktop_runtime_coordinator: DesktopRuntimeCoordinatorPort | None = None,
     ) -> None:
@@ -271,7 +272,11 @@ class ArpExecution:
         ):
             raise ValueError("desktop runtime coordinator requires vnext selection")
         self._desktop_runtime_coordinator = desktop_runtime_coordinator
-        self.status = ArpRunStatus.QUEUED
+        if type(start_paused) is not bool:
+            raise TypeError("start_paused must be bool")
+        self.status = (
+            ArpRunStatus.PAUSED if start_paused else ArpRunStatus.QUEUED
+        )
         self.current_node_id: str | None = None
         self.variables = {**graph.variables, **self.inputs}
         self.outputs: dict[str, Any] = {}
@@ -288,7 +293,9 @@ class ArpExecution:
         self.finished_at: float | None = None
         self.stop_event = threading.Event()
         self.pause_controller = PauseController()
-        self._manual_paused = False
+        self._manual_paused = start_paused
+        if start_paused:
+            self.pause_controller.pause()
         self._lock = threading.RLock()
         self._gate_condition = threading.Condition(self._lock)
         self._gate_decisions: dict[str, dict[str, Any]] = {}
@@ -450,11 +457,24 @@ class ArpExecution:
         self.stop_event.set()
         self._manual_paused = False
         self.pause_controller.resume()
+        canceled_before_start = False
         with self._gate_condition:
-            if self.status == ArpRunStatus.QUEUED:
+            if self.started_at is None and self.status in {
+                ArpRunStatus.QUEUED,
+                ArpRunStatus.PAUSED,
+            }:
                 self.status = ArpRunStatus.CANCELED
+                self.error = "run canceled"
                 self.finished_at = time.time()
+                canceled_before_start = True
             self._gate_condition.notify_all()
+        if canceled_before_start:
+            BUS.publish(
+                "arp_run_done",
+                run_id=self.run_id,
+                status=self.status.value,
+                error="run canceled",
+            )
 
     def pause(self) -> bool:
         with self._lock:
@@ -913,6 +933,8 @@ class ArpExecution:
             experience_policy=str(
                 self.graph.metadata.get("experience_policy") or "allow"
             ),
+            status=self.status.value,
+            manual_paused=self._manual_paused,
         )
 
         try:
@@ -1105,13 +1127,19 @@ class ArpRunManager:
         handlers: dict[ArpNodeKind, NodeHandler] | None = None,
         *,
         inputs: dict[str, Any] | None = None,
+        start_paused: bool = False,
         on_start: Callable[[ArpExecution], None] | None = None,
         on_finish: Callable[[ArpExecution], None] | None = None,
     ) -> ArpExecution:
         with self._lock:
             if self.busy():
                 raise RuntimeError("an ARP run is already active")
-            execution = self.prepare(graph, handlers, inputs=inputs)
+            execution = self.prepare(
+                graph,
+                handlers,
+                inputs=inputs,
+                start_paused=start_paused,
+            )
 
             def worker() -> None:
                 self.run_prepared(execution, on_start=on_start, on_finish=on_finish)
@@ -1127,6 +1155,7 @@ class ArpRunManager:
         handlers: dict[ArpNodeKind, NodeHandler] | None = None,
         *,
         inputs: dict[str, Any] | None = None,
+        start_paused: bool = False,
         desktop_runtime_selection: DesktopRuntimeSelection | None = None,
         desktop_runtime_coordinator: DesktopRuntimeCoordinatorPort | None = None,
     ) -> ArpExecution:
@@ -1138,12 +1167,22 @@ class ArpRunManager:
             graph,
             handlers,
             inputs=inputs,
+            start_paused=start_paused,
             desktop_runtime_selection=desktop_runtime_selection,
             desktop_runtime_coordinator=desktop_runtime_coordinator,
         )
         with self._lock:
             self._runs[execution.run_id] = execution
             self._current_id = execution.run_id
+        if start_paused:
+            BUS.publish(
+                "arp_run_paused",
+                run_id=execution.run_id,
+                graph_id=graph.id,
+                graph_name=graph.name,
+                status="paused",
+                prestart=True,
+            )
         return execution
 
     def run_prepared(
@@ -1156,6 +1195,8 @@ class ArpRunManager:
         """Run a prepared execution in the caller's job/thread boundary."""
         if execution.stop_event.is_set():
             execution.cancel()
+            return execution.to_dict()
+        if not execution._wait_if_paused():
             return execution.to_dict()
         if on_start:
             on_start(execution)

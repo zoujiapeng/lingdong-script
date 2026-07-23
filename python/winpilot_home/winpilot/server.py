@@ -971,6 +971,7 @@ def _start_arp_execution(
     inputs: dict[str, Any],
     *,
     runtime_version: str | None = None,
+    start_paused: bool = False,
 ) -> ArpExecution:
     selected_runtime_version = (
         CONFIG.get("vnext", "runtime_version", default=None)
@@ -1321,6 +1322,7 @@ def _start_arp_execution(
         graph,
         default_handlers(on_runner) if is_legacy_runtime else None,
         inputs=inputs,
+        start_paused=start_paused,
         desktop_runtime_selection=desktop_runtime_selection,
         desktop_runtime_coordinator=desktop_runtime_coordinator,
     )
@@ -1378,6 +1380,7 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
             graph,
             req.inputs,
             runtime_version=req.runtime_version,
+            start_paused=req.start_paused,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

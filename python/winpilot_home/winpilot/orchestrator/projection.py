@@ -155,7 +155,7 @@ class RunProjectionStore:
         if event_type == "arp_run_paused":
             return "paused"
         if event_type == "arp_run_resumed":
-            return "deciding"
+            return "starting" if event.get("status") == "queued" else "deciding"
         if event_type in {"agent_done", "agent_error", "arp_run_done"}:
             return "terminal"
         if event_type == "schedule" and event.get("action") == "finished":
@@ -210,6 +210,8 @@ class RunProjectionStore:
                 run["graph_id"] = event.get("graph_id")
                 run["kind"] = "arp"
             if event_type == "arp_run_start":
+                run["manual_paused"] = event.get("manual_paused") is True
+                run["status"] = str(event.get("status") or "running")
                 task_contract = event.get("task_contract")
                 if isinstance(task_contract, dict):
                     run["task_contract"] = copy.deepcopy(task_contract)
@@ -586,7 +588,7 @@ class RunProjectionStore:
                 run["status"] = "paused"
             elif event_type == "arp_run_resumed":
                 run["manual_paused"] = False
-                run["status"] = "running"
+                run["status"] = str(event.get("status") or "running")
             elif run.get("status") in _TERMINAL:
                 pass
             elif run.get("manual_paused"):

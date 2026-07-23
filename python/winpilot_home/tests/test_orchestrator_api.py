@@ -258,6 +258,53 @@ def test_generic_run_pause_and_resume_routes_control_arp_run(client):
     assert client.post(f"/api/v2/runs/{run_id}/cancel").status_code == 200
 
 
+def test_start_paused_is_atomic_until_the_same_run_is_resumed(client):
+    graph = _graph_payload()
+    graph["policy"] = {"require_evidence_on_done": False}
+    created = client.post(
+        "/api/v2/arp/runs",
+        json={"graph": graph, "inputs": {}, "start_paused": True},
+    )
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run_id"]
+    initial = created.json()["run"]
+    assert initial["run_id"] == run_id
+    assert initial["status"] == "paused"
+    assert initial["manual_paused"] is True
+    assert initial["started_at"] is None
+    assert initial["history"] == []
+
+    time.sleep(0.1)
+    detail = client.get(f"/api/v2/runs/{run_id}").json()
+    assert detail["arp"]["status"] == "paused"
+    assert detail["arp"]["manual_paused"] is True
+    assert detail["arp"]["history"] == []
+    assert detail["run"]["run_id"] == run_id
+    assert detail["run"]["status"] == "paused"
+
+    resumed = client.post(f"/api/v2/runs/{run_id}/resume")
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["arp"]["run_id"] == run_id
+    assert resumed.json()["arp"]["manual_paused"] is False
+    deadline = time.time() + 3
+    status = ""
+    while time.time() < deadline:
+        status = client.get(f"/api/v2/runs/{run_id}").json()["arp"]["status"]
+        if status not in {"queued", "running", "paused"}:
+            break
+        time.sleep(0.02)
+    assert status == "done"
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", "false", None])
+def test_start_paused_request_rejects_non_boolean_values(client, value):
+    response = client.post(
+        "/api/v2/arp/runs",
+        json={"graph": _graph_payload(), "inputs": {}, "start_paused": value},
+    )
+    assert response.status_code == 422
+
+
 def test_generic_run_cancel_route_also_cancels_agent_job(client):
     from winpilot import server
 

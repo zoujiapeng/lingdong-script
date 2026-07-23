@@ -716,6 +716,55 @@ def test_run_projection_preserves_manual_pause_across_child_events():
     assert resumed["manual_paused"] is False
 
 
+def test_run_projection_tracks_prestart_pause_and_queued_resume_exactly():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    store.on_event({
+        "type": "arp_run_paused",
+        "ts": 1.0,
+        "run_id": "prestart-pause",
+        "graph_id": "graph",
+        "graph_name": "Paused before start",
+        "status": "paused",
+        "prestart": True,
+    })
+    paused = store.get("prestart-pause")
+    assert paused["goal"] == "Paused before start"
+    assert paused["status"] == "paused"
+    assert paused["phase"] == "paused"
+    assert paused["manual_paused"] is True
+
+    store.on_event({
+        "type": "arp_run_resumed",
+        "ts": 2.0,
+        "run_id": "prestart-pause",
+        "status": "queued",
+    })
+    queued = store.get("prestart-pause")
+    assert queued["status"] == "queued"
+    assert queued["phase"] == "starting"
+    assert queued["manual_paused"] is False
+
+
+def test_run_start_does_not_trust_truthy_manual_pause_payload():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    store.on_event({
+        "type": "arp_run_start",
+        "ts": 1.0,
+        "run_id": "truthy-pause",
+        "graph_name": "Truthy pause",
+        "status": "running",
+        "manual_paused": "true",
+    })
+
+    run = store.get("truthy-pause")
+    assert run["status"] == "running"
+    assert run["manual_paused"] is False
+
+
 def test_run_projection_folds_agent_child_into_parent_arp_run():
     from winpilot.orchestrator.projection import RunProjectionStore
 
