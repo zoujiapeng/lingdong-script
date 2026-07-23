@@ -1198,9 +1198,9 @@ def test_runner_stops_foreground_guard_before_client_error_cleanup(
                 @staticmethod
                 def runtime_status():
                     return {
-                        "running": False,
+                        "running": True,
                         "current_run": {
-                            "run_id": "arp-terminal", "status": "done",
+                            "run_id": "arp-paused", "status": "paused",
                             "goal": spec["task"],
                         },
                     }
@@ -1219,6 +1219,8 @@ def test_runner_stops_foreground_guard_before_client_error_cleanup(
                 match="atomic pause barrier",
             ):
                 kwargs["after_submit"](Driver(), partial)
+            cleanup = kwargs["before_error_cleanup"](Driver(), partial)
+            assert cleanup == {"targetless_guard_aborted": True}
             calls.append("client_error_cleanup")
             assert calls.index("guard_stopped") < calls.index("client_error_cleanup")
             return {
