@@ -151,25 +151,29 @@ def run_target_acquisition_case(
             }
 
         def handoff(driver: Any, _partial: dict[str, Any]) -> dict[str, Any]:
-            pause_barrier = _wait_for_submitted_run(
-                driver, _partial, task=task,
-            )
-            handoff = fixture.finish_targetless_handoff(
-                baseline["instances"],
-                baseline["launch_records"],
-            )
-            before_resume = driver.capture_desktop(
-                "targetless-before-resume.png",
-            )
-            resume_barrier = driver.resume_paused_run(
-                pause_barrier["run_id"],
-            )
-            return {
-                "pause_barrier": pause_barrier,
-                **handoff,
-                "desktop_screenshot": before_resume,
-                "resume_barrier": resume_barrier,
-            }
+            try:
+                pause_barrier = _wait_for_submitted_run(
+                    driver, _partial, task=task,
+                )
+                handoff = fixture.finish_targetless_handoff(
+                    baseline["instances"],
+                    baseline["launch_records"],
+                )
+                before_resume = driver.capture_desktop(
+                    "targetless-before-resume.png",
+                )
+                resume_barrier = driver.resume_paused_run(
+                    pause_barrier["run_id"],
+                )
+                return {
+                    "pause_barrier": pause_barrier,
+                    **handoff,
+                    "desktop_screenshot": before_resume,
+                    "resume_barrier": resume_barrier,
+                }
+            except Exception:
+                fixture.abort_targetless_handoff()
+                raise
 
         def verify(client_result: dict[str, Any]) -> dict[str, Any]:
             assert fixture is not None

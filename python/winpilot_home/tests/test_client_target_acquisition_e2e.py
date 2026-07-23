@@ -1157,6 +1157,95 @@ def test_handoff_barrier_rejects_new_run_that_is_already_terminal():
         )
 
 
+def test_runner_stops_foreground_guard_before_client_error_cleanup(
+    tmp_path, monkeypatch,
+):
+    calls: list[str] = []
+
+    class FakeFixture:
+        public_name = "PublicFixture"
+
+        def prepare(self, _mode):
+            return {"instances": [], "launch_records": []}
+
+        def stage_targetless_handoff(self, *_args, **_kwargs):
+            calls.append("guard_started")
+            return {
+                "guard_started": True, "guard_armed": True,
+                "shell_hwnd": 7, "control_surface_hwnd": 901,
+                "control_surface_pid": 902, "guarded_fixture_hwnds": [],
+            }
+
+        def abort_targetless_handoff(self):
+            calls.append("guard_stopped")
+
+        def cleanup(self):
+            calls.append("fixture_cleanup")
+            return {"passed": True, "errors": []}
+
+    fake = FakeFixture()
+
+    class Harness:
+        @staticmethod
+        def run_case(_name, spec, **kwargs):
+            class Driver:
+                identity = type("Identity", (), {"hwnd": 901, "pid": 902})()
+
+                @staticmethod
+                def capture_desktop(name):
+                    return str(tmp_path / name)
+
+                @staticmethod
+                def runtime_status():
+                    return {
+                        "running": False,
+                        "current_run": {
+                            "run_id": "arp-terminal", "status": "done",
+                            "goal": spec["task"],
+                        },
+                    }
+
+                @staticmethod
+                def run_detail(run_id):
+                    return {
+                        "run": {"run_id": run_id, "status": "done"},
+                        "arp": {"run_id": run_id, "status": "done"},
+                    }
+
+            partial = {"runtime_before": {"current_run": None}}
+            kwargs["before_submit"](Driver(), partial)
+            with pytest.raises(
+                runner.FixtureUnavailable,
+                match="atomic pause barrier",
+            ):
+                kwargs["after_submit"](Driver(), partial)
+            calls.append("client_error_cleanup")
+            assert calls.index("guard_stopped") < calls.index("client_error_cleanup")
+            return {
+                "passed": False,
+                "task_verdict": {"source": "external", "passed": False},
+                "before_submit_handoff": {},
+            }
+
+    monkeypatch.setattr(runner, "_interactive_desktop", lambda: True)
+    monkeypatch.setattr(runner.AcquisitionFixture, "create", lambda _seed: fake)
+    result = runner.run_target_acquisition_case(
+        "target-cold-launch",
+        {
+            "seed": 1, "mode": "cold", "task_template": "打开 {public_name}",
+            "max_steps": 5, "timeout": 5,
+        },
+        output_root=tmp_path, group_id=None, pair_id=None,
+        client_harness=Harness, evidence_projector=lambda _value: {},
+    )
+
+    assert result["passed"] is False
+    assert calls == [
+        "guard_started", "guard_stopped", "client_error_cleanup",
+        "fixture_cleanup",
+    ]
+
+
 def test_runner_marks_missing_compiler_or_interactive_environment_unavailable(
     tmp_path, monkeypatch,
 ):
