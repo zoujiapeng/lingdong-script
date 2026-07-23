@@ -8,6 +8,7 @@ import math
 from types import MappingProxyType
 from typing import Any
 
+from ..process_identity import ProcessIdentityError, canonical_process_identity
 from ..visual_runtime.keyboard_contracts import (
     CANONICAL_HOTKEY_KEYS,
     CANONICAL_HOTKEY_MODIFIERS,
@@ -62,6 +63,17 @@ class FinalKeyboardGuardDecision(str, Enum):
     STOP_REQUESTED = "stop_requested"
 
 
+class FinalTargetActivationGuardDecision(str, Enum):
+    """Mechanical identity verdict immediately before window activation."""
+
+    ADMITTED = "admitted"
+    TARGET_UNAVAILABLE = "target_unavailable"
+    TARGET_ROOT_CHANGED = "target_root_changed"
+    TARGET_PROCESS_CHANGED = "target_process_changed"
+    AUTHORITY_CHANGED = "authority_changed"
+    STOP_REQUESTED = "stop_requested"
+
+
 def _scalar_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
     frozen: dict[str, Any] = {}
     for key, value in facts.items():
@@ -81,6 +93,29 @@ class RawActionContext:
 
     target_hwnd: int
     current_hwnd: int
+
+
+@dataclass(frozen=True, slots=True)
+class RawTargetActivationContext:
+    """Strong existing-window identity already selected by the Controller."""
+
+    target_hwnd: int
+    target_root_hwnd: int
+    target_process_id: int
+    target_process_identity: str
+
+    def __post_init__(self) -> None:
+        if type(self.target_hwnd) is not int or self.target_hwnd <= 0:
+            raise ValueError("target_hwnd must be a positive integer")
+        if type(self.target_root_hwnd) is not int or self.target_root_hwnd <= 0:
+            raise ValueError("target_root_hwnd must be a positive integer")
+        if type(self.target_process_id) is not int or self.target_process_id <= 0:
+            raise ValueError("target_process_id must be a positive integer")
+        try:
+            identity = canonical_process_identity(self.target_process_identity)
+        except ProcessIdentityError as exc:
+            raise ValueError("target_process_identity must be canonical") from exc
+        object.__setattr__(self, "target_process_identity", identity)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,7 +149,9 @@ class RawActionReceipt:
     error_kind: str | None = None
 
     def __post_init__(self) -> None:
-        if self.action not in {"scroll", "click", "type_text", "hotkey"}:
+        if self.action not in {
+            "scroll", "click", "type_text", "hotkey", "activate_target",
+        }:
             raise ValueError("unknown raw receipt action")
         if not isinstance(self.outcome, MutationOutcome):
             raise ValueError("raw receipt outcome must be MutationOutcome")
@@ -168,6 +205,7 @@ class RawActionReceipt:
 RawBackend = Callable[..., RawBackendResult]
 FinalPointerGuard = Callable[[int, int], FinalPointerGuardDecision]
 FinalKeyboardGuard = Callable[[], FinalKeyboardGuardDecision]
+FinalTargetActivationGuard = Callable[[], FinalTargetActivationGuardDecision]
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +273,27 @@ class AdmittedPhysicalHotkeyBackend:
 
 
 @dataclass(frozen=True, slots=True)
+class AdmittedPhysicalTargetActivationBackend:
+    """Marks one unqueued existing-window activation mechanism."""
+
+    execute: RawBackend
+
+    def __post_init__(self) -> None:
+        if not callable(self.execute):
+            raise TypeError(
+                "admitted physical target activation backend must be callable"
+            )
+        if hasattr(self.execute, "__wrapped__"):
+            raise TypeError(
+                "admitted physical target activation backend cannot wrap "
+                "a decorated entry"
+            )
+
+    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+        return self.execute(*args, **kwargs)
+
+
+@dataclass(frozen=True, slots=True)
 class RawDeviceBackends:
     scroll: RawBackend | None = None
     click: RawBackend | None = None
@@ -242,6 +301,9 @@ class RawDeviceBackends:
     admitted_physical_scroll: AdmittedPhysicalScrollBackend | None = None
     admitted_physical_type_text: AdmittedPhysicalTypeTextBackend | None = None
     admitted_physical_hotkey: AdmittedPhysicalHotkeyBackend | None = None
+    admitted_physical_target_activation: (
+        AdmittedPhysicalTargetActivationBackend | None
+    ) = None
 
     def __post_init__(self) -> None:
         for name in ("scroll", "click"):
@@ -273,6 +335,17 @@ class RawDeviceBackends:
             raise TypeError(
                 "admitted_physical_hotkey must be AdmittedPhysicalHotkeyBackend or null"
             )
+        if (
+            self.admitted_physical_target_activation is not None
+            and not isinstance(
+                self.admitted_physical_target_activation,
+                AdmittedPhysicalTargetActivationBackend,
+            )
+        ):
+            raise TypeError(
+                "admitted_physical_target_activation must be "
+                "AdmittedPhysicalTargetActivationBackend or null"
+            )
 
 
 class RawDeviceExecutor:
@@ -297,6 +370,10 @@ class RawDeviceExecutor:
             ("scroll", self._backends.admitted_physical_scroll),
             ("type_text", self._backends.admitted_physical_type_text),
             ("hotkey", self._backends.admitted_physical_hotkey),
+            (
+                "activate_target",
+                self._backends.admitted_physical_target_activation,
+            ),
         )
         return tuple(sorted(name for name, backend in pairs if backend is not None))
 
@@ -528,15 +605,45 @@ class RawDeviceExecutor:
             final_guard=final_guard,
         )
 
+    def activate_target(
+        self,
+        context: RawTargetActivationContext,
+        *,
+        final_guard: FinalTargetActivationGuard,
+    ) -> RawActionReceipt:
+        """Invoke one admitted activation backend without fallback or replay."""
+
+        if not isinstance(context, RawTargetActivationContext):
+            return self._receipt(
+                "activate_target",
+                MutationOutcome.NOT_STARTED,
+                error_kind="invalid_context",
+            )
+        if not callable(final_guard):
+            return self._receipt(
+                "activate_target",
+                MutationOutcome.NOT_STARTED,
+                error_kind="invalid_final_guard",
+            )
+        return self._call(
+            "activate_target",
+            self._backends.admitted_physical_target_activation,
+            context,
+            final_guard=final_guard,
+        )
+
 
 __all__ = [
     "AdmittedPhysicalClickBackend", "AdmittedPhysicalHotkeyBackend",
-    "AdmittedPhysicalScrollBackend", "AdmittedPhysicalTypeTextBackend",
+    "AdmittedPhysicalScrollBackend", "AdmittedPhysicalTargetActivationBackend",
+    "AdmittedPhysicalTypeTextBackend",
     "CANONICAL_HOTKEY_KEYS", "CANONICAL_HOTKEY_MODIFIERS",
     "ClickCount", "ClickMechanism",
     "FinalKeyboardGuard", "FinalKeyboardGuardDecision", "FinalPointerGuard",
-    "FinalPointerGuardDecision", "HotkeyChord", "MAX_TYPE_TEXT_CODEPOINTS",
+    "FinalPointerGuardDecision", "FinalTargetActivationGuard",
+    "FinalTargetActivationGuardDecision", "HotkeyChord",
+    "MAX_TYPE_TEXT_CODEPOINTS",
     "MouseButton",
     "RawActionContext", "RawActionReceipt", "RawBackendResult",
-    "RawDeviceBackends", "RawDeviceExecutor",
+    "RawDeviceBackends", "RawDeviceExecutor", "RawTargetActivationContext",
 ]
