@@ -6,6 +6,7 @@ from typing import Mapping, Protocol, Any
 
 from ..actor import ActorDecisionEnvelope, ActorTurnInput, ImageRegion
 from ..mission import MissionProjection
+from ..targeting import TargetDiscoverySnapshot
 from .contracts import ControllerTransition, RuntimeSnapshot
 
 
@@ -37,6 +38,17 @@ class RuntimeStatePort(Protocol):
     ) -> RuntimeSnapshot: ...
 
 
+class TargetDiscoveryPort(Protocol):
+    """Read-only target facts; it never selects or activates a candidate."""
+
+    def discover(
+        self,
+        query: str,
+        *,
+        stop_event: Event | None = None,
+    ) -> TargetDiscoverySnapshot: ...
+
+
 class ControllerPort(Protocol):
     def execute(
         self,
@@ -50,4 +62,10 @@ class PointerCleanupPort(Protocol):
     def release_pointer(self, lease_id: str, *, reason: str) -> bool: ...
 
 
-__all__ = ["ActorPort", "RuntimeStatePort", "ControllerPort", "PointerCleanupPort"]
+__all__ = [
+    "ActorPort",
+    "RuntimeStatePort",
+    "TargetDiscoveryPort",
+    "ControllerPort",
+    "PointerCleanupPort",
+]

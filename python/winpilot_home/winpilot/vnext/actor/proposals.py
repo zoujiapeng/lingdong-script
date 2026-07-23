@@ -18,9 +18,10 @@ from pydantic import (
 )
 
 from ..capability_names import InvalidCapability, canonical_capability
+from ..targeting.contracts import MAX_TARGET_QUERY_CHARS
 
 
-ACTOR_PROPOSAL_FORMAT = "actor-proposal/0"
+ACTOR_PROPOSAL_FORMAT = "actor-proposal/1"
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _RUNTIME_FIELDS = frozenset({
     "mission_id", "run_id", "revision", "mission_revision", "goal_revision",
@@ -46,6 +47,7 @@ _BATCH_FIELDS = frozenset({"actions", "action_batch", "batch", "operations", "to
 _FORBIDDEN_ACTIONS = frozenset({
     "done", "fail", "failed", "finish", "complete", "complete_task",
     "complete_subgoal", "claim_obligation_done", "blocked", "observe",
+    "discover_target",
     "request_capability", "request_inspection", "request_replan",
     "run_action_batch", "execute_action_batch", "execute_subgoal", "revise_plan",
 })
@@ -141,7 +143,7 @@ def _reject_overreach(value: Any, path: str = "proposal") -> None:
 
 class _ActorModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    format: Literal["actor-proposal/0"] = ACTOR_PROPOSAL_FORMAT
+    format: Literal["actor-proposal/1"] = ACTOR_PROPOSAL_FORMAT
 
 
 class ImageRegion(BaseModel):
@@ -226,6 +228,19 @@ class ObserveProposal(_ActorModel):
         return self
 
 
+class DiscoverTargetRequest(_ActorModel):
+    kind: Literal["discover_target"] = "discover_target"
+    query: str
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def _query(cls, value: Any) -> str:
+        if type(value) is not str or len(value) > MAX_TARGET_QUERY_CHARS:
+            raise ValueError("query must be bounded text")
+        query = _text(value, "query")
+        return query
+
+
 class CapabilityRequest(_ActorModel):
     kind: Literal["request_capability"] = "request_capability"
     capability: str
@@ -307,14 +322,16 @@ class ReplanRequest(_ActorModel):
 
 ActorProposal: TypeAlias = Annotated[
     Union[
-        DesktopActionProposal, ObserveProposal, CapabilityRequest,
+        DesktopActionProposal, ObserveProposal, DiscoverTargetRequest,
+        CapabilityRequest,
         InspectionRequest, ClaimObligationDone, BlockedReport, ReplanRequest,
     ],
     Field(discriminator="kind"),
 ]
 _ADAPTER = TypeAdapter(ActorProposal)
 _KNOWN_KINDS = frozenset({
-    "desktop_action", "observe", "request_capability", "request_inspection",
+    "desktop_action", "observe", "discover_target",
+    "request_capability", "request_inspection",
     "claim_obligation_done", "blocked", "request_replan",
 })
 
@@ -340,7 +357,8 @@ def actor_proposal_to_json(proposal: ActorProposal) -> str:
 
 __all__ = [
     "ACTOR_PROPOSAL_FORMAT", "ActorContractError", "InvalidActorProposal",
-    "ImageRegion", "DesktopActionProposal", "ObserveProposal", "CapabilityRequest",
+    "ImageRegion", "DesktopActionProposal", "ObserveProposal",
+    "DiscoverTargetRequest", "CapabilityRequest",
     "InspectionRequest", "ClaimObligationDone", "BlockedReport", "ReplanRequest",
     "ActorProposal", "parse_actor_proposal", "actor_proposal_to_json",
 ]

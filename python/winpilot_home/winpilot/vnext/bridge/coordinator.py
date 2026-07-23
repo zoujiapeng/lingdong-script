@@ -60,6 +60,7 @@ from ..mission import (
 )
 from ..profiling import ExecutionPolicy
 from ..runtime import MissionRuntime, MutationPermitAuthority, RuntimeStatus
+from ..targeting import FreshWindowsTargetDiscovery
 from ..verification import (
     DeterministicActionEffectVerifier,
     DeterministicMissionCompletionVerifier,
@@ -223,6 +224,7 @@ class LiveDesktopRuntimeCoordinator:
         verifier_factory: Callable[[Mapping[str, Any]], Any] | None = None,
         window_exists_resolver: Callable[[int], bool] | None = None,
         desktop_identity_reader: Callable[[], DesktopObservationIdentity] | None = None,
+        target_discovery: Any | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         frame_max_age_s: float = DEFAULT_FRAME_MAX_AGE_S,
         clock: Callable[[], float] = time.time,
@@ -278,6 +280,10 @@ class LiveDesktopRuntimeCoordinator:
             desktop_identity_reader
         ):
             raise TypeError("desktop_identity_reader must be callable or null")
+        if target_discovery is not None and not callable(
+            getattr(target_discovery, "discover", None)
+        ):
+            raise TypeError("target_discovery must provide discover()")
         if not callable(clock):
             raise TypeError("clock must be callable")
 
@@ -300,6 +306,9 @@ class LiveDesktopRuntimeCoordinator:
         self._window_exists = window_exists_resolver
         self._read_desktop_identity = (
             desktop_identity_reader or _windows_desktop_identity
+        )
+        self._target_discovery = target_discovery or FreshWindowsTargetDiscovery(
+            clock=clock,
         )
         self._max_turns = max_turns
         self._frame_max_age_s = float(frame_max_age_s)
@@ -570,6 +579,7 @@ class LiveDesktopRuntimeCoordinator:
             actor=actor_probe,
             state=state,
             controller=controller,
+            target_discovery=self._target_discovery,
             mutation_permits=permits,
             attested_visual_verifier=self._verifier_factory(self._api_config),
             mission_completion_verifier=DeterministicMissionCompletionVerifier(),
@@ -762,6 +772,7 @@ class LiveDesktopRuntimeCoordinator:
             return self._failed(type(exc).__name__)
         finally:
             if runtime is not None:
+                runtime.discard_ephemeral_state()
                 runtime.mutation_permits.close()
             if evidence is not None:
                 evidence.close()

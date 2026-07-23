@@ -18,6 +18,7 @@ from ...modeling import (
     create_openai_client,
     invoke_chat_completion,
 )
+from ..targeting.contracts import DISCOVER_TARGET_TOOL_NAME
 from .action_history import (
     ActionHistoryProjectionError,
     project_action_history_args,
@@ -224,6 +225,12 @@ def _proposal_for(
                 arguments.get("question")
                 or "refresh the current authoritative frame"
             ),
+        }
+    elif name == DISCOVER_TARGET_TOOL_NAME:
+        raw = {
+            "format": ACTOR_PROPOSAL_FORMAT,
+            "kind": "discover_target",
+            **dict(arguments),
         }
     elif name == "claim_obligation_done":
         raw = {
@@ -478,6 +485,10 @@ class OpenAIVisualActor:
             "mission": mission_payload,
             "frame": turn_payload["frame"],
         }
+        if turn_payload["target_discovery_feedback"] is not None:
+            user_payload["target_discovery_feedback"] = (
+                turn_payload["target_discovery_feedback"]
+            )
         if turn_payload["target_choices"]:
             user_payload["target_choices"] = turn_payload["target_choices"]
         request = {

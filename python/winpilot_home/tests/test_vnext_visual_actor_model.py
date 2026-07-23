@@ -17,6 +17,7 @@ from winpilot.vnext.actor.model import (
 from winpilot.vnext.actor.proposals import (
     ACTOR_PROPOSAL_FORMAT,
     DesktopActionProposal,
+    DiscoverTargetRequest,
     InvalidActorProposal,
     parse_actor_proposal,
 )
@@ -296,6 +297,100 @@ def test_visual_actor_sees_ordinal_choice_and_returns_no_runtime_identity() -> N
         "launch_target", "broker_projection_id", "frame_id",
     ):
         assert private_name not in user_text
+
+
+def test_visual_actor_maps_discover_target_without_local_intent() -> None:
+    requests = []
+
+    def create(**request):
+        requests.append(request)
+        return _response(_tool_call(
+            "discover_target",
+            {"query": "Visible workspace"},
+        ))
+
+    proposal = parse_actor_proposal(_actor(create).propose(
+        _turn("discover_target"),
+        image_b64="AAAA",
+        submitted_size=(100, 100),
+    ))
+
+    assert isinstance(proposal, DiscoverTargetRequest)
+    assert proposal.query == "Visible workspace"
+    parameters = requests[0]["tools"][0]["function"]["parameters"]
+    assert parameters == {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": r"[\s\S]*\S[\s\S]*",
+            },
+        },
+        "required": ["query"],
+    }
+    assert "local_intent" not in parameters["properties"]
+    assert "target_choices" not in json.loads(
+        requests[0]["messages"][-1]["content"][0]["text"]
+    )
+
+
+def test_visual_actor_sees_one_empty_discovery_feedback_without_runtime_identity() -> None:
+    requests = []
+    raw = json.loads(_turn("discover_target").to_json())
+    raw["target_discovery_feedback"] = {
+        "format": "actor-target-discovery-feedback/0",
+        "query": "Orbit",
+        "outcome": "no_candidates",
+    }
+    turn = ActorTurnInput.from_dict(raw)
+
+    def create(**request):
+        requests.append(request)
+        return _response(_tool_call(
+            "discover_target",
+            {"query": "a different visible workspace"},
+        ))
+
+    _actor(create).propose(turn, image_b64="AAAA", submitted_size=(100, 100))
+
+    user_text = requests[0]["messages"][-1]["content"][0]["text"]
+    payload = json.loads(user_text)
+    assert payload["target_discovery_feedback"] == {
+        "format": "actor-target-discovery-feedback/0",
+        "query": "Orbit",
+        "outcome": "no_candidates",
+    }
+    assert "target_choices" not in payload
+    for private_name in (
+        "candidate_fingerprint", "candidate_ref", "discovery_id", "frame_id",
+        "mission_id", "run_id", "broker_projection_id",
+    ):
+        assert private_name not in user_text
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        {"query": ""},
+        {"query": "   "},
+        {"query": "x" * 257},
+        {"query": "Visible workspace", "local_intent": "not a mutation"},
+        {"query": "Visible workspace", "frame_id": 9},
+    ),
+)
+def test_visual_actor_rejects_invalid_discover_target_response(arguments) -> None:
+    actor = _actor(lambda **_request: _response(
+        _tool_call("discover_target", arguments)
+    ))
+    with pytest.raises(VisualActorModelError):
+        actor.propose(
+            _turn("discover_target"),
+            image_b64="AAAA",
+            submitted_size=(100, 100),
+        )
 
 
 def test_provider_strips_nested_annotations_but_preserves_same_named_property() -> None:

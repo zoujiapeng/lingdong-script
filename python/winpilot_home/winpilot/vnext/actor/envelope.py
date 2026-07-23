@@ -13,7 +13,7 @@ from ..capabilities import PointerLeaseState
 from .proposals import ActorProposal
 
 
-ACTOR_ENVELOPE_FORMAT = "actor-envelope/1"
+ACTOR_ENVELOPE_FORMAT = "actor-envelope/2"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 
 
@@ -41,7 +41,7 @@ class ActorDecisionEnvelope(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    format: Literal["actor-envelope/1"] = ACTOR_ENVELOPE_FORMAT
+    format: Literal["actor-envelope/2"] = ACTOR_ENVELOPE_FORMAT
     decision_id: str
     mission_id: str
     run_id: str

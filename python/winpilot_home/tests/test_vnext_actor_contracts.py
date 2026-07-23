@@ -9,6 +9,7 @@ import random
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from winpilot.vnext.actor import (
@@ -25,6 +26,7 @@ from winpilot.vnext.actor import (
     CapabilityRequest,
     ClaimObligationDone,
     DesktopActionProposal,
+    DiscoverTargetRequest,
     ImageRegion,
     InspectionRequest,
     InvalidActorEnvelope,
@@ -62,12 +64,15 @@ from winpilot.vnext.mission.contracts import (
     target_binding_attestation,
 )
 from winpilot.vnext.targeting import (
+    DISCOVER_TARGET_TOOL_NAME,
+    MAX_TARGET_QUERY_CHARS,
     TargetCandidate,
     TargetDiscoverySnapshot,
     TargetSelectionLease,
     TargetSelectionScope,
     activate_target_tool_schema,
     candidate_ref_for,
+    discover_target_tool_schema,
     launch_identity_for,
 )
 from winpilot.visual_runtime.commit_admission import (
@@ -328,6 +333,10 @@ def test_all_proposal_variants_are_strict_discriminated_round_trips() -> None:
             image_region=ImageRegion(x=1, y=2, width=30, height=40),
             question="Describe the small control",
         ),
+        DiscoverTargetRequest(
+            format=ACTOR_PROPOSAL_FORMAT,
+            query="Visible workspace",
+        ),
         CapabilityRequest(
             format=ACTOR_PROPOSAL_FORMAT,
             capability="pointer.dynamic",
@@ -366,6 +375,7 @@ def test_all_proposal_variants_are_strict_discriminated_round_trips() -> None:
 
 
 def test_model_wire_requires_explicit_version_and_exact_one_outcome() -> None:
+    assert ACTOR_PROPOSAL_FORMAT == "actor-proposal/1"
     with pytest.raises(InvalidActorProposal, match="explicit format"):
         parse_actor_proposal({
             "kind": "blocked", "blocker_kind": "unknown", "observed_facts": [],
@@ -378,6 +388,111 @@ def test_model_wire_requires_explicit_version_and_exact_one_outcome() -> None:
     for kind in ("done", "fail", "action_batch", "desktop_actions"):
         with pytest.raises(InvalidActorProposal, match="unsupported actor proposal kind"):
             parse_actor_proposal({"format": ACTOR_PROPOSAL_FORMAT, "kind": kind})
+    with pytest.raises(InvalidActorProposal):
+        parse_actor_proposal({
+            "format": "actor-proposal/0",
+            "kind": "discover_target",
+            "query": "Visible workspace",
+        })
+
+
+def test_discover_target_proposal_is_strict_bounded_and_identity_free() -> None:
+    proposal = parse_actor_proposal({
+        "format": ACTOR_PROPOSAL_FORMAT,
+        "kind": DISCOVER_TARGET_TOOL_NAME,
+        "query": "  Visible workspace  ",
+    })
+
+    assert isinstance(proposal, DiscoverTargetRequest)
+    assert proposal.query == "Visible workspace"
+    assert json.loads(actor_proposal_to_json(proposal)) == {
+        "format": ACTOR_PROPOSAL_FORMAT,
+        "kind": DISCOVER_TARGET_TOOL_NAME,
+        "query": "Visible workspace",
+    }
+    for invalid in (
+        "",
+        "   ",
+        True,
+        ["Visible workspace"],
+        "x" * (MAX_TARGET_QUERY_CHARS + 1),
+    ):
+        with pytest.raises(InvalidActorProposal):
+            parse_actor_proposal({
+                "format": ACTOR_PROPOSAL_FORMAT,
+                "kind": DISCOVER_TARGET_TOOL_NAME,
+                "query": invalid,
+            })
+    for extra in (
+        {"mission_id": "invented"},
+        {"frame_id": 1},
+        {"candidate_ref": "target-" + "0" * 24},
+        {"launch_target": r"C:\Apps\Visible.exe"},
+        {"local_intent": "not a mutation"},
+    ):
+        with pytest.raises(InvalidActorProposal):
+            parse_actor_proposal({
+                "format": ACTOR_PROPOSAL_FORMAT,
+                "kind": DISCOVER_TARGET_TOOL_NAME,
+                "query": "Visible workspace",
+                **extra,
+            })
+
+
+def test_discover_target_tool_schema_has_one_canonical_owner() -> None:
+    assert discover_target_tool_schema() == {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_TARGET_QUERY_CHARS,
+                "pattern": r"[\s\S]*\S[\s\S]*",
+            },
+        },
+        "required": ["query"],
+    }
+
+    validator = Draft202012Validator(discover_target_tool_schema())
+    assert list(validator.iter_errors({"query": "Visible workspace"})) == []
+    assert list(validator.iter_errors({"query": " \t\r\n "}))
+
+
+@pytest.mark.parametrize(
+    "query,accepted",
+    (
+        ("Visible workspace", True),
+        ("  可见应用  ", True),
+        ("\nOrbit\n", True),
+        ("x" * MAX_TARGET_QUERY_CHARS, True),
+        (" " + "x" * (MAX_TARGET_QUERY_CHARS - 2) + " ", True),
+        ("", False),
+        (" \t\r\n ", False),
+        ("\u2003", False),
+        ("x" * (MAX_TARGET_QUERY_CHARS + 1), False),
+        (" " + "x" * MAX_TARGET_QUERY_CHARS + " ", False),
+    ),
+)
+def test_discovery_schema_and_proposal_accept_the_same_query_domain(
+    query: str,
+    accepted: bool,
+) -> None:
+    schema_ok = not list(Draft202012Validator(
+        discover_target_tool_schema()
+    ).iter_errors({"query": query}))
+    try:
+        proposal = parse_actor_proposal({
+            "format": ACTOR_PROPOSAL_FORMAT,
+            "kind": DISCOVER_TARGET_TOOL_NAME,
+            "query": query,
+        })
+    except InvalidActorProposal:
+        proposal_ok = False
+    else:
+        proposal_ok = isinstance(proposal, DiscoverTargetRequest)
+    assert schema_ok is accepted
+    assert proposal_ok is accepted
 
 
 @pytest.mark.parametrize(
@@ -465,6 +580,7 @@ def test_serialization_is_stable_under_argument_insertion_order() -> None:
 
 
 def test_runtime_envelope_binds_all_authority_and_round_trips() -> None:
+    assert ACTOR_ENVELOPE_FORMAT == "actor-envelope/2"
     envelope = ActorDecisionEnvelope(
         format=ACTOR_ENVELOPE_FORMAT,
         decision_id="decision-1",
@@ -523,7 +639,12 @@ def test_envelope_is_strict_and_frame_identity_is_atomic() -> None:
     with pytest.raises(InvalidActorEnvelope, match="explicit format"):
         ActorDecisionEnvelope.from_dict({key: value for key, value in raw.items() if key != "format"})
     with pytest.raises(InvalidActorEnvelope):
-        ActorDecisionEnvelope.from_dict({**raw, "format": "actor-envelope/0"})
+        ActorDecisionEnvelope.from_dict({**raw, "format": "actor-envelope/1"})
+    with pytest.raises(InvalidActorEnvelope):
+        ActorDecisionEnvelope.from_dict({
+            **raw,
+            "proposal": {**raw["proposal"], "format": "actor-proposal/0"},
+        })
     with pytest.raises(InvalidActorEnvelope):
         ActorDecisionEnvelope.from_dict({
             **raw,
@@ -582,7 +703,7 @@ def test_envelope_rejects_frame_target_identity_disagreement() -> None:
 
 
 def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> None:
-    assert ACTOR_TURN_INPUT_FORMAT == "actor-turn-input/4"
+    assert ACTOR_TURN_INPUT_FORMAT == "actor-turn-input/5"
     assert ACTOR_MISSION_VIEW_FORMAT == "actor-mission-view/2"
     turn = project_actor_turn_input(_card(), _frame(), _catalog(), _projection())
     raw = json.loads(turn.to_json())
@@ -633,8 +754,8 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
 @pytest.mark.parametrize(
     "mutate",
     (
+        lambda raw: raw.update(format="actor-turn-input/4"),
         lambda raw: raw.update(format="actor-turn-input/3"),
-        lambda raw: raw.update(format="actor-turn-input/2"),
         lambda raw: raw["mission"].update(format="actor-mission-view/1"),
         lambda raw: raw["tools"][0].update(format="actor-tool-view/0"),
         lambda raw: raw["mission"]["last_transition"].update(
@@ -642,7 +763,7 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
         ),
     ),
 )
-def test_actor_turn_v4_rejects_stale_formats_and_removed_completion_hint(mutate) -> None:
+def test_actor_turn_v5_rejects_stale_formats_and_removed_completion_hint(mutate) -> None:
     raw = json.loads(
         project_actor_turn_input(_card(), _frame(), _catalog(), _projection()).to_json()
     )
@@ -745,6 +866,39 @@ def test_target_choices_and_activation_tool_must_be_projected_together() -> None
                 candidate_count=1,
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "keep_choices,keep_activation",
+    ((True, True), (True, False), (False, True)),
+)
+def test_empty_discovery_feedback_is_mutually_exclusive_with_target_authority(
+    keep_choices: bool,
+    keep_activation: bool,
+) -> None:
+    raw = json.loads(_project_target_turn(
+        _target_lease((_target_candidate(),)),
+    ).to_json())
+    raw["target_discovery_feedback"] = {
+        "format": "actor-target-discovery-feedback/0",
+        "query": "Orbit",
+        "outcome": "no_candidates",
+    }
+    if not keep_choices:
+        raw["target_choices"] = []
+    if not keep_activation:
+        raw["tools"] = [{
+            "format": "actor-tool-view/1",
+            "name": DISCOVER_TARGET_TOOL_NAME,
+            "schema": discover_target_tool_schema(),
+            "requires_local_intent": False,
+        }]
+
+    with pytest.raises(
+        InvalidActorView,
+        match="feedback cannot include choices or activation",
+    ):
+        ActorTurnInput.from_dict(raw)
 
 
 @pytest.mark.parametrize(

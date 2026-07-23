@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol
 
 from ..actor import (
@@ -18,6 +18,7 @@ from ..actor import (
     CapabilityRequest,
     ClaimObligationDone,
     DesktopActionProposal,
+    DiscoverTargetRequest,
     InspectionRequest,
     InvalidActorProposal,
     ObserveProposal,
@@ -56,6 +57,14 @@ from ..mission import (
     StaleRevisionError,
 )
 from ..profiling import ExecutionProfile
+from ..targeting import (
+    ACTIVATE_TARGET_TOOL_NAME,
+    DISCOVER_TARGET_TOOL_NAME,
+    TargetDiscoverySnapshot,
+    TargetSelectionLease,
+    TargetSelectionLeaseError,
+    TargetSelectionScope,
+)
 from ..verification import (
     AcceptedObligationVerification,
     ActionEffectVerificationRequest,
@@ -78,7 +87,13 @@ from .contracts import (
     RuntimeSnapshot,
     RuntimeStatus,
 )
-from .ports import ActorPort, ControllerPort, PointerCleanupPort, RuntimeStatePort
+from .ports import (
+    ActorPort,
+    ControllerPort,
+    PointerCleanupPort,
+    RuntimeStatePort,
+    TargetDiscoveryPort,
+)
 from .mutation_permits import MutationPermitAuthority, MutationPermitError
 
 if TYPE_CHECKING:
@@ -86,6 +101,7 @@ if TYPE_CHECKING:
 
 
 _PROPOSAL_TOOL = {
+    "discover_target": DISCOVER_TARGET_TOOL_NAME,
     "observe": "observe",
     "request_capability": "request_capability",
     "request_inspection": "request_inspection",
@@ -120,6 +136,18 @@ class _PendingActorAction:
     arguments: Mapping[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingTargetDiscovery:
+    """One private discovery result eligible for exactly the following turn."""
+
+    mission_id: str
+    run_id: str
+    mission_revision: int
+    obligation_id: str
+    source_turn_index: int
+    snapshot: TargetDiscoverySnapshot
+
+
 class MissionRuntime:
     """Coordinate exactly one local obligation decision per call."""
 
@@ -133,6 +161,7 @@ class MissionRuntime:
         actor: ActorPort,
         state: RuntimeStatePort,
         controller: ControllerPort,
+        target_discovery: TargetDiscoveryPort | None = None,
         pointer_cleanup: PointerCleanupPort | None = None,
         mutation_permits: MutationPermitAuthority | None = None,
         obligation_verifier: ObligationVerifierPort | None = None,
@@ -157,6 +186,26 @@ class MissionRuntime:
         self._actor = actor
         self._state = state
         self._controller = controller
+        try:
+            discovery_tool = catalog.get(DISCOVER_TARGET_TOOL_NAME)
+        except KeyError:
+            discovery_tool = None
+        if discovery_tool is not None and target_discovery is None:
+            raise TypeError(
+                "Catalog discover_target requires one read-only target_discovery port"
+            )
+        if target_discovery is not None and not callable(
+            getattr(target_discovery, "discover", None)
+        ):
+            raise TypeError("target_discovery must provide discover()")
+        if discovery_tool is not None and (
+            discovery_tool.route is not ToolRoute.VISUAL_ACTOR
+            or discovery_tool.mutation_kind is not MutationKind.NONE
+        ):
+            raise TypeError(
+                "discover_target must be a read-only Visual Actor tool"
+            )
+        self._target_discovery = target_discovery
         self._pointer_cleanup = pointer_cleanup
         if obligation_verifier is not None and not callable(
             getattr(obligation_verifier, "verify", None)
@@ -236,6 +285,8 @@ class MissionRuntime:
             raise TypeError("mutation permit authority must match Runtime mission/run")
         self._turn_lock = threading.Lock()
         self._pending_actor_action: _PendingActorAction | None = None
+        self._pending_target_discovery: _PendingTargetDiscovery | None = None
+        self._active_target_selection_lease: TargetSelectionLease | None = None
 
     @property
     def reducer(self) -> MissionReducer:
@@ -244,6 +295,117 @@ class MissionRuntime:
     @property
     def mutation_permits(self) -> MutationPermitAuthority:
         return self._mutation_permits
+
+    def _discard_active_target_selection(self) -> None:
+        lease = self._active_target_selection_lease
+        self._active_target_selection_lease = None
+        if lease is not None:
+            lease.discard()
+
+    def _discard_target_sidecars(self) -> None:
+        self._pending_target_discovery = None
+        self._discard_active_target_selection()
+
+    def discard_ephemeral_state(self) -> None:
+        """Deterministically clear run-local cognitive sidecars.
+
+        The coordinator calls this at run teardown.  No Mission or Evidence
+        state is changed, and no desktop authority is contacted.
+        """
+
+        with self._turn_lock:
+            self._pending_actor_action = None
+            self._discard_target_sidecars()
+
+    def _take_target_discovery_for_turn(
+        self,
+        pending: _PendingTargetDiscovery | None,
+        snapshot: RuntimeSnapshot,
+        *,
+        turn_index: int,
+    ) -> TargetDiscoverySnapshot | None:
+        """Consume a pending result only for its exact following turn."""
+
+        if pending is None:
+            return None
+        mission = self._reducer.projection
+        frame = snapshot.frame
+        if (
+            pending.mission_id != mission.mission_id
+            or pending.run_id != mission.run_id
+            or pending.mission_revision != mission.revision
+            or pending.obligation_id != mission.active_obligation_id
+            or turn_index != pending.source_turn_index + 1
+            or mission.target_binding is not None
+            or snapshot.target is not None
+            or snapshot.broker_state.target.live
+            or frame is None
+            or frame.scope != "full_desktop"
+            or frame.epoch != 0
+            or not snapshot.broker_state.frame.authoritative
+            or not snapshot.broker_state.frame.fresh
+        ):
+            return None
+        return pending.snapshot
+
+    @staticmethod
+    def _with_target_candidates(
+        snapshot: RuntimeSnapshot,
+        discovery: TargetDiscoverySnapshot | None,
+    ) -> RuntimeSnapshot:
+        if discovery is None:
+            return snapshot
+        state = snapshot.broker_state
+        if (
+            state.candidate_fingerprint is not None
+            or state.candidate_count is not None
+        ):
+            raise ValueError(
+                "RuntimeState cannot provide a second target candidate owner"
+            )
+        return replace(
+            snapshot,
+            broker_state=replace(
+                state,
+                candidate_fingerprint=discovery.candidate_fingerprint,
+                candidate_count=len(discovery.candidates),
+            ),
+        )
+
+    def _target_selection_scope(
+        self,
+        snapshot: RuntimeSnapshot,
+        projection: BrokerProjection,
+        discovery: TargetDiscoverySnapshot,
+        *,
+        turn_index: int,
+    ) -> TargetSelectionScope:
+        frame = snapshot.frame
+        mission = self._reducer.projection
+        if (
+            frame is None
+            or frame.scope != "full_desktop"
+            or frame.epoch != 0
+            or snapshot.target is not None
+            or mission.target_binding is not None
+            or projection.target_binding_id is not None
+            or projection.candidate_fingerprint
+            != discovery.candidate_fingerprint
+            or projection.candidate_count != len(discovery.candidates)
+        ):
+            raise ValueError(
+                "target selection requires one exact unbound desktop authority"
+            )
+        return TargetSelectionScope(
+            mission_id=mission.mission_id,
+            run_id=mission.run_id,
+            mission_revision=mission.revision,
+            obligation_id=str(mission.active_obligation_id or ""),
+            turn_index=turn_index,
+            frame=frame.commit_identity,
+            broker_projection_id=projection.projection_id,
+            candidate_fingerprint=discovery.candidate_fingerprint,
+        )
 
     @staticmethod
     def _stopped(stop_event: threading.Event | None) -> bool:
@@ -278,6 +440,7 @@ class MissionRuntime:
         detail: str = "turn canceled before desktop admission",
     ) -> MissionRuntimeResult:
         self._pending_actor_action = None
+        self._discard_target_sidecars()
         attempted = False
         try:
             snapshot = self._state.current(
@@ -1541,6 +1704,7 @@ class MissionRuntime:
                 stop_event=stop_event,
             )
         finally:
+            self._discard_active_target_selection()
             self._turn_lock.release()
 
     def _run_locked(
@@ -1557,24 +1721,29 @@ class MissionRuntime:
         terminal_status = self._reducer.projection.status
         if terminal_status is MissionStatus.VERIFIED:
             self._pending_actor_action = None
+            self._discard_target_sidecars()
             return self._result(
                 RuntimeStatus.MISSION_VERIFIED,
                 detail="mission was already independently verified",
             )
         if terminal_status in {MissionStatus.FAILED, MissionStatus.CANCELED}:
             self._pending_actor_action = None
+            self._discard_target_sidecars()
             return self._result(
                 RuntimeStatus.STATE_REJECTED,
                 detail=f"mission is terminal: {terminal_status.value}",
             )
         if self._stopped(stop_event):
             return self._canceled(turn_index)
+        pending_target_discovery = self._pending_target_discovery
+        self._pending_target_discovery = None
         completion = self._maybe_verify_mission(
             turn_index=turn_index,
             stop_event=stop_event,
         )
         if completion is not None:
             self._pending_actor_action = None
+            self._discard_target_sidecars()
             return completion
         try:
             initial = self._state.observe(
@@ -1586,6 +1755,15 @@ class MissionRuntime:
                 raise ValueError("Broker state turn_index does not match Runtime turn")
             if not self._snapshot_matches_mission(initial):
                 raise ValueError("Runtime target identity does not match accepted Mission state")
+            active_target_discovery = self._take_target_discovery_for_turn(
+                pending_target_discovery,
+                initial,
+                turn_index=turn_index,
+            )
+            initial = self._with_target_candidates(
+                initial,
+                active_target_discovery,
+            )
             broker_projection = self._project(initial, grants)
         except Exception as exc:
             return self._result(RuntimeStatus.STATE_REJECTED, detail=str(exc))
@@ -1609,6 +1787,61 @@ class MissionRuntime:
                 route=route,
                 detail="Visual Actor route has no frame payload",
             )
+        target_selection_lease = None
+        current_target_selection_scope = None
+        if (
+            active_target_discovery is not None
+            and active_target_discovery.candidates
+        ):
+            if ACTIVATE_TARGET_TOOL_NAME not in broker_projection.tool_names:
+                return self._result(
+                    RuntimeStatus.STATE_REJECTED,
+                    route=route,
+                    detail=(
+                        "target candidates exist without an admitted "
+                        "activate_target tool"
+                    ),
+                )
+            try:
+                lease_scope = self._target_selection_scope(
+                    initial,
+                    broker_projection,
+                    active_target_discovery,
+                    turn_index=turn_index,
+                )
+                target_selection_lease = TargetSelectionLease(
+                    scope=lease_scope,
+                    discovery=active_target_discovery,
+                )
+                self._active_target_selection_lease = target_selection_lease
+                pre_actor_current = self._with_target_candidates(
+                    self._state.current(
+                        self._reducer.projection,
+                        turn_index=turn_index,
+                    ),
+                    active_target_discovery,
+                )
+                pre_actor_broker = self._project(pre_actor_current, grants)
+                current_target_selection_scope = self._target_selection_scope(
+                    pre_actor_current,
+                    pre_actor_broker,
+                    active_target_discovery,
+                    turn_index=turn_index,
+                )
+                if (
+                    pre_actor_current.authority_key != initial.authority_key
+                    or pre_actor_broker != broker_projection
+                    or current_target_selection_scope != lease_scope
+                ):
+                    raise ValueError(
+                        "target candidate authority changed before Actor projection"
+                    )
+            except Exception as exc:
+                return self._result(
+                    RuntimeStatus.STATE_REJECTED,
+                    route=route,
+                    detail=str(exc),
+                )
         try:
             turn = project_actor_turn_input(
                 self._reducer.card,
@@ -1619,6 +1852,10 @@ class MissionRuntime:
                     pending_actor_action,
                     broker_projection,
                 ),
+                target_discovery=active_target_discovery,
+                target_selection_lease=target_selection_lease,
+                current_target_selection_scope=current_target_selection_scope,
+                current_run_id=self._reducer.definition.run_id,
             )
         except Exception as exc:
             return self._result(RuntimeStatus.ACTOR_ERROR, route=route, detail=str(exc))
@@ -1651,7 +1888,13 @@ class MissionRuntime:
         proposal_kind = proposal.kind
         try:
             current_projection = self._reducer.projection
-            latest = self._state.current(current_projection, turn_index=turn_index)
+            latest = self._with_target_candidates(
+                self._state.current(
+                    current_projection,
+                    turn_index=turn_index,
+                ),
+                active_target_discovery,
+            )
             latest_matches_mission = self._snapshot_matches_mission(latest)
             latest_broker = self._project(latest, grants)
         except Exception as exc:
@@ -1701,6 +1944,179 @@ class MissionRuntime:
                 projection=latest_broker,
                 proposal=proposal,
             )
+        except Exception as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                detail=str(exc),
+            )
+
+        if isinstance(proposal, DiscoverTargetRequest):
+            discovery_port = self._target_discovery
+            if discovery_port is None:
+                return self._result(
+                    RuntimeStatus.UNAVAILABLE,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    detail="read-only target discovery is not configured",
+                )
+            if (
+                self._reducer.projection.target_binding is not None
+                or latest.target is not None
+                or latest.frame is None
+                or latest.frame.scope != "full_desktop"
+                or latest.frame.epoch != 0
+            ):
+                return self._result(
+                    RuntimeStatus.STATE_REJECTED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    detail="target discovery requires an unbound full desktop",
+                )
+            try:
+                discovered = discovery_port.discover(
+                    proposal.query,
+                    stop_event=stop_event,
+                )
+                if not isinstance(discovered, TargetDiscoverySnapshot):
+                    raise TypeError(
+                        "target discovery returned an invalid snapshot"
+                    )
+                if discovered.query != proposal.query:
+                    raise ValueError(
+                        "target discovery query does not match the Actor request"
+                    )
+            except Exception as exc:
+                if self._stopped(stop_event):
+                    return self._canceled(turn_index)
+                return self._result(
+                    RuntimeStatus.STATE_REJECTED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    detail=str(exc),
+                )
+            if self._stopped(stop_event):
+                return self._canceled(turn_index)
+            discovered_projection = self._reducer.projection
+            if (
+                discovered_projection.mission_id != current_projection.mission_id
+                or discovered_projection.run_id != current_projection.run_id
+                or discovered_projection.revision != current_projection.revision
+                or discovered_projection.active_obligation_id
+                != current_projection.active_obligation_id
+                or discovered_projection.target_binding is not None
+            ):
+                return self._result(
+                    RuntimeStatus.STALE_DISCARDED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    detail="Mission authority changed during target discovery",
+                )
+            try:
+                post_discovery_state = self._with_target_candidates(
+                    self._state.current(
+                        discovered_projection,
+                        turn_index=turn_index,
+                    ),
+                    active_target_discovery,
+                )
+                post_discovery_broker = self._project(
+                    post_discovery_state,
+                    grants,
+                )
+                if (
+                    not self._snapshot_matches_mission(post_discovery_state)
+                    or post_discovery_state.authority_key != latest.authority_key
+                    or post_discovery_broker != latest_broker
+                ):
+                    raise ValueError(
+                        "desktop authority changed during target discovery"
+                    )
+            except Exception as exc:
+                return self._result(
+                    RuntimeStatus.STALE_DISCARDED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    detail=str(exc),
+                )
+            self._pending_target_discovery = _PendingTargetDiscovery(
+                mission_id=self._reducer.definition.mission_id,
+                run_id=self._reducer.definition.run_id,
+                mission_revision=current_projection.revision,
+                obligation_id=str(
+                    current_projection.active_obligation_id or ""
+                ),
+                source_turn_index=turn_index,
+                snapshot=discovered,
+            )
+            return self._result(
+                RuntimeStatus.OBSERVED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+            )
+
+        if (
+            isinstance(proposal, DesktopActionProposal)
+            and proposal.action == ACTIVATE_TARGET_TOOL_NAME
+        ):
+            lease = self._active_target_selection_lease
+            if lease is None or active_target_discovery is None:
+                return self._result(
+                    RuntimeStatus.STALE_DISCARDED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    detail="activate_target has no current candidate lease",
+                )
+            try:
+                current_scope = self._target_selection_scope(
+                    latest,
+                    latest_broker,
+                    active_target_discovery,
+                    turn_index=turn_index,
+                )
+                lease.consume(
+                    scope=current_scope,
+                    candidate_ordinal=proposal.args.get("candidate_ordinal"),
+                )
+            except TargetSelectionLeaseError as exc:
+                return self._result(
+                    RuntimeStatus.STALE_DISCARDED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    detail=str(exc),
+                )
+            except Exception as exc:
+                return self._result(
+                    RuntimeStatus.STATE_REJECTED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=decision_id,
+                    detail=str(exc),
+                )
+            finally:
+                lease.discard()
+                self._active_target_selection_lease = None
+            return self._result(
+                RuntimeStatus.UNAVAILABLE,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                detail=(
+                    "target candidate selection was consumed, but the "
+                    "activation owner is not connected"
+                ),
+            )
+
+        try:
             envelope = self._envelope(
                 decision_id=decision_id,
                 snapshot=latest,
@@ -1712,6 +2128,7 @@ class MissionRuntime:
                 RuntimeStatus.STATE_REJECTED,
                 route=route,
                 proposal_kind=proposal_kind,
+                decision_id=decision_id,
                 detail=str(exc),
             )
         obligation_id = envelope.obligation_id

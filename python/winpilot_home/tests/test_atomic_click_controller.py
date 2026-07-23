@@ -85,7 +85,7 @@ def _envelope(frame, *, decision_id="decision-1", action="click", args=None):
         capability_grant_ids=(),
         allowed_evidence_scope=("frame-proof-1",),
         proposal=parse_actor_proposal({
-            "format": "actor-proposal/0",
+            "format": "actor-proposal/1",
             "kind": "desktop_action",
             "action": action,
             "args": {"image_x": 10, "image_y": 5} if args is None else args,

@@ -36,7 +36,7 @@ def _envelope(**updates) -> ActorDecisionEnvelope:
         "capability_grant_ids": (),
         "allowed_evidence_scope": ("frame-proof-9",),
         "proposal": parse_actor_proposal({
-            "format": "actor-proposal/0",
+            "format": "actor-proposal/1",
             "kind": "desktop_action",
             "action": "click",
             "args": {"image_x": 100, "image_y": 200},

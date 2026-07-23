@@ -1,7 +1,13 @@
 """P4a pure Mission Runtime contracts and injected coordinator."""
 
 from .contracts import *
-from .ports import ActorPort, ControllerPort, PointerCleanupPort, RuntimeStatePort
+from .ports import (
+    ActorPort,
+    ControllerPort,
+    PointerCleanupPort,
+    RuntimeStatePort,
+    TargetDiscoveryPort,
+)
 from .mission_runtime import MissionRuntime
 from .mutation_permits import *
 
