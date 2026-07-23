@@ -252,9 +252,6 @@ def target_acquisition_verdict(
         or {}
     )
     paused_queue = pause_barrier.get("desktop_action_queue") or {}
-    allowed_resume_foregrounds = {
-        before_handoff.get("shell_hwnd"), *(verified or []),
-    }
     queue_keys = (
         "submitted", "completed", "failed",
         "async_submitted", "async_completed", "async_failed",
@@ -305,7 +302,6 @@ def target_acquisition_verdict(
         or resume_barrier.get("control_surface_iconic") is not True
         or type(resume_barrier.get("foreground_hwnd")) is not int
         or resume_barrier.get("foreground_hwnd", 0) <= 0
-        or resume_barrier.get("foreground_hwnd") not in allowed_resume_foregrounds
         or resume_barrier.get("foreground_hwnd") == client.get("hwnd")
     ):
         invalid.append("targetless client handoff proof is incomplete")

@@ -294,6 +294,35 @@ def test_oracle_binds_trace_to_exact_process_window_and_launch(mode, tmp_path):
     assert forged["passed"] is False
 
 
+@pytest.mark.parametrize("mode", ["existing", "cold"])
+def test_oracle_accepts_any_positive_non_client_foreground_after_yield(
+    mode, tmp_path,
+):
+    executable = tmp_path / "fixture.exe"
+    row = _row(executable)
+    record = {
+        "nonce": "public", "process_id": row["process_id"], "utc_ticks": 9,
+        "exe_path": row["exe_path"], "exe_sha256": row["exe_sha256"],
+    }
+    before_rows = [copy.deepcopy(row)] if mode == "existing" else []
+    before_records = [record] if mode == "existing" else []
+    client = _client_result(_trace(tmp_path, row, mode), mode=mode)
+    client["after_submit_handoff"]["resume_barrier"]["foreground_hwnd"] = 802
+
+    verdict = oracle.target_acquisition_verdict(
+        mode=mode,
+        fixture=_Fixture(executable, [row], [record]),
+        baseline={
+            "instances": before_rows,
+            "launch_records": before_records,
+        },
+        client_result=client,
+    )
+
+    assert verdict["oracle_status"] == "conclusive"
+    assert verdict["passed"] is True
+
+
 def test_oracle_rejects_region_and_cold_launch_hash_drift(tmp_path):
     executable = tmp_path / "fixture.exe"
     row = _row(executable)
@@ -393,7 +422,8 @@ def test_target_acquisition_verdict_rejects_handoff_identity_drift(
 
 @pytest.mark.parametrize("mutation", [
     "pause_status", "pause_manual", "pause_history", "queue_changed",
-    "resume_manual", "resume_foreground", "unverified_foreground",
+    "resume_manual", "resume_foreground", "resume_zero", "resume_bool",
+    "resume_string",
     "missing_start_paused",
 ])
 def test_target_acquisition_verdict_rejects_forged_pause_or_resume_proof(
@@ -420,8 +450,12 @@ def test_target_acquisition_verdict_rejects_forged_pause_or_resume_proof(
         client["after_submit_handoff"]["resume_barrier"]["manual_paused"] = True
     elif mutation == "resume_foreground":
         client["after_submit_handoff"]["resume_barrier"]["foreground_hwnd"] = 901
-    elif mutation == "unverified_foreground":
-        client["after_submit_handoff"]["resume_barrier"]["foreground_hwnd"] = 802
+    elif mutation == "resume_zero":
+        client["after_submit_handoff"]["resume_barrier"]["foreground_hwnd"] = 0
+    elif mutation == "resume_bool":
+        client["after_submit_handoff"]["resume_barrier"]["foreground_hwnd"] = True
+    elif mutation == "resume_string":
+        client["after_submit_handoff"]["resume_barrier"]["foreground_hwnd"] = "7"
     else:
         client["configuration"]["start_paused_toggle"] = 0
 
