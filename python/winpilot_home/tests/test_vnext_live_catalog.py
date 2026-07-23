@@ -35,6 +35,7 @@ def test_live_catalog_advertises_only_currently_executable_contracts() -> None:
     assert tuple(tool.name for tool in catalog.tools) == LIVE_TOOL_NAMES
     assert set(LIVE_TOOL_NAMES) == {
         "discover_target",
+        "activate_target",
         "click",
         "double_click",
         "scroll",
@@ -46,6 +47,7 @@ def test_live_catalog_advertises_only_currently_executable_contracts() -> None:
     assert "wait" not in LIVE_TOOL_NAMES
     assert all(tool.route is ToolRoute.VISUAL_ACTOR for tool in catalog.tools)
     assert catalog.get("click").mutation_kind is MutationKind.GUI
+    assert catalog.get("activate_target").mutation_kind is MutationKind.GUI
     assert catalog.get("double_click").mutation_kind is MutationKind.GUI
     assert catalog.get("scroll").mutation_kind is MutationKind.GUI
     assert catalog.get("type_text").mutation_kind is MutationKind.GUI
@@ -54,13 +56,13 @@ def test_live_catalog_advertises_only_currently_executable_contracts() -> None:
         catalog.get(name).mutation_kind is MutationKind.NONE
         for name in ("discover_target", "claim_obligation_done", "blocked")
     )
-    assert "activate_target" not in LIVE_TOOL_NAMES
-    assert "activate_target" not in tuple(tool.name for tool in catalog.tools)
+    assert tuple(tool.name for tool in catalog.tools).count("activate_target") == 1
 
 
 def test_live_catalog_history_visibility_is_explicit_and_default_deny() -> None:
     catalog = build_live_catalog()
     expected = {
+        "activate_target": set(),
         "click": {"image_x", "image_y"},
         "double_click": {"image_x", "image_y"},
         "scroll": {"image_x", "image_y", "direction", "notches"},
@@ -145,6 +147,50 @@ def test_discover_target_contract_is_read_only_strict_and_targetless() -> None:
     ):
         with pytest.raises(ToolArgumentValidationError):
             validator.validate("discover_target", arguments)
+
+
+def test_activate_target_contract_is_ordinal_only_and_candidate_scoped() -> None:
+    catalog = build_live_catalog()
+    validator = ToolArgumentValidator(catalog)
+    tool = catalog.get("activate_target")
+
+    assert tool.mutation_kind is MutationKind.GUI
+    assert tool.route is ToolRoute.VISUAL_ACTOR
+    assert tool.required_any_capabilities == ("visual.interact",)
+    assert tool.prerequisites == (
+        "authoritative_full_desktop_frame",
+        "pointer_released",
+        "runtime_healthy",
+        "target_candidates_available",
+        "target_unbound",
+    )
+    assert tool.schema == {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "candidate_ordinal": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+            },
+        },
+        "required": ("candidate_ordinal",),
+    }
+    for ordinal in (1, 8, 16):
+        assert validator.validate(
+            "activate_target", {"candidate_ordinal": ordinal},
+        ) == {"candidate_ordinal": ordinal}
+    for arguments in (
+        {},
+        {"candidate_ordinal": 0},
+        {"candidate_ordinal": 17},
+        {"candidate_ordinal": True},
+        {"candidate_ordinal": 1, "image_x": 4, "image_y": 9},
+        {"candidate_ordinal": 1, "candidate_ref": "private"},
+        {"candidate_ordinal": 1, "frame_id": 1},
+    ):
+        with pytest.raises(ToolArgumentValidationError):
+            validator.validate("activate_target", arguments)
 
 
 def test_scroll_contract_is_explicit_strict_and_bounded() -> None:
@@ -285,7 +331,8 @@ def test_live_runtime_snapshot_has_exact_generic_controller_parity() -> None:
 
     assert snapshot.controller_tool_names == gui_tools
     assert set(LIVE_CONTROLLER_TOOL_NAMES) == set(gui_tools) == {
-        "click", "double_click", "scroll", "type_text", "hotkey",
+        "activate_target", "click", "double_click", "scroll", "type_text",
+        "hotkey",
     }
     owner_ids = tuple(
         owner.owner_id for owner in snapshot.capability_registry.owners

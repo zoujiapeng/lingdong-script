@@ -864,6 +864,35 @@ def test_default_off_and_non_image_args_fail_before_queue_or_raw():
     assert raw_calls == []
 
 
+def test_bound_actor_activate_target_never_enters_coordinate_or_raw_path() -> None:
+    authority, frame = _authority()
+    envelope = _envelope(
+        frame,
+        action="activate_target",
+        args={"candidate_ordinal": 1},
+    )
+    raw_calls = []
+    observation = Observation()
+    queue = DesktopActionQueue()
+    controller, _permits = _controller(
+        envelope,
+        authority,
+        lambda *call, **kwargs: raw_calls.append((call, kwargs)),
+        observation=observation,
+        queue=queue,
+    )
+
+    with pytest.raises(
+        AtomicDesktopControllerError,
+        match="Runtime-bound target acquisition envelope",
+    ):
+        controller.execute(envelope)
+
+    assert raw_calls == []
+    assert observation.requests == []
+    assert queue.status()["submitted"] == 0
+
+
 def test_controller_post_action_contract_is_strict():
     with pytest.raises(AtomicDesktopControllerError, match="positive"):
         ControllerPostAction(0, ("evidence-1",))

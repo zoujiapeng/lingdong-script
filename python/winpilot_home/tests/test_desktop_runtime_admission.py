@@ -19,7 +19,10 @@ from winpilot.tasking.capability import (
 )
 from winpilot.tasking.compiler import TaskContractCompiler
 from winpilot.tasking.contracts import StageType, TaskContract
-from winpilot.vnext.capabilities.live_catalog import build_live_catalog
+from winpilot.vnext.capabilities.live_catalog import (
+    LIVE_CONTROLLER_TOOL_NAMES,
+    build_live_catalog,
+)
 from winpilot.vnext.capabilities.registry import (
     CapabilityOwner,
     RuntimeCapabilityRegistry,
@@ -47,9 +50,7 @@ def _snapshot(
         capability_registry=RuntimeCapabilityRegistry((
             CapabilityOwner("live-visual-runtime", capabilities),
         )),
-        controller_tool_names=(
-            "click", "double_click", "scroll", "type_text", "hotkey",
-        ),
+        controller_tool_names=LIVE_CONTROLLER_TOOL_NAMES,
         available_services=(
             tuple(sorted(CANONICAL_RUNTIME_SERVICES))
             if services is None

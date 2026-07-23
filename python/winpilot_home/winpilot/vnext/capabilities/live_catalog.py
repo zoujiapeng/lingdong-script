@@ -13,7 +13,9 @@ from ...visual_runtime.keyboard_contracts import (
 )
 from ...orchestrator.runtime_admission import RuntimeCapabilitySnapshot
 from ..targeting.contracts import (
+    ACTIVATE_TARGET_TOOL_NAME,
     DISCOVER_TARGET_TOOL_NAME,
+    activate_target_tool_schema,
     discover_target_tool_schema,
 )
 from .contracts import MutationKind, ToolCatalog, ToolRoute, ToolSpec
@@ -22,6 +24,7 @@ from .registry import CapabilityOwner, RuntimeCapabilityRegistry
 
 LIVE_TOOL_NAMES = (
     DISCOVER_TARGET_TOOL_NAME,
+    ACTIVATE_TARGET_TOOL_NAME,
     "click",
     "double_click",
     "scroll",
@@ -32,6 +35,7 @@ LIVE_TOOL_NAMES = (
 )
 
 LIVE_CONTROLLER_TOOL_NAMES = (
+    ACTIVATE_TARGET_TOOL_NAME,
     "click",
     "double_click",
     "scroll",
@@ -56,6 +60,13 @@ _CLICK_PREREQUISITES = (*_FRAME_PREREQUISITES, "pointer_released")
 _TARGET_DISCOVERY_PREREQUISITES = (
     "target_unbound",
     "authoritative_full_desktop_frame",
+    "pointer_released",
+    "runtime_healthy",
+)
+_TARGET_ACTIVATION_PREREQUISITES = (
+    "target_unbound",
+    "authoritative_full_desktop_frame",
+    "target_candidates_available",
     "pointer_released",
     "runtime_healthy",
 )
@@ -157,6 +168,15 @@ def build_live_catalog() -> ToolCatalog:
             required_any_capabilities=("visual.interact",),
             prerequisites=_TARGET_DISCOVERY_PREREQUISITES,
             order=5,
+        ),
+        ToolSpec(
+            name=ACTIVATE_TARGET_TOOL_NAME,
+            schema=activate_target_tool_schema(),
+            route=ToolRoute.VISUAL_ACTOR,
+            mutation_kind=MutationKind.GUI,
+            required_any_capabilities=("visual.interact",),
+            prerequisites=_TARGET_ACTIVATION_PREREQUISITES,
+            order=6,
         ),
         ToolSpec(
             name="click",

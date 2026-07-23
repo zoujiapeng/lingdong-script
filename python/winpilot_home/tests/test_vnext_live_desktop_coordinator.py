@@ -19,6 +19,8 @@ from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
     AdmittedPhysicalHotkeyBackend,
     AdmittedPhysicalScrollBackend,
+    AdmittedPhysicalTargetActivationBackend,
+    AdmittedPhysicalTargetLaunchBackend,
     AdmittedPhysicalTypeTextBackend,
     FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
@@ -63,6 +65,7 @@ from winpilot.vnext.bridge.coordinator import (
 from winpilot.vnext.capabilities.live_catalog import (
     build_live_runtime_snapshot,
 )
+from winpilot.vnext.bridge.runtime_state import DesktopObservationIdentity
 
 
 class Backend:
@@ -177,6 +180,8 @@ def _context(*, contract=None, stop_event=None):
             "execution_context": {
                 "format": "execution-context/1",
                 "entrypoint": "native_agent_cockpit",
+                "task_id": "task-arp-run-1",
+                "submitted_at": int(time.time() * 1000),
                 "desktop_handoff": {
                     "required": True,
                     "strategy": "foreground_after_control_surface_yield",
@@ -208,6 +213,43 @@ def _context(*, contract=None, stop_event=None):
     )
 
 
+def _targetless_context(*, rewrite_target=None):
+    context = _context()
+    inputs = dict(context.inputs)
+    execution_context = dict(inputs["execution_context"])
+    now_ms = int(time.time() * 1000)
+    handoff = dict(execution_context["desktop_handoff"])
+    handoff["prepared_at"] = now_ms
+    execution_context["desktop_handoff"] = handoff
+    target = {
+        "format": "desktop-target/2",
+        "hwnd": 0,
+        "root_hwnd": 0,
+        "title": "",
+        "process_id": 0,
+        "process_identity": "",
+        "class_name": "",
+        "rect": [],
+        "captured_at": now_ms,
+        "foreground_verified": False,
+        "usable": False,
+        "failure_type": "target_binding_missing",
+        "reason": "no foreground target after the control surface yielded",
+    }
+    execution_context["target_window"] = (
+        rewrite_target(dict(target)) if rewrite_target is not None else target
+    )
+    inputs["execution_context"] = execution_context
+    return DesktopRuntimeCoordinatorContext(
+        run_id=context.run_id,
+        graph=context.graph,
+        inputs=inputs,
+        stop_event=context.stop_event,
+        wait_if_paused=context.wait_if_paused,
+        is_paused=context.is_paused,
+    )
+
+
 def _observer(authority):
     pixels = np.zeros((600, 800, 3), dtype=np.uint8)
     ok, encoded = cv2.imencode(".png", pixels)
@@ -227,6 +269,7 @@ def _observer(authority):
         authority,
         capture=lambda _hwnd, *, region: image_b64,
         select_scope=select_scope,
+        virtual_desktop=lambda: Region(10, 20, 800, 600),
         captured_at=lambda: 10.0,
     )
 
@@ -306,6 +349,12 @@ def _coordinator(
         "scroll": AdmittedPhysicalScrollBackend(raw_scroll),
         "type_text": AdmittedPhysicalTypeTextBackend(raw_type_text),
         "hotkey": AdmittedPhysicalHotkeyBackend(raw_hotkey),
+        "activate_target": AdmittedPhysicalTargetActivationBackend(
+            lambda *_args, **_kwargs: None
+        ),
+        "launch_target": AdmittedPhysicalTargetLaunchBackend(
+            lambda *_args, **_kwargs: None
+        ),
     }
     if omit_admitted_backend is not None:
         backends[omit_admitted_backend] = None
@@ -320,6 +369,8 @@ def _coordinator(
             admitted_physical_scroll=backends["scroll"],
             admitted_physical_type_text=backends["type_text"],
             admitted_physical_hotkey=backends["hotkey"],
+            admitted_physical_target_activation=backends["activate_target"],
+            admitted_physical_target_launch=backends["launch_target"],
         )),
         facts_reader=WindowsDesktopFactsReader(facts_backend or Backend()),
         observer_factory=_observer,
@@ -593,7 +644,7 @@ def test_production_activation_observation_maps_fresh_windows_facts() -> None:
     assert backend.title_calls == 1
 
 
-def test_runtime_composes_one_activation_facts_and_post_frame_owner(
+def test_runtime_composes_one_acquisition_facts_and_post_frame_owner(
     monkeypatch,
 ) -> None:
     captured = {}
@@ -620,6 +671,100 @@ def test_runtime_composes_one_activation_facts_and_post_frame_owner(
     assert captured["post_action"] is activation_post
     assert activation_post._activation_observation is activation_observation
     assert activation_observation._facts is live._facts
+    launch_observation = captured["launch_observation"]
+    assert captured["launch_presence"] is live._launch_presence
+    assert captured["launch_post_action"] is activation_post
+    assert activation_post._launch_observation is launch_observation
+    assert launch_observation._presence is live._launch_presence
+    assert launch_observation._target_facts is live._launch_target_facts
+    assert launch_observation._desktop_facts is live._facts
+
+
+def test_canonical_all_zero_initial_target_observes_full_desktop_without_binding(
+    monkeypatch,
+) -> None:
+    observed = []
+    original_observe = coordinator_module.RuntimeStateBridge.observe
+
+    def observe(bridge, projection, **kwargs):
+        snapshot = original_observe(bridge, projection, **kwargs)
+        observed.append((projection.target_binding, snapshot))
+        return snapshot
+
+    monkeypatch.setattr(
+        coordinator_module.RuntimeStateBridge, "observe", observe,
+    )
+    actor = ScriptedActor([_blocked()])
+    live = _coordinator(
+        actor,
+        PositiveVisualModel(),
+        desktop_identity_reader=lambda: DesktopObservationIdentity(
+            hwnd=1,
+            region=Region(10, 20, 800, 600),
+        ),
+    )
+
+    def forbidden_bind(**_kwargs):
+        raise AssertionError("targetless initial state must not bind a target")
+
+    monkeypatch.setattr(live, "_bind_target", forbidden_bind)
+    result = live.run(_targetless_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert len(actor.calls) == 1
+    assert observed
+    binding, snapshot = observed[0]
+    assert binding is None
+    assert snapshot.target is None
+    assert snapshot.frame is not None
+    assert snapshot.frame.scope == "full_desktop"
+    assert snapshot.frame.hwnd == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "rewrite_target"),
+    (
+        (
+            "partial",
+            lambda target: {
+                key: value for key, value in target.items()
+                if key != "process_identity"
+            },
+        ),
+        (
+            "stale",
+            lambda target: {**target, "captured_at": 1},
+        ),
+        (
+            "false_zero",
+            lambda target: {**target, "hwnd": "0"},
+        ),
+    ),
+)
+def test_noncanonical_targetless_reports_fail_before_model(
+    name,
+    rewrite_target,
+) -> None:
+    del name
+    actor = ScriptedActor([_blocked()])
+    verifier = PositiveVisualModel()
+    raw_calls = []
+    trace = Trace()
+
+    result = _coordinator(
+        actor,
+        verifier,
+        raw_calls=raw_calls,
+        trace=trace,
+    ).run(_targetless_context(rewrite_target=rewrite_target))
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert actor.calls == []
+    assert verifier.calls == []
+    assert raw_calls == []
+    rejected = trace.records[-1][1]
+    assert rejected["type"] == "vnext_mission_runtime_rejected"
+    assert "initial target rejected" in rejected["reason"]
 
 
 def test_bound_handoff_never_reads_targetless_desktop_identity() -> None:
@@ -968,6 +1113,12 @@ def test_live_controller_catalog_and_raw_inventory_are_exact() -> None:
         admitted_physical_scroll=AdmittedPhysicalScrollBackend(lambda: None),
         admitted_physical_type_text=AdmittedPhysicalTypeTextBackend(lambda: None),
         admitted_physical_hotkey=AdmittedPhysicalHotkeyBackend(lambda: None),
+        admitted_physical_target_activation=(
+            AdmittedPhysicalTargetActivationBackend(lambda: None)
+        ),
+        admitted_physical_target_launch=(
+            AdmittedPhysicalTargetLaunchBackend(lambda: None)
+        ),
     ))
     snapshot = build_live_runtime_snapshot()
 
@@ -979,7 +1130,13 @@ def test_live_controller_catalog_and_raw_inventory_are_exact() -> None:
     ))
 
 
-@pytest.mark.parametrize("missing", ["click", "scroll", "type_text", "hotkey"])
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "activate_target", "click", "hotkey",
+        "launch_target", "scroll", "type_text",
+    ],
+)
 def test_live_coordinator_rejects_incomplete_raw_inventory_before_actor(
     missing,
 ) -> None:
@@ -1552,6 +1709,12 @@ def test_factory_accepts_only_injected_physical_owner() -> None:
         admitted_physical_scroll=AdmittedPhysicalScrollBackend(lambda: None),
         admitted_physical_type_text=AdmittedPhysicalTypeTextBackend(lambda: None),
         admitted_physical_hotkey=AdmittedPhysicalHotkeyBackend(lambda: None),
+        admitted_physical_target_activation=(
+            AdmittedPhysicalTargetActivationBackend(lambda: None)
+        ),
+        admitted_physical_target_launch=(
+            AdmittedPhysicalTargetLaunchBackend(lambda: None)
+        ),
     ))
     coordinator = build_live_desktop_runtime_coordinator(
         api_config={}, raw_device=raw,
