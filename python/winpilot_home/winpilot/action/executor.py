@@ -36,6 +36,7 @@ from .raw_device import (
     AdmittedPhysicalClickBackend,
     AdmittedPhysicalHotkeyBackend,
     AdmittedPhysicalScrollBackend,
+    AdmittedPhysicalTargetActivationBackend,
     AdmittedPhysicalTypeTextBackend,
     ClickCount,
     ClickMechanism,
@@ -43,10 +44,13 @@ from .raw_device import (
     FinalKeyboardGuardDecision,
     FinalPointerGuard,
     FinalPointerGuardDecision,
+    FinalTargetActivationGuard,
+    FinalTargetActivationGuardDecision,
     HotkeyChord,
     MAX_TYPE_TEXT_CODEPOINTS,
     MouseButton,
     RawBackendResult,
+    RawTargetActivationContext,
 )
 
 user32 = ctypes.windll.user32
@@ -1620,6 +1624,59 @@ def execute_admitted_physical_hotkey(
 
 ADMITTED_PHYSICAL_HOTKEY_BACKEND = AdmittedPhysicalHotkeyBackend(
     execute_admitted_physical_hotkey
+)
+
+
+def execute_admitted_physical_target_activation(
+    context: RawTargetActivationContext,
+    *,
+    final_guard: FinalTargetActivationGuard,
+) -> RawBackendResult:
+    """Call one SetForegroundWindow mechanism without recovery fallbacks."""
+
+    if not isinstance(context, RawTargetActivationContext) or not callable(
+        final_guard
+    ):
+        return RawBackendResult(False, {
+            "ok": False,
+            "via": "final_target_guard",
+            "error": "invalid admitted target activation",
+        })
+    if _dry_run():
+        return RawBackendResult(False, {"ok": True, "dry_run": True})
+    try:
+        decision = final_guard()
+    except Exception:
+        decision = FinalTargetActivationGuardDecision.AUTHORITY_CHANGED
+    if not isinstance(decision, FinalTargetActivationGuardDecision):
+        decision = FinalTargetActivationGuardDecision.AUTHORITY_CHANGED
+    if decision is not FinalTargetActivationGuardDecision.ADMITTED:
+        return RawBackendResult(False, {
+            "ok": False,
+            "via": "final_target_guard",
+            "guard_decision": decision.value,
+        })
+    try:
+        # Exactly one Win32 mutation call.  Foreground success is verified by
+        # the Controller's independent post-action facts and frame evidence.
+        win32gui.SetForegroundWindow(context.target_hwnd)
+    except Exception:
+        return RawBackendResult(None, {
+            "ok": False,
+            "via": "set_foreground_window",
+            "error": "target activation outcome unknown",
+        })
+    _publish_action_fact("activate_target", via="set_foreground_window")
+    return RawBackendResult(True, {
+        "ok": True,
+        "via": "set_foreground_window",
+    })
+
+
+ADMITTED_PHYSICAL_TARGET_ACTIVATION_BACKEND = (
+    AdmittedPhysicalTargetActivationBackend(
+        execute_admitted_physical_target_activation
+    )
 )
 
 

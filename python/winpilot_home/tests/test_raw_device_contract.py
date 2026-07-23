@@ -521,6 +521,83 @@ def test_target_activation_is_reported_in_admitted_inventory_only_when_bound() -
     assert "activate_target" in raw.admitted_action_names
 
 
+def test_production_target_activation_uses_one_guard_and_one_win32_call(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    guard_calls: list[str] = []
+    activation_calls: list[int] = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(
+        executor.win32gui,
+        "SetForegroundWindow",
+        lambda hwnd: activation_calls.append(hwnd),
+    )
+
+    result = executor.ADMITTED_PHYSICAL_TARGET_ACTIVATION_BACKEND(
+        _activation_context(hwnd=41),
+        final_guard=lambda: (
+            guard_calls.append("guard")
+            or FinalTargetActivationGuardDecision.ADMITTED
+        ),
+    )
+
+    assert result.input_completed is True
+    assert result.facts["via"] == "set_foreground_window"
+    assert guard_calls == ["guard"]
+    assert activation_calls == [41]
+
+
+def test_production_target_activation_guard_rejection_never_calls_win32(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    activation_calls: list[int] = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(
+        executor.win32gui,
+        "SetForegroundWindow",
+        lambda hwnd: activation_calls.append(hwnd),
+    )
+
+    result = executor.execute_admitted_physical_target_activation(
+        _activation_context(),
+        final_guard=lambda: (
+            FinalTargetActivationGuardDecision.AUTHORITY_CHANGED
+        ),
+    )
+
+    assert result.input_completed is False
+    assert result.facts["guard_decision"] == "authority_changed"
+    assert activation_calls == []
+
+
+def test_production_target_activation_win32_exception_is_unknown(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    calls: list[int] = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+
+    def uncertain(hwnd: int) -> None:
+        calls.append(hwnd)
+        raise OSError("injected SetForegroundWindow uncertainty")
+
+    monkeypatch.setattr(executor.win32gui, "SetForegroundWindow", uncertain)
+
+    result = executor.execute_admitted_physical_target_activation(
+        _activation_context(hwnd=52),
+        final_guard=lambda: FinalTargetActivationGuardDecision.ADMITTED,
+    )
+
+    assert result.input_completed is None
+    assert result.facts["via"] == "set_foreground_window"
+    assert calls == [52]
+
+
 _KEYBOARD_INPUTS = (
     ("type_text", "keyboard text"),
     ("hotkey", HotkeyChord(("ctrl", "s"))),
