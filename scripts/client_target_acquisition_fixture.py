@@ -9,13 +9,14 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import winreg
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import psutil
 import win32con
@@ -28,6 +29,73 @@ APP_PATHS_ROOT = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
 
 class FixtureUnavailable(RuntimeError):
     """The independent fixture could not be established or observed."""
+
+
+@dataclass(slots=True)
+class _ShellForegroundGuard:
+    """Keep the shell foreground while the Electron handoff is captured."""
+
+    control_surface_hwnd: int
+    shell_hwnd: int
+    control_surface_pid: int = 0
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    armed_event: threading.Event = field(default_factory=threading.Event)
+    thread: threading.Thread | None = None
+    shell_observation_count: int = 0
+    failure: str = ""
+
+    def start(self) -> None:
+        if self.thread is not None:
+            raise FixtureUnavailable("targetless shell guard already started")
+        self.thread = threading.Thread(
+            target=self._run,
+            name="winpilot-targetless-shell-guard",
+            daemon=True,
+        )
+        self.thread.start()
+        if not self.armed_event.wait(2.0):
+            self.stop_event.set()
+            self.thread.join(2.0)
+            raise FixtureUnavailable("targetless shell guard did not arm")
+        if self.failure:
+            raise FixtureUnavailable(self.failure)
+
+    def _run(self) -> None:
+        try:
+            self.armed_event.set()
+            while (
+                not self.stop_event.is_set()
+                and not win32gui.IsIconic(self.control_surface_hwnd)
+            ):
+                time.sleep(0.01)
+            if self.stop_event.is_set():
+                return
+            while not self.stop_event.is_set():
+                win32gui.SetForegroundWindow(self.shell_hwnd)
+                time.sleep(0.02)
+                if int(ctypes.windll.user32.GetForegroundWindow() or 0) == self.shell_hwnd:
+                    self.shell_observation_count += 1
+        except Exception as exc:
+            self.failure = f"shell guard failed: {type(exc).__name__}"
+
+    def stop(self) -> dict[str, Any]:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(2.0)
+            if self.thread.is_alive():
+                raise FixtureUnavailable("targetless shell guard did not stop")
+        if self.failure:
+            raise FixtureUnavailable(self.failure)
+        if self.shell_observation_count <= 0:
+            raise FixtureUnavailable("targetless shell guard observed no shell foreground")
+        foreground = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        if foreground != self.shell_hwnd:
+            raise FixtureUnavailable("shell lost foreground before handoff completed")
+        return {
+            "shell_hwnd": self.shell_hwnd,
+            "foreground_hwnd": foreground,
+            "shell_observation_count": self.shell_observation_count,
+        }
 
 
 def same_path(left: object, right: object) -> bool:
@@ -135,6 +203,9 @@ class AcquisitionFixture:
     nonce: str
     registry_key: str
     registry_created: bool = False
+    _handoff_guard: _ShellForegroundGuard | None = field(
+        default=None, init=False, repr=False,
+    )
 
     @classmethod
     def create(cls, seed: int) -> "AcquisitionFixture":
@@ -253,23 +324,144 @@ class AcquisitionFixture:
         return {"instances": rows, "launch_records": records}
 
     def stage_targetless_handoff(
-        self, expected_rows: list[dict[str, Any]],
+        self,
+        expected_rows: list[dict[str, Any]],
+        expected_launch_records: list[dict[str, Any]],
+        *,
+        control_surface_hwnd: int,
+        control_surface_pid: int,
     ) -> dict[str, Any]:
-        """Put the shell above exact fixtures before the client takes focus."""
+        """Keep shell foreground without hiding the discoverable fixture."""
 
         current = self.instances()
-        if current != expected_rows:
+        current_records = self.launch_records()
+        if (
+            current != expected_rows
+            or current_records != expected_launch_records
+            or not self.records_match(current_records, current)
+        ):
             raise FixtureUnavailable(
                 "fixture identity changed before targetless handoff",
             )
-        shell = focus_shell_targetless(duration=0.4)
+        windows = self._verified_expected_windows(expected_rows)
+        if any(
+            not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd)
+            for hwnd in windows
+        ):
+            raise FixtureUnavailable("fixture window is not visibly discoverable")
+        if self._handoff_guard is not None:
+            raise FixtureUnavailable("targetless shell guard is already active")
+        control_surface_hwnd = int(control_surface_hwnd or 0)
+        control_surface_pid = int(control_surface_pid or 0)
+        self._verify_control_surface(
+            control_surface_hwnd, control_surface_pid,
+        )
+        shell_hwnd = int(ctypes.windll.user32.GetShellWindow() or 0)
+        if shell_hwnd <= 0 or not win32gui.IsWindow(shell_hwnd):
+            raise FixtureUnavailable("GetShellWindow returned no exact HWND")
+        guard = _ShellForegroundGuard(
+            control_surface_hwnd, shell_hwnd, control_surface_pid,
+        )
+        self._handoff_guard = guard
+        try:
+            guard.start()
+        except Exception:
+            if guard.thread is None or not guard.thread.is_alive():
+                self._handoff_guard = None
+            raise
         return {
-            **shell,
-            "verified_fixture_hwnds": [
-                int(window["hwnd"])
-                for row in current for window in row["windows"]
-            ],
+            "shell_hwnd": shell_hwnd,
+            "guarded_fixture_hwnds": windows,
+            "control_surface_hwnd": control_surface_hwnd,
+            "control_surface_pid": control_surface_pid,
+            "guard_armed": guard.armed_event.is_set(),
+            "guard_started": True,
         }
+
+    def finish_targetless_handoff(
+        self,
+        expected_rows: list[dict[str, Any]],
+        expected_launch_records: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Stop the shell guard and prove fixtures stayed discoverable."""
+
+        guard = self._handoff_guard
+        if guard is None:
+            raise FixtureUnavailable("targetless shell guard is not active")
+        self._verify_control_surface(
+            guard.control_surface_hwnd,
+            guard.control_surface_pid,
+        )
+        current = self.instances()
+        records = self.launch_records()
+        if (
+            current != expected_rows
+            or records != expected_launch_records
+            or not self.records_match(records, current)
+        ):
+            raise FixtureUnavailable("fixture changed before handoff release")
+        windows = self._verified_expected_windows(expected_rows)
+        if any(
+            not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd)
+            for hwnd in windows
+        ):
+            raise FixtureUnavailable("fixture stopped being visibly discoverable")
+        stopped = guard.stop()
+        self._handoff_guard = None
+        if self.instances() != expected_rows or self.launch_records() != expected_launch_records:
+            raise FixtureUnavailable("fixture changed while releasing handoff")
+        return {
+            **stopped,
+            "verified_fixture_hwnds": windows,
+            "focus_strategy": "shell_foreground_guard",
+        }
+
+    @staticmethod
+    def _verify_control_surface(hwnd: int, process_id: int) -> None:
+        try:
+            hwnd = int(hwnd)
+            process_id = int(process_id)
+            _thread, owner = win32process.GetWindowThreadProcessId(hwnd)
+            root = int(win32gui.GetAncestor(hwnd, win32con.GA_ROOT) or 0)
+        except (TypeError, ValueError, OSError) as exc:
+            raise FixtureUnavailable("control surface identity is unavailable") from exc
+        if (
+            hwnd <= 0
+            or process_id <= 0
+            or not win32gui.IsWindow(hwnd)
+            or int(owner or 0) != process_id
+            or root != hwnd
+        ):
+            raise FixtureUnavailable("control surface identity changed")
+
+    def _verified_expected_windows(
+        self, expected_rows: list[dict[str, Any]],
+    ) -> list[int]:
+        windows: list[int] = []
+        for row in expected_rows:
+            try:
+                process = psutil.Process(int(row["process_id"]))
+            except (KeyError, TypeError, ValueError, psutil.Error) as exc:
+                raise FixtureUnavailable("fixture process is unavailable") from exc
+            if not self._same_process(process, row):
+                raise FixtureUnavailable("fixture process identity changed")
+            for window in row.get("windows") or []:
+                try:
+                    hwnd = int(window["hwnd"])
+                    expected_root = int(window["root_hwnd"])
+                    _thread, owner = win32process.GetWindowThreadProcessId(hwnd)
+                    root = int(win32gui.GetAncestor(hwnd, win32con.GA_ROOT) or 0)
+                except (KeyError, TypeError, ValueError, OSError) as exc:
+                    raise FixtureUnavailable("fixture window is unavailable") from exc
+                if (
+                    not win32gui.IsWindow(hwnd)
+                    or int(owner or 0) != process.pid
+                    or root != expected_root
+                    or not self._same_process(process, row)
+                ):
+                    raise FixtureUnavailable("fixture window identity changed")
+                windows.append(hwnd)
+        return windows
 
     @staticmethod
     def records_match(records: list[dict], rows: list[dict]) -> bool:
@@ -364,12 +556,25 @@ class AcquisitionFixture:
         return errors
 
     def cleanup(self) -> dict[str, Any]:
+        guard_error = []
+        if self._handoff_guard is not None:
+            self._handoff_guard.stop_event.set()
+            thread = self._handoff_guard.thread
+            if thread is not None:
+                thread.join(2.0)
+                if thread.is_alive():
+                    guard_error.append("handoff_guard:still_running")
+            if not guard_error:
+                self._handoff_guard = None
+        if guard_error:
+            return {"passed": False, "errors": guard_error}
         if not self._safe_scope():
             return {"passed": False, "errors": ["fixture scope is unsafe"]}
         errors = [
             error for row in exact_instances(self.executable)
             for error in self._close_exact(row)
         ]
+        errors = [*guard_error, *errors]
         if self.registry_created:
             try:
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.registry_key) as key:
@@ -391,36 +596,7 @@ class AcquisitionFixture:
         except Exception as exc:
             errors.append(f"directory:{type(exc).__name__}:{exc}")
         return {"passed": not errors, "errors": errors}
-
-
-def focus_shell_targetless(
-    *,
-    duration: float = 2.0,
-    shell_reader: Callable[[], int] | None = None,
-    foreground_reader: Callable[[], int] | None = None,
-    focus: Callable[[int], object] | None = None,
-) -> dict[str, Any]:
-    shell_reader = shell_reader or (
-        lambda: int(ctypes.windll.user32.GetShellWindow() or 0)
-    )
-    foreground_reader = foreground_reader or (
-        lambda: int(ctypes.windll.user32.GetForegroundWindow() or 0)
-    )
-    focus = focus or win32gui.SetForegroundWindow
-    shell = int(shell_reader() or 0)
-    if shell <= 0:
-        raise FixtureUnavailable("GetShellWindow returned no exact HWND")
-    deadline, observed = time.monotonic() + max(0.2, duration), 0
-    while time.monotonic() < deadline:
-        focus(shell)
-        time.sleep(0.1)
-        observed = int(foreground_reader() or 0)
-    if observed != shell:
-        raise FixtureUnavailable("exact shell HWND did not own foreground")
-    return {"shell_hwnd": shell, "foreground_hwnd": observed, "exact": True}
-
-
 __all__ = [
     "AcquisitionFixture", "FixtureUnavailable", "exact_instances",
-    "file_sha256", "focus_shell_targetless", "process_identity_for", "same_path",
+    "file_sha256", "process_identity_for", "same_path",
 ]

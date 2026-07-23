@@ -39,7 +39,9 @@ NAV_AGENT = "智能代理"
 NAV_ASSETS = "技能与学习"
 RUN_TASK = "运行任务"
 STOP_TASK = "停止"
+CONTINUE_TASK = "继续"
 COLD_START = "冷启动（禁用 Skill/长期经验）"
+START_PAUSED = "启动后暂停（确认环境后继续）"
 RUNTIME_SELECTOR = "实验运行时"
 RUNTIME_LABELS = {
     "legacy": "Legacy（默认）",
@@ -283,7 +285,8 @@ class ElectronClientDriver:
                 key: current.get(key)
                 for key in (
                     "run_id", "kind", "status", "phase", "goal",
-                    "current_node_id", "current_tool", "runtime_version", "error",
+                    "manual_paused", "current_node_id", "current_tool",
+                    "runtime_version", "error",
                 )
             }
         runtime = payload.get("runtime") or {}
@@ -294,6 +297,9 @@ class ElectronClientDriver:
             "arp_running": bool(payload.get("arp_running")),
             "current_run": compact_current,
             "model_profile": dict(payload.get("model_profile") or {}),
+            "desktop_action_queue": dict(
+                payload.get("desktop_action_queue") or {}
+            ),
             "runtime_identity": {
                 "contract_version": runtime.get("contract_version"),
                 "pid": runtime.get("pid"),
@@ -309,6 +315,18 @@ class ElectronClientDriver:
                     for key in ("loaded_stamp", "current_stamp", "drifted")
                 },
             },
+        }
+
+    def run_detail(self, run_id: str) -> dict[str, Any]:
+        request = urllib.request.Request(
+            f"{self._runtime_url}/api/v2/runs/{run_id}",
+            headers={"Authorization": f"Bearer {self._runtime_token}"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            payload = json.load(response)
+        return {
+            "run": dict(payload.get("run") or {}),
+            "arp": dict(payload.get("arp") or {}),
         }
 
     def restore_and_focus(self) -> None:
@@ -494,6 +512,7 @@ class ElectronClientDriver:
         task: str,
         max_steps: int,
         runtime_version: str = "legacy",
+        start_paused: bool = False,
     ) -> dict[str, Any]:
         self.restore_and_focus()
         try:
@@ -538,17 +557,29 @@ class ElectronClientDriver:
             )
 
         checkboxes = _visible_descendants(self.window, "CheckBox")
-        checkbox = next(
+        cold_start_checkbox = next(
             (item for item in checkboxes if item.Name == COLD_START),
             None,
         )
-        if checkbox is None:
+        if cold_start_checkbox is None:
             raise RuntimeError("客户端冷启动开关不可见")
-        if _toggle_state(checkbox) != 1:
-            _toggle(checkbox)
+        if _toggle_state(cold_start_checkbox) != 1:
+            _toggle(cold_start_checkbox)
             time.sleep(0.2)
-        if _toggle_state(checkbox) != 1:
+        if _toggle_state(cold_start_checkbox) != 1:
             raise RuntimeError("无法通过客户端开启冷启动")
+        start_paused_checkbox = next(
+            (item for item in checkboxes if item.Name == START_PAUSED),
+            None,
+        )
+        if start_paused_checkbox is None:
+            raise RuntimeError("客户端启动后暂停开关不可见")
+        expected_pause_state = 1 if start_paused else 0
+        if _toggle_state(start_paused_checkbox) != expected_pause_state:
+            _toggle(start_paused_checkbox)
+            time.sleep(0.2)
+        if _toggle_state(start_paused_checkbox) != expected_pause_state:
+            raise RuntimeError("无法通过客户端设置启动后暂停状态")
 
         spinners = _visible_descendants(self.window, "Spinner")
         if not spinners:
@@ -565,11 +596,61 @@ class ElectronClientDriver:
             raise RuntimeError(f"客户端目标输入不一致: {value!r}")
         return {
             "task_input": value,
-            "cold_start_toggle": _toggle_state(checkbox),
+            "cold_start_toggle": _toggle_state(cold_start_checkbox),
+            "start_paused_toggle": _toggle_state(start_paused_checkbox),
             "max_steps": max_steps,
             "runtime_version": expected_runtime,
             "runtime_selector_value": observed_runtime,
         }
+
+    def resume_paused_run(
+        self,
+        run_id: str,
+        *,
+        timeout: float = 20.0,
+    ) -> dict[str, Any]:
+        """Resume one exact run through the visible Continue control."""
+
+        self.restore_and_focus()
+        deadline = time.monotonic() + timeout
+        control = None
+        while time.monotonic() < deadline:
+            try:
+                control = self.button(CONTINUE_TASK)
+                break
+            except RuntimeError:
+                time.sleep(0.1)
+        if control is None:
+            raise RuntimeError("客户端未显示可恢复当前运行的继续按钮")
+        method = _activate_run_control(control, without_focus=False)
+        while time.monotonic() < deadline:
+            detail = self.run_detail(run_id)
+            projection, arp = detail["run"], detail["arp"]
+            if (
+                str(projection.get("run_id") or "") != run_id
+                or str(arp.get("run_id") or "") != run_id
+            ):
+                raise RuntimeError("继续操作返回了不同的运行身份")
+            status = str(arp.get("status") or "")
+            if arp.get("manual_paused") is False and status in {
+                "queued", "running",
+            }:
+                iconic = bool(win32gui.IsIconic(self.identity.hwnd))
+                foreground = int(win32gui.GetForegroundWindow() or 0)
+                if not iconic or foreground == self.identity.hwnd:
+                    raise RuntimeError("继续桌面运行前客户端没有让出前台")
+                return {
+                    "run_id": run_id,
+                    "status": status,
+                    "manual_paused": False,
+                    "control_method": method,
+                    "control_surface_iconic": iconic,
+                    "foreground_hwnd": foreground,
+                }
+            if status not in {"paused", "queued", "running"}:
+                raise RuntimeError("运行在继续完成前进入终态")
+            time.sleep(0.05)
+        raise RuntimeError("客户端继续操作没有恢复同一运行")
 
     def stop_active_run(self, *, timeout: int = 30) -> dict[str, Any]:
         """Stop a client-submitted run through the visible Electron UI."""
@@ -1196,10 +1277,14 @@ def run_case(
             result["session_reset"] = driver.clear_session_through_client()
         else:
             result["session_reset"] = {"skipped": True, "reason": "same scenario context"}
+        start_paused = spec.get("start_paused", False)
+        if type(start_paused) is not bool:
+            raise RuntimeError("start_paused case option must be boolean")
         result["configuration"] = driver.configure_goal(
             spec["task"],
             int(spec.get("max_steps", 120)),
             str(spec.get("runtime_version") or "legacy"),
+            start_paused,
         )
         result["screenshots"] = {
             "before_submit": driver.capture_window("before-submit.png")
