@@ -16,7 +16,7 @@ import time
 from typing import Any, Protocol
 
 from ...action.desktop_queue import DESKTOP_ACTION_QUEUE, DesktopActionQueue
-from ...agent.frame_authority import FrameAuthority
+from ...agent.frame_authority import FrameAuthority, FrameState
 from ...orchestrator.desktop_runtime import (
     DesktopRuntimeCoordinatorContext,
     DesktopRuntimeCoordinatorResult,
@@ -52,10 +52,14 @@ from ..capabilities import CapabilityBroker, PointerLeaseState
 from ..capabilities.live_catalog import build_live_runtime_snapshot
 from ..evidence import EvidenceRegistry
 from ..mission import (
+    MissionProjection,
     MissionReducer,
     MissionStatus,
+    TARGET_BINDING_EVIDENCE_KIND,
+    TargetBinding,
     project_legacy_contract,
     target_binding_attestation,
+    target_binding_evidence_payload_hash,
 )
 from ..profiling import ExecutionPolicy
 from ..runtime import (
@@ -93,6 +97,7 @@ from .initial_target import (
 DEFAULT_MAX_TURNS = 24
 DEFAULT_FRAME_MAX_AGE_S = 30.0
 _PRODUCT_SUPPORTED_LAUNCH_KINDS = ("exe",)
+_TARGET_BINDING_TRACE_FORMAT = "vnext-target-binding-accepted/1"
 _RECOVERABLE_TURN_STATUSES = frozenset({
     RuntimeStatus.ACTION_RECORDED,
     RuntimeStatus.INVALID_PROPOSAL,
@@ -266,6 +271,81 @@ def _accepted_turn_tool_name(
     ):
         return "blocked"
     return None
+
+
+def _accepted_target_binding_trace_event(
+    *,
+    accepted_events: tuple[Any, ...] | None,
+    projection: MissionProjection,
+    evidence: EvidenceRegistry,
+    frame: FrameState | None,
+) -> dict[str, Any] | None:
+    try:
+        if accepted_events is None or len(accepted_events) != 1:
+            return None
+        event = accepted_events[0]
+        if event.kind != "target_bound":
+            return None
+        binding = TargetBinding.from_dict(event.payload["target_binding"])
+        if (
+            projection.target_binding != binding
+            or event.evidence_refs != (binding.established_by_evidence_ref,)
+            or event.base_revision + 1 != projection.revision
+        ):
+            return None
+
+        refs = tuple(ref for ref in evidence.snapshot()
+                     if ref.id == binding.established_by_evidence_ref)
+        if len(refs) != 1:
+            return None
+        ref = refs[0]
+        expected_hash = target_binding_evidence_payload_hash(
+            mission_id=event.mission_id, run_id=event.run_id, binding=binding,
+        )
+        if (
+            ref.obligation_id is None
+            or (
+                ref.kind, ref.trust, ref.action_id, ref.payload_hash,
+            ) != (
+                TARGET_BINDING_EVIDENCE_KIND,
+                "deterministic",
+                binding.acquisition_action_id,
+                expected_hash,
+            )
+        ):
+            return None
+        if (
+            frame is None
+            or frame.frame_id != ref.frame_id
+            or frame.hwnd != binding.hwnd
+            or frame.epoch != binding.epoch
+            or frame.scope != "target_window"
+        ):
+            return None
+
+        return {
+            "type": "vnext_target_binding_accepted",
+            "format": _TARGET_BINDING_TRACE_FORMAT, "runtime_version": "vnext",
+            "event_id": event.event_id, "mission_id": projection.mission_id,
+            "run_id": projection.run_id,
+            "mission_revision": event.base_revision + 1,
+            "obligation_id": ref.obligation_id, "binding_id": binding.binding_id,
+            "hwnd": binding.hwnd, "root_hwnd": binding.root_hwnd,
+            "process_id": binding.process_id,
+            "process_identity": binding.process_identity,
+            "canonical_identity_sha256": binding.canonical_identity_sha256,
+            "epoch": binding.epoch,
+            "frame_id": ref.frame_id,
+            "region": list(frame.region),
+            "acquisition_action_id": binding.acquisition_action_id,
+            "evidence_refs": list(event.evidence_refs),
+            "evidence_trust": [{
+                "evidence_id": ref.id, "kind": ref.kind, "trust": ref.trust,
+            }],
+        }
+    except Exception:
+        # Trace construction is observational and cannot reject product work.
+        return None
 
 
 class LiveDesktopRuntimeCoordinator:
@@ -567,7 +647,9 @@ class LiveDesktopRuntimeCoordinator:
         context: DesktopRuntimeCoordinatorContext,
         reducer: MissionReducer,
         evidence: EvidenceRegistry,
-    ) -> tuple[MissionRuntime, tuple[str, ...], _ActorProjectionProbe]:
+    ) -> tuple[
+        MissionRuntime, tuple[str, ...], _ActorProjectionProbe, FrameAuthority,
+    ]:
         frames = FrameAuthority()
         observer = self._observer_factory(frames)
         if not isinstance(observer, FrameObserver) or observer.authority is not frames:
@@ -677,7 +759,7 @@ class LiveDesktopRuntimeCoordinator:
             action_effect_verifier=DeterministicActionEffectVerifier(),
             evidence_registry=evidence,
         )
-        return runtime, tuple(tool.name for tool in catalog.tools), actor_probe
+        return runtime, tuple(tool.name for tool in catalog.tools), actor_probe, frames
 
     @staticmethod
     def _failed(status: str) -> DesktopRuntimeCoordinatorResult:
@@ -721,13 +803,14 @@ class LiveDesktopRuntimeCoordinator:
                     handoff_hwnd=initial_target.hwnd,
                     handoff=handoff,
                 )
-            runtime, tool_names, actor_probe = self._runtime(
+            runtime, tool_names, actor_probe, frame_authority = self._runtime(
                 context, reducer, evidence,
             )
             self._trace(context.run_id, {
                 "type": "vnext_mission_runtime_started",
                 "runtime_version": "vnext",
                 "mission_id": definition.mission_id,
+                "run_id": definition.run_id,
                 "mission_revision": reducer.projection.revision,
                 "active_obligation_id": reducer.projection.active_obligation_id,
                 "tool_names": list(tool_names),
@@ -738,6 +821,8 @@ class LiveDesktopRuntimeCoordinator:
                     self._runtime_snapshot.catalog.fingerprint
                 ),
                 "profile_source": "safe_default",
+                "initial_target_mode": initial_target.mode.value,
+                "initial_target_reason": initial_target.targetless_reason,
                 "turn_budget": turn_budget,
             })
 
@@ -817,6 +902,15 @@ class LiveDesktopRuntimeCoordinator:
                     ),
                     "detail": result.detail[:512],
                 })
+                if self._trace_sidecar is not None:
+                    binding_trace = _accepted_target_binding_trace_event(
+                        accepted_events=accepted_turn_events,
+                        projection=projection,
+                        evidence=evidence,
+                        frame=frame_authority.current,
+                    )
+                    if binding_trace is not None:
+                        self._trace(context.run_id, binding_trace)
                 if (
                     result.status is RuntimeStatus.MISSION_VERIFIED
                     and projection.status is MissionStatus.VERIFIED
@@ -832,6 +926,7 @@ class LiveDesktopRuntimeCoordinator:
                     }
                     self._trace(context.run_id, {
                         "type": "vnext_mission_runtime_finished",
+                        "run_id": definition.run_id,
                         **output,
                     })
                     return DesktopRuntimeCoordinatorResult(
