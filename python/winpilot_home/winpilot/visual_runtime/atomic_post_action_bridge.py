@@ -14,7 +14,8 @@ import time
 from collections.abc import Callable
 from typing import Protocol
 
-from ..action.raw_device import RawActionReceipt
+from ..action.raw_device import RawActionReceipt, RawTargetLaunchReceipt
+from ..action.replay_policy import MutationOutcome
 from ..agent.frame_authority import FrameAuthority, FrameState
 from ..vnext.actor import ActorDecisionEnvelope, DesktopActionProposal
 from ..vnext.evidence import (
@@ -23,13 +24,17 @@ from ..vnext.evidence import (
     frame_identity_payload_hash,
 )
 from ..vnext.mission import EvidenceRef
-from ..vnext.runtime.target_activation import TargetActivationEnvelope
+from ..vnext.runtime.target_activation import ActivatedTargetIdentity, TargetActivationEnvelope
+from ..vnext.runtime.target_launch import TargetLaunchEnvelope
 from ..utils.screenshot import Region
 from .atomic_click_controller import (
     ControllerPostAction,
     TargetActivationObservation,
     TargetActivationObservationPort,
     TargetActivationPostAction,
+    TargetLaunchObservationPort,
+    TargetLaunchObservationResult,
+    TargetLaunchObservationState,
 )
 from .commit_admission import (
     CommitAdmissionResult,
@@ -61,6 +66,7 @@ class AtomicPostActionBridge:
         observer: FrameObserver,
         evidence: EvidenceRegistry,
         activation_observation: TargetActivationObservationPort | None = None,
+        launch_observation: TargetLaunchObservationPort | None = None,
         related_window: Callable[[int | None, int | None], bool] | None = None,
         post_input_settle_delay_s: float = 0.12,
         wait: Callable[[float], None] = time.sleep,
@@ -80,6 +86,13 @@ class AtomicPostActionBridge:
                 "activation_observation must implement "
                 "TargetActivationObservationPort or be null"
             )
+        if launch_observation is not None and not isinstance(
+            launch_observation, TargetLaunchObservationPort
+        ):
+            raise TypeError(
+                "launch_observation must implement "
+                "TargetLaunchObservationPort or be null"
+            )
         if related_window is not None and not callable(related_window):
             raise TypeError("related_window must be callable or null")
         if (
@@ -96,6 +109,7 @@ class AtomicPostActionBridge:
         self._observer = observer
         self._evidence = evidence
         self._activation_observation = activation_observation
+        self._launch_observation = launch_observation
         self._related_window = related_window
         self._post_input_settle_delay_s = float(post_input_settle_delay_s)
         self._wait = wait
@@ -157,6 +171,17 @@ class AtomicPostActionBridge:
             created_at=post_frame.committed_at,
         )
         return self._evidence.append(evidence)
+
+    def _validate_evidence_scope(
+        self, envelope: _PostActionEnvelope, action: str,
+    ) -> None:
+        if (
+            envelope.mission_id != self._evidence.mission_id
+            or envelope.run_id != self._evidence.run_id
+        ):
+            raise AtomicPostActionBridgeError(
+                f"{action} is outside the evidence registry mission/run"
+            )
 
     def _validate_call(
         self,
@@ -369,13 +394,7 @@ class AtomicPostActionBridge:
             raise AtomicPostActionBridgeError(
                 "activation post-action requires an applied raw receipt or null"
             )
-        if (
-            envelope.mission_id != self._evidence.mission_id
-            or envelope.run_id != self._evidence.run_id
-        ):
-            raise AtomicPostActionBridgeError(
-                "activation is outside the evidence registry mission/run"
-            )
+        self._validate_evidence_scope(envelope, "activation")
         if raw_receipt is not None and self._post_input_settle_delay_s > 0.0:
             self._wait(self._post_input_settle_delay_s)
 
@@ -392,6 +411,75 @@ class AtomicPostActionBridge:
                 envelope
             ),
             error_prefix="activation",
+        )
+        return TargetActivationPostAction(
+            activated_target=after_commit.activated_target,
+            exact_foreground=True,
+            post_frame_id=post_frame.frame_id,
+            evidence_refs=(evidence.id,),
+        )
+
+    def observe_after_launch(
+        self,
+        envelope: TargetLaunchEnvelope,
+        *,
+        raw_receipt: RawTargetLaunchReceipt,
+        selected_target: ActivatedTargetIdentity,
+    ) -> TargetActivationPostAction:
+        """Capture proof only for the target fixed by the bounded launch poll."""
+
+        if not isinstance(envelope, TargetLaunchEnvelope):
+            raise TypeError("envelope must be TargetLaunchEnvelope")
+        if not isinstance(selected_target, ActivatedTargetIdentity):
+            raise TypeError("selected_target must be ActivatedTargetIdentity")
+        if not isinstance(raw_receipt, RawTargetLaunchReceipt) or (
+            raw_receipt.outcome is not MutationOutcome.APPLIED
+            or raw_receipt.launch_request_count != 1
+            or raw_receipt.process_id != selected_target.process_id
+            or raw_receipt.process_identity != selected_target.process_identity
+        ):
+            raise AtomicPostActionBridgeError(
+                "launch post-action requires an exact applied raw receipt"
+            )
+        observation_port = self._launch_observation
+        if observation_port is None:
+            raise AtomicPostActionBridgeError("launch observation port is not configured")
+        self._validate_evidence_scope(envelope, "launch")
+        selected_key = (
+            selected_target.hwnd,
+            selected_target.root_hwnd,
+            selected_target.process_id,
+            selected_target.process_identity,
+            selected_target.window_region,
+        )
+
+        def observe_selected() -> object:
+            result = observation_port.observe_launch(
+                envelope,
+                raw_receipt=raw_receipt,
+                selected_hwnd=selected_target.hwnd,
+            )
+            if (
+                not isinstance(result, TargetLaunchObservationResult)
+                or result.state is not TargetLaunchObservationState.READY
+                or result.observation is None
+                or self._acquired_target_key(result.observation) != selected_key
+            ):
+                raise AtomicPostActionBridgeError(
+                    "launch observation does not identify the selected target"
+                )
+            return result.observation
+
+        after_commit, post_frame, evidence = self._observe_after_acquisition(
+            envelope,
+            action=envelope.proposal.action,
+            expected_target=(
+                selected_target.hwnd,
+                selected_target.process_id,
+                selected_target.process_identity,
+            ),
+            observe_target=observe_selected,
+            error_prefix="launch",
         )
         return TargetActivationPostAction(
             activated_target=after_commit.activated_target,

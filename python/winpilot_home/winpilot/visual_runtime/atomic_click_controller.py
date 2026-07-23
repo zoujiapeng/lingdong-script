@@ -8,22 +8,28 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
+import ntpath
 import re
 from threading import Event
+import time
 from typing import Protocol, TypeVar, runtime_checkable
 
-from ..action.desktop_queue import DesktopActionQueue
+from ..action.desktop_queue import DesktopActionCanceled, DesktopActionQueue
 from ..action.raw_device import (
     ClickCount,
     ClickMechanism,
     FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
     FinalTargetActivationGuardDecision,
+    FinalTargetLaunchGuardDecision,
     MouseButton,
     RawActionContext,
     RawActionReceipt,
     RawDeviceExecutor,
     RawTargetActivationContext,
+    RawTargetLaunchContext,
+    RawTargetLaunchReceipt,
 )
 from ..action.replay_policy import MutationOutcome
 from ..agent.frame_authority import FrameAuthority
@@ -43,7 +49,13 @@ from ..vnext.runtime.target_activation import (
     TargetActivationOutcome,
     TargetActivationTransition,
 )
+from ..vnext.runtime.target_launch import (
+    TargetLaunchEnvelope,
+    TargetLaunchOutcome,
+    TargetLaunchTransition,
+)
 from ..vnext.targeting import TargetState
+from ..vnext.targeting.executable_presence import ExecutablePresenceSnapshot
 from .commit_admission import (
     CommitAdmissionGate,
     CommitInputKind,
@@ -241,6 +253,68 @@ class TargetActivationPostActionPort(Protocol):
     ) -> TargetActivationPostAction: ...
 
 
+class TargetLaunchObservationState(str, Enum):
+    """One read-only launched-process/window observation."""
+
+    READY = "ready"
+    NOT_READY = "not_ready"
+    EXITED = "exited"
+    PROCESS_REUSED = "process_reused"
+    AMBIGUOUS = "ambiguous"
+    SOURCE_UNAVAILABLE = "source_unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class TargetLaunchObservationResult:
+    """A status plus the existing strong target shape when uniquely ready."""
+
+    state: TargetLaunchObservationState
+    observation: TargetActivationObservation | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.state, TargetLaunchObservationState)
+            or (self.state is TargetLaunchObservationState.READY)
+            != isinstance(self.observation, TargetActivationObservation)
+        ):
+            raise AtomicDesktopControllerError(
+                "only a valid ready launch observation may carry a target"
+            )
+
+
+@runtime_checkable
+class TargetLaunchPresencePort(Protocol):
+    """Read exact/unresolved process presence for one canonical EXE."""
+
+    def read(self, executable_path: str) -> ExecutablePresenceSnapshot: ...
+
+
+@runtime_checkable
+class TargetLaunchObservationPort(Protocol):
+    """Take one read-only observation; Runtime owns the bounded poll loop."""
+
+    def observe_launch(
+        self,
+        envelope: TargetLaunchEnvelope,
+        *,
+        raw_receipt: RawTargetLaunchReceipt,
+        selected_hwnd: int | None,
+    ) -> TargetLaunchObservationResult: ...
+
+
+@runtime_checkable
+class TargetLaunchPostActionPort(Protocol):
+    """Capture proof for the one launched target selected by bounded polling."""
+
+    def observe_after_launch(
+        self,
+        envelope: TargetLaunchEnvelope,
+        *,
+        raw_receipt: RawTargetLaunchReceipt,
+        selected_target: ActivatedTargetIdentity,
+    ) -> TargetActivationPostAction: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedInput:
     request: CommitAdmissionRequest
@@ -251,8 +325,8 @@ class _PreparedInput:
 
 
 @dataclass(frozen=True, slots=True)
-class _TargetActivationAttempt:
-    raw_receipt: RawActionReceipt | None = None
+class _TargetAcquisitionAttempt:
+    raw_receipt: RawActionReceipt | RawTargetLaunchReceipt | None = None
     already_foreground: bool = False
     failure_reason: str = ""
 
@@ -275,6 +349,12 @@ class AtomicDesktopController:
         post_action: ControllerPostActionPort,
         activation_observation: TargetActivationObservationPort | None = None,
         activation_post_action: TargetActivationPostActionPort | None = None,
+        launch_presence: TargetLaunchPresencePort | None = None,
+        launch_observation: TargetLaunchObservationPort | None = None,
+        launch_post_action: TargetLaunchPostActionPort | None = None,
+        launch_poll_attempts: int = 51,
+        launch_poll_interval_s: float = 0.1,
+        launch_poll_wait: Callable[[float], None] = time.sleep,
         enabled: bool = False,
     ) -> None:
         if not isinstance(action_queue, DesktopActionQueue):
@@ -305,6 +385,22 @@ class AtomicDesktopController:
                 "activation_post_action must implement "
                 "TargetActivationPostActionPort or be null"
             )
+        for name, value, port in (
+            ("launch_presence", launch_presence, TargetLaunchPresencePort),
+            ("launch_observation", launch_observation, TargetLaunchObservationPort),
+            ("launch_post_action", launch_post_action, TargetLaunchPostActionPort),
+        ):
+            if value is not None and not isinstance(value, port):
+                raise TypeError(f"{name} does not implement its launch port")
+        if type(launch_poll_attempts) is not int or not 1 <= launch_poll_attempts <= 100:
+            raise ValueError("launch_poll_attempts must be in [1, 100]")
+        if (
+            type(launch_poll_interval_s) not in {int, float}
+            or not 0.0 <= float(launch_poll_interval_s) <= 1.0
+        ):
+            raise ValueError("launch_poll_interval_s must be finite and in [0, 1]")
+        if not callable(launch_poll_wait):
+            raise TypeError("launch_poll_wait must be callable")
         if type(enabled) is not bool:
             raise TypeError("enabled must be boolean")
         self._queue = action_queue
@@ -316,6 +412,12 @@ class AtomicDesktopController:
         self._post = post_action
         self._activation_observation = activation_observation
         self._activation_post = activation_post_action
+        self._launch_presence = launch_presence
+        self._launch_observation = launch_observation
+        self._launch_post = launch_post_action
+        self._launch_poll_attempts = launch_poll_attempts
+        self._launch_poll_interval_s = float(launch_poll_interval_s)
+        self._launch_poll_wait = launch_poll_wait
         self._enabled = enabled
 
     @staticmethod
@@ -598,6 +700,108 @@ class AtomicDesktopController:
             failure_reason="",
         )
 
+    @staticmethod
+    def _launch_transition(
+        envelope: TargetLaunchEnvelope,
+        *,
+        request_count: int | None,
+        reason: str,
+        receipt: RawTargetLaunchReceipt | None = None,
+        post: TargetActivationPostAction | None = None,
+    ) -> TargetLaunchTransition:
+        completed = receipt is not None and post is not None
+        return TargetLaunchTransition(
+            outcome=(
+                TargetLaunchOutcome.COMPLETED
+                if completed
+                else TargetLaunchOutcome.REJECTED
+                if request_count == 0
+                else TargetLaunchOutcome.UNKNOWN
+            ),
+            action_id=envelope.decision_id,
+            candidate_ref=envelope.candidate.candidate_ref,
+            launch_request_count=request_count,
+            launch_process_id=None if receipt is None else receipt.process_id,
+            launch_process_identity=(
+                None if receipt is None else receipt.process_identity
+            ),
+            activated_target=None if post is None else post.activated_target,
+            post_frame_id=None if post is None else post.post_frame_id,
+            evidence_refs=() if post is None else post.evidence_refs,
+            failure_reason="" if completed else reason,
+        )
+
+    def _launch_presence_decision(
+        self,
+        envelope: TargetLaunchEnvelope,
+    ) -> FinalTargetLaunchGuardDecision:
+        presence = self._launch_presence
+        executable_path = envelope.candidate.launch_target
+        assert presence is not None and executable_path is not None
+        try:
+            snapshot = presence.read(executable_path)
+        except Exception:
+            return FinalTargetLaunchGuardDecision.PROCESS_STATE_UNKNOWN
+        if not isinstance(snapshot, ExecutablePresenceSnapshot):
+            return FinalTargetLaunchGuardDecision.PROCESS_STATE_UNKNOWN
+        if (
+            ntpath.normcase(snapshot.executable_path).casefold()
+            != ntpath.normcase(executable_path).casefold()
+        ):
+            return FinalTargetLaunchGuardDecision.AUTHORITY_CHANGED
+        if snapshot.exact_instances:
+            return FinalTargetLaunchGuardDecision.EXISTING_PROCESS
+        if snapshot.unresolved_process_ids:
+            return FinalTargetLaunchGuardDecision.PROCESS_STATE_UNKNOWN
+        return FinalTargetLaunchGuardDecision.ADMITTED
+
+    def _poll_launched_target(
+        self,
+        envelope: TargetLaunchEnvelope,
+        receipt: RawTargetLaunchReceipt,
+        *,
+        stop_event: Event | None,
+    ) -> tuple[TargetActivationObservation | None, str]:
+        observation_port = self._launch_observation
+        assert observation_port is not None
+        for attempt in range(self._launch_poll_attempts):
+            if stop_event is not None and stop_event.is_set():
+                return None, "launch_poll_stop_requested"
+            try:
+                result = observation_port.observe_launch(
+                    envelope,
+                    raw_receipt=receipt,
+                    selected_hwnd=None,
+                )
+            except Exception:
+                return None, "launch_poll_source_unavailable"
+            if not isinstance(result, TargetLaunchObservationResult):
+                return None, "launch_poll_source_unavailable"
+            if result.state is TargetLaunchObservationState.READY:
+                observed = result.observation
+                assert observed is not None
+                target = observed.activated_target
+                if (
+                    not observed.exact_foreground
+                    or target.process_id != receipt.process_id
+                    or target.process_identity != receipt.process_identity
+                ):
+                    return None, "launch_poll_identity_unproved"
+                return observed, ""
+            if result.state is not TargetLaunchObservationState.NOT_READY:
+                return None, f"launch_poll_{result.state.value}"
+            if attempt + 1 == self._launch_poll_attempts:
+                break
+            if stop_event is not None:
+                if stop_event.wait(self._launch_poll_interval_s):
+                    return None, "launch_poll_stop_requested"
+            elif self._launch_poll_interval_s > 0.0:
+                try:
+                    self._launch_poll_wait(self._launch_poll_interval_s)
+                except Exception:
+                    return None, "launch_poll_wait_failed"
+        return None, "launch_poll_timeout"
+
     def _run_acquisition_transaction(
         self,
         envelope: MutationEnvelope,
@@ -693,20 +897,20 @@ class AtomicDesktopController:
 
         def under_admission(
             permit: RuntimeMutationPermit,
-        ) -> _TargetActivationAttempt:
+        ) -> _TargetAcquisitionAttempt:
             if not isinstance(permit, RuntimeMutationPermit) or not permit.allowed:
                 reason = getattr(permit, "reason", None)
                 value = getattr(reason, "value", "invalid")
-                return _TargetActivationAttempt(
+                return _TargetAcquisitionAttempt(
                     failure_reason=f"mutation_permit_{value}"
                 )
             if envelope.candidate.state is not TargetState.VISIBLE:
-                return _TargetActivationAttempt(
+                return _TargetAcquisitionAttempt(
                     failure_reason="candidate_requires_recovery"
                 )
             decision, observed = read_current()
             if decision is not FinalTargetActivationGuardDecision.ADMITTED:
-                return _TargetActivationAttempt(
+                return _TargetAcquisitionAttempt(
                     failure_reason=decision.value
                 )
             assert observed is not None
@@ -717,12 +921,12 @@ class AtomicDesktopController:
                 # identity/foreground read under active authority.
                 decision, observed = read_current()
                 if decision is not FinalTargetActivationGuardDecision.ADMITTED:
-                    return _TargetActivationAttempt(
+                    return _TargetAcquisitionAttempt(
                         failure_reason=decision.value
                     )
                 assert observed is not None
                 if observed.exact_foreground:
-                    return _TargetActivationAttempt(
+                    return _TargetAcquisitionAttempt(
                         already_foreground=True
                     )
 
@@ -740,10 +944,10 @@ class AtomicDesktopController:
                 context,
                 final_guard=final_activation_guard,
             )
-            return _TargetActivationAttempt(raw_receipt=receipt)
+            return _TargetAcquisitionAttempt(raw_receipt=receipt)
 
         def after_pin(attempt: object) -> TargetActivationTransition:
-            assert isinstance(attempt, _TargetActivationAttempt)
+            assert isinstance(attempt, _TargetAcquisitionAttempt)
             if attempt.failure_reason:
                 return self._activation_failure(
                     envelope,
@@ -827,14 +1031,190 @@ class AtomicDesktopController:
             after_pin=after_pin,
         )
 
+    def _execute_target_launch(
+        self,
+        envelope: TargetLaunchEnvelope,
+        *,
+        stop_event: Event | None,
+    ) -> TargetLaunchTransition:
+        presence = self._launch_presence
+        observation_port = self._launch_observation
+        post_port = self._launch_post
+        if presence is None or observation_port is None or post_port is None:
+            raise AtomicDesktopControllerError(
+                "target launch ports are not configured"
+            )
+        admission_started = False
+
+        def authority_current() -> bool:
+            return self._permits.active_launch_admission_matches(
+                envelope.decision_id,
+                frame=envelope.frame,
+                pointer=envelope.pointer,
+                candidate_fingerprint=envelope.candidate_fingerprint,
+                candidate=envelope.candidate,
+            )
+
+        def final_launch_guard() -> FinalTargetLaunchGuardDecision:
+            if stop_event is not None and stop_event.is_set():
+                return FinalTargetLaunchGuardDecision.STOP_REQUESTED
+            if not authority_current():
+                return FinalTargetLaunchGuardDecision.AUTHORITY_CHANGED
+            decision = self._launch_presence_decision(envelope)
+            if decision is not FinalTargetLaunchGuardDecision.ADMITTED:
+                return decision
+            if stop_event is not None and stop_event.is_set():
+                return FinalTargetLaunchGuardDecision.STOP_REQUESTED
+            if not authority_current():
+                return FinalTargetLaunchGuardDecision.AUTHORITY_CHANGED
+            return FinalTargetLaunchGuardDecision.ADMITTED
+
+        def under_admission(
+            permit: RuntimeMutationPermit,
+        ) -> _TargetAcquisitionAttempt:
+            nonlocal admission_started
+            admission_started = True
+            if not isinstance(permit, RuntimeMutationPermit) or not permit.allowed:
+                reason = getattr(permit, "reason", None)
+                value = getattr(reason, "value", "invalid")
+                return _TargetAcquisitionAttempt(
+                    failure_reason=f"mutation_permit_{value}"
+                )
+            if stop_event is not None and stop_event.is_set():
+                return _TargetAcquisitionAttempt(failure_reason="stop_requested")
+            decision = self._launch_presence_decision(envelope)
+            if decision is not FinalTargetLaunchGuardDecision.ADMITTED:
+                return _TargetAcquisitionAttempt(failure_reason=decision.value)
+            executable_path = envelope.candidate.launch_target
+            assert executable_path is not None
+            receipt = self._raw.launch_target(
+                RawTargetLaunchContext(executable_path),
+                final_guard=final_launch_guard,
+            )
+            return _TargetAcquisitionAttempt(raw_receipt=receipt)
+
+        def after_pin(attempt: object) -> TargetLaunchTransition:
+            assert isinstance(attempt, _TargetAcquisitionAttempt)
+            if attempt.failure_reason:
+                return self._launch_transition(
+                    envelope,
+                    request_count=0,
+                    reason=attempt.failure_reason,
+                )
+            receipt = attempt.raw_receipt
+            if not isinstance(receipt, RawTargetLaunchReceipt):
+                return self._launch_transition(
+                    envelope,
+                    request_count=None,
+                    reason="raw_launch_result_unavailable",
+                )
+            if receipt.outcome is MutationOutcome.NOT_STARTED:
+                return self._launch_transition(
+                    envelope,
+                    request_count=0,
+                    reason=receipt.error_kind or "launch_not_started",
+                )
+            if receipt.outcome is MutationOutcome.OUTCOME_UNKNOWN:
+                return self._launch_transition(
+                    envelope,
+                    request_count=receipt.launch_request_count,
+                    reason=receipt.error_kind or "launch_outcome_unknown",
+                )
+            assert receipt.outcome is MutationOutcome.APPLIED
+
+            observed, failure_reason = self._poll_launched_target(
+                envelope,
+                receipt,
+                stop_event=stop_event,
+            )
+            if observed is None:
+                return self._launch_transition(
+                    envelope,
+                    request_count=1,
+                    reason=failure_reason,
+                )
+            selected = observed.activated_target
+            try:
+                post = post_port.observe_after_launch(
+                    envelope,
+                    raw_receipt=receipt,
+                    selected_target=selected,
+                )
+                if not isinstance(post, TargetActivationPostAction):
+                    raise TypeError(
+                        "launch post_action returned an invalid result"
+                    )
+                actual = post.activated_target
+                actual_key = (
+                    actual.hwnd, actual.root_hwnd, actual.process_id,
+                    actual.process_identity, actual.window_region,
+                )
+                selected_key = (
+                    selected.hwnd, selected.root_hwnd, selected.process_id,
+                    selected.process_identity, selected.window_region,
+                )
+                if (
+                    not post.exact_foreground
+                    or actual_key != selected_key
+                ):
+                    raise AtomicDesktopControllerError(
+                        "launch post-action target changed"
+                    )
+            except Exception:
+                return self._launch_transition(
+                    envelope,
+                    request_count=1,
+                    reason="launch_post_observation_failed",
+                )
+            return self._launch_transition(
+                envelope,
+                request_count=1,
+                reason="",
+                receipt=receipt,
+                post=post,
+            )
+
+        try:
+            return self._run_acquisition_transaction(
+                envelope,
+                target_hwnd=None,
+                stop_event=stop_event,
+                under_admission=under_admission,
+                frame_changed=lambda: self._launch_transition(
+                    envelope,
+                    request_count=0,
+                    reason="frame_changed",
+                ),
+                after_pin=after_pin,
+            )
+        except DesktopActionCanceled:
+            if admission_started:
+                raise
+            return self._launch_transition(
+                envelope,
+                request_count=0,
+                reason="desktop_action_canceled",
+            )
+
     def execute(
         self,
-        envelope: ActorDecisionEnvelope | TargetActivationEnvelope,
+        envelope: (
+            ActorDecisionEnvelope
+            | TargetActivationEnvelope
+            | TargetLaunchEnvelope
+        ),
         *,
         stop_event: Event | None = None,
-    ) -> ControllerTransition | TargetActivationTransition:
+    ) -> ControllerTransition | TargetActivationTransition | TargetLaunchTransition:
         if not self._enabled:
             raise AtomicDesktopControllerError("AtomicDesktopController is disabled")
+        if isinstance(envelope, TargetLaunchEnvelope):
+            if stop_event is not None and not isinstance(stop_event, Event):
+                raise TypeError("stop_event must be threading.Event or null")
+            return self._execute_target_launch(
+                envelope,
+                stop_event=stop_event,
+            )
         if isinstance(envelope, TargetActivationEnvelope):
             if stop_event is not None and not isinstance(stop_event, Event):
                 raise TypeError("stop_event must be threading.Event or null")
@@ -963,4 +1343,9 @@ __all__ = [
     "TargetActivationObservationPort",
     "TargetActivationPostAction",
     "TargetActivationPostActionPort",
+    "TargetLaunchObservationPort",
+    "TargetLaunchObservationResult",
+    "TargetLaunchObservationState",
+    "TargetLaunchPostActionPort",
+    "TargetLaunchPresencePort",
 ]
