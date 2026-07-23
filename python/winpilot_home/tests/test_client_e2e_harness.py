@@ -345,6 +345,31 @@ def test_runtime_done_without_an_independent_oracle_is_not_a_pass():
     assert harness._case_passed(result) is False
 
 
+def test_run_control_activation_keeps_default_click_and_explicit_invoke_separate():
+    harness = _load_harness()
+    calls = []
+
+    class Pattern:
+        def Invoke(self):
+            calls.append("invoke")
+
+    class Control:
+        def Click(self):
+            calls.append("click")
+
+        @staticmethod
+        def GetPattern(pattern_id):
+            assert pattern_id == harness.auto.PatternId.InvokePattern
+            return Pattern()
+
+    control = Control()
+    assert harness._activate_run_control(control, without_focus=False) == "click"
+    assert harness._activate_run_control(
+        control, without_focus=True,
+    ) == "invoke_pattern"
+    assert calls == ["click", "invoke"]
+
+
 def test_suite_preserves_only_case_two_to_case_three_short_term_context(
     monkeypatch,
     tmp_path,

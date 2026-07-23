@@ -34,6 +34,7 @@ def _row(executable: Path, *, pid: int = 701) -> dict[str, Any]:
         "process_identity": identity,
         "windows": [{
             "hwnd": 801, "root_hwnd": 801, "region": [10, 20, 720, 480],
+            "is_minimized": False,
         }],
     }
 
@@ -436,6 +437,65 @@ def test_register_failure_still_cleans_exact_partial_registry_key(
     assert not root.exists()
 
 
+def test_targetless_staging_verifies_fixture_then_places_shell_above_it(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "fixture.exe"
+    row = _row(executable)
+    fixture = fixture_module.AcquisitionFixture(
+        tmp_path, executable, tmp_path / "launch.log", "Public", "nonce",
+        f"{fixture_module.APP_PATHS_ROOT}\\Public.exe",
+    )
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture, "instances",
+        lambda _self: copy.deepcopy([row]),
+    )
+
+    focused = []
+    monkeypatch.setattr(
+        fixture_module, "focus_shell_targetless",
+        lambda **_kwargs: focused.append("shell") or {
+            "shell_hwnd": 7, "foreground_hwnd": 7, "exact": True,
+        },
+    )
+
+    result = fixture.stage_targetless_handoff([row])
+
+    assert focused == ["shell"]
+    assert result["verified_fixture_hwnds"] == [801]
+    assert result["exact"] is True
+
+
+def test_targetless_staging_rejects_identity_drift_before_any_mutation(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "fixture.exe"
+    baseline = _row(executable)
+    drifted = copy.deepcopy(baseline)
+    drifted["process_identity"] = "process-drifted"
+    fixture = fixture_module.AcquisitionFixture(
+        tmp_path, executable, tmp_path / "launch.log", "Public", "nonce",
+        f"{fixture_module.APP_PATHS_ROOT}\\Public.exe",
+    )
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture, "instances",
+        lambda _self: copy.deepcopy([drifted]),
+    )
+    mutations = []
+    monkeypatch.setattr(
+        fixture_module, "focus_shell_targetless",
+        lambda **_kwargs: mutations.append("focus"),
+    )
+
+    with pytest.raises(
+        fixture_module.FixtureUnavailable,
+        match="identity changed before targetless handoff",
+    ):
+        fixture.stage_targetless_handoff([baseline])
+
+    assert mutations == []
+
+
 def test_cleanup_refuses_pid_reuse_before_any_window_or_process_mutation(
     tmp_path, monkeypatch,
 ):
@@ -510,6 +570,13 @@ def test_runner_uses_only_visible_client_entry_and_public_random_name(
             assert mode == "cold"
             return {"instances": [], "launch_records": []}
 
+        def stage_targetless_handoff(self, rows):
+            assert rows == []
+            return {
+                "shell_hwnd": 1, "foreground_hwnd": 1, "exact": True,
+                "verified_fixture_hwnds": [],
+            }
+
         def cleanup(self):
             return {"passed": True, "errors": []}
 
@@ -519,20 +586,23 @@ def test_runner_uses_only_visible_client_entry_and_public_random_name(
         @staticmethod
         def run_case(name, spec, **kwargs):
             captured.update({"name": name, "spec": spec, **kwargs})
-            captured["handoff"] = kwargs["after_submit"](None, {})
+            class Driver:
+                @staticmethod
+                def capture_desktop(name):
+                    return str(tmp_path / name)
+
+            captured["before_submit"] = kwargs["before_submit"](Driver(), {})
+            captured["handoff"] = kwargs["after_submit"](Driver(), {})
             return {
                 "passed": True,
                 "task_verdict": {"passed": True},
                 "runtime_before": {"model_profile": {"model": "before"}},
+                "before_submit_handoff": captured["before_submit"],
             }
 
     monkeypatch.setattr(runner, "_interactive_desktop", lambda: True)
     monkeypatch.setattr(
         runner.AcquisitionFixture, "create", lambda _seed: FakeFixture(),
-    )
-    monkeypatch.setattr(
-        runner, "focus_shell_targetless",
-        lambda: {"shell_hwnd": 1, "foreground_hwnd": 1, "exact": True},
     )
     result = runner.run_target_acquisition_case(
         "target-cold-launch",
@@ -550,12 +620,21 @@ def test_runner_uses_only_visible_client_entry_and_public_random_name(
 
     assert result["passed"] is True
     assert captured["reset_session"] is True
+    assert captured["submit_without_focus"] is True
     assert captured["spec"]["runtime_version"] == "vnext"
     assert captured["spec"]["task"] == (
         "打开应用 WinPilotAcquisition-public-nonce"
     )
     assert private not in json.dumps(captured, default=str)
     assert result["projected_client_result"] is True
+    assert result["targetless_precondition"]["exact"] is True
+    assert captured["before_submit"]["desktop_screenshot"].endswith(
+        "targetless-before-submit.png",
+    )
+    assert captured["handoff"]["focus_mutated"] is False
+    assert captured["handoff"]["desktop_screenshot"].endswith(
+        "targetless-after-submit.png",
+    )
 
 
 def test_runner_marks_missing_compiler_or_interactive_environment_unavailable(
