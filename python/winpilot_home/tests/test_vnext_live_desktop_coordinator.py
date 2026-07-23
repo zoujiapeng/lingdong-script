@@ -48,7 +48,7 @@ from winpilot.vnext.verification import VerifierAssessment
 from winpilot.vnext.actor import DesktopActionProposal
 from winpilot.vnext.actor.model import OpenAIVisualActor
 from winpilot.vnext.capabilities import PointerLeaseState
-from winpilot.vnext.runtime import TargetActivationEnvelope
+from winpilot.vnext.runtime import RuntimeStatus, TargetActivationEnvelope
 from winpilot.vnext.targeting import (
     TargetCandidate,
     candidate_fingerprint_for,
@@ -447,6 +447,25 @@ def _activation_envelope() -> TargetActivationEnvelope:
         }),
         candidate=candidate,
     )
+
+
+def test_target_bound_event_proves_accepted_activation_tool_name() -> None:
+    decision_id = "decision-activation-1"
+    result = SimpleNamespace(
+        status=RuntimeStatus.ACTION_RECORDED,
+        proposal_kind="desktop_action",
+        decision_id=decision_id,
+    )
+    event = SimpleNamespace(
+        kind="target_bound",
+        payload={
+            "target_binding": {"acquisition_action_id": decision_id},
+        },
+    )
+
+    assert coordinator_module._accepted_turn_tool_name(
+        result, (event,),
+    ) == "activate_target"
 
 
 def _invalid_click():

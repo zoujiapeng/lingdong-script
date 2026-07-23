@@ -67,7 +67,7 @@ from ..runtime import (
     RuntimeStatus,
     TargetActivationEnvelope,
 )
-from ..targeting import FreshWindowsTargetDiscovery
+from ..targeting import ACTIVATE_TARGET_TOOL_NAME, FreshWindowsTargetDiscovery
 from ..verification import (
     DeterministicActionEffectVerifier,
     DeterministicMissionCompletionVerifier,
@@ -224,16 +224,26 @@ def _accepted_turn_tool_name(
         transitions = tuple(
             event for event in accepted_events if event.kind == "transition_recorded"
         )
-        if len(transitions) != 1:
+        target_bindings = tuple(
+            event for event in accepted_events if event.kind == "target_bound"
+        )
+        if len(transitions) == 1 and not target_bindings:
+            payload = transitions[0].payload
+            action = payload.get("action")
+            if (
+                type(action) is str
+                and action
+                and payload.get("action_id") == result.decision_id
+            ):
+                return action
             return None
-        payload = transitions[0].payload
-        action = payload.get("action")
-        if (
-            type(action) is str
-            and action
-            and payload.get("action_id") == result.decision_id
-        ):
-            return action
+        if len(target_bindings) == 1 and not transitions:
+            binding = target_bindings[0].payload.get("target_binding")
+            if (
+                isinstance(binding, Mapping)
+                and binding.get("acquisition_action_id") == result.decision_id
+            ):
+                return ACTIVATE_TARGET_TOOL_NAME
         return None
     if (
         result.proposal_kind == "claim_obligation_done"
