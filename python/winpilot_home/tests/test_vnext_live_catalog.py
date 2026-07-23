@@ -34,6 +34,7 @@ def test_live_catalog_advertises_only_currently_executable_contracts() -> None:
 
     assert tuple(tool.name for tool in catalog.tools) == LIVE_TOOL_NAMES
     assert set(LIVE_TOOL_NAMES) == {
+        "discover_target",
         "click",
         "double_click",
         "scroll",
@@ -51,8 +52,10 @@ def test_live_catalog_advertises_only_currently_executable_contracts() -> None:
     assert catalog.get("hotkey").mutation_kind is MutationKind.GUI
     assert all(
         catalog.get(name).mutation_kind is MutationKind.NONE
-        for name in ("claim_obligation_done", "blocked")
+        for name in ("discover_target", "claim_obligation_done", "blocked")
     )
+    assert "activate_target" not in LIVE_TOOL_NAMES
+    assert "activate_target" not in tuple(tool.name for tool in catalog.tools)
 
 
 def test_live_catalog_history_visibility_is_explicit_and_default_deny() -> None:
@@ -98,6 +101,50 @@ def test_click_contract_is_exactly_submitted_image_xy() -> None:
     for arguments in rejected:
         with pytest.raises(ToolArgumentValidationError):
             validator.validate("click", arguments)
+
+
+def test_discover_target_contract_is_read_only_strict_and_targetless() -> None:
+    catalog = build_live_catalog()
+    validator = ToolArgumentValidator(catalog)
+    tool = catalog.get("discover_target")
+
+    assert tool.mutation_kind is MutationKind.NONE
+    assert tool.route is ToolRoute.VISUAL_ACTOR
+    assert tool.required_any_capabilities == ("visual.interact",)
+    assert tool.prerequisites == (
+        "authoritative_full_desktop_frame",
+        "pointer_released",
+        "runtime_healthy",
+        "target_unbound",
+    )
+    assert tool.schema == {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": r"[\s\S]*\S[\s\S]*",
+            },
+        },
+        "required": ("query",),
+    }
+    assert validator.validate(
+        "discover_target", {"query": "Visible workspace"},
+    ) == {"query": "Visible workspace"}
+    for arguments in (
+        {},
+        {"query": ""},
+        {"query": " \t\r\n "},
+        {"query": True},
+        {"query": "x" * 257},
+        {"query": "Visible workspace", "local_intent": "not a mutation"},
+        {"query": "Visible workspace", "frame_id": 1},
+        {"query": "Visible workspace", "candidate_ref": "private"},
+    ):
+        with pytest.raises(ToolArgumentValidationError):
+            validator.validate("discover_target", arguments)
 
 
 def test_scroll_contract_is_explicit_strict_and_bounded() -> None:

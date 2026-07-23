@@ -127,6 +127,11 @@ class ScriptedActor:
         return dict(self.proposal)
 
 
+class NoCallTargetDiscovery:
+    def discover(self, _query: str, *, stop_event=None):
+        raise AssertionError("bound Runtime unexpectedly requested target discovery")
+
+
 class ScriptedVerifier:
     verifier_kind = "deterministic_first"
 
@@ -687,7 +692,7 @@ def _add_frame_evidence(registry: EvidenceRegistry, frame: RuntimeFrame) -> None
 
 def _click(x: int = 320, y: int = 240) -> dict[str, Any]:
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "desktop_action",
         "action": "click",
         "args": {"x": x, "y": y},
@@ -697,7 +702,7 @@ def _click(x: int = 320, y: int = 240) -> dict[str, Any]:
 
 def _live_click(x: int = 320, y: int = 240) -> dict[str, Any]:
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "desktop_action",
         "action": "click",
         "args": {"image_x": x, "image_y": y},
@@ -707,7 +712,7 @@ def _live_click(x: int = 320, y: int = 240) -> dict[str, Any]:
 
 def _type_text(text: str) -> dict[str, Any]:
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "desktop_action",
         "action": "type_text",
         "args": {"text": text},
@@ -717,7 +722,7 @@ def _type_text(text: str) -> dict[str, Any]:
 
 def _hotkey(*modifiers: str, key: str) -> dict[str, Any]:
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "desktop_action",
         "action": "hotkey",
         "args": {"modifiers": list(modifiers), "key": key},
@@ -727,7 +732,7 @@ def _hotkey(*modifiers: str, key: str) -> dict[str, Any]:
 
 def _claim() -> dict[str, Any]:
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "claim_obligation_done",
         "concise_claim": "the requested local state is now visible",
     }
@@ -809,6 +814,11 @@ def _harness(
         actor=actor,
         state=state,
         controller=controller,
+        target_discovery=(
+            NoCallTargetDiscovery()
+            if any(tool.name == "discover_target" for tool in catalog.tools)
+            else None
+        ),
         pointer_cleanup=pointer_cleanup,
         mutation_permits=permits,
         obligation_verifier=obligation_verifier,
@@ -881,6 +891,11 @@ def _canonical_action_harness(
         actor=actor,
         state=state,
         controller=controller,
+        target_discovery=(
+            NoCallTargetDiscovery()
+            if any(tool.name == "discover_target" for tool in catalog.tools)
+            else None
+        ),
         mutation_permits=permits,
         action_effect_verifier=DeterministicActionEffectVerifier(),
         evidence_registry=registry,
@@ -1376,6 +1391,7 @@ def test_mission_replay_or_a_new_runtime_does_not_reconstruct_previous_action() 
         actor=actor,
         state=harness.state,
         controller=controller,
+        target_discovery=NoCallTargetDiscovery(),
         mutation_permits=permits,
     )
 
@@ -2828,7 +2844,7 @@ def test_terminal_mission_never_observes_or_mutates_desktop(
 @pytest.mark.parametrize("invalid_scope", ("missing", "other_run", "other_obligation"))
 def test_claim_rejects_missing_or_out_of_scope_frame_evidence(invalid_scope: str) -> None:
     harness = _harness({
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "claim_obligation_done",
         "concise_claim": "the current state appears complete",
     })
@@ -2859,7 +2875,7 @@ def test_claim_rejects_missing_or_out_of_scope_frame_evidence(invalid_scope: str
 
 def test_blocked_report_does_not_promote_actor_observations_to_verified_facts() -> None:
     harness = _harness({
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "blocked",
         "blocker_kind": "unexpected_dialog",
         "observed_facts": ("A dialog covers the current target",),
@@ -2877,7 +2893,7 @@ def test_blocked_report_does_not_promote_actor_observations_to_verified_facts() 
 
 def test_observe_refreshes_pixels_without_claim_or_completion_event() -> None:
     harness = _harness({
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "observe",
         "observation_kind": "image_region",
         "image_region": {"x": 100, "y": 80, "width": 300, "height": 200},
@@ -2897,7 +2913,7 @@ def test_observe_refreshes_pixels_without_claim_or_completion_event() -> None:
 
 def test_observe_rejects_region_outside_submitted_image_without_second_capture() -> None:
     harness = _harness({
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "observe",
         "observation_kind": "image_region",
         "image_region": {"x": 1200, "y": 700, "width": 200, "height": 100},
@@ -2917,13 +2933,13 @@ def test_observe_rejects_region_outside_submitted_image_without_second_capture()
     "proposal",
     (
         {
-            "format": "actor-proposal/0",
+            "format": "actor-proposal/1",
             "kind": "request_inspection",
             "region": {"x": 0, "y": 0, "width": 200, "height": 200},
             "question": "Describe the local geometry",
         },
         {
-            "format": "actor-proposal/0",
+            "format": "actor-proposal/1",
             "kind": "request_replan",
             "reason_kind": "strategy_exhausted",
             "observed_conflicts": ("the expected state is absent",),

@@ -134,6 +134,15 @@ class Trace:
         return True
 
 
+class DiscoveryTrap:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def discover(self, query, *, stop_event=None):
+        self.calls.append((query, stop_event))
+        raise AssertionError("bound coordinator called target discovery")
+
+
 def _task_contract(*, max_steps=18) -> dict:
     goal = "Complete the currently visible unknown interface task"
     return TaskContractCompiler().compile(
@@ -227,6 +236,7 @@ def _coordinator(
     clock=lambda: 10.0,
     facts_backend=None,
     desktop_identity_reader=None,
+    target_discovery=None,
 ):
     calls = raw_calls if raw_calls is not None else []
     snapshot = (
@@ -307,6 +317,7 @@ def _coordinator(
         ),
         window_exists_resolver=lambda hwnd: hwnd == 101,
         desktop_identity_reader=desktop_identity_reader,
+        target_discovery=target_discovery,
         max_turns=max_turns,
         frame_max_age_s=frame_max_age_s,
         clock=clock,
@@ -320,7 +331,7 @@ def _click(
     local_intent: str = "select the visible target on the current frame",
 ):
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "desktop_action",
         "action": "click",
         "args": {"image_x": image_x, "image_y": image_y},
@@ -330,7 +341,7 @@ def _click(
 
 def _claim():
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "claim_obligation_done",
         "concise_claim": "the current visual task shows its completed state",
     }
@@ -338,7 +349,7 @@ def _claim():
 
 def _blocked():
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "blocked",
         "blocker_kind": "visual_uncertainty",
         "observed_facts": ["the current pixels do not identify one safe action"],
@@ -347,7 +358,7 @@ def _blocked():
 
 def _scroll(*, direction="down", notches=4):
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "desktop_action",
         "action": "scroll",
         "args": {
@@ -362,7 +373,7 @@ def _scroll(*, direction="down", notches=4):
 
 def _type_text(text):
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "desktop_action",
         "action": "type_text",
         "args": {"text": text},
@@ -372,7 +383,7 @@ def _type_text(text):
 
 def _hotkey(*, modifiers, key):
     return {
-        "format": "actor-proposal/0",
+        "format": "actor-proposal/1",
         "kind": "desktop_action",
         "action": "hotkey",
         "args": {"modifiers": list(modifiers), "key": key},
@@ -458,6 +469,20 @@ def test_live_coordinator_uses_one_actor_controller_and_independent_verifier():
     assert {
         item["event_id"] for item in claim_trace["accepted_events"]
     } == set(claim_trace["accepted_event_ids"])
+
+
+def test_bound_coordinator_never_calls_target_discovery() -> None:
+    actor = ScriptedActor([_click(), _claim()])
+    discovery = DiscoveryTrap()
+
+    result = _coordinator(
+        actor,
+        PositiveVisualModel(),
+        target_discovery=discovery,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    assert discovery.calls == []
 
 
 def test_bound_handoff_never_reads_targetless_desktop_identity() -> None:

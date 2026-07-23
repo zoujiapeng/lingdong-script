@@ -12,11 +12,16 @@ from ...visual_runtime.keyboard_contracts import (
     MAX_TYPE_TEXT_CODEPOINTS,
 )
 from ...orchestrator.runtime_admission import RuntimeCapabilitySnapshot
+from ..targeting.contracts import (
+    DISCOVER_TARGET_TOOL_NAME,
+    discover_target_tool_schema,
+)
 from .contracts import MutationKind, ToolCatalog, ToolRoute, ToolSpec
 from .registry import CapabilityOwner, RuntimeCapabilityRegistry
 
 
 LIVE_TOOL_NAMES = (
+    DISCOVER_TARGET_TOOL_NAME,
     "click",
     "double_click",
     "scroll",
@@ -48,6 +53,12 @@ _FRAME_PREREQUISITES = (
     "runtime_healthy",
 )
 _CLICK_PREREQUISITES = (*_FRAME_PREREQUISITES, "pointer_released")
+_TARGET_DISCOVERY_PREREQUISITES = (
+    "target_unbound",
+    "authoritative_full_desktop_frame",
+    "pointer_released",
+    "runtime_healthy",
+)
 
 
 def _point_schema() -> dict[str, object]:
@@ -138,6 +149,15 @@ def build_live_catalog() -> ToolCatalog:
     """
 
     return ToolCatalog((
+        ToolSpec(
+            name=DISCOVER_TARGET_TOOL_NAME,
+            schema=discover_target_tool_schema(),
+            route=ToolRoute.VISUAL_ACTOR,
+            mutation_kind=MutationKind.NONE,
+            required_any_capabilities=("visual.interact",),
+            prerequisites=_TARGET_DISCOVERY_PREREQUISITES,
+            order=5,
+        ),
         ToolSpec(
             name="click",
             schema=_point_schema(),

@@ -21,8 +21,12 @@ from ..capabilities.state import AuthoritativeFrameState, BrokerProjection, Exec
 from ..mission.contracts import MissionCard
 from ..targeting.contracts import (
     ACTIVATE_TARGET_TOOL_NAME,
+    DISCOVER_TARGET_TOOL_NAME,
     MAX_TARGET_CANDIDATES,
+    MAX_TARGET_QUERY_CHARS,
+    TargetDiscoverySnapshot,
     activate_target_tool_schema,
+    discover_target_tool_schema,
 )
 from ..targeting.lease import (
     TargetSelectionLease,
@@ -35,7 +39,8 @@ from .proposals import _freeze, _json_value, _reject_overreach, _thaw, _unique_t
 ACTOR_MISSION_VIEW_FORMAT = "actor-mission-view/2"
 ACTOR_FRAME_VIEW_FORMAT = "actor-frame-view/0"
 ACTOR_TOOL_VIEW_FORMAT = "actor-tool-view/1"
-ACTOR_TURN_INPUT_FORMAT = "actor-turn-input/4"
+ACTOR_TURN_INPUT_FORMAT = "actor-turn-input/5"
+ACTOR_TARGET_DISCOVERY_FEEDBACK_FORMAT = "actor-target-discovery-feedback/0"
 ACTOR_PREVIOUS_ACTION_FORMAT = "actor-previous-action/0"
 MAX_ACTOR_PREVIOUS_INTENT_CHARS = 240
 MAX_ACTOR_PREVIOUS_ARGUMENT_CHARS = 4_096
@@ -260,13 +265,32 @@ class ActorTargetChoiceView(_View):
         return value.strip() or None
 
 
+class ActorTargetDiscoveryFeedback(_View):
+    """One-turn, identity-free feedback for an empty discovery result."""
+
+    format: Literal["actor-target-discovery-feedback/0"]
+    query: str
+    outcome: Literal["no_candidates"]
+
+    @field_validator("query")
+    @classmethod
+    def _query(cls, value: Any) -> str:
+        if (
+            type(value) is not str
+            or not value.strip()
+            or len(value.strip()) > MAX_TARGET_QUERY_CHARS
+        ):
+            raise ValueError("target discovery query must be bounded non-empty text")
+        return value.strip()
+
 class ActorTurnInput(_View):
     """Complete model-visible turn input; the image bytes travel separately."""
 
-    format: Literal["actor-turn-input/4"]
+    format: Literal["actor-turn-input/5"]
     mission: ActorMissionView
     frame: ActorFrameView
     tools: tuple[ActorToolView, ...]
+    target_discovery_feedback: ActorTargetDiscoveryFeedback | None = None
     target_choices: tuple[ActorTargetChoiceView, ...] = ()
     previous_action: ActorPreviousActionView | None = None
 
@@ -280,7 +304,20 @@ class ActorTurnInput(_View):
         return value
 
     @model_validator(mode="after")
-    def _target_choices_match_surface(self) -> "ActorTurnInput":
+    def _target_acquisition_tools_match_surface(self) -> "ActorTurnInput":
+        discovery_tools = tuple(
+            tool for tool in self.tools
+            if tool.name == DISCOVER_TARGET_TOOL_NAME
+        )
+        if discovery_tools:
+            tool = discovery_tools[0]
+            if (
+                tool.requires_local_intent is not False
+                or _thaw(tool.input_schema) != discover_target_tool_schema()
+            ):
+                raise ValueError(
+                    "discover_target must use the canonical read-only query schema"
+                )
         ordinals = tuple(item.ordinal for item in self.target_choices)
         if ordinals != tuple(range(1, len(ordinals) + 1)):
             raise ValueError("target choice ordinals must be contiguous and one-based")
@@ -289,6 +326,11 @@ class ActorTurnInput(_View):
             if tool.name == ACTIVATE_TARGET_TOOL_NAME
         )
         has_activation_tool = bool(activation_tools)
+        feedback = self.target_discovery_feedback
+        if feedback is not None and (self.target_choices or has_activation_tool):
+            raise ValueError(
+                "empty target discovery feedback cannot include choices or activation"
+            )
         if has_activation_tool != bool(self.target_choices):
             raise ValueError(
                 "activate_target and target_choices must be projected together"
@@ -426,6 +468,22 @@ def project_actor_target_choices(
         raise InvalidActorView(str(exc)) from exc
 
 
+def project_actor_target_discovery_feedback(
+    discovery: TargetDiscoverySnapshot | None,
+) -> ActorTargetDiscoveryFeedback | None:
+    if discovery is None or discovery.candidates:
+        return None
+    if not isinstance(discovery, TargetDiscoverySnapshot):
+        raise InvalidActorView(
+            "target discovery feedback requires one TargetDiscoverySnapshot"
+        )
+    return ActorTargetDiscoveryFeedback(
+        format=ACTOR_TARGET_DISCOVERY_FEEDBACK_FORMAT,
+        query=discovery.query,
+        outcome="no_candidates",
+    )
+
+
 def project_actor_turn_input(
     card: MissionCard,
     frame: AuthoritativeFrameState,
@@ -433,6 +491,7 @@ def project_actor_turn_input(
     projection: BrokerProjection,
     *,
     previous_action: ActorPreviousActionView | None = None,
+    target_discovery: TargetDiscoverySnapshot | None = None,
     target_selection_lease: TargetSelectionLease | None = None,
     current_target_selection_scope: TargetSelectionScope | None = None,
     current_run_id: str | None = None,
@@ -456,6 +515,27 @@ def project_actor_turn_input(
         )
     if binding is not None and target_selection_lease is not None:
         raise InvalidActorView("bound target cannot project acquisition candidates")
+    if target_discovery is not None:
+        if not isinstance(target_discovery, TargetDiscoverySnapshot):
+            raise InvalidActorView(
+                "target discovery result must be TargetDiscoverySnapshot"
+            )
+        if binding is not None or frame.scope != "full_desktop":
+            raise InvalidActorView(
+                "target discovery result requires an unbound full-desktop frame"
+            )
+        if (
+            projection.candidate_fingerprint
+            != target_discovery.candidate_fingerprint
+            or projection.candidate_count != len(target_discovery.candidates)
+        ):
+            raise InvalidActorView(
+                "BrokerProjection does not identify the target discovery result"
+            )
+        if bool(target_discovery.candidates) != bool(target_selection_lease):
+            raise InvalidActorView(
+                "non-empty target discovery and selection lease must be projected together"
+            )
     if target_selection_lease is not None:
         scope = current_target_selection_scope
         if not isinstance(scope, TargetSelectionScope):
@@ -491,6 +571,7 @@ def project_actor_turn_input(
     mission_view = project_actor_mission_view(card)
     frame_view = project_actor_frame_view(frame)
     tool_views = project_actor_tool_views(catalog, projection)
+    discovery_feedback = project_actor_target_discovery_feedback(target_discovery)
     choice_views = project_actor_target_choices(target_selection_lease)
     try:
         return ActorTurnInput(
@@ -498,6 +579,7 @@ def project_actor_turn_input(
             mission=mission_view,
             frame=frame_view,
             tools=tool_views,
+            target_discovery_feedback=discovery_feedback,
             target_choices=choice_views,
             previous_action=previous_action,
         )
@@ -510,12 +592,14 @@ def project_actor_turn_input(
 __all__ = [
     "ACTOR_MISSION_VIEW_FORMAT", "ACTOR_FRAME_VIEW_FORMAT", "ACTOR_TOOL_VIEW_FORMAT",
     "ACTOR_TURN_INPUT_FORMAT", "ACTOR_PREVIOUS_ACTION_FORMAT",
+    "ACTOR_TARGET_DISCOVERY_FEEDBACK_FORMAT",
     "MAX_ACTOR_PREVIOUS_INTENT_CHARS", "MAX_ACTOR_PREVIOUS_ARGUMENT_CHARS",
     "InvalidActorView", "ActorObligationView",
     "ActorArtifactView", "ActorTransitionView", "ActorFailureView", "ActorMissionView",
     "ActorPreviousActionView", "ActorFrameView", "ActorToolView",
-    "ActorTargetChoiceView", "ActorTurnInput",
+    "ActorTargetDiscoveryFeedback", "ActorTargetChoiceView", "ActorTurnInput",
     "project_actor_mission_view",
     "project_actor_frame_view", "project_actor_tool_views",
-    "project_actor_target_choices", "project_actor_turn_input",
+    "project_actor_target_discovery_feedback", "project_actor_target_choices",
+    "project_actor_turn_input",
 ]

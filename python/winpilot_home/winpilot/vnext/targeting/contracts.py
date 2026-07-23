@@ -24,6 +24,7 @@ _TOKEN = re.compile(r"[a-z][a-z0-9_]{0,63}")
 MAX_TARGET_CANDIDATES = 16
 MAX_TARGET_QUERY_CHARS = 256
 MAX_TARGET_TEXT_CHARS = 512
+DISCOVER_TARGET_TOOL_NAME = "discover_target"
 ACTIVATE_TARGET_TOOL_NAME = "activate_target"
 _CANDIDATE_FINGERPRINT = re.compile(r"target-candidates-[0-9a-f]{64}")
 
@@ -41,6 +42,24 @@ class TargetState(str, Enum):
     VISIBLE = "visible"
     RECOVERABLE = "recoverable"
     INSTALLED = "installed"
+
+
+def discover_target_tool_schema() -> dict[str, object]:
+    """Canonical Actor schema for one read-only target query."""
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_TARGET_QUERY_CHARS,
+                "pattern": r"[\s\S]*\S[\s\S]*",
+            },
+        },
+        "required": ["query"],
+    }
 
 
 def activate_target_tool_schema() -> dict[str, object]:
@@ -268,8 +287,12 @@ class TargetDiscoverySnapshot:
             float(self.captured_at)
         ) or float(self.captured_at) < 0:
             raise TargetContractError("captured_at must be finite and non-negative")
-        if not isinstance(self.notices, tuple) or any(
-            type(item) is not str for item in self.notices
+        if (
+            not isinstance(self.notices, tuple)
+            or len(self.notices) > MAX_TARGET_CANDIDATES
+            or any(
+                type(item) is not str for item in self.notices
+            )
         ):
             raise TargetContractError("notices must be a tuple of strings")
         notices = tuple(item.strip() for item in self.notices)
@@ -288,11 +311,12 @@ class TargetDiscoverySnapshot:
         )
 
 __all__ = [
-    "ACTIVATE_TARGET_TOOL_NAME", "MAX_TARGET_CANDIDATES", "MAX_TARGET_QUERY_CHARS",
+    "ACTIVATE_TARGET_TOOL_NAME", "DISCOVER_TARGET_TOOL_NAME",
+    "MAX_TARGET_CANDIDATES", "MAX_TARGET_QUERY_CHARS",
     "TARGET_CANDIDATE_FORMAT", "TARGET_DISCOVERY_FORMAT",
     "TargetActivation", "TargetCandidate", "TargetContractError",
     "TargetDiscoverySnapshot", "TargetState", "activate_target_tool_schema",
     "candidate_fingerprint_for", "canonical_candidate_fingerprint",
-    "candidate_ref_for",
+    "candidate_ref_for", "discover_target_tool_schema",
     "launch_identity_for", "process_identity_for",
 ]

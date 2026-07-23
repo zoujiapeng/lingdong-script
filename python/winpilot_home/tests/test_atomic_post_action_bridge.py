@@ -115,7 +115,7 @@ def _envelope(
         capability_grant_ids=(),
         allowed_evidence_scope=("pre-frame-evidence",),
         proposal=parse_actor_proposal({
-            "format": "actor-proposal/0",
+            "format": "actor-proposal/1",
             "kind": "desktop_action",
             "action": action,
             "args": args,
