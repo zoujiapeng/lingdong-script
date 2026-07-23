@@ -385,6 +385,17 @@ def _launch_sort_identity(entry: dict) -> tuple[str, str]:
     return kind, normalized
 
 
+def _cached_launch_target_is_missing(entry: dict) -> bool:
+    """Return whether a cached file-backed launch target has disappeared."""
+
+    if entry.get("kind") not in {"exe", "lnk"}:
+        return False
+    target = os.path.expandvars(
+        str(entry.get("target") or "").strip().strip('"')
+    )
+    return not target or not os.path.isfile(target)
+
+
 def resolve(
     query: str,
     max_results: int = 5,
@@ -462,11 +473,27 @@ def resolve(
     with _cache_lock:
         had_cached_index = _cache is not None
     results = candidates(_index(force_refresh=force_refresh) if force_refresh else _index())
-    if not results and had_cached_index and not force_refresh:
+    refreshed = force_refresh
+    if (
+        had_cached_index
+        and not force_refresh
+        and (
+            not results
+            or any(_cached_launch_target_is_missing(item) for item in results)
+        )
+    ):
         # Install/uninstall and shortcut changes are common while the desktop
-        # client is running.  A miss is cheap enough to justify one forced
-        # multi-source refresh before declaring the app absent.
+        # client is running.  A miss or a matching file-backed entry that has
+        # disappeared is enough to justify one multi-source refresh.  This
+        # prevents a positive-but-stale fuzzy result from masking a newly
+        # installed target for the lifetime of the catalog cache.
         results = candidates(_index(force_refresh=True))
+        refreshed = True
+    if refreshed:
+        results = [
+            item for item in results
+            if not _cached_launch_target_is_missing(item)
+        ]
     if results:
         return results
     if launch_kinds is not None and "exe" not in launch_kinds:
