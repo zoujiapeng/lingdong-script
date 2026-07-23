@@ -112,18 +112,49 @@ class TraceSidecarPort(Protocol):
 
 
 class _ActorProjectionProbe:
-    """Record one non-sensitive Actor-input fact for the trace sidecar."""
+    """Record bounded, non-sensitive Actor facts for the trace sidecar."""
 
     def __init__(self, actor: Any) -> None:
         self._actor = actor
         self.previous_action_projected: bool | None = None
+        self.tool_names: tuple[str, ...] | None = None
+        self.target_choice_count: int | None = None
+        self.had_discovery_feedback: bool | None = None
+        self.feedback_query_sha256: str | None = None
+        self.proposal_query_sha256: str | None = None
+        self.proposal_query_chars: int | None = None
 
     def reset(self) -> None:
         self.previous_action_projected = None
+        self.tool_names = None
+        self.target_choice_count = None
+        self.had_discovery_feedback = None
+        self.feedback_query_sha256 = None
+        self.proposal_query_sha256 = None
+        self.proposal_query_chars = None
+
+    @staticmethod
+    def _text_sha256(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     def propose(self, turn: Any, **kwargs: Any) -> Any:
         self.previous_action_projected = turn.previous_action is not None
-        return self._actor.propose(turn, **kwargs)
+        self.tool_names = tuple(tool.name for tool in turn.tools)
+        self.target_choice_count = len(turn.target_choices)
+        feedback = turn.target_discovery_feedback
+        self.had_discovery_feedback = feedback is not None
+        if feedback is not None:
+            self.feedback_query_sha256 = self._text_sha256(feedback.query)
+        proposal = self._actor.propose(turn, **kwargs)
+        if (
+            isinstance(proposal, Mapping)
+            and proposal.get("kind") == "discover_target"
+            and type(proposal.get("query")) is str
+        ):
+            query = proposal["query"]
+            self.proposal_query_sha256 = self._text_sha256(query)
+            self.proposal_query_chars = len(query)
+        return proposal
 
 
 class LiveDesktopCoordinatorError(RuntimeError):
@@ -867,6 +898,26 @@ class LiveDesktopRuntimeCoordinator:
                     ),
                     "previous_action_projected": (
                         actor_probe.previous_action_projected
+                    ),
+                    "actor_input_tool_names": (
+                        list(actor_probe.tool_names)
+                        if actor_probe.tool_names is not None
+                        else None
+                    ),
+                    "actor_input_target_choice_count": (
+                        actor_probe.target_choice_count
+                    ),
+                    "actor_input_had_discovery_feedback": (
+                        actor_probe.had_discovery_feedback
+                    ),
+                    "actor_input_feedback_query_sha256": (
+                        actor_probe.feedback_query_sha256
+                    ),
+                    "proposal_discovery_query_sha256": (
+                        actor_probe.proposal_query_sha256
+                    ),
+                    "proposal_discovery_query_chars": (
+                        actor_probe.proposal_query_chars
                     ),
                     "status": result.status.value,
                     "route": None if result.route is None else result.route.value,
