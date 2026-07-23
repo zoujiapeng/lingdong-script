@@ -17,10 +17,12 @@ from ..action.raw_device import (
     ClickMechanism,
     FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
+    FinalTargetActivationGuardDecision,
     MouseButton,
     RawActionContext,
     RawActionReceipt,
     RawDeviceExecutor,
+    RawTargetActivationContext,
 )
 from ..action.replay_policy import MutationOutcome
 from ..agent.frame_authority import FrameAuthority
@@ -33,6 +35,13 @@ from ..vnext.runtime.mutation_permits import (
     MutationPermitAuthority,
     RuntimeMutationPermit,
 )
+from ..vnext.runtime.target_activation import (
+    ActivatedTargetIdentity,
+    TargetActivationEnvelope,
+    TargetActivationOutcome,
+    TargetActivationTransition,
+)
+from ..vnext.targeting import TargetState
 from .commit_admission import (
     CommitAdmissionGate,
     CommitInputKind,
@@ -143,12 +152,106 @@ class ControllerPostActionPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class TargetActivationObservation:
+    """Fresh strong identity read for one Runtime-selected window."""
+
+    activated_target: ActivatedTargetIdentity
+    exact_foreground: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.activated_target, ActivatedTargetIdentity):
+            raise AtomicDesktopControllerError(
+                "activated_target must be ActivatedTargetIdentity"
+            )
+        if type(self.exact_foreground) is not bool:
+            raise AtomicDesktopControllerError(
+                "exact_foreground must be boolean"
+            )
+
+
+@runtime_checkable
+class TargetActivationObservationPort(Protocol):
+    """Read current target/foreground facts without mutating the desktop."""
+
+    def observe_activation(
+        self,
+        envelope: TargetActivationEnvelope,
+    ) -> TargetActivationObservation: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TargetActivationPostAction:
+    """Independent foreground/frame proof after one activation transaction."""
+
+    activated_target: ActivatedTargetIdentity
+    exact_foreground: bool
+    post_frame_id: int
+    evidence_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.activated_target, ActivatedTargetIdentity):
+            raise AtomicDesktopControllerError(
+                "activated_target must be ActivatedTargetIdentity"
+            )
+        if type(self.exact_foreground) is not bool:
+            raise AtomicDesktopControllerError(
+                "exact_foreground must be boolean"
+            )
+        if type(self.post_frame_id) is not int or self.post_frame_id <= 0:
+            raise AtomicDesktopControllerError(
+                "post_frame_id must be a positive integer"
+            )
+        if isinstance(self.evidence_refs, (str, bytes)):
+            raise AtomicDesktopControllerError(
+                "evidence_refs must be an identity array"
+            )
+        try:
+            refs = tuple(self.evidence_refs)
+        except TypeError as exc:
+            raise AtomicDesktopControllerError(
+                "evidence_refs must be an identity array"
+            ) from exc
+        if not refs or any(
+            type(ref) is not str or not _IDENTITY.fullmatch(ref.strip())
+            for ref in refs
+        ):
+            raise AtomicDesktopControllerError(
+                "evidence_refs must contain valid non-empty identities"
+            )
+        normalized = tuple(sorted(ref.strip() for ref in refs))
+        if len(normalized) != len(set(normalized)):
+            raise AtomicDesktopControllerError(
+                "evidence_refs must not contain duplicates"
+            )
+        object.__setattr__(self, "evidence_refs", normalized)
+
+
+@runtime_checkable
+class TargetActivationPostActionPort(Protocol):
+    """Capture exact foreground and target-window frame proof after activation."""
+
+    def observe_after_activation(
+        self,
+        envelope: TargetActivationEnvelope,
+        *,
+        raw_receipt: RawActionReceipt | None,
+    ) -> TargetActivationPostAction: ...
+
+
+@dataclass(frozen=True, slots=True)
 class _PreparedInput:
     request: CommitAdmissionRequest
     click_count: ClickCount | None = None
     scroll_amount: int | None = None
     text: str | None = None
     chord: HotkeyChord | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetActivationAttempt:
+    raw_receipt: RawActionReceipt | None = None
+    already_foreground: bool = False
+    failure_reason: str = ""
 
 
 class AtomicDesktopController:
@@ -167,6 +270,8 @@ class AtomicDesktopController:
         final_guard: PhysicalInputFinalGuardPort,
         raw_device: RawDeviceExecutor,
         post_action: ControllerPostActionPort,
+        activation_observation: TargetActivationObservationPort | None = None,
+        activation_post_action: TargetActivationPostActionPort | None = None,
         enabled: bool = False,
     ) -> None:
         if not isinstance(action_queue, DesktopActionQueue):
@@ -183,6 +288,20 @@ class AtomicDesktopController:
             raise TypeError("final_guard must implement PhysicalInputFinalGuardPort")
         if not isinstance(post_action, ControllerPostActionPort):
             raise TypeError("post_action must implement ControllerPostActionPort")
+        if activation_observation is not None and not isinstance(
+            activation_observation, TargetActivationObservationPort
+        ):
+            raise TypeError(
+                "activation_observation must implement "
+                "TargetActivationObservationPort or be null"
+            )
+        if activation_post_action is not None and not isinstance(
+            activation_post_action, TargetActivationPostActionPort
+        ):
+            raise TypeError(
+                "activation_post_action must implement "
+                "TargetActivationPostActionPort or be null"
+            )
         if type(enabled) is not bool:
             raise TypeError("enabled must be boolean")
         self._queue = action_queue
@@ -192,6 +311,8 @@ class AtomicDesktopController:
         self._final_guard = final_guard
         self._raw = raw_device
         self._post = post_action
+        self._activation_observation = activation_observation
+        self._activation_post = activation_post_action
         self._enabled = enabled
 
     @staticmethod
@@ -418,16 +539,286 @@ class AtomicDesktopController:
             input_completed=False if definitely_not_executed else None,
         )
 
+    @staticmethod
+    def _activation_identity_guard(
+        envelope: TargetActivationEnvelope,
+        observation: TargetActivationObservation,
+    ) -> FinalTargetActivationGuardDecision:
+        target = observation.activated_target
+        candidate = envelope.candidate
+        if target.hwnd != candidate.hwnd:
+            return FinalTargetActivationGuardDecision.TARGET_ROOT_CHANGED
+        if (
+            target.process_id != candidate.process_id
+            or target.process_identity != candidate.process_identity
+        ):
+            return FinalTargetActivationGuardDecision.TARGET_PROCESS_CHANGED
+        return FinalTargetActivationGuardDecision.ADMITTED
+
+    @staticmethod
+    def _activation_failure(
+        envelope: TargetActivationEnvelope,
+        *,
+        unknown: bool,
+        reason: str,
+    ) -> TargetActivationTransition:
+        return TargetActivationTransition(
+            outcome=(
+                TargetActivationOutcome.UNKNOWN
+                if unknown
+                else TargetActivationOutcome.REJECTED
+            ),
+            action_id=envelope.decision_id,
+            candidate_ref=envelope.candidate.candidate_ref,
+            mutation_completed=None if unknown else False,
+            activated_target=None,
+            post_frame_id=None,
+            evidence_refs=(),
+            failure_reason=reason,
+        )
+
+    @staticmethod
+    def _activation_completed(
+        envelope: TargetActivationEnvelope,
+        post: TargetActivationPostAction,
+        *,
+        mutation_completed: bool,
+    ) -> TargetActivationTransition:
+        return TargetActivationTransition(
+            outcome=TargetActivationOutcome.COMPLETED,
+            action_id=envelope.decision_id,
+            candidate_ref=envelope.candidate.candidate_ref,
+            mutation_completed=mutation_completed,
+            activated_target=post.activated_target,
+            post_frame_id=post.post_frame_id,
+            evidence_refs=post.evidence_refs,
+            failure_reason="",
+        )
+
+    def _execute_target_activation(
+        self,
+        envelope: TargetActivationEnvelope,
+        *,
+        stop_event: Event | None,
+    ) -> TargetActivationTransition:
+        observation_port = self._activation_observation
+        post_port = self._activation_post
+        if observation_port is None or post_port is None:
+            raise AtomicDesktopControllerError(
+                "target activation ports are not configured"
+            )
+        activation_expected_target: ActivatedTargetIdentity | None = None
+
+        def read_current() -> tuple[
+            FinalTargetActivationGuardDecision,
+            TargetActivationObservation | None,
+        ]:
+            if stop_event is not None and stop_event.is_set():
+                return FinalTargetActivationGuardDecision.STOP_REQUESTED, None
+            try:
+                observed = observation_port.observe_activation(envelope)
+            except Exception:
+                return FinalTargetActivationGuardDecision.TARGET_UNAVAILABLE, None
+            if not isinstance(observed, TargetActivationObservation):
+                return FinalTargetActivationGuardDecision.TARGET_UNAVAILABLE, None
+            decision = self._activation_identity_guard(envelope, observed)
+            if decision is not FinalTargetActivationGuardDecision.ADMITTED:
+                return decision, observed
+            expected = activation_expected_target
+            if expected is not None:
+                current = observed.activated_target
+                if current.root_hwnd != expected.root_hwnd:
+                    return (
+                        FinalTargetActivationGuardDecision.TARGET_ROOT_CHANGED,
+                        observed,
+                    )
+                if current.window_region != expected.window_region:
+                    return (
+                        FinalTargetActivationGuardDecision.AUTHORITY_CHANGED,
+                        observed,
+                    )
+            if stop_event is not None and stop_event.is_set():
+                return FinalTargetActivationGuardDecision.STOP_REQUESTED, observed
+            if not self._permits.active_activation_admission_matches(
+                envelope.decision_id,
+                frame=envelope.frame,
+                pointer=envelope.pointer,
+                candidate_fingerprint=envelope.candidate_fingerprint,
+                candidate=envelope.candidate,
+            ):
+                return FinalTargetActivationGuardDecision.AUTHORITY_CHANGED, observed
+            return FinalTargetActivationGuardDecision.ADMITTED, observed
+
+        def final_activation_guard() -> FinalTargetActivationGuardDecision:
+            decision, _observation = read_current()
+            return decision
+
+        def under_physical_lease() -> TargetActivationTransition:
+            def under_frame_pin() -> _TargetActivationAttempt:
+                permit = self._permits.begin_admission(envelope)
+                try:
+                    if not isinstance(permit, RuntimeMutationPermit) or not permit.allowed:
+                        reason = getattr(permit, "reason", None)
+                        value = getattr(reason, "value", "invalid")
+                        return _TargetActivationAttempt(
+                            failure_reason=f"mutation_permit_{value}"
+                        )
+                    if envelope.candidate.state is not TargetState.VISIBLE:
+                        return _TargetActivationAttempt(
+                            failure_reason="candidate_requires_recovery"
+                        )
+                    decision, observed = read_current()
+                    if decision is not FinalTargetActivationGuardDecision.ADMITTED:
+                        return _TargetActivationAttempt(
+                            failure_reason=decision.value
+                        )
+                    assert observed is not None
+                    nonlocal activation_expected_target
+                    activation_expected_target = observed.activated_target
+                    if observed.exact_foreground:
+                        # A zero-mutation completion still requires a final
+                        # strong identity/foreground read under active authority.
+                        decision, observed = read_current()
+                        if (
+                            decision
+                            is not FinalTargetActivationGuardDecision.ADMITTED
+                        ):
+                            return _TargetActivationAttempt(
+                                failure_reason=decision.value
+                            )
+                        assert observed is not None
+                        if observed.exact_foreground:
+                            return _TargetActivationAttempt(
+                                already_foreground=True
+                            )
+
+                    candidate = envelope.candidate
+                    assert candidate.hwnd is not None
+                    assert candidate.process_id is not None
+                    assert candidate.process_identity is not None
+                    context = RawTargetActivationContext(
+                        target_hwnd=candidate.hwnd,
+                        target_root_hwnd=(
+                            activation_expected_target.root_hwnd
+                        ),
+                        target_process_id=candidate.process_id,
+                        target_process_identity=candidate.process_identity,
+                    )
+                    receipt = self._raw.activate_target(
+                        context,
+                        final_guard=final_activation_guard,
+                    )
+                    return _TargetActivationAttempt(raw_receipt=receipt)
+                finally:
+                    if permit.allowed:
+                        self._permits.finish_admission(envelope.decision_id)
+
+            pinned, attempt = self._frames.run_if_current(
+                envelope.frame, under_frame_pin,
+            )
+            if not pinned:
+                return self._activation_failure(
+                    envelope,
+                    unknown=False,
+                    reason="frame_changed",
+                )
+            assert isinstance(attempt, _TargetActivationAttempt)
+            if attempt.failure_reason:
+                return self._activation_failure(
+                    envelope,
+                    unknown=False,
+                    reason=attempt.failure_reason,
+                )
+
+            receipt = attempt.raw_receipt
+            if not attempt.already_foreground:
+                if not isinstance(receipt, RawActionReceipt):
+                    return self._activation_failure(
+                        envelope,
+                        unknown=True,
+                        reason="raw_activation_result_unavailable",
+                    )
+                if receipt.outcome is MutationOutcome.OUTCOME_UNKNOWN:
+                    return self._activation_failure(
+                        envelope,
+                        unknown=True,
+                        reason=receipt.error_kind or "activation_outcome_unknown",
+                    )
+                if receipt.outcome is not MutationOutcome.APPLIED:
+                    return self._activation_failure(
+                        envelope,
+                        unknown=False,
+                        reason=receipt.error_kind or "activation_not_applied",
+                    )
+
+            try:
+                post = post_port.observe_after_activation(
+                    envelope,
+                    raw_receipt=receipt,
+                )
+                if not isinstance(post, TargetActivationPostAction):
+                    raise TypeError(
+                        "activation post_action returned an invalid result"
+                    )
+                post_guard = self._activation_identity_guard(
+                    envelope,
+                    TargetActivationObservation(
+                        post.activated_target,
+                        post.exact_foreground,
+                    ),
+                )
+                if (
+                    post_guard is not FinalTargetActivationGuardDecision.ADMITTED
+                    or activation_expected_target is None
+                    or post.activated_target.root_hwnd
+                    != activation_expected_target.root_hwnd
+                    or post.activated_target.window_region
+                    != activation_expected_target.window_region
+                    or not post.exact_foreground
+                ):
+                    raise AtomicDesktopControllerError(
+                        "activation post-action target is not exact foreground"
+                    )
+            except Exception:
+                return self._activation_failure(
+                    envelope,
+                    unknown=not attempt.already_foreground,
+                    reason="activation_post_observation_failed",
+                )
+            return self._activation_completed(
+                envelope,
+                post,
+                mutation_completed=not attempt.already_foreground,
+            )
+
+        candidate_hwnd = envelope.candidate.hwnd
+        assert candidate_hwnd is not None
+        return self._queue.run(
+            envelope.proposal.action,
+            under_physical_lease,
+            target_hwnd=candidate_hwnd,
+            scope="physical",
+            cancel_event=stop_event,
+            metadata={"owner": "vnext_atomic_desktop_controller"},
+        )
+
     def execute(
         self,
-        envelope: ActorDecisionEnvelope,
+        envelope: ActorDecisionEnvelope | TargetActivationEnvelope,
         *,
         stop_event: Event | None = None,
-    ) -> ControllerTransition:
+    ) -> ControllerTransition | TargetActivationTransition:
         if not self._enabled:
             raise AtomicDesktopControllerError("AtomicDesktopController is disabled")
+        if isinstance(envelope, TargetActivationEnvelope):
+            if stop_event is not None and not isinstance(stop_event, Event):
+                raise TypeError("stop_event must be threading.Event or null")
+            return self._execute_target_activation(
+                envelope,
+                stop_event=stop_event,
+            )
         if not isinstance(envelope, ActorDecisionEnvelope):
-            raise TypeError("envelope must be ActorDecisionEnvelope")
+            raise TypeError("envelope must be a supported Controller envelope")
         if stop_event is not None and not isinstance(stop_event, Event):
             raise TypeError("stop_event must be threading.Event or null")
         prepared = self._request(envelope)
@@ -543,4 +934,8 @@ __all__ = [
     "PhysicalInputFinalGuardPort",
     "REQUIRED_RAW_ACTION_NAMES",
     "SUPPORTED_DESKTOP_TOOL_NAMES",
+    "TargetActivationObservation",
+    "TargetActivationObservationPort",
+    "TargetActivationPostAction",
+    "TargetActivationPostActionPort",
 ]
