@@ -21,6 +21,7 @@ export async function submitGoalThroughControlPlane(
   maxSteps = 30,
   coldStart = false,
   runtimeVersion: DesktopRuntimeVersion = 'legacy',
+  startPaused = false,
 ) {
   const compiled = await client.compileTask(goal, maxSteps, coldStart);
   const inputs = await buildClientRunInputs(
@@ -29,7 +30,43 @@ export async function submitGoalThroughControlPlane(
     (handoff) => client.captureDesktopContext(handoff.control_surface_pid),
     runtimeVersion,
   );
-  return client.startGraph(compiled.graph, inputs, runtimeVersion);
+  return client.startGraph(
+    compiled.graph,
+    inputs,
+    runtimeVersion,
+    startPaused,
+  );
+}
+
+export async function resumeRunThroughControlPlane(
+  client: ControlPlaneClient,
+  runId: string,
+  snapshot: ArpExecutionSnapshot | null,
+) {
+  const executionContext = snapshot?.execution_context;
+  const handoff = (
+    typeof executionContext === 'object' && executionContext !== null
+      ? (executionContext as Record<string, unknown>).desktop_handoff
+      : null
+  );
+  const handoffRequired = (
+    typeof handoff === 'object'
+    && handoff !== null
+    && (handoff as Record<string, unknown>).required === true
+  );
+  if (handoffRequired) {
+    const bridge = window.electronAPI;
+    if (!bridge?.prepareDesktopHandoff) {
+      throw new Error('继续桌面任务前无法让出客户端前台。');
+    }
+    const result = await bridge.prepareDesktopHandoff();
+    if (!result.yielded) {
+      throw new Error(
+        `继续桌面任务前无法让出客户端前台：${result.reason || 'foreground handoff failed'}`,
+      );
+    }
+  }
+  return client.resumeRun(runId);
 }
 
 export function useControlPlane() {
@@ -210,10 +247,11 @@ export function useControlPlane() {
     maxSteps = 30,
     coldStart = false,
     runtimeVersion: DesktopRuntimeVersion = 'legacy',
+    startPaused = false,
   ) => {
     const client = requireCompatibleClient();
     const run = await submitGoalThroughControlPlane(
-      client, goal, maxSteps, coldStart, runtimeVersion,
+      client, goal, maxSteps, coldStart, runtimeVersion, startPaused,
     );
     await refresh();
     return run;
@@ -249,9 +287,11 @@ export function useControlPlane() {
 
   const resumeCurrent = useCallback(async () => {
     if (!currentRun) return;
-    await requireClient().resumeRun(currentRun.run_id);
+    await resumeRunThroughControlPlane(
+      requireClient(), currentRun.run_id, arpSnapshot,
+    );
     await refresh();
-  }, [currentRun, refresh]);
+  }, [arpSnapshot, currentRun, refresh]);
 
   const decideGate = useCallback(async (approved: boolean, comment = '') => {
     const nodeId = String(arpSnapshot?.current_node_id || currentRun?.current_node_id || '');

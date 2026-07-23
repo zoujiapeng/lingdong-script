@@ -77,7 +77,7 @@ describe('control plane client contracts', () => {
       const client = new ControlPlaneClient('http://127.0.0.1:8765');
       const graph = { format: 'arp/1', id: 'graph-1' } as any;
       const inputs = { execution_context: { format: 'execution-context/1' } };
-      await client.startGraph(graph, inputs, 'vnext');
+      await client.startGraph(graph, inputs, 'vnext', true);
 
       const [url, init] = fetchMock.mock.calls[0] as unknown as [URL, RequestInit];
       expect(String(url)).toContain('/api/v2/arp/runs');
@@ -86,6 +86,7 @@ describe('control plane client contracts', () => {
         graph,
         inputs,
         runtime_version: 'vnext',
+        start_paused: true,
       });
       expect(JSON.stringify(graph)).not.toContain('runtime_version');
       expect(JSON.stringify(inputs)).not.toContain('runtime_version');

@@ -872,6 +872,7 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
   const [maxSteps, setMaxSteps] = useState(40);
   const [coldStart, setColdStart] = useState(() => localStorage.getItem('arp-cold-start') === '1');
+  const [startPaused, setStartPaused] = useState(false);
   const [runtimeVersion, setRuntimeVersion] = useState<DesktopRuntimeVersion>('legacy');
   const [submitting, setSubmitting] = useState(false);
   const [controlling, setControlling] = useState(false);
@@ -905,7 +906,9 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
     try {
       localStorage.setItem('arp-last-goal', goal.trim());
       localStorage.setItem('arp-cold-start', coldStart ? '1' : '0');
-      await plane.startGoal(goal.trim(), maxSteps, coldStart, runtimeVersion);
+      await plane.startGoal(
+        goal.trim(), maxSteps, coldStart, runtimeVersion, startPaused,
+      );
     } catch (error) {
       if (error instanceof TaskClarificationRequired) {
         setClarificationQuestions(error.questions);
@@ -974,6 +977,10 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
           <label className="arp-cold-start-control" title="禁用 Skill 重放与长期经验提示；仍保留当前对话中的短期指代，用于真实冷启动验收">
             <input type="checkbox" checked={coldStart} onChange={(event) => setColdStart(event.target.checked)} disabled={active} />
             冷启动（禁用 Skill/长期经验）
+          </label>
+          <label className="arp-cold-start-control arp-start-paused-control" title="运行会先进入暂停状态；点击继续后才开始模型判断和桌面操作">
+            <input type="checkbox" checked={startPaused} onChange={(event) => setStartPaused(event.target.checked)} disabled={active || submitting} />
+            启动后暂停（确认环境后继续）
           </label>
           <div className="arp-action-spacer" />
           {active ? (
