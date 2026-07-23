@@ -335,9 +335,13 @@ P4b.2 target acquisition 必须单独通过同入口、独立 oracle，至少覆
 full-desktop scope 与 candidate summary 的注入式合同测试。live Catalog/MissionRuntime 已能在注入式
 unbound turn dispatch mutation-free `discover_target`，并重验 authority；coordinator 也注入了每次请求
 采集新 OS facts 的 discovery port。空结果只在下一合格回合投影 query 与 `no_candidates`，不暴露身份。
-但 product coordinator 仍强制已有 foreground handoff，Electron targetless 不可达；live Catalog 没有
-`activate_target`/`open_app`，也没有上述 activation/launch oracle。因此这些条目均不得记为 pass，
-P4b.2 与 P7 仍未完成。
+commits `2d1fb1b..845c034` 已用注入式负向/property/replay 测试闭合 existing-window 的
+lease/envelope/permit、admitted RawDevice/AtomicDesktopController、强身份 foreground guard、权威
+post frame/evidence、Runtime binding 和 accepted-event trace。该结果只证明内部链能够 fail closed；
+它不是同入口 E2E 或独立 oracle。product coordinator 仍强制已有 foreground handoff，Electron
+targetless 不可达；live Catalog 没有 `activate_target`/`open_app`，Server composition root 也未注入
+admitted activation backend。existing-instance reuse oracle、cold-launch owner 与 causal oracle 均未
+实现，因此上列 target-acquisition 条目仍不得记为 pass，P4b.2/P7/P8/P9 仍未达，legacy 删除数为 0。
 
 ### 5.5 Broker
 

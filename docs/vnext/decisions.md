@@ -818,3 +818,38 @@
   post-action bridge. Legacy focus/open fallback chains remain forbidden.
 - behavior boundary: this decision adds no GUI primitive, Controller call, Mission event, Catalog tool,
   prompt, model call or Electron route. Product behavior and the default legacy path are unchanged.
+
+### D040: existing-window activation closes internally before product reachability
+
+- status: commits `2d1fb1b..845c034` close the injected existing-window execution, post-frame,
+  Runtime binding and accepted-event trace path. Live Catalog exposure, Server raw-backend composition,
+  targetless Electron reachability, cold launch and both target-acquisition oracles remain pending.
+  D039 remains the historical contract-only decision; this entry records the later implementation boundary.
+- single execution owner: `activate_target` now uses the same run-scoped
+  `MutationPermitAuthority`, physical `DesktopActionQueue`, `FrameAuthority`,
+  `AtomicDesktopController` and admitted `RawDeviceExecutor` chain as other vNext GUI mutations.
+  The raw primitive uses one declared foreground mechanism after a final strong-identity guard; it
+  does not call legacy focus helpers or try an alternative mechanism after an uncertain result.
+- exact existing instance: Runtime resolves the Actor's ordinal only by consuming the current
+  `TargetSelectionLease`, binds the complete private candidate in `target-activation-envelope/0`,
+  and revalidates the targetless Mission/frame/Broker/grant/lease authority when Controller consumes
+  the permit. An exact target already in the foreground may complete without a Win32 mutation, but
+  still requires a second foreground proof and the same post-frame closure.
+- postcondition and Mission truth: Controller returns only
+  `target-activation-transition/0`. The shared post-action bridge captures a current
+  `target_window` frame and registers deterministic `post_action_frame` evidence for the exact
+  action. MissionRuntime reconciles action id, candidate ref, HWND/PID/process identity, current
+  root/region/frame authority and the Registry evidence hash. Only then does Runtime construct a
+  separate `authoritative_target_binding` attestation and accept one `target_bound` event. The
+  Controller evidence is not reused as binding evidence, and no second target ledger is created.
+- uncertainty and trace: rejected proves no activation and is not replayed. Unknown, an unconsumed
+  permit, a stale lease/revision, or any transition/frame/evidence mismatch binds no target, invokes
+  no fallback and is never automatically replayed. The existing private Runtime-turn sidecar now
+  recognizes an accepted `target_bound` event as the activation outcome without exposing private
+  candidate identity or changing BUS/WebSocket product events.
+- rollout boundary: the live Catalog still omits `activate_target`; the Server composition root
+  does not yet inject the admitted activation backend; the coordinator still requires a foreground
+  handoff, so the targetless Electron path cannot reach this code. `open_app` cold launch, its causal
+  process/window binding, the existing-instance-reuse Electron oracle and the cold-launch Electron
+  oracle are all unimplemented. P4b.2, P7, P8 and P9 remain unmet, P6 remains disabled, and the
+  number of deleted legacy product responsibilities remains zero.

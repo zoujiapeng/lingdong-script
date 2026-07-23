@@ -1,6 +1,6 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、已绑定状态的 `click/double_click/scroll/type_text/hotkey/claim/blocked` 小工具面、注入式 targetless Runtime 的只读 `discover_target`、共享 atomic Controller 执行链、deterministic ActionEffectVerifier、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已接入同一代码组合。产品 coordinator 仍强制 foreground handoff，因此 Electron 不能抵达 targetless discovery；legacy 仍默认。P4b.1 keyboard 已有同一 Electron 入口和独立 oracle 证据：`keyboard-entry` 在当前 previous-action 合同下 3/3 通过，`keyboard-select-all` 在修正 layout-independent oracle 后通过。这些配置与早期基线不同，不证明通用 Agent 能力提升，也不满足完整 P7；其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
+本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、已绑定状态的 `click/double_click/scroll/type_text/hotkey/claim/blocked` 小工具面、注入式 targetless Runtime 的只读 `discover_target`、共享 atomic Controller 执行链、deterministic ActionEffectVerifier、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已接入同一代码组合。existing-window activation 的 RawDevice/Controller/post-frame/Runtime binding/accepted-event trace 内部闭环也已实现，但 live Catalog、Server raw backend 与 targetless Electron 入口尚未接线，因此产品仍不能抵达该 mutation；legacy 仍默认。P4b.1 keyboard 已有同一 Electron 入口和独立 oracle 证据：`keyboard-entry` 在当前 previous-action 合同下 3/3 通过，`keyboard-select-all` 在修正 layout-independent oracle 后通过。这些配置与早期基线不同，不证明通用 Agent 能力提升，也不满足完整 P7；其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
 
 ## 1. 版本与基本规则
 
@@ -1220,7 +1220,7 @@ reducer event and resulting revision
 
 这样失败可以归因到 Goal Compiler、Task Profiler、Execution Policy、Mission Reducer、Broker、Actor、Frame/Controller、Verifier、Planner、Inspector或外部环境，而不是笼统归因于“模型不行”。
 
-## 19. Existing-window activation authority（纯合同，尚未接线）
+## 19. Existing-window activation authority（内部闭环，产品入口尚未接线）
 
 `target-activation-envelope/0` 是 Runtime 私有的单次 mutation authority。它绑定
 mission/run/revision/obligation、epoch-zero `full_desktop` frame、released pointer、Broker
@@ -1241,9 +1241,29 @@ foreground/frame/evidence 的结果是 `unknown`，不得自动重放。Runtime 
 action/decision/candidate、HWND/PID/process identity、post frame 与 Registry evidence；只有 Runtime
 可以据此追加 evidence 并提交 `target_bound` Mission event。
 
-当前切片没有 activation primitive、Controller 分派、Mission event、Catalog 工具、prompt 或产品
-入口变化。下一切片必须复用同一个 `AtomicDesktopController`、`DesktopActionQueue`、
-`FrameAuthority`、`RawDeviceExecutor` 与 post-action bridge；禁止调用 legacy focus 级联。
+commits `2d1fb1b..845c034` 已按上述合同闭合 existing-window 内部执行链。admitted
+`activate_target` primitive 只在最终强身份 guard 后使用一种前台切换机制，并复用同一个
+`AtomicDesktopController`、`DesktopActionQueue`、`FrameAuthority`、`RawDeviceExecutor` 与
+post-action bridge；禁止调用 legacy focus 级联或在不确定后尝试第二种机制。精确目标本来就在前台
+时可以零 mutation 完成，但仍需再次证明 foreground 和强身份。
+
+post-action bridge 在同一 `FrameAuthority` 上提交 `target_window` 权威帧，并为本次 action 注册
+独立 deterministic `post_action_frame` evidence。MissionRuntime 只从刚消费的 lease 取得完整候选，
+在 permit consume 时重新核对 targetless Mission/revision/obligation、epoch-zero full-desktop
+frame、pointer、Broker/grants、evidence scope 和 lease fingerprint；Controller 返回后再精确对账
+action/candidate、HWND/PID/process identity、当前 root/region/post frame 及 Registry 中的
+mission/run/obligation/action/frame/hash。全部成立后，Runtime 才构造另一份
+`authoritative_target_binding` attestation 并接受唯一 `target_bound` event。post-frame evidence
+不能冒充 binding evidence；Mission binding 仍只由 accepted event + immutable evidence 重放派生。
+
+rejected、unknown、未消费 permit、stale revision/lease 或任何 transition/frame/evidence 不一致都
+不绑定、不 fallback、不 replay。private Runtime-turn trace 只从 accepted `target_bound` 识别本次
+activation 已被 Mission 接受，不记录私有 candidate identity，也不修改 BUS/WebSocket 事件。
+
+这仍不是产品可达能力：live Catalog 尚未加入 `activate_target`，Server composition root 尚未注入
+admitted activation backend，coordinator 仍强制 foreground handoff，所以 targetless Electron
+入口不能执行这条链。`open_app` cold launch、启动前后因果绑定和 existing-instance/cold-launch
+两类同入口独立 oracle 都未完成。P4b.2/P7/P8/P9 均未达，legacy 删除数为 0。
 
 ### P1.5 completion and recovery contract (canonical)
 
