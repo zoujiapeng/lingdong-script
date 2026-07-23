@@ -254,24 +254,10 @@ class MutationPermitAuthority:
         candidate: object,
     ) -> bool:
         """Read whether one exact private target activation owns admission."""
-
-        with self._lock:
-            if self._closed:
-                return False
-            pending = self._active.get(str(decision_id))
-            if pending is None:
-                return False
-            envelope = pending.envelope
-            if not isinstance(envelope, TargetActivationEnvelope):
-                return False
-            return bool(
-                envelope.decision_id == decision_id
-                and envelope.frame == frame
-                and envelope.pointer == pointer
-                and envelope.candidate_fingerprint == candidate_fingerprint
-                and isinstance(candidate, TargetCandidate)
-                and envelope.candidate == candidate
-            )
+        return self._active_target_acquisition_admission_matches(
+            TargetActivationEnvelope, decision_id, frame, pointer,
+            candidate_fingerprint, candidate,
+        )
 
     def active_launch_admission_matches(
         self,
@@ -283,7 +269,18 @@ class MutationPermitAuthority:
         candidate: object,
     ) -> bool:
         """Read whether one exact private target launch owns admission."""
+        return self._active_target_acquisition_admission_matches(
+            TargetLaunchEnvelope, decision_id, frame, pointer,
+            candidate_fingerprint, candidate,
+        )
 
+    def _active_target_acquisition_admission_matches(
+        self,
+        envelope_type: type[TargetActivationEnvelope | TargetLaunchEnvelope],
+        decision_id: str,
+        frame: object, pointer: object,
+        candidate_fingerprint: object, candidate: object,
+    ) -> bool:
         with self._lock:
             if self._closed:
                 return False
@@ -291,9 +288,9 @@ class MutationPermitAuthority:
             if pending is None:
                 return False
             envelope = pending.envelope
-            if not isinstance(envelope, TargetLaunchEnvelope):
+            if not isinstance(envelope, envelope_type):
                 return False
-            return bool(
+            return (
                 envelope.decision_id == decision_id
                 and envelope.frame == frame
                 and envelope.pointer == pointer
