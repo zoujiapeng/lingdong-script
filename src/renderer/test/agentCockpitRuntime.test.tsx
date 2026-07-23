@@ -24,7 +24,11 @@ describe('AgentCockpit runtime canary selector', () => {
     render(<AgentCockpit plane={plane as never} />);
 
     const selector = screen.getByLabelText('实验运行时');
+    const startPaused = screen.getByRole('checkbox', {
+      name: '启动后暂停（确认环境后继续）',
+    });
     expect(selector).toHaveValue('legacy');
+    expect(startPaused).not.toBeChecked();
     expect(screen.getByRole('option', { name: 'Legacy（默认）' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'vNext（实验）' })).toBeInTheDocument();
 
@@ -33,10 +37,11 @@ describe('AgentCockpit runtime canary selector', () => {
       '完成当前界面上的测试。',
     );
     await user.selectOptions(selector, 'vnext');
+    await user.click(startPaused);
     await user.click(screen.getByRole('button', { name: '运行任务' }));
 
     await waitFor(() => expect(startGoal).toHaveBeenCalledWith(
-      '完成当前界面上的测试。', 40, false, 'vnext',
+      '完成当前界面上的测试。', 40, false, 'vnext', true,
     ));
   });
 });

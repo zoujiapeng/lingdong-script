@@ -475,13 +475,19 @@ export class ControlPlaneClient {
     graph: ArpGraph,
     inputs: Record<string, unknown> = {},
     runtimeVersion: DesktopRuntimeVersion = 'legacy',
+    startPaused = false,
   ): Promise<ArpExecutionSnapshot> {
     if (!DESKTOP_RUNTIME_VERSIONS.includes(runtimeVersion)) {
       throw new Error(`不支持的桌面运行时：${String(runtimeVersion)}`);
     }
     const response = await this.request<{ ok: boolean; run_id: string; run: ArpExecutionSnapshot }>('api/v2/arp/runs', {
       method: 'POST',
-      body: JSON.stringify({ graph, inputs, runtime_version: runtimeVersion }),
+      body: JSON.stringify({
+        graph,
+        inputs,
+        runtime_version: runtimeVersion,
+        start_paused: startPaused,
+      }),
     });
     return response.run;
   }

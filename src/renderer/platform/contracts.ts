@@ -152,6 +152,7 @@ export interface RunProjection {
   run_id: string;
   kind: 'agent' | 'arp';
   status: string;
+  manual_paused?: boolean;
   phase: string;
   goal: string;
   graph_id?: string | null;
