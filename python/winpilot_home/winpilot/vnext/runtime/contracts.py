@@ -15,7 +15,7 @@ from ...visual_runtime.commit_admission import (
 
 
 RUNTIME_FRAME_FORMAT = "runtime-frame/0"
-RUNTIME_SNAPSHOT_FORMAT = "runtime-snapshot/1"
+RUNTIME_SNAPSHOT_FORMAT = "runtime-snapshot/2"
 CONTROLLER_TRANSITION_FORMAT = "controller-transition/1"
 MISSION_RUNTIME_RESULT_FORMAT = "mission-runtime-result/0"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
@@ -122,6 +122,7 @@ class RuntimeFrame:
             frame_id=self.frame_id,
             hwnd=self.hwnd,
             epoch=self.epoch,
+            scope=self.scope,
             authoritative=authoritative,
             fresh=fresh,
         )
@@ -164,6 +165,7 @@ class RuntimeSnapshot:
             frame_state.frame_id != self.frame.frame_id
             or frame_state.epoch != self.frame.epoch
             or frame_state.hwnd != self.frame.hwnd
+            or frame_state.scope != self.frame.scope
         ):
             raise RuntimeContractError("frame payload and Broker state identity disagree")
         if self.target is not None and (
@@ -171,6 +173,10 @@ class RuntimeSnapshot:
             or self.target.epoch != self.frame.epoch
         ):
             raise RuntimeContractError("frame and target commit identity disagree")
+        if self.target is None and self.frame.scope != "full_desktop":
+            raise RuntimeContractError(
+                "targetless Runtime snapshot requires a full-desktop frame"
+            )
 
     @property
     def authority_key(self) -> tuple[Any, ...]:

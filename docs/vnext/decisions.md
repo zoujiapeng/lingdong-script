@@ -718,7 +718,7 @@
 
 ### D036: ordinal target choices use a Runtime-private one-shot mapping
 
-- status: pure contract accepted; live discovery, Broker projection and activation are pending.
+- status: pure choice/lease contract accepted; live discovery dispatch and activation are pending.
 - the Actor never copies or invents target identity. It may later choose only one bounded ordinal from
   the exact choices in its current `actor-turn-input/4`; the ordinal has no meaning outside that turn.
 - `TargetSelectionLease` freezes the original ordered `TargetCandidate` tuple and binds it to exact
@@ -731,6 +731,24 @@
 - discovery contracts no longer offer `actor_view()`, `to_json()` or public candidate-ref selection.
   Actor projection owns the only semantic view. No live tool was added in this slice, so current Electron
   product behavior and the existing bound-target tool surface remain unchanged.
-- the next gated slice must add a targetless full-desktop authoritative frame and read-only discovery.
+- D037 supplies the targetless observation prerequisite without changing this lease contract. The next
+  gated slice must connect read-only discovery without a mutation permit or Controller call.
   Exact existing-window activation must then run through the same injected Controller/physical
   ActionQueue with pre/post strong-identity checks; legacy focus/open helpers remain forbidden.
+
+### D037: targetless observation reuses the sole frame authority
+
+- status: accepted as a behavior-preserving seam; product targetless execution remains unreachable.
+- when Mission has no accepted target binding, Runtime may capture the real full desktop with a positive
+  desktop HWND, epoch zero and exact virtual desktop region. It uses the existing FrameObserver and
+  FrameAuthority rather than introducing a desktop-frame owner.
+- `broker-runtime-state/1` records frame scope and a paired private candidate fingerprint/count;
+  `broker-projection/1` binds those facts plus the complete frame state into projection identity.
+  `runtime-snapshot/2` requires an unbound frame to be `full_desktop`. Old and mixed versions fail closed.
+- `tool-spec/1` and `tool-catalog/1` add the canonical
+  `authoritative_full_desktop_frame` and `target_candidates_available` prerequisite names; the version
+  bump prevents an older catalog reader from silently treating them as unknown policy.
+- a target reader is never called while unbound. A desktop identity mismatch before or after CAS rejects
+  the turn; a bound target can later be accepted by Mission and used by the same bridge without rebuild.
+- this decision does not add a live tool, model call, prompt text, target choice, focus, launch, Controller
+  mutation or Mission event. The existing foreground-handoff product behavior therefore remains unchanged.

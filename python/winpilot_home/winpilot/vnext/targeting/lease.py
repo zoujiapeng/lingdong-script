@@ -150,6 +150,8 @@ class TargetSelectionLease:
             if self._consumed:
                 return False
             self._consumed = True
+            self._candidates = ()
+            self._choice_facts = ()
             return True
 
     def consume(
@@ -163,16 +165,19 @@ class TargetSelectionLease:
         with self._lock:
             if self._consumed:
                 raise TargetSelectionLeaseError("target selection lease is exhausted")
+            candidates = self._candidates
             self._consumed = True
+            self._candidates = ()
+            self._choice_facts = ()
         if scope != self._scope:
             raise TargetSelectionLeaseError("target selection lease is stale")
         if (
             type(candidate_ordinal) is not int
             or candidate_ordinal < 1
-            or candidate_ordinal > len(self._candidates)
+            or candidate_ordinal > len(candidates)
         ):
             raise TargetSelectionLeaseError("candidate_ordinal is outside the frozen mapping")
-        return self._candidates[candidate_ordinal - 1]
+        return candidates[candidate_ordinal - 1]
 
 
 __all__ = [

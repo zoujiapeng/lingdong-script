@@ -152,6 +152,27 @@ def test_discard_is_idempotent_and_prevents_future_resolution() -> None:
         lease.consume(scope=_scope(), candidate_ordinal=1)
 
 
+def test_concurrent_consume_and_discard_close_exactly_once() -> None:
+    lease = _lease()
+
+    def close(index):
+        if index % 2:
+            return ("discard", lease.discard())
+        try:
+            lease.consume(scope=_scope(), candidate_ordinal=1)
+            return ("consume", True)
+        except TargetSelectionLeaseError:
+            return ("consume", False)
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        results = tuple(executor.map(close, range(64)))
+
+    assert sum(success for _kind, success in results) == 1
+    assert lease.consumed is True
+    with pytest.raises(TargetSelectionLeaseError, match="exhausted"):
+        lease.choice_facts()
+
+
 def test_private_mapping_has_no_public_bypass_and_safe_facts_expire() -> None:
     lease = _lease()
     assert not hasattr(lease, "ordered_candidates")

@@ -435,6 +435,7 @@ def project_actor_turn_input(
     previous_action: ActorPreviousActionView | None = None,
     target_selection_lease: TargetSelectionLease | None = None,
     current_target_selection_scope: TargetSelectionScope | None = None,
+    current_run_id: str | None = None,
 ) -> ActorTurnInput:
     if card.active_obligation_id != projection.obligation_id:
         raise InvalidActorView("MissionCard and BrokerProjection obligation mismatch")
@@ -447,6 +448,8 @@ def project_actor_turn_input(
         raise InvalidActorView("Visual Actor requires a fresh authoritative frame")
     if binding and (frame.hwnd != binding.hwnd or frame.epoch != binding.epoch):
         raise InvalidActorView("authoritative frame does not belong to the bound target")
+    if binding is None and frame.scope != "full_desktop":
+        raise InvalidActorView("unbound Actor input requires a full-desktop frame")
     if (target_selection_lease is None) != (current_target_selection_scope is None):
         raise InvalidActorView(
             "target selection lease and current scope must be projected together"
@@ -461,6 +464,8 @@ def project_actor_turn_input(
             raise InvalidActorView("target selection lease scope is stale")
         if (
             scope.mission_id != card.mission_id
+            or type(current_run_id) is not str
+            or scope.run_id != current_run_id
             or scope.mission_revision != card.mission_revision
             or scope.obligation_id != card.active_obligation_id
             or scope.broker_projection_id != projection.projection_id
@@ -474,6 +479,14 @@ def project_actor_turn_input(
         ):
             raise InvalidActorView(
                 "target selection lease requires the exact full-desktop frame"
+            )
+        choice_count = len(target_selection_lease.choice_facts())
+        if (
+            projection.candidate_fingerprint != scope.candidate_fingerprint
+            or projection.candidate_count != choice_count
+        ):
+            raise InvalidActorView(
+                "BrokerProjection does not identify the target selection lease"
             )
     mission_view = project_actor_mission_view(card)
     frame_view = project_actor_frame_view(frame)

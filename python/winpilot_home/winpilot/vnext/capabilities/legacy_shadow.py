@@ -222,8 +222,22 @@ class LegacyBrokerShadowObserver:
             self._invalidate_target(
                 "authoritative_frame_stale", observed_frame_id=frame_id,
             )
-            return AuthoritativeFrameState(frame_id, hwnd, epoch, True, False), TargetState()
-        frame_state = AuthoritativeFrameState(frame_id, hwnd, epoch, True, True)
+            return AuthoritativeFrameState(
+                frame_id=frame_id,
+                hwnd=hwnd,
+                epoch=epoch,
+                scope=str(getattr(frame, "scope", "target_window")),
+                authoritative=True,
+                fresh=False,
+            ), TargetState()
+        frame_state = AuthoritativeFrameState(
+            frame_id=frame_id,
+            hwnd=hwnd,
+            epoch=epoch,
+            scope=str(getattr(frame, "scope", "target_window")),
+            authoritative=True,
+            fresh=True,
+        )
 
         verified = bool(getattr(session, "_target_binding_verified", False))
         target_hwnd = int(getattr(session, "hwnd", 0) or 0)

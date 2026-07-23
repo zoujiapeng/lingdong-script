@@ -414,7 +414,9 @@ class MissionRuntime:
         return bool(
             target.binding_id == binding.binding_id
             and target.hwnd == binding.hwnd
+            and target.root_hwnd == binding.root_hwnd
             and target.process_id == binding.process_id
+            and target.process_identity == binding.process_identity
             and target.epoch == binding.epoch
         )
 

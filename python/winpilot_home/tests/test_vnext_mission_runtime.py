@@ -633,7 +633,12 @@ def _snapshot(
             available_capabilities=ALL_CAPABILITIES,
             target=target_state,
             frame=AuthoritativeFrameState(
-                frame.frame_id, frame.hwnd, frame.epoch, True, True,
+                frame.frame_id,
+                frame.hwnd,
+                frame.epoch,
+                frame.scope,
+                True,
+                True,
             ),
             pointer=pointer or PointerLeaseState(PointerDisposition.RELEASED),
             executor_offers=offers,
@@ -647,8 +652,9 @@ def _snapshot(
 
 
 def test_runtime_snapshot_rejects_previous_wire_version() -> None:
-    with pytest.raises(RuntimeContractError, match="format"):
-        replace(_snapshot(_frame(9)), format="runtime-snapshot/0")
+    for old_format in ("runtime-snapshot/0", "runtime-snapshot/1"):
+        with pytest.raises(RuntimeContractError, match="format"):
+            replace(_snapshot(_frame(9)), format=old_format)
 
 
 def _set_harness_turn(harness: Harness, turn_index: int) -> None:
@@ -1152,6 +1158,32 @@ def test_initial_runtime_target_must_match_accepted_mission_process() -> None:
     assert harness.controller.calls == []
 
 
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"root_hwnd": 202},
+        {"process_identity": REPLACEMENT_PROCESS_IDENTITY},
+    ),
+)
+def test_initial_runtime_target_rejects_each_strong_identity_mismatch(
+    changes,
+) -> None:
+    baseline = _snapshot(_frame(9))
+    assert baseline.target is not None
+    initial = replace(
+        baseline,
+        target=replace(baseline.target, **changes),
+    )
+    harness = _harness(_click(), initial=initial)
+
+    result = harness.runtime.run_one_turn(turn_index=4)
+
+    assert result.status is RuntimeStatus.STATE_REJECTED
+    assert "accepted Mission state" in result.detail
+    assert harness.actor.calls == []
+    assert harness.controller.calls == []
+
+
 def test_visual_route_binds_one_actor_proposal_to_one_runtime_envelope() -> None:
     harness = _harness(_click())
     before = len(harness.reducer.events)
@@ -1510,6 +1542,15 @@ def test_target_change_does_not_cross_project_previous_action() -> None:
         frame,
         turn_index=5,
         target=TargetState(replacement.binding_id, 202, 4, True),
+        runtime_target=TargetCommitIdentity(
+            binding_id=replacement.binding_id,
+            hwnd=replacement.hwnd,
+            root_hwnd=replacement.root_hwnd,
+            process_id=replacement.process_id,
+            process_identity=replacement.process_identity,
+            epoch=replacement.epoch,
+            window_region=(0, 0, 1280, 720),
+        ),
     )
     harness.actor.proposal = _live_click(630, 430)
 
