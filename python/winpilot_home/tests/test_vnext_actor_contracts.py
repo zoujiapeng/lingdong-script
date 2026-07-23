@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 import json
 import math
 import random
@@ -19,6 +20,7 @@ from winpilot.vnext.actor import (
     ACTOR_TURN_INPUT_FORMAT,
     ActorDecisionEnvelope,
     ActorTurnInput,
+    ActorTargetChoiceView,
     BlockedReport,
     CapabilityRequest,
     ClaimObligationDone,
@@ -33,6 +35,7 @@ from winpilot.vnext.actor import (
     actor_proposal_to_json,
     parse_actor_proposal,
     project_actor_turn_input,
+    project_actor_target_choices,
 )
 from winpilot.vnext.capabilities.contracts import (
     MutationKind,
@@ -57,6 +60,15 @@ from winpilot.vnext.mission.contracts import (
     TransitionSummary,
     VerifiedFact,
     target_binding_attestation,
+)
+from winpilot.vnext.targeting import (
+    TargetCandidate,
+    TargetDiscoverySnapshot,
+    TargetSelectionLease,
+    TargetSelectionScope,
+    activate_target_tool_schema,
+    candidate_ref_for,
+    launch_identity_for,
 )
 from winpilot.visual_runtime.commit_admission import (
     FrameCommitIdentity,
@@ -214,6 +226,85 @@ def _projection(**overrides) -> BrokerProjection:
     return BrokerProjection(**values)
 
 
+def _target_candidate(
+    *, label: str = "Orbit Workspace", target: str = r"C:\Apps\Orbit.exe",
+) -> TargetCandidate:
+    identity = launch_identity_for(kind="exe", target=target)
+    return TargetCandidate(
+        candidate_ref=candidate_ref_for(activation="open_app", identity=identity),
+        activation="open_app",
+        state="installed",
+        label=label,
+        provenance=("installed_catalog",),
+        launch_kind="exe",
+        launch_target=target,
+    )
+
+
+def _target_catalog() -> ToolCatalog:
+    return ToolCatalog((
+        ToolSpec(
+            name="activate_target",
+            schema=activate_target_tool_schema(),
+            route=ToolRoute.VISUAL_ACTOR,
+            mutation_kind=MutationKind.GUI,
+            required_any_capabilities=("visual.interact",),
+        ),
+    ))
+
+
+def _target_projection() -> BrokerProjection:
+    return _projection(
+        target_binding_id=None,
+        tool_names=("activate_target",),
+    )
+
+
+def _target_lease(
+    candidates: tuple[TargetCandidate, ...],
+    *,
+    frame_scope: str = "full_desktop",
+) -> TargetSelectionLease:
+    snapshot = TargetDiscoverySnapshot(
+        query="Orbit", candidates=candidates, captured_at=1,
+    )
+    return TargetSelectionLease(
+        scope=TargetSelectionScope(
+            mission_id="mission-actor-test",
+            run_id="run-actor-test",
+            mission_revision=4,
+            obligation_id="obligation-current",
+            turn_index=1,
+            frame=FrameCommitIdentity(
+                82, 0, 1, (0, 0, 100, 100), frame_scope,
+                (100, 100), "d" * 64,
+            ),
+            broker_projection_id="projection-runtime-1",
+            candidate_fingerprint=snapshot.candidate_fingerprint,
+        ),
+        discovery=snapshot,
+    )
+
+
+def _project_target_turn(
+    lease: TargetSelectionLease,
+    *,
+    card: MissionCard | None = None,
+    frame: AuthoritativeFrameState | None = None,
+    catalog: ToolCatalog | None = None,
+    projection: BrokerProjection | None = None,
+    current_scope: TargetSelectionScope | None = None,
+) -> ActorTurnInput:
+    return project_actor_turn_input(
+        card or replace(_card(), target_binding=None),
+        frame or _frame(hwnd=1, epoch=0),
+        catalog or _target_catalog(),
+        projection or _target_projection(),
+        target_selection_lease=lease,
+        current_target_selection_scope=current_scope or lease.scope,
+    )
+
+
 def test_all_proposal_variants_are_strict_discriminated_round_trips() -> None:
     proposals = (
         _action(),
@@ -287,6 +378,8 @@ def test_model_wire_requires_explicit_version_and_exact_one_outcome() -> None:
         "mission_id", "missionId", "mission-id", "FRAME_ID", "frameId",
         "obligation_id", "evidence_refs", "brokerProjectionId", "grant_ids",
         "target_binding_id", "pointerLeaseId", "artifact_id", "hwnd",
+        "candidate_ref", "candidateId", "discovery_id", "leaseId", "root_hwnd",
+        "processIdentity", "executable_path", "launchTarget", "application_id",
     ),
 )
 def test_runtime_identity_is_rejected_at_any_argument_depth(field: str) -> None:
@@ -481,7 +574,7 @@ def test_envelope_rejects_frame_target_identity_disagreement() -> None:
 
 
 def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> None:
-    assert ACTOR_TURN_INPUT_FORMAT == "actor-turn-input/3"
+    assert ACTOR_TURN_INPUT_FORMAT == "actor-turn-input/4"
     assert ACTOR_MISSION_VIEW_FORMAT == "actor-mission-view/2"
     turn = project_actor_turn_input(_card(), _frame(), _catalog(), _projection())
     raw = json.loads(turn.to_json())
@@ -532,6 +625,7 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
 @pytest.mark.parametrize(
     "mutate",
     (
+        lambda raw: raw.update(format="actor-turn-input/3"),
         lambda raw: raw.update(format="actor-turn-input/2"),
         lambda raw: raw["mission"].update(format="actor-mission-view/1"),
         lambda raw: raw["tools"][0].update(format="actor-tool-view/0"),
@@ -540,7 +634,7 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
         ),
     ),
 )
-def test_actor_turn_v3_rejects_stale_formats_and_removed_completion_hint(mutate) -> None:
+def test_actor_turn_v4_rejects_stale_formats_and_removed_completion_hint(mutate) -> None:
     raw = json.loads(
         project_actor_turn_input(_card(), _frame(), _catalog(), _projection()).to_json()
     )
@@ -548,6 +642,195 @@ def test_actor_turn_v3_rejects_stale_formats_and_removed_completion_hint(mutate)
 
     with pytest.raises(InvalidActorView):
         ActorTurnInput.from_dict(raw)
+
+
+def test_target_choices_are_ordinal_only_and_strip_private_candidate_identity() -> None:
+    candidates = (
+        _target_candidate(),
+        _target_candidate(
+            label="Orbit Notes", target=r"C:\Apps\OrbitNotes.exe",
+        ),
+    )
+    turn = _project_target_turn(_target_lease(candidates))
+
+    raw = json.loads(turn.to_json())
+    assert raw["target_choices"] == [
+        {
+            "ordinal": 1,
+            "label": "Orbit Workspace",
+            "state": "installed",
+            "window_title": None,
+        },
+        {
+            "ordinal": 2,
+            "label": "Orbit Notes",
+            "state": "installed",
+            "window_title": None,
+        },
+    ]
+    wire = turn.to_json()
+    for secret in (
+        candidates[0].candidate_ref,
+        candidates[1].candidate_ref,
+        candidates[0].launch_target,
+        "candidate_ref",
+        "activation",
+        "provenance",
+        "launch_target",
+        "lease_id",
+        "process_identity",
+    ):
+        assert secret not in wire
+    assert ActorTurnInput.from_dict(raw).to_json() == wire
+
+
+@pytest.mark.parametrize("ordinal", (True, 1.0, "1", 0, -1, 17))
+def test_target_choice_rejects_non_strict_or_out_of_range_ordinal(ordinal) -> None:
+    with pytest.raises(ValidationError):
+        ActorTargetChoiceView(
+            ordinal=ordinal,
+            label="Candidate",
+            state="visible",
+            window_title=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "ordinals",
+    ((2,), (1, 1), (1, 3), (2, 1)),
+)
+def test_actor_turn_rejects_non_contiguous_target_choice_ordinals(ordinals) -> None:
+    raw = json.loads(_project_target_turn(
+        _target_lease((_target_candidate(),)),
+    ).to_json())
+    raw["target_choices"] = [
+        {
+            "ordinal": ordinal,
+            "label": f"Candidate {index}",
+            "state": "visible",
+            "window_title": None,
+        }
+        for index, ordinal in enumerate(ordinals)
+    ]
+    with pytest.raises(InvalidActorView, match="contiguous"):
+        ActorTurnInput.from_dict(raw)
+
+
+def test_target_choices_and_activation_tool_must_be_projected_together() -> None:
+    targetless_card = replace(_card(), target_binding=None)
+    with pytest.raises(InvalidActorView, match="projected together"):
+        project_actor_turn_input(
+            targetless_card,
+            _frame(hwnd=1, epoch=0),
+            _target_catalog(),
+            _target_projection(),
+        )
+    with pytest.raises(InvalidActorView, match="projected together"):
+        _project_target_turn(
+            _target_lease((_target_candidate(),)),
+            card=targetless_card,
+            catalog=_catalog(),
+            projection=_projection(target_binding_id=None),
+        )
+
+
+@pytest.mark.parametrize(
+    "schema,requires_local_intent",
+    (
+        ({
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"anything": {"type": "string"}},
+            "required": ["anything"],
+        }, True),
+        (activate_target_tool_schema(), False),
+    ),
+)
+def test_activate_target_requires_canonical_ordinal_schema_and_local_intent(
+    schema,
+    requires_local_intent,
+) -> None:
+    raw = json.loads(_project_target_turn(
+        _target_lease((_target_candidate(),)),
+    ).to_json())
+    raw["tools"][0]["schema"] = schema
+    raw["tools"][0]["requires_local_intent"] = requires_local_intent
+    with pytest.raises(InvalidActorView, match="canonical ordinal-only"):
+        ActorTurnInput.from_dict(raw)
+
+
+@pytest.mark.parametrize(
+    "frame,lease",
+    (
+        (_frame(frame_id=83, hwnd=1, epoch=0), _target_lease((_target_candidate(),))),
+        (
+            _frame(hwnd=1, epoch=0),
+            _target_lease((_target_candidate(),), frame_scope="target_window"),
+        ),
+    ),
+)
+def test_target_choices_require_exact_full_desktop_frame(frame, lease) -> None:
+    with pytest.raises(InvalidActorView, match="exact full-desktop"):
+        _project_target_turn(lease, frame=frame)
+
+
+@pytest.mark.parametrize(
+    "change",
+    (
+        lambda scope: replace(scope, run_id="another-run"),
+        lambda scope: replace(scope, turn_index=scope.turn_index + 1),
+        lambda scope: replace(
+            scope,
+            frame=replace(scope.frame, image_sha256="e" * 64),
+        ),
+        lambda scope: replace(
+            scope,
+            frame=replace(scope.frame, region=(1, 1, 99, 99)),
+        ),
+        lambda scope: replace(
+            scope,
+            frame=replace(scope.frame, submitted_size=(99, 99)),
+        ),
+    ),
+)
+def test_target_choice_projection_rejects_any_exact_scope_mismatch(change) -> None:
+    lease = _target_lease((_target_candidate(),))
+    with pytest.raises(InvalidActorView, match="scope is stale"):
+        _project_target_turn(lease, current_scope=change(lease.scope))
+
+
+def test_target_selection_lease_requires_independent_current_scope() -> None:
+    lease = _target_lease((_target_candidate(),))
+    with pytest.raises(InvalidActorView, match="projected together"):
+        project_actor_turn_input(
+            replace(_card(), target_binding=None),
+            _frame(hwnd=1, epoch=0),
+            _target_catalog(),
+            _target_projection(),
+            target_selection_lease=lease,
+        )
+
+
+def test_bound_target_cannot_project_acquisition_candidates() -> None:
+    with pytest.raises(InvalidActorView, match="bound target"):
+        _project_target_turn(
+            _target_lease((_target_candidate(),)),
+            card=_card(), frame=_frame(),
+            projection=_projection(tool_names=("activate_target",)),
+        )
+
+
+def test_target_choice_projection_is_deterministic_and_contiguous() -> None:
+    candidates = tuple(
+        _target_candidate(
+            label=f"Candidate {index}",
+            target=fr"C:\Apps\Candidate-{index}.exe",
+        )
+        for index in range(1, 17)
+    )
+    choices = project_actor_target_choices(_target_lease(candidates))
+    assert tuple(item.ordinal for item in choices) == tuple(range(1, 17))
+    assert project_actor_target_choices(_target_lease(candidates)) == choices
 
 
 @pytest.mark.parametrize(

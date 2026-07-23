@@ -12,19 +12,30 @@ from pydantic import (
     Field,
     field_serializer,
     field_validator,
+    model_validator,
 )
 
 from ..capabilities.contracts import MutationKind, ToolCatalog, ToolRoute
 from ..capability_names import InvalidCapability, canonical_capabilities
 from ..capabilities.state import AuthoritativeFrameState, BrokerProjection, ExecutionRoute
 from ..mission.contracts import MissionCard
+from ..targeting.contracts import (
+    ACTIVATE_TARGET_TOOL_NAME,
+    MAX_TARGET_CANDIDATES,
+    activate_target_tool_schema,
+)
+from ..targeting.lease import (
+    TargetSelectionLease,
+    TargetSelectionLeaseError,
+    TargetSelectionScope,
+)
 from .proposals import _freeze, _json_value, _reject_overreach, _thaw, _unique_text
 
 
 ACTOR_MISSION_VIEW_FORMAT = "actor-mission-view/2"
 ACTOR_FRAME_VIEW_FORMAT = "actor-frame-view/0"
 ACTOR_TOOL_VIEW_FORMAT = "actor-tool-view/1"
-ACTOR_TURN_INPUT_FORMAT = "actor-turn-input/3"
+ACTOR_TURN_INPUT_FORMAT = "actor-turn-input/4"
 ACTOR_PREVIOUS_ACTION_FORMAT = "actor-previous-action/0"
 MAX_ACTOR_PREVIOUS_INTENT_CHARS = 240
 MAX_ACTOR_PREVIOUS_ARGUMENT_CHARS = 4_096
@@ -224,13 +235,39 @@ class ActorToolView(_View):
         return _canonical_json(self)
 
 
+class ActorTargetChoiceView(_View):
+    """Semantic candidate facts; ordinal is meaningful only for this turn."""
+
+    ordinal: Annotated[int, Field(strict=True, ge=1, le=MAX_TARGET_CANDIDATES)]
+    label: str
+    state: Literal["visible", "recoverable", "installed"]
+    window_title: str | None
+
+    @field_validator("label")
+    @classmethod
+    def _label(cls, value: Any) -> str:
+        if type(value) is not str or not value.strip() or len(value.strip()) > 512:
+            raise ValueError("target choice label must be bounded non-empty text")
+        return value.strip()
+
+    @field_validator("window_title")
+    @classmethod
+    def _window_title(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if type(value) is not str or len(value.strip()) > 512:
+            raise ValueError("target choice window_title must be bounded text or null")
+        return value.strip() or None
+
+
 class ActorTurnInput(_View):
     """Complete model-visible turn input; the image bytes travel separately."""
 
-    format: Literal["actor-turn-input/3"]
+    format: Literal["actor-turn-input/4"]
     mission: ActorMissionView
     frame: ActorFrameView
     tools: tuple[ActorToolView, ...]
+    target_choices: tuple[ActorTargetChoiceView, ...] = ()
     previous_action: ActorPreviousActionView | None = None
 
     @field_validator("tools")
@@ -241,6 +278,29 @@ class ActorTurnInput(_View):
         if len({tool.name for tool in value}) != len(value):
             raise ValueError("Actor tools must be unique")
         return value
+
+    @model_validator(mode="after")
+    def _target_choices_match_surface(self) -> "ActorTurnInput":
+        ordinals = tuple(item.ordinal for item in self.target_choices)
+        if ordinals != tuple(range(1, len(ordinals) + 1)):
+            raise ValueError("target choice ordinals must be contiguous and one-based")
+        activation_tools = tuple(
+            tool for tool in self.tools
+            if tool.name == ACTIVATE_TARGET_TOOL_NAME
+        )
+        has_activation_tool = bool(activation_tools)
+        if has_activation_tool != bool(self.target_choices):
+            raise ValueError(
+                "activate_target and target_choices must be projected together"
+            )
+        if activation_tools:
+            tool = activation_tools[0]
+            if (
+                tool.requires_local_intent is not True
+                or _thaw(tool.input_schema) != activate_target_tool_schema()
+            ):
+                raise ValueError("activate_target must use the canonical ordinal-only schema")
+        return self
 
     def to_json(self) -> str:
         return _canonical_json(self)
@@ -347,6 +407,25 @@ def project_actor_tool_views(
     return tuple(tools)
 
 
+def project_actor_target_choices(
+    lease: TargetSelectionLease | None,
+) -> tuple[ActorTargetChoiceView, ...]:
+    if lease is None:
+        return ()
+    if not isinstance(lease, TargetSelectionLease):
+        raise InvalidActorView("target choices require one TargetSelectionLease")
+    try:
+        facts = lease.choice_facts()
+        return tuple(ActorTargetChoiceView(**{
+            "ordinal": item.ordinal,
+            "label": item.label,
+            "state": item.state,
+            "window_title": item.window_title,
+        }) for item in facts)
+    except TargetSelectionLeaseError as exc:
+        raise InvalidActorView(str(exc)) from exc
+
+
 def project_actor_turn_input(
     card: MissionCard,
     frame: AuthoritativeFrameState,
@@ -354,6 +433,8 @@ def project_actor_turn_input(
     projection: BrokerProjection,
     *,
     previous_action: ActorPreviousActionView | None = None,
+    target_selection_lease: TargetSelectionLease | None = None,
+    current_target_selection_scope: TargetSelectionScope | None = None,
 ) -> ActorTurnInput:
     if card.active_obligation_id != projection.obligation_id:
         raise InvalidActorView("MissionCard and BrokerProjection obligation mismatch")
@@ -366,13 +447,51 @@ def project_actor_turn_input(
         raise InvalidActorView("Visual Actor requires a fresh authoritative frame")
     if binding and (frame.hwnd != binding.hwnd or frame.epoch != binding.epoch):
         raise InvalidActorView("authoritative frame does not belong to the bound target")
-    return ActorTurnInput(
-        format=ACTOR_TURN_INPUT_FORMAT,
-        mission=project_actor_mission_view(card),
-        frame=project_actor_frame_view(frame),
-        tools=project_actor_tool_views(catalog, projection),
-        previous_action=previous_action,
-    )
+    if (target_selection_lease is None) != (current_target_selection_scope is None):
+        raise InvalidActorView(
+            "target selection lease and current scope must be projected together"
+        )
+    if binding is not None and target_selection_lease is not None:
+        raise InvalidActorView("bound target cannot project acquisition candidates")
+    if target_selection_lease is not None:
+        scope = current_target_selection_scope
+        if not isinstance(scope, TargetSelectionScope):
+            raise InvalidActorView("current target selection scope is invalid")
+        if target_selection_lease.scope != scope:
+            raise InvalidActorView("target selection lease scope is stale")
+        if (
+            scope.mission_id != card.mission_id
+            or scope.mission_revision != card.mission_revision
+            or scope.obligation_id != card.active_obligation_id
+            or scope.broker_projection_id != projection.projection_id
+        ):
+            raise InvalidActorView("target selection lease does not match the current turn")
+        if (
+            scope.frame.scope != "full_desktop"
+            or scope.frame.frame_id != frame.frame_id
+            or scope.frame.hwnd != frame.hwnd
+            or scope.frame.epoch != frame.epoch
+        ):
+            raise InvalidActorView(
+                "target selection lease requires the exact full-desktop frame"
+            )
+    mission_view = project_actor_mission_view(card)
+    frame_view = project_actor_frame_view(frame)
+    tool_views = project_actor_tool_views(catalog, projection)
+    choice_views = project_actor_target_choices(target_selection_lease)
+    try:
+        return ActorTurnInput(
+            format=ACTOR_TURN_INPUT_FORMAT,
+            mission=mission_view,
+            frame=frame_view,
+            tools=tool_views,
+            target_choices=choice_views,
+            previous_action=previous_action,
+        )
+    except InvalidActorView:
+        raise
+    except Exception as exc:
+        raise InvalidActorView(str(exc)) from exc
 
 
 __all__ = [
@@ -381,7 +500,9 @@ __all__ = [
     "MAX_ACTOR_PREVIOUS_INTENT_CHARS", "MAX_ACTOR_PREVIOUS_ARGUMENT_CHARS",
     "InvalidActorView", "ActorObligationView",
     "ActorArtifactView", "ActorTransitionView", "ActorFailureView", "ActorMissionView",
-    "ActorPreviousActionView", "ActorFrameView", "ActorToolView", "ActorTurnInput",
+    "ActorPreviousActionView", "ActorFrameView", "ActorToolView",
+    "ActorTargetChoiceView", "ActorTurnInput",
     "project_actor_mission_view",
-    "project_actor_frame_view", "project_actor_tool_views", "project_actor_turn_input",
+    "project_actor_frame_view", "project_actor_tool_views",
+    "project_actor_target_choices", "project_actor_turn_input",
 ]

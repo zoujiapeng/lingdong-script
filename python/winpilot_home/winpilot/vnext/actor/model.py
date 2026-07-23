@@ -478,6 +478,8 @@ class OpenAIVisualActor:
             "mission": mission_payload,
             "frame": turn_payload["frame"],
         }
+        if turn_payload["target_choices"]:
+            user_payload["target_choices"] = turn_payload["target_choices"]
         request = {
             "model": self._model,
             "messages": [

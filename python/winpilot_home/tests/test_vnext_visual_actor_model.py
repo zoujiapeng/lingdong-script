@@ -162,6 +162,32 @@ def _turn_with_previous_action(
     return ActorTurnInput.from_dict(raw)
 
 
+def _target_choice_turn() -> ActorTurnInput:
+    raw = json.loads(_turn("click").to_json())
+    raw["tools"] = [{
+        "format": ACTOR_TOOL_VIEW_FORMAT,
+        "name": "activate_target",
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "candidate_ordinal": {
+                    "type": "integer", "minimum": 1, "maximum": 16,
+                },
+            },
+            "required": ["candidate_ordinal"],
+        },
+        "requires_local_intent": True,
+    }]
+    raw["target_choices"] = [{
+        "ordinal": 1,
+        "label": "Visible Workspace",
+        "state": "visible",
+        "window_title": "Current document",
+    }]
+    return ActorTurnInput.from_dict(raw)
+
+
 def test_visual_actor_uses_one_isolated_tool_call_and_returns_strict_proposal(
     monkeypatch,
 ) -> None:
@@ -235,6 +261,41 @@ def test_visual_actor_uses_one_isolated_tool_call_and_returns_strict_proposal(
     assert payload["mission"] == expected_turn["mission"]
     assert payload["frame"] == expected_turn["frame"]
     assert "tools" not in payload
+
+
+def test_visual_actor_sees_ordinal_choice_and_returns_no_runtime_identity() -> None:
+    requests = []
+
+    def create(**request):
+        requests.append(request)
+        return _response(_tool_call(
+            "activate_target",
+            _desktop_arguments(
+                "activate the visible workspace",
+                candidate_ordinal=1,
+            ),
+        ))
+
+    proposal = parse_actor_proposal(_actor(create).propose(
+        _target_choice_turn(), image_b64="AAAA", submitted_size=(100, 100),
+    ))
+
+    assert proposal.action == "activate_target"
+    assert dict(proposal.args) == {"candidate_ordinal": 1}
+    assert proposal.local_intent == "activate the visible workspace"
+    user_text = requests[0]["messages"][-1]["content"][0]["text"]
+    payload = json.loads(user_text)
+    assert payload["target_choices"] == [{
+        "ordinal": 1,
+        "label": "Visible Workspace",
+        "state": "visible",
+        "window_title": "Current document",
+    }]
+    for private_name in (
+        "candidate_ref", "lease_id", "hwnd", "process_id", "process_identity",
+        "launch_target", "broker_projection_id", "frame_id",
+    ):
+        assert private_name not in user_text
 
 
 def test_provider_strips_nested_annotations_but_preserves_same_named_property() -> None:

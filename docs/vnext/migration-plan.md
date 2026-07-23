@@ -450,6 +450,8 @@ P4a 不授权删除任何 legacy 产品职责。`AgentRunner` 的全局 todo、�
 - legacy与vNext不同时运行；
 -失败保留真实oracle结论。
 
+P4b.2 当前增量已完成 `actor-turn-input/4` 的 ordinal-only target choice 与 Runtime-private、线程安全、一次性 `TargetSelectionLease` 纯合同，并删除会暴露 candidate ref 的 discovery Actor serializer。它尚未加入 live Catalog/Broker/Coordinator，因此不改变产品行为，也不把 P4b.2 标记为完成。
+
 ## 9. P5：claim 与独立 Verifier
 
 状态：**P5 的增量 live 路径已接入 deterministic ActionEffectVerifier、独立视觉 ObligationVerifier 和本地 deterministic MissionCompletionVerifier；跨进程 exactly-once、动态画面误差与真实 verifier 校准仍未闭合。**

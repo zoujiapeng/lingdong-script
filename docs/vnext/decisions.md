@@ -624,7 +624,8 @@
 
 - status: accepted contract with bounded same-entry keyboard evidence; no general uplift or P7 claim.
 - versions and local intent: `actor-tool-view/1` adds the strict Boolean `requires_local_intent` and
-  `actor-turn-input/3` adds at most one optional `actor-previous-action/0`. For every GUI mutation the
+  `actor-turn-input/4` adds at most one optional `actor-previous-action/0`; the later version also
+  reserves an optional bounded ordinal-only target-choice projection. For every GUI mutation the
   provider requires one bounded non-empty `local_intent`, validates it with the function arguments,
   then removes it before Controller execution. It is local semantic context, not a plan, identity,
   completion claim or recovery command. No application, task phrase, coordinate rule or system-prompt
@@ -704,12 +705,32 @@
   stable. `mission-event/1` is `kind`-only. Optional frame identities in evidence, transitions,
   invalidation and the replay-derived rebind barrier are positive integers or null; zero and coercions are
   rejected. Old or mixed versions are rejected rather than guessed.
-- Actor boundary: the existing `TargetDiscoverySnapshot.actor_view()` is not the final live Actor ABI
-  because it still exposes a candidate reference. Live wiring must expose bounded ordinals only and keep
-  HWND, PID, paths, AppID, process identity and candidate lease private to Runtime.
+- Actor boundary: `TargetDiscoverySnapshot` and `TargetCandidate` no longer expose an Actor serializer
+  or candidate-ref lookup. `actor-turn-input/4` is the only model boundary for target choices and exposes
+  contiguous one-based ordinals plus label, visible title and state only. HWND, PID, paths, AppID,
+  activation route, process identity and candidate mapping remain private to Runtime.
 - rollout gate: the current coordinator still requires a foreground handoff and the live Catalog has no
   discover/open/switch tools. The next slice must connect targetless observation, unbound Broker tools,
   ordinal selection, fresh candidate revalidation and exact activation through the existing single
   Controller/ActionQueue. A launch call happens at most once; polling is observation, and an ambiguous or
   possibly executed result is `unknown` with no action replay. P4b.2 remains incomplete until separate
   same-entry Electron oracles prove existing-instance reuse and causally unique cold launch.
+
+### D036: ordinal target choices use a Runtime-private one-shot mapping
+
+- status: pure contract accepted; live discovery, Broker projection and activation are pending.
+- the Actor never copies or invents target identity. It may later choose only one bounded ordinal from
+  the exact choices in its current `actor-turn-input/4`; the ordinal has no meaning outside that turn.
+- `TargetSelectionLease` freezes the original ordered `TargetCandidate` tuple and binds it to exact
+  mission/run/revision/obligation/turn/frame-authority/Broker-projection state. It is thread-safe and
+  consumes on the first attempt, including malformed, out-of-range or stale attempts. Concurrent
+  consumers can resolve at most one candidate.
+- the sidecar is intentionally non-serializable and has no model-visible lease id. It never enters
+  Mission events, evidence, BUS/WebSocket, persistent trace, Verifier input or replay. Rediscovery creates
+  a new mapping; an old ordinal is never applied to a reordered snapshot.
+- discovery contracts no longer offer `actor_view()`, `to_json()` or public candidate-ref selection.
+  Actor projection owns the only semantic view. No live tool was added in this slice, so current Electron
+  product behavior and the existing bound-target tool surface remain unchanged.
+- the next gated slice must add a targetless full-desktop authoritative frame and read-only discovery.
+  Exact existing-window activation must then run through the same injected Controller/physical
+  ActionQueue with pre/post strong-identity checks; legacy focus/open helpers remain forbidden.
