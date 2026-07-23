@@ -22,7 +22,14 @@ from ..vnext.evidence import (
     frame_identity_payload_hash,
 )
 from ..vnext.mission import EvidenceRef
-from .atomic_click_controller import ControllerPostAction
+from ..vnext.runtime.target_activation import TargetActivationEnvelope
+from ..utils.screenshot import Region
+from .atomic_click_controller import (
+    ControllerPostAction,
+    TargetActivationObservation,
+    TargetActivationObservationPort,
+    TargetActivationPostAction,
+)
 from .commit_admission import (
     CommitAdmissionResult,
     CommitAdmissionStatus,
@@ -44,6 +51,7 @@ class AtomicPostActionBridge:
         frame_authority: FrameAuthority,
         observer: FrameObserver,
         evidence: EvidenceRegistry,
+        activation_observation: TargetActivationObservationPort | None = None,
         related_window: Callable[[int | None, int | None], bool] | None = None,
         post_input_settle_delay_s: float = 0.12,
         wait: Callable[[float], None] = time.sleep,
@@ -56,6 +64,13 @@ class AtomicPostActionBridge:
             raise TypeError("observer and bridge must share one FrameAuthority")
         if not isinstance(evidence, EvidenceRegistry):
             raise TypeError("evidence must be EvidenceRegistry")
+        if activation_observation is not None and not isinstance(
+            activation_observation, TargetActivationObservationPort
+        ):
+            raise TypeError(
+                "activation_observation must implement "
+                "TargetActivationObservationPort or be null"
+            )
         if related_window is not None and not callable(related_window):
             raise TypeError("related_window must be callable or null")
         if (
@@ -71,6 +86,7 @@ class AtomicPostActionBridge:
             raise TypeError("wait must be callable")
         self._observer = observer
         self._evidence = evidence
+        self._activation_observation = activation_observation
         self._related_window = related_window
         self._post_input_settle_delay_s = float(post_input_settle_delay_s)
         self._wait = wait
@@ -89,7 +105,7 @@ class AtomicPostActionBridge:
 
     @staticmethod
     def _evidence_id(
-        envelope: ActorDecisionEnvelope,
+        envelope: ActorDecisionEnvelope | TargetActivationEnvelope,
         payload_hash: str,
     ) -> str:
         identity = {
@@ -213,6 +229,148 @@ class AtomicPostActionBridge:
             post_frame_id=post_frame.frame_id,
             evidence_refs=(evidence.id,),
             visible_effect="",
+        )
+
+    @staticmethod
+    def _activation_identity_key(
+        observation: TargetActivationObservation,
+    ) -> tuple[object, ...]:
+        target = observation.activated_target
+        return (
+            target.hwnd,
+            target.root_hwnd,
+            target.process_id,
+            target.process_identity,
+            target.window_region,
+        )
+
+    @staticmethod
+    def _validate_activation_observation(
+        envelope: TargetActivationEnvelope,
+        observation: object,
+    ) -> TargetActivationObservation:
+        if not isinstance(observation, TargetActivationObservation):
+            raise AtomicPostActionBridgeError(
+                "activation observation returned an invalid result"
+            )
+        target = observation.activated_target
+        candidate = envelope.candidate
+        if (
+            target.hwnd != candidate.hwnd
+            or target.process_id != candidate.process_id
+            or target.process_identity != candidate.process_identity
+        ):
+            raise AtomicPostActionBridgeError(
+                "activation observation does not identify the selected candidate"
+            )
+        if not observation.exact_foreground:
+            raise AtomicPostActionBridgeError(
+                "selected activation target is not exact foreground"
+            )
+        return observation
+
+    def observe_after_activation(
+        self,
+        envelope: TargetActivationEnvelope,
+        *,
+        raw_receipt: RawActionReceipt | None,
+    ) -> TargetActivationPostAction:
+        """Capture one target frame only after exact foreground proof closes."""
+
+        if not isinstance(envelope, TargetActivationEnvelope):
+            raise TypeError("envelope must be TargetActivationEnvelope")
+        observation_port = self._activation_observation
+        if observation_port is None:
+            raise AtomicPostActionBridgeError(
+                "activation observation port is not configured"
+            )
+        if raw_receipt is not None and (
+            not isinstance(raw_receipt, RawActionReceipt)
+            or raw_receipt.action != "activate_target"
+            or raw_receipt.input_completed is not True
+        ):
+            raise AtomicPostActionBridgeError(
+                "activation post-action requires an applied raw receipt or null"
+            )
+        if (
+            envelope.mission_id != self._evidence.mission_id
+            or envelope.run_id != self._evidence.run_id
+        ):
+            raise AtomicPostActionBridgeError(
+                "activation is outside the evidence registry mission/run"
+            )
+        if raw_receipt is not None and self._post_input_settle_delay_s > 0.0:
+            self._wait(self._post_input_settle_delay_s)
+
+        before = self._validate_activation_observation(
+            envelope,
+            observation_port.observe_activation(envelope),
+        )
+        target = before.activated_target
+        left, top, width, height = target.window_region
+        captured = self._observer.capture(
+            epoch=envelope.frame.epoch,
+            hwnd=target.hwnd,
+            phase="post_action",
+            action="activate_target",
+            provided_region=Region(left, top, width, height),
+            expected_previous_frame_id=envelope.frame.frame_id,
+        )
+        if captured is None:
+            raise AtomicPostActionBridgeError(
+                "activation post-action frame capture failed"
+            )
+        before_commit = self._validate_activation_observation(
+            envelope,
+            observation_port.observe_activation(envelope),
+        )
+        if self._activation_identity_key(before_commit) != (
+            self._activation_identity_key(before)
+        ):
+            raise AtomicPostActionBridgeError(
+                "activation target changed during frame capture"
+            )
+
+        post_frame = self._observer.commit(captured)
+        after_commit = self._validate_activation_observation(
+            envelope,
+            observation_port.observe_activation(envelope),
+        )
+        if self._activation_identity_key(after_commit) != (
+            self._activation_identity_key(before_commit)
+        ):
+            raise AtomicPostActionBridgeError(
+                "activation target changed after frame commit"
+            )
+        frame_identity = self._frame_identity(post_frame)
+        if (
+            frame_identity.hwnd != after_commit.activated_target.hwnd
+            or frame_identity.region
+            != after_commit.activated_target.window_region
+            or frame_identity.scope != "target_window"
+        ):
+            raise AtomicPostActionBridgeError(
+                "activation frame does not match the proved target"
+            )
+        payload_hash = frame_identity_payload_hash(frame_identity)
+        evidence = EvidenceRef(
+            id=self._evidence_id(envelope, payload_hash),
+            mission_id=envelope.mission_id,
+            run_id=envelope.run_id,
+            obligation_id=envelope.obligation_id,
+            kind=POST_ACTION_FRAME_EVIDENCE_KIND,
+            trust="deterministic",
+            payload_hash=payload_hash,
+            frame_id=post_frame.frame_id,
+            action_id=envelope.decision_id,
+            created_at=post_frame.committed_at,
+        )
+        self._evidence.append(evidence)
+        return TargetActivationPostAction(
+            activated_target=after_commit.activated_target,
+            exact_foreground=True,
+            post_frame_id=post_frame.frame_id,
+            evidence_refs=(evidence.id,),
         )
 
 
