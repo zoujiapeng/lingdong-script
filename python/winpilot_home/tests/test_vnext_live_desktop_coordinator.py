@@ -38,10 +38,22 @@ from winpilot.utils.screenshot import Region
 from winpilot.visual_runtime.atomic_click_controller import (
     AtomicDesktopController,
 )
+from winpilot.visual_runtime.atomic_post_action_bridge import (
+    AtomicPostActionBridge,
+)
+from winpilot.visual_runtime.commit_admission import FrameCommitIdentity
 from winpilot.visual_runtime.frame_observer import FrameObserver
 from winpilot.visual_runtime.windows_desktop_facts import WindowsDesktopFactsReader
 from winpilot.vnext.verification import VerifierAssessment
+from winpilot.vnext.actor import DesktopActionProposal
 from winpilot.vnext.actor.model import OpenAIVisualActor
+from winpilot.vnext.capabilities import PointerLeaseState
+from winpilot.vnext.runtime import TargetActivationEnvelope
+from winpilot.vnext.targeting import (
+    TargetCandidate,
+    candidate_fingerprint_for,
+    candidate_ref_for,
+)
 from winpilot.vnext.verification.visual_model import ReadOnlyVisualVerifierAdapter
 from winpilot.vnext.bridge.coordinator import (
     LiveDesktopCoordinatorError,
@@ -391,6 +403,52 @@ def _hotkey(*, modifiers, key):
     }
 
 
+def _activation_envelope() -> TargetActivationEnvelope:
+    candidate = TargetCandidate(
+        candidate_ref=candidate_ref_for(
+            activation="switch_window",
+            identity=f"101|7|{TEST_PROCESS_IDENTITY}",
+        ),
+        activation="switch_window",
+        state="visible",
+        label="Stale discovery label",
+        provenance=("visible_windows",),
+        window_title="Stale discovery title",
+        hwnd=101,
+        process_id=7,
+        process_identity=TEST_PROCESS_IDENTITY,
+    )
+    return TargetActivationEnvelope(
+        decision_id="decision-activation-1",
+        mission_id="mission-arp-run-1",
+        run_id="arp-run-1",
+        mission_revision=1,
+        obligation_id="obligation-1",
+        frame=FrameCommitIdentity(
+            frame_id=1,
+            epoch=0,
+            hwnd=1,
+            region=(0, 0, 1920, 1080),
+            scope="full_desktop",
+            submitted_size=(1280, 720),
+            image_sha256="a" * 64,
+        ),
+        pointer=PointerLeaseState(),
+        broker_projection_id="projection-1",
+        capability_grant_ids=("grant-1",),
+        allowed_evidence_scope=("evidence-frame-1",),
+        candidate_fingerprint=candidate_fingerprint_for((candidate,)),
+        proposal=DesktopActionProposal.model_validate({
+            "format": "actor-proposal/1",
+            "kind": "desktop_action",
+            "action": "activate_target",
+            "args": {"candidate_ordinal": 1},
+            "local_intent": "bring the selected target to the foreground",
+        }),
+        candidate=candidate,
+    )
+
+
 def _invalid_click():
     proposal = _click()
     proposal["args"] = {"image_x": "not-a-coordinate", "image_y": 100}
@@ -483,6 +541,66 @@ def test_bound_coordinator_never_calls_target_discovery() -> None:
 
     assert result.status is DesktopRuntimeCoordinatorStatus.DONE
     assert discovery.calls == []
+
+
+def test_production_activation_observation_maps_fresh_windows_facts() -> None:
+    class TitledBackend(Backend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.foreground = 101
+            self.title_calls = 0
+
+        def window_title(self, hwnd):
+            assert hwnd == 101
+            self.title_calls += 1
+            return "Fresh operating-system title"
+
+    backend = TitledBackend()
+    adapter = coordinator_module._WindowsTargetActivationObservation(
+        WindowsDesktopFactsReader(backend)
+    )
+
+    observed = adapter.observe_activation(_activation_envelope())
+
+    target = observed.activated_target
+    assert target.hwnd == 101
+    assert target.root_hwnd == 100
+    assert target.process_id == 7
+    assert target.process_identity == TEST_PROCESS_IDENTITY
+    assert target.window_region == (10, 20, 800, 600)
+    assert target.title_snapshot == "Fresh operating-system title"
+    assert target.title_snapshot != "Stale discovery title"
+    assert observed.exact_foreground is True
+    assert backend.title_calls == 1
+
+
+def test_runtime_composes_one_activation_facts_and_post_frame_owner(
+    monkeypatch,
+) -> None:
+    captured = {}
+    controller_type = coordinator_module.AtomicDesktopController
+
+    def build_controller(**kwargs):
+        captured.update(kwargs)
+        return controller_type(**kwargs)
+
+    monkeypatch.setattr(
+        coordinator_module, "AtomicDesktopController", build_controller,
+    )
+    live = _coordinator(
+        ScriptedActor([_click(), _claim()]),
+        PositiveVisualModel(),
+    )
+
+    result = live.run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    activation_observation = captured["activation_observation"]
+    activation_post = captured["activation_post_action"]
+    assert isinstance(activation_post, AtomicPostActionBridge)
+    assert captured["post_action"] is activation_post
+    assert activation_post._activation_observation is activation_observation
+    assert activation_observation._facts is live._facts
 
 
 def test_bound_handoff_never_reads_targetless_desktop_identity() -> None:

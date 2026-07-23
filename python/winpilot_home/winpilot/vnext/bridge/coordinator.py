@@ -38,6 +38,7 @@ from ...visual_runtime.atomic_click_controller import (
     AtomicDesktopController,
     REQUIRED_RAW_ACTION_NAMES,
     SUPPORTED_DESKTOP_TOOL_NAMES,
+    TargetActivationObservation,
 )
 from ...visual_runtime.atomic_post_action_bridge import AtomicPostActionBridge
 from ...visual_runtime.commit_admission import TargetCommitIdentity
@@ -59,7 +60,13 @@ from ..mission import (
     target_binding_attestation,
 )
 from ..profiling import ExecutionPolicy
-from ..runtime import MissionRuntime, MutationPermitAuthority, RuntimeStatus
+from ..runtime import (
+    ActivatedTargetIdentity,
+    MissionRuntime,
+    MutationPermitAuthority,
+    RuntimeStatus,
+    TargetActivationEnvelope,
+)
 from ..targeting import FreshWindowsTargetDiscovery
 from ..verification import (
     DeterministicActionEffectVerifier,
@@ -106,6 +113,40 @@ class _ActorProjectionProbe:
 
 class LiveDesktopCoordinatorError(RuntimeError):
     """The selected vNext run cannot safely continue."""
+
+
+class _WindowsTargetActivationObservation:
+    """Map one canonical Windows facts owner into the activation port."""
+
+    def __init__(self, facts: WindowsDesktopFactsReader) -> None:
+        if not isinstance(facts, WindowsDesktopFactsReader):
+            raise TypeError("facts must be WindowsDesktopFactsReader")
+        self._facts = facts
+
+    def observe_activation(
+        self,
+        envelope: TargetActivationEnvelope,
+    ) -> TargetActivationObservation:
+        if not isinstance(envelope, TargetActivationEnvelope):
+            raise TypeError("envelope must be TargetActivationEnvelope")
+        candidate_hwnd = envelope.candidate.hwnd
+        if candidate_hwnd is None:
+            raise LiveDesktopCoordinatorError(
+                "existing-window activation requires a candidate hwnd"
+            )
+        facts = self._facts.read_activation_facts(candidate_hwnd)
+        target = facts.target
+        return TargetActivationObservation(
+            activated_target=ActivatedTargetIdentity(
+                hwnd=target.hwnd,
+                root_hwnd=target.root_hwnd,
+                process_id=target.process_id,
+                process_identity=target.process_identity,
+                window_region=facts.window_region,
+                title_snapshot=facts.title_snapshot,
+            ),
+            exact_foreground=facts.exact_foreground,
+        )
 
 
 def _plain_json(value: Any) -> Any:
@@ -539,6 +580,15 @@ class LiveDesktopRuntimeCoordinator:
             clock=self._clock,
         )
         facts_observation = WindowsDesktopCommitObservation(self._facts, state)
+        activation_observation = _WindowsTargetActivationObservation(
+            self._facts
+        )
+        post_action = AtomicPostActionBridge(
+            frame_authority=frames,
+            observer=observer,
+            evidence=evidence,
+            activation_observation=activation_observation,
+        )
         controller = AtomicDesktopController(
             action_queue=self._action_queue,
             frame_authority=frames,
@@ -546,11 +596,9 @@ class LiveDesktopRuntimeCoordinator:
             observation=facts_observation,
             final_guard=WindowsPhysicalInputFinalGuard(self._facts),
             raw_device=self._raw_device,
-            post_action=AtomicPostActionBridge(
-                frame_authority=frames,
-                observer=observer,
-                evidence=evidence,
-            ),
+            post_action=post_action,
+            activation_observation=activation_observation,
+            activation_post_action=post_action,
             enabled=True,
         )
         catalog = self._runtime_snapshot.catalog
