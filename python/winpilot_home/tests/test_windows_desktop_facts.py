@@ -32,8 +32,10 @@ from winpilot.visual_runtime.windows_desktop_facts import (
     RuntimeCommitState,
     TargetActivationFacts,
     WindowsDesktopCommitObservation,
+    WindowsDesktopFactsDriftError,
     WindowsDesktopFactsError,
     WindowsDesktopFactsReader,
+    WindowsDesktopFactsSourceError,
     WindowsPhysicalInputFinalGuard,
 )
 
@@ -202,6 +204,39 @@ def test_pywin32_backend_reads_process_creation_time_and_absolute_executable(
     assert backend.process_executable_path(7) == r"C:\Apps\Host\host.exe"
 
 
+@pytest.mark.parametrize("method", ("create_time", "exe"))
+def test_pywin32_backend_types_psutil_failures_as_source_errors(
+    monkeypatch,
+    method,
+):
+    class Process:
+        def __init__(self, process_id):
+            assert process_id == 7
+
+        @staticmethod
+        def create_time():
+            if method == "create_time":
+                raise RuntimeError("opaque")
+            return 1_700_000_000.125
+
+        @staticmethod
+        def exe():
+            if method == "exe":
+                raise RuntimeError("opaque")
+            return r"C:\Apps\Host\host.exe"
+
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(Process=Process))
+    backend = PyWin32DesktopFactsBackend()
+    read = (
+        backend.process_creation_time_ns
+        if method == "create_time"
+        else backend.process_executable_path
+    )
+
+    with pytest.raises(WindowsDesktopFactsSourceError):
+        read(7)
+
+
 def _request(**changes) -> CommitAdmissionRequest:
     request = CommitAdmissionRequest(
         request_id="decision-1",
@@ -342,6 +377,20 @@ def test_activation_facts_fail_closed_on_identity_or_region_drift() -> None:
 
     with pytest.raises(WindowsDesktopFactsError, match="activation target changed"):
         WindowsDesktopFactsReader(backend).read_activation_facts(101)
+
+
+def test_strict_activation_does_not_turn_foreground_identity_failure_into_drift():
+    backend = Backend()
+    backend.foreground = 101
+    backend.process_creation_overrides[2] = 0
+
+    with pytest.raises(WindowsDesktopFactsError) as captured:
+        WindowsDesktopFactsReader(backend).read_activation_facts(
+            101,
+            strict_foreground=True,
+        )
+
+    assert not isinstance(captured.value, WindowsDesktopFactsDriftError)
 
 
 def test_activation_title_is_optional_and_never_substitutes_for_identity() -> None:

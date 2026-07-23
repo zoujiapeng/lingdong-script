@@ -5,6 +5,7 @@ repairs a target, interprets pixels, or selects another semantic destination.
 """
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
 import math
 import ntpath
@@ -33,6 +34,14 @@ Region = tuple[int, int, int, int]
 
 class WindowsDesktopFactsError(ValueError):
     """A complete current Windows identity could not be proved."""
+
+
+class WindowsDesktopFactsDriftError(WindowsDesktopFactsError):
+    """A sampled Windows identity changed during one observation."""
+
+
+class WindowsDesktopFactsSourceError(WindowsDesktopFactsError):
+    """A required Windows fact source could not be read."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,12 +109,12 @@ class PyWin32DesktopFactsBackend:
 
     @staticmethod
     def process_creation_time_ns(process_id: int) -> int:
-        import psutil
-
         try:
+            import psutil
+
             value = psutil.Process(int(process_id)).create_time()
         except Exception as exc:
-            raise WindowsDesktopFactsError(
+            raise WindowsDesktopFactsSourceError(
                 "process creation time is unavailable"
             ) from exc
         if (
@@ -113,28 +122,28 @@ class PyWin32DesktopFactsBackend:
             or not math.isfinite(float(value))
             or float(value) <= 0
         ):
-            raise WindowsDesktopFactsError(
+            raise WindowsDesktopFactsSourceError(
                 "process creation time is unavailable"
             )
         result = int(float(value) * 1_000_000_000)
         if result <= 0:
-            raise WindowsDesktopFactsError(
+            raise WindowsDesktopFactsSourceError(
                 "process creation time is unavailable"
             )
         return result
 
     @staticmethod
     def process_executable_path(process_id: int) -> str:
-        import psutil
-
         try:
+            import psutil
+
             value = psutil.Process(int(process_id)).exe()
         except Exception as exc:
-            raise WindowsDesktopFactsError(
+            raise WindowsDesktopFactsSourceError(
                 "process executable path is unavailable"
             ) from exc
         if type(value) is not str or not value.strip() or not ntpath.isabs(value.strip()):
-            raise WindowsDesktopFactsError(
+            raise WindowsDesktopFactsSourceError(
                 "process executable path is unavailable or not absolute"
             )
         return ntpath.normpath(value.strip())
@@ -151,6 +160,14 @@ class PyWin32DesktopFactsBackend:
         import win32gui
 
         return int(win32gui.GetForegroundWindow() or 0)
+
+    @staticmethod
+    def shell_hwnd() -> int:
+        return int(ctypes.windll.user32.GetShellWindow() or 0)
+
+    @staticmethod
+    def desktop_hwnd() -> int:
+        return int(ctypes.windll.user32.GetDesktopWindow() or 0)
 
     @staticmethod
     def window_title(hwnd: int) -> str:
@@ -258,7 +275,11 @@ class WindowsDesktopFactsReader:
     def __init__(
         self, backend: WindowsDesktopFactsBackend | None = None,
     ) -> None:
-        resolved = backend or PyWin32DesktopFactsBackend()
+        resolved = (
+            backend
+            if backend is not None
+            else PyWin32DesktopFactsBackend()
+        )
         if not isinstance(resolved, WindowsDesktopFactsBackend):
             raise TypeError("backend must implement WindowsDesktopFactsBackend")
         self._backend = resolved
@@ -338,7 +359,7 @@ class WindowsDesktopFactsReader:
         first = self._target_sample(hwnd)
         second = self._target_sample(hwnd)
         if second != first:
-            raise WindowsDesktopFactsError(
+            raise WindowsDesktopFactsDriftError(
                 "target identity changed during Windows observation"
             )
         return TargetCommitIdentity(
@@ -351,7 +372,12 @@ class WindowsDesktopFactsReader:
             window_region=first.region,
         )
 
-    def read_activation_facts(self, hwnd: int) -> TargetActivationFacts:
+    def read_activation_facts(
+        self,
+        hwnd: int,
+        *,
+        strict_foreground: bool = False,
+    ) -> TargetActivationFacts:
         """Read stable unbound target and foreground facts without mutation.
 
         The target is sampled on both sides of the foreground read.  An
@@ -359,10 +385,20 @@ class WindowsDesktopFactsReader:
         empty snapshot and never weakens the strong HWND/process checks.
         """
 
+        if type(strict_foreground) is not bool:
+            raise TypeError("strict_foreground must be boolean")
         first = self._target_sample(hwnd)
-        foreground = self._optional_window(
-            self._backend.foreground_hwnd(), "foreground",
-        )
+        foreground_hwnd = self._backend.foreground_hwnd()
+        if strict_foreground and type(foreground_hwnd) is int:
+            foreground = (
+                self._live_window(foreground_hwnd, "foreground")
+                if foreground_hwnd > 0
+                else None
+            )
+        elif strict_foreground:
+            raise WindowsDesktopFactsError("foreground hwnd is unavailable")
+        else:
+            foreground = self._optional_window(foreground_hwnd, "foreground")
         title = ""
         read_title = getattr(self._backend, "window_title", None)
         if callable(read_title):
@@ -374,7 +410,7 @@ class WindowsDesktopFactsReader:
                 title = ""
         second = self._target_sample(hwnd)
         if second != first:
-            raise WindowsDesktopFactsError(
+            raise WindowsDesktopFactsDriftError(
                 "activation target changed during Windows observation"
             )
         return TargetActivationFacts(
@@ -400,7 +436,7 @@ class WindowsDesktopFactsReader:
             )
         second = self._target_sample(expected.hwnd)
         if second != first:
-            raise WindowsDesktopFactsError(
+            raise WindowsDesktopFactsDriftError(
                 "target identity changed during Windows observation"
             )
         target = TargetCommitIdentity(
@@ -433,7 +469,7 @@ class WindowsDesktopFactsReader:
         )
         second = self._target_sample(expected.hwnd)
         if second != first:
-            raise WindowsDesktopFactsError(
+            raise WindowsDesktopFactsDriftError(
                 "target identity changed during final pointer observation"
             )
         return WindowsDesktopFacts(
@@ -582,6 +618,8 @@ __all__ = [
     "WindowsDesktopCommitObservation",
     "WindowsDesktopFacts",
     "WindowsDesktopFactsBackend",
+    "WindowsDesktopFactsDriftError",
     "WindowsDesktopFactsError",
     "WindowsDesktopFactsReader",
+    "WindowsDesktopFactsSourceError",
 ]

@@ -913,15 +913,21 @@ discovery、Runtime state 与 commit guard 仍在各自 authority seam 读取所
 身份在两次采样和 bind 前均完全相同，当前合同不能绝对区分前后两个窗口代际。该限制必须保留在 trace
 和 rollout 判断中，不能据此宣称 unbound target acquisition 或 P7 已完成。
 
-`initial-target-resolution/0` 是尚未接入 coordinator 的纯 strict seam。它先按 canonical raw
+`initial-target-resolution/0` 是 renderer 与 coordinator 同一产品入口使用的 strict seam。它先按 canonical raw
 `execution-context/1` 字段集合校验，再决定是否调用现有 normalization：required handoff 只有
 fresh、强身份可重验的 `desktop-target/2` 才得到 `bound`；显式 `required=false/not_required`
 且没有 target，或 required handoff 携带字段完整、fresh 的 canonical
 `target_binding_missing` absence，才得到 `targetless`。缺字段、混合 schema、陈旧 absence、
 伪零身份和其他 unusable target 均 fail closed，不能因 normalization 丢字段而降级成 targetless。
+capture 生产端也必须满足同一反向不变量：只有前后稳定的 `GetForegroundWindow()==0`，或前后稳定且
+精确等于 `GetShellWindow` / `GetDesktopWindow` 的系统 surface，才能投影完整全零的
+`target_binding_missing`。非零普通窗口无法建立强身份、geometry/source 读取失败、control-surface
+冲突和任意采样漂移都必须保留为其他 typed failure；filtered `list_windows` 清单及其空结果不是
+binding 或 absence 证据。`captured_at` 表示最终采样完成时间。
 返回值内部冻结 bound target；唯一 JSON-ready 出口是 `target_dict()`，它恢复 canonical `rect`
-数组，调用者不得直接序列化内部 immutable mapping。该 seam 目前没有接入 renderer 或
-`VNextDesktopRuntimeCoordinator`，所以客户端仍不能借此提交 targetless run。
+数组，调用者不得直接序列化内部 immutable mapping。显式选择 vNext 时，canonical absence 已可经
+同一 Electron 提交入口进入 targetless Runtime；legacy 对同一 absence 仍 fail closed。真实 Electron
+targetless existing-window/cold-launch E2E 尚未达到门槛，因此这里不宣称默认切换完成。
 
 `is_paused` 必须是非阻塞 snapshot read，不得调用 pause wait 或持有 Controller/RawDevice lease。
 coordinator 只在每个 turn 入口调用 blocking `wait_if_paused`；Actor 返回后的 authority/Broker
