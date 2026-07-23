@@ -98,6 +98,13 @@ class EvidenceRegistry:
         return tuple(self.refs.values())
 
 
+def _append_evidence(registry: Any, ref: EvidenceRef) -> None:
+    if isinstance(registry, CanonicalEvidenceRegistry):
+        registry.append(ref)
+    else:
+        registry.add(ref)
+
+
 class ScriptedActor:
     def __init__(
         self,
@@ -259,25 +266,27 @@ class SpyController:
         evidence_refs: tuple[str, ...] = ()
         if self.outcome in {ControllerOutcome.COMPLETED, ControllerOutcome.REJECTED}:
             evidence_id = f"evidence-{envelope.decision_id}"
-            self.registry.add(EvidenceRef(
+            post_frame = self.state.post_action.frame
+            assert post_frame is not None
+            _append_evidence(self.registry, EvidenceRef(
                 id=evidence_id,
                 mission_id=envelope.mission_id,
                 run_id=envelope.run_id,
                 obligation_id=envelope.obligation_id,
-                kind="controller_transition",
+                kind=POST_ACTION_FRAME_EVIDENCE_KIND,
                 trust="deterministic",
-                payload_hash=f"payload-{envelope.decision_id}",
-                frame_id=self.state.post_action.frame.frame_id,
+                payload_hash=frame_identity_payload_hash(
+                    post_frame.commit_identity
+                ),
+                frame_id=post_frame.frame_id,
                 action_id=envelope.decision_id,
             ))
             evidence_refs = (evidence_id,)
-            post_frame = self.state.post_action.frame
-            assert post_frame is not None
             self.state.post_action = replace(
                 self.state.post_action,
                 frame=replace(
                     post_frame,
-                    evidence_refs=post_frame.evidence_refs + evidence_refs,
+                    evidence_refs=evidence_refs,
                 ),
             )
         proposal = envelope.proposal
@@ -420,7 +429,7 @@ class RacingBroker(CapabilityBroker):
 @dataclass
 class Harness:
     reducer: MissionReducer
-    registry: EvidenceRegistry
+    registry: Any
     actor: ScriptedActor
     state: ScriptedState
     controller: SpyController
@@ -572,9 +581,9 @@ def _target_attestation(
     )
 
 
-def _bind_target(reducer: MissionReducer, registry: EvidenceRegistry) -> None:
+def _bind_target(reducer: MissionReducer, registry: Any) -> None:
     binding, evidence = _target_attestation()
-    registry.add(evidence)
+    _append_evidence(registry, evidence)
     reducer.apply(reducer.event(
         "target_bound",
         payload={"target_binding": binding.to_dict()},
@@ -676,9 +685,9 @@ def _set_harness_turn(harness: Harness, turn_index: int) -> None:
     harness.state.post_action = advance(harness.state.post_action)
 
 
-def _add_frame_evidence(registry: EvidenceRegistry, frame: RuntimeFrame) -> None:
+def _add_frame_evidence(registry: Any, frame: RuntimeFrame) -> None:
     for evidence_id in frame.evidence_refs:
-        registry.add(EvidenceRef(
+        _append_evidence(registry, EvidenceRef(
             id=evidence_id,
             mission_id="mission-1",
             run_id="run-1",
@@ -772,8 +781,8 @@ def _harness(
     obligation_verifier: ScriptedVerifier | None = None,
     verifier_enabled: bool = False,
 ) -> Harness:
-    registry = EvidenceRegistry()
     mission = definition or _definition(capability)
+    registry = CanonicalEvidenceRegistry(mission.mission_id, mission.run_id)
     reducer = (
         reducer_factory(mission, registry)
         if reducer_factory else MissionReducer(mission, evidence=registry)
@@ -822,6 +831,7 @@ def _harness(
         pointer_cleanup=pointer_cleanup,
         mutation_permits=permits,
         obligation_verifier=obligation_verifier,
+        evidence_registry=registry,
     )
     return Harness(
         reducer, registry, actor, state, controller, runtime, profile, catalog, permits,
@@ -2242,10 +2252,10 @@ def test_verifier_cannot_accept_evidence_that_changed_during_call(
         harness = holder["harness"]
         evidence_id = "frame-proof-9-base"
         if evidence_race == "removed":
-            del harness.registry.refs[evidence_id]
+            del harness.registry._refs[evidence_id]
         else:
-            original = harness.registry.refs[evidence_id]
-            harness.registry.refs[evidence_id] = replace(
+            original = harness.registry._refs[evidence_id]
+            harness.registry._refs[evidence_id] = replace(
                 original,
                 payload_hash="replacement-payload",
             )
@@ -2591,14 +2601,14 @@ def test_mission_completion_requires_concrete_verifier_and_shared_registry() -> 
 
     with pytest.raises(TypeError, match="injected together"):
         MissionRuntime(**common, mission_completion_verifier=verifier)
-    with pytest.raises(TypeError, match="injected together"):
+    with pytest.raises(TypeError, match="share one EvidenceRegistry"):
         MissionRuntime(**common, evidence_registry=canonical)
-    with pytest.raises(TypeError, match="canonical EvidenceRegistry"):
-        MissionRuntime(
-            **common,
-            mission_completion_verifier=verifier,
-            evidence_registry=harness.registry,
-        )
+    runtime = MissionRuntime(
+        **common,
+        mission_completion_verifier=verifier,
+        evidence_registry=harness.registry,
+    )
+    assert runtime.reducer is harness.reducer
     with pytest.raises(TypeError, match="share one EvidenceRegistry"):
         MissionRuntime(
             **common,
@@ -2854,8 +2864,8 @@ def test_claim_rejects_missing_or_out_of_scope_frame_evidence(invalid_scope: str
         snapshot = replace(harness.state.initial, frame=frame)
         harness.state.initial = harness.state.current_snapshot = snapshot
     else:
-        original = harness.registry.refs[evidence_id]
-        harness.registry.refs[evidence_id] = replace(
+            original = harness.registry._refs[evidence_id]
+            harness.registry._refs[evidence_id] = replace(
             original,
             run_id=("other-run" if invalid_scope == "other_run" else original.run_id),
             obligation_id=(
@@ -3028,14 +3038,14 @@ def test_controller_evidence_must_bind_exact_transition_identity(mismatch: str) 
                 ),
             )
             return transition
-        ref = harness.registry.refs[evidence_id]
+        ref = harness.registry._refs[evidence_id]
         changes = {
             "action_id": "other-decision",
             "frame_id": 999,
             "obligation_id": "other-obligation",
             "trust": "model_visual",
         }
-        harness.registry.refs[evidence_id] = replace(
+        harness.registry._refs[evidence_id] = replace(
             ref,
             **{mismatch: changes[mismatch]},
         )

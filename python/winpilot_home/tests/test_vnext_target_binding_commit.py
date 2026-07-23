@@ -11,7 +11,11 @@ from winpilot.vnext.capabilities import (
     BrokerRuntimeState,
     TargetState,
 )
-from winpilot.vnext.evidence import EvidenceRegistry
+from winpilot.vnext.evidence import (
+    POST_ACTION_FRAME_EVIDENCE_KIND,
+    EvidenceRegistry,
+    frame_identity_payload_hash,
+)
 from winpilot.vnext.mission import (
     EvidenceRef,
     MissionDefinition,
@@ -19,7 +23,10 @@ from winpilot.vnext.mission import (
     ObligationSpec,
 )
 from winpilot.vnext.runtime.contracts import RuntimeFrame, RuntimeSnapshot
-from winpilot.vnext.runtime.target_activation import ActivatedTargetIdentity
+from winpilot.vnext.runtime.target_activation import (
+    ActivatedTargetIdentity,
+    TargetActivationTransition,
+)
 from winpilot.vnext.runtime.target_binding_commit import (
     commit_target_binding,
     target_binding_evidence_id,
@@ -54,7 +61,11 @@ def _target() -> ActivatedTargetIdentity:
     )
 
 
-def _frame(target: ActivatedTargetIdentity | None = None) -> RuntimeFrame:
+def _frame(
+    target: ActivatedTargetIdentity | None = None,
+    *,
+    evidence_refs: tuple[str, ...] = ("evidence-post-acquire",),
+) -> RuntimeFrame:
     selected = target or _target()
     image_b64 = base64.b64encode(b"target-frame").decode("ascii")
     return RuntimeFrame(
@@ -66,7 +77,47 @@ def _frame(target: ActivatedTargetIdentity | None = None) -> RuntimeFrame:
         submitted_size=(900, 600),
         image_b64=image_b64,
         image_sha256=hashlib.sha256(image_b64.encode("ascii")).hexdigest(),
+        evidence_refs=evidence_refs,
     )
+
+
+def _transition(
+    target: ActivatedTargetIdentity,
+    frame: RuntimeFrame,
+    *,
+    action_id: str,
+) -> TargetActivationTransition:
+    return TargetActivationTransition(
+        outcome="completed",
+        action_id=action_id,
+        candidate_ref=f"target-{'a' * 24}",
+        mutation_completed=True,
+        activated_target=target,
+        post_frame_id=frame.frame_id,
+        evidence_refs=frame.evidence_refs,
+        failure_reason="",
+    )
+
+
+def _register_post_evidence(
+    registry: EvidenceRegistry,
+    target: ActivatedTargetIdentity,
+    frame: RuntimeFrame,
+    *,
+    action_id: str,
+) -> EvidenceRef:
+    del target
+    return registry.append(EvidenceRef(
+        id=frame.evidence_refs[0],
+        mission_id="mission-acquire",
+        run_id="run-acquire",
+        obligation_id="open-target",
+        kind=POST_ACTION_FRAME_EVIDENCE_KIND,
+        trust="deterministic",
+        payload_hash=frame_identity_payload_hash(frame.commit_identity),
+        frame_id=frame.frame_id,
+        action_id=action_id,
+    ))
 
 
 class _State:
@@ -139,6 +190,15 @@ def _owners():
 
 
 def _commit(reducer, registry, state, *, action_id="decision-acquire"):
+    target = _target()
+    frame = state.frame
+    if reducer.projection.target_binding is None:
+        _register_post_evidence(
+            registry,
+            target,
+            frame,
+            action_id=action_id,
+        )
     return commit_target_binding(
         reducer=reducer,
         registry=registry,
@@ -148,8 +208,9 @@ def _commit(reducer, registry, state, *, action_id="decision-acquire"):
         base_revision=0,
         obligation_id="open-target",
         acquisition_action_id=action_id,
-        target=_target(),
-        post_frame=_frame().commit_identity,
+        target=target,
+        transition=_transition(target, frame, action_id=action_id),
+        authority_epoch=frame.epoch,
         turn_index=3,
     )
 
@@ -171,7 +232,10 @@ def test_commit_appends_one_attestation_then_accepts_one_replayable_event() -> N
     assert [event.event_id for event in reducer.events] == [event_id]
     assert [event.kind for event in reducer.events] == ["target_bound"]
     assert reducer.projection.target_binding == binding
-    assert registry.snapshot() == (evidence,)
+    assert registry.snapshot() == (
+        result.post_action.evidence_refs[0],
+        evidence,
+    )
     assert reducer.events[0].evidence_refs == (evidence.id,)
     replayed = MissionReducer.replay(
         reducer.definition,
@@ -213,7 +277,9 @@ def test_evidence_identity_is_canonical_and_acquisition_kind_neutral() -> None:
 
 def test_stale_revision_rejects_before_state_or_evidence_write() -> None:
     reducer, registry = _owners()
-    state = _State(_target(), _frame())
+    target = _target()
+    frame = _frame(target)
+    state = _State(target, frame)
 
     with pytest.raises(ValueError, match="stale or inconsistent"):
         commit_target_binding(
@@ -225,8 +291,13 @@ def test_stale_revision_rejects_before_state_or_evidence_write() -> None:
             base_revision=1,
             obligation_id="open-target",
             acquisition_action_id="decision-stale",
-            target=_target(),
-            post_frame=_frame().commit_identity,
+            target=target,
+            transition=_transition(
+                target,
+                frame,
+                action_id="decision-stale",
+            ),
+            authority_epoch=frame.epoch,
             turn_index=3,
         )
 
@@ -252,7 +323,7 @@ def test_revision_race_during_read_never_appends_or_accepts_binding() -> None:
     with pytest.raises(ValueError, match="Mission authority changed"):
         _commit(reducer, registry, state)
 
-    assert registry.snapshot() == ()
+    assert len(registry.snapshot()) == 1
     assert [event.kind for event in reducer.events] == ["obligation_blocked"]
     assert reducer.projection.target_binding is None
 
@@ -271,26 +342,29 @@ def test_tampered_runtime_authority_is_rejected_without_write(state: _State) -> 
     with pytest.raises(ValueError, match="post frame"):
         _commit(reducer, registry, state)
 
-    assert registry.snapshot() == ()
+    assert len(registry.snapshot()) == 1
     assert reducer.events == ()
     assert reducer.projection.target_binding is None
 
 
-def test_tampered_input_frame_is_rejected_before_runtime_read() -> None:
+def test_tampered_transition_frame_is_rejected_without_binding_write() -> None:
     reducer, registry = _owners()
-    state = _State(_target(), _frame())
-    frame = _frame().commit_identity
-    tampered = type(frame)(
-        frame.frame_id,
-        frame.epoch,
-        frame.hwnd,
-        (41, 50, 900, 600),
-        frame.scope,
-        frame.submitted_size,
-        frame.image_sha256,
+    target = _target()
+    frame = _frame(target)
+    state = _State(target, frame)
+    _register_post_evidence(
+        registry,
+        target,
+        frame,
+        action_id="decision-tampered",
     )
+    transition = _transition(
+        target,
+        frame,
+        action_id="decision-tampered",
+    ).model_copy(update={"post_frame_id": frame.frame_id + 1})
 
-    with pytest.raises(ValueError, match="stale or inconsistent"):
+    with pytest.raises(ValueError, match="post frame"):
         commit_target_binding(
             reducer=reducer,
             registry=registry,
@@ -300,13 +374,14 @@ def test_tampered_input_frame_is_rejected_before_runtime_read() -> None:
             base_revision=0,
             obligation_id="open-target",
             acquisition_action_id="decision-tampered",
-            target=_target(),
-            post_frame=tampered,
+            target=target,
+            transition=transition,
+            authority_epoch=frame.epoch,
             turn_index=3,
         )
 
-    assert state.calls == 0
-    assert registry.snapshot() == ()
+    assert state.calls == 1
+    assert len(registry.snapshot()) == 1
     assert reducer.events == ()
 
 
@@ -331,7 +406,7 @@ def test_conflicting_canonical_evidence_identity_never_accepts_event() -> None:
     with pytest.raises(ValueError):
         _commit(reducer, registry, _State(target, _frame(target)))
 
-    assert len(registry.snapshot()) == 1
+    assert len(registry.snapshot()) == 2
     assert reducer.events == ()
     assert reducer.projection.target_binding is None
 
@@ -345,4 +420,4 @@ def test_completed_binding_cannot_accept_a_second_event() -> None:
         _commit(reducer, registry, state, action_id="decision-second")
 
     assert [event.kind for event in reducer.events] == ["target_bound"]
-    assert len(registry.snapshot()) == 1
+    assert len(registry.snapshot()) == 2

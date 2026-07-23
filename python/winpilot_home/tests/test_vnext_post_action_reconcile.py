@@ -23,6 +23,8 @@ from winpilot.vnext.runtime.post_action_reconcile import (
     PostActionReconciliationError,
     reconcile_post_action,
 )
+from winpilot.vnext.runtime.target_activation import TargetActivationTransition
+from winpilot.vnext.runtime.target_launch import TargetLaunchTransition
 
 
 MISSION_ID = "mission-1"
@@ -285,6 +287,54 @@ def test_reconcile_rejects_unknown_mutation_outcome() -> None:
         match="unknown mutation outcome",
     ):
         _reconcile(transition, snapshot, registry)
+
+
+@pytest.mark.parametrize(
+    "transition",
+    (
+        TargetActivationTransition(
+            outcome="unknown",
+            action_id=ACTION_ID,
+            candidate_ref=f"target-{'a' * 24}",
+            mutation_completed=None,
+            activated_target=None,
+            post_frame_id=7,
+            evidence_refs=(EVIDENCE_ID,),
+            failure_reason="foreground proof is uncertain",
+        ),
+        TargetLaunchTransition(
+            outcome="unknown",
+            action_id=ACTION_ID,
+            candidate_ref=f"target-{'b' * 24}",
+            launch_request_count=1,
+            launch_process_id=None,
+            launch_process_identity=None,
+            activated_target=None,
+            post_frame_id=7,
+            evidence_refs=(EVIDENCE_ID,),
+            failure_reason="launch may have executed",
+        ),
+    ),
+)
+def test_reconcile_rejects_unknown_target_acquisition_outcomes(
+    transition: TargetActivationTransition | TargetLaunchTransition,
+) -> None:
+    _, snapshot, _, registry, _ = _facts()
+
+    with pytest.raises(
+        PostActionReconciliationError,
+        match="unknown mutation outcome",
+    ):
+        reconcile_post_action(
+            transition,
+            snapshot,
+            registry,
+            mission_id=MISSION_ID,
+            run_id=RUN_ID,
+            obligation_id=OBLIGATION_ID,
+            action_id=ACTION_ID,
+            action="activate_target",
+        )
 
 
 @pytest.mark.parametrize(

@@ -11,6 +11,21 @@ from ..evidence import (
 )
 from ..mission import EvidenceRef
 from .contracts import ControllerOutcome, ControllerTransition, RuntimeSnapshot
+from .target_activation import (
+    TargetActivationOutcome,
+    TargetActivationTransition,
+)
+from .target_launch import TargetLaunchOutcome, TargetLaunchTransition
+
+
+PostActionTransition = (
+    ControllerTransition | TargetActivationTransition | TargetLaunchTransition
+)
+_UNKNOWN_OUTCOMES = {
+    ControllerOutcome.UNKNOWN,
+    TargetActivationOutcome.UNKNOWN,
+    TargetLaunchOutcome.UNKNOWN,
+}
 
 
 class PostActionReconciliationError(ValueError):
@@ -29,7 +44,7 @@ class PostActionReconciliation:
 
 
 def reconcile_post_action(
-    transition: ControllerTransition,
+    transition: PostActionTransition,
     snapshot: RuntimeSnapshot,
     evidence: EvidenceRegistry,
     *,
@@ -45,8 +60,11 @@ def reconcile_post_action(
     remains a MissionRuntime concern, not a property of evidence matching.
     """
 
-    if not isinstance(transition, ControllerTransition):
-        raise TypeError("transition must be ControllerTransition")
+    if not isinstance(
+        transition,
+        (ControllerTransition, TargetActivationTransition, TargetLaunchTransition),
+    ):
+        raise TypeError("transition must be a canonical post-action transition")
     if not isinstance(snapshot, RuntimeSnapshot):
         raise TypeError("snapshot must be RuntimeSnapshot")
     if not isinstance(evidence, EvidenceRegistry):
@@ -62,7 +80,7 @@ def reconcile_post_action(
     mission_id, run_id, obligation_id, action_id, action = (
         value.strip() for value in expected
     )
-    if transition.outcome is ControllerOutcome.UNKNOWN:
+    if transition.outcome in _UNKNOWN_OUTCOMES:
         raise PostActionReconciliationError(
             "unknown mutation outcome is not post-action reconcilable"
         )
@@ -130,6 +148,7 @@ def reconcile_post_action(
 
 
 __all__ = [
+    "PostActionTransition",
     "PostActionReconciliation",
     "PostActionReconciliationError",
     "reconcile_post_action",
