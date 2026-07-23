@@ -35,7 +35,19 @@ from winpilot.vnext.runtime import (
     MutationPermitAuthority,
     RuntimeFrame,
 )
-from winpilot.visual_runtime.atomic_click_controller import AtomicDesktopController
+from winpilot.vnext.runtime.target_activation import (
+    ActivatedTargetIdentity,
+    TargetActivationEnvelope,
+)
+from winpilot.vnext.targeting import (
+    TargetCandidate,
+    candidate_fingerprint_for,
+    candidate_ref_for,
+)
+from winpilot.visual_runtime.atomic_click_controller import (
+    AtomicDesktopController,
+    TargetActivationObservation,
+)
 from winpilot.visual_runtime.atomic_post_action_bridge import (
     AtomicPostActionBridge,
     AtomicPostActionBridgeError,
@@ -719,3 +731,169 @@ def test_bridge_and_projector_have_no_bus_or_gui_mutation_owner() -> None:
         }
         assert imported.isdisjoint(forbidden_imports)
         assert calls.isdisjoint(mutation_calls)
+
+
+def _activation_envelope() -> tuple[
+    FrameAuthority, TargetActivationEnvelope, ActivatedTargetIdentity,
+]:
+    authority = FrameAuthority()
+    frame = authority.commit(
+        epoch=0,
+        hwnd=1,
+        region=(0, 0, 1920, 1080),
+        scope="full_desktop",
+        reason="targetless",
+        submitted_size=(1120, 630),
+        image_b64=IMAGE_BEFORE,
+        captured_at=1.0,
+    )
+    candidate = TargetCandidate(
+        candidate_ref=candidate_ref_for(
+            activation="switch_window",
+            identity=f"101|7|{PROCESS_IDENTITY}",
+        ),
+        activation="switch_window",
+        state="visible",
+        label="Workspace",
+        provenance=("visible_windows",),
+        window_title="Workspace",
+        hwnd=101,
+        process_id=7,
+        process_identity=PROCESS_IDENTITY,
+    )
+    envelope = TargetActivationEnvelope(
+        decision_id="decision-activation-1",
+        mission_id="mission-1",
+        run_id="run-1",
+        mission_revision=4,
+        obligation_id="obligation-1",
+        frame=_identity(frame),
+        pointer=PointerLeaseState(PointerDisposition.RELEASED),
+        broker_projection_id="projection-1",
+        capability_grant_ids=(),
+        allowed_evidence_scope=("pre-frame-evidence",),
+        candidate_fingerprint=candidate_fingerprint_for((candidate,)),
+        proposal=parse_actor_proposal({
+            "format": "actor-proposal/1",
+            "kind": "desktop_action",
+            "action": "activate_target",
+            "args": {"candidate_ordinal": 1},
+            "local_intent": "activate the selected visible target",
+        }),
+        candidate=candidate,
+    )
+    target = ActivatedTargetIdentity(
+        hwnd=101,
+        root_hwnd=101,
+        process_id=7,
+        process_identity=PROCESS_IDENTITY,
+        window_region=(REGION.left, REGION.top, REGION.width, REGION.height),
+        title_snapshot="Workspace",
+    )
+    return authority, envelope, target
+
+
+class _ActivationObservation:
+    def __init__(self, observations):
+        self.observations = list(observations)
+        self.calls = 0
+
+    def observe_activation(self, _envelope):
+        value = self.observations[min(self.calls, len(self.observations) - 1)]
+        self.calls += 1
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+def _activation_receipt() -> RawActionReceipt:
+    return RawActionReceipt(
+        "activate_target",
+        MutationOutcome.APPLIED,
+        RawBackendResult(True, {"via": "set_foreground_window"}),
+    )
+
+
+def test_activation_bridge_cas_commits_exact_target_frame_and_evidence() -> None:
+    authority, envelope, target = _activation_envelope()
+    registry = EvidenceRegistry("mission-1", "run-1")
+    observation = _ActivationObservation((
+        TargetActivationObservation(target, True),
+    ))
+    bridge = AtomicPostActionBridge(
+        frame_authority=authority,
+        observer=_observer(authority),
+        evidence=registry,
+        activation_observation=observation,
+        post_input_settle_delay_s=0.0,
+    )
+
+    post = bridge.observe_after_activation(envelope, raw_receipt=None)
+
+    current = authority.current
+    assert current is not None
+    assert (current.frame_id, current.hwnd, current.scope, current.region) == (
+        envelope.frame.frame_id + 1,
+        target.hwnd,
+        "target_window",
+        target.window_region,
+    )
+    assert observation.calls == 3
+    assert post.activated_target == target
+    assert post.post_frame_id == current.frame_id
+    evidence, = registry.snapshot()
+    assert post.evidence_refs == (evidence.id,)
+    assert evidence.action_id == envelope.decision_id
+    assert evidence.payload_hash == frame_identity_payload_hash(_identity(current))
+
+
+def test_activation_bridge_rejects_drift_before_frame_commit() -> None:
+    authority, envelope, target = _activation_envelope()
+    registry = EvidenceRegistry("mission-1", "run-1")
+    changed = target.model_copy(update={
+        "window_region": (11, 20, 800, 600),
+    })
+    observation = _ActivationObservation((
+        TargetActivationObservation(target, True),
+        TargetActivationObservation(changed, True),
+    ))
+    bridge = AtomicPostActionBridge(
+        frame_authority=authority,
+        observer=_observer(authority),
+        evidence=registry,
+        activation_observation=observation,
+        post_input_settle_delay_s=0.0,
+    )
+
+    with pytest.raises(AtomicPostActionBridgeError, match="changed"):
+        bridge.observe_after_activation(
+            envelope,
+            raw_receipt=_activation_receipt(),
+        )
+
+    assert authority.current is not None
+    assert authority.current.frame_id == envelope.frame.frame_id
+    assert registry.snapshot() == ()
+
+
+def test_activation_bridge_requires_exact_foreground_and_applied_receipt() -> None:
+    authority, envelope, target = _activation_envelope()
+    registry = EvidenceRegistry("mission-1", "run-1")
+    bridge = AtomicPostActionBridge(
+        frame_authority=authority,
+        observer=_observer(authority),
+        evidence=registry,
+        activation_observation=_ActivationObservation((
+            TargetActivationObservation(target, False),
+        )),
+        post_input_settle_delay_s=0.0,
+    )
+
+    with pytest.raises(AtomicPostActionBridgeError, match="exact foreground"):
+        bridge.observe_after_activation(envelope, raw_receipt=None)
+    with pytest.raises(AtomicPostActionBridgeError, match="applied raw receipt"):
+        bridge.observe_after_activation(envelope, raw_receipt=_receipt())
+
+    assert authority.current is not None
+    assert authority.current.frame_id == envelope.frame.frame_id
+    assert registry.snapshot() == ()
