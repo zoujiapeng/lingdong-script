@@ -98,6 +98,7 @@ from .ports import (
     RuntimeStatePort,
     TargetDiscoveryPort,
 )
+from .mutation_attempt import call_once_with_permit
 from .mutation_permits import MutationPermitAuthority, MutationPermitError
 from .target_activation import (
     TargetActivationEnvelope,
@@ -2452,8 +2453,9 @@ class MissionRuntime:
                     proposal=proposal,
                     candidate=selected_candidate,
                 )
-                self._mutation_permits.issue(
-                    activation_envelope,
+                activation_attempt = call_once_with_permit(
+                    authority=self._mutation_permits,
+                    envelope=activation_envelope,
                     turn_index=turn_index,
                     still_current=lambda: self._activation_still_current(
                         activation_envelope,
@@ -2463,6 +2465,10 @@ class MissionRuntime:
                         grants=grants,
                         stop_event=stop_event,
                     ),
+                    execute=lambda admitted: self._controller.execute(
+                        admitted,
+                        stop_event=stop_event,
+                    ),
                 )
             except (MutationPermitError, ValueError) as exc:
                 self._discard_active_target_selection()
@@ -2470,25 +2476,13 @@ class MissionRuntime:
                     RuntimeStatus.STATE_REJECTED,
                     str(exc),
                 )
-            permit_was_pending = False
-            try:
-                activation_transition = self._controller.execute(
-                    activation_envelope,
-                    stop_event=stop_event,
-                )
-            except Exception as exc:
-                self._mutation_permits.revoke(decision_id)
-                self._mutation_permits.finish_admission(decision_id)
-                self._discard_active_target_selection()
+            self._discard_active_target_selection()
+            if activation_attempt.controller_error is not None:
                 return activation_unknown(
-                    f"Controller raised after activation admission: {exc}"
+                    "Controller raised after activation admission: "
+                    f"{activation_attempt.controller_error}"
                 )
-            else:
-                permit_was_pending = self._mutation_permits.revoke(
-                    decision_id
-                )
-                self._mutation_permits.finish_admission(decision_id)
-                self._discard_active_target_selection()
+            activation_transition = activation_attempt.transition
             if not isinstance(
                 activation_transition,
                 TargetActivationTransition,
@@ -2513,7 +2507,7 @@ class MissionRuntime:
                     )
                 )
             if (
-                permit_was_pending
+                activation_attempt.pending_permit_revoked
                 and activation_transition.outcome
                 is not TargetActivationOutcome.REJECTED
             ):
@@ -2712,13 +2706,18 @@ class MissionRuntime:
         if self._stopped(stop_event):
             return self._canceled(turn_index)
         try:
-            self._mutation_permits.issue(
-                envelope,
+            mutation_attempt = call_once_with_permit(
+                authority=self._mutation_permits,
+                envelope=envelope,
                 turn_index=turn_index,
                 still_current=lambda: self._mutation_still_current(
                     envelope,
                     turn_index=turn_index,
                     grants=grants,
+                    stop_event=stop_event,
+                ),
+                execute=lambda admitted: self._controller.execute(
+                    admitted,
                     stop_event=stop_event,
                 ),
             )
@@ -2730,21 +2729,30 @@ class MissionRuntime:
                 decision_id=decision_id,
                 detail=str(exc),
             )
-        permit_was_pending = False
-        try:
-            transition = self._controller.execute(envelope, stop_event=stop_event)
-        except Exception as exc:
-            self._mutation_permits.revoke(decision_id)
+        if mutation_attempt.controller_error is not None:
             return self._block_unknown(
                 obligation_id,
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=decision_id,
-                detail=f"Controller raised after admission: {exc}",
+                detail=(
+                    "Controller raised after admission: "
+                    f"{mutation_attempt.controller_error}"
+                ),
             )
-        else:
-            permit_was_pending = self._mutation_permits.revoke(decision_id)
-        if permit_was_pending and transition.outcome is not ControllerOutcome.REJECTED:
+        transition = mutation_attempt.transition
+        if not isinstance(transition, ControllerTransition):
+            return self._block_unknown(
+                obligation_id,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                detail="Controller returned an invalid mutation transition",
+            )
+        if (
+            mutation_attempt.pending_permit_revoked
+            and transition.outcome is not ControllerOutcome.REJECTED
+        ):
             return self._block_unknown(
                 obligation_id,
                 route=route,
