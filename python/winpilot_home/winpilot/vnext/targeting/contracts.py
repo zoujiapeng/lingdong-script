@@ -1,6 +1,7 @@
 """Strict, immutable contracts for read-only desktop target discovery."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
@@ -27,6 +28,20 @@ MAX_TARGET_TEXT_CHARS = 512
 DISCOVER_TARGET_TOOL_NAME = "discover_target"
 ACTIVATE_TARGET_TOOL_NAME = "activate_target"
 _CANDIDATE_FINGERPRINT = re.compile(r"target-candidates-[0-9a-f]{64}")
+_TARGET_CANDIDATE_FIELDS = (
+    "format",
+    "candidate_ref",
+    "activation",
+    "state",
+    "label",
+    "provenance",
+    "window_title",
+    "hwnd",
+    "process_id",
+    "process_identity",
+    "launch_kind",
+    "launch_target",
+)
 
 
 class TargetContractError(ValueError):
@@ -224,6 +239,57 @@ class TargetCandidate:
         else:
             object.__setattr__(self, "launch_kind", kind)
             object.__setattr__(self, "launch_target", target)
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize the one canonical Runtime-private candidate schema."""
+
+        return {
+            "format": self.format,
+            "candidate_ref": self.candidate_ref,
+            "activation": self.activation.value,
+            "state": self.state.value,
+            "label": self.label,
+            "provenance": list(self.provenance),
+            "window_title": self.window_title,
+            "hwnd": self.hwnd,
+            "process_id": self.process_id,
+            "process_identity": self.process_identity,
+            "launch_kind": self.launch_kind,
+            "launch_target": self.launch_target,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> "TargetCandidate":
+        """Parse strict JSON wire data without creating a second schema owner."""
+
+        if type(raw) is not dict:
+            raise TargetContractError("TargetCandidate must be a JSON object")
+        missing = set(_TARGET_CANDIDATE_FIELDS) - set(raw)
+        extra = set(raw) - set(_TARGET_CANDIDATE_FIELDS)
+        if missing or extra:
+            raise TargetContractError(
+                "invalid TargetCandidate fields; "
+                f"missing={sorted(missing)}, extra={sorted(extra)}"
+            )
+        if raw["format"] != TARGET_CANDIDATE_FORMAT:
+            raise TargetContractError("unsupported TargetCandidate format")
+        provenance = raw["provenance"]
+        if type(provenance) is not list:
+            raise TargetContractError("TargetCandidate provenance must be a JSON array")
+        return cls(
+            format=raw["format"],
+            candidate_ref=raw["candidate_ref"],
+            activation=raw["activation"],
+            state=raw["state"],
+            label=raw["label"],
+            provenance=tuple(provenance),
+            window_title=raw["window_title"],
+            hwnd=raw["hwnd"],
+            process_id=raw["process_id"],
+            process_identity=raw["process_identity"],
+            launch_kind=raw["launch_kind"],
+            launch_target=raw["launch_target"],
+        )
 
 
 def candidate_fingerprint_for(candidates: tuple[TargetCandidate, ...]) -> str:

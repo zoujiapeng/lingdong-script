@@ -2,12 +2,24 @@
 from __future__ import annotations
 
 from threading import Event
-from typing import Mapping, Protocol, Any
+from typing import Any, Mapping, Protocol, TypeAlias
 
 from ..actor import ActorDecisionEnvelope, ActorTurnInput, ImageRegion
 from ..mission import MissionProjection
 from ..targeting import TargetDiscoverySnapshot
 from .contracts import ControllerTransition, RuntimeSnapshot
+from .target_activation import (
+    TargetActivationEnvelope,
+    TargetActivationTransition,
+)
+
+
+ControllerEnvelope: TypeAlias = (
+    ActorDecisionEnvelope | TargetActivationEnvelope
+)
+ControllerResult: TypeAlias = (
+    ControllerTransition | TargetActivationTransition
+)
 
 
 class ActorPort(Protocol):
@@ -52,10 +64,10 @@ class TargetDiscoveryPort(Protocol):
 class ControllerPort(Protocol):
     def execute(
         self,
-        envelope: ActorDecisionEnvelope,
+        envelope: ControllerEnvelope,
         *,
         stop_event: Event | None = None,
-    ) -> ControllerTransition: ...
+    ) -> ControllerResult: ...
 
 
 class PointerCleanupPort(Protocol):
@@ -64,8 +76,10 @@ class PointerCleanupPort(Protocol):
 
 __all__ = [
     "ActorPort",
+    "ControllerEnvelope",
     "RuntimeStatePort",
     "TargetDiscoveryPort",
     "ControllerPort",
+    "ControllerResult",
     "PointerCleanupPort",
 ]

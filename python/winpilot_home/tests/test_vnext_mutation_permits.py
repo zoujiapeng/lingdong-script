@@ -1,14 +1,29 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+from typing import get_args
 
 import pytest
+from winpilot.process_identity import process_identity_for
 from winpilot.vnext.actor import ActorDecisionEnvelope, parse_actor_proposal
 from winpilot.vnext.capabilities import PointerDisposition, PointerLeaseState
 from winpilot.vnext.runtime import (
     MutationPermitAuthority,
     MutationPermitError,
     MutationPermitReason,
+)
+from winpilot.vnext.runtime.contracts import ControllerTransition
+from winpilot.vnext.runtime.mutation_permits import MutationEnvelope
+from winpilot.vnext.runtime.ports import ControllerEnvelope, ControllerResult
+from winpilot.vnext.runtime.target_activation import (
+    TargetActivationEnvelope,
+    TargetActivationTransition,
+)
+from winpilot.vnext.targeting import (
+    TargetCandidate,
+    candidate_fingerprint_for,
+    candidate_ref_for,
 )
 from winpilot.visual_runtime.commit_admission import (
     FrameCommitIdentity,
@@ -47,6 +62,82 @@ def _envelope(**updates) -> ActorDecisionEnvelope:
     return ActorDecisionEnvelope(**values)
 
 
+def _target_candidate(
+    *,
+    hwnd: int = 901,
+    process_id: int = 41,
+    creation_time_ns: int = 100,
+) -> TargetCandidate:
+    process_identity = process_identity_for(
+        process_id=process_id,
+        executable_path=fr"C:\Apps\host-{process_id}.exe",
+        creation_time_ns=creation_time_ns,
+    )
+    return TargetCandidate(
+        candidate_ref=candidate_ref_for(
+            activation="switch_window",
+            identity=f"{hwnd}|{process_id}|{process_identity}",
+        ),
+        activation="switch_window",
+        state="visible",
+        label="Visible workspace",
+        provenance=("visible_windows",),
+        window_title="Workspace",
+        hwnd=hwnd,
+        process_id=process_id,
+        process_identity=process_identity,
+    )
+
+
+def _activation_envelope(
+    *,
+    candidate: TargetCandidate | None = None,
+    **updates,
+) -> TargetActivationEnvelope:
+    selected = candidate or _target_candidate()
+    values = {
+        "decision_id": "decision-activation-1",
+        "mission_id": "mission-1",
+        "run_id": "run-1",
+        "mission_revision": 4,
+        "obligation_id": "obligation-1",
+        "frame": FrameCommitIdentity(
+            82, 0, 1, (0, 0, 1920, 1080), "full_desktop",
+            (1280, 720), "b" * 64,
+        ),
+        "pointer": PointerLeaseState(PointerDisposition.RELEASED),
+        "broker_projection_id": "projection-activation-1",
+        "capability_grant_ids": (),
+        "allowed_evidence_scope": ("frame-proof-82",),
+        "candidate_fingerprint": candidate_fingerprint_for((selected,)),
+        "proposal": parse_actor_proposal({
+            "format": "actor-proposal/1",
+            "kind": "desktop_action",
+            "action": "activate_target",
+            "args": {"candidate_ordinal": 1},
+            "local_intent": "activate the selected visible target",
+        }),
+        "candidate": selected,
+    }
+    values.update(updates)
+    return TargetActivationEnvelope(**values)
+
+
+def test_controller_and_permit_unions_cover_only_current_mutation_contracts() -> None:
+    assert set(get_args(MutationEnvelope)) == {
+        ActorDecisionEnvelope,
+        TargetActivationEnvelope,
+    }
+    assert set(get_args(ControllerEnvelope)) == {
+        ActorDecisionEnvelope,
+        TargetActivationEnvelope,
+    }
+    assert set(get_args(ControllerResult)) == {
+        ControllerTransition,
+        TargetActivationTransition,
+    }
+
+
 def test_permit_is_consumed_once_and_replay_is_rejected() -> None:
     authority = MutationPermitAuthority("mission-1", "run-1")
     checks = 0
@@ -71,6 +162,33 @@ def test_permit_is_consumed_once_and_replay_is_rejected() -> None:
     assert checks == 1
 
 
+def test_activation_permit_is_consumed_once_and_replay_is_rejected() -> None:
+    authority = MutationPermitAuthority("mission-1", "run-1")
+    checks = 0
+
+    def current() -> bool:
+        nonlocal checks
+        checks += 1
+        return True
+
+    envelope = _activation_envelope()
+    permit_id = authority.issue(envelope, turn_index=5, still_current=current)
+
+    first = authority.consume(envelope)
+    second = authority.consume(envelope)
+
+    assert first.allowed is True
+    assert first.reason is MutationPermitReason.ALLOWED
+    assert first.permit_id == permit_id
+    assert first.envelope_sha256 == hashlib.sha256(
+        envelope.to_json().encode("utf-8")
+    ).hexdigest()
+    assert first.turn_index == 5
+    assert second.allowed is False
+    assert second.reason is MutationPermitReason.ALREADY_CONSUMED
+    assert checks == 1
+
+
 def test_mismatched_envelope_consumes_without_calling_runtime_check() -> None:
     authority = MutationPermitAuthority("mission-1", "run-1")
     calls = 0
@@ -89,6 +207,68 @@ def test_mismatched_envelope_consumes_without_calling_runtime_check() -> None:
     assert rejected.allowed is False
     assert calls == 0
     assert authority.consume(_envelope()).reason is MutationPermitReason.ALREADY_CONSUMED
+
+
+def test_private_activation_candidate_mismatch_consumes_without_runtime_check() -> None:
+    authority = MutationPermitAuthority("mission-1", "run-1")
+    calls = 0
+
+    def current() -> bool:
+        nonlocal calls
+        calls += 1
+        return True
+
+    original = _activation_envelope()
+    replacement = _target_candidate(creation_time_ns=101)
+    mismatched = _activation_envelope(
+        candidate=replacement,
+        candidate_fingerprint=candidate_fingerprint_for((replacement,)),
+    )
+    authority.issue(original, turn_index=0, still_current=current)
+
+    rejected = authority.consume(mismatched)
+
+    assert rejected.reason is MutationPermitReason.ENVELOPE_MISMATCH
+    assert rejected.allowed is False
+    assert rejected.envelope_sha256 == hashlib.sha256(
+        mismatched.to_json().encode("utf-8")
+    ).hexdigest()
+    assert rejected.envelope_sha256 != hashlib.sha256(
+        original.to_json().encode("utf-8")
+    ).hexdigest()
+    assert calls == 0
+    assert authority.consume(original).reason is (
+        MutationPermitReason.ALREADY_CONSUMED
+    )
+
+
+@pytest.mark.parametrize("issued_kind", ("actor", "activation"))
+def test_mutation_envelope_kinds_cannot_cross_consume(issued_kind: str) -> None:
+    authority = MutationPermitAuthority("mission-1", "run-1")
+    decision_id = "decision-cross-kind"
+    actor = _envelope(decision_id=decision_id)
+    activation = _activation_envelope(decision_id=decision_id)
+    issued, submitted = (
+        (actor, activation)
+        if issued_kind == "actor"
+        else (activation, actor)
+    )
+    checks = 0
+
+    def current() -> bool:
+        nonlocal checks
+        checks += 1
+        return True
+
+    authority.issue(issued, turn_index=0, still_current=current)
+
+    assert authority.consume(submitted).reason is (
+        MutationPermitReason.ENVELOPE_MISMATCH
+    )
+    assert checks == 0
+    assert authority.consume(issued).reason is (
+        MutationPermitReason.ALREADY_CONSUMED
+    )
 
 
 @pytest.mark.parametrize(
@@ -149,6 +329,29 @@ def test_concurrent_consumers_allow_exactly_one_commit_attempt() -> None:
     )
 
 
+def test_concurrent_activation_consumers_allow_exactly_one_commit_attempt() -> None:
+    authority = MutationPermitAuthority("mission-1", "run-1")
+    envelope = _activation_envelope()
+    authority.issue(envelope, turn_index=0, still_current=lambda: True)
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(
+            lambda _index: authority.consume(envelope), range(64),
+        ))
+
+    assert sum(result.allowed for result in results) == 1
+    assert sum(
+        result.reason is MutationPermitReason.ALLOWED for result in results
+    ) == 1
+    assert all(
+        result.reason in {
+            MutationPermitReason.ALLOWED,
+            MutationPermitReason.ALREADY_CONSUMED,
+        }
+        for result in results
+    )
+
+
 def test_active_admission_is_exact_transient_and_not_replayable() -> None:
     authority = MutationPermitAuthority("mission-1", "run-1")
     envelope = _envelope()
@@ -185,6 +388,75 @@ def test_active_admission_is_exact_transient_and_not_replayable() -> None:
         pointer=envelope.pointer,
     ) is False
     assert authority.consume(envelope).reason is MutationPermitReason.ALREADY_CONSUMED
+
+
+def test_active_activation_admission_requires_exact_private_authority() -> None:
+    authority = MutationPermitAuthority("mission-1", "run-1")
+    envelope = _activation_envelope()
+    authority.issue(envelope, turn_index=0, still_current=lambda: True)
+
+    permit = authority.begin_admission(envelope)
+
+    assert permit.allowed is True
+    assert authority.active_count == 1
+    assert authority.active_activation_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        pointer=envelope.pointer,
+        candidate_fingerprint=envelope.candidate_fingerprint,
+        candidate=envelope.candidate,
+    ) is True
+    assert authority.active_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        target=None,
+        pointer=envelope.pointer,
+    ) is False
+
+    replacement = _target_candidate(creation_time_ns=101)
+    assert authority.active_activation_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        pointer=envelope.pointer,
+        candidate_fingerprint=envelope.candidate_fingerprint,
+        candidate=replacement,
+    ) is False
+    assert authority.active_activation_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        pointer=envelope.pointer,
+        candidate_fingerprint=candidate_fingerprint_for((replacement,)),
+        candidate=envelope.candidate,
+    ) is False
+    assert authority.active_activation_admission_matches(
+        envelope.decision_id,
+        frame=FrameCommitIdentity(
+            83, 0, 1, (0, 0, 1920, 1080), "full_desktop",
+            (1280, 720), "c" * 64,
+        ),
+        pointer=envelope.pointer,
+        candidate_fingerprint=envelope.candidate_fingerprint,
+        candidate=envelope.candidate,
+    ) is False
+    assert authority.active_activation_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        pointer=PointerLeaseState(PointerDisposition.UNKNOWN),
+        candidate_fingerprint=envelope.candidate_fingerprint,
+        candidate=envelope.candidate,
+    ) is False
+
+    assert authority.finish_admission(envelope.decision_id) is True
+    assert authority.active_activation_admission_matches(
+        envelope.decision_id,
+        frame=envelope.frame,
+        pointer=envelope.pointer,
+        candidate_fingerprint=envelope.candidate_fingerprint,
+        candidate=envelope.candidate,
+    ) is False
+    assert authority.consume(envelope).reason is (
+        MutationPermitReason.ALREADY_CONSUMED
+    )
 
 
 def test_close_revokes_an_active_admission() -> None:
