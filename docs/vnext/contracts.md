@@ -1,6 +1,6 @@
 # vNext 状态与角色合同
 
-本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、`click/double_click/scroll/type_text/hotkey/claim/blocked` 小工具面、共享 atomic Controller 执行链、deterministic ActionEffectVerifier、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已从同一 per-run 产品选择接通。legacy 仍默认。P4b.1 keyboard 已有同一 Electron 入口和独立 oracle 证据：`keyboard-entry` 在当前 previous-action 合同下 3/3 通过，`keyboard-select-all` 在修正 layout-independent oracle 后通过。这些配置与早期基线不同，不证明通用 Agent 能力提升，也不满足完整 P7；其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
+本文定义 vNext 各层交换的 typed data。P1/P1.5 已实现纯 Python 合同、Reducer、replay、MissionCard 和 legacy shadow；P2 Profiler 与 P3 Broker 已有默认关闭的 shadow，但评测/enforce 门槛未达；queue-time capability admission 已收敛为一个 runtime-aware owner。P4/P5 现有默认关闭的增量 live coordinator：严格 Actor proposal/view/envelope、模型 Visual Actor、已绑定状态的 `click/double_click/scroll/type_text/hotkey/claim/blocked` 小工具面、注入式 targetless Runtime 的只读 `discover_target`、共享 atomic Controller 执行链、deterministic ActionEffectVerifier、独立视觉 ObligationVerifier 与本地 deterministic MissionVerifier 已接入同一代码组合。产品 coordinator 仍强制 foreground handoff，因此 Electron 不能抵达 targetless discovery；legacy 仍默认。P4b.1 keyboard 已有同一 Electron 入口和独立 oracle 证据：`keyboard-entry` 在当前 previous-action 合同下 3/3 通过，`keyboard-select-all` 在修正 layout-independent oracle 后通过。这些配置与早期基线不同，不证明通用 Agent 能力提升，也不满足完整 P7；其余 GUI 原语、跨进程 exactly-once 与 P6 均未实现。
 
 ## 1. 版本与基本规则
 
@@ -18,10 +18,10 @@ action-effect/0
 actor-mission-view/2
 actor-frame-view/0
 actor-tool-view/1
-actor-turn-input/4
+actor-turn-input/5
 actor-previous-action/0
-actor-proposal/0
-actor-envelope/1
+actor-proposal/1
+actor-envelope/2
 tool-spec/1
 tool-catalog/1
 broker-runtime-state/1
@@ -57,7 +57,13 @@ desktop-target/2
 并使承载 target payload 的 `mission-event` 升为 `/1`。completion handoff 后 `actor-mission-view`
 为 `/2`、`actor-turn-input` 为 `/2`；后续因 tool 增加 `requires_local_intent` 将
 `actor-tool-view` 升为 `/1`，因 turn 增加可选 `previous_action` 将 `actor-turn-input`
-升为 `/3`，再因 ordinal-only target choices 升为 `/4`，并新增 `actor-previous-action/0`。
+升为 `/3`，再因 ordinal-only target choices 升为 `/4`，最后因加入一次性、无身份的空 discovery
+反馈升为 `/5`，并新增 `actor-previous-action/0`。
+只读 `discover_target` 增加独立 proposal variant 后，`actor-proposal` 升为 `/1`；旧 `/0`
+不再接受，且 discovery query 仍不携带 Runtime 身份或 GUI mutation intent。由于
+`ActorDecisionEnvelope.proposal` 嵌套该 breaking contract，envelope 同步升为
+`actor-envelope/2`；`actor-envelope/1` 与新 proposal、或新 envelope 与旧 proposal 的混合值均
+fail closed，不能只升级内层而保留旧外层版本。
 targetless observation 又将 `tool-spec` / `tool-catalog` 升为 `/1`（新增严格 prerequisite 名）、
 将 `broker-runtime-state` / `broker-projection` 升为 `/1`（frame scope 与 candidate pair），并将
 `runtime-snapshot` 升为 `/2`（targetless frame 必须为 full desktop）。这些旧版本均不再接受；
@@ -612,11 +618,26 @@ P4a 不把带 Runtime 身份的 `MissionCard` 或 `BrokerProjection` 原样交�
 - `ActorToolView`：只包含当前 BrokerProjection 允许的 Visual Actor 工具名、严格 JSON schema 和机械布尔值 `requires_local_intent`；
 - `ActorTurnInput`：组合上述三种 view、可选的一条 `previous_action`，以及未绑定目标时可选的连续序号 target choices；图片字节和 submitted size 通过注入的 `ActorPort` 单独传递。
 
-这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。`actor-mission-view/2` 不再投影内部 ActionEffect 恒定的 `semantic_completion=unknown`：该值只表示像素比较器没有语义完成权限，不能伪装成 Runtime 对当前义务“尚未完成”的判断。内部 `action-effect/0` 仍保留该哨兵。`actor-tool-view/1` 与 `actor-turn-input/4` 严格拒绝旧版或混合版本。`/4` 的每个 target choice 仅含连续的 1-based ordinal、语义 label、可见 window title 和 visible/recoverable/installed 状态，不含 candidate ref、activation、provenance、query、HWND、PID、路径、AppID、process identity 或 lease/discovery identity。choices 与 `activate_target` 工具必须同时出现，已绑定 target 不得投影 choices。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前增量 live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
+这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。`actor-mission-view/2` 不再投影内部 ActionEffect 恒定的 `semantic_completion=unknown`：该值只表示像素比较器没有语义完成权限，不能伪装成 Runtime 对当前义务“尚未完成”的判断。内部 `action-effect/0` 仍保留该哨兵。`actor-tool-view/1` 与 `actor-turn-input/5` 严格拒绝旧版或混合版本。`/5` 的每个 target choice 仅含连续的 1-based ordinal、语义 label、可见 window title 和 visible/recoverable/installed 状态，不含 candidate ref、activation、provenance、query、HWND、PID、路径、AppID、process identity 或 lease/discovery identity。choices 与 `activate_target` 工具必须同时出现，已绑定 target 不得投影 choices。一次空 discovery 只能在下一合格回合增加一个 `actor-target-discovery-feedback/0`：内容严格为原 query 和 `outcome=no_candidates`，不含 fingerprint、count、候选身份、来源 turn/frame、错误分类或路线建议；该反馈不能与 choices/activation 同时出现，投影后即丢弃。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前增量 live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
 
-Target discovery snapshot 与 candidate 是 Runtime-private typed data，不再提供 Actor serialization 或 candidate-ref lookup。`TargetSelectionLease` 是线程安全、进程内、不可序列化的一次性 sidecar：它冻结 ordered candidates，并精确绑定 mission/run/revision/obligation/turn/frame authority/Broker projection；第一次 consume 尝试无论成功、越界或 stale 都耗尽，restart 即丢失。它不是 Mission、Evidence、BUS、trace、Verifier 或 replay 的一部分，也不能形成第二份 target ledger。当前切片只建立该合同，尚未把 `activate_target` 加入 live Catalog。
+Target discovery snapshot 与 candidate 是 Runtime-private typed data，不再提供 Actor serialization 或 candidate-ref lookup。`TargetSelectionLease` 是线程安全、进程内、不可序列化的一次性 sidecar：它冻结 ordered candidates，并精确绑定 mission/run/revision/obligation/turn/frame authority/Broker projection；第一次 consume 尝试无论成功、越界或 stale 都耗尽，restart 即丢失。它不是 Mission、Evidence、BUS、trace、Verifier 或 replay 的一部分，也不能形成第二份 target ledger。
 
-无 target 的 Runtime 现在可以通过同一个 `FrameObserver -> FrameAuthority` 捕获权威全桌面帧。`runtime-snapshot/2` 要求 targetless frame 的 `scope` 必须为 `full_desktop`；真实 desktop HWND、epoch 0 与 virtual desktop region 在 capture 前、commit 前和 commit 后都必须保持一致。窗口帧和桌面帧不建立第二个 frame owner。`broker-runtime-state/1` 保留同一 frame scope，并用成对的 `candidate_fingerprint` / `candidate_count` 区分“尚未发现”“发现为空”和“存在候选”；candidate pair 存在时（包括 count 为 0）必须是 unbound full-desktop 状态。`broker-projection/1` 的 identity 同时绑定完整 frame state 与候选集合摘要，但这些摘要不进入 Actor view。当前 live coordinator 仍要求 foreground handoff，因此这只是可测试的 Runtime seam，不代表客户端已经能从未绑定状态发现或激活应用。
+live Catalog 当前只加入了 `discover_target`：它要求 unbound、fresh authoritative `full_desktop`
+frame、released pointer、healthy Runtime 与 `visual.interact`，mutation kind 为 `none`。Runtime 只在
+该状态下把严格 query 交给注入的 `TargetDiscoveryPort`，返回后重新核对 Mission、frame 和 Broker
+authority；接受结果只写入一回合的私有 pending snapshot，返回 `OBSERVED`，不申请 mutation permit，
+不调用 Controller，不写 Mission event/evidence。coordinator 已注入按请求新建 Windows facts snapshot
+的 `FreshWindowsTargetDiscovery`，但产品 coordinator 仍要求已有 foreground handoff，因此 Electron
+入口尚不能抵达这条 targetless dispatch。`activate_target` 与 `open_app` 仍未加入 live Catalog；
+非空候选在下一回合若没有 activation tool 会 fail closed，不会把 candidate 交给通用 Controller 或
+隐式 legacy fallback。
+
+`FreshWindowsTargetDiscovery` 的 discovery `captured_at` 绑定产生候选的同一 OS facts snapshot，
+不会因稍后的 installed-app lookup 看起来更“新”。取消只在 facts source 之间、installed resolver
+迭代项之间和返回边界协作检查；正在阻塞的默认 installed resolver 调用不能被抢占，可能在其有界
+lookup 期间延迟取消。它仍是只读端口，不拥有 focus、launch、Mission mutation 或候选选择权限。
+
+无 target 的 Runtime 现在可以通过同一个 `FrameObserver -> FrameAuthority` 捕获权威全桌面帧。`runtime-snapshot/2` 要求 targetless frame 的 `scope` 必须为 `full_desktop`；真实 desktop HWND、epoch 0 与 virtual desktop region 在 capture 前、commit 前和 commit 后都必须保持一致。窗口帧和桌面帧不建立第二个 frame owner。`broker-runtime-state/1` 保留同一 frame scope，并用成对的 `candidate_fingerprint` / `candidate_count` 区分“尚未发现”“发现为空”和“存在候选”；candidate pair 存在时（包括 count 为 0）必须是 unbound full-desktop 状态。`broker-projection/1` 的 identity 同时绑定完整 frame state 与候选集合摘要，但这些摘要不进入 Actor view。live Catalog/Runtime 已能在注入式 targetless turn 执行只读 discovery；产品 coordinator 仍要求 foreground handoff，因此这只是可测试的 Runtime seam，不代表客户端已经能从未绑定状态发现或激活应用。
 
 ### 9.2 上一笔 Actor 动作的有界上下文
 
@@ -783,7 +804,7 @@ Runtime构造 envelope。必须拒绝：
 
 1. 从 Reducer 的当前 Projection/Card 和 `RuntimeStatePort.observe()` 取得权威 snapshot；
 2. 确定性投影 Broker，并只把 Actor view、图片和小工具面交给注入 ActorPort；
-3. 严格解析一个 `actor-proposal/0`；
+3. 严格解析一个 `actor-proposal/1`；
 4. Actor 返回后重新读取 revision、active obligation 和完整 authority snapshot，并重新投影 Broker；
 5. 任一 frame/epoch/HWND/region/image hash/target/pointer/grant/projection 或义务变化都返回 `stale_discarded`，不进入 Controller；
 6. 只有仍在最新 BrokerProjection 中的一笔 Visual Actor 动作，才由 Runtime 绑定 envelope 后交给注入 ControllerPort。
@@ -858,7 +879,9 @@ Actor 可见 scroll args 严格为 `{image_x, image_y, direction: "up" | "down",
 P4b.1 先把共享 commit admission 从 `commit-admission-request/0` 升级为严格的
 `commit-admission-request/1`，显式区分 `input_kind=point|keyboard`。P4b.2 又因 target、foreground 与
 hit-test 增加必需的强 `process_identity`，将其升级为 `commit-admission-request/2`，并将内部观察合同升级为
-`commit-environment/1`；携带同一嵌套身份的 `actor-envelope/1` 与 `runtime-snapshot/2` 也拒绝旧版本。`runtime-snapshot/2` 同时把 `RuntimeFrame.scope` 机械投影到 `broker-runtime-state/1`，并拒绝 targetless 非全桌面帧。
+`commit-environment/1`；携带同一嵌套身份、且其 proposal 已升为 `/1` 的
+`actor-envelope/2` 与 `runtime-snapshot/2` 也拒绝旧版本。`runtime-snapshot/2` 同时把
+`RuntimeFrame.scope` 机械投影到 `broker-runtime-state/1`，并拒绝 targetless 非全桌面帧。
 point 必须携带 `screen_point`，并继续
 执行 frame/target containment 与 hit-test；keyboard 必须令 `screen_point=null`、只能走 physical route，
 跳过无意义的 `WindowFromPoint`，但仍核对同一 frame/epoch/target、pointer released、mutation authority、
@@ -889,6 +912,16 @@ discovery、Runtime state 与 commit guard 仍在各自 authority seam 读取所
 能够识别进程实例更换，但不是 Windows 窗口 generation id：若同一进程内 HWND/root HWND 被复用且四项
 身份在两次采样和 bind 前均完全相同，当前合同不能绝对区分前后两个窗口代际。该限制必须保留在 trace
 和 rollout 判断中，不能据此宣称 unbound target acquisition 或 P7 已完成。
+
+`initial-target-resolution/0` 是尚未接入 coordinator 的纯 strict seam。它先按 canonical raw
+`execution-context/1` 字段集合校验，再决定是否调用现有 normalization：required handoff 只有
+fresh、强身份可重验的 `desktop-target/2` 才得到 `bound`；显式 `required=false/not_required`
+且没有 target，或 required handoff 携带字段完整、fresh 的 canonical
+`target_binding_missing` absence，才得到 `targetless`。缺字段、混合 schema、陈旧 absence、
+伪零身份和其他 unusable target 均 fail closed，不能因 normalization 丢字段而降级成 targetless。
+返回值内部冻结 bound target；唯一 JSON-ready 出口是 `target_dict()`，它恢复 canonical `rect`
+数组，调用者不得直接序列化内部 immutable mapping。该 seam 目前没有接入 renderer 或
+`VNextDesktopRuntimeCoordinator`，所以客户端仍不能借此提交 targetless run。
 
 `is_paused` 必须是非阻塞 snapshot read，不得调用 pause wait 或持有 Controller/RawDevice lease。
 coordinator 只在每个 turn 入口调用 blocking `wait_if_paused`；Actor 返回后的 authority/Broker

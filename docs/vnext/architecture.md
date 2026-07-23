@@ -281,16 +281,27 @@ request_capability  claim_obligation_done  blocked
 Catalog 只用 `visual.interact` 授权 click/double-click/scroll/type-text/hotkey。canonical 名称统一由
 `vnext/capability_names.py` 持有，兼容 re-export 不能成为第二 owner。
 
-P4b.2 当前完成 target acquisition 的只读事实基础和 ordinal/one-shot 纯合同：`TargetDiscovery` 聚合安装目录、进程与窗口候选，
+P4b.2 当前完成 target acquisition 的只读事实基础、Runtime dispatch 和 ordinal/one-shot 纯合同：`TargetDiscovery` 聚合安装目录、进程与窗口候选，
 `WindowsTargetFacts` 用一次不可变快照给 PID、创建时间、绝对 exe 路径和 HWND 建立强身份；Mission
 只接受由 Runtime action 与 deterministic evidence 共同证明的 strict `TargetBinding`。这些 owner 均不
-选择候选、不聚焦窗口、不启动应用。`actor-turn-input/4` 已成为唯一 target choice 模型边界，只投影连续
+选择候选、不聚焦窗口、不启动应用。`actor-turn-input/5` 已成为唯一 target choice 模型边界，只投影连续
 序号、语义名称、可见标题和状态；`TargetSelectionLease` 在 Runtime 私有 sidecar 中冻结原候选映射并
 保证一次性消费。`RuntimeStateBridge` 现已能在没有 accepted target 时，复用同一个 `FrameObserver` 和
 `FrameAuthority` 捕获经 desktop HWND、epoch 与 virtual region 前后核对的权威全桌面帧；Broker 严格
-保留 frame scope 以及 Runtime-private candidate fingerprint/count，但 live coordinator 仍要求 foreground
-handoff，尚未把 targetless 输入交给 Actor。下一切片仍需接通只读 discovery、解析并重新验证候选，再通过
-同一个 Controller/ActionQueue 执行精确 `switch/open`。
+保留 frame scope 以及 Runtime-private candidate fingerprint/count。live Catalog 现在提供 mutation-free
+`discover_target`，MissionRuntime 只在 unbound full-desktop authority 下调用注入的 discovery port，
+返回后重验 Mission/frame/Broker，并把结果最多留到下一合格回合；空结果只投影 query 与
+`no_candidates`，不投影身份。coordinator 已注入每次请求都获取新 Windows facts 的
+`FreshWindowsTargetDiscovery`，其时间戳绑定产生候选的同一 OS snapshot；取消在 source 边界协作，
+不能抢占正在阻塞的默认 installed resolver。
+
+产品 coordinator 仍要求 foreground handoff，Electron 尚不能提交 targetless 输入。
+`activate_target`/`open_app` 也尚未进入 live Catalog 或 Controller；非空 discovery 因此 fail closed，
+不会隐式调用 legacy focus/open。另有 `initial-target-resolution/0` 纯 strict seam 可区分 bound、显式
+optional targetless 与 canonical missing-target absence，并通过 `target_dict()` 返回 JSON-ready target，
+但 renderer/coordinator 尚未接线。下一切片必须先通过同一个 Controller/ActionQueue 闭合精确
+existing-window activation，并单独闭合 cold launch 的因果证明；两类候选都有真实 owner 后，才接通
+同入口 targetless 边界，避免向 Actor 暴露只能发现、不能执行的产品工具面。
 在 existing-instance reuse 与 cold-launch 的同入口 oracle 闭合前，上面的未绑定工具面仍是目标设计，
 不是当前产品能力。
 
@@ -503,9 +514,11 @@ Frame、坐标、admission 与 RawDevice primitive，再由 Runtime-bound Contro
 Actor 以明确 direction/notches 表达 viewport 导航，Controller 才机械映射到 RawDevice signed amount；
 结果不确定时不切换机制也不自动重放。keyboard 已完成 owner/parity 代码合同，并由同入口 Electron trusted-browser oracle 验证 type-text 三个随机 seed 与 hotkey select-all；这些是非 paired 的窄原语可达性证据，不代表 P7 或默认切换完成。`drag`、`draw_strokes` 和 held pointer 必须逐项完成相同 owner/parity/unknown-no-replay 合同，不能通过 legacy fallback 补齐。
 
-target acquisition 的只读 discovery、Windows facts 与 strict Mission attestation 已建立，但当前 live
-coordinator 仍要求已有 foreground handoff，live Catalog 没有 `discover/open/switch`，也没有启动前后
-因果验证。下一实现必须扩展现有唯一 ControllerPort，而不能调用 legacy `open_app/focus_window` 形成
+target acquisition 的只读 discovery、Windows facts 与 strict Mission attestation 已建立；live Catalog
+和 MissionRuntime 已接通 mutation-free `discover_target`，但当前 product coordinator 仍要求已有
+foreground handoff，使 targetless dispatch 在 Electron 不可达。live Catalog 没有 `activate/open`，
+也没有启动前后因果验证。下一实现必须扩展现有唯一 ControllerPort，而不能调用 legacy
+`open_app/focus_window` 形成
 第二执行入口；已运行实例只能在强进程/窗口身份可重验时复用，cold launch 只能执行一次，poll 只是
 只读观察，任何可能已执行但无法唯一归因的结果都进入 `unknown` 且不得 action replay。
 
