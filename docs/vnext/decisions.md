@@ -752,3 +752,42 @@
   the turn; a bound target can later be accepted by Mission and used by the same bridge without rebuild.
 - this decision does not add a live tool, model call, prompt text, target choice, focus, launch, Controller
   mutation or Mission event. The existing foreground-handoff product behavior therefore remains unchanged.
+
+### D038: read-only discovery advances independently from product reachability
+
+- status: the read-only Catalog/Runtime slice is accepted; product targetless execution, activation and
+  P4b.2/P7 gates remain incomplete. D035-D037 above remain historical records of the slices in which they
+  were accepted; this decision records the current boundary rather than rewriting those earlier states.
+- version discipline: adding a dedicated discovery proposal changes `actor-proposal/0` to
+  `actor-proposal/1`. Because that proposal is nested in the Runtime envelope, the containing contract is
+  `actor-envelope/2`, not `/1`. Adding identity-free empty-result feedback changes
+  `actor-turn-input/4` to `/5`. Old and mixed outer/inner versions fail closed. This is the Actor envelope's
+  exact-schema policy: changing its accepted proposal union changes that outer wire contract. It does not
+  retroactively replace D035's separately declared stable-wrapper policy for `execution-context/1`.
+- live read-only path: the Catalog exposes `discover_target` only for an unbound, fresh authoritative
+  full-desktop frame with released pointer, healthy Runtime and accepted `visual.interact`.
+  MissionRuntime delegates the exact Actor query to one injected `TargetDiscoveryPort`, then rechecks
+  Mission, frame and Broker authority. An accepted result returns `OBSERVED` and is retained only in a
+  one-turn Runtime-private sidecar. It creates no mutation permit, Controller call, Mission event,
+  evidence, target binding or durable candidate ledger.
+- Actor projection: an empty result can appear only in the next eligible turn as the original query plus
+  `outcome=no_candidates`; it carries no fingerprint, count, candidate, source turn/frame or Runtime
+  identity. A non-empty result still requires an admitted `activate_target` tool and one-shot ordinal
+  lease. Because activation is not in the live Catalog, that path fails closed instead of invoking a
+  generic Controller or legacy fallback.
+- composition boundary: the coordinator injects `FreshWindowsTargetDiscovery`, but it still requires a
+  foreground-handoff target before constructing the live run. The Electron targetless path is therefore
+  unreachable and existing product behavior is unchanged. `activate_target` and `open_app` remain
+  unconnected.
+- freshness and cancellation: `FreshWindowsTargetDiscovery.captured_at` is the timestamp of the exact OS
+  facts snapshot from which window/process candidates were derived. Stop checks are cooperative before
+  and after facts sources and between installed-result items; they cannot preempt a currently blocking
+  default installed resolver, so cancellation may be delayed for that resolver's bounded lookup.
+- initial-entry seam: `initial-target-resolution/0` is a pure strict classifier, not live wiring. It
+  accepts only a fresh strong bound target, an explicit optional targetless handoff, or a complete fresh
+  canonical missing-target absence. Malformed/partial/stale inputs fail closed before normalization.
+  Bound data is frozen internally and `target_dict()` is the only JSON-ready projection. Renderer and
+  coordinator do not yet call this seam, so it is not Electron evidence.
+- gate: no item in this decision completes P4b.2, adds an activation/launch mutation, establishes an
+  existing-instance or cold-launch oracle, completes P7, changes the default runtime or authorizes legacy
+  deletion.

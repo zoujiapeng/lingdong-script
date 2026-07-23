@@ -332,8 +332,12 @@ P4b.2 target acquisition 必须单独通过同入口、独立 oracle，至少覆
   Mission events + registry 完整 replay。
 
 当前已有纯 discovery、Windows facts、strict TargetBinding，以及 targetless Runtime/Broker
-full-desktop scope 与 candidate summary 的注入式合同测试；live coordinator 仍未 dispatch discovery，
-也没有 targetless activation 和上述 Electron oracle，因此这些条目均不得记为 pass。
+full-desktop scope 与 candidate summary 的注入式合同测试。live Catalog/MissionRuntime 已能在注入式
+unbound turn dispatch mutation-free `discover_target`，并重验 authority；coordinator 也注入了每次请求
+采集新 OS facts 的 discovery port。空结果只在下一合格回合投影 query 与 `no_candidates`，不暴露身份。
+但 product coordinator 仍强制已有 foreground handoff，Electron targetless 不可达；live Catalog 没有
+`activate_target`/`open_app`，也没有上述 activation/launch oracle。因此这些条目均不得记为 pass，
+P4b.2 与 P7 仍未完成。
 
 ### 5.5 Broker
 
