@@ -11,9 +11,9 @@ model-request/0
 task-profile-proposal/0
 execution-profile/0
 mission-definition/0
-mission-event/0
-mission-projection/1
-mission-card/1
+mission-event/1
+mission-projection/2
+mission-card/2
 action-effect/0
 actor-mission-view/2
 actor-frame-view/0
@@ -21,10 +21,10 @@ actor-tool-view/1
 actor-turn-input/3
 actor-previous-action/0
 actor-proposal/0
-actor-envelope/0
+actor-envelope/1
 broker-projection/0
 runtime-frame/0
-runtime-snapshot/0
+runtime-snapshot/1
 controller-transition/1
 mission-runtime-result/0
 desktop-runtime-coordinator-context/1
@@ -42,18 +42,27 @@ mission-completion-verification-result/0
 mission-completion-aggregate/0
 mission-patch-proposal/0
 inspection-report/0
+execution-context/1
+desktop-target/2
 ```
 
 `/0` 表示尚未发生首个不兼容升级的旁路实验合同；单个合同只有在真实字段边界变化时才升版，
 不是等到默认切换时统一改号。
 以上版本已按当前代码逐项核对：coordinator context 因新增非阻塞 pause reading 升为
-`desktop-runtime-coordinator-context/1`；ActionEffect/no-progress 切片使 `mission-projection`、
-`mission-card` 和 `controller-transition` 升为 `/1`。completion handoff 后 `actor-mission-view`
+`desktop-runtime-coordinator-context/1`；ActionEffect/no-progress 切片先使 `mission-projection`、
+`mission-card` 和 `controller-transition` 升为 `/1`，严格 TargetBinding 又使前两者升为 `/2`，
+并使承载 target payload 的 `mission-event` 升为 `/1`。completion handoff 后 `actor-mission-view`
 为 `/2`、`actor-turn-input` 为 `/2`；本轮因 tool 增加 `requires_local_intent` 将
 `actor-tool-view` 升为 `/1`，因 turn 增加可选 `previous_action` 将 `actor-turn-input`
 升为 `/3`，并新增 `actor-previous-action/0`。这些旧版本均不再接受；
 `action-effect/0` 与 `actor-previous-action/0` 是新合同。其他仍列为 `/0` 的合同未发生
 不兼容字段变化，不能为追求版本号整齐而批量改号。
+
+`CommitEnvironment` 与 `RuntimeSnapshot` 是同进程 authority handoff，不是持久化记录或模型
+payload；它们以 constructor 的严格 `format` 防止旧 typed value 混入，但故意不提供 JSON
+round-trip。特别是 `RuntimeSnapshot` 持有权威帧图像，禁止为了 trace 再序列化完整对象。trace 只写
+既有有界 sidecar/fingerprint；若未来需要跨进程传输，必须另建不含图像副本的新版本合同和完整
+`to_dict/from_dict` 测试，不能把当前对象暗中当 wire schema。
 
 基本规则：
 
@@ -316,7 +325,12 @@ Policy 只表达用户要求所需的最低证据，不允许 Verifier自行增�
 
 ### 6.1 MissionEvent
 
-The canonical event key is `kind`; `type` is accepted only when reading a legacy record and is never serialized. Event `format` must equal `mission-event/0`, payload values must be strict finite JSONValue values, and every accepted event is bound to the current mission/run revision.
+The canonical event key is `kind`; `type` is not accepted, either alone or
+alongside `kind`. Event `format` must equal `mission-event/1`, payload values
+must be strict finite JSONValue values, and every accepted event is bound to
+the current mission/run revision. `/1` rejects both the former `type` spelling
+and the former target payload shape instead of deferring a nominally old event
+to Reducer-time guessing.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -331,8 +345,9 @@ class MissionEvent:
     created_at: float
 ```
 
-P1 同时接受历史实现使用的 `type` 与本合同的 `kind` 拼写，并将事件级 `evidence_refs` 合并到
-Reducer 的 run-scoped EvidenceScope。事件时间戳是审计元数据，不参与自动 event id 的确定性哈希。
+事件级 `evidence_refs` 合并到 Reducer 的 run-scoped EvidenceScope。事件时间戳是审计元数据，
+不参与自动 event id 的确定性哈希。历史 `type` 记录若需要迁移，必须先在显式离线迁移边界转换为
+canonical `/1`，不能让 Reducer 长期维持双 schema。
 
 只有 Reducer可以接受事件。每个事件必须检查 base revision、主体、evidence scope 与不变量。
 
@@ -493,6 +508,11 @@ telemetry_only
 
 `actor_claim` 和 `telemetry_only` 不能单独满足 obligation。
 
+所有 Mission 合同里的 frame identity 使用同一严格边界：必填 frame id 必须是正整数；可空的
+`EvidenceRef.frame_id`、`TransitionSummary.frame_id`、`target_invalidated.observed_frame_id` 与
+`MissionProjection.target_rebind_after_frame_id` 只能是正整数或 `None`。布尔值、零、负数、浮点数和
+数字字符串均拒绝，不能用 `0` 伪装“尚未观测”。
+
 ## 8. ArtifactRef 与 TargetBinding
 
 ```python
@@ -510,14 +530,38 @@ class ArtifactRef:
 class TargetBinding:
     binding_id: str
     hwnd: int
+    root_hwnd: int
     process_id: int
-    executable_identity: str
+    process_identity: str
     title_snapshot: str
-    established_by_evidence_ref: str
     epoch: int
+    canonical_identity_sha256: str
+    acquisition_action_id: str
+    established_by_evidence_ref: str
 ```
 
-窗口标题不能独立决定身份。绑定来自进程、路径、窗口、时序和当前画面的组合证据。失效时由 accepted event 清除，Broker退回未绑定工具面。
+窗口标题不能独立决定身份。`canonical_identity_sha256` 机械覆盖
+`hwnd/root_hwnd/process_id/process_identity/epoch`；其中 `process_identity` 必须由 PID、
+进程创建时间与绝对可执行路径机械派生。
+`binding_id` 进一步绑定 mission、run、该 physical identity 和 Runtime 生成的
+`acquisition_action_id`。标题不参与 physical identity，只进入 establishment attestation payload。
+
+`target_bound` 只在 Mission 当前未绑定时接受，payload 只能包含一个 canonical
+`target_binding`。其 establishment evidence 必须是当前 run、当前 obligation 下的
+`authoritative_target_binding` + `deterministic` evidence；action id 和 payload hash 必须与
+binding 机械一致，且不能携带 artifact identity。事件只能引用这一笔 establishment evidence，
+不能借 target bind 顺带合并其他证据。
+
+已有绑定不能直接覆盖。失效事件必须精确携带
+`expected_binding_id`、`expected_canonical_identity_sha256`、`observed_frame_id` 与非空 `reason`；当前无绑定、
+陈旧身份、空原因、额外字段或附带正向 evidence 均拒绝。只有 accepted `target_invalidated` 清除绑定后，Broker
+才退回未绑定工具面。`observed_frame_id` 为 Runtime 实际发现失效时的正整数权威帧 id；若该值存在，
+`MissionProjection.target_rebind_after_frame_id` 由事件重放派生，后续 `target_bound` 的 establishment
+evidence 必须绑定严格更新的帧。`None` 只表示失效发生时没有额外可引用的权威帧；Reducer 仍继承
+已接受 establishment evidence 的 frame id 作为下界。payload 不能用更小的 frame id 弱化该下界，
+也不得用 0 伪装未知。
+projection 不允许 binding 与 rebind barrier 同时存在；barrier 是 Runtime authority gate，不投影进
+MissionCard，也不向 Actor 暴露。
 
 ## 9. MissionCard
 
@@ -802,7 +846,10 @@ RawDevice 接收 Controller 已解析的 typed scroll/click 参数、bounded tex
 Actor 可见 scroll args 严格为 `{image_x, image_y, direction: "up" | "down", notches: 1..12}`；`up` 表示显露 viewport 上方内容，`down` 表示显露下方内容。Actor 可见 keyboard args 严格为 `type_text:{text: 1..4096 codepoints}` 和 `hotkey:{modifiers: unique subset of ctrl/alt/shift/win, key: one canonical non-modifier}`；Runtime 先按 Catalog schema 验证，Controller 再以固定 modifier 顺序构造 `HotkeyChord`。keyboard 的 `CommitAdmissionRequest` 使用 `input_kind=keyboard` 与 `screen_point=null`，不调用坐标 mapper 或 hit-test；它仍共享 Runtime permit、权威 frame pin、target/foreground 复核、唯一 physical lease、post-action frame/evidence 和 unknown-no-replay。sidecar、evidence 与 raw facts 不保存文本或 chord 内容。`DesktopRuntimeSelection` 只在 run 开始时冻结；缺失 coordinator、任一端口或任一 raw primitive 都必须在 Actor/mutation 前拒绝，不能隐式 fallback 到 legacy。`drag`、`draw_strokes`、held pointer 与 ROI observe 仍未接入。
 
 P4b.1 先把共享 commit admission 从 `commit-admission-request/0` 升级为严格的
-`commit-admission-request/1`，显式区分 `input_kind=point|keyboard`。point 必须携带 `screen_point`，并继续
+`commit-admission-request/1`，显式区分 `input_kind=point|keyboard`。P4b.2 又因 target、foreground 与
+hit-test 增加必需的强 `process_identity`，将其升级为 `commit-admission-request/2`，并将内部观察合同升级为
+`commit-environment/1`；携带同一嵌套身份的 `actor-envelope/1` 与 `runtime-snapshot/1` 也拒绝旧版本。
+point 必须携带 `screen_point`，并继续
 执行 frame/target containment 与 hit-test；keyboard 必须令 `screen_point=null`、只能走 physical route，
 跳过无意义的 `WindowFromPoint`，但仍核对同一 frame/epoch/target、pointer released、mutation authority、
 stop/cancel 与 foreground root/process。最终 keyboard guard 也只读复核 target/foreground，不选择或聚焦
@@ -819,6 +866,19 @@ stop/cancel 与 foreground root/process。最终 keyboard guard 也只读复核 
 ### 11.4 P4c product coordinator 与 per-run selector
 
 `desktop-runtime-coordinator-context/1` 只携带 Runtime 冻结的 run id、任务/contract 只读快照、现有 stop owner、回合入口的 blocking pause gate 与 commit 前的只读 `is_paused`；`desktop-runtime-coordinator-result/0` 只允许严格 terminal 结果。`/1` 不兼容 `/0`，因为新增的非阻塞 pause reading 用于丢弃模型调用期间产生的旧动作，恢复后必须从新权威帧重新决策。客户端只在顶层 ARP run request 发送 `runtime_version`，不把它写入 graph、task contract、Profiler 或模型 payload。`ArpExecution` 仅在 selection 为 `vnext` 且 Server 注入增量 live `DesktopRuntimeCoordinatorPort` 时调用一次 coordinator，并完全绕过 legacy node handlers；结果非法、异常或取消都不得 fallback。缺省/`legacy` run 仍不注入该 coordinator。
+
+客户端 handoff 的外层继续是稳定的 `execution-context/1`；其中 `target_window` 已不兼容升级为
+`desktop-target/2`，必须携带 `hwnd/root_hwnd/process_id/process_identity`。capture 在一次 handoff 内
+前后两次读取 foreground HWND、root HWND、PID 与 canonical process identity，任一项变化就把该 target
+标为不可用。coordinator 建立 Mission `TargetBinding` 前，再从当前 OS 状态读取强 target identity，并与
+handoff 中四项逐项精确比较；不一致时在 Actor 和 Controller 调用前 fail closed。
+
+这里统一的是 `winpilot/process_identity.py` 中不读取 OS 的 canonical **派生与校验 owner**。capture、
+discovery、Runtime state 与 commit guard 仍在各自 authority seam 读取所需 OS 事实；不能把它们误写成
+一个包揽所有 Windows 观察的 facts owner。当前 process identity 绑定 PID、创建时间和绝对 exe 路径，
+能够识别进程实例更换，但不是 Windows 窗口 generation id：若同一进程内 HWND/root HWND 被复用且四项
+身份在两次采样和 bind 前均完全相同，当前合同不能绝对区分前后两个窗口代际。该限制必须保留在 trace
+和 rollout 判断中，不能据此宣称 unbound target acquisition 或 P7 已完成。
 
 `is_paused` 必须是非阻塞 snapshot read，不得调用 pause wait 或持有 Controller/RawDevice lease。
 coordinator 只在每个 turn 入口调用 blocking `wait_if_paused`；Actor 返回后的 authority/Broker

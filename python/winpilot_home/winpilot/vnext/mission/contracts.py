@@ -16,22 +16,29 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping, Iterable
 
+from ...process_identity import ProcessIdentityError, canonical_process_identity
+
 
 JSONValue = Any
 
 
 MISSION_DEFINITION_FORMAT = "mission-definition/0"
-MISSION_EVENT_FORMAT = "mission-event/0"
-MISSION_PROJECTION_FORMAT = "mission-projection/1"
-MISSION_CARD_FORMAT = "mission-card/1"
+MISSION_EVENT_FORMAT = "mission-event/1"
+MISSION_PROJECTION_FORMAT = "mission-projection/2"
+MISSION_CARD_FORMAT = "mission-card/2"
 ACTION_EFFECT_FORMAT = "action-effect/0"
 ACTION_EFFECT_COMPARATOR_VERSION = "frame-delta/0"
 ACTION_EFFECT_EVIDENCE_KIND = "deterministic_action_effect"
+TARGET_BINDING_IDENTITY_FORMAT = "target-binding-identity/1"
+TARGET_BINDING_EVIDENCE_FORMAT = "target-binding-evidence/1"
+TARGET_BINDING_EVIDENCE_KIND = "authoritative_target_binding"
 # ``unchanged`` is intentionally a high-precision fact: any decoded pixel
 # delta is reported as ``changed``.  A non-zero threshold can turn a real
 # small-control response (caret, checkbox, focus ring) into false no-progress.
 ACTION_EFFECT_CHANGE_RATIO_THRESHOLD = 0.0
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_CANONICAL_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_TARGET_BINDING_ID_RE = re.compile(r"^target-[0-9a-f]{24}$")
 
 
 def _as_tuple(value: Iterable[Any] | None) -> tuple[Any, ...]:
@@ -113,6 +120,18 @@ def _json_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
             raise TypeError("JSON object keys must be strings")
         frozen[key] = _freeze(item)
     return MappingProxyType(frozen)
+
+
+def _canonical_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 class MissionError(ValueError):
@@ -354,6 +373,13 @@ class EvidenceRef:
             if not _SHA256_RE.fullmatch(content_sha):
                 raise EvidenceScopeError("content_sha256 must be a 64-character SHA-256 hex digest")
             object.__setattr__(self, "content_sha256", content_sha)
+        if (
+            self.frame_id is not None
+            and (type(self.frame_id) is not int or self.frame_id <= 0)
+        ):
+            raise EvidenceScopeError(
+                "evidence frame_id must be a positive integer or null"
+            )
         if self.created_at is not None and not math.isfinite(float(self.created_at)):
             raise EvidenceScopeError("evidence created_at must be finite")
 
@@ -387,7 +413,7 @@ class EvidenceRef:
             trust=str(raw.get("trust") or ""),
             obligation_id=(str(raw["obligation_id"]) if raw.get("obligation_id") is not None else None),
             payload_hash=str(raw.get("payload_hash") or ""),
-            frame_id=(int(raw["frame_id"]) if raw.get("frame_id") is not None else None),
+            frame_id=raw.get("frame_id"),
             action_id=(str(raw["action_id"]) if raw.get("action_id") is not None else None),
             artifact_id=(str(raw["artifact_id"]) if raw.get("artifact_id") is not None else None),
             created_at=(float(raw["created_at"]) if raw.get("created_at") is not None else None),
@@ -434,55 +460,274 @@ class ArtifactRef:
         )
 
 
+def target_binding_identity_sha256(
+    *,
+    hwnd: int,
+    root_hwnd: int,
+    process_id: int,
+    process_identity: str,
+    epoch: int,
+) -> str:
+    """Hash the complete stable window/process identity used by a binding."""
+
+    for name, value in (
+        ("hwnd", hwnd),
+        ("root_hwnd", root_hwnd),
+        ("process_id", process_id),
+    ):
+        if type(value) is not int or value <= 0:
+            raise InvalidMissionEvent(f"target {name} must be a positive integer")
+    if type(epoch) is not int or epoch < 0:
+        raise InvalidMissionEvent("target epoch must be a non-negative integer")
+    try:
+        canonical_process = canonical_process_identity(process_identity)
+    except ProcessIdentityError as exc:
+        raise InvalidMissionEvent(
+            "target canonical process identity is required"
+        ) from exc
+    return _canonical_sha256({
+        "format": TARGET_BINDING_IDENTITY_FORMAT,
+        "hwnd": hwnd,
+        "root_hwnd": root_hwnd,
+        "process_id": process_id,
+        "process_identity": canonical_process,
+        "epoch": epoch,
+    })
+
+
+def target_binding_id_for(
+    *,
+    mission_id: str,
+    run_id: str,
+    canonical_identity_sha256: str,
+    acquisition_action_id: str,
+) -> str:
+    """Derive one run- and acquisition-scoped binding identity."""
+
+    values: dict[str, str] = {}
+    for name, value in (
+        ("mission_id", mission_id),
+        ("run_id", run_id),
+        ("acquisition_action_id", acquisition_action_id),
+    ):
+        if type(value) is not str or not value.strip():
+            raise InvalidMissionEvent(f"target {name} cannot be empty")
+        values[name] = value.strip()
+    if (
+        type(canonical_identity_sha256) is not str
+        or not _CANONICAL_SHA256_RE.fullmatch(canonical_identity_sha256)
+    ):
+        raise InvalidMissionEvent(
+            "target canonical_identity_sha256 must be a lowercase SHA-256 digest"
+        )
+    digest = _canonical_sha256({
+        "format": "target-binding-id/1",
+        **values,
+        "canonical_identity_sha256": canonical_identity_sha256,
+    })
+    return f"target-{digest[:24]}"
+
+
 @dataclass(frozen=True, slots=True)
 class TargetBinding:
     binding_id: str
     hwnd: int
+    root_hwnd: int
     process_id: int
-    executable_identity: str
+    process_identity: str
     title_snapshot: str
-    established_by_evidence_ref: str
     epoch: int
+    canonical_identity_sha256: str
+    acquisition_action_id: str
+    established_by_evidence_ref: str
 
     def __post_init__(self) -> None:
-        for name in ("binding_id", "executable_identity", "established_by_evidence_ref"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
+        for name in (
+            "binding_id",
+            "process_identity",
+            "acquisition_action_id",
+            "established_by_evidence_ref",
+        ):
+            raw = getattr(self, name)
+            if type(raw) is not str or not raw.strip():
                 raise InvalidMissionEvent(f"target {name} cannot be empty")
+            value = raw.strip()
+            if len(value) > 2048:
+                raise InvalidMissionEvent(f"target {name} is too long")
             object.__setattr__(self, name, value)
-        object.__setattr__(self, "title_snapshot", str(self.title_snapshot or ""))
-        object.__setattr__(self, "hwnd", int(self.hwnd))
-        object.__setattr__(self, "process_id", int(self.process_id))
-        object.__setattr__(self, "epoch", int(self.epoch))
-        if int(self.hwnd) <= 0:
-            raise InvalidMissionEvent("target hwnd must be positive")
-        if int(self.process_id) <= 0 or int(self.epoch) < 0:
+        if not _TARGET_BINDING_ID_RE.fullmatch(self.binding_id):
+            raise InvalidMissionEvent("target binding_id is not canonical")
+        if type(self.title_snapshot) is not str:
+            raise InvalidMissionEvent("target title_snapshot must be a string")
+        if len(self.title_snapshot) > 4096:
+            raise InvalidMissionEvent("target title_snapshot is too long")
+        for name in ("hwnd", "root_hwnd", "process_id"):
+            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
+                raise InvalidMissionEvent(
+                    f"target {name} must be a positive integer"
+                )
+        if type(self.epoch) is not int or self.epoch < 0:
             raise InvalidMissionEvent(
-                "target process_id must be positive and epoch cannot be negative"
+                "target epoch must be a non-negative integer"
+            )
+        if (
+            type(self.canonical_identity_sha256) is not str
+            or not _CANONICAL_SHA256_RE.fullmatch(
+                self.canonical_identity_sha256
+            )
+        ):
+            raise InvalidMissionEvent(
+                "target canonical_identity_sha256 must be a lowercase SHA-256 digest"
+            )
+        expected_identity = target_binding_identity_sha256(
+            hwnd=self.hwnd,
+            root_hwnd=self.root_hwnd,
+            process_id=self.process_id,
+            process_identity=self.process_identity,
+            epoch=self.epoch,
+        )
+        if self.canonical_identity_sha256 != expected_identity:
+            raise InvalidMissionEvent(
+                "target canonical identity hash does not match its identity fields"
             )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "binding_id": self.binding_id,
             "hwnd": self.hwnd,
+            "root_hwnd": self.root_hwnd,
             "process_id": self.process_id,
-            "executable_identity": self.executable_identity,
+            "process_identity": self.process_identity,
             "title_snapshot": self.title_snapshot,
-            "established_by_evidence_ref": self.established_by_evidence_ref,
             "epoch": self.epoch,
+            "canonical_identity_sha256": self.canonical_identity_sha256,
+            "acquisition_action_id": self.acquisition_action_id,
+            "established_by_evidence_ref": self.established_by_evidence_ref,
         }
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "TargetBinding":
+        if not isinstance(raw, Mapping):
+            raise InvalidMissionEvent("target binding must be a JSON object")
+        fields = {
+            "binding_id",
+            "hwnd",
+            "root_hwnd",
+            "process_id",
+            "process_identity",
+            "title_snapshot",
+            "epoch",
+            "canonical_identity_sha256",
+            "acquisition_action_id",
+            "established_by_evidence_ref",
+        }
+        missing, extra = fields - set(raw), set(raw) - fields
+        if missing or extra:
+            raise InvalidMissionEvent(
+                "invalid target binding fields; "
+                f"missing={sorted(missing)}, extra={sorted(extra)}"
+            )
         return cls(
-            binding_id=str(raw.get("binding_id") or ""),
-            hwnd=int(raw.get("hwnd") or 0),
-            process_id=int(raw.get("process_id") or 0),
-            executable_identity=str(raw.get("executable_identity") or ""),
-            title_snapshot=str(raw.get("title_snapshot") or ""),
-            established_by_evidence_ref=str(raw.get("established_by_evidence_ref") or ""),
-            epoch=int(raw.get("epoch") or 0),
+            binding_id=raw["binding_id"],
+            hwnd=raw["hwnd"],
+            root_hwnd=raw["root_hwnd"],
+            process_id=raw["process_id"],
+            process_identity=raw["process_identity"],
+            title_snapshot=raw["title_snapshot"],
+            epoch=raw["epoch"],
+            canonical_identity_sha256=raw["canonical_identity_sha256"],
+            acquisition_action_id=raw["acquisition_action_id"],
+            established_by_evidence_ref=raw["established_by_evidence_ref"],
         )
+
+
+def target_binding_evidence_payload_hash(
+    *, mission_id: str, run_id: str, binding: TargetBinding,
+) -> str:
+    """Bind one deterministic target attestation to its mission/run/action."""
+
+    if not isinstance(binding, TargetBinding):
+        raise InvalidMissionEvent("binding must be TargetBinding")
+    expected_binding_id = target_binding_id_for(
+        mission_id=mission_id,
+        run_id=run_id,
+        canonical_identity_sha256=binding.canonical_identity_sha256,
+        acquisition_action_id=binding.acquisition_action_id,
+    )
+    if binding.binding_id != expected_binding_id:
+        raise InvalidMissionEvent(
+            "target binding_id does not match mission/run/acquisition identity"
+        )
+    return _canonical_sha256({
+        "format": TARGET_BINDING_EVIDENCE_FORMAT,
+        "mission_id": mission_id.strip(),
+        "run_id": run_id.strip(),
+        "binding_id": binding.binding_id,
+        "canonical_identity_sha256": binding.canonical_identity_sha256,
+        "acquisition_action_id": binding.acquisition_action_id,
+        "title_snapshot": binding.title_snapshot,
+    })
+
+
+def target_binding_attestation(
+    *,
+    mission_id: str,
+    run_id: str,
+    obligation_id: str,
+    evidence_id: str,
+    acquisition_action_id: str,
+    hwnd: int,
+    root_hwnd: int,
+    process_id: int,
+    process_identity: str,
+    title_snapshot: str,
+    epoch: int,
+    frame_id: int | None = None,
+    created_at: float | None = None,
+) -> tuple[TargetBinding, EvidenceRef]:
+    """Build the one canonical binding/evidence pair accepted by the reducer."""
+
+    identity = target_binding_identity_sha256(
+        hwnd=hwnd,
+        root_hwnd=root_hwnd,
+        process_id=process_id,
+        process_identity=process_identity,
+        epoch=epoch,
+    )
+    binding = TargetBinding(
+        binding_id=target_binding_id_for(
+            mission_id=mission_id,
+            run_id=run_id,
+            canonical_identity_sha256=identity,
+            acquisition_action_id=acquisition_action_id,
+        ),
+        hwnd=hwnd,
+        root_hwnd=root_hwnd,
+        process_id=process_id,
+        process_identity=process_identity,
+        title_snapshot=title_snapshot,
+        epoch=epoch,
+        canonical_identity_sha256=identity,
+        acquisition_action_id=acquisition_action_id,
+        established_by_evidence_ref=evidence_id,
+    )
+    evidence = EvidenceRef(
+        id=evidence_id,
+        mission_id=mission_id,
+        run_id=run_id,
+        obligation_id=obligation_id,
+        kind=TARGET_BINDING_EVIDENCE_KIND,
+        trust="deterministic",
+        payload_hash=target_binding_evidence_payload_hash(
+            mission_id=mission_id,
+            run_id=run_id,
+            binding=binding,
+        ),
+        frame_id=frame_id,
+        action_id=acquisition_action_id,
+        created_at=created_at,
+    )
+    return binding, evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -760,10 +1005,10 @@ class TransitionSummary:
             object.__setattr__(self, "action_id", action_id)
         object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
         if self.frame_id is not None and (
-            type(self.frame_id) is not int or self.frame_id < 0
+            type(self.frame_id) is not int or self.frame_id <= 0
         ):
             raise InvalidMissionEvent(
-                "transition frame_id must be a non-negative integer or null"
+                "transition frame_id must be a positive integer or null"
             )
         if self.action_effect is not None:
             effect = (
@@ -987,47 +1232,66 @@ class MissionEvent:
         base_revision: int = 0,
         payload: Mapping[str, Any] | None = None,
         event_id: str = "",
-        format: str | None = MISSION_EVENT_FORMAT,
+        format: str = MISSION_EVENT_FORMAT,
         evidence_refs: Iterable[str] | None = None,
         created_at: float | None = None,
-        *,
-        type: str | None = None,
     ) -> None:
-        # ``type`` is accepted only as a legacy input alias.  The canonical
-        # field and wire representation remain ``kind``.
-        if type and kind and str(type) != str(kind):
-            raise InvalidMissionEvent("type and kind disagree")
-        resolved_kind = str(kind or type or "")
-        object.__setattr__(self, "kind", resolved_kind)
-        object.__setattr__(self, "mission_id", str(mission_id))
-        object.__setattr__(self, "run_id", str(run_id))
-        object.__setattr__(self, "base_revision", int(base_revision))
-        object.__setattr__(self, "payload", payload or {})
-        object.__setattr__(self, "event_id", str(event_id or ""))
-        object.__setattr__(self, "format", MISSION_EVENT_FORMAT if format is None else str(format))
-        object.__setattr__(self, "evidence_refs", _as_string_tuple(evidence_refs))
-        object.__setattr__(self, "created_at", None if created_at is None else float(created_at))
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "mission_id", mission_id)
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "base_revision", base_revision)
+        object.__setattr__(self, "payload", {} if payload is None else payload)
+        object.__setattr__(self, "event_id", event_id)
+        object.__setattr__(self, "format", format)
+        if evidence_refs is None:
+            normalized_refs: tuple[Any, ...] = ()
+        elif isinstance(evidence_refs, (list, tuple)):
+            normalized_refs = tuple(evidence_refs)
+        else:
+            raise InvalidMissionEvent(
+                "evidence_refs must be an ordered sequence of strings"
+            )
+        object.__setattr__(self, "evidence_refs", normalized_refs)
+        object.__setattr__(self, "created_at", created_at)
         self.__post_init__()
 
     def __post_init__(self) -> None:
         if self.format != MISSION_EVENT_FORMAT:
             raise InvalidMissionEvent(f"unsupported MissionEvent format: {self.format!r}")
-        if not str(self.kind).strip():
+        if type(self.kind) is not str or not self.kind.strip():
             raise InvalidMissionEvent("event kind cannot be empty")
-        if not str(self.mission_id).strip() or not str(self.run_id).strip():
+        if (
+            type(self.mission_id) is not str
+            or not self.mission_id.strip()
+            or type(self.run_id) is not str
+            or not self.run_id.strip()
+        ):
             raise InvalidMissionEvent("event mission_id and run_id are required")
-        if int(self.base_revision) < 0:
-            raise InvalidMissionEvent("base_revision cannot be negative")
-        if self.created_at is not None and not math.isfinite(float(self.created_at)):
-            raise InvalidMissionEvent("created_at must be finite")
-        object.__setattr__(self, "kind", str(self.kind))
-        object.__setattr__(self, "mission_id", str(self.mission_id))
-        object.__setattr__(self, "run_id", str(self.run_id))
+        if type(self.event_id) is not str:
+            raise InvalidMissionEvent("event_id must be a string")
+        if type(self.base_revision) is not int or self.base_revision < 0:
+            raise InvalidMissionEvent(
+                "base_revision must be a non-negative integer"
+            )
+        if self.created_at is not None:
+            if (
+                type(self.created_at) not in (int, float)
+                or not math.isfinite(float(self.created_at))
+            ):
+                raise InvalidMissionEvent("created_at must be a finite number or null")
+            object.__setattr__(self, "created_at", float(self.created_at))
         try:
             object.__setattr__(self, "payload", _json_mapping(self.payload))
         except (TypeError, ValueError) as exc:
             raise InvalidMissionEvent("payload must contain only JSONValue") from exc
-        object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
+        if any(
+            type(ref) is not str or not ref.strip()
+            for ref in self.evidence_refs
+        ):
+            raise InvalidMissionEvent(
+                "evidence_refs must contain only non-empty strings"
+            )
+        object.__setattr__(self, "evidence_refs", tuple(self.evidence_refs))
         if not self.event_id:
             canonical = {
                 "kind": self.kind,
@@ -1041,11 +1305,6 @@ class MissionEvent:
                 json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest()[:24]
             object.__setattr__(self, "event_id", f"event-{digest}")
-
-    @property
-    def type(self) -> str:
-        """Legacy read alias; it is not a second serialized field."""
-        return self.kind
 
     @property
     def event_type(self) -> str:
@@ -1091,20 +1350,34 @@ class MissionEvent:
     def from_dict(cls, raw: Mapping[str, Any]) -> "MissionEvent":
         if not isinstance(raw, Mapping):
             raise InvalidMissionEvent("MissionEvent must be a JSON object")
-        raw_kind = raw.get("kind")
-        raw_type = raw.get("type")
-        if raw_kind is not None and raw_type is not None and str(raw_kind) != str(raw_type):
-            raise InvalidMissionEvent("type and kind disagree")
+        fields = {
+            "format", "event_id", "mission_id", "run_id", "base_revision",
+            "kind", "payload", "evidence_refs", "created_at",
+        }
+        if set(raw) != fields or any(type(key) is not str for key in raw):
+            raise InvalidMissionEvent(
+                "MissionEvent fields do not match the canonical schema"
+            )
+        if not isinstance(raw.get("payload"), Mapping):
+            raise InvalidMissionEvent("MissionEvent payload must be a JSON object")
+        if not isinstance(raw.get("evidence_refs"), list):
+            raise InvalidMissionEvent(
+                "MissionEvent evidence_refs must be a JSON array"
+            )
+        if type(raw.get("event_id")) is not str or not raw.get("event_id"):
+            raise InvalidMissionEvent(
+                "MissionEvent event_id must be a non-empty string"
+            )
         return cls(
-            kind=str(raw_kind or raw_type or ""),
-            mission_id=str(raw.get("mission_id") or ""),
-            run_id=str(raw.get("run_id") or ""),
-            base_revision=int(raw.get("base_revision", raw.get("revision", 0))),
+            kind=raw.get("kind"),
+            mission_id=raw.get("mission_id"),
+            run_id=raw.get("run_id"),
+            base_revision=raw.get("base_revision"),
             payload=raw.get("payload") or {},
-            event_id=str(raw.get("event_id") or ""),
-            format=str(raw.get("format") or ""),
-            evidence_refs=raw.get("evidence_refs") or (),
-            created_at=(float(raw["created_at"]) if raw.get("created_at") is not None else None),
+            event_id=raw.get("event_id"),
+            format=raw.get("format"),
+            evidence_refs=raw.get("evidence_refs"),
+            created_at=raw.get("created_at"),
         )
 
 
@@ -1191,6 +1464,7 @@ class MissionProjection:
     verified_facts: tuple[VerifiedFact, ...] = ()
     artifact_bindings: Mapping[str, ArtifactRef] = field(default_factory=dict)
     target_binding: TargetBinding | None = None
+    target_rebind_after_frame_id: int | None = None
     evidence_refs: Mapping[str, EvidenceRef] = field(default_factory=dict)
     accepted_event_ids: tuple[str, ...] = ()
     pending_approval: Mapping[str, Any] | None = None
@@ -1207,6 +1481,23 @@ class MissionProjection:
             raise InvalidMissionEvent(f"unsupported MissionProjection format: {self.format!r}")
         if int(self.revision) < 0:
             raise InvalidMissionEvent("projection revision cannot be negative")
+        if (
+            self.target_rebind_after_frame_id is not None
+            and (
+                type(self.target_rebind_after_frame_id) is not int
+                or self.target_rebind_after_frame_id <= 0
+            )
+        ):
+            raise InvalidMissionEvent(
+                "target_rebind_after_frame_id must be a positive integer or null"
+            )
+        if (
+            self.target_binding is not None
+            and self.target_rebind_after_frame_id is not None
+        ):
+            raise InvalidMissionEvent(
+                "bound target cannot also require a newer rebind frame"
+            )
         object.__setattr__(self, "obligation_states", tuple(self.obligation_states))
         ids = tuple(item.id for item in self.obligation_states)
         if len(ids) != len(set(ids)):
@@ -1273,6 +1564,7 @@ class MissionProjection:
                 key: value.to_dict() for key, value in self.artifact_bindings.items()
             },
             "target_binding": self.target_binding.to_dict() if self.target_binding else None,
+            "target_rebind_after_frame_id": self.target_rebind_after_frame_id,
             "evidence_refs": {
                 key: value.to_dict() for key, value in self.evidence_refs.items()
             },
@@ -1553,12 +1845,16 @@ __all__ = [
     "MISSION_DEFINITION_FORMAT", "MISSION_EVENT_FORMAT", "MISSION_PROJECTION_FORMAT",
     "MISSION_CARD_FORMAT", "ACTION_EFFECT_FORMAT", "ACTION_EFFECT_COMPARATOR_VERSION",
     "ACTION_EFFECT_EVIDENCE_KIND", "ACTION_EFFECT_CHANGE_RATIO_THRESHOLD",
+    "TARGET_BINDING_IDENTITY_FORMAT", "TARGET_BINDING_EVIDENCE_FORMAT",
+    "TARGET_BINDING_EVIDENCE_KIND",
     "MissionError", "InvalidMissionDefinition",
     "InvalidMissionEvent", "StaleRevisionError", "DuplicateEventError",
     "EvidenceScopeError", "IllegalTransitionError", "ObligationStatus", "MissionStatus",
     "LocalVisualChange", "ActionEffectReason", "ActionEffectSummary",
     "JSONValue", "EvidencePolicy", "ObligationSpec", "ObligationDefinition", "EvidenceRef", "ArtifactRef",
-    "TargetBinding", "VerifiedFact", "TransitionSummary", "FailureSummary",
+    "TargetBinding", "target_binding_identity_sha256", "target_binding_id_for",
+    "target_binding_evidence_payload_hash", "target_binding_attestation",
+    "VerifiedFact", "TransitionSummary", "FailureSummary",
     "MissionDefinition", "MissionEvent", "ObligationProjection", "MissionProjection", "MissionState",
     "ActiveObligationCard", "MissionCard", "EvidenceScope", "thaw",
 ]

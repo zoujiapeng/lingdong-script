@@ -9,6 +9,7 @@ import pytest
 
 from winpilot.vnext.mission import (
     ACTION_EFFECT_EVIDENCE_KIND,
+    TARGET_BINDING_EVIDENCE_KIND,
     ActionEffectReason,
     ActionEffectSummary,
     ArtifactRef,
@@ -23,6 +24,9 @@ from winpilot.vnext.mission import (
     LocalVisualChange,
     MissionDefinition,
     MissionEvent,
+    MISSION_EVENT_FORMAT,
+    MISSION_PROJECTION_FORMAT,
+    MISSION_CARD_FORMAT,
     MissionReducer,
     MissionStatus,
     MissionCard,
@@ -34,11 +38,77 @@ from winpilot.vnext.mission import (
     project_legacy_contract,
     project_legacy_trace,
     VerifiedFact,
+    target_binding_evidence_payload_hash,
+    target_binding_attestation,
+    target_binding_id_for,
+    target_binding_identity_sha256,
 )
 
 
 ARTIFACT_SHA256 = "a" * 64
 OTHER_ARTIFACT_SHA256 = "b" * 64
+
+
+def _target_binding_and_evidence(
+    *,
+    mission_id: str = "m1",
+    run_id: str = "r1",
+    obligation_id: str = "obligation-1",
+    action_id: str = "acquire-target-1",
+    hwnd: int = 101,
+    root_hwnd: int = 100,
+    process_id: int = 7,
+    process_identity: str = "process-" + "1" * 32,
+    title_snapshot: str = "Current application",
+    epoch: int = 3,
+    evidence_id: str = "target-proof",
+    frame_id: int | None = None,
+) -> tuple[TargetBinding, EvidenceRef]:
+    return target_binding_attestation(
+        mission_id=mission_id,
+        run_id=run_id,
+        obligation_id=obligation_id,
+        evidence_id=evidence_id,
+        acquisition_action_id=action_id,
+        hwnd=hwnd,
+        root_hwnd=root_hwnd,
+        process_id=process_id,
+        process_identity=process_identity,
+        title_snapshot=title_snapshot,
+        epoch=epoch,
+        frame_id=frame_id,
+    )
+
+
+def _target_bound_event(
+    reducer: MissionReducer,
+    binding: TargetBinding,
+) -> MissionEvent:
+    return reducer.event(
+        "target_bound",
+        payload={"target_binding": binding.to_dict()},
+        evidence_refs=(binding.established_by_evidence_ref,),
+    )
+
+
+def _target_invalidated_event(
+    reducer: MissionReducer,
+    binding: TargetBinding,
+    *,
+    reason: str = "target identity changed",
+    observed_frame_id: int | None = None,
+) -> MissionEvent:
+    return reducer.event(
+        "target_invalidated",
+        payload={
+            "expected_binding_id": binding.binding_id,
+            "expected_canonical_identity_sha256": (
+                binding.canonical_identity_sha256
+            ),
+            "observed_frame_id": observed_frame_id,
+            "reason": reason,
+        },
+    )
 
 
 def _action_effect_material(
@@ -331,7 +401,7 @@ def test_definition_falls_back_to_one_lossless_obligation() -> None:
     assert definition.obligations[0].required_capabilities == ("visual.interact",)
 
 
-def test_definition_wire_metadata_and_event_kind_alias_are_deterministic() -> None:
+def test_definition_wire_metadata_and_event_kind_are_deterministic() -> None:
     definition = _definition()
     assert definition.stable_topological_order == ("capture", "send")
     assert definition.experience_policy == "allow"
@@ -345,7 +415,7 @@ def test_definition_wire_metadata_and_event_kind_alias_are_deterministic() -> No
         base_revision=0,
         payload={"obligation_id": "capture"},
     )
-    assert event.type == event.kind == "obligation_claimed"
+    assert event.kind == "obligation_claimed"
     assert MissionEvent.from_dict(event.to_dict()).to_dict() == event.to_dict()
 
 
@@ -372,14 +442,56 @@ def test_contracts_are_strict_versioned_json_and_canonical_on_wire() -> None:
         MissionEvent(kind="transition_recorded", mission_id="m1", run_id="r1", payload={"bad": object()})
     with pytest.raises(InvalidMissionEvent):
         MissionEvent(kind="transition_recorded", mission_id="m1", run_id="r1", format="mission-event/9")
+    type_only = dict(wire)
+    type_only["type"] = type_only.pop("kind")
+    with pytest.raises(InvalidMissionEvent, match="canonical schema"):
+        MissionEvent.from_dict(type_only)
+    with pytest.raises(InvalidMissionEvent, match="canonical schema"):
+        MissionEvent.from_dict({**wire, "type": wire["kind"]})
+    for field, value in (
+        ("kind", 7),
+        ("mission_id", True),
+        ("run_id", 7),
+        ("event_id", False),
+        ("event_id", ""),
+        ("base_revision", "0"),
+        ("payload", []),
+        ("payload", ""),
+        ("evidence_refs", "proof-1"),
+        ("evidence_refs", {"proof": "1"}),
+    ):
+        with pytest.raises(InvalidMissionEvent):
+            MissionEvent.from_dict({**wire, field: value})
     with pytest.raises(InvalidMissionEvent):
         MissionEvent.from_dict({
+            **wire,
             "format": "mission-event/0",
-            "kind": "transition_recorded",
-            "type": "mission_failed",
-            "mission_id": "m1",
-            "run_id": "r1",
         })
+    projection = MissionReducer(_definition()).projection
+    with pytest.raises(InvalidMissionEvent, match="MissionProjection format"):
+        replace(projection, format="mission-projection/1")
+    with pytest.raises(InvalidMissionEvent, match="MissionCard format"):
+        replace(MissionCard.from_projection(projection), format="mission-card/1")
+    assert projection.format == MISSION_PROJECTION_FORMAT
+    assert MissionCard.from_projection(projection).format == MISSION_CARD_FORMAT
+
+
+def test_projection_cannot_be_bound_and_waiting_for_a_rebind_frame() -> None:
+    definition = _definition()
+    binding, _proof = _target_binding_and_evidence()
+    projection = MissionReducer(definition).projection
+    with pytest.raises(InvalidMissionEvent, match="bound target"):
+        replace(
+            projection,
+            target_binding=binding,
+            target_rebind_after_frame_id=3,
+        )
+
+
+def test_projection_rebind_barrier_requires_a_positive_frame() -> None:
+    projection = MissionReducer(_definition()).projection
+    with pytest.raises(InvalidMissionEvent, match="positive integer"):
+        replace(projection, target_rebind_after_frame_id=0)
 
 
 @pytest.mark.parametrize("input_completed", [None, 0, 1, "true", []])
@@ -395,8 +507,8 @@ def test_transition_summary_requires_literal_boolean_input_completion(
         )
 
 
-@pytest.mark.parametrize("frame_id", [-1, True, 1.0, "1"])
-def test_transition_summary_requires_non_negative_integer_frame_identity(
+@pytest.mark.parametrize("frame_id", [0, -1, True, 1.0, "1"])
+def test_transition_summary_requires_positive_integer_frame_identity(
     frame_id,
 ) -> None:
     with pytest.raises(InvalidMissionEvent, match="frame_id"):
@@ -456,7 +568,7 @@ def test_raw_transition_event_requires_explicit_input_completion() -> None:
     assert reducer.events == ()
 
 
-@pytest.mark.parametrize("frame_id", [-1, True, 1.0, "1"])
+@pytest.mark.parametrize("frame_id", [0, -1, True, 1.0, "1"])
 def test_raw_transition_event_rejects_noncanonical_frame_identity(frame_id) -> None:
     reducer = MissionReducer(
         MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1")
@@ -938,17 +1050,410 @@ def test_verification_enforces_evidence_kind_and_target_hwnd() -> None:
     with pytest.raises(InvalidMissionEvent):
         reducer.apply(reducer.event(
             "target_bound",
-            payload={
-                "binding_id": "window",
+            payload={"target_binding": {
+                "binding_id": "target-" + "0" * 24,
                 "hwnd": 0,
+                "root_hwnd": 1,
                 "process_id": 1,
-                "executable_identity": "app",
+                "process_identity": "app",
                 "title_snapshot": "window",
-                "established_by_evidence_ref": proof.id,
                 "epoch": 0,
-            },
+                "canonical_identity_sha256": "0" * 64,
+                "acquisition_action_id": "acquire-invalid",
+                "established_by_evidence_ref": proof.id,
+            }},
             evidence_refs=[proof.id],
         ))
+
+
+def test_target_binding_accepts_only_canonical_run_scoped_acquisition_evidence() -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    binding, proof = _target_binding_and_evidence()
+    reducer = MissionReducer(definition, evidence=(proof,))
+
+    projection = reducer.apply(_target_bound_event(reducer, binding))
+
+    assert projection.target_binding == binding
+    assert projection.evidence_refs[proof.id] == proof
+    assert binding.binding_id == target_binding_id_for(
+        mission_id=definition.mission_id,
+        run_id=definition.run_id,
+        canonical_identity_sha256=binding.canonical_identity_sha256,
+        acquisition_action_id=binding.acquisition_action_id,
+    )
+    assert proof.payload_hash == target_binding_evidence_payload_hash(
+        mission_id=definition.mission_id,
+        run_id=definition.run_id,
+        binding=binding,
+    )
+
+
+@pytest.mark.parametrize(
+    "changed",
+    ("kind", "trust", "action_id", "payload_hash", "obligation_id", "artifact"),
+)
+def test_target_binding_rejects_noncanonical_establishment_evidence(
+    changed: str,
+) -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    binding, proof = _target_binding_and_evidence()
+    if changed == "artifact":
+        proof = replace(
+            proof,
+            artifact_id="artifact-1",
+            content_sha256=ARTIFACT_SHA256,
+        )
+    else:
+        values = {
+            "kind": "telemetry_only",
+            "trust": "actor_claim",
+            "action_id": "different-action",
+            "payload_hash": "0" * 64,
+            "obligation_id": "different-obligation",
+        }
+        proof = replace(proof, **{changed: values[changed]})
+    reducer = MissionReducer(definition, evidence=(proof,))
+    before = reducer.projection.to_dict()
+
+    with pytest.raises(EvidenceScopeError):
+        reducer.apply(_target_bound_event(reducer, binding))
+
+    assert reducer.projection.to_dict() == before
+    assert reducer.events == ()
+
+
+@pytest.mark.parametrize("scope_field", ("mission_id", "run_id"))
+def test_target_binding_rejects_cross_scope_evidence(scope_field: str) -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    binding, proof = _target_binding_and_evidence()
+    proof = replace(proof, **{scope_field: f"other-{scope_field}"})
+    reducer = MissionReducer(definition, evidence=(proof,))
+
+    with pytest.raises(EvidenceScopeError, match="outside mission/run scope"):
+        reducer.apply(_target_bound_event(reducer, binding))
+
+    assert reducer.projection.target_binding is None
+    assert reducer.events == ()
+
+
+def test_target_binding_cannot_merge_unrelated_evidence() -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    binding, proof = _target_binding_and_evidence()
+    unrelated = EvidenceRef(
+        id="unrelated-proof",
+        mission_id="m1",
+        run_id="r1",
+        obligation_id=None,
+        kind="telemetry_only",
+        trust="telemetry_only",
+        payload_hash="unrelated-payload",
+    )
+    reducer = MissionReducer(definition, evidence=(proof, unrelated))
+
+    with pytest.raises(EvidenceScopeError, match="only its establishment"):
+        reducer.apply(reducer.event(
+            "target_bound",
+            payload={"target_binding": binding.to_dict()},
+            evidence_refs=(proof.id, unrelated.id),
+        ))
+
+    assert reducer.projection.target_binding is None
+    assert reducer.projection.evidence_refs == {}
+
+
+@pytest.mark.parametrize("evidence_refs", ((), ("target-proof", "target-proof")))
+def test_target_binding_requires_one_explicit_establishment_reference(
+    evidence_refs: tuple[str, ...],
+) -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    binding, proof = _target_binding_and_evidence()
+    reducer = MissionReducer(definition, evidence=(proof,))
+
+    with pytest.raises(EvidenceScopeError, match="only its establishment"):
+        reducer.apply(reducer.event(
+            "target_bound",
+            payload={"target_binding": binding.to_dict()},
+            evidence_refs=evidence_refs,
+        ))
+
+    assert reducer.events == ()
+
+
+@pytest.mark.parametrize(
+    "change",
+    ("binding_id", "title_snapshot", "acquisition_action_id", "physical_identity"),
+)
+def test_target_binding_rejects_identity_or_attestation_tampering(
+    change: str,
+) -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    binding, proof = _target_binding_and_evidence()
+    if change == "binding_id":
+        candidate = replace(binding, binding_id="target-" + "f" * 24)
+    elif change == "title_snapshot":
+        candidate = replace(binding, title_snapshot="tampered title")
+    elif change == "acquisition_action_id":
+        action_id = "different-acquisition"
+        candidate = replace(
+            binding,
+            acquisition_action_id=action_id,
+            binding_id=target_binding_id_for(
+                mission_id=definition.mission_id,
+                run_id=definition.run_id,
+                canonical_identity_sha256=binding.canonical_identity_sha256,
+                acquisition_action_id=action_id,
+            ),
+        )
+    else:
+        identity = target_binding_identity_sha256(
+            hwnd=binding.hwnd + 1,
+            root_hwnd=binding.root_hwnd,
+            process_id=binding.process_id,
+            process_identity=binding.process_identity,
+            epoch=binding.epoch,
+        )
+        candidate = replace(
+            binding,
+            hwnd=binding.hwnd + 1,
+            canonical_identity_sha256=identity,
+            binding_id=target_binding_id_for(
+                mission_id=definition.mission_id,
+                run_id=definition.run_id,
+                canonical_identity_sha256=identity,
+                acquisition_action_id=binding.acquisition_action_id,
+            ),
+        )
+    reducer = MissionReducer(definition, evidence=(proof,))
+
+    with pytest.raises((EvidenceScopeError, InvalidMissionEvent)):
+        reducer.apply(_target_bound_event(reducer, candidate))
+
+    assert reducer.projection.target_binding is None
+    assert reducer.events == ()
+
+
+def test_target_binding_contract_is_strict_and_hash_checked() -> None:
+    binding, _ = _target_binding_and_evidence()
+    with pytest.raises(InvalidMissionEvent, match="identity hash"):
+        replace(binding, hwnd=binding.hwnd + 1)
+    with pytest.raises(InvalidMissionEvent, match="canonical process identity"):
+        replace(binding, process_identity="pid:7")
+    with pytest.raises(InvalidMissionEvent, match="fields"):
+        TargetBinding.from_dict({**binding.to_dict(), "legacy_field": True})
+    raw = binding.to_dict()
+    raw.pop("root_hwnd")
+    with pytest.raises(InvalidMissionEvent, match="fields"):
+        TargetBinding.from_dict(raw)
+    with pytest.raises(InvalidMissionEvent, match="positive integer"):
+        TargetBinding.from_dict({**binding.to_dict(), "hwnd": True})
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    _, proof = _target_binding_and_evidence()
+    reducer = MissionReducer(definition, evidence=(proof,))
+    with pytest.raises(InvalidMissionEvent, match="only target_binding"):
+        reducer.apply(reducer.event(
+            "target_bound",
+            payload=binding.to_dict(),
+            evidence_refs=(proof.id,),
+        ))
+
+
+def test_target_replacement_requires_matching_invalidation_cas() -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    first, first_proof = _target_binding_and_evidence()
+    second, second_proof = _target_binding_and_evidence(
+        action_id="acquire-target-2",
+        hwnd=202,
+        root_hwnd=200,
+        process_id=8,
+        process_identity="process-" + "2" * 32,
+        epoch=4,
+        evidence_id="target-proof-2",
+    )
+    reducer = MissionReducer(definition, evidence=(first_proof, second_proof))
+    reducer.apply(_target_bound_event(reducer, first))
+
+    with pytest.raises(IllegalTransitionError, match="invalidated"):
+        reducer.apply(_target_bound_event(reducer, second))
+    assert reducer.projection.target_binding == first
+
+    reducer.apply(_target_invalidated_event(reducer, first))
+    projection = reducer.apply(_target_bound_event(reducer, second))
+    assert projection.target_binding == second
+    assert set(projection.evidence_refs) == {first_proof.id, second_proof.id}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    (
+        ("expected_binding_id", "target-" + "f" * 24, IllegalTransitionError),
+        ("expected_canonical_identity_sha256", "f" * 64, IllegalTransitionError),
+        ("observed_frame_id", True, InvalidMissionEvent),
+        ("observed_frame_id", 0, InvalidMissionEvent),
+        ("observed_frame_id", -1, InvalidMissionEvent),
+        ("observed_frame_id", "1", InvalidMissionEvent),
+        ("reason", "", InvalidMissionEvent),
+    ),
+)
+def test_target_invalidation_requires_current_identity_and_reason(
+    field: str,
+    value: object,
+    error: type[Exception],
+) -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    binding, proof = _target_binding_and_evidence()
+    reducer = MissionReducer(definition, evidence=(proof,))
+    reducer.apply(_target_bound_event(reducer, binding))
+    payload = dict(_target_invalidated_event(reducer, binding).payload)
+    payload[field] = value
+    before = reducer.projection.to_dict()
+
+    with pytest.raises(error):
+        reducer.apply(reducer.event("target_invalidated", payload=payload))
+
+    assert reducer.projection.to_dict() == before
+    assert len(reducer.events) == 1
+
+
+def test_target_invalidation_without_current_binding_or_with_extra_field_fails() -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    binding, proof = _target_binding_and_evidence()
+    reducer = MissionReducer(definition, evidence=(proof,))
+    with pytest.raises(IllegalTransitionError, match="no target"):
+        reducer.apply(_target_invalidated_event(reducer, binding))
+
+    reducer.apply(_target_bound_event(reducer, binding))
+    payload = dict(_target_invalidated_event(reducer, binding).payload)
+    payload["legacy"] = True
+    with pytest.raises(InvalidMissionEvent, match="canonical schema"):
+        reducer.apply(reducer.event("target_invalidated", payload=payload))
+
+    canonical = _target_invalidated_event(reducer, binding)
+    with pytest.raises(EvidenceScopeError, match="cannot attach"):
+        reducer.apply(reducer.event(
+            "target_invalidated",
+            payload=dict(canonical.payload),
+            evidence_refs=(proof.id,),
+        ))
+
+
+def test_target_rebind_requires_evidence_from_a_strictly_newer_frame() -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    first, first_proof = _target_binding_and_evidence(
+        action_id="acquire-first", evidence_id="proof-first", frame_id=10,
+    )
+    stale, stale_proof = _target_binding_and_evidence(
+        action_id="acquire-stale", evidence_id="proof-stale", frame_id=10,
+        process_identity="process-" + "2" * 32,
+    )
+    fresh, fresh_proof = _target_binding_and_evidence(
+        action_id="acquire-fresh", evidence_id="proof-fresh", frame_id=11,
+        process_identity="process-" + "2" * 32,
+    )
+    evidence = [first_proof, stale_proof, fresh_proof]
+    reducer = MissionReducer(definition, evidence=evidence)
+    reducer.apply(_target_bound_event(reducer, first))
+    reducer.apply(_target_invalidated_event(
+        reducer, first, observed_frame_id=10,
+    ))
+
+    assert reducer.projection.target_rebind_after_frame_id == 10
+    assert "target_rebind_after_frame_id" not in MissionCard.from_projection(
+        reducer.projection
+    ).to_dict()
+    with pytest.raises(EvidenceScopeError, match="newer authoritative frame"):
+        reducer.apply(_target_bound_event(reducer, stale))
+    projection = reducer.apply(_target_bound_event(reducer, fresh))
+
+    assert projection.target_binding == fresh
+    assert projection.target_rebind_after_frame_id is None
+    replayed = MissionReducer.replay(
+        definition, reducer.events, evidence=evidence,
+    ).projection
+    assert replayed.to_dict() == projection.to_dict()
+
+
+def test_target_invalidation_cannot_weaken_established_frame_floor() -> None:
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    binding, proof = _target_binding_and_evidence(frame_id=10)
+    reducer = MissionReducer(definition, evidence=(proof,))
+    reducer.apply(_target_bound_event(reducer, binding))
+
+    with pytest.raises(InvalidMissionEvent, match="predate"):
+        reducer.apply(_target_invalidated_event(
+            reducer, binding, observed_frame_id=9,
+        ))
+
+    assert reducer.projection.target_binding == binding
+    projection = reducer.apply(_target_invalidated_event(
+        reducer, binding, observed_frame_id=None,
+    ))
+    assert projection.target_rebind_after_frame_id == 10
+
+
+@pytest.mark.parametrize("frame_id", [True, -1, "11", 1.5])
+def test_target_attestation_rejects_noncanonical_frame_identity(frame_id) -> None:
+    with pytest.raises(EvidenceScopeError, match="frame_id"):
+        _target_binding_and_evidence(frame_id=frame_id)
+
+
+def test_randomized_target_bind_invalidate_replay_is_deterministic() -> None:
+    rng = random.Random(0xB1AD)
+    definition = MissionDefinition.from_goal(
+        "goal", mission_id="m1", run_id="r1",
+    )
+    evidence: list[EvidenceRef] = []
+    reducer = MissionReducer(definition, evidence=evidence)
+    count = 24
+    for index in range(count):
+        hwnd = rng.randint(100, 50000)
+        binding, proof = _target_binding_and_evidence(
+            action_id=f"acquire-{index}",
+            hwnd=hwnd,
+            root_hwnd=hwnd + 1,
+            process_id=rng.randint(1, 50000),
+            process_identity=f"process-{rng.getrandbits(128):032x}",
+            title_snapshot=f"Window {rng.getrandbits(32):08x}",
+            epoch=index,
+            evidence_id=f"target-proof-{index}",
+        )
+        evidence.append(proof)
+        reducer.apply(_target_bound_event(reducer, binding))
+        if index + 1 < count:
+            reducer.apply(_target_invalidated_event(reducer, binding))
+
+    shuffled = list(evidence)
+    rng.shuffle(shuffled)
+    replayed = MissionReducer.replay(
+        definition,
+        reducer.events,
+        evidence=shuffled,
+    )
+    assert replayed.projection.to_dict() == reducer.projection.to_dict()
+    assert replayed.events == reducer.events
 
 
 @pytest.mark.parametrize("terminal_event", ["mission_failed", "mission_canceled"])
@@ -1023,7 +1528,7 @@ def test_stale_revision_and_duplicate_event_are_fail_closed() -> None:
     with pytest.raises(DuplicateEventError):
         reducer.apply(event)
     stale = MissionEvent(
-        type="obligation_claimed",
+        kind="obligation_claimed",
         mission_id="m1",
         run_id="r1",
         base_revision=0,
@@ -1703,7 +2208,8 @@ def test_visual_verifier_permission_and_identity_relationships_are_fail_closed()
     with pytest.raises(InvalidMissionEvent):
         ArtifactRef("", "image/png", ARTIFACT_SHA256, "goal", proof.id)
     with pytest.raises(InvalidMissionEvent):
-        TargetBinding("", 1, 1, "app", "title", proof.id, 0)
+        binding, _ = _target_binding_and_evidence()
+        replace(binding, binding_id="")
 
 
 def test_visual_permission_uses_evidence_trust_not_payload_self_report() -> None:
@@ -1858,15 +2364,13 @@ def test_artifact_target_and_fact_evidence_cannot_cross_identities() -> None:
             },
         ))
 
-    target_evidence = EvidenceRef(
-        id="target-proof",
-        mission_id="m2",
-        run_id="r2",
+    target_binding, target_evidence = _target_binding_and_evidence(
+        mission_id="m2", run_id="r2",
+    )
+    target_evidence = replace(
+        target_evidence,
         artifact_id="artifact-1",
         content_sha256=OTHER_ARTIFACT_SHA256,
-        kind="target",
-        trust="deterministic",
-        payload_hash="hash-target-proof",
     )
     target_reducer = MissionReducer(
         MissionDefinition.from_goal("goal", mission_id="m2", run_id="r2"),
@@ -1875,14 +2379,8 @@ def test_artifact_target_and_fact_evidence_cannot_cross_identities() -> None:
     with pytest.raises(EvidenceScopeError):
         target_reducer.apply(target_reducer.event(
             "target_bound",
-            payload={
-                "binding_id": "window",
-                "hwnd": 42,
-                "process_id": 1,
-                "executable_identity": "app",
-                "title_snapshot": "window",
-                "established_by_evidence_ref": "target-proof",
-            },
+            payload={"target_binding": target_binding.to_dict()},
+            evidence_refs=(target_evidence.id,),
         ))
 
     fact_reducer = MissionReducer(

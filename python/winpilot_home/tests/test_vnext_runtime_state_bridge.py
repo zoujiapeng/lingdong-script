@@ -26,7 +26,7 @@ from winpilot.vnext.mission import (
     MissionProjection,
     ObligationProjection,
     ObligationStatus,
-    TargetBinding,
+    target_binding_attestation,
 )
 from winpilot.vnext.runtime import MutationPermitAuthority
 from winpilot.visual_runtime.commit_admission import (
@@ -41,6 +41,10 @@ from winpilot.visual_runtime.frame_observer import FrameObserver
 
 REGION = Region(10, 20, 640, 480)
 IMAGE = "ZnJhbWU="
+PROCESS_IDENTITY = f"process-{'1' * 32}"
+REPLACEMENT_PROCESS_IDENTITY = f"process-{'2' * 32}"
+DEFAULT_ACQUISITION_ACTION_ID = "target-acquisition-1"
+ALTERNATE_ACQUISITION_ACTION_ID = "target-acquisition-2"
 
 
 class _TargetReader:
@@ -89,16 +93,57 @@ class _CountingObserver(FrameObserver):
         return super().commit(captured)
 
 
-def _target(**changes) -> TargetCommitIdentity:
+def _binding_for(
+    *,
+    mission_id: str = "mission-1",
+    run_id: str = "run-1",
+    obligation_id: str = "obligation-1",
+    acquisition_action_id: str = DEFAULT_ACQUISITION_ACTION_ID,
+    hwnd: int = 101,
+    root_hwnd: int = 101,
+    process_id: int = 7,
+    process_identity: str = PROCESS_IDENTITY,
+    epoch: int = 3,
+):
+    binding, _evidence = target_binding_attestation(
+        mission_id=mission_id,
+        run_id=run_id,
+        obligation_id=obligation_id,
+        evidence_id=f"target-proof-{acquisition_action_id}",
+        acquisition_action_id=acquisition_action_id,
+        hwnd=hwnd,
+        root_hwnd=root_hwnd,
+        process_id=process_id,
+        process_identity=process_identity,
+        title_snapshot="Test",
+        epoch=epoch,
+    )
+    return binding
+
+
+def _target(
+    *,
+    acquisition_action_id: str = DEFAULT_ACQUISITION_ACTION_ID,
+    **changes,
+) -> TargetCommitIdentity:
     values = {
-        "binding_id": "target-1",
         "hwnd": 101,
         "root_hwnd": 101,
         "process_id": 7,
+        "process_identity": PROCESS_IDENTITY,
         "epoch": 3,
         "window_region": (REGION.left, REGION.top, REGION.width, REGION.height),
     }
     values.update(changes)
+    if "binding_id" not in values:
+        values["binding_id"] = _binding_for(
+            acquisition_action_id=acquisition_action_id,
+            hwnd=values["hwnd"],
+            root_hwnd=values["root_hwnd"],
+            process_id=values["process_id"],
+            process_identity=values["process_identity"],
+            epoch=values["epoch"],
+        ).binding_id
     return TargetCommitIdentity(**values)
 
 
@@ -115,13 +160,27 @@ def _projection(
     )
     binding = None
     if target is not None:
-        binding = TargetBinding(
-            binding_id=target.binding_id,
+        alternate = _binding_for(
+            acquisition_action_id=ALTERNATE_ACQUISITION_ACTION_ID,
             hwnd=target.hwnd,
+            root_hwnd=target.root_hwnd,
             process_id=target.process_id,
-            executable_identity="test.exe",
-            title_snapshot="Test",
-            established_by_evidence_ref="target-proof",
+            process_identity=target.process_identity,
+            epoch=target.epoch,
+        )
+        action_id = (
+            ALTERNATE_ACQUISITION_ACTION_ID
+            if target.binding_id == alternate.binding_id
+            else DEFAULT_ACQUISITION_ACTION_ID
+        )
+        binding = _binding_for(
+            mission_id=mission_id,
+            run_id=run_id,
+            acquisition_action_id=action_id,
+            hwnd=target.hwnd,
+            root_hwnd=target.root_hwnd,
+            process_id=target.process_id,
+            process_identity=target.process_identity,
             epoch=target.epoch,
         )
     return MissionProjection(
@@ -321,6 +380,7 @@ def test_image_region_is_explicitly_rejected_without_side_effects() -> None:
         {"hwnd": 102},
         {"root_hwnd": 102},
         {"process_id": 8},
+        {"process_identity": REPLACEMENT_PROCESS_IDENTITY},
         {"epoch": 4},
         {"window_region": (11, 20, 640, 480)},
     ),
@@ -345,9 +405,10 @@ def test_live_target_drift_fails_closed_and_never_switches_target(changed) -> No
 @pytest.mark.parametrize(
     "binding_change",
     (
-        {"binding_id": "target-2"},
+        {"acquisition_action_id": ALTERNATE_ACQUISITION_ACTION_ID},
         {"hwnd": 202},
         {"process_id": 99},
+        {"process_identity": REPLACEMENT_PROCESS_IDENTITY},
         {"epoch": 9},
     ),
 )

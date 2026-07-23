@@ -16,13 +16,17 @@ import time
 from typing import Protocol, runtime_checkable
 import unicodedata
 
+from ...process_identity import (
+    MAX_PROCESS_EXECUTABLE_PATH_CHARS,
+    ProcessIdentityError,
+)
 from .contracts import process_identity_for
 
 
 WINDOWS_TARGET_FACTS_FORMAT = "windows-target-facts/0"
 MAX_PROCESS_FACTS = 16_384
 MAX_WINDOW_FACTS = 8_192
-MAX_EXECUTABLE_PATH_CHARS = 2_048
+MAX_EXECUTABLE_PATH_CHARS = MAX_PROCESS_EXECUTABLE_PATH_CHARS
 MAX_WINDOW_TITLE_CHARS = 512
 MAX_PROCESS_QUERY_CHARS = 512
 
@@ -98,11 +102,14 @@ class ProcessTargetFact:
         if not ntpath.isabs(path):
             raise WindowsTargetFactsError("executable_path must be absolute")
         path = ntpath.normpath(path)
-        expected = process_identity_for(
-            process_id=process_id,
-            creation_time_ns=creation_time_ns,
-            executable_path=path,
-        )
+        try:
+            expected = process_identity_for(
+                process_id=process_id,
+                creation_time_ns=creation_time_ns,
+                executable_path=path,
+            )
+        except ProcessIdentityError as exc:
+            raise WindowsTargetFactsError(str(exc)) from exc
         if self.process_identity != expected:
             raise WindowsTargetFactsError(
                 "process_identity does not match PID, creation time, and executable path"
@@ -127,15 +134,19 @@ class ProcessTargetFact:
             "executable_path",
             maximum=MAX_EXECUTABLE_PATH_CHARS,
         )
+        try:
+            process_identity = process_identity_for(
+                process_id=process_id,
+                creation_time_ns=creation_time_ns,
+                executable_path=path,
+            )
+        except ProcessIdentityError as exc:
+            raise WindowsTargetFactsError(str(exc)) from exc
         return cls(
             process_id=process_id,
             creation_time_ns=creation_time_ns,
             executable_path=path,
-            process_identity=process_identity_for(
-                process_id=process_id,
-                creation_time_ns=creation_time_ns,
-                executable_path=path,
-            ),
+            process_identity=process_identity,
         )
 
 

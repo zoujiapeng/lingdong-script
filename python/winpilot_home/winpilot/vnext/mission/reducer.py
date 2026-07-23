@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping
 
 from .contracts import (
     ACTION_EFFECT_EVIDENCE_KIND,
+    TARGET_BINDING_EVIDENCE_KIND,
     ActionEffectSummary,
     ArtifactRef,
     EvidenceRef,
@@ -32,6 +33,8 @@ from .contracts import (
     StaleRevisionError,
     _as_string_tuple,
     thaw,
+    target_binding_evidence_payload_hash,
+    target_binding_id_for,
 )
 
 
@@ -229,12 +232,53 @@ def _parse_artifact(payload: Mapping[str, Any]) -> ArtifactRef:
 
 
 def _parse_target(payload: Mapping[str, Any]) -> TargetBinding:
+    if set(payload) != {"target_binding"}:
+        raise InvalidMissionEvent(
+            "target_bound payload must contain only target_binding"
+        )
     raw = payload.get("target_binding")
-    if isinstance(raw, TargetBinding):
-        return raw
-    if not isinstance(raw, Mapping):
-        raw = payload
     return TargetBinding.from_dict(raw)
+
+
+def _validate_target_binding_evidence(
+    projection: MissionProjection,
+    target: TargetBinding,
+    refs: tuple[EvidenceRef, ...],
+) -> None:
+    expected_binding_id = target_binding_id_for(
+        mission_id=projection.mission_id,
+        run_id=projection.run_id,
+        canonical_identity_sha256=target.canonical_identity_sha256,
+        acquisition_action_id=target.acquisition_action_id,
+    )
+    if target.binding_id != expected_binding_id:
+        raise EvidenceScopeError(
+            "target binding_id does not bind the current mission/run/acquisition"
+        )
+    by_id = {ref.id: ref for ref in refs}
+    try:
+        established = by_id[target.established_by_evidence_ref]
+    except KeyError as exc:
+        raise EvidenceScopeError(
+            "target establishment evidence is missing from the event"
+        ) from exc
+    expected_payload_hash = target_binding_evidence_payload_hash(
+        mission_id=projection.mission_id,
+        run_id=projection.run_id,
+        binding=target,
+    )
+    if (
+        established.kind != TARGET_BINDING_EVIDENCE_KIND
+        or established.trust != "deterministic"
+        or established.obligation_id != projection.active_obligation_id
+        or established.action_id != target.acquisition_action_id
+        or established.payload_hash != expected_payload_hash
+        or established.artifact_id is not None
+        or established.content_sha256 is not None
+    ):
+        raise EvidenceScopeError(
+            "target establishment evidence does not bind the canonical acquisition"
+        )
 
 
 def _parse_transition(payload: Mapping[str, Any]) -> TransitionSummary:
@@ -246,10 +290,10 @@ def _parse_transition(payload: Mapping[str, Any]) -> TransitionSummary:
         raise InvalidMissionEvent("transition input_completed must be boolean")
     frame_id = payload.get("frame_id")
     if frame_id is not None and (
-        type(frame_id) is not int or frame_id < 0
+        type(frame_id) is not int or frame_id <= 0
     ):
         raise InvalidMissionEvent(
-            "transition frame_id must be a non-negative integer or null"
+            "transition frame_id must be a positive integer or null"
         )
     raw_effect = payload.get("action_effect")
     if raw_effect is not None and not isinstance(raw_effect, Mapping):
@@ -548,22 +592,102 @@ def _apply_event(
         return _merge_evidence(updated, refs)
 
     if event_type == "target_bound":
-        target = _parse_target(payload)
-        target_evidence_ids = tuple(
-            dict.fromkeys((*event.evidence_refs, target.established_by_evidence_ref))
-        )
-        refs = _evidence_refs(projection, scope, target_evidence_ids, required=True)
-        established = next(ref for ref in refs if ref.id == target.established_by_evidence_ref)
-        if established.artifact_id not in (None, ""):
-            raise EvidenceScopeError("target evidence cannot identify an artifact")
         if projection.target_binding is not None:
-            old = projection.target_binding
-            if old.binding_id == target.binding_id and old != target:
-                raise IllegalTransitionError("target binding identity changed without invalidation")
-        return _merge_evidence(replace(projection, target_binding=target), refs)
+            raise IllegalTransitionError(
+                "target must be invalidated before another binding is accepted"
+            )
+        target = _parse_target(payload)
+        target_evidence_ids = (target.established_by_evidence_ref,)
+        if event.evidence_refs != target_evidence_ids:
+            raise EvidenceScopeError(
+                "target_bound must reference only its establishment evidence"
+            )
+        refs = _evidence_refs(projection, scope, target_evidence_ids, required=True)
+        _validate_target_binding_evidence(projection, target, refs)
+        if projection.target_rebind_after_frame_id is not None:
+            established = refs[0]
+            if (
+                established.frame_id is None
+                or established.frame_id <= projection.target_rebind_after_frame_id
+            ):
+                raise EvidenceScopeError(
+                    "target rebind evidence must use a newer authoritative frame"
+                )
+        return _merge_evidence(replace(
+            projection,
+            target_binding=target,
+            target_rebind_after_frame_id=None,
+        ), refs)
 
     if event_type == "target_invalidated":
-        return replace(projection, target_binding=None, last_error=_payload_text(payload, "reason"))
+        if event.evidence_refs:
+            raise EvidenceScopeError(
+                "target_invalidated cannot attach positive evidence"
+            )
+        fields = {
+            "expected_binding_id",
+            "expected_canonical_identity_sha256",
+            "observed_frame_id",
+            "reason",
+        }
+        if set(payload) != fields:
+            raise InvalidMissionEvent(
+                "target_invalidated payload fields do not match the canonical schema"
+            )
+        current = projection.target_binding
+        if current is None:
+            raise IllegalTransitionError("there is no target binding to invalidate")
+        expected_binding_id = _payload_text(payload, "expected_binding_id").strip()
+        expected_identity = _payload_text(
+            payload, "expected_canonical_identity_sha256",
+        ).strip()
+        reason = _payload_text(payload, "reason").strip()
+        observed_frame_id = payload.get("observed_frame_id")
+        if (
+            observed_frame_id is not None
+            and (type(observed_frame_id) is not int or observed_frame_id <= 0)
+        ):
+            raise InvalidMissionEvent(
+                "target invalidation observed_frame_id must be positive or null"
+            )
+        prior_evidence = projection.evidence_refs.get(
+            current.established_by_evidence_ref
+        )
+        if prior_evidence is None:
+            raise EvidenceScopeError(
+                "current target establishment evidence is unavailable"
+            )
+        prior_frame_id = prior_evidence.frame_id
+        if (
+            observed_frame_id is not None
+            and prior_frame_id is not None
+            and observed_frame_id < prior_frame_id
+        ):
+            raise InvalidMissionEvent(
+                "target invalidation frame cannot predate establishment evidence"
+            )
+        rebind_after_frame_id = (
+            observed_frame_id
+            if observed_frame_id is not None
+            else prior_frame_id
+        )
+        if not expected_binding_id or not expected_identity or not reason:
+            raise InvalidMissionEvent(
+                "target invalidation identity and reason cannot be empty"
+            )
+        if (
+            expected_binding_id != current.binding_id
+            or expected_identity != current.canonical_identity_sha256
+        ):
+            raise IllegalTransitionError(
+                "target invalidation does not match the current binding"
+            )
+        return replace(
+            projection,
+            target_binding=None,
+            target_rebind_after_frame_id=rebind_after_frame_id,
+            last_error=reason,
+        )
 
     if event_type == "transition_recorded":
         obligation_id = _payload_text(payload, "obligation_id", projection.active_obligation_id or "")

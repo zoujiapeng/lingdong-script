@@ -36,7 +36,7 @@ from winpilot.vnext.mission import (
     MissionDefinition,
     MissionReducer,
     ObligationSpec,
-    TargetBinding,
+    target_binding_attestation,
 )
 from winpilot.vnext.profiling import DEFAULT_CAPABILITY_CATALOG, ExecutionPolicy
 
@@ -98,6 +98,23 @@ def _catalog() -> ToolCatalog:
     return build_tool_catalog((_schema(item.name) for item in policies), policies)
 
 
+def _target_attestation():
+    return target_binding_attestation(
+        mission_id="m1",
+        run_id="r1",
+        obligation_id="o1",
+        evidence_id="e-target",
+        acquisition_action_id="target-acquisition-1",
+        hwnd=101,
+        root_hwnd=101,
+        process_id=7,
+        process_identity=f"process-{'1' * 32}",
+        title_snapshot="",
+        epoch=3,
+        frame_id=9,
+    )
+
+
 def _mission(capability: str = "visual.interact", *, bound: bool = True):
     definition = MissionDefinition(
         mission_id="m1",
@@ -110,26 +127,17 @@ def _mission(capability: str = "visual.interact", *, bound: bool = True):
             required_capabilities=(capability,),
         ),),
     )
+    target_binding = None
     evidence = ()
     if bound:
-        evidence = (EvidenceRef(
-            id="e-target", mission_id="m1", run_id="r1", kind="target",
-            trust="deterministic", obligation_id="o1",
-            payload_hash="target-payload-hash", frame_id=9,
-        ),)
+        target_binding, target_evidence = _target_attestation()
+        evidence = (target_evidence,)
     reducer = MissionReducer(definition, evidence=evidence)
     if bound:
+        assert target_binding is not None
         reducer.apply(reducer.event(
             "target_bound",
-            payload=TargetBinding(
-                binding_id="target-1",
-                hwnd=101,
-                process_id=7,
-                executable_identity="opaque-process-identity",
-                title_snapshot="",
-                established_by_evidence_ref="e-target",
-                epoch=3,
-            ).to_dict(),
+            payload={"target_binding": target_binding.to_dict()},
             evidence_refs=("e-target",),
         ))
     return reducer.projection
@@ -205,7 +213,9 @@ def _state(**overrides):
     values = {
         "turn_index": 4,
         "available_capabilities": ALL_CAPABILITIES,
-        "target": TargetState("target-1", 101, 3, True),
+        "target": TargetState(
+            _target_attestation()[0].binding_id, 101, 3, True,
+        ),
         "frame": AuthoritativeFrameState(9, 101, 3, True, True),
         "pointer": PointerLeaseState(PointerDisposition.RELEASED),
     }

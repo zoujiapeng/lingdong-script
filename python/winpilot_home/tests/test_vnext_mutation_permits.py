@@ -28,7 +28,8 @@ def _envelope(**updates) -> ActorDecisionEnvelope:
             (1120, 630), "a" * 64,
         ),
         "target": TargetCommitIdentity(
-            "target-1", 101, 101, 7, 3, (0, 0, 1280, 720),
+            "target-1", 101, 101, 7, "process-" + "1" * 32, 3,
+            (0, 0, 1280, 720),
         ),
         "pointer": PointerLeaseState(PointerDisposition.RELEASED),
         "broker_projection_id": "projection-1",

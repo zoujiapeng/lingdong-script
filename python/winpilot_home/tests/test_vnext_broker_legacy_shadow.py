@@ -5,6 +5,10 @@ from dataclasses import replace
 from types import SimpleNamespace
 import threading
 
+from winpilot.visual_runtime.windows_desktop_facts import (
+    WindowsDesktopFactsError,
+    WindowsDesktopFactsReader,
+)
 from winpilot.vnext.capabilities.contracts import MutationKind
 from winpilot.vnext.capabilities.legacy_shadow import (
     BROKER_LEGACY_SHADOW_FORMAT,
@@ -77,6 +81,46 @@ class _Trace:
         return True
 
 
+class _DesktopFactsBackend:
+    def __init__(self) -> None:
+        self.creation_time_ns = 1_000_000_000
+        self.executable_path = r"C:\Program Files\Test Host\host.exe"
+        self.process_facts_available = True
+
+    def is_window(self, hwnd):
+        return hwnd == 101
+
+    def root_hwnd(self, hwnd):
+        return 101 if hwnd == 101 else 0
+
+    def process_id(self, hwnd):
+        return 77 if hwnd == 101 else 0
+
+    def process_creation_time_ns(self, process_id):
+        assert process_id == 77
+        if not self.process_facts_available:
+            raise WindowsDesktopFactsError("process facts unavailable")
+        return self.creation_time_ns
+
+    def process_executable_path(self, process_id):
+        assert process_id == 77
+        return self.executable_path
+
+    def window_region(self, hwnd):
+        assert hwnd == 101
+        return (10, 20, 800, 600)
+
+    def foreground_hwnd(self):
+        return 101
+
+    def window_from_point(self, _point):
+        return 101
+
+
+def _facts_readers(backend=None):
+    return WindowsDesktopFactsReader(backend or _DesktopFactsBackend())
+
+
 def _runner(*, frame_id=4, epoch=2, hwnd=101, verified=True, executable="host.exe"):
     frame = SimpleNamespace(
         frame_id=frame_id,
@@ -102,12 +146,14 @@ def _runner(*, frame_id=4, epoch=2, hwnd=101, verified=True, executable="host.ex
 
 def _observer(trace=None, *, run_id="r1"):
     trace = trace or _Trace()
+    desktop_facts = _facts_readers()
     return build_legacy_broker_shadow_observer(
         run_id=run_id,
         contract=_contract(),
         profile=_profile(run_id),
         trace=trace,
         available_capabilities=legacy_local_capability_registry().snapshot(),
+        desktop_facts_reader=desktop_facts,
     ), trace
 
 
@@ -164,6 +210,11 @@ def test_epoch_change_invalidates_then_rebinds_instead_of_replacing_projection()
     _observe(observer, runner=_runner(epoch=2), step=1)
     _observe(observer, runner=_runner(frame_id=5, epoch=3), step=2)
     assert [item.kind for item in observer.accepted_events] == [
+        "target_bound", "target_invalidated",
+    ]
+    assert observer.projection.target_binding is None
+    _observe(observer, runner=_runner(frame_id=6, epoch=3), step=3)
+    assert [item.kind for item in observer.accepted_events] == [
         "target_bound", "target_invalidated", "target_bound",
     ]
     assert observer.projection.target_binding.epoch == 3
@@ -174,9 +225,13 @@ def test_epoch_change_invalidates_then_rebinds_instead_of_replacing_projection()
     ).projection.to_dict() == observer.projection.to_dict()
     assert trace.records[1][1]["replay_delta"]["mission_definition"] is None
     assert [item["kind"] for item in trace.records[1][1]["replay_delta"]["accepted_events"]] == [
-        "target_invalidated", "target_bound",
+        "target_invalidated",
     ]
-    assert len(trace.records[1][1]["replay_delta"]["evidence_refs"]) == 1
+    assert len(trace.records[1][1]["replay_delta"]["evidence_refs"]) == 0
+    assert [item["kind"] for item in trace.records[2][1]["replay_delta"]["accepted_events"]] == [
+        "target_bound",
+    ]
+    assert len(trace.records[2][1]["replay_delta"]["evidence_refs"]) == 1
 
 
 def test_unverified_target_never_exposes_gui_mutation() -> None:
@@ -201,11 +256,13 @@ def test_application_resolution_capability_does_not_unlock_generic_gui_mutation(
         _profile(), accepted_capabilities=("application.resolve",),
     )
     trace = _Trace()
+    desktop_facts = _facts_readers()
     observer = LegacyBrokerShadowObserver(
         definition=definition,
         profile=profile,
         trace=trace,
         available_capabilities=legacy_local_capability_registry().snapshot(),
+        desktop_facts_reader=desktop_facts,
     )
     _observe(observer, runner=_runner(verified=False))
     names = trace.records[0][1]["broker_projection"]["tool_names"]
@@ -252,11 +309,13 @@ def test_local_artifact_executor_requires_real_owner_and_projects_receipted_rout
     )
     profile = replace(_profile(), accepted_capabilities=("artifact.capture",))
     trace = _Trace()
+    desktop_facts = _facts_readers()
     observer = LegacyBrokerShadowObserver(
         definition=definition,
         profile=profile,
         trace=trace,
         available_capabilities=legacy_local_capability_registry().snapshot(),
+        desktop_facts_reader=desktop_facts,
     )
     runner = _runner()
     runner.session._managed_artifacts = lambda: (object(), object())
@@ -279,11 +338,13 @@ def test_multi_obligation_projection_is_explicitly_unavailable() -> None:
         ),
     )
     trace = _Trace()
+    desktop_facts = _facts_readers()
     observer = LegacyBrokerShadowObserver(
         definition=definition,
         profile=_profile(),
         trace=trace,
         available_capabilities=CANONICAL_CAPABILITIES,
+        desktop_facts_reader=desktop_facts,
     )
     _observe(observer)
     assert trace.records[0][1]["status"] == "unavailable"
@@ -347,6 +408,73 @@ def test_unchanged_target_emits_no_duplicate_replay_facts() -> None:
     }
     assert trace.records[0][1]["outer_turn_index"] == 1
     assert trace.records[1][1]["outer_turn_index"] == 2
+
+
+def test_same_hwnd_and_pid_with_reused_process_never_uses_cached_binding() -> None:
+    backend = _DesktopFactsBackend()
+    trace = _Trace()
+    observer = build_legacy_broker_shadow_observer(
+        run_id="r1",
+        contract=_contract(),
+        profile=_profile(),
+        trace=trace,
+        available_capabilities=legacy_local_capability_registry().snapshot(),
+        desktop_facts_reader=_facts_readers(backend),
+    )
+    _observe(observer, step=1)
+    first_binding = observer.projection.target_binding
+    assert first_binding is not None
+
+    backend.creation_time_ns += 1
+    _observe(observer, step=2)
+
+    assert observer.projection.target_binding is None
+    assert observer.accepted_events[-1].kind == "target_invalidated"
+    assert trace.records[1][1]["broker_projection"]["target_binding_id"] is None
+
+    _observe(observer, runner=_runner(frame_id=4), step=3)
+    assert observer.projection.target_binding is None
+    assert observer.accepted_events[-1].kind == "target_invalidated"
+
+    _observe(observer, runner=_runner(frame_id=5), step=4)
+    second_binding = observer.projection.target_binding
+    assert second_binding is not None
+    assert second_binding.binding_id != first_binding.binding_id
+    assert observer.accepted_events[-1].kind == "target_bound"
+
+
+def test_target_fact_failure_invalidates_replay_truth_and_projects_unbound() -> None:
+    backend = _DesktopFactsBackend()
+    trace = _Trace()
+    observer = build_legacy_broker_shadow_observer(
+        run_id="r1",
+        contract=_contract(),
+        profile=_profile(),
+        trace=trace,
+        available_capabilities=legacy_local_capability_registry().snapshot(),
+        desktop_facts_reader=_facts_readers(backend),
+    )
+    _observe(observer, step=1)
+    backend.process_facts_available = False
+
+    _observe(observer, runner=_runner(frame_id=5), step=2)
+
+    assert observer.projection.target_binding is None
+    assert observer.accepted_events[-1].kind == "target_invalidated"
+    assert trace.records[1][1]["status"] == "projected"
+    assert trace.records[1][1]["broker_projection"]["target_binding_id"] is None
+    replayed = MissionReducer.replay(
+        observer.definition,
+        observer.accepted_events,
+        evidence=observer.evidence_refs,
+    ).projection
+    assert replayed.to_dict() == observer.projection.to_dict()
+
+    backend.process_facts_available = True
+    _observe(observer, runner=_runner(frame_id=5), step=3)
+    assert observer.projection.target_binding is None
+    _observe(observer, runner=_runner(frame_id=6), step=4)
+    assert observer.projection.target_binding is not None
 
 
 def test_run_scoped_observer_attach_and_cleanup_are_identity_safe() -> None:

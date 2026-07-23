@@ -596,12 +596,14 @@ export interface CurrentRunResponse {
 }
 
 export interface DesktopTargetContext {
-  format: 'desktop-target/1';
+  format: 'desktop-target/2';
   hwnd: number;
+  root_hwnd: number;
   title: string;
   process_id: number;
+  process_identity: string;
   class_name: string;
-  rect: number[];
+  rect: [number, number, number, number] | [];
   captured_at: number;
   foreground_verified: boolean;
   usable: boolean;

@@ -54,9 +54,9 @@ from winpilot.vnext.mission.contracts import (
     ArtifactRef,
     FailureSummary,
     MissionCard,
-    TargetBinding,
     TransitionSummary,
     VerifiedFact,
+    target_binding_attestation,
 )
 from winpilot.visual_runtime.commit_admission import (
     FrameCommitIdentity,
@@ -74,6 +74,23 @@ def _action(**overrides) -> DesktopActionProposal:
     }
     values.update(overrides)
     return parse_actor_proposal(values)
+
+
+def _actor_target_binding():
+    binding, _evidence = target_binding_attestation(
+        mission_id="mission-actor-test",
+        run_id="run-actor-test",
+        obligation_id="obligation-current",
+        evidence_id="evidence-target-1",
+        acquisition_action_id="target-acquisition-1",
+        hwnd=9123,
+        root_hwnd=9123,
+        process_id=44,
+        process_identity=f"process-{'1' * 32}",
+        title_snapshot="Example Surface",
+        epoch=7,
+    )
+    return binding
 
 
 def _card() -> MissionCard:
@@ -123,15 +140,7 @@ def _card() -> MissionCard:
                 evidence_ref="evidence-runtime-1",
             ),
         ),
-        target_binding=TargetBinding(
-            binding_id="binding-runtime-1",
-            hwnd=9123,
-            process_id=44,
-            executable_identity="example.exe",
-            title_snapshot="Example Surface",
-            established_by_evidence_ref="evidence-target-1",
-            epoch=7,
-        ),
+        target_binding=_actor_target_binding(),
         last_transition=TransitionSummary(
             action="click",
             input_completed=True,
@@ -199,7 +208,7 @@ def _projection(**overrides) -> BrokerProjection:
         "active_grants": (),
         "missing_capabilities": (),
         "projection_reasons": ("visual route is available",),
-        "target_binding_id": "binding-runtime-1",
+        "target_binding_id": _actor_target_binding().binding_id,
     }
     values.update(overrides)
     return BrokerProjection(**values)
@@ -376,6 +385,7 @@ def test_runtime_envelope_binds_all_authority_and_round_trips() -> None:
             hwnd=9123,
             root_hwnd=9000,
             process_id=44,
+            process_identity=f"process-{'1' * 32}",
             epoch=7,
             window_region=(0, 0, 1200, 800),
         ),
@@ -411,6 +421,8 @@ def test_envelope_is_strict_and_frame_identity_is_atomic() -> None:
     ).to_json())
     with pytest.raises(InvalidActorEnvelope, match="explicit format"):
         ActorDecisionEnvelope.from_dict({key: value for key, value in raw.items() if key != "format"})
+    with pytest.raises(InvalidActorEnvelope):
+        ActorDecisionEnvelope.from_dict({**raw, "format": "actor-envelope/0"})
     with pytest.raises(InvalidActorEnvelope):
         ActorDecisionEnvelope.from_dict({
             **raw,
@@ -455,7 +467,8 @@ def test_envelope_rejects_frame_target_identity_disagreement() -> None:
         1, 4, 10, (0, 0, 100, 100), "target_window", (100, 100), "c" * 64,
     )
     target = TargetCommitIdentity(
-        "binding", 11, 11, 7, 4, (0, 0, 100, 100),
+        "binding", 11, 11, 7, f"process-{'1' * 32}", 4,
+        (0, 0, 100, 100),
     )
     with pytest.raises(ValidationError, match="frame and target identity disagree"):
         ActorDecisionEnvelope(
@@ -487,7 +500,8 @@ def test_actor_turn_projection_strips_runtime_identity_and_keeps_semantics() -> 
     text = turn.to_json()
     for secret in (
         "mission-actor-test", "obligation-current", "artifact-runtime-1",
-        "evidence-runtime-1", "binding-runtime-1", "projection-runtime-1", "9123",
+        "evidence-runtime-1", _actor_target_binding().binding_id,
+        "projection-runtime-1", "9123",
     ):
         assert secret not in text
     assert raw["mission"]["original_goal"] == "Complete the unknown visible task."

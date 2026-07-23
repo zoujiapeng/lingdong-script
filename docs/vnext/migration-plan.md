@@ -156,14 +156,20 @@ P0只添加观测，不改变决策。用同一 Electron入口收集 legacy基�
 
 ## 5. P1：纯 MissionDefinition、Event 与 Projection
 
-审计结果：canonical wire schema 只序列化 `ObligationSpec` 与 `kind`；历史 `ObligationDefinition`/`type` 只作为读取旧记录的兼容输入，禁止继续产生双写事实。尚未完整实现的 planner、approval、external、user-goal 事件必须 fail-closed。验证必须覆盖全部 acceptance criteria、绑定 `verification_id` 并使用当前 run-scoped EvidenceRegistry；`MissionProjection` 与 `MissionCard` 只能由 Definition、accepted events 和当前证据派生。
+审计结果：canonical wire schema 只序列化 `ObligationSpec` 与 `kind`；`mission-event/1` 不再接受
+历史 `type` 拼写或 `kind/type` 双写。旧记录如需迁移，必须在显式离线迁移边界转换，不能让 Reducer
+长期保留第二套 schema。`ObligationDefinition` 只保留为同一实现的 deprecated Python read alias，
+不形成第二份 wire 事实。尚未完整实现的 planner、approval、external、user-goal 事件必须 fail-closed。
+验证必须覆盖全部 acceptance criteria、绑定 `verification_id` 并使用当前 run-scoped EvidenceRegistry；
+`MissionProjection` 与 `MissionCard` 只能由 Definition、accepted events 和当前证据派生。
 
-状态：**已完成（离线/shadow only）**。提交 `3de1227` 实现
+状态：**纯合同已完成，且已被显式选择的 vNext live Runtime 使用；legacy 仍默认。** 提交 `3de1227` 实现
 `python/winpilot_home/winpilot/vnext/mission/` 中的 versioned contracts、纯 Reducer、事件
 replay、stale revision/evidence scope 校验、单 obligation fallback、MissionCard 与
 `project_legacy_contract`/`project_legacy_trace`；提交 `e3f938d` 对齐 `ObligationSpec` 别名、稳定
-拓扑序、`kind`/`type` 双写线格式和事件级 evidence refs。它不被 legacy runner 读取，也不改变
-`task-contract/1`。
+拓扑序和事件级 evidence refs。当前审计又将 Mission wire 收紧为 `mission-event/1` 的 `kind`-only、
+`mission-projection/2` 与 `mission-card/2`；legacy runner 不读取这些 Mission 状态，`task-contract/1`
+保持不变。
 
 新增内容仅限：
 
@@ -185,7 +191,8 @@ replay、stale revision/evidence scope 校验、单 obligation fallback、Missio
 - Projection必须可从 Definition、accepted events 与 EvidenceRegistry重放；
 - 不建立脱离现有 TaskContract/Evidence的第二份持久化完成账本。
 
-P1不启动模型、不操控桌面、不替换 legacy runner。完成后可用历史 trace 离线投影，但不改变产品行为。
+P1 合同本身不启动模型、不操控桌面、不替换 legacy runner；后续 P4/P5 live coordinator 复用这些合同。
+因此这里的“已使用”只表示显式 vNext run 的状态 owner 已接线，不表示 P7 达标、默认切换或 legacy 删除。
 
 测试重点：
 
@@ -346,7 +353,7 @@ P4a admission 在 Actor 返回后重新读取 Mission revision/active obligation
 
 P4b 按原语把这些合同接到现有唯一 FrameAuthority、admission/坐标校验和 Controller/RawDevice 链。Bridge 必须先让 legacy 委托共享 owner，不能复制 capture、action parser、pointer owner 或执行器。当前 click/double-click/scroll/type-text/hotkey 已进入 live 实验链；三个 click seed、ActionEffect 接线前最终 scroll 合同的一对双向 seed、三个 type-text seed 和一个 hotkey select-all seed 证明这些窄链可达，但不证明当前恢复稳定、其他原语或真实任务。
 
-P4b 当前完成的可独立回退切片包括：legacy 委托两阶段 `FrameObserver`；submitted-image -> normalized-frame -> physical-screen 的单次 typed 坐标映射；每 run 冻结一次的 `DesktopRuntimeSelection`；以及默认关闭的 `AtomicDesktopController`。该 Controller 接受 `click`/`double_click`/`scroll`/`type_text`/`hotkey`，将 Actor-visible `direction: up|down`、`notches: 1..12` 机械转换为 RawDevice signed amount，旧 signed Actor 参数 fail closed。在唯一 physical lease 中它消费 Runtime mutation permit、pin 权威 frame、核对 commit-time HWND/PID/epoch/region/hit-test，并在每次 pointer 或 keyboard mutation 紧前做对应 final target guard。scroll 与 keyboard 经 unqueued admitted physical SendInput backend 单机制执行，不使用 legacy fallback。动作后释放 frame pin但保持同一 physical lease；raw receipt 已确认输入完成时，`AtomicPostActionBridge` 做一次通用、有界的 120 ms settle，再捕获唯一 post frame、CAS 提交新权威帧并向 run-scoped EvidenceRegistry 写入对应 evidence。明确未执行时不等待；任何不确定输入结果都阻塞且不自动重放。
+P4b 当前完成的可独立回退切片包括：legacy 委托两阶段 `FrameObserver`；submitted-image -> normalized-frame -> physical-screen 的单次 typed 坐标映射；每 run 冻结一次的 `DesktopRuntimeSelection`；以及默认关闭的 `AtomicDesktopController`。该 Controller 接受 `click`/`double_click`/`scroll`/`type_text`/`hotkey`，将 Actor-visible `direction: up|down`、`notches: 1..12` 机械转换为 RawDevice signed amount，旧 signed Actor 参数 fail closed。在唯一 physical lease 中它消费 Runtime mutation permit、pin 权威 frame、核对 commit-time HWND/root HWND/PID/process identity/epoch/region/hit-test，并在每次 pointer 或 keyboard mutation 紧前做对应 final target guard。scroll 与 keyboard 经 unqueued admitted physical SendInput backend 单机制执行，不使用 legacy fallback。动作后释放 frame pin但保持同一 physical lease；raw receipt 已确认输入完成时，`AtomicPostActionBridge` 做一次通用、有界的 120 ms settle，再捕获唯一 post frame、CAS 提交新权威帧并向 run-scoped EvidenceRegistry 写入对应 evidence。明确未执行时不等待；任何不确定输入结果都阻塞且不自动重放。
 
 动作事务闭合后，Runtime 调用独立、只读的 deterministic ActionEffectVerifier，并把 comparison 与前后帧
 证据放进同一个 accepted transition event。Reducer 逐 obligation 重放派生 streak，Actor 只看到
@@ -410,7 +417,7 @@ P8/P9 不开始。
 
 1. **P7a recovery calibration（测量底座已实跑，门槛未达）**：同一客户端 harness 已加入 multi-seed matrix、失败状态保留、oracle 的 conclusive pass/conclusive fail/unavailable 三态，以及 trace-bound ActionEffect/streak、false-done 与 wall latency 报告；默认单 case 行为不变，非 paired run 不生成 `pair_id`。paired 只允许已具备两侧原语 parity 的 `precise-click` 和 `scroll-reveal`，其他 case fail closed。attempted arm/pair 与 `eligible_for_ab` 分开统计，只有身份、配置、完整 run-scoped evidence、conclusive oracle 和 clean revision 均闭合的一对才可进入 A/B。首批结果为 precise-click 1 个 eligible pair 两侧通过、scroll 2 个 eligible pairs 中 vNext 1/2 对 legacy 2/2；因此 recovery gate 未达。当前 trace 不能可靠测量机械动作重复、Actor 语义策略变化或细分 Controller/queue latency，相关结论不得生成；无可靠来源的指标保持 `None`。下一小片继续扩展多 seed、双向边界、静止 no-op、延迟变化、ambient animation 和不可比较帧。没有跨 seed 稳定证据前不修改 prompt、不自动反向，也不增加恢复角色。
 2. **P4b.1 keyboard parity（已完成窄原语门槛，非 P7 完成）**：`type_text` 与 `hotkey` 已复用同一 Runtime envelope、single-use permit、无假坐标的 keyboard commit admission、唯一 RawDevice mechanism、unknown-no-replay 和 post-action evidence；Catalog 与 Controller 共享中立的 canonical keyboard contract，产品 composition 在 Actor 前校验完整 raw inventory，private sidecar 不记录文本或 chord。legacy 继续委托共享机械 owner，没有复制第二套执行器。冷启动、空 session、同入口 Electron trusted-browser oracle 中，type-text 三个随机 seed 和 hotkey select-all 均 conclusive pass；select-all 首轮失败保留为 layout-dependent DOM `code` 造成的 oracle false negative，产品链未因此改写。结果未做 eligible paired A/B，不能外推总体成功率。
-3. **P4b.2 unbound target acquisition**：把目前分散的已运行窗口、可恢复窗口、进程、Start Menu、StartApps、App Paths 与快捷方式事实收敛到一个只读发现端口。Actor只选择候选或提出 open/switch；Runtime用启动前后因果证据建立 TargetBinding。不得按应用名写路线，也不得在已有实例可复用时无条件新开。
+3. **P4b.2 unbound target acquisition（身份与 foreground handoff 封口，live unbound activation 未接通）**：commit `2e41325` 已把安装目录、已运行/可恢复窗口与进程事实收敛为不选择目标的 deterministic `TargetDiscovery`；commit `53c6368` 提供一次性不可变 Windows 进程/窗口快照，process identity 绑定 PID、创建时间和绝对 exe 路径。严格 TargetBinding attestation 又机械绑定 root HWND、process identity、mission/run/acquisition action 与唯一 run-scoped deterministic evidence；标题不能单独决定身份。当前 `execution-context/1` 稳定外层嵌套 `desktop-target/2`：capture 前后两次采样 HWND/root/PID/process identity，initial bind 前再次读取并逐项精确比较。canonical process identity 只有一个不读取 OS 的中立派生/校验 owner；capture、discovery、Runtime state 和 commit guard 仍各自在自己的 authority seam 读取 OS 事实。该方案能拒绝进程实例复用，却不能绝对识别同一进程内、四项身份均未变化的 HWND/root 代际复用。Mission `mission-event/1` 只接受 `kind`；EvidenceRef、transition、invalidation 与 replay rebind barrier 的可空 frame identity 只能是正整数或 `None`。当前 coordinator 仍要求 foreground handoff，live Actor/Broker/Catalog 尚无 targetless discover/open/switch，且没有复用实例或冷启动 Electron oracle，所以本阶段仍未完成。下一切片必须接通 targetless 权威观察、unbound Broker 投影、Actor 的有界候选序号选择、Runtime 私有 one-shot candidate sidecar、同一 Controller/ActionQueue 内的精确 switch/open，以及启动前后因果证明；已有实例可复用时不得无条件新开，mutation outcome unknown 时不得 replay。
 4. **P4b.3 continuous visual interaction**：按 `atomic drag -> held pointer -> draw_strokes -> ROI observe` 顺序迁移。drag/draw 共享同一有序路径与坐标 owner；held pointer 只有一个 lease/cleanup owner；ROI 是 FrameAuthority 的只读裁剪和坐标变换，不创建第二个视觉状态。
 5. **P7b real-task expansion**：在上述基础能力分别通过同入口 oracle 后，先跑单应用 held-out，再引入可靠的 multi-obligation、artifact/session reference 和跨应用 handoff；无法安全拆分仍保持 full-goal obligation。原始 11 题与组合任务只作为黑盒覆盖，不进入生产规则。
 6. **P2/P3/P6 gate**：只有多个真实任务证明 fixed safe-standard 或当前小工具面造成 over/under-profile、necessary-tool miss 或跨义务结构失败，才让 Profiler 影响 live profile；Planner/Inspector 仍需至少两个 held-out 任务族的独立 A/B uplift。P8/P9 继续等待完整门槛。
@@ -633,7 +640,7 @@ Bridge禁止：
 -主架构文档中“已实现/目标设计”边界。
 
 具体run证据留在trace/report。长期文档不保存密钥、本机绝对路径、单次临时截图或未复现成功。
-## P1.5：完成、证据与恢复合同闭合（已完成，仍为离线 shadow）
+## P1.5：完成、证据与恢复合同闭合（合同已完成，显式 vNext live 已复用）
 
 本阶段只扩展 P1 的纯合同与可重放 Reducer，没有进入 P2，也没有改变
 prompt、模型调用、工具面、Controller、GUI 动作或 legacy `done` 语义。
@@ -657,9 +664,10 @@ prompt、模型调用、工具面、Controller、GUI 动作或 legacy `done` 语
 - 完成、重复 fingerprint、超出尝试次数、错误证据 scope、错误身份、stale
   event、terminal write 和 replay/property 情况均 fail-closed。
 
-P1.5 的实现仍是 sidecar/shadow；产品真实客户端入口、WinPilot 全量回归、
-`npm test`、typecheck 和 build 只用于行为不变回归，不能把离线合同测试当作
-真实 GUI 成功证据。后续 P2/P3/P4a 的旁路实现不改变这一证据边界。
+P1.5 最初作为 sidecar/shadow 落地；后续显式选择的 vNext live coordinator 已复用同一
+Reducer、EvidenceRegistry 与验证合同，legacy 仍默认且不读取 vNext Mission 状态。离线合同测试和
+常规回归仍不能冒充真实 GUI 成功证据；当前窄 Electron canary 也没有满足 P7、默认切换或 legacy
+删除门槛。
 
 ## P2a status (2026-07-21)
 

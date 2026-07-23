@@ -321,6 +321,19 @@ ambient animation、视频、短暂动画、错误 target binding 和不可比�
 `unchanged`；`changed` 既不证明动作因果，也不计作 grounded pass。动态全帧变化可能持续清零 streak
 并掩盖 no-op，这是已知召回限制，不得用应用规则、OCR/UIA/MCP fallback 或自动反向动作掩盖。
 
+P4b.2 target acquisition 必须单独通过同入口、独立 oracle，至少覆盖：
+
+- 已有实例的 HWND、root HWND、PID、创建时间与 process identity 可重验，执行后实例数不增加；
+- cold launch 前目标进程为零，只调用一次 launch，随后出现唯一、可因果归属的新进程与可绑定窗口；
+- discovery 后实例突然出现时在 launch 前拒绝旧候选，不自动改为另一条路线；
+- stale/ambiguous candidate、PID/HWND reuse、进程状态未知、running-without-bindable-window 与焦点漂移；
+- launch 返回成功但没有唯一新窗口、后置帧失败或结果可能已执行时进入 `unknown`，不自动 replay；
+- 最终 accepted TargetBinding 的 root HWND、process identity、acquisition action 与唯一 evidence 可从
+  Mission events + registry 完整 replay。
+
+当前只有纯 discovery、Windows facts 和 strict TargetBinding 合同测试；没有 targetless live activation
+和上述 Electron oracle，因此这些条目均不得记为 pass。
+
 ### 5.5 Broker
 
 - necessary tool recall；

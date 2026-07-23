@@ -10,11 +10,16 @@ import os
 import re
 from typing import Any, Iterable
 
+from ...process_identity import (
+    ProcessIdentityError,
+    canonical_process_identity,
+    process_identity_for,
+)
+
 
 TARGET_DISCOVERY_FORMAT = "target-discovery/0"
 TARGET_CANDIDATE_FORMAT = "target-candidate/0"
 _REF = re.compile(r"target-[0-9a-f]{24}")
-_PROCESS_IDENTITY = re.compile(r"process-[0-9a-f]{32}")
 _TOKEN = re.compile(r"[a-z][a-z0-9_]{0,63}")
 MAX_TARGET_CANDIDATES = 16
 MAX_TARGET_QUERY_CHARS = 256
@@ -95,29 +100,6 @@ def launch_identity_for(*, kind: object, target: object) -> str:
     return _launch_parts(kind=kind, target=target)[2]
 
 
-def process_identity_for(
-    *, process_id: int, executable_path: object, creation_time_ns: int,
-) -> str:
-    if type(process_id) is not int or process_id <= 0:
-        raise TargetContractError("process_id must be a positive integer")
-    if type(creation_time_ns) is not int or creation_time_ns <= 0:
-        raise TargetContractError("creation_time_ns must be a positive integer")
-    path = os.path.normcase(os.path.normpath(
-        _text(executable_path, "executable_path", maximum=2048)
-    )).casefold()
-    material = json.dumps(
-        {
-            "creation_time_ns": creation_time_ns,
-            "executable_path": path,
-            "process_id": process_id,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return "process-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
-
-
 def _window_ref_identity(
     *, hwnd: int, process_id: int, process_identity: str,
 ) -> str:
@@ -166,15 +148,20 @@ class TargetCandidate:
                 type(self.hwnd) is not int or self.hwnd <= 0
                 or type(self.process_id) is not int or self.process_id <= 0
                 or type(self.process_identity) is not str
-                or not _PROCESS_IDENTITY.fullmatch(self.process_identity.strip())
             ):
                 raise TargetContractError("switch_window requires stable window/process identity")
+            try:
+                process_identity = canonical_process_identity(self.process_identity)
+            except ProcessIdentityError as exc:
+                raise TargetContractError(
+                    "switch_window requires stable window/process identity"
+                ) from exc
             if self.launch_kind is not None or self.launch_target is not None:
                 raise TargetContractError("switch_window cannot contain launch identity")
             ref_identity = _window_ref_identity(
                 hwnd=self.hwnd,
                 process_id=self.process_id,
-                process_identity=self.process_identity.strip(),
+                process_identity=process_identity,
             )
         else:
             if state is not TargetState.INSTALLED:
@@ -195,7 +182,7 @@ class TargetCandidate:
         object.__setattr__(self, "window_title", title)
         object.__setattr__(self, "provenance", provenance)
         if activation is TargetActivation.SWITCH_WINDOW:
-            object.__setattr__(self, "process_identity", self.process_identity.strip())
+            object.__setattr__(self, "process_identity", process_identity)
         else:
             object.__setattr__(self, "launch_kind", kind)
             object.__setattr__(self, "launch_target", target)
