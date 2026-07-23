@@ -215,12 +215,43 @@ class _Fixture:
     )
 
 
-def _client_result(trace: Path) -> dict[str, Any]:
+def _client_result(trace: Path, *, mode: str) -> dict[str, Any]:
+    fixture_hwnds = [801] if mode == "existing" else []
+    queue = {
+        "submitted": 0, "completed": 0, "failed": 0,
+        "async_submitted": 0, "async_completed": 0, "async_failed": 0,
+    }
     return {
-        "configuration": {"runtime_version": "vnext", "cold_start_toggle": 1},
+        "client": {"pid": 902, "hwnd": 901},
+        "runtime_before": {"desktop_action_queue": dict(queue)},
+        "configuration": {
+            "runtime_version": "vnext", "cold_start_toggle": 1,
+            "start_paused_toggle": 1,
+        },
         "session_reset": {"after": 0},
         "memory_isolation": {"passed": True},
         "result": {"run_id": RUN_ID},
+        "before_submit_handoff": {
+            "guard_started": True, "guard_armed": True, "shell_hwnd": 7,
+            "control_surface_hwnd": 901, "control_surface_pid": 902,
+            "guarded_fixture_hwnds": fixture_hwnds,
+        },
+        "after_submit_handoff": {
+            "pause_barrier": {
+                "run_id": RUN_ID, "status": "paused",
+                "manual_paused": True, "started_at": None,
+                "history_count": 0, "desktop_action_queue": dict(queue),
+            },
+            "focus_strategy": "shell_foreground_guard",
+            "shell_hwnd": 7, "foreground_hwnd": 7,
+            "shell_observation_count": 4,
+            "verified_fixture_hwnds": fixture_hwnds,
+            "resume_barrier": {
+                "run_id": RUN_ID, "status": "running",
+                "manual_paused": False, "control_method": "click",
+                "control_surface_iconic": True, "foreground_hwnd": 7,
+            },
+        },
         "trace_binding": {
             "trace_file": str(trace), "passed": True,
             "run_id": RUN_ID, "parse_errors": [],
@@ -244,7 +275,7 @@ def test_oracle_binds_trace_to_exact_process_window_and_launch(mode, tmp_path):
     verdict = oracle.target_acquisition_verdict(
         mode=mode, fixture=fixture,
         baseline={"instances": before_rows, "launch_records": before_records},
-        client_result=_client_result(trace),
+        client_result=_client_result(trace, mode=mode),
     )
     assert verdict["oracle_status"] == "conclusive"
     assert verdict["passed"] is True
@@ -256,7 +287,7 @@ def test_oracle_binds_trace_to_exact_process_window_and_launch(mode, tmp_path):
     forged = oracle.target_acquisition_verdict(
         mode=mode, fixture=fixture,
         baseline={"instances": before_rows, "launch_records": before_records},
-        client_result=_client_result(trace),
+        client_result=_client_result(trace, mode=mode),
     )
     assert forged["oracle_status"] == "conclusive"
     assert forged["passed"] is False
@@ -277,7 +308,7 @@ def test_oracle_rejects_region_and_cold_launch_hash_drift(tmp_path):
     verdict = oracle.target_acquisition_verdict(
         mode="cold", fixture=fixture,
         baseline={"instances": [], "launch_records": []},
-        client_result=_client_result(trace),
+        client_result=_client_result(trace, mode="cold"),
     )
     assert verdict["oracle_status"] == "conclusive"
     assert verdict["passed"] is False
@@ -291,7 +322,7 @@ def test_missing_bound_trace_is_oracle_unavailable(tmp_path):
     executable = tmp_path / "fixture.exe"
     row = _row(executable)
     fixture = _Fixture(executable, [row], [])
-    client = _client_result(tmp_path / "missing.jsonl")
+    client = _client_result(tmp_path / "missing.jsonl", mode="existing")
 
     verdict = oracle.target_acquisition_verdict(
         mode="existing", fixture=fixture,
@@ -318,8 +349,85 @@ def test_invalid_bound_trace_is_harness_invalid_not_conclusive_failure(tmp_path)
     verdict = oracle.target_acquisition_verdict(
         mode="existing", fixture=fixture,
         baseline={"instances": [row], "launch_records": []},
-        client_result=_client_result(path),
+        client_result=_client_result(path, mode="existing"),
     )
+    assert verdict["oracle_status"] == "unavailable"
+    assert verdict["status"] == "harness_invalid"
+    assert verdict["passed"] is False
+
+
+@pytest.mark.parametrize("mutation", [
+    "pause_run", "resume_run", "verified_hwnd", "both_hwnds", "client_hwnd",
+])
+def test_target_acquisition_verdict_rejects_handoff_identity_drift(
+    tmp_path, mutation,
+):
+    executable = tmp_path / "fixture.exe"
+    row = _row(executable)
+    fixture = _Fixture(executable, [row], [])
+    trace = _trace(tmp_path, row, "existing")
+    client = _client_result(trace, mode="existing")
+    if mutation == "pause_run":
+        client["after_submit_handoff"]["pause_barrier"]["run_id"] = "arp-other"
+    elif mutation == "resume_run":
+        client["after_submit_handoff"]["resume_barrier"]["run_id"] = "arp-other"
+    elif mutation == "verified_hwnd":
+        client["after_submit_handoff"]["verified_fixture_hwnds"] = [802]
+    elif mutation == "both_hwnds":
+        client["before_submit_handoff"]["guarded_fixture_hwnds"] = [802]
+        client["after_submit_handoff"]["verified_fixture_hwnds"] = [802]
+    else:
+        client["before_submit_handoff"]["control_surface_hwnd"] = 903
+
+    verdict = oracle.target_acquisition_verdict(
+        mode="existing", fixture=fixture,
+        baseline={"instances": [row], "launch_records": []},
+        client_result=client,
+    )
+
+    assert verdict["oracle_status"] == "unavailable"
+    assert verdict["status"] == "harness_invalid"
+    assert "targetless client handoff proof is incomplete" in verdict["errors"]
+
+
+@pytest.mark.parametrize("mutation", [
+    "pause_status", "pause_manual", "pause_history", "queue_changed",
+    "resume_manual", "resume_foreground", "missing_start_paused",
+])
+def test_target_acquisition_verdict_rejects_forged_pause_or_resume_proof(
+    tmp_path, mutation,
+):
+    executable = tmp_path / "fixture.exe"
+    row = _row(executable)
+    record = {
+        "nonce": "public", "process_id": row["process_id"], "utc_ticks": 9,
+        "exe_path": row["exe_path"], "exe_sha256": row["exe_sha256"],
+    }
+    client = _client_result(_trace(tmp_path, row, "existing"), mode="existing")
+    if mutation == "pause_status":
+        client["after_submit_handoff"]["pause_barrier"]["status"] = "running"
+    elif mutation == "pause_manual":
+        client["after_submit_handoff"]["pause_barrier"]["manual_paused"] = "true"
+    elif mutation == "pause_history":
+        client["after_submit_handoff"]["pause_barrier"]["history_count"] = 1
+    elif mutation == "queue_changed":
+        client["after_submit_handoff"]["pause_barrier"][
+            "desktop_action_queue"
+        ]["submitted"] = 1
+    elif mutation == "resume_manual":
+        client["after_submit_handoff"]["resume_barrier"]["manual_paused"] = True
+    elif mutation == "resume_foreground":
+        client["after_submit_handoff"]["resume_barrier"]["foreground_hwnd"] = 901
+    else:
+        client["configuration"]["start_paused_toggle"] = 0
+
+    verdict = oracle.target_acquisition_verdict(
+        mode="existing",
+        fixture=_Fixture(executable, [row], [record]),
+        baseline={"instances": [row], "launch_records": [record]},
+        client_result=client,
+    )
+
     assert verdict["oracle_status"] == "unavailable"
     assert verdict["status"] == "harness_invalid"
     assert verdict["passed"] is False
@@ -339,6 +447,20 @@ def test_fixture_cleanup_is_exact_and_rejects_unsafe_scope(tmp_path, monkeypatch
         f"{fixture_module.APP_PATHS_ROOT}\\Public.exe",
         registry_created=True,
     )
+    joined = []
+
+    class GuardThread:
+        @staticmethod
+        def join(timeout):
+            joined.append(timeout)
+
+        @staticmethod
+        def is_alive():
+            return False
+
+    guard = fixture_module._ShellForegroundGuard(901, 7)
+    guard.thread = GuardThread()
+    fixture._handoff_guard = guard
     monkeypatch.setattr(fixture_module, "exact_instances", lambda _path: [])
     deleted = []
 
@@ -359,6 +481,8 @@ def test_fixture_cleanup_is_exact_and_rejects_unsafe_scope(tmp_path, monkeypatch
         lambda root_key, key: deleted.append((root_key, key)),
     )
     assert fixture.cleanup()["passed"] is True
+    assert guard.stop_event.is_set()
+    assert joined == [2.0]
     assert not root.exists()
     assert deleted == [(
         fixture_module.winreg.HKEY_CURRENT_USER,
@@ -437,7 +561,7 @@ def test_register_failure_still_cleans_exact_partial_registry_key(
     assert not root.exists()
 
 
-def test_targetless_staging_verifies_fixture_then_places_shell_above_it(
+def test_targetless_staging_guards_shell_without_hiding_exact_fixture(
     tmp_path, monkeypatch,
 ):
     executable = tmp_path / "fixture.exe"
@@ -450,20 +574,72 @@ def test_targetless_staging_verifies_fixture_then_places_shell_above_it(
         fixture_module.AcquisitionFixture, "instances",
         lambda _self: copy.deepcopy([row]),
     )
+    records = [{
+        "nonce": "nonce", "process_id": row["process_id"], "utc_ticks": 9,
+        "exe_path": row["exe_path"], "exe_sha256": row["exe_sha256"],
+    }]
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture, "launch_records",
+        lambda _self: copy.deepcopy(records),
+    )
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture, "_verified_expected_windows",
+        lambda _self, rows: [
+            int(window["hwnd"])
+            for item in rows for window in item["windows"]
+        ],
+    )
 
     focused = []
     monkeypatch.setattr(
-        fixture_module, "focus_shell_targetless",
-        lambda **_kwargs: focused.append("shell") or {
-            "shell_hwnd": 7, "foreground_hwnd": 7, "exact": True,
-        },
+        fixture_module.win32gui, "IsWindowVisible",
+        lambda hwnd: hwnd == 801,
+    )
+    monkeypatch.setattr(
+        fixture_module.win32gui, "IsIconic", lambda hwnd: hwnd == 901,
+    )
+    monkeypatch.setattr(
+        fixture_module.win32gui, "IsWindow", lambda hwnd: hwnd in {7, 901},
+    )
+    monkeypatch.setattr(
+        fixture_module.win32gui, "GetAncestor", lambda hwnd, _kind: hwnd,
+    )
+    monkeypatch.setattr(
+        fixture_module.win32process, "GetWindowThreadProcessId",
+        lambda hwnd: (1, 902 if hwnd == 901 else row["process_id"]),
+    )
+    monkeypatch.setattr(
+        fixture_module.win32gui, "SetForegroundWindow",
+        lambda hwnd: focused.append(hwnd),
+    )
+    monkeypatch.setattr(
+        fixture_module.ctypes.windll.user32, "GetShellWindow", lambda: 7,
+    )
+    monkeypatch.setattr(
+        fixture_module.ctypes.windll.user32, "GetForegroundWindow",
+        lambda: 7,
     )
 
-    result = fixture.stage_targetless_handoff([row])
+    staged = fixture.stage_targetless_handoff(
+        [row], records, control_surface_hwnd=901, control_surface_pid=902,
+    )
+    deadline = fixture_module.time.monotonic() + 1.0
+    while not focused and fixture_module.time.monotonic() < deadline:
+        fixture_module.time.sleep(0.01)
+    finished = fixture.finish_targetless_handoff([row], records)
 
-    assert focused == ["shell"]
-    assert result["verified_fixture_hwnds"] == [801]
-    assert result["exact"] is True
+    assert focused and set(focused) == {7}
+    assert staged == {
+        "shell_hwnd": 7,
+        "guarded_fixture_hwnds": [801],
+        "control_surface_hwnd": 901, "control_surface_pid": 902,
+        "guard_armed": True,
+        "guard_started": True,
+    }
+    assert finished["verified_fixture_hwnds"] == [801]
+    assert finished["foreground_hwnd"] == 7
+    assert finished["shell_observation_count"] >= 1
+    assert finished["focus_strategy"] == "shell_foreground_guard"
 
 
 def test_targetless_staging_rejects_identity_drift_before_any_mutation(
@@ -483,17 +659,262 @@ def test_targetless_staging_rejects_identity_drift_before_any_mutation(
     )
     mutations = []
     monkeypatch.setattr(
-        fixture_module, "focus_shell_targetless",
-        lambda **_kwargs: mutations.append("focus"),
+        fixture_module.win32gui, "SetForegroundWindow",
+        lambda *_args: mutations.append("focus"),
     )
 
     with pytest.raises(
         fixture_module.FixtureUnavailable,
         match="identity changed before targetless handoff",
     ):
-        fixture.stage_targetless_handoff([baseline])
+        fixture.stage_targetless_handoff(
+            [baseline], [], control_surface_hwnd=901, control_surface_pid=902,
+        )
 
     assert mutations == []
+
+
+def test_targetless_staging_rechecks_process_and_window_before_guarding(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "fixture.exe"
+    baseline = _row(executable)
+    fixture = fixture_module.AcquisitionFixture(
+        tmp_path, executable, tmp_path / "launch.log", "Public", "nonce",
+        f"{fixture_module.APP_PATHS_ROOT}\\Public.exe",
+    )
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture, "instances",
+        lambda _self: copy.deepcopy([baseline]),
+    )
+    records = [{
+        "nonce": "nonce", "process_id": baseline["process_id"],
+        "utc_ticks": 9, "exe_path": baseline["exe_path"],
+        "exe_sha256": baseline["exe_sha256"],
+    }]
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture, "launch_records",
+        lambda _self: copy.deepcopy(records),
+    )
+
+    class ReusedProcess:
+        pid = baseline["process_id"]
+
+        @staticmethod
+        def exe():
+            return str(tmp_path / "different.exe")
+
+        @staticmethod
+        def create_time():
+            return baseline["create_time_ns"] / 1_000_000_000
+
+    monkeypatch.setattr(
+        fixture_module.psutil, "Process", lambda _pid: ReusedProcess(),
+    )
+    mutations = []
+    monkeypatch.setattr(
+        fixture_module.win32gui, "SetForegroundWindow",
+        lambda *_args: mutations.append("focus"),
+    )
+
+    with pytest.raises(
+        fixture_module.FixtureUnavailable,
+        match="fixture process identity changed",
+    ):
+        fixture.stage_targetless_handoff(
+            [baseline], records,
+            control_surface_hwnd=901, control_surface_pid=902,
+        )
+
+    assert mutations == []
+
+
+def test_handoff_release_rejects_an_extra_fixture_before_stopping_guard(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "fixture.exe"
+    baseline = _row(executable)
+    extra = _row(executable, pid=702)
+    record = {
+        "nonce": "nonce", "process_id": baseline["process_id"],
+        "utc_ticks": 9, "exe_path": baseline["exe_path"],
+        "exe_sha256": baseline["exe_sha256"],
+    }
+    fixture = fixture_module.AcquisitionFixture(
+        tmp_path, executable, tmp_path / "launch.log", "Public", "nonce",
+        f"{fixture_module.APP_PATHS_ROOT}\\Public.exe",
+    )
+    stopped: list[str] = []
+
+    class Guard:
+        control_surface_hwnd = 901
+        control_surface_pid = 902
+
+        @staticmethod
+        def stop():
+            stopped.append("stop")
+            return {}
+
+    fixture._handoff_guard = Guard()
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture,
+        "_verify_control_surface",
+        staticmethod(lambda *_args: None),
+    )
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture,
+        "instances",
+        lambda _self: copy.deepcopy([baseline, extra]),
+    )
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture,
+        "launch_records",
+        lambda _self: [copy.deepcopy(record)],
+    )
+
+    with pytest.raises(
+        fixture_module.FixtureUnavailable,
+        match="fixture changed before handoff release",
+    ):
+        fixture.finish_targetless_handoff([baseline], [record])
+
+    assert stopped == []
+    assert fixture._handoff_guard is not None
+
+
+def test_targetless_shell_guard_rejects_foreground_loss(monkeypatch):
+    guard = fixture_module._ShellForegroundGuard(901, 7)
+    guard.shell_observation_count = 1
+    monkeypatch.setattr(
+        fixture_module.ctypes.windll.user32, "GetForegroundWindow",
+        lambda: 9,
+    )
+
+    with pytest.raises(
+        fixture_module.FixtureUnavailable,
+        match="shell lost foreground",
+    ):
+        guard.stop()
+
+
+def test_targetless_shell_guard_fails_if_control_never_minimizes(monkeypatch):
+    guard = fixture_module._ShellForegroundGuard(901, 7)
+    monkeypatch.setattr(fixture_module.win32gui, "IsIconic", lambda _hwnd: False)
+
+    guard.start()
+    with pytest.raises(
+        fixture_module.FixtureUnavailable,
+        match="observed no shell foreground",
+    ):
+        guard.stop()
+
+
+def test_targetless_shell_guard_surfaces_foreground_api_failure(monkeypatch):
+    guard = fixture_module._ShellForegroundGuard(901, 7)
+    monkeypatch.setattr(fixture_module.win32gui, "IsIconic", lambda _hwnd: True)
+    monkeypatch.setattr(
+        fixture_module.win32gui,
+        "SetForegroundWindow",
+        lambda _hwnd: (_ for _ in ()).throw(RuntimeError("denied")),
+    )
+
+    with pytest.raises(
+        fixture_module.FixtureUnavailable,
+        match="shell guard failed: RuntimeError",
+    ):
+        guard.start()
+
+
+def test_cleanup_stops_guard_before_scope_check_and_retains_live_guard(
+    tmp_path, monkeypatch,
+):
+    fixture = fixture_module.AcquisitionFixture(
+        tmp_path, tmp_path / "fixture.exe", tmp_path / "launch.log",
+        "Public", "nonce", f"{fixture_module.APP_PATHS_ROOT}\\Public.exe",
+    )
+    joins: list[float] = []
+
+    class LiveThread:
+        @staticmethod
+        def join(timeout):
+            joins.append(timeout)
+
+        @staticmethod
+        def is_alive():
+            return True
+
+    guard = fixture_module._ShellForegroundGuard(901, 7)
+    guard.thread = LiveThread()
+    fixture._handoff_guard = guard
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture, "_safe_scope", lambda _self: False,
+    )
+    monkeypatch.setattr(
+        fixture_module,
+        "exact_instances",
+        lambda _path: pytest.fail("destructive cleanup must not start"),
+    )
+
+    result = fixture.cleanup()
+
+    assert result == {"passed": False, "errors": ["handoff_guard:still_running"]}
+    assert guard.stop_event.is_set()
+    assert joins == [2.0]
+    assert fixture._handoff_guard is guard
+
+
+def test_cleanup_stops_guard_even_when_destructive_scope_is_unsafe(
+    tmp_path, monkeypatch,
+):
+    fixture = fixture_module.AcquisitionFixture(
+        tmp_path, tmp_path / "fixture.exe", tmp_path / "launch.log",
+        "Public", "nonce", f"{fixture_module.APP_PATHS_ROOT}\\Public.exe",
+    )
+
+    class StoppedThread:
+        @staticmethod
+        def join(_timeout):
+            return None
+
+        @staticmethod
+        def is_alive():
+            return False
+
+    guard = fixture_module._ShellForegroundGuard(901, 7)
+    guard.thread = StoppedThread()
+    fixture._handoff_guard = guard
+    monkeypatch.setattr(
+        fixture_module.AcquisitionFixture, "_safe_scope", lambda _self: False,
+    )
+
+    result = fixture.cleanup()
+
+    assert result == {"passed": False, "errors": ["fixture scope is unsafe"]}
+    assert guard.stop_event.is_set()
+    assert fixture._handoff_guard is None
+
+
+def test_control_surface_identity_rejects_pid_or_root_drift(monkeypatch):
+    monkeypatch.setattr(fixture_module.win32gui, "IsWindow", lambda _hwnd: True)
+    monkeypatch.setattr(fixture_module.win32gui, "GetAncestor", lambda _h, _k: 901)
+    monkeypatch.setattr(
+        fixture_module.win32process,
+        "GetWindowThreadProcessId",
+        lambda _hwnd: (1, 902),
+    )
+
+    with pytest.raises(
+        fixture_module.FixtureUnavailable,
+        match="control surface identity changed",
+    ):
+        fixture_module.AcquisitionFixture._verify_control_surface(901, 903)
+
+    monkeypatch.setattr(fixture_module.win32gui, "GetAncestor", lambda _h, _k: 999)
+    with pytest.raises(
+        fixture_module.FixtureUnavailable,
+        match="control surface identity changed",
+    ):
+        fixture_module.AcquisitionFixture._verify_control_surface(901, 902)
 
 
 def test_cleanup_refuses_pid_reuse_before_any_window_or_process_mutation(
@@ -570,11 +991,26 @@ def test_runner_uses_only_visible_client_entry_and_public_random_name(
             assert mode == "cold"
             return {"instances": [], "launch_records": []}
 
-        def stage_targetless_handoff(self, rows):
+        def stage_targetless_handoff(
+            self, rows, records, *, control_surface_hwnd, control_surface_pid,
+        ):
             assert rows == []
+            assert records == []
+            assert control_surface_hwnd == 901
+            assert control_surface_pid == 902
             return {
-                "shell_hwnd": 1, "foreground_hwnd": 1, "exact": True,
-                "verified_fixture_hwnds": [],
+                "shell_hwnd": 1, "guarded_fixture_hwnds": [],
+                "control_surface_hwnd": 901, "control_surface_pid": 902,
+                "guard_started": True, "guard_armed": True,
+            }
+
+        def finish_targetless_handoff(self, rows, records):
+            assert rows == []
+            assert records == []
+            return {
+                "verified_fixture_hwnds": [], "foreground_hwnd": 1,
+                "shell_observation_count": 4,
+                "focus_strategy": "shell_foreground_guard",
             }
 
         def cleanup(self):
@@ -587,12 +1023,60 @@ def test_runner_uses_only_visible_client_entry_and_public_random_name(
         def run_case(name, spec, **kwargs):
             captured.update({"name": name, "spec": spec, **kwargs})
             class Driver:
+                identity = type("Identity", (), {"hwnd": 901, "pid": 902})()
+
                 @staticmethod
                 def capture_desktop(name):
                     return str(tmp_path / name)
 
-            captured["before_submit"] = kwargs["before_submit"](Driver(), {})
-            captured["handoff"] = kwargs["after_submit"](Driver(), {})
+                @staticmethod
+                def runtime_status():
+                    return {
+                        "running": True,
+                        "desktop_action_queue": {
+                            "submitted": 0, "completed": 0, "failed": 0,
+                            "async_submitted": 0, "async_completed": 0,
+                            "async_failed": 0,
+                        },
+                        "current_run": {
+                            "run_id": "arp-new", "status": "paused",
+                            "manual_paused": True,
+                            "goal": spec["task"],
+                        },
+                    }
+
+                @staticmethod
+                def run_detail(run_id):
+                    assert run_id == "arp-new"
+                    return {
+                        "run": {
+                            "run_id": run_id, "status": "paused",
+                            "manual_paused": True,
+                        },
+                        "arp": {
+                            "run_id": run_id, "status": "paused",
+                            "manual_paused": True, "started_at": None,
+                            "history": [],
+                        },
+                    }
+
+                @staticmethod
+                def resume_paused_run(run_id):
+                    return {
+                        "run_id": run_id, "status": "running",
+                        "manual_paused": False, "control_method": "click",
+                        "control_surface_iconic": True, "foreground_hwnd": 1,
+                    }
+
+            partial = {
+                "runtime_before": {
+                    "current_run": {"run_id": "arp-old"},
+                },
+            }
+            captured["before_submit"] = kwargs["before_submit"](
+                Driver(), partial,
+            )
+            captured["handoff"] = kwargs["after_submit"](Driver(), partial)
             return {
                 "passed": True,
                 "task_verdict": {"passed": True},
@@ -622,19 +1106,55 @@ def test_runner_uses_only_visible_client_entry_and_public_random_name(
     assert captured["reset_session"] is True
     assert captured["submit_without_focus"] is True
     assert captured["spec"]["runtime_version"] == "vnext"
+    assert captured["spec"]["start_paused"] is True
     assert captured["spec"]["task"] == (
         "打开应用 WinPilotAcquisition-public-nonce"
     )
     assert private not in json.dumps(captured, default=str)
     assert result["projected_client_result"] is True
-    assert result["targetless_precondition"]["exact"] is True
+    assert result["targetless_precondition"]["guard_started"] is True
     assert captured["before_submit"]["desktop_screenshot"].endswith(
         "targetless-before-submit.png",
     )
-    assert captured["handoff"]["focus_mutated"] is False
-    assert captured["handoff"]["desktop_screenshot"].endswith(
-        "targetless-after-submit.png",
+    assert captured["handoff"]["focus_strategy"] == (
+        "shell_foreground_guard"
     )
+    assert captured["handoff"]["pause_barrier"]["run_id"] == "arp-new"
+    assert captured["handoff"]["pause_barrier"]["status"] == "paused"
+    assert captured["handoff"]["resume_barrier"]["run_id"] == "arp-new"
+    assert captured["handoff"]["verified_fixture_hwnds"] == []
+    assert captured["handoff"]["desktop_screenshot"].endswith(
+        "targetless-before-resume.png",
+    )
+
+
+def test_handoff_barrier_rejects_new_run_that_is_already_terminal():
+    class Driver:
+        @staticmethod
+        def runtime_status():
+            return {
+                "running": False,
+                "current_run": {
+                    "run_id": "arp-new", "status": "done", "goal": "task",
+                },
+            }
+
+        @staticmethod
+        def run_detail(run_id):
+            return {
+                "run": {"run_id": run_id, "status": "done"},
+                "arp": {"run_id": run_id, "status": "done"},
+            }
+
+    with pytest.raises(
+        runner.FixtureUnavailable,
+        match="did not enter the atomic pause barrier",
+    ):
+        runner._wait_for_submitted_run(
+            Driver(),
+            {"runtime_before": {"current_run": {"run_id": "arp-old"}}},
+            task="task", timeout=0.1,
+        )
 
 
 def test_runner_marks_missing_compiler_or_interactive_environment_unavailable(

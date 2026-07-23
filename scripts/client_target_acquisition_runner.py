@@ -5,6 +5,7 @@ import ctypes
 import hashlib
 import json
 import os
+import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime
@@ -30,6 +31,59 @@ def _interactive_desktop() -> bool:
         os.name == "nt"
         and int(ctypes.windll.user32.GetForegroundWindow() or 0) > 0
     )
+
+
+def _wait_for_submitted_run(
+    driver: Any,
+    partial: dict[str, Any],
+    *,
+    task: str,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    previous = str(
+        ((partial.get("runtime_before") or {}).get("current_run") or {}).get(
+            "run_id",
+        )
+        or ""
+    )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        runtime = driver.runtime_status()
+        current = runtime.get("current_run") or {}
+        run_id = str(current.get("run_id") or "")
+        status = str(current.get("status") or "")
+        if run_id and run_id != previous and current.get("goal") == task:
+            detail = driver.run_detail(run_id)
+            projection = detail.get("run") or {}
+            execution = detail.get("arp") or {}
+            if (
+                runtime.get("running") is not True
+                or status != "paused"
+                or current.get("manual_paused") is not True
+                or projection.get("run_id") != run_id
+                or projection.get("status") != "paused"
+                or projection.get("manual_paused") is not True
+                or execution.get("run_id") != run_id
+                or execution.get("status") != "paused"
+                or execution.get("manual_paused") is not True
+                or execution.get("started_at") is not None
+                or list(execution.get("history") or [])
+            ):
+                raise FixtureUnavailable(
+                    "submitted run did not enter the atomic pause barrier",
+                )
+            return {
+                "run_id": run_id,
+                "status": status,
+                "manual_paused": True,
+                "started_at": None,
+                "history_count": 0,
+                "desktop_action_queue": dict(
+                    runtime.get("desktop_action_queue") or {}
+                ),
+            }
+        time.sleep(0.05)
+    raise FixtureUnavailable("submitted run did not reach the handoff barrier")
 
 
 def run_target_acquisition_case(
@@ -74,6 +128,7 @@ def run_target_acquisition_case(
             "timeout": int(source["timeout"]),
             "entrypoint": "electron_client_windows_uia",
             "cold_start_required": True,
+            "start_paused": True,
         }
         result.update({
             "task": task, "public_fixture_name": fixture.public_name,
@@ -82,7 +137,12 @@ def run_target_acquisition_case(
         })
 
         def before_submit(driver: Any, _partial: dict[str, Any]) -> dict[str, Any]:
-            staged = fixture.stage_targetless_handoff(baseline["instances"])
+            staged = fixture.stage_targetless_handoff(
+                baseline["instances"],
+                baseline["launch_records"],
+                control_surface_hwnd=int(driver.identity.hwnd),
+                control_surface_pid=int(driver.identity.pid),
+            )
             return {
                 **staged,
                 "desktop_screenshot": driver.capture_desktop(
@@ -91,14 +151,24 @@ def run_target_acquisition_case(
             }
 
         def handoff(driver: Any, _partial: dict[str, Any]) -> dict[str, Any]:
+            pause_barrier = _wait_for_submitted_run(
+                driver, _partial, task=task,
+            )
+            handoff = fixture.finish_targetless_handoff(
+                baseline["instances"],
+                baseline["launch_records"],
+            )
+            before_resume = driver.capture_desktop(
+                "targetless-before-resume.png",
+            )
+            resume_barrier = driver.resume_paused_run(
+                pause_barrier["run_id"],
+            )
             return {
-                "foreground_hwnd": int(
-                    ctypes.windll.user32.GetForegroundWindow() or 0
-                ),
-                "desktop_screenshot": driver.capture_desktop(
-                    "targetless-after-submit.png",
-                ),
-                "focus_mutated": False,
+                "pause_barrier": pause_barrier,
+                **handoff,
+                "desktop_screenshot": before_resume,
+                "resume_barrier": resume_barrier,
             }
 
         def verify(client_result: dict[str, Any]) -> dict[str, Any]:
@@ -113,6 +183,7 @@ def run_target_acquisition_case(
             {
                 "task": task, "max_steps": int(source["max_steps"]),
                 "timeout": int(source["timeout"]), "runtime_version": "vnext",
+                "start_paused": True,
             },
             output_root=case_dir / "client", reset_session=True,
             before_submit=before_submit,

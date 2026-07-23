@@ -370,6 +370,81 @@ def test_run_control_activation_keeps_default_click_and_explicit_invoke_separate
     assert calls == ["click", "invoke"]
 
 
+def test_resume_paused_run_uses_visible_continue_and_requires_frontend_yield(
+    monkeypatch, tmp_path,
+):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver.output_dir = tmp_path
+    driver.identity = harness.ClientIdentity(
+        pid=902, hwnd=901, executable="electron.exe",
+        command_line=[], workspace_verified=True,
+    )
+    calls: list[str] = []
+
+    class Control:
+        @staticmethod
+        def Click():
+            calls.append("continue")
+
+    driver.restore_and_focus = lambda: calls.append("focus")
+    driver.button = lambda title: (
+        Control() if title == harness.CONTINUE_TASK else None
+    )
+    driver.run_detail = lambda run_id: {
+        "run": {"run_id": run_id, "status": "running"},
+        "arp": {
+            "run_id": run_id, "status": "running", "manual_paused": False,
+        },
+    }
+    monkeypatch.setattr(harness.win32gui, "IsIconic", lambda _hwnd: True)
+    monkeypatch.setattr(harness.win32gui, "GetForegroundWindow", lambda: 7)
+
+    resumed = driver.resume_paused_run("arp-paused", timeout=1)
+
+    assert calls == ["focus", "continue"]
+    assert resumed == {
+        "run_id": "arp-paused", "status": "running",
+        "manual_paused": False, "control_method": "click",
+        "control_surface_iconic": True, "foreground_hwnd": 7,
+    }
+
+
+def test_resume_paused_run_rejects_client_that_stays_foreground(
+    monkeypatch, tmp_path,
+):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver.output_dir = tmp_path
+    driver.identity = harness.ClientIdentity(
+        pid=902, hwnd=901, executable="electron.exe",
+        command_line=[], workspace_verified=True,
+    )
+
+    class Control:
+        @staticmethod
+        def Click():
+            return None
+
+    driver.restore_and_focus = lambda: None
+    driver.button = lambda _title: Control()
+    driver.run_detail = lambda run_id: {
+        "run": {"run_id": run_id, "status": "running"},
+        "arp": {
+            "run_id": run_id, "status": "running", "manual_paused": False,
+        },
+    }
+    monkeypatch.setattr(harness.win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(harness.win32gui, "GetForegroundWindow", lambda: 901)
+
+    try:
+        driver.resume_paused_run("arp-paused", timeout=1)
+    except RuntimeError as exc:
+        assert "没有让出前台" in str(exc)
+    else:
+        raise AssertionError("foreground client must fail closed")
+
+
 def test_suite_preserves_only_case_two_to_case_three_short_term_context(
     monkeypatch,
     tmp_path,

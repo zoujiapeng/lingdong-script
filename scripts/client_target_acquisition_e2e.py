@@ -228,11 +228,84 @@ def target_acquisition_verdict(
         invalid.append("client did not explicitly select vnext")
     if configuration.get("cold_start_toggle") != 1:
         invalid.append("client cold-start toggle is not enabled")
+    if configuration.get("start_paused_toggle") != 1:
+        invalid.append("client start-paused toggle is not enabled")
     if (client_result.get("session_reset") or {}).get("after") != 0:
         invalid.append("client session reset is not empty")
     if (client_result.get("memory_isolation") or {}).get("passed") is not True:
         invalid.append("run memory isolation is incomplete")
     run_id = str((client_result.get("result") or {}).get("run_id") or "")
+    before_handoff = client_result.get("before_submit_handoff") or {}
+    after_handoff = client_result.get("after_submit_handoff") or {}
+    pause_barrier = after_handoff.get("pause_barrier") or {}
+    resume_barrier = after_handoff.get("resume_barrier") or {}
+    guarded = before_handoff.get("guarded_fixture_hwnds")
+    verified = after_handoff.get("verified_fixture_hwnds")
+    client = client_result.get("client") or {}
+    expected_fixture_hwnds = sorted(
+        int(window.get("hwnd") or 0)
+        for row in baseline.get("instances") or []
+        for window in row.get("windows") or []
+    )
+    before_queue = (
+        (client_result.get("runtime_before") or {}).get("desktop_action_queue")
+        or {}
+    )
+    paused_queue = pause_barrier.get("desktop_action_queue") or {}
+    queue_keys = (
+        "submitted", "completed", "failed",
+        "async_submitted", "async_completed", "async_failed",
+    )
+    queue_unchanged = all(
+        before_queue.get(key) == paused_queue.get(key) for key in queue_keys
+    )
+    queue_observed = all(
+        type(before_queue.get(key)) is int
+        and before_queue.get(key, -1) >= 0
+        and type(paused_queue.get(key)) is int
+        and paused_queue.get(key, -1) >= 0
+        for key in queue_keys
+    )
+    if (
+        before_handoff.get("guard_started") is not True
+        or before_handoff.get("guard_armed") is not True
+        or type(before_handoff.get("shell_hwnd")) is not int
+        or before_handoff.get("shell_hwnd", 0) <= 0
+        or type(before_handoff.get("control_surface_hwnd")) is not int
+        or before_handoff.get("control_surface_hwnd", 0) <= 0
+        or before_handoff.get("control_surface_hwnd") != client.get("hwnd")
+        or type(before_handoff.get("control_surface_pid")) is not int
+        or before_handoff.get("control_surface_pid", 0) <= 0
+        or before_handoff.get("control_surface_pid") != client.get("pid")
+        or not isinstance(guarded, list)
+        or any(type(hwnd) is not int or hwnd <= 0 for hwnd in guarded)
+        or sorted(guarded) != expected_fixture_hwnds
+        or not isinstance(verified, list)
+        or any(type(hwnd) is not int or hwnd <= 0 for hwnd in verified)
+        or after_handoff.get("focus_strategy") != "shell_foreground_guard"
+        or after_handoff.get("shell_hwnd") != before_handoff.get("shell_hwnd")
+        or after_handoff.get("foreground_hwnd") != before_handoff.get("shell_hwnd")
+        or type(after_handoff.get("shell_observation_count")) is not int
+        or after_handoff.get("shell_observation_count", 0) <= 0
+        or sorted(verified or []) != expected_fixture_hwnds
+        or pause_barrier.get("run_id") != run_id
+        or pause_barrier.get("status") != "paused"
+        or pause_barrier.get("manual_paused") is not True
+        or pause_barrier.get("started_at") is not None
+        or pause_barrier.get("history_count") != 0
+        or not queue_observed
+        or not queue_unchanged
+        or resume_barrier.get("run_id") != run_id
+        or resume_barrier.get("status") not in {"queued", "running"}
+        or resume_barrier.get("manual_paused") is not False
+        or resume_barrier.get("control_method") != "click"
+        or resume_barrier.get("control_surface_iconic") is not True
+        or type(resume_barrier.get("foreground_hwnd")) is not int
+        or resume_barrier.get("foreground_hwnd", 0) <= 0
+        or resume_barrier.get("foreground_hwnd") != before_handoff.get("shell_hwnd")
+        or resume_barrier.get("foreground_hwnd") == client.get("hwnd")
+    ):
+        invalid.append("targetless client handoff proof is incomplete")
     if (
         trace_binding.get("passed") is not True
         or str(trace_binding.get("run_id") or "") != run_id
