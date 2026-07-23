@@ -442,6 +442,10 @@ def test_discover_target_proposal_is_strict_bounded_and_identity_free() -> None:
 def test_discover_target_tool_schema_has_one_canonical_owner() -> None:
     assert discover_target_tool_schema() == {
         "type": "object",
+        "description": (
+            "Search running windows and installed applications by name. "
+            "Returns target_choices on the next turn and does not change the desktop."
+        ),
         "additionalProperties": False,
         "properties": {
             "query": {

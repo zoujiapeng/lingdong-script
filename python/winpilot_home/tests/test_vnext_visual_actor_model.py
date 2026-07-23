@@ -168,16 +168,7 @@ def _target_choice_turn() -> ActorTurnInput:
     raw["tools"] = [{
         "format": ACTOR_TOOL_VIEW_FORMAT,
         "name": "activate_target",
-        "schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "candidate_ordinal": {
-                    "type": "integer", "minimum": 1, "maximum": 16,
-                },
-            },
-            "required": ["candidate_ordinal"],
-        },
+        "schema": build_live_catalog().get("activate_target").to_dict()["schema"],
         "requires_local_intent": True,
     }]
     raw["target_choices"] = [{
@@ -284,6 +275,11 @@ def test_visual_actor_sees_ordinal_choice_and_returns_no_runtime_identity() -> N
     assert proposal.action == "activate_target"
     assert dict(proposal.args) == {"candidate_ordinal": 1}
     assert proposal.local_intent == "activate the visible workspace"
+    function = requests[0]["tools"][0]["function"]
+    assert function["description"] == (
+        build_live_catalog().get("activate_target").schema["description"]
+    )
+    assert "description" not in function["parameters"]
     user_text = requests[0]["messages"][-1]["content"][0]["text"]
     payload = json.loads(user_text)
     assert payload["target_choices"] == [{
@@ -317,6 +313,11 @@ def test_visual_actor_maps_discover_target_without_local_intent() -> None:
 
     assert isinstance(proposal, DiscoverTargetRequest)
     assert proposal.query == "Visible workspace"
+    function = requests[0]["tools"][0]["function"]
+    assert function["description"] == (
+        build_live_catalog().get("discover_target").schema["description"]
+    )
+    assert "description" not in function["parameters"]
     parameters = requests[0]["tools"][0]["function"]["parameters"]
     assert parameters == {
         "type": "object",
