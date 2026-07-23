@@ -30,6 +30,9 @@ _RUNTIME_FIELDS = frozenset({
     "capability_grant_ids", "target_binding_id", "pointer_lease_id",
     "decision_id", "envelope_id", "action_id", "artifact_id",
     "verification_id", "hwnd", "process_id",
+    "candidate_ref", "candidate_id", "discovery_id", "lease_id",
+    "candidate_lease_id", "target_lease_id", "root_hwnd", "process_identity",
+    "executable_path", "launch_target", "launch_kind", "application_id", "app_id",
 })
 _PHYSICAL_COORD_FIELDS = frozenset({
     f"{space}_{part}"

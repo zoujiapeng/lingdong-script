@@ -18,7 +18,7 @@ action-effect/0
 actor-mission-view/2
 actor-frame-view/0
 actor-tool-view/1
-actor-turn-input/3
+actor-turn-input/4
 actor-previous-action/0
 actor-proposal/0
 actor-envelope/1
@@ -604,9 +604,11 @@ P4a 不把带 Runtime 身份的 `MissionCard` 或 `BrokerProjection` 原样交�
 - `ActorMissionView`：完整 `original_goal`、当前义务的语义字段、相关事实/工件摘要、target 标题、当前义务自己的 transition/failure 摘要，以及中性的 `unchanged_frame_streak`；
 - `ActorFrameView`：只说明图片是否可用、是否权威/新鲜，以及 `submitted_image_pixels` 坐标系；
 - `ActorToolView`：只包含当前 BrokerProjection 允许的 Visual Actor 工具名、严格 JSON schema 和机械布尔值 `requires_local_intent`；
-- `ActorTurnInput`：组合上述三种 view 与可选的一条 `previous_action`，图片字节和 submitted size 通过注入的 `ActorPort` 单独传递。
+- `ActorTurnInput`：组合上述三种 view、可选的一条 `previous_action`，以及未绑定目标时可选的连续序号 target choices；图片字节和 submitted size 通过注入的 `ActorPort` 单独传递。
 
-这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。`actor-mission-view/2` 不再投影内部 ActionEffect 恒定的 `semantic_completion=unknown`：该值只表示像素比较器没有语义完成权限，不能伪装成 Runtime 对当前义务“尚未完成”的判断。内部 `action-effect/0` 仍保留该哨兵。`actor-tool-view/1` 与 `actor-turn-input/3` 严格拒绝旧版或混合版本。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前增量 live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
+这些 view 结构上不含 mission/run/revision/obligation/frame/evidence/grant/projection identity。`actor-mission-view/2` 不再投影内部 ActionEffect 恒定的 `semantic_completion=unknown`：该值只表示像素比较器没有语义完成权限，不能伪装成 Runtime 对当前义务“尚未完成”的判断。内部 `action-effect/0` 仍保留该哨兵。`actor-tool-view/1` 与 `actor-turn-input/4` 严格拒绝旧版或混合版本。`/4` 的每个 target choice 仅含连续的 1-based ordinal、语义 label、可见 window title 和 visible/recoverable/installed 状态，不含 candidate ref、activation、provenance、query、HWND、PID、路径、AppID、process identity 或 lease/discovery identity。choices 与 `activate_target` 工具必须同时出现，已绑定 target 不得投影 choices。语义文本完整保留，不通过关键词替换或应用规则“清洗”。当前增量 live coordinator 已通过隔离的模型请求实现该 ActorPort；Runtime 仍是机械身份的唯一绑定者，provider 不能扩大 BrokerProjection 或接触 Controller。
+
+Target discovery snapshot 与 candidate 是 Runtime-private typed data，不再提供 Actor serialization 或 candidate-ref lookup。`TargetSelectionLease` 是线程安全、进程内、不可序列化的一次性 sidecar：它冻结 ordered candidates，并精确绑定 mission/run/revision/obligation/turn/frame authority/Broker projection；第一次 consume 尝试无论成功、越界或 stale 都耗尽，restart 即丢失。它不是 Mission、Evidence、BUS、trace、Verifier 或 replay 的一部分，也不能形成第二份 target ledger。当前切片只建立该合同，尚未把 `activate_target` 加入 live Catalog。
 
 ### 9.2 上一笔 Actor 动作的有界上下文
 

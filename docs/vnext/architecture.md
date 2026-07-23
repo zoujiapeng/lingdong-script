@@ -246,8 +246,10 @@ Broker 不读取应用名称、窗口标题、测试题号、任务句关键词�
 未绑定窗口：
 
 ```text
-open_app  switch_window  observe  blocked
+discover_target  activate_target  blocked
 ```
+
+`discover_target` 只产生只读候选事实；`activate_target` 只接受当前 turn 的有界 ordinal。Runtime 从同一私有 lease 机械读取该候选已经冻结的 switch/open activation，不替 Actor 改选候选，也不向模型暴露两套物理身份工具。
 
 普通已绑定窗口：
 
@@ -279,12 +281,13 @@ request_capability  claim_obligation_done  blocked
 Catalog 只用 `visual.interact` 授权 click/double-click/scroll/type-text/hotkey。canonical 名称统一由
 `vnext/capability_names.py` 持有，兼容 re-export 不能成为第二 owner。
 
-P4b.2 当前只完成 target acquisition 的只读事实基础：`TargetDiscovery` 聚合安装目录、进程与窗口候选，
+P4b.2 当前完成 target acquisition 的只读事实基础和 ordinal/one-shot 纯合同：`TargetDiscovery` 聚合安装目录、进程与窗口候选，
 `WindowsTargetFacts` 用一次不可变快照给 PID、创建时间、绝对 exe 路径和 HWND 建立强身份；Mission
 只接受由 Runtime action 与 deterministic evidence 共同证明的 strict `TargetBinding`。这些 owner 均不
-选择候选、不聚焦窗口、不启动应用。live Actor/Broker 尚未接入 targetless 输入，正式 Actor view 也不得
-暴露 `candidate_ref`、HWND、PID、路径或 AppID；下一切片由 Actor 只选择有界序号，Runtime 在私有
-one-shot sidecar 中解析并重新验证候选，再通过同一个 Controller/ActionQueue 执行精确 `switch/open`。
+选择候选、不聚焦窗口、不启动应用。`actor-turn-input/4` 已成为唯一 target choice 模型边界，只投影连续
+序号、语义名称、可见标题和状态；`TargetSelectionLease` 在 Runtime 私有 sidecar 中冻结原候选映射并
+保证一次性消费。live Actor/Broker 尚未接入 targetless 输入；下一切片仍需解析并重新验证候选，再通过
+同一个 Controller/ActionQueue 执行精确 `switch/open`。
 在 existing-instance reuse 与 cold-launch 的同入口 oracle 闭合前，上面的未绑定工具面仍是目标设计，
 不是当前产品能力。
 
