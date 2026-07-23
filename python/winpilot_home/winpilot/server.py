@@ -1014,9 +1014,18 @@ def _start_arp_execution(
                 ADMITTED_PHYSICAL_CLICK_BACKEND,
                 ADMITTED_PHYSICAL_HOTKEY_BACKEND,
                 ADMITTED_PHYSICAL_SCROLL_BACKEND,
+                ADMITTED_PHYSICAL_TARGET_ACTIVATION_BACKEND,
                 ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
             )
-            from .action.raw_device import RawDeviceBackends, RawDeviceExecutor
+            from .action.raw_device import (
+                AdmittedPhysicalTargetLaunchBackend,
+                RawDeviceBackends,
+                RawDeviceExecutor,
+            )
+            from .action.windows_target_launch import WindowsCreateProcessWBackend
+            from .visual_runtime.windows_target_launch_facts import (
+                PsutilLaunchProcessIdentityReader,
+            )
             from .vnext.bridge.coordinator import (
                 build_live_desktop_runtime_coordinator,
             )
@@ -1028,6 +1037,16 @@ def _start_arp_execution(
                     admitted_physical_scroll=ADMITTED_PHYSICAL_SCROLL_BACKEND,
                     admitted_physical_type_text=ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
                     admitted_physical_hotkey=ADMITTED_PHYSICAL_HOTKEY_BACKEND,
+                    admitted_physical_target_activation=(
+                        ADMITTED_PHYSICAL_TARGET_ACTIVATION_BACKEND
+                    ),
+                    admitted_physical_target_launch=(
+                        AdmittedPhysicalTargetLaunchBackend(
+                            WindowsCreateProcessWBackend(
+                                PsutilLaunchProcessIdentityReader(),
+                            )
+                        )
+                    ),
                 )),
                 trace_sidecar=trace_mod.RECORDER,
             )

@@ -232,6 +232,7 @@ def test_required_handoff_accepts_only_a_fresh_all_zero_absence_report() -> None
         lambda target: {**target, "foreground_verified": True},
         lambda target: {**target, "captured_at": 0},
         lambda target: {**target, "captured_at": 1},
+        lambda target: {**target, "captured_at": 4_999},
         lambda target: {**target, "failure_type": "capture_failed"},
         lambda target: {**target, "extra": True},
     ),

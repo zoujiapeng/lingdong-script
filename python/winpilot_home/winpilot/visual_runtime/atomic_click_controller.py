@@ -80,10 +80,10 @@ from .submitted_image_coordinates import SubmittedImageCoordinateMapper
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _AcquisitionResult = TypeVar("_AcquisitionResult")
 SUPPORTED_DESKTOP_TOOL_NAMES = tuple(sorted((
-    "click", "double_click", "scroll", "type_text", "hotkey",
+    "activate_target", "click", "double_click", "scroll", "type_text", "hotkey",
 )))
 REQUIRED_RAW_ACTION_NAMES = tuple(sorted((
-    "click", "scroll", "type_text", "hotkey",
+    "activate_target", "click", "hotkey", "launch_target", "scroll", "type_text",
 )))
 
 
@@ -429,6 +429,10 @@ class AtomicDesktopController:
         ):
             raise AtomicDesktopControllerError(
                 "AtomicDesktopController does not support this desktop action"
+            )
+        if proposal.action == "activate_target":
+            raise AtomicDesktopControllerError(
+                "activate_target requires a Runtime-bound target acquisition envelope"
             )
         if envelope.target is None:
             raise AtomicDesktopControllerError(

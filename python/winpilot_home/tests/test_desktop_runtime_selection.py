@@ -854,9 +854,58 @@ def test_vnext_server_composes_all_admitted_raw_backends_without_legacy(
         assert raw_devices[0].admitted_action_names == tuple(sorted(
             AtomicDesktopController.required_raw_action_names
         ))
+        assert raw_devices[0].admitted_action_names == (
+            "activate_target",
+            "click",
+            "hotkey",
+            "launch_target",
+            "scroll",
+            "type_text",
+        )
     finally:
         with server.STATE.lock:
             server.STATE.run_jobs.pop(execution.run_id, None)
+
+
+def test_vnext_missing_launch_backend_fails_before_prepare_without_fallback(
+    monkeypatch,
+) -> None:
+    import winpilot.action.windows_target_launch as launch_module
+    import winpilot.server as server
+
+    calls: list[str] = []
+    _captured, calls = _install_server_run_capture(
+        monkeypatch,
+        server,
+        calls=calls,
+    )
+    monkeypatch.setattr(
+        server,
+        "default_handlers",
+        lambda *_args, **_kwargs: calls.append("legacy_fallback"),
+    )
+
+    def unavailable_launch_backend(*_args, **_kwargs):
+        raise RuntimeError("launch backend unavailable")
+
+    monkeypatch.setattr(
+        launch_module,
+        "WindowsCreateProcessWBackend",
+        unavailable_launch_backend,
+    )
+    _install_live_coordinator_factory(monkeypatch)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"vNext desktop runtime coordinator construction failed \(RuntimeError\)",
+    ):
+        server._start_arp_execution(
+            _vnext_task_stage_graph(),
+            {},
+            runtime_version="vnext",
+        )
+
+    assert calls == []
 
 
 def test_vnext_admission_failure_precedes_prepare_model_controller_job_and_fallback(

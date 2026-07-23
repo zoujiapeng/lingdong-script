@@ -27,11 +27,6 @@ from ...orchestrator.runtime_admission import (
     vnext_full_goal_stage,
 )
 from ...tasking.contracts import TaskContract
-from ...tasking.execution_context import (
-    foreground_handoff_conflict,
-    normalize_execution_context,
-    validated_handoff_target,
-)
 from ...utils.screenshot import virtual_screen_region
 from ...visual_runtime.atomic_click_controller import (
     AdmittedRawDeviceInventoryPort,
@@ -43,6 +38,9 @@ from ...visual_runtime.atomic_click_controller import (
 from ...visual_runtime.atomic_post_action_bridge import AtomicPostActionBridge
 from ...visual_runtime.commit_admission import TargetCommitIdentity
 from ...visual_runtime.frame_observer import FrameObserver
+from ...visual_runtime.windows_target_launch_facts import (
+    WindowsTargetLaunchObservationAdapter,
+)
 from ...visual_runtime.windows_desktop_facts import (
     WindowsDesktopCommitObservation,
     WindowsDesktopFactsError,
@@ -67,7 +65,12 @@ from ..runtime import (
     RuntimeStatus,
     TargetActivationEnvelope,
 )
-from ..targeting import ACTIVATE_TARGET_TOOL_NAME, FreshWindowsTargetDiscovery
+from ..targeting import (
+    ACTIVATE_TARGET_TOOL_NAME,
+    FreshWindowsTargetDiscovery,
+    WindowsTargetFactsReader,
+)
+from ..targeting.executable_presence import ExecutablePresenceReader
 from ..verification import (
     DeterministicActionEffectVerifier,
     DeterministicMissionCompletionVerifier,
@@ -78,6 +81,12 @@ from .runtime_state import (
     DesktopObservationIdentity,
     RuntimeReadState,
     RuntimeStateBridge,
+)
+from .initial_target import (
+    InitialTargetMode,
+    InitialTargetResolution,
+    InitialTargetResolutionError,
+    resolve_initial_target,
 )
 
 
@@ -276,6 +285,8 @@ class LiveDesktopRuntimeCoordinator:
         window_exists_resolver: Callable[[int], bool] | None = None,
         desktop_identity_reader: Callable[[], DesktopObservationIdentity] | None = None,
         target_discovery: Any | None = None,
+        launch_presence_reader: ExecutablePresenceReader | None = None,
+        launch_target_facts_reader: WindowsTargetFactsReader | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         frame_max_age_s: float = DEFAULT_FRAME_MAX_AGE_S,
         clock: Callable[[], float] = time.time,
@@ -335,6 +346,18 @@ class LiveDesktopRuntimeCoordinator:
             getattr(target_discovery, "discover", None)
         ):
             raise TypeError("target_discovery must provide discover()")
+        if launch_presence_reader is not None and not isinstance(
+            launch_presence_reader, ExecutablePresenceReader
+        ):
+            raise TypeError(
+                "launch_presence_reader must be ExecutablePresenceReader"
+            )
+        if launch_target_facts_reader is not None and not isinstance(
+            launch_target_facts_reader, WindowsTargetFactsReader
+        ):
+            raise TypeError(
+                "launch_target_facts_reader must be WindowsTargetFactsReader"
+            )
         if not callable(clock):
             raise TypeError("clock must be callable")
 
@@ -360,6 +383,12 @@ class LiveDesktopRuntimeCoordinator:
         )
         self._target_discovery = target_discovery or FreshWindowsTargetDiscovery(
             clock=clock,
+        )
+        self._launch_presence = (
+            launch_presence_reader or ExecutablePresenceReader(clock=clock)
+        )
+        self._launch_target_facts = (
+            launch_target_facts_reader or WindowsTargetFactsReader(clock=clock)
         )
         self._max_turns = max_turns
         self._frame_max_age_s = float(frame_max_age_s)
@@ -422,32 +451,24 @@ class LiveDesktopRuntimeCoordinator:
             )
         return contract
 
-    def _handoff_target(
+    def _initial_target(
         self, context: DesktopRuntimeCoordinatorContext
-    ) -> tuple[int, dict[str, Any]]:
+    ) -> InitialTargetResolution:
         inputs = _plain_json(context.inputs)
-        execution_context = normalize_execution_context(inputs)
+        execution_context = (
+            inputs.get("execution_context")
+            if isinstance(inputs, dict)
+            else None
+        )
         kwargs: dict[str, Any] = {}
         if self._window_exists is not None:
             kwargs["window_exists_resolver"] = self._window_exists
-        hwnd, failure = validated_handoff_target(execution_context, **kwargs)
-        if not hwnd:
-            failure_type = (
-                str(failure.get("failure_type") or "target_binding_missing")
-                if isinstance(failure, dict)
-                else "target_binding_missing"
-            )
+        try:
+            return resolve_initial_target(execution_context, **kwargs)
+        except InitialTargetResolutionError as exc:
             raise LiveDesktopCoordinatorError(
-                f"desktop handoff target rejected ({failure_type})"
-            )
-        conflict = foreground_handoff_conflict(execution_context, hwnd)
-        if conflict is not None:
-            raise LiveDesktopCoordinatorError(
-                "desktop handoff target rejected "
-                f"({str(conflict.get('failure_type') or 'control_surface_handoff_failed')})"
-            )
-        target = execution_context.get("target_window")
-        return hwnd, target if isinstance(target, dict) else {}
+                f"desktop initial target rejected ({exc.failure_type})"
+            ) from exc
 
     def _bind_target(
         self,
@@ -593,11 +614,17 @@ class LiveDesktopRuntimeCoordinator:
         activation_observation = _WindowsTargetActivationObservation(
             self._facts
         )
+        launch_observation = WindowsTargetLaunchObservationAdapter(
+            self._launch_presence,
+            self._launch_target_facts,
+            self._facts,
+        )
         post_action = AtomicPostActionBridge(
             frame_authority=frames,
             observer=observer,
             evidence=evidence,
             activation_observation=activation_observation,
+            launch_observation=launch_observation,
         )
         controller = AtomicDesktopController(
             action_queue=self._action_queue,
@@ -609,6 +636,9 @@ class LiveDesktopRuntimeCoordinator:
             post_action=post_action,
             activation_observation=activation_observation,
             activation_post_action=post_action,
+            launch_presence=self._launch_presence,
+            launch_observation=launch_observation,
+            launch_post_action=post_action,
             enabled=True,
         )
         catalog = self._runtime_snapshot.catalog
@@ -675,13 +705,19 @@ class LiveDesktopRuntimeCoordinator:
             )
             evidence = EvidenceRegistry(definition.mission_id, definition.run_id)
             reducer = MissionReducer(definition, evidence=evidence)
-            hwnd, handoff = self._handoff_target(context)
-            self._bind_target(
-                reducer=reducer,
-                evidence=evidence,
-                handoff_hwnd=hwnd,
-                handoff=handoff,
-            )
+            initial_target = self._initial_target(context)
+            if initial_target.mode is InitialTargetMode.BOUND:
+                handoff = initial_target.target_dict()
+                if handoff is None:
+                    raise LiveDesktopCoordinatorError(
+                        "bound initial target has no canonical target"
+                    )
+                self._bind_target(
+                    reducer=reducer,
+                    evidence=evidence,
+                    handoff_hwnd=initial_target.hwnd,
+                    handoff=handoff,
+                )
             runtime, tool_names, actor_probe = self._runtime(
                 context, reducer, evidence,
             )

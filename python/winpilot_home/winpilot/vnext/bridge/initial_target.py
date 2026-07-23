@@ -330,6 +330,7 @@ def resolve_initial_target(
             and type(raw_target.get("reason")) is str
             and type(captured_at) is int
             and captured_at > 0
+            and captured_at >= prepared_at
             and captured_at <= current_ms
             and current_ms - captured_at <= max_age_ms
         )
