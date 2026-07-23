@@ -451,7 +451,7 @@ P4a 不授权删除任何 legacy 产品职责。`AgentRunner` 的全局 todo、�
 - legacy与vNext不同时运行；
 -失败保留真实oracle结论。
 
-P4b.2 当前增量已完成 `actor-turn-input/5` 的 ordinal-only target choice与一次性空结果反馈、Runtime-private 线程安全 `TargetSelectionLease`、targetless `full_desktop` Runtime/Broker 严格合同，以及 live Catalog/MissionRuntime 的 read-only discovery dispatch，并删除会暴露 candidate ref 的 discovery Actor serializer。coordinator 虽已注入 fresh Windows discovery port，仍强制已有 foreground handoff；Electron targetless 不可达，live Catalog 也没有 activation/open，因此不改变现有产品行为，也不把 P4b.2 或 P7 标记为完成。
+P4b.2 当前增量已完成 `actor-turn-input/5` 的 ordinal-only target choice与一次性空结果反馈、Runtime-private 线程安全 `TargetSelectionLease`、targetless `full_desktop` Runtime/Broker 严格合同，以及 live Catalog/MissionRuntime 的 read-only discovery dispatch，并删除会暴露 candidate ref 的 discovery Actor serializer。随后新增了严格、可重放的 existing-window activation envelope/identity/transition 纯合同，并把它纳入与 Actor action 共用的单次线程安全 mutation permit；完整私有候选进入 canonical permit fingerprint，cross-kind、篡改和重复消费均 fail closed。该合同仍没有 activation primitive、Controller 分派、Mission binding 或 live Catalog 工具；ordinal/candidate/list fingerprint 只能由刚消费的一次性 lease 解析，接线时还必须精确对账 transition、post frame 和 Registry evidence。coordinator 仍强制已有 foreground handoff，Electron targetless 不可达，因此不改变现有产品行为，也不把 P4b.2 或 P7 标记为完成。
 
 ## 9. P5：claim 与独立 Verifier
 
