@@ -151,29 +151,31 @@ def run_target_acquisition_case(
             }
 
         def handoff(driver: Any, _partial: dict[str, Any]) -> dict[str, Any]:
-            try:
-                pause_barrier = _wait_for_submitted_run(
-                    driver, _partial, task=task,
-                )
-                handoff = fixture.finish_targetless_handoff(
-                    baseline["instances"],
-                    baseline["launch_records"],
-                )
-                before_resume = driver.capture_desktop(
-                    "targetless-before-resume.png",
-                )
-                resume_barrier = driver.resume_paused_run(
-                    pause_barrier["run_id"],
-                )
-                return {
-                    "pause_barrier": pause_barrier,
-                    **handoff,
-                    "desktop_screenshot": before_resume,
-                    "resume_barrier": resume_barrier,
-                }
-            except Exception:
-                fixture.abort_targetless_handoff()
-                raise
+            pause_barrier = _wait_for_submitted_run(
+                driver, _partial, task=task,
+            )
+            handoff = fixture.finish_targetless_handoff(
+                baseline["instances"],
+                baseline["launch_records"],
+            )
+            before_resume = driver.capture_desktop(
+                "targetless-before-resume.png",
+            )
+            resume_barrier = driver.resume_paused_run(
+                pause_barrier["run_id"],
+            )
+            return {
+                "pause_barrier": pause_barrier,
+                **handoff,
+                "desktop_screenshot": before_resume,
+                "resume_barrier": resume_barrier,
+            }
+
+        def before_client_error_cleanup(
+            _driver: Any, _partial: dict[str, Any],
+        ) -> dict[str, Any]:
+            fixture.abort_targetless_handoff()
+            return {"targetless_guard_aborted": True}
 
         def verify(client_result: dict[str, Any]) -> dict[str, Any]:
             assert fixture is not None
@@ -191,7 +193,9 @@ def run_target_acquisition_case(
             },
             output_root=case_dir / "client", reset_session=True,
             before_submit=before_submit,
-            after_submit=handoff, independent_verifier=verify,
+            after_submit=handoff,
+            before_error_cleanup=before_client_error_cleanup,
+            independent_verifier=verify,
             submit_without_focus=True,
         )
         result["client_result"] = client_result

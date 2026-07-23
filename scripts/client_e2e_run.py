@@ -1248,6 +1248,10 @@ def run_case(
     | None = None,
     after_submit: Callable[[ElectronClientDriver, dict[str, Any]], dict[str, Any] | None]
     | None = None,
+    before_error_cleanup: Callable[
+        [ElectronClientDriver, dict[str, Any]], dict[str, Any] | None
+    ]
+    | None = None,
     independent_verifier: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     required_context_run_id: str = "",
     submit_without_focus: bool = False,
@@ -1344,6 +1348,15 @@ def run_case(
             )
     except Exception as error:
         result["runner_error"] = f"{type(error).__name__}: {error}"
+        if before_error_cleanup is not None:
+            try:
+                cleanup = before_error_cleanup(driver, result)
+                if cleanup is not None:
+                    result["before_error_cleanup"] = cleanup
+            except Exception as cleanup_error:
+                result["before_error_cleanup_error"] = (
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
         try:
             if driver.runtime_status().get("running"):
                 result["error_cleanup"] = driver.stop_active_run()

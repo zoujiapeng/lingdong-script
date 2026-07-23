@@ -370,6 +370,99 @@ def test_run_control_activation_keeps_default_click_and_explicit_invoke_separate
     assert calls == ["click", "invoke"]
 
 
+def test_run_case_calls_pre_cleanup_hook_before_canceling_active_run(
+    monkeypatch, tmp_path,
+):
+    harness = _load_harness()
+    calls: list[str] = []
+
+    class Driver:
+        identity = harness.ClientIdentity(
+            pid=902, hwnd=901, executable="electron.exe",
+            command_line=[], workspace_verified=True,
+        )
+
+        def __init__(self, _output_dir):
+            self.status_reads = 0
+            self.renderer_reloaded = False
+
+        def runtime_status(self):
+            self.status_reads += 1
+            if self.status_reads == 1:
+                return {"running": False, "current_run": None}
+            return {
+                "running": True,
+                "current_run": {
+                    "run_id": "arp-paused", "status": "paused",
+                    "goal": "target task",
+                },
+            }
+
+        @staticmethod
+        def clear_session_through_client():
+            return {"cleared": True}
+
+        @staticmethod
+        def configure_goal(_task, _steps, runtime_version, _start_paused):
+            return {
+                "runtime_version": runtime_version,
+                "cold_start_toggle": 1,
+            }
+
+        @staticmethod
+        def capture_window(name):
+            return str(tmp_path / name)
+
+        @staticmethod
+        def button(_title):
+            return object()
+
+        @staticmethod
+        def stop_active_run():
+            calls.append("client_error_cleanup")
+            return {"stopped": True, "run_id": "arp-paused"}
+
+    monkeypatch.setattr(harness, "ElectronClientDriver", Driver)
+    monkeypatch.setattr(
+        harness, "_activate_run_control",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("invoke outcome unknown"),
+        ),
+    )
+    monkeypatch.setattr(
+        harness, "_bound_trace_evidence", lambda *_args: {"passed": False},
+    )
+    monkeypatch.setattr(
+        harness, "_memory_isolation_evidence",
+        lambda *_args, **_kwargs: {"passed": False},
+    )
+    monkeypatch.setattr(
+        harness, "_execution_evidence", lambda *_args: {},
+    )
+
+    def before_error_cleanup(_driver, _partial):
+        calls.append("guard_stopped")
+        return {"targetless_guard_aborted": True}
+
+    result = harness.run_case(
+        "unknown-submit",
+        {
+            "task": "target task", "max_steps": 5,
+            "runtime_version": "vnext", "start_paused": True,
+        },
+        output_root=tmp_path, reset_session=True,
+        before_error_cleanup=before_error_cleanup,
+        submit_without_focus=True,
+    )
+
+    assert calls == ["guard_stopped", "client_error_cleanup"]
+    assert result["before_error_cleanup"] == {
+        "targetless_guard_aborted": True,
+    }
+    assert result["error_cleanup"]["run_id"] == "arp-paused"
+    assert "invoke outcome unknown" in result["runner_error"]
+
+
 def test_resume_paused_run_uses_visible_continue_and_requires_frontend_yield(
     monkeypatch, tmp_path,
 ):
