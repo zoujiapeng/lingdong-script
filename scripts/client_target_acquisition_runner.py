@@ -15,7 +15,6 @@ from client_target_acquisition_e2e import target_acquisition_verdict
 from client_target_acquisition_fixture import (
     AcquisitionFixture,
     FixtureUnavailable,
-    focus_shell_targetless,
 )
 
 
@@ -82,8 +81,25 @@ def run_target_acquisition_case(
             "evaluation_config_fingerprint": _fingerprint(config),
         })
 
-        def handoff(_driver: Any, _partial: dict[str, Any]) -> dict[str, Any]:
-            return focus_shell_targetless()
+        def before_submit(driver: Any, _partial: dict[str, Any]) -> dict[str, Any]:
+            staged = fixture.stage_targetless_handoff(baseline["instances"])
+            return {
+                **staged,
+                "desktop_screenshot": driver.capture_desktop(
+                    "targetless-before-submit.png",
+                ),
+            }
+
+        def handoff(driver: Any, _partial: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "foreground_hwnd": int(
+                    ctypes.windll.user32.GetForegroundWindow() or 0
+                ),
+                "desktop_screenshot": driver.capture_desktop(
+                    "targetless-after-submit.png",
+                ),
+                "focus_mutated": False,
+            }
 
         def verify(client_result: dict[str, Any]) -> dict[str, Any]:
             assert fixture is not None
@@ -99,9 +115,14 @@ def run_target_acquisition_case(
                 "timeout": int(source["timeout"]), "runtime_version": "vnext",
             },
             output_root=case_dir / "client", reset_session=True,
+            before_submit=before_submit,
             after_submit=handoff, independent_verifier=verify,
+            submit_without_focus=True,
         )
         result["client_result"] = client_result
+        result["targetless_precondition"] = dict(
+            client_result.get("before_submit_handoff") or {},
+        )
         result.update(evidence_projector(client_result))
         result["external_verdict"] = dict(
             client_result.get("task_verdict") or {},

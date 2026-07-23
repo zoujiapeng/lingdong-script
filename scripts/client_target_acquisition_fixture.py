@@ -105,6 +105,7 @@ def exact_instances(executable: Path) -> list[dict[str, Any]]:
                             win32gui.GetAncestor(hwnd, win32con.GA_ROOT) or 0
                         ),
                         "region": _window_region(hwnd),
+                        "is_minimized": bool(win32gui.IsIconic(hwnd)),
                     })
                 return True
 
@@ -250,6 +251,25 @@ class AcquisitionFixture:
         ):
             raise FixtureUnavailable("fixture baseline identity is incomplete")
         return {"instances": rows, "launch_records": records}
+
+    def stage_targetless_handoff(
+        self, expected_rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Put the shell above exact fixtures before the client takes focus."""
+
+        current = self.instances()
+        if current != expected_rows:
+            raise FixtureUnavailable(
+                "fixture identity changed before targetless handoff",
+            )
+        shell = focus_shell_targetless(duration=0.4)
+        return {
+            **shell,
+            "verified_fixture_hwnds": [
+                int(window["hwnd"])
+                for row in current for window in row["windows"]
+            ],
+        }
 
     @staticmethod
     def records_match(records: list[dict], rows: list[dict]) -> bool:

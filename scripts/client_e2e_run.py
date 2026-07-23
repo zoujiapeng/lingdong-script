@@ -187,6 +187,19 @@ def _toggle(control: Any) -> None:
     pattern.Toggle()
 
 
+def _activate_run_control(control: Any, *, without_focus: bool) -> str:
+    """Activate the visible Run control through one explicit UIA path."""
+
+    if not without_focus:
+        control.Click()
+        return "click"
+    pattern = control.GetPattern(auto.PatternId.InvokePattern)
+    if pattern is None:
+        raise RuntimeError("run control does not support UIA InvokePattern")
+    pattern.Invoke()
+    return "invoke_pattern"
+
+
 class ElectronClientDriver:
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
@@ -1150,10 +1163,13 @@ def run_case(
     *,
     output_root: Path,
     reset_session: bool,
+    before_submit: Callable[[ElectronClientDriver, dict[str, Any]], dict[str, Any] | None]
+    | None = None,
     after_submit: Callable[[ElectronClientDriver, dict[str, Any]], dict[str, Any] | None]
     | None = None,
     independent_verifier: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     required_context_run_id: str = "",
+    submit_without_focus: bool = False,
 ) -> dict[str, Any]:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     output_dir = output_root / f"{timestamp}-{_slug(name)}"
@@ -1188,7 +1204,14 @@ def run_case(
         result["screenshots"] = {
             "before_submit": driver.capture_window("before-submit.png")
         }
-        driver.button(RUN_TASK).Click()
+        run_control = driver.button(RUN_TASK)
+        if before_submit is not None:
+            handoff = before_submit(driver, result)
+            if handoff is not None:
+                result["before_submit_handoff"] = handoff
+        result["submit_control_method"] = _activate_run_control(
+            run_control, without_focus=submit_without_focus,
+        )
         submitted_at = time.time()
         result["submitted_at"] = datetime.now().astimezone().isoformat()
         print(
