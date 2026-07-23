@@ -12,9 +12,11 @@ from enum import Enum
 import re
 from typing import Any, Generic, TypeVar
 
+from ..process_identity import ProcessIdentityError, canonical_process_identity
 
-COMMIT_ADMISSION_REQUEST_FORMAT = "commit-admission-request/1"
-COMMIT_ENVIRONMENT_FORMAT = "commit-environment/0"
+
+COMMIT_ADMISSION_REQUEST_FORMAT = "commit-admission-request/2"
+COMMIT_ENVIRONMENT_FORMAT = "commit-environment/1"
 COMMIT_ADMISSION_RESULT_FORMAT = "commit-admission-result/0"
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -174,6 +176,7 @@ class TargetCommitIdentity:
     hwnd: int
     root_hwnd: int
     process_id: int
+    process_identity: str
     epoch: int
     window_region: Region
 
@@ -181,6 +184,11 @@ class TargetCommitIdentity:
         object.__setattr__(self, "binding_id", _identity(self.binding_id, "binding_id"))
         for name in ("hwnd", "root_hwnd", "process_id"):
             object.__setattr__(self, name, _integer(getattr(self, name), name, positive=True))
+        try:
+            process_identity = canonical_process_identity(self.process_identity)
+        except ProcessIdentityError as exc:
+            raise CommitAdmissionError(str(exc)) from exc
+        object.__setattr__(self, "process_identity", process_identity)
         object.__setattr__(self, "epoch", _integer(self.epoch, "target epoch"))
         object.__setattr__(self, "window_region", _region(self.window_region, "window_region"))
 
@@ -188,13 +196,15 @@ class TargetCommitIdentity:
         return {
             "binding_id": self.binding_id, "hwnd": self.hwnd,
             "root_hwnd": self.root_hwnd, "process_id": self.process_id,
+            "process_identity": self.process_identity,
             "epoch": self.epoch, "window_region": list(self.window_region),
         }
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "TargetCommitIdentity":
         return cls(**_strict(raw, (
-            "binding_id", "hwnd", "root_hwnd", "process_id", "epoch", "window_region",
+            "binding_id", "hwnd", "root_hwnd", "process_id",
+            "process_identity", "epoch", "window_region",
         ), "TargetCommitIdentity"))
 
 
@@ -266,10 +276,12 @@ class CommitEnvironment:
     foreground_hwnd: int | None
     foreground_root_hwnd: int | None
     foreground_process_id: int | None
+    foreground_process_identity: str | None
     hit_test_point: Point | None
     hit_hwnd: int | None
     hit_root_hwnd: int | None
     hit_process_id: int | None
+    hit_process_identity: str | None
     format: str = COMMIT_ENVIRONMENT_FORMAT
 
     def __post_init__(self) -> None:
@@ -281,7 +293,8 @@ class CommitEnvironment:
             if type(getattr(self, name)) is not bool:
                 raise CommitAdmissionError(f"{name} must be boolean")
         foreground = (
-            self.foreground_hwnd, self.foreground_root_hwnd, self.foreground_process_id,
+            self.foreground_hwnd, self.foreground_root_hwnd,
+            self.foreground_process_id, self.foreground_process_identity,
         )
         if any(value is not None for value in foreground) != all(
             value is not None for value in foreground
@@ -292,7 +305,18 @@ class CommitEnvironment:
             "hit_hwnd", "hit_root_hwnd", "hit_process_id",
         ):
             object.__setattr__(self, name, _optional_positive(getattr(self, name), name))
-        hit = (self.hit_hwnd, self.hit_root_hwnd, self.hit_process_id)
+        for name in ("foreground_process_identity", "hit_process_identity"):
+            value = getattr(self, name)
+            if value is not None:
+                try:
+                    value = canonical_process_identity(value, name)
+                except ProcessIdentityError as exc:
+                    raise CommitAdmissionError(str(exc)) from exc
+                object.__setattr__(self, name, value)
+        hit = (
+            self.hit_hwnd, self.hit_root_hwnd, self.hit_process_id,
+            self.hit_process_identity,
+        )
         if self.hit_test_point is None:
             if any(value is not None for value in hit):
                 raise CommitAdmissionError("hit identity requires hit_test_point")
@@ -398,6 +422,7 @@ class CommitAdmissionGate:
             if (
                 observed.foreground_root_hwnd != expected.root_hwnd
                 or observed.foreground_process_id != expected.process_id
+                or observed.foreground_process_identity != expected.process_identity
             ):
                 return CommitAdmissionReason.FOREGROUND_CHANGED
 
@@ -409,6 +434,7 @@ class CommitAdmissionGate:
                 observed.hit_test_point != request.screen_point
                 or observed.hit_root_hwnd != expected.root_hwnd
                 or observed.hit_process_id != expected.process_id
+                or observed.hit_process_identity != expected.process_identity
             ):
                 return CommitAdmissionReason.HIT_TEST_CHANGED
         return None

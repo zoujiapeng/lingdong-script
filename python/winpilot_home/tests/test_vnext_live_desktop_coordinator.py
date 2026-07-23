@@ -14,6 +14,7 @@ import pytest
 import winpilot.vnext.bridge.coordinator as coordinator_module
 
 from winpilot.action.desktop_queue import DesktopActionQueue
+from winpilot.process_identity import process_identity_for
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
     AdmittedPhysicalHotkeyBackend,
@@ -30,6 +31,7 @@ from winpilot.orchestrator.desktop_runtime import (
     DesktopRuntimeCoordinatorContext,
     DesktopRuntimeCoordinatorStatus,
 )
+from winpilot.tasking.execution_context import capture_foreground_window_context
 from winpilot.tasking.compiler import TaskContractCompiler
 from winpilot.utils.image_capture import VisualCaptureScope
 from winpilot.utils.screenshot import Region
@@ -59,6 +61,8 @@ class Backend:
         self.region = (10, 20, 800, 600)
         self.foreground = 100
         self.hit = 111
+        self.creation_time_ns = 1_000_000_000
+        self.executable_path = r"C:\Program Files\Test Surface\surface.exe"
 
     def is_window(self, hwnd):
         return hwnd in self.live
@@ -69,6 +73,14 @@ class Backend:
     def process_id(self, hwnd):
         return self.pids[hwnd]
 
+    def process_creation_time_ns(self, process_id):
+        assert process_id == 7
+        return self.creation_time_ns
+
+    def process_executable_path(self, process_id):
+        assert process_id == 7
+        return self.executable_path
+
     def window_region(self, hwnd):
         assert hwnd == 101
         return self.region
@@ -78,6 +90,13 @@ class Backend:
 
     def window_from_point(self, _point):
         return self.hit
+
+
+TEST_PROCESS_IDENTITY = process_identity_for(
+    process_id=7,
+    creation_time_ns=1_000_000_000,
+    executable_path=r"C:\Program Files\Test Surface\surface.exe",
+)
 
 
 class ScriptedActor:
@@ -135,21 +154,23 @@ def _context(*, contract=None, stop_event=None):
         },
         inputs={
             "execution_context": {
-                "format": "desktop-execution-context/1",
+                "format": "execution-context/1",
                 "entrypoint": "native_agent_cockpit",
                 "desktop_handoff": {
                     "required": True,
-                    "strategy": "yield_before_capture",
+                    "strategy": "foreground_after_control_surface_yield",
                     "yielded": True,
                     "control_surface_pid": 999,
                     "prepared_at": int(time.time() * 1000),
                     "reason": "",
                 },
                 "target_window": {
-                    "format": "desktop-target/1",
+                    "format": "desktop-target/2",
                     "hwnd": 101,
+                    "root_hwnd": 100,
                     "title": "Unknown visual surface",
                     "process_id": 7,
+                    "process_identity": TEST_PROCESS_IDENTITY,
                     "class_name": "Surface",
                     "rect": [10, 20, 810, 620],
                     "captured_at": int(time.time() * 1000),
@@ -204,6 +225,7 @@ def _coordinator(
     max_turns=6,
     frame_max_age_s=30.0,
     clock=lambda: 10.0,
+    facts_backend=None,
 ):
     calls = raw_calls if raw_calls is not None else []
     snapshot = (
@@ -276,7 +298,7 @@ def _coordinator(
             admitted_physical_type_text=backends["type_text"],
             admitted_physical_hotkey=backends["hotkey"],
         )),
-        facts_reader=WindowsDesktopFactsReader(Backend()),
+        facts_reader=WindowsDesktopFactsReader(facts_backend or Backend()),
         observer_factory=_observer,
         actor_factory=lambda _api: actor,
         verifier_factory=lambda _api: ReadOnlyVisualVerifierAdapter(
@@ -963,11 +985,13 @@ def test_invalid_handoff_fails_closed_without_model_or_legacy_fallback():
     (
         ("foreground_verified", False),
         ("process_id", 8),
+        ("process_identity", "process-" + "b" * 32),
     ),
 )
 def test_handoff_identity_mismatch_fails_before_actor(field, value):
     actor = ScriptedActor([_click()])
     verifier = PositiveVisualModel()
+    trace = Trace()
     context = _context()
     inputs = dict(context.inputs)
     execution_context = dict(inputs["execution_context"])
@@ -984,11 +1008,96 @@ def test_handoff_identity_mismatch_fails_before_actor(field, value):
         is_paused=context.is_paused,
     )
 
-    result = _coordinator(actor, verifier).run(context)
+    raw_calls = []
+    result = _coordinator(
+        actor, verifier, raw_calls=raw_calls, trace=trace,
+    ).run(context)
 
     assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
     assert actor.calls == []
     assert verifier.calls == []
+    assert raw_calls == []
+    rejected = trace.records[-1][1]
+    assert rejected["type"] == "vnext_mission_runtime_rejected"
+    if field == "process_identity":
+        assert "process identity changed" in rejected["reason"]
+
+
+def test_capture_to_bind_process_reuse_fails_before_any_model_or_raw_call():
+    backend = Backend()
+    captured = capture_foreground_window_context(
+        999,
+        foreground_resolver=lambda: 101,
+        root_hwnd_resolver=lambda _hwnd: 100,
+        process_id_resolver=lambda _hwnd: 7,
+        process_identity_resolver=lambda _pid: TEST_PROCESS_IDENTITY,
+        windows_provider=lambda: [{
+            "hwnd": 101,
+            "title": "Unknown visual surface",
+            "class_name": "Surface",
+            "rect": [10, 20, 810, 620],
+        }],
+        time_provider=time.time,
+    )
+    assert captured["usable"] is True
+    backend.creation_time_ns += 1
+    base = _context()
+    inputs = dict(base.inputs)
+    execution_context = dict(inputs["execution_context"])
+    execution_context["target_window"] = captured
+    inputs["execution_context"] = execution_context
+    context = DesktopRuntimeCoordinatorContext(
+        run_id=base.run_id,
+        graph=base.graph,
+        inputs=inputs,
+        stop_event=base.stop_event,
+        wait_if_paused=base.wait_if_paused,
+        is_paused=base.is_paused,
+    )
+    actor = ScriptedActor([_click()])
+    verifier = PositiveVisualModel()
+    trace = Trace()
+    raw_calls = []
+
+    result = _coordinator(
+        actor,
+        verifier,
+        facts_backend=backend,
+        raw_calls=raw_calls,
+        trace=trace,
+    ).run(context)
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert actor.calls == []
+    assert verifier.calls == []
+    assert raw_calls == []
+    assert trace.records[-1][1]["type"] == "vnext_mission_runtime_rejected"
+    assert "process identity changed" in trace.records[-1][1]["reason"]
+
+
+def test_initial_target_fact_failure_is_a_typed_pre_model_rejection():
+    backend = Backend()
+    backend.executable_path = "surface.exe"
+    actor = ScriptedActor([_click()])
+    verifier = PositiveVisualModel()
+    trace = Trace()
+    raw_calls = []
+
+    result = _coordinator(
+        actor,
+        verifier,
+        facts_backend=backend,
+        raw_calls=raw_calls,
+        trace=trace,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert actor.calls == []
+    assert verifier.calls == []
+    assert raw_calls == []
+    rejected = trace.records[-1][1]
+    assert rejected["type"] == "vnext_mission_runtime_rejected"
+    assert "identity is unavailable" in rejected["reason"]
 
 
 def test_getwindowrect_and_dwm_geometry_may_differ_before_current_binding():
@@ -1170,6 +1279,41 @@ def test_stale_frame_after_actor_decision_never_reaches_raw_device() -> None:
     assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
     assert actor.calls == 1
     assert raw_calls == []
+
+
+def test_same_hwnd_and_pid_process_reuse_after_actor_never_reaches_raw_device() -> None:
+    backend = Backend()
+    raw_calls = []
+    trace = Trace()
+
+    class ReuseRacingActor:
+        calls = 0
+
+        def propose(self, *_args, **_kwargs):
+            self.calls += 1
+            backend.creation_time_ns += 1
+            return _click()
+
+    actor = ReuseRacingActor()
+    result = _coordinator(
+        actor,
+        PositiveVisualModel(),
+        raw_calls=raw_calls,
+        max_turns=2,
+        facts_backend=backend,
+        trace=trace,
+    ).run(_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert result.error.endswith("(state_rejected)")
+    assert actor.calls == 1
+    assert raw_calls == []
+    turn = next(
+        record for _run_id, record in trace.records
+        if record["type"] == "vnext_mission_runtime_turn"
+    )
+    assert turn["status"] == "state_rejected"
+    assert "process identity" in turn["detail"]
 
 
 def test_pause_during_actor_decision_discards_click_before_raw_device() -> None:

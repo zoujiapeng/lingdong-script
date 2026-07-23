@@ -54,6 +54,7 @@ from winpilot.visual_runtime.frame_observer import FrameObserver
 IMAGE_BEFORE = "YmVmb3Jl"
 IMAGE_AFTER = "YWZ0ZXI="
 REGION = Region(10, 20, 800, 600)
+PROCESS_IDENTITY = "process-" + "1" * 32
 
 
 def _authority() -> tuple[FrameAuthority, FrameState]:
@@ -107,7 +108,7 @@ def _envelope(
         obligation_id="obligation-1",
         frame=_identity(frame),
         target=TargetCommitIdentity(
-            "target-1", 101, 101, 7, 3, frame.region,
+            "target-1", 101, 101, 7, PROCESS_IDENTITY, 3, frame.region,
         ),
         pointer=PointerLeaseState(PointerDisposition.RELEASED),
         broker_projection_id="projection-1",
@@ -203,10 +204,12 @@ class _Observation:
             foreground_hwnd=request.target.hwnd,
             foreground_root_hwnd=request.target.root_hwnd,
             foreground_process_id=request.target.process_id,
+            foreground_process_identity=request.target.process_identity,
             hit_test_point=request.screen_point,
             hit_hwnd=request.target.hwnd,
             hit_root_hwnd=request.target.root_hwnd,
             hit_process_id=request.target.process_id,
+            hit_process_identity=request.target.process_identity,
         )
 
 

@@ -25,6 +25,7 @@ from winpilot.visual_runtime.commit_admission import (
 
 
 SHA = "a" * 64
+PROCESS_IDENTITY = "process-" + "1" * 32
 
 
 def _frame(**changes) -> FrameCommitIdentity:
@@ -46,6 +47,7 @@ def _target(**changes) -> TargetCommitIdentity:
         hwnd=101,
         root_hwnd=100,
         process_id=444,
+        process_identity=PROCESS_IDENTITY,
         epoch=3,
         window_region=(10, 20, 800, 600),
     )
@@ -84,10 +86,12 @@ def _environment(request: CommitAdmissionRequest, **changes) -> CommitEnvironmen
         foreground_hwnd=101,
         foreground_root_hwnd=request.target.root_hwnd,
         foreground_process_id=request.target.process_id,
+        foreground_process_identity=request.target.process_identity,
         hit_test_point=request.screen_point if point_input else None,
         hit_hwnd=111 if point_input else None,
         hit_root_hwnd=request.target.root_hwnd if point_input else None,
         hit_process_id=request.target.process_id if point_input else None,
+        hit_process_identity=request.target.process_identity if point_input else None,
     )
     values.update(changes)
     return CommitEnvironment(**values)
@@ -198,10 +202,21 @@ def test_frame_authority_pin_accepts_contract_identity_and_rejects_stale_before_
         ({"target": _target(root_hwnd=99)}, CommitAdmissionReason.TARGET_ROOT_CHANGED),
         ({"target": _target(window_region=(11, 20, 800, 600))}, CommitAdmissionReason.TARGET_GEOMETRY_CHANGED),
         ({"target": _target(process_id=445)}, CommitAdmissionReason.TARGET_CHANGED),
-        ({"foreground_hwnd": None, "foreground_root_hwnd": None, "foreground_process_id": None}, CommitAdmissionReason.FOREGROUND_UNAVAILABLE),
+        ({
+            "foreground_hwnd": None,
+            "foreground_root_hwnd": None,
+            "foreground_process_id": None,
+            "foreground_process_identity": None,
+        }, CommitAdmissionReason.FOREGROUND_UNAVAILABLE),
         ({"foreground_root_hwnd": 99}, CommitAdmissionReason.FOREGROUND_CHANGED),
         ({"foreground_process_id": 445}, CommitAdmissionReason.FOREGROUND_CHANGED),
-        ({"hit_test_point": None, "hit_hwnd": None, "hit_root_hwnd": None, "hit_process_id": None}, CommitAdmissionReason.HIT_TEST_UNAVAILABLE),
+        ({
+            "hit_test_point": None,
+            "hit_hwnd": None,
+            "hit_root_hwnd": None,
+            "hit_process_id": None,
+            "hit_process_identity": None,
+        }, CommitAdmissionReason.HIT_TEST_UNAVAILABLE),
         ({"hit_test_point": (151, 140)}, CommitAdmissionReason.HIT_TEST_CHANGED),
         ({"hit_root_hwnd": 99}, CommitAdmissionReason.HIT_TEST_CHANGED),
         ({"hit_process_id": 445}, CommitAdmissionReason.HIT_TEST_CHANGED),
@@ -238,6 +253,7 @@ def test_background_route_does_not_require_foreground_but_still_requires_hit() -
         foreground_hwnd=None,
         foreground_root_hwnd=None,
         foreground_process_id=None,
+        foreground_process_identity=None,
     )
     calls = []
     result = CommitAdmissionGate(lambda _bound: environment).admit_and_commit(
@@ -252,10 +268,12 @@ def test_background_route_does_not_require_foreground_but_still_requires_hit() -
         foreground_hwnd=None,
         foreground_root_hwnd=None,
         foreground_process_id=None,
+        foreground_process_identity=None,
         hit_test_point=None,
         hit_hwnd=None,
         hit_root_hwnd=None,
         hit_process_id=None,
+        hit_process_identity=None,
     )
     assert _reject_reason(request, missing_hit) is CommitAdmissionReason.HIT_TEST_UNAVAILABLE
 
@@ -268,6 +286,7 @@ def test_keyboard_admission_requires_foreground_but_never_requires_hit_test() ->
         hit_hwnd=None,
         hit_root_hwnd=None,
         hit_process_id=None,
+        hit_process_identity=None,
     )
     calls = []
 
@@ -284,6 +303,7 @@ def test_keyboard_admission_requires_foreground_but_never_requires_hit_test() ->
         foreground_hwnd=None,
         foreground_root_hwnd=None,
         foreground_process_id=None,
+        foreground_process_identity=None,
     )
     assert _reject_reason(
         request, no_foreground,
@@ -307,6 +327,7 @@ def test_keyboard_admission_requires_foreground_but_never_requires_hit_test() ->
                 "foreground_hwnd": None,
                 "foreground_root_hwnd": None,
                 "foreground_process_id": None,
+                "foreground_process_identity": None,
             },
             CommitAdmissionReason.FOREGROUND_UNAVAILABLE,
         ),
@@ -324,6 +345,7 @@ def test_keyboard_dynamic_identity_mismatch_fails_before_callback(
         hit_hwnd=None,
         hit_root_hwnd=None,
         hit_process_id=None,
+        hit_process_identity=None,
         **changes,
     )
     assert _reject_reason(request, environment) is reason
@@ -393,7 +415,8 @@ def test_contract_round_trip_and_unknown_fields_fail_closed() -> None:
         lambda: _request(route="auto"),
         lambda: _environment(_request(), mutation_allowed=1),
         lambda: _environment(_request(), foreground_root_hwnd=None),
-        lambda: replace(_request(), format="commit-admission-request/0"),
+        lambda: replace(_request(), format="commit-admission-request/1"),
+        lambda: replace(_environment(_request()), format="commit-environment/0"),
     ],
 )
 def test_malformed_contract_values_are_rejected(factory) -> None:
@@ -457,6 +480,7 @@ def test_randomized_exact_replay_admits_and_stale_identity_rejects(
         target = TargetCommitIdentity(
             binding_id=f"binding-{index}", hwnd=frame.hwnd,
             root_hwnd=frame.hwnd, process_id=2000 + index,
+            process_identity=f"process-{index + 1:032x}",
             epoch=frame.epoch, window_region=frame.region,
         )
         point = (left + width // 2, top + height // 2)
@@ -495,4 +519,4 @@ def test_commit_admission_has_no_semantic_or_legacy_imports() -> None:
             imported.append(node.module or "")
     forbidden = ("agent", "task", "uia", "ocr", "mcp", "app", "controller", "raw_device")
     assert not any(any(token in module.lower() for token in forbidden) for module in imported)
-    assert COMMIT_ADMISSION_REQUEST_FORMAT == "commit-admission-request/1"
+    assert COMMIT_ADMISSION_REQUEST_FORMAT == "commit-admission-request/2"

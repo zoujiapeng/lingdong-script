@@ -545,7 +545,7 @@
   frame and evidence present or both absent. The absent form is valid only when admission/RawDevice
   proved `NOT_STARTED/NOT_APPLIED`; Runtime returns `stale_discarded`, accepts no transition and starts
   from a fresh observation. A possibly executed mutation remains `unknown`, blocks and is never replayed.
-- versions: `mission-projection/1`, `mission-card/1`, `actor-mission-view/1`, `actor-turn-input/1` and
+- versions at that slice: `mission-projection/1`, `mission-card/1`, `actor-mission-view/1`, `actor-turn-input/1` and
   `controller-transition/1` replace their `/0` forms; `action-effect/0` is new. Other contracts do not
   change version merely for alignment.
 - rollout: this slice adds no model call, prompt text, model tool, GUI primitive, application rule or
@@ -598,7 +598,7 @@
 
 ### D033: keyboard primitives extend the same input transaction without fake coordinates
 
-- status: code and injected-test contract accepted; same-entry Electron evidence pending
+- status: code and injected-test contract accepted; bounded same-entry Electron evidence is recorded
 - surface: the explicit vNext Catalog adds `type_text:{text}` with a 1..4096-codepoint bound and
   `hotkey:{modifiers,key}` with unique canonical modifiers plus one non-modifier primary key. A pure
   owner-neutral keyboard contract is shared by Catalog, Controller and RawDevice; vNext does not
@@ -663,3 +663,53 @@
   `arp-20260723-072705-9dbc00`, passed. The baseline, final Actor contract and corrected oracle are
   different configurations; these runs establish diagnosis and same-entry reachability, not a
   controlled general-agent uplift, full P7, default switch or legacy-deletion gate.
+
+### D035: P4b.2 starts with read-only discovery and strict target attestation
+
+- status: read-only discovery and strict foreground-handoff identity closure accepted; unbound
+  activation and Electron gates pending.
+- discovery: one immutable Windows facts snapshot samples processes and top-level windows once.
+  Process identity is derived from PID, creation time and absolute executable path; only windows
+  backed by that strong identity become `switch_window` candidates. `TargetDiscovery` aggregates and
+  orders candidates but never chooses one, focuses a window, launches an application or mutates Mission.
+- duplicate prevention: exact running-process evidence suppresses cold launch when a bindable existing
+  window is available. Unknown process state and running-without-bindable-window fail closed instead of
+  launching blindly. Window title remains semantic display evidence and never establishes application or
+  process identity by itself.
+- Mission identity: accepted `TargetBinding` carries root HWND, canonical process identity, epoch,
+  Runtime acquisition action and content-hashed attestation. `target_bound` requires exactly one current
+  run/obligation `authoritative_target_binding` deterministic evidence object. Replacement requires an
+  exact compare-and-swap `target_invalidated` event first; neither event creates a second target ledger.
+- stale-frame barrier: target invalidation may record the actually observed authoritative frame id.
+  Reducer derives a rebind floor from that accepted event and rejects establishment evidence from the
+  same or an older frame. The floor cannot coexist with a live binding and is not projected to Actor;
+  it prevents a reused HWND/PID from inheriting pixels captured for the previous process without adding
+  a mutable target ledger.
+- identity derivation: `winpilot/process_identity.py` is the one neutral, OS-free owner for deriving and
+  validating canonical process identity from PID, creation time and absolute executable path. Discovery,
+  handoff capture, Runtime current-state reads and commit guards still read OS facts at their own authority
+  seams; this decision does not create one global Windows facts reader.
+- foreground handoff: stable `execution-context/1` now nests strict `desktop-target/2`. Capture samples
+  foreground HWND, root HWND, PID and process identity before and after reading the target; any mismatch
+  makes it unusable. Immediately before initial Mission binding, the coordinator rereads the physical target
+  and requires exact equality with all four captured fields. Capture-to-bind process replacement therefore
+  fails before Actor or Controller execution.
+- limits: the strong identity distinguishes process instances, not every window generation. If one process
+  reuses the same HWND/root HWND while PID, creation time and executable path remain identical throughout
+  both capture samples and the bind read, the current contract cannot absolutely distinguish the old and new
+  window. This residual limitation blocks any claim of complete target acquisition.
+- versions and strict identities: the breaking nested changes are explicit in `desktop-target/2`,
+  `commit-admission-request/2`, `commit-environment/1`, `actor-envelope/1`, `runtime-snapshot/1`,
+  `mission-event/1`, `mission-projection/2` and `mission-card/2`; the outer `execution-context/1` remains
+  stable. `mission-event/1` is `kind`-only. Optional frame identities in evidence, transitions,
+  invalidation and the replay-derived rebind barrier are positive integers or null; zero and coercions are
+  rejected. Old or mixed versions are rejected rather than guessed.
+- Actor boundary: the existing `TargetDiscoverySnapshot.actor_view()` is not the final live Actor ABI
+  because it still exposes a candidate reference. Live wiring must expose bounded ordinals only and keep
+  HWND, PID, paths, AppID, process identity and candidate lease private to Runtime.
+- rollout gate: the current coordinator still requires a foreground handoff and the live Catalog has no
+  discover/open/switch tools. The next slice must connect targetless observation, unbound Broker tools,
+  ordinal selection, fresh candidate revalidation and exact activation through the existing single
+  Controller/ActionQueue. A launch call happens at most once; polling is observation, and an ambiguous or
+  possibly executed result is `unknown` with no action replay. P4b.2 remains incomplete until separate
+  same-entry Electron oracles prove existing-instance reuse and causally unique cold launch.

@@ -6,6 +6,8 @@ repairs a target, interprets pixels, or selects another semantic destination.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import ntpath
 from typing import Protocol, runtime_checkable
 
 from ..action.raw_device import (
@@ -17,6 +19,11 @@ from .commit_admission import (
     CommitAdmissionRequest,
     CommitEnvironment,
     TargetCommitIdentity,
+)
+from ..process_identity import (
+    ProcessIdentityError,
+    canonical_process_identity,
+    process_identity_for,
 )
 
 
@@ -61,6 +68,8 @@ class WindowsDesktopFactsBackend(Protocol):
     def is_window(self, hwnd: int) -> bool: ...
     def root_hwnd(self, hwnd: int) -> int: ...
     def process_id(self, hwnd: int) -> int: ...
+    def process_creation_time_ns(self, process_id: int) -> int: ...
+    def process_executable_path(self, process_id: int) -> str: ...
     def window_region(self, hwnd: int) -> Region: ...
     def foreground_hwnd(self) -> int: ...
     def window_from_point(self, point: Point) -> int: ...
@@ -90,6 +99,47 @@ class PyWin32DesktopFactsBackend:
         return int(process_id or 0)
 
     @staticmethod
+    def process_creation_time_ns(process_id: int) -> int:
+        import psutil
+
+        try:
+            value = psutil.Process(int(process_id)).create_time()
+        except Exception as exc:
+            raise WindowsDesktopFactsError(
+                "process creation time is unavailable"
+            ) from exc
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(float(value))
+            or float(value) <= 0
+        ):
+            raise WindowsDesktopFactsError(
+                "process creation time is unavailable"
+            )
+        result = int(float(value) * 1_000_000_000)
+        if result <= 0:
+            raise WindowsDesktopFactsError(
+                "process creation time is unavailable"
+            )
+        return result
+
+    @staticmethod
+    def process_executable_path(process_id: int) -> str:
+        import psutil
+
+        try:
+            value = psutil.Process(int(process_id)).exe()
+        except Exception as exc:
+            raise WindowsDesktopFactsError(
+                "process executable path is unavailable"
+            ) from exc
+        if type(value) is not str or not value.strip() or not ntpath.isabs(value.strip()):
+            raise WindowsDesktopFactsError(
+                "process executable path is unavailable or not absolute"
+            )
+        return ntpath.normpath(value.strip())
+
+    @staticmethod
     def window_region(hwnd: int) -> Region:
         from ..utils.screenshot import window_region
 
@@ -114,11 +164,17 @@ class WindowIdentity:
     hwnd: int
     root_hwnd: int
     process_id: int
+    process_identity: str
 
     def __post_init__(self) -> None:
         for name in ("hwnd", "root_hwnd", "process_id"):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise WindowsDesktopFactsError(f"{name} must be a positive integer")
+        try:
+            value = canonical_process_identity(self.process_identity)
+        except ProcessIdentityError as exc:
+            raise WindowsDesktopFactsError(str(exc)) from exc
+        object.__setattr__(self, "process_identity", value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,10 +230,30 @@ class WindowsDesktopFactsReader:
         value = self._positive(hwnd, f"{name} hwnd")
         if self._backend.is_window(value) is not True:
             raise WindowsDesktopFactsError(f"{name} hwnd is not a live window")
+        root_hwnd = self._positive(
+            self._backend.root_hwnd(value), f"{name} root hwnd",
+        )
+        process_id = self._positive(
+            self._backend.process_id(value), f"{name} process id",
+        )
+        try:
+            process_identity = process_identity_for(
+                process_id=process_id,
+                creation_time_ns=self._positive(
+                    self._backend.process_creation_time_ns(process_id),
+                    f"{name} process creation time",
+                ),
+                executable_path=self._backend.process_executable_path(process_id),
+            )
+        except (ProcessIdentityError, KeyError) as exc:
+            raise WindowsDesktopFactsError(
+                f"{name} strong process identity is unavailable"
+            ) from exc
         return WindowIdentity(
             value,
-            self._positive(self._backend.root_hwnd(value), f"{name} root hwnd"),
-            self._positive(self._backend.process_id(value), f"{name} process id"),
+            root_hwnd,
+            process_id,
+            process_identity,
         )
 
     def _optional_window(self, hwnd: object, name: str) -> WindowIdentity | None:
@@ -227,6 +303,7 @@ class WindowsDesktopFactsReader:
             hwnd=first.window.hwnd,
             root_hwnd=first.window.root_hwnd,
             process_id=first.window.process_id,
+            process_identity=first.window.process_identity,
             epoch=epoch,
             window_region=first.region,
         )
@@ -255,6 +332,7 @@ class WindowsDesktopFactsReader:
             hwnd=first.window.hwnd,
             root_hwnd=first.window.root_hwnd,
             process_id=first.window.process_id,
+            process_identity=first.window.process_identity,
             epoch=expected.epoch,
             window_region=first.region,
         )
@@ -284,12 +362,13 @@ class WindowsDesktopFactsReader:
             )
         return WindowsDesktopFacts(
             target=TargetCommitIdentity(
-                expected.binding_id,
-                first.window.hwnd,
-                first.window.root_hwnd,
-                first.window.process_id,
-                expected.epoch,
-                first.region,
+                binding_id=expected.binding_id,
+                hwnd=first.window.hwnd,
+                root_hwnd=first.window.root_hwnd,
+                process_id=first.window.process_id,
+                process_identity=first.window.process_identity,
+                epoch=expected.epoch,
+                window_region=first.region,
             ),
             foreground=None,
             hit_test_point=request.screen_point if hit is not None else None,
@@ -319,6 +398,8 @@ class WindowsPhysicalInputFinalGuard:
             return FinalPointerGuardDecision.TARGET_ROOT_CHANGED
         if actual.process_id != expected.process_id:
             return FinalPointerGuardDecision.TARGET_PROCESS_CHANGED
+        if actual.process_identity != expected.process_identity:
+            return FinalPointerGuardDecision.TARGET_PROCESS_CHANGED
         if actual.window_region != expected.window_region:
             return FinalPointerGuardDecision.TARGET_GEOMETRY_CHANGED
         left, top, width, height = expected.window_region
@@ -330,6 +411,7 @@ class WindowsPhysicalInputFinalGuard:
         if (
             facts.hit.root_hwnd != expected.root_hwnd
             or facts.hit.process_id != expected.process_id
+            or facts.hit.process_identity != expected.process_identity
         ):
             return FinalPointerGuardDecision.HIT_TEST_CHANGED
         return FinalPointerGuardDecision.ADMITTED
@@ -352,6 +434,8 @@ class WindowsPhysicalInputFinalGuard:
             return FinalKeyboardGuardDecision.TARGET_ROOT_CHANGED
         if actual.process_id != expected.process_id:
             return FinalKeyboardGuardDecision.TARGET_PROCESS_CHANGED
+        if actual.process_identity != expected.process_identity:
+            return FinalKeyboardGuardDecision.TARGET_PROCESS_CHANGED
         if actual.window_region != expected.window_region:
             return FinalKeyboardGuardDecision.TARGET_GEOMETRY_CHANGED
         if facts.foreground is None:
@@ -359,6 +443,7 @@ class WindowsPhysicalInputFinalGuard:
         if (
             facts.foreground.root_hwnd != expected.root_hwnd
             or facts.foreground.process_id != expected.process_id
+            or facts.foreground.process_identity != expected.process_identity
         ):
             return FinalKeyboardGuardDecision.FOREGROUND_CHANGED
         return FinalKeyboardGuardDecision.ADMITTED
@@ -400,10 +485,14 @@ class WindowsDesktopCommitObservation:
             foreground_process_id=(
                 None if foreground is None else foreground.process_id
             ),
+            foreground_process_identity=(
+                None if foreground is None else foreground.process_identity
+            ),
             hit_test_point=facts.hit_test_point,
             hit_hwnd=None if hit is None else hit.hwnd,
             hit_root_hwnd=None if hit is None else hit.root_hwnd,
             hit_process_id=None if hit is None else hit.process_id,
+            hit_process_identity=None if hit is None else hit.process_identity,
         )
 
 

@@ -205,6 +205,7 @@ def test_well_formed_window_without_strong_process_identity_is_not_exposed():
         ({**_process(), "process_id": True}, "positive integer"),
         ({**_process(), "creation_time_ns": 1.5}, "positive integer"),
         ({**_process(), "executable_path": "orbit.exe"}, "absolute"),
+        ({**_process(), "executable_path": r"\Apps\orbit.exe"}, "absolute"),
         ({**_process(), "executable_path": "C:\\bad\x00.exe"}, "invalid"),
     ],
 )

@@ -609,9 +609,18 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
             f"{base}/api/v2/desktop-context?exclude_process_id=0",
         )
         target_window = desktop_context.get("target") or {}
+        assert target_window.get("format") == "desktop-target/2", target_window
         assert target_window.get("usable") is True, target_window
         assert target_window.get("foreground_verified") is True, target_window
         assert int(target_window.get("hwnd") or 0) == browser_hwnd, target_window
+        assert int(target_window.get("root_hwnd") or 0) > 0, target_window
+        assert int(target_window.get("process_id") or 0) > 0, target_window
+        process_identity = str(target_window.get("process_identity") or "")
+        assert (
+            process_identity.startswith("process-")
+            and len(process_identity) == 40
+            and all(character in "0123456789abcdef" for character in process_identity[8:])
+        ), target_window
         submitted_at = int(time.time() * 1000)
         execution_context = {
             "format": "execution-context/1",

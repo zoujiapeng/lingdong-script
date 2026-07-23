@@ -50,7 +50,7 @@ from winpilot.vnext.mission import (
     MissionStatus,
     ObligationSpec,
     ObligationStatus,
-    TargetBinding,
+    target_binding_attestation,
 )
 from winpilot.vnext.profiling import DEFAULT_CAPABILITY_CATALOG, ExecutionPolicy
 from winpilot.vnext.runtime import (
@@ -82,6 +82,8 @@ ALL_CAPABILITIES = tuple(sorted(DEFAULT_CAPABILITY_CATALOG))
 VALID_PIXEL_IMAGE = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACklEQVQIHWMAAgAABAABDTukuQAAAABJRU5ErkJggg=="
 )
+PROCESS_IDENTITY = f"process-{'1' * 32}"
+REPLACEMENT_PROCESS_IDENTITY = f"process-{'2' * 32}"
 
 
 class EvidenceRegistry:
@@ -539,27 +541,39 @@ def _definition(
     )
 
 
-def _bind_target(reducer: MissionReducer, registry: EvidenceRegistry) -> None:
-    registry.add(EvidenceRef(
-        id="target-proof",
+def _target_attestation(
+    *,
+    evidence_id: str = "target-proof",
+    acquisition_action_id: str = "target-acquisition-1",
+    hwnd: int = 101,
+    root_hwnd: int | None = None,
+    process_id: int = 7,
+    process_identity: str = PROCESS_IDENTITY,
+    title_snapshot: str = "Current application",
+    epoch: int = 3,
+):
+    return target_binding_attestation(
         mission_id="mission-1",
         run_id="run-1",
-        kind="target",
-        trust="deterministic",
-        payload_hash="target-proof-payload",
-    ))
+        obligation_id="o1",
+        evidence_id=evidence_id,
+        acquisition_action_id=acquisition_action_id,
+        hwnd=hwnd,
+        root_hwnd=hwnd if root_hwnd is None else root_hwnd,
+        process_id=process_id,
+        process_identity=process_identity,
+        title_snapshot=title_snapshot,
+        epoch=epoch,
+    )
+
+
+def _bind_target(reducer: MissionReducer, registry: EvidenceRegistry) -> None:
+    binding, evidence = _target_attestation()
+    registry.add(evidence)
     reducer.apply(reducer.event(
         "target_bound",
-        payload=TargetBinding(
-            binding_id="target-1",
-            hwnd=101,
-            process_id=7,
-            executable_identity="opaque-process",
-            title_snapshot="Current application",
-            established_by_evidence_ref="target-proof",
-            epoch=3,
-        ).to_dict(),
-        evidence_refs=("target-proof",),
+        payload={"target_binding": binding.to_dict()},
+        evidence_refs=(evidence.id,),
     ))
 
 
@@ -598,12 +612,18 @@ def _snapshot(
     offers: tuple[ExecutorOffer, ...] = (),
     authorizations: tuple[str, ...] = (),
 ) -> RuntimeSnapshot:
-    target_state = target or TargetState("target-1", frame.hwnd, frame.epoch, True)
+    target_state = target or TargetState(
+        _target_attestation(hwnd=frame.hwnd, epoch=frame.epoch)[0].binding_id,
+        frame.hwnd,
+        frame.epoch,
+        True,
+    )
     target_identity = runtime_target or TargetCommitIdentity(
         binding_id=str(target_state.binding_id),
         hwnd=int(target_state.hwnd),
         root_hwnd=int(target_state.hwnd),
         process_id=7,
+        process_identity=PROCESS_IDENTITY,
         epoch=int(target_state.epoch),
         window_region=(0, 0, 1280, 720),
     )
@@ -624,6 +644,11 @@ def _snapshot(
         frame=frame,
         target=target_identity,
     )
+
+
+def test_runtime_snapshot_rejects_previous_wire_version() -> None:
+    with pytest.raises(RuntimeContractError, match="format"):
+        replace(_snapshot(_frame(9)), format="runtime-snapshot/0")
 
 
 def _set_harness_turn(harness: Harness, turn_index: int) -> None:
@@ -796,26 +821,11 @@ def _canonical_action_harness(
     mission = _definition()
     registry = CanonicalEvidenceRegistry(mission.mission_id, mission.run_id)
     reducer = MissionReducer(mission, evidence=registry)
-    target_proof = EvidenceRef(
-        id="target-proof",
-        mission_id=mission.mission_id,
-        run_id=mission.run_id,
-        kind="target",
-        trust="deterministic",
-        payload_hash="target-proof-payload",
-    )
+    target_binding, target_proof = _target_attestation()
     registry.append(target_proof)
     reducer.apply(reducer.event(
         "target_bound",
-        payload=TargetBinding(
-            binding_id="target-1",
-            hwnd=101,
-            process_id=7,
-            executable_identity="opaque-process",
-            title_snapshot="Current application",
-            established_by_evidence_ref=target_proof.id,
-            epoch=3,
-        ).to_dict(),
+        payload={"target_binding": target_binding.to_dict()},
         evidence_refs=(target_proof.id,),
     ))
 
@@ -909,26 +919,11 @@ def _visual_harness(
         definition.mission_id, definition.run_id
     )
     reducer = MissionReducer(definition, evidence=registry)
-    target_proof = EvidenceRef(
-        id="target-proof",
-        mission_id=definition.mission_id,
-        run_id=definition.run_id,
-        kind="target",
-        trust="deterministic",
-        payload_hash="target-proof-payload",
-    )
+    target_binding, target_proof = _target_attestation()
     registry.append(target_proof)
     reducer.apply(reducer.event(
         "target_bound",
-        payload=TargetBinding(
-            binding_id="target-1",
-            hwnd=101,
-            process_id=7,
-            executable_identity="opaque-process",
-            title_snapshot="Current application",
-            established_by_evidence_ref=target_proof.id,
-            epoch=3,
-        ).to_dict(),
+        payload={"target_binding": target_binding.to_dict()},
         evidence_refs=(target_proof.id,),
     ))
     frame = _frame(9, salt=evidence_mode)
@@ -1014,26 +1009,11 @@ def _completion_harness(
     registry = CanonicalEvidenceRegistry(mission.mission_id, mission.run_id)
     reducer_type = FailOnceMissionCompletionReducer if fail_once else MissionReducer
     reducer = reducer_type(mission, evidence=registry)
-    target_proof = EvidenceRef(
-        id="target-proof",
-        mission_id=mission.mission_id,
-        run_id=mission.run_id,
-        kind="target",
-        trust="deterministic",
-        payload_hash="target-proof-payload",
-    )
+    target_binding, target_proof = _target_attestation()
     registry.append(target_proof)
     reducer.apply(reducer.event(
         "target_bound",
-        payload=TargetBinding(
-            binding_id="target-1",
-            hwnd=101,
-            process_id=7,
-            executable_identity="opaque-process",
-            title_snapshot="Current application",
-            established_by_evidence_ref=target_proof.id,
-            epoch=3,
-        ).to_dict(),
+        payload={"target_binding": target_binding.to_dict()},
         evidence_refs=(target_proof.id,),
     ))
     frame = _frame(9)
@@ -1153,7 +1133,13 @@ def test_runtime_snapshot_rejects_broker_target_identity_disagreement(field: str
 
 def test_initial_runtime_target_must_match_accepted_mission_process() -> None:
     target = TargetCommitIdentity(
-        "target-1", 101, 101, 8, 3, (0, 0, 1280, 720),
+        _target_attestation()[0].binding_id,
+        101,
+        101,
+        8,
+        REPLACEMENT_PROCESS_IDENTITY,
+        3,
+        (0, 0, 1280, 720),
     )
     initial = _snapshot(_frame(9), runtime_target=target)
     harness = _harness(_click(), initial=initial)
@@ -1186,7 +1172,7 @@ def test_visual_route_binds_one_actor_proposal_to_one_runtime_envelope() -> None
     assert envelope.frame.hwnd == 101
     assert envelope.frame.scope == "target_window"
     assert envelope.frame.image_sha256 == _frame(9).image_sha256
-    assert envelope.target.binding_id == "target-1"
+    assert envelope.target.binding_id == _target_attestation()[0].binding_id
     assert envelope.target.root_hwnd == 101
     assert envelope.target.process_id == 7
     assert envelope.pointer == PointerLeaseState(PointerDisposition.RELEASED)
@@ -1491,35 +1477,39 @@ def test_target_change_does_not_cross_project_previous_action() -> None:
     )
     assert harness.runtime.run_one_turn(turn_index=4).status is RuntimeStatus.ACTION_RECORDED
     assert harness.runtime._pending_actor_action is not None
+    current_binding = harness.reducer.projection.target_binding
+    assert current_binding is not None
     harness.reducer.apply(harness.reducer.event(
-        "target_invalidated", payload={"reason": "window identity changed"},
+        "target_invalidated",
+        payload={
+            "expected_binding_id": current_binding.binding_id,
+            "expected_canonical_identity_sha256": (
+                current_binding.canonical_identity_sha256
+            ),
+            "observed_frame_id": None,
+            "reason": "window identity changed",
+        },
     ))
-    harness.registry.append(EvidenceRef(
-        id="target-proof-2",
-        mission_id="mission-1",
-        run_id="run-1",
-        kind="target",
-        trust="deterministic",
-        payload_hash="target-proof-payload-2",
-    ))
+    replacement, replacement_proof = _target_attestation(
+        evidence_id="target-proof-2",
+        acquisition_action_id="target-acquisition-2",
+        hwnd=202,
+        process_id=7,
+        process_identity=REPLACEMENT_PROCESS_IDENTITY,
+        title_snapshot="Replacement application",
+        epoch=4,
+    )
+    harness.registry.append(replacement_proof)
     harness.reducer.apply(harness.reducer.event(
         "target_bound",
-        payload=TargetBinding(
-            binding_id="target-2",
-            hwnd=202,
-            process_id=7,
-            executable_identity="replacement-process",
-            title_snapshot="Replacement application",
-            established_by_evidence_ref="target-proof-2",
-            epoch=4,
-        ).to_dict(),
-        evidence_refs=("target-proof-2",),
+        payload={"target_binding": replacement.to_dict()},
+        evidence_refs=(replacement_proof.id,),
     ))
     frame = _frame(12, hwnd=202, epoch=4)
     harness.state.post_action = _snapshot(
         frame,
         turn_index=5,
-        target=TargetState("target-2", 202, 4, True),
+        target=TargetState(replacement.binding_id, 202, 4, True),
     )
     harness.actor.proposal = _live_click(630, 430)
 
@@ -1713,7 +1703,8 @@ def test_proven_rejection_without_post_observation_is_stale_not_unknown() -> Non
     "race",
     (
         "revision", "obligation", "frame", "scope", "hash", "target",
-        "target_root", "target_pid", "target_geometry", "pointer", "grant", "broker",
+        "target_root", "target_pid", "target_process_identity",
+        "target_geometry", "pointer", "grant", "broker",
     ),
 )
 def test_post_actor_identity_or_authority_change_discards_without_execution(race: str) -> None:
@@ -1741,16 +1732,28 @@ def test_post_actor_identity_or_authority_change_discards_without_execution(race
     elif race == "hash":
         current = _snapshot(_frame(9, salt="changed-pixels"))
     elif race == "target":
+        changed_binding, _changed_evidence = _target_attestation(
+            acquisition_action_id="target-acquisition-race",
+            hwnd=202,
+            epoch=3,
+        )
         current = _snapshot(
             _frame(9, hwnd=202),
-            target=TargetState("target-2", 202, 3, True),
+            target=TargetState(changed_binding.binding_id, 202, 3, True),
         )
-    elif race in {"target_root", "target_pid", "target_geometry"}:
+    elif race in {
+        "target_root", "target_pid", "target_process_identity", "target_geometry",
+    }:
         target_identity = TargetCommitIdentity(
-            binding_id="target-1",
+            binding_id=_target_attestation()[0].binding_id,
             hwnd=101,
             root_hwnd=(202 if race == "target_root" else 101),
             process_id=(8 if race == "target_pid" else 7),
+            process_identity=(
+                REPLACEMENT_PROCESS_IDENTITY
+                if race in {"target_pid", "target_process_identity"}
+                else PROCESS_IDENTITY
+            ),
             epoch=3,
             window_region=(
                 (1, 0, 1280, 720)

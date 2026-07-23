@@ -39,9 +39,11 @@ from ...visual_runtime.atomic_click_controller import (
     SUPPORTED_DESKTOP_TOOL_NAMES,
 )
 from ...visual_runtime.atomic_post_action_bridge import AtomicPostActionBridge
+from ...visual_runtime.commit_admission import TargetCommitIdentity
 from ...visual_runtime.frame_observer import FrameObserver
 from ...visual_runtime.windows_desktop_facts import (
     WindowsDesktopCommitObservation,
+    WindowsDesktopFactsError,
     WindowsDesktopFactsReader,
     WindowsPhysicalInputFinalGuard,
 )
@@ -50,11 +52,10 @@ from ..capabilities import CapabilityBroker, PointerLeaseState
 from ..capabilities.live_catalog import build_live_runtime_snapshot
 from ..evidence import EvidenceRegistry
 from ..mission import (
-    EvidenceRef,
     MissionReducer,
     MissionStatus,
-    TargetBinding,
     project_legacy_contract,
+    target_binding_attestation,
 )
 from ..profiling import ExecutionPolicy
 from ..runtime import MissionRuntime, MutationPermitAuthority, RuntimeStatus
@@ -187,22 +188,6 @@ def _accepted_turn_tool_name(
     ):
         return "blocked"
     return None
-
-
-def _handoff_region(value: Any) -> tuple[int, int, int, int]:
-    """Convert Win32 ``left, top, right, bottom`` to Runtime geometry."""
-
-    if (
-        not isinstance(value, (list, tuple))
-        or len(value) != 4
-        or any(type(item) is not int for item in value)
-    ):
-        raise LiveDesktopCoordinatorError("desktop handoff target rect is invalid")
-    left, top, right, bottom = value
-    width, height = right - left, bottom - top
-    if width <= 0 or height <= 0:
-        raise LiveDesktopCoordinatorError("desktop handoff target rect is invalid")
-    return left, top, width, height
 
 
 class LiveDesktopRuntimeCoordinator:
@@ -387,62 +372,79 @@ class LiveDesktopRuntimeCoordinator:
         evidence: EvidenceRegistry,
         handoff_hwnd: int,
         handoff: Mapping[str, Any],
-    ) -> Any:
+    ) -> TargetCommitIdentity:
         definition = reducer.definition
-        binding_material = {
-            "format": "vnext-target-binding-identity/0",
+        acquisition_action_id = "handoff-" + _digest({
+            "format": "vnext-handoff-acquisition/2",
             "mission_id": definition.mission_id,
             "run_id": definition.run_id,
             "handoff_hwnd": handoff_hwnd,
-        }
-        binding_id = "target-" + _digest(binding_material)[:24]
-        target = self._facts.read_target_identity(
-            handoff_hwnd,
-            binding_id=binding_id,
-            epoch=0,
-        )
+            "handoff_process_identity": handoff.get("process_identity"),
+            "captured_at": handoff.get("captured_at"),
+        })[:24]
+        try:
+            physical_target = self._facts.read_target_identity(
+                handoff_hwnd,
+                binding_id="target-" + "0" * 24,
+                epoch=0,
+            )
+        except WindowsDesktopFactsError as exc:
+            raise LiveDesktopCoordinatorError(
+                "desktop handoff target identity is unavailable"
+            ) from exc
         handoff_process_id = int(handoff.get("process_id") or 0)
-        handoff_region = _handoff_region(handoff.get("rect"))
+        handoff_root_hwnd = int(handoff.get("root_hwnd") or 0)
+        handoff_process_identity = str(handoff.get("process_identity") or "")
         if handoff.get("foreground_verified") is not True:
             raise LiveDesktopCoordinatorError(
                 "desktop handoff target was not foreground-verified"
             )
-        if handoff_process_id != target.process_id:
+        if (
+            handoff_process_id != physical_target.process_id
+            or handoff_root_hwnd != physical_target.root_hwnd
+            or handoff_process_identity != physical_target.process_identity
+        ):
             raise LiveDesktopCoordinatorError(
                 "desktop handoff process identity changed"
             )
-        binding_core = {
-            "binding_id": binding_id,
-            "hwnd": target.hwnd,
-            "process_id": target.process_id,
-            "executable_identity": f"pid:{target.process_id}",
-            "title_snapshot": str(handoff.get("title") or ""),
-            "epoch": target.epoch,
-        }
-        evidence_hash = _digest({
-            "format": "vnext-target-binding-evidence/0",
+        process_identity = physical_target.process_identity
+        evidence_id = "evidence-target-" + _digest({
+            "format": "vnext-target-binding-evidence-id/1",
             "mission_id": definition.mission_id,
             "run_id": definition.run_id,
-            "target": target.to_dict(),
-            # The client snapshot uses GetWindowRect endpoints while the
-            # commit owner uses DWM visible bounds.  Preserve both identities;
-            # only the freshly double-sampled DWM region is actionable.
-            "handoff_region": list(handoff_region),
-            "binding": binding_core,
-        })
-        evidence_id = "evidence-target-" + evidence_hash[:24]
-        binding = TargetBinding(
-            **binding_core,
-            established_by_evidence_ref=evidence_id,
-        )
-        ref = EvidenceRef(
-            id=evidence_id,
+            "acquisition_action_id": acquisition_action_id,
+            "hwnd": physical_target.hwnd,
+            "root_hwnd": physical_target.root_hwnd,
+            "process_id": physical_target.process_id,
+            "process_identity": process_identity,
+        })[:24]
+        obligation_id = reducer.projection.active_obligation_id
+        if obligation_id is None:
+            raise LiveDesktopCoordinatorError(
+                "desktop handoff has no active mission obligation"
+            )
+        binding, ref = target_binding_attestation(
             mission_id=definition.mission_id,
             run_id=definition.run_id,
-            kind="authoritative_target_binding",
-            trust="deterministic",
-            payload_hash=evidence_hash,
+            obligation_id=obligation_id,
+            evidence_id=evidence_id,
+            acquisition_action_id=acquisition_action_id,
+            hwnd=physical_target.hwnd,
+            root_hwnd=physical_target.root_hwnd,
+            process_id=physical_target.process_id,
+            process_identity=process_identity,
+            title_snapshot=str(handoff.get("title") or ""),
+            epoch=physical_target.epoch,
             created_at=float(self._clock()),
+        )
+        target = TargetCommitIdentity(
+            binding_id=binding.binding_id,
+            hwnd=physical_target.hwnd,
+            root_hwnd=physical_target.root_hwnd,
+            process_id=physical_target.process_id,
+            process_identity=process_identity,
+            epoch=physical_target.epoch,
+            window_region=physical_target.window_region,
         )
         evidence.append(ref)
         reducer.apply(reducer.event(
@@ -458,7 +460,7 @@ class LiveDesktopRuntimeCoordinator:
         context: DesktopRuntimeCoordinatorContext,
         reducer: MissionReducer,
         evidence: EvidenceRegistry,
-        target: Any,
+        target: TargetCommitIdentity,
     ) -> tuple[MissionRuntime, tuple[str, ...], _ActorProjectionProbe]:
         frames = FrameAuthority()
         observer = self._observer_factory(frames)

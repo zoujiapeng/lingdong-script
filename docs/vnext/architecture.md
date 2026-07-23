@@ -279,6 +279,15 @@ request_capability  claim_obligation_done  blocked
 Catalog 只用 `visual.interact` 授权 click/double-click/scroll/type-text/hotkey。canonical 名称统一由
 `vnext/capability_names.py` 持有，兼容 re-export 不能成为第二 owner。
 
+P4b.2 当前只完成 target acquisition 的只读事实基础：`TargetDiscovery` 聚合安装目录、进程与窗口候选，
+`WindowsTargetFacts` 用一次不可变快照给 PID、创建时间、绝对 exe 路径和 HWND 建立强身份；Mission
+只接受由 Runtime action 与 deterministic evidence 共同证明的 strict `TargetBinding`。这些 owner 均不
+选择候选、不聚焦窗口、不启动应用。live Actor/Broker 尚未接入 targetless 输入，正式 Actor view 也不得
+暴露 `candidate_ref`、HWND、PID、路径或 AppID；下一切片由 Actor 只选择有界序号，Runtime 在私有
+one-shot sidecar 中解析并重新验证候选，再通过同一个 Controller/ActionQueue 执行精确 `switch/open`。
+在 existing-instance reuse 与 cold-launch 的同入口 oracle 闭合前，上面的未绑定工具面仍是目标设计，
+不是当前产品能力。
+
 ### 9.2 CapabilityRequest
 
 Actor 可以请求 broad capability，例如 `pointer.dynamic` 或 `visual.read_text`。请求只是 proposal。Broker 必须校验 catalog、active obligation、当前状态、安全、provider 与授权后，才产生绑定 obligation/revision、有期限的 grant。禁止从自由文本解析应用模式。
@@ -487,6 +496,12 @@ Frame、坐标、admission 与 RawDevice primitive，再由 Runtime-bound Contro
 在紧邻物理输入前执行对应的 pointer 或 keyboard final target guard。scroll 与 keyboard 只走 unqueued admitted physical SendInput backend，
 Actor 以明确 direction/notches 表达 viewport 导航，Controller 才机械映射到 RawDevice signed amount；
 结果不确定时不切换机制也不自动重放。keyboard 已完成 owner/parity 代码合同，并由同入口 Electron trusted-browser oracle 验证 type-text 三个随机 seed 与 hotkey select-all；这些是非 paired 的窄原语可达性证据，不代表 P7 或默认切换完成。`drag`、`draw_strokes` 和 held pointer 必须逐项完成相同 owner/parity/unknown-no-replay 合同，不能通过 legacy fallback 补齐。
+
+target acquisition 的只读 discovery、Windows facts 与 strict Mission attestation 已建立，但当前 live
+coordinator 仍要求已有 foreground handoff，live Catalog 没有 `discover/open/switch`，也没有启动前后
+因果验证。下一实现必须扩展现有唯一 ControllerPort，而不能调用 legacy `open_app/focus_window` 形成
+第二执行入口；已运行实例只能在强进程/窗口身份可重验时复用，cold launch 只能执行一次，poll 只是
+只读观察，任何可能已执行但无法唯一归因的结果都进入 `unknown` 且不得 action replay。
 
 live bridge 对 frame freshness 使用显式 max-age（默认 30 秒），并在 Actor 返回后的 Broker
 reprojection 中重新计算；过龄帧不能进入 click admission。任务回合数来自 canonical

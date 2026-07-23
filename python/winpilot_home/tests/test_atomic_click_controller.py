@@ -42,6 +42,7 @@ from winpilot.visual_runtime.commit_admission import (
 
 
 IMAGE = "YWJj"
+PROCESS_IDENTITY = "process-" + "1" * 32
 
 
 def _authority() -> tuple[FrameAuthority, object]:
@@ -76,7 +77,8 @@ def _envelope(frame, *, decision_id="decision-1", action="click", args=None):
             "image_sha256": frame.image_sha256,
         },
         target=TargetCommitIdentity(
-            "target-1", 101, 101, 7, 3, (10, 20, 101, 51),
+            "target-1", 101, 101, 7, PROCESS_IDENTITY, 3,
+            (10, 20, 101, 51),
         ),
         pointer=PointerLeaseState(PointerDisposition.RELEASED),
         broker_projection_id="projection-1",
@@ -109,6 +111,10 @@ class Observation:
             foreground_hwnd=request.target.hwnd if self.foreground else 202,
             foreground_root_hwnd=request.target.root_hwnd if self.foreground else 202,
             foreground_process_id=request.target.process_id if self.foreground else 8,
+            foreground_process_identity=(
+                request.target.process_identity
+                if self.foreground else "process-" + "2" * 32
+            ),
             hit_test_point=request.screen_point,
             hit_hwnd=request.target.hwnd if request.screen_point is not None else None,
             hit_root_hwnd=(
@@ -116,6 +122,10 @@ class Observation:
             ),
             hit_process_id=(
                 request.target.process_id if request.screen_point is not None else None
+            ),
+            hit_process_identity=(
+                request.target.process_identity
+                if request.screen_point is not None else None
             ),
         )
 

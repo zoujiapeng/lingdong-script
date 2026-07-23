@@ -180,12 +180,14 @@ describe('control plane client contracts', () => {
 
   it('captures the post-handoff desktop target through the authenticated control plane', async () => {
     const target = {
-      format: 'desktop-target/1',
+      format: 'desktop-target/2',
       hwnd: 501,
+      root_hwnd: 501,
       title: 'Visible target',
       process_id: 902,
+      process_identity: 'process-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       class_name: 'TargetWindow',
-      rect: [10, 20, 1210, 820],
+      rect: [10, 20, 1210, 820] as [number, number, number, number],
       captured_at: 1_750_000,
       foreground_verified: true,
       usable: true,
@@ -209,6 +211,46 @@ describe('control plane client contracts', () => {
       expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({
         Authorization: 'Bearer managed-token',
       });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects malformed desktop-target responses before run submission', async () => {
+    const valid = {
+      format: 'desktop-target/2',
+      hwnd: 501,
+      root_hwnd: 501,
+      title: 'Visible target',
+      process_id: 902,
+      process_identity: 'process-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      class_name: 'TargetWindow',
+      rect: [10, 20, 1210, 820],
+      captured_at: 1_750_000,
+      foreground_verified: true,
+      usable: true,
+      failure_type: '',
+      reason: '',
+    };
+    const malformed = [
+      { ...valid, format: 'desktop-target/1' },
+      { ...valid, process_id: true },
+      { ...valid, process_identity: 'process-weak' },
+      { ...valid, rect: [10, 20, 1210, 820, 900] },
+      { ...valid, unrecognized: true },
+    ];
+
+    try {
+      for (const target of malformed) {
+        vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, target }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })));
+        await expect(
+          new ControlPlaneClient('http://127.0.0.1:8765', 'managed-token')
+            .captureDesktopContext(7712),
+        ).rejects.toThrow(/desktop target/i);
+      }
     } finally {
       vi.unstubAllGlobals();
     }

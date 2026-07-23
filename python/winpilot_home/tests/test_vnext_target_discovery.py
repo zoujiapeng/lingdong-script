@@ -5,6 +5,10 @@ import random
 
 import pytest
 
+from winpilot.process_identity import (
+    ProcessIdentityError,
+    process_identity_for as neutral_process_identity_for,
+)
 from winpilot.vnext.targeting import (
     TargetActivation,
     TargetCandidate,
@@ -24,6 +28,19 @@ def _process_identity(pid: int) -> str:
         executable_path=fr"C:\Apps\host-{pid}.exe",
         creation_time_ns=100,
     )
+
+
+def test_process_identity_is_reexported_from_neutral_visual_runtime_owner():
+    assert process_identity_for is neutral_process_identity_for
+
+
+def test_process_identity_reexport_rejects_relative_executable_path():
+    with pytest.raises(ProcessIdentityError, match="absolute"):
+        process_identity_for(
+            process_id=7,
+            executable_path="host.exe",
+            creation_time_ns=100,
+        )
 
 
 def _discovery(*, installed=(), visible=(), running=None):

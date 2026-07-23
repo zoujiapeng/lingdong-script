@@ -211,7 +211,9 @@ class RuntimeStateBridge:
         if (
             binding.binding_id != target.binding_id
             or binding.hwnd != target.hwnd
+            or binding.root_hwnd != target.root_hwnd
             or binding.process_id != target.process_id
+            or binding.process_identity != target.process_identity
             or binding.epoch != target.epoch
         ):
             raise RuntimeStateBridgeError(
@@ -230,7 +232,7 @@ class RuntimeStateBridge:
             raise RuntimeStateBridgeError("current target identity is unavailable")
         if current != self._target:
             raise RuntimeStateBridgeError(
-                "target HWND, root, process, epoch, or geometry changed"
+                "target HWND, root, process identity, epoch, or geometry changed"
             )
         return self._target
 

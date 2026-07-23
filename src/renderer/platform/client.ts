@@ -135,6 +135,76 @@ async function readJson<T>(response: Response): Promise<T> {
   return data as T;
 }
 
+const DESKTOP_TARGET_FIELDS = [
+  'captured_at',
+  'class_name',
+  'failure_type',
+  'foreground_verified',
+  'format',
+  'hwnd',
+  'process_id',
+  'process_identity',
+  'reason',
+  'rect',
+  'root_hwnd',
+  'title',
+  'usable',
+] as const;
+
+function desktopTargetContext(value: unknown): DesktopTargetContext {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Desktop target response is not an object.');
+  }
+  const target = value as Record<string, unknown>;
+  const fields = Object.keys(target).sort();
+  if (
+    fields.length !== DESKTOP_TARGET_FIELDS.length
+    || fields.some((field, index) => field !== DESKTOP_TARGET_FIELDS[index])
+  ) {
+    throw new Error('Desktop target response has an invalid schema.');
+  }
+  const integer = (field: string, positive: boolean) => (
+    Number.isInteger(target[field])
+    && typeof target[field] === 'number'
+    && (positive ? Number(target[field]) > 0 : Number(target[field]) >= 0)
+  );
+  const textFields = [
+    'title', 'process_identity', 'class_name', 'failure_type', 'reason',
+  ];
+  const rect = target.rect;
+  const usable = target.usable === true;
+  const validRect = Array.isArray(rect) && (
+    (!usable && rect.length === 0)
+    || (
+      rect.length === 4
+      && rect.every((item) => typeof item === 'number' && Number.isInteger(item))
+      && Number(rect[2]) > Number(rect[0])
+      && Number(rect[3]) > Number(rect[1])
+    )
+  );
+  if (
+    target.format !== 'desktop-target/2'
+    || !integer('hwnd', usable)
+    || !integer('root_hwnd', usable)
+    || !integer('process_id', usable)
+    || !integer('captured_at', true)
+    || !textFields.every((field) => typeof target[field] === 'string')
+    || typeof target.foreground_verified !== 'boolean'
+    || typeof target.usable !== 'boolean'
+    || !validRect
+    || (
+      usable
+      && (
+        target.foreground_verified !== true
+        || !/^process-[0-9a-f]{32}$/.test(String(target.process_identity))
+      )
+    )
+  ) {
+    throw new Error('Desktop target response violates desktop-target/2.');
+  }
+  return target as unknown as DesktopTargetContext;
+}
+
 export class ControlPlaneClient {
   readonly baseUrl: string;
   readonly token: string;
@@ -170,10 +240,13 @@ export class ControlPlaneClient {
   }
 
   async captureDesktopContext(excludeProcessId = 0): Promise<DesktopTargetContext> {
-    const response = await this.request<{ ok: boolean; target: DesktopTargetContext }>(
+    const response = await this.request<{ ok: boolean; target: unknown }>(
       `api/v2/desktop-context?exclude_process_id=${Math.max(0, Math.trunc(excludeProcessId))}`,
     );
-    return response.target;
+    if (response.ok !== true) {
+      throw new Error('Desktop target capture did not succeed.');
+    }
+    return desktopTargetContext(response.target);
   }
 
   run(runId: string): Promise<CurrentRunResponse> {

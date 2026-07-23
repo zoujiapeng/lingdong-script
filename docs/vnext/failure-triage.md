@@ -101,7 +101,7 @@ Profiler判断错不能通过给Actor增加“记住这是复杂任务”的prom
 -启动后是否有因果快照；
 -是否错误新开实例、退回网页或绑定登录页。
 
-优先修AppResolver，不能用prompt教固定安装路径。
+优先修 TargetDiscovery、WindowsTargetFacts、TargetBinding 与 activation causality，不能用 prompt 教固定安装路径。
 
 ### 2.7 Frame、目标与坐标
 
@@ -246,7 +246,7 @@ Prompt是最后一层。只允许修正：
 | 简单任务启动Planner/Inspector | TaskProfiler、ExecutionPolicy | 给Actor解释为何任务简单 |
 | 跨应用工件任务只执行第一段 | under-profile、MissionDefinition、dependency | 给Actor追加整条主线 |
 | 只打开应用就claim完成 | obligation、claim/verifier、Card | 应用专属后续步骤prompt |
-| 已有登录实例却新开 | AppResolver、TargetBinding | 专属“先找窗口”规则 |
+| 已有登录实例却新开 | TargetDiscovery、WindowsTargetFacts、TargetBinding、activation causality | 专属“先找窗口”规则 |
 | 找到网页但找不到客户端 | 多源索引、candidate identity | 固定安装路径 |
 | 点击输入框后停住 | 新帧、active obligation、Broker、延迟 | 输入框教程 |
 | 点击无反应 | HWND/focus/frame/down-up/遮挡 | OCR附近自动改点 |

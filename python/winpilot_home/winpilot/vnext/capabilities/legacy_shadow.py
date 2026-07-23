@@ -11,8 +11,17 @@ import json
 import threading
 from typing import Any, Iterable, Mapping, Protocol
 
-from ..mission import EvidenceRef, MissionDefinition, MissionReducer, TargetBinding
-from ..mission import project_legacy_contract
+from ...visual_runtime.windows_desktop_facts import (
+    WindowsDesktopFactsError,
+    WindowsDesktopFactsReader,
+)
+from ..mission import (
+    EvidenceRef,
+    MissionDefinition,
+    MissionReducer,
+    project_legacy_contract,
+    target_binding_attestation,
+)
 from ..profiling import ExecutionProfile
 from .broker import CapabilityBroker
 from .catalog import ToolPolicy, build_tool_catalog, schemas_by_name
@@ -151,11 +160,19 @@ class LegacyBrokerShadowObserver:
         profile: ExecutionProfile,
         trace: ShadowTraceWriter,
         available_capabilities: Iterable[str],
+        desktop_facts_reader: WindowsDesktopFactsReader | None = None,
     ) -> None:
         self.definition = definition
         self.profile = profile
         self._trace = trace
         self._available = tuple(sorted(set(available_capabilities)))
+        if desktop_facts_reader is not None and not isinstance(
+            desktop_facts_reader, WindowsDesktopFactsReader
+        ):
+            raise TypeError(
+                "desktop_facts_reader must be WindowsDesktopFactsReader"
+            )
+        self._desktop_facts = desktop_facts_reader or WindowsDesktopFactsReader()
         self._evidence: dict[str, EvidenceRef] = {}
         self._reducer = MissionReducer(definition, evidence=lambda: self._evidence)
         self._lock = threading.RLock()
@@ -202,72 +219,126 @@ class LegacyBrokerShadowObserver:
         except (TypeError, ValueError):
             session_epoch = -1
         if session_epoch != epoch:
-            self._invalidate_target("authoritative_frame_stale")
+            self._invalidate_target(
+                "authoritative_frame_stale", observed_frame_id=frame_id,
+            )
             return AuthoritativeFrameState(frame_id, hwnd, epoch, True, False), TargetState()
         frame_state = AuthoritativeFrameState(frame_id, hwnd, epoch, True, True)
 
         verified = bool(getattr(session, "_target_binding_verified", False))
         target_hwnd = int(getattr(session, "hwnd", 0) or 0)
         process_id = int(getattr(session, "_target_process_id", 0) or 0)
-        executable = str(getattr(session, "_target_process_name", "") or "").strip()
-        if not executable and process_id > 0:
-            executable = f"pid:{process_id}"
-        if not (verified and target_hwnd == hwnd and executable):
-            self._invalidate_target("authoritative_target_unavailable")
+        if not (verified and target_hwnd == hwnd and process_id > 0):
+            self._invalidate_target(
+                "authoritative_target_unavailable", observed_frame_id=frame_id,
+            )
             return frame_state, TargetState()
-
-        binding_material = {
+        current = self._reducer.projection.target_binding
+        try:
+            physical = self._desktop_facts.read_target_identity(
+                hwnd,
+                binding_id="target-" + "0" * 24,
+                epoch=epoch,
+            )
+        except WindowsDesktopFactsError:
+            self._invalidate_target(
+                "authoritative_target_identity_unavailable",
+                observed_frame_id=frame_id,
+            )
+            return frame_state, TargetState()
+        if physical.process_id != process_id:
+            self._invalidate_target(
+                "authoritative_target_process_changed",
+                observed_frame_id=frame_id,
+            )
+            return frame_state, TargetState()
+        process_identity = physical.process_identity
+        if (
+            current is not None
+            and current.hwnd == physical.hwnd
+            and current.root_hwnd == physical.root_hwnd
+            and current.process_id == physical.process_id
+            and current.process_identity == physical.process_identity
+            and current.epoch == physical.epoch
+        ):
+            return frame_state, TargetState(
+                current.binding_id, current.hwnd, current.epoch, True
+            )
+        if current is not None:
+            prior_evidence = self._evidence.get(
+                current.established_by_evidence_ref
+            )
+            prior_frame_id = (
+                None if prior_evidence is None else prior_evidence.frame_id
+            )
+            self._invalidate_target(
+                "authoritative_target_changed", observed_frame_id=frame_id,
+            )
+            if prior_frame_id is None or frame_id <= prior_frame_id:
+                return frame_state, TargetState()
+        rebind_after = self._reducer.projection.target_rebind_after_frame_id
+        if rebind_after is not None and frame_id <= rebind_after:
+            return frame_state, TargetState()
+        acquisition_action_id = "legacy-observation-" + _digest({
             "mission_id": self.definition.mission_id,
             "run_id": self.definition.run_id,
-            "hwnd": hwnd,
-            "process_id": process_id,
-            "executable_identity": executable,
-        }
-        binding_id = "target-" + _digest(binding_material)[:24]
-        evidence_material = {
-            **binding_material,
             "frame_id": frame_id,
             "epoch": epoch,
-            "frame_sha256": str(getattr(frame, "image_sha256", "") or ""),
-        }
-        payload_hash = _digest(evidence_material)
-        evidence_id = "evidence-target-" + payload_hash[:24]
-        evidence = EvidenceRef(
-            id=evidence_id,
+            "hwnd": hwnd,
+            "process_identity": process_identity,
+        })[:24]
+        evidence_id = "evidence-target-" + _digest({
+            "mission_id": self.definition.mission_id,
+            "run_id": self.definition.run_id,
+            "acquisition_action_id": acquisition_action_id,
+        })[:24]
+        obligation_id = self._reducer.projection.active_obligation_id
+        if obligation_id is None:
+            self._invalidate_target("active_obligation_unavailable")
+            return frame_state, TargetState()
+        binding, evidence = target_binding_attestation(
             mission_id=self.definition.mission_id,
             run_id=self.definition.run_id,
-            kind="authoritative_target_binding",
-            trust="deterministic",
-            payload_hash=payload_hash,
+            obligation_id=obligation_id,
+            evidence_id=evidence_id,
+            acquisition_action_id=acquisition_action_id,
+            hwnd=physical.hwnd,
+            root_hwnd=physical.root_hwnd,
+            process_id=physical.process_id,
+            process_identity=process_identity,
+            title_snapshot="",
+            epoch=physical.epoch,
             frame_id=frame_id,
             created_at=getattr(frame, "captured_at", None),
         )
-        binding = TargetBinding(
-            binding_id=binding_id,
-            hwnd=hwnd,
-            process_id=process_id,
-            executable_identity=executable,
-            title_snapshot="",
-            established_by_evidence_ref=evidence_id,
-            epoch=epoch,
+        self._evidence[evidence.id] = evidence
+        event = self._reducer.event(
+            "target_bound",
+            payload={"target_binding": binding.to_dict()},
+            evidence_refs=(evidence.id,),
+            created_at=evidence.created_at,
         )
-        if self._reducer.projection.target_binding != binding:
-            self._invalidate_target("authoritative_target_changed")
-            self._evidence[evidence.id] = evidence
-            event = self._reducer.event(
-                "target_bound",
-                payload={"target_binding": binding.to_dict()},
-                evidence_refs=(evidence.id,),
-                created_at=evidence.created_at,
-            )
-            self._reducer.apply(event)
-        return frame_state, TargetState(binding_id, hwnd, epoch, True)
+        self._reducer.apply(event)
+        return frame_state, TargetState(
+            binding.binding_id, binding.hwnd, binding.epoch, True
+        )
 
-    def _invalidate_target(self, reason: str) -> None:
-        if self._reducer.projection.target_binding is None:
+    def _invalidate_target(
+        self, reason: str, *, observed_frame_id: int | None = None,
+    ) -> None:
+        binding = self._reducer.projection.target_binding
+        if binding is None:
             return
         self._reducer.apply(self._reducer.event(
-            "target_invalidated", payload={"reason": reason}
+            "target_invalidated",
+            payload={
+                "expected_binding_id": binding.binding_id,
+                "expected_canonical_identity_sha256": (
+                    binding.canonical_identity_sha256
+                ),
+                "observed_frame_id": observed_frame_id,
+                "reason": reason,
+            },
         ))
 
     def _write(self, record: dict[str, Any]) -> bool:
@@ -408,6 +479,7 @@ def build_legacy_broker_shadow_observer(
     profile: ExecutionProfile,
     trace: ShadowTraceWriter,
     available_capabilities: Iterable[str],
+    desktop_facts_reader: WindowsDesktopFactsReader | None = None,
 ) -> LegacyBrokerShadowObserver:
     """Factory for StageRuntime/server; it creates no alternate product path.
 
@@ -424,6 +496,7 @@ def build_legacy_broker_shadow_observer(
         profile=profile,
         trace=trace,
         available_capabilities=available_capabilities,
+        desktop_facts_reader=desktop_facts_reader,
     )
 
 
