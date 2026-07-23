@@ -24,11 +24,15 @@ from winpilot.action.raw_device import (
     AdmittedPhysicalTypeTextBackend,
     FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
+    FinalTargetActivationGuardDecision,
+    FinalTargetLaunchGuardDecision,
     HotkeyChord,
     RawBackendResult,
     RawDeviceBackends,
     RawDeviceExecutor,
+    RawTargetLaunchReceipt,
 )
+from winpilot.action.replay_policy import MutationOutcome
 from winpilot.orchestrator.desktop_runtime import (
     DesktopRuntimeCoordinatorContext,
     DesktopRuntimeCoordinatorStatus,
@@ -52,10 +56,15 @@ from winpilot.vnext.actor.model import OpenAIVisualActor
 from winpilot.vnext.capabilities import PointerLeaseState
 from winpilot.vnext.runtime import RuntimeStatus, TargetActivationEnvelope
 from winpilot.vnext.targeting import (
+    TargetActivation,
     TargetCandidate,
+    TargetDiscoverySnapshot,
     candidate_fingerprint_for,
     candidate_ref_for,
+    launch_identity_for,
 )
+from winpilot.vnext.targeting.executable_presence import ExecutablePresenceReader
+from winpilot.vnext.targeting.windows_facts import WindowsTargetFactsReader
 from winpilot.vnext.verification.visual_model import ReadOnlyVisualVerifierAdapter
 from winpilot.vnext.bridge.coordinator import (
     LiveDesktopCoordinatorError,
@@ -158,6 +167,40 @@ class DiscoveryTrap:
         raise AssertionError("bound coordinator called target discovery")
 
 
+class FixedTargetDiscovery:
+    def __init__(self, query, candidate) -> None:
+        self.calls = []
+        self.snapshot = TargetDiscoverySnapshot(
+            query=query, candidates=(candidate,), captured_at=10.0,
+        )
+
+    def discover(self, query, *, stop_event=None):
+        self.calls.append((query, stop_event))
+        return self.snapshot
+
+
+def _launch_state():
+    desktop = Backend()
+    desktop.roots[101] = 101
+    desktop.region = (30, 40, 800, 600)
+    desktop.live, desktop.foreground, desktop.hit = set(), 0, 0
+    state = SimpleNamespace(
+        executable_path=desktop.executable_path,
+        process_id=7,
+        creation_time_ns=desktop.creation_time_ns,
+        process_identity=TEST_PROCESS_IDENTITY,
+        hwnd=101,
+        region=desktop.region,
+        desktop=desktop,
+        launched=False,
+    )
+    def mark_launched():
+        state.launched = True
+        desktop.live, desktop.foreground, desktop.hit = {101}, 101, 101
+    state.mark_launched = mark_launched
+    return state
+
+
 def _task_contract(*, max_steps=18) -> dict:
     goal = "Complete the currently visible unknown interface task"
     return TaskContractCompiler().compile(
@@ -250,15 +293,16 @@ def _targetless_context(*, rewrite_target=None):
     )
 
 
-def _observer(authority):
+def _observer(authority, *, target_regions=None):
     pixels = np.zeros((600, 800, 3), dtype=np.uint8)
     ok, encoded = cv2.imencode(".png", pixels)
     assert ok
     image_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
+    regions = {} if target_regions is None else dict(target_regions)
 
     def select_scope(hwnd, **_kwargs):
         return VisualCaptureScope(
-            Region(10, 20, 800, 600),
+            regions.get(hwnd, Region(10, 20, 800, 600)),
             "target_window",
             "test_exact_target",
             target_hwnd=hwnd,
@@ -292,6 +336,11 @@ def _coordinator(
     facts_backend=None,
     desktop_identity_reader=None,
     target_discovery=None,
+    observer_factory=None,
+    launch_presence_reader=None,
+    launch_target_facts_reader=None,
+    raw_target_activation=None,
+    raw_target_launch=None,
 ):
     calls = raw_calls if raw_calls is not None else []
     snapshot = (
@@ -350,10 +399,10 @@ def _coordinator(
         "type_text": AdmittedPhysicalTypeTextBackend(raw_type_text),
         "hotkey": AdmittedPhysicalHotkeyBackend(raw_hotkey),
         "activate_target": AdmittedPhysicalTargetActivationBackend(
-            lambda *_args, **_kwargs: None
+            raw_target_activation or (lambda *_args, **_kwargs: None)
         ),
         "launch_target": AdmittedPhysicalTargetLaunchBackend(
-            lambda *_args, **_kwargs: None
+            raw_target_launch or (lambda *_args, **_kwargs: None)
         ),
     }
     if omit_admitted_backend is not None:
@@ -373,7 +422,7 @@ def _coordinator(
             admitted_physical_target_launch=backends["launch_target"],
         )),
         facts_reader=WindowsDesktopFactsReader(facts_backend or Backend()),
-        observer_factory=_observer,
+        observer_factory=observer_factory or _observer,
         actor_factory=lambda _api: actor,
         verifier_factory=lambda _api: ReadOnlyVisualVerifierAdapter(
             verifier_model
@@ -381,6 +430,8 @@ def _coordinator(
         window_exists_resolver=lambda hwnd: hwnd == 101,
         desktop_identity_reader=desktop_identity_reader,
         target_discovery=target_discovery,
+        launch_presence_reader=launch_presence_reader,
+        launch_target_facts_reader=launch_target_facts_reader,
         max_turns=max_turns,
         frame_max_age_s=frame_max_age_s,
         clock=clock,
@@ -416,6 +467,21 @@ def _blocked():
         "kind": "blocked",
         "blocker_kind": "visual_uncertainty",
         "observed_facts": ["the current pixels do not identify one safe action"],
+    }
+
+
+def _discover_target(query):
+    return {
+        "format": "actor-proposal/1", "kind": "discover_target", "query": query,
+    }
+
+
+def _activate_target(candidate_ordinal=1):
+    return {
+        "format": "actor-proposal/1", "kind": "desktop_action",
+        "action": "activate_target",
+        "args": {"candidate_ordinal": candidate_ordinal},
+        "local_intent": "make the selected target available",
     }
 
 
@@ -498,6 +564,143 @@ def _activation_envelope() -> TargetActivationEnvelope:
         }),
         candidate=candidate,
     )
+
+
+def _installed_executable_candidate(state):
+    return TargetCandidate(
+        candidate_ref=candidate_ref_for(
+            activation=TargetActivation.OPEN_APP,
+            identity=launch_identity_for(
+                kind="exe",
+                target=state.executable_path,
+            ),
+        ),
+        activation=TargetActivation.OPEN_APP,
+        state="installed",
+        label="Installed visual surface",
+        provenance=("installed_catalog",),
+        launch_kind="exe",
+        launch_target=state.executable_path,
+    )
+
+
+def _launch_composition(state, discovery):
+    process = {
+        "process_id": state.process_id,
+        "creation_time_ns": state.creation_time_ns,
+        "executable_path": state.executable_path,
+    }
+    presence = SimpleNamespace(read_processes=lambda: tuple(
+        ({**process, "process_name": "surface.exe"},)
+        if state.launched else ()
+    ))
+    target_facts = SimpleNamespace(
+        read_processes=lambda: (process,) if state.launched else (),
+        read_windows=lambda: ({
+            "hwnd": state.hwnd,
+            "process_id": state.process_id,
+            "title": "Fresh launched surface",
+            "visible": True,
+        },) if state.launched else (),
+    )
+    return {
+        "facts_backend": state.desktop,
+        "desktop_identity_reader": lambda: DesktopObservationIdentity(
+            hwnd=1, region=Region(10, 20, 800, 600),
+        ),
+        "target_discovery": discovery,
+        "observer_factory": lambda authority: _observer(
+            authority, target_regions={state.hwnd: Region(*state.region)},
+        ),
+        "launch_presence_reader": ExecutablePresenceReader(
+            presence, clock=lambda: 10.0,
+        ),
+        "launch_target_facts_reader": WindowsTargetFactsReader(
+            target_facts, clock=lambda: 11.0,
+        ),
+    }
+
+
+def _capture_acquisition_state(monkeypatch):
+    registries, observations = [], []
+    registry_type = coordinator_module.EvidenceRegistry
+    original_observe = coordinator_module.RuntimeStateBridge.observe
+
+    def build_registry(*args, **kwargs):
+        registry = registry_type(*args, **kwargs)
+        registries.append(registry)
+        return registry
+
+    def observe(bridge, projection, **kwargs):
+        snapshot = original_observe(bridge, projection, **kwargs)
+        observations.append((projection, snapshot))
+        return snapshot
+
+    monkeypatch.setattr(coordinator_module, "EvidenceRegistry", build_registry)
+    monkeypatch.setattr(
+        coordinator_module.RuntimeStateBridge, "observe", observe,
+    )
+    return registries, observations
+
+
+def _accepted_trace_events(trace):
+    return [
+        (turn, event)
+        for _run_id, turn in trace.records
+        if turn["type"] == "vnext_mission_runtime_turn"
+        for event in turn["accepted_events"]
+    ]
+
+
+def _assert_one_proved_target_turn(trace, registries):
+    assert len(registries) == 1
+    registry = registries[0]
+    accepted = _accepted_trace_events(trace)
+    assert len({event["event_id"] for _turn, event in accepted}) == len(accepted)
+    targets = [
+        turn for turn, event in accepted if event["kind"] == "target_bound"
+    ]
+    assert len(targets) == 1
+    turn = targets[0]
+    assert turn["accepted_tool_name"] == "activate_target"
+    refs = [
+        ref for ref in registry.snapshot()
+        if ref.kind == "authoritative_target_binding"
+    ]
+    assert len(refs) == 1
+    assert (
+        refs[0].mission_id, refs[0].run_id,
+        refs[0].trust, refs[0].action_id,
+    ) == (
+        "mission-arp-run-1", "arp-run-1",
+        "deterministic", turn["decision_id"],
+    )
+
+
+def _assert_final_bound_observation(
+    observations, *, identity, region,
+):
+    projection, snapshot = [
+        item for item in observations
+        if item[0].target_binding is not None
+        and item[1].target is not None
+    ][-1]
+    binding = projection.target_binding
+    target = snapshot.target
+    frame = snapshot.frame
+    assert frame is not None
+    assert (
+        binding.hwnd, binding.root_hwnd,
+        binding.process_id, binding.process_identity,
+    ) == identity
+    assert (
+        target.hwnd, target.root_hwnd, target.process_id,
+        target.process_identity, target.window_region,
+    ) == (*identity, region)
+    assert (frame.hwnd, frame.region, frame.scope) == (
+        identity[0], region, "target_window",
+    )
+    assert target.binding_id == binding.binding_id
 
 
 def test_target_bound_event_proves_accepted_activation_tool_name() -> None:
@@ -719,6 +922,190 @@ def test_canonical_all_zero_initial_target_observes_full_desktop_without_binding
     assert snapshot.frame is not None
     assert snapshot.frame.scope == "full_desktop"
     assert snapshot.frame.hwnd == 1
+
+
+def test_targetless_existing_window_runs_discover_activate_and_proved_bind(
+    monkeypatch,
+) -> None:
+    registries, observations = _capture_acquisition_state(monkeypatch)
+    backend = Backend()
+    backend.region = (30, 40, 800, 600)
+    candidate = _activation_envelope().candidate
+    discovery = FixedTargetDiscovery("Surface", candidate)
+    actor = ScriptedActor([
+        _discover_target("Surface"),
+        _activate_target(),
+        _claim(),
+    ])
+    activation_calls = []
+    launch_calls = []
+    trace = Trace()
+
+    def raw_activate(context, *, final_guard):
+        decision = final_guard()
+        activation_calls.append((context, decision))
+        if decision is FinalTargetActivationGuardDecision.ADMITTED:
+            backend.foreground = candidate.hwnd
+        return RawBackendResult(
+            decision is FinalTargetActivationGuardDecision.ADMITTED,
+            {"final_guard": decision.value},
+        )
+
+    def forbidden_launch(*args, **kwargs):
+        launch_calls.append((args, kwargs))
+        return RawTargetLaunchReceipt(
+            MutationOutcome.NOT_STARTED,
+            0,
+            error_kind="unexpected_launch",
+        )
+
+    context = _targetless_context()
+    result = _coordinator(
+        actor,
+        PositiveVisualModel(),
+        facts_backend=backend,
+        desktop_identity_reader=lambda: DesktopObservationIdentity(
+            hwnd=1,
+            region=Region(10, 20, 800, 600),
+        ),
+        target_discovery=discovery,
+        observer_factory=lambda authority: _observer(
+            authority, target_regions={candidate.hwnd: Region(*backend.region)},
+        ),
+        raw_target_activation=raw_activate,
+        raw_target_launch=forbidden_launch,
+        trace=trace,
+    ).run(context)
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    assert discovery.calls == [("Surface", context.stop_event)]
+    assert len(activation_calls) == 1
+    assert activation_calls[0][1] is FinalTargetActivationGuardDecision.ADMITTED
+    assert (
+        activation_calls[0][0].target_hwnd,
+        activation_calls[0][0].target_process_id,
+        activation_calls[0][0].target_process_identity,
+    ) == (candidate.hwnd, candidate.process_id, candidate.process_identity)
+    assert launch_calls == []
+    _assert_one_proved_target_turn(trace, registries)
+    _assert_final_bound_observation(
+        observations,
+        identity=(
+            candidate.hwnd, backend.roots[candidate.hwnd],
+            candidate.process_id, candidate.process_identity,
+        ),
+        region=backend.region,
+    )
+
+
+def test_targetless_executable_runs_discover_single_launch_and_proved_bind(
+    monkeypatch,
+) -> None:
+    registries, observations = _capture_acquisition_state(monkeypatch)
+    state = _launch_state()
+    candidate = _installed_executable_candidate(state)
+    discovery = FixedTargetDiscovery("Surface", candidate)
+    actor = ScriptedActor([
+        _discover_target("Surface"),
+        _activate_target(),
+        _claim(),
+    ])
+    activation_calls = []
+    launch_calls = []
+    trace = Trace()
+
+    def forbidden_activation(*args, **kwargs):
+        activation_calls.append((args, kwargs))
+        return RawBackendResult(False, {"unexpected_activation": True})
+
+    def raw_launch(context, *, final_guard):
+        decision = final_guard()
+        launch_calls.append((context, decision))
+        assert decision is FinalTargetLaunchGuardDecision.ADMITTED
+        state.mark_launched()
+        return RawTargetLaunchReceipt(
+            MutationOutcome.APPLIED,
+            1,
+            process_id=state.process_id,
+            process_identity=state.process_identity,
+        )
+
+    context = _targetless_context()
+    result = _coordinator(
+        actor,
+        PositiveVisualModel(),
+        **_launch_composition(state, discovery),
+        raw_target_activation=forbidden_activation,
+        raw_target_launch=raw_launch,
+        trace=trace,
+    ).run(context)
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.DONE
+    assert discovery.calls == [("Surface", context.stop_event)]
+    assert activation_calls == []
+    assert len(launch_calls) == 1
+    assert launch_calls[0][0].executable_path == state.executable_path
+    _assert_one_proved_target_turn(trace, registries)
+    _assert_final_bound_observation(
+        observations,
+        identity=(
+            state.hwnd, state.hwnd,
+            state.process_id, state.process_identity,
+        ),
+        region=state.region,
+    )
+
+
+def test_targetless_uncertain_launch_never_replays_or_binds(
+    monkeypatch,
+) -> None:
+    registries, _observations = _capture_acquisition_state(monkeypatch)
+    state = _launch_state()
+    discovery = FixedTargetDiscovery(
+        "Surface",
+        _installed_executable_candidate(state),
+    )
+    actor = ScriptedActor([
+        _discover_target("Surface"),
+        _activate_target(),
+        _activate_target(),
+    ])
+    launch_calls = []
+    trace = Trace()
+
+    def uncertain_launch(context, *, final_guard):
+        decision = final_guard()
+        launch_calls.append((context, decision))
+        assert decision is FinalTargetLaunchGuardDecision.ADMITTED
+        return RawTargetLaunchReceipt(
+            MutationOutcome.OUTCOME_UNKNOWN,
+            None,
+            error_kind="launch_api_boundary_uncertain",
+        )
+
+    result = _coordinator(
+        actor,
+        PositiveVisualModel(),
+        **_launch_composition(state, discovery),
+        raw_target_launch=uncertain_launch,
+        trace=trace,
+    ).run(_targetless_context())
+
+    assert result.status is DesktopRuntimeCoordinatorStatus.FAILED
+    assert result.error.endswith("(blocked)")
+    assert len(actor.calls) == 2
+    assert len(launch_calls) == 1
+    assert state.launched is False
+    accepted = [event for _turn, event in _accepted_trace_events(trace)]
+    assert len({event["event_id"] for event in accepted}) == len(accepted)
+    assert [event["kind"] for event in accepted] == [
+        "obligation_blocked",
+    ]
+    assert sum(event["kind"] == "target_bound" for event in accepted) == 0
+    assert all(
+        ref.kind != "authoritative_target_binding"
+        for ref in registries[0].snapshot()
+    )
 
 
 @pytest.mark.parametrize(
