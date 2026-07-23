@@ -66,6 +66,10 @@ def discover_target_tool_schema() -> dict[str, object]:
 
     return {
         "type": "object",
+        "description": (
+            "Search running windows and installed applications by name. "
+            "Returns target_choices on the next turn and does not change the desktop."
+        ),
         "additionalProperties": False,
         "properties": {
             "query": {
@@ -84,6 +88,10 @@ def activate_target_tool_schema() -> dict[str, object]:
 
     return {
         "type": "object",
+        "description": (
+            "Select one current target_choice by its ordinal. Runtime switches to "
+            "its existing window or launches it, then binds the resulting window."
+        ),
         "additionalProperties": False,
         "properties": {
             "candidate_ordinal": {

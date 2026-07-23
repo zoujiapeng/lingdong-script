@@ -121,6 +121,10 @@ def test_discover_target_contract_is_read_only_strict_and_targetless() -> None:
     )
     assert tool.schema == {
         "type": "object",
+        "description": (
+            "Search running windows and installed applications by name. "
+            "Returns target_choices on the next turn and does not change the desktop."
+        ),
         "additionalProperties": False,
         "properties": {
             "query": {
@@ -166,6 +170,10 @@ def test_activate_target_contract_is_ordinal_only_and_candidate_scoped() -> None
     )
     assert tool.schema == {
         "type": "object",
+        "description": (
+            "Select one current target_choice by its ordinal. Runtime switches to "
+            "its existing window or launches it, then binds the resulting window."
+        ),
         "additionalProperties": False,
         "properties": {
             "candidate_ordinal": {
