@@ -190,6 +190,9 @@ def test_resolve_refreshes_a_cached_multisource_index_once_on_miss(monkeypatch):
     }
     calls = []
     monkeypatch.setattr(apps, "_cache", (1.0, []))
+    monkeypatch.setattr(
+        apps.os.path, "isfile", lambda path: path == refreshed["target"],
+    )
 
     def fake_index(*, force_refresh=False):
         calls.append(force_refresh)
@@ -199,6 +202,63 @@ def test_resolve_refreshes_a_cached_multisource_index_once_on_miss(monkeypatch):
 
     assert apps.resolve("Comet Canvas")[0]["target"] == refreshed["target"]
     assert calls == [False, True]
+
+
+@pytest.mark.parametrize(
+    ("cached_exists", "expected_target", "expected_calls"),
+    ((False, r"C:\Current\Orbit.exe", [False, True]),
+     (True, r"C:\Old\Orbit.exe", [False])),
+)
+def test_resolve_refreshes_only_when_cached_matching_file_disappeared(
+    monkeypatch, cached_exists, expected_target, expected_calls,
+):
+    from winpilot.perception import apps
+
+    stale = {
+        "name": "Orbit Previous",
+        "target": r"C:\Old\Orbit.exe",
+        "kind": "exe",
+    }
+    current = {
+        "name": "Orbit Current",
+        "target": r"C:\Current\Orbit.exe",
+        "kind": "exe",
+    }
+    calls = []
+    monkeypatch.setattr(apps, "_cache", (1.0, [stale]))
+    monkeypatch.setattr(
+        apps.os.path,
+        "isfile",
+        lambda path: cached_exists or path == current["target"],
+    )
+
+    def fake_index(*, force_refresh=False):
+        calls.append(force_refresh)
+        return [current] if force_refresh else [stale]
+
+    monkeypatch.setattr(apps, "_index", fake_index)
+
+    result = apps.resolve("Orbit", launch_kinds=("exe",))
+
+    assert result[0]["target"] == expected_target
+    assert calls == expected_calls
+
+
+def test_forced_refresh_drops_a_file_target_that_is_still_missing(monkeypatch):
+    from winpilot.perception import apps
+
+    missing = {
+        "name": "Orbit Missing",
+        "target": r"C:\Missing\Orbit.lnk",
+        "kind": "lnk",
+    }
+    monkeypatch.setattr(apps, "_cache", (1.0, [missing]))
+    monkeypatch.setattr(apps, "_index", lambda *, force_refresh=False: [missing])
+    monkeypatch.setattr(apps.os.path, "isfile", lambda _path: False)
+
+    assert apps.resolve(
+        "Orbit", force_refresh=True, launch_kinds=("lnk",),
+    ) == []
 
 
 def test_index_keeps_same_kind_entries_with_distinct_launch_targets(monkeypatch):
