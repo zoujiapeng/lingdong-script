@@ -66,6 +66,8 @@ from ..targeting import (
     TargetSelectionLease,
     TargetSelectionLeaseError,
     TargetSelectionScope,
+    canonical_supported_launch_kinds,
+    canonical_supported_launch_target,
 )
 from ..verification import (
     AcceptedObligationVerification,
@@ -172,6 +174,7 @@ class MissionRuntime:
         state: RuntimeStatePort,
         controller: ControllerPort,
         target_discovery: TargetDiscoveryPort | None = None,
+        supported_launch_kinds: tuple[str, ...] | None = None,
         pointer_cleanup: PointerCleanupPort | None = None,
         mutation_permits: MutationPermitAuthority | None = None,
         obligation_verifier: ObligationVerifierPort | None = None,
@@ -212,6 +215,17 @@ class MissionRuntime:
             getattr(target_discovery, "discover", None)
         ):
             raise TypeError("target_discovery must provide discover()")
+        if target_discovery is not None and supported_launch_kinds is None:
+            raise TypeError(
+                "target_discovery requires explicit supported_launch_kinds"
+            )
+        supported = canonical_supported_launch_kinds(
+            () if supported_launch_kinds is None else supported_launch_kinds
+        )
+        if target_discovery is None and supported:
+            raise TypeError(
+                "supported_launch_kinds require a target_discovery port"
+            )
         if discovery_tool is not None and (
             discovery_tool.route is not ToolRoute.VISUAL_ACTOR
             or discovery_tool.mutation_kind is not MutationKind.NONE
@@ -227,6 +241,7 @@ class MissionRuntime:
                 "activate_target must be a GUI-mutating Visual Actor tool"
             )
         self._target_discovery = target_discovery
+        self._supported_launch_kinds = supported
         self._pointer_cleanup = pointer_cleanup
         if obligation_verifier is not None and not callable(
             getattr(obligation_verifier, "verify", None)
@@ -2143,6 +2158,22 @@ class MissionRuntime:
                     raise ValueError(
                         "target discovery query does not match the Actor request"
                     )
+                for candidate in discovered.candidates:
+                    if candidate.activation is not TargetActivation.OPEN_APP:
+                        continue
+                    launch_kind, launch_target = canonical_supported_launch_target(
+                        kind=candidate.launch_kind,
+                        target=candidate.launch_target,
+                        supported_launch_kinds=self._supported_launch_kinds,
+                    )
+                    if (
+                        candidate.launch_kind != launch_kind
+                        or candidate.launch_target != launch_target
+                    ):
+                        raise ValueError(
+                            "target discovery returned a non-canonical "
+                            "launch candidate"
+                        )
             except Exception as exc:
                 if self._stopped(stop_event):
                     return self._canceled(turn_index)

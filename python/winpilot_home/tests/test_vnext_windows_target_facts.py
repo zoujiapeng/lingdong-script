@@ -143,10 +143,11 @@ def test_target_discovery_alias_fanout_never_rescans_windows_or_processes():
         "aliases": ["orbit", "orbit workspace", "workspace"],
     },)
     discovery = TargetDiscovery(
-        installed_resolver=lambda _query, _limit: installed,
+        installed_resolver=lambda _query, _limit, _kinds: installed,
         visible_windows=adapter.visible_windows,
         process_windows=adapter.process_windows,
         process_identity=adapter.process_identity,
+        supported_launch_kinds=("exe",),
         clock=lambda: 200,
     )
 

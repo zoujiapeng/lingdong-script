@@ -15,6 +15,8 @@ from .contracts import (
     activate_target_tool_schema,
     candidate_fingerprint_for,
     canonical_candidate_fingerprint,
+    canonical_supported_launch_kinds,
+    canonical_supported_launch_target,
     candidate_ref_for,
     discover_target_tool_schema,
     launch_identity_for,
@@ -53,7 +55,8 @@ __all__ = [
     "WindowsTargetFactsError", "WindowsTargetFactsReader",
     "WindowsTargetFactsSnapshot",
     "activate_target_tool_schema", "candidate_fingerprint_for",
-    "canonical_candidate_fingerprint", "candidate_ref_for",
+    "canonical_candidate_fingerprint", "canonical_supported_launch_kinds",
+    "canonical_supported_launch_target", "candidate_ref_for",
     "discover_target_tool_schema",
     "launch_identity_for", "process_identity_for",
 ]

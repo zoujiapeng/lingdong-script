@@ -13,6 +13,7 @@ from typing import Iterable
 
 from ...process_identity import (
     ProcessIdentityError,
+    canonical_executable_path,
     canonical_process_identity,
     process_identity_for,
 )
@@ -42,6 +43,7 @@ _TARGET_CANDIDATE_FIELDS = (
     "launch_kind",
     "launch_target",
 )
+_TARGET_LAUNCH_KINDS = frozenset(("appid", "exe", "lnk"))
 
 
 class TargetContractError(ValueError):
@@ -114,6 +116,22 @@ def _tokens(values: Iterable[object], name: str) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
+def canonical_supported_launch_kinds(value: object) -> tuple[str, ...]:
+    """Validate one deterministic Runtime launch-capability inventory."""
+
+    if type(value) is not tuple or any(type(item) is not str for item in value):
+        raise TargetContractError("supported_launch_kinds must be a tuple of strings")
+    if (
+        tuple(sorted(value)) != value
+        or len(value) != len(set(value))
+        or any(item not in _TARGET_LAUNCH_KINDS for item in value)
+    ):
+        raise TargetContractError(
+            "supported_launch_kinds must contain unique canonical launch kinds"
+        )
+    return value
+
+
 def candidate_ref_for(*, activation: TargetActivation | str, identity: str) -> str:
     try:
         route = TargetActivation(activation).value
@@ -130,7 +148,7 @@ def candidate_ref_for(*, activation: TargetActivation | str, identity: str) -> s
 
 def _launch_parts(*, kind: object, target: object) -> tuple[str, str, str]:
     launch_kind = _text(kind, "launch_kind", maximum=16).casefold()
-    if launch_kind not in {"appid", "exe", "lnk"}:
+    if launch_kind not in _TARGET_LAUNCH_KINDS:
         raise TargetContractError("unsupported launch_kind")
     launch_target = _text(
         os.path.expandvars(
@@ -151,6 +169,31 @@ def _launch_parts(*, kind: object, target: object) -> tuple[str, str, str]:
 
 def launch_identity_for(*, kind: object, target: object) -> str:
     return _launch_parts(kind=kind, target=target)[2]
+
+
+def canonical_supported_launch_target(
+    *,
+    kind: object,
+    target: object,
+    supported_launch_kinds: object,
+) -> tuple[str, str]:
+    """Return a launch target only when the injected Runtime can execute it."""
+
+    supported = canonical_supported_launch_kinds(supported_launch_kinds)
+    launch_kind = _text(kind, "launch_kind", maximum=16).casefold()
+    if launch_kind not in supported:
+        raise TargetContractError("launch_kind is not supported by this Runtime")
+    if launch_kind == "exe":
+        try:
+            launch_target = canonical_executable_path(target, "launch_target")
+        except ProcessIdentityError as exc:
+            raise TargetContractError(str(exc)) from exc
+        return launch_kind, launch_target
+    normalized_kind, launch_target, _identity = _launch_parts(
+        kind=launch_kind,
+        target=target,
+    )
+    return normalized_kind, launch_target
 
 
 def _window_ref_identity(
@@ -383,6 +426,7 @@ __all__ = [
     "TargetActivation", "TargetCandidate", "TargetContractError",
     "TargetDiscoverySnapshot", "TargetState", "activate_target_tool_schema",
     "candidate_fingerprint_for", "canonical_candidate_fingerprint",
+    "canonical_supported_launch_kinds", "canonical_supported_launch_target",
     "candidate_ref_for", "discover_target_tool_schema",
     "launch_identity_for", "process_identity_for",
 ]

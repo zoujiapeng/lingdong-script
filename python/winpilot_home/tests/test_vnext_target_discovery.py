@@ -9,6 +9,7 @@ from winpilot.process_identity import (
     process_identity_for as neutral_process_identity_for,
 )
 from winpilot.vnext.targeting import (
+    MAX_TARGET_CANDIDATES,
     TargetActivation,
     TargetCandidate,
     TargetContractError,
@@ -42,15 +43,22 @@ def test_process_identity_reexport_rejects_relative_executable_path():
         )
 
 
-def _discovery(*, installed=(), visible=(), running=None):
+def _discovery(
+    *,
+    installed=(),
+    visible=(),
+    running=None,
+    supported_launch_kinds=("appid", "exe", "lnk"),
+):
     running = running or {}
     return TargetDiscovery(
-        installed_resolver=lambda _query, _limit: list(installed),
+        installed_resolver=lambda _query, _limit, _kinds: list(installed),
         visible_windows=lambda: list(visible),
         process_windows=lambda term: running.get(
             term.casefold(), {"running": False, "windows": []}
         ),
         process_identity=_process_identity,
+        supported_launch_kinds=supported_launch_kinds,
         clock=lambda: 123.5,
     )
 
@@ -262,6 +270,7 @@ def test_switch_candidate_ref_changes_when_pid_or_process_identity_changes():
         visible_windows=lambda: [{**raw, "pid": 44}],
         process_windows=lambda _term: {},
         process_identity=_process_identity,
+        supported_launch_kinds=(),
         clock=lambda: 123.5,
     ).discover("Orbit").candidates[0]
 
@@ -280,6 +289,7 @@ def test_switch_candidate_ref_detects_process_reuse_with_same_hwnd_and_pid():
             executable_path=fr"C:\Apps\host-{pid}.exe",
             creation_time_ns=101,
         ),
+        supported_launch_kinds=(),
         clock=lambda: 123.5,
     ).discover("Orbit").candidates[0]
 
@@ -349,6 +359,7 @@ def test_unknown_running_state_never_becomes_launch_candidate():
         visible_windows=lambda: [],
         process_windows=lambda _term: (_ for _ in ()).throw(RuntimeError("denied")),
         process_identity=_process_identity,
+        supported_launch_kinds=("exe",),
         clock=lambda: 1,
     )
 
@@ -372,6 +383,7 @@ def test_truncated_process_terms_cannot_prove_application_is_not_running():
             "running": term == "zz-running", "windows": [],
         },
         process_identity=_process_identity,
+        supported_launch_kinds=("exe",),
         clock=lambda: 1,
     )
 
@@ -407,6 +419,150 @@ def test_ambiguous_installed_candidates_remain_separate_for_actor_choice():
         "Comet Canvas", "Comet Notes",
     ]
     assert len({item.candidate_ref for item in snapshot.candidates}) == 2
+
+
+def test_launch_candidates_are_filtered_by_injected_runtime_capability():
+    snapshot = _discovery(
+        installed=(
+            {"name": "Orbit Native", "kind": "exe", "target": r"C:\Orbit.exe"},
+            {"name": "Orbit Store", "kind": "appid", "target": "Vendor.Orbit!App"},
+            {"name": "Orbit Link", "kind": "lnk", "target": r"C:\Orbit.lnk"},
+        ),
+        supported_launch_kinds=("exe",),
+    ).discover("Orbit")
+
+    assert [
+        (item.label, item.launch_kind, item.launch_target)
+        for item in snapshot.candidates
+    ] == [("Orbit Native", "exe", r"C:\Orbit.exe")]
+
+
+def test_unsupported_installed_kind_still_correlates_a_running_window():
+    app = {
+        "name": "Orbit Store",
+        "kind": "appid",
+        "target": "Vendor.Orbit!App",
+        "process_name": "orbit.exe",
+    }
+    window = {
+        "hwnd": 711,
+        "pid": 81,
+        "title": "Orbit Store",
+        "visible": True,
+    }
+
+    snapshot = _discovery(
+        installed=(app,),
+        running={"orbit.exe": {"running": True, "windows": [window]}},
+        supported_launch_kinds=("exe",),
+    ).discover("Orbit")
+
+    assert len(snapshot.candidates) == 1
+    assert snapshot.candidates[0].activation is TargetActivation.SWITCH_WINDOW
+    assert snapshot.candidates[0].hwnd == 711
+
+
+def test_empty_launch_capability_keeps_strong_window_candidates():
+    snapshot = _discovery(
+        installed=({
+            "name": "Orbit",
+            "kind": "exe",
+            "target": r"C:\Orbit.exe",
+        },),
+        visible=({
+            "hwnd": 712,
+            "pid": 82,
+            "title": "Orbit result",
+            "visible": True,
+        },),
+        supported_launch_kinds=(),
+    ).discover("Orbit")
+
+    assert len(snapshot.candidates) == 1
+    assert snapshot.candidates[0].activation is TargetActivation.SWITCH_WINDOW
+
+
+def test_executable_launch_candidates_require_shared_canonical_exe_identity():
+    rows = (
+        {"name": "Valid", "kind": "exe", "target": r"C:\Apps\valid.exe"},
+        {"name": "Relative", "kind": "exe", "target": r"Apps\relative.exe"},
+        {"name": "Wrong suffix", "kind": "exe", "target": r"C:\Apps\wrong.com"},
+        {"name": "Not normalized", "kind": "exe", "target": r"C:\Apps\..\bad.exe"},
+    )
+
+    snapshot = _discovery(
+        installed=rows,
+        supported_launch_kinds=("exe",),
+    ).discover("app")
+
+    assert [(item.label, item.launch_target) for item in snapshot.candidates] == [
+        ("Valid", r"C:\Apps\valid.exe"),
+    ]
+
+
+def test_unsupported_launch_rows_do_not_consume_the_candidate_limit():
+    unsupported = tuple(
+        {
+            "name": f"Orbit Store {index:02d}",
+            "kind": "appid",
+            "target": f"Vendor.Orbit{index}!App",
+        }
+        for index in range(24)
+    )
+    supported = {
+        "name": "Orbit Native",
+        "kind": "exe",
+        "target": r"C:\Orbit.exe",
+    }
+    rows = (*unsupported, supported)
+    calls = []
+
+    discovery = TargetDiscovery(
+        installed_resolver=lambda query, limit, kinds: (
+            calls.append((query, limit, kinds))
+            or (
+                *rows[:limit],
+                *(
+                    tuple(row for row in rows if row["kind"] in kinds)[:limit]
+                ),
+            )
+        ),
+        visible_windows=lambda: (),
+        process_windows=lambda _term: {"running": False, "windows": []},
+        process_identity=_process_identity,
+        supported_launch_kinds=("exe",),
+        clock=lambda: 123.5,
+    )
+
+    snapshot = discovery.discover("Orbit")
+
+    assert calls == [("Orbit", MAX_TARGET_CANDIDATES, ("exe",))]
+    assert len(snapshot.candidates) == 1
+    assert snapshot.candidates[0].label == "Orbit Native"
+
+
+def test_filtered_candidate_order_is_deterministic_across_source_order():
+    installed = [
+        {"name": "Orbit B", "kind": "exe", "target": r"C:\Apps\B.exe"},
+        {"name": "Orbit Store", "kind": "appid", "target": "Vendor.Orbit!App"},
+        {"name": "Orbit A", "kind": "exe", "target": r"C:\Apps\A.exe"},
+    ]
+
+    def refs(rows):
+        return tuple(
+            item.candidate_ref
+            for item in _discovery(
+                installed=rows,
+                supported_launch_kinds=("exe",),
+            ).discover("Orbit").candidates
+        )
+
+    expected = refs(installed)
+    rng = random.Random(9973)
+    for _ in range(30):
+        shuffled = list(installed)
+        rng.shuffle(shuffled)
+        assert refs(shuffled) == expected
 
 
 def test_duplicate_catalog_rows_for_same_launch_identity_are_merged():
@@ -546,6 +702,7 @@ def test_source_failure_is_explicit_and_does_not_fabricate_empty_success():
         visible_windows=lambda: (_ for _ in ()).throw(RuntimeError("offline")),
         process_windows=lambda _term: {},
         process_identity=_process_identity,
+        supported_launch_kinds=(),
         clock=lambda: 7,
     )
 
@@ -579,8 +736,34 @@ def test_discovery_rejects_invalid_query_without_calling_sources(query):
         visible_windows=lambda: called.append("windows") or [],
         process_windows=lambda _term: {},
         process_identity=_process_identity,
+        supported_launch_kinds=(),
     )
 
     with pytest.raises(TargetContractError):
         discovery.discover(query)
+    assert called == []
+
+
+@pytest.mark.parametrize(
+    "supported",
+    (
+        ["exe"],
+        ("EXE",),
+        ("lnk", "exe"),
+        ("exe", "exe"),
+        ("shell",),
+    ),
+)
+def test_malformed_launch_capability_fails_before_any_source_read(supported):
+    called = []
+
+    with pytest.raises(TargetContractError, match="supported_launch_kinds"):
+        TargetDiscovery(
+            installed_resolver=lambda *_args: called.append("installed") or (),
+            visible_windows=lambda: called.append("windows") or (),
+            process_windows=lambda _term: called.append("process") or {},
+            process_identity=lambda _pid: called.append("identity") or "",
+            supported_launch_kinds=supported,
+        )
+
     assert called == []

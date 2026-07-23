@@ -17,8 +17,13 @@ from .contracts import (
     TargetDiscoverySnapshot,
     TargetState,
     candidate_ref_for,
+    canonical_supported_launch_kinds,
+    canonical_supported_launch_target,
     launch_identity_for,
 )
+
+_INSTALLED_LANE_BUDGET = MAX_TARGET_CANDIDATES
+_INSTALLED_UNION_BUDGET = _INSTALLED_LANE_BUDGET * 2
 
 
 def _normalized(value: object) -> str:
@@ -82,12 +87,17 @@ class TargetDiscovery:
     def __init__(
         self,
         *,
-        installed_resolver: Callable[[str, int], Iterable[Mapping[str, object]]],
+        installed_resolver: Callable[
+            [str, int, tuple[str, ...]],
+            Iterable[Mapping[str, object]],
+        ],
         visible_windows: Callable[[], Iterable[Mapping[str, object]]],
         process_windows: Callable[[str], Mapping[str, object]],
         process_identity: Callable[[int], str],
+        supported_launch_kinds: tuple[str, ...],
         clock: Callable[[], float] = time.time,
     ) -> None:
+        supported = canonical_supported_launch_kinds(supported_launch_kinds)
         for value, name in (
             (installed_resolver, "installed_resolver"),
             (visible_windows, "visible_windows"),
@@ -101,6 +111,7 @@ class TargetDiscovery:
         self._visible = visible_windows
         self._process_windows = process_windows
         self._process_identity = process_identity
+        self._supported_launch_kinds = supported
         self._clock = clock
 
     @staticmethod
@@ -148,8 +159,12 @@ class TargetDiscovery:
         notices: list[str] = []
         try:
             installed = tuple(islice(
-                self._installed(query, MAX_TARGET_CANDIDATES),
-                MAX_TARGET_CANDIDATES * 4,
+                self._installed(
+                    query,
+                    _INSTALLED_LANE_BUDGET,
+                    self._supported_launch_kinds,
+                ),
+                _INSTALLED_UNION_BUDGET,
             ))
         except Exception:
             installed = ()
@@ -310,9 +325,12 @@ class TargetDiscovery:
             if app_identity in unknown_running_state_ids:
                 notices.append("running_state_unavailable")
                 continue
-            kind = str(raw.get("kind") or "").strip().casefold()
-            target = str(raw.get("target") or "").strip()
             try:
+                kind, target = canonical_supported_launch_target(
+                    kind=raw.get("kind"),
+                    target=raw.get("target"),
+                    supported_launch_kinds=self._supported_launch_kinds,
+                )
                 candidates.append(TargetCandidate(
                     candidate_ref=candidate_ref_for(
                         activation=TargetActivation.OPEN_APP,
