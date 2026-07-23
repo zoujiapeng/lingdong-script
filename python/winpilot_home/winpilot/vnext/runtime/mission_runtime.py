@@ -6,7 +6,6 @@ never performs desktop input itself.
 from __future__ import annotations
 
 import hashlib
-import json
 import threading
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol
@@ -56,7 +55,6 @@ from ..mission import (
     MissionStatus,
     ObligationStatus,
     StaleRevisionError,
-    target_binding_attestation,
 )
 from ..profiling import ExecutionProfile
 from ..targeting import (
@@ -100,11 +98,13 @@ from .ports import (
 )
 from .mutation_attempt import call_once_with_permit
 from .mutation_permits import MutationPermitAuthority, MutationPermitError
+from .post_action_reconcile import reconcile_post_action
 from .target_activation import (
     TargetActivationEnvelope,
     TargetActivationOutcome,
     TargetActivationTransition,
 )
+from .target_binding_commit import commit_target_binding
 
 if TYPE_CHECKING:
     from ..verification.visual_model import VisualVerifierAttestation
@@ -268,16 +268,6 @@ class MissionRuntime:
             raise TypeError(
                 "action effect verifier and evidence registry must be injected together"
             )
-        if (
-            evidence_registry is not None
-            and mission_completion_verifier is None
-            and attested_visual_verifier is None
-            and action_effect_verifier is None
-            and activation_tool is None
-        ):
-            raise TypeError(
-                "Runtime verification owner and evidence registry must be injected together"
-            )
         if mission_completion_verifier is not None:
             if type(mission_completion_verifier) is not DeterministicMissionCompletionVerifier:
                 raise TypeError(
@@ -291,17 +281,17 @@ class MissionRuntime:
             )
         if evidence_registry is not None:
             if type(evidence_registry) is not EvidenceRegistry:
-                raise TypeError("verification requires canonical EvidenceRegistry")
+                raise TypeError("Runtime requires canonical EvidenceRegistry")
             if reducer.evidence_source is not evidence_registry:
                 raise TypeError(
-                    "verification and MissionReducer must share one EvidenceRegistry"
+                    "Runtime and MissionReducer must share one EvidenceRegistry"
                 )
             if (
                 evidence_registry.mission_id != reducer.definition.mission_id
                 or evidence_registry.run_id != reducer.definition.run_id
             ):
                 raise TypeError(
-                    "mission completion EvidenceRegistry must match Runtime mission/run"
+                    "Runtime EvidenceRegistry must match Runtime mission/run"
                 )
         self._mission_completion_verifier = mission_completion_verifier
         self._action_effect_verifier = action_effect_verifier
@@ -758,38 +748,6 @@ class MissionRuntime:
             and self._tool_admitted(ACTIVATE_TARGET_TOOL_NAME, broker)
         )
 
-    @staticmethod
-    def _target_binding_evidence_id(
-        envelope: TargetActivationEnvelope,
-        transition: TargetActivationTransition,
-    ) -> str:
-        target = transition.activated_target
-        if target is None:
-            raise ValueError(
-                "completed target activation has no activated identity"
-            )
-        material = {
-            "format": "vnext-target-binding-evidence-id/1",
-            "mission_id": envelope.mission_id,
-            "run_id": envelope.run_id,
-            "acquisition_action_id": envelope.decision_id,
-            "hwnd": target.hwnd,
-            "root_hwnd": target.root_hwnd,
-            "process_id": target.process_id,
-            "process_identity": target.process_identity,
-        }
-        encoded = json.dumps(
-            material,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return (
-            "evidence-target-"
-            + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
-        )
-
     def _commit_activated_target(
         self,
         envelope: TargetActivationEnvelope,
@@ -800,21 +758,8 @@ class MissionRuntime:
         """Reconcile Controller facts, then accept the sole binding event."""
 
         registry = self._evidence_registry
-        if registry is None or registry is not self._reducer.evidence_source:
-            raise ValueError(
-                "target activation requires the Reducer's canonical EvidenceRegistry"
-            )
-        mission = self._reducer.projection
-        if (
-            mission.mission_id != envelope.mission_id
-            or mission.run_id != envelope.run_id
-            or mission.revision != envelope.mission_revision
-            or mission.active_obligation_id != envelope.obligation_id
-            or mission.target_binding is not None
-        ):
-            raise ValueError(
-                "Mission authority changed before target binding reconciliation"
-            )
+        if registry is None:
+            raise ValueError("target activation requires an EvidenceRegistry")
         activated = transition.activated_target
         if activated is None:
             raise ValueError("completed activation omitted target identity")
@@ -827,115 +772,21 @@ class MissionRuntime:
             raise ValueError(
                 "activated identity does not match the selected candidate"
             )
-        binding, binding_evidence = target_binding_attestation(
+        committed = commit_target_binding(
+            reducer=self._reducer,
+            registry=registry,
+            state=self._state,
             mission_id=envelope.mission_id,
             run_id=envelope.run_id,
+            base_revision=envelope.mission_revision,
             obligation_id=envelope.obligation_id,
-            evidence_id=self._target_binding_evidence_id(
-                envelope,
-                transition,
-            ),
             acquisition_action_id=envelope.decision_id,
-            hwnd=activated.hwnd,
-            root_hwnd=activated.root_hwnd,
-            process_id=activated.process_id,
-            process_identity=activated.process_identity,
-            title_snapshot=activated.title_snapshot,
-            epoch=envelope.frame.epoch,
-            frame_id=transition.post_frame_id,
-        )
-
-        # RuntimeStateBridge accepts this ephemeral projection only as a
-        # read probe.  Mission truth remains unchanged until target_bound is
-        # accepted below.
-        post = self._state.current(
-            replace(mission, target_binding=binding),
+            target=activated,
+            transition=transition,
+            authority_epoch=envelope.frame.epoch,
             turn_index=turn_index,
         )
-        post_frame = post.frame
-        post_target = post.target
-        if (
-            post.broker_state.turn_index != turn_index
-            or not post.broker_state.frame.authoritative
-            or not post.broker_state.frame.fresh
-            or post_frame is None
-            or post_target is None
-            or post_frame.frame_id != transition.post_frame_id
-            or post_frame.hwnd != activated.hwnd
-            or post_frame.epoch != envelope.frame.epoch
-            or post_frame.scope != "target_window"
-            or post_frame.region != activated.window_region
-            or post_target.binding_id != binding.binding_id
-            or post_target.hwnd != activated.hwnd
-            or post_target.root_hwnd != activated.root_hwnd
-            or post_target.process_id != activated.process_id
-            or post_target.process_identity != activated.process_identity
-            or post_target.epoch != envelope.frame.epoch
-            or post_target.window_region != activated.window_region
-        ):
-            raise ValueError(
-                "Controller post frame is not current activated-target authority"
-            )
-        evidence_ids = transition.evidence_refs
-        if (
-            not evidence_ids
-            or tuple(sorted(evidence_ids))
-            != tuple(sorted(post_frame.evidence_refs))
-        ):
-            raise ValueError(
-                "activation post frame does not carry Controller evidence"
-            )
-        refs = self._reducer.evidence_scope.require(
-            evidence_ids,
-            obligation_id=envelope.obligation_id,
-        )
-        expected_frame_hash = frame_identity_payload_hash(
-            post_frame.commit_identity
-        )
-        if len(refs) != len(evidence_ids) or any(
-            ref.kind != POST_ACTION_FRAME_EVIDENCE_KIND
-            or ref.trust != "deterministic"
-            or ref.mission_id != envelope.mission_id
-            or ref.run_id != envelope.run_id
-            or ref.obligation_id != envelope.obligation_id
-            or ref.action_id != envelope.decision_id
-            or ref.frame_id != post_frame.frame_id
-            or ref.payload_hash != expected_frame_hash
-            or ref.artifact_id is not None
-            or ref.content_sha256 is not None
-            for ref in refs
-        ):
-            raise ValueError(
-                "activation transition evidence does not bind the current post frame"
-            )
-
-        # Recheck Mission immediately before the immutable side effect.  A
-        # race may leave an orphan evidence object, but can never accept a
-        # stale or second target binding.
-        current = self._reducer.projection
-        if (
-            current.revision != envelope.mission_revision
-            or current.active_obligation_id != envelope.obligation_id
-            or current.target_binding is not None
-        ):
-            raise ValueError(
-                "Mission authority changed during target binding reconciliation"
-            )
-        registry.append(binding_evidence)
-        event_ids = self._accept(
-            "target_bound",
-            payload={"target_binding": binding.to_dict()},
-            evidence_refs=(binding_evidence.id,),
-            base_revision=envelope.mission_revision,
-        )
-        if (
-            len(event_ids) != 1
-            or self._reducer.projection.target_binding != binding
-        ):
-            raise ValueError(
-                "Reducer did not derive the accepted target binding"
-            )
-        return event_ids
+        return (committed.event_id,)
 
     @staticmethod
     def _proposal_tool(proposal: object) -> str:
@@ -1868,36 +1719,6 @@ class MissionRuntime:
             detail=detail,
         )
 
-    def _transition_evidence_matches(
-        self,
-        transition: ControllerTransition,
-        *,
-        decision_id: str,
-        obligation_id: str,
-        post_frame: RuntimeFrame,
-    ) -> bool:
-        """Require current, deterministic evidence for this exact transition."""
-
-        evidence_refs = tuple(getattr(transition, "evidence_refs", ()) or ())
-        frame_evidence = tuple(getattr(post_frame, "evidence_refs", ()) or ())
-        frame_id = getattr(post_frame, "frame_id", None)
-        if not evidence_refs or not set(evidence_refs) <= set(frame_evidence):
-            return False
-        try:
-            refs = self._reducer.evidence_scope.require(
-                evidence_refs,
-                obligation_id=obligation_id,
-            )
-        except MissionError:
-            return False
-        return any(
-            ref.obligation_id == obligation_id
-            and ref.action_id == decision_id
-            and ref.frame_id == frame_id
-            and ref.trust == "deterministic"
-            for ref in refs
-        )
-
     def _deterministic_frame_evidence_ref(
         self,
         frame: RuntimeFrame,
@@ -2790,15 +2611,20 @@ class MissionRuntime:
             )
         try:
             post = self._state.current(self._reducer.projection, turn_index=turn_index)
-            if post.frame is None or post.frame.frame_id != transition.post_frame_id:
-                raise ValueError("Controller post frame is not current authority")
-            if not self._transition_evidence_matches(
+            registry = self._evidence_registry
+            if registry is None:
+                raise ValueError("Controller reconciliation requires evidence")
+            reconcile_post_action(
                 transition,
-                decision_id=decision_id,
+                post,
+                registry,
+                mission_id=self._reducer.definition.mission_id,
+                run_id=self._reducer.definition.run_id,
                 obligation_id=obligation_id,
-                post_frame=post.frame,
-            ):
-                raise ValueError("Controller transition evidence identity is not current")
+                action_id=decision_id,
+                action=proposal.action,
+            )
+            assert post.frame is not None
             target_binding_valid = bool(
                 self._snapshot_matches_mission(post)
                 and post.target == latest.target

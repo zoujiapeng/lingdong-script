@@ -6,12 +6,20 @@ from dataclasses import dataclass, replace
 import hashlib
 import json
 
-from ...visual_runtime.commit_admission import FrameCommitIdentity
 from ..evidence import EvidenceRegistry
 from ..mission import EvidenceRef, MissionReducer, TargetBinding
 from ..mission import target_binding_attestation
+from .post_action_reconcile import (
+    PostActionReconciliation,
+    PostActionTransition,
+    reconcile_post_action,
+)
 from .ports import RuntimeStatePort
-from .target_activation import ActivatedTargetIdentity
+from .target_activation import (
+    ActivatedTargetIdentity,
+    TargetActivationTransition,
+)
+from .target_launch import TargetLaunchTransition
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +27,7 @@ class TargetBindingCommit:
     binding: TargetBinding
     evidence: EvidenceRef
     event_id: str
+    post_action: PostActionReconciliation
 
 
 def target_binding_evidence_id(
@@ -59,7 +68,8 @@ def commit_target_binding(
     obligation_id: str,
     acquisition_action_id: str,
     target: ActivatedTargetIdentity,
-    post_frame: FrameCommitIdentity,
+    transition: PostActionTransition,
+    authority_epoch: int,
     turn_index: int,
 ) -> TargetBindingCommit:
     """Read current authority, append one attestation, then accept one event."""
@@ -71,8 +81,19 @@ def commit_target_binding(
         raise TypeError("state must provide current()")
     if not isinstance(target, ActivatedTargetIdentity):
         raise TypeError("target must use the canonical contract")
-    if not isinstance(post_frame, FrameCommitIdentity):
-        raise TypeError("post_frame must use the canonical contract")
+    if not isinstance(
+        transition,
+        (TargetActivationTransition, TargetLaunchTransition),
+    ):
+        raise TypeError("transition must be a target acquisition transition")
+    if type(authority_epoch) is not int or authority_epoch < 0:
+        raise ValueError("authority_epoch must be a non-negative integer")
+    if (
+        transition.action_id != acquisition_action_id
+        or transition.activated_target != target
+        or transition.post_frame_id is None
+    ):
+        raise ValueError("target acquisition transition identity is inconsistent")
 
     mission = reducer.projection
     if (
@@ -81,9 +102,6 @@ def commit_target_binding(
         or mission.revision != base_revision
         or mission.active_obligation_id != obligation_id
         or mission.target_binding is not None
-        or post_frame.hwnd != target.hwnd
-        or post_frame.region != target.window_region
-        or post_frame.scope != "target_window"
     ):
         raise ValueError("target binding authority is stale or inconsistent")
 
@@ -103,8 +121,8 @@ def commit_target_binding(
         process_id=target.process_id,
         process_identity=target.process_identity,
         title_snapshot=target.title_snapshot,
-        epoch=post_frame.epoch,
-        frame_id=post_frame.frame_id,
+        epoch=authority_epoch,
+        frame_id=transition.post_frame_id,
     )
     shadow_mission = replace(mission, target_binding=binding)
     post = state.current(shadow_mission, turn_index=turn_index)
@@ -114,17 +132,32 @@ def commit_target_binding(
         or not post.broker_state.frame.authoritative
         or not post.broker_state.frame.fresh
         or post.frame is None
-        or post.frame.commit_identity != post_frame
+        or post.frame.frame_id != transition.post_frame_id
+        or post.frame.epoch != authority_epoch
+        or post.frame.hwnd != target.hwnd
+        or post.frame.region != target.window_region
+        or post.frame.scope != "target_window"
         or current_target is None
         or current_target.binding_id != binding.binding_id
         or current_target.hwnd != target.hwnd
         or current_target.root_hwnd != target.root_hwnd
         or current_target.process_id != target.process_id
         or current_target.process_identity != target.process_identity
-        or current_target.epoch != post_frame.epoch
+        or current_target.epoch != authority_epoch
         or current_target.window_region != target.window_region
     ):
         raise ValueError("post frame is not current target authority")
+    assert post.frame is not None
+    post_action = reconcile_post_action(
+        transition,
+        post,
+        registry,
+        mission_id=mission_id,
+        run_id=run_id,
+        obligation_id=obligation_id,
+        action_id=acquisition_action_id,
+        action=transition.action,
+    )
 
     current = reducer.projection
     if (
@@ -143,7 +176,7 @@ def commit_target_binding(
     reducer.apply(event)
     if reducer.projection.target_binding != binding:
         raise ValueError("Reducer did not derive the accepted target binding")
-    commit = TargetBindingCommit(binding, evidence, event.event_id)
+    commit = TargetBindingCommit(binding, evidence, event.event_id, post_action)
     return commit
 
 
