@@ -401,6 +401,10 @@ def test_activation_transition_rejects_invalid_three_state_combinations(
     "rewrite",
     (
         lambda raw: {key: value for key, value in raw.items() if key != "action_id"},
+        lambda raw: {key: value for key, value in raw.items() if key != "action"},
+        lambda raw: {
+            key: value for key, value in raw.items() if key != "failure_reason"
+        },
         lambda raw: {**raw, "extra": True},
         lambda raw: {**raw, "format": "target-activation-transition/1"},
         lambda raw: {**raw, "outcome": "maybe"},

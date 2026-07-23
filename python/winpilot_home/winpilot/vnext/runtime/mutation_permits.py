@@ -1,10 +1,10 @@
 """Run-scoped, single-use admission permits for GUI mutation.
 
 The permit owner is ephemeral execution state, not Mission completion truth.
-Runtime issues one permit for one exact Actor mutation or target-activation
-envelope.  A Controller may consume it exactly once after acquiring the
-desktop queue and before raw input.  Rejection never restores the permit;
-recovery requires a new decision.
+Runtime issues one permit for one exact Actor mutation, existing-target
+activation, or installed-target launch envelope. A Controller may consume it
+exactly once after acquiring the desktop queue and before raw input. Rejection
+never restores the permit; recovery requires a new decision.
 """
 from __future__ import annotations
 
@@ -19,10 +19,16 @@ from typing import TypeAlias
 from ..actor import ActorDecisionEnvelope
 from ..targeting import TargetCandidate
 from .target_activation import TargetActivationEnvelope
+from .target_launch import TargetLaunchEnvelope
 
 
 MutationEnvelope: TypeAlias = (
-    ActorDecisionEnvelope | TargetActivationEnvelope
+    ActorDecisionEnvelope | TargetActivationEnvelope | TargetLaunchEnvelope
+)
+_MUTATION_ENVELOPE_TYPES = (
+    ActorDecisionEnvelope,
+    TargetActivationEnvelope,
+    TargetLaunchEnvelope,
 )
 
 
@@ -98,9 +104,7 @@ class MutationPermitAuthority:
         turn_index: int,
         still_current: Callable[[], bool],
     ) -> str:
-        if not isinstance(
-            envelope, (ActorDecisionEnvelope, TargetActivationEnvelope)
-        ):
+        if not isinstance(envelope, _MUTATION_ENVELOPE_TYPES):
             raise MutationPermitError(
                 "envelope must be a supported mutation envelope"
             )
@@ -143,9 +147,7 @@ class MutationPermitAuthority:
     ) -> RuntimeMutationPermit:
         """Retire one pending permit and optionally hold its commit admission."""
 
-        if not isinstance(
-            envelope, (ActorDecisionEnvelope, TargetActivationEnvelope)
-        ):
+        if not isinstance(envelope, _MUTATION_ENVELOPE_TYPES):
             raise MutationPermitError(
                 "envelope must be a supported mutation envelope"
             )
@@ -261,6 +263,35 @@ class MutationPermitAuthority:
                 return False
             envelope = pending.envelope
             if not isinstance(envelope, TargetActivationEnvelope):
+                return False
+            return bool(
+                envelope.decision_id == decision_id
+                and envelope.frame == frame
+                and envelope.pointer == pointer
+                and envelope.candidate_fingerprint == candidate_fingerprint
+                and isinstance(candidate, TargetCandidate)
+                and envelope.candidate == candidate
+            )
+
+    def active_launch_admission_matches(
+        self,
+        decision_id: str,
+        *,
+        frame: object,
+        pointer: object,
+        candidate_fingerprint: object,
+        candidate: object,
+    ) -> bool:
+        """Read whether one exact private target launch owns admission."""
+
+        with self._lock:
+            if self._closed:
+                return False
+            pending = self._active.get(str(decision_id))
+            if pending is None:
+                return False
+            envelope = pending.envelope
+            if not isinstance(envelope, TargetLaunchEnvelope):
                 return False
             return bool(
                 envelope.decision_id == decision_id

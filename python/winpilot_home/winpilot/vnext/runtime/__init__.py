@@ -2,6 +2,7 @@
 
 from .contracts import *
 from .target_activation import *
+from .target_launch import *
 from .ports import (
     ActorPort,
     ControllerPort,
