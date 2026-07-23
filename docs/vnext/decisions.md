@@ -791,3 +791,30 @@
 - gate: no item in this decision completes P4b.2, adds an activation/launch mutation, establishes an
   existing-instance or cold-launch oracle, completes P7, changes the default runtime or authorizes legacy
   deletion.
+
+### D039: existing-window activation starts with one strict Runtime authority
+
+- status: pure activation contracts and shared single-use permit accepted; physical activation, Mission
+  binding, live Catalog exposure, targetless Electron reachability and P4b.2/P7 gates remain pending.
+- authority: `target-activation-envelope/0` binds the current mission/run/revision/obligation, exact
+  epoch-zero full-desktop frame, released pointer, Broker/grants/evidence scope, candidate-list
+  fingerprint, ordinal-only Actor proposal and the complete Runtime-private existing-window candidate.
+  The envelope is issued only from a just-consumed `TargetSelectionLease`; it is not an independent proof
+  that an ordinal belongs to a candidate list.
+- one permit owner: activation and bound-target Actor mutations share `MutationPermitAuthority`. The
+  canonical envelope hash includes the complete private candidate. Cross-kind consumption, candidate
+  substitution, stale authority, duplicate or concurrent consumption fail closed; the existing Actor
+  admission path keeps its original type boundary.
+- strict replay: wire parsers accept only finite JSON values and reject Python objects, tuples, bytes,
+  coercions, old versions and mixed schemas. `TargetCandidate` itself owns its one private wire codec;
+  the activation contract does not duplicate that schema.
+- three outcomes: completed requires a strong activated identity, post frame and deterministic evidence;
+  its mutation flag may be false when the exact target was already foreground. Rejected proves no
+  mutation. Unknown means mutation may have occurred or postconditions could not be closed and is never
+  replayable automatically.
+- next execution gate: Runtime must reconcile the returned action/candidate/activated identity/post frame
+  and Registry evidence with the issued envelope. The only permitted implementation reuses the existing
+  `AtomicDesktopController`, physical `DesktopActionQueue`, `FrameAuthority`, `RawDeviceExecutor` and
+  post-action bridge. Legacy focus/open fallback chains remain forbidden.
+- behavior boundary: this decision adds no GUI primitive, Controller call, Mission event, Catalog tool,
+  prompt, model call or Electron route. Product behavior and the default legacy path are unchanged.

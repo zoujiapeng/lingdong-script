@@ -1219,6 +1219,32 @@ reducer event and resulting revision
 它是不含参数、意图或图像的私有 trace sidecar 事实，不进入 BUS/WebSocket 或 Mission 真相。
 
 这样失败可以归因到 Goal Compiler、Task Profiler、Execution Policy、Mission Reducer、Broker、Actor、Frame/Controller、Verifier、Planner、Inspector或外部环境，而不是笼统归因于“模型不行”。
+
+## 19. Existing-window activation authority（纯合同，尚未接线）
+
+`target-activation-envelope/0` 是 Runtime 私有的单次 mutation authority。它绑定
+mission/run/revision/obligation、epoch-zero `full_desktop` frame、released pointer、Broker
+projection、grants、evidence scope、整个候选列表 fingerprint、Actor 的 ordinal-only
+`activate_target` proposal，以及从同一 one-shot selection lease 解析出的完整强
+`TargetCandidate`。Actor 永远看不到 HWND、PID、process identity、candidate ref 或 fingerprint。
+
+该 envelope 本身不能证明一个 ordinal 属于某个列表；唯一有效来源是 Runtime 刚刚成功消费的
+`TargetSelectionLease`。permit 的 canonical SHA-256 同时覆盖 proposal 与完整私有候选，交叉类型、
+篡改或重复消费均 fail closed。wire/replay parser 只接受严格 JSONValue，不接受 tuple、bytes、
+dataclass、Pydantic object、NaN 或隐式枚举转换。`TargetCandidate.to_dict/from_dict` 是私有候选
+wire schema 的唯一 owner。
+
+`target-activation-transition/0` 只有三种结果：`completed` 必须带强 activated identity、post frame
+和 run-scoped deterministic evidence，且 `mutation_completed` 可以是 `false`（目标本来就在前台）
+或 `true`（唯一 primitive 已执行）；`rejected` 必须证明 mutation 未发生；任何可能执行但无法闭合
+foreground/frame/evidence 的结果是 `unknown`，不得自动重放。Runtime 接受结果前必须精确核对
+action/decision/candidate、HWND/PID/process identity、post frame 与 Registry evidence；只有 Runtime
+可以据此追加 evidence 并提交 `target_bound` Mission event。
+
+当前切片没有 activation primitive、Controller 分派、Mission event、Catalog 工具、prompt 或产品
+入口变化。下一切片必须复用同一个 `AtomicDesktopController`、`DesktopActionQueue`、
+`FrameAuthority`、`RawDeviceExecutor` 与 post-action bridge；禁止调用 legacy focus 级联。
+
 ### P1.5 completion and recovery contract (canonical)
 
 The Python sidecar is explicit about the distinction between obligation
