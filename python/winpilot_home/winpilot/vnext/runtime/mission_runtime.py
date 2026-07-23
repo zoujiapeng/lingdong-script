@@ -101,10 +101,10 @@ from .mutation_permits import MutationPermitAuthority, MutationPermitError
 from .post_action_reconcile import reconcile_post_action
 from .target_activation import (
     TargetActivationEnvelope,
-    TargetActivationOutcome,
     TargetActivationTransition,
 )
 from .target_binding_commit import commit_target_binding
+from .target_launch import TargetLaunchEnvelope, TargetLaunchTransition
 
 if TYPE_CHECKING:
     from ..verification.visual_model import VisualVerifierAttestation
@@ -646,7 +646,7 @@ class MissionRuntime:
             and self._tool_admitted(tool_name, broker)
         )
 
-    def _activation_envelope(
+    def _target_acquisition_envelope(
         self,
         *,
         decision_id: str,
@@ -655,7 +655,7 @@ class MissionRuntime:
         discovery: TargetDiscoverySnapshot,
         proposal: DesktopActionProposal,
         candidate: TargetCandidate,
-    ) -> TargetActivationEnvelope:
+    ) -> TargetActivationEnvelope | TargetLaunchEnvelope:
         frame = snapshot.frame
         if (
             frame is None
@@ -665,7 +665,12 @@ class MissionRuntime:
             raise ValueError(
                 "target activation requires an unbound authoritative frame"
             )
-        return TargetActivationEnvelope(
+        envelope_type = (
+            TargetActivationEnvelope
+            if candidate.activation is TargetActivation.SWITCH_WINDOW
+            else TargetLaunchEnvelope
+        )
+        return envelope_type(
             decision_id=decision_id,
             mission_id=self._reducer.definition.mission_id,
             run_id=self._reducer.definition.run_id,
@@ -685,9 +690,9 @@ class MissionRuntime:
             candidate=candidate,
         )
 
-    def _activation_still_current(
+    def _target_acquisition_still_current(
         self,
-        envelope: TargetActivationEnvelope,
+        envelope: TargetActivationEnvelope | TargetLaunchEnvelope,
         *,
         lease: TargetSelectionLease,
         discovery: TargetDiscoverySnapshot,
@@ -748,10 +753,10 @@ class MissionRuntime:
             and self._tool_admitted(ACTIVATE_TARGET_TOOL_NAME, broker)
         )
 
-    def _commit_activated_target(
+    def _commit_acquired_target(
         self,
-        envelope: TargetActivationEnvelope,
-        transition: TargetActivationTransition,
+        envelope: TargetActivationEnvelope | TargetLaunchEnvelope,
+        transition: TargetActivationTransition | TargetLaunchTransition,
         *,
         turn_index: int,
     ) -> tuple[str, ...]:
@@ -759,16 +764,31 @@ class MissionRuntime:
 
         registry = self._evidence_registry
         if registry is None:
-            raise ValueError("target activation requires an EvidenceRegistry")
+            raise ValueError("target acquisition requires an EvidenceRegistry")
         activated = transition.activated_target
         if activated is None:
-            raise ValueError("completed activation omitted target identity")
+            raise ValueError(
+                "completed target acquisition omitted target identity"
+            )
         candidate = envelope.candidate
-        if (
-            activated.hwnd != candidate.hwnd
-            or activated.process_id != candidate.process_id
-            or activated.process_identity != candidate.process_identity
-        ):
+        if isinstance(envelope, TargetActivationEnvelope):
+            if not isinstance(transition, TargetActivationTransition):
+                raise ValueError("target acquisition contract types disagree")
+            identity_matches = (
+                activated.hwnd == candidate.hwnd
+                and activated.process_id == candidate.process_id
+                and activated.process_identity == candidate.process_identity
+            )
+        else:
+            if not isinstance(transition, TargetLaunchTransition):
+                raise ValueError("target acquisition contract types disagree")
+            identity_matches = (
+                transition.launch_request_count == 1
+                and transition.launch_process_id == activated.process_id
+                and transition.launch_process_identity
+                == activated.process_identity
+            )
+        if not identity_matches:
             raise ValueError(
                 "activated identity does not match the selected candidate"
             )
@@ -2256,17 +2276,8 @@ class MissionRuntime:
                     RuntimeStatus.STATE_REJECTED,
                     str(exc),
                 )
-            if selected_candidate.activation is not TargetActivation.SWITCH_WINDOW:
-                self._discard_active_target_selection()
-                return finish_activation(
-                    RuntimeStatus.UNAVAILABLE,
-                    (
-                        "target candidate selection was consumed, but the "
-                        "cold-launch owner is not connected"
-                    ),
-                )
             try:
-                activation_envelope = self._activation_envelope(
+                acquisition_envelope = self._target_acquisition_envelope(
                     decision_id=decision_id,
                     snapshot=latest,
                     projection=latest_broker,
@@ -2274,12 +2285,12 @@ class MissionRuntime:
                     proposal=proposal,
                     candidate=selected_candidate,
                 )
-                activation_attempt = call_once_with_permit(
+                acquisition_attempt = call_once_with_permit(
                     authority=self._mutation_permits,
-                    envelope=activation_envelope,
+                    envelope=acquisition_envelope,
                     turn_index=turn_index,
-                    still_current=lambda: self._activation_still_current(
-                        activation_envelope,
+                    still_current=lambda: self._target_acquisition_still_current(
+                        acquisition_envelope,
                         lease=lease,
                         discovery=active_target_discovery,
                         turn_index=turn_index,
@@ -2298,27 +2309,29 @@ class MissionRuntime:
                     str(exc),
                 )
             self._discard_active_target_selection()
-            if activation_attempt.controller_error is not None:
+            if acquisition_attempt.controller_error is not None:
                 return activation_unknown(
-                    "Controller raised after activation admission: "
-                    f"{activation_attempt.controller_error}"
+                    "Controller raised after target acquisition admission: "
+                    f"{acquisition_attempt.controller_error}"
                 )
-            activation_transition = activation_attempt.transition
-            if not isinstance(
-                activation_transition,
-                TargetActivationTransition,
-            ):
+            acquisition_transition = acquisition_attempt.transition
+            transition_type = (
+                TargetActivationTransition
+                if isinstance(acquisition_envelope, TargetActivationEnvelope)
+                else TargetLaunchTransition
+            )
+            if not isinstance(acquisition_transition, transition_type):
                 return activation_unknown(
                     (
-                        "Controller returned an invalid target activation "
+                        "Controller returned an invalid target acquisition "
                         "transition"
                     )
                 )
             if (
-                activation_transition.action_id != decision_id
-                or activation_transition.action
+                acquisition_transition.action_id != decision_id
+                or acquisition_transition.action
                 != ACTIVATE_TARGET_TOOL_NAME
-                or activation_transition.candidate_ref
+                or acquisition_transition.candidate_ref
                 != selected_candidate.candidate_ref
             ):
                 return activation_unknown(
@@ -2327,54 +2340,48 @@ class MissionRuntime:
                         "match Runtime authority"
                     )
                 )
+            acquisition_outcome = acquisition_transition.outcome.value
             if (
-                activation_attempt.pending_permit_revoked
-                and activation_transition.outcome
-                is not TargetActivationOutcome.REJECTED
+                acquisition_attempt.pending_permit_revoked
+                and acquisition_outcome != "rejected"
             ):
                 return activation_unknown(
                     (
-                        "Controller returned an activation outcome without "
+                        "Controller returned an acquisition outcome without "
                         "consuming the Runtime permit"
                     )
                 )
-            if (
-                activation_transition.outcome
-                is TargetActivationOutcome.UNKNOWN
-            ):
+            if acquisition_outcome == "unknown":
                 return activation_unknown(
                     (
-                        "Controller could not prove the target activation "
+                        "Controller could not prove the target acquisition "
                         "outcome"
                     )
                 )
-            if (
-                activation_transition.outcome
-                is TargetActivationOutcome.REJECTED
-            ):
+            if acquisition_outcome == "rejected":
                 return finish_activation(
                     RuntimeStatus.STALE_DISCARDED,
                     (
-                        "Controller proved that target activation did not "
+                        "Controller proved that target acquisition did not "
                         "execute; the decision was not replayed"
                     ),
                 )
             try:
-                event_ids = self._commit_activated_target(
-                    activation_envelope,
-                    activation_transition,
+                event_ids = self._commit_acquired_target(
+                    acquisition_envelope,
+                    acquisition_transition,
                     turn_index=turn_index,
                 )
             except Exception as exc:
                 return activation_unknown(
                     (
-                        "Controller target activation could not be "
+                        "Controller target acquisition could not be "
                         f"reconciled: {exc}"
                     )
                 )
             return finish_activation(
                 RuntimeStatus.ACTION_RECORDED,
-                "existing target was bound from deterministic evidence",
+                "selected target was bound from deterministic evidence",
                 event_ids,
             )
 

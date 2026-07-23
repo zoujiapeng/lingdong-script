@@ -41,6 +41,9 @@ from winpilot.vnext.runtime import (
     TargetActivationEnvelope,
     TargetActivationOutcome,
     TargetActivationTransition,
+    TargetLaunchEnvelope,
+    TargetLaunchOutcome,
+    TargetLaunchTransition,
 )
 from winpilot.vnext.runtime.target_activation import ActivatedTargetIdentity
 from winpilot.vnext.targeting import (
@@ -256,6 +259,45 @@ class _ActivationState(_State):
         )
 
 
+def _record_completed_target(
+    state: _ActivationState,
+    evidence_registry: EvidenceRegistry,
+    envelope: TargetActivationEnvelope | TargetLaunchEnvelope,
+    target: ActivatedTargetIdentity,
+    *,
+    payload_hash_override: str | None = None,
+) -> RuntimeFrame:
+    raw = base64.b64encode(f"activated:{target.hwnd}".encode()).decode("ascii")
+    post = RuntimeFrame(
+        frame_id=30,
+        epoch=0,
+        hwnd=target.hwnd,
+        region=target.window_region,
+        scope="target_window",
+        submitted_size=(900, 600),
+        image_b64=raw,
+        image_sha256=hashlib.sha256(raw.encode("ascii")).hexdigest(),
+    )
+    evidence = EvidenceRef(
+        id=f"post-action-{envelope.decision_id}",
+        mission_id=envelope.mission_id,
+        run_id=envelope.run_id,
+        obligation_id=envelope.obligation_id,
+        kind=POST_ACTION_FRAME_EVIDENCE_KIND,
+        trust="deterministic",
+        payload_hash=(
+            payload_hash_override
+            or frame_identity_payload_hash(post.commit_identity)
+        ),
+        frame_id=post.frame_id,
+        action_id=envelope.decision_id,
+    )
+    evidence_registry.append(evidence)
+    post = replace(post, evidence_refs=(evidence.id,))
+    state.set_activated(target, post)
+    return post
+
+
 class _ActivationController:
     def __init__(
         self,
@@ -345,38 +387,13 @@ class _ActivationController:
             window_region=(40, 50, 900, 600),
             title_snapshot=candidate.window_title,
         )
-        raw = base64.b64encode(
-            f"activated:{candidate.hwnd}".encode()
-        ).decode("ascii")
-        post = RuntimeFrame(
-            frame_id=30,
-            epoch=0,
-            hwnd=candidate.hwnd,
-            region=activated.window_region,
-            scope="target_window",
-            submitted_size=(900, 600),
-            image_b64=raw,
-            image_sha256=hashlib.sha256(
-                raw.encode("ascii")
-            ).hexdigest(),
+        post = _record_completed_target(
+            self.state,
+            self.evidence,
+            envelope,
+            activated,
+            payload_hash_override=self.evidence_hash_override,
         )
-        evidence = EvidenceRef(
-            id=f"post-action-{envelope.decision_id}",
-            mission_id=envelope.mission_id,
-            run_id=envelope.run_id,
-            obligation_id=envelope.obligation_id,
-            kind=POST_ACTION_FRAME_EVIDENCE_KIND,
-            trust="deterministic",
-            payload_hash=(
-                self.evidence_hash_override
-                or frame_identity_payload_hash(post.commit_identity)
-            ),
-            frame_id=post.frame_id,
-            action_id=envelope.decision_id,
-        )
-        self.evidence.append(evidence)
-        post = replace(post, evidence_refs=(evidence.id,))
-        self.state.set_activated(activated, post)
         transition = TargetActivationTransition(
             outcome=self.outcome,
             action_id=envelope.decision_id,
@@ -387,11 +404,123 @@ class _ActivationController:
             mutation_completed=True,
             activated_target=activated,
             post_frame_id=post.frame_id,
-            evidence_refs=(evidence.id,),
+            evidence_refs=post.evidence_refs,
             failure_reason="",
         )
         if self.after_execute is not None:
             self.after_execute()
+        return (
+            self.transition_mutator(transition)
+            if self.transition_mutator is not None
+            else transition
+        )
+
+
+class _LaunchController:
+    def __init__(
+        self,
+        state: _ActivationState,
+        evidence: EvidenceRegistry,
+        permits: MutationPermitAuthority,
+        *,
+        outcome: TargetLaunchOutcome = TargetLaunchOutcome.COMPLETED,
+        consume_permit: bool = True,
+        candidate_ref_override: str | None = None,
+        evidence_hash_override: str | None = None,
+    ) -> None:
+        self.state = state
+        self.evidence = evidence
+        self.permits = permits
+        self.outcome = outcome
+        self.consume_permit = consume_permit
+        self.candidate_ref_override = candidate_ref_override
+        self.evidence_hash_override = evidence_hash_override
+        self.calls: list[TargetLaunchEnvelope] = []
+        self.saw_active_admission = False
+        self.raise_after_admission = False
+        self.transition_mutator = None
+
+    def execute(self, envelope, **_kwargs):
+        assert isinstance(envelope, TargetLaunchEnvelope)
+        self.calls.append(envelope)
+        permit = (
+            self.permits.begin_admission(envelope)
+            if self.consume_permit else None
+        )
+        if permit is not None and permit.allowed:
+            self.saw_active_admission = (
+                self.permits.active_launch_admission_matches(
+                    envelope.decision_id,
+                    frame=envelope.frame,
+                    pointer=envelope.pointer,
+                    candidate_fingerprint=envelope.candidate_fingerprint,
+                    candidate=envelope.candidate,
+                )
+            )
+        if self.raise_after_admission:
+            raise RuntimeError("injected launch controller failure")
+        if (
+            permit is not None and not permit.allowed
+        ) or self.outcome is TargetLaunchOutcome.REJECTED:
+            return TargetLaunchTransition(
+                outcome=TargetLaunchOutcome.REJECTED,
+                action_id=envelope.decision_id,
+                candidate_ref=envelope.candidate.candidate_ref,
+                launch_request_count=0,
+                launch_process_id=None,
+                launch_process_identity=None,
+                activated_target=None,
+                post_frame_id=None,
+                evidence_refs=(),
+                failure_reason=(
+                    permit.reason.value
+                    if permit is not None and not permit.allowed
+                    else "launch_not_applied"
+                ),
+            )
+        if self.outcome is TargetLaunchOutcome.UNKNOWN:
+            return TargetLaunchTransition(
+                outcome=self.outcome,
+                action_id=envelope.decision_id,
+                candidate_ref=envelope.candidate.candidate_ref,
+                launch_request_count=1,
+                launch_process_id=None,
+                launch_process_identity=None,
+                activated_target=None,
+                post_frame_id=None,
+                evidence_refs=(),
+                failure_reason="launch_outcome_unknown",
+            )
+        activated = ActivatedTargetIdentity(
+            hwnd=505,
+            root_hwnd=505,
+            process_id=707,
+            process_identity=f"process-{'7' * 32}",
+            window_region=(40, 50, 900, 600),
+            title_snapshot="Orbit",
+        )
+        post = _record_completed_target(
+            self.state,
+            self.evidence,
+            envelope,
+            activated,
+            payload_hash_override=self.evidence_hash_override,
+        )
+        transition = TargetLaunchTransition(
+            outcome=self.outcome,
+            action_id=envelope.decision_id,
+            candidate_ref=(
+                self.candidate_ref_override
+                or envelope.candidate.candidate_ref
+            ),
+            launch_request_count=1,
+            launch_process_id=activated.process_id,
+            launch_process_identity=activated.process_identity,
+            activated_target=activated,
+            post_frame_id=post.frame_id,
+            evidence_refs=post.evidence_refs,
+            failure_reason="",
+        )
         return (
             self.transition_mutator(transition)
             if self.transition_mutator is not None
@@ -477,14 +606,11 @@ def _runtime(
     return runtime, reducer, evidence, permits, controller
 
 
-def _activation_runtime(
+def _target_acquisition_runtime(
     candidates: tuple[TargetCandidate, ...],
     *,
-    actor: _Actor | None = None,
-    outcome: TargetActivationOutcome = TargetActivationOutcome.COMPLETED,
-    candidate_ref_override: str | None = None,
-    evidence_hash_override: str | None = None,
-    consume_permit: bool = True,
+    actor: _Actor,
+    controller_factory,
 ):
     definition = _definition()
     evidence = EvidenceRegistry(definition.mission_id, definition.run_id)
@@ -499,15 +625,7 @@ def _activation_runtime(
         1: _snapshot(11, turn_index=1),
         2: _snapshot(12, turn_index=2),
     })
-    controller = _ActivationController(
-        state,
-        evidence,
-        permits,
-        outcome=outcome,
-        candidate_ref_override=candidate_ref_override,
-        evidence_hash_override=evidence_hash_override,
-        consume_permit=consume_permit,
-    )
+    controller = controller_factory(state, evidence, permits)
     profile = ExecutionPolicy().safe_default(
         definition.mission_id,
         definition.goal_revision,
@@ -518,7 +636,7 @@ def _activation_runtime(
         profile=profile,
         broker=CapabilityBroker(catalog),
         catalog=catalog,
-        actor=actor or _Actor(_discover(), _activate()),
+        actor=actor,
         state=state,
         controller=controller,
         target_discovery=_Discovery(TargetDiscoverySnapshot(
@@ -529,6 +647,54 @@ def _activation_runtime(
         mutation_permits=permits,
     )
     return runtime, reducer, evidence, permits, state, controller
+
+
+def _activation_runtime(
+    candidates: tuple[TargetCandidate, ...],
+    *,
+    actor: _Actor | None = None,
+    outcome: TargetActivationOutcome = TargetActivationOutcome.COMPLETED,
+    candidate_ref_override: str | None = None,
+    evidence_hash_override: str | None = None,
+    consume_permit: bool = True,
+):
+    return _target_acquisition_runtime(
+        candidates,
+        actor=actor or _Actor(_discover(), _activate()),
+        controller_factory=lambda state, evidence, permits: _ActivationController(
+            state,
+            evidence,
+            permits,
+            outcome=outcome,
+            candidate_ref_override=candidate_ref_override,
+            evidence_hash_override=evidence_hash_override,
+            consume_permit=consume_permit,
+        ),
+    )
+
+
+def _launch_runtime(
+    *,
+    candidate: TargetCandidate | None = None,
+    actor: _Actor | None = None,
+    outcome: TargetLaunchOutcome = TargetLaunchOutcome.COMPLETED,
+    consume_permit: bool = True,
+    candidate_ref_override: str | None = None,
+    evidence_hash_override: str | None = None,
+):
+    return _target_acquisition_runtime(
+        (candidate or _candidate(),),
+        actor=actor or _Actor(_discover(), _activate()),
+        controller_factory=lambda state, evidence, permits: _LaunchController(
+            state,
+            evidence,
+            permits,
+            outcome=outcome,
+            consume_permit=consume_permit,
+            candidate_ref_override=candidate_ref_override,
+            evidence_hash_override=evidence_hash_override,
+        ),
+    )
 
 
 def test_catalog_discovery_requires_an_injected_read_only_port() -> None:
@@ -584,7 +750,7 @@ def test_discovery_projects_one_turn_choices_without_mutation_or_mission_write()
         captured_at=1.0,
     )
     discovery = _Discovery(discovery_snapshot)
-    actor = _Actor(_discover(), _activate())
+    actor = _Actor(_discover(), _discover())
     state = _State({
         0: _snapshot(10, turn_index=0),
         1: _snapshot(11, turn_index=1),
@@ -601,9 +767,9 @@ def test_discovery_projects_one_turn_choices_without_mutation_or_mission_write()
 
     assert first.status is RuntimeStatus.OBSERVED
     assert first.accepted_event_ids == ()
-    assert second.status is RuntimeStatus.UNAVAILABLE
+    assert second.status is RuntimeStatus.OBSERVED
     assert second.accepted_event_ids == ()
-    assert [query for query, _stop in discovery.calls] == ["Orbit"]
+    assert [query for query, _stop in discovery.calls] == ["Orbit", "Orbit"]
     assert reducer.projection.revision == initial_revision
     assert reducer.projection.accepted_event_ids == ()
     assert evidence.snapshot() == ()
@@ -951,6 +1117,216 @@ def test_existing_window_activation_accepts_one_replayable_binding_event() -> No
     replay_attempt = runtime.run_one_turn(turn_index=2)
     assert replay_attempt.status is RuntimeStatus.STATE_REJECTED
     assert len(controller.calls) == 1
+
+
+def test_installed_exe_launch_uses_same_owner_and_replays_binding() -> None:
+    runtime, reducer, evidence, permits, _state, controller = (
+        _launch_runtime()
+    )
+
+    assert runtime.run_one_turn(turn_index=0).status is RuntimeStatus.OBSERVED
+    result = runtime.run_one_turn(turn_index=1)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert len(result.accepted_event_ids) == 1
+    assert [event.kind for event in reducer.events] == ["target_bound"]
+    assert len(controller.calls) == 1
+    envelope = controller.calls[0]
+    assert isinstance(envelope, TargetLaunchEnvelope)
+    assert envelope.candidate == _candidate()
+    assert dict(envelope.proposal.args) == {"candidate_ordinal": 1}
+    assert controller.saw_active_admission is True
+    assert permits.pending_count == permits.active_count == 0
+    binding = reducer.projection.target_binding
+    assert binding is not None
+    assert (
+        binding.hwnd,
+        binding.process_id,
+        binding.process_identity,
+        binding.acquisition_action_id,
+    ) == (505, 707, f"process-{'7' * 32}", result.decision_id)
+    assert {ref.kind for ref in evidence.snapshot()} == {
+        POST_ACTION_FRAME_EVIDENCE_KIND,
+        "authoritative_target_binding",
+    }
+    replayed = MissionReducer.replay(
+        reducer.definition,
+        reducer.events,
+        evidence=evidence,
+    )
+    assert replayed.projection.target_binding == binding
+
+    assert (
+        runtime.run_one_turn(turn_index=2).status
+        is RuntimeStatus.STATE_REJECTED
+    )
+    assert len(controller.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("kind", "target"),
+    (
+        ("appid", "Contoso.Orbit_123!Main"),
+        ("lnk", r"C:\ProgramData\Microsoft\Windows\Start Menu\Orbit.lnk"),
+    ),
+)
+def test_non_exe_installed_candidate_fails_before_controller(
+    kind: str,
+    target: str,
+) -> None:
+    candidate = TargetCandidate(
+        candidate_ref=candidate_ref_for(
+            activation=TargetActivation.OPEN_APP,
+            identity=launch_identity_for(kind=kind, target=target),
+        ),
+        activation=TargetActivation.OPEN_APP,
+        state=CandidateState.INSTALLED,
+        label="Orbit",
+        provenance=("installed_catalog",),
+        launch_kind=kind,
+        launch_target=target,
+    )
+    runtime, reducer, evidence, permits, _state, controller = (
+        _launch_runtime(candidate=candidate)
+    )
+
+    assert runtime.run_one_turn(turn_index=0).status is RuntimeStatus.OBSERVED
+    result = runtime.run_one_turn(turn_index=1)
+
+    assert result.status is RuntimeStatus.STATE_REJECTED
+    assert controller.calls == []
+    assert reducer.projection.accepted_event_ids == ()
+    assert reducer.projection.target_binding is None
+    assert evidence.snapshot() == ()
+    assert permits.pending_count == permits.active_count == 0
+
+
+def test_rejected_launch_is_stale_and_never_replayed() -> None:
+    actor = _Actor(_discover(), _activate(), _activate())
+    runtime, reducer, evidence, permits, _state, controller = (
+        _launch_runtime(
+            actor=actor,
+            outcome=TargetLaunchOutcome.REJECTED,
+        )
+    )
+
+    assert runtime.run_one_turn(turn_index=0).status is RuntimeStatus.OBSERVED
+    rejected = runtime.run_one_turn(turn_index=1)
+    later = runtime.run_one_turn(turn_index=2)
+
+    assert rejected.status is RuntimeStatus.STALE_DISCARDED
+    assert rejected.accepted_event_ids == ()
+    assert later.status is RuntimeStatus.UNAVAILABLE
+    assert reducer.projection.accepted_event_ids == ()
+    assert reducer.projection.target_binding is None
+    assert evidence.snapshot() == ()
+    assert len(controller.calls) == 1
+    assert permits.pending_count == permits.active_count == 0
+
+
+def test_unknown_launch_accepts_one_block_and_never_replays() -> None:
+    actor = _Actor(_discover(), _activate())
+    runtime, reducer, evidence, permits, _state, controller = (
+        _launch_runtime(
+            actor=actor,
+            outcome=TargetLaunchOutcome.UNKNOWN,
+        )
+    )
+
+    assert runtime.run_one_turn(turn_index=0).status is RuntimeStatus.OBSERVED
+    unknown = runtime.run_one_turn(turn_index=1)
+    later = runtime.run_one_turn(turn_index=2)
+
+    assert unknown.status is RuntimeStatus.BLOCKED
+    assert len(unknown.accepted_event_ids) == 1
+    assert later.status is RuntimeStatus.UNAVAILABLE
+    assert [event.kind for event in reducer.events] == ["obligation_blocked"]
+    assert reducer.projection.target_binding is None
+    assert evidence.snapshot() == ()
+    assert len(controller.calls) == 1
+    assert len(actor.turns) == 2
+    assert permits.pending_count == permits.active_count == 0
+
+
+def test_launch_controller_exception_blocks_once_without_replay() -> None:
+    actor = _Actor(_discover(), _activate())
+    runtime, reducer, _evidence, permits, _state, controller = (
+        _launch_runtime(actor=actor)
+    )
+    controller.raise_after_admission = True
+
+    runtime.run_one_turn(turn_index=0)
+    failed = runtime.run_one_turn(turn_index=1)
+    later = runtime.run_one_turn(turn_index=2)
+
+    assert failed.status is RuntimeStatus.BLOCKED
+    assert later.status is RuntimeStatus.UNAVAILABLE
+    assert [event.kind for event in reducer.events] == ["obligation_blocked"]
+    assert reducer.projection.target_binding is None
+    assert len(controller.calls) == 1
+    assert len(actor.turns) == 2
+    assert permits.pending_count == permits.active_count == 0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"candidate_ref_override": _window_candidate().candidate_ref},
+        {"evidence_hash_override": "tampered-frame-hash"},
+    ),
+)
+def test_tampered_launch_transition_never_binds(overrides) -> None:
+    runtime, reducer, _evidence, permits, _state, controller = (
+        _launch_runtime(**overrides)
+    )
+
+    runtime.run_one_turn(turn_index=0)
+    result = runtime.run_one_turn(turn_index=1)
+
+    assert result.status is RuntimeStatus.BLOCKED
+    assert [event.kind for event in reducer.events] == ["obligation_blocked"]
+    assert reducer.projection.target_binding is None
+    assert len(controller.calls) == 1
+    assert permits.pending_count == permits.active_count == 0
+
+
+def test_launch_process_identity_tamper_never_binds() -> None:
+    runtime, reducer, _evidence, _permits, _state, controller = (
+        _launch_runtime()
+    )
+    controller.transition_mutator = lambda transition: transition.model_copy(
+        update={"launch_process_id": 708}
+    )
+
+    runtime.run_one_turn(turn_index=0)
+    result = runtime.run_one_turn(turn_index=1)
+
+    assert result.status is RuntimeStatus.BLOCKED
+    assert [event.kind for event in reducer.events] == ["obligation_blocked"]
+    assert reducer.projection.target_binding is None
+    assert len(controller.calls) == 1
+
+
+def test_unconsumed_launch_permit_blocks_without_binding_or_replay() -> None:
+    actor = _Actor(_discover(), _activate())
+    runtime, reducer, _evidence, permits, _state, controller = (
+        _launch_runtime(
+            actor=actor,
+            consume_permit=False,
+        )
+    )
+
+    runtime.run_one_turn(turn_index=0)
+    result = runtime.run_one_turn(turn_index=1)
+    later = runtime.run_one_turn(turn_index=2)
+
+    assert result.status is RuntimeStatus.BLOCKED
+    assert later.status is RuntimeStatus.UNAVAILABLE
+    assert [event.kind for event in reducer.events] == ["obligation_blocked"]
+    assert reducer.projection.target_binding is None
+    assert len(controller.calls) == 1
+    assert len(actor.turns) == 2
+    assert permits.pending_count == permits.active_count == 0
 
 
 def test_candidate_ordinal_resolves_only_against_original_order() -> None:
