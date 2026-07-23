@@ -15,6 +15,7 @@ from winpilot.action.raw_device import (
     RawBackendResult,
     RawDeviceBackends,
     RawDeviceExecutor,
+    RawTargetLaunchReceipt,
 )
 from winpilot.action.replay_policy import MutationOutcome
 from winpilot.agent.frame_authority import FrameAuthority, FrameState
@@ -39,14 +40,18 @@ from winpilot.vnext.runtime.target_activation import (
     ActivatedTargetIdentity,
     TargetActivationEnvelope,
 )
+from winpilot.vnext.runtime.target_launch import TargetLaunchEnvelope
 from winpilot.vnext.targeting import (
     TargetCandidate,
     candidate_fingerprint_for,
     candidate_ref_for,
+    launch_identity_for,
 )
 from winpilot.visual_runtime.atomic_click_controller import (
     AtomicDesktopController,
     TargetActivationObservation,
+    TargetLaunchObservationResult,
+    TargetLaunchObservationState,
 )
 from winpilot.visual_runtime.atomic_post_action_bridge import (
     AtomicPostActionBridge,
@@ -894,6 +899,187 @@ def test_activation_bridge_requires_exact_foreground_and_applied_receipt() -> No
     with pytest.raises(AtomicPostActionBridgeError, match="applied raw receipt"):
         bridge.observe_after_activation(envelope, raw_receipt=_receipt())
 
+    assert authority.current is not None
+    assert authority.current.frame_id == envelope.frame.frame_id
+    assert registry.snapshot() == ()
+
+
+def _launch_envelope() -> tuple[
+    FrameAuthority, TargetLaunchEnvelope, ActivatedTargetIdentity,
+]:
+    authority, activation, target = _activation_envelope()
+    launch_target = r"C:\Apps\Workspace.exe"
+    candidate = TargetCandidate(
+        candidate_ref=candidate_ref_for(
+            activation="open_app",
+            identity=launch_identity_for(kind="exe", target=launch_target),
+        ),
+        activation="open_app",
+        state="installed",
+        label="Workspace",
+        provenance=("installed_catalog",),
+        launch_kind="exe",
+        launch_target=launch_target,
+    )
+    envelope = TargetLaunchEnvelope(
+        decision_id="decision-launch-1",
+        mission_id=activation.mission_id,
+        run_id=activation.run_id,
+        mission_revision=activation.mission_revision,
+        obligation_id=activation.obligation_id,
+        frame=activation.frame,
+        pointer=activation.pointer,
+        broker_projection_id=activation.broker_projection_id,
+        capability_grant_ids=activation.capability_grant_ids,
+        allowed_evidence_scope=activation.allowed_evidence_scope,
+        candidate_fingerprint=candidate_fingerprint_for((candidate,)),
+        proposal=activation.proposal,
+        candidate=candidate,
+    )
+    return authority, envelope, target
+
+
+class _LaunchObservation:
+    def __init__(self, values):
+        self.values = list(values)
+        self.selected_hwnds: list[int | None] = []
+
+    def observe_launch(
+        self,
+        _envelope,
+        *,
+        raw_receipt,
+        selected_hwnd,
+    ):
+        index = len(self.selected_hwnds)
+        self.selected_hwnds.append(selected_hwnd)
+        return self.values[min(index, len(self.values) - 1)]
+
+
+def _launch_receipt() -> RawTargetLaunchReceipt:
+    return RawTargetLaunchReceipt(
+        MutationOutcome.APPLIED,
+        1,
+        process_id=7,
+        process_identity=PROCESS_IDENTITY,
+    )
+
+
+def test_launch_bridge_reuses_fixed_observation_for_cas_and_evidence() -> None:
+    authority, envelope, target = _launch_envelope()
+    registry = EvidenceRegistry("mission-1", "run-1")
+    observation = _LaunchObservation((
+        TargetLaunchObservationResult(
+            TargetLaunchObservationState.READY,
+            TargetActivationObservation(target, True),
+        ),
+    ))
+    bridge = AtomicPostActionBridge(
+        frame_authority=authority,
+        observer=_observer(authority),
+        evidence=registry,
+        launch_observation=observation,
+        post_input_settle_delay_s=0.0,
+    )
+
+    post = bridge.observe_after_launch(
+        envelope,
+        raw_receipt=_launch_receipt(),
+        selected_target=target,
+    )
+
+    current = authority.current
+    assert current is not None
+    assert (current.hwnd, current.scope, current.region) == (
+        target.hwnd,
+        "target_window",
+        target.window_region,
+    )
+    assert observation.selected_hwnds == [target.hwnd] * 3
+    assert post.activated_target == target
+    evidence, = registry.snapshot()
+    assert post.evidence_refs == (evidence.id,)
+    assert evidence.action_id == envelope.decision_id
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        TargetLaunchObservationResult(
+            TargetLaunchObservationState.NOT_READY
+        ),
+        TargetLaunchObservationResult(
+            TargetLaunchObservationState.AMBIGUOUS
+        ),
+    ),
+)
+def test_launch_bridge_never_reselects_when_fixed_target_is_not_ready(
+    result: TargetLaunchObservationResult,
+) -> None:
+    authority, envelope, target = _launch_envelope()
+    registry = EvidenceRegistry("mission-1", "run-1")
+    observation = _LaunchObservation((result,))
+    bridge = AtomicPostActionBridge(
+        frame_authority=authority,
+        observer=_observer(authority),
+        evidence=registry,
+        launch_observation=observation,
+        post_input_settle_delay_s=0.0,
+    )
+
+    with pytest.raises(AtomicPostActionBridgeError, match="selected target"):
+        bridge.observe_after_launch(
+            envelope,
+            raw_receipt=_launch_receipt(),
+            selected_target=target,
+        )
+
+    assert observation.selected_hwnds == [target.hwnd]
+    assert authority.current is not None
+    assert authority.current.frame_id == envelope.frame.frame_id
+    assert registry.snapshot() == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("root_hwnd", 102),
+        ("window_region", (11, 20, 800, 600)),
+    ),
+)
+def test_launch_bridge_rejects_fixed_target_drift_before_first_capture(
+    field: str,
+    value: object,
+) -> None:
+    authority, envelope, target = _launch_envelope()
+    registry = EvidenceRegistry("mission-1", "run-1")
+    changed = target.model_copy(update={field: value})
+    observation = _LaunchObservation((
+        TargetLaunchObservationResult(
+            TargetLaunchObservationState.READY,
+            TargetActivationObservation(changed, True),
+        ),
+    ))
+    captures: list[int] = []
+    bridge = AtomicPostActionBridge(
+        frame_authority=authority,
+        observer=_observer(
+            authority,
+            capture=lambda hwnd, **_kwargs: captures.append(hwnd) or IMAGE_AFTER,
+        ),
+        evidence=registry,
+        launch_observation=observation,
+        post_input_settle_delay_s=0.0,
+    )
+
+    with pytest.raises(AtomicPostActionBridgeError, match="selected target"):
+        bridge.observe_after_launch(
+            envelope,
+            raw_receipt=_launch_receipt(),
+            selected_target=target,
+        )
+
+    assert captures == []
     assert authority.current is not None
     assert authority.current.frame_id == envelope.frame.frame_id
     assert registry.snapshot() == ()
