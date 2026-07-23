@@ -1,0 +1,406 @@
+"""Exact private Windows fixture for visible-client target-acquisition E2E."""
+from __future__ import annotations
+
+import ctypes
+import hashlib
+import json
+import ntpath
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+import uuid
+import winreg
+from ctypes import wintypes
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+import psutil
+import win32con
+import win32gui
+import win32process
+
+
+APP_PATHS_ROOT = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
+
+
+class FixtureUnavailable(RuntimeError):
+    """The independent fixture could not be established or observed."""
+
+
+def same_path(left: object, right: object) -> bool:
+    def normalized(value: object) -> str:
+        return os.path.normcase(os.path.abspath(str(value))).casefold()
+    return normalized(left) == normalized(right)
+
+
+def file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def process_identity_for(
+    *, process_id: int, executable_path: str, creation_time_ns: int,
+) -> str:
+    material = {
+        "creation_time_ns": creation_time_ns,
+        "executable_path": ntpath.normcase(
+            ntpath.normpath(executable_path),
+        ).casefold(),
+        "process_id": process_id,
+    }
+    encoded = json.dumps(
+        material, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return "process-" + hashlib.sha256(encoded).hexdigest()[:32]
+
+
+def _window_region(hwnd: int) -> list[int]:
+    rect = wintypes.RECT()
+    result = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+        hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect),
+    )
+    if result and not ctypes.windll.user32.GetWindowRect(
+        hwnd, ctypes.byref(rect),
+    ):
+        raise OSError("window region is unavailable")
+    return [rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top]
+
+
+def _csc_path() -> Path:
+    windows = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    candidates = (
+        shutil.which("csc.exe"),
+        windows / r"Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+        windows / r"Microsoft.NET\Framework\v4.0.30319\csc.exe",
+    )
+    found = next(
+        (Path(item) for item in candidates if item and Path(item).is_file()),
+        None,
+    )
+    if found is None:
+        raise FixtureUnavailable("csc.exe is unavailable")
+    return found
+
+
+def exact_instances(executable: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for process in psutil.process_iter(("pid", "exe", "create_time")):
+        try:
+            if not same_path(process.info.get("exe"), executable):
+                continue
+            pid = int(process.info["pid"])
+            path = str(Path(process.info["exe"]).resolve())
+            created = int(float(process.info["create_time"]) * 1_000_000_000)
+            windows: list[dict[str, Any]] = []
+
+            def collect(hwnd: int, _extra: object) -> bool:
+                _thread, owner = win32process.GetWindowThreadProcessId(hwnd)
+                if int(owner or 0) == pid and win32gui.IsWindowVisible(hwnd):
+                    windows.append({
+                        "hwnd": int(hwnd),
+                        "root_hwnd": int(
+                            win32gui.GetAncestor(hwnd, win32con.GA_ROOT) or 0
+                        ),
+                        "region": _window_region(hwnd),
+                    })
+                return True
+
+            win32gui.EnumWindows(collect, None)
+            rows.append({
+                "exe_path": path, "exe_sha256": file_sha256(Path(path)),
+                "process_id": pid, "create_time_ns": created,
+                "process_identity": process_identity_for(
+                    process_id=pid, executable_path=path,
+                    creation_time_ns=created,
+                ),
+                "windows": sorted(windows, key=lambda item: item["hwnd"]),
+            })
+        except (psutil.Error, OSError, TypeError, ValueError):
+            continue
+    return sorted(
+        rows, key=lambda item: (item["create_time_ns"], item["process_id"]),
+    )
+
+
+@dataclass(slots=True)
+class AcquisitionFixture:
+    root: Path
+    executable: Path
+    launch_log: Path
+    public_name: str
+    nonce: str
+    registry_key: str
+    registry_created: bool = False
+
+    @classmethod
+    def create(cls, seed: int) -> "AcquisitionFixture":
+        nonce = f"{int(seed) & 0xFFFFFFFF:08x}-{uuid.uuid4().hex[:10]}"
+        name = f"WinPilotAcquisition-{nonce}"
+        root = Path(tempfile.mkdtemp(prefix="winpilot-target-acquisition-"))
+        fixture = cls(
+            root, root / f"{name}.exe", root / "launch.log",
+            name, nonce, f"{APP_PATHS_ROOT}\\{name}.exe",
+        )
+        try:
+            fixture._compile()
+            fixture._register()
+            return fixture
+        except Exception:
+            fixture.cleanup()
+            raise
+
+    def _compile(self) -> None:
+        source = self.root / "Fixture.cs"
+        literal = lambda value: json.dumps(str(value), ensure_ascii=False)
+        source.write_text(
+            "using System;using System.Diagnostics;using System.IO;"
+            "using System.Security.Cryptography;using System.Windows.Forms;"
+            "static class P{[STAThread]static void Main(){"
+            "var p=Process.GetCurrentProcess();var e=p.MainModule.FileName;"
+            "string h;using(var s=SHA256.Create())using(var f=File.OpenRead(e)){"
+            "h=BitConverter.ToString(s.ComputeHash(f)).Replace(\"-\",\"\").ToLower();}"
+            f"File.AppendAllText({literal(self.launch_log)},"
+            f"{literal(self.nonce + '|')}+p.Id+'|'+DateTime.UtcNow.Ticks+'|'+"
+            "e+'|'+h+Environment.NewLine);Application.EnableVisualStyles();"
+            f"Application.Run(new Form{{Text={literal(self.public_name)},"
+            "Width=720,Height=480,"
+            "StartPosition=FormStartPosition.CenterScreen});}}",
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            [
+                str(_csc_path()), "/nologo", "/target:winexe",
+                f"/out:{self.executable}", "/reference:System.Windows.Forms.dll",
+                str(source),
+            ],
+            cwd=self.root, capture_output=True, text=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if completed.returncode or not self.executable.is_file():
+            detail = (completed.stderr or completed.stdout)[-500:]
+            raise FixtureUnavailable(f"fixture compilation failed: {detail}")
+
+    def _register(self) -> None:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.registry_key):
+                raise FixtureUnavailable("random App Paths key already exists")
+        except FileNotFoundError:
+            pass
+        key = winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER, self.registry_key, 0, winreg.KEY_WRITE,
+        )
+        # From this point cleanup owns the exact random key even if writing its
+        # default value raises.  Setting this after SetValueEx leaked partial
+        # keys on failed fixture setup.
+        self.registry_created = True
+        with key:
+            winreg.SetValueEx(key, None, 0, winreg.REG_SZ, str(self.executable))
+
+    def launch_records(self) -> list[dict[str, int | str]]:
+        if not self.launch_log.is_file():
+            return []
+        records = []
+        for line in self.launch_log.read_text(encoding="utf-8").splitlines():
+            parts = line.split("|")
+            if len(parts) != 5 or parts[0] != self.nonce:
+                raise FixtureUnavailable("fixture launch log identity is invalid")
+            records.append({
+                "nonce": parts[0], "process_id": int(parts[1]),
+                "utc_ticks": int(parts[2]), "exe_path": parts[3],
+                "exe_sha256": parts[4],
+            })
+        return records
+
+    def instances(self) -> list[dict[str, Any]]:
+        return exact_instances(self.executable)
+
+    def wait_instances(
+        self, count: int, timeout: float = 12.0,
+    ) -> list[dict[str, Any]]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            rows = self.instances()
+            if len(rows) == count and all(len(row["windows"]) == 1 for row in rows):
+                return rows
+            time.sleep(0.1)
+        raise FixtureUnavailable(f"fixture instance count did not become {count}")
+
+    def prepare(self, mode: str) -> dict[str, Any]:
+        if mode not in {"existing", "cold"}:
+            raise ValueError("mode must be existing or cold")
+        if self.instances() or self.launch_records():
+            raise FixtureUnavailable("fixture did not start from zero instances")
+        process = (
+            subprocess.Popen(
+                [str(self.executable)], cwd=self.root,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if mode == "existing" else None
+        )
+        rows = self.wait_instances(1) if process is not None else []
+        records = self.launch_records()
+        if (
+            len(records) != len(rows)
+            or process is not None and rows[0]["process_id"] != process.pid
+            or rows and not self.records_match(records, rows)
+        ):
+            raise FixtureUnavailable("fixture baseline identity is incomplete")
+        return {"instances": rows, "launch_records": records}
+
+    @staticmethod
+    def records_match(records: list[dict], rows: list[dict]) -> bool:
+        try:
+            by_pid = {int(row["process_id"]): row for row in rows}
+            return len(records) == len(by_pid) and all(
+                int(record["utc_ticks"]) > 0
+                and int(record["process_id"]) in by_pid
+                and same_path(
+                    record["exe_path"],
+                    by_pid[int(record["process_id"])]["exe_path"],
+                )
+                and record["exe_sha256"]
+                == by_pid[int(record["process_id"])]["exe_sha256"]
+                for record in records
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _safe_scope(self) -> bool:
+        try:
+            root, temp_root = self.root.resolve(), Path(tempfile.gettempdir()).resolve()
+            return bool(
+                root.parent == temp_root
+                and root.name.startswith("winpilot-target-acquisition-")
+                and self.executable.resolve().parent == root
+                and self.executable.name == f"{self.public_name}.exe"
+                and self.launch_log.resolve().parent == root
+                and self.registry_key
+                == f"{APP_PATHS_ROOT}\\{self.public_name}.exe"
+            )
+        except OSError:
+            return False
+
+    @staticmethod
+    def _same_process(process: psutil.Process, row: dict) -> bool:
+        try:
+            path = process.exe()
+            created = int(float(process.create_time()) * 1_000_000_000)
+            return bool(
+                process.pid == row["process_id"]
+                and same_path(path, row["exe_path"])
+                and created == row["create_time_ns"]
+                and process_identity_for(
+                    process_id=process.pid, executable_path=path,
+                    creation_time_ns=created,
+                ) == row["process_identity"]
+            )
+        except (psutil.Error, OSError, KeyError, TypeError, ValueError):
+            return False
+
+    def _close_exact(self, row: dict) -> list[str]:
+        errors: list[str] = []
+        try:
+            process = psutil.Process(row["process_id"])
+        except psutil.Error:
+            return errors
+        if not self._same_process(process, row):
+            return ["process:identity_changed"]
+        for window in row["windows"]:
+            try:
+                _thread, owner = win32process.GetWindowThreadProcessId(window["hwnd"])
+                root = win32gui.GetAncestor(window["hwnd"], win32con.GA_ROOT)
+                exact = (
+                    win32gui.IsWindow(window["hwnd"])
+                    and int(owner or 0) == row["process_id"]
+                    and int(root or 0) == window["root_hwnd"]
+                    and self._same_process(process, row)
+                )
+                if not exact:
+                    raise RuntimeError("window identity changed")
+                win32gui.PostMessage(window["hwnd"], win32con.WM_CLOSE, 0, 0)
+            except Exception as exc:
+                errors.append(f"window:{type(exc).__name__}")
+        for label, mutate in (
+            ("terminate", process.terminate), ("kill", process.kill),
+        ):
+            try:
+                process.wait(2)
+                return errors
+            except psutil.TimeoutExpired:
+                if not self._same_process(process, row):
+                    errors.append(f"process:identity_changed_before_{label}")
+                    return errors
+                mutate()
+            except psutil.Error:
+                return errors
+        try:
+            process.wait(2)
+        except psutil.Error as exc:
+            errors.append(f"process:{type(exc).__name__}")
+        return errors
+
+    def cleanup(self) -> dict[str, Any]:
+        if not self._safe_scope():
+            return {"passed": False, "errors": ["fixture scope is unsafe"]}
+        errors = [
+            error for row in exact_instances(self.executable)
+            for error in self._close_exact(row)
+        ]
+        if self.registry_created:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.registry_key) as key:
+                    try:
+                        registered, _kind = winreg.QueryValueEx(key, None)
+                    except FileNotFoundError:
+                        registered = None
+                if registered is not None and not same_path(
+                    registered, self.executable,
+                ):
+                    raise RuntimeError("App Paths ownership changed")
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, self.registry_key)
+                self.registry_created = False
+            except Exception as exc:
+                errors.append(f"registry:{type(exc).__name__}:{exc}")
+        try:
+            if self.root.exists():
+                shutil.rmtree(self.root)
+        except Exception as exc:
+            errors.append(f"directory:{type(exc).__name__}:{exc}")
+        return {"passed": not errors, "errors": errors}
+
+
+def focus_shell_targetless(
+    *,
+    duration: float = 2.0,
+    shell_reader: Callable[[], int] | None = None,
+    foreground_reader: Callable[[], int] | None = None,
+    focus: Callable[[int], object] | None = None,
+) -> dict[str, Any]:
+    shell_reader = shell_reader or (
+        lambda: int(ctypes.windll.user32.GetShellWindow() or 0)
+    )
+    foreground_reader = foreground_reader or (
+        lambda: int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    )
+    focus = focus or win32gui.SetForegroundWindow
+    shell = int(shell_reader() or 0)
+    if shell <= 0:
+        raise FixtureUnavailable("GetShellWindow returned no exact HWND")
+    deadline, observed = time.monotonic() + max(0.2, duration), 0
+    while time.monotonic() < deadline:
+        focus(shell)
+        time.sleep(0.1)
+        observed = int(foreground_reader() or 0)
+    if observed != shell:
+        raise FixtureUnavailable("exact shell HWND did not own foreground")
+    return {"shell_hwnd": shell, "foreground_hwnd": observed, "exact": True}
+
+
+__all__ = [
+    "AcquisitionFixture", "FixtureUnavailable", "exact_instances",
+    "file_sha256", "focus_shell_targetless", "process_identity_for", "same_path",
+]
