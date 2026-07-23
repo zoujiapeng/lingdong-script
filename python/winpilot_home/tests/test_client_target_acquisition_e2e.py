@@ -1157,6 +1157,86 @@ def test_handoff_barrier_rejects_new_run_that_is_already_terminal():
         )
 
 
+def test_handoff_barrier_waits_for_canonical_pause_surfaces_to_converge():
+    detail_reads = 0
+
+    class Driver:
+        @staticmethod
+        def runtime_status():
+            return {
+                "running": True,
+                "current_run": {
+                    "run_id": "arp-new", "status": "paused",
+                    "manual_paused": True, "goal": "task",
+                },
+            }
+
+        @staticmethod
+        def run_detail(run_id):
+            nonlocal detail_reads
+            detail_reads += 1
+            projection_ready = detail_reads > 1
+            return {
+                "run": {
+                    "run_id": run_id,
+                    "status": "paused" if projection_ready else "queued",
+                    "manual_paused": projection_ready,
+                },
+                "arp": {
+                    "run_id": run_id, "status": "paused",
+                    "manual_paused": True, "started_at": None,
+                    "history": [],
+                },
+            }
+
+    barrier = runner._wait_for_submitted_run(
+        Driver(),
+        {"runtime_before": {"current_run": {"run_id": "arp-old"}}},
+        task="task", timeout=0.5,
+    )
+
+    assert detail_reads == 2
+    assert barrier["run_id"] == "arp-new"
+    assert barrier["history_count"] == 0
+
+
+def test_handoff_barrier_never_waits_after_execution_started():
+    class Driver:
+        @staticmethod
+        def runtime_status():
+            return {
+                "running": True,
+                "current_run": {
+                    "run_id": "arp-new", "status": "paused",
+                    "manual_paused": True, "goal": "task",
+                },
+            }
+
+        @staticmethod
+        def run_detail(run_id):
+            return {
+                "run": {
+                    "run_id": run_id, "status": "paused",
+                    "manual_paused": True,
+                },
+                "arp": {
+                    "run_id": run_id, "status": "paused",
+                    "manual_paused": True, "started_at": 1.0,
+                    "history": [],
+                },
+            }
+
+    with pytest.raises(
+        runner.FixtureUnavailable,
+        match="crossed the atomic pause barrier",
+    ):
+        runner._wait_for_submitted_run(
+            Driver(),
+            {"runtime_before": {"current_run": {"run_id": "arp-old"}}},
+            task="task", timeout=0.5,
+        )
+
+
 def test_runner_stops_foreground_guard_before_client_error_cleanup(
     tmp_path, monkeypatch,
 ):
