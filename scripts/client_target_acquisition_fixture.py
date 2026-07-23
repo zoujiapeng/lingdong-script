@@ -416,6 +416,20 @@ class AcquisitionFixture:
             "focus_strategy": "shell_foreground_guard",
         }
 
+    def abort_targetless_handoff(self) -> None:
+        """Stop a guard after a failed barrier without claiming handoff proof."""
+
+        guard = self._handoff_guard
+        if guard is None:
+            return
+        guard.stop_event.set()
+        thread = guard.thread
+        if thread is not None:
+            thread.join(2.0)
+            if thread.is_alive():
+                raise FixtureUnavailable("targetless shell guard did not stop")
+        self._handoff_guard = None
+
     @staticmethod
     def _verify_control_surface(hwnd: int, process_id: int) -> None:
         try:
@@ -558,14 +572,10 @@ class AcquisitionFixture:
     def cleanup(self) -> dict[str, Any]:
         guard_error = []
         if self._handoff_guard is not None:
-            self._handoff_guard.stop_event.set()
-            thread = self._handoff_guard.thread
-            if thread is not None:
-                thread.join(2.0)
-                if thread.is_alive():
-                    guard_error.append("handoff_guard:still_running")
-            if not guard_error:
-                self._handoff_guard = None
+            try:
+                self.abort_targetless_handoff()
+            except FixtureUnavailable:
+                guard_error.append("handoff_guard:still_running")
         if guard_error:
             return {"passed": False, "errors": guard_error}
         if not self._safe_scope():
