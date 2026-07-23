@@ -96,12 +96,16 @@ def _aggregate_arm(
 
 def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     harness = _load_harness()
+    browser_cases = [
+        item for item in harness.VISUAL_CASES.values()
+        if item.get("family") != "target_acquisition"
+    ]
 
     assert harness.SUITES["smoke"] == (
         "drag-fit", "slider", "dynamic-hold", "game-drag-v2",
     )
     assert {
-        item["scenario"] for item in harness.VISUAL_CASES.values()
+        item["scenario"] for item in browser_cases
     } == {
         "precise_click", "scroll_reveal", "drag_fit", "slider",
         "corridor_drag", "dynamic_hold", "keyboard_entry",
@@ -122,10 +126,10 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
         for name in ("corridor-v0", "corridor-v1", "game-drag-v2", "corridor-v3")
     } == {0, 1, 2, 3}
     assert {
-        item["task"] for item in harness.VISUAL_CASES.values()
+        item["task"] for item in browser_cases
     } == {"完成当前界面上的测试。"}
     leaked_recipe = " ".join(
-        item["task"] for item in harness.VISUAL_CASES.values()
+        item["task"] for item in browser_cases
     ).casefold()
     assert all(
         token not in leaked_recipe
@@ -138,7 +142,7 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     ).parameters
     assert "seed" in inspect.signature(harness.run_visual_case).parameters
     assert "植物大战僵尸" not in " ".join(
-        item["task"] for item in harness.VISUAL_CASES.values()
+        item["task"] for item in browser_cases
     )
 
 
@@ -307,6 +311,34 @@ def test_visual_run_matrix_rejects_seed_aliases_and_missing_primitive_parity():
         harness.build_run_matrix(("keyboard-entry",), paired=True)
     with pytest.raises(ValueError, match="primitive parity"):
         harness.build_run_matrix(("keyboard-select-all",), paired=True)
+
+
+def test_target_acquisition_family_is_explicit_vnext_and_not_pairable():
+    harness = _load_harness()
+    names = ("target-existing-window", "target-cold-launch")
+
+    assert harness.SUITES["vnext-target-acquisition"] == names
+    assert [
+        harness.VISUAL_CASES[name]["mode"] for name in names
+    ] == ["existing", "cold"]
+    for name in names:
+        case = harness.VISUAL_CASES[name]
+        assert case["runtime_version"] == "vnext"
+        assert case["vnext_only"] is True
+        assert case["task_template"] == "打开应用 {public_name}"
+        assert set(case).isdisjoint({
+            "exe_path", "process_id", "hwnd", "launch_log",
+        })
+    assert [
+        row["runtime_version"]
+        for row in harness.build_run_matrix(names)
+    ] == ["vnext", "vnext"]
+    with pytest.raises(ValueError, match="requires runtime_version=vnext"):
+        harness.build_run_matrix(
+            ("target-existing-window",), runtime_version="legacy",
+        )
+    with pytest.raises(ValueError, match="primitive parity"):
+        harness.build_run_matrix(("target-cold-launch",), paired=True)
 
 
 def test_recovery_aggregate_marks_incomplete_pairs_without_inventing_metrics():
@@ -496,6 +528,45 @@ def test_trace_recovery_evidence_keeps_unavailable_oracle_three_state(tmp_path):
     assert evidence["external_oracle_pass"] is None
     assert evidence["false_done_count"] is None
     assert evidence["frame_incomparable_count"] == 1
+
+
+def test_project_client_run_evidence_uses_one_comparable_identity_projection(
+    tmp_path,
+):
+    harness = _load_harness()
+    run_id = "arp-projection"
+    trace = tmp_path / "arp-projection.jsonl"
+    trace.write_text(json.dumps({
+        "type": "arp_run_done", "run_id": run_id, "status": "done",
+    }) + "\n", encoding="utf-8")
+    model = {
+        "provider": "provider", "model": "vision-model",
+        "supports_vision": True,
+    }
+    runtime = {"contract_version": 2, "pid": 99}
+    projected = harness.project_client_run_evidence({
+        "runtime_before": {
+            "model_profile": model, "runtime_identity": runtime,
+        },
+        "result": {
+            "runtime": {
+                "model_profile": copy.deepcopy(model),
+                "runtime_identity": copy.deepcopy(runtime),
+            },
+        },
+        "trace_binding": {
+            "passed": True, "run_id": run_id,
+            "trace_file": str(trace), "parse_errors": [],
+        },
+        "configuration": {"runtime_version": "legacy"},
+        "task_verdict": {"oracle_status": "unavailable", "passed": False},
+    })
+
+    assert projected["model_configuration_identity"] == model
+    assert projected["runtime_service_identity"] == {
+        "before": runtime, "after": runtime,
+    }
+    assert projected["recovery_evidence"]["false_done_count"] is None
 
 
 def test_trace_recovery_evidence_parse_error_nulls_trace_metrics(tmp_path):

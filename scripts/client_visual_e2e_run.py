@@ -42,6 +42,9 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import client_e2e_run as client_harness  # noqa: E402
+from client_target_acquisition_runner import (  # noqa: E402
+    run_target_acquisition_case,
+)
 
 
 TARGET_SERVER = (
@@ -145,6 +148,28 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "max_steps": 36,
         "timeout": 420,
     },
+    "target-existing-window": {
+        "family": "target_acquisition",
+        "scenario": "target_acquisition",
+        "mode": "existing",
+        "task_template": "打开应用 {public_name}",
+        "seed": 41001,
+        "max_steps": 12,
+        "timeout": 240,
+        "runtime_version": "vnext",
+        "vnext_only": True,
+    },
+    "target-cold-launch": {
+        "family": "target_acquisition",
+        "scenario": "target_acquisition",
+        "mode": "cold",
+        "task_template": "打开应用 {public_name}",
+        "seed": 41002,
+        "max_steps": 12,
+        "timeout": 240,
+        "runtime_version": "vnext",
+        "vnext_only": True,
+    },
 }
 
 SUITES = {
@@ -152,6 +177,9 @@ SUITES = {
     "vnext-canary": ("precise-click",),
     "vnext-scroll": ("scroll-reveal",),
     "vnext-keyboard": ("keyboard-entry", "keyboard-select-all"),
+    "vnext-target-acquisition": (
+        "target-existing-window", "target-cold-launch",
+    ),
     "all": tuple(VISUAL_CASES),
 }
 
@@ -1218,6 +1246,40 @@ def trace_recovery_evidence(client_result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def project_client_run_evidence(
+    client_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Project comparable model, Runtime, and recovery identities once."""
+
+    model_before = dict(
+        (client_result.get("runtime_before") or {}).get("model_profile") or {},
+    )
+    terminal_runtime = (client_result.get("result") or {}).get("runtime") or {}
+    model_after = dict(terminal_runtime.get("model_profile") or {})
+    runtime_before = dict(
+        (client_result.get("runtime_before") or {}).get("runtime_identity") or {},
+    )
+    runtime_after = dict(terminal_runtime.get("runtime_identity") or {})
+    return {
+        "model_configuration_identity": (
+            {
+                "provider": str(model_before.get("provider") or ""),
+                "model": str(model_before.get("model") or ""),
+                "supports_vision": model_before.get("supports_vision") is True,
+            }
+            if model_before == model_after
+            and model_before.get("provider")
+            and model_before.get("model")
+            else None
+        ),
+        "runtime_service_identity": (
+            {"before": runtime_before, "after": runtime_after}
+            if runtime_before and runtime_after else None
+        ),
+        "recovery_evidence": trace_recovery_evidence(client_result),
+    }
+
+
 def _parse_seed_csv(raw: str | None) -> tuple[int, ...]:
     if raw is None or not raw.strip():
         return ()
@@ -1277,6 +1339,8 @@ def build_run_matrix(
                     or str(case.get("runtime_version") or "legacy"),
                 )
             for order, selected_runtime in enumerate(runtimes):
+                if case.get("vnext_only") is True and selected_runtime != "vnext":
+                    raise ValueError(f"{name} requires runtime_version=vnext")
                 rows.append({
                     "name": name,
                     "seed": int(seed),
@@ -1581,8 +1645,6 @@ def run_visual_case(
     max_steps: int | None = None,
     timeout: int | None = None,
 ) -> dict[str, Any]:
-    if os.name != "nt" or not ctypes.windll.user32.GetForegroundWindow():
-        raise RuntimeError("an unlocked interactive Windows desktop is required")
     source = dict(VISUAL_CASES[name])
     if seed is not None:
         if type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF:
@@ -1596,6 +1658,16 @@ def run_visual_case(
         source["max_steps"] = int(max_steps)
     if timeout is not None:
         source["timeout"] = int(timeout)
+    if source.get("vnext_only") is True and source.get("runtime_version") != "vnext":
+        raise ValueError(f"{name} requires runtime_version=vnext")
+    if source.get("family") == "target_acquisition":
+        return run_target_acquisition_case(
+            name, source, output_root=output_root, group_id=group_id,
+            pair_id=pair_id, client_harness=client_harness,
+            evidence_projector=project_client_run_evidence,
+        )
+    if os.name != "nt" or not ctypes.windll.user32.GetForegroundWindow():
+        raise RuntimeError("an unlocked interactive Windows desktop is required")
 
     case_id = f"client-{name}-{uuid.uuid4().hex[:10]}"
     scenario = str(source["scenario"])
@@ -1740,34 +1812,7 @@ def run_visual_case(
             independent_verifier=verify_external_state,
         )
         result["client_result"] = client_result
-        model_before = dict(
-            (client_result.get("runtime_before") or {}).get("model_profile") or {},
-        )
-        terminal_runtime = (
-            (client_result.get("result") or {}).get("runtime") or {}
-        )
-        model_after = dict(terminal_runtime.get("model_profile") or {})
-        runtime_before = dict(
-            (client_result.get("runtime_before") or {}).get("runtime_identity")
-            or {},
-        )
-        runtime_after = dict(terminal_runtime.get("runtime_identity") or {})
-        result["model_configuration_identity"] = (
-            {
-                "provider": str(model_before.get("provider") or ""),
-                "model": str(model_before.get("model") or ""),
-                "supports_vision": model_before.get("supports_vision") is True,
-            }
-            if model_before == model_after
-            and model_before.get("provider")
-            and model_before.get("model")
-            else None
-        )
-        result["runtime_service_identity"] = (
-            {"before": runtime_before, "after": runtime_after}
-            if runtime_before and runtime_after else None
-        )
-        result["recovery_evidence"] = trace_recovery_evidence(client_result)
+        result.update(project_client_run_evidence(client_result))
         state = dict(oracle_result.get("state") or {})
         result["external_state"] = state
         verdict = dict(oracle_result.get("verdict") or {})
