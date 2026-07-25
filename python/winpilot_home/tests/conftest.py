@@ -16,6 +16,9 @@ import os
 import subprocess
 import sys
 import types
+from copy import deepcopy
+
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -126,3 +129,31 @@ if _missing("cv2"):
     mod.findContours = lambda *args, **kwargs: ([], None)
     mod.imencode = lambda *_args, **_kwargs: (False, b"")
     sys.modules["cv2"] = mod
+
+
+@pytest.fixture
+def isolated_config():
+    """Apply an explicit, in-memory config over production defaults.
+
+    Tests that need an optional runtime capability must opt into it instead of
+    inheriting a developer's ignored ``config.json``.  The shared Config object
+    keeps its identity so existing imports see the override.  Applying and
+    restoring the override never invokes Config persistence.
+    """
+    from winpilot import config as config_mod
+
+    original = config_mod.CONFIG.snapshot()
+
+    def apply(patch: dict) -> dict:
+        if not isinstance(patch, dict):
+            raise TypeError("isolated_config patch must be a dict")
+        replacement = config_mod._merge(config_mod._DEFAULTS, patch)
+        with config_mod._lock:
+            config_mod.CONFIG._data = replacement
+        return config_mod.CONFIG.snapshot()
+
+    try:
+        yield apply
+    finally:
+        with config_mod._lock:
+            config_mod.CONFIG._data = deepcopy(original)

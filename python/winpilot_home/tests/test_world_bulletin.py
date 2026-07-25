@@ -774,7 +774,7 @@ def test_screen_watcher_emits_change_event_with_run_context():
     assert event["regions"][0]["left"] == 10
 
 
-def test_predictive_ocr_prefetches_action_evidence(monkeypatch):
+def test_predictive_ocr_prefetches_action_evidence(monkeypatch, isolated_config):
     import time
 
     import numpy as np
@@ -784,6 +784,7 @@ def test_predictive_ocr_prefetches_action_evidence(monkeypatch):
     from winpilot.perception.model import UIElement
     from winpilot.utils.screenshot import Region
 
+    isolated_config({"fusion": {"predictive_ocr_enabled": True}})
     session = ToolSession(task="read transient result")
     session.run_id = "prefetch-run"
     crop_region = Region(100, 120, 180, 60)

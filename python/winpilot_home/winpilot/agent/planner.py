@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path, PureWindowsPath
 from typing import Callable, Any
 
 from ..config import CONFIG
+from ..modeling import ModelRetryPolicy, invoke_chat_completion
 from ..utils.log import logger
 
 # Valid keys for a subgoal completion check (mirror verify.SUPPORTED_CONDITIONS;
@@ -482,6 +484,8 @@ def make_plan(
     temperature: float = 0.2,
     runtime_context: str = "",
     on_response: Callable[[Any], None] | None = None,
+    stop_event=None,
+    decision_id: str | None = None,
 ) -> list[dict]:
     """One focused LLM call -> ordered subgoals (each {goal, check}). [] on failure."""
     try:
@@ -492,15 +496,24 @@ def make_plan(
                 "Use it when useful and do not treat absent labels as proof of absence:\n"
                 + str(runtime_context).strip()
             )
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _PLAN_SYSTEM},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=temperature,
-            max_tokens=800,
+        outcome = invoke_chat_completion(
+            client,
+            decision_id=decision_id or f"legacy-planner:{uuid.uuid4().hex}",
+            model_role="legacy_planner",
+            purpose="upfront_plan_generation",
+            provider_request={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _PLAN_SYSTEM},
+                    {"role": "user", "content": user_content},
+                ],
+                "temperature": temperature,
+                "max_tokens": 800,
+            },
+            policy=ModelRetryPolicy(max_attempts=1),
+            stop_event=stop_event,
         )
+        resp = outcome.response
         if on_response is not None:
             on_response(resp)
         steps = _ground_plan_file_checks(
