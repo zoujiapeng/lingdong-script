@@ -18,6 +18,7 @@ from zipfile import BadZipFile, ZipFile
 
 from ..config import CONFIG
 from ..model_adapter import model_profile_from_config, model_supports_vision
+from ..modeling import ModelRetryPolicy, invoke_chat_completion
 from ..perception import fusion, intent, vlm as vlm_mod
 from ..utils.image_capture import capture_window_jpeg_b64, select_visual_capture_scope
 from ..utils.log import BUS, logger
@@ -466,6 +467,12 @@ def _explicit_saved_paths(task: str) -> list[Path]:
 
 
 class DoneVerifierMixin:
+    def _next_done_judge_decision_id(self, purpose: str) -> str:
+        """Bind one transport request to one legacy verifier decision."""
+        sequence = int(getattr(self, "_done_judge_decision_seq", 0) or 0) + 1
+        self._done_judge_decision_seq = sequence
+        return f"{self.run_id}:{purpose}:{sequence}"
+
     def _history_mentions_action(self, *names: str) -> bool:
         """Return true when a direct tool call or batch sub-action was recorded."""
         if not names:
@@ -1725,7 +1732,15 @@ class DoneVerifierMixin:
             }
             if judge_extra_body:
                 request_kwargs["extra_body"] = judge_extra_body
-            response = judge_client.chat.completions.create(**request_kwargs)
+            response = invoke_chat_completion(
+                judge_client,
+                decision_id=self._next_done_judge_decision_id("native_done_judge"),
+                model_role="legacy_done_verifier",
+                purpose="native_completion_verification",
+                provider_request=request_kwargs,
+                policy=ModelRetryPolicy(max_attempts=1),
+                stop_event=getattr(self, "stop_event", None),
+            ).response
             tracker = getattr(self, "_track_aux_model_response", None)
             if callable(tracker):
                 tracker(response, purpose="done_judge", model=judge_model)
@@ -2026,7 +2041,15 @@ class DoneVerifierMixin:
             }
             if judge_extra_body:
                 request_kwargs["extra_body"] = judge_extra_body
-            resp = judge_client.chat.completions.create(**request_kwargs)
+            resp = invoke_chat_completion(
+                judge_client,
+                decision_id=self._next_done_judge_decision_id("done_judge"),
+                model_role="legacy_done_verifier",
+                purpose="completion_verification",
+                provider_request=request_kwargs,
+                policy=ModelRetryPolicy(max_attempts=1),
+                stop_event=getattr(self, "stop_event", None),
+            ).response
             tracker = getattr(self, "_track_aux_model_response", None)
             if callable(tracker):
                 tracker(resp, purpose="done_judge", model=judge_model)

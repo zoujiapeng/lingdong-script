@@ -1,51 +1,542 @@
-"""Low-overhead controller adapter for already-authorized desktop actions.
-
-The outer ToolSession owns policy, scope, trace and world-state updates. Inside
-one controller batch this adapter calls the concrete tool handler directly so
-child actions do not recursively pay the complete ToolSession dispatch cost.
-"""
+"""Typed, session-free execution of already-admitted physical input."""
 from __future__ import annotations
 
-import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from enum import Enum
+import math
+from types import MappingProxyType
 from typing import Any
 
-from ..agent.tool_result import ToolResult
+from ..visual_runtime.keyboard_contracts import (
+    CANONICAL_HOTKEY_KEYS,
+    CANONICAL_HOTKEY_MODIFIERS,
+    HotkeyChord,
+    MAX_TYPE_TEXT_CODEPOINTS,
+)
+from .replay_policy import MutationOutcome
 
 
-RAW_DEVICE_ACTIONS = {
-    "click",
-    "type_text",
-    "hotkey",
-    "scroll",
-    "move_mouse",
-    "drag",
-    "draw_strokes",
-    "clipboard_read",
-    "clipboard_write",
-    "clipboard_paste",
-    "focus_window",
-    "launch",
-}
+class MouseButton(str, Enum):
+    LEFT = "left"
+    RIGHT = "right"
+    MIDDLE = "middle"
+
+
+class ClickCount(int, Enum):
+    SINGLE = 1
+    DOUBLE = 2
+
+
+class ClickMechanism(str, Enum):
+    BACKGROUND_MESSAGE = "background_message"
+    PHYSICAL = "physical"
+    PREPOSITIONED_PHYSICAL = "prepositioned_physical"
+
+
+class FinalPointerGuardDecision(str, Enum):
+    """Mechanical target verdict sampled immediately before pointer input."""
+
+    ADMITTED = "admitted"
+    TARGET_UNAVAILABLE = "target_unavailable"
+    TARGET_ROOT_CHANGED = "target_root_changed"
+    TARGET_PROCESS_CHANGED = "target_process_changed"
+    TARGET_GEOMETRY_CHANGED = "target_geometry_changed"
+    POINT_OUTSIDE_TARGET = "point_outside_target"
+    POINTER_POSITION_CHANGED = "pointer_position_changed"
+    STOP_REQUESTED = "stop_requested"
+    HIT_TEST_UNAVAILABLE = "hit_test_unavailable"
+    HIT_TEST_CHANGED = "hit_test_changed"
+
+
+class FinalKeyboardGuardDecision(str, Enum):
+    """Mechanical target verdict sampled immediately before keyboard input."""
+
+    ADMITTED = "admitted"
+    TARGET_UNAVAILABLE = "target_unavailable"
+    TARGET_ROOT_CHANGED = "target_root_changed"
+    TARGET_PROCESS_CHANGED = "target_process_changed"
+    TARGET_GEOMETRY_CHANGED = "target_geometry_changed"
+    FOREGROUND_UNAVAILABLE = "foreground_unavailable"
+    FOREGROUND_CHANGED = "foreground_changed"
+    STOP_REQUESTED = "stop_requested"
+
+
+def _scalar_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
+    frozen: dict[str, Any] = {}
+    for key, value in facts.items():
+        if type(key) is not str or not key:
+            raise TypeError("raw fact keys must be non-empty strings")
+        if value is not None and type(value) not in {bool, int, float, str}:
+            raise TypeError("raw facts must contain JSON scalar values")
+        if type(value) is float and not math.isfinite(value):
+            raise TypeError("raw fact numbers must be finite")
+        frozen[key] = value
+    return MappingProxyType(frozen)
+
+
+@dataclass(frozen=True, slots=True)
+class RawActionContext:
+    """Target identity already selected by the Controller."""
+
+    target_hwnd: int
+    current_hwnd: int
+
+
+@dataclass(frozen=True, slots=True)
+class RawBackendResult:
+    """Explicit mechanical result returned by one physical backend call."""
+
+    input_completed: bool | None
+    facts: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if self.input_completed is not None and type(self.input_completed) is not bool:
+            raise TypeError("input_completed must be boolean or null")
+        if not isinstance(self.facts, Mapping):
+            raise TypeError("raw backend facts must be a mapping")
+        object.__setattr__(self, "facts", _scalar_facts(self.facts))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "input_completed": self.input_completed,
+            "facts": dict(self.facts),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RawActionReceipt:
+    """Mechanical input fact, never proof of a visible or semantic effect."""
+
+    action: str
+    outcome: MutationOutcome
+    backend_result: RawBackendResult | None = None
+    error_kind: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.action not in {"scroll", "click", "type_text", "hotkey"}:
+            raise ValueError("unknown raw receipt action")
+        if not isinstance(self.outcome, MutationOutcome):
+            raise ValueError("raw receipt outcome must be MutationOutcome")
+        if self.backend_result is not None and not isinstance(
+            self.backend_result, RawBackendResult
+        ):
+            raise TypeError("backend_result must be RawBackendResult or null")
+        if self.backend_result is not None and (
+            self.backend_result.input_completed is not self.input_completed
+        ):
+            raise ValueError("backend_result contradicts raw receipt outcome")
+        if self.outcome in {MutationOutcome.APPLIED, MutationOutcome.NOT_APPLIED}:
+            if self.backend_result is None:
+                raise ValueError("applied/not-applied receipt requires backend_result")
+        elif self.outcome is MutationOutcome.NOT_STARTED and self.backend_result is not None:
+            raise ValueError("not-started receipt cannot contain backend_result")
+        if self.error_kind is not None and (
+            type(self.error_kind) is not str or not self.error_kind
+        ):
+            raise ValueError("error_kind must be non-empty or null")
+        if self.outcome in {
+            MutationOutcome.NOT_STARTED,
+            MutationOutcome.OUTCOME_UNKNOWN,
+        } and self.error_kind is None:
+            raise ValueError("uncertain/not-started receipt requires error_kind")
+        if self.outcome in {MutationOutcome.APPLIED, MutationOutcome.NOT_APPLIED}:
+            if self.error_kind is not None:
+                raise ValueError("certain raw receipt cannot contain error_kind")
+
+    @property
+    def input_completed(self) -> bool | None:
+        return {
+            MutationOutcome.APPLIED: True,
+            MutationOutcome.NOT_APPLIED: False,
+            MutationOutcome.NOT_STARTED: False,
+            MutationOutcome.OUTCOME_UNKNOWN: None,
+        }[self.outcome]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "outcome": self.outcome.value,
+            "input_completed": self.input_completed,
+            "backend_result": (
+                None if self.backend_result is None else self.backend_result.to_dict()
+            ),
+            "error_kind": self.error_kind,
+        }
+
+
+RawBackend = Callable[..., RawBackendResult]
+FinalPointerGuard = Callable[[int, int], FinalPointerGuardDecision]
+FinalKeyboardGuard = Callable[[], FinalKeyboardGuardDecision]
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedPhysicalClickBackend:
+    """Explicitly marks a backend which never acquires DesktopActionQueue."""
+
+    execute: RawBackend
+
+    def __post_init__(self) -> None:
+        if not callable(self.execute):
+            raise TypeError("admitted physical click backend must be callable")
+        if hasattr(self.execute, "__wrapped__"):
+            raise TypeError("admitted physical click backend cannot wrap a decorated entry")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+        return self.execute(*args, **kwargs)
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedPhysicalScrollBackend:
+    """Explicitly marks a physical wheel backend which never acquires the queue."""
+
+    execute: RawBackend
+
+    def __post_init__(self) -> None:
+        if not callable(self.execute):
+            raise TypeError("admitted physical scroll backend must be callable")
+        if hasattr(self.execute, "__wrapped__"):
+            raise TypeError("admitted physical scroll backend cannot wrap a decorated entry")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+        return self.execute(*args, **kwargs)
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedPhysicalTypeTextBackend:
+    """Marks an unqueued, single-mechanism physical text backend."""
+
+    execute: RawBackend
+
+    def __post_init__(self) -> None:
+        if not callable(self.execute):
+            raise TypeError("admitted physical type-text backend must be callable")
+        if hasattr(self.execute, "__wrapped__"):
+            raise TypeError("admitted physical type-text backend cannot wrap a decorated entry")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+        return self.execute(*args, **kwargs)
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedPhysicalHotkeyBackend:
+    """Marks an unqueued, single-mechanism physical hotkey backend."""
+
+    execute: RawBackend
+
+    def __post_init__(self) -> None:
+        if not callable(self.execute):
+            raise TypeError("admitted physical hotkey backend must be callable")
+        if hasattr(self.execute, "__wrapped__"):
+            raise TypeError("admitted physical hotkey backend cannot wrap a decorated entry")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+        return self.execute(*args, **kwargs)
+
+
+@dataclass(frozen=True, slots=True)
+class RawDeviceBackends:
+    scroll: RawBackend | None = None
+    click: RawBackend | None = None
+    admitted_physical_click: AdmittedPhysicalClickBackend | None = None
+    admitted_physical_scroll: AdmittedPhysicalScrollBackend | None = None
+    admitted_physical_type_text: AdmittedPhysicalTypeTextBackend | None = None
+    admitted_physical_hotkey: AdmittedPhysicalHotkeyBackend | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("scroll", "click"):
+            backend = getattr(self, name)
+            if backend is not None and not callable(backend):
+                raise TypeError(f"{name} backend must be callable or null")
+        if self.admitted_physical_click is not None and not isinstance(
+            self.admitted_physical_click, AdmittedPhysicalClickBackend
+        ):
+            raise TypeError(
+                "admitted_physical_click must be AdmittedPhysicalClickBackend or null"
+            )
+        if self.admitted_physical_scroll is not None and not isinstance(
+            self.admitted_physical_scroll, AdmittedPhysicalScrollBackend
+        ):
+            raise TypeError(
+                "admitted_physical_scroll must be AdmittedPhysicalScrollBackend or null"
+            )
+        if self.admitted_physical_type_text is not None and not isinstance(
+            self.admitted_physical_type_text, AdmittedPhysicalTypeTextBackend
+        ):
+            raise TypeError(
+                "admitted_physical_type_text must be "
+                "AdmittedPhysicalTypeTextBackend or null"
+            )
+        if self.admitted_physical_hotkey is not None and not isinstance(
+            self.admitted_physical_hotkey, AdmittedPhysicalHotkeyBackend
+        ):
+            raise TypeError(
+                "admitted_physical_hotkey must be AdmittedPhysicalHotkeyBackend or null"
+            )
 
 
 class RawDeviceExecutor:
-    def __init__(self, session) -> None:
-        self.session = session
+    """Always-strict typed primitive executor; no parsing, policy, or replay."""
 
-    def supports(self, action: str) -> bool:
-        return action in RAW_DEVICE_ACTIONS and callable(
-            getattr(self.session, f"_t_{action}", None)
+    def __init__(self, backends: RawDeviceBackends) -> None:
+        if not isinstance(backends, RawDeviceBackends):
+            raise TypeError("backends must be RawDeviceBackends")
+        self._backends = backends
+
+    @property
+    def admitted_action_names(self) -> tuple[str, ...]:
+        """Return the immutable inventory of queue-admitted physical primitives.
+
+        This exposes names only, never backend callables.  Product composition
+        uses it to prove that every advertised Controller primitive has one
+        concrete RawDevice route before the Visual Actor is constructed.
+        """
+
+        pairs = (
+            ("click", self._backends.admitted_physical_click),
+            ("scroll", self._backends.admitted_physical_scroll),
+            ("type_text", self._backends.admitted_physical_type_text),
+            ("hotkey", self._backends.admitted_physical_hotkey),
+        )
+        return tuple(sorted(name for name, backend in pairs if backend is not None))
+
+    @staticmethod
+    def _receipt(
+        action: str,
+        outcome: MutationOutcome,
+        *,
+        backend_result: RawBackendResult | None = None,
+        error_kind: str | None = None,
+    ) -> RawActionReceipt:
+        return RawActionReceipt(action, outcome, backend_result, error_kind)
+
+    @staticmethod
+    def _context_error(context: RawActionContext) -> str | None:
+        valid_hwnd = lambda value: type(value) is int and value > 0
+        if not isinstance(context, RawActionContext) or not all(
+            map(valid_hwnd, (context.target_hwnd, context.current_hwnd))
+        ):
+            return "invalid_context"
+        if context.target_hwnd != context.current_hwnd:
+            return "target_mismatch"
+        return None
+
+    @classmethod
+    def _from_backend(cls, action: str, result: object) -> RawActionReceipt:
+        if not isinstance(result, RawBackendResult):
+            return cls._receipt(
+                action, MutationOutcome.OUTCOME_UNKNOWN,
+                error_kind="backend_result_uncertain",
+            )
+        if action in {"type_text", "hotkey"}:
+            result = cls._sanitize_keyboard_result(action, result)
+        completed = result.input_completed
+        outcome = (
+            MutationOutcome.OUTCOME_UNKNOWN if completed is None
+            else MutationOutcome.APPLIED if completed
+            else MutationOutcome.NOT_APPLIED
+        )
+        return cls._receipt(
+            action, outcome, backend_result=result,
+            error_kind="backend_result_uncertain" if completed is None else None,
         )
 
-    def execute(self, action: str, args: dict[str, Any]) -> ToolResult:
-        if not self.supports(action):
-            raise ValueError(f"raw device action is not supported: {action}")
-        started = time.monotonic()
-        handler = getattr(self.session, f"_t_{action}")
-        result = handler(dict(args))
-        if not isinstance(result, ToolResult):
-            result = ToolResult(str(result))
-        result.replay = dict(result.replay or {})
-        result.replay["raw_device"] = True
-        result.replay.setdefault("elapsed_ms", int((time.monotonic() - started) * 1000))
-        return result
+    @staticmethod
+    def _sanitize_keyboard_result(
+        action: str,
+        result: RawBackendResult,
+    ) -> RawBackendResult:
+        """Keep only bounded non-content diagnostics at the RawDevice boundary."""
+
+        source = result.facts
+        safe: dict[str, Any] = {}
+        for key in (
+            "ok", "dry_run", "release_cleanup_attempted",
+            "release_cleanup_completed",
+        ):
+            if type(source.get(key)) is bool:
+                safe[key] = source[key]
+        if source.get("via") == "physical_sendinput":
+            safe["via"] = "physical_sendinput"
+        decision = source.get("guard_decision")
+        if type(decision) is str and decision in {
+            item.value for item in FinalKeyboardGuardDecision
+        }:
+            safe["guard_decision"] = decision
+        if action == "type_text":
+            for key in ("requested_codepoints", "completed_codepoints"):
+                value = source.get(key)
+                if type(value) is int and 0 <= value <= MAX_TYPE_TEXT_CODEPOINTS:
+                    safe[key] = value
+        else:
+            value = source.get("key_count")
+            if type(value) is int and 0 <= value <= 6:
+                safe["key_count"] = value
+        return RawBackendResult(result.input_completed, safe)
+
+    @classmethod
+    def _call(
+        cls, action: str, backend: Callable[..., RawBackendResult] | None,
+        *args: Any, **kwargs: Any,
+    ) -> RawActionReceipt:
+        if backend is None:
+            return cls._receipt(
+                action, MutationOutcome.NOT_STARTED,
+                error_kind="backend_unavailable",
+            )
+        try:
+            result = backend(*args, **kwargs)
+        except Exception:
+            return cls._receipt(
+                action, MutationOutcome.OUTCOME_UNKNOWN,
+                error_kind="backend_exception",
+            )
+        return cls._from_backend(action, result)
+
+    def scroll(
+        self,
+        context: RawActionContext,
+        x: int,
+        y: int,
+        amount: int,
+        *,
+        final_guard: FinalPointerGuard | None = None,
+    ) -> RawActionReceipt:
+        context_error = self._context_error(context)
+        if context_error is not None:
+            return self._receipt(
+                "scroll", MutationOutcome.NOT_STARTED,
+                error_kind=context_error,
+            )
+        if any(type(value) is not int for value in (x, y, amount)) or amount == 0:
+            return self._receipt(
+                "scroll", MutationOutcome.NOT_STARTED,
+                error_kind="invalid_args",
+            )
+        backend = self._backends.scroll
+        call_kwargs: dict[str, Any] = {"hwnd": context.target_hwnd}
+        if final_guard is not None:
+            if not callable(final_guard):
+                return self._receipt(
+                    "scroll", MutationOutcome.NOT_STARTED,
+                    error_kind="invalid_final_guard",
+                )
+            backend = self._backends.admitted_physical_scroll
+            call_kwargs["final_guard"] = final_guard
+        return self._call(
+            "scroll", backend, x, y, amount, **call_kwargs,
+        )
+
+    def click(
+        self,
+        context: RawActionContext,
+        x: int,
+        y: int,
+        button: MouseButton,
+        count: ClickCount,
+        mechanism: ClickMechanism,
+        *,
+        final_guard: FinalPointerGuard | None = None,
+    ) -> RawActionReceipt:
+        context_error = self._context_error(context)
+        if context_error is not None:
+            return self._receipt(
+                "click", MutationOutcome.NOT_STARTED,
+                error_kind=context_error,
+            )
+        if not (
+            type(x) is int and type(y) is int
+            and isinstance(button, MouseButton)
+            and isinstance(count, ClickCount)
+            and isinstance(mechanism, ClickMechanism)
+        ):
+            return self._receipt(
+                "click", MutationOutcome.NOT_STARTED,
+                error_kind="invalid_args",
+            )
+        backend = self._backends.click
+        call_kwargs: dict[str, Any] = {"hwnd": context.target_hwnd}
+        if final_guard is not None:
+            if (
+                not callable(final_guard)
+                or mechanism is ClickMechanism.BACKGROUND_MESSAGE
+            ):
+                return self._receipt(
+                    "click", MutationOutcome.NOT_STARTED,
+                    error_kind="invalid_final_guard",
+                )
+            backend = self._backends.admitted_physical_click
+            call_kwargs["final_guard"] = final_guard
+        return self._call(
+            "click", backend, x, y, button=button, count=count,
+            mechanism=mechanism, **call_kwargs,
+        )
+
+    def type_text(
+        self,
+        context: RawActionContext,
+        text: str,
+        *,
+        final_guard: FinalKeyboardGuard,
+    ) -> RawActionReceipt:
+        context_error = self._context_error(context)
+        if context_error is not None:
+            return self._receipt(
+                "type_text", MutationOutcome.NOT_STARTED,
+                error_kind=context_error,
+            )
+        if (
+            type(text) is not str
+            or not 1 <= len(text) <= MAX_TYPE_TEXT_CODEPOINTS
+            or not callable(final_guard)
+        ):
+            return self._receipt(
+                "type_text", MutationOutcome.NOT_STARTED,
+                error_kind="invalid_args",
+            )
+        return self._call(
+            "type_text",
+            self._backends.admitted_physical_type_text,
+            text,
+            hwnd=context.target_hwnd,
+            final_guard=final_guard,
+        )
+
+    def hotkey(
+        self,
+        context: RawActionContext,
+        chord: HotkeyChord,
+        *,
+        final_guard: FinalKeyboardGuard,
+    ) -> RawActionReceipt:
+        context_error = self._context_error(context)
+        if context_error is not None:
+            return self._receipt(
+                "hotkey", MutationOutcome.NOT_STARTED,
+                error_kind=context_error,
+            )
+        if not isinstance(chord, HotkeyChord) or not callable(final_guard):
+            return self._receipt(
+                "hotkey", MutationOutcome.NOT_STARTED,
+                error_kind="invalid_args",
+            )
+        return self._call(
+            "hotkey",
+            self._backends.admitted_physical_hotkey,
+            chord,
+            hwnd=context.target_hwnd,
+            final_guard=final_guard,
+        )
+
+
+__all__ = [
+    "AdmittedPhysicalClickBackend", "AdmittedPhysicalHotkeyBackend",
+    "AdmittedPhysicalScrollBackend", "AdmittedPhysicalTypeTextBackend",
+    "CANONICAL_HOTKEY_KEYS", "CANONICAL_HOTKEY_MODIFIERS",
+    "ClickCount", "ClickMechanism",
+    "FinalKeyboardGuard", "FinalKeyboardGuardDecision", "FinalPointerGuard",
+    "FinalPointerGuardDecision", "HotkeyChord", "MAX_TYPE_TEXT_CODEPOINTS",
+    "MouseButton",
+    "RawActionContext", "RawActionReceipt", "RawBackendResult",
+    "RawDeviceBackends", "RawDeviceExecutor",
+]

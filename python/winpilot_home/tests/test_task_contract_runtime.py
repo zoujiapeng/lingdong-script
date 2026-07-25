@@ -546,6 +546,7 @@ def test_client_gui_goal_never_turns_parser_guesses_into_runtime_policy(task):
 def test_semantic_child_runner_never_uses_raw_intent_parser_fallback(monkeypatch):
     import threading
 
+    from winpilot.agent import loop as loop_mod
     from winpilot.agent.loop import AgentRunner
     from winpilot.agent.router import build_runner as real_build_runner
     from winpilot.tasking.intent import TaskIntentParser
@@ -557,6 +558,8 @@ def test_semantic_child_runner_never_uses_raw_intent_parser_fallback(monkeypatch
     # This test exercises only semantic-child construction; application launch
     # is a separate deterministic stage concern.
     stage.parameters = {**stage.parameters, "app": ""}
+
+    monkeypatch.setattr(loop_mod, "_main_model_has_vision", lambda: True)
 
     def parser_fallback_is_a_bug(*_args, **_kwargs):
         raise AssertionError("semantic child reparsed its generated raw goal")

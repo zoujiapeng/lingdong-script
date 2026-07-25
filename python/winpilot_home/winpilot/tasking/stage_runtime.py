@@ -777,6 +777,7 @@ class StageRuntime:
                 response = generate_conversation_response(
                     contract.task,
                     list(contract.session_context or []),
+                    stop_event=stop_event,
                 )
                 record = registry.record(
                     "stage.verified_outcome",
@@ -1060,6 +1061,7 @@ class StageRuntime:
                 instruction=str(params.get("instruction") or contract.task),
                 recipient=str(params.get("recipient") or contract.intent.recipient),
                 channel=str(params.get("app") or contract.intent.channel),
+                stop_event=stop_event,
             )
             ref = str(params.get("message_ref") or "outbound_message_draft")
             context["runtime_state"].setdefault("message_drafts", {})[ref] = (

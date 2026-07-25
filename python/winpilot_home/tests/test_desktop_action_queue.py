@@ -6,6 +6,12 @@ import pytest
 from winpilot.action import executor
 from winpilot.action import desktop_queue as desktop_queue_module
 from winpilot.action.desktop_queue import DesktopActionQueue
+from winpilot.action.raw_device import (
+    ClickCount,
+    ClickMechanism,
+    MouseButton,
+    RawBackendResult,
+)
 from winpilot.utils.log import BUS
 
 
@@ -290,7 +296,10 @@ def test_public_click_uses_one_outer_queue_event(monkeypatch):
     monkeypatch.setattr(
         executor,
         "_raw_click",
-        lambda x, y, button, double, hwnd: calls.append((x, y, button, double, hwnd)),
+        lambda x, y, button, count, hwnd: (
+            calls.append((x, y, button, count, hwnd))
+            or RawBackendResult(True, {})
+        ),
     )
 
     BUS.add_sink(events.append)
@@ -300,7 +309,44 @@ def test_public_click_uses_one_outer_queue_event(monkeypatch):
         BUS.remove_sink(events.append)
 
     assert out["ok"] is True
-    assert calls == [(10, 20, "left", False, 123)]
+    assert calls == [(10, 20, MouseButton.LEFT, ClickCount.SINGLE, 123)]
+    queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
+    assert [(event["state"], event["action"]) for event in queue_events] == [
+        ("start", "click"),
+        ("done", "click"),
+    ]
+
+
+def test_typed_click_uses_one_outer_queue_event(monkeypatch):
+    calls = []
+    events = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(
+        executor,
+        "_raw_click",
+        lambda x, y, button, count, hwnd, prepositioned=False,
+        allow_target_focus=True, enforce_foreground=False: (
+            calls.append((
+                x, y, button, count, hwnd, prepositioned, allow_target_focus,
+                enforce_foreground,
+            ))
+            or RawBackendResult(True, {})
+        ),
+    )
+
+    BUS.add_sink(events.append)
+    try:
+        out = executor.execute_click_input(
+            10, 20, MouseButton.LEFT, ClickCount.SINGLE,
+            ClickMechanism.PHYSICAL, hwnd=123,
+        )
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert out.input_completed is True
+    assert calls == [(
+        10, 20, MouseButton.LEFT, ClickCount.SINGLE, 123, False, False, True,
+    )]
     queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
     assert [(event["state"], event["action"]) for event in queue_events] == [
         ("start", "click"),
@@ -330,21 +376,27 @@ def test_prepositioned_click_keeps_physical_servo_path(monkeypatch):
     monkeypatch.setattr(
         executor,
         "_post_click",
-        lambda *_args, **_kwargs: calls.append(("post",)) or True,
+        lambda *_args, **_kwargs: (
+            calls.append(("post",)) or RawBackendResult(True, {})
+        ),
     )
     monkeypatch.setattr(
         executor,
         "_raw_click",
-        lambda x, y, button, double, hwnd, prepositioned=False: calls.append((
-            "raw", x, y, button, double, hwnd, prepositioned,
-        )),
+        lambda x, y, button, count, hwnd, prepositioned=False,
+        allow_target_focus=True: (
+            calls.append(("raw", x, y, button, count, hwnd, prepositioned))
+            or RawBackendResult(True, {})
+        ),
     )
 
     out = executor.click(30, 40, hwnd=456, prepositioned=True)
 
     assert out["ok"] is True
     assert out["prepositioned"] is True
-    assert calls == [("raw", 30, 40, "left", False, 456, True)]
+    assert calls == [(
+        "raw", 30, 40, MouseButton.LEFT, ClickCount.SINGLE, 456, True,
+    )]
 
 
 def test_force_physical_click_bypasses_background_window_message(monkeypatch):
@@ -354,21 +406,27 @@ def test_force_physical_click_bypasses_background_window_message(monkeypatch):
     monkeypatch.setattr(
         executor,
         "_post_click",
-        lambda *_args, **_kwargs: calls.append(("post",)) or True,
+        lambda *_args, **_kwargs: (
+            calls.append(("post",)) or RawBackendResult(True, {})
+        ),
     )
     monkeypatch.setattr(
         executor,
         "_raw_click",
-        lambda x, y, button, double, hwnd, prepositioned=False: calls.append((
-            "raw", x, y, button, double, hwnd, prepositioned,
-        )),
+        lambda x, y, button, count, hwnd, prepositioned=False,
+        allow_target_focus=True: (
+            calls.append(("raw", x, y, button, count, hwnd, prepositioned))
+            or RawBackendResult(True, {})
+        ),
     )
 
     out = executor.click(30, 40, hwnd=456, force_physical=True)
 
     assert out["ok"] is True
     assert out["via"] == "physical_sendinput"
-    assert calls == [("raw", 30, 40, "left", False, 456, False)]
+    assert calls == [(
+        "raw", 30, 40, MouseButton.LEFT, ClickCount.SINGLE, 456, False,
+    )]
 
 
 def test_raw_prepositioned_click_does_not_refocus_or_repeat_slow_move(monkeypatch):
@@ -380,6 +438,13 @@ def test_raw_prepositioned_click_does_not_refocus_or_repeat_slow_move(monkeypatc
         lambda hwnd: calls.append(("focus", hwnd)),
     )
     monkeypatch.setattr(executor, "_cursor_pos", lambda: (30, 40))
+    monkeypatch.setattr(
+        executor,
+        "_target_window_still_foreground",
+        lambda _hwnd: (_ for _ in ()).throw(
+            AssertionError("legacy prepositioned click must not add a foreground gate")
+        ),
+    )
     monkeypatch.setattr(
         executor,
         "_raw_move_mouse",
@@ -394,11 +459,52 @@ def test_raw_prepositioned_click_does_not_refocus_or_repeat_slow_move(monkeypatc
     monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", sleeps.append)
 
-    executor._raw_click(30, 40, "left", False, 456, prepositioned=True)
+    result = executor._raw_click(
+        30, 40, MouseButton.LEFT, ClickCount.SINGLE, 456,
+        prepositioned=True,
+    )
 
+    assert result.input_completed is True
     assert all(call[0] not in {"focus", "move"} for call in calls)
     assert [call[0] for call in calls] == ["send", "send"]
     assert sleeps == [0.008]
+
+
+def test_legacy_raw_click_refocuses_without_adding_a_foreground_gate(monkeypatch):
+    calls = []
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(
+        executor,
+        "_raw_focus_window",
+        lambda hwnd: calls.append(("focus", hwnd)),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_target_window_still_foreground",
+        lambda _hwnd: (_ for _ in ()).throw(
+            AssertionError("legacy click must retain the master admission boundary")
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_raw_move_mouse",
+        lambda x, y: calls.append(("move", x, y)),
+    )
+    monkeypatch.setattr(executor, "_mouse_input", lambda flag: flag)
+    monkeypatch.setattr(
+        executor,
+        "_send_inputs",
+        lambda inputs: calls.append(("send", tuple(inputs))),
+    )
+    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    result = executor._raw_click(
+        30, 40, MouseButton.LEFT, ClickCount.SINGLE, 456,
+    )
+
+    assert result.input_completed is True
+    assert [call[0] for call in calls] == ["focus", "move", "send", "send"]
 
 
 def test_raw_focus_continues_when_set_foreground_raises(monkeypatch):
@@ -621,11 +727,12 @@ def test_target_window_guard_accepts_same_root_and_rejects_other_app(monkeypatch
 
 def test_type_text_newline_uses_raw_enter_without_nested_queue(monkeypatch):
     sent_batches = []
+    sleeps = []
     events = []
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
     monkeypatch.setattr(executor, "_should_type_via_vk", lambda _text: False)
     monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent_batches.append(len(inputs)))
-    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(executor.time, "sleep", sleeps.append)
 
     BUS.add_sink(events.append)
     try:
@@ -635,6 +742,7 @@ def test_type_text_newline_uses_raw_enter_without_nested_queue(monkeypatch):
 
     assert out == {"ok": True, "typed": 3}
     assert sent_batches == [2, 1, 1, 2]
+    assert sleeps == [0, 0.03, 0]
     queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
     assert [(event["state"], event["action"]) for event in queue_events] == [
         ("start", "type_text"),

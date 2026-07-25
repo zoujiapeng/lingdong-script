@@ -1712,7 +1712,10 @@ def test_type_into_element_refuses_compact_property_editor_element_id():
     assert "not a safe input field" in out["results"][0]["data"]["error"]
 
 
-def test_type_into_element_uses_targeted_input_value_when_full_read_is_truncated(monkeypatch):
+def test_type_into_element_uses_targeted_input_value_when_full_read_is_truncated(
+    monkeypatch,
+    isolated_config,
+):
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast import controller as controller_mod
     from winpilot.fast.controller import FastGuiController
@@ -1720,6 +1723,7 @@ def test_type_into_element_uses_targeted_input_value_when_full_read_is_truncated
     from winpilot.perception.model import UIElement
     from winpilot.utils.screenshot import Region
 
+    isolated_config({"perception": {"uia": {"enabled": True}}})
     path = r"C:\Users\zou\Desktop\claude\output\paint-drawing-saved.png"
 
     class Session:

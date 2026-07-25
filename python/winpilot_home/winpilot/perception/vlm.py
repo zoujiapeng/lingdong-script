@@ -15,14 +15,16 @@ from __future__ import annotations
 import base64
 import json
 import math
-from pathlib import Path
 import re
+import uuid
+from pathlib import Path
 from typing import Any
 
 import cv2
 
 from ..config import CONFIG
 from ..model_adapter import model_profile_from_config
+from ..modeling import create_openai_client, invoke_chat_completion
 from ..utils.log import logger
 from ..utils.screenshot import Region, capture
 from .model import UIElement
@@ -31,6 +33,16 @@ _DEEPSEEK_TEXT_ONLY_RE = re.compile(
     r"^(deepseek-chat|deepseek-reasoner|deepseek-v4(?:-flash|-pro)?)$",
     re.I,
 )
+
+_MODEL_CALL_CONTRACTS = {
+    "describe": ("legacy_visual_helper", "describe_screen_region"),
+    "structured-json": (
+        "legacy_visual_helper",
+        "inspect_authoritative_visual_artifact",
+    ),
+    "verify": ("legacy_visual_verifier", "verify_visual_completion"),
+    "collect": ("legacy_visual_helper", "ground_interactive_elements"),
+}
 
 
 def _settings() -> dict:
@@ -71,10 +83,8 @@ def is_configured() -> bool:
 
 
 def _client():
-    from openai import OpenAI
-
     vlm = _settings()
-    return OpenAI(
+    return create_openai_client(
         base_url=vlm["base_url"],
         api_key=vlm.get("api_key") or "none",
         timeout=120,
@@ -105,6 +115,18 @@ def _extra_body() -> dict:
     return {"thinking": {"type": "disabled"}}
 
 
+def _invoke_model(operation: str, provider_request: dict[str, Any]) -> Any:
+    """Bind one read-only visual call before the transport sees the payload."""
+    model_role, purpose = _MODEL_CALL_CONTRACTS[operation]
+    return invoke_chat_completion(
+        _client(),
+        decision_id=f"perception-vlm-{operation}-{uuid.uuid4().hex}",
+        model_role=model_role,
+        purpose=purpose,
+        provider_request=provider_request,
+    ).response
+
+
 def describe(region: Region, question: str) -> str:
     """Ask the configured VLM a question about a screen region."""
     if not is_configured():
@@ -113,22 +135,26 @@ def describe(region: Region, question: str) -> str:
     region = region.clamp_to_screen()
     b64, _scale = _encode_region(region)
     vlm = _settings()
+    provider_request = {
+        "model": vlm["model"],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    },
+                    {"type": "text", "text": question},
+                ],
+            }
+        ],
+        "max_tokens": 800,
+        "temperature": 0.1,
+        "extra_body": _extra_body(),
+    }
     try:
-        resp = _client().chat.completions.create(
-            model=vlm["model"],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                        {"type": "text", "text": question},
-                    ],
-                }
-            ],
-            max_tokens=800,
-            temperature=0.1,
-            extra_body=_extra_body(),
-        )
+        resp = _invoke_model("describe", provider_request)
         return resp.choices[0].message.content or ""
     except Exception as exc:
         logger.warning("VLM describe 失败: %s", exc)
@@ -160,9 +186,9 @@ def _structured_json_from_array(
         raise RuntimeError("authoritative visual artifact could not be encoded")
     b64 = base64.b64encode(encoded.tobytes()).decode()
     settings = _settings()
-    response = _client().chat.completions.create(
-        model=settings["model"],
-        messages=[{
+    provider_request = {
+        "model": settings["model"],
+        "messages": [{
             "role": "user",
             "content": [
                 {
@@ -172,10 +198,11 @@ def _structured_json_from_array(
                 {"type": "text", "text": str(prompt or "").strip()},
             ],
         }],
-        max_tokens=max(300, min(6000, int(max_tokens))),
-        temperature=0.0,
-        extra_body=_extra_body(),
-    )
+        "max_tokens": max(300, min(6000, int(max_tokens))),
+        "temperature": 0.0,
+        "extra_body": _extra_body(),
+    }
+    response = _invoke_model("structured-json", provider_request)
     raw = str(response.choices[0].message.content or "").strip()
     start, end = raw.find("{"), raw.rfind("}")
     if start < 0 or end <= start:
@@ -281,20 +308,24 @@ def verify(region: Region, criteria: str) -> dict:
         "requested detail/quality is visibly inadequate. When passed is true, "
         "subject_present must be true and issues must be empty."
     )
+    provider_request = {
+        "model": settings["model"],
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                },
+                {"type": "text", "text": prompt},
+            ],
+        }],
+        "max_tokens": 600,
+        "temperature": 0.0,
+        "extra_body": _extra_body(),
+    }
     try:
-        resp = _client().chat.completions.create(
-            model=settings["model"],
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                    {"type": "text", "text": prompt},
-                ],
-            }],
-            max_tokens=600,
-            temperature=0.0,
-            extra_body=_extra_body(),
-        )
+        resp = _invoke_model("verify", provider_request)
         raw = str(resp.choices[0].message.content or "").strip()
         start, end = raw.find("{"), raw.rfind("}")
         if start < 0 or end <= start:
@@ -501,21 +532,25 @@ def collect(region: Region) -> list[UIElement]:
         region = region.clamp_to_screen()
         b64, scale = _encode_region(region)
         vlm = _settings()
-        resp = _client().chat.completions.create(
-            model=vlm["model"],
-            messages=[
+        provider_request = {
+            "model": vlm["model"],
+            "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                        },
                         {"type": "text", "text": _GROUND_PROMPT},
                     ],
                 }
             ],
-            max_tokens=3000,
-            temperature=0.0,
-            extra_body=_extra_body(),
-        )
+            "max_tokens": 3000,
+            "temperature": 0.0,
+            "extra_body": _extra_body(),
+        }
+        resp = _invoke_model("collect", provider_request)
         raw = resp.choices[0].message.content or "[]"
         start, end = raw.find("["), raw.rfind("]")
         if start < 0 or end <= start:
