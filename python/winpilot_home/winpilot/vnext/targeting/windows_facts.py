@@ -260,6 +260,7 @@ class PsutilWin32TargetFactsBackend:
                     or float(created) <= 0
                     or type(executable) is not str
                     or not executable.strip()
+                    or not ntpath.splitdrive(executable.strip())[0]
                     or not ntpath.isabs(executable.strip())
                 ):
                     continue
