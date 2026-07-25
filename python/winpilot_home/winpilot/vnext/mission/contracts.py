@@ -1,4 +1,4 @@
-"""Pure, versioned state contracts for deterministic vNext mission replay.
+"""Pure, versioned state contracts for the vNext mission shadow.
 
 This module deliberately has no imports from the agent loop, model adapter,
 desktop controller, perception stack, or ``task-contract/1``.  The objects are
@@ -22,8 +22,15 @@ JSONValue = Any
 
 MISSION_DEFINITION_FORMAT = "mission-definition/0"
 MISSION_EVENT_FORMAT = "mission-event/0"
-MISSION_PROJECTION_FORMAT = "mission-projection/0"
-MISSION_CARD_FORMAT = "mission-card/0"
+MISSION_PROJECTION_FORMAT = "mission-projection/1"
+MISSION_CARD_FORMAT = "mission-card/1"
+ACTION_EFFECT_FORMAT = "action-effect/0"
+ACTION_EFFECT_COMPARATOR_VERSION = "frame-delta/0"
+ACTION_EFFECT_EVIDENCE_KIND = "deterministic_action_effect"
+# ``unchanged`` is intentionally a high-precision fact: any decoded pixel
+# delta is reported as ``changed``.  A non-zero threshold can turn a real
+# small-control response (caret, checkbox, focus ring) into false no-progress.
+ACTION_EFFECT_CHANGE_RATIO_THRESHOLD = 0.0
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -155,6 +162,23 @@ class MissionStatus(str, Enum):
     VERIFIED = "verified"
     FAILED = "failed"
     CANCELED = "canceled"
+
+
+class LocalVisualChange(str, Enum):
+    CHANGED = "changed"
+    UNCHANGED = "unchanged"
+    UNKNOWN = "unknown"
+
+
+class ActionEffectReason(str, Enum):
+    EXACT_PAYLOAD = "exact_payload"
+    ALIGNED_PIXEL_DELTA = "aligned_pixel_delta"
+    INPUT_NOT_EXECUTED = "input_not_executed"
+    TARGET_BINDING_CHANGED = "target_binding_changed"
+    FRAME_NOT_COMPARABLE = "frame_not_comparable"
+    DECODE_FAILED = "decode_failed"
+    DECODED_SIZE_MISMATCH = "decoded_size_mismatch"
+    COMPARISON_FAILED = "comparison_failed"
 
 
 DEFAULT_ALLOWED_TRUST = (
@@ -499,6 +523,219 @@ class VerifiedFact:
 
 
 @dataclass(frozen=True, slots=True)
+class ActionEffectSummary:
+    """Deterministic, non-semantic comparison of two authoritative frames."""
+
+    action_id: str
+    input_completed: bool
+    before_frame_id: int
+    after_frame_id: int
+    before_frame_evidence_ref: str
+    after_frame_evidence_ref: str
+    before_frame_payload_hash: str
+    after_frame_payload_hash: str
+    target_binding_valid: bool
+    frame_comparable: bool
+    local_visual_change: LocalVisualChange | str
+    change_ratio: float | None
+    reason: ActionEffectReason | str
+    evidence_ref: str
+    semantic_completion: str = "unknown"
+    comparator_version: str = ACTION_EFFECT_COMPARATOR_VERSION
+    format: str = ACTION_EFFECT_FORMAT
+
+    def __post_init__(self) -> None:
+        if self.format != ACTION_EFFECT_FORMAT:
+            raise InvalidMissionEvent("unsupported action effect format")
+        if self.comparator_version != ACTION_EFFECT_COMPARATOR_VERSION:
+            raise InvalidMissionEvent("unsupported action effect comparator")
+        for name in (
+            "action_id",
+            "before_frame_evidence_ref",
+            "after_frame_evidence_ref",
+            "evidence_ref",
+        ):
+            raw_value = getattr(self, name)
+            if type(raw_value) is not str or not raw_value.strip():
+                raise InvalidMissionEvent(f"action effect {name} cannot be empty")
+            object.__setattr__(self, name, raw_value.strip())
+        for name in ("before_frame_payload_hash", "after_frame_payload_hash"):
+            value = getattr(self, name)
+            if type(value) is not str or not _SHA256_RE.fullmatch(value):
+                raise InvalidMissionEvent(
+                    f"action effect {name} must be a SHA-256 digest"
+                )
+            object.__setattr__(self, name, value.lower())
+        if type(self.input_completed) is not bool:
+            raise InvalidMissionEvent("action effect input_completed must be boolean")
+        for name in ("target_binding_valid", "frame_comparable"):
+            if type(getattr(self, name)) is not bool:
+                raise InvalidMissionEvent(f"action effect {name} must be boolean")
+        for name in ("before_frame_id", "after_frame_id"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise InvalidMissionEvent(f"action effect {name} must be positive")
+        if self.after_frame_id <= self.before_frame_id:
+            raise InvalidMissionEvent("action effect frames must be in commit order")
+        try:
+            change = LocalVisualChange(self.local_visual_change)
+            reason = ActionEffectReason(self.reason)
+        except ValueError as exc:
+            raise InvalidMissionEvent("invalid action effect classification") from exc
+        object.__setattr__(self, "local_visual_change", change)
+        object.__setattr__(self, "reason", reason)
+        if self.semantic_completion != "unknown":
+            raise InvalidMissionEvent("pixel comparison cannot claim semantic completion")
+        ratio = self.change_ratio
+        if ratio is not None:
+            if (
+                isinstance(ratio, bool)
+                or not isinstance(ratio, (int, float))
+                or not math.isfinite(float(ratio))
+                or not 0.0 <= float(ratio) <= 1.0
+            ):
+                raise InvalidMissionEvent("action effect change_ratio must be null or in [0, 1]")
+            ratio = float(ratio)
+            object.__setattr__(self, "change_ratio", ratio)
+
+        if not self.input_completed:
+            coherent = bool(
+                not self.frame_comparable
+                and change is LocalVisualChange.UNKNOWN
+                and ratio is None
+                and reason is ActionEffectReason.INPUT_NOT_EXECUTED
+            )
+        elif not self.target_binding_valid:
+            coherent = bool(
+                not self.frame_comparable
+                and change is LocalVisualChange.UNKNOWN
+                and ratio is None
+                and reason is ActionEffectReason.TARGET_BINDING_CHANGED
+            )
+        elif self.frame_comparable:
+            expected_change = (
+                LocalVisualChange.CHANGED
+                if ratio is not None
+                and ratio > ACTION_EFFECT_CHANGE_RATIO_THRESHOLD
+                else LocalVisualChange.UNCHANGED
+            )
+            coherent = bool(
+                ratio is not None
+                and change is expected_change
+                and reason in {
+                    ActionEffectReason.EXACT_PAYLOAD,
+                    ActionEffectReason.ALIGNED_PIXEL_DELTA,
+                }
+                and (
+                    reason is not ActionEffectReason.EXACT_PAYLOAD
+                    or (ratio == 0.0 and change is LocalVisualChange.UNCHANGED)
+                )
+            )
+        else:
+            coherent = bool(
+                change is LocalVisualChange.UNKNOWN
+                and ratio is None
+                and reason in {
+                    ActionEffectReason.FRAME_NOT_COMPARABLE,
+                    ActionEffectReason.DECODE_FAILED,
+                    ActionEffectReason.DECODED_SIZE_MISMATCH,
+                    ActionEffectReason.COMPARISON_FAILED,
+                }
+            )
+        if not coherent:
+            raise InvalidMissionEvent("action effect fields are contradictory")
+
+    def payload_dict(self) -> dict[str, Any]:
+        """Canonical evidence material, excluding its self-referential ID."""
+
+        return {
+            "format": self.format,
+            "comparator_version": self.comparator_version,
+            "action_id": self.action_id,
+            "input_completed": self.input_completed,
+            "before_frame_id": self.before_frame_id,
+            "after_frame_id": self.after_frame_id,
+            "before_frame_evidence_ref": self.before_frame_evidence_ref,
+            "after_frame_evidence_ref": self.after_frame_evidence_ref,
+            "before_frame_payload_hash": self.before_frame_payload_hash,
+            "after_frame_payload_hash": self.after_frame_payload_hash,
+            "target_binding_valid": self.target_binding_valid,
+            "frame_comparable": self.frame_comparable,
+            "local_visual_change": self.local_visual_change.value,
+            "change_ratio": self.change_ratio,
+            "reason": self.reason.value,
+            "semantic_completion": self.semantic_completion,
+        }
+
+    @property
+    def payload_hash(self) -> str:
+        encoded = json.dumps(
+            self.payload_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.payload_dict(),
+            "evidence_ref": self.evidence_ref,
+            "payload_hash": self.payload_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "ActionEffectSummary":
+        if not isinstance(raw, Mapping):
+            raise InvalidMissionEvent("action effect must be an object")
+        expected = {
+            "format",
+            "comparator_version",
+            "action_id",
+            "input_completed",
+            "before_frame_id",
+            "after_frame_id",
+            "before_frame_evidence_ref",
+            "after_frame_evidence_ref",
+            "before_frame_payload_hash",
+            "after_frame_payload_hash",
+            "target_binding_valid",
+            "frame_comparable",
+            "local_visual_change",
+            "change_ratio",
+            "reason",
+            "semantic_completion",
+            "evidence_ref",
+            "payload_hash",
+        }
+        if set(raw) != expected:
+            raise InvalidMissionEvent("action effect fields do not match the canonical schema")
+        result = cls(
+            format=raw["format"],
+            comparator_version=raw["comparator_version"],
+            action_id=raw["action_id"],
+            input_completed=raw["input_completed"],
+            before_frame_id=raw["before_frame_id"],
+            after_frame_id=raw["after_frame_id"],
+            before_frame_evidence_ref=raw["before_frame_evidence_ref"],
+            after_frame_evidence_ref=raw["after_frame_evidence_ref"],
+            before_frame_payload_hash=raw["before_frame_payload_hash"],
+            after_frame_payload_hash=raw["after_frame_payload_hash"],
+            target_binding_valid=raw["target_binding_valid"],
+            frame_comparable=raw["frame_comparable"],
+            local_visual_change=raw["local_visual_change"],
+            change_ratio=raw["change_ratio"],
+            reason=raw["reason"],
+            semantic_completion=raw["semantic_completion"],
+            evidence_ref=raw["evidence_ref"],
+        )
+        if raw["payload_hash"] != result.payload_hash:
+            raise InvalidMissionEvent("action effect payload_hash does not match its content")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class TransitionSummary:
     action: str
     input_completed: bool
@@ -506,6 +743,8 @@ class TransitionSummary:
     evidence_refs: tuple[str, ...] = ()
     frame_id: int | None = None
     obligation_id: str = ""
+    action_id: str | None = None
+    action_effect: ActionEffectSummary | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action", str(self.action or "unknown"))
@@ -514,6 +753,11 @@ class TransitionSummary:
         object.__setattr__(self, "obligation_id", str(self.obligation_id or "").strip())
         if not self.obligation_id:
             raise InvalidMissionEvent("transition summary must bind an obligation")
+        if self.action_id is not None:
+            action_id = str(self.action_id or "").strip()
+            if not action_id:
+                raise InvalidMissionEvent("transition action_id cannot be empty")
+            object.__setattr__(self, "action_id", action_id)
         object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
         if self.frame_id is not None and (
             type(self.frame_id) is not int or self.frame_id < 0
@@ -521,9 +765,27 @@ class TransitionSummary:
             raise InvalidMissionEvent(
                 "transition frame_id must be a non-negative integer or null"
             )
+        if self.action_effect is not None:
+            effect = (
+                self.action_effect
+                if isinstance(self.action_effect, ActionEffectSummary)
+                else ActionEffectSummary.from_dict(self.action_effect)
+            )
+            if (
+                self.action_id != effect.action_id
+                or self.input_completed is not effect.input_completed
+                or self.frame_id != effect.after_frame_id
+                or effect.evidence_ref not in self.evidence_refs
+                or effect.before_frame_evidence_ref not in self.evidence_refs
+                or effect.after_frame_evidence_ref not in self.evidence_refs
+            ):
+                raise InvalidMissionEvent(
+                    "transition does not bind its action effect identity"
+                )
+            object.__setattr__(self, "action_effect", effect)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "action": self.action,
             "input_completed": self.input_completed,
             "visible_effect": self.visible_effect,
@@ -531,6 +793,13 @@ class TransitionSummary:
             "frame_id": self.frame_id,
             "obligation_id": self.obligation_id,
         }
+        # Omitting absent additive fields preserves historical event replay
+        # and claim fingerprints for pre-action-effect transitions.
+        if self.action_id is not None:
+            result["action_id"] = self.action_id
+        if self.action_effect is not None:
+            result["action_effect"] = self.action_effect.to_dict()
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -852,6 +1121,7 @@ class ObligationProjection:
     verified_claim_fingerprint: str | None = None
     activation_attempt_count: int = 0
     verification_attempt_count: int = 0
+    no_progress_streak: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", ObligationStatus(self.status))
@@ -872,7 +1142,12 @@ class ObligationProjection:
             if not value:
                 raise InvalidMissionEvent("verified_claim_fingerprint cannot be empty")
             object.__setattr__(self, "verified_claim_fingerprint", value)
-        for name in ("failure_count", "activation_attempt_count", "verification_attempt_count"):
+        for name in (
+            "failure_count",
+            "activation_attempt_count",
+            "verification_attempt_count",
+            "no_progress_streak",
+        ):
             value = int(getattr(self, name))
             if value < 0:
                 raise InvalidMissionEvent(f"{name} cannot be negative")
@@ -901,6 +1176,7 @@ class ObligationProjection:
             "verified_claim_fingerprint": self.verified_claim_fingerprint,
             "activation_attempt_count": self.activation_attempt_count,
             "verification_attempt_count": self.verification_attempt_count,
+            "no_progress_streak": self.no_progress_streak,
         }
 
 
@@ -1044,6 +1320,7 @@ class MissionCard:
     target_binding: TargetBinding | None = None
     last_transition: TransitionSummary | None = None
     failure_summary: FailureSummary | None = None
+    no_progress_streak: int = 0
     format: str = MISSION_CARD_FORMAT
 
     def __post_init__(self) -> None:
@@ -1051,6 +1328,8 @@ class MissionCard:
             raise InvalidMissionEvent(f"unsupported MissionCard format: {self.format!r}")
         object.__setattr__(self, "verified_facts", tuple(self.verified_facts))
         object.__setattr__(self, "artifact_bindings", tuple(self.artifact_bindings))
+        if type(self.no_progress_streak) is not int or self.no_progress_streak < 0:
+            raise InvalidMissionEvent("MissionCard no_progress_streak must be non-negative")
 
     @property
     def active_obligation_id(self) -> str | None:
@@ -1068,6 +1347,7 @@ class MissionCard:
             "target_binding": self.target_binding.to_dict() if self.target_binding else None,
             "last_transition": self.last_transition.to_dict() if self.last_transition else None,
             "failure_summary": self.failure_summary.to_dict() if self.failure_summary else None,
+            "no_progress_streak": self.no_progress_streak,
         }
 
     @classmethod
@@ -1115,6 +1395,11 @@ class MissionCard:
         failure = projection.failure_summary
         if failure is not None and failure.obligation_id != active_id:
             failure = None
+        no_progress_streak = (
+            projection.obligation_state(active_id).no_progress_streak
+            if active_id is not None
+            else 0
+        )
         return cls(
             mission_id=projection.mission_id,
             mission_revision=projection.revision,
@@ -1125,6 +1410,7 @@ class MissionCard:
             target_binding=projection.target_binding,
             last_transition=transition,
             failure_summary=failure,
+            no_progress_streak=no_progress_streak,
         )
 
 
@@ -1265,9 +1551,12 @@ ObligationDefinition = ObligationSpec
 
 __all__ = [
     "MISSION_DEFINITION_FORMAT", "MISSION_EVENT_FORMAT", "MISSION_PROJECTION_FORMAT",
-    "MISSION_CARD_FORMAT", "MissionError", "InvalidMissionDefinition",
+    "MISSION_CARD_FORMAT", "ACTION_EFFECT_FORMAT", "ACTION_EFFECT_COMPARATOR_VERSION",
+    "ACTION_EFFECT_EVIDENCE_KIND", "ACTION_EFFECT_CHANGE_RATIO_THRESHOLD",
+    "MissionError", "InvalidMissionDefinition",
     "InvalidMissionEvent", "StaleRevisionError", "DuplicateEventError",
     "EvidenceScopeError", "IllegalTransitionError", "ObligationStatus", "MissionStatus",
+    "LocalVisualChange", "ActionEffectReason", "ActionEffectSummary",
     "JSONValue", "EvidencePolicy", "ObligationSpec", "ObligationDefinition", "EvidenceRef", "ArtifactRef",
     "TargetBinding", "VerifiedFact", "TransitionSummary", "FailureSummary",
     "MissionDefinition", "MissionEvent", "ObligationProjection", "MissionProjection", "MissionState",

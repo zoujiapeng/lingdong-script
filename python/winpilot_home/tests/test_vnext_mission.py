@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import random
+from dataclasses import replace
 
 import pytest
 
 from winpilot.vnext.mission import (
+    ACTION_EFFECT_EVIDENCE_KIND,
+    ActionEffectReason,
+    ActionEffectSummary,
     ArtifactRef,
     DuplicateEventError,
     EvidenceRef,
@@ -16,6 +20,7 @@ from winpilot.vnext.mission import (
     IllegalTransitionError,
     InvalidMissionDefinition,
     InvalidMissionEvent,
+    LocalVisualChange,
     MissionDefinition,
     MissionEvent,
     MissionReducer,
@@ -32,6 +37,101 @@ from winpilot.vnext.mission import (
 
 ARTIFACT_SHA256 = "a" * 64
 OTHER_ARTIFACT_SHA256 = "b" * 64
+
+
+def _action_effect_material(
+    index: int,
+    change: LocalVisualChange,
+    *,
+    obligation_id: str = "obligation-1",
+    mission_id: str = "m1",
+    run_id: str = "r1",
+) -> tuple[ActionEffectSummary, tuple[EvidenceRef, ...]]:
+    action_id = f"decision-{index}"
+    before_id = f"before-frame-{index}"
+    after_id = f"after-frame-{index}"
+    effect_id = f"action-effect-{index}"
+    if change is LocalVisualChange.CHANGED:
+        comparable, ratio, reason = True, 0.01, ActionEffectReason.ALIGNED_PIXEL_DELTA
+    elif change is LocalVisualChange.UNCHANGED:
+        comparable, ratio, reason = True, 0.0, ActionEffectReason.EXACT_PAYLOAD
+    else:
+        comparable, ratio, reason = False, None, ActionEffectReason.COMPARISON_FAILED
+    summary = ActionEffectSummary(
+        action_id=action_id,
+        input_completed=True,
+        before_frame_id=index * 2 + 1,
+        after_frame_id=index * 2 + 2,
+        before_frame_evidence_ref=before_id,
+        after_frame_evidence_ref=after_id,
+        before_frame_payload_hash="a" * 64,
+        after_frame_payload_hash="b" * 64,
+        target_binding_valid=True,
+        frame_comparable=comparable,
+        local_visual_change=change,
+        change_ratio=ratio,
+        reason=reason,
+        evidence_ref=effect_id,
+    )
+    refs = (
+        EvidenceRef(
+            id=before_id,
+            mission_id=mission_id,
+            run_id=run_id,
+            obligation_id=obligation_id,
+            kind="current_frame",
+            trust="deterministic",
+            payload_hash=summary.before_frame_payload_hash,
+            frame_id=summary.before_frame_id,
+        ),
+        EvidenceRef(
+            id=after_id,
+            mission_id=mission_id,
+            run_id=run_id,
+            obligation_id=obligation_id,
+            kind="post_action_frame",
+            trust="deterministic",
+            payload_hash=summary.after_frame_payload_hash,
+            frame_id=summary.after_frame_id,
+            action_id=action_id,
+        ),
+        EvidenceRef(
+            id=effect_id,
+            mission_id=mission_id,
+            run_id=run_id,
+            obligation_id=obligation_id,
+            kind=ACTION_EFFECT_EVIDENCE_KIND,
+            trust="deterministic",
+            payload_hash=summary.payload_hash,
+            frame_id=summary.after_frame_id,
+            action_id=action_id,
+        ),
+    )
+    return summary, refs
+
+
+def _transition_with_effect(
+    reducer: MissionReducer,
+    summary: ActionEffectSummary,
+) -> MissionEvent:
+    refs = (
+        summary.before_frame_evidence_ref,
+        summary.after_frame_evidence_ref,
+        summary.evidence_ref,
+    )
+    return reducer.event(
+        "transition_recorded",
+        payload={
+            "obligation_id": reducer.projection.active_obligation_id,
+            "action_id": summary.action_id,
+            "action": "click",
+            "input_completed": summary.input_completed,
+            "frame_id": summary.after_frame_id,
+            "evidence_refs": list(refs),
+            "action_effect": summary.to_dict(),
+        },
+        evidence_refs=refs,
+    )
 
 
 def _evidence(
@@ -405,6 +505,205 @@ def test_transition_identity_is_stable_across_wire_replay() -> None:
         frame_id=7,
         obligation_id="obligation-1",
     )
+
+
+def test_action_effect_streak_is_derived_only_from_accepted_events() -> None:
+    sequence = (
+        LocalVisualChange.UNCHANGED,
+        LocalVisualChange.UNCHANGED,
+        LocalVisualChange.UNKNOWN,
+        LocalVisualChange.CHANGED,
+        LocalVisualChange.UNCHANGED,
+    )
+    material = tuple(
+        _action_effect_material(index, change)
+        for index, change in enumerate(sequence, start=1)
+    )
+    evidence = tuple(ref for _summary, refs in material for ref in refs)
+    definition = MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1")
+    reducer = MissionReducer(definition, evidence=evidence)
+    observed = []
+
+    for summary, _refs in material:
+        reducer.apply(_transition_with_effect(reducer, summary))
+        observed.append(
+            reducer.projection.obligation_state("obligation-1").no_progress_streak
+        )
+
+    assert observed == [1, 2, 2, 0, 1]
+    card = reducer.card
+    assert card.no_progress_streak == 1
+    assert card.last_transition is not None
+    assert card.last_transition.action_effect == material[-1][0]
+
+    replayed = MissionReducer.replay(
+        definition,
+        [event.to_dict() for event in reducer.events],
+        evidence=evidence,
+    )
+    assert replayed.projection.to_dict() == reducer.projection.to_dict()
+    assert replayed.card.to_dict() == reducer.card.to_dict()
+
+
+def test_randomized_action_effect_replay_matches_suffix_policy() -> None:
+    randomizer = random.Random(20260722)
+    for case in range(40):
+        sequence = tuple(
+            randomizer.choice(tuple(LocalVisualChange))
+            for _ in range(randomizer.randint(1, 30))
+        )
+        material = tuple(
+            _action_effect_material(
+                case * 100 + index,
+                change,
+            )
+            for index, change in enumerate(sequence, start=1)
+        )
+        evidence = tuple(ref for _summary, refs in material for ref in refs)
+        definition = MissionDefinition.from_goal(
+            "random unknown GUI task",
+            mission_id="m1",
+            run_id="r1",
+        )
+        reducer = MissionReducer(definition, evidence=evidence)
+        expected = 0
+        for summary, _refs in material:
+            reducer.apply(_transition_with_effect(reducer, summary))
+            if summary.local_visual_change is LocalVisualChange.UNCHANGED:
+                expected += 1
+            elif summary.local_visual_change is LocalVisualChange.CHANGED:
+                expected = 0
+        assert reducer.projection.obligation_state(
+            "obligation-1"
+        ).no_progress_streak == expected
+        replayed = MissionReducer.replay(
+            definition,
+            tuple(event.to_dict() for event in reducer.events),
+            evidence=evidence,
+        )
+        assert replayed.projection.to_dict() == reducer.projection.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("kind", "visual_model"),
+        ("trust", "independent_visual_model"),
+        ("obligation_id", "other-obligation"),
+        ("obligation_id", None),
+        ("action_id", "other-action"),
+        ("frame_id", 999),
+        ("payload_hash", "wrong-payload"),
+    ),
+)
+def test_action_effect_attestation_must_match_real_registry_evidence(
+    field: str,
+    value: object,
+) -> None:
+    summary, refs = _action_effect_material(1, LocalVisualChange.UNCHANGED)
+    corrupted = tuple(
+        replace(ref, **{field: value}) if ref.id == summary.evidence_ref else ref
+        for ref in refs
+    )
+    reducer = MissionReducer(
+        MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1"),
+        evidence=corrupted,
+    )
+    before = reducer.projection.to_dict()
+
+    with pytest.raises((EvidenceScopeError, IllegalTransitionError)):
+        reducer.apply(_transition_with_effect(reducer, summary))
+
+    assert reducer.projection.to_dict() == before
+    assert reducer.events == ()
+
+
+@pytest.mark.parametrize(
+    ("ref_index", "field", "value"),
+    (
+        (0, "kind", "oracle"),
+        (0, "trust", "independent_visual_model"),
+        (0, "frame_id", 999),
+        (0, "payload_hash", "0" * 64),
+        (0, "obligation_id", None),
+        (1, "kind", "current_frame"),
+        (1, "trust", "provider_receipt"),
+        (1, "frame_id", 999),
+        (1, "action_id", "other-action"),
+        (1, "payload_hash", "0" * 64),
+        (1, "obligation_id", None),
+    ),
+)
+def test_action_effect_requires_exact_before_and_after_frame_evidence(
+    ref_index: int,
+    field: str,
+    value: object,
+) -> None:
+    summary, refs = _action_effect_material(1, LocalVisualChange.CHANGED)
+    corrupted = tuple(
+        replace(ref, **{field: value}) if index == ref_index else ref
+        for index, ref in enumerate(refs)
+    )
+    reducer = MissionReducer(
+        MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1"),
+        evidence=corrupted,
+    )
+
+    with pytest.raises(EvidenceScopeError):
+        reducer.apply(_transition_with_effect(reducer, summary))
+
+    assert reducer.events == ()
+    assert reducer.projection.obligation_state("obligation-1").no_progress_streak == 0
+
+
+def test_stale_action_effect_event_cannot_increment_no_progress_twice() -> None:
+    summary, refs = _action_effect_material(1, LocalVisualChange.UNCHANGED)
+    reducer = MissionReducer(
+        MissionDefinition.from_goal("goal", mission_id="m1", run_id="r1"),
+        evidence=refs,
+    )
+    event = _transition_with_effect(reducer, summary)
+    reducer.apply(event)
+    after = reducer.projection.to_dict()
+
+    with pytest.raises(DuplicateEventError):
+        reducer.apply(event)
+
+    assert reducer.projection.to_dict() == after
+    assert reducer.projection.obligation_state("obligation-1").no_progress_streak == 1
+
+
+def test_action_effect_feedback_does_not_cross_obligation_boundary() -> None:
+    definition = MissionDefinition(
+        mission_id="m1",
+        run_id="r1",
+        original_goal="complete two unknown states",
+        obligations=(
+            ObligationSpec(id="first", desired_state="first state"),
+            ObligationSpec(
+                id="second",
+                desired_state="second state",
+                depends_on=("first",),
+            ),
+        ),
+    )
+    summary, action_refs = _action_effect_material(
+        1,
+        LocalVisualChange.UNCHANGED,
+        obligation_id="first",
+    )
+    verification = _evidence("first-proof", "first")
+    reducer = MissionReducer(definition, evidence=(*action_refs, verification))
+    reducer.apply(_transition_with_effect(reducer, summary))
+    assert reducer.card.no_progress_streak == 1
+    reducer.apply(reducer.event("obligation_claimed", payload={"obligation_id": "first"}))
+    reducer.apply(_verify_event(reducer, "first", verification.id))
+
+    assert reducer.projection.active_obligation_id == "second"
+    assert reducer.projection.obligation_state("first").no_progress_streak == 1
+    assert reducer.projection.obligation_state("second").no_progress_streak == 0
+    assert reducer.card.no_progress_streak == 0
+    assert reducer.card.last_transition is None
 
 
 def test_active_selection_uses_dependency_first_stable_topological_order() -> None:
@@ -849,14 +1148,6 @@ def test_unimplemented_planner_patch_fails_closed_without_model_or_gui_side_effe
     with pytest.raises(InvalidMissionEvent):
         reducer.apply(reducer.event("planner_patch_proposed", payload={"steps": [{"click": [1, 2]}]}))
     assert reducer.projection.to_dict() == before
-
-
-
-
-
-
-
-
 
 
 @pytest.mark.parametrize(
