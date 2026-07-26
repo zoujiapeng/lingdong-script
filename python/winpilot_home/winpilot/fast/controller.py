@@ -15,10 +15,10 @@ import win32process
 from ..agent.tool_result import ToolResult
 from ..action import executor as action_executor
 from ..action.desktop_queue import DESKTOP_ACTION_QUEUE
-from ..action.raw_device import RawDeviceExecutor
 from ..config import CONFIG
 from ..perception import ocr, uia, vision_cv, vlm
 from ..utils.log import BUS
+from .legacy_session_actions import LegacyToolSessionActionAdapter
 from ..utils.screenshot import Region, capture, window_region
 from .action_contract import (
     ALLOWED_BATCH_ACTIONS,
@@ -554,7 +554,7 @@ class FastGuiController:
             event_context_provider=lambda: {"run_id": getattr(self.session, "run_id", None)},
         )
         self.capture_fn = capture_fn
-        self.raw_device = RawDeviceExecutor(session)
+        self.raw_device = LegacyToolSessionActionAdapter(session)
         self._color_palette_button_cache: dict[tuple[int, int, int, int, int], tuple[int, int]] = {}
         self._color_swatch_cache: dict[
             tuple[tuple[int, int, int, int, int], str], tuple[int, int]
@@ -3280,7 +3280,7 @@ class FastGuiController:
                 continue
             # Scope guard every mutation before any controller-local work.
             # Some actions such as select_color perform capture/recognition
-            # before their eventual raw click; guarding only RawDeviceExecutor
+            # before their eventual raw click; guarding only the legacy adapter
             # let those actions inspect an occluding foreground window.
             scope_blocked = None
             scope_recovery = None

@@ -64,7 +64,7 @@ def test_visual_model_runtime_preflight_requires_a_multimodal_provider(monkeypat
         CapabilityPlanner.assert_runtime_satisfiable(contract)
 
 
-def test_static_and_live_capability_checks_are_separate(monkeypatch):
+def test_static_and_live_capability_checks_are_separate(monkeypatch, isolated_config):
     from types import SimpleNamespace
 
     from winpilot.perception import vlm
@@ -77,6 +77,13 @@ def test_static_and_live_capability_checks_are_separate(monkeypatch):
         cold_start=True,
     )
     CapabilityPlanner.assert_satisfiable(contract)
+    isolated_config({
+        "api": {
+            "base_url": "https://model.test/v1",
+            "api_key": "test-api-key",
+            "model": "test-text-model",
+        },
+    })
     # The live half of this test needs explicit provider and platform facts.
     # Never inherit a developer machine's configured model, model metadata, or
     # the CI host OS when asserting that a fully available runtime has no gaps.

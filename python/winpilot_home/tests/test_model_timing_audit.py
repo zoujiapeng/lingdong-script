@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -22,18 +21,44 @@ def _runner(task: str = "Inspect the current window"):
     return runner
 
 
-def test_chat_accumulates_successful_model_wait_once():
+def _install_elapsed_recorder(runner, monkeypatch, *, elapsed_ms: int = 25):
+    calls: list[float] = []
+
+    def accumulate(started: float) -> int:
+        calls.append(started)
+        runner.model_elapsed_ms += elapsed_ms
+        return elapsed_ms
+
+    monkeypatch.setattr(runner, "_accumulate_model_elapsed", accumulate)
+    return calls
+
+
+def test_model_elapsed_accumulator_uses_monotonic_delta(monkeypatch):
+    import winpilot.agent.loop as loop
+
+    runner = _runner()
+    try:
+        monkeypatch.setattr(loop.time, "monotonic", lambda: 10.125)
+
+        assert runner._accumulate_model_elapsed(10.0) == 125
+        assert runner.model_elapsed_ms == 125
+    finally:
+        runner.session.close()
+
+
+def test_chat_accumulates_successful_model_wait_once(monkeypatch):
     runner = _runner()
     try:
         response = object()
+        elapsed_calls = _install_elapsed_recorder(runner, monkeypatch)
 
         def create(**_kwargs):
-            time.sleep(0.025)
             return response
 
         assert runner._chat(_CompletionsClient(create), []) is response
         assert runner.model_request_count == 1
-        assert 15 <= runner.model_elapsed_ms < 500
+        assert runner.model_elapsed_ms == 25
+        assert len(elapsed_calls) == 1
     finally:
         runner.session.close()
 
@@ -44,41 +69,42 @@ def test_chat_accumulates_failed_model_wait(monkeypatch):
     monkeypatch.setattr(loop, "_API_RETRIES", 1)
     runner = _runner()
     try:
+        elapsed_calls = _install_elapsed_recorder(runner, monkeypatch)
+
         def create(**_kwargs):
-            time.sleep(0.025)
             raise OSError("provider unavailable")
 
         with pytest.raises(RuntimeError, match="provider unavailable"):
             runner._chat(_CompletionsClient(create), [])
         assert runner.model_request_count == 1
-        assert 15 <= runner.model_elapsed_ms < 500
+        assert runner.model_elapsed_ms == 25
+        assert len(elapsed_calls) == 1
     finally:
         runner.session.close()
 
 
-def test_chat_accumulates_only_until_canceled_call_is_abandoned():
+def test_chat_accumulates_only_until_canceled_call_is_abandoned(monkeypatch):
     stop_event = threading.Event()
+    release_provider = threading.Event()
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("Inspect the current window", stop_event=stop_event)
     runner.messages = [{"role": "user", "content": "Inspect the current window"}]
     try:
+        elapsed_calls = _install_elapsed_recorder(runner, monkeypatch)
+
         def create(**_kwargs):
-            time.sleep(0.6)
+            stop_event.set()
+            release_provider.wait(timeout=1)
             return object()
 
-        timer = threading.Timer(0.03, stop_event.set)
-        timer.start()
-        started = time.monotonic()
         assert runner._chat(_CompletionsClient(create), []) is None
-        wall_ms = int((time.monotonic() - started) * 1000)
-        timer.join(timeout=1)
 
         assert runner.model_request_count == 1
-        assert runner.model_elapsed_ms >= 20
-        assert runner.model_elapsed_ms <= wall_ms + 20
-        assert runner.model_elapsed_ms < 500
+        assert runner.model_elapsed_ms == 25
+        assert len(elapsed_calls) == 1
     finally:
+        release_provider.set()
         runner.session.close()
 
 
@@ -129,7 +155,6 @@ class _FakeSemanticRunner:
         return None
 
     def run(self):
-        time.sleep(0.03)
         return {"status": self.status}
 
 
@@ -141,19 +166,19 @@ def test_create_stage_success_outputs_split_model_and_controller_time(monkeypatc
     )
     fake = _FakeSemanticRunner(verified=True, model_elapsed_ms=12)
     monkeypatch.setattr(stage_runtime, "build_runner", lambda *_args, **_kwargs: fake)
+    monkeypatch.setattr(stage_runtime.time, "monotonic", lambda: 10.125)
 
-    started = time.monotonic()
     result = stage_runtime.StageRuntime()._execute(
         stage,
         contract,
         context,
         threading.Event(),
-        started,
+        10.0,
     )
 
     assert result.ok is True
     assert result.output["model_elapsed_ms"] == 12
-    assert result.output["controller_elapsed_ms"] >= 10
+    assert result.output["controller_elapsed_ms"] == 113
     assert result.output["model_calls"] == 2
 
 
@@ -166,6 +191,16 @@ def test_create_stage_failure_output_keeps_model_and_controller_time(monkeypatch
     )
     fake = _FakeSemanticRunner(verified=False, model_elapsed_ms=12)
     monkeypatch.setattr(stage_runtime, "build_runner", lambda *_args, **_kwargs: fake)
+    first_clock_read = True
+
+    def monotonic():
+        nonlocal first_clock_read
+        if first_clock_read:
+            first_clock_read = False
+            return 10.0
+        return 10.125
+
+    monkeypatch.setattr(stage_runtime.time, "monotonic", monotonic)
     node = ArpNode(
         id=stage.id,
         kind=ArpNodeKind.TASK_STAGE,
@@ -181,7 +216,7 @@ def test_create_stage_failure_output_keeps_model_and_controller_time(monkeypatch
     assert result.ok is False
     assert result.output["status"] == "failed"
     assert result.output["model_elapsed_ms"] == 12
-    assert result.output["controller_elapsed_ms"] >= 10
+    assert result.output["controller_elapsed_ms"] == 113
     assert result.output["model_calls"] == 2
 
 
@@ -194,10 +229,19 @@ def test_semantic_stage_failure_before_model_still_outputs_zero_model_time(monke
     )
 
     def fail_to_build(*_args, **_kwargs):
-        time.sleep(0.015)
         raise RuntimeError("runner construction failed")
 
     monkeypatch.setattr(stage_runtime, "build_runner", fail_to_build)
+    first_clock_read = True
+
+    def monotonic():
+        nonlocal first_clock_read
+        if first_clock_read:
+            first_clock_read = False
+            return 10.0
+        return 10.125
+
+    monkeypatch.setattr(stage_runtime.time, "monotonic", monotonic)
     node = ArpNode(
         id=stage.id,
         kind=ArpNodeKind.TASK_STAGE,
@@ -212,4 +256,4 @@ def test_semantic_stage_failure_before_model_still_outputs_zero_model_time(monke
 
     assert result.ok is False
     assert result.output["model_elapsed_ms"] == 0
-    assert result.output["controller_elapsed_ms"] >= 10
+    assert result.output["controller_elapsed_ms"] == 125

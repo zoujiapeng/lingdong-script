@@ -743,9 +743,10 @@ def test_text_appears_scoped_to_target_window(monkeypatch):
     assert "未找到文字" in out.detail
 
 
-def test_text_appears_can_use_fullscreen_without_target(monkeypatch):
+def test_text_appears_can_use_fullscreen_without_target(monkeypatch, isolated_config):
     from winpilot.action import verify
 
+    isolated_config({"perception": {"ocr": {"enabled": True}}})
     monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 0)
     monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda hwnd: False)
     monkeypatch.setattr(verify.ocr, "find_text", lambda *a, **k: True)
@@ -772,9 +773,10 @@ def test_text_appears_tolerates_ocr_separator_errors(monkeypatch):
     assert out.verified
 
 
-def test_text_appears_uses_indexed_uia_query_before_fusion(monkeypatch):
+def test_text_appears_uses_indexed_uia_query_before_fusion(monkeypatch, isolated_config):
     from winpilot.action import verify
 
+    isolated_config({"perception": {"uia": {"enabled": True}}})
     monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 123)
     monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda hwnd: True)
     monkeypatch.setattr(
@@ -884,11 +886,15 @@ def test_text_appears_uses_async_watcher_roi_ocr_before_full_fusion(monkeypatch)
     assert out.trace["predictive_ocr"]["processed_count"] == 1
 
 
-def test_visible_and_groundtruth_checks_overlap_without_early_success(monkeypatch):
+def test_visible_and_groundtruth_checks_overlap_without_early_success(
+    monkeypatch,
+    isolated_config,
+):
     import threading
 
     from winpilot.action import verify
 
+    isolated_config({"perception": {"uia": {"enabled": True}}})
     groundtruth_started = threading.Event()
     visible_started = threading.Event()
 
@@ -934,9 +940,13 @@ def test_visible_and_groundtruth_checks_overlap_without_early_success(monkeypatc
     assert trace["checks"]["file_exists"]["ok"] is True
 
 
-def test_parallel_file_evidence_retries_until_eventually_visible(monkeypatch):
+def test_parallel_file_evidence_retries_until_eventually_visible(
+    monkeypatch,
+    isolated_config,
+):
     from winpilot.action import verify
 
+    isolated_config({"perception": {"uia": {"enabled": True}}})
     calls = {"count": 0}
 
     def check_groundtruth(key, value, timeout_s=15.0):
@@ -984,9 +994,10 @@ def test_image_file_format_rejects_extension_only_fake_success(tmp_path):
     assert "魔数不匹配" in detail
 
 
-def test_shell_true_verification_is_not_parallelized(monkeypatch):
+def test_shell_true_verification_is_not_parallelized(monkeypatch, isolated_config):
     from winpilot.action import verify
 
+    isolated_config({"perception": {"uia": {"enabled": True}}})
     order = []
 
     def find_visible(_hwnd, _needle):

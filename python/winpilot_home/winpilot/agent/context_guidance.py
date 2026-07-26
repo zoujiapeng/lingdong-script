@@ -60,6 +60,10 @@ class ContextGuidanceMixin:
             return
         api = CONFIG.get("api", default={})
         model = api.get("model", "deepseek-v4-flash")
+        planner_sequence = int(
+            getattr(self, "_legacy_planner_decision_sequence", 0) or 0
+        ) + 1
+        self._legacy_planner_decision_sequence = planner_sequence
         steps = make_plan(
             client,
             model,
@@ -67,6 +71,10 @@ class ContextGuidanceMixin:
             runtime_context=self._planning_runtime_context(),
             on_response=lambda response: self._track_aux_model_response(
                 response, purpose="planner", model=model,
+            ),
+            stop_event=getattr(self, "stop_event", None),
+            decision_id=(
+                f"{self.run_id}:legacy-planner:upfront:{planner_sequence}"
             ),
         )
         if not steps:

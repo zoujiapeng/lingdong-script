@@ -165,7 +165,8 @@ class OpenAICompatibleAdapter:
         self.profile = model_profile_from_config(self.api)
         self.chat = SimpleNamespace(completions=_CompletionsFacade(self))
 
-    def create_chat_completion(self, **kwargs: Any) -> Any:
+    def prepare_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+        """Build the exact provider request before Runtime freezes it."""
         params = dict(kwargs)
         params.setdefault("model", self.profile.model)
         extra = request_extra_body(self.api, self.profile)
@@ -175,7 +176,15 @@ class OpenAICompatibleAdapter:
                 **extra,
                 **(existing if isinstance(existing, dict) else {}),
             }
+        return params
+
+    def send_prepared_chat_completion(self, params: dict[str, Any]) -> Any:
         return self.client.chat.completions.create(**params)
+
+    def create_chat_completion(self, **kwargs: Any) -> Any:
+        return self.send_prepared_chat_completion(
+            self.prepare_chat_completion(**kwargs)
+        )
 
 
 def build_model_adapter(client: Any, api: dict[str, Any]) -> OpenAICompatibleAdapter:
