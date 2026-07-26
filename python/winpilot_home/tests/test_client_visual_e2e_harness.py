@@ -17,6 +17,15 @@ def _load_harness():
 
 
 def _state(scenario: str, details: dict, *, moves: int) -> dict:
+    ready = {
+        "case_id": "case-1",
+        "scenario": scenario,
+        "seed": 17,
+        "type": "page_ready",
+        "trusted": False,
+        "succeeded": False,
+        "details": {"succeeded": False, "event_sequence": 1},
+    }
     success = {
         "case_id": "case-1",
         "scenario": scenario,
@@ -26,7 +35,8 @@ def _state(scenario: str, details: dict, *, moves: int) -> dict:
         "pointer_type": "mouse",
         "move_count": moves,
         "succeeded": True,
-        "details": {"succeeded": True, **details},
+        "received_at": 20.0,
+        "details": {"succeeded": True, **details, "event_sequence": 2},
     }
     return {
         "ready": True,
@@ -34,8 +44,31 @@ def _state(scenario: str, details: dict, *, moves: int) -> dict:
         "case_id": "case-1",
         "scenario": scenario,
         "seed": 17,
-        "events": [success],
+        "events": [ready, success],
         "success_event": success,
+    }
+
+
+def _event(
+    scenario: str,
+    event_type: str,
+    sequence: int,
+    *,
+    trusted: bool = True,
+    succeeded: bool = False,
+    details: dict | None = None,
+) -> dict:
+    return {
+        "case_id": "case-1",
+        "scenario": scenario,
+        "seed": 17,
+        "type": event_type,
+        "trusted": trusted,
+        "succeeded": succeeded,
+        "details": {
+            **(details or {}),
+            "event_sequence": sequence,
+        },
     }
 
 
@@ -47,7 +80,18 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     )
     assert {
         item["scenario"] for item in harness.VISUAL_CASES.values()
-    } == {"drag_fit", "slider", "corridor_drag", "dynamic_hold"}
+    } == {
+        "drag_fit", "slider", "corridor_drag", "dynamic_hold",
+        "click_double_click", "bidirectional_scroll", "text_hotkey",
+        "cancel_guard",
+    }
+    assert harness.SUITES["pr15-legacy"] == (
+        "click-double-click",
+        "scroll-bidirectional",
+        "text-hotkey",
+        "dynamic-hold",
+        "stop-cancel",
+    )
     assert {
         harness.VISUAL_CASES[name]["expected_variant"]
         for name in ("corridor-v0", "corridor-v1", "game-drag-v2", "corridor-v3")
@@ -67,6 +111,9 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     assert "after_submit" in inspect.signature(
         harness.client_harness.run_case,
     ).parameters
+    assert "before_submit" in inspect.signature(
+        harness.client_harness.run_case,
+    ).parameters
     assert "seed" in inspect.signature(harness.run_visual_case).parameters
     assert "植物大战僵尸" not in " ".join(
         item["task"] for item in harness.VISUAL_CASES.values()
@@ -78,8 +125,14 @@ def test_external_verdict_requires_complete_object_placement():
     state = _state(
         "drag_fit",
         {
-            "token": {"left": 30, "top": 30, "right": 60, "bottom": 60},
-            "target": {"left": 20, "top": 20, "right": 70, "bottom": 70},
+            "token": {
+                "left": 30, "top": 30, "right": 60, "bottom": 60,
+                "width": 30, "height": 30,
+            },
+            "target": {
+                "left": 20, "top": 20, "right": 70, "bottom": 70,
+                "width": 50, "height": 50,
+            },
         },
         moves=4,
     )
@@ -117,10 +170,7 @@ def test_external_verdict_checks_slider_band_and_corridor_path():
         },
         moves=8,
     )
-    corridor["events"].insert(0, {
-        "type": "page_ready",
-        "details": {"variant": 2},
-    })
+    corridor["events"][0]["details"]["variant"] = 2
     assert harness.external_verdict(
         corridor,
         case_id="case-1",
@@ -152,10 +202,7 @@ def test_corridor_variant_zero_and_zero_clearance_are_valid():
         },
         moves=8,
     )
-    corridor["events"].insert(0, {
-        "type": "page_ready",
-        "details": {"variant": 0},
-    })
+    corridor["events"][0]["details"]["variant"] = 0
 
     verdict = harness.external_verdict(
         corridor,
@@ -181,29 +228,35 @@ def test_external_verdict_requires_one_cross_frame_held_pointer_gesture():
         },
         moves=3,
     )
-    dynamic["events"].insert(0, {
-        "type": "pointerdown",
-        "trusted": True,
-        "details": {"down_count": 1},
-    })
-    dynamic["events"].insert(1, {
-        "type": "checkpoint_reached",
-        "trusted": True,
-        "details": {"checkpoint_reached": True},
-    })
-    dynamic["events"].insert(2, {
-        "type": "pointerup",
-        "trusted": True,
-        "succeeded": True,
-        "details": {
-            "succeeded": True,
-            "down_count": 1,
-            "checkpoint_reached": True,
+    dynamic["events"][1:1] = [
+        _event(
+            "dynamic_hold",
+            "pointerdown",
+            2,
+            details={"down_count": 1},
+        ),
+        _event(
+            "dynamic_hold",
+            "checkpoint_reached",
+            3,
+            details={"checkpoint_reached": True},
+        ),
+        _event(
+            "dynamic_hold",
+            "pointerup",
+            4,
+            succeeded=True,
+            details={
+                "succeeded": True,
+                "down_count": 1,
+                "checkpoint_reached": True,
             "goal_revealed_after_down": True,
             "inside_goal": True,
-            "completion_event": "pointerup",
-        },
-    })
+                "completion_event": "pointerup",
+            },
+        ),
+    ]
+    dynamic["success_event"]["details"]["event_sequence"] = 5
 
     verdict = harness.external_verdict(
         dynamic,
@@ -213,11 +266,15 @@ def test_external_verdict_requires_one_cross_frame_held_pointer_gesture():
     )
 
     assert verdict["passed"] is True
-    dynamic["events"].insert(0, {
-        "type": "pointerdown",
-        "trusted": True,
-        "details": {"down_count": 2},
-    })
+    dynamic["events"].insert(
+        1,
+        _event(
+            "dynamic_hold",
+            "pointerdown",
+            1,
+            details={"down_count": 2},
+        ),
+    )
     failed = harness.external_verdict(
         dynamic,
         case_id="case-1",
@@ -241,14 +298,21 @@ def test_external_verdict_rejects_goal_entry_without_trusted_pointerup():
         },
         moves=5,
     )
-    dynamic["events"][:0] = [
-        {"type": "pointerdown", "trusted": True, "details": {"down_count": 1}},
-        {
-            "type": "checkpoint_reached",
-            "trusted": True,
-            "details": {"checkpoint_reached": True},
-        },
+    dynamic["events"][1:1] = [
+        _event(
+            "dynamic_hold",
+            "pointerdown",
+            2,
+            details={"down_count": 1},
+        ),
+        _event(
+            "dynamic_hold",
+            "checkpoint_reached",
+            3,
+            details={"checkpoint_reached": True},
+        ),
     ]
+    dynamic["success_event"]["details"]["event_sequence"] = 4
 
     verdict = harness.external_verdict(
         dynamic,
@@ -289,3 +353,399 @@ def test_external_verdict_rejects_agent_claim_without_trusted_pointer_event():
 
     assert verdict["passed"] is False
     assert "success event is not trusted and successful" in verdict["errors"]
+
+
+def _with_coords(event: dict, x: int, y: int) -> dict:
+    event["client_x"] = x
+    event["client_y"] = y
+    return event
+
+
+def test_click_double_click_oracle_requires_exact_targets_coords_and_counts():
+    harness = _load_harness()
+    state = _state(
+        "click_double_click",
+        {
+            "target_id": "double-target",
+            "single_click_count": 1,
+            "double_click_event_count": 2,
+            "dblclick_count": 1,
+            "wrong_click_count": 0,
+        },
+        moves=0,
+    )
+    single = {
+        "left": 10, "top": 10, "right": 110, "bottom": 70,
+        "width": 100, "height": 60,
+    }
+    double = {
+        "left": 210, "top": 10, "right": 310, "bottom": 70,
+        "width": 100, "height": 60,
+    }
+    state["events"][0]["details"].update({
+        "single_target": single,
+        "double_target": double,
+    })
+    chain = [
+        ("pointerdown", "single-target", 50, 40),
+        ("pointerup", "single-target", 50, 40),
+        ("click", "single-target", 50, 40),
+        ("pointerdown", "double-target", 250, 40),
+        ("pointerup", "double-target", 250, 40),
+        ("click", "double-target", 250, 40),
+        ("pointerdown", "double-target", 250, 40),
+        ("pointerup", "double-target", 250, 40),
+        ("click", "double-target", 250, 40),
+        ("dblclick", "double-target", 250, 40),
+    ]
+    causal = [
+        _with_coords(
+            _event(
+                "click_double_click",
+                event_type,
+                index,
+                details={"target_id": target_id},
+            ),
+            x,
+            y,
+        )
+        for index, (event_type, target_id, x, y) in enumerate(chain, start=2)
+    ]
+    state["events"][1:1] = causal
+    success = state["success_event"]
+    success["details"]["event_sequence"] = 12
+    success["client_x"] = 250
+    success["client_y"] = 40
+
+    verdict = harness.external_verdict(
+        state,
+        case_id="case-1",
+        scenario="click_double_click",
+        seed=17,
+    )
+
+    assert verdict["passed"] is True
+    assert verdict["duplicate_input_count"] == 0
+    duplicate = _with_coords(
+        _event(
+            "click_double_click",
+            "click",
+            13,
+            details={"target_id": "double-target"},
+        ),
+        250,
+        40,
+    )
+    state["events"].append(duplicate)
+    failed = harness.external_verdict(
+        state,
+        case_id="case-1",
+        scenario="click_double_click",
+        seed=17,
+    )
+    assert failed["passed"] is False
+    assert failed["duplicate_input_count"] > 0
+
+
+def test_bidirectional_scroll_oracle_requires_wheel_sign_and_scrolltop_change():
+    harness = _load_harness()
+    state = _state(
+        "bidirectional_scroll",
+        {
+            "target_id": "scroll-pane",
+            "down_wheel_count": 1,
+            "up_wheel_count": 1,
+            "observed_max_scroll_top": 900,
+            "final_scroll_top": 0,
+            "scroll_top_changed": True,
+        },
+        moves=0,
+    )
+    pane = {
+        "left": 100, "top": 50, "right": 500, "bottom": 350,
+        "width": 400, "height": 300,
+    }
+    state["events"][0]["details"].update({
+        "pane": pane,
+        "start_scroll_top": 300,
+    })
+    down = _with_coords(
+        _event(
+            "bidirectional_scroll",
+            "wheel",
+            2,
+            details={
+                "target_id": "scroll-pane",
+                "delta_y": 638,
+                "direction": "down",
+            },
+        ),
+        250,
+        180,
+    )
+    checkpoint = _event(
+        "bidirectional_scroll",
+        "scroll_checkpoint",
+        3,
+        details={"checkpoint": "bottom"},
+    )
+    bottom_state = _event(
+        "bidirectional_scroll",
+        "scroll_state",
+        4,
+        details={"scroll_top": 900},
+    )
+    up = _with_coords(
+        _event(
+            "bidirectional_scroll",
+            "wheel",
+            5,
+            details={
+                "target_id": "scroll-pane",
+                "delta_y": -900,
+                "direction": "up",
+            },
+        ),
+        250,
+        180,
+    )
+    top_state = _event(
+        "bidirectional_scroll",
+        "scroll_state",
+        6,
+        details={"scroll_top": 0},
+    )
+    state["events"][1:1] = [down, checkpoint, bottom_state, up, top_state]
+    state["success_event"]["details"]["event_sequence"] = 7
+
+    verdict = harness.external_verdict(
+        state,
+        case_id="case-1",
+        scenario="bidirectional_scroll",
+        seed=17,
+    )
+
+    assert verdict["passed"] is True
+    up["details"]["delta_y"] = 100
+    failed = harness.external_verdict(
+        state,
+        case_id="case-1",
+        scenario="bidirectional_scroll",
+        seed=17,
+    )
+    assert failed["passed"] is False
+    assert "wheel directions are not a single down-then-up transaction" in failed["errors"]
+
+
+def test_text_hotkey_oracle_rebuilds_exact_multiline_value_and_release():
+    harness = _load_harness()
+    expected = "A\nB"
+    state = _state(
+        "text_hotkey",
+        {
+            "final_text": expected,
+            "value": expected,
+            "modifier_released": True,
+            "hotkey_down_count": 1,
+            "hotkey_enter_up_count": 1,
+            "control_release_count": 1,
+            "duplicate_input_count": 0,
+        },
+        moves=0,
+    )
+    state["events"][0]["details"]["expected_text"] = expected
+    sequence = 2
+    events = []
+    for value, input_type in (
+        ("A", "insertText"),
+        ("A\n", "insertLineBreak"),
+        ("A\nB", "insertText"),
+    ):
+        events.append(_event(
+            "text_hotkey",
+            "beforeinput",
+            sequence,
+            details={"target_id": "exact-editor", "input_type": input_type},
+        ))
+        sequence += 1
+        events.append(_event(
+            "text_hotkey",
+            "input",
+            sequence,
+            details={
+                "target_id": "exact-editor",
+                "input_type": input_type,
+                "value_after": value,
+            },
+        ))
+        sequence += 1
+    for event_type, key, ctrl in (
+        ("keydown", "Control", True),
+        ("hotkey_keydown", "Enter", True),
+        ("hotkey_enter_keyup", "Enter", True),
+        ("modifier_keyup", "Control", False),
+    ):
+        events.append(_event(
+            "text_hotkey",
+            event_type,
+            sequence,
+            details={
+                "target_id": "exact-editor",
+                "key": key,
+                "ctrl_key": ctrl,
+                "shift_key": False,
+                "alt_key": False,
+                "meta_key": False,
+                "repeat": False,
+            },
+        ))
+        sequence += 1
+    state["events"][1:1] = events
+    state["success_event"]["details"]["event_sequence"] = sequence
+
+    verdict = harness.external_verdict(
+        state,
+        case_id="case-1",
+        scenario="text_hotkey",
+        seed=17,
+    )
+
+    assert verdict["passed"] is True
+    state["success_event"]["details"]["final_text"] = "A\nBB"
+    failed = harness.external_verdict(
+        state,
+        case_id="case-1",
+        scenario="text_hotkey",
+        seed=17,
+    )
+    assert failed["passed"] is False
+
+
+def test_cancel_oracle_rejects_late_proposal_and_accepts_continuous_quiet_window(
+    monkeypatch,
+):
+    harness = _load_harness()
+    cutoff = 100.0
+    physical_cutoff = 100.2
+    events = [
+        _event("cancel_guard", "page_ready", 1, trusted=False),
+        {
+            **_event(
+                "cancel_guard",
+                "cancel_checkpoint",
+                2,
+                details={
+                    "target_id": "cancel-start",
+                    "start_click_count": 1,
+                },
+            ),
+            "received_at": 99.0,
+        },
+    ]
+    for index in range(1, 82):
+        events.append({
+            **_event(
+                "cancel_guard",
+                "target_heartbeat",
+                index + 2,
+                trusted=False,
+            ),
+            "received_at": physical_cutoff + index,
+        })
+    state = {
+        "ready": True,
+        "success": False,
+        "case_id": "case-1",
+        "scenario": "cancel_guard",
+        "seed": 17,
+        "events": events,
+    }
+    stream_events = [
+        {
+            "type": "agent_decision",
+            "ts": 101.0,
+            "ok": False,
+            "canceled": True,
+            "_observed_at": 101.0,
+        },
+        *[
+            {"type": "ping", "_observed_at": physical_cutoff + index}
+            for index in range(1, 82)
+        ],
+    ]
+    evidence = {
+        "stop": {
+            "requested_stop": True,
+            "run_button_restored": True,
+            "runtime_stopped": True,
+            "click_started_at": cutoff,
+            "click_finished_at": physical_cutoff,
+            "confirmed_at": 101.0,
+            "stop_control": {
+                "name": "停止",
+                "control_type": "ButtonControl",
+                "visible": True,
+                "rectangle": {
+                    "left": 10, "top": 10, "right": 80, "bottom": 40,
+                },
+            },
+        },
+        "inflight_model_request": {"observed": True},
+        "quiet_input_hook": {
+            "started_at": 90.0,
+            "stopped_at": 181.0,
+            "events": [],
+            "errors": [],
+        },
+        "foreground_samples": [{"at": 101.0, "hwnd": 22}],
+        "expected_foreground_hwnd": 22,
+        "quiet_elapsed_seconds": 80.1,
+        "target_after_quiet": {
+            "print_window_succeeded": True,
+            "visually_nonblank": True,
+        },
+        "modifier_state_after_quiet": {},
+        "runtime_event_stream": {"events": stream_events, "errors": []},
+    }
+    client_result = {
+        "result": {"outcome": "terminal", "status": "canceled"},
+        "product": {"request_total_timeout_s": 75},
+        "trace_binding": {"child_run_ids": ["child-1"]},
+    }
+    monkeypatch.setattr(
+        harness,
+        "_debug_timeline",
+        lambda _run_id: [
+            {"kind": "llm_abandoned", "mtime": 101.0, "index": 3},
+        ],
+    )
+
+    verdict = harness.cancel_external_verdict(
+        state,
+        client_result,
+        evidence,
+        case_id="case-1",
+        scenario="cancel_guard",
+        seed=17,
+        quiet_seconds=80.0,
+    )
+
+    assert verdict["passed"] is True
+    evidence["runtime_event_stream"]["events"].append({
+        "type": "agent_decision",
+        "ts": 102.0,
+        "ok": True,
+        "canceled": False,
+        "_observed_at": 102.0,
+    })
+    failed = harness.cancel_external_verdict(
+        state,
+        client_result,
+        evidence,
+        case_id="case-1",
+        scenario="cancel_guard",
+        seed=17,
+        quiet_seconds=80.0,
+    )
+    assert failed["passed"] is False
+    assert failed["late_model_proposal_count"] == 1

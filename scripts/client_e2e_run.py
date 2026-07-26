@@ -11,9 +11,11 @@ desktop agent while it works.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -31,8 +33,11 @@ from PIL import ImageGrab
 
 
 WORKSPACE = Path(__file__).resolve().parents[1]
+PRODUCT_WORKSPACE = Path(
+    os.environ.get("WINPILOT_E2E_PRODUCT_WORKSPACE") or WORKSPACE
+).resolve()
 DEFAULT_OUTPUT = WORKSPACE / "output" / "playwright" / "client-e2e"
-TRACE_ROOT = WORKSPACE / "python" / "winpilot_home" / "traces"
+TRACE_ROOT = PRODUCT_WORKSPACE / "python" / "winpilot_home" / "traces"
 
 CLIENT_TITLE = "灵动脚本"
 NAV_AGENT = "智能代理"
@@ -137,6 +142,47 @@ class ClientIdentity:
     workspace_verified: bool
 
 
+def product_metadata() -> dict[str, Any]:
+    """Return non-secret provenance for the separately tested product tree."""
+
+    revision = subprocess.check_output(
+        ["git", "-C", str(PRODUCT_WORKSPACE), "rev-parse", "HEAD"],
+        text=True,
+        encoding="utf-8",
+    ).strip()
+    tracked_status = subprocess.check_output(
+        [
+            "git", "-C", str(PRODUCT_WORKSPACE), "status",
+            "--porcelain", "--untracked-files=normal",
+        ],
+        text=True,
+        encoding="utf-8",
+    ).strip()
+    config_path = PRODUCT_WORKSPACE / "python" / "winpilot_home" / "config.json"
+    config_hash = ""
+    api: dict[str, Any] = {}
+    if config_path.is_file():
+        raw = config_path.read_bytes()
+        config_hash = hashlib.sha256(raw).hexdigest()
+        parsed = json.loads(raw.decode("utf-8"))
+        if isinstance(parsed, dict) and isinstance(parsed.get("api"), dict):
+            api = dict(parsed["api"])
+    return {
+        "harness_workspace": str(WORKSPACE),
+        "product_workspace": str(PRODUCT_WORKSPACE),
+        "product_revision": revision,
+        "worktree_clean": not tracked_status,
+        "tracked_worktree_clean": not tracked_status,
+        "config_sha256": config_hash,
+        "provider": str(api.get("provider") or ""),
+        "base_url": str(api.get("base_url") or ""),
+        "model": str(api.get("model") or ""),
+        "request_timeout_s": api.get("request_timeout_s"),
+        "request_total_timeout_s": api.get("request_total_timeout_s"),
+        "configured_max_retries": api.get("max_retries"),
+    }
+
+
 def _slug(value: str) -> str:
     safe = re.sub(r"[^0-9A-Za-z._-]+", "-", value).strip("-")
     return safe[:80] or "case"
@@ -206,9 +252,10 @@ class ElectronClientDriver:
         command_line = process.cmdline()
         executable = process.exe()
         workspace_verified = any(
-            str(WORKSPACE).lower() in arg.lower() for arg in command_line
+            str(PRODUCT_WORKSPACE).lower() in arg.lower() for arg in command_line
         ) or process.parent() is not None and any(
-            str(WORKSPACE).lower() in arg.lower() for arg in process.parent().cmdline()
+            str(PRODUCT_WORKSPACE).lower() in arg.lower()
+            for arg in process.parent().cmdline()
         )
         self.identity = ClientIdentity(
             pid=process.pid,
@@ -509,8 +556,27 @@ class ElectronClientDriver:
             pass
         self.restore_and_focus()
         requested = False
+        click_started_at = 0.0
+        click_finished_at = 0.0
+        stop_control: dict[str, Any] = {}
         try:
-            self.button(STOP_TASK).Click()
+            control = self.button(STOP_TASK)
+            rectangle = control.BoundingRectangle
+            stop_control = {
+                "name": str(control.Name or ""),
+                "control_type": str(control.ControlTypeName or ""),
+                "automation_id": str(control.AutomationId or ""),
+                "rectangle": {
+                    "left": int(rectangle.left),
+                    "top": int(rectangle.top),
+                    "right": int(rectangle.right),
+                    "bottom": int(rectangle.bottom),
+                },
+                "visible": not bool(control.IsOffscreen),
+            }
+            click_started_at = time.time()
+            control.Click()
+            click_finished_at = time.time()
             requested = True
         except RuntimeError:
             # The run may have become terminal between the status poll and
@@ -533,8 +599,13 @@ class ElectronClientDriver:
             if run_button_restored and runtime_stopped:
                 break
             time.sleep(0.5)
+        confirmed_at = time.time() if run_button_restored and runtime_stopped else 0.0
         return {
             "requested_stop": requested,
+            "click_started_at": click_started_at,
+            "click_finished_at": click_finished_at,
+            "confirmed_at": confirmed_at,
+            "stop_control": stop_control,
             "run_button_restored": run_button_restored,
             "runtime_stopped": runtime_stopped,
             "runtime_before": before,
@@ -840,6 +911,16 @@ def _bound_trace_evidence(run_id: str, task: str) -> dict[str, Any]:
         "run_id": run_id,
         "trace_ids": [path.stem] if path is not None else [],
         "trace_file": str(path) if path is not None else "",
+        "outer_run_ids": sorted({
+            str(event.get("run_id") or "")
+            for event in starts
+            if str(event.get("run_id") or "")
+        }),
+        "child_run_ids": sorted({
+            str(event.get("run_id") or "")
+            for event in agent_starts
+            if str(event.get("run_id") or "")
+        }),
         "start_event_count": len(starts),
         "agent_start_count": len(agent_starts),
         "matching_trace_count": len(matched_paths),
@@ -1027,6 +1108,8 @@ def _case_execution_valid(result: dict[str, Any]) -> bool:
             and (result.get("execution_evidence") or {}).get("persistent_ready") is True
         )
         if expected == "persistent"
+        else outcome == "terminal" and status == "canceled"
+        if expected == "canceled"
         else outcome == "terminal" and status == "done"
     )
     return bool(
@@ -1057,6 +1140,8 @@ def run_case(
     *,
     output_root: Path,
     reset_session: bool,
+    before_submit: Callable[[ElectronClientDriver, dict[str, Any]], dict[str, Any] | None]
+    | None = None,
     after_submit: Callable[[ElectronClientDriver, dict[str, Any]], dict[str, Any] | None]
     | None = None,
     independent_verifier: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
@@ -1072,6 +1157,7 @@ def run_case(
         "expected": spec.get("expected", "terminal"),
         "started_at": datetime.now().astimezone().isoformat(),
         "client": asdict(driver.identity),
+        "product": product_metadata(),
         "client_renderer_reloaded": driver.renderer_reloaded,
         "entrypoint": "electron_client_windows_uia",
     }
@@ -1093,6 +1179,10 @@ def run_case(
         result["screenshots"] = {
             "before_submit": driver.capture_window("before-submit.png")
         }
+        if before_submit is not None:
+            preparation = before_submit(driver, result)
+            if preparation is not None:
+                result["before_submit_preparation"] = preparation
         driver.button(RUN_TASK).Click()
         submitted_at = time.time()
         result["submitted_at"] = datetime.now().astimezone().isoformat()

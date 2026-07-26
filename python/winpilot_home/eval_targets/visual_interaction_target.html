@@ -45,6 +45,33 @@
       box-shadow: 0 5px 13px rgba(47,125,221,.27); }
     .sequence-marker.complete { border-color: #148052; background: #24a66d; }
     .sequence-distractor { border: 4px solid #6d7785; background: #cbd1d9; color: #4b5563; }
+    .click-target { position: absolute; width: 150px; height: 92px; border: 5px solid;
+      border-radius: 18px; color: #fff; font-size: 19px; font-weight: 900; cursor: pointer;
+      box-shadow: 0 7px 18px rgba(26,44,75,.24); }
+    .single-target { border-color: #075b62; background: #0f9aa5; }
+    .double-target { border-color: #74105e; background: #c2399e; }
+    .click-distractor { position: absolute; width: 118px; height: 76px; border: 4px solid #6d7785;
+      border-radius: 16px; background: #cbd1d9; color: #4b5563; font-size: 17px; font-weight: 800; }
+    .scroll-pane { position: absolute; overflow-y: auto; overscroll-behavior: contain; border: 5px solid #2e4668;
+      border-radius: 14px; background: #fff; scrollbar-width: auto; }
+    .scroll-content { position: relative; width: 100%; background:
+      repeating-linear-gradient(0deg,#f5f8fc 0 54px,#e8eef7 54px 108px); }
+    .scroll-marker { position: absolute; left: 42px; right: 42px; height: 78px; display: grid;
+      place-items: center; border: 5px solid; border-radius: 15px; font-size: 20px; font-weight: 900; }
+    .scroll-top-marker { top: 22px; border-color: #6f2ca0; background: #f2e4fb; color: #592078; }
+    .scroll-bottom-marker { bottom: 22px; border-color: #b55a00; background: #fff0d7; color: #8a4200; }
+    .text-card { position: absolute; inset: 24px; padding: 18px; border: 3px solid #53677f;
+      border-radius: 14px; background: #fff; }
+    .exact-payload { margin: 8px 0 12px; padding: 10px 13px; border-radius: 8px;
+      background: #1f2937; color: #fff; font: 18px/1.45 ui-monospace, Consolas, monospace;
+      white-space: pre-wrap; user-select: text; }
+    .exact-editor { width: 100%; height: 150px; padding: 12px; resize: none; border: 4px solid #2563a7;
+      border-radius: 10px; font: 19px/1.45 ui-monospace, Consolas, monospace; background: #f9fbff; }
+    .cancel-target { position: absolute; width: 180px; height: 100px; border: 6px solid #7b2400;
+      border-radius: 20px; background: #ef6c2f; color: #fff; font-size: 22px; font-weight: 900;
+      cursor: pointer; box-shadow: 0 8px 20px rgba(130,45,8,.28); }
+    .cancel-next { border-color: #0b5d3d; background: #1b9b69; }
+    .concealed { visibility: hidden; opacity: 0; }
     .slider-track { position: absolute; height: 18px; border-radius: 10px; background: #c8d1df;
       border: 2px solid #697890; }
     .goal-band { position: absolute; top: -32px; height: 80px; border: 4px solid #158954;
@@ -92,6 +119,7 @@
     const status = document.getElementById('status');
     let readyDetails = {};
     let moveCount = 0;
+    let reportSequence = 0;
 
     function rngFactory(value) {
       let a = value || 0x6d2b79f5;
@@ -105,13 +133,15 @@
       bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height),
     }; };
     function report(type, event, details = {}) {
+      const eventSequence = ++reportSequence;
       const payload = { case_id: caseId, scenario, seed, type,
         trusted: Boolean(event && event.isTrusted), pointer_type: event && event.pointerType || '',
         client_x: event && Math.round(event.clientX) || 0,
         client_y: event && Math.round(event.clientY) || 0,
         screen_x: event && Math.round(event.screenX) || 0,
         screen_y: event && Math.round(event.screenY) || 0,
-        move_count: moveCount, succeeded: Boolean(details.succeeded), details };
+        move_count: moveCount, succeeded: Boolean(details.succeeded),
+        details: {...details, event_sequence:eventSequence} };
       return fetch('/event', {method:'POST', headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload), cache:'no-store'}).catch(() => {});
     }
@@ -206,6 +236,66 @@
       readyDetails={required_sequence:required,targets:targets.map(box),distractor_count:3};
     }
 
+    function setupClickDoubleClick() {
+      heading.textContent='Trusted Click Identity';
+      instruction.textContent='First click the teal SINGLE target exactly once. Then double-click the magenta DOUBLE target exactly once. Do not click gray distractors.';
+      const W=arena.clientWidth,H=arena.clientHeight;
+      const positions=[
+        {x:Math.round(between(45,W*.32)),y:Math.round(between(55,H-150))},
+        {x:Math.round(between(W*.58,W-190)),y:Math.round(between(55,H-150))},
+        {x:Math.round(between(W*.34,W*.48)),y:Math.round(between(55,H-120))},
+      ];
+      if(rng()>.5)[positions[0],positions[1]]=[positions[1],positions[0]];
+      const single=document.createElement('button');single.className='click-target single-target';
+      single.textContent='SINGLE · CLICK ONCE';single.dataset.targetId='single-target';
+      const double=document.createElement('button');double.className='click-target double-target';
+      double.textContent='DOUBLE · DOUBLE-CLICK';double.dataset.targetId='double-target';
+      const distractor=document.createElement('button');distractor.className='click-distractor';
+      distractor.textContent='IGNORE';distractor.dataset.targetId='distractor';
+      place(single,positions[0].x,positions[0].y,150,92);
+      place(double,positions[1].x,positions[1].y,150,92);
+      place(distractor,positions[2].x,positions[2].y,118,76);
+      arena.append(single,double,distractor);
+      let phase='single',singleClicks=0,doubleClicks=0,doubleDblClicks=0,wrongClicks=0;
+      const identity=(event,element)=>({
+        target_id:element.dataset.targetId,target:box(element),phase,
+        single_click_count:singleClicks,double_click_event_count:doubleClicks,
+        dblclick_count:doubleDblClicks,wrong_click_count:wrongClicks,
+      });
+      for(const element of [single,double,distractor]){
+        element.addEventListener('pointerdown',event=>report('pointerdown',event,identity(event,element)));
+        element.addEventListener('pointerup',event=>report('pointerup',event,identity(event,element)));
+      }
+      single.addEventListener('click',event=>{
+        singleClicks++;report('click',event,identity(event,single));
+        if(!event.isTrusted||phase!=='single'||singleClicks!==1){
+          wrongClicks++;markFailure('SINGLE_CLICK_COUNT_OR_ORDER_INVALID',event,identity(event,single));return;
+        }
+        phase='double';single.classList.add('complete');
+        status.className='status';status.textContent='SINGLE_OK — NOW DOUBLE-CLICK THE MAGENTA TARGET';
+      });
+      double.addEventListener('click',event=>{
+        doubleClicks++;report('click',event,identity(event,double));
+        if(!event.isTrusted||phase!=='double'||doubleClicks>2){
+          wrongClicks++;markFailure('DOUBLE_TARGET_CLICK_COUNT_OR_ORDER_INVALID',event,identity(event,double));
+        }
+      });
+      double.addEventListener('dblclick',event=>{
+        doubleDblClicks++;const details=identity(event,double);
+        report('dblclick',event,details);
+        const succeeded=event.isTrusted&&phase==='double'&&singleClicks===1&&
+          doubleClicks===2&&doubleDblClicks===1&&wrongClicks===0;
+        if(succeeded)markSuccess('CLICK_AND_DOUBLE_CLICK_SUCCEEDED',event,{...details,succeeded:true});
+        else markFailure('DOUBLE_CLICK_TRANSACTION_INVALID',event,{...details,succeeded:false});
+      });
+      distractor.addEventListener('click',event=>{
+        wrongClicks++;report('wrong_click',event,identity(event,distractor));
+        markFailure('DISTRACTOR_CLICKED',event,{...identity(event,distractor),succeeded:false});
+      });
+      readyDetails={single_target:box(single),double_target:box(double),distractor:box(distractor),
+        required_single_clicks:1,required_double_click_events:2,required_dblclicks:1};
+    }
+
     function setupSlider() {
       heading.textContent='Precision Slider'; instruction.textContent='Drag the orange knob into the striped green GOAL band.';
       const W=arena.clientWidth, x0=95, width=W-190, y=Math.round(arena.clientHeight/2);
@@ -225,6 +315,47 @@
         const details={succeeded,knob:box(knob),goal:box(band),center_x:Math.round(cx)};
         if(succeeded)markSuccess('SLIDER_SUCCEEDED',event,details);else markFailure('SLIDER_MISSED_GOAL',event,details);});
       readyDetails={knob:box(knob),goal:box(band)};
+    }
+
+    function setupBidirectionalScroll() {
+      heading.textContent='Bidirectional Trusted Wheel';
+      instruction.textContent='Inside the bordered scroll panel: scroll DOWN until the orange BOTTOM checkpoint is visible, then scroll UP until the purple TOP finish marker is visible.';
+      arena.style.touchAction='auto';
+      const pane=document.createElement('div');pane.className='scroll-pane';pane.dataset.targetId='scroll-pane';
+      place(pane,Math.round(between(110,180)),24,Math.round(between(620,700)),338);
+      const content=document.createElement('div');content.className='scroll-content';content.style.height='1320px';
+      const top=document.createElement('div');top.className='scroll-marker scroll-top-marker';top.textContent='TOP · FINISH HERE';
+      const bottom=document.createElement('div');bottom.className='scroll-marker scroll-bottom-marker';bottom.textContent='BOTTOM · REVERSE DIRECTION';
+      content.append(top,bottom);pane.append(content);arena.append(pane);
+      const startTop=Math.round(between(260,360));pane.scrollTop=startTop;
+      let phase='down',downWheelCount=0,upWheelCount=0,maxTop=startTop,lastDelta=0,scrollEventCount=0;
+      const geometry=()=>({target_id:'scroll-pane',target:box(pane),phase,start_scroll_top:startTop,
+        scroll_top:Math.round(pane.scrollTop),max_scroll_top:Math.round(pane.scrollHeight-pane.clientHeight),
+        observed_max_scroll_top:Math.round(maxTop),down_wheel_count:downWheelCount,
+        up_wheel_count:upWheelCount,scroll_event_count:scrollEventCount,last_delta_y:Math.round(lastDelta)});
+      pane.addEventListener('wheel',event=>{
+        lastDelta=event.deltaY;
+        if(event.deltaY>0)downWheelCount++;
+        if(event.deltaY<0)upWheelCount++;
+        report('wheel',event,{...geometry(),delta_y:Math.round(event.deltaY),
+          direction:event.deltaY>0?'down':event.deltaY<0?'up':'none'});
+      },{passive:true});
+      pane.addEventListener('scroll',event=>{
+        scrollEventCount++;maxTop=Math.max(maxTop,pane.scrollTop);
+        if(phase==='down'&&pane.scrollTop>=pane.scrollHeight-pane.clientHeight-35){
+          phase='up';status.className='status';status.textContent='BOTTOM_REACHED — NOW SCROLL UP TO TOP';
+          report('scroll_checkpoint',event,{...geometry(),checkpoint:'bottom'});
+        }
+        const details=geometry();
+        report('scroll_state',event,details);
+        if(phase==='up'&&downWheelCount>0&&upWheelCount>0&&pane.scrollTop<=24&&
+          maxTop-startTop>=250){
+          markSuccess('BIDIRECTIONAL_SCROLL_SUCCEEDED',event,{...details,succeeded:true,
+            final_scroll_top:Math.round(pane.scrollTop),scroll_top_changed:true});
+        }
+      });
+      readyDetails={target_id:'scroll-pane',pane:box(pane),start_scroll_top:startTop,
+        max_scroll_top:pane.scrollHeight-pane.clientHeight};
     }
 
     function distanceToSegment(p,a,b){const dx=b.x-a.x,dy=b.y-a.y,l2=dx*dx+dy*dy||1;
@@ -306,6 +437,98 @@
       readyDetails={token:box(token),checkpoint:box(checkpointEl),goal_initially_hidden:true};
     }
 
+    function setupTextHotkey() {
+      heading.textContent='Exact Text and Modifier Release';
+      const token=String(seed%100000).padStart(5,'0');
+      const expected=`PR15 LEGACY ${token}\nINPUT EXACT ${String((seed*17)%100000).padStart(5,'0')}`;
+      instruction.textContent='Type the exact two-line payload shown below into the editor, including the newline. Then press Ctrl+Enter exactly once to submit.';
+      arena.style.touchAction='auto';arena.style.userSelect='text';
+      const card=document.createElement('div');card.className='text-card';
+      const label=document.createElement('div');label.textContent='EXACT PAYLOAD (two lines):';label.style.fontWeight='900';
+      const payload=document.createElement('pre');payload.className='exact-payload';payload.textContent=expected;
+      const editor=document.createElement('textarea');editor.className='exact-editor';editor.dataset.targetId='exact-editor';
+      editor.setAttribute('aria-label','Exact payload editor');editor.spellcheck=false;
+      card.append(label,payload,editor);arena.append(card);
+      let inputEventCount=0,hotkeyDownCount=0,hotkeyEnterUpCount=0,controlReleaseCount=0;
+      const keyboard=(event)=>({target_id:'exact-editor',key:event.key||'',code:event.code||'',
+        ctrl_key:Boolean(event.ctrlKey),shift_key:Boolean(event.shiftKey),alt_key:Boolean(event.altKey),
+        meta_key:Boolean(event.metaKey),repeat:Boolean(event.repeat),value:editor.value,input_event_count:inputEventCount,
+        hotkey_down_count:hotkeyDownCount,hotkey_enter_up_count:hotkeyEnterUpCount,
+        control_release_count:controlReleaseCount,expected_text:expected});
+      editor.addEventListener('beforeinput',event=>report('beforeinput',event,{...keyboard(event),
+        input_type:event.inputType||'',data:event.data||'',value_before:editor.value}));
+      editor.addEventListener('input',event=>{
+        inputEventCount++;report('input',event,{...keyboard(event),input_type:event.inputType||'',
+          data:event.data||'',value_after:editor.value});
+      });
+      for(const forbiddenType of ['paste','cut','drop','compositionstart','compositionupdate','compositionend']){
+        editor.addEventListener(forbiddenType,event=>report(forbiddenType,event,keyboard(event)));
+      }
+      editor.addEventListener('keydown',event=>{
+        if(event.key==='Enter'&&event.ctrlKey){
+          event.preventDefault();hotkeyDownCount++;
+          report('hotkey_keydown',event,keyboard(event));
+          if(hotkeyDownCount>1)markFailure('HOTKEY_REPEATED',event,{...keyboard(event),succeeded:false});
+        }else report('keydown',event,keyboard(event));
+      });
+      editor.addEventListener('keyup',event=>{
+        if(event.key==='Enter'&&event.ctrlKey){
+          hotkeyEnterUpCount++;report('hotkey_enter_keyup',event,keyboard(event));return;
+        }
+        if(event.key==='Control'&&hotkeyDownCount>0){
+          controlReleaseCount++;const details=keyboard(event);
+          report('modifier_keyup',event,details);
+          const succeeded=event.isTrusted&&event.ctrlKey===false&&editor.value===expected&&
+            inputEventCount>0&&hotkeyDownCount===1&&hotkeyEnterUpCount===1&&controlReleaseCount===1;
+          if(succeeded)markSuccess('TEXT_AND_HOTKEY_SUCCEEDED',event,{...details,succeeded:true,
+            final_text:editor.value,modifier_released:true,duplicate_input_count:0});
+          else markFailure('TEXT_HOTKEY_OR_RELEASE_INVALID',event,{...details,succeeded:false,
+            final_text:editor.value,modifier_released:event.ctrlKey===false});
+          return;
+        }
+        report('keyup',event,keyboard(event));
+      });
+      readyDetails={target_id:'exact-editor',editor:box(editor),expected_text:expected,
+        expected_line_count:2,required_hotkey:'Control+Enter'};
+    }
+
+    function setupCancelGuard() {
+      heading.textContent='Cancellation Guard';
+      instruction.textContent='Click the orange START target once. A green NEXT target appears shortly afterward; continue only while the task is still running.';
+      const W=arena.clientWidth,H=arena.clientHeight;
+      const start=document.createElement('button');start.className='cancel-target';start.textContent='START · CLICK ONCE';
+      start.dataset.targetId='cancel-start';
+      const next=document.createElement('button');next.className='cancel-target cancel-next concealed';next.textContent='NEXT · CLICK';
+      next.dataset.targetId='cancel-next';
+      place(start,Math.round(between(90,W*.35)),Math.round(between(100,H-150)),180,100);
+      place(next,Math.round(between(W*.62,W-230)),Math.round(between(90,H-150)),180,100);
+      arena.append(start,next);
+      let startClicks=0,nextClicks=0,checkpointAt=0;
+      const details=(element)=>({target_id:element.dataset.targetId,target:box(element),
+        start_click_count:startClicks,next_click_count:nextClicks,checkpoint_at:checkpointAt});
+      for(const element of [start,next]){
+        element.addEventListener('pointerdown',event=>report('pointerdown',event,details(element)));
+        element.addEventListener('pointerup',event=>report('pointerup',event,details(element)));
+      }
+      start.addEventListener('click',event=>{
+        startClicks++;checkpointAt=Date.now()/1000;
+        report('cancel_checkpoint',event,{...details(start),checkpoint_reached:true});
+        status.className='status';status.textContent='CHECKPOINT_REACHED — WAITING FOR NEXT';
+        start.disabled=true;
+        setTimeout(()=>{
+          next.classList.remove('concealed');
+          report('next_revealed',null,{...details(next),revealed:true});
+        },850);
+      });
+      next.addEventListener('click',event=>{
+        nextClicks++;report('post_checkpoint_input',event,{...details(next),succeeded:false});
+        markFailure('INPUT_RECEIVED_AFTER_CANCEL_CHECKPOINT',event,{...details(next),succeeded:false});
+      });
+      setInterval(()=>report('target_heartbeat',null,{...details(next),alive:true}),1000);
+      readyDetails={start_target:box(start),next_target_initially_hidden:true,
+        checkpoint_event:'cancel_checkpoint',post_checkpoint_event:'post_checkpoint_input'};
+    }
+
     function setupSharedTurn() {
       heading.textContent='Shared Visual Turn';
       instruction.innerHTML='Continue the visible shared drawing game. Draw your move with pointer strokes inside one empty cell. <span class="black">USER: BLACK O</span> &nbsp; <span class="red">YOU: RED X</span>';
@@ -334,7 +557,10 @@
       readyDetails={board:box(canvas),user_cell:userCell,cell_size:cell,legend:box(legend)};
     }
 
-    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn};
+    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,
+      click_double_click:setupClickDoubleClick,slider:setupSlider,bidirectional_scroll:setupBidirectionalScroll,
+      corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,text_hotkey:setupTextHotkey,
+      cancel_guard:setupCancelGuard,shared_turn:setupSharedTurn};
     (setups[scenario]||setupDragFit)();
     requestAnimationFrame(()=>requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
       viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails})));
