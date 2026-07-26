@@ -1414,7 +1414,13 @@ def test_broker_is_frozen_and_package_is_pure_default_unreachable() -> None:
     home = Path(__file__).resolve().parents[1]
     package = home / "winpilot" / "vnext" / "capabilities"
     files = tuple(sorted(path.name for path in package.glob("*.py")))
-    assert files == ("__init__.py", "broker.py", "contracts.py", "state.py")
+    assert files == (
+        "__init__.py",
+        "argument_validation.py",
+        "broker.py",
+        "contracts.py",
+        "state.py",
+    )
     source = "\n".join(
         path.read_text(encoding="utf-8") for path in package.glob("*.py")
     )
@@ -1445,12 +1451,15 @@ def test_broker_is_frozen_and_package_is_pure_default_unreachable() -> None:
                         "__future__",
                         "dataclasses",
                         "enum",
+                        "jsonschema",
+                        "jsonschema.exceptions",
                         "types",
                         "typing",
                     }
                 else:
                     root = (node.module or "").split(".", 1)[0]
                     assert root in {
+                        "argument_validation",
                         "broker",
                         "capability_names",
                         "contracts",
