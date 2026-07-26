@@ -94,9 +94,12 @@ def _json_copy(
             )
         return value
     if type(value) is float:
-        if math.isfinite(value):
+        if math.isfinite(value) and abs(value) <= _MAX_INTEGER:
             return 0.0 if value == 0.0 else value
-        raise ValueError(f"non-finite number at {_display_path(path)}")
+        raise ValueError(
+            f"float outside finite signed 64-bit range at "
+            f"{_display_path(path)}"
+        )
     if type(value) not in (dict, list):
         raise ValueError(f"non-JSON value at {_display_path(path)}")
 
