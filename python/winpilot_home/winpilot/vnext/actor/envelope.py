@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 import re
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Mapping
 
 from pydantic import (
     BaseModel,
@@ -32,6 +32,13 @@ from ..mission import (
     MissionReducer,
     MissionStatus,
 )
+from ..json_contract import (
+    BoundedJSONError,
+    MAX_JSON_ARRAY_ITEMS,
+    MAX_SIGNED_64,
+    MIN_SIGNED_64,
+    bounded_json_copy,
+)
 from ..profiling import ExecutionProfile
 from .proposals import (
     ActorProposal,
@@ -50,11 +57,10 @@ from .proposals import (
 ACTOR_ENVELOPE_FORMAT = "actor-envelope/1"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_MAX_INTEGER = (1 << 63) - 1
-_MAX_ARRAY_ITEMS = 4096
+_MAX_INTEGER = MAX_SIGNED_64
 _SIGNED_INT = Annotated[
     int,
-    Field(strict=True, ge=-_MAX_INTEGER, le=_MAX_INTEGER),
+    Field(strict=True, ge=MIN_SIGNED_64, le=MAX_SIGNED_64),
 ]
 _POSITIVE_INT = Annotated[
     int,
@@ -75,9 +81,9 @@ class InvalidActorAdmission(InvalidActorEnvelope):
 
 
 def _identity(value: Any, name: str) -> str:
-    if type(value) is not str or not _ID.fullmatch(value.strip()):
+    if type(value) is not str or not _ID.fullmatch(value):
         raise ValueError(f"{name} is not a valid Runtime identity")
-    return value.strip()
+    return value
 
 
 def _identities(value: Any, name: str) -> tuple[str, ...]:
@@ -85,7 +91,7 @@ def _identities(value: Any, name: str) -> tuple[str, ...]:
         value, (list, tuple)
     ):
         raise ValueError(f"{name} must be an array")
-    if len(value) > _MAX_ARRAY_ITEMS:
+    if len(value) > MAX_JSON_ARRAY_ITEMS:
         raise ValueError(f"{name} exceeds the array item limit")
     result = tuple(_identity(item, f"{name}[]") for item in value)
     if len(result) != len(set(result)):
@@ -98,7 +104,7 @@ def _ordered_identities(value: Any, name: str) -> tuple[str, ...]:
         value, (list, tuple)
     ):
         raise ValueError(f"{name} must be an array")
-    if len(value) > _MAX_ARRAY_ITEMS:
+    if len(value) > MAX_JSON_ARRAY_ITEMS:
         raise ValueError(f"{name} exceeds the array item limit")
     result = tuple(_identity(item, f"{name}[]") for item in value)
     if len(result) != len(set(result)):
@@ -135,7 +141,7 @@ def _frame_region(value: Any) -> tuple[int, int, int, int]:
     for coordinate, name in ((x, "x"), (y, "y")):
         if (
             type(coordinate) is not int
-            or coordinate < -_MAX_INTEGER
+            or coordinate < MIN_SIGNED_64
             or coordinate > _MAX_INTEGER
         ):
             raise ValueError(f"frame_region.{name} must be a signed integer")
@@ -313,7 +319,7 @@ class ActorDecisionEnvelope(BaseModel):
     frame_image_sha256: str
     target_binding_id: str
     pointer_disposition: Literal["released"]
-    pointer_lease_id: None = None
+    pointer_lease_id: None
     broker_projection_id: str
     capability_grant_ids: tuple[str, ...]
     allowed_evidence_scope: tuple[str, ...]
@@ -381,7 +387,7 @@ class ActorDecisionEnvelope(BaseModel):
     def _validated_copy(self) -> "ActorDecisionEnvelope":
         raw = BaseModel.model_dump(self, mode="json")
         try:
-            return ActorDecisionEnvelope.model_validate(raw)
+            return ActorDecisionEnvelope.from_dict(raw)
         except Exception as exc:
             raise InvalidActorEnvelope(
                 "ActorDecisionEnvelope instance is not canonical"
@@ -422,10 +428,19 @@ class ActorDecisionEnvelope(BaseModel):
         raw = self.to_dict()
         if update is not None:
             if type(update) is not dict:
-                raise InvalidActorEnvelope("model_copy update must be plain JSON")
-            raw.update(update)
+                raise InvalidActorEnvelope(
+                    "model_copy update must be a plain JSON object"
+                )
+            try:
+                copied_update = bounded_json_copy(update)
+            except (BoundedJSONError, RecursionError) as exc:
+                raise InvalidActorEnvelope(
+                    "model_copy update violates the bounded JSON contract: "
+                    f"{exc}"
+                ) from exc
+            raw.update(copied_update)
         try:
-            return ActorDecisionEnvelope.model_validate(raw)
+            return ActorDecisionEnvelope.from_dict(raw)
         except Exception as exc:
             raise InvalidActorEnvelope(
                 "model_copy update does not form a canonical envelope"
@@ -475,13 +490,27 @@ class ActorDecisionEnvelope(BaseModel):
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ActorDecisionEnvelope":
-        if type(raw) is not dict or "format" not in raw:
+        if type(raw) is not dict:
             raise InvalidActorEnvelope(
-                "ActorDecisionEnvelope requires a plain object with "
-                "explicit format"
+                "ActorDecisionEnvelope requires a plain JSON object"
             )
         try:
-            return cls.model_validate(raw)
+            value = bounded_json_copy(raw)
+        except (BoundedJSONError, RecursionError) as exc:
+            raise InvalidActorEnvelope(
+                "ActorDecisionEnvelope violates the bounded JSON contract: "
+                f"{exc}"
+            ) from exc
+        expected = set(cls.model_fields)
+        keys = set(value)
+        if keys != expected:
+            raise InvalidActorEnvelope(
+                "ActorDecisionEnvelope fields mismatch: "
+                f"missing={sorted(expected - keys)!r}, "
+                f"unknown={sorted(keys - expected)!r}"
+            )
+        try:
+            return cls.model_validate(value)
         except Exception as exc:
             raise InvalidActorEnvelope(str(exc)) from exc
 
