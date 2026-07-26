@@ -14,6 +14,13 @@ from winpilot.vnext.capability_names import (
     InvalidCapability,
     canonical_capabilities,
 )
+from winpilot.vnext.json_contract import (
+    MAX_JSON_ARRAY_ITEMS,
+    MAX_JSON_DEPTH,
+    MAX_JSON_KEY_LENGTH,
+    MAX_JSON_STRING_LENGTH,
+    MAX_SIGNED_64,
+)
 from winpilot.vnext.profiling import (
     CognitiveServices,
     DEFAULT_CAPABILITY_CATALOG,
@@ -21,6 +28,7 @@ from winpilot.vnext.profiling import (
     ExecutionPolicy,
     ExecutionProfile,
     InvalidProfileSchema,
+    ProfileTrigger,
     TaskDimensions,
     TaskProfileProposal,
     UnsupportedCapability,
@@ -66,6 +74,159 @@ def test_contracts_are_strict_versioned_and_round_trip_canonically() -> None:
         ExecutionProfile.from_dict({**profile.to_dict(), "format": "execution-profile/9"})
     with pytest.raises(InvalidProfileSchema):
         ExecutionProfile.from_dict({**profile.to_dict(), "unexpected": True})
+
+
+def test_all_profile_from_dict_entrypoints_require_plain_complete_objects() -> None:
+    profile = ExecutionPolicy(provider_availability=ALL_PROVIDERS).evaluate(
+        _proposal(), mission_id="m1", goal_revision=3
+    )
+    cases = (
+        (TaskDimensions.from_dict, TaskDimensions().to_dict()),
+        (CognitiveServices.from_dict, CognitiveServices().to_dict()),
+        (ProfileTrigger.from_dict, ProfileTrigger("condition").to_dict()),
+        (TaskProfileProposal.from_dict, _proposal().to_dict()),
+        (ExecutionProfile.from_dict, profile.to_dict()),
+    )
+
+    for parser, raw in cases:
+        with pytest.raises(InvalidProfileSchema, match="plain JSON object"):
+            parser(UserDict(raw))
+        with pytest.raises(InvalidProfileSchema, match="plain JSON object"):
+            parser(None)
+        with pytest.raises(InvalidProfileSchema, match="plain JSON object"):
+            parser([])
+
+        missing = dict(raw)
+        missing.pop(next(iter(missing)))
+        with pytest.raises(InvalidProfileSchema, match="missing="):
+            parser(missing)
+
+        with pytest.raises(InvalidProfileSchema, match="unknown="):
+            parser({**raw, "legacy_alias": None})
+
+
+def test_profile_wire_rejects_legacy_aliases_and_nonliteral_field_types() -> None:
+    proposal = _proposal().to_dict()
+    profile = ExecutionPolicy(provider_availability=ALL_PROVIDERS).evaluate(
+        _proposal(), mission_id="m1", goal_revision=3
+    ).to_dict()
+
+    for alias in ("type", "revision", "evidence_id", "description", "criteria"):
+        with pytest.raises(InvalidProfileSchema, match="unknown=|forbidden"):
+            TaskProfileProposal.from_dict({**proposal, alias: "legacy"})
+
+    for value in ("0.95", 1, True, None):
+        with pytest.raises(InvalidProfileSchema, match="float"):
+            TaskProfileProposal.from_dict({**proposal, "confidence": value})
+
+    for value in ("false", 0, 1, None):
+        services = dict(proposal["requested_services"])
+        services["planner"] = value
+        with pytest.raises(InvalidProfileSchema, match="boolean"):
+            TaskProfileProposal.from_dict(
+                {**proposal, "requested_services": services}
+            )
+
+    for value in ("3", True, None, -1, MAX_SIGNED_64 + 1):
+        with pytest.raises(InvalidProfileSchema):
+            ExecutionProfile.from_dict({**profile, "goal_revision": value})
+
+    for value in (1, True, "0.95"):
+        with pytest.raises(InvalidProfileSchema, match="float"):
+            ExecutionProfile.from_dict({**profile, "confidence": value})
+
+    for value in (None, True, 1):
+        with pytest.raises(InvalidProfileSchema, match="literal string"):
+            ProfileTrigger.from_dict({"condition": value})
+
+
+def test_profile_wire_strings_round_trip_without_silent_normalization() -> None:
+    raw = _proposal(
+        rationale=(" rationale with intentional spacing ",),
+    ).to_dict()
+
+    assert TaskProfileProposal.from_dict(raw).to_dict() == raw
+
+
+def test_profile_wire_arrays_are_literal_lists_and_triggers_are_objects() -> None:
+    proposal = _proposal().to_dict()
+    profile = ExecutionPolicy(provider_availability=ALL_PROVIDERS).evaluate(
+        _proposal(), mission_id="m1", goal_revision=3
+    ).to_dict()
+
+    for field in (
+        "broad_capability_hypotheses",
+        "upgrade_triggers",
+        "downgrade_conditions",
+        "rationale",
+    ):
+        with pytest.raises(InvalidProfileSchema):
+            TaskProfileProposal.from_dict({**proposal, field: tuple(proposal[field])})
+        with pytest.raises(InvalidProfileSchema):
+            TaskProfileProposal.from_dict({**proposal, field: None})
+
+    for field in (
+        "accepted_capabilities",
+        "upgrade_triggers",
+        "downgrade_conditions",
+        "policy_reasons",
+    ):
+        with pytest.raises(InvalidProfileSchema):
+            ExecutionProfile.from_dict({**profile, field: tuple(profile[field])})
+        with pytest.raises(InvalidProfileSchema):
+            ExecutionProfile.from_dict({**profile, field: None})
+
+    profile["upgrade_triggers"] = ["legacy raw string trigger"]
+    with pytest.raises(InvalidProfileSchema, match="plain JSON object"):
+        ExecutionProfile.from_dict(profile)
+
+
+def test_profile_wire_uses_shared_bounded_json_limits() -> None:
+    proposal = _proposal().to_dict()
+
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    with pytest.raises(InvalidProfileSchema, match="cyclic JSON"):
+        TaskProfileProposal.from_dict({**proposal, "rationale": cyclic})
+
+    deep: list[object] = []
+    cursor = deep
+    for _ in range(MAX_JSON_DEPTH + 2):
+        child: list[object] = []
+        cursor.append(child)
+        cursor = child
+    with pytest.raises(InvalidProfileSchema, match="depth exceeds"):
+        TaskProfileProposal.from_dict({**proposal, "rationale": deep})
+
+    with pytest.raises(InvalidProfileSchema, match="string length exceeds"):
+        TaskProfileProposal.from_dict(
+            {**proposal, "rationale": ["x" * (MAX_JSON_STRING_LENGTH + 1)]}
+        )
+
+    with pytest.raises(InvalidProfileSchema, match="array length exceeds"):
+        TaskProfileProposal.from_dict(
+            {
+                **proposal,
+                "rationale": ["x"] * (MAX_JSON_ARRAY_ITEMS + 1),
+            }
+        )
+
+    with pytest.raises(InvalidProfileSchema, match="node count exceeds"):
+        TaskProfileProposal.from_dict(
+            {**proposal, "rationale": [None] * MAX_JSON_ARRAY_ITEMS}
+        )
+
+    with pytest.raises(InvalidProfileSchema, match="key length exceeds"):
+        TaskProfileProposal.from_dict(
+            {**proposal, "x" * (MAX_JSON_KEY_LENGTH + 1): None}
+        )
+
+
+def test_execution_policy_exposes_only_canonical_entrypoints() -> None:
+    policy = ExecutionPolicy()
+    assert not hasattr(policy, "available_services")
+    assert not hasattr(policy, "accept")
+    assert not hasattr(policy, "resolve")
 
 
 @pytest.mark.parametrize(
@@ -501,6 +662,7 @@ def test_execution_profile_package_is_pure_and_has_one_owner() -> None:
         "re",
         "typing",
         "winpilot.vnext.capability_names",
+        "winpilot.vnext.json_contract",
         "winpilot.vnext.profiling.contracts",
         "winpilot.vnext.profiling.policy",
     }

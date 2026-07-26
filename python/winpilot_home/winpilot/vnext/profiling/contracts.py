@@ -17,11 +17,15 @@ from ..capability_names import (
     InvalidCapability,
     canonical_capabilities,
 )
+from ..json_contract import (
+    BoundedJSONError,
+    MAX_SIGNED_64,
+    bounded_json_copy,
+)
 
 
 TASK_PROFILE_PROPOSAL_FORMAT = "task-profile-proposal/0"
 EXECUTION_PROFILE_FORMAT = "execution-profile/0"
-_MAX_PROPOSAL_NODES = 4096
 
 
 class ExecutionProfileError(ValueError):
@@ -34,11 +38,6 @@ class InvalidProfileSchema(ExecutionProfileError):
 
 class UnsupportedCapability(ExecutionProfileError):
     """A proposal contains a capability outside the injected catalog."""
-
-
-# A policy-specific spelling is useful to callers without creating a second
-# error hierarchy or a second contract owner.
-ExecutionPolicyError = ExecutionProfileError
 
 
 class ExecutionDepth(str, Enum):
@@ -55,12 +54,18 @@ _DEPTH_VALUES = tuple(item.value for item in ExecutionDepth)
 _DEPTH_BY_VALUE = {item.value: item for item in ExecutionDepth}
 
 
-def _require_mapping(value: Any, name: str) -> Mapping[str, Any]:
+def _bounded_object(value: Any, name: str) -> dict[str, Any]:
     if type(value) is not dict:
-        raise InvalidProfileSchema(f"{name} must be a JSON object")
-    if any(not isinstance(key, str) for key in value):
-        raise InvalidProfileSchema(f"{name} object keys must be strings")
-    return value
+        raise InvalidProfileSchema(f"{name} must be a plain JSON object")
+    try:
+        canonical = bounded_json_copy(value)
+    except (BoundedJSONError, RecursionError) as exc:
+        raise InvalidProfileSchema(
+            f"{name} violates the bounded JSON contract: {exc}"
+        ) from exc
+    if type(canonical) is not dict:  # pragma: no cover - validator invariant
+        raise InvalidProfileSchema(f"{name} must be a plain JSON object")
+    return canonical
 
 
 def _strict_keys(value: Mapping[str, Any], expected: Iterable[str], name: str) -> None:
@@ -78,9 +83,11 @@ def _strict_keys(value: Mapping[str, Any], expected: Iterable[str], name: str) -
 
 
 def _text(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise InvalidProfileSchema(f"{name} must be a literal string")
+    if not value.strip():
         raise InvalidProfileSchema(f"{name} must be a non-empty string")
-    return value.strip()
+    return value
 
 
 def _string_tuple(value: Any, name: str, *, unique: bool = True) -> tuple[str, ...]:
@@ -95,12 +102,11 @@ def _string_tuple(value: Any, name: str, *, unique: bool = True) -> tuple[str, .
 def _finite_confidence(value: Any, name: str, *, nullable: bool = False) -> float | None:
     if value is None and nullable:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise InvalidProfileSchema(f"{name} must be a finite number in [0, 1]")
-    result = float(value)
-    if not math.isfinite(result) or not 0.0 <= result <= 1.0:
-        raise InvalidProfileSchema(f"{name} must be a finite number in [0, 1]")
-    return 0.0 if result == 0.0 else result
+    if type(value) is not float or not math.isfinite(value):
+        raise InvalidProfileSchema(f"{name} must be a finite literal float in [0, 1]")
+    if not 0.0 <= value <= 1.0:
+        raise InvalidProfileSchema(f"{name} must be a finite literal float in [0, 1]")
+    return 0.0 if value == 0.0 else value
 
 
 def _bool(value: Any, name: str) -> bool:
@@ -153,8 +159,8 @@ class TaskDimensions:
         return {name: getattr(self, name) for name in _DIMENSION_VALUES}
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "TaskDimensions":
-        value = _require_mapping(raw, "dimensions")
+    def from_dict(cls, raw: dict[str, Any]) -> "TaskDimensions":
+        value = _bounded_object(raw, "dimensions")
         _strict_keys(value, _DIMENSION_VALUES, "dimensions")
         return cls(**{name: value[name] for name in _DIMENSION_VALUES})
 
@@ -177,8 +183,8 @@ class CognitiveServices:
         return {name: getattr(self, name) for name in self._FIELDS}
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "CognitiveServices":
-        value = _require_mapping(raw, "requested_services")
+    def from_dict(cls, raw: dict[str, Any]) -> "CognitiveServices":
+        value = _bounded_object(raw, "requested_services")
         _strict_keys(value, cls._FIELDS, "requested_services")
         return cls(**{name: _bool(value[name], f"services.{name}") for name in cls._FIELDS})
 
@@ -196,10 +202,8 @@ class ProfileTrigger:
         return {"condition": self.condition}
 
     @classmethod
-    def from_value(cls, raw: Any) -> "ProfileTrigger":
-        if isinstance(raw, str):
-            return cls(raw)
-        value = _require_mapping(raw, "trigger")
+    def from_dict(cls, raw: dict[str, Any]) -> "ProfileTrigger":
+        value = _bounded_object(raw, "trigger")
         _strict_keys(value, ("condition",), "trigger")
         return cls(value["condition"])
 
@@ -230,31 +234,16 @@ _FORBIDDEN_PROPOSAL_KEYS = frozenset({
 
 def _reject_forbidden_keys(value: Any) -> None:
     stack = [value]
-    seen_containers: set[int] = set()
-    visited = 0
     while stack:
         item = stack.pop()
-        visited += 1
-        if visited > _MAX_PROPOSAL_NODES:
-            raise InvalidProfileSchema("proposal exceeds the bounded JSON node budget")
         if type(item) is dict:
-            marker = id(item)
-            if marker in seen_containers:
-                raise InvalidProfileSchema("proposal JSON must not contain cycles")
-            seen_containers.add(marker)
             for key, nested in item.items():
-                if type(key) is not str:
-                    raise InvalidProfileSchema("proposal object keys must be strings")
                 if key in _FORBIDDEN_PROPOSAL_KEYS:
                     raise InvalidProfileSchema(
                         f"proposal contains forbidden field {key!r}"
                     )
                 stack.append(nested)
-        elif type(item) in (list, tuple):
-            marker = id(item)
-            if marker in seen_containers:
-                raise InvalidProfileSchema("proposal JSON must not contain cycles")
-            seen_containers.add(marker)
+        elif type(item) is list:
             stack.extend(item)
 
 
@@ -332,10 +321,18 @@ class TaskProfileProposal:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "TaskProfileProposal":
-        value = _require_mapping(raw, "proposal")
+    def from_dict(cls, raw: dict[str, Any]) -> "TaskProfileProposal":
+        value = _bounded_object(raw, "proposal")
         _reject_forbidden_keys(value)
         _strict_keys(value, _PROPOSAL_FIELDS, "proposal")
+        for name in (
+            "broad_capability_hypotheses",
+            "upgrade_triggers",
+            "downgrade_conditions",
+            "rationale",
+        ):
+            if type(value[name]) is not list:
+                raise InvalidProfileSchema(f"proposal.{name} must be a JSON array")
         return cls(
             format=value["format"],
             dimensions=TaskDimensions.from_dict(value["dimensions"]),
@@ -421,8 +418,13 @@ class ExecutionProfile:
         claimed_profile_id = _text(self.profile_id, "profile.profile_id")
         object.__setattr__(self, "profile_id", claimed_profile_id)
         object.__setattr__(self, "mission_id", _text(self.mission_id, "profile.mission_id"))
-        if type(self.goal_revision) is not int or self.goal_revision < 0:
-            raise InvalidProfileSchema("profile.goal_revision must be a non-negative integer")
+        if (
+            type(self.goal_revision) is not int
+            or not 0 <= self.goal_revision <= MAX_SIGNED_64
+        ):
+            raise InvalidProfileSchema(
+                "profile.goal_revision must be a non-negative signed-64 integer"
+            )
         object.__setattr__(self, "accepted_depth", _depth(self.accepted_depth, "accepted_depth"))
         services = self.services
         if isinstance(services, Mapping):
@@ -439,8 +441,12 @@ class ExecutionProfile:
             raw_triggers = getattr(self, name)
             if isinstance(raw_triggers, (str, bytes)) or not isinstance(raw_triggers, (list, tuple)):
                 raise InvalidProfileSchema(f"profile.{name} must be an array")
-        triggers = tuple(item if isinstance(item, ProfileTrigger) else ProfileTrigger.from_value(item) for item in self.upgrade_triggers)
-        downgrades = tuple(item if isinstance(item, ProfileTrigger) else ProfileTrigger.from_value(item) for item in self.downgrade_conditions)
+        triggers = tuple(self.upgrade_triggers)
+        downgrades = tuple(self.downgrade_conditions)
+        if any(type(item) is not ProfileTrigger for item in (*triggers, *downgrades)):
+            raise InvalidProfileSchema(
+                "profile triggers must be ProfileTrigger values"
+            )
         object.__setattr__(self, "upgrade_triggers", triggers)
         object.__setattr__(self, "downgrade_conditions", downgrades)
         source = _text(self.source, "profile.source")
@@ -500,12 +506,17 @@ class ExecutionProfile:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "ExecutionProfile":
-        value = _require_mapping(raw, "profile")
+    def from_dict(cls, raw: dict[str, Any]) -> "ExecutionProfile":
+        value = _bounded_object(raw, "profile")
         _strict_keys(value, _PROFILE_FIELDS, "profile")
-        for name in ("upgrade_triggers", "downgrade_conditions"):
-            if isinstance(value[name], (str, bytes)) or not isinstance(value[name], (list, tuple)):
-                raise InvalidProfileSchema(f"profile.{name} must be an array")
+        for name in (
+            "accepted_capabilities",
+            "upgrade_triggers",
+            "downgrade_conditions",
+            "policy_reasons",
+        ):
+            if type(value[name]) is not list:
+                raise InvalidProfileSchema(f"profile.{name} must be a JSON array")
         return cls(
             format=value["format"],
             profile_id=value["profile_id"],
@@ -514,8 +525,8 @@ class ExecutionProfile:
             accepted_depth=value["accepted_depth"],
             services=CognitiveServices.from_dict(value["services"]),
             accepted_capabilities=value["accepted_capabilities"],
-            upgrade_triggers=tuple(ProfileTrigger.from_value(item) for item in value["upgrade_triggers"]),
-            downgrade_conditions=tuple(ProfileTrigger.from_value(item) for item in value["downgrade_conditions"]),
+            upgrade_triggers=tuple(ProfileTrigger.from_dict(item) for item in value["upgrade_triggers"]),
+            downgrade_conditions=tuple(ProfileTrigger.from_dict(item) for item in value["downgrade_conditions"]),
             source=value["source"],
             confidence=value["confidence"],
             policy_reasons=value["policy_reasons"],
@@ -525,7 +536,6 @@ __all__ = [
     "TASK_PROFILE_PROPOSAL_FORMAT",
     "EXECUTION_PROFILE_FORMAT",
     "ExecutionProfileError",
-    "ExecutionPolicyError",
     "InvalidProfileSchema",
     "UnsupportedCapability",
     "ExecutionDepth",
