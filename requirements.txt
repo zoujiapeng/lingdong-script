@@ -39,6 +39,7 @@ fastapi>=0.110               # WinPilot agent web server (embedded in Agent pane
 uvicorn>=0.29                # ASGI server for WinPilot
 pydantic>=2.0                # WinPilot server request models
 mcp>=1.26,<2                 # ChatGPT/Codex desktop Streamable HTTP bridge
+jsonschema>=4.23,<5          # strict vNext tool-argument validation
 
 # Development
 # pytest>=7.0.0
