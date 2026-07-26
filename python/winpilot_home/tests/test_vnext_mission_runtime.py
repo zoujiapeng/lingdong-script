@@ -1,0 +1,1187 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+import hashlib
+import threading
+from typing import Any, Callable, Mapping
+
+import pytest
+
+from winpilot.vnext.actor import ACTOR_PROPOSAL_FORMAT, ActorDecisionEnvelope
+from winpilot.vnext.capabilities import (
+    AuthoritativeFrameState,
+    BrokerRuntimeState,
+    CapabilityBroker,
+    MutationKind,
+    PointerDisposition,
+    PointerLeaseState,
+    TargetState,
+    ToolCatalog,
+    ToolRoute,
+    ToolSpec,
+)
+from winpilot.vnext.evidence import EvidenceRegistry
+from winpilot.vnext.mission import (
+    EvidencePolicy,
+    EvidenceRef,
+    MissionDefinition,
+    MissionReducer,
+    MissionStatus,
+    ObligationSpec,
+    TargetBinding,
+)
+from winpilot.vnext.profiling import ExecutionPolicy
+from winpilot.vnext.runtime import (
+    APPROVED_RUNTIME_TOOLS,
+    CURRENT_FRAME_EVIDENCE_KIND,
+    POST_ACTION_FRAME_EVIDENCE_KIND,
+    VISUAL_VERIFIER_EVIDENCE_KIND,
+    ActorTurnInput,
+    ControllerOutcome,
+    ControllerTransition,
+    MissionRuntime,
+    MissionRuntimeConfigurationError,
+    MutationPermitAuthority,
+    MutationPermitError,
+    MutationPermitReason,
+    RuntimeFrame,
+    RuntimeFrameIdentity,
+    RuntimeSnapshot,
+    RuntimeStatus,
+    RuntimeTargetIdentity,
+    RuntimeVerifierTurn,
+)
+from winpilot.vnext.verification import VerifierAssessment
+
+
+MISSION_ID = "mission-runtime"
+RUN_ID = "run-runtime"
+OBLIGATION_ID = "full-goal"
+GOAL = "Make the requested visible state exist"
+HWND = 9123
+PROCESS_ID = 44
+EPOCH = 7
+GUI_GATES = (
+    "target_bound",
+    "authoritative_frame",
+    "pointer_released",
+    "runtime_healthy",
+)
+
+
+def _empty_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+    }
+
+
+def _point_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "image_x": {"type": "number", "minimum": 0},
+            "image_y": {"type": "number", "minimum": 0},
+        },
+        "required": ["image_x", "image_y"],
+    }
+
+
+def _scroll_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "image_x": {"type": "number", "minimum": 0},
+            "image_y": {"type": "number", "minimum": 0},
+            "amount": {
+                "type": "integer",
+                "minimum": -1200,
+                "maximum": 1200,
+                "not": {"const": 0},
+            },
+        },
+        "required": ["image_x", "image_y", "amount"],
+    }
+
+
+def _text_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "text": {"type": "string", "minLength": 1, "maxLength": 16384},
+        },
+        "required": ["text"],
+    }
+
+
+def _hotkey_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "keys": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                "minItems": 1,
+                "maxItems": 8,
+                "uniqueItems": True,
+            },
+        },
+        "required": ["keys"],
+    }
+
+
+def _tool(
+    name: str,
+    *,
+    mutation: MutationKind,
+    schema: dict[str, Any],
+    order: int,
+) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        schema=schema,
+        route=ToolRoute.VISUAL_ACTOR,
+        mutation_kind=mutation,
+        required_any_capabilities=(
+            ("visual.interact",)
+            if mutation is MutationKind.GUI
+            else ()
+        ),
+        prerequisites=GUI_GATES if mutation is MutationKind.GUI else (),
+        order=order,
+    )
+
+
+def _catalog(*, include_extra: bool = False) -> ToolCatalog:
+    schemas = {
+        "click": _point_schema(),
+        "double_click": _point_schema(),
+        "scroll": _scroll_schema(),
+        "type_text": _text_schema(),
+        "hotkey": _hotkey_schema(),
+    }
+    tools = [
+        _tool(
+            name,
+            mutation=MutationKind.GUI,
+            schema=schemas[name],
+            order=order,
+        )
+        for order, name in enumerate(
+            ("click", "double_click", "scroll", "type_text", "hotkey"),
+            start=1,
+        )
+    ]
+    tools.extend(
+        (
+            _tool(
+                "claim_obligation_done",
+                mutation=MutationKind.NONE,
+                schema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "concise_claim": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 16384,
+                        },
+                    },
+                    "required": ["concise_claim"],
+                },
+                order=20,
+            ),
+            _tool(
+                "blocked",
+                mutation=MutationKind.NONE,
+                schema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "blocker_kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 192,
+                        },
+                        "observed_facts": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 16384,
+                            },
+                            "maxItems": 64,
+                            "uniqueItems": True,
+                        },
+                    },
+                    "required": ["blocker_kind", "observed_facts"],
+                },
+                order=21,
+            ),
+        )
+    )
+    if include_extra:
+        tools.append(
+            _tool(
+                "observe",
+                mutation=MutationKind.NONE,
+                schema=_empty_schema(),
+                order=22,
+            )
+        )
+    return ToolCatalog(tuple(tools))
+
+
+def _action(action: str = "click") -> dict[str, Any]:
+    args: dict[str, Any]
+    if action in {"click", "double_click"}:
+        args = {"image_x": 10, "image_y": 20}
+    elif action == "scroll":
+        args = {"image_x": 10, "image_y": 20, "amount": -120}
+    elif action == "type_text":
+        args = {"text": "hello"}
+    elif action == "hotkey":
+        args = {"keys": ["ctrl", "a"]}
+    else:
+        args = {}
+    return {
+        "format": ACTOR_PROPOSAL_FORMAT,
+        "kind": "desktop_action",
+        "action": action,
+        "args": args,
+        "local_intent": f"perform one {action}",
+    }
+
+
+def _claim() -> dict[str, Any]:
+    return {
+        "format": ACTOR_PROPOSAL_FORMAT,
+        "kind": "claim_obligation_done",
+        "concise_claim": "the requested state is visibly present",
+    }
+
+
+def _blocked() -> dict[str, Any]:
+    return {
+        "format": ACTOR_PROPOSAL_FORMAT,
+        "kind": "blocked",
+        "blocker_kind": "visible_precondition_missing",
+        "observed_facts": ["the required control is not visible"],
+    }
+
+
+class FakeActor:
+    def __init__(self, *proposals: Mapping[str, Any]) -> None:
+        self.proposals = list(proposals)
+        self.turns: list[ActorTurnInput] = []
+        self.calls = 0
+        self.on_propose: Callable[[], None] | None = None
+        self.raise_error: Exception | None = None
+
+    def propose(
+        self,
+        turn: ActorTurnInput,
+        *,
+        image_b64: str,
+        image_media_type: str,
+        submitted_size: tuple[int, int],
+        stop_event: threading.Event | None = None,
+    ) -> Mapping[str, Any]:
+        assert image_b64
+        assert image_media_type == "image/jpeg"
+        assert submitted_size == (320, 240)
+        assert stop_event is None or isinstance(stop_event, threading.Event)
+        self.calls += 1
+        self.turns.append(turn)
+        if self.on_propose is not None:
+            self.on_propose()
+        if self.raise_error is not None:
+            raise self.raise_error
+        if not self.proposals:
+            raise AssertionError("unexpected Actor call")
+        return dict(self.proposals.pop(0))
+
+
+class FakeVerifier:
+    verifier_kind = "independent_visual_model"
+
+    def __init__(self, assessment: VerifierAssessment | None = None) -> None:
+        self.assessment = assessment or VerifierAssessment(
+            verified=True,
+            satisfied_conditions=("the visible result is confirmed",),
+            confidence=1.0,
+            concise_reason="the exact frozen frame satisfies the criterion",
+        )
+        self.turns: list[RuntimeVerifierTurn] = []
+        self.calls = 0
+        self.on_assess: Callable[[], None] | None = None
+        self.raise_error: Exception | None = None
+
+    def assess(
+        self,
+        turn: RuntimeVerifierTurn,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> VerifierAssessment:
+        assert stop_event is None or isinstance(stop_event, threading.Event)
+        self.calls += 1
+        self.turns.append(turn)
+        if self.on_assess is not None:
+            self.on_assess()
+        if self.raise_error is not None:
+            raise self.raise_error
+        return self.assessment
+
+
+class FakeState:
+    def __init__(self, snapshot: RuntimeSnapshot) -> None:
+        self.snapshot = snapshot
+        self.observe_calls = 0
+        self.current_calls = 0
+        self.raise_current_on: int | None = None
+
+    def _for_turn(self, turn_index: int) -> RuntimeSnapshot:
+        snapshot = RuntimeSnapshot(
+            broker_state=replace(
+                self.snapshot.broker_state,
+                turn_index=turn_index,
+            ),
+            frame=self.snapshot.frame,
+            target=self.snapshot.target,
+        )
+        self.snapshot = snapshot
+        return snapshot
+
+    def observe(
+        self,
+        projection: Any,
+        *,
+        turn_index: int,
+    ) -> RuntimeSnapshot:
+        del projection
+        self.observe_calls += 1
+        return self._for_turn(turn_index)
+
+    def current(
+        self,
+        projection: Any,
+        *,
+        turn_index: int,
+    ) -> RuntimeSnapshot:
+        del projection
+        self.current_calls += 1
+        if self.current_calls == self.raise_current_on:
+            raise RuntimeError("synthetic current-state failure")
+        return self._for_turn(turn_index)
+
+    def install_frame(self, frame: RuntimeFrame) -> None:
+        self.snapshot = RuntimeSnapshot(
+            broker_state=replace(
+                self.snapshot.broker_state,
+                frame=frame.broker_frame(),
+            ),
+            frame=frame,
+            target=self.snapshot.target,
+        )
+
+
+class FakeController:
+    def __init__(
+        self,
+        *,
+        authority: MutationPermitAuthority,
+        state: FakeState,
+        make_post_frame: Callable[
+            [ActorDecisionEnvelope],
+            tuple[RuntimeFrame, EvidenceRef],
+        ],
+    ) -> None:
+        self.authority = authority
+        self.state = state
+        self.make_post_frame = make_post_frame
+        self.mode = "completed"
+        self.calls = 0
+        self.envelopes: list[ActorDecisionEnvelope] = []
+        self.admissions = []
+        self.duplicate_admission = None
+        self.try_duplicate = False
+        self.change_commit_before_admission = False
+        self.lie_completed_when_denied = False
+        self.finish_before_return = False
+        self.on_after_admission: Callable[[], None] | None = None
+        self.stop_before_admission: threading.Event | None = None
+        self.stop_after_action: threading.Event | None = None
+
+    def execute(
+        self,
+        envelope: ActorDecisionEnvelope,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> ControllerTransition:
+        self.calls += 1
+        self.envelopes.append(envelope)
+        if self.stop_before_admission is not None:
+            self.stop_before_admission.set()
+        changed_frame: RuntimeFrame | None = None
+        changed_evidence: EvidenceRef | None = None
+        if self.change_commit_before_admission:
+            changed_frame, changed_evidence = self.make_post_frame(envelope)
+            self.state.install_frame(changed_frame)
+        admission = self.authority.begin_admission(
+            envelope,
+            current_commit_identity=self.state.snapshot.commit_identity,
+        )
+        self.admissions.append(admission)
+        if self.on_after_admission is not None:
+            self.on_after_admission()
+        if self.try_duplicate:
+            self.duplicate_admission = self.authority.begin_admission(
+                envelope,
+                current_commit_identity=self.state.snapshot.commit_identity,
+            )
+        if self.mode == "raise":
+            raise RuntimeError("synthetic controller failure")
+        action = envelope.proposal.action
+        if not admission.allowed and self.lie_completed_when_denied:
+            assert changed_frame is not None
+            assert changed_evidence is not None
+            return ControllerTransition(
+                outcome=ControllerOutcome.COMPLETED,
+                action_id=envelope.decision_id,
+                action=action,
+                input_completed=True,
+                visible_effect="malicious completed claim",
+                post_frame_evidence=(changed_evidence,),
+                post_frame_id=changed_frame.frame_id,
+            )
+        if not admission.allowed or self.mode == "rejected":
+            return ControllerTransition(
+                outcome=ControllerOutcome.REJECTED,
+                action_id=envelope.decision_id,
+                action=action,
+                input_completed=False,
+            )
+        if self.mode == "unknown":
+            return ControllerTransition(
+                outcome=ControllerOutcome.UNKNOWN,
+                action_id=envelope.decision_id,
+                action=action,
+                input_completed=None,
+            )
+        if self.mode == "unknown_applied":
+            return ControllerTransition(
+                outcome=ControllerOutcome.UNKNOWN,
+                action_id=envelope.decision_id,
+                action=action,
+                input_completed=True,
+            )
+        frame, post_evidence = self.make_post_frame(envelope)
+        self.state.install_frame(frame)
+        if self.finish_before_return:
+            assert self.authority.finish_admission(envelope.decision_id)
+        if self.stop_after_action is not None:
+            self.stop_after_action.set()
+        return ControllerTransition(
+            outcome=ControllerOutcome.COMPLETED,
+            action_id=envelope.decision_id,
+            action=action,
+            input_completed=True,
+            visible_effect="post-action frame captured",
+            post_frame_evidence=(post_evidence,),
+            post_frame_id=frame.frame_id,
+        )
+
+
+@dataclass
+class Harness:
+    reducer: MissionReducer
+    registry: EvidenceRegistry
+    actor: FakeActor
+    verifier: FakeVerifier
+    state: FakeState
+    controller: FakeController
+    permits: MutationPermitAuthority
+    runtime: MissionRuntime
+    catalog: ToolCatalog
+
+    def make_frame(
+        self,
+        frame_id: int,
+        *,
+        kind: str,
+        action_id: str | None = None,
+    ) -> tuple[RuntimeFrame, EvidenceRef]:
+        image_b64 = f"ZnJhbWUt{frame_id:02d}"
+        digest = hashlib.sha256(image_b64.encode("ascii")).hexdigest()
+        identity = RuntimeFrameIdentity(
+            frame_id=frame_id,
+            epoch=EPOCH,
+            hwnd=HWND,
+            region=(100, 200, 640, 480),
+            scope="target_window",
+            submitted_size=(320, 240),
+            image_sha256=digest,
+        )
+        suffix = "" if action_id is None else f"-{action_id}"
+        ref = EvidenceRef(
+            id=f"e-frame-{frame_id}{suffix}",
+            mission_id=MISSION_ID,
+            run_id=RUN_ID,
+            obligation_id=OBLIGATION_ID,
+            kind=kind,
+            trust="deterministic",
+            payload_hash=identity.payload_hash,
+            action_id=action_id,
+            frame_id=frame_id,
+        )
+        return RuntimeFrame(
+            frame_id=frame_id,
+            epoch=EPOCH,
+            hwnd=HWND,
+            region=identity.region,
+            scope=identity.scope,
+            submitted_size=identity.submitted_size,
+            image_b64=image_b64,
+            image_sha256=digest,
+            evidence_refs=(ref.id,),
+        ), ref
+
+
+def _definition(
+    *,
+    obligations: tuple[ObligationSpec, ...] | None = None,
+) -> MissionDefinition:
+    return MissionDefinition(
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        original_goal=GOAL,
+        obligations=obligations
+        or (
+            ObligationSpec(
+                id=OBLIGATION_ID,
+                desired_state=GOAL,
+                acceptance_criteria=("the visible result is confirmed",),
+                required_capabilities=("visual.interact",),
+                evidence_policy=EvidencePolicy(
+                    allow_independent_visual_verifier=True,
+                ),
+            ),
+        ),
+    )
+
+
+def _harness(
+    *proposals: Mapping[str, Any],
+    definition: MissionDefinition | None = None,
+    catalog: ToolCatalog | None = None,
+    bind_target: bool = True,
+    profile_provider: bool = True,
+) -> Harness:
+    definition = definition or _definition()
+    registry = EvidenceRegistry(definition.mission_id, definition.run_id)
+    reducer = MissionReducer(definition, evidence=registry)
+    actor = FakeActor(*(proposals or (_action(),)))
+    verifier = FakeVerifier()
+    catalog = catalog or _catalog()
+
+    image_b64 = "ZnJhbWUtMDE="
+    digest = hashlib.sha256(image_b64.encode("ascii")).hexdigest()
+    frame_identity = RuntimeFrameIdentity(
+        frame_id=1,
+        epoch=EPOCH,
+        hwnd=HWND,
+        region=(100, 200, 640, 480),
+        scope="target_window",
+        submitted_size=(320, 240),
+        image_sha256=digest,
+    )
+    current_ref = EvidenceRef(
+        id="e-frame-1",
+        mission_id=definition.mission_id,
+        run_id=definition.run_id,
+        obligation_id=definition.obligations[0].id,
+        kind=CURRENT_FRAME_EVIDENCE_KIND,
+        trust="deterministic",
+        payload_hash=frame_identity.payload_hash,
+        frame_id=1,
+    )
+    target_ref = EvidenceRef(
+        id="e-target",
+        mission_id=definition.mission_id,
+        run_id=definition.run_id,
+        obligation_id=definition.obligations[0].id,
+        kind="target",
+        trust="deterministic",
+        payload_hash="target-evidence-payload",
+        frame_id=1,
+    )
+    registry.append_many((current_ref, target_ref))
+    binding = TargetBinding(
+        binding_id="binding-current",
+        hwnd=HWND,
+        process_id=PROCESS_ID,
+        executable_identity="opaque-process",
+        title_snapshot="",
+        established_by_evidence_ref=target_ref.id,
+        epoch=EPOCH,
+    )
+    if bind_target:
+        reducer.apply(
+            reducer.event(
+                "target_bound",
+                payload={"target_binding": binding.to_dict()},
+                evidence_refs=(current_ref.id, target_ref.id),
+            )
+        )
+    frame = RuntimeFrame(
+        frame_id=1,
+        epoch=EPOCH,
+        hwnd=HWND,
+        region=frame_identity.region,
+        scope=frame_identity.scope,
+        submitted_size=frame_identity.submitted_size,
+        image_b64=image_b64,
+        image_sha256=digest,
+        evidence_refs=(current_ref.id,),
+    )
+    snapshot = RuntimeSnapshot(
+        broker_state=BrokerRuntimeState(
+            turn_index=0,
+            available_capabilities=("visual.interact",),
+            target=TargetState(
+                binding.binding_id,
+                binding.hwnd,
+                binding.epoch,
+                True,
+            ),
+            frame=frame.broker_frame(),
+            pointer=PointerLeaseState(PointerDisposition.RELEASED),
+            runtime_healthy=True,
+        ),
+        frame=frame,
+        target=RuntimeTargetIdentity.from_binding(binding),
+    )
+    state = FakeState(snapshot)
+    permits = MutationPermitAuthority(
+        definition.mission_id,
+        definition.run_id,
+    )
+    holder: dict[str, Harness] = {}
+
+    def make_post_frame(
+        envelope: ActorDecisionEnvelope,
+    ) -> tuple[RuntimeFrame, EvidenceRef]:
+        return holder["harness"].make_frame(
+            state.snapshot.frame.frame_id + 1,
+            kind=POST_ACTION_FRAME_EVIDENCE_KIND,
+            action_id=envelope.decision_id,
+        )
+
+    controller = FakeController(
+        authority=permits,
+        state=state,
+        make_post_frame=make_post_frame,
+    )
+    profile = ExecutionPolicy(
+        provider_availability=(
+            ("obligation_verifier",) if profile_provider else ()
+        ),
+    ).safe_default(
+        definition.mission_id,
+        definition.goal_revision,
+        available_capabilities=("visual.interact",),
+    )
+    broker = CapabilityBroker(catalog)
+    runtime = MissionRuntime(
+        reducer=reducer,
+        profile=profile,
+        broker=broker,
+        catalog=catalog,
+        actor=actor,
+        state=state,
+        controller=controller,
+        verifier=verifier,
+        evidence_registry=registry,
+        mutation_permits=permits,
+    )
+    harness = Harness(
+        reducer=reducer,
+        registry=registry,
+        actor=actor,
+        verifier=verifier,
+        state=state,
+        controller=controller,
+        permits=permits,
+        runtime=runtime,
+        catalog=catalog,
+    )
+    holder["harness"] = harness
+    return harness
+
+
+@pytest.mark.parametrize(
+    "action",
+    ("click", "double_click", "scroll", "type_text", "hotkey"),
+)
+def test_minimal_runtime_executes_each_approved_action_once(action: str) -> None:
+    harness = _harness(_action(action))
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 1
+    assert len(harness.controller.admissions) == 1
+    assert harness.controller.admissions[0].allowed is True
+    assert harness.permits.pending_count == 0
+    assert harness.permits.active_count == 0
+    assert harness.permits.consumed_count == 1
+    assert [event.kind for event in harness.reducer.events] == [
+        "target_bound",
+        "transition_recorded",
+    ]
+    assert harness.reducer.card.last_transition.action == action
+
+
+def test_previous_action_view_is_bounded_and_derived_from_mission_card() -> None:
+    harness = _harness(_action("click"), _blocked())
+    assert harness.runtime.run_one_turn(turn_index=0).status is RuntimeStatus.ACTION_RECORDED
+
+    result = harness.runtime.run_one_turn(turn_index=1)
+
+    assert result.status is RuntimeStatus.BLOCKED
+    assert harness.actor.calls == 2
+    previous = harness.actor.turns[1].previous_action
+    assert previous is not None
+    assert previous.action == "click"
+    assert previous.input_completed is True
+    assert previous.visible_effect == "post-action frame captured"
+    wire = harness.actor.turns[1].to_dict()
+    assert "mission_id" not in str(wire)
+    assert "run_id" not in str(wire)
+    assert "frame_id" not in str(wire)
+    assert "binding-current" not in str(wire)
+    assert str(HWND) not in str(wire)
+
+
+def test_actor_result_is_discarded_when_mission_revision_changes() -> None:
+    harness = _harness(_action())
+    harness.actor.on_propose = lambda: harness.reducer.apply(
+        harness.reducer.event(
+            "mission_blocked",
+            payload={"reason": "synthetic concurrent change"},
+        )
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.STALE_DISCARDED
+    assert harness.controller.calls == 0
+    assert harness.permits.consumed_count == 0
+
+
+def test_untrusted_pre_frame_is_rejected_before_actor_or_controller() -> None:
+    harness = _harness(_action())
+    bad_frame = replace(
+        harness.state.snapshot.frame,
+        evidence_refs=("e-target",),
+    )
+    harness.state.snapshot = RuntimeSnapshot(
+        broker_state=harness.state.snapshot.broker_state,
+        frame=bad_frame,
+        target=harness.state.snapshot.target,
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.STATE_REJECTED
+    assert harness.actor.calls == 0
+    assert harness.controller.calls == 0
+
+
+def test_duplicate_controller_admission_is_denied_without_second_input() -> None:
+    harness = _harness(_action())
+    harness.controller.try_duplicate = True
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 1
+    assert harness.controller.duplicate_admission is not None
+    assert harness.controller.duplicate_admission.allowed is False
+    assert (
+        harness.controller.duplicate_admission.reason
+        is MutationPermitReason.ALREADY_CONSUMED
+    )
+
+
+def test_permit_issue_rejects_turn_index_not_bound_by_actor_envelope() -> None:
+    harness = _harness(_action())
+    harness.controller.mode = "rejected"
+    assert (
+        harness.runtime.run_one_turn(turn_index=0).status
+        is RuntimeStatus.STALE_DISCARDED
+    )
+    envelope = harness.controller.envelopes[0]
+    authority = MutationPermitAuthority(MISSION_ID, RUN_ID)
+
+    with pytest.raises(MutationPermitError, match="disagree"):
+        authority.issue(
+            envelope,
+            turn_index=envelope.turn_index + 1,
+            commit_identity=harness.state.snapshot.commit_identity,
+            still_current=lambda: True,
+        )
+
+
+@pytest.mark.parametrize("mode", ("unknown", "raise"))
+def test_unknown_controller_outcome_is_blocked_and_never_replayed(
+    mode: str,
+) -> None:
+    harness = _harness(_action(), _action())
+    harness.controller.mode = mode
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    second = harness.runtime.run_one_turn(turn_index=1)
+
+    assert first.status is RuntimeStatus.BLOCKED
+    assert second.status is RuntimeStatus.BLOCKED
+    assert harness.controller.calls == 1
+    assert harness.reducer.projection.status is MissionStatus.BLOCKED
+    assert harness.reducer.events[-1].kind == "obligation_blocked"
+    assert "not replayed" in harness.reducer.events[-1].payload["reason"]
+
+
+def test_applied_input_with_unreconciled_outcome_is_preserved_and_blocked() -> None:
+    harness = _harness(_action(), _action())
+    harness.controller.mode = "unknown_applied"
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    second = harness.runtime.run_one_turn(turn_index=1)
+
+    assert first.status is RuntimeStatus.BLOCKED
+    assert second.status is RuntimeStatus.BLOCKED
+    assert harness.controller.calls == 1
+    assert "not replayed" in harness.reducer.events[-1].payload["reason"]
+
+
+def test_unknown_outcome_closes_mutation_after_concurrent_revision() -> None:
+    harness = _harness(_action(), _action())
+    harness.controller.mode = "unknown"
+    binding = harness.reducer.projection.target_binding
+    assert binding is not None
+    harness.controller.on_after_admission = lambda: harness.reducer.apply(
+        harness.reducer.event(
+            "target_bound",
+            payload={"target_binding": binding.to_dict()},
+            evidence_refs=("e-target",),
+        )
+    )
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    second = harness.runtime.run_one_turn(turn_index=1)
+
+    assert first.status is RuntimeStatus.BLOCKED
+    assert second.status is RuntimeStatus.BLOCKED
+    assert harness.controller.calls == 1
+    assert harness.permits.closed is True
+    assert [event.kind for event in harness.reducer.events] == [
+        "target_bound",
+        "target_bound",
+        "obligation_blocked",
+    ]
+
+
+@pytest.mark.parametrize(
+    "configure",
+    (
+        lambda controller: (
+            setattr(controller, "change_commit_before_admission", True),
+            setattr(controller, "lie_completed_when_denied", True),
+        ),
+        lambda controller: setattr(
+            controller,
+            "finish_before_return",
+            True,
+        ),
+    ),
+)
+def test_completed_claim_without_closed_active_permit_fails_closed(
+    configure: Callable[[FakeController], Any],
+) -> None:
+    harness = _harness(_action())
+    configure(harness.controller)
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.BLOCKED
+    assert harness.controller.calls == 1
+    assert harness.reducer.events[-1].kind == "obligation_blocked"
+    assert harness.permits.pending_count == 0
+    assert harness.permits.active_count == 0
+
+
+def test_rejected_controller_proves_no_input_and_is_not_replayed() -> None:
+    harness = _harness(_action(), _blocked())
+    harness.controller.mode = "rejected"
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    second = harness.runtime.run_one_turn(turn_index=1)
+
+    assert first.status is RuntimeStatus.STALE_DISCARDED
+    assert second.status is RuntimeStatus.BLOCKED
+    assert harness.controller.calls == 1
+    assert len(harness.reducer.events) == 2
+
+
+def test_post_action_state_failure_is_blocked_after_one_input_attempt() -> None:
+    harness = _harness(_action(), _action())
+    harness.state.raise_current_on = 3
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    second = harness.runtime.run_one_turn(turn_index=1)
+
+    assert first.status is RuntimeStatus.BLOCKED
+    assert second.status is RuntimeStatus.BLOCKED
+    assert harness.controller.calls == 1
+    assert any(
+        ref.kind == POST_ACTION_FRAME_EVIDENCE_KIND
+        for ref in harness.registry.snapshot()
+    )
+
+
+def test_claim_is_bound_to_frozen_frame_and_independently_verified() -> None:
+    harness = _harness(_claim())
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.MISSION_VERIFIED
+    assert harness.controller.calls == 0
+    assert harness.verifier.calls == 1
+    turn = harness.verifier.turns[0]
+    assert turn.frame.frame_id == 1
+    assert tuple(ref.id for ref in turn.request.evidence_refs) == ("e-frame-1",)
+    assert [event.kind for event in harness.reducer.events] == [
+        "target_bound",
+        "obligation_claimed",
+        "verification_recorded",
+        "mission_verified",
+    ]
+    visual_refs = [
+        ref
+        for ref in harness.registry.snapshot()
+        if ref.kind == VISUAL_VERIFIER_EVIDENCE_KIND
+    ]
+    assert len(visual_refs) == 1
+    assert visual_refs[0].trust == "independent_visual_model"
+    assert visual_refs[0].frame_id == 1
+    assert harness.reducer.projection.status is MissionStatus.VERIFIED
+
+
+def test_claim_preserves_required_current_frame_evidence_kind() -> None:
+    definition = MissionDefinition(
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        original_goal=GOAL,
+        obligations=(
+            ObligationSpec(
+                id=OBLIGATION_ID,
+                desired_state=GOAL,
+                acceptance_criteria=("the visible result is confirmed",),
+                required_capabilities=("visual.interact",),
+                evidence_policy=EvidencePolicy(
+                    required_evidence_kinds=(CURRENT_FRAME_EVIDENCE_KIND,),
+                    allow_independent_visual_verifier=True,
+                ),
+            ),
+        ),
+    )
+    harness = _harness(_claim(), definition=definition)
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.MISSION_VERIFIED
+    verification = harness.reducer.events[-2]
+    assert verification.kind == "verification_recorded"
+    assert "e-frame-1" in verification.evidence_refs
+    assert any(
+        ref.kind == VISUAL_VERIFIER_EVIDENCE_KIND
+        for ref in harness.registry.snapshot()
+    )
+
+
+def test_verifier_result_is_discarded_when_claim_revision_changes() -> None:
+    harness = _harness(_claim())
+    harness.verifier.on_assess = lambda: harness.reducer.apply(
+        harness.reducer.event(
+            "mission_canceled",
+            payload={"reason": "synthetic concurrent cancellation"},
+        )
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.STALE_DISCARDED
+    assert [event.kind for event in harness.reducer.events] == [
+        "target_bound",
+        "obligation_claimed",
+        "mission_canceled",
+    ]
+    assert not any(
+        ref.kind == VISUAL_VERIFIER_EVIDENCE_KIND
+        for ref in harness.registry.snapshot()
+    )
+
+
+def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
+    before = _harness(_action())
+    before_stop = threading.Event()
+    before_stop.set()
+
+    before_result = before.runtime.run_one_turn(
+        turn_index=0,
+        stop_event=before_stop,
+    )
+
+    assert before_result.status is RuntimeStatus.CANCELED
+    assert before.actor.calls == 0
+    assert before.controller.calls == 0
+    assert before.reducer.events[-1].kind == "mission_canceled"
+
+    admission = _harness(_action())
+    admission_stop = threading.Event()
+    admission.controller.stop_before_admission = admission_stop
+    admission_result = admission.runtime.run_one_turn(
+        turn_index=0,
+        stop_event=admission_stop,
+    )
+
+    assert admission_result.status is RuntimeStatus.CANCELED
+    assert admission.controller.calls == 1
+    assert admission.controller.admissions[0].allowed is False
+    assert admission.reducer.events[-1].kind == "mission_canceled"
+
+    after = _harness(_action())
+    after_stop = threading.Event()
+    after.controller.stop_after_action = after_stop
+    after_result = after.runtime.run_one_turn(
+        turn_index=0,
+        stop_event=after_stop,
+    )
+
+    assert after_result.status is RuntimeStatus.CANCELED
+    assert after.controller.calls == 1
+    assert [event.kind for event in after.reducer.events] == [
+        "target_bound",
+        "transition_recorded",
+        "mission_canceled",
+    ]
+
+
+def test_actor_and_verifier_exceptions_after_stop_are_cancellation() -> None:
+    actor_harness = _harness(_action())
+    actor_stop = threading.Event()
+    actor_harness.actor.on_propose = actor_stop.set
+    actor_harness.actor.raise_error = RuntimeError("model call canceled")
+
+    actor_result = actor_harness.runtime.run_one_turn(
+        turn_index=0,
+        stop_event=actor_stop,
+    )
+
+    assert actor_result.status is RuntimeStatus.CANCELED
+    assert actor_harness.controller.calls == 0
+    assert actor_harness.reducer.events[-1].kind == "mission_canceled"
+
+    verifier_harness = _harness(_claim())
+    verifier_stop = threading.Event()
+    verifier_harness.verifier.on_assess = verifier_stop.set
+    verifier_harness.verifier.raise_error = RuntimeError(
+        "model call canceled"
+    )
+
+    verifier_result = verifier_harness.runtime.run_one_turn(
+        turn_index=0,
+        stop_event=verifier_stop,
+    )
+
+    assert verifier_result.status is RuntimeStatus.CANCELED
+    assert [event.kind for event in verifier_harness.reducer.events] == [
+        "target_bound",
+        "obligation_claimed",
+        "mission_canceled",
+    ]
+
+
+def test_identical_fake_run_replays_deterministically() -> None:
+    def run() -> tuple[Any, ...]:
+        harness = _harness(_action(), _claim())
+        first = harness.runtime.run_one_turn(turn_index=0)
+        second = harness.runtime.run_one_turn(turn_index=1)
+        return (
+            first,
+            second,
+            tuple(event.to_dict() for event in harness.reducer.events),
+            tuple(ref.to_dict() for ref in harness.registry.snapshot()),
+            harness.reducer.projection.to_dict(),
+            tuple(turn.to_dict() for turn in harness.actor.turns),
+        )
+
+    assert run() == run()
+
+
+def test_minimal_runtime_rejects_scope_expansion_at_construction() -> None:
+    with pytest.raises(
+        MissionRuntimeConfigurationError,
+        match="pre-bound target",
+    ):
+        _harness(_action(), bind_target=False)
+
+    with pytest.raises(
+        MissionRuntimeConfigurationError,
+        match="one full-goal obligation",
+    ):
+        _harness(
+            _action(),
+            definition=_definition(
+                obligations=(
+                    ObligationSpec(
+                        id="first",
+                        desired_state=GOAL,
+                        required_capabilities=("visual.interact",),
+                        evidence_policy=EvidencePolicy(
+                            allow_independent_visual_verifier=True,
+                        ),
+                    ),
+                    ObligationSpec(id="second", desired_state="second"),
+                )
+            ),
+        )
+
+    with pytest.raises(
+        MissionRuntimeConfigurationError,
+        match="exactly the minimal canary surface",
+    ):
+        _harness(_action(), catalog=_catalog(include_extra=True))
+
+    with pytest.raises(
+        MissionRuntimeConfigurationError,
+        match="fixed safe STANDARD profile",
+    ):
+        _harness(_action(), profile_provider=False)
+
+
+def test_actor_sees_exact_minimal_tool_surface_and_invalid_action_fails_closed() -> None:
+    harness = _harness(_action("unsupported"))
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.UNAVAILABLE
+    assert harness.controller.calls == 0
+    assert {
+        item["name"] for item in harness.actor.turns[0].to_dict()["tools"]
+    } == APPROVED_RUNTIME_TOOLS
