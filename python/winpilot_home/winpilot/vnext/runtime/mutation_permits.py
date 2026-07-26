@@ -294,6 +294,48 @@ class MutationPermitAuthority:
                 and pending.commit_identity == current_commit_identity
             )
 
+    def revalidate_active_admission(
+        self,
+        envelope: ActorDecisionEnvelope,
+        *,
+        current_commit_identity: RuntimeCommitIdentity,
+    ) -> bool:
+        """Recheck live Runtime state and the exact active permit identity.
+
+        The stored Runtime callback is deliberately invoked outside the permit
+        lock.  A second locked comparison then proves the same admission is
+        still active, so close/cleanup races fail closed.
+        """
+
+        if (
+            type(envelope) is not ActorDecisionEnvelope
+            or type(current_commit_identity) is not RuntimeCommitIdentity
+        ):
+            return False
+        with self._lock:
+            pending = self._active.get(envelope.decision_id)
+            if not (
+                not self._closed
+                and pending is not None
+                and pending.envelope == envelope
+                and pending.commit_identity == current_commit_identity
+            ):
+                return False
+            still_current = pending.still_current
+        try:
+            current = still_current()
+        except Exception:
+            return False
+        if current is not True:
+            return False
+        with self._lock:
+            return bool(
+                not self._closed
+                and self._active.get(envelope.decision_id) is pending
+                and pending.envelope == envelope
+                and pending.commit_identity == current_commit_identity
+            )
+
     def finish_admission(self, decision_id: str) -> bool:
         with self._lock:
             return self._active.pop(str(decision_id), None) is not None
