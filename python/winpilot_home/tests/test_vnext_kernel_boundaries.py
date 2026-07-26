@@ -8,6 +8,7 @@ from pathlib import Path
 PACKAGE_ROOT = Path(__file__).parents[1] / "winpilot"
 VNEXT_ROOT = PACKAGE_ROOT / "vnext"
 RUNTIME_ROOT = VNEXT_ROOT / "runtime"
+MODEL_ROLES_ROOT = VNEXT_ROOT / "model_roles"
 KERNEL_ROOTS = (
     VNEXT_ROOT / "__init__.py",
     VNEXT_ROOT / "mission",
@@ -75,6 +76,7 @@ RUNTIME_FORBIDDEN_IMPORT_PREFIXES = (
     "winpilot.tasking",
     "winpilot.visual_runtime",
     "winpilot.vnext.bridge",
+    "winpilot.vnext.model_roles",
     "winpilot.vnext.targeting",
 )
 
@@ -94,6 +96,46 @@ ATOMIC_DESKTOP_IMPORTS = (
     "winpilot.visual_runtime.frame_observer",
     "winpilot.visual_runtime.normalized_frame_coordinates",
     "winpilot.visual_runtime.submitted_image_coordinates",
+)
+
+MODEL_ROLE_FILES = (
+    "__init__.py",
+    "common.py",
+    "visual_actor.py",
+    "visual_obligation_verifier.py",
+)
+
+MODEL_ROLE_ALLOWED_PRODUCT_PREFIXES = (
+    "winpilot.modeling",
+    "winpilot.vnext.actor",
+    "winpilot.vnext.runtime.contracts",
+    "winpilot.vnext.verification",
+    "winpilot.vnext.model_roles",
+)
+
+MODEL_ROLE_FORBIDDEN_IMPORT_PREFIXES = (
+    "openai",
+    "anthropic",
+    "cohere",
+    "google.genai",
+    "groq",
+    "mistralai",
+    "ollama",
+    "together",
+    "win32",
+    "pyautogui",
+    "winpilot.action",
+    "winpilot.agent",
+    "winpilot.fast",
+    "winpilot.integrations",
+    "winpilot.orchestrator",
+    "winpilot.server",
+    "winpilot.tasking",
+    "winpilot.visual_runtime",
+    "winpilot.vnext.bridge",
+    "winpilot.vnext.desktop_adapter",
+    "winpilot.vnext.profiling",
+    "winpilot.vnext.targeting",
 )
 
 
@@ -225,3 +267,55 @@ def test_only_atomic_adapter_crosses_the_live_desktop_boundary() -> None:
     assert tuple(imported for _path, imported in crossings) == (
         ATOMIC_DESKTOP_IMPORTS
     )
+
+
+def test_live_model_roles_are_exact_isolated_and_use_only_model_runtime() -> None:
+    assert tuple(
+        sorted(path.name for path in MODEL_ROLES_ROOT.glob("*.py"))
+    ) == MODEL_ROLE_FILES
+    paths = _source_files(MODEL_ROLES_ROOT)
+    forbidden = [
+        f"{path.relative_to(PACKAGE_ROOT.parent)} -> {imported}"
+        for path in paths
+        for imported in _imports(path)
+        if any(
+            _matches_prefix(imported, prefix)
+            for prefix in MODEL_ROLE_FORBIDDEN_IMPORT_PREFIXES
+        )
+    ]
+    assert forbidden == []
+    unexpected_product_imports = [
+        f"{path.relative_to(PACKAGE_ROOT.parent)} -> {imported}"
+        for path in paths
+        for imported in _imports(path)
+        if _matches_prefix(imported, "winpilot")
+        and not any(
+            _matches_prefix(imported, prefix)
+            for prefix in MODEL_ROLE_ALLOWED_PRODUCT_PREFIXES
+        )
+    ]
+    assert unexpected_product_imports == []
+    modeling_importers = {
+        path.name
+        for path in paths
+        if any(
+            _matches_prefix(imported, "winpilot.modeling")
+            for imported in _imports(path)
+        )
+    }
+    assert modeling_importers == {
+        "visual_actor.py",
+        "visual_obligation_verifier.py",
+    }
+    vnext_modeling_importers = {
+        path.relative_to(VNEXT_ROOT).as_posix()
+        for path in _source_files(VNEXT_ROOT)
+        if any(
+            _matches_prefix(imported, "winpilot.modeling")
+            for imported in _imports(path)
+        )
+    }
+    assert vnext_modeling_importers == {
+        "model_roles/visual_actor.py",
+        "model_roles/visual_obligation_verifier.py",
+    }
