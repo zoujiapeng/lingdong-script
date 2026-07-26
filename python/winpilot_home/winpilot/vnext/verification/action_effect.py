@@ -64,7 +64,7 @@ class ActionEffectVerificationError(ValueError):
 def _text(value: Any, name: str) -> str:
     if type(value) is not str or not value.strip():
         raise ActionEffectVerificationError(f"{name} must be a non-empty string")
-    return value.strip()
+    return value
 
 
 def _validate_frame(frame: Any, name: str) -> _RuntimeFramePort:

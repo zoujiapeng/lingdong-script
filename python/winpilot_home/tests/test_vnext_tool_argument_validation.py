@@ -15,6 +15,12 @@ from winpilot.vnext.capabilities import (
     ToolSchemaValidationError,
     ToolSpec,
 )
+from winpilot.vnext.json_contract import (
+    MAX_JSON_ARRAY_ITEMS,
+    MAX_JSON_KEY_LENGTH,
+    MAX_JSON_NODES,
+    MIN_SIGNED_64,
+)
 
 
 GUI_GATES = (
@@ -123,6 +129,11 @@ def test_valid_arguments_return_a_detached_json_copy() -> None:
         ),
         (
             {"mode": "click", "points": [[True, 2]]},
+            "type",
+            ("points", 0, 0),
+        ),
+        (
+            {"mode": "click", "points": [[None, 2]]},
             "type",
             ("points", 0, 0),
         ),
@@ -285,15 +296,15 @@ def test_mapping_subclasses_are_rejected_before_iteration() -> None:
         float("inf"),
         object(),
         1 << 80,
-        1e308,
+        MIN_SIGNED_64 - 1,
         "x" * 1_048_577,
     ),
     ids=(
         "nan",
         "inf",
         "object",
-        "large_int",
-        "large_float",
+        "high_int",
+        "low_int",
         "large_string",
     ),
 )
@@ -304,6 +315,25 @@ def test_non_json_or_unbounded_values_fail_before_schema(bad) -> None:
             {"mode": "click", "points": [[bad, 2]]},
         )
     assert caught.value.code == "arguments_not_json"
+
+
+def test_finite_float_and_signed_64_integer_endpoints_are_literal_json() -> None:
+    validator = ToolArgumentValidator(_catalog({
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "minimum": {"type": "integer"},
+            "maximum": {"type": "integer"},
+            "finite": {"type": "number"},
+        },
+        "required": ["minimum", "maximum", "finite"],
+    }))
+    arguments = {
+        "minimum": -(1 << 63),
+        "maximum": (1 << 63) - 1,
+        "finite": 1e308,
+    }
+    assert validator.validate("interact", arguments) == arguments
 
 
 def test_cycles_depth_nodes_and_non_string_keys_fail_closed() -> None:
@@ -319,7 +349,19 @@ def test_cycles_depth_nodes_and_non_string_keys_fail_closed() -> None:
         {1: "not-json"},
         cyclic,
         deep,
-        {"mode": "click", "points": [[0, 1]], "many": [0] * 4097},
+        {"k" * (MAX_JSON_KEY_LENGTH + 1): None},
+        {
+            "mode": "click",
+            "points": [[0, 1]],
+            "many": [0] * (MAX_JSON_ARRAY_ITEMS + 1),
+        },
+        {
+            f"k{index}": None
+            for index in range(MAX_JSON_NODES)
+        },
+        {
+            "chunks": ["\u754c" * 900_000 for _ in range(2)],
+        },
     )
     for value in values:
         with pytest.raises(ToolArgumentValidationError) as caught:
