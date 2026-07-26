@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
-from typing import Any, Mapping
+from typing import Any
 
 from .contracts import (
     BROKER_PROJECTION_FORMAT,
@@ -19,11 +19,13 @@ from .contracts import (
     _SHA,
     _TOOL,
     _boolean,
+    _capabilities,
+    _enum_value,
     _identity,
     _strict,
     _strings,
+    _wire_array,
 )
-from ..capability_names import canonical_capabilities
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +60,7 @@ class TargetState:
         return {"binding_id": self.binding_id, "hwnd": self.hwnd, "epoch": self.epoch, "live": self.live}
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "TargetState":
+    def from_dict(cls, raw: object) -> "TargetState":
         return cls(**_strict(raw, ("binding_id", "hwnd", "epoch", "live"), "TargetState"))
 
 
@@ -112,7 +114,7 @@ class AuthoritativeFrameState:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "AuthoritativeFrameState":
+    def from_dict(cls, raw: object) -> "AuthoritativeFrameState":
         fields = ("frame_id", "hwnd", "epoch", "authoritative", "fresh", "scope")
         return cls(**_strict(raw, fields, "AuthoritativeFrameState"))
 
@@ -124,7 +126,15 @@ class PointerLeaseState:
     physically_owned: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "disposition", PointerDisposition(self.disposition))
+        object.__setattr__(
+            self,
+            "disposition",
+            _enum_value(
+                self.disposition,
+                PointerDisposition,
+                "pointer.disposition",
+            ),
+        )
         object.__setattr__(
             self,
             "physically_owned",
@@ -147,7 +157,7 @@ class PointerLeaseState:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "PointerLeaseState":
+    def from_dict(cls, raw: object) -> "PointerLeaseState":
         fields = ("disposition", "lease_id", "physically_owned")
         return cls(**_strict(raw, fields, "PointerLeaseState"))
 
@@ -166,10 +176,8 @@ class ArtifactState:
             object.__setattr__(self, name, _identity(getattr(self, name), name))
         if type(self.content_sha256) is not str:
             raise CapabilityContractError("artifact content_sha256 must be a string")
-        digest = self.content_sha256.lower()
-        if not _SHA.fullmatch(digest):
+        if not _SHA.fullmatch(self.content_sha256):
             raise CapabilityContractError("artifact content_sha256 is invalid")
-        object.__setattr__(self, "content_sha256", digest)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -179,7 +187,7 @@ class ArtifactState:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "ArtifactState":
+    def from_dict(cls, raw: object) -> "ArtifactState":
         fields = ("artifact_id", "run_id", "content_sha256", "binding_name", "sendable")
         return cls(**_strict(raw, fields, "ArtifactState"))
 
@@ -198,13 +206,20 @@ class ExecutorOffer:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "executor_id", _identity(self.executor_id, "executor_id"))
-        route = ToolRoute(self.route)
+        route = _enum_value(self.route, ToolRoute, "offer.route")
         if route is ToolRoute.VISUAL_ACTOR:
             raise CapabilityContractError("executor offer cannot impersonate visual actor")
         object.__setattr__(self, "route", route)
         for name in ("available", "live", "mutates_desktop"):
             object.__setattr__(self, name, _boolean(getattr(self, name), f"offer.{name}"))
-        object.__setattr__(self, "supported_capabilities", canonical_capabilities(self.supported_capabilities))
+        object.__setattr__(
+            self,
+            "supported_capabilities",
+            _capabilities(
+                self.supported_capabilities,
+                "offer.supported_capabilities",
+            ),
+        )
         object.__setattr__(self, "tool_names", _strings(self.tool_names, "offer.tool_names"))
         object.__setattr__(self, "authorization_scopes", _strings(self.authorization_scopes, "offer.authorization_scopes"))
         object.__setattr__(self, "receipt_kinds", _strings(self.receipt_kinds, "offer.receipt_kinds"))
@@ -222,12 +237,20 @@ class ExecutorOffer:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "ExecutorOffer":
+    def from_dict(cls, raw: object) -> "ExecutorOffer":
         fields = (
             "executor_id", "route", "supported_capabilities", "tool_names",
             "available", "live", "mutates_desktop", "authorization_scopes", "receipt_kinds",
         )
-        return cls(**_strict(raw, fields, "ExecutorOffer"))
+        value = _strict(raw, fields, "ExecutorOffer")
+        for name in (
+            "supported_capabilities",
+            "tool_names",
+            "authorization_scopes",
+            "receipt_kinds",
+        ):
+            _wire_array(value[name], f"ExecutorOffer.{name}")
+        return cls(**value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +277,14 @@ class BrokerRuntimeState:
             or self.turn_index > _MAX_INTEGER
         ):
             raise CapabilityContractError("invalid broker runtime state")
-        object.__setattr__(self, "available_capabilities", canonical_capabilities(self.available_capabilities))
+        object.__setattr__(
+            self,
+            "available_capabilities",
+            _capabilities(
+                self.available_capabilities,
+                "available_capabilities",
+            ),
+        )
         object.__setattr__(
             self,
             "target",
@@ -338,7 +368,7 @@ class BrokerRuntimeState:
         return {**self._content_dict(), "fingerprint": self.fingerprint}
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "BrokerRuntimeState":
+    def from_dict(cls, raw: object) -> "BrokerRuntimeState":
         fields = (
             "format", "turn_index", "available_capabilities", "target", "frame",
             "pointer", "artifacts", "executor_offers", "authorization_scopes",
@@ -346,6 +376,13 @@ class BrokerRuntimeState:
         )
         value = _strict(raw, fields, "BrokerRuntimeState")
         fingerprint = value.pop("fingerprint")
+        for name in (
+            "available_capabilities",
+            "artifacts",
+            "executor_offers",
+            "authorization_scopes",
+        ):
+            _wire_array(value[name], f"BrokerRuntimeState.{name}")
         value["target"] = TargetState.from_dict(value["target"])
         value["frame"] = AuthoritativeFrameState.from_dict(value["frame"])
         value["pointer"] = PointerLeaseState.from_dict(value["pointer"])
@@ -437,17 +474,13 @@ class BrokerProjection:
         object.__setattr__(self, "run_id", _identity(self.run_id, "run_id"))
         if type(self.catalog_fingerprint) is not str:
             raise CapabilityContractError("catalog_fingerprint must be a string")
-        catalog_fingerprint = self.catalog_fingerprint.lower()
-        if not _SHA.fullmatch(catalog_fingerprint):
+        if not _SHA.fullmatch(self.catalog_fingerprint):
             raise CapabilityContractError("catalog_fingerprint must be SHA-256")
-        object.__setattr__(self, "catalog_fingerprint", catalog_fingerprint)
         object.__setattr__(self, "profile_id", _identity(self.profile_id, "profile_id"))
         if type(self.state_fingerprint) is not str:
             raise CapabilityContractError("state_fingerprint must be a string")
-        state_fingerprint = self.state_fingerprint.lower()
-        if not _SHA.fullmatch(state_fingerprint):
+        if not _SHA.fullmatch(self.state_fingerprint):
             raise CapabilityContractError("state_fingerprint must be SHA-256")
-        object.__setattr__(self, "state_fingerprint", state_fingerprint)
         object.__setattr__(self, "obligation_id", _identity(self.obligation_id, "obligation_id"))
         if (
             type(self.mission_revision) is not int
@@ -461,7 +494,15 @@ class BrokerProjection:
             or self.turn_index > _MAX_INTEGER
         ):
             raise CapabilityContractError("turn_index must be non-negative")
-        object.__setattr__(self, "execution_route", ExecutionRoute(self.execution_route))
+        object.__setattr__(
+            self,
+            "execution_route",
+            _enum_value(
+                self.execution_route,
+                ExecutionRoute,
+                "execution_route",
+            ),
+        )
         tool_names = _strings(
             self.tool_names, "tool_names", sorted_output=False
         )
@@ -498,7 +539,14 @@ class BrokerProjection:
             )
         grants = tuple(sorted(grants, key=lambda item: item.grant_id))
         object.__setattr__(self, "active_grants", grants)
-        object.__setattr__(self, "missing_capabilities", canonical_capabilities(self.missing_capabilities))
+        object.__setattr__(
+            self,
+            "missing_capabilities",
+            _capabilities(
+                self.missing_capabilities,
+                "missing_capabilities",
+            ),
+        )
         object.__setattr__(self, "projection_reasons", _strings(self.projection_reasons, "projection_reasons", sorted_output=False))
         for name in (
             "executor_id",
@@ -580,7 +628,7 @@ class BrokerProjection:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "BrokerProjection":
+    def from_dict(cls, raw: object) -> "BrokerProjection":
         fields = (
             "format", "projection_id", "mission_id", "run_id",
             "catalog_fingerprint", "profile_id", "mission_revision", "obligation_id",
@@ -590,8 +638,13 @@ class BrokerProjection:
             "tool_names", "active_grants", "missing_capabilities", "projection_reasons",
         )
         value = _strict(raw, fields, "BrokerProjection")
-        if not isinstance(value["active_grants"], (list, tuple)):
-            raise CapabilityContractError("active_grants must be an array")
+        for name in (
+            "tool_names",
+            "active_grants",
+            "missing_capabilities",
+            "projection_reasons",
+        ):
+            _wire_array(value[name], f"BrokerProjection.{name}")
         value["active_grants"] = tuple(
             CapabilityGrant.from_dict(item) for item in value["active_grants"]
         )
