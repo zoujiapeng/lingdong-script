@@ -26,6 +26,13 @@ from ..model_adapter import (
     empty_usage_total,
     model_profile_from_config,
 )
+from ..modeling import (
+    ModelCallError,
+    ModelCallRuntime,
+    ModelRequestEnvelope,
+    ModelRetryPolicy,
+    create_openai_client,
+)
 from ..perception import fusion, intent, reducer, vlm
 from ..runtime_info import runtime_fingerprint
 from ..fast.action_contract import (
@@ -43,6 +50,9 @@ from ..utils.image_capture import (
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, virtual_screen_region, window_region
 from ..utils.trace_payload import sanitize_trace_payload
+from ..visual_runtime.frame_observer import FrameObserver
+from ..visual_runtime.normalized_frame_coordinates import NormalizedFrameCoordinateMapper
+from ..visual_runtime.submitted_image_coordinates import SubmittedImageCoordinateMapper
 from . import playbooks, prompts, session as session_mod
 from .context_guidance import ContextGuidanceMixin
 from .done_verifier import (
@@ -656,8 +666,6 @@ def _unexecuted_constraint_category(result_text: str) -> str:
 
 
 def _client():
-    from openai import OpenAI
-
     api = CONFIG.get("api", default={})
     if not api.get("api_key"):
         raise RuntimeError("config.json 缺少 api.api_key")
@@ -669,7 +677,11 @@ def _client():
     # invalid or unexpectedly large value.  AgentRunner owns the total
     # request watchdog below and ignores late responses after a deadline.
     timeout_s = max(5.0, min(180.0, timeout_s))
-    return OpenAI(base_url=api["base_url"], api_key=api["api_key"], timeout=timeout_s)
+    return create_openai_client(
+        base_url=api["base_url"],
+        api_key=api["api_key"],
+        timeout=timeout_s,
+    )
 
 
 def _main_model_has_vision() -> bool:
@@ -2579,56 +2591,40 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         )
         started = time.monotonic()
         try:
-            cached = getattr(self.session, "_last_native_frame_capture", None)
-            cached_matches = bool(
-                image_b64
-                and isinstance(cached, dict)
-                and cached.get("image_b64") == image_b64
-                and int(cached.get("hwnd") or 0) == hwnd
-                and cached.get("region") is not None
+            # Construct with this module's current dependencies on every call.
+            # Besides making the seam injectable for vNext, this preserves the
+            # legacy test/runtime ability to replace capture and scope owners.
+            observer = FrameObserver(
+                self._frame_authority,
+                capture=capture_window_jpeg_b64,
+                select_scope=select_visual_capture_scope,
+                settled_initial_capture=self._capture_settled_initial_frame,
+                virtual_desktop=virtual_screen_region,
             )
-            if frame_region is not None:
-                # Preflight captured these pixels from this exact rectangle.
-                # Never query a later window rectangle and pair it with an
-                # older JPEG: a move/resize between the two would corrupt all
-                # subsequent normalized coordinates.
-                region = frame_region
-                scope = (
-                    "full_desktop"
-                    if region == virtual_screen_region()
-                    else "target_window"
-                )
-                scope_reason = "preflight_exact_capture_region"
-            elif cached_matches:
-                # Explicit observe captured these pixels and this rectangle in
-                # one operation. Reuse the pair without a redundant screenshot.
-                region = cached["region"]
-                scope = str(cached.get("scope") or "target_window")
-                scope_reason = str(
-                    cached.get("scope_reason") or "observe_exact_capture_region"
-                )
-            else:
-                decision = select_visual_capture_scope(
-                    hwnd or None,
-                    enabled=None,
-                    related_window=getattr(
-                        self.session, "_window_related_to_target", None,
-                    ),
-                )
-                region = decision.region
-                scope = decision.scope
-                scope_reason = decision.reason
-            if region.width < 16 or region.height < 16:
+            epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
+            captured = observer.capture(
+                epoch=epoch,
+                hwnd=hwnd,
+                phase=phase,
+                action=action,
+                provided_image_b64=image_b64,
+                provided_region=frame_region,
+                cached_capture=getattr(
+                    self.session, "_last_native_frame_capture", None,
+                ),
+                related_window=getattr(
+                    self.session, "_window_related_to_target", None,
+                ),
+                expected_previous_frame_id=(
+                    previous_state.frame_id if previous_state is not None else 0
+                ),
+            )
+            if captured is None:
                 return False
-            if image_b64:
-                b64 = image_b64
-            elif phase == "initial" and action == "target_prebind":
-                b64 = self._capture_settled_initial_frame(hwnd, region)
-            else:
-                b64 = capture_window_jpeg_b64(hwnd, region=region)
-            if not b64:
-                return False
-            captured_at = time.time()
+            region = captured.region
+            scope = captured.scope
+            scope_reason = captured.reason
+            b64 = captured.image_b64
             region_tuple = (
                 int(region.left), int(region.top), int(region.width), int(region.height),
             )
@@ -2693,24 +2689,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     graphical_grounding_line,
                     pixel_graphical_candidates,
                 ) = self._visual_graphical_grounding_assist(b64)
-            max_side = 1120
-            scale = min(1.0, max_side / max(1, region.width, region.height))
-            submitted_width = max(1, int(region.width * scale))
-            submitted_height = max(1, int(region.height * scale))
-            epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
-            frame_state = self._frame_authority.commit(
-                epoch=epoch,
-                hwnd=hwnd,
-                region=region_tuple,
-                scope=scope,
-                reason=scope_reason,
-                submitted_size=(submitted_width, submitted_height),
-                image_b64=b64,
-                captured_at=captured_at,
-                expected_previous_frame_id=(
-                    previous_state.frame_id if previous_state is not None else 0
-                ),
-            )
+            frame_state = observer.commit(captured)
+            region = captured.region
+            submitted_width, submitted_height = frame_state.submitted_size
+            epoch = frame_state.epoch
             frame_id = frame_state.frame_id
             self._mirror_authoritative_frame(frame_state)
             self._record_visual_effect_checkpoint(
@@ -3804,6 +3786,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )
             return args
         left, top, width, height = region
+        frame_mapper = NormalizedFrameCoordinateMapper((left, top, width, height))
         mapped = dict(args)
         if (
             tool_name in {"move_mouse", "mouse_up"}
@@ -3823,16 +3806,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             ):
                 mapped["constraint_frame_region"] = dict(inherited_constraint)
         image_source: dict[str, Any] = {}
-
-        def numeric_image_value(value: Any, field: str) -> float:
-            if isinstance(value, bool):
-                raise ValueError(f"{field} must be a numeric submitted-image pixel coordinate")
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                raise ValueError(
-                    f"{field} must be a numeric submitted-image pixel coordinate"
-                ) from None
+        image_mapper = SubmittedImageCoordinateMapper(self._visual_submitted_size)
 
         def convert_image_pair(
             image_x_key: str,
@@ -3840,198 +3814,35 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             frame_x_key: str,
             frame_y_key: str,
         ) -> bool:
-            present = (image_x_key in mapped, image_y_key in mapped)
-            if not any(present):
-                return False
-            if not all(present):
-                raise ValueError(
-                    f"{tool_name} requires both {image_x_key} and {image_y_key}"
-                )
-            if frame_x_key in mapped or frame_y_key in mapped:
-                raise ValueError(
-                    f"{tool_name} received mixed submitted-image and normalized-frame coordinates"
-                )
-            submitted = self._visual_submitted_size
-            if not submitted or submitted[0] <= 0 or submitted[1] <= 0:
-                raise ValueError(
-                    f"{tool_name} submitted-image coordinates require the current frame image dimensions"
-                )
-            image_width, image_height = submitted
-            image_x = numeric_image_value(mapped.pop(image_x_key), image_x_key)
-            image_y = numeric_image_value(mapped.pop(image_y_key), image_y_key)
-            if not (
-                0.0 <= image_x <= max(0, image_width - 1)
-                and 0.0 <= image_y <= max(0, image_height - 1)
-            ):
-                raise ValueError(
-                    f"{image_x_key}/{image_y_key} must stay inside the exact submitted "
-                    f"image bounds 0..{max(0, image_width - 1)} by "
-                    f"0..{max(0, image_height - 1)}"
-                )
-            mapped[frame_x_key] = (
-                image_x * 1000.0 / max(1, image_width - 1)
+            nonlocal mapped
+            mapped, point_source = image_mapper.map_point_pair(
+                mapped,
+                image_keys=(image_x_key, image_y_key),
+                frame_keys=(frame_x_key, frame_y_key),
+                context=tool_name,
             )
-            mapped[frame_y_key] = (
-                image_y * 1000.0 / max(1, image_height - 1)
-            )
-            image_source[image_x_key] = image_x
-            image_source[image_y_key] = image_y
-            return True
+            image_source.update(point_source)
+            return bool(point_source)
 
         if tool_name in {"click", "double_click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
             convert_image_pair("image_x", "image_y", "frame_x", "frame_y")
         elif tool_name == "drag":
-            image_endpoint_present = any(
-                key in mapped
-                for key in ("image_x1", "image_y1", "image_x2", "image_y2")
+            mapped, drag_source = image_mapper.map_drag_image_coordinates(
+                mapped, context=tool_name, max_points=_NATIVE_DRAG_MAX_POINTS,
             )
-            if image_endpoint_present:
-                first_image = convert_image_pair(
-                    "image_x1", "image_y1", "frame_x1", "frame_y1",
-                )
-                second_image = convert_image_pair(
-                    "image_x2", "image_y2", "frame_x2", "frame_y2",
-                )
-                if not first_image or not second_image:
-                    raise ValueError(
-                        "drag submitted-image coordinates require both complete endpoints"
-                    )
-                if "frame_points" in mapped:
-                    raise ValueError(
-                        "drag received image endpoints with normalized frame_points"
-                    )
-                if "image_points" in mapped:
-                    raw_image_points = mapped.pop("image_points")
-                    if not isinstance(raw_image_points, list):
-                        raise ValueError("image_points must be an array of [x,y] pixels")
-                    compact_image_points: list[Any] = []
-                    for raw_point in raw_image_points:
-                        if not compact_image_points or raw_point != compact_image_points[-1]:
-                            compact_image_points.append(raw_point)
-                    if len(compact_image_points) > _NATIVE_DRAG_MAX_POINTS:
-                        raise ValueError(
-                            f"image_points accepts at most {_NATIVE_DRAG_MAX_POINTS} meaningful points"
-                        )
-                    converted_points: list[list[float]] = []
-                    original_points: list[list[float]] = []
-                    for index, raw_point in enumerate(compact_image_points):
-                        if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
-                            raise ValueError(f"image_points[{index}] must be [x,y]")
-                        temporary = {
-                            "image_x": raw_point[0],
-                            "image_y": raw_point[1],
-                        }
-                        prior = mapped
-                        mapped = temporary
-                        try:
-                            convert_image_pair(
-                                "image_x", "image_y", "frame_x", "frame_y",
-                            )
-                            converted_points.append([
-                                float(mapped["frame_x"]), float(mapped["frame_y"]),
-                            ])
-                            original_points.append([
-                                float(image_source.pop("image_x")),
-                                float(image_source.pop("image_y")),
-                            ])
-                        finally:
-                            mapped = prior
-                    mapped["frame_points"] = converted_points
-                    image_source["image_points"] = original_points
-            elif "image_points" in mapped:
-                raise ValueError(
-                    "image_points require drag endpoints in the same submitted-image coordinate source"
-                )
-        elif tool_name == "draw_strokes" and "image_strokes" in mapped:
-            if "frame_strokes" in mapped:
-                raise ValueError(
-                    "draw_strokes received mixed submitted-image and normalized-frame coordinates"
-                )
-            raw_image_strokes = mapped.pop("image_strokes")
-            if not isinstance(raw_image_strokes, list) or not raw_image_strokes:
-                raise ValueError("image_strokes must contain at least one stroke")
-            if len(raw_image_strokes) > 16:
-                raise ValueError("image_strokes accepts at most 16 strokes")
-            converted_strokes: list[list[list[float]]] = []
-            original_strokes: list[list[list[float]]] = []
-            for stroke_index, raw_stroke in enumerate(raw_image_strokes):
-                if not isinstance(raw_stroke, list) or not (2 <= len(raw_stroke) <= 16):
-                    raise ValueError(
-                        f"image_strokes[{stroke_index}] must contain 2..16 [x,y] points"
-                    )
-                converted_stroke: list[list[float]] = []
-                original_stroke: list[list[float]] = []
-                for point_index, raw_point in enumerate(raw_stroke):
-                    if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
-                        raise ValueError(
-                            f"image_strokes[{stroke_index}][{point_index}] must be [x,y]"
-                        )
-                    temporary = {"image_x": raw_point[0], "image_y": raw_point[1]}
-                    prior = mapped
-                    mapped = temporary
-                    try:
-                        convert_image_pair(
-                            "image_x", "image_y", "frame_x", "frame_y",
-                        )
-                        converted_stroke.append([
-                            float(mapped["frame_x"]), float(mapped["frame_y"]),
-                        ])
-                        original_stroke.append([
-                            float(image_source.pop("image_x")),
-                            float(image_source.pop("image_y")),
-                        ])
-                    finally:
-                        mapped = prior
-                converted_strokes.append(converted_stroke)
-                original_strokes.append(original_stroke)
-            mapped["frame_strokes"] = converted_strokes
-            image_source["image_strokes"] = original_strokes
-        elif tool_name == "draw_strokes" and "image_strokes" in image_source:
-            raise ValueError("invalid submitted-image stroke coordinates")
+            image_source.update(drag_source)
+        elif tool_name == "draw_strokes":
+            mapped, stroke_source = image_mapper.map_image_strokes(
+                mapped, context=tool_name, max_strokes=16, max_points_per_stroke=16,
+            )
+            image_source.update(stroke_source)
 
         if "constraint_image_region" in mapped:
-            if "constraint_frame_region" in mapped:
-                raise ValueError(
-                    f"{tool_name} received both submitted-image and normalized-frame constraints"
-                )
-            submitted = self._visual_submitted_size
-            if not submitted or submitted[0] <= 0 or submitted[1] <= 0:
-                raise ValueError(
-                    f"{tool_name} submitted-image constraint requires the current image dimensions"
-                )
-            raw_image_constraint = mapped.pop("constraint_image_region")
-            if not isinstance(raw_image_constraint, (list, tuple)) or len(raw_image_constraint) != 4:
-                raise ValueError(
-                    "constraint_image_region requires [left,top,right,bottom] pixel bounds"
-                )
-            try:
-                image_left, image_top, image_right, image_bottom = (
-                    numeric_image_value(value, "constraint_image_region")
-                    for value in raw_image_constraint
-                )
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "constraint_image_region requires numeric [left,top,right,bottom] pixel bounds"
-                ) from None
-            image_width, image_height = submitted
-            if not (
-                0.0 <= image_left < image_right <= max(0, image_width - 1)
-                and 0.0 <= image_top < image_bottom <= max(0, image_height - 1)
-            ):
-                raise ValueError(
-                    "constraint_image_region must be a positive rectangle inside the exact "
-                    f"submitted image bounds 0..{max(0, image_width - 1)} by "
-                    f"0..{max(0, image_height - 1)}"
-                )
-            mapped["constraint_frame_region"] = [
-                image_left * 1000.0 / max(1, image_width - 1),
-                image_top * 1000.0 / max(1, image_height - 1),
-                image_right * 1000.0 / max(1, image_width - 1),
-                image_bottom * 1000.0 / max(1, image_height - 1),
-            ]
-            image_source["constraint_image_region"] = [
-                image_left, image_top, image_right, image_bottom,
-            ]
+            mapped, constraint_source = image_mapper.map_constraint_image_region(
+                mapped,
+                context=tool_name,
+            )
+            image_source["constraint_image_region"] = constraint_source
         constraint_frame_region: dict[str, float] | None = None
         if "constraint_frame_region" in mapped:
             if "constraint_region" in mapped or "_constraint_region" in mapped:
@@ -4309,11 +4120,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 raise ValueError(
                     f"{x_key}/{y_key} must stay inside the current frame's 0..1000 bounds"
                 )
-            # Region.right/bottom are exclusive.  Mapping 1000 through width
-            # itself would click one pixel outside the captured window.
-            px = int(round(left + nx / 1000.0 * max(0, width - 1)))
-            py = int(round(top + ny / 1000.0 * max(0, height - 1)))
-            return px, py
+            return frame_mapper.map_point(nx, ny)
 
         def require_normalized_instead_of_physical(
             physical_keys: tuple[str, ...],
@@ -4639,6 +4446,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             # charge the same request a second time.
             self._accumulate_model_elapsed(decision_started)
 
+    def _model_role(self) -> str:
+        """Stable role label for request identity, not model routing."""
+        return "legacy_coding_agent" if self._is_coding else "legacy_visual_agent"
+
     def _chat_request(
         self,
         client,
@@ -4726,6 +4537,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             thinking_mode == "enabled"
             or (thinking_mode is None and configured_thinking_enabled)
         )
+        model_role = self._model_role()
+        decision_step = int(self._decision_step or 0)
         box: dict[str, Any] = {}
         self._last_llm_model = model
         self._last_llm_thinking_enabled = thinking_enabled
@@ -4749,78 +4562,80 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "tools": tools,
         })
 
-        def _is_rate_limit(exc: Exception) -> bool:
-            text = str(exc).lower()
-            return "429" in text or "too many requests" in text or "rate limit" in text
-
         cancel_event = threading.Event()
 
-        def _backoff_sleep(seconds: float) -> bool:
-            """Sleep in small slices so a Stop interrupts the wait. Returns
-            False if a Stop was requested mid-wait."""
-            waited = 0.0
-            while waited < seconds:
-                if self.stop_event.is_set() or cancel_event.is_set():
-                    return False
-                time.sleep(0.2)
-                waited += 0.2
-            return True
+        request_params: dict[str, Any] = {
+            "model": model,
+            "messages": self.messages,
+            "tools": tools,
+        }
+        if gui_tool_recovery_request and tools:
+            request_params["tool_choice"] = "required"
+        if thinking_enabled:
+            request_params["max_completion_tokens"] = request_max_tokens
+        else:
+            request_params["temperature"] = float(api.get("temperature", 0.3))
+            request_params["max_tokens"] = request_max_tokens
+        if thinking_mode is not None:
+            request_params["extra_body"] = {
+                "thinking": {"type": thinking_mode},
+            }
+
+        prepare_request = getattr(client, "prepare_chat_completion", None)
+        send_prepared = getattr(client, "send_prepared_chat_completion", None)
+        if callable(prepare_request) and callable(send_prepared):
+            provider_request = prepare_request(**request_params)
+            send_once = send_prepared
+        else:
+            provider_request = request_params
+
+            def send_once(params: dict[str, Any]):
+                return client.chat.completions.create(**params)
+
+        request_envelope = ModelRequestEnvelope.bind(
+            decision_id=f"{self.run_id}:{decision_step}:{self.model_request_count}",
+            model_role=model_role,
+            purpose="legacy_agent_decision",
+            provider_request=provider_request,
+        )
+        retry_policy = ModelRetryPolicy(
+            max_attempts=max_attempts,
+            total_timeout_s=total_timeout_s,
+            initial_backoff_s=1.5,
+            rate_limit_initial_backoff_s=_RATE_LIMIT_BACKOFF_S,
+            backoff_multiplier=2.0,
+            max_backoff_s=20.0,
+        )
+
+        def record_attempt(attempt) -> None:
+            self._trace_debug("llm_request_attempt", {
+                "run_id": self.run_id,
+                "decision_id": request_envelope.decision_id,
+                "request_fingerprint": request_envelope.request_fingerprint,
+                "attempt": attempt.attempt,
+                "retry_kind": attempt.kind.value,
+                "ok": attempt.ok,
+                "error_kind": attempt.error_kind,
+                "retryable": attempt.retryable,
+                "elapsed_ms": attempt.elapsed_ms,
+            })
 
         def worker() -> None:
-            last_exc: Exception | None = None
-            for attempt in range(1, max_attempts + 1):
-                if self.stop_event.is_set() or cancel_event.is_set():
-                    return
-                try:
-                    # A timed-out deep visual request may get one bounded
-                    # lightweight reconsideration. No GUI tool has run yet,
-                    # so this retry cannot duplicate a desktop action.
-                    attempt_thinking_enabled = bool(
-                        thinking_enabled and not (
-                            attempt > 1
-                            and thinking_mode == "enabled"
-                            and thinking_policy not in {"always_by_config", "provider_configured"}
-                        )
-                    )
-                    attempt_thinking_mode = (
-                        "enabled" if attempt_thinking_enabled
-                        else "disabled" if thinking_mode is not None
-                        and (attempt > 1 or thinking_mode == "disabled")
-                        else None
-                    )
-                    request_params: dict[str, Any] = {
-                        "model": model,
-                        "messages": self.messages,
-                        "tools": tools,
-                    }
-                    if gui_tool_recovery_request and tools:
-                        request_params["tool_choice"] = "required"
-                    if attempt_thinking_enabled:
-                        request_params["max_completion_tokens"] = request_max_tokens
-                    else:
-                        request_params["temperature"] = float(api.get("temperature", 0.3))
-                        request_params["max_tokens"] = request_max_tokens
-                    if attempt_thinking_mode is not None:
-                        request_params["extra_body"] = {
-                            "thinking": {"type": attempt_thinking_mode},
-                        }
-                    box["resp"] = client.chat.completions.create(**request_params)
-                    return
-                except Exception as exc:
-                    last_exc = exc
-                    logger.warning("API 调用失败 (第%d次): %s", attempt, exc)
-                    if attempt < max_attempts and not cancel_event.is_set():
-                        # Rate limits (429) need a much longer wait than a
-                        # transient network blip — back off exponentially
-                        # (5s, 10s, 20s...) so a burst of drawing strokes
-                        # doesn't kill the run. Stop interrupts the wait.
-                        if _is_rate_limit(exc):
-                            if not _backoff_sleep(_RATE_LIMIT_BACKOFF_S * (2 ** (attempt - 1))):
-                                return
-                        else:
-                            if not _backoff_sleep(1.5 * attempt):
-                                return
-            box["exc"] = RuntimeError(f"API 连续 {_API_RETRIES} 次失败: {last_exc}")
+            try:
+                outcome = ModelCallRuntime().execute(
+                    request_envelope,
+                    send_once,
+                    policy=retry_policy,
+                    stop_event=cancel_event,
+                    on_attempt=record_attempt,
+                )
+                box["resp"] = outcome.response
+                box["model_attempts"] = outcome.attempts
+                box["request_retry_count"] = outcome.request_retry_count
+            except ModelCallError as exc:
+                box["exc"] = exc
+                box["model_attempts"] = exc.attempts
+                box["request_retry_count"] = exc.request_retry_count
 
         thread = threading.Thread(target=worker, daemon=True, name="llm-call")
         thread.start()

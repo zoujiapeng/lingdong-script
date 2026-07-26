@@ -32,6 +32,22 @@ import win32gui
 from ..config import CONFIG
 from ..utils.log import BUS, logger
 from .desktop_queue import queued_desktop_action
+from .raw_device import (
+    AdmittedPhysicalClickBackend,
+    AdmittedPhysicalHotkeyBackend,
+    AdmittedPhysicalScrollBackend,
+    AdmittedPhysicalTypeTextBackend,
+    ClickCount,
+    ClickMechanism,
+    FinalKeyboardGuard,
+    FinalKeyboardGuardDecision,
+    FinalPointerGuard,
+    FinalPointerGuardDecision,
+    HotkeyChord,
+    MAX_TYPE_TEXT_CODEPOINTS,
+    MouseButton,
+    RawBackendResult,
+)
 
 user32 = ctypes.windll.user32
 
@@ -289,38 +305,70 @@ def _same_window_root(candidate: int, expected: int | None) -> bool:
         return int(candidate or 0) == int(expected or 0)
 
 
+def _try_release(call: Callable[..., Any], *args: Any) -> bool:
+    try:
+        call(*args)
+        return True
+    except Exception:
+        return False
+
+
 def _post_click(
     x: int,
     y: int,
-    button: str,
-    double: bool,
+    button: MouseButton,
+    count: ClickCount,
     expected_hwnd: int | None = None,
-) -> bool:
-    """Background click at screen (x,y) via window messages — no cursor move.
-    Returns False if no target window resolved (caller falls back)."""
+) -> RawBackendResult:
+    """Attempt one message click; only a zero-message result permits fallback."""
     try:
         target = win32gui.WindowFromPoint((int(x), int(y)))
         if not target or not _same_window_root(int(target), expected_hwnd):
-            return False
+            return RawBackendResult(False, {"route_available": False})
         cx, cy = win32gui.ScreenToClient(target, (int(x), int(y)))
         lparam = (cy << 16) | (cx & 0xFFFF)
-        down, up, mk = _WM.get(button, _WM["left"])
-        for index in range(2 if double else 1):
-            down_message = _WM_DOUBLE.get(button, down) if index == 1 else down
+        down, up, mk = _WM[button.value]
+    except Exception:
+        return RawBackendResult(False, {"route_available": False})
+
+    completed_clicks = 0
+    for index in range(count.value):
+        down_message = _WM_DOUBLE[button.value] if index == 1 else down
+        try:
             win32gui.PostMessage(target, down_message, mk, lparam)
+        except Exception:
+            return _click_progress(
+                None, completed_clicks, "post_message_down_outcome_unknown",
+                cleanup=_try_release(win32gui.PostMessage, target, up, 0, lparam),
+                via="post_message",
+            )
+        try:
+            sampled = _sample_pressed_state()
+        except Exception:
             sampled = False
+        try:
+            win32gui.PostMessage(target, up, 0, lparam)
+        except Exception:
+            return _click_progress(
+                None, completed_clicks, "post_message_up_outcome_unknown",
+                cleanup=_try_release(win32gui.PostMessage, target, up, 0, lparam),
+                via="post_message",
+            )
+        completed_clicks += 1
+        if sampled:
             try:
-                sampled = _sample_pressed_state()
-            finally:
-                win32gui.PostMessage(target, up, 0, lparam)
-            if sampled:
                 _settle_after_release()
-            if double:
+            except Exception:
+                logger.debug("post-click settle failed", exc_info=True)
+        if index + 1 < count.value:
+            try:
                 time.sleep(0.05)
-        return True
-    except Exception as exc:
-        logger.debug("post_click 失败: %s", exc)
-        return False
+            except Exception:
+                return _click_progress(
+                    None, completed_clicks,
+                    "post_message_inter_click_wait_failed", via="post_message",
+                )
+    return _click_progress(True, completed_clicks, via="post_message")
 
 
 def _cursor_pos() -> tuple[int, int]:
@@ -463,6 +511,121 @@ def move_mouse(x: int, y: int, hwnd: int | None = None) -> dict:
     return {"ok": True, "x": int(x), "y": int(y)}
 
 
+_CLICK_OWNERSHIP_LOST = "click stopped because the user took foreground/cursor ownership"
+
+
+def _legacy_click_failure(
+    result: RawBackendResult,
+    *,
+    cursor_restored: bool | None = None,
+) -> dict[str, Any]:
+    facts = dict(result.facts)
+    facts.update({
+        "ok": False, "verified": False, "blocked": True,
+        "error": str(result.facts.get("error") or _CLICK_OWNERSHIP_LOST),
+    })
+    if cursor_restored is not None:
+        facts["cursor_restored"] = cursor_restored
+    if result.input_completed is not None:
+        facts.pop("completed_clicks", None)
+    else:
+        facts.update(input_completed=None, outcome_unknown=True)
+    return facts
+
+
+def _click_progress(
+    input_completed: bool | None,
+    completed_clicks: int,
+    error: str = "",
+    *,
+    cleanup: bool | None = None,
+    via: str = "",
+) -> RawBackendResult:
+    facts: dict[str, Any] = {"completed_clicks": int(completed_clicks)}
+    if error:
+        facts.update({"ok": False, "blocked": True, "error": error})
+        if error == _CLICK_OWNERSHIP_LOST:
+            facts["cooperative_input"] = True
+    if cleanup is not None:
+        facts.update(release_cleanup_attempted=True,
+                     release_cleanup_completed=cleanup)
+    if via:
+        facts["via"] = via
+    return RawBackendResult(input_completed, facts)
+
+
+def _execute_click_input_unqueued(
+    x: int,
+    y: int,
+    button: MouseButton,
+    count: ClickCount,
+    mechanism: ClickMechanism,
+    hwnd: int | None = None,
+    *,
+    final_guard: FinalPointerGuard | None = None,
+) -> RawBackendResult:
+    """Execute one strict click after the caller has serialized admission."""
+    if not (
+        type(x) is int and type(y) is int and isinstance(button, MouseButton)
+        and isinstance(count, ClickCount)
+        and isinstance(mechanism, ClickMechanism)
+    ):
+        return _click_progress(False, 0, "invalid typed click input")
+    if _dry_run():
+        return RawBackendResult(False, {"ok": True, "dry_run": True})
+    if mechanism is ClickMechanism.BACKGROUND_MESSAGE:
+        return _post_click(x, y, button, count, expected_hwnd=hwnd)
+    raw_args = (
+        x, y, button, count, hwnd,
+        mechanism is ClickMechanism.PREPOSITIONED_PHYSICAL, False,
+    )
+    if final_guard is None:
+        return _raw_click(*raw_args, enforce_foreground=True)
+    return _raw_click(
+        *raw_args,
+        enforce_foreground=True,
+        final_guard=final_guard,
+    )
+
+
+def execute_admitted_physical_click(
+    x: int,
+    y: int,
+    button: MouseButton,
+    count: ClickCount,
+    mechanism: ClickMechanism,
+    hwnd: int | None = None,
+    *,
+    final_guard: FinalPointerGuard,
+) -> RawBackendResult:
+    """Run an already-queued physical click with a true pre-down guard."""
+    if not callable(final_guard) or mechanism is ClickMechanism.BACKGROUND_MESSAGE:
+        return _click_progress(False, 0, "invalid admitted physical click")
+    return _execute_click_input_unqueued(
+        x, y, button, count, mechanism, hwnd=hwnd, final_guard=final_guard,
+    )
+
+
+ADMITTED_PHYSICAL_CLICK_BACKEND = AdmittedPhysicalClickBackend(
+    execute_admitted_physical_click
+)
+
+
+@queued_desktop_action("click")
+def execute_click_input(
+    x: int,
+    y: int,
+    button: MouseButton,
+    count: ClickCount,
+    mechanism: ClickMechanism,
+    hwnd: int | None = None,
+) -> RawBackendResult:
+    """Queue one strict single-mechanism click for RawDevice."""
+    return _execute_click_input_unqueued(
+        x, y, button, count, mechanism, hwnd=hwnd,
+    )
+
+
 @queued_desktop_action("click")
 def click(
     x: int,
@@ -481,6 +644,8 @@ def click(
     """
     if _dry_run():
         return {"ok": True, "dry_run": True}
+    typed_button = MouseButton(button)
+    count = ClickCount.DOUBLE if bool(double) else ClickCount.SINGLE
     # A visual-servo click deliberately owns the physical cursor: its final
     # confirmation is only valid for the cursor position it just measured.
     # Replacing that mouse-down with a background window message would break
@@ -492,32 +657,33 @@ def click(
                 "blocked": True,
                 "cooperative_input": True,
             }
-        if _post_click(x, y, button, double, expected_hwnd=hwnd):
-            BUS.publish("action", action="click", x=x, y=y, button=button,
-                        double=double, via="post_message")
+        posted = _post_click(
+            int(x), int(y), typed_button, count, expected_hwnd=hwnd,
+        )
+        if posted.input_completed is True:
+            _publish_action_fact("click", x=x, y=y, button=button,
+                                 double=double, via="post_message")
             return {"ok": True, "x": x, "y": y, "via": "post_message"}
+        if posted.input_completed is None:
+            return _legacy_click_failure(posted)
         # fallback: must use SendInput, but restore the user's cursor afterwards
         cooperative_block = cooperative_input_guard("click", hwnd)
         if cooperative_block is not None:
             return cooperative_block
         saved = _cursor_pos()
         try:
-            completed = _raw_click(x, y, button, double, hwnd)
+            completed = _raw_click(int(x), int(y), typed_button, count, hwnd)
         finally:
-            cursor_restored = _restore_cursor_after_agent_input(
-                saved, (int(x), int(y)), hwnd,
-            )
-        if completed is False:
-            return {
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "cooperative_input": True,
-                "cursor_restored": cursor_restored,
-                "error": "click stopped because the user took foreground/cursor ownership",
-            }
-        BUS.publish("action", action="click", x=x, y=y, button=button,
-                    double=double, via="sendinput_restored")
+            try:
+                cursor_restored = _restore_cursor_after_agent_input(
+                    saved, (int(x), int(y)), hwnd,
+                )
+            except Exception:
+                cursor_restored = False
+        if completed.input_completed is not True or completed.facts.get("blocked"):
+            return _legacy_click_failure(completed, cursor_restored=cursor_restored)
+        _publish_action_fact("click", x=x, y=y, button=button,
+                             double=double, via="sendinput_restored")
         return {
             "ok": True, "x": x, "y": y, "via": "sendinput_restored",
             "prepositioned": bool(prepositioned),
@@ -527,18 +693,14 @@ def click(
         cooperative_block = cooperative_input_guard("visual_servo_click", hwnd)
         if cooperative_block is not None:
             return cooperative_block
-        completed = _raw_click(x, y, button, double, hwnd, prepositioned=True)
+        completed = _raw_click(
+            int(x), int(y), typed_button, count, hwnd, True, False,
+        )
     else:
-        completed = _raw_click(x, y, button, double, hwnd)
-    if completed is False:
-        return {
-            "ok": False,
-            "verified": False,
-            "blocked": True,
-            "cooperative_input": True,
-            "error": "click stopped because the user took foreground/cursor ownership",
-        }
-    BUS.publish("action", action="click", x=x, y=y, button=button, double=double)
+        completed = _raw_click(int(x), int(y), typed_button, count, hwnd)
+    if completed.input_completed is not True or completed.facts.get("blocked"):
+        return _legacy_click_failure(completed)
+    _publish_action_fact("click", x=x, y=y, button=button, double=double)
     return {
         "ok": True,
         "x": x,
@@ -551,14 +713,22 @@ def click(
 def _raw_click(
     x: int,
     y: int,
-    button: str,
-    double: bool,
+    button: MouseButton,
+    count: ClickCount,
     hwnd: int | None,
     prepositioned: bool = False,
-) -> bool:
+    allow_target_focus: bool = True,
+    enforce_foreground: bool = False,
+    final_guard: FinalPointerGuard | None = None,
+) -> RawBackendResult:
     cooperative_mode = multi_input_cooperation_enabled()
-    if hwnd and not prepositioned and not cooperative_mode:
-        _raw_focus_window(hwnd)
+    if hwnd and not cooperative_mode:
+        if not prepositioned and allow_target_focus:
+            _raw_focus_window(hwnd)
+        if enforce_foreground and not _target_window_still_foreground(hwnd):
+            return _click_progress(
+                False, 0, "click target is not the current foreground window",
+            )
     if prepositioned:
         current_x, current_y = _cursor_pos()
         if abs(int(current_x) - int(x)) > 3 or abs(int(current_y) - int(y)) > 3:
@@ -570,43 +740,109 @@ def _raw_click(
     if cooperative_mode and not _cooperative_action_still_owned(
         hwnd, expected_cursor=(int(x), int(y)),
     ):
-        return False
-    if button == "left":
+        return _click_progress(
+            False, 0, _CLICK_OWNERSHIP_LOST,
+        )
+    if button is MouseButton.LEFT:
         down, up = win32con.MOUSEEVENTF_LEFTDOWN, win32con.MOUSEEVENTF_LEFTUP
-    elif button == "right":
+    elif button is MouseButton.RIGHT:
         down, up = win32con.MOUSEEVENTF_RIGHTDOWN, win32con.MOUSEEVENTF_RIGHTUP
-    elif button == "middle":
+    elif button is MouseButton.MIDDLE:
         down, up = win32con.MOUSEEVENTF_MIDDLEDOWN, win32con.MOUSEEVENTF_MIDDLEUP
     else:
-        raise ValueError(f"未知鼠标键: {button}")
-    for _ in range(2 if double else 1):
+        raise TypeError("button must be MouseButton")
+    completed_clicks = 0
+    for index in range(count.value):
+        if (
+            enforce_foreground
+            and hwnd
+            and not cooperative_mode
+            and not _target_window_still_foreground(hwnd)
+        ):
+            return _click_progress(
+                False if completed_clicks == 0 else None,
+                completed_clicks,
+                "click target lost foreground ownership before mouse-down",
+            )
         if cooperative_mode and not _cooperative_action_still_owned(
             hwnd, expected_cursor=(int(x), int(y)),
         ):
-            return False
-        _send_inputs([_mouse_input(down)])
-        sampled = False
-        still_owned = True
+            return _click_progress(
+                False if completed_clicks == 0 else None,
+                completed_clicks,
+                _CLICK_OWNERSHIP_LOST,
+            )
+        if final_guard is not None:
+            try:
+                cursor_before = tuple(map(int, _cursor_pos()))
+                guard_decision = final_guard(*cursor_before)
+                cursor_after = tuple(map(int, _cursor_pos()))
+            except Exception:
+                guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
+                cursor_before = cursor_after = ()
+            if not isinstance(guard_decision, FinalPointerGuardDecision):
+                guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
+            if (
+                guard_decision is FinalPointerGuardDecision.ADMITTED
+                and (
+                    cursor_before != (int(x), int(y))
+                    or cursor_after != cursor_before
+                )
+            ):
+                guard_decision = FinalPointerGuardDecision.POINTER_POSITION_CHANGED
+            if guard_decision is not FinalPointerGuardDecision.ADMITTED:
+                return _click_progress(
+                    False if completed_clicks == 0 else None,
+                    completed_clicks,
+                    f"final click guard rejected: {guard_decision.value}",
+                    via="final_target_guard",
+                )
+        try:
+            _send_inputs([_mouse_input(down)])
+        except Exception:
+            return _click_progress(
+                None, completed_clicks, "click down outcome unknown",
+                cleanup=_try_release(_send_inputs, [_mouse_input(up)]),
+            )
         try:
             sampled = _sample_pressed_state()
-            if cooperative_mode:
-                still_owned = _cooperative_action_still_owned(
-                    hwnd, expected_cursor=(int(x), int(y)),
-                )
-        finally:
+            still_owned = not cooperative_mode or _cooperative_action_still_owned(
+                hwnd, expected_cursor=(int(x), int(y)),
+            )
+        except Exception:
+            sampled, still_owned = False, False
+        try:
             _send_inputs([_mouse_input(up)])
+        except Exception:
+            return _click_progress(
+                None, completed_clicks, "click up outcome unknown",
+                cleanup=_try_release(_send_inputs, [_mouse_input(up)]),
+            )
+        completed_clicks += 1
         if cooperative_mode and (
             not still_owned
             or not _cooperative_action_still_owned(
                 hwnd, expected_cursor=(int(x), int(y)),
             )
         ):
-            return False
+            return _click_progress(
+                True if completed_clicks == count.value else None,
+                completed_clicks,
+                _CLICK_OWNERSHIP_LOST,
+            )
         if sampled:
-            _settle_after_release()
-        if double:
-            time.sleep(0.06)
-    return True
+            try:
+                _settle_after_release()
+            except Exception:
+                logger.debug("physical-click settle failed", exc_info=True)
+        if index + 1 < count.value:
+            try:
+                time.sleep(0.06)
+            except Exception:
+                return _click_progress(
+                    None, completed_clicks, "click inter-click wait failed",
+                )
+    return _click_progress(True, completed_clicks)
 
 
 def _abs_mouse_move(x: int, y: int) -> None:
@@ -839,40 +1075,169 @@ def draw_strokes(strokes: list, duration_s: float = 0.4,
     return result
 
 
-@queued_desktop_action("scroll")
-def scroll(
+def _publish_action_fact(action: str, **payload: Any) -> None:
+    """Telemetry cannot turn one completed input into a fallback replay."""
+    try:
+        BUS.publish("action", action=action, **payload)
+    except Exception:
+        logger.debug("%s action telemetry failed", action, exc_info=True)
+
+
+def _physical_scroll_result(
+    input_completed: bool | None,
+    *,
+    error: str = "",
+    via: str = "physical_sendinput",
+    cursor_restored: bool | None = None,
+) -> RawBackendResult:
+    facts: dict[str, Any] = {"ok": input_completed is True, "via": via}
+    if error:
+        facts.update({"blocked": True, "error": error})
+    if cursor_restored is not None:
+        facts["cursor_restored"] = cursor_restored
+    return RawBackendResult(input_completed, facts)
+
+
+def execute_admitted_physical_scroll(
     x: int,
     y: int,
     amount: int,
     hwnd: int | None = None,
-) -> dict:
-    """amount: positive=up, negative=down; in notches."""
+    *,
+    final_guard: FinalPointerGuard,
+) -> RawBackendResult:
+    """Send one already-queued physical wheel input after its final guard.
+
+    ``amount`` keeps WinPilot's canonical wheel convention: negative scrolls
+    down and positive scrolls up.
+    """
+
+    if (
+        any(type(value) is not int for value in (x, y, amount))
+        or amount == 0
+        or not callable(final_guard)
+    ):
+        return _physical_scroll_result(False, error="invalid admitted physical scroll")
     if _dry_run():
-        return {"ok": True, "dry_run": True}
+        return RawBackendResult(False, {"ok": True, "dry_run": True})
+
+    try:
+        saved = tuple(map(int, _cursor_pos()))
+    except Exception:
+        return _physical_scroll_result(False, error="scroll cursor position unavailable")
+
+    input_completed: bool | None = False
+    error = ""
+    via = "physical_sendinput"
+    expected = (int(x), int(y))
+    try:
+        try:
+            _raw_move_mouse(*expected)
+            time.sleep(0.04)
+        except Exception:
+            error = "scroll pointer positioning failed"
+        if not error and multi_input_cooperation_enabled() and not (
+            _cooperative_action_still_owned(hwnd, expected_cursor=expected)
+        ):
+            error = "scroll stopped because the user took foreground/cursor ownership"
+        if not error:
+            try:
+                cursor_before = tuple(map(int, _cursor_pos()))
+                guard_decision = final_guard(*cursor_before)
+                cursor_after = tuple(map(int, _cursor_pos()))
+            except Exception:
+                guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
+                cursor_before = cursor_after = ()
+            if not isinstance(guard_decision, FinalPointerGuardDecision):
+                guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
+            if (
+                guard_decision is FinalPointerGuardDecision.ADMITTED
+                and (cursor_before != expected or cursor_after != cursor_before)
+            ):
+                guard_decision = FinalPointerGuardDecision.POINTER_POSITION_CHANGED
+            if guard_decision is not FinalPointerGuardDecision.ADMITTED:
+                via = "final_target_guard"
+                error = f"final pointer guard rejected: {guard_decision.value}"
+        if not error:
+            try:
+                _send_inputs([
+                    _mouse_input(
+                        win32con.MOUSEEVENTF_WHEEL,
+                        data=amount * 120 & 0xFFFFFFFF,
+                    )
+                ])
+            except Exception:
+                input_completed = None
+                error = "scroll wheel outcome unknown"
+            else:
+                input_completed = True
+    finally:
+        cursor_restored = _restore_cursor_after_agent_input(saved, expected, hwnd)
+
+    result = _physical_scroll_result(
+        input_completed,
+        error=error,
+        via=via,
+        cursor_restored=cursor_restored,
+    )
+    if input_completed is True:
+        _publish_action_fact(
+            "scroll", x=x, y=y, amount=amount, via="physical_sendinput",
+        )
+    return result
+
+
+ADMITTED_PHYSICAL_SCROLL_BACKEND = AdmittedPhysicalScrollBackend(
+    execute_admitted_physical_scroll
+)
+
+
+@queued_desktop_action("scroll")
+def execute_scroll_input(
+    x: int,
+    y: int,
+    amount: int,
+    hwnd: int | None = None,
+) -> RawBackendResult:
+    """Execute one scroll attempt and report explicit mechanical completion."""
+    if _dry_run():
+        return RawBackendResult(False, {"ok": True, "dry_run": True})
     if _no_mouse_steal():
         if multi_input_cooperation_enabled() and not hwnd:
-            return cooperative_input_guard("scroll", hwnd) or {
+            result = cooperative_input_guard("scroll", hwnd) or {
                 "ok": False,
                 "blocked": True,
                 "cooperative_input": True,
             }
+            return RawBackendResult(False, result)
         # WM_MOUSEWHEEL to the window under the point — no cursor move.
+        target = 0
         try:
             target = win32gui.WindowFromPoint((int(x), int(y)))
-            if target and _same_window_root(int(target), hwnd):
-                wparam = (int(amount) * 120) << 16
-                lparam = (int(y) << 16) | (int(x) & 0xFFFF)  # screen coords for wheel
-                win32gui.PostMessage(target, win32con.WM_MOUSEWHEEL, wparam, lparam)
-                BUS.publish("action", action="scroll", x=x, y=y, amount=amount,
-                            via="post_message")
-                return {"ok": True, "via": "post_message"}
+            target_matches = bool(target and _same_window_root(int(target), hwnd))
         except Exception as exc:
-            logger.debug("post scroll 失败: %s", exc)
+            logger.debug("post scroll target resolution failed: %s", exc)
+            target_matches = False
+        if target_matches:
+            wparam = (int(amount) * 120) << 16
+            lparam = (int(y) << 16) | (int(x) & 0xFFFF)  # screen coords for wheel
+            try:
+                win32gui.PostMessage(target, win32con.WM_MOUSEWHEEL, wparam, lparam)
+            except Exception:
+                return RawBackendResult(None, {
+                    "ok": False,
+                    "via": "post_message",
+                    "error": "post_message_outcome_unknown",
+                })
+            _publish_action_fact("scroll", x=x, y=y, amount=amount,
+                                 via="post_message")
+            return RawBackendResult(True, {"ok": True, "via": "post_message"})
         cooperative_block = cooperative_input_guard("scroll", hwnd)
         if cooperative_block is not None:
-            return cooperative_block
+            return RawBackendResult(False, cooperative_block)
         saved = _cursor_pos()
         completed = True
+        wheel_sent = False
         try:
             _raw_move_mouse(x, y)
             time.sleep(0.04)
@@ -882,6 +1247,7 @@ def scroll(
                 completed = False
             else:
                 _send_inputs([_mouse_input(win32con.MOUSEEVENTF_WHEEL, data=amount * 120 & 0xFFFFFFFF)])
+                wheel_sent = True
                 if multi_input_cooperation_enabled() and not _cooperative_action_still_owned(
                     hwnd, expected_cursor=(int(x), int(y)),
                 ):
@@ -891,195 +1257,581 @@ def scroll(
                 saved, (int(x), int(y)), hwnd,
             )
         if not completed:
-            return {
+            return RawBackendResult(wheel_sent, {
                 "ok": False,
                 "verified": False,
                 "blocked": True,
                 "cooperative_input": True,
                 "cursor_restored": cursor_restored,
                 "error": "scroll stopped because the user took foreground/cursor ownership",
-            }
-        BUS.publish("action", action="scroll", x=x, y=y, amount=amount,
-                    via="sendinput_restored")
-        return {
+            })
+        _publish_action_fact("scroll", x=x, y=y, amount=amount,
+                             via="sendinput_restored")
+        return RawBackendResult(True, {
             "ok": True,
             "via": "sendinput_restored",
             "cursor_restored": cursor_restored,
-        }
+        })
     _raw_move_mouse(x, y)
     time.sleep(0.04)
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_WHEEL, data=amount * 120 & 0xFFFFFFFF)])
-    BUS.publish("action", action="scroll", x=x, y=y, amount=amount)
-    return {"ok": True}
+    _publish_action_fact("scroll", x=x, y=y, amount=amount)
+    return RawBackendResult(True, {"ok": True})
+
+
+def scroll(
+    x: int,
+    y: int,
+    amount: int,
+    hwnd: int | None = None,
+) -> dict:
+    """Legacy mapping adapter; amount is positive=up, negative=down."""
+    return dict(execute_scroll_input(x, y, amount, hwnd=hwnd).facts)
 
 
 # ------------------------------------------------------------- keyboard API
-@queued_desktop_action("type_text")
-def type_text(
+def _keyboard_guard_decision(
+    final_guard: FinalKeyboardGuard,
+) -> FinalKeyboardGuardDecision:
+    try:
+        decision = final_guard()
+    except Exception:
+        return FinalKeyboardGuardDecision.TARGET_UNAVAILABLE
+    return (
+        decision
+        if isinstance(decision, FinalKeyboardGuardDecision)
+        else FinalKeyboardGuardDecision.TARGET_UNAVAILABLE
+    )
+
+
+def _keyboard_result(
+    input_completed: bool | None,
+    *,
+    requested_codepoints: int | None = None,
+    completed_codepoints: int | None = None,
+    key_count: int | None = None,
+    release_cleanup_attempted: bool = False,
+    release_cleanup_completed: bool = True,
+    error: str = "",
+    guard_decision: FinalKeyboardGuardDecision | None = None,
+) -> RawBackendResult:
+    facts: dict[str, Any] = {
+        "ok": input_completed is True,
+        "via": "physical_sendinput",
+        "release_cleanup_attempted": release_cleanup_attempted,
+        "release_cleanup_completed": release_cleanup_completed,
+    }
+    if requested_codepoints is not None:
+        facts["requested_codepoints"] = requested_codepoints
+    if completed_codepoints is not None:
+        facts["completed_codepoints"] = completed_codepoints
+    if key_count is not None:
+        facts["key_count"] = key_count
+    if error:
+        facts["error"] = error
+    if guard_decision is not None:
+        facts["guard_decision"] = guard_decision.value
+    return RawBackendResult(input_completed, facts)
+
+
+def _unicode_units(char: str) -> tuple[int, ...]:
+    code = ord(char)
+    if code <= 0xFFFF:
+        return (code,)
+    code -= 0x10000
+    return (0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF))
+
+
+def _vk_character_inputs(char: str) -> tuple[list[_Input], list[_Input]] | None:
+    result = user32.VkKeyScanW(ctypes.c_wchar(char))
+    if result == -1:
+        return None
+    vk = result & 0xFF
+    state = (result >> 8) & 0xFF
+    modifiers: list[int] = []
+    if state & 1:
+        modifiers.append(_VK_SHIFT)
+    if state & 2:
+        modifiers.append(_VK_CTRL)
+    if state & 4:
+        modifiers.append(_VK_ALT)
+    flags = _KEYEVENTF_EXTENDEDKEY if vk in _EXTENDED_VKS else 0
+    downs = [_key_input(vk=modifier) for modifier in modifiers]
+    downs.append(_key_input(vk=vk, flags=flags))
+    ups = [_key_input(vk=vk, flags=flags | _KEYEVENTF_KEYUP)]
+    ups.extend(
+        _key_input(vk=modifier, flags=_KEYEVENTF_KEYUP)
+        for modifier in reversed(modifiers)
+    )
+    return downs, ups
+
+
+def _best_effort_key_releases(ups: list[_Input]) -> tuple[bool, bool]:
+    attempted = bool(ups)
+    completed = True
+    for key_up in ups:
+        try:
+            _send_inputs([key_up])
+        except Exception:
+            completed = False
+    return attempted, completed
+
+
+def _send_text_codepoint(char: str, *, via_vk: bool) -> tuple[bool | None, bool, bool]:
+    if char == "\n":
+        vk = _VK["enter"]
+        batches = [(
+            [_key_input(vk=vk)],
+            [_key_input(vk=vk, flags=_KEYEVENTF_KEYUP)],
+            True,
+        )]
+    elif via_vk:
+        inputs = _vk_character_inputs(char)
+        if inputs is None:
+            return False, False, True
+        downs, ups = inputs
+        batches = [(downs, ups, False)]
+    else:
+        batches = [(
+            [_key_input(scan=unit, flags=_KEYEVENTF_UNICODE)],
+            [_key_input(
+                scan=unit,
+                flags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP,
+            )],
+            False,
+        ) for unit in _unicode_units(char)]
+
+    for downs, ups, split_release in batches:
+        try:
+            _send_inputs(downs if split_release else [*downs, *ups])
+            if split_release:
+                _send_inputs(ups)
+        except Exception:
+            cleanup_attempted, cleanup_completed = _best_effort_key_releases(ups)
+            return None, cleanup_attempted, cleanup_completed
+    return True, False, True
+
+
+def _legacy_physical_type_text(
     text: str,
-    interval_s: float = 0.008,
-    hwnd: int | None = None,
-) -> dict:
-    """Unicode injection — IME-independent, supports Chinese.
+    hwnd: int | None,
+    interval_s: float,
+) -> RawBackendResult:
+    """Preserve master's focus, newline-chord, and pacing behavior."""
 
-    hwnd: if given, re-focus the window every 8 characters so focus theft
-    (another window activating mid-type) does not silently swallow keystrokes.
-    """
-    if _dry_run():
-        return {"ok": True, "dry_run": True}
+    requested = len(text)
+    typed = 0
 
-    cooperative_block = cooperative_input_guard("type_text", hwnd)
-    if cooperative_block is not None:
-        return cooperative_block
+    def result(
+        input_completed: bool | None,
+        *,
+        error: str = "",
+        via: str = "",
+    ) -> RawBackendResult:
+        facts: dict[str, Any] = {
+            "ok": input_completed is True,
+            "completed_codepoints": typed,
+            "requested_codepoints": requested,
+        }
+        if error:
+            facts.update({"blocked": True, "error": error})
+        if via:
+            facts["via"] = via
+        return RawBackendResult(input_completed, facts)
 
-    def _refocus_if_needed(i: int) -> bool:
+    def refocus_if_needed(index: int) -> bool:
         if hwnd and multi_input_cooperation_enabled():
             try:
                 return int(win32gui.GetForegroundWindow() or 0) == int(hwnd)
             except Exception:
                 return False
-        if hwnd and i > 0 and i % 8 == 0:
+        if hwnd and index > 0 and index % 8 == 0:
             if win32gui.GetForegroundWindow() != hwnd:
                 _raw_focus_window(hwnd)
                 time.sleep(0.08)
         return True
 
-    if _should_type_via_vk(text):
-        typed = 0
-        for char in text:
-            if not _refocus_if_needed(typed):
-                return {
-                    "ok": False,
-                    "verified": False,
-                    "blocked": True,
-                    "cooperative_input": True,
-                    "typed": typed,
-                    "requested": len(text),
-                    "error": "foreground changed while typing; stopped instead of stealing keyboard focus",
-                }
+    via_vk = _should_type_via_vk(text)
+    for char in text:
+        if not refocus_if_needed(typed):
+            return result(
+                False if typed == 0 else None,
+                error=(
+                    "foreground changed while typing; stopped instead of "
+                    "stealing keyboard focus"
+                ),
+                via="vk" if via_vk else "",
+            )
+        if via_vk:
             if not _press_char_vk(char):
-                break
+                return result(
+                    False if typed == 0 else None,
+                    error="character input unavailable",
+                    via="vk",
+                )
             typed += 1
             if (
                 multi_input_cooperation_enabled()
                 and not _cooperative_action_still_owned(hwnd)
             ):
-                return {
-                    "ok": False,
-                    "verified": False,
-                    "blocked": True,
-                    "cooperative_input": True,
-                    "typed": typed,
-                    "requested": len(text),
-                    "error": (
+                return result(
+                    None,
+                    error=(
                         "foreground changed immediately after a typed key; "
                         "stopped without sending further input"
                     ),
-                }
+                    via="vk",
+                )
             time.sleep(max(interval_s, 0.03))
-        BUS.publish("action", action="type_text", length=typed, via="vk")
-        return {"ok": typed == len(text), "typed": typed,
-                "requested": len(text), "via": "vk"}
-    typed = 0
-    for char in text:
-        if not _refocus_if_needed(typed):
-            return {
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "cooperative_input": True,
-                "typed": typed,
-                "requested": len(text),
-                "error": "foreground changed while typing; stopped instead of stealing keyboard focus",
-            }
+            continue
         if char == "\n":
             key_result = _raw_press_keys_for_target(["enter"], hwnd)
             if key_result.get("ok") is not True:
-                key_result.setdefault("typed", typed)
-                key_result.setdefault("requested", len(text))
-                return key_result
+                completed = key_result.get("input_completed")
+                if (
+                    completed is not True
+                    and completed is not False
+                    and completed is not None
+                ):
+                    completed = False if typed == 0 else None
+                return result(
+                    completed,
+                    error=str(
+                        key_result.get("error")
+                        or "newline key chord was not completed"
+                    ),
+                )
             typed += 1
             continue
-        code = ord(char)
-        if code > 0xFFFF:  # surrogate pair for emoji etc.
-            code -= 0x10000
-            pair = (0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF))
-        else:
-            pair = (code,)
-        for unit in pair:
+        for unit in _unicode_units(char):
             _send_inputs([
                 _key_input(scan=unit, flags=_KEYEVENTF_UNICODE),
-                _key_input(scan=unit, flags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP),
+                _key_input(
+                    scan=unit,
+                    flags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP,
+                ),
             ])
         typed += 1
         if (
             multi_input_cooperation_enabled()
             and not _cooperative_action_still_owned(hwnd)
         ):
-            return {
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "cooperative_input": True,
-                "typed": typed,
-                "requested": len(text),
-                "error": (
+            return result(
+                None,
+                error=(
                     "foreground changed immediately after a typed character; "
                     "stopped without sending further input"
                 ),
-            }
+            )
         time.sleep(interval_s)
-    BUS.publish("action", action="type_text", length=typed)
-    return {"ok": True, "typed": typed}
+    return result(True, via="vk" if via_vk else "")
 
 
-def _raw_press_keys(keys: list[str], hwnd: int | None = None) -> dict:
-    vks = [_vk_of(k) for k in keys]
+def _execute_physical_type_text(
+    text: str,
+    hwnd: int | None = None,
+    *,
+    final_guard: FinalKeyboardGuard,
+    interval_s: float = 0.008,
+    publish_action_fact: bool = True,
+    legacy_semantics: bool = False,
+) -> RawBackendResult:
+    """Type one bounded string without queueing; strict mode never refocuses."""
+
+    if (
+        type(text) is not str
+        or type(interval_s) not in {int, float}
+        or isinstance(interval_s, bool)
+        or not math.isfinite(float(interval_s))
+        or not 0 <= float(interval_s) <= 1
+        or not callable(final_guard)
+        or type(publish_action_fact) is not bool
+        or type(legacy_semantics) is not bool
+    ):
+        return _keyboard_result(
+            False,
+            requested_codepoints=len(text) if type(text) is str else 0,
+            completed_codepoints=0,
+            error="invalid admitted physical type text",
+        )
+    if _dry_run():
+        return RawBackendResult(False, {"ok": True, "dry_run": True})
+    if legacy_semantics:
+        return _legacy_physical_type_text(text, hwnd, float(interval_s))
+
+    requested = len(text)
+    completed = 0
+    via_vk = _should_type_via_vk(text)
+    for char in text:
+        decision = _keyboard_guard_decision(final_guard)
+        if decision is not FinalKeyboardGuardDecision.ADMITTED:
+            return _keyboard_result(
+                False if completed == 0 else None,
+                requested_codepoints=requested,
+                completed_codepoints=completed,
+                error="final keyboard guard rejected before text input",
+                guard_decision=decision,
+            )
+        sent, cleanup_attempted, cleanup_completed = _send_text_codepoint(
+            char, via_vk=via_vk,
+        )
+        if sent is not True:
+            return _keyboard_result(
+                None if sent is None or completed else False,
+                requested_codepoints=requested,
+                completed_codepoints=completed,
+                release_cleanup_attempted=cleanup_attempted,
+                release_cleanup_completed=cleanup_completed,
+                error=(
+                    "text input outcome unknown"
+                    if sent is None
+                    else "text input unavailable"
+                ),
+            )
+        completed += 1
+        decision = _keyboard_guard_decision(final_guard)
+        if decision is not FinalKeyboardGuardDecision.ADMITTED:
+            return _keyboard_result(
+                None,
+                requested_codepoints=requested,
+                completed_codepoints=completed,
+                error="final keyboard guard changed after text input",
+                guard_decision=decision,
+            )
+        time.sleep(max(float(interval_s), 0.03) if via_vk else float(interval_s))
+
+    result = _keyboard_result(
+        True,
+        requested_codepoints=requested,
+        completed_codepoints=completed,
+    )
+    if publish_action_fact:
+        _publish_action_fact("type_text", length=completed, via="physical_sendinput")
+    return result
+
+
+def execute_admitted_physical_type_text(
+    text: str,
+    hwnd: int | None = None,
+    *,
+    final_guard: FinalKeyboardGuard,
+    interval_s: float = 0.008,
+) -> RawBackendResult:
+    """Strict vNext boundary around the shared physical text mechanism."""
+
+    if type(text) is not str or not 1 <= len(text) <= MAX_TYPE_TEXT_CODEPOINTS:
+        return _keyboard_result(
+            False,
+            requested_codepoints=len(text) if type(text) is str else 0,
+            completed_codepoints=0,
+            error="invalid admitted physical type text",
+        )
+    return _execute_physical_type_text(
+        text,
+        hwnd=hwnd,
+        final_guard=final_guard,
+        interval_s=interval_s,
+        publish_action_fact=True,
+    )
+
+
+ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND = AdmittedPhysicalTypeTextBackend(
+    execute_admitted_physical_type_text
+)
+
+
+def _execute_physical_hotkey_vks(
+    vks: tuple[int, ...],
+    *,
+    final_guard: FinalKeyboardGuard,
+    release_individually: bool = True,
+) -> RawBackendResult:
+    decision = _keyboard_guard_decision(final_guard)
+    if decision is not FinalKeyboardGuardDecision.ADMITTED:
+        return _keyboard_result(
+            False,
+            key_count=len(vks),
+            error="final keyboard guard rejected before hotkey",
+            guard_decision=decision,
+        )
     downs, ups = [], []
     for vk in vks:
         flags = _KEYEVENTF_EXTENDEDKEY if vk in _EXTENDED_VKS else 0
         downs.append(_key_input(vk=vk, flags=flags))
         ups.append(_key_input(vk=vk, flags=flags | _KEYEVENTF_KEYUP))
-    if multi_input_cooperation_enabled():
-        if not _cooperative_action_still_owned(hwnd):
-            return {
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "cooperative_input": True,
-                "keys": keys,
-                "error": "foreground ownership changed before the key chord",
-            }
-        pressed = False
-        still_owned = True
-        try:
-            _send_inputs(downs)
-            pressed = True
-            time.sleep(0.03)
-            still_owned = _cooperative_action_still_owned(hwnd)
-        finally:
-            if pressed:
-                _send_inputs(list(reversed(ups)))
-        still_owned = bool(
-            still_owned and _cooperative_action_still_owned(hwnd)
-        )
-        if not still_owned:
-            return {
-                "ok": False,
-                "verified": False,
-                "blocked": True,
-                "cooperative_input": True,
-                "keys": keys,
-                "error": (
-                    "foreground ownership changed during the key chord; "
-                    "the agent released its keys and stopped"
-                ),
-            }
-    else:
+
+    down_attempted = False
+    down_completed = False
+    release_attempted = False
+    release_completed = True
+    release_had_error = False
+    guard_after = FinalKeyboardGuardDecision.ADMITTED
+    try:
+        down_attempted = True
         _send_inputs(downs)
+        down_completed = True
         time.sleep(0.03)
-        _send_inputs(list(reversed(ups)))
-    return {"ok": True, "keys": keys}
+        guard_after = _keyboard_guard_decision(final_guard)
+    except Exception:
+        guard_after = FinalKeyboardGuardDecision.TARGET_UNAVAILABLE
+    finally:
+        if down_attempted:
+            ordered_ups = list(reversed(ups))
+            if release_individually:
+                release_attempted, release_completed = _best_effort_key_releases(
+                    ordered_ups
+                )
+            else:
+                release_attempted = bool(ordered_ups)
+                try:
+                    _send_inputs(ordered_ups)
+                except Exception:
+                    release_had_error = True
+                    _attempted, release_completed = _best_effort_key_releases(
+                        ordered_ups
+                    )
+
+    if (
+        down_completed
+        and release_completed
+        and guard_after is FinalKeyboardGuardDecision.ADMITTED
+    ):
+        guard_after = _keyboard_guard_decision(final_guard)
+
+    completed = bool(
+        down_completed
+        and release_completed
+        and not release_had_error
+        and guard_after is FinalKeyboardGuardDecision.ADMITTED
+    )
+    if completed:
+        return _keyboard_result(
+            True,
+            key_count=len(vks),
+            release_cleanup_attempted=release_attempted,
+            release_cleanup_completed=release_completed,
+        )
+    return _keyboard_result(
+        None,
+        key_count=len(vks),
+        release_cleanup_attempted=release_attempted,
+        release_cleanup_completed=release_completed,
+        error="hotkey outcome unknown",
+        guard_decision=guard_after,
+    )
+
+
+def execute_admitted_physical_hotkey(
+    chord: HotkeyChord,
+    hwnd: int | None = None,
+    *,
+    final_guard: FinalKeyboardGuard,
+) -> RawBackendResult:
+    """Send one canonical chord without queueing, parsing, focus, or fallback."""
+
+    if not isinstance(chord, HotkeyChord) or not callable(final_guard):
+        return _keyboard_result(False, key_count=0, error="invalid admitted hotkey")
+    if _dry_run():
+        return RawBackendResult(False, {"ok": True, "dry_run": True})
+    try:
+        vks = tuple(_vk_of(key) for key in chord.keys)
+    except Exception:
+        return _keyboard_result(
+            False, key_count=len(chord.keys), error="invalid admitted hotkey",
+        )
+    result = _execute_physical_hotkey_vks(vks, final_guard=final_guard)
+    if result.input_completed is True:
+        _publish_action_fact(
+            "hotkey", key_count=len(chord.keys), via="physical_sendinput",
+        )
+    return result
+
+
+ADMITTED_PHYSICAL_HOTKEY_BACKEND = AdmittedPhysicalHotkeyBackend(
+    execute_admitted_physical_hotkey
+)
+
+
+def _legacy_hotkey_guard(hwnd: int | None) -> FinalKeyboardGuardDecision:
+    if hwnd is None or not multi_input_cooperation_enabled():
+        return FinalKeyboardGuardDecision.ADMITTED
+    try:
+        owned = _cooperative_action_still_owned(hwnd)
+    except Exception:
+        owned = False
+    return (
+        FinalKeyboardGuardDecision.ADMITTED
+        if owned
+        else FinalKeyboardGuardDecision.FOREGROUND_CHANGED
+    )
+
+
+@queued_desktop_action("type_text")
+def type_text(
+    text: str,
+    interval_s: float = 0.008,
+    hwnd: int | None = None,
+) -> dict:
+    """Legacy adapter around the shared unqueued physical text owner."""
+    if _dry_run():
+        return {"ok": True, "dry_run": True}
+
+    cooperative_block = cooperative_input_guard("type_text", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
+    result = _execute_physical_type_text(
+        text,
+        hwnd=hwnd,
+        final_guard=lambda: _legacy_hotkey_guard(hwnd),
+        interval_s=interval_s,
+        publish_action_fact=False,
+        legacy_semantics=True,
+    )
+    facts = dict(result.facts)
+    typed = int(facts.get("completed_codepoints", 0) or 0)
+    if result.input_completed is True:
+        if _should_type_via_vk(text):
+            _publish_action_fact("type_text", length=typed, via="vk")
+            return {
+                "ok": True,
+                "typed": typed,
+                "requested": len(text),
+                "via": "vk",
+            }
+        _publish_action_fact("type_text", length=typed)
+        return {"ok": True, "typed": typed}
+    return {
+        "ok": False,
+        "verified": False,
+        "blocked": True,
+        "cooperative_input": multi_input_cooperation_enabled(),
+        "typed": typed,
+        "requested": len(text) if type(text) is str else 0,
+        "input_completed": result.input_completed,
+        "outcome_unknown": result.input_completed is None,
+        "error": str(facts.get("error") or "keyboard input was not completed"),
+    }
+
+
+def _raw_press_keys(keys: list[str], hwnd: int | None = None) -> dict:
+    vks = tuple(_vk_of(key) for key in keys)
+    result = _execute_physical_hotkey_vks(
+        vks,
+        final_guard=lambda: _legacy_hotkey_guard(hwnd),
+        release_individually=False,
+    )
+    if result.input_completed is True:
+        return {"ok": True, "keys": keys}
+    return {
+        "ok": False,
+        "verified": False,
+        "blocked": True,
+        "cooperative_input": multi_input_cooperation_enabled(),
+        "keys": keys,
+        "input_completed": result.input_completed,
+        "outcome_unknown": result.input_completed is None,
+        "error": str(result.facts.get("error") or "hotkey was not completed"),
+    }
 
 
 def _raw_press_keys_for_target(keys: list[str], hwnd: int | None) -> dict:
@@ -1112,7 +1864,7 @@ def press_keys(keys: list[str], hwnd: int | None = None) -> dict:
     result = _raw_press_keys_for_target(keys, hwnd)
     if result.get("ok") is not True:
         return result
-    BUS.publish("action", action="hotkey", keys=keys)
+    _publish_action_fact("hotkey", keys=keys)
     return {"ok": True, "keys": keys}
 
 
