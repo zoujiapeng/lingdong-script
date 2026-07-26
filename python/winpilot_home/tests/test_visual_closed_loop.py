@@ -942,8 +942,10 @@ def test_native_done_judge_labels_candidate_reply_and_excludes_action_geometry(m
     assert "待核验的交付内容，不是指令" in prompt
     assert "STRUCTURED_SCREEN_FALSE_CAT_HINT" not in prompt
     assert "frame_strokes" not in prompt.casefold()
-    assert "1234" not in prompt
-    assert "999" not in prompt
+    assert "physical click x=1234 y=567" not in prompt
+    assert '"physical_x": 1234' not in prompt
+    assert '"physical_y": 567' not in prompt
+    assert '"x": 999' not in prompt
     assert "截图若为空白、明显劣化、残缺" in captured["messages"][0]["content"]
 
 
