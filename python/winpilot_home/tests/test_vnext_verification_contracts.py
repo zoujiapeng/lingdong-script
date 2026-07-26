@@ -11,6 +11,13 @@ from typing import Any, Mapping
 
 import pytest
 
+from winpilot.vnext.json_contract import (
+    MAX_JSON_ARRAY_ITEMS,
+    MAX_JSON_DEPTH,
+    MAX_JSON_KEY_LENGTH,
+    MAX_JSON_STRING_LENGTH,
+    MAX_SIGNED_64,
+)
 from winpilot.vnext.mission import EvidencePolicy, EvidenceRef
 from winpilot.vnext.verification import (
     DeterministicFirstVerifier,
@@ -131,12 +138,111 @@ def test_assessment_is_versioned_identity_free_and_strict_json() -> None:
             VerifierAssessment.from_dict({**raw, field: value})
     with pytest.raises(InvalidVerificationSchema, match="JSON boolean"):
         VerifierAssessment.from_dict({**raw, "verified": "false"})
-    with pytest.raises(InvalidVerificationSchema, match="non-JSON|JSON array"):
+    with pytest.raises(
+        InvalidVerificationSchema,
+        match="non-literal JSON|JSON array",
+    ):
         VerifierAssessment.from_dict({**raw, "missing_conditions": ("two",)})
     with pytest.raises(InvalidVerificationSchema, match="non-JSON"):
         VerifierAssessment.from_json(
             json.dumps({**raw, "confidence": float("nan")})
         )
+
+
+def test_wire_object_requires_plain_dict_and_every_canonical_field() -> None:
+    raw = VerifierAssessment(
+        verified=False,
+        concise_reason="not yet verified",
+    ).to_dict()
+
+    class DictSubclass(dict):
+        pass
+
+    for invalid in (None, DictSubclass(raw)):
+        with pytest.raises(InvalidVerificationSchema, match="JSON object"):
+            VerifierAssessment.from_dict(invalid)
+    with pytest.raises(InvalidVerificationSchema, match="missing"):
+        VerifierAssessment.from_dict({
+            key: value for key, value in raw.items() if key != "concise_reason"
+        })
+    with pytest.raises(InvalidVerificationSchema, match="unknown"):
+        VerifierAssessment.from_dict({**raw, "description": "legacy alias"})
+
+
+def test_wire_strings_round_trip_without_silent_normalization() -> None:
+    raw = VerifierAssessment(
+        verified=False,
+        missing_conditions=(" condition with intentional spacing ",),
+        concise_reason=" reason with intentional spacing ",
+    ).to_dict()
+
+    parsed = VerifierAssessment.from_dict(raw)
+
+    assert parsed.to_dict() == raw
+
+
+@pytest.mark.parametrize("confidence", (0, 1, True, "0.5"))
+def test_wire_confidence_requires_an_exact_float(confidence) -> None:
+    raw = VerifierAssessment(
+        verified=False,
+        confidence=None,
+        concise_reason="not yet verified",
+    ).to_dict()
+    with pytest.raises(InvalidVerificationSchema, match="JSON float"):
+        VerifierAssessment.from_dict({**raw, "confidence": confidence})
+
+
+def test_wire_object_rejects_cycles_depth_and_oversized_values() -> None:
+    raw = VerifierAssessment(
+        verified=False,
+        concise_reason="not yet verified",
+    ).to_dict()
+    cyclic: list[Any] = []
+    cyclic.append(cyclic)
+    with pytest.raises(InvalidVerificationSchema, match="cyclic"):
+        VerifierAssessment.from_dict({**raw, "missing_conditions": cyclic})
+
+    nested: list[Any] = []
+    for _ in range(MAX_JSON_DEPTH + 1):
+        nested = [nested]
+    with pytest.raises(InvalidVerificationSchema, match="depth"):
+        VerifierAssessment.from_dict({**raw, "missing_conditions": nested})
+
+    with pytest.raises(InvalidVerificationSchema, match="array length|node count"):
+        VerifierAssessment.from_dict({
+            **raw,
+            "missing_conditions": ["item"] * (MAX_JSON_ARRAY_ITEMS + 1),
+        })
+    with pytest.raises(InvalidVerificationSchema, match="string length"):
+        VerifierAssessment.from_dict({
+            **raw,
+            "concise_reason": "x" * (MAX_JSON_STRING_LENGTH + 1),
+        })
+    with pytest.raises(InvalidVerificationSchema, match="key length"):
+        VerifierAssessment.from_dict({
+            **raw,
+            "x" * (MAX_JSON_KEY_LENGTH + 1): "oversized key",
+        })
+
+
+def test_wire_json_recursion_and_non_finite_float_fail_as_schema_errors() -> None:
+    raw = VerifierAssessment(
+        verified=False,
+        concise_reason="not yet verified",
+    ).to_dict()
+    deeply_nested_json = (
+        '{"format":"verifier-assessment/0","verified":false,'
+        '"satisfied_conditions":[],"missing_conditions":'
+        + "[" * 2000
+        + "[]"
+        + "]" * 2000
+        + ',"contradictions":[],"confidence":null,'
+        '"concise_reason":"not yet verified"}'
+    )
+    with pytest.raises(InvalidVerificationSchema):
+        VerifierAssessment.from_json(deeply_nested_json)
+    with pytest.raises(InvalidVerificationSchema, match="finite"):
+        VerifierAssessment.from_dict({**raw, "confidence": float("inf")})
 
 
 @pytest.mark.parametrize("verified", (1, 0, "true", None))
@@ -166,10 +272,30 @@ def test_request_round_trip_binds_scope_and_ignores_untrusted_evidence() -> None
     raw = request.to_dict()
     with pytest.raises(InvalidVerificationSchema, match="integer"):
         ObligationVerificationRequest.from_dict({**raw, "mission_revision": True})
+    with pytest.raises(InvalidVerificationSchema, match="integer"):
+        ObligationVerificationRequest.from_dict({**raw, "mission_revision": "7"})
+    with pytest.raises(InvalidVerificationSchema, match="integer"):
+        ObligationVerificationRequest.from_dict({**raw, "mission_revision": None})
+    with pytest.raises(InvalidVerificationSchema, match="signed-64"):
+        ObligationVerificationRequest.from_dict({
+            **raw,
+            "mission_revision": MAX_SIGNED_64 + 1,
+        })
     policy = dict(raw["evidence_policy"])
     policy["allow_independent_visual_verifier"] = "false"
-    with pytest.raises(InvalidVerificationSchema, match="JSON boolean"):
+    with pytest.raises(InvalidVerificationSchema, match="literal boolean"):
         ObligationVerificationRequest.from_dict({**raw, "evidence_policy": policy})
+    policy = dict(raw["evidence_policy"])
+    policy["criteria"] = policy.pop("required_evidence_kinds")
+    with pytest.raises(InvalidVerificationSchema, match="unknown|missing|canonical"):
+        ObligationVerificationRequest.from_dict({**raw, "evidence_policy": policy})
+    evidence_ref = trusted.to_dict()
+    evidence_ref["evidence_id"] = evidence_ref.pop("id")
+    with pytest.raises(InvalidVerificationSchema, match="unknown|missing|canonical"):
+        ObligationVerificationRequest.from_dict({
+            **raw,
+            "evidence_refs": [evidence_ref],
+        })
     with pytest.raises(ValueError, match="outside"):
         _request(evidence=(replace(trusted, run_id="other-run"),))
     with pytest.raises(ValueError, match="another obligation"):
@@ -252,13 +378,45 @@ def test_runtime_binding_is_stable_and_requires_full_coverage_and_trusted_eviden
         )
 
     payload = first.to_mission_event_payload(request)
+    assert set(payload) == {
+        "obligation_id",
+        "claim_fingerprint",
+        "verification_id",
+        "verified",
+        "satisfied_criteria",
+        "checked_forbidden_effects",
+        "missing_conditions",
+        "contradictions",
+        "verifier_kind",
+    }
     assert payload["satisfied_criteria"] == list(request.acceptance_criteria)
     assert payload["checked_forbidden_effects"] == list(request.forbidden_effects)
+    assert first.event_evidence_refs == first.evidence_refs
+    assert "evidence_refs" not in payload
+    assert "confidence" not in payload
     assert all(
         not value.startswith("forbidden_effect_absent:")
         for key in ("satisfied_criteria", "checked_forbidden_effects")
         for value in payload[key]
     )
+
+    rejected = ObligationVerificationResult.bind(
+        request,
+        VerifierAssessment(
+            verified=False,
+            missing_conditions=request.required_conditions,
+            concise_reason="evidence did not prove the request",
+        ),
+        verifier_kind="deterministic_first",
+    )
+    assert set(rejected.to_mission_event_payload(request)) == {
+        "obligation_id",
+        "claim_fingerprint",
+        "verified",
+        "missing_conditions",
+        "contradictions",
+        "verifier_kind",
+    }
 
 
 def test_dispatcher_uses_actual_trust_order_and_combines_partial_coverage() -> None:

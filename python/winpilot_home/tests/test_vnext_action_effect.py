@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, replace
 import hashlib
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import cv2
 import numpy as np
@@ -17,6 +17,13 @@ from winpilot.vnext.mission import (
     ActionEffectSummary,
     InvalidMissionEvent,
     LocalVisualChange,
+    MissionEvent,
+)
+from winpilot.vnext.json_contract import (
+    MAX_JSON_ARRAY_ITEMS,
+    MAX_JSON_DEPTH,
+    MAX_JSON_KEY_LENGTH,
+    MAX_JSON_STRING_LENGTH,
 )
 from winpilot.vnext.verification import (
     ActionEffectVerificationError,
@@ -101,6 +108,12 @@ def _request(
     )
 
 
+def _summary() -> ActionEffectSummary:
+    return DeterministicActionEffectVerifier().verify(
+        _request(_frame(1), _frame(2))
+    ).summary
+
+
 def test_exact_authoritative_pixels_are_unchanged_and_evidence_bound() -> None:
     image = _image()
     before = _frame(1, image_b64=image)
@@ -120,6 +133,15 @@ def test_exact_authoritative_pixels_are_unchanged_and_evidence_bound() -> None:
     assert result.evidence.kind == ACTION_EFFECT_EVIDENCE_KIND
     assert result.evidence.payload_hash == summary.payload_hash
     assert ActionEffectSummary.from_dict(summary.to_dict()) == summary
+
+
+def test_action_effect_request_does_not_silently_normalize_text() -> None:
+    request = replace(
+        _request(_frame(1), _frame(2)),
+        mission_id=" mission-1 ",
+    )
+
+    assert request.mission_id == " mission-1 "
 
 
 @pytest.mark.parametrize(
@@ -318,14 +340,131 @@ def test_comparison_exception_is_unknown_not_changed(monkeypatch) -> None:
     ),
 )
 def test_action_effect_wire_contract_fails_closed(mutation: dict) -> None:
-    result = DeterministicActionEffectVerifier().verify(
-        _request(_frame(1), _frame(2))
-    )
-    raw = result.summary.to_dict()
+    raw = _summary().to_dict()
     raw.update(mutation)
 
     with pytest.raises(InvalidMissionEvent):
         ActionEffectSummary.from_dict(raw)
+
+
+def test_action_effect_wire_requires_a_plain_complete_dict() -> None:
+    raw = _summary().to_dict()
+    with pytest.raises(InvalidMissionEvent, match="plain JSON object"):
+        ActionEffectSummary.from_dict(MappingProxyType(raw))
+
+    raw.pop("action_id")
+    with pytest.raises(InvalidMissionEvent, match="missing"):
+        ActionEffectSummary.from_dict(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("input_completed", "true"),
+        ("input_completed", 1),
+        ("input_completed", None),
+        ("target_binding_valid", 1),
+        ("frame_comparable", "false"),
+        ("before_frame_id", "1"),
+        ("before_frame_id", True),
+        ("before_frame_id", 1.0),
+        ("after_frame_id", None),
+        ("change_ratio", 0),
+        ("change_ratio", True),
+        ("change_ratio", "0.0"),
+        ("change_ratio", float("inf")),
+    ),
+)
+def test_action_effect_wire_rejects_scalar_coercions(
+    field: str,
+    value: object,
+) -> None:
+    raw = _summary().to_dict()
+    raw[field] = value
+
+    with pytest.raises(InvalidMissionEvent):
+        ActionEffectSummary.from_dict(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("action_id", 1),
+        ("input_completed", 1),
+        ("before_frame_id", True),
+        ("change_ratio", 0),
+        ("local_visual_change", "unchanged"),
+        ("reason", "exact_payload"),
+    ),
+)
+def test_action_effect_constructor_rejects_scalar_and_enum_coercions(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(InvalidMissionEvent):
+        replace(_summary(), **{field: value})
+
+
+def test_action_effect_wire_uses_the_shared_json_budget() -> None:
+    too_long = _summary().to_dict()
+    too_long["action_id"] = "x" * (MAX_JSON_STRING_LENGTH + 1)
+    with pytest.raises(InvalidMissionEvent, match="bounded JSON contract"):
+        ActionEffectSummary.from_dict(too_long)
+
+    too_wide = _summary().to_dict()
+    too_wide["action_id"] = [None] * (MAX_JSON_ARRAY_ITEMS + 1)
+    with pytest.raises(InvalidMissionEvent, match="bounded JSON contract"):
+        ActionEffectSummary.from_dict(too_wide)
+
+    oversized_key = _summary().to_dict()
+    oversized_key["x" * (MAX_JSON_KEY_LENGTH + 1)] = None
+    with pytest.raises(InvalidMissionEvent, match="bounded JSON contract"):
+        ActionEffectSummary.from_dict(oversized_key)
+
+    too_deep: object = "leaf"
+    for _ in range(MAX_JSON_DEPTH + 1):
+        too_deep = [too_deep]
+    deep = _summary().to_dict()
+    deep["action_id"] = too_deep
+    with pytest.raises(InvalidMissionEvent, match="bounded JSON contract"):
+        ActionEffectSummary.from_dict(deep)
+
+    cyclic = _summary().to_dict()
+    cyclic["action_id"] = cyclic
+    with pytest.raises(InvalidMissionEvent, match="cyclic"):
+        ActionEffectSummary.from_dict(cyclic)
+
+
+def test_transition_event_validates_nested_action_effect_and_wire_evidence_owner() -> None:
+    summary = _summary()
+    payload = {
+        "obligation_id": "obligation-1",
+        "input_completed": summary.input_completed,
+        "action_id": summary.action_id,
+        "action_effect": summary.to_dict(),
+    }
+    event = MissionEvent(
+        kind="transition_recorded",
+        mission_id="mission-1",
+        run_id="run-1",
+        payload=payload,
+        evidence_refs=(
+            summary.before_frame_evidence_ref,
+            summary.after_frame_evidence_ref,
+            summary.evidence_ref,
+        ),
+    )
+    assert event.payload["action_effect"]["action_id"] == summary.action_id
+
+    nested_alias = event.to_dict()
+    nested_alias["payload"]["action_effect"]["type"] = "legacy"
+    with pytest.raises(InvalidMissionEvent, match="unknown"):
+        MissionEvent.from_dict(nested_alias)
+
+    payload_alias = event.to_dict()
+    payload_alias["payload"]["evidence_refs"] = list(event.evidence_refs)
+    with pytest.raises(InvalidMissionEvent, match="unknown"):
+        MissionEvent.from_dict(payload_alias)
 
 
 def test_action_effect_result_is_deterministic_for_the_same_frozen_request() -> None:
