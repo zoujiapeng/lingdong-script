@@ -7,6 +7,7 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).parents[1] / "winpilot"
 VNEXT_ROOT = PACKAGE_ROOT / "vnext"
+RUNTIME_ROOT = VNEXT_ROOT / "runtime"
 KERNEL_ROOTS = (
     VNEXT_ROOT / "__init__.py",
     VNEXT_ROOT / "mission",
@@ -39,6 +40,42 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "winpilot.vnext.runtime",
     "winpilot.vnext.targeting",
     "winpilot.vnext.verification",
+)
+
+RUNTIME_FILES = (
+    "__init__.py",
+    "contracts.py",
+    "mission_runtime.py",
+    "mutation_attempt.py",
+    "mutation_permits.py",
+    "ports.py",
+    "post_action_reconcile.py",
+)
+
+RUNTIME_FORBIDDEN_IMPORT_PREFIXES = (
+    "openai",
+    "anthropic",
+    "cohere",
+    "google.genai",
+    "groq",
+    "mistralai",
+    "ollama",
+    "together",
+    "cv2",
+    "numpy",
+    "win32",
+    "pyautogui",
+    "winpilot.action",
+    "winpilot.agent",
+    "winpilot.fast",
+    "winpilot.integrations",
+    "winpilot.modeling",
+    "winpilot.orchestrator",
+    "winpilot.server",
+    "winpilot.tasking",
+    "winpilot.visual_runtime",
+    "winpilot.vnext.bridge",
+    "winpilot.vnext.targeting",
 )
 
 
@@ -114,3 +151,42 @@ def test_existing_product_code_cannot_reach_vnext_by_import() -> None:
                     f"{path.relative_to(PACKAGE_ROOT.parent)} -> {imported}"
                 )
     assert violations == []
+
+
+def test_minimal_runtime_is_exact_default_unreachable_and_sdk_free() -> None:
+    assert tuple(sorted(path.name for path in RUNTIME_ROOT.glob("*.py"))) == (
+        RUNTIME_FILES
+    )
+    violations = [
+        f"{path.relative_to(PACKAGE_ROOT.parent)} -> {imported}"
+        for path in _source_files(RUNTIME_ROOT)
+        for imported in _imports(path)
+        if any(
+            _matches_prefix(imported, prefix)
+            for prefix in RUNTIME_FORBIDDEN_IMPORT_PREFIXES
+        )
+    ]
+    assert violations == []
+
+
+def test_minimal_runtime_tool_surface_cannot_expand_silently() -> None:
+    from winpilot.vnext.runtime.contracts import (
+        APPROVED_DESKTOP_ACTIONS,
+        APPROVED_OUTCOME_TOOLS,
+        APPROVED_RUNTIME_TOOLS,
+    )
+
+    assert APPROVED_DESKTOP_ACTIONS == {
+        "click",
+        "double_click",
+        "scroll",
+        "type_text",
+        "hotkey",
+    }
+    assert APPROVED_OUTCOME_TOOLS == {
+        "claim_obligation_done",
+        "blocked",
+    }
+    assert APPROVED_RUNTIME_TOOLS == (
+        APPROVED_DESKTOP_ACTIONS | APPROVED_OUTCOME_TOOLS
+    )
