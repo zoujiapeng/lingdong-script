@@ -21,6 +21,11 @@ _MAX_INTEGER = (1 << 63) - 1
 _MAX_JSON_STRING_LENGTH = 1_048_576
 _MAX_KEY_LENGTH = 256
 _MAX_ARRAY_ITEMS = 4096
+_REFERENCE_KEYWORDS = frozenset({
+    "$ref",
+    "$dynamicRef",
+    "$recursiveRef",
+})
 
 
 class ToolSchemaValidationError(CapabilityContractError):
@@ -67,7 +72,7 @@ def _json_copy(
     depth: int = 0,
     nodes: list[int] | None = None,
 ) -> Any:
-    """Copy finite JSON, accepting tuples/mapping proxies from frozen contracts."""
+    """Copy finite plain JSON without invoking caller-defined containers."""
     if depth > _MAX_JSON_DEPTH:
         raise ValueError(f"JSON depth exceeded at {_display_path(path)}")
     count = nodes if nodes is not None else [0]
@@ -92,7 +97,7 @@ def _json_copy(
         if math.isfinite(value):
             return 0.0 if value == 0.0 else value
         raise ValueError(f"non-finite number at {_display_path(path)}")
-    if not isinstance(value, (Mapping, list, tuple)):
+    if type(value) not in (dict, list):
         raise ValueError(f"non-JSON value at {_display_path(path)}")
 
     seen = ancestors if ancestors is not None else set()
@@ -101,7 +106,7 @@ def _json_copy(
         raise ValueError(f"cyclic JSON value at {_display_path(path)}")
     seen.add(marker)
     try:
-        if isinstance(value, Mapping):
+        if type(value) is dict:
             if any(type(key) is not str for key in value):
                 raise ValueError(
                     f"non-string object key at {_display_path(path)}"
@@ -151,6 +156,30 @@ def _error_sort_key(error: Any) -> tuple[Any, ...]:
     )
 
 
+def _reject_nonlocal_references(
+    value: Any,
+    *,
+    path: tuple[str | int, ...] = (),
+) -> None:
+    if type(value) is dict:
+        for key, child in value.items():
+            child_path = (*path, key)
+            if key in _REFERENCE_KEYWORDS and (
+                type(child) is not str or not child.startswith("#")
+            ):
+                raise ToolSchemaValidationError(
+                    "tool schema contains a non-local reference at "
+                    f"{_display_path(child_path)}"
+                )
+            _reject_nonlocal_references(child, path=child_path)
+    elif type(value) is list:
+        for index, child in enumerate(value):
+            _reject_nonlocal_references(
+                child,
+                path=(*path, index),
+            )
+
+
 class ToolArgumentValidator:
     """Precompiled validator bound to exactly one immutable ``ToolCatalog``."""
 
@@ -166,12 +195,21 @@ class ToolArgumentValidator:
         try:
             from jsonschema import Draft202012Validator
             from jsonschema.exceptions import SchemaError
+            from referencing import Registry
+            from referencing.exceptions import NoSuchResource
         except ImportError as exc:  # pragma: no cover - declared dependency
             raise ToolSchemaValidationError(
                 "jsonschema is unavailable; tool arguments cannot be validated"
             ) from exc
 
         validators: dict[str, Any] = {}
+
+        def _deny_remote_retrieval(uri: str) -> Any:
+            raise NoSuchResource(ref=uri)
+
+        hermetic_registry = Registry(
+            retrieve=_deny_remote_retrieval,
+        )
         for spec in catalog.tools:
             schema = spec.to_dict()["schema"]
             dialect = schema.get("$schema")
@@ -180,13 +218,17 @@ class ToolArgumentValidator:
                     f"tool {spec.name!r} declares unsupported "
                     "JSON Schema dialect"
                 )
+            _reject_nonlocal_references(schema)
             try:
                 Draft202012Validator.check_schema(schema)
             except SchemaError as exc:
                 raise ToolSchemaValidationError(
                     f"tool {spec.name!r} has an invalid JSON Schema"
                 ) from exc
-            validators[spec.name] = Draft202012Validator(schema)
+            validators[spec.name] = Draft202012Validator(
+                schema,
+                registry=hermetic_registry,
+            )
         self._validators = MappingProxyType(validators)
 
     @property
@@ -207,7 +249,7 @@ class ToolArgumentValidator:
                 tool_name=rendered_name,
                 code="unknown_tool",
             )
-        if not isinstance(arguments, Mapping):
+        if type(arguments) is not dict:
             raise ToolArgumentValidationError(
                 tool_name=tool_name,
                 code="arguments_not_object",
@@ -220,10 +262,16 @@ class ToolArgumentValidator:
                 code="arguments_not_json",
             ) from exc
 
-        errors = sorted(
-            self._validators[tool_name].iter_errors(value),
-            key=_error_sort_key,
-        )
+        try:
+            errors = sorted(
+                self._validators[tool_name].iter_errors(value),
+                key=_error_sort_key,
+            )
+        except Exception as exc:
+            raise ToolArgumentValidationError(
+                tool_name=tool_name,
+                code="schema_evaluation_failed",
+            ) from exc
         if errors:
             error = errors[0]
             raise ToolArgumentValidationError(

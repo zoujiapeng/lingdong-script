@@ -1453,6 +1453,8 @@ def test_broker_is_frozen_and_package_is_pure_default_unreachable() -> None:
                         "enum",
                         "jsonschema",
                         "jsonschema.exceptions",
+                        "referencing",
+                        "referencing.exceptions",
                         "types",
                         "typing",
                     }
