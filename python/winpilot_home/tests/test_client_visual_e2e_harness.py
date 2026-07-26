@@ -325,6 +325,82 @@ def test_external_verdict_rejects_goal_entry_without_trusted_pointerup():
     assert "dynamic gesture has no unique trusted pointerup evidence" in verdict["errors"]
 
 
+def test_dynamic_failure_without_success_has_no_fake_after_terminal_input():
+    harness = _load_harness()
+    state = {
+        "ready": True,
+        "success": False,
+        "case_id": "case-1",
+        "scenario": "dynamic_hold",
+        "seed": 17,
+        "events": [
+            _event("dynamic_hold", "page_ready", 1, trusted=False),
+            _event(
+                "dynamic_hold",
+                "pointerdown",
+                2,
+                details={"down_count": 1},
+            ),
+            _event(
+                "dynamic_hold",
+                "pointermove",
+                3,
+                details={"checkpoint_reached": False},
+            ),
+            _event(
+                "dynamic_hold",
+                "pointerup",
+                4,
+                details={
+                    "down_count": 1,
+                    "checkpoint_reached": False,
+                    "goal_revealed_after_down": False,
+                    "inside_goal": False,
+                    "completion_event": "pointerup",
+                },
+            ),
+        ],
+    }
+
+    verdict = harness.external_verdict(
+        state,
+        case_id="case-1",
+        scenario="dynamic_hold",
+        seed=17,
+    )
+
+    assert verdict["passed"] is False
+    assert "no trusted scenario_success event" in verdict["errors"]
+    assert "pointer input arrived after dynamic-hold success" not in verdict["errors"]
+
+
+def test_success_oracle_rejects_missing_terminal_event_sequence():
+    harness = _load_harness()
+    state = _state(
+        "drag_fit",
+        {
+            "pointerdown_count": 1,
+            "pointerup_count": 1,
+            "completion_event": "pointerup",
+            "started_in_source": True,
+            "inside_goal": True,
+            "source_target": "source",
+            "drop_target": "goal",
+        },
+        moves=3,
+    )
+    state["success_event"]["details"].pop("event_sequence")
+
+    verdict = harness.external_verdict(
+        state,
+        case_id="case-1",
+        scenario="drag_fit",
+        seed=17,
+    )
+
+    assert "terminal success event sequence is missing" in verdict["errors"]
+
+
 def test_dynamic_target_persists_pointerup_before_success():
     target = (
         Path(__file__).resolve().parents[1]
@@ -601,7 +677,14 @@ def test_text_hotkey_oracle_rebuilds_exact_multiline_value_and_release():
         ))
         sequence += 1
     state["events"][1:1] = events
-    state["success_event"]["details"]["event_sequence"] = sequence
+    state["success_event"]["details"].update({
+        "event_sequence": sequence,
+        # The terminal snapshot carries the last key state but is not itself
+        # another keyboard event.
+        "key": "Control",
+        "ctrl_key": False,
+        "target_id": "exact-editor",
+    })
 
     verdict = harness.external_verdict(
         state,
@@ -694,7 +777,24 @@ def test_cancel_oracle_rejects_late_proposal_and_accepts_continuous_quiet_window
         "quiet_input_hook": {
             "started_at": 90.0,
             "stopped_at": 181.0,
-            "events": [],
+            "events": [
+                {
+                    "at": 100.1,
+                    "kind": "mouse",
+                    "message": "left_down",
+                    "x": 40,
+                    "y": 20,
+                    "injected": True,
+                },
+                {
+                    "at": 100.15,
+                    "kind": "mouse",
+                    "message": "left_up",
+                    "x": 40,
+                    "y": 20,
+                    "injected": True,
+                },
+            ],
             "errors": [],
         },
         "foreground_samples": [{"at": 101.0, "hwnd": 22}],
@@ -731,6 +831,25 @@ def test_cancel_oracle_rejects_late_proposal_and_accepts_continuous_quiet_window
     )
 
     assert verdict["passed"] is True
+    evidence["quiet_input_hook"]["events"].append({
+        "at": 100.18,
+        "kind": "keyboard",
+        "message": "key_down",
+        "vk_code": 65,
+        "injected": True,
+    })
+    late_input = harness.cancel_external_verdict(
+        state,
+        client_result,
+        evidence,
+        case_id="case-1",
+        scenario="cancel_guard",
+        seed=17,
+        quiet_seconds=80.0,
+    )
+    assert late_input["passed"] is False
+    assert late_input["post_cancel_injected_input_count"] == 1
+    evidence["quiet_input_hook"]["events"].pop()
     evidence["runtime_event_stream"]["events"].append({
         "type": "agent_decision",
         "ts": 102.0,
@@ -749,3 +868,53 @@ def test_cancel_oracle_rejects_late_proposal_and_accepts_continuous_quiet_window
     )
     assert failed["passed"] is False
     assert failed["late_model_proposal_count"] == 1
+
+
+def test_runtime_event_stream_does_not_treat_local_empty_close_as_disconnect():
+    harness = _load_harness()
+    stream = harness.RuntimeEventStream("http://127.0.0.1:7880", "token")
+
+    class LocallyClosedSocket:
+        def recv(self):
+            stream._stop.set()
+            return ""
+
+    stream._socket = LocallyClosedSocket()
+    stream._read_loop()
+
+    assert stream.errors == []
+    assert stream.closed_by_harness is True
+    assert stream.disconnected_at > 0
+
+    exception_stream = harness.RuntimeEventStream(
+        "http://127.0.0.1:7880",
+        "token",
+    )
+
+    class LocallyClosedExceptionSocket:
+        def recv(self):
+            exception_stream._stop.set()
+            raise RuntimeError("socket closed by local stop")
+
+    exception_stream._socket = LocallyClosedExceptionSocket()
+    exception_stream._read_loop()
+
+    assert exception_stream.errors == []
+    assert exception_stream.closed_by_harness is True
+
+    remote_stream = harness.RuntimeEventStream(
+        "http://127.0.0.1:7880",
+        "token",
+    )
+
+    class RemotelyClosedSocket:
+        def recv(self):
+            return ""
+
+    remote_stream._socket = RemotelyClosedSocket()
+    remote_stream._read_loop()
+
+    assert remote_stream.errors == [
+        "WebSocketConnectionClosedException: empty close frame",
+    ]
+    assert remote_stream.closed_by_harness is False

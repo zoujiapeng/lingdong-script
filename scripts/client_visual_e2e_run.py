@@ -360,6 +360,8 @@ class RuntimeEventStream:
         self.errors: list[str] = []
         self.connected_at = 0.0
         self.disconnected_at = 0.0
+        self.stop_requested_at = 0.0
+        self.closed_by_harness = False
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._socket: websocket.WebSocket | None = None
@@ -386,6 +388,16 @@ class RuntimeEventStream:
             except Exception as error:
                 if not self._stop.is_set():
                     self.errors.append(f"{type(error).__name__}: {error}")
+                else:
+                    self.closed_by_harness = True
+                break
+            if raw in ("", b"", None):
+                if not self._stop.is_set():
+                    self.errors.append(
+                        "WebSocketConnectionClosedException: empty close frame",
+                    )
+                else:
+                    self.closed_by_harness = True
                 break
             try:
                 value = json.loads(raw)
@@ -396,7 +408,8 @@ class RuntimeEventStream:
                         )
                         self.events = self.events[-8000:]
             except Exception as error:
-                self.errors.append(f"{type(error).__name__}: {error}")
+                if not self._stop.is_set():
+                    self.errors.append(f"{type(error).__name__}: {error}")
         self.disconnected_at = time.time()
 
     def snapshot(self) -> dict[str, Any]:
@@ -405,11 +418,14 @@ class RuntimeEventStream:
         return {
             "connected_at": self.connected_at,
             "disconnected_at": self.disconnected_at,
+            "stop_requested_at": self.stop_requested_at,
+            "closed_by_harness": self.closed_by_harness,
             "events": events,
             "errors": list(self.errors),
         }
 
     def stop(self) -> dict[str, Any]:
+        self.stop_requested_at = time.time()
         self._stop.set()
         if self._socket is not None:
             try:
@@ -795,12 +811,18 @@ def external_verdict(
     ready = ready_events[0] if len(ready_events) == 1 else {}
     ready_details = ready.get("details") or {}
     terminal_sequence = int(details.get("event_sequence") or 0)
-    after_terminal = [
-        item
-        for item in events
-        if int((item.get("details") or {}).get("event_sequence") or 0)
-        > terminal_sequence
-    ]
+    if success_events and terminal_sequence <= 0:
+        errors.append("terminal success event sequence is missing")
+    after_terminal = (
+        [
+            item
+            for item in events
+            if int((item.get("details") or {}).get("event_sequence") or 0)
+            > terminal_sequence
+        ]
+        if terminal_sequence > 0
+        else []
+    )
     move_count = int(event.get("move_count") or 0)
     duplicate_input_count = 0
 
@@ -986,7 +1008,13 @@ def external_verdict(
         relevant_keys = [
             item
             for item in events
-            if (
+            if item.get("type") in {
+                "keydown",
+                "hotkey_keydown",
+                "hotkey_enter_keyup",
+                "modifier_keyup",
+            }
+            and (
                 str((item.get("details") or {}).get("key") or "").casefold()
                 == "control"
                 or (
@@ -1395,10 +1423,35 @@ def cancel_external_verdict(
 
     hook = evidence.get("quiet_input_hook") or {}
     all_hook_events = list(hook.get("events") or [])
+    stop_click_events = [
+        item
+        for item in all_hook_events
+        if cutoff <= float(item.get("at") or 0) <= physical_cutoff + 0.05
+        and item.get("kind") == "mouse"
+        and item.get("message") in {"left_down", "left_up"}
+        and item.get("injected") is True
+        and int(stop_rectangle.get("left") or 0)
+        <= int(item.get("x") or 0)
+        < int(stop_rectangle.get("right") or 0)
+        and int(stop_rectangle.get("top") or 0)
+        <= int(item.get("y") or 0)
+        < int(stop_rectangle.get("bottom") or 0)
+    ]
+    stop_messages = [item.get("message") for item in stop_click_events]
+    if not (
+        stop_messages == ["left_down", "left_up"]
+        and stop_click_events[0].get("x") == stop_click_events[1].get("x")
+        and stop_click_events[0].get("y") == stop_click_events[1].get("y")
+    ):
+        invalid_reasons.append(
+            "low-level hook does not contain one exact visible Stop click",
+        )
+    stop_event_ids = {id(item) for item in stop_click_events}
     hook_events = [
         item
         for item in all_hook_events
-        if float(item.get("at") or 0) >= physical_cutoff
+        if float(item.get("at") or 0) >= cutoff
+        and id(item) not in stop_event_ids
     ]
     human_events = [
         item for item in all_hook_events if item.get("injected") is False
@@ -1924,7 +1977,7 @@ def run_visual_case(
                 state = _json_get(state_url)
             stream_quiet: bool | None = None
             settle_error: str | None = None
-            if scenario != "cancel_guard" and state.get("success") is True:
+            if scenario != "cancel_guard":
                 state, stream_quiet, settle_error = _settle_external_state(
                     state_url,
                     state,
@@ -1958,17 +2011,22 @@ def run_visual_case(
                 terminal_time = float(
                     ((state.get("success_event") or {}).get("received_at") or 0),
                 )
+                causal_end = (
+                    terminal_time + 0.02
+                    if terminal_time
+                    else float(input_evidence.get("stopped_at") or time.time())
+                )
                 causal_input = [
                     item
                     for item in (input_evidence.get("events") or [])
                     if input_causal_started_at
                     <= float(item.get("at") or 0)
-                    <= terminal_time + 0.02
+                    <= causal_end
                 ]
                 human_input = [
                     item
                     for item in (input_evidence.get("events") or [])
-                    if float(item.get("at") or 0) <= terminal_time + 0.02
+                    if float(item.get("at") or 0) <= causal_end
                     and item.get("injected") is False
                 ]
                 invalid_reasons: list[str] = []
