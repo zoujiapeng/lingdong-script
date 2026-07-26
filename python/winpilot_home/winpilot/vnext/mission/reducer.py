@@ -7,6 +7,8 @@ from dataclasses import replace
 from typing import Any, Iterable, Mapping
 
 from .contracts import (
+    ACTION_EFFECT_EVIDENCE_KIND,
+    ActionEffectSummary,
     ArtifactRef,
     EvidenceRef,
     EvidenceScope,
@@ -21,6 +23,7 @@ from .contracts import (
     ObligationSpec,
     ObligationProjection,
     ObligationStatus,
+    LocalVisualChange,
     TargetBinding,
     TransitionSummary,
     VerifiedFact,
@@ -248,7 +251,11 @@ def _parse_target(payload: Mapping[str, Any]) -> TargetBinding:
     return TargetBinding.from_dict(thaw(raw))
 
 
-def _parse_transition(payload: Mapping[str, Any]) -> TransitionSummary:
+def _parse_transition(
+    payload: Mapping[str, Any],
+    *,
+    evidence_refs: tuple[str, ...],
+) -> TransitionSummary:
     obligation_id = _payload_text(payload, "obligation_id")
     if "input_completed" not in payload:
         raise InvalidMissionEvent("transition input_completed is required")
@@ -262,14 +269,88 @@ def _parse_transition(payload: Mapping[str, Any]) -> TransitionSummary:
         raise InvalidMissionEvent(
             "transition frame_id must be a non-negative integer or null"
         )
+    raw_effect = payload.get("action_effect")
+    if raw_effect is not None and not isinstance(raw_effect, Mapping):
+        raise InvalidMissionEvent("transition action_effect must be an object")
     return TransitionSummary(
         action=_payload_text(payload, "action", "unknown"),
         input_completed=input_completed,
         visible_effect=_payload_text(payload, "visible_effect"),
-        evidence_refs=(),
+        evidence_refs=evidence_refs,
         frame_id=frame_id,
         obligation_id=obligation_id,
+        action_id=(
+            _payload_text(payload, "action_id")
+            if payload.get("action_id") is not None
+            else None
+        ),
+        action_effect=(
+            ActionEffectSummary.from_dict(thaw(raw_effect))
+            if raw_effect is not None
+            else None
+        ),
     )
+
+
+def _validate_action_effect_evidence(
+    transition: TransitionSummary,
+    refs: tuple[EvidenceRef, ...],
+) -> None:
+    effect = transition.action_effect
+    if effect is None:
+        return
+    by_id = {ref.id: ref for ref in refs}
+    try:
+        before = by_id[effect.before_frame_evidence_ref]
+        after = by_id[effect.after_frame_evidence_ref]
+        attestation = by_id[effect.evidence_ref]
+    except KeyError as exc:
+        raise EvidenceScopeError(
+            "action effect evidence is missing from the transition"
+        ) from exc
+    if (
+        before.obligation_id != transition.obligation_id
+        or before.trust != "deterministic"
+        or before.frame_id != effect.before_frame_id
+        or before.kind not in {"current_frame", "post_action_frame"}
+        or before.payload_hash != effect.before_frame_payload_hash
+        or (
+            before.kind == "current_frame"
+            and before.action_id is not None
+        )
+        or (
+            before.kind == "post_action_frame"
+            and (
+                not before.action_id
+                or before.action_id == effect.action_id
+            )
+        )
+    ):
+        raise EvidenceScopeError(
+            "action effect before-frame evidence is not deterministic frame evidence"
+        )
+    if (
+        after.obligation_id != transition.obligation_id
+        or after.trust != "deterministic"
+        or after.kind != "post_action_frame"
+        or after.frame_id != effect.after_frame_id
+        or after.action_id != effect.action_id
+        or after.payload_hash != effect.after_frame_payload_hash
+    ):
+        raise EvidenceScopeError(
+            "action effect after-frame evidence does not bind the action"
+        )
+    if (
+        attestation.obligation_id != transition.obligation_id
+        or attestation.trust != "deterministic"
+        or attestation.kind != ACTION_EFFECT_EVIDENCE_KIND
+        or attestation.frame_id != effect.after_frame_id
+        or attestation.action_id != effect.action_id
+        or attestation.payload_hash != effect.payload_hash
+    ):
+        raise EvidenceScopeError(
+            "action effect attestation does not bind the canonical comparison"
+        )
 
 
 def _claim_fingerprint(
@@ -301,12 +382,11 @@ def _claim_fingerprint(
 def _event_evidence_ids(
     event: MissionEvent,
     payload: Mapping[str, Any],
-    key: str = "evidence_refs",
 ) -> tuple[str, ...]:
     """Return the one canonical wire-level evidence reference sequence."""
-    if key in payload:
+    if "evidence_refs" in payload:
         raise InvalidMissionEvent(
-            f"legacy payload field {key!r} is not accepted; "
+            "legacy payload field 'evidence_refs' is not accepted; "
             "use MissionEvent.evidence_refs"
         )
     return event.evidence_refs
@@ -515,19 +595,30 @@ def _apply_event(
         if not obligation_id or projection.active_obligation_id != obligation_id:
             raise IllegalTransitionError("transition must be bound to the active obligation")
         _definition_for(projection, obligation_id)
-        transition = _parse_transition({**payload, "obligation_id": obligation_id})
         transition_refs = _event_evidence_ids(event, payload)
-        if transition_refs != transition.evidence_refs:
-            transition = TransitionSummary(
-                action=transition.action,
-                input_completed=transition.input_completed,
-                visible_effect=transition.visible_effect,
-                evidence_refs=transition_refs,
-                frame_id=transition.frame_id,
-                obligation_id=obligation_id,
-            )
+        transition = _parse_transition(
+            {**payload, "obligation_id": obligation_id},
+            evidence_refs=transition_refs,
+        )
         refs = _evidence_refs(projection, scope, transition_refs, obligation_id=obligation_id)
-        return _merge_evidence(replace(projection, last_transition=transition), refs)
+        _validate_action_effect_evidence(transition, refs)
+        effect = transition.action_effect
+        previous = states[obligation_id]
+        streak = previous.no_progress_streak
+        if effect is not None and effect.input_completed:
+            if effect.local_visual_change is LocalVisualChange.UNCHANGED:
+                streak += 1
+            elif effect.local_visual_change is LocalVisualChange.CHANGED:
+                streak = 0
+        states[obligation_id] = replace(previous, no_progress_streak=streak)
+        updated = replace(
+            projection,
+            obligation_states=tuple(
+                states[item.id] for item in projection.definition.obligations
+            ),
+            last_transition=transition,
+        )
+        return _merge_evidence(updated, refs)
 
     if event_type == "obligation_claimed":
         obligation_id = _payload_text(payload, "obligation_id")
