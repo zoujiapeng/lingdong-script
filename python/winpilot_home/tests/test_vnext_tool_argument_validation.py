@@ -63,12 +63,17 @@ def _catalog(schema: dict | None = None) -> ToolCatalog:
 def test_valid_arguments_return_a_detached_json_copy() -> None:
     validator = ToolArgumentValidator(_catalog())
     point = [10, 20]
-    arguments = MappingProxyType({
+    arguments = {
         "points": (point,),
         "mode": "click",
         "strength": 0.5,
-    })
+    }
 
+    with pytest.raises(ToolArgumentValidationError) as non_json:
+        validator.validate("interact", arguments)
+    assert non_json.value.code == "arguments_not_json"
+
+    arguments["points"] = [point]
     result = validator.validate("interact", arguments)
 
     assert result == {
@@ -163,6 +168,73 @@ def test_composition_keywords_are_supported() -> None:
         validator.validate("interact", {"condition": 0})
 
 
+def test_local_fragment_references_are_supported_and_fail_closed() -> None:
+    validator = ToolArgumentValidator(_catalog({
+        "$defs": {
+            "mode": {"type": "string", "enum": ["click"]},
+        },
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "mode": {"$ref": "#/$defs/mode"},
+        },
+        "required": ["mode"],
+    }))
+    assert validator.validate("interact", {"mode": "click"}) == {
+        "mode": "click",
+    }
+    with pytest.raises(ToolArgumentValidationError) as mismatch:
+        validator.validate("interact", {"mode": "drag"})
+    assert mismatch.value.code == "schema_mismatch"
+
+    unresolved = ToolArgumentValidator(_catalog({
+        "type": "object",
+        "properties": {
+            "mode": {"$ref": "#/$defs/missing"},
+        },
+    }))
+    with pytest.raises(ToolArgumentValidationError) as failed:
+        unresolved.validate("interact", {"mode": "click"})
+    assert failed.value.code == "schema_evaluation_failed"
+
+
+@pytest.mark.parametrize(
+    ("keyword", "reference"),
+    (
+        ("$ref", "https://127.0.0.1:9/schema.json"),
+        ("$dynamicRef", "https://example.invalid/schema"),
+        ("$recursiveRef", "../schema.json"),
+        ("$ref", "child.json"),
+        ("$ref", ""),
+    ),
+)
+def test_nonlocal_references_are_rejected_without_network(
+    monkeypatch,
+    keyword,
+    reference,
+) -> None:
+    calls = []
+
+    def _network_forbidden(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("schema validation attempted network access")
+
+    monkeypatch.setattr("urllib.request.urlopen", _network_forbidden)
+    schema = {
+        "$id": "https://example.invalid/root.json",
+        "type": "object",
+        "properties": {
+            "value": {keyword: reference},
+        },
+    }
+    with pytest.raises(
+        ToolSchemaValidationError,
+        match="non-local reference",
+    ):
+        ToolArgumentValidator(_catalog(schema))
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "schema",
     (
@@ -188,6 +260,22 @@ def test_unknown_tool_and_non_object_arguments_fail_closed() -> None:
     with pytest.raises(ToolArgumentValidationError) as not_object:
         validator.validate("interact", [])  # type: ignore[arg-type]
     assert not_object.value.code == "arguments_not_object"
+
+
+def test_mapping_subclasses_are_rejected_before_iteration() -> None:
+    class ExecutableMapping(dict):
+        def items(self):
+            raise AssertionError("mapping subclass was executed")
+
+    validator = ToolArgumentValidator(_catalog())
+    hostile = ExecutableMapping({
+        "mode": "click",
+        "points": [[1, 2]],
+    })
+    for value in (hostile, MappingProxyType(hostile)):
+        with pytest.raises(ToolArgumentValidationError) as caught:
+            validator.validate("interact", value)
+        assert caught.value.code == "arguments_not_object"
 
 
 @pytest.mark.parametrize(
