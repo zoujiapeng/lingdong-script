@@ -285,9 +285,17 @@ def test_mapping_subclasses_are_rejected_before_iteration() -> None:
         float("inf"),
         object(),
         1 << 80,
+        1e308,
         "x" * 1_048_577,
     ),
-    ids=("nan", "inf", "object", "large_int", "large_string"),
+    ids=(
+        "nan",
+        "inf",
+        "object",
+        "large_int",
+        "large_float",
+        "large_string",
+    ),
 )
 def test_non_json_or_unbounded_values_fail_before_schema(bad) -> None:
     with pytest.raises(ToolArgumentValidationError) as caught:
