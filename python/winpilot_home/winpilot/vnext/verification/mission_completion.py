@@ -6,6 +6,7 @@ import json
 from typing import Annotated, Any, Literal, Mapping
 
 from pydantic import BeforeValidator, model_validator
+from ..json_contract import BoundedJSONError, bounded_json_copy
 from ..mission import EvidenceRef
 from .contracts import (
     TRUST_ORDER,
@@ -209,7 +210,8 @@ class MissionCompletionVerificationResult(_WireModel):
             raise ValueError("mission completion result must be verified")
         try:
             payload = json.loads(self.aggregate_payload_json)
-        except (json.JSONDecodeError, TypeError) as exc:
+            payload = bounded_json_copy(payload)
+        except (BoundedJSONError, json.JSONDecodeError, RecursionError, TypeError) as exc:
             raise ValueError("aggregate_payload_json is not valid JSON") from exc
         if type(payload) is not dict or _canonical_json(payload) != self.aggregate_payload_json:
             raise ValueError("aggregate_payload_json must be a canonical JSON object")
@@ -322,7 +324,6 @@ class MissionCompletionVerificationResult(_WireModel):
             "accepted_obligation_verification_ids": list(
                 self.accepted_obligation_verification_ids
             ),
-            "evidence_refs": list(self.event_evidence_refs),
             "aggregate_evidence_id": self.aggregate_evidence.id,
             "aggregate_payload_hash": self.aggregate_payload_hash,
         }

@@ -16,6 +16,15 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping, Iterable
 
+from ..json_contract import (
+    BoundedJSONError,
+    MAX_JSON_STRING_LENGTH,
+    MAX_SIGNED_64,
+    MIN_SIGNED_64,
+    bounded_json_copy,
+    freeze_bounded_json,
+)
+
 
 JSONValue = Any
 
@@ -32,49 +41,14 @@ ACTION_EFFECT_EVIDENCE_KIND = "deterministic_action_effect"
 # small-control response (caret, checkbox, focus ring) into false no-progress.
 ACTION_EFFECT_CHANGE_RATIO_THRESHOLD = 0.0
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-
-
-def _as_tuple(value: Iterable[Any] | None) -> tuple[Any, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        return (value,)
-    if isinstance(value, (set, frozenset)):
-        raise TypeError("unordered sets are not valid contract sequences")
-    return tuple(value)
-
-
-def _as_string_tuple(value: Iterable[Any] | None) -> tuple[str, ...]:
-    return tuple(str(item) for item in _as_tuple(value) if str(item).strip())
-
-
-def _freeze(value: Any) -> Any:
-    """Recursively freeze a strict JSONValue payload."""
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("JSON numbers must be finite")
-        return value
-    if isinstance(value, Mapping):
-        frozen: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError("JSON object keys must be strings")
-            frozen[key] = _freeze(item)
-        return MappingProxyType(frozen)
-    if isinstance(value, (list, tuple, set, frozenset)):
-        if isinstance(value, (set, frozenset)):
-            raise TypeError("JSON arrays cannot be sets")
-        return tuple(_freeze(item) for item in value)
-    raise TypeError(f"value of type {type(value).__name__} is not JSONValue")
+_MISSING_PAYLOAD = object()
 
 
 def thaw(value: Any) -> Any:
     """Return ordinary JSON-compatible containers for serialization."""
     if isinstance(value, Mapping):
-        return {str(key): thaw(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
+        return {key: thaw(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
         return [thaw(item) for item in value]
     if isinstance(value, Enum):
         return value.value
@@ -101,18 +75,14 @@ def _mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return MappingProxyType(normalized)
 
 
-def _json_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
+def _json_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
     """Freeze and validate a mapping whose values must be strict JSONValue."""
-    if value is None:
-        value = {}
-    if not isinstance(value, Mapping):
-        raise TypeError("value must be a JSON object mapping")
-    frozen: dict[str, Any] = {}
-    for key, item in value.items():
-        if not isinstance(key, str):
-            raise TypeError("JSON object keys must be strings")
-        frozen[key] = _freeze(item)
-    return MappingProxyType(frozen)
+    if type(value) is not dict:
+        raise BoundedJSONError("value must be a plain JSON object")
+    frozen = freeze_bounded_json(value)
+    if not isinstance(frozen, MappingProxyType):  # pragma: no cover - invariant
+        raise BoundedJSONError("value must be a plain JSON object")
+    return frozen
 
 
 class MissionError(ValueError):
@@ -141,6 +111,154 @@ class EvidenceScopeError(MissionError):
 
 class IllegalTransitionError(MissionError):
     pass
+
+
+def _contract_text(
+    value: Any,
+    name: str,
+    error_type: type[MissionError],
+    *,
+    allow_empty: bool = False,
+) -> str:
+    if type(value) is not str:
+        raise error_type(f"{name} must be a literal string")
+    if len(value) > MAX_JSON_STRING_LENGTH:
+        raise error_type(
+            f"{name} exceeds the maximum string length "
+            f"{MAX_JSON_STRING_LENGTH}"
+        )
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise error_type(f"{name} contains an invalid Unicode scalar") from exc
+    if not allow_empty and not value.strip():
+        raise error_type(f"{name} cannot be empty")
+    return value
+
+
+def _contract_bool(
+    value: Any,
+    name: str,
+    error_type: type[MissionError],
+) -> bool:
+    if type(value) is not bool:
+        raise error_type(f"{name} must be a literal boolean")
+    return value
+
+
+def _contract_int(
+    value: Any,
+    name: str,
+    error_type: type[MissionError],
+    *,
+    minimum: int = MIN_SIGNED_64,
+    maximum: int = MAX_SIGNED_64,
+) -> int:
+    if type(value) is not int:
+        raise error_type(f"{name} must be a literal integer")
+    if not minimum <= value <= maximum:
+        raise error_type(f"{name} must be in range [{minimum}, {maximum}]")
+    return value
+
+
+def _contract_float(
+    value: Any,
+    name: str,
+    error_type: type[MissionError],
+) -> float:
+    if type(value) is not float or not math.isfinite(value):
+        raise error_type(f"{name} must be a finite literal float")
+    return value
+
+
+def _contract_string_tuple(
+    value: Any,
+    name: str,
+    error_type: type[MissionError],
+    *,
+    allow_none: bool = False,
+) -> tuple[str, ...]:
+    if value is None and allow_none:
+        return ()
+    if type(value) not in (list, tuple):
+        raise error_type(f"{name} must be a string sequence")
+    result = tuple(
+        _contract_text(item, f"{name}[]", error_type)
+        for item in value
+    )
+    return result
+
+
+def _as_string_tuple(value: Any) -> tuple[str, ...]:
+    """Strict internal event sequence parser retained for reducer helpers."""
+    return _contract_string_tuple(
+        value,
+        "event string sequence",
+        InvalidMissionEvent,
+        allow_none=True,
+    )
+
+
+def _wire_object(
+    raw: Any,
+    fields: Iterable[str],
+    name: str,
+    error_type: type[MissionError],
+) -> dict[str, Any]:
+    if type(raw) is not dict:
+        raise error_type(f"{name} must be a plain JSON object")
+    try:
+        value = bounded_json_copy(raw)
+    except BoundedJSONError as exc:
+        raise error_type(f"{name} violates the bounded JSON contract: {exc}") from exc
+    expected = set(fields)
+    actual = set(value)
+    missing = expected - actual
+    unknown = actual - expected
+    if missing or unknown:
+        details: list[str] = []
+        if missing:
+            details.append(f"missing={sorted(missing)!r}")
+        if unknown:
+            details.append(f"unknown={sorted(unknown)!r}")
+        raise error_type(
+            f"{name} has non-canonical fields ({', '.join(details)})"
+        )
+    return value
+
+
+def _wire_string_list(
+    value: Any,
+    name: str,
+    error_type: type[MissionError],
+) -> tuple[str, ...]:
+    if type(value) is not list:
+        raise error_type(f"{name} must be a JSON array of strings")
+    return _contract_string_tuple(value, name, error_type)
+
+
+def _wire_optional_text(
+    value: Any,
+    name: str,
+    error_type: type[MissionError],
+) -> str | None:
+    if value is None:
+        return None
+    return _contract_text(value, name, error_type)
+
+
+def _validate_contract_wire(
+    wire: Any,
+    name: str,
+    error_type: type[MissionError],
+) -> None:
+    """Ensure a directly constructed contract can round-trip over its wire."""
+    try:
+        bounded_json_copy(wire)
+    except BoundedJSONError as exc:
+        raise error_type(
+            f"{name} violates the bounded JSON contract: {exc}"
+        ) from exc
 
 
 class ObligationStatus(str, Enum):
@@ -200,25 +318,65 @@ class EvidencePolicy:
     max_verification_attempts: int = 1
     uncertain_policy: str = "blocked"
 
+    _FIELDS = (
+        "required_evidence_kinds",
+        "preferred_evidence_kinds",
+        "allow_independent_visual_verifier",
+        "max_verification_attempts",
+        "uncertain_policy",
+    )
+
     def __post_init__(self) -> None:
-        object.__setattr__(self, "required_evidence_kinds", _as_string_tuple(self.required_evidence_kinds))
-        object.__setattr__(self, "preferred_evidence_kinds", _as_string_tuple(self.preferred_evidence_kinds))
-        object.__setattr__(self, "allow_independent_visual_verifier", bool(self.allow_independent_visual_verifier))
-        if int(self.max_verification_attempts) < 1:
-            raise InvalidMissionDefinition("max_verification_attempts must be positive")
-        object.__setattr__(self, "max_verification_attempts", int(self.max_verification_attempts))
-        if str(self.uncertain_policy) not in {"collect_more", "ask_user", "blocked", "fail"}:
+        object.__setattr__(
+            self,
+            "required_evidence_kinds",
+            _contract_string_tuple(
+                self.required_evidence_kinds,
+                "required_evidence_kinds",
+                InvalidMissionDefinition,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "preferred_evidence_kinds",
+            _contract_string_tuple(
+                self.preferred_evidence_kinds,
+                "preferred_evidence_kinds",
+                InvalidMissionDefinition,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "allow_independent_visual_verifier",
+            _contract_bool(
+                self.allow_independent_visual_verifier,
+                "allow_independent_visual_verifier",
+                InvalidMissionDefinition,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "max_verification_attempts",
+            _contract_int(
+                self.max_verification_attempts,
+                "max_verification_attempts",
+                InvalidMissionDefinition,
+                minimum=1,
+            ),
+        )
+        policy = _contract_text(
+            self.uncertain_policy,
+            "uncertain_policy",
+            InvalidMissionDefinition,
+        )
+        if policy not in {"collect_more", "ask_user", "blocked", "fail"}:
             raise InvalidMissionDefinition("invalid uncertain_policy")
-        object.__setattr__(self, "uncertain_policy", str(self.uncertain_policy))
-
-    @property
-    def allowed_trust(self) -> tuple[str, ...]:
-        """Compatibility view; trust is a runtime evidence invariant."""
-        return DEFAULT_ALLOWED_TRUST
-
-    @property
-    def minimum_evidence(self) -> int:
-        return 1
+        object.__setattr__(self, "uncertain_policy", policy)
+        _validate_contract_wire(
+            self.to_dict(),
+            "EvidencePolicy",
+            InvalidMissionDefinition,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -228,6 +386,43 @@ class EvidencePolicy:
             "max_verification_attempts": self.max_verification_attempts,
             "uncertain_policy": self.uncertain_policy,
         }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "EvidencePolicy":
+        value = _wire_object(
+            raw,
+            cls._FIELDS,
+            "EvidencePolicy",
+            InvalidMissionDefinition,
+        )
+        return cls(
+            required_evidence_kinds=_wire_string_list(
+                value["required_evidence_kinds"],
+                "required_evidence_kinds",
+                InvalidMissionDefinition,
+            ),
+            preferred_evidence_kinds=_wire_string_list(
+                value["preferred_evidence_kinds"],
+                "preferred_evidence_kinds",
+                InvalidMissionDefinition,
+            ),
+            allow_independent_visual_verifier=_contract_bool(
+                value["allow_independent_visual_verifier"],
+                "allow_independent_visual_verifier",
+                InvalidMissionDefinition,
+            ),
+            max_verification_attempts=_contract_int(
+                value["max_verification_attempts"],
+                "max_verification_attempts",
+                InvalidMissionDefinition,
+                minimum=1,
+            ),
+            uncertain_policy=_contract_text(
+                value["uncertain_policy"],
+                "uncertain_policy",
+                InvalidMissionDefinition,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,33 +441,87 @@ class ObligationSpec:
     required: bool = True
     source_span: tuple[int, int] | None = None
 
+    _FIELDS = (
+        "id",
+        "desired_state",
+        "acceptance_criteria",
+        "depends_on",
+        "forbidden_effects",
+        "required_capabilities",
+        "input_artifact_refs",
+        "output_binding_names",
+        "evidence_policy",
+        "required",
+        "source_span",
+    )
+
     def __post_init__(self) -> None:
-        if not str(self.id).strip():
-            raise InvalidMissionDefinition("obligation id cannot be empty")
-        if not str(self.desired_state).strip():
-            raise InvalidMissionDefinition(f"obligation {self.id!r} has no desired_state")
-        object.__setattr__(self, "id", str(self.id))
-        object.__setattr__(self, "desired_state", str(self.desired_state))
+        object.__setattr__(
+            self,
+            "id",
+            _contract_text(self.id, "obligation id", InvalidMissionDefinition),
+        )
+        object.__setattr__(
+            self,
+            "desired_state",
+            _contract_text(
+                self.desired_state,
+                f"obligation {self.id!r} desired_state",
+                InvalidMissionDefinition,
+            ),
+        )
         for name in (
             "acceptance_criteria", "depends_on", "forbidden_effects",
             "required_capabilities", "input_artifact_refs", "output_binding_names",
         ):
-            object.__setattr__(self, name, _as_string_tuple(getattr(self, name)))
+            object.__setattr__(
+                self,
+                name,
+                _contract_string_tuple(
+                    getattr(self, name),
+                    f"obligation {self.id!r} {name}",
+                    InvalidMissionDefinition,
+                ),
+            )
         if not self.acceptance_criteria:
             object.__setattr__(self, "acceptance_criteria", (self.desired_state,))
         if not self.required_capabilities:
             object.__setattr__(self, "required_capabilities", ("visual.interact",))
         policy = self.evidence_policy
-        if isinstance(policy, Mapping):
-            policy = EvidencePolicy(**dict(policy))
-        if not isinstance(policy, EvidencePolicy):
+        if type(policy) is dict:
+            policy = EvidencePolicy.from_dict(policy)
+        if type(policy) is not EvidencePolicy:
             raise InvalidMissionDefinition(f"obligation {self.id!r} has invalid evidence_policy")
         object.__setattr__(self, "evidence_policy", policy)
+        object.__setattr__(
+            self,
+            "required",
+            _contract_bool(
+                self.required,
+                f"obligation {self.id!r} required",
+                InvalidMissionDefinition,
+            ),
+        )
         if self.source_span is not None:
-            span = tuple(int(item) for item in self.source_span)
-            if len(span) != 2 or span[0] < 0 or span[1] < span[0]:
+            if type(self.source_span) not in (list, tuple) or len(self.source_span) != 2:
+                raise InvalidMissionDefinition(f"obligation {self.id!r} has invalid source_span")
+            span = tuple(
+                _contract_int(
+                    item,
+                    f"obligation {self.id!r} source_span[]",
+                    InvalidMissionDefinition,
+                    minimum=0,
+                )
+                for item in self.source_span
+            )
+            if span[1] < span[0]:
                 raise InvalidMissionDefinition(f"obligation {self.id!r} has invalid source_span")
             object.__setattr__(self, "source_span", span)
+        _validate_contract_wire(
+            self.to_dict(),
+            "ObligationSpec",
+            InvalidMissionDefinition,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -291,20 +540,81 @@ class ObligationSpec:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ObligationSpec":
-        if not isinstance(raw, Mapping):
-            raise InvalidMissionDefinition("obligation must be a JSON object")
+        value = _wire_object(
+            raw,
+            cls._FIELDS,
+            "ObligationSpec",
+            InvalidMissionDefinition,
+        )
+        acceptance_criteria = _wire_string_list(
+            value["acceptance_criteria"],
+            "acceptance_criteria",
+            InvalidMissionDefinition,
+        )
+        required_capabilities = _wire_string_list(
+            value["required_capabilities"],
+            "required_capabilities",
+            InvalidMissionDefinition,
+        )
+        if not acceptance_criteria:
+            raise InvalidMissionDefinition(
+                "acceptance_criteria must contain at least one string"
+            )
+        if not required_capabilities:
+            raise InvalidMissionDefinition(
+                "required_capabilities must contain at least one string"
+            )
+        raw_span = value["source_span"]
+        if raw_span is not None and (
+            type(raw_span) is not list or len(raw_span) != 2
+        ):
+            raise InvalidMissionDefinition(
+                "source_span must be null or a two-integer JSON array"
+            )
         return cls(
-            id=str(raw.get("id") or ""),
-            desired_state=str(raw.get("desired_state") or raw.get("description") or ""),
-            acceptance_criteria=raw.get("acceptance_criteria") or raw.get("criteria") or (),
-            depends_on=raw.get("depends_on") or (),
-            forbidden_effects=raw.get("forbidden_effects") or (),
-            required_capabilities=raw.get("required_capabilities") or (),
-            input_artifact_refs=raw.get("input_artifact_refs") or (),
-            output_binding_names=raw.get("output_binding_names") or (),
-            evidence_policy=raw.get("evidence_policy") or {},
-            required=bool(raw.get("required", True)),
-            source_span=tuple(raw["source_span"]) if raw.get("source_span") else None,
+            id=_contract_text(value["id"], "id", InvalidMissionDefinition),
+            desired_state=_contract_text(
+                value["desired_state"],
+                "desired_state",
+                InvalidMissionDefinition,
+            ),
+            acceptance_criteria=acceptance_criteria,
+            depends_on=_wire_string_list(
+                value["depends_on"], "depends_on", InvalidMissionDefinition
+            ),
+            forbidden_effects=_wire_string_list(
+                value["forbidden_effects"],
+                "forbidden_effects",
+                InvalidMissionDefinition,
+            ),
+            required_capabilities=required_capabilities,
+            input_artifact_refs=_wire_string_list(
+                value["input_artifact_refs"],
+                "input_artifact_refs",
+                InvalidMissionDefinition,
+            ),
+            output_binding_names=_wire_string_list(
+                value["output_binding_names"],
+                "output_binding_names",
+                InvalidMissionDefinition,
+            ),
+            evidence_policy=EvidencePolicy.from_dict(value["evidence_policy"]),
+            required=_contract_bool(
+                value["required"], "required", InvalidMissionDefinition
+            ),
+            source_span=(
+                None
+                if raw_span is None
+                else tuple(
+                    _contract_int(
+                        item,
+                        "source_span[]",
+                        InvalidMissionDefinition,
+                        minimum=0,
+                    )
+                    for item in raw_span
+                )
+            ),
         )
 
 
@@ -323,43 +633,117 @@ class EvidenceRef:
     created_at: float | None = None
     content_sha256: str | None = None
 
+    _FIELDS = (
+        "id",
+        "mission_id",
+        "run_id",
+        "kind",
+        "trust",
+        "obligation_id",
+        "payload_hash",
+        "frame_id",
+        "action_id",
+        "artifact_id",
+        "created_at",
+        "content_sha256",
+    )
+
     def __post_init__(self) -> None:
         for name in ("id", "mission_id", "run_id", "kind", "trust"):
-            if not str(getattr(self, name) or "").strip():
-                raise EvidenceScopeError(f"evidence {name} cannot be empty")
-            object.__setattr__(self, name, str(getattr(self, name)))
-        if not str(self.payload_hash or "").strip():
-            raise EvidenceScopeError("evidence payload_hash cannot be empty")
-        object.__setattr__(self, "payload_hash", str(self.payload_hash))
+            object.__setattr__(
+                self,
+                name,
+                _contract_text(
+                    getattr(self, name),
+                    f"evidence {name}",
+                    EvidenceScopeError,
+                ),
+            )
+        object.__setattr__(
+            self,
+            "payload_hash",
+            _contract_text(
+                self.payload_hash,
+                "evidence payload_hash",
+                EvidenceScopeError,
+            ),
+        )
         if self.obligation_id is not None:
-            value = str(self.obligation_id).strip()
-            object.__setattr__(self, "obligation_id", value or None)
+            object.__setattr__(
+                self,
+                "obligation_id",
+                _contract_text(
+                    self.obligation_id,
+                    "evidence obligation_id",
+                    EvidenceScopeError,
+                ),
+            )
         if self.action_id is not None:
-            value = str(self.action_id).strip()
-            object.__setattr__(self, "action_id", value or None)
+            object.__setattr__(
+                self,
+                "action_id",
+                _contract_text(
+                    self.action_id,
+                    "evidence action_id",
+                    EvidenceScopeError,
+                ),
+            )
         if self.artifact_id is not None:
-            value = str(self.artifact_id).strip()
-            if not value:
-                object.__setattr__(self, "artifact_id", None)
-            else:
-                object.__setattr__(self, "artifact_id", value)
-                if self.content_sha256 is None:
-                    raise EvidenceScopeError(
-                        "artifact evidence requires content_sha256"
-                    )
+            object.__setattr__(
+                self,
+                "artifact_id",
+                _contract_text(
+                    self.artifact_id,
+                    "evidence artifact_id",
+                    EvidenceScopeError,
+                ),
+            )
+            if self.content_sha256 is None:
+                raise EvidenceScopeError(
+                    "artifact evidence requires content_sha256"
+                )
         if self.content_sha256 is not None:
-            content_sha = str(self.content_sha256).strip().lower()
+            content_sha = _contract_text(
+                self.content_sha256,
+                "evidence content_sha256",
+                EvidenceScopeError,
+            )
             if self.artifact_id is None:
                 raise EvidenceScopeError("content_sha256 requires artifact_id")
-            if not _SHA256_RE.fullmatch(content_sha):
-                raise EvidenceScopeError("content_sha256 must be a 64-character SHA-256 hex digest")
+            if (
+                content_sha != content_sha.lower()
+                or not _SHA256_RE.fullmatch(content_sha)
+            ):
+                raise EvidenceScopeError(
+                    "content_sha256 must be a lowercase 64-character SHA-256 hex digest"
+                )
             object.__setattr__(self, "content_sha256", content_sha)
-        if self.created_at is not None and not math.isfinite(float(self.created_at)):
-            raise EvidenceScopeError("evidence created_at must be finite")
-
-    @property
-    def evidence_id(self) -> str:
-        return self.id
+        if self.frame_id is not None:
+            object.__setattr__(
+                self,
+                "frame_id",
+                _contract_int(
+                    self.frame_id,
+                    "evidence frame_id",
+                    EvidenceScopeError,
+                    minimum=0,
+                ),
+            )
+        if self.created_at is not None:
+            object.__setattr__(
+                self,
+                "created_at",
+                _contract_float(
+                    self.created_at,
+                    "evidence created_at",
+                    EvidenceScopeError,
+                ),
+            )
+        _validate_contract_wire(
+            self.to_dict(),
+            "EvidenceRef",
+            EvidenceScopeError,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -379,19 +763,52 @@ class EvidenceRef:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "EvidenceRef":
+        value = _wire_object(
+            raw,
+            cls._FIELDS,
+            "EvidenceRef",
+            EvidenceScopeError,
+        )
         return cls(
-            id=str(raw.get("id") or raw.get("evidence_id") or ""),
-            mission_id=str(raw.get("mission_id") or ""),
-            run_id=str(raw.get("run_id") or ""),
-            kind=str(raw.get("kind") or ""),
-            trust=str(raw.get("trust") or ""),
-            obligation_id=(str(raw["obligation_id"]) if raw.get("obligation_id") is not None else None),
-            payload_hash=str(raw.get("payload_hash") or ""),
-            frame_id=(int(raw["frame_id"]) if raw.get("frame_id") is not None else None),
-            action_id=(str(raw["action_id"]) if raw.get("action_id") is not None else None),
-            artifact_id=(str(raw["artifact_id"]) if raw.get("artifact_id") is not None else None),
-            created_at=(float(raw["created_at"]) if raw.get("created_at") is not None else None),
-            content_sha256=(str(raw["content_sha256"]) if raw.get("content_sha256") is not None else None),
+            id=_contract_text(value["id"], "id", EvidenceScopeError),
+            mission_id=_contract_text(
+                value["mission_id"], "mission_id", EvidenceScopeError
+            ),
+            run_id=_contract_text(value["run_id"], "run_id", EvidenceScopeError),
+            kind=_contract_text(value["kind"], "kind", EvidenceScopeError),
+            trust=_contract_text(value["trust"], "trust", EvidenceScopeError),
+            obligation_id=_wire_optional_text(
+                value["obligation_id"], "obligation_id", EvidenceScopeError
+            ),
+            payload_hash=_contract_text(
+                value["payload_hash"], "payload_hash", EvidenceScopeError
+            ),
+            frame_id=(
+                None
+                if value["frame_id"] is None
+                else _contract_int(
+                    value["frame_id"],
+                    "frame_id",
+                    EvidenceScopeError,
+                    minimum=0,
+                )
+            ),
+            action_id=_wire_optional_text(
+                value["action_id"], "action_id", EvidenceScopeError
+            ),
+            artifact_id=_wire_optional_text(
+                value["artifact_id"], "artifact_id", EvidenceScopeError
+            ),
+            created_at=(
+                None
+                if value["created_at"] is None
+                else _contract_float(
+                    value["created_at"], "created_at", EvidenceScopeError
+                )
+            ),
+            content_sha256=_wire_optional_text(
+                value["content_sha256"], "content_sha256", EvidenceScopeError
+            ),
         )
 
 
@@ -403,16 +820,37 @@ class ArtifactRef:
     producer_obligation_id: str
     evidence_ref: str
 
+    _FIELDS = (
+        "artifact_id",
+        "media_type",
+        "sha256",
+        "producer_obligation_id",
+        "evidence_ref",
+    )
+
     def __post_init__(self) -> None:
         for name in ("artifact_id", "media_type", "sha256", "producer_obligation_id", "evidence_ref"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise InvalidMissionEvent(f"artifact {name} cannot be empty")
-            object.__setattr__(self, name, value)
-        digest = str(self.sha256).lower()
-        if not _SHA256_RE.fullmatch(digest):
-            raise InvalidMissionEvent("artifact sha256 must be a 64-character SHA-256 hex digest")
-        object.__setattr__(self, "sha256", digest)
+            object.__setattr__(
+                self,
+                name,
+                _contract_text(
+                    getattr(self, name),
+                    f"artifact {name}",
+                    InvalidMissionEvent,
+                ),
+            )
+        if (
+            self.sha256 != self.sha256.lower()
+            or not _SHA256_RE.fullmatch(self.sha256)
+        ):
+            raise InvalidMissionEvent(
+                "artifact sha256 must be a lowercase 64-character SHA-256 hex digest"
+            )
+        _validate_contract_wire(
+            self.to_dict(),
+            "ArtifactRef",
+            InvalidMissionEvent,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -425,12 +863,28 @@ class ArtifactRef:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ArtifactRef":
+        value = _wire_object(
+            raw,
+            cls._FIELDS,
+            "ArtifactRef",
+            InvalidMissionEvent,
+        )
         return cls(
-            artifact_id=str(raw.get("artifact_id") or ""),
-            media_type=str(raw.get("media_type") or "application/octet-stream"),
-            sha256=str(raw.get("sha256") or ""),
-            producer_obligation_id=str(raw.get("producer_obligation_id") or ""),
-            evidence_ref=str(raw.get("evidence_ref") or ""),
+            artifact_id=_contract_text(
+                value["artifact_id"], "artifact_id", InvalidMissionEvent
+            ),
+            media_type=_contract_text(
+                value["media_type"], "media_type", InvalidMissionEvent
+            ),
+            sha256=_contract_text(value["sha256"], "sha256", InvalidMissionEvent),
+            producer_obligation_id=_contract_text(
+                value["producer_obligation_id"],
+                "producer_obligation_id",
+                InvalidMissionEvent,
+            ),
+            evidence_ref=_contract_text(
+                value["evidence_ref"], "evidence_ref", InvalidMissionEvent
+            ),
         )
 
 
@@ -444,22 +898,66 @@ class TargetBinding:
     established_by_evidence_ref: str
     epoch: int
 
+    _FIELDS = (
+        "binding_id",
+        "hwnd",
+        "process_id",
+        "executable_identity",
+        "title_snapshot",
+        "established_by_evidence_ref",
+        "epoch",
+    )
+
     def __post_init__(self) -> None:
         for name in ("binding_id", "executable_identity", "established_by_evidence_ref"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise InvalidMissionEvent(f"target {name} cannot be empty")
-            object.__setattr__(self, name, value)
-        object.__setattr__(self, "title_snapshot", str(self.title_snapshot or ""))
-        object.__setattr__(self, "hwnd", int(self.hwnd))
-        object.__setattr__(self, "process_id", int(self.process_id))
-        object.__setattr__(self, "epoch", int(self.epoch))
-        if int(self.hwnd) <= 0:
-            raise InvalidMissionEvent("target hwnd must be positive")
-        if int(self.process_id) <= 0 or int(self.epoch) < 0:
-            raise InvalidMissionEvent(
-                "target process_id must be positive and epoch cannot be negative"
+            object.__setattr__(
+                self,
+                name,
+                _contract_text(
+                    getattr(self, name),
+                    f"target {name}",
+                    InvalidMissionEvent,
+                ),
             )
+        object.__setattr__(
+            self,
+            "title_snapshot",
+            _contract_text(
+                self.title_snapshot,
+                "target title_snapshot",
+                InvalidMissionEvent,
+                allow_empty=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "hwnd",
+            _contract_int(
+                self.hwnd, "target hwnd", InvalidMissionEvent, minimum=1
+            ),
+        )
+        object.__setattr__(
+            self,
+            "process_id",
+            _contract_int(
+                self.process_id,
+                "target process_id",
+                InvalidMissionEvent,
+                minimum=1,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "epoch",
+            _contract_int(
+                self.epoch, "target epoch", InvalidMissionEvent, minimum=0
+            ),
+        )
+        _validate_contract_wire(
+            self.to_dict(),
+            "TargetBinding",
+            InvalidMissionEvent,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -474,14 +972,44 @@ class TargetBinding:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "TargetBinding":
+        value = _wire_object(
+            raw,
+            cls._FIELDS,
+            "TargetBinding",
+            InvalidMissionEvent,
+        )
         return cls(
-            binding_id=str(raw.get("binding_id") or ""),
-            hwnd=int(raw.get("hwnd") or 0),
-            process_id=int(raw.get("process_id") or 0),
-            executable_identity=str(raw.get("executable_identity") or ""),
-            title_snapshot=str(raw.get("title_snapshot") or ""),
-            established_by_evidence_ref=str(raw.get("established_by_evidence_ref") or ""),
-            epoch=int(raw.get("epoch") or 0),
+            binding_id=_contract_text(
+                value["binding_id"], "binding_id", InvalidMissionEvent
+            ),
+            hwnd=_contract_int(
+                value["hwnd"], "hwnd", InvalidMissionEvent, minimum=1
+            ),
+            process_id=_contract_int(
+                value["process_id"],
+                "process_id",
+                InvalidMissionEvent,
+                minimum=1,
+            ),
+            executable_identity=_contract_text(
+                value["executable_identity"],
+                "executable_identity",
+                InvalidMissionEvent,
+            ),
+            title_snapshot=_contract_text(
+                value["title_snapshot"],
+                "title_snapshot",
+                InvalidMissionEvent,
+                allow_empty=True,
+            ),
+            established_by_evidence_ref=_contract_text(
+                value["established_by_evidence_ref"],
+                "established_by_evidence_ref",
+                InvalidMissionEvent,
+            ),
+            epoch=_contract_int(
+                value["epoch"], "epoch", InvalidMissionEvent, minimum=0
+            ),
         )
 
 
@@ -494,22 +1022,58 @@ class VerifiedFact:
     valid_for_obligation_ids: tuple[str, ...] = ()
     expires_on_epoch_change: bool = True
 
+    _FIELDS = (
+        "id",
+        "statement",
+        "evidence_refs",
+        "scope",
+        "valid_for_obligation_ids",
+        "expires_on_epoch_change",
+    )
+
     def __post_init__(self) -> None:
         for name in ("id", "statement", "scope"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise InvalidMissionEvent(f"verified fact {name} cannot be empty")
-            object.__setattr__(self, name, value)
-        evidence_refs = _as_string_tuple(self.evidence_refs)
+            object.__setattr__(
+                self,
+                name,
+                _contract_text(
+                    getattr(self, name),
+                    f"verified fact {name}",
+                    InvalidMissionEvent,
+                ),
+            )
+        evidence_refs = _contract_string_tuple(
+            self.evidence_refs,
+            "verified fact evidence_refs",
+            InvalidMissionEvent,
+        )
         if not evidence_refs:
             raise EvidenceScopeError("verified fact requires evidence_refs")
         if len(evidence_refs) != len(set(evidence_refs)):
             raise EvidenceScopeError("verified fact evidence_refs must be unique")
-        valid_for = _as_string_tuple(self.valid_for_obligation_ids)
+        valid_for = _contract_string_tuple(
+            self.valid_for_obligation_ids,
+            "verified fact valid_for_obligation_ids",
+            InvalidMissionEvent,
+        )
         if len(valid_for) != len(set(valid_for)):
             raise InvalidMissionEvent("verified fact obligation ids must be unique")
         object.__setattr__(self, "evidence_refs", evidence_refs)
         object.__setattr__(self, "valid_for_obligation_ids", valid_for)
+        object.__setattr__(
+            self,
+            "expires_on_epoch_change",
+            _contract_bool(
+                self.expires_on_epoch_change,
+                "verified fact expires_on_epoch_change",
+                InvalidMissionEvent,
+            ),
+        )
+        _validate_contract_wire(
+            self.to_dict(),
+            "VerifiedFact",
+            InvalidMissionEvent,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -520,6 +1084,37 @@ class VerifiedFact:
             "valid_for_obligation_ids": list(self.valid_for_obligation_ids),
             "expires_on_epoch_change": self.expires_on_epoch_change,
         }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "VerifiedFact":
+        value = _wire_object(
+            raw,
+            cls._FIELDS,
+            "VerifiedFact",
+            InvalidMissionEvent,
+        )
+        return cls(
+            id=_contract_text(value["id"], "id", InvalidMissionEvent),
+            statement=_contract_text(
+                value["statement"], "statement", InvalidMissionEvent
+            ),
+            evidence_refs=_wire_string_list(
+                value["evidence_refs"], "evidence_refs", InvalidMissionEvent
+            ),
+            scope=_contract_text(
+                value["scope"], "scope", InvalidMissionEvent
+            ),
+            valid_for_obligation_ids=_wire_string_list(
+                value["valid_for_obligation_ids"],
+                "valid_for_obligation_ids",
+                InvalidMissionEvent,
+            ),
+            expires_on_epoch_change=_contract_bool(
+                value["expires_on_epoch_change"],
+                "expires_on_epoch_change",
+                InvalidMissionEvent,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,9 +1139,36 @@ class ActionEffectSummary:
     comparator_version: str = ACTION_EFFECT_COMPARATOR_VERSION
     format: str = ACTION_EFFECT_FORMAT
 
+    _FIELDS = (
+        "format",
+        "comparator_version",
+        "action_id",
+        "input_completed",
+        "before_frame_id",
+        "after_frame_id",
+        "before_frame_evidence_ref",
+        "after_frame_evidence_ref",
+        "before_frame_payload_hash",
+        "after_frame_payload_hash",
+        "target_binding_valid",
+        "frame_comparable",
+        "local_visual_change",
+        "change_ratio",
+        "reason",
+        "semantic_completion",
+        "evidence_ref",
+        "payload_hash",
+    )
+
     def __post_init__(self) -> None:
+        _contract_text(self.format, "action effect format", InvalidMissionEvent)
         if self.format != ACTION_EFFECT_FORMAT:
             raise InvalidMissionEvent("unsupported action effect format")
+        _contract_text(
+            self.comparator_version,
+            "action effect comparator_version",
+            InvalidMissionEvent,
+        )
         if self.comparator_version != ACTION_EFFECT_COMPARATOR_VERSION:
             raise InvalidMissionEvent("unsupported action effect comparator")
         for name in (
@@ -555,48 +1177,64 @@ class ActionEffectSummary:
             "after_frame_evidence_ref",
             "evidence_ref",
         ):
-            raw_value = getattr(self, name)
-            if type(raw_value) is not str or not raw_value.strip():
-                raise InvalidMissionEvent(f"action effect {name} cannot be empty")
-            object.__setattr__(self, name, raw_value.strip())
+            _contract_text(
+                getattr(self, name),
+                f"action effect {name}",
+                InvalidMissionEvent,
+            )
         for name in ("before_frame_payload_hash", "after_frame_payload_hash"):
             value = getattr(self, name)
-            if type(value) is not str or not _SHA256_RE.fullmatch(value):
+            _contract_text(value, f"action effect {name}", InvalidMissionEvent)
+            if not _SHA256_RE.fullmatch(value) or value != value.lower():
                 raise InvalidMissionEvent(
-                    f"action effect {name} must be a SHA-256 digest"
+                    f"action effect {name} must be a canonical SHA-256 digest"
                 )
-            object.__setattr__(self, name, value.lower())
-        if type(self.input_completed) is not bool:
-            raise InvalidMissionEvent("action effect input_completed must be boolean")
+        _contract_bool(
+            self.input_completed,
+            "action effect input_completed",
+            InvalidMissionEvent,
+        )
         for name in ("target_binding_valid", "frame_comparable"):
-            if type(getattr(self, name)) is not bool:
-                raise InvalidMissionEvent(f"action effect {name} must be boolean")
+            _contract_bool(
+                getattr(self, name),
+                f"action effect {name}",
+                InvalidMissionEvent,
+            )
         for name in ("before_frame_id", "after_frame_id"):
-            value = getattr(self, name)
-            if type(value) is not int or value <= 0:
-                raise InvalidMissionEvent(f"action effect {name} must be positive")
+            _contract_int(
+                getattr(self, name),
+                f"action effect {name}",
+                InvalidMissionEvent,
+                minimum=1,
+            )
         if self.after_frame_id <= self.before_frame_id:
             raise InvalidMissionEvent("action effect frames must be in commit order")
-        try:
-            change = LocalVisualChange(self.local_visual_change)
-            reason = ActionEffectReason(self.reason)
-        except ValueError as exc:
-            raise InvalidMissionEvent("invalid action effect classification") from exc
-        object.__setattr__(self, "local_visual_change", change)
-        object.__setattr__(self, "reason", reason)
+        if type(self.local_visual_change) is not LocalVisualChange:
+            raise InvalidMissionEvent(
+                "action effect local_visual_change must be a LocalVisualChange"
+            )
+        if type(self.reason) is not ActionEffectReason:
+            raise InvalidMissionEvent(
+                "action effect reason must be an ActionEffectReason"
+            )
+        change = self.local_visual_change
+        reason = self.reason
+        _contract_text(
+            self.semantic_completion,
+            "action effect semantic_completion",
+            InvalidMissionEvent,
+        )
         if self.semantic_completion != "unknown":
             raise InvalidMissionEvent("pixel comparison cannot claim semantic completion")
         ratio = self.change_ratio
         if ratio is not None:
-            if (
-                isinstance(ratio, bool)
-                or not isinstance(ratio, (int, float))
-                or not math.isfinite(float(ratio))
-                or not 0.0 <= float(ratio) <= 1.0
-            ):
+            _contract_float(
+                ratio,
+                "action effect change_ratio",
+                InvalidMissionEvent,
+            )
+            if not 0.0 <= ratio <= 1.0:
                 raise InvalidMissionEvent("action effect change_ratio must be null or in [0, 1]")
-            ratio = float(ratio)
-            object.__setattr__(self, "change_ratio", ratio)
 
         if not self.input_completed:
             coherent = bool(
@@ -687,50 +1325,115 @@ class ActionEffectSummary:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ActionEffectSummary":
-        if not isinstance(raw, Mapping):
-            raise InvalidMissionEvent("action effect must be an object")
-        expected = {
-            "format",
-            "comparator_version",
-            "action_id",
-            "input_completed",
-            "before_frame_id",
-            "after_frame_id",
-            "before_frame_evidence_ref",
-            "after_frame_evidence_ref",
-            "before_frame_payload_hash",
-            "after_frame_payload_hash",
-            "target_binding_valid",
-            "frame_comparable",
-            "local_visual_change",
-            "change_ratio",
-            "reason",
-            "semantic_completion",
-            "evidence_ref",
-            "payload_hash",
-        }
-        if set(raw) != expected:
-            raise InvalidMissionEvent("action effect fields do not match the canonical schema")
-        result = cls(
-            format=raw["format"],
-            comparator_version=raw["comparator_version"],
-            action_id=raw["action_id"],
-            input_completed=raw["input_completed"],
-            before_frame_id=raw["before_frame_id"],
-            after_frame_id=raw["after_frame_id"],
-            before_frame_evidence_ref=raw["before_frame_evidence_ref"],
-            after_frame_evidence_ref=raw["after_frame_evidence_ref"],
-            before_frame_payload_hash=raw["before_frame_payload_hash"],
-            after_frame_payload_hash=raw["after_frame_payload_hash"],
-            target_binding_valid=raw["target_binding_valid"],
-            frame_comparable=raw["frame_comparable"],
-            local_visual_change=raw["local_visual_change"],
-            change_ratio=raw["change_ratio"],
-            reason=raw["reason"],
-            semantic_completion=raw["semantic_completion"],
-            evidence_ref=raw["evidence_ref"],
+        value = _wire_object(
+            raw,
+            cls._FIELDS,
+            "ActionEffectSummary",
+            InvalidMissionEvent,
         )
-        if raw["payload_hash"] != result.payload_hash:
+        local_visual_change_raw = _contract_text(
+            value["local_visual_change"],
+            "local_visual_change",
+            InvalidMissionEvent,
+        )
+        reason_raw = _contract_text(
+            value["reason"],
+            "reason",
+            InvalidMissionEvent,
+        )
+        try:
+            local_visual_change = LocalVisualChange(local_visual_change_raw)
+            reason = ActionEffectReason(reason_raw)
+        except ValueError as exc:
+            raise InvalidMissionEvent(
+                "invalid action effect classification"
+            ) from exc
+        change_ratio = value["change_ratio"]
+        if change_ratio is not None:
+            change_ratio = _contract_float(
+                change_ratio,
+                "change_ratio",
+                InvalidMissionEvent,
+            )
+        result = cls(
+            format=_contract_text(
+                value["format"], "format", InvalidMissionEvent
+            ),
+            comparator_version=_contract_text(
+                value["comparator_version"],
+                "comparator_version",
+                InvalidMissionEvent,
+            ),
+            action_id=_contract_text(
+                value["action_id"], "action_id", InvalidMissionEvent
+            ),
+            input_completed=_contract_bool(
+                value["input_completed"],
+                "input_completed",
+                InvalidMissionEvent,
+            ),
+            before_frame_id=_contract_int(
+                value["before_frame_id"],
+                "before_frame_id",
+                InvalidMissionEvent,
+                minimum=1,
+            ),
+            after_frame_id=_contract_int(
+                value["after_frame_id"],
+                "after_frame_id",
+                InvalidMissionEvent,
+                minimum=1,
+            ),
+            before_frame_evidence_ref=_contract_text(
+                value["before_frame_evidence_ref"],
+                "before_frame_evidence_ref",
+                InvalidMissionEvent,
+            ),
+            after_frame_evidence_ref=_contract_text(
+                value["after_frame_evidence_ref"],
+                "after_frame_evidence_ref",
+                InvalidMissionEvent,
+            ),
+            before_frame_payload_hash=_contract_text(
+                value["before_frame_payload_hash"],
+                "before_frame_payload_hash",
+                InvalidMissionEvent,
+            ),
+            after_frame_payload_hash=_contract_text(
+                value["after_frame_payload_hash"],
+                "after_frame_payload_hash",
+                InvalidMissionEvent,
+            ),
+            target_binding_valid=_contract_bool(
+                value["target_binding_valid"],
+                "target_binding_valid",
+                InvalidMissionEvent,
+            ),
+            frame_comparable=_contract_bool(
+                value["frame_comparable"],
+                "frame_comparable",
+                InvalidMissionEvent,
+            ),
+            local_visual_change=local_visual_change,
+            change_ratio=change_ratio,
+            reason=reason,
+            semantic_completion=_contract_text(
+                value["semantic_completion"],
+                "semantic_completion",
+                InvalidMissionEvent,
+            ),
+            evidence_ref=_contract_text(
+                value["evidence_ref"], "evidence_ref", InvalidMissionEvent
+            ),
+        )
+        payload_hash = _contract_text(
+            value["payload_hash"], "payload_hash", InvalidMissionEvent
+        )
+        if (
+            not _SHA256_RE.fullmatch(payload_hash)
+            or payload_hash != payload_hash.lower()
+            or payload_hash != result.payload_hash
+        ):
             raise InvalidMissionEvent("action effect payload_hash does not match its content")
         return result
 
@@ -747,23 +1450,61 @@ class TransitionSummary:
     action_effect: ActionEffectSummary | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "action", str(self.action or "unknown"))
+        object.__setattr__(
+            self,
+            "action",
+            _contract_text(self.action, "transition action", InvalidMissionEvent),
+        )
         if type(self.input_completed) is not bool:
             raise InvalidMissionEvent("transition input_completed must be boolean")
-        object.__setattr__(self, "obligation_id", str(self.obligation_id or "").strip())
-        if not self.obligation_id:
-            raise InvalidMissionEvent("transition summary must bind an obligation")
+        object.__setattr__(
+            self,
+            "visible_effect",
+            _contract_text(
+                self.visible_effect,
+                "transition visible_effect",
+                InvalidMissionEvent,
+                allow_empty=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "obligation_id",
+            _contract_text(
+                self.obligation_id,
+                "transition obligation_id",
+                InvalidMissionEvent,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            _contract_string_tuple(
+                self.evidence_refs,
+                "transition evidence_refs",
+                InvalidMissionEvent,
+            ),
+        )
+        if self.frame_id is not None:
+            object.__setattr__(
+                self,
+                "frame_id",
+                _contract_int(
+                    self.frame_id,
+                    "transition frame_id",
+                    InvalidMissionEvent,
+                    minimum=0,
+                ),
+            )
         if self.action_id is not None:
-            action_id = str(self.action_id or "").strip()
-            if not action_id:
-                raise InvalidMissionEvent("transition action_id cannot be empty")
-            object.__setattr__(self, "action_id", action_id)
-        object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
-        if self.frame_id is not None and (
-            type(self.frame_id) is not int or self.frame_id < 0
-        ):
-            raise InvalidMissionEvent(
-                "transition frame_id must be a non-negative integer or null"
+            object.__setattr__(
+                self,
+                "action_id",
+                _contract_text(
+                    self.action_id,
+                    "transition action_id",
+                    InvalidMissionEvent,
+                ),
             )
         if self.action_effect is not None:
             effect = (
@@ -811,14 +1552,49 @@ class FailureSummary:
     obligation_id: str = ""
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "kind", str(self.kind or "failure"))
-        object.__setattr__(self, "obligation_id", str(self.obligation_id or "").strip())
-        if not self.obligation_id:
-            raise InvalidMissionEvent("failure summary must bind an obligation")
-        object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
-        if int(self.count) < 1:
-            raise InvalidMissionEvent("failure count must be positive")
-        object.__setattr__(self, "count", int(self.count))
+        object.__setattr__(
+            self,
+            "kind",
+            _contract_text(self.kind, "failure kind", InvalidMissionEvent),
+        )
+        object.__setattr__(
+            self,
+            "message",
+            _contract_text(
+                self.message,
+                "failure message",
+                InvalidMissionEvent,
+                allow_empty=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "obligation_id",
+            _contract_text(
+                self.obligation_id,
+                "failure obligation_id",
+                InvalidMissionEvent,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            _contract_string_tuple(
+                self.evidence_refs,
+                "failure evidence_refs",
+                InvalidMissionEvent,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "count",
+            _contract_int(
+                self.count,
+                "failure count",
+                InvalidMissionEvent,
+                minimum=1,
+            ),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -848,19 +1624,58 @@ class MissionDefinition:
     # shadow; it merely keeps the input available for a later projection.
     experience_policy: str = "allow"
 
+    _FIELDS = (
+        "format",
+        "mission_id",
+        "run_id",
+        "original_goal",
+        "goal_revision",
+        "source",
+        "metadata",
+        "obligations",
+        "stable_topological_order",
+        "experience_policy",
+    )
+
     def __post_init__(self) -> None:
+        _contract_text(
+            self.format,
+            "MissionDefinition format",
+            InvalidMissionDefinition,
+        )
         if self.format != MISSION_DEFINITION_FORMAT:
             raise InvalidMissionDefinition(f"unsupported MissionDefinition format: {self.format!r}")
-        if not str(self.mission_id).strip() or not str(self.run_id).strip():
-            raise InvalidMissionDefinition("mission_id and run_id are required")
-        if not str(self.original_goal).strip():
-            raise InvalidMissionDefinition("original_goal cannot be empty")
-        object.__setattr__(self, "mission_id", str(self.mission_id))
-        object.__setattr__(self, "run_id", str(self.run_id))
-        object.__setattr__(self, "original_goal", str(self.original_goal))
+        object.__setattr__(
+            self,
+            "mission_id",
+            _contract_text(
+                self.mission_id, "mission_id", InvalidMissionDefinition
+            ),
+        )
+        object.__setattr__(
+            self,
+            "run_id",
+            _contract_text(self.run_id, "run_id", InvalidMissionDefinition),
+        )
+        object.__setattr__(
+            self,
+            "original_goal",
+            _contract_text(
+                self.original_goal, "original_goal", InvalidMissionDefinition
+            ),
+        )
+        object.__setattr__(
+            self,
+            "source",
+            _contract_text(self.source, "source", InvalidMissionDefinition),
+        )
+        if type(self.obligations) not in (list, tuple):
+            raise InvalidMissionDefinition(
+                "obligations must be an internal tuple/list of ObligationSpec values"
+            )
         obligations = tuple(
-            item if isinstance(item, ObligationSpec) else ObligationSpec.from_dict(item)
-            for item in _as_tuple(self.obligations)
+            item if type(item) is ObligationSpec else ObligationSpec.from_dict(item)
+            for item in self.obligations
         )
         if not obligations:
             obligations = (
@@ -871,6 +1686,11 @@ class MissionDefinition:
                     required_capabilities=("visual.interact",),
                 ),
             )
+        _validate_contract_wire(
+            {"obligations": [item.to_dict() for item in obligations]},
+            "MissionDefinition obligations",
+            InvalidMissionDefinition,
+        )
         ids = [item.id for item in obligations]
         if len(ids) != len(set(ids)):
             raise InvalidMissionDefinition("obligation ids must be unique")
@@ -883,23 +1703,45 @@ class MissionDefinition:
                 raise InvalidMissionDefinition(
                     f"obligation {item.id!r} depends on unknown ids: {sorted(unknown)}"
                 )
-        _assert_acyclic(obligations)
+        topological_order = _stable_topological_order(obligations)
         object.__setattr__(self, "obligations", obligations)
         try:
             object.__setattr__(self, "metadata", _json_mapping(self.metadata))
-        except (TypeError, ValueError) as exc:
-            raise InvalidMissionDefinition("metadata must be JSONValue") from exc
-        if int(self.goal_revision) < 0:
-            raise InvalidMissionDefinition("goal_revision cannot be negative")
-        topological_order = _stable_topological_order(obligations)
-        requested_order = _as_string_tuple(self.stable_topological_order)
+        except BoundedJSONError as exc:
+            raise InvalidMissionDefinition(
+                f"metadata violates the bounded JSON contract: {exc}"
+            ) from exc
+        object.__setattr__(
+            self,
+            "goal_revision",
+            _contract_int(
+                self.goal_revision,
+                "goal_revision",
+                InvalidMissionDefinition,
+                minimum=0,
+            ),
+        )
+        requested_order = _contract_string_tuple(
+            self.stable_topological_order,
+            "stable_topological_order",
+            InvalidMissionDefinition,
+        )
         if requested_order and requested_order != topological_order:
             raise InvalidMissionDefinition(
                 "stable_topological_order does not match the obligation DAG"
             )
         object.__setattr__(self, "stable_topological_order", topological_order)
-        policy = str(self.experience_policy or "allow")
+        policy = _contract_text(
+            self.experience_policy,
+            "experience_policy",
+            InvalidMissionDefinition,
+        )
         object.__setattr__(self, "experience_policy", policy)
+        _validate_contract_wire(
+            self.to_dict(),
+            "MissionDefinition",
+            InvalidMissionDefinition,
+        )
 
     @classmethod
     def from_goal(
@@ -911,6 +1753,11 @@ class MissionDefinition:
         required_capabilities: Iterable[str] = ("visual.interact",),
         experience_policy: str = "allow",
     ) -> "MissionDefinition":
+        capabilities = _contract_string_tuple(
+            required_capabilities,
+            "required_capabilities",
+            InvalidMissionDefinition,
+        )
         return cls(
             mission_id=mission_id,
             run_id=run_id,
@@ -920,7 +1767,7 @@ class MissionDefinition:
                     id="obligation-1",
                     desired_state=original_goal,
                     acceptance_criteria=(original_goal,),
-                    required_capabilities=tuple(required_capabilities),
+                    required_capabilities=capabilities,
                 ),
             ),
             experience_policy=experience_policy,
@@ -942,23 +1789,351 @@ class MissionDefinition:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "MissionDefinition":
-        if not isinstance(raw, Mapping):
-            raise InvalidMissionDefinition("MissionDefinition must be a JSON object")
+        value = _wire_object(
+            raw,
+            cls._FIELDS,
+            "MissionDefinition",
+            InvalidMissionDefinition,
+        )
+        if type(value["obligations"]) is not list:
+            raise InvalidMissionDefinition(
+                "obligations must be a JSON array"
+            )
+        if not value["obligations"]:
+            raise InvalidMissionDefinition(
+                "obligations must contain at least one canonical obligation"
+            )
+        if type(value["metadata"]) is not dict:
+            raise InvalidMissionDefinition("metadata must be a plain JSON object")
         return cls(
-            mission_id=str(raw.get("mission_id") or ""),
-            run_id=str(raw.get("run_id") or ""),
-            original_goal=str(raw.get("original_goal") or ""),
+            mission_id=_contract_text(
+                value["mission_id"], "mission_id", InvalidMissionDefinition
+            ),
+            run_id=_contract_text(
+                value["run_id"], "run_id", InvalidMissionDefinition
+            ),
+            original_goal=_contract_text(
+                value["original_goal"],
+                "original_goal",
+                InvalidMissionDefinition,
+            ),
             obligations=tuple(
                 ObligationSpec.from_dict(item)
-                for item in (raw.get("obligations") or ())
+                for item in value["obligations"]
             ),
-            goal_revision=int(raw.get("goal_revision") or 0),
-            source=str(raw.get("source") or "vnext"),
-            metadata=raw.get("metadata") or {},
-            format=str(raw.get("format") or ""),
-            stable_topological_order=raw.get("stable_topological_order") or (),
-            experience_policy=str(raw.get("experience_policy") or "allow"),
+            goal_revision=_contract_int(
+                value["goal_revision"],
+                "goal_revision",
+                InvalidMissionDefinition,
+                minimum=0,
+            ),
+            source=_contract_text(
+                value["source"], "source", InvalidMissionDefinition
+            ),
+            metadata=value["metadata"],
+            format=_contract_text(
+                value["format"], "format", InvalidMissionDefinition
+            ),
+            stable_topological_order=_wire_string_list(
+                value["stable_topological_order"],
+                "stable_topological_order",
+                InvalidMissionDefinition,
+            ),
+            experience_policy=_contract_text(
+                value["experience_policy"],
+                "experience_policy",
+                InvalidMissionDefinition,
+            ),
         )
+
+
+UNIMPLEMENTED_MISSION_EVENT_KINDS = frozenset(
+    {
+        "approval_requested",
+        "approval_decided",
+        "external_change_armed",
+        "external_change_recorded",
+        "planner_requested",
+        "planner_patch_proposed",
+        "planner_patch_accepted",
+        "planner_patch_rejected",
+        "inspection_requested",
+        "inspection_recorded",
+        "capability_requested",
+        "capability_granted",
+        "capability_denied",
+        "execution_profile_accepted",
+        "execution_profile_revised",
+        "user_goal_revised",
+    }
+)
+_EVENT_PAYLOAD_FIELDS = {
+    "mission_compiled": (frozenset(), frozenset()),
+    "obligation_activated": (
+        frozenset({"obligation_id"}),
+        frozenset(),
+    ),
+    "artifact_bound": (
+        frozenset({"artifact"}),
+        frozenset({"binding_name"}),
+    ),
+    "target_bound": (
+        frozenset({"target_binding"}),
+        frozenset(),
+    ),
+    "target_invalidated": (
+        frozenset(),
+        frozenset({"reason"}),
+    ),
+    "transition_recorded": (
+        frozenset({"obligation_id", "input_completed"}),
+        frozenset(
+            {
+                "action",
+                "visible_effect",
+                "frame_id",
+                "action_id",
+                "action_effect",
+            }
+        ),
+    ),
+    "obligation_claimed": (
+        frozenset({"obligation_id"}),
+        frozenset(),
+    ),
+    "verification_recorded": (
+        frozenset({"obligation_id", "verified", "claim_fingerprint"}),
+        frozenset(
+            {
+                "verification_id",
+                "satisfied_criteria",
+                "checked_forbidden_effects",
+                "missing_conditions",
+                "contradictions",
+                "facts",
+                "verifier_kind",
+                "reason",
+                "failure_kind",
+            }
+        ),
+    ),
+    "fact_recorded": (
+        frozenset({"fact"}),
+        frozenset({"obligation_id"}),
+    ),
+    "obligation_blocked": (
+        frozenset({"obligation_id"}),
+        frozenset({"reason", "blocker_kind"}),
+    ),
+    "obligation_unblocked": (
+        frozenset({"obligation_id"}),
+        frozenset(),
+    ),
+    "mission_blocked": (
+        frozenset(),
+        frozenset({"reason"}),
+    ),
+    "mission_failed": (
+        frozenset(),
+        frozenset({"reason"}),
+    ),
+    "mission_canceled": (
+        frozenset(),
+        frozenset({"reason"}),
+    ),
+    "mission_verified": (
+        frozenset(
+            {
+                "verified",
+                "verification_id",
+                "accepted_obligation_verification_ids",
+                "aggregate_evidence_id",
+                "aggregate_payload_hash",
+            }
+        ),
+        frozenset(),
+    ),
+}
+_EVENT_PAYLOAD_FIELDS.update(
+    {
+        event_type: (frozenset(), frozenset())
+        for event_type in UNIMPLEMENTED_MISSION_EVENT_KINDS
+    }
+)
+_EVENT_TEXT_FIELDS = frozenset(
+    {
+        "obligation_id",
+        "binding_name",
+        "reason",
+        "action",
+        "action_id",
+        "visible_effect",
+        "claim_fingerprint",
+        "verification_id",
+        "verifier_kind",
+        "failure_kind",
+        "blocker_kind",
+        "aggregate_evidence_id",
+        "aggregate_payload_hash",
+    }
+)
+_EVENT_STRING_ARRAY_FIELDS = frozenset(
+    {
+        "satisfied_criteria",
+        "checked_forbidden_effects",
+        "missing_conditions",
+        "contradictions",
+        "accepted_obligation_verification_ids",
+    }
+)
+
+
+def _validate_event_payload(
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> None:
+    """Validate the canonical, kind-specific MissionEvent payload."""
+    schema = _EVENT_PAYLOAD_FIELDS.get(event_type)
+    if schema is None:
+        raise InvalidMissionEvent(
+            f"unsupported MissionEvent kind: {event_type!r}"
+        )
+    required, optional = schema
+    actual = set(payload)
+    missing = required - actual
+    unknown = actual - required - optional
+    if missing or unknown:
+        details: list[str] = []
+        if missing:
+            details.append(f"missing={sorted(missing)!r}")
+        if unknown:
+            details.append(f"unknown={sorted(unknown)!r}")
+        raise InvalidMissionEvent(
+            f"{event_type} payload has non-canonical fields "
+            f"({', '.join(details)})"
+        )
+
+    for field_name in actual & _EVENT_TEXT_FIELDS:
+        _contract_text(
+            payload[field_name],
+            f"{event_type} payload {field_name!r}",
+            InvalidMissionEvent,
+            allow_empty=field_name in {"reason", "visible_effect"},
+        )
+    for field_name in actual & _EVENT_STRING_ARRAY_FIELDS:
+        if type(payload[field_name]) not in (list, tuple):
+            raise InvalidMissionEvent(
+                f"{event_type} payload {field_name!r} "
+                "must be a JSON array of strings"
+            )
+        _contract_string_tuple(
+            payload[field_name],
+            f"{event_type} payload {field_name!r}",
+            InvalidMissionEvent,
+        )
+
+    if "verified" in payload:
+        _contract_bool(
+            payload["verified"],
+            f"{event_type} payload 'verified'",
+            InvalidMissionEvent,
+        )
+    if event_type == "verification_recorded" and type(payload["verified"]) is bool:
+        common = frozenset({"obligation_id", "verified", "claim_fingerprint"})
+        if payload["verified"]:
+            variant_required = common | frozenset(
+                {"verification_id", "satisfied_criteria"}
+            )
+            variant_allowed = variant_required | frozenset(
+                {
+                    "checked_forbidden_effects",
+                    "missing_conditions",
+                    "contradictions",
+                    "facts",
+                    "verifier_kind",
+                }
+            )
+        else:
+            variant_required = common
+            variant_allowed = variant_required | frozenset(
+                {
+                    "missing_conditions",
+                    "contradictions",
+                    "verifier_kind",
+                    "reason",
+                    "failure_kind",
+                }
+            )
+        variant_missing = variant_required - actual
+        variant_unknown = actual - variant_allowed
+        if variant_missing or variant_unknown:
+            details = []
+            if variant_missing:
+                details.append(f"missing={sorted(variant_missing)!r}")
+            if variant_unknown:
+                details.append(f"unknown={sorted(variant_unknown)!r}")
+            raise InvalidMissionEvent(
+                "verification_recorded payload has non-canonical verdict "
+                f"fields ({', '.join(details)})"
+            )
+    if event_type == "mission_verified" and payload["verified"] is not True:
+        raise InvalidMissionEvent(
+            "mission_verified payload 'verified' must be the literal boolean true"
+        )
+    if "input_completed" in payload:
+        _contract_bool(
+            payload["input_completed"],
+            f"{event_type} payload 'input_completed'",
+            InvalidMissionEvent,
+        )
+    if "frame_id" in payload and payload["frame_id"] is not None:
+        _contract_int(
+            payload["frame_id"],
+            f"{event_type} payload 'frame_id'",
+            InvalidMissionEvent,
+            minimum=0,
+        )
+    if "action_effect" in payload:
+        raw_effect = payload["action_effect"]
+        if not isinstance(raw_effect, Mapping):
+            raise InvalidMissionEvent(
+                f"{event_type} payload 'action_effect' must be a JSON object"
+            )
+        ActionEffectSummary.from_dict(thaw(raw_effect))
+
+    if "artifact" in payload:
+        raw_artifact = payload["artifact"]
+        if not isinstance(raw_artifact, Mapping):
+            raise InvalidMissionEvent(
+                f"{event_type} payload 'artifact' must be a JSON object"
+            )
+        ArtifactRef.from_dict(thaw(raw_artifact))
+    if "target_binding" in payload:
+        raw_target = payload["target_binding"]
+        if not isinstance(raw_target, Mapping):
+            raise InvalidMissionEvent(
+                f"{event_type} payload 'target_binding' must be a JSON object"
+            )
+        TargetBinding.from_dict(thaw(raw_target))
+    if "fact" in payload:
+        raw_fact = payload["fact"]
+        if not isinstance(raw_fact, Mapping):
+            raise InvalidMissionEvent(
+                f"{event_type} payload 'fact' must be a JSON object"
+            )
+        VerifiedFact.from_dict(thaw(raw_fact))
+    if "facts" in payload:
+        raw_facts = payload["facts"]
+        if type(raw_facts) not in (list, tuple):
+            raise InvalidMissionEvent(
+                f"{event_type} payload 'facts' must be a JSON array"
+            )
+        for raw_fact in raw_facts:
+            if not isinstance(raw_fact, Mapping):
+                raise InvalidMissionEvent(
+                    f"{event_type} payload 'facts' items must be JSON objects"
+                )
+            VerifiedFact.from_dict(thaw(raw_fact))
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -979,55 +2154,114 @@ class MissionEvent:
     evidence_refs: tuple[str, ...] = ()
     created_at: float | None = None
 
+    _FIELDS = (
+        "format",
+        "event_id",
+        "mission_id",
+        "run_id",
+        "base_revision",
+        "kind",
+        "payload",
+        "evidence_refs",
+        "created_at",
+    )
+
     def __init__(
         self,
-        kind: str | None = None,
+        kind: str = "",
         mission_id: str = "",
         run_id: str = "",
         base_revision: int = 0,
-        payload: Mapping[str, Any] | None = None,
+        payload: Mapping[str, Any] | object = _MISSING_PAYLOAD,
         event_id: str = "",
-        format: str | None = MISSION_EVENT_FORMAT,
+        format: str = MISSION_EVENT_FORMAT,
         evidence_refs: Iterable[str] | None = None,
         created_at: float | None = None,
-        *,
-        type: str | None = None,
     ) -> None:
-        # ``type`` is accepted only as a legacy input alias.  The canonical
-        # field and wire representation remain ``kind``.
-        if type and kind and str(type) != str(kind):
-            raise InvalidMissionEvent("type and kind disagree")
-        resolved_kind = str(kind or type or "")
-        object.__setattr__(self, "kind", resolved_kind)
-        object.__setattr__(self, "mission_id", str(mission_id))
-        object.__setattr__(self, "run_id", str(run_id))
-        object.__setattr__(self, "base_revision", int(base_revision))
-        object.__setattr__(self, "payload", payload or {})
-        object.__setattr__(self, "event_id", str(event_id or ""))
-        object.__setattr__(self, "format", MISSION_EVENT_FORMAT if format is None else str(format))
-        object.__setattr__(self, "evidence_refs", _as_string_tuple(evidence_refs))
-        object.__setattr__(self, "created_at", None if created_at is None else float(created_at))
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "mission_id", mission_id)
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "base_revision", base_revision)
+        object.__setattr__(
+            self,
+            "payload",
+            {} if payload is _MISSING_PAYLOAD else payload,
+        )
+        object.__setattr__(self, "event_id", event_id)
+        object.__setattr__(self, "format", format)
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            () if evidence_refs is None else evidence_refs,
+        )
+        object.__setattr__(self, "created_at", created_at)
         self.__post_init__()
 
     def __post_init__(self) -> None:
+        _contract_text(self.format, "MissionEvent format", InvalidMissionEvent)
         if self.format != MISSION_EVENT_FORMAT:
             raise InvalidMissionEvent(f"unsupported MissionEvent format: {self.format!r}")
-        if not str(self.kind).strip():
-            raise InvalidMissionEvent("event kind cannot be empty")
-        if not str(self.mission_id).strip() or not str(self.run_id).strip():
-            raise InvalidMissionEvent("event mission_id and run_id are required")
-        if int(self.base_revision) < 0:
-            raise InvalidMissionEvent("base_revision cannot be negative")
-        if self.created_at is not None and not math.isfinite(float(self.created_at)):
-            raise InvalidMissionEvent("created_at must be finite")
-        object.__setattr__(self, "kind", str(self.kind))
-        object.__setattr__(self, "mission_id", str(self.mission_id))
-        object.__setattr__(self, "run_id", str(self.run_id))
+        object.__setattr__(
+            self,
+            "kind",
+            _contract_text(self.kind, "event kind", InvalidMissionEvent),
+        )
+        object.__setattr__(
+            self,
+            "mission_id",
+            _contract_text(
+                self.mission_id, "event mission_id", InvalidMissionEvent
+            ),
+        )
+        object.__setattr__(
+            self,
+            "run_id",
+            _contract_text(self.run_id, "event run_id", InvalidMissionEvent),
+        )
+        object.__setattr__(
+            self,
+            "base_revision",
+            _contract_int(
+                self.base_revision,
+                "event base_revision",
+                InvalidMissionEvent,
+                minimum=0,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "event_id",
+            _contract_text(
+                self.event_id,
+                "event event_id",
+                InvalidMissionEvent,
+                allow_empty=True,
+            ),
+        )
+        if self.created_at is not None:
+            object.__setattr__(
+                self,
+                "created_at",
+                _contract_float(
+                    self.created_at, "event created_at", InvalidMissionEvent
+                ),
+            )
         try:
             object.__setattr__(self, "payload", _json_mapping(self.payload))
-        except (TypeError, ValueError) as exc:
-            raise InvalidMissionEvent("payload must contain only JSONValue") from exc
-        object.__setattr__(self, "evidence_refs", _as_string_tuple(self.evidence_refs))
+        except BoundedJSONError as exc:
+            raise InvalidMissionEvent(
+                f"payload violates the bounded JSON contract: {exc}"
+            ) from exc
+        _validate_event_payload(self.kind, self.payload)
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            _contract_string_tuple(
+                self.evidence_refs,
+                "event evidence_refs",
+                InvalidMissionEvent,
+            ),
+        )
         if not self.event_id:
             canonical = {
                 "kind": self.kind,
@@ -1041,15 +2275,11 @@ class MissionEvent:
                 json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest()[:24]
             object.__setattr__(self, "event_id", f"event-{digest}")
-
-    @property
-    def type(self) -> str:
-        """Legacy read alias; it is not a second serialized field."""
-        return self.kind
-
-    @property
-    def event_type(self) -> str:
-        return self.kind
+        _validate_contract_wire(
+            self.to_dict(),
+            "MissionEvent",
+            InvalidMissionEvent,
+        )
 
     @classmethod
     def create(
@@ -1068,7 +2298,7 @@ class MissionEvent:
             mission_id=definition.mission_id,
             run_id=definition.run_id,
             base_revision=base_revision,
-            payload=payload or {},
+            payload={} if payload is None else payload,
             event_id=event_id,
             evidence_refs=evidence_refs,
             created_at=created_at,
@@ -1089,22 +2319,45 @@ class MissionEvent:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "MissionEvent":
-        if not isinstance(raw, Mapping):
-            raise InvalidMissionEvent("MissionEvent must be a JSON object")
-        raw_kind = raw.get("kind")
-        raw_type = raw.get("type")
-        if raw_kind is not None and raw_type is not None and str(raw_kind) != str(raw_type):
-            raise InvalidMissionEvent("type and kind disagree")
+        value = _wire_object(
+            raw,
+            cls._FIELDS,
+            "MissionEvent",
+            InvalidMissionEvent,
+        )
+        if type(value["payload"]) is not dict:
+            raise InvalidMissionEvent("payload must be a plain JSON object")
         return cls(
-            kind=str(raw_kind or raw_type or ""),
-            mission_id=str(raw.get("mission_id") or ""),
-            run_id=str(raw.get("run_id") or ""),
-            base_revision=int(raw.get("base_revision", raw.get("revision", 0))),
-            payload=raw.get("payload") or {},
-            event_id=str(raw.get("event_id") or ""),
-            format=str(raw.get("format") or ""),
-            evidence_refs=raw.get("evidence_refs") or (),
-            created_at=(float(raw["created_at"]) if raw.get("created_at") is not None else None),
+            kind=_contract_text(value["kind"], "kind", InvalidMissionEvent),
+            mission_id=_contract_text(
+                value["mission_id"], "mission_id", InvalidMissionEvent
+            ),
+            run_id=_contract_text(
+                value["run_id"], "run_id", InvalidMissionEvent
+            ),
+            base_revision=_contract_int(
+                value["base_revision"],
+                "base_revision",
+                InvalidMissionEvent,
+                minimum=0,
+            ),
+            payload=value["payload"],
+            event_id=_contract_text(
+                value["event_id"], "event_id", InvalidMissionEvent
+            ),
+            format=_contract_text(
+                value["format"], "format", InvalidMissionEvent
+            ),
+            evidence_refs=_wire_string_list(
+                value["evidence_refs"], "evidence_refs", InvalidMissionEvent
+            ),
+            created_at=(
+                None
+                if value["created_at"] is None
+                else _contract_float(
+                    value["created_at"], "created_at", InvalidMissionEvent
+                )
+            ),
         )
 
 
@@ -1124,44 +2377,91 @@ class ObligationProjection:
     no_progress_streak: int = 0
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "status", ObligationStatus(self.status))
-        object.__setattr__(self, "claim_evidence_refs", _as_string_tuple(self.claim_evidence_refs))
-        object.__setattr__(self, "verified_evidence_refs", _as_string_tuple(self.verified_evidence_refs))
+        object.__setattr__(
+            self,
+            "id",
+            _contract_text(
+                self.id, "obligation projection id", InvalidMissionEvent
+            ),
+        )
+        if type(self.status) is not ObligationStatus:
+            raise InvalidMissionEvent(
+                "obligation projection status must be an ObligationStatus"
+            )
+        object.__setattr__(
+            self,
+            "claim_evidence_refs",
+            _contract_string_tuple(
+                self.claim_evidence_refs,
+                "claim_evidence_refs",
+                InvalidMissionEvent,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "verified_evidence_refs",
+            _contract_string_tuple(
+                self.verified_evidence_refs,
+                "verified_evidence_refs",
+                InvalidMissionEvent,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "last_reason",
+            _contract_text(
+                self.last_reason,
+                "last_reason",
+                InvalidMissionEvent,
+                allow_empty=True,
+            ),
+        )
         if self.verification_id is not None:
-            value = str(self.verification_id).strip()
-            if not value:
-                raise InvalidMissionEvent("verification_id cannot be empty")
-            object.__setattr__(self, "verification_id", value)
+            object.__setattr__(
+                self,
+                "verification_id",
+                _contract_text(
+                    self.verification_id,
+                    "verification_id",
+                    InvalidMissionEvent,
+                ),
+            )
         if self.claim_fingerprint is not None:
-            value = str(self.claim_fingerprint).strip()
-            if not value:
-                raise InvalidMissionEvent("claim_fingerprint cannot be empty")
-            object.__setattr__(self, "claim_fingerprint", value)
+            object.__setattr__(
+                self,
+                "claim_fingerprint",
+                _contract_text(
+                    self.claim_fingerprint,
+                    "claim_fingerprint",
+                    InvalidMissionEvent,
+                ),
+            )
         if self.verified_claim_fingerprint is not None:
-            value = str(self.verified_claim_fingerprint).strip()
-            if not value:
-                raise InvalidMissionEvent("verified_claim_fingerprint cannot be empty")
-            object.__setattr__(self, "verified_claim_fingerprint", value)
+            object.__setattr__(
+                self,
+                "verified_claim_fingerprint",
+                _contract_text(
+                    self.verified_claim_fingerprint,
+                    "verified_claim_fingerprint",
+                    InvalidMissionEvent,
+                ),
+            )
         for name in (
             "failure_count",
             "activation_attempt_count",
             "verification_attempt_count",
             "no_progress_streak",
         ):
-            value = int(getattr(self, name))
-            if value < 0:
-                raise InvalidMissionEvent(f"{name} cannot be negative")
-            object.__setattr__(self, name, value)
-
-    @property
-    def accepted_verification_id(self) -> str | None:
-        """Canonical read name for the accepted obligation verifier identity."""
-        return self.verification_id
-
-    @property
-    def activation_count(self) -> int:
-        """Compatibility read alias; the serialized field is explicit."""
-        return self.activation_attempt_count
+            object.__setattr__(
+                self,
+                name,
+                _contract_int(
+                    getattr(self, name),
+                    name,
+                    InvalidMissionEvent,
+                    minimum=0,
+                ),
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1203,10 +2503,21 @@ class MissionProjection:
     format: str = MISSION_PROJECTION_FORMAT
 
     def __post_init__(self) -> None:
+        _contract_text(
+            self.format, "MissionProjection format", InvalidMissionEvent
+        )
         if self.format != MISSION_PROJECTION_FORMAT:
             raise InvalidMissionEvent(f"unsupported MissionProjection format: {self.format!r}")
-        if int(self.revision) < 0:
-            raise InvalidMissionEvent("projection revision cannot be negative")
+        object.__setattr__(
+            self,
+            "revision",
+            _contract_int(
+                self.revision,
+                "projection revision",
+                InvalidMissionEvent,
+                minimum=0,
+            ),
+        )
         object.__setattr__(self, "obligation_states", tuple(self.obligation_states))
         ids = tuple(item.id for item in self.obligation_states)
         if len(ids) != len(set(ids)):
@@ -1216,14 +2527,32 @@ class MissionProjection:
         object.__setattr__(self, "evidence_refs", _mapping(self.evidence_refs))
         object.__setattr__(self, "failure_budgets", _mapping(self.failure_budgets))
         object.__setattr__(self, "accepted_event_ids", _as_string_tuple(self.accepted_event_ids))
-        object.__setattr__(self, "status", MissionStatus(self.status))
+        if type(self.status) is not MissionStatus:
+            raise InvalidMissionEvent(
+                "mission projection status must be a MissionStatus"
+            )
         if self.mission_verification_id is not None:
-            value = str(self.mission_verification_id).strip()
-            if not value:
-                raise InvalidMissionEvent("mission_verification_id cannot be empty")
-            object.__setattr__(self, "mission_verification_id", value)
+            object.__setattr__(
+                self,
+                "mission_verification_id",
+                _contract_text(
+                    self.mission_verification_id,
+                    "mission_verification_id",
+                    InvalidMissionEvent,
+                ),
+            )
         if self.pending_approval is not None:
-            object.__setattr__(self, "pending_approval", _json_mapping(self.pending_approval))
+            try:
+                object.__setattr__(
+                    self,
+                    "pending_approval",
+                    _json_mapping(self.pending_approval),
+                )
+            except BoundedJSONError as exc:
+                raise InvalidMissionEvent(
+                    "pending_approval violates the bounded JSON contract: "
+                    f"{exc}"
+                ) from exc
 
     @property
     def mission_id(self) -> str:
@@ -1243,11 +2572,6 @@ class MissionProjection:
             state.id for state in self.obligation_states
             if state.status is ObligationStatus.VERIFIED
         )
-
-    @property
-    def obligations(self) -> tuple[ObligationSpec, ...]:
-        """Compatibility view of immutable definitions, never mutable status."""
-        return self.definition.obligations
 
     def obligation_state(self, obligation_id: str) -> ObligationProjection:
         for state in self.obligation_states:
@@ -1494,26 +2818,6 @@ class EvidenceScope:
         return tuple(found)
 
 
-def _assert_acyclic(obligations: tuple[ObligationSpec, ...]) -> None:
-    graph = {item.id: set(item.depends_on) for item in obligations}
-    visiting: set[str] = set()
-    visited: set[str] = set()
-
-    def visit(node: str) -> None:
-        if node in visiting:
-            raise InvalidMissionDefinition("obligation dependency graph contains a cycle")
-        if node in visited:
-            return
-        visiting.add(node)
-        for dependency in graph[node]:
-            visit(dependency)
-        visiting.remove(node)
-        visited.add(node)
-
-    for node in graph:
-        visit(node)
-
-
 def _stable_topological_order(
     obligations: tuple[ObligationSpec, ...],
 ) -> tuple[str, ...]:
@@ -1524,29 +2828,31 @@ def _stable_topological_order(
     """
     graph = {item.id: item.depends_on for item in obligations}
     ordered: list[str] = []
-    visited: set[str] = set()
-
-    def visit(node: str) -> None:
-        if node in visited:
-            return
-        for dependency in graph[node]:
-            visit(dependency)
-        visited.add(node)
-        ordered.append(node)
-
-    for node in graph:
-        visit(node)
+    colors = {node: 0 for node in graph}
+    for root in graph:
+        if colors[root] == 2:
+            continue
+        stack: list[tuple[str, int]] = [(root, 0)]
+        while stack:
+            node, dependency_index = stack[-1]
+            if colors[node] == 0:
+                colors[node] = 1
+            dependencies = graph[node]
+            if dependency_index < len(dependencies):
+                dependency = dependencies[dependency_index]
+                stack[-1] = (node, dependency_index + 1)
+                if colors[dependency] == 1:
+                    raise InvalidMissionDefinition(
+                        "obligation dependency graph contains a cycle"
+                    )
+                if colors[dependency] == 0:
+                    stack.append((dependency, 0))
+                continue
+            stack.pop()
+            if colors[node] != 2:
+                colors[node] = 2
+                ordered.append(node)
     return tuple(ordered)
-
-
-# The architecture documents use MissionState for the long-lived view; P1's
-# implementation calls the same derived value MissionProjection.  This alias
-# prevents callers from accidentally creating a second state structure.
-MissionState = MissionProjection
-
-# Compatibility import for the pre-audit name.  There is one canonical class
-# and one serialized schema: ``ObligationSpec``.
-ObligationDefinition = ObligationSpec
 
 
 __all__ = [
@@ -1557,8 +2863,8 @@ __all__ = [
     "InvalidMissionEvent", "StaleRevisionError", "DuplicateEventError",
     "EvidenceScopeError", "IllegalTransitionError", "ObligationStatus", "MissionStatus",
     "LocalVisualChange", "ActionEffectReason", "ActionEffectSummary",
-    "JSONValue", "EvidencePolicy", "ObligationSpec", "ObligationDefinition", "EvidenceRef", "ArtifactRef",
+    "JSONValue", "EvidencePolicy", "ObligationSpec", "EvidenceRef", "ArtifactRef",
     "TargetBinding", "VerifiedFact", "TransitionSummary", "FailureSummary",
-    "MissionDefinition", "MissionEvent", "ObligationProjection", "MissionProjection", "MissionState",
+    "MissionDefinition", "MissionEvent", "ObligationProjection", "MissionProjection",
     "ActiveObligationCard", "MissionCard", "EvidenceScope", "thaw",
 ]

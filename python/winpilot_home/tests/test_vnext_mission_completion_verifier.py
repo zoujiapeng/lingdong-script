@@ -106,7 +106,7 @@ def test_request_is_strict_versioned_replayable_and_exactly_scoped() -> None:
         MissionCompletionVerificationRequest.from_dict({**raw, "format": "request/9"})
     with pytest.raises(InvalidVerificationSchema, match="unknown"):
         MissionCompletionVerificationRequest.from_dict({**raw, "runtime": "smuggled"})
-    with pytest.raises(InvalidVerificationSchema, match="non-JSON"):
+    with pytest.raises(InvalidVerificationSchema, match="non-literal JSON"):
         MissionCompletionVerificationRequest.from_dict({
             **raw,
             "required_obligations": tuple(raw["required_obligations"]),
@@ -289,15 +289,23 @@ def test_runtime_binding_is_stable_self_contained_and_hashes_full_evidence() -> 
         item.to_dict() for item in request.required_obligations
     ]
     event_payload = first.to_mission_event_payload()
+    assert set(event_payload) == {
+        "verified",
+        "verification_id",
+        "accepted_obligation_verification_ids",
+        "aggregate_evidence_id",
+        "aggregate_payload_hash",
+    }
     assert event_payload["accepted_obligation_verification_ids"] == [
         "verification-first",
         "verification-second",
     ]
-    assert event_payload["evidence_refs"] == [
+    assert "evidence_refs" not in event_payload
+    assert first.event_evidence_refs == (
         "first-proof",
         "second-proof",
         first.aggregate_evidence.id,
-    ]
+    )
 
 
 def test_binding_rejects_incomplete_or_negative_assessment_and_tampering() -> None:
@@ -366,8 +374,12 @@ def test_result_is_ready_for_same_registry_and_revision_guarded_mission_event() 
             "verified": True,
             "verification_id": "verification-goal",
             "satisfied_criteria": ["goal"],
-            "evidence_refs": [proof.id],
+            "checked_forbidden_effects": [],
+            "missing_conditions": [],
+            "contradictions": [],
+            "verifier_kind": "deterministic",
         },
+        evidence_refs=(proof.id,),
     ))
     assert reducer.projection.status is MissionStatus.AWAITING_MISSION_VERIFICATION
     state = reducer.projection.obligation_state("obligation-1")
@@ -390,12 +402,18 @@ def test_result_is_ready_for_same_registry_and_revision_guarded_mission_event() 
 
     registry.append(result.aggregate_evidence)
     first = reducer.event(
-        "mission_verified", payload=result.to_mission_event_payload()
+        "mission_verified",
+        payload=result.to_mission_event_payload(),
+        evidence_refs=result.event_evidence_refs,
     )
     concurrent = reducer.event(
-        "mission_verified", payload=result.to_mission_event_payload()
+        "mission_verified",
+        payload=result.to_mission_event_payload(),
+        evidence_refs=result.event_evidence_refs,
     )
     assert first.event_id == concurrent.event_id
+    assert first.evidence_refs == result.event_evidence_refs
+    assert "evidence_refs" not in first.payload
     reducer.apply(first)
     assert reducer.projection.status is MissionStatus.VERIFIED
     with pytest.raises(DuplicateEventError):

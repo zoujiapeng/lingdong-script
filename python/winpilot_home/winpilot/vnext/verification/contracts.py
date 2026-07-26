@@ -10,10 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from typing import Annotated, Any, Iterable, Literal, Mapping
+from typing import Annotated, Any, Iterable, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, ValidationError, model_validator
 
+from ..json_contract import BoundedJSONError, bounded_json_copy
 from ..mission import EvidencePolicy, EvidenceRef
 
 
@@ -42,7 +43,7 @@ class InvalidVerificationSchema(VerificationContractError):
 def _text(value: Any, name: str) -> str:
     if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
-    return value.strip()
+    return value
 
 
 def _integer(value: Any, name: str, minimum: int = 0) -> int:
@@ -60,12 +61,9 @@ def _literal_bool(value: Any, name: str) -> bool:
 def _confidence(value: Any) -> float | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError("confidence must be null or a finite number in [0, 1]")
-    result = float(value)
-    if not math.isfinite(result) or not 0.0 <= result <= 1.0:
-        raise ValueError("confidence must be null or a finite number in [0, 1]")
-    return result
+    if type(value) is not float or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise ValueError("confidence must be null or a finite JSON float in [0, 1]")
+    return value
 
 
 def _strings(value: Any, name: str) -> tuple[str, ...]:
@@ -104,30 +102,6 @@ WireBool = Annotated[bool, BeforeValidator(_wire_bool)]
 WireInteger = Annotated[int, BeforeValidator(_wire_integer)]
 WireStrings = Annotated[tuple[str, ...], BeforeValidator(_wire_strings)]
 WireConfidence = Annotated[float | None, BeforeValidator(_confidence)]
-
-
-def _json_value(value: Any, path: str = "value", seen: set[int] | None = None) -> None:
-    if value is None or type(value) in {str, bool, int}:
-        return
-    if type(value) is float:
-        if not math.isfinite(value):
-            raise InvalidVerificationSchema(f"{path} contains a non-JSON number")
-        return
-    if type(value) not in {list, dict}:
-        raise InvalidVerificationSchema(f"{path} contains a non-JSON value")
-    ancestors = seen if seen is not None else set()
-    marker = id(value)
-    if marker in ancestors:
-        raise InvalidVerificationSchema(f"{path} contains a cyclic value")
-    ancestors.add(marker)
-    try:
-        values = enumerate(value) if type(value) is list else value.items()
-        for key, item in values:
-            if type(value) is dict and type(key) is not str:
-                raise InvalidVerificationSchema(f"{path} object keys must be strings")
-            _json_value(item, f"{path}.{key}", ancestors)
-    finally:
-        ancestors.remove(marker)
 
 
 def _condition_key(value: str) -> str:
@@ -171,13 +145,18 @@ class _WireModel(BaseModel):
         )
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]):
+    def from_dict(cls, raw: dict[str, Any]):
         if type(raw) is not dict:
             raise InvalidVerificationSchema(f"{cls.__name__} must be a JSON object")
-        _json_value(raw, cls.__name__)
+        try:
+            canonical = bounded_json_copy(raw)
+        except (BoundedJSONError, RecursionError) as exc:
+            raise InvalidVerificationSchema(
+                f"{cls.__name__} contains invalid bounded JSON: {exc}"
+            ) from exc
         expected = set(cls.model_fields)
-        missing = expected - set(raw)
-        unknown = set(raw) - expected
+        missing = expected - set(canonical)
+        unknown = set(canonical) - expected
         if missing or unknown:
             details = []
             if missing:
@@ -188,7 +167,7 @@ class _WireModel(BaseModel):
                 f"{cls.__name__} has non-canonical fields ({', '.join(details)})"
             )
         try:
-            return cls.model_validate(raw)
+            return cls.model_validate(canonical)
         except (ValidationError, ValueError, TypeError) as exc:
             raise InvalidVerificationSchema(str(exc)) from exc
 
@@ -204,7 +183,7 @@ class _WireModel(BaseModel):
 
         try:
             value = json.loads(raw, parse_constant=reject_constant)
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        except (json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
             if isinstance(exc, InvalidVerificationSchema):
                 raise
             raise InvalidVerificationSchema(f"{cls.__name__} is not valid JSON") from exc
@@ -239,62 +218,15 @@ class VerifierAssessment(_WireModel):
         return self
 
 
-_POLICY_FIELDS = frozenset({
-    "required_evidence_kinds",
-    "preferred_evidence_kinds",
-    "allow_independent_visual_verifier",
-    "max_verification_attempts",
-    "uncertain_policy",
-})
-_EVIDENCE_FIELDS = frozenset({
-    "id", "mission_id", "run_id", "kind", "trust", "obligation_id",
-    "payload_hash", "frame_id", "action_id", "artifact_id", "created_at",
-    "content_sha256",
-})
-
-
 def _policy(value: Any) -> EvidencePolicy:
     if isinstance(value, EvidencePolicy):
         return value
-    if type(value) is not dict or set(value) != _POLICY_FIELDS:
-        raise ValueError("evidence_policy must use the canonical schema")
-    return EvidencePolicy(
-        required_evidence_kinds=_strings(
-            value["required_evidence_kinds"], "required_evidence_kinds"
-        ),
-        preferred_evidence_kinds=_strings(
-            value["preferred_evidence_kinds"], "preferred_evidence_kinds"
-        ),
-        allow_independent_visual_verifier=_literal_bool(
-            value["allow_independent_visual_verifier"],
-            "allow_independent_visual_verifier",
-        ),
-        max_verification_attempts=_integer(
-            value["max_verification_attempts"], "max_verification_attempts", 1
-        ),
-        uncertain_policy=_text(value["uncertain_policy"], "uncertain_policy"),
-    )
+    return EvidencePolicy.from_dict(value)
 
 
 def _evidence(value: Any) -> EvidenceRef:
     if isinstance(value, EvidenceRef):
         return value
-    if type(value) is not dict or set(value) != _EVIDENCE_FIELDS:
-        raise ValueError("evidence_ref must use the canonical schema")
-    for name in ("id", "mission_id", "run_id", "kind", "trust", "payload_hash"):
-        _text(value[name], f"evidence_ref.{name}")
-    for name in ("obligation_id", "action_id", "artifact_id", "content_sha256"):
-        if value[name] is not None and type(value[name]) is not str:
-            raise ValueError(f"evidence_ref.{name} must be a string or null")
-    if value["frame_id"] is not None:
-        _integer(value["frame_id"], "evidence_ref.frame_id")
-    created_at = value["created_at"]
-    if created_at is not None and (
-        isinstance(created_at, bool)
-        or not isinstance(created_at, (int, float))
-        or not math.isfinite(float(created_at))
-    ):
-        raise ValueError("evidence_ref.created_at must be a finite number or null")
     return EvidenceRef.from_dict(value)
 
 
@@ -367,12 +299,19 @@ class ObligationVerificationRequest(_WireModel):
         if trust not in TRUST_ORDER:
             raise InvalidVerificationSchema(f"unsupported verifier evidence trust: {trust!r}")
         return ObligationVerificationRequest(
-            **{
-                **self.model_dump(exclude={"evidence_refs"}),
-                "evidence_refs": tuple(
-                    ref for ref in self.evidence_refs if ref.trust == trust
-                ),
-            }
+            format=self.format,
+            mission_id=self.mission_id,
+            run_id=self.run_id,
+            mission_revision=self.mission_revision,
+            obligation_id=self.obligation_id,
+            claim_fingerprint=self.claim_fingerprint,
+            desired_state=self.desired_state,
+            acceptance_criteria=self.acceptance_criteria,
+            forbidden_effects=self.forbidden_effects,
+            evidence_policy=self.evidence_policy,
+            evidence_refs=tuple(
+                ref for ref in self.evidence_refs if ref.trust == trust
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -508,27 +447,34 @@ class ObligationVerificationResult(_WireModel):
         def public_conditions(values: Iterable[str]) -> list[str]:
             return [forbidden_tokens.get(_condition_key(value), value) for value in values]
 
-        return {
+        payload: dict[str, Any] = {
             "obligation_id": request.obligation_id,
             "claim_fingerprint": request.claim_fingerprint,
-            "verification_id": self.verification_id,
             "verified": self.verified,
-            "satisfied_criteria": [
-                criterion
-                for criterion in request.acceptance_criteria
-                if _condition_key(criterion) in satisfied
-            ],
-            "checked_forbidden_effects": [
-                effect
-                for token, effect in forbidden_tokens.items()
-                if token in satisfied
-            ],
             "missing_conditions": public_conditions(self.missing_conditions),
             "contradictions": public_conditions(self.contradictions),
-            "evidence_refs": list(self.evidence_refs),
             "verifier_kind": self.verifier_kind,
-            "confidence": self.confidence,
         }
+        if self.verified:
+            payload.update({
+                "verification_id": self.verification_id,
+                "satisfied_criteria": [
+                    criterion
+                    for criterion in request.acceptance_criteria
+                    if _condition_key(criterion) in satisfied
+                ],
+                "checked_forbidden_effects": [
+                    effect
+                    for token, effect in forbidden_tokens.items()
+                    if token in satisfied
+                ],
+            })
+        return payload
+
+    @property
+    def event_evidence_refs(self) -> tuple[str, ...]:
+        """Evidence identities bound through the Mission event envelope."""
+        return self.evidence_refs
 
 
 __all__ = [
