@@ -49,6 +49,15 @@ from winpilot.vnext.capabilities import (
     ToolSpec,
 )
 from winpilot.vnext.capabilities.state import _broker_projection_id
+from winpilot.vnext.json_contract import (
+    MAX_JSON_ARRAY_ITEMS,
+    MAX_JSON_DEPTH,
+    MAX_JSON_KEY_LENGTH,
+    MAX_JSON_NODES,
+    MAX_JSON_STRING_LENGTH,
+    MAX_SIGNED_64,
+    MIN_SIGNED_64,
+)
 from winpilot.vnext.mission import (
     EvidenceRef,
     MissionDefinition,
@@ -111,6 +120,16 @@ def _imports(path: Path, package_root: Path) -> tuple[str, ...]:
 
 def _matches_prefix(module: str, prefix: str) -> bool:
     return module == prefix or module.startswith(prefix + ".")
+
+
+def _nested_json(depth: int) -> dict:
+    root: dict = {}
+    cursor = root
+    for _ in range(depth):
+        child: dict = {}
+        cursor["next"] = child
+        cursor = child
+    return root
 
 
 def _schema() -> dict:
@@ -226,15 +245,17 @@ def _mission_reducer(
         reducer.apply(
             reducer.event(
                 "target_bound",
-                payload=TargetBinding(
-                    binding_id="binding-current",
-                    hwnd=9123,
-                    process_id=44,
-                    executable_identity="opaque-process",
-                    title_snapshot="",
-                    established_by_evidence_ref="e-target",
-                    epoch=7,
-                ).to_dict(),
+                payload={
+                    "target_binding": TargetBinding(
+                        binding_id="binding-current",
+                        hwnd=9123,
+                        process_id=44,
+                        executable_identity="opaque-process",
+                        title_snapshot="",
+                        established_by_evidence_ref="e-target",
+                        epoch=7,
+                    ).to_dict(),
+                },
                 evidence_refs=("e-target",),
             )
         )
@@ -340,7 +361,9 @@ def _all_proposals():
         ObserveProposal(
             format=ACTOR_PROPOSAL_FORMAT,
             observation_kind="image_region",
-            image_region=ImageRegion(x=1, y=2, width=30, height=40),
+            image_region=ImageRegion(
+                x=1.0, y=2.0, width=30.0, height=40.0
+            ),
             question="Describe the small control",
         ),
         CapabilityRequest(
@@ -350,7 +373,9 @@ def _all_proposals():
         ),
         InspectionRequest(
             format=ACTOR_PROPOSAL_FORMAT,
-            region=ImageRegion(x=2, y=3, width=4, height=5),
+            region=ImageRegion(
+                x=2.0, y=3.0, width=4.0, height=5.0
+            ),
             question="Describe visible topology only",
         ),
         ClaimObligationDone(
@@ -407,7 +432,7 @@ def test_all_proposal_variants_are_strict_identity_free_round_trips() -> None:
 
 
 def test_model_wire_requires_plain_object_version_and_one_outcome() -> None:
-    with pytest.raises(InvalidActorProposal, match="plain object"):
+    with pytest.raises(InvalidActorProposal, match="explicit format"):
         parse_actor_proposal({
             "kind": "blocked",
             "blocker_kind": "unknown",
@@ -418,7 +443,7 @@ def test_model_wire_requires_plain_object_version_and_one_outcome() -> None:
             **_action().model_dump(mode="json"),
             "concise_claim": "also claim completion",
         })
-    with pytest.raises(InvalidActorProposal, match="plain object"):
+    with pytest.raises(InvalidActorProposal, match="plain JSON object"):
         parse_actor_proposal(type("MappingLike", (dict,), {})(
             _action().model_dump(mode="json")
         ))
@@ -431,6 +456,171 @@ def test_model_wire_requires_plain_object_version_and_one_outcome() -> None:
                 "format": ACTOR_PROPOSAL_FORMAT,
                 "kind": kind,
             })
+
+
+def test_every_proposal_branch_requires_exact_complete_canonical_fields() -> None:
+    for proposal in _all_proposals():
+        raw = proposal.model_dump(mode="json")
+        for field in tuple(raw):
+            missing = dict(raw)
+            del missing[field]
+            with pytest.raises(
+                InvalidActorProposal,
+                match="explicit|fields mismatch",
+            ):
+                parse_actor_proposal(missing)
+
+    raw = _action().model_dump(mode="json")
+    for alias in (
+        "type",
+        "revision",
+        "evidence_id",
+        "description",
+        "criteria",
+    ):
+        with pytest.raises(InvalidActorProposal, match="unknown"):
+            parse_actor_proposal({**raw, alias: "legacy"})
+
+
+def test_proposal_wire_rejects_coercible_scalars_none_and_non_list_arrays() -> None:
+    raw = _action().model_dump(mode="json")
+    for field, value in (
+        ("action", 1),
+        ("action", True),
+        ("action", None),
+        ("action", "1"),
+        ("format", "true"),
+        ("local_intent", 9),
+        ("local_intent", False),
+        ("local_intent", None),
+    ):
+        with pytest.raises(InvalidActorProposal):
+            parse_actor_proposal({**raw, field: value})
+
+    blocked = BlockedReport(
+        blocker_kind="unknown",
+        observed_facts=("one visible fact",),
+    ).model_dump(mode="json")
+    with pytest.raises(InvalidActorProposal, match="non-literal JSON"):
+        parse_actor_proposal({
+            **blocked,
+            "observed_facts": ("tuple is not wire JSON",),
+        })
+    for value in (None, "facts", [1], [True]):
+        with pytest.raises(InvalidActorProposal):
+            parse_actor_proposal({**blocked, "observed_facts": value})
+
+
+def test_image_region_wire_and_model_require_exact_finite_floats() -> None:
+    raw = {
+        "format": ACTOR_PROPOSAL_FORMAT,
+        "kind": "request_inspection",
+        "region": {
+            "x": 1.0,
+            "y": 2.0,
+            "width": 3.0,
+            "height": 4.0,
+        },
+        "question": "Inspect the submitted image region",
+    }
+    assert parse_actor_proposal(raw).region.x == 1.0
+    for field in ("x", "y", "width", "height"):
+        for value in (1, "1.0", True, None, math.inf, math.nan):
+            region = {**raw["region"], field: value}
+            with pytest.raises(InvalidActorProposal):
+                parse_actor_proposal({**raw, "region": region})
+    for change in (
+        {"type": "region"},
+        {"revision": 1},
+        {"description": "legacy"},
+        {"criteria": []},
+    ):
+        with pytest.raises(InvalidActorProposal, match="fields mismatch"):
+            parse_actor_proposal({
+                **raw,
+                "region": {**raw["region"], **change},
+            })
+
+
+def test_proposal_wire_uses_one_shared_bounded_json_budget() -> None:
+    minimum = _action(args={
+        "minimum": MIN_SIGNED_64,
+        "maximum": MAX_SIGNED_64,
+        "large_finite": 1e308,
+    })
+    assert minimum.args["minimum"] == MIN_SIGNED_64
+    assert minimum.args["maximum"] == MAX_SIGNED_64
+    assert minimum.args["large_finite"] == 1e308
+
+    cyclic: dict = {}
+    cyclic["self"] = cyclic
+    cases = (
+        (cyclic, "cyclic"),
+        (_nested_json(MAX_JSON_DEPTH + 1), "depth"),
+        (
+            {f"node_{index}": None for index in range(MAX_JSON_NODES)},
+            "node",
+        ),
+        ({"text": "x" * (MAX_JSON_STRING_LENGTH + 1)}, "string"),
+        ({"items": [None] * (MAX_JSON_ARRAY_ITEMS + 1)}, "array"),
+        ({"k" * (MAX_JSON_KEY_LENGTH + 1): None}, "key"),
+        ({"integer": MAX_SIGNED_64 + 1}, "signed-64"),
+        ({"integer": MIN_SIGNED_64 - 1}, "signed-64"),
+        ({"float": math.inf}, "finite"),
+        ({"float": math.nan}, "finite"),
+        (
+            {"strings": ["x" * MAX_JSON_STRING_LENGTH] * 5},
+            "UTF-8",
+        ),
+    )
+    for args, message in cases:
+        with pytest.raises(InvalidActorProposal, match=message):
+            _action(args=args)
+
+
+def test_proposal_whole_wire_rejects_nested_container_subclasses() -> None:
+    class DictSubclass(dict):
+        pass
+
+    class ListSubclass(list):
+        pass
+
+    for args in (
+        {"nested": DictSubclass({"value": 1})},
+        {"nested": ListSubclass([1])},
+        {"nested": (1, 2)},
+        {"nested": object()},
+    ):
+        with pytest.raises(InvalidActorProposal, match="non-literal JSON"):
+            _action(args=args)
+
+
+def test_proposal_text_is_preserved_and_canonical_tokens_are_not_trimmed() -> None:
+    proposal = _action(local_intent="  preserve these spaces  ")
+    assert proposal.local_intent == "  preserve these spaces  "
+    with pytest.raises(InvalidActorProposal):
+        _action(action=" click ")
+    with pytest.raises(InvalidActorProposal, match="canonical"):
+        parse_actor_proposal({
+            "format": ACTOR_PROPOSAL_FORMAT,
+            "kind": "request_capability",
+            "capability": " pointer.dynamic ",
+            "reason": "No trimming is allowed",
+        })
+
+
+def test_proposal_serialization_revalidates_the_combined_wire_budget() -> None:
+    proposal = ReplanRequest(
+        reason_kind="strategy_conflict",
+        observed_conflicts=tuple(
+            f"conflict-{index}" for index in range(2200)
+        ),
+        failed_strategy_summaries=tuple(
+            f"failed-{index}" for index in range(2200)
+        ),
+    )
+    with pytest.raises(InvalidActorProposal, match="not an ActorProposal"):
+        actor_proposal_to_json(proposal)
 
 
 @pytest.mark.parametrize(
@@ -531,14 +721,15 @@ def test_action_args_are_bounded_finite_json_and_deeply_immutable() -> None:
     with pytest.raises(TypeError):
         proposal.args["nested"][0]["image_x"] = 2
 
-    for bad in (math.nan, math.inf, 1e308, object(), 1 << 80):
+    for bad in (math.nan, math.inf, object(), 1 << 80):
         with pytest.raises(InvalidActorProposal):
             _action(args={"value": bad})
+    assert _action(args={"value": 1e308}).args["value"] == 1e308
     with pytest.raises(InvalidActorProposal):
         _action(args={1: "non-string key"})
     with pytest.raises(InvalidActorProposal):
         _action(args={"text": "x" * 1_048_577})
-    with pytest.raises(InvalidActorProposal, match="node limit"):
+    with pytest.raises(InvalidActorProposal, match="array length"):
         _action(args={"values": [0] * 4097})
 
     cyclic: dict = {}
@@ -560,7 +751,7 @@ def test_action_args_are_bounded_finite_json_and_deeply_immutable() -> None:
 
     hostile = ExecutableMapping({"image_x": 1, "image_y": 2})
     for value in (hostile, MappingProxyType(hostile)):
-        with pytest.raises(InvalidActorProposal, match="non-JSON"):
+        with pytest.raises(InvalidActorProposal, match="non-literal JSON"):
             _action(args=value)
 
 
@@ -581,11 +772,13 @@ def test_semantic_text_and_arrays_have_explicit_resource_bounds() -> None:
 
 
 def test_image_regions_only_validate_bounded_image_local_shape() -> None:
-    region = ImageRegion(x=50_000, y=40_000, width=20, height=10)
+    region = ImageRegion(
+        x=50_000.0, y=40_000.0, width=20.0, height=10.0
+    )
     assert region.x == 50_000
     for bad in (-1, math.nan, math.inf, True, 1 << 80, 10**5000):
         with pytest.raises(ValidationError):
-            ImageRegion(x=bad, y=0, width=1, height=1)
+            ImageRegion(x=bad, y=0.0, width=1.0, height=1.0)
 
 
 def test_proposal_serialization_is_canonical_for_order_and_signed_zero() -> None:
@@ -673,7 +866,7 @@ def test_envelope_is_content_addressed_and_tamper_evident() -> None:
 def test_envelope_wire_is_strict_bounded_and_frozen() -> None:
     envelope = _bind()
     raw = envelope.to_dict()
-    with pytest.raises(InvalidActorEnvelope, match="explicit format"):
+    with pytest.raises(InvalidActorEnvelope, match="missing=.*format"):
         ActorDecisionEnvelope.from_dict({
             key: value
             for key, value in raw.items()
@@ -690,7 +883,7 @@ def test_envelope_wire_is_strict_bounded_and_frozen() -> None:
     ):
         with pytest.raises(InvalidActorEnvelope):
             ActorDecisionEnvelope.from_dict({**raw, **change})
-    with pytest.raises(InvalidActorEnvelope, match="array item"):
+    with pytest.raises(InvalidActorEnvelope, match="array length"):
         ActorDecisionEnvelope.from_dict({
             **raw,
             "allowed_evidence_scope": [
@@ -699,6 +892,251 @@ def test_envelope_wire_is_strict_bounded_and_frozen() -> None:
         })
     with pytest.raises(ValidationError):
         envelope.turn_index = 9
+
+
+def test_envelope_wire_requires_plain_exact_complete_fields_and_no_aliases() -> None:
+    raw = _bind().to_dict()
+
+    class DictSubclass(dict):
+        pass
+
+    for value in (
+        MappingProxyType(raw),
+        DictSubclass(raw),
+        (),
+        None,
+        object(),
+    ):
+        with pytest.raises(InvalidActorEnvelope, match="plain JSON object"):
+            ActorDecisionEnvelope.from_dict(value)  # type: ignore[arg-type]
+
+    for field in tuple(raw):
+        missing = dict(raw)
+        del missing[field]
+        with pytest.raises(InvalidActorEnvelope, match="missing"):
+            ActorDecisionEnvelope.from_dict(missing)
+    without_pointer_lease = dict(raw)
+    del without_pointer_lease["pointer_lease_id"]
+    with pytest.raises(InvalidActorEnvelope, match="pointer_lease_id"):
+        ActorDecisionEnvelope.from_dict(without_pointer_lease)
+
+    for alias in (
+        "type",
+        "revision",
+        "evidence_id",
+        "description",
+        "criteria",
+    ):
+        with pytest.raises(InvalidActorEnvelope, match="unknown"):
+            ActorDecisionEnvelope.from_dict({**raw, alias: "legacy"})
+
+
+def test_envelope_wire_rejects_coercible_scalars_none_and_non_list_arrays() -> None:
+    raw = _bind().to_dict()
+    for field, value in (
+        ("mission_revision", "1"),
+        ("mission_revision", True),
+        ("mission_revision", 1.0),
+        ("mission_revision", None),
+        ("turn_index", "5"),
+        ("frame_id", True),
+        ("frame_epoch", "7"),
+        ("frame_hwnd", 9123.0),
+        ("pointer_lease_id", "false"),
+        ("pointer_disposition", "held"),
+        ("frame_scope", True),
+    ):
+        with pytest.raises(InvalidActorEnvelope):
+            ActorDecisionEnvelope.from_dict({**raw, field: value})
+    for field in (
+        "accepted_mission_event_ids",
+        "capability_grant_ids",
+        "allowed_evidence_scope",
+        "frame_region",
+        "submitted_image_size",
+    ):
+        with pytest.raises(InvalidActorEnvelope, match="non-literal JSON"):
+            ActorDecisionEnvelope.from_dict({
+                **raw,
+                field: tuple(raw[field]),
+            })
+
+    for index_value in ("0", True, 0.0, None):
+        region = list(raw["frame_region"])
+        region[0] = index_value
+        with pytest.raises(InvalidActorEnvelope):
+            ActorDecisionEnvelope.from_dict({
+                **raw,
+                "frame_region": region,
+            })
+
+
+def test_envelope_wire_uses_one_shared_bounded_json_budget() -> None:
+    envelope = _bind()
+    serialized = envelope.to_json()
+
+    def with_args(args):
+        raw = json.loads(serialized)
+        raw["proposal"]["args"] = args
+        return raw
+
+    cyclic: dict = {}
+    cyclic["self"] = cyclic
+    cases = (
+        (with_args(cyclic), "cyclic"),
+        (with_args(_nested_json(MAX_JSON_DEPTH + 1)), "depth"),
+        (
+            with_args({
+                f"node_{index}": None
+                for index in range(MAX_JSON_NODES)
+            }),
+            "node",
+        ),
+        (
+            with_args({
+                "text": "x" * (MAX_JSON_STRING_LENGTH + 1)
+            }),
+            "string",
+        ),
+        (
+            with_args({
+                "items": [None] * (MAX_JSON_ARRAY_ITEMS + 1)
+            }),
+            "array",
+        ),
+        (
+            with_args({
+                "k" * (MAX_JSON_KEY_LENGTH + 1): None
+            }),
+            "key",
+        ),
+        (
+            {
+                **json.loads(serialized),
+                "mission_revision": MAX_SIGNED_64 + 1,
+            },
+            "signed-64",
+        ),
+        (
+            {
+                **json.loads(serialized),
+                "frame_region": [
+                    MIN_SIGNED_64 - 1,
+                    0,
+                    1,
+                    1,
+                ],
+            },
+            "signed-64",
+        ),
+        (with_args({"value": math.inf}), "finite"),
+        (with_args({"value": math.nan}), "finite"),
+        (
+            with_args({
+                "strings": ["x" * MAX_JSON_STRING_LENGTH] * 5
+            }),
+            "UTF-8",
+        ),
+    )
+    for raw, message in cases:
+        with pytest.raises(InvalidActorEnvelope, match=message):
+            ActorDecisionEnvelope.from_dict(raw)
+
+    bounded = _bind(frame_region=(
+        MIN_SIGNED_64,
+        MAX_SIGNED_64,
+        1,
+        1,
+    ))
+    assert ActorDecisionEnvelope.from_dict(bounded.to_dict()) == bounded
+
+
+def test_envelope_nested_wire_rejects_non_json_containers_and_aliases() -> None:
+    raw = _bind().to_dict()
+
+    class DictSubclass(dict):
+        pass
+
+    class ListSubclass(list):
+        pass
+
+    for args in (
+        {"nested": DictSubclass({"value": 1})},
+        {"nested": ListSubclass([1])},
+        {"nested": (1, 2)},
+        {"nested": object()},
+    ):
+        changed = json.loads(json.dumps(raw))
+        changed["proposal"]["args"] = args
+        with pytest.raises(InvalidActorEnvelope, match="non-literal JSON"):
+            ActorDecisionEnvelope.from_dict(changed)
+    for alias in (
+        "type",
+        "revision",
+        "evidence_id",
+        "description",
+        "criteria",
+    ):
+        proposal = dict(raw["proposal"])
+        proposal[alias] = "legacy"
+        with pytest.raises(InvalidActorEnvelope, match="unknown"):
+            ActorDecisionEnvelope.from_dict({
+                **raw,
+                "proposal": proposal,
+            })
+
+
+def test_model_copy_update_is_bounded_literal_json_ingress() -> None:
+    envelope = _bind()
+    assert envelope.model_copy() == envelope
+
+    class DictSubclass(dict):
+        pass
+
+    for update in (
+        MappingProxyType({"frame_id": 1}),
+        DictSubclass({"frame_id": 1}),
+        (),
+        object(),
+    ):
+        with pytest.raises(InvalidActorEnvelope, match="plain JSON object"):
+            envelope.model_copy(update=update)  # type: ignore[arg-type]
+
+    cyclic: dict = {}
+    cyclic["self"] = cyclic
+    for update, message in (
+        ({"legacy": cyclic}, "cyclic"),
+        ({"legacy": _nested_json(MAX_JSON_DEPTH + 1)}, "depth"),
+        (
+            {"legacy": {
+                f"node_{index}": None
+                for index in range(MAX_JSON_NODES)
+            }},
+            "node",
+        ),
+        (
+            {"legacy": "x" * (MAX_JSON_STRING_LENGTH + 1)},
+            "string",
+        ),
+        (
+            {"legacy": [None] * (MAX_JSON_ARRAY_ITEMS + 1)},
+            "array",
+        ),
+        ({"legacy": object()}, "non-literal JSON"),
+        ({"legacy": (1, 2)}, "non-literal JSON"),
+        ({"legacy": math.inf}, "finite"),
+        ({"legacy": MAX_SIGNED_64 + 1}, "signed-64"),
+    ):
+        with pytest.raises(InvalidActorEnvelope, match=message):
+            envelope.model_copy(update=update)
+    for update in (
+        {"frame_id": "82"},
+        {"frame_id": True},
+        {"pointer_lease_id": "false"},
+        {"type": ACTOR_ENVELOPE_FORMAT},
+    ):
+        with pytest.raises(InvalidActorEnvelope, match="model_copy update"):
+            envelope.model_copy(update=update)
 
 
 def test_constructed_envelope_cannot_serialize_without_revalidation() -> None:
@@ -828,7 +1266,9 @@ def test_binder_rejects_projection_catalog_and_tool_misalignment() -> None:
         bind_actor_decision(
             **common,
             proposal=InspectionRequest(
-                region=ImageRegion(x=1, y=1, width=2, height=2),
+                region=ImageRegion(
+                    x=1.0, y=1.0, width=2.0, height=2.0
+                ),
                 question="Inspect this future-only region",
             ),
         )
@@ -997,10 +1437,10 @@ def test_binder_enforces_exact_submitted_image_bounds() -> None:
     outside_region = ObserveProposal(
         observation_kind="image_region",
         image_region=ImageRegion(
-            x=895,
-            y=590,
-            width=10,
-            height=10,
+            x=895.0,
+            y=590.0,
+            width=10.0,
+            height=10.0,
         ),
         question="Inspect the submitted-image edge",
     )
@@ -1189,6 +1629,7 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
         "winpilot.vnext.actor",
         "winpilot.vnext.capabilities",
         "winpilot.vnext.capability_names",
+        "winpilot.vnext.json_contract",
         "winpilot.vnext.mission",
         "winpilot.vnext.profiling",
     )

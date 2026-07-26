@@ -18,17 +18,16 @@ from pydantic import (
 )
 
 from ..capability_names import InvalidCapability, canonical_capability
+from ..json_contract import (
+    BoundedJSONError,
+    MAX_JSON_ARRAY_ITEMS,
+    bounded_json_copy,
+)
 
 
 ACTOR_PROPOSAL_FORMAT = "actor-proposal/0"
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
-_MAX_JSON_DEPTH = 64
-_MAX_JSON_NODES = 4096
-_MAX_INTEGER = (1 << 63) - 1
 _MAX_TEXT_LENGTH = 16_384
-_MAX_JSON_STRING_LENGTH = 1_048_576
-_MAX_KEY_LENGTH = 256
-_MAX_ARRAY_ITEMS = 4096
 _RUNTIME_FIELDS = frozenset({
     "mission_id", "run_id", "revision", "mission_revision", "goal_revision",
     "obligation_id", "frame_id", "frame_epoch", "epoch", "evidence_id",
@@ -71,10 +70,9 @@ class InvalidActorProposal(ActorContractError):
 def _text(value: Any, name: str) -> str:
     if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
-    result = value.strip()
-    if len(result) > _MAX_TEXT_LENGTH:
+    if len(value) > _MAX_TEXT_LENGTH:
         raise ValueError(f"{name} exceeds the text length limit")
-    return result
+    return value
 
 
 def _unique_text(values: Any, name: str) -> tuple[str, ...]:
@@ -82,7 +80,7 @@ def _unique_text(values: Any, name: str) -> tuple[str, ...]:
         values, (list, tuple)
     ):
         raise ValueError(f"{name} must be an array of strings")
-    if len(values) > _MAX_ARRAY_ITEMS:
+    if len(values) > MAX_JSON_ARRAY_ITEMS:
         raise ValueError(f"{name} exceeds the array item limit")
     result = tuple(_text(value, f"{name}[]") for value in values)
     if len(result) != len(set(result)):
@@ -90,77 +88,10 @@ def _unique_text(values: Any, name: str) -> tuple[str, ...]:
     return result
 
 
-def _json_value(
-    value: Any,
-    path: str = "value",
-    *,
-    ancestors: set[int] | None = None,
-    depth: int = 0,
-    nodes: list[int] | None = None,
-) -> Any:
-    if depth > _MAX_JSON_DEPTH:
-        raise ValueError(f"{path} exceeds the JSON depth limit")
-    count = nodes if nodes is not None else [0]
-    count[0] += 1
-    if count[0] > _MAX_JSON_NODES:
-        raise ValueError(f"{path} exceeds the JSON node limit")
-    if value is None or isinstance(value, bool):
-        return value
-    if type(value) is str:
-        if len(value) > _MAX_JSON_STRING_LENGTH:
-            raise ValueError(f"{path} exceeds the JSON string length limit")
-        return value
-    if type(value) is int:
-        if abs(value) > _MAX_INTEGER:
-            raise ValueError(f"{path} integer exceeds the signed 64-bit limit")
-        return value
-    if type(value) is float:
-        if not math.isfinite(value) or abs(value) > _MAX_INTEGER:
-            raise ValueError(
-                f"{path} float exceeds the finite signed 64-bit range"
-            )
-        return 0.0 if value == 0.0 else value
-    if type(value) not in (list, dict):
-        raise ValueError(f"{path} contains a non-JSON value")
-    seen = ancestors if ancestors is not None else set()
-    marker = id(value)
-    if marker in seen:
-        raise ValueError(f"{path} contains a cyclic JSON value")
-    seen.add(marker)
-    try:
-        if type(value) is list:
-            return [
-                _json_value(
-                    item,
-                    f"{path}[]",
-                    ancestors=seen,
-                    depth=depth + 1,
-                    nodes=count,
-                )
-                for item in value
-            ]
-        if any(type(key) is not str for key in value):
-            raise ValueError(f"{path} keys must be strings")
-        if any(len(key) > _MAX_KEY_LENGTH for key in value):
-            raise ValueError(f"{path} key exceeds the length limit")
-        return {
-            key: _json_value(
-                item,
-                f"{path}.{key}",
-                ancestors=seen,
-                depth=depth + 1,
-                nodes=count,
-            )
-            for key, item in value.items()
-        }
-    finally:
-        seen.remove(marker)
-
-
 def _freeze(value: Any) -> Any:
-    if isinstance(value, list):
+    if type(value) is list:
         return tuple(_freeze(item) for item in value)
-    if isinstance(value, dict):
+    if type(value) is dict:
         return MappingProxyType({
             key: _freeze(item) for key, item in value.items()
         })
@@ -168,11 +99,13 @@ def _freeze(value: Any) -> Any:
 
 
 def _thaw(value: Any) -> Any:
-    if isinstance(value, Mapping):
+    if type(value) is MappingProxyType:
         return {key: _thaw(item) for key, item in value.items()}
-    if isinstance(value, tuple):
+    if type(value) is tuple:
         return [_thaw(item) for item in value]
-    return value
+    if value is None or type(value) in (str, bool, int, float):
+        return value
+    raise ValueError("proposal.args contains a non-canonical JSON value")
 
 
 def _canonical_key(value: str) -> str:
@@ -184,7 +117,7 @@ def _canonical_key(value: str) -> str:
 
 
 def _reject_overreach(value: Any, path: str = "proposal") -> None:
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         for key, item in value.items():
             normalized = _canonical_key(key)
             if (
@@ -206,7 +139,7 @@ def _reject_overreach(value: Any, path: str = "proposal") -> None:
                 raise ValueError(
                     f"{path}.{key} attempts multiple action outcomes"
                 )
-            if normalized == "coordinate_space" and isinstance(item, str):
+            if normalized == "coordinate_space" and type(item) is str:
                 if item.strip().lower() not in {
                     "image", "submitted_image", "current_image",
                 }:
@@ -214,7 +147,7 @@ def _reject_overreach(value: Any, path: str = "proposal") -> None:
                         f"{path}.{key} must refer to the submitted image"
                     )
             _reject_overreach(item, f"{path}.{key}")
-    elif isinstance(value, (list, tuple)):
+    elif type(value) is list:
         for index, item in enumerate(value):
             _reject_overreach(item, f"{path}[{index}]")
 
@@ -234,16 +167,10 @@ class ImageRegion(BaseModel):
     @field_validator("x", "y", "width", "height", mode="before")
     @classmethod
     def _finite_number(cls, value: Any, info: Any) -> Any:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"{info.field_name} must be a finite number")
-        try:
-            number = float(value)
-        except (OverflowError, TypeError, ValueError) as exc:
+        if type(value) is not float or not math.isfinite(value):
             raise ValueError(
-                f"{info.field_name} must be a finite number"
-            ) from exc
-        if not math.isfinite(number) or number > _MAX_INTEGER:
-            raise ValueError(f"{info.field_name} must be a finite number")
+                f"{info.field_name} must be an exact finite float"
+            )
         return value
 
 
@@ -271,9 +198,14 @@ class DesktopActionProposal(_ActorModel):
     @field_validator("args", mode="before")
     @classmethod
     def _args(cls, value: Any) -> Mapping[str, Any]:
-        normalized = _json_value(value, "proposal.args")
-        if not isinstance(normalized, dict):
-            raise ValueError("proposal.args must be a JSON object")
+        try:
+            normalized = bounded_json_copy(value)
+        except (BoundedJSONError, RecursionError) as exc:
+            raise ValueError(
+                f"proposal.args violates the bounded JSON contract: {exc}"
+            ) from exc
+        if type(normalized) is not dict:
+            raise ValueError("proposal.args must be a plain JSON object")
         _reject_overreach(normalized, "proposal.args")
         return normalized
 
@@ -323,9 +255,12 @@ class CapabilityRequest(_ActorModel):
     @classmethod
     def _capability(cls, value: Any) -> str:
         try:
-            return canonical_capability(value)
+            result = canonical_capability(value)
         except InvalidCapability as exc:
             raise ValueError(str(exc)) from exc
+        if result != value:
+            raise ValueError("capability must already be canonical")
+        return result
 
     @field_validator("reason")
     @classmethod
@@ -433,18 +368,141 @@ _KNOWN_KINDS = frozenset({
     "request_replan",
 })
 
+_WIRE_FIELDS = {
+    "desktop_action": frozenset({
+        "format", "kind", "action", "args", "local_intent",
+    }),
+    "observe": frozenset({
+        "format", "kind", "observation_kind", "image_region", "question",
+    }),
+    "request_capability": frozenset({
+        "format", "kind", "capability", "reason",
+    }),
+    "request_inspection": frozenset({
+        "format", "kind", "region", "question",
+    }),
+    "claim_obligation_done": frozenset({
+        "format", "kind", "concise_claim",
+    }),
+    "blocked": frozenset({
+        "format", "kind", "blocker_kind", "observed_facts",
+    }),
+    "request_replan": frozenset({
+        "format", "kind", "reason_kind", "observed_conflicts",
+        "failed_strategy_summaries",
+    }),
+}
 
-def parse_actor_proposal(raw: Mapping[str, Any]) -> ActorProposal:
-    if type(raw) is not dict or "format" not in raw or "kind" not in raw:
+_WIRE_STRING_FIELDS = {
+    "desktop_action": ("format", "kind", "action", "local_intent"),
+    "observe": ("format", "kind", "observation_kind", "question"),
+    "request_capability": ("format", "kind", "capability", "reason"),
+    "request_inspection": ("format", "kind", "question"),
+    "claim_obligation_done": ("format", "kind", "concise_claim"),
+    "blocked": ("format", "kind", "blocker_kind"),
+    "request_replan": ("format", "kind", "reason_kind"),
+}
+
+
+def _wire_string(value: Any, name: str) -> None:
+    if type(value) is not str:
+        raise InvalidActorProposal(f"{name} must be a literal JSON string")
+
+
+def _wire_string_array(value: Any, name: str) -> None:
+    if type(value) is not list:
+        raise InvalidActorProposal(f"{name} must be a literal JSON array")
+    if any(type(item) is not str for item in value):
         raise InvalidActorProposal(
-            "ActorProposal requires a plain object with explicit format and kind"
+            f"{name} must contain only literal JSON strings"
         )
-    if raw.get("kind") not in _KNOWN_KINDS:
+
+
+def _wire_image_region(value: Any, name: str) -> None:
+    if type(value) is not dict:
+        raise InvalidActorProposal(f"{name} must be a plain JSON object")
+    expected = {"x", "y", "width", "height"}
+    keys = set(value)
+    if keys != expected:
         raise InvalidActorProposal(
-            f"unsupported actor proposal kind: {raw.get('kind')!r}"
+            f"{name} fields mismatch: missing={sorted(expected - keys)!r}, "
+            f"unknown={sorted(keys - expected)!r}"
+        )
+    for field in ("x", "y", "width", "height"):
+        if type(value[field]) is not float:
+            raise InvalidActorProposal(
+                f"{name}.{field} must be an exact finite float"
+            )
+
+
+def _validate_wire_shape(value: dict[str, Any], kind: str) -> None:
+    expected = _WIRE_FIELDS[kind]
+    keys = set(value)
+    if keys != expected:
+        raise InvalidActorProposal(
+            f"ActorProposal fields mismatch: "
+            f"missing={sorted(expected - keys)!r}, "
+            f"unknown={sorted(keys - expected)!r}"
+        )
+    for field in _WIRE_STRING_FIELDS[kind]:
+        _wire_string(value[field], f"ActorProposal.{field}")
+    if kind == "desktop_action":
+        if type(value["args"]) is not dict:
+            raise InvalidActorProposal(
+                "ActorProposal.args must be a plain JSON object"
+            )
+    elif kind == "observe":
+        image_region = value["image_region"]
+        if image_region is not None:
+            _wire_image_region(image_region, "ActorProposal.image_region")
+    elif kind == "request_inspection":
+        _wire_image_region(value["region"], "ActorProposal.region")
+    elif kind == "blocked":
+        _wire_string_array(
+            value["observed_facts"],
+            "ActorProposal.observed_facts",
+        )
+    elif kind == "request_replan":
+        _wire_string_array(
+            value["observed_conflicts"],
+            "ActorProposal.observed_conflicts",
+        )
+        _wire_string_array(
+            value["failed_strategy_summaries"],
+            "ActorProposal.failed_strategy_summaries",
+        )
+
+
+def parse_actor_proposal(raw: object) -> ActorProposal:
+    if type(raw) is not dict:
+        raise InvalidActorProposal(
+            "ActorProposal requires a plain JSON object"
         )
     try:
-        return _ADAPTER.validate_python(raw)
+        value = bounded_json_copy(raw)
+    except (BoundedJSONError, RecursionError) as exc:
+        raise InvalidActorProposal(
+            f"ActorProposal violates the bounded JSON contract: {exc}"
+        ) from exc
+    if type(value) is not dict:  # pragma: no cover - validator invariant
+        raise InvalidActorProposal("ActorProposal requires a plain JSON object")
+    if "format" not in value or "kind" not in value:
+        raise InvalidActorProposal(
+            "ActorProposal requires explicit format and kind"
+        )
+    _wire_string(value["format"], "ActorProposal.format")
+    _wire_string(value["kind"], "ActorProposal.kind")
+    if value["format"] != ACTOR_PROPOSAL_FORMAT:
+        raise InvalidActorProposal("unsupported ActorProposal format")
+    if value["kind"] not in _KNOWN_KINDS:
+        raise InvalidActorProposal(
+            f"unsupported actor proposal kind: {value['kind']!r}"
+        )
+    _validate_wire_shape(value, value["kind"])
+    try:
+        return _ADAPTER.validate_python(value)
+    except InvalidActorProposal:
+        raise
     except Exception as exc:
         raise InvalidActorProposal(str(exc)) from exc
 
@@ -454,7 +512,7 @@ def actor_proposal_to_json(proposal: ActorProposal) -> str:
         raise InvalidActorProposal("value is not an ActorProposal")
     try:
         value = _ADAPTER.dump_python(proposal, mode="json")
-        validated = _ADAPTER.validate_python(value)
+        validated = parse_actor_proposal(value)
         value = _ADAPTER.dump_python(validated, mode="json")
     except Exception as exc:
         raise InvalidActorProposal("value is not an ActorProposal") from exc
