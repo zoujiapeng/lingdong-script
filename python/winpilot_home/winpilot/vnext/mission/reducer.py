@@ -29,7 +29,10 @@ from .contracts import (
     VerifiedFact,
     EvidenceScopeError,
     DuplicateEventError,
+    DEFAULT_ALLOWED_TRUST,
     StaleRevisionError,
+    UNIMPLEMENTED_MISSION_EVENT_KINDS,
+    _validate_event_payload,
     _as_string_tuple,
     thaw,
 )
@@ -50,28 +53,39 @@ _HOLD_STATUSES = {
     MissionStatus.AWAITING_MISSION_VERIFICATION,
     MissionStatus.BLOCKED,
 }
-_UNIMPLEMENTED_EVENTS = {
-    "approval_requested",
-    "approval_decided",
-    "external_change_armed",
-    "external_change_recorded",
-    "planner_requested",
-    "planner_patch_proposed",
-    "planner_patch_accepted",
-    "planner_patch_rejected",
-    "inspection_requested",
-    "inspection_recorded",
-    "capability_requested",
-    "capability_granted",
-    "capability_denied",
-    "execution_profile_accepted",
-    "execution_profile_revised",
-    "user_goal_revised",
-}
-
-
 def _payload_text(payload: Mapping[str, Any], key: str, default: str = "") -> str:
-    return str(payload.get(key) or default)
+    if key not in payload:
+        return default
+    value = payload[key]
+    if type(value) is not str:
+        raise InvalidMissionEvent(f"event payload {key!r} must be a literal string")
+    return value
+
+
+def _payload_string_tuple(
+    payload: Mapping[str, Any],
+    key: str,
+) -> tuple[str, ...]:
+    if key not in payload:
+        return ()
+    value = payload[key]
+    if type(value) not in (list, tuple):
+        raise InvalidMissionEvent(
+            f"event payload {key!r} must be a JSON array of strings"
+        )
+    return _as_string_tuple(value)
+
+
+def _payload_items(
+    payload: Mapping[str, Any],
+    key: str,
+) -> tuple[Any, ...]:
+    if key not in payload:
+        return ()
+    value = payload[key]
+    if type(value) not in (list, tuple):
+        raise InvalidMissionEvent(f"event payload {key!r} must be a JSON array")
+    return tuple(value)
 
 
 def _initial_projection(definition: MissionDefinition) -> MissionProjection:
@@ -220,24 +234,28 @@ def _merge_evidence(
 
 
 def _parse_artifact(payload: Mapping[str, Any]) -> ArtifactRef:
-    raw = payload.get("artifact")
-    if isinstance(raw, ArtifactRef):
-        return raw
+    if "artifact" not in payload:
+        raise InvalidMissionEvent("artifact_bound payload requires artifact")
+    raw = payload["artifact"]
     if not isinstance(raw, Mapping):
-        raw = payload
-    return ArtifactRef.from_dict(raw)
+        raise InvalidMissionEvent("artifact must be a JSON object")
+    return ArtifactRef.from_dict(thaw(raw))
 
 
 def _parse_target(payload: Mapping[str, Any]) -> TargetBinding:
-    raw = payload.get("target_binding")
-    if isinstance(raw, TargetBinding):
-        return raw
+    if "target_binding" not in payload:
+        raise InvalidMissionEvent("target_bound payload requires target_binding")
+    raw = payload["target_binding"]
     if not isinstance(raw, Mapping):
-        raw = payload
-    return TargetBinding.from_dict(raw)
+        raise InvalidMissionEvent("target_binding must be a JSON object")
+    return TargetBinding.from_dict(thaw(raw))
 
 
-def _parse_transition(payload: Mapping[str, Any]) -> TransitionSummary:
+def _parse_transition(
+    payload: Mapping[str, Any],
+    *,
+    evidence_refs: tuple[str, ...],
+) -> TransitionSummary:
     obligation_id = _payload_text(payload, "obligation_id")
     if "input_completed" not in payload:
         raise InvalidMissionEvent("transition input_completed is required")
@@ -258,7 +276,7 @@ def _parse_transition(payload: Mapping[str, Any]) -> TransitionSummary:
         action=_payload_text(payload, "action", "unknown"),
         input_completed=input_completed,
         visible_effect=_payload_text(payload, "visible_effect"),
-        evidence_refs=payload.get("evidence_refs") or (),
+        evidence_refs=evidence_refs,
         frame_id=frame_id,
         obligation_id=obligation_id,
         action_id=(
@@ -267,7 +285,7 @@ def _parse_transition(payload: Mapping[str, Any]) -> TransitionSummary:
             else None
         ),
         action_effect=(
-            ActionEffectSummary.from_dict(raw_effect)
+            ActionEffectSummary.from_dict(thaw(raw_effect))
             if raw_effect is not None
             else None
         ),
@@ -364,25 +382,22 @@ def _claim_fingerprint(
 def _event_evidence_ids(
     event: MissionEvent,
     payload: Mapping[str, Any],
-    key: str = "evidence_refs",
 ) -> tuple[str, ...]:
-    """Merge wire-level evidence_refs with the legacy payload location."""
-    return tuple(dict.fromkeys((*event.evidence_refs, *_as_string_tuple(payload.get(key) or ()))))
+    """Return the one canonical wire-level evidence reference sequence."""
+    if "evidence_refs" in payload:
+        raise InvalidMissionEvent(
+            "legacy payload field 'evidence_refs' is not accepted; "
+            "use MissionEvent.evidence_refs"
+        )
+    return event.evidence_refs
 
 
 def _parse_fact(raw: Any) -> VerifiedFact:
-    if isinstance(raw, VerifiedFact):
+    if type(raw) is VerifiedFact:
         return raw
     if not isinstance(raw, Mapping):
         raise InvalidMissionEvent("verified fact must be an object")
-    return VerifiedFact(
-        id=str(raw.get("id") or ""),
-        statement=str(raw.get("statement") or ""),
-        evidence_refs=raw.get("evidence_refs") or (),
-        scope=str(raw.get("scope") or "obligation"),
-        valid_for_obligation_ids=raw.get("valid_for_obligation_ids") or (),
-        expires_on_epoch_change=bool(raw.get("expires_on_epoch_change", True)),
-    )
+    return VerifiedFact.from_dict(thaw(raw))
 
 
 def _validate_fact_identity(
@@ -453,7 +468,8 @@ def _verification_exhausted_status(
     policy: str,
 ) -> tuple[ObligationStatus, MissionStatus, str]:
     """Map an uncertain verification policy to an explicit recovery state."""
-    policy = str(policy)
+    if type(policy) is not str:
+        raise InvalidMissionEvent("uncertain verification policy must be a string")
     if policy == "fail":
         return ObligationStatus.BLOCKED, MissionStatus.FAILED, "verification_uncertain_failed"
     if policy == "blocked":
@@ -467,8 +483,16 @@ def _criteria_covered(
     required: Iterable[str],
     supplied: Iterable[str],
 ) -> bool:
-    required_set = {" ".join(str(item).split()).casefold() for item in required if str(item).strip()}
-    supplied_set = {" ".join(str(item).split()).casefold() for item in supplied if str(item).strip()}
+    required_set = {
+        " ".join(item.split()).casefold()
+        for item in required
+        if item.strip()
+    }
+    supplied_set = {
+        " ".join(item.split()).casefold()
+        for item in supplied
+        if item.strip()
+    }
     return required_set.issubset(supplied_set)
 
 
@@ -490,6 +514,7 @@ def _apply_event(
 ) -> MissionProjection:
     payload = event.payload
     event_type = event.kind
+    _validate_event_payload(event_type, payload)
     states = _state_map(projection)
 
     if event_type == "mission_compiled":
@@ -570,19 +595,11 @@ def _apply_event(
         if not obligation_id or projection.active_obligation_id != obligation_id:
             raise IllegalTransitionError("transition must be bound to the active obligation")
         _definition_for(projection, obligation_id)
-        transition = _parse_transition({**payload, "obligation_id": obligation_id})
         transition_refs = _event_evidence_ids(event, payload)
-        if transition_refs != transition.evidence_refs:
-            transition = TransitionSummary(
-                action=transition.action,
-                input_completed=transition.input_completed,
-                visible_effect=transition.visible_effect,
-                evidence_refs=transition_refs,
-                frame_id=transition.frame_id,
-                obligation_id=obligation_id,
-                action_id=transition.action_id,
-                action_effect=transition.action_effect,
-            )
+        transition = _parse_transition(
+            {**payload, "obligation_id": obligation_id},
+            evidence_refs=transition_refs,
+        )
         refs = _evidence_refs(projection, scope, transition_refs, obligation_id=obligation_id)
         _validate_action_effect_evidence(transition, refs)
         effect = transition.action_effect
@@ -632,7 +649,7 @@ def _apply_event(
         return _merge_evidence(updated, refs)
 
     if event_type == "verification_recorded":
-        obligation_id = _payload_text(payload, "obligation_id", _payload_text(payload, "subject_id"))
+        obligation_id = _payload_text(payload, "obligation_id")
         definition = _definition_for(projection, obligation_id)
         previous = states[obligation_id]
         if projection.active_obligation_id != obligation_id:
@@ -656,15 +673,11 @@ def _apply_event(
         if type(payload.get("verified")) is not bool:
             raise InvalidMissionEvent("verification verdict must be boolean")
         verified = payload["verified"]
-        missing = _as_string_tuple(payload.get("missing_conditions") or ())
-        contradictions = _as_string_tuple(payload.get("contradictions") or ())
-        satisfied = _as_string_tuple(
-            payload.get("satisfied_criteria")
-            or payload.get("satisfied_conditions")
-            or ()
-        )
-        checked_forbidden = _as_string_tuple(
-            payload.get("checked_forbidden_effects") or ()
+        missing = _payload_string_tuple(payload, "missing_conditions")
+        contradictions = _payload_string_tuple(payload, "contradictions")
+        satisfied = _payload_string_tuple(payload, "satisfied_criteria")
+        checked_forbidden = _payload_string_tuple(
+            payload, "checked_forbidden_effects"
         )
         refs = _evidence_refs(
             projection,
@@ -705,11 +718,11 @@ def _apply_event(
                 )
             if missing or contradictions:
                 raise IllegalTransitionError("verified result still has missing or contradictory conditions")
-            if len(refs) < definition.evidence_policy.minimum_evidence:
+            if len(refs) < 1:
                 raise EvidenceScopeError(
-                    f"verification requires at least {definition.evidence_policy.minimum_evidence} evidence ref(s)"
+                    "verification requires at least one evidence ref"
                 )
-            allowed = set(definition.evidence_policy.allowed_trust)
+            allowed = set(DEFAULT_ALLOWED_TRUST)
             disallowed = [ref.id for ref in refs if ref.trust not in allowed]
             if disallowed:
                 raise EvidenceScopeError(f"verification evidence is not allowed: {disallowed}")
@@ -719,7 +732,7 @@ def _apply_event(
                     "verification evidence does not cover required evidence kinds"
                 )
             facts: list[VerifiedFact] = []
-            for raw in payload.get("facts") or ():
+            for raw in _payload_items(payload, "facts"):
                 fact = _parse_fact(raw)
                 fact_refs = _validate_fact_identity(
                     updated,
@@ -791,7 +804,9 @@ def _apply_event(
         )
 
     if event_type == "fact_recorded":
-        fact = _parse_fact(payload.get("fact") or payload)
+        if "fact" not in payload:
+            raise InvalidMissionEvent("fact_recorded payload requires fact")
+        fact = _parse_fact(payload["fact"])
         wire_refs = _as_string_tuple(event.evidence_refs)
         payload_refs = _as_string_tuple(fact.evidence_refs)
         if wire_refs and payload_refs and set(wire_refs) != set(payload_refs):
@@ -886,7 +901,11 @@ def _apply_event(
             raise IllegalTransitionError(
                 "mission_verified requires every required obligation to be verified"
             )
-        if "verified" in payload and payload.get("verified") is not True:
+        if type(payload.get("verified")) is not bool:
+            raise InvalidMissionEvent(
+                "mission_verified verdict must be a literal boolean"
+            )
+        if payload["verified"] is not True:
             raise IllegalTransitionError(
                 "mission_verified verdict must be the boolean true"
             )
@@ -904,8 +923,9 @@ def _apply_event(
             for obligation_id in projection.definition.stable_topological_order
             if projection.obligation_definition(obligation_id).required
         )
-        supplied_obligation_verification_ids = _as_string_tuple(
-            payload.get("accepted_obligation_verification_ids") or ()
+        supplied_obligation_verification_ids = _payload_string_tuple(
+            payload,
+            "accepted_obligation_verification_ids",
         )
         if (
             any(item is None for item in expected_obligation_verification_ids)
@@ -982,7 +1002,7 @@ def reduce_projection(
     """Pure state transition.  The input projection is never mutated."""
     if event.mission_id != projection.mission_id or event.run_id != projection.run_id:
         raise InvalidMissionEvent("event does not belong to the projection mission/run")
-    if event.kind in _UNIMPLEMENTED_EVENTS:
+    if event.kind in UNIMPLEMENTED_MISSION_EVENT_KINDS:
         raise InvalidMissionEvent(
             f"mission event is not implemented in P1: {event.kind}"
         )
@@ -1060,7 +1080,7 @@ class MissionReducer:
         return MissionCard.from_projection(self._projection)
 
     def apply(self, event: MissionEvent | Mapping[str, Any]) -> MissionProjection:
-        if not isinstance(event, MissionEvent):
+        if type(event) is not MissionEvent:
             event = MissionEvent.from_dict(event)
         next_projection = reduce_projection(
             self._projection,
@@ -1070,10 +1090,6 @@ class MissionReducer:
         self._projection = next_projection
         self._events.append(event)
         return next_projection
-
-    # ``reduce`` is intentionally an alias with no separate semantics; it is
-    # useful to callers that think of the reducer as a state machine function.
-    reduce = apply
 
     def apply_many(self, events: Iterable[MissionEvent | Mapping[str, Any]]) -> MissionProjection:
         for event in events:
@@ -1094,13 +1110,14 @@ class MissionReducer:
         evidence_refs: Iterable[str] | None = None,
         created_at: float | None = None,
     ) -> MissionEvent:
-        bound_payload = dict(payload or {})
+        if payload is None:
+            bound_payload: dict[str, Any] = {}
+        elif type(payload) is dict:
+            bound_payload = payload.copy()
+        else:
+            raise InvalidMissionEvent("event payload must be a plain JSON object")
         if event_type == "verification_recorded":
-            obligation_id = _payload_text(
-                bound_payload,
-                "obligation_id",
-                _payload_text(bound_payload, "subject_id"),
-            )
+            obligation_id = _payload_text(bound_payload, "obligation_id")
             try:
                 claim_fingerprint = self._projection.obligation_state(
                     obligation_id

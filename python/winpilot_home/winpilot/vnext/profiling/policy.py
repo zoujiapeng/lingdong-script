@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from ..capability_names import CANONICAL_CAPABILITIES
+from ..json_contract import MAX_SIGNED_64
 
 from .contracts import (
     CognitiveServices,
@@ -40,7 +41,9 @@ def _normalize_available(values: Any, *, name: str) -> frozenset[str]:
         result: set[str] = set()
         seen: set[str] = set()
         for raw_key, enabled in values.items():
-            key = _text(raw_key, f"{name}[]")
+            key = _text(raw_key, f"{name}[]").strip()
+            if not key:
+                raise InvalidProfileSchema(f"{name}[] must be a non-empty string")
             if key in seen:
                 raise InvalidProfileSchema(
                     f"{name} contains duplicate normalized key {key!r}"
@@ -55,7 +58,9 @@ def _normalize_available(values: Any, *, name: str) -> frozenset[str]:
         raise InvalidProfileSchema(f"{name} must be a collection, not a string")
     if not isinstance(values, (list, tuple, set, frozenset)):
         raise InvalidProfileSchema(f"{name} must be a finite collection")
-    normalized = tuple(_text(item, f"{name}[]") for item in values)
+    normalized = tuple(_text(item, f"{name}[]").strip() for item in values)
+    if any(not item for item in normalized):
+        raise InvalidProfileSchema(f"{name}[] must be a non-empty string")
     if len(normalized) != len(set(normalized)):
         raise InvalidProfileSchema(f"{name} must not contain duplicate values")
     return frozenset(normalized)
@@ -63,8 +68,10 @@ def _normalize_available(values: Any, *, name: str) -> frozenset[str]:
 
 def _validate_mission_identity(mission_id: str, goal_revision: int) -> tuple[str, int]:
     mission = _text(mission_id, "mission_id")
-    if type(goal_revision) is not int or goal_revision < 0:
-        raise InvalidProfileSchema("goal_revision must be a non-negative integer")
+    if type(goal_revision) is not int or not 0 <= goal_revision <= MAX_SIGNED_64:
+        raise InvalidProfileSchema(
+            "goal_revision must be a non-negative signed-64 integer"
+        )
     return mission, goal_revision
 
 
@@ -73,7 +80,6 @@ class ExecutionPolicy:
     """Fail-closed deterministic gate from proposal to accepted profile."""
 
     provider_availability: frozenset[str]
-    available_services: frozenset[str]
     capability_catalog: frozenset[str]
     min_confidence: float
 
@@ -82,13 +88,8 @@ class ExecutionPolicy:
         *,
         capability_catalog: Iterable[str] | None = None,
         provider_availability: Iterable[str] | Mapping[str, bool] | None = None,
-        available_services: Iterable[str] | Mapping[str, bool] | None = None,
         min_confidence: float = 0.5,
     ) -> None:
-        if provider_availability is not None and available_services is not None:
-            raise InvalidProfileSchema(
-                "provide provider_availability or available_services, not both"
-            )
         catalog = (
             DEFAULT_CAPABILITY_CATALOG
             if capability_catalog is None
@@ -102,13 +103,10 @@ class ExecutionPolicy:
                 "capability_catalog contains unknown canonical capabilities: "
                 f"{unknown_catalog!r}"
             )
-        providers = provider_availability
-        if providers is None:
-            providers = available_services
         # P2a has no connected cognitive provider.  Availability must therefore
         # be explicitly injected instead of being inferred from requested roles.
         normalized_providers = _normalize_available(
-            providers, name="provider_availability"
+            provider_availability, name="provider_availability"
         )
         if not normalized_providers <= _SERVICE_FIELDS:
             raise InvalidProfileSchema(
@@ -117,7 +115,6 @@ class ExecutionPolicy:
         confidence = _finite_confidence(min_confidence, "min_confidence")
         assert confidence is not None
         object.__setattr__(self, "provider_availability", normalized_providers)
-        object.__setattr__(self, "available_services", normalized_providers)
         object.__setattr__(self, "capability_catalog", frozenset(catalog))
         object.__setattr__(self, "min_confidence", confidence)
 
@@ -133,19 +130,13 @@ class ExecutionPolicy:
     def _runtime_providers(
         self,
         provider_availability: Iterable[str] | Mapping[str, bool] | None,
-        available_services: Iterable[str] | Mapping[str, bool] | None,
     ) -> frozenset[str]:
-        if provider_availability is not None and available_services is not None:
-            raise InvalidProfileSchema(
-                "provide provider_availability or available_services, not both"
-            )
-        raw = provider_availability
-        if raw is None:
-            raw = available_services
         providers = (
             self.provider_availability
-            if raw is None
-            else _normalize_available(raw, name="provider_availability")
+            if provider_availability is None
+            else _normalize_available(
+                provider_availability, name="provider_availability"
+            )
         )
         if not providers <= _SERVICE_FIELDS:
             raise InvalidProfileSchema(
@@ -185,13 +176,10 @@ class ExecutionPolicy:
         reason: str = "safe_standard_default",
         available_capabilities: Iterable[str] | None = None,
         provider_availability: Iterable[str] | Mapping[str, bool] | None = None,
-        available_services: Iterable[str] | Mapping[str, bool] | None = None,
     ) -> ExecutionProfile:
         mission, revision = _validate_mission_identity(mission_id, goal_revision)
         available = self._runtime_capabilities(available_capabilities)
-        providers = self._runtime_providers(
-            provider_availability, available_services
-        )
+        providers = self._runtime_providers(provider_availability)
         capabilities = tuple(
             sorted({"visual.interact"} & self.capability_catalog & available)
         )
@@ -241,13 +229,10 @@ class ExecutionPolicy:
         goal_revision: int,
         available_capabilities: Iterable[str] | None = None,
         provider_availability: Iterable[str] | Mapping[str, bool] | None = None,
-        available_services: Iterable[str] | Mapping[str, bool] | None = None,
     ) -> ExecutionProfile:
         mission, revision = _validate_mission_identity(mission_id, goal_revision)
         available = self._runtime_capabilities(available_capabilities)
-        providers = self._runtime_providers(
-            provider_availability, available_services
-        )
+        providers = self._runtime_providers(provider_availability)
         if proposal is None:
             return self.safe_default(
                 mission,
@@ -275,7 +260,7 @@ class ExecutionPolicy:
                 available_capabilities=available,
                 provider_availability=providers,
             )
-        if accepted.confidence < float(self.min_confidence):
+        if accepted.confidence < self.min_confidence:
             return self.safe_default(
                 mission,
                 revision,
@@ -401,9 +386,5 @@ class ExecutionPolicy:
             confidence=accepted.confidence,
             policy_reasons=reasons_tuple,
         )
-
-    accept = evaluate
-    resolve = evaluate
-
 
 __all__ = ["DEFAULT_CAPABILITY_CATALOG", "ExecutionPolicy"]

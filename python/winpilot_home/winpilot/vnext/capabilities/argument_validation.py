@@ -7,20 +7,14 @@ It does not repair arguments, select tools, or interpret GUI semantics.
 """
 from __future__ import annotations
 
-import math
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from ..json_contract import BoundedJSONError, bounded_json_copy
 from .contracts import CapabilityContractError, ToolCatalog
 
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
-_MAX_JSON_DEPTH = 64
-_MAX_JSON_NODES = 4096
-_MAX_INTEGER = (1 << 63) - 1
-_MAX_JSON_STRING_LENGTH = 1_048_576
-_MAX_KEY_LENGTH = 256
-_MAX_ARRAY_ITEMS = 4096
 _REFERENCE_KEYWORDS = frozenset({
     "$ref",
     "$dynamicRef",
@@ -60,90 +54,8 @@ class ToolArgumentValidationError(CapabilityContractError):
 def _display_path(path: tuple[str | int, ...]) -> str:
     result = "$"
     for item in path:
-        result += f"[{item}]" if isinstance(item, int) else f".{item}"
+        result += f"[{item}]" if type(item) is int else f".{item}"
     return result
-
-
-def _json_copy(
-    value: Any,
-    *,
-    path: tuple[str | int, ...] = (),
-    ancestors: set[int] | None = None,
-    depth: int = 0,
-    nodes: list[int] | None = None,
-) -> Any:
-    """Copy finite plain JSON without invoking caller-defined containers."""
-    if depth > _MAX_JSON_DEPTH:
-        raise ValueError(f"JSON depth exceeded at {_display_path(path)}")
-    count = nodes if nodes is not None else [0]
-    count[0] += 1
-    if count[0] > _MAX_JSON_NODES:
-        raise ValueError(f"JSON node limit exceeded at {_display_path(path)}")
-    if value is None or type(value) is bool:
-        return value
-    if type(value) is str:
-        if len(value) > _MAX_JSON_STRING_LENGTH:
-            raise ValueError(
-                f"JSON string limit exceeded at {_display_path(path)}"
-            )
-        return value
-    if type(value) is int:
-        if abs(value) > _MAX_INTEGER:
-            raise ValueError(
-                f"integer limit exceeded at {_display_path(path)}"
-            )
-        return value
-    if type(value) is float:
-        if math.isfinite(value) and abs(value) <= _MAX_INTEGER:
-            return 0.0 if value == 0.0 else value
-        raise ValueError(
-            f"float outside finite signed 64-bit range at "
-            f"{_display_path(path)}"
-        )
-    if type(value) not in (dict, list):
-        raise ValueError(f"non-JSON value at {_display_path(path)}")
-
-    seen = ancestors if ancestors is not None else set()
-    marker = id(value)
-    if marker in seen:
-        raise ValueError(f"cyclic JSON value at {_display_path(path)}")
-    seen.add(marker)
-    try:
-        if type(value) is dict:
-            if any(type(key) is not str for key in value):
-                raise ValueError(
-                    f"non-string object key at {_display_path(path)}"
-                )
-            if any(len(key) > _MAX_KEY_LENGTH for key in value):
-                raise ValueError(
-                    f"object key limit exceeded at {_display_path(path)}"
-                )
-            return {
-                key: _json_copy(
-                    child,
-                    path=(*path, key),
-                    ancestors=seen,
-                    depth=depth + 1,
-                    nodes=count,
-                )
-                for key, child in value.items()
-            }
-        if len(value) > _MAX_ARRAY_ITEMS:
-            raise ValueError(
-                f"array item limit exceeded at {_display_path(path)}"
-            )
-        return [
-            _json_copy(
-                child,
-                path=(*path, index),
-                ancestors=seen,
-                depth=depth + 1,
-                nodes=count,
-            )
-            for index, child in enumerate(value)
-        ]
-    finally:
-        seen.remove(marker)
 
 
 def _error_sort_key(error: Any) -> tuple[Any, ...]:
@@ -258,8 +170,8 @@ class ToolArgumentValidator:
                 code="arguments_not_object",
             )
         try:
-            value = _json_copy(arguments)
-        except ValueError as exc:
+            value = bounded_json_copy(arguments)
+        except (BoundedJSONError, RecursionError) as exc:
             raise ToolArgumentValidationError(
                 tool_name=tool_name,
                 code="arguments_not_json",
