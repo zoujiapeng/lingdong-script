@@ -5,6 +5,7 @@ import ast
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 import random
+from types import MappingProxyType
 
 import pytest
 
@@ -27,6 +28,15 @@ from winpilot.vnext.capabilities import (
     ToolSpec,
 )
 from winpilot.vnext.capabilities.state import _broker_projection_id
+from winpilot.vnext.json_contract import (
+    MAX_JSON_ARRAY_ITEMS,
+    MAX_JSON_DEPTH,
+    MAX_JSON_KEY_LENGTH,
+    MAX_JSON_NODES,
+    MAX_JSON_STRING_LENGTH,
+    MAX_SIGNED_64,
+    MIN_SIGNED_64,
+)
 from winpilot.vnext.mission import (
     ArtifactRef,
     EvidenceRef,
@@ -232,15 +242,17 @@ def _mission(capability: str = "visual.interact", *, bound: bool = True):
         reducer.apply(
             reducer.event(
                 "target_bound",
-                payload=TargetBinding(
-                    binding_id="target-1",
-                    hwnd=101,
-                    process_id=7,
-                    executable_identity="opaque-process-identity",
-                    title_snapshot="",
-                    established_by_evidence_ref="e-target",
-                    epoch=3,
-                ).to_dict(),
+                payload={
+                    "target_binding": TargetBinding(
+                        binding_id="target-1",
+                        hwnd=101,
+                        process_id=7,
+                        executable_identity="opaque-process-identity",
+                        title_snapshot="",
+                        established_by_evidence_ref="e-target",
+                        epoch=3,
+                    ).to_dict(),
+                },
                 evidence_refs=("e-target",),
             )
         )
@@ -307,9 +319,9 @@ def _mission_with_artifact_binding():
                 "verified": True,
                 "satisfied_criteria": ["artifact existence is confirmed"],
                 "verification_id": "capture-verification",
-                "evidence_refs": ["capture-proof"],
                 "verifier_kind": "deterministic",
             },
+            evidence_refs=("capture-proof",),
         )
     )
     artifact = ArtifactRef(
@@ -388,6 +400,284 @@ def _provider_offer(
     )
 
 
+def _wire_samples():
+    catalog = _catalog()
+    state = _state(
+        artifacts=(
+            ArtifactState(
+                "artifact-1",
+                "r1",
+                "a" * 64,
+                "current_artifact",
+                True,
+            ),
+        ),
+        executor_offers=(_provider_offer(),),
+        authorization_scopes=("external.send",),
+    )
+    mission = _mission()
+    projection = CapabilityBroker(catalog).project(
+        mission,
+        _profile(mission),
+        state,
+    )
+    grant = CapabilityGrant.issue(
+        mission_id="m1",
+        run_id="r1",
+        capability="visual.interact",
+        obligation_id="o1",
+        mission_revision=mission.revision,
+        issued_turn=state.turn_index,
+        expires_after_turns=2,
+        policy_reason="canonical test grant",
+    )
+    values = (
+        catalog.tools[0],
+        catalog,
+        grant,
+        state.target,
+        state.frame,
+        state.pointer,
+        state.artifacts[0],
+        state.executor_offers[0],
+        state,
+        projection,
+    )
+    return tuple((type(value), value.to_dict()) for value in values)
+
+
+@pytest.mark.parametrize(
+    ("contract", "raw"),
+    _wire_samples(),
+    ids=lambda value: value.__name__ if isinstance(value, type) else None,
+)
+def test_every_capability_wire_entry_requires_plain_exact_complete_objects(
+    contract,
+    raw,
+) -> None:
+    assert contract.from_dict(raw).to_dict() == raw
+
+    class DictSubclass(dict):
+        pass
+
+    for non_plain in (MappingProxyType(raw), DictSubclass(raw)):
+        with pytest.raises(CapabilityContractError, match="plain JSON object"):
+            contract.from_dict(non_plain)
+
+    missing = dict(raw)
+    missing.pop(next(iter(missing)))
+    with pytest.raises(CapabilityContractError, match="missing="):
+        contract.from_dict(missing)
+
+    for alias in ("type", "revision", "evidence_id", "description", "criteria"):
+        unknown = {**raw, alias: "legacy"}
+        with pytest.raises(CapabilityContractError, match="unknown="):
+            contract.from_dict(unknown)
+
+
+@pytest.mark.parametrize(
+    ("contract", "raw", "field"),
+    (
+        (ToolSpec, _catalog().tools[0].to_dict(), "prerequisites"),
+        (ToolCatalog, _catalog().to_dict(), "tools"),
+        (
+            ExecutorOffer,
+            _provider_offer().to_dict(),
+            "supported_capabilities",
+        ),
+        (
+            BrokerRuntimeState,
+            _state().to_dict(),
+            "available_capabilities",
+        ),
+        (
+            BrokerProjection,
+            _wire_samples()[-1][1],
+            "tool_names",
+        ),
+    ),
+)
+@pytest.mark.parametrize("replacement", (None, (), "visual.interact"))
+def test_wire_array_fields_require_literal_lists(
+    contract,
+    raw,
+    field,
+    replacement,
+) -> None:
+    changed = {**raw, field: replacement}
+    with pytest.raises(CapabilityContractError):
+        contract.from_dict(changed)
+
+
+@pytest.mark.parametrize(
+    ("contract", "raw", "field", "bad"),
+    (
+        (TargetState, TargetState("target-1", 101, 3, True).to_dict(), "live", "true"),
+        (TargetState, TargetState("target-1", 101, 3, True).to_dict(), "live", 1),
+        (TargetState, TargetState("target-1", 101, 3, True).to_dict(), "live", None),
+        (TargetState, TargetState("target-1", 101, 3, True).to_dict(), "hwnd", "101"),
+        (TargetState, TargetState("target-1", 101, 3, True).to_dict(), "hwnd", True),
+        (ToolSpec, _catalog().tools[0].to_dict(), "order", "1"),
+        (ToolSpec, _catalog().tools[0].to_dict(), "order", True),
+        (ToolSpec, _catalog().tools[0].to_dict(), "order", None),
+        (
+            ExecutorOffer,
+            _provider_offer().to_dict(),
+            "route",
+            "provider ",
+        ),
+        (
+            ExecutorOffer,
+            _provider_offer().to_dict(),
+            "supported_capabilities",
+            [" communication.send_text"],
+        ),
+    ),
+)
+def test_wire_scalars_never_coerce_or_normalize(
+    contract,
+    raw,
+    field,
+    bad,
+) -> None:
+    with pytest.raises(CapabilityContractError):
+        contract.from_dict({**raw, field: bad})
+
+
+def _bounded_tool_wire_cases():
+    base = _catalog().tools[0].to_dict()
+
+    cyclic = {**base, "schema": {"type": "object"}}
+    cyclic["schema"]["cycle"] = cyclic["schema"]
+
+    deep_schema = {"type": "object"}
+    leaf = deep_schema
+    for _ in range(MAX_JSON_DEPTH + 2):
+        child = {"value": None}
+        leaf["child"] = child
+        leaf = child
+
+    return (
+        ("cycle", cyclic),
+        ("depth", {**base, "schema": deep_schema}),
+        (
+            "nodes",
+            {
+                **base,
+                "schema": {
+                    "type": "object",
+                    "nodes": {
+                        f"k{index}": None
+                        for index in range(MAX_JSON_NODES)
+                    },
+                },
+            },
+        ),
+        (
+            "string",
+            {
+                **base,
+                "schema": {
+                    "type": "object",
+                    "value": "x" * (MAX_JSON_STRING_LENGTH + 1),
+                },
+            },
+        ),
+        (
+            "array",
+            {
+                **base,
+                "schema": {
+                    "type": "object",
+                    "values": [None] * (MAX_JSON_ARRAY_ITEMS + 1),
+                },
+            },
+        ),
+        (
+            "key",
+            {
+                **base,
+                "schema": {
+                    "type": "object",
+                    "k" * (MAX_JSON_KEY_LENGTH + 1): None,
+                },
+            },
+        ),
+        (
+            "utf8",
+            {
+                **base,
+                "schema": {
+                    "type": "object",
+                    "values": [
+                        "\u754c" * 900_000
+                        for _ in range(2)
+                    ],
+                },
+            },
+        ),
+        (
+            "high-int",
+            {
+                **base,
+                "schema": {
+                    "type": "object",
+                    "maximum": MAX_SIGNED_64 + 1,
+                },
+            },
+        ),
+        (
+            "low-int",
+            {
+                **base,
+                "schema": {
+                    "type": "object",
+                    "minimum": MIN_SIGNED_64 - 1,
+                },
+            },
+        ),
+        (
+            "nan",
+            {
+                **base,
+                "schema": {"type": "object", "value": float("nan")},
+            },
+        ),
+        (
+            "infinity",
+            {
+                **base,
+                "schema": {"type": "object", "value": float("inf")},
+            },
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "raw"),
+    _bounded_tool_wire_cases(),
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_tool_spec_wire_rejects_every_shared_json_budget(
+    case,
+    raw,
+) -> None:
+    with pytest.raises(CapabilityContractError, match="bounded JSON"):
+        ToolSpec.from_dict(raw)
+
+
+def test_tool_spec_wire_accepts_signed_64_and_finite_float_endpoints() -> None:
+    raw = _catalog().tools[0].to_dict()
+    raw["schema"] = {
+        "type": "object",
+        "minimum": MIN_SIGNED_64,
+        "maximum": MAX_SIGNED_64,
+        "finite": 1e308,
+    }
+    restored = ToolSpec.from_dict(raw)
+    assert restored.to_dict()["schema"] == raw["schema"]
+
+
 def test_catalog_and_runtime_state_are_strict_content_addressed_values() -> None:
     catalog = _catalog()
     restored = ToolCatalog.from_dict(catalog.to_dict())
@@ -451,7 +741,7 @@ def test_catalog_schema_is_immutable_and_bounded_json_fails_closed() -> None:
             ToolRoute.VISUAL_ACTOR,
             MutationKind.NONE,
         )
-    with pytest.raises(CapabilityContractError, match="64-bit"):
+    with pytest.raises(CapabilityContractError, match="signed-64"):
         ToolSpec(
             "observe",
             {"type": "object", "maximum": 10**5000},
@@ -1465,6 +1755,7 @@ def test_broker_is_frozen_and_package_is_pure_default_unreachable() -> None:
                         "broker",
                         "capability_names",
                         "contracts",
+                        "json_contract",
                         "mission",
                         "profiling",
                         "state",
