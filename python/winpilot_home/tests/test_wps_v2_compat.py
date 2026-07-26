@@ -6,8 +6,6 @@ ext.delay run their REAL implementations to prove variable interpolation works
 end-to-end. The key invariant: a v1 flat script behaves exactly as before.
 """
 import json
-import threading
-import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -117,19 +115,27 @@ def test_v2_ext_delay_records_result(tmp_path):
 
 
 def test_v2_ext_delay_cancellation_is_prompt_and_not_success(tmp_path):
-    stop_event = threading.Event()
+    class CancelOnWait:
+        def __init__(self):
+            self.wait_calls = []
+            self._set = False
+
+        def is_set(self):
+            return self._set
+
+        def wait(self, timeout=None):
+            self.wait_calls.append(timeout)
+            self._set = True
+            return True
+
+    stop_event = CancelOnWait()
     script = {"format": "wps/2", "steps": [{"tool": "ext.delay", "seconds": 10}]}
     r = trace_mod.Replayer(stop_event)
     r.step_delay = 0
-    timer = threading.Timer(0.03, stop_event.set)
-    started = time.monotonic()
-    timer.start()
-    try:
-        out = r.run(_write(tmp_path, script))
-    finally:
-        timer.cancel()
+    out = r.run(_write(tmp_path, script))
 
-    assert time.monotonic() - started < 1.0
+    assert stop_event.wait_calls == [10.0]
+    assert stop_event.is_set()
     assert out["ok"] is False
     assert out["results"][0]["ok"] is False
     assert out["results"][0]["stopped"] is True
