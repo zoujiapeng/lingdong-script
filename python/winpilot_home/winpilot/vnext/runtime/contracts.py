@@ -1028,6 +1028,32 @@ class ControllerTransition:
             )
         return tuple(dict.fromkeys(refs))
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return the exact reasoning-free Controller transition snapshot."""
+
+        return {
+            "format": self.format,
+            "outcome": self.outcome.value,
+            "action_id": self.action_id,
+            "action": self.action,
+            "input_completed": self.input_completed,
+            "visible_effect": self.visible_effect,
+            "post_frame_evidence": [
+                ref.to_dict() for ref in self.post_frame_evidence
+            ],
+            "post_frame_id": self.post_frame_id,
+            "action_effect": (
+                None
+                if self.action_effect is None
+                else self.action_effect.to_dict()
+            ),
+            "action_effect_evidence": (
+                None
+                if self.action_effect_evidence is None
+                else self.action_effect_evidence.to_dict()
+            ),
+        }
+
 
 class RuntimeStatus(str, Enum):
     ACTION_RECORDED = "action_recorded"

@@ -45,6 +45,7 @@ from ...visual_runtime.submitted_image_coordinates import (
     SubmittedImageCoordinateMapper,
 )
 from ..actor import ActorDecisionEnvelope, DesktopActionProposal
+from ..evidence_plane import RuntimeEvidencePlane
 from ..mission import EvidenceRef, TargetBinding
 from ..runtime import (
     ControllerOutcome,
@@ -162,6 +163,7 @@ class AtomicDesktopAdapter:
         mutation_permits: MutationPermitAuthority,
         raw_device: RawDeviceExecutor,
         receipt_trace_sink: RawReceiptTraceSink | None = None,
+        runtime_evidence_plane: RuntimeEvidencePlane | None = None,
         post_input_settle_delay_s: float = 0.12,
         wait: Callable[[float], Any] = time.sleep,
     ) -> None:
@@ -204,6 +206,13 @@ class AtomicDesktopAdapter:
         ):
             raise TypeError("receipt_trace_sink must provide record()")
         if (
+            runtime_evidence_plane is not None
+            and type(runtime_evidence_plane) is not RuntimeEvidencePlane
+        ):
+            raise TypeError(
+                "runtime_evidence_plane must be RuntimeEvidencePlane or null"
+            )
+        if (
             isinstance(post_input_settle_delay_s, bool)
             or not isinstance(post_input_settle_delay_s, (int, float))
         ):
@@ -226,6 +235,15 @@ class AtomicDesktopAdapter:
             or mutation_permits.run_id == ""
         ):
             raise ValueError("mutation permit scope must be non-empty")
+        if runtime_evidence_plane is not None and (
+            runtime_evidence_plane.mission_id
+            != mutation_permits.mission_id
+            or runtime_evidence_plane.run_id
+            != mutation_permits.run_id
+        ):
+            raise ValueError(
+                "Runtime evidence plane and mutation permit scope differ"
+            )
 
         self._authority = frame_authority
         self._observer = frame_observer
@@ -234,6 +252,7 @@ class AtomicDesktopAdapter:
         self._permits = mutation_permits
         self._raw = raw_device
         self._trace = receipt_trace_sink
+        self._runtime_evidence = runtime_evidence_plane
         self._post_input_settle_delay_s = settle_delay
         self._wait = wait
         self._effect = DeterministicActionEffectVerifier()
@@ -247,6 +266,10 @@ class AtomicDesktopAdapter:
     @property
     def frozen_target_binding(self) -> TargetBinding:
         return self._binding
+
+    @property
+    def runtime_evidence_plane(self) -> RuntimeEvidencePlane | None:
+        return self._runtime_evidence
 
     def execute(
         self,
@@ -477,6 +500,33 @@ class AtomicDesktopAdapter:
                     f"permit_{admission.reason.value}",
                 ),
             )
+        evidence_plane = self._runtime_evidence
+        if evidence_plane is not None:
+            try:
+                if admission.permit_id is None:
+                    raise ValueError(
+                        "allowed admission is missing permit identity"
+                    )
+                evidence_plane.record_admission(
+                    decision_id=envelope.decision_id,
+                    mission_id=envelope.mission_id,
+                    run_id=envelope.run_id,
+                    frame_identity=commit_identity.frame.to_dict(),
+                    target_identity=commit_identity.target.to_dict(),
+                    mutation_permit_id=admission.permit_id,
+                    controller_route="vnext_atomic_desktop_adapter",
+                    actor_envelope_sha256=hashlib.sha256(
+                        envelope.to_json().encode("utf-8")
+                    ).hexdigest(),
+                )
+            except Exception:
+                return _PinnedExecution(
+                    before_frame,
+                    self._not_started(
+                        prepared.action,
+                        "evidence_admission_rejected",
+                    ),
+                )
 
         raw_started = False
 
@@ -493,6 +543,21 @@ class AtomicDesktopAdapter:
                     prepared.action,
                     revalidation_error,
                 )
+            if evidence_plane is not None:
+                try:
+                    evidence_plane.reserve_physical_attempt(
+                        decision_id=envelope.decision_id,
+                        mission_id=envelope.mission_id,
+                        run_id=envelope.run_id,
+                        actor_envelope_sha256=hashlib.sha256(
+                            envelope.to_json().encode("utf-8")
+                        ).hexdigest(),
+                    )
+                except Exception:
+                    return self._not_started(
+                        prepared.action,
+                        "evidence_attempt_rejected",
+                    )
             raw_started = True
             return self._run_raw(
                 envelope,
@@ -1136,8 +1201,6 @@ class AtomicDesktopAdapter:
         phase: str,
     ) -> None:
         sink = self._trace
-        if sink is None:
-            return
         metadata: Mapping[str, TraceScalar] = MappingProxyType(
             {
                 "phase": phase,
@@ -1152,14 +1215,29 @@ class AtomicDesktopAdapter:
                 "target_binding_id": envelope.target_binding_id,
             }
         )
-        try:
-            sink.record(
-                receipt,
-                envelope=envelope,
-                metadata=metadata,
-            )
-        except Exception:
-            return
+        if sink is not None:
+            try:
+                sink.record(
+                    receipt,
+                    envelope=envelope,
+                    metadata=metadata,
+                )
+            except Exception:
+                pass
+        evidence_plane = self._runtime_evidence
+        if evidence_plane is not None:
+            try:
+                evidence_plane.record_raw_receipt(
+                    decision_id=envelope.decision_id,
+                    mission_id=envelope.mission_id,
+                    run_id=envelope.run_id,
+                    actor_envelope_sha256=hashlib.sha256(
+                        envelope.to_json().encode("utf-8")
+                    ).hexdigest(),
+                    receipt=receipt.to_dict(),
+                )
+            except Exception:
+                pass
 
 
 __all__ = [
