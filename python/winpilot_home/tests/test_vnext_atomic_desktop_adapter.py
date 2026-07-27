@@ -273,6 +273,7 @@ class _Harness:
     permits: MutationPermitAuthority
     raw: _RawHarness
     trace: _Trace
+    wait_calls: list[float]
     adapter: AtomicDesktopAdapter
     envelope: ActorDecisionEnvelope
     commit_identity: RuntimeCommitIdentity
@@ -379,6 +380,8 @@ def _harness(
     *,
     raw_result: bool | None = True,
     trace_fail: bool = False,
+    post_input_settle_delay_s: float = 0.12,
+    wait: Callable[[float], None] | None = None,
 ) -> _Harness:
     authority = FrameAuthority()
     before_b64 = _jpeg(20)
@@ -421,6 +424,13 @@ def _harness(
     permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
     raw = _RawHarness(raw_result)
     trace = _Trace(trace_fail)
+    wait_calls: list[float] = []
+
+    def settle_wait(delay: float) -> None:
+        wait_calls.append(delay)
+        if wait is not None:
+            wait(delay)
+
     adapter = AtomicDesktopAdapter(
         frame_authority=authority,
         frame_observer=observer,
@@ -429,6 +439,8 @@ def _harness(
         mutation_permits=permits,
         raw_device=raw.executor(),
         receipt_trace_sink=trace,
+        post_input_settle_delay_s=post_input_settle_delay_s,
+        wait=settle_wait,
     )
     envelope = _envelope(before, binding, action)
     frame_identity = RuntimeFrameIdentity(
@@ -448,6 +460,7 @@ def _harness(
         permits=permits,
         raw=raw,
         trace=trace,
+        wait_calls=wait_calls,
         adapter=adapter,
         envelope=envelope,
         commit_identity=RuntimeCommitIdentity(
@@ -490,6 +503,7 @@ def test_exact_atomic_surface_completes_once_with_effect(
         transition.post_frame_evidence[0].id
     )
     assert len(harness.raw.calls) == 1
+    assert harness.wait_calls == [0.12]
     assert harness.raw.calls[0][0] == raw_name
     assert harness.authority.current is not None
     assert harness.authority.current.frame_id == 2
@@ -511,6 +525,140 @@ def test_exact_atomic_surface_completes_once_with_effect(
         assert values[4] is ClickMechanism.PHYSICAL
     elif action == "scroll":
         assert harness.raw.calls[0][1] == (*POINT, -240, HWND)
+
+
+def test_applied_order_is_raw_then_wait_then_capture(monkeypatch) -> None:
+    observed: list[tuple[str, float | int]] = []
+    holder: dict[str, _Harness] = {}
+    stop = threading.Event()
+
+    def wait(delay: float) -> None:
+        harness = holder["harness"]
+        assert len(harness.raw.calls) == 1
+        assert harness.authority.current is not None
+        assert harness.authority.current.frame_id == 1
+        observed.append(("wait", delay))
+        stop.set()
+
+    harness = _harness("click", wait=wait)
+    holder["harness"] = harness
+    original_capture = harness.observer._capture
+
+    def capture(*args, **kwargs):
+        assert observed == [("wait", 0.12)]
+        observed.append(("capture", len(harness.raw.calls)))
+        return original_capture(*args, **kwargs)
+
+    monkeypatch.setattr(harness.observer, "_capture", capture)
+
+    attempt = harness.run(stop_event=stop)
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert attempt.transition.post_frame_id == 2
+    assert stop.is_set()
+    assert observed == [("wait", 0.12), ("capture", 1)]
+
+
+def test_zero_settle_delay_does_not_call_wait() -> None:
+    harness = _harness(
+        "scroll",
+        post_input_settle_delay_s=0,
+        wait=lambda _delay: pytest.fail("zero delay must not call wait"),
+    )
+
+    attempt = harness.run()
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert harness.wait_calls == []
+
+
+@pytest.mark.parametrize(
+    ("raw_result", "expected_outcome", "input_completed"),
+    (
+        (False, ControllerOutcome.REJECTED, False),
+        (None, ControllerOutcome.UNKNOWN, None),
+    ),
+)
+def test_non_completed_raw_receipt_does_not_wait(
+    raw_result: bool | None,
+    expected_outcome: ControllerOutcome,
+    input_completed: bool | None,
+) -> None:
+    harness = _harness("click", raw_result=raw_result)
+
+    attempt = harness.run()
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is expected_outcome
+    assert attempt.transition.input_completed is input_completed
+    assert harness.wait_calls == []
+    assert len(harness.raw.calls) == 1
+
+
+def test_wait_exception_after_completed_input_is_unknown_without_replay() -> None:
+    def fail_wait(_delay: float) -> None:
+        raise RuntimeError("settle clock failed")
+
+    harness = _harness("type_text", wait=fail_wait)
+
+    attempt = harness.run()
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.UNKNOWN
+    assert attempt.transition.input_completed is True
+    assert attempt.transition.post_frame_id is None
+    assert harness.wait_calls == [0.12]
+    assert len(harness.raw.calls) == 1
+    assert harness.authority.current is not None
+    assert harness.authority.current.frame_id == 1
+    assert harness.trace.records[0][0].outcome is MutationOutcome.APPLIED
+
+
+@pytest.mark.parametrize(
+    ("delay", "error_type"),
+    (
+        (True, TypeError),
+        (False, TypeError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        (float("-inf"), ValueError),
+        (-0.01, ValueError),
+        (1.01, ValueError),
+    ),
+)
+def test_invalid_post_input_settle_delay_is_rejected(
+    delay: float,
+    error_type: type[Exception],
+) -> None:
+    with pytest.raises(error_type, match="post_input_settle_delay_s"):
+        _harness(
+            "click",
+            post_input_settle_delay_s=delay,
+        )
+
+
+@pytest.mark.parametrize("wait", (None, 0, object()))
+def test_noncallable_wait_is_rejected_even_for_zero_delay(wait: Any) -> None:
+    harness = _harness("click")
+
+    with pytest.raises(TypeError, match="wait must be callable"):
+        AtomicDesktopAdapter(
+            frame_authority=harness.authority,
+            frame_observer=harness.observer,
+            frozen_target_binding=harness.binding,
+            target_probe=harness.probe,
+            mutation_permits=harness.permits,
+            raw_device=harness.raw.executor(),
+            receipt_trace_sink=harness.trace,
+            post_input_settle_delay_s=0,
+            wait=wait,
+        )
 
 
 def test_queue_acquisition_race_revalidates_before_raw(
@@ -708,6 +856,7 @@ def test_pre_set_stop_rejects_before_raw() -> None:
     assert attempt.transition is not None
     assert attempt.transition.outcome is ControllerOutcome.REJECTED
     assert harness.raw.calls == []
+    assert harness.wait_calls == []
     assert harness.trace.records[0][0].error_kind == "stop_requested"
 
 
