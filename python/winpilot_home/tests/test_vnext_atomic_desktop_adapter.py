@@ -32,7 +32,11 @@ from winpilot.action.desktop_queue import DesktopActionCanceled
 from winpilot.action.replay_policy import MutationOutcome
 from winpilot.agent.frame_authority import FrameAuthority
 from winpilot.utils.screenshot import Region
-from winpilot.visual_runtime.frame_observer import FrameObserver
+from winpilot.visual_runtime import (
+    FrameObserver,
+    NormalizedFrameCoordinateMapper,
+    SubmittedImageCoordinateMapper,
+)
 from winpilot.vnext.actor import (
     ACTOR_ENVELOPE_FORMAT,
     ACTOR_PROPOSAL_FORMAT,
@@ -80,10 +84,26 @@ def _jpeg(level: int) -> str:
     return base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
+def _map_submitted_test_point(image_x: object, image_y: object) -> tuple[int, int]:
+    frame_arguments, _ = SubmittedImageCoordinateMapper(
+        (REGION[2], REGION[3])
+    ).map_point_pair(
+        {"image_x": image_x, "image_y": image_y},
+        image_keys=("image_x", "image_y"),
+        frame_keys=("frame_x", "frame_y"),
+        context="atomic adapter test",
+    )
+    return NormalizedFrameCoordinateMapper(REGION).map_point(
+        frame_arguments["frame_x"],
+        frame_arguments["frame_y"],
+    )
+
+
 @dataclass
 class _Probe:
     current: LiveTargetSnapshot
     hit_root: int | None = HWND
+    expected_hit_point: tuple[int, int] = POINT
     on_snapshot: Callable[[int], None] | None = None
     on_hit_test: Callable[[int], None] | None = None
 
@@ -99,7 +119,7 @@ class _Probe:
         return self.current
 
     def hit_test_root(self, x: int, y: int) -> int | None:
-        assert (x, y) == POINT
+        assert (x, y) == self.expected_hit_point
         self.hit_test_calls += 1
         if self.on_hit_test is not None:
             self.on_hit_test(self.hit_test_calls)
@@ -462,6 +482,7 @@ def _harness(
     with_runtime_evidence: bool = False,
     evidence_run_directory: Path | None = None,
     action_args: dict[str, Any] | None = None,
+    expected_hit_point: tuple[int, int] = POINT,
 ) -> _Harness:
     authority = FrameAuthority()
     before_b64 = _jpeg(20)
@@ -500,7 +521,8 @@ def _harness(
             executable_identity=binding.executable_identity,
             region=REGION,
             foreground_root_hwnd=HWND,
-        )
+        ),
+        expected_hit_point=expected_hit_point,
     )
     permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
     raw = _RawHarness(raw_result)
@@ -785,32 +807,35 @@ def test_atomic_adapter_records_admission_and_single_raw_receipt() -> None:
         (
             "scroll",
             {
-                "image_x": 50.0,
-                "image_y": 40.0,
-                "amount": -240,
+                "image_x": 37.0,
+                "image_y": 29.0,
+                "amount": -713,
             },
             {
                 "kind": "wheel",
-                "x": 60,
-                "y": 60,
-                "signed_wheel_amount": -240,
-                "event_wheel_delta": -28_800,
+                "x": 47,
+                "y": 49,
+                "signed_wheel_amount": -713,
+                "event_wheel_delta": -85_560,
             },
             "raw_device.admitted_physical_scroll/0",
         ),
         (
             "type_text",
-            {"text": "hello"},
-            {"kind": "type_text", "text": "hello"},
+            {"text": "PRIVATE-TEXT-admitted-8c71"},
+            {
+                "kind": "type_text",
+                "text": "PRIVATE-TEXT-admitted-8c71",
+            },
             "raw_device.admitted_physical_type_text/0",
         ),
         (
             "hotkey",
-            {"keys": ["ctrl", "l"]},
+            {"keys": ["ctrl", "alt", "shift", "f11"]},
             {
                 "kind": "hotkey",
-                "modifiers": ["ctrl"],
-                "key": "l",
+                "modifiers": ["ctrl", "alt", "shift"],
+                "key": "f11",
             },
             "raw_device.admitted_physical_hotkey/0",
         ),
@@ -824,9 +849,18 @@ def test_durable_attempt_records_exact_submitted_and_physical_arguments(
     raw_device_route: str,
 ) -> None:
     run_directory = tmp_path / "evidence-run"
+    expected_hit_point = POINT
+    if action == "scroll":
+        expected_hit_point = _map_submitted_test_point(
+            submitted_arguments["image_x"],
+            submitted_arguments["image_y"],
+        )
+        assert expected_hit_point == (47, 49)
     harness = _harness(
         action,
+        action_args=submitted_arguments,
         evidence_run_directory=run_directory,
+        expected_hit_point=expected_hit_point,
     )
     journal = harness.evidence_journal
     plane = harness.runtime_evidence
@@ -852,6 +886,32 @@ def test_durable_attempt_records_exact_submitted_and_physical_arguments(
         assert attempt["physical_arguments"] == physical_arguments
         assert attempt["raw_device_route"] == raw_device_route
         assert attempt["mechanism"] == "physical_sendinput"
+        raw_action, raw_arguments = harness.raw.calls[0]
+        if action in {"click", "double_click"}:
+            assert raw_action == "click"
+            assert raw_arguments[:2] == (
+                physical_arguments["x"],
+                physical_arguments["y"],
+            )
+        elif action == "scroll":
+            assert raw_action == "scroll"
+            assert raw_arguments == (
+                physical_arguments["x"],
+                physical_arguments["y"],
+                physical_arguments["signed_wheel_amount"],
+                HWND,
+            )
+        elif action == "type_text":
+            assert raw_action == "type_text"
+            assert raw_arguments == (
+                physical_arguments["text"],
+                HWND,
+            )
+        else:
+            assert raw_action == "hotkey"
+            chord, hwnd = raw_arguments
+            assert tuple(chord.keys) == tuple(submitted_arguments["keys"])
+            assert hwnd == HWND
 
         references = {
             reference.role.value: reference
@@ -1505,6 +1565,33 @@ def test_complete_live_target_identity_is_required_before_queue(
 def test_pointer_hit_test_is_required_before_queue() -> None:
     harness = _harness("scroll")
     harness.probe.hit_root = HWND + 1
+
+    attempt = harness.run()
+
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.REJECTED
+    assert harness.raw.calls == []
+    assert harness.trace.records[0][0].error_kind == "hit_test_changed"
+
+
+def test_pointer_hit_test_rejects_an_incorrect_mapped_point() -> None:
+    submitted_arguments = {
+        "image_x": 37.0,
+        "image_y": 29.0,
+        "amount": -713,
+    }
+    mapped_point = _map_submitted_test_point(
+        submitted_arguments["image_x"],
+        submitted_arguments["image_y"],
+    )
+    assert mapped_point == (47, 49)
+    assert mapped_point != POINT
+    harness = _harness(
+        "scroll",
+        action_args=submitted_arguments,
+        expected_hit_point=POINT,
+    )
 
     attempt = harness.run()
 
