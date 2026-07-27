@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WinPilot vNext Canary</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #eef2f7; color: #182232; }
+    main { width: min(980px, calc(100vw - 48px)); margin: 24px auto; }
+    .meta { font: 12px/1.4 ui-monospace, monospace; color: #536174; }
+    h1 { margin: 8px 0 6px; font-size: 28px; }
+    .rules { margin: 0 0 18px; padding: 14px 16px; border-left: 5px solid #315efb;
+      border-radius: 8px; background: white; font-size: 18px; line-height: 1.45; }
+    .arena { position: relative; min-height: 470px; overflow: hidden; border: 2px solid #bdc8d8;
+      border-radius: 16px; background: white; box-shadow: 0 14px 34px #23344a18; }
+    .status { margin-top: 14px; padding: 11px 14px; border-radius: 8px;
+      background: #e8edf5; font-weight: 700; }
+    .status.success { color: #075c35; background: #d9f5e7; }
+    .status.failure { color: #8e1f2a; background: #fde2e5; }
+    button { min-width: 150px; min-height: 72px; border: 0; border-radius: 14px;
+      color: white; font-size: 18px; font-weight: 800; box-shadow: 0 8px 18px #1b2b4630; }
+    .single { position: absolute; background: #315efb; }
+    .double { position: absolute; background: #8b3fd1; }
+    .distractor { position: absolute; background: #737d8c; }
+    button.complete { outline: 6px solid #8bd6ae; }
+    .scroll-shell { width: min(720px, calc(100% - 80px)); margin: 36px auto; }
+    .scroll-stage { height: 365px; overflow-y: auto; overscroll-behavior: contain;
+      border: 3px solid #315efb; border-radius: 14px; background: #f8faff; }
+    .scroll-marker { display: grid; min-height: 92px; place-items: center;
+      font-size: 20px; font-weight: 900; background: #dfe8ff; }
+    .scroll-marker.reached { background: #ffecae; }
+    .scroll-marker.complete { background: #d7f4e4; }
+    .scroll-space { display: grid; min-height: 760px; place-items: center;
+      color: #6c7788; font-size: 18px; background:
+      repeating-linear-gradient(135deg, #fff, #fff 24px, #f0f4fa 24px, #f0f4fa 48px); }
+    .editor-card { width: min(720px, calc(100% - 80px)); margin: 70px auto;
+      padding: 28px; border: 2px solid #bdc8d8; border-radius: 14px; background: #f8faff; }
+    .token { display: inline-block; margin: 8px 0 20px; padding: 8px 12px;
+      border-radius: 8px; background: #17233a; color: white;
+      font: 800 21px/1.2 ui-monospace, monospace; letter-spacing: .06em; }
+    input { width: 100%; padding: 14px 16px; border: 3px solid #315efb; border-radius: 10px;
+      background: white; color: #182232; font: 20px/1.2 ui-monospace, monospace; }
+    input.complete { border-color: #17915b; background: #e8faef; }
+    .hint { margin-top: 14px; color: #536174; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="meta" id="identity"></div>
+    <h1 id="heading">vNext Minimal Live Canary</h1>
+    <p class="rules" id="rules"></p>
+    <section class="arena" id="arena" aria-label="Canary task surface"></section>
+    <div class="status" id="status" role="status">WAITING_FOR_TRUSTED_INPUT</div>
+  </main>
+  <script>
+    const query = new URLSearchParams(location.search);
+    const caseId = query.get("case") || "manual";
+    const scenario = query.get("scenario") || "click_double";
+    const seed = Number(query.get("seed") || 1) >>> 0;
+    const pageId = `vnext-canary:${caseId}:${scenario}:${seed}`;
+    document.title = `WinPilot vNext Canary ${caseId}`;
+    document.getElementById("identity").textContent =
+      `case=${caseId} · scenario=${scenario} · seed=${seed}`;
+
+    const arena = document.getElementById("arena");
+    const rules = document.getElementById("rules");
+    const status = document.getElementById("status");
+    let eventSeq = 0;
+    let reportTail = Promise.resolve();
+    let completed = false;
+    const violations = [];
+
+    function rngFactory(value) {
+      let a = value || 0x6d2b79f5;
+      return () => {
+        a |= 0; a = a + 0x6d2b79f5 | 0;
+        let t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+    const rng = rngFactory(seed);
+    const between = (low, high) => low + (high - low) * rng();
+
+    function report(type, event, details = {}) {
+      const payload = {
+        case_id: caseId,
+        scenario,
+        seed,
+        page_id: pageId,
+        event_seq: ++eventSeq,
+        type,
+        trusted: Boolean(event && event.isTrusted),
+        details,
+      };
+      reportTail = reportTail
+        .then(() => fetch("/event", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+          cache: "no-store",
+        }))
+        .catch(() => undefined);
+      return reportTail;
+    }
+
+    function fail(code, event, details = {}) {
+      violations.push(code);
+      status.className = "status failure";
+      status.textContent = `INVALID_INPUT: ${code}`;
+      return report("wrong_input", event, {
+        code,
+        violation_count: violations.length,
+        ...details,
+      });
+    }
+
+    function succeed(message, event, details) {
+      if (completed) return fail("duplicate_completion", event, details);
+      completed = true;
+      status.className = "status success";
+      status.textContent = message;
+      return report("scenario_success", event, {
+        succeeded: true,
+        violations: [...violations],
+        ...details,
+      });
+    }
+
+    function setupClickDouble() {
+      rules.textContent =
+        "First single-click the blue SINGLE button exactly once. Then double-click the purple DOUBLE button exactly once. Do not click gray distractors.";
+      const single = document.createElement("button");
+      single.className = "single";
+      single.id = "single";
+      single.textContent = "SINGLE";
+      const double = document.createElement("button");
+      double.className = "double";
+      double.id = "double";
+      double.textContent = "DOUBLE";
+      const distractor = document.createElement("button");
+      distractor.className = "distractor";
+      distractor.id = "distractor";
+      distractor.textContent = "IGNORE";
+      const leftFirst = rng() < .5;
+      const topA = Math.round(between(70, 155));
+      const topB = Math.round(between(265, 350));
+      Object.assign(single.style, {
+        left: `${leftFirst ? 110 : 620}px`,
+        top: `${topA}px`,
+      });
+      Object.assign(double.style, {
+        left: `${leftFirst ? 620 : 110}px`,
+        top: `${topB}px`,
+      });
+      Object.assign(distractor.style, {
+        left: `${Math.round(between(360, 470))}px`,
+        top: `${Math.round(between(170, 260))}px`,
+      });
+      arena.append(single, double, distractor);
+      arena.addEventListener("click", event => {
+        if (!(event.target instanceof HTMLButtonElement)) {
+          fail("background_clicked", event, {target_id: "background"});
+        }
+      });
+
+      const counts = {single_click: 0, double_click_events: 0, dblclick: 0};
+      for (const target of [single, double, distractor]) {
+        target.addEventListener("pointerdown", event => report("pointerdown", event, {
+          target_id: target.id, detail: event.detail,
+        }));
+        target.addEventListener("pointerup", event => report("pointerup", event, {
+          target_id: target.id, detail: event.detail,
+        }));
+      }
+      distractor.addEventListener("click", event => fail(
+        "distractor_clicked", event, {target_id: "distractor", detail: event.detail},
+      ));
+      single.addEventListener("click", event => {
+        counts.single_click++;
+        report("click", event, {
+          target_id: "single", detail: event.detail, counts: {...counts},
+        });
+        if (completed) return fail("input_after_completion", event);
+        if (counts.single_click !== 1 || counts.double_click_events || counts.dblclick) {
+          return fail("single_click_duplicate_or_out_of_order", event, {counts: {...counts}});
+        }
+        single.classList.add("complete");
+      });
+      double.addEventListener("click", event => {
+        counts.double_click_events++;
+        report("click", event, {
+          target_id: "double", detail: event.detail, counts: {...counts},
+        });
+        if (completed) return fail("input_after_completion", event);
+        if (counts.single_click !== 1 || counts.double_click_events > 2) {
+          return fail("double_click_sequence_invalid", event, {counts: {...counts}});
+        }
+      });
+      double.addEventListener("dblclick", event => {
+        counts.dblclick++;
+        report("dblclick", event, {
+          target_id: "double", detail: event.detail, counts: {...counts},
+        });
+        if (
+          event.isTrusted &&
+          counts.single_click === 1 &&
+          counts.double_click_events === 2 &&
+          counts.dblclick === 1 &&
+          violations.length === 0
+        ) {
+          double.classList.add("complete");
+          return succeed("CLICK_DOUBLE_COMPLETE", event, {
+            final_dom_state: "complete",
+            counts: {...counts},
+          });
+        }
+        return fail("dblclick_invalid", event, {counts: {...counts}});
+      });
+      return {layout_variant: leftFirst ? "single-left" : "single-right"};
+    }
+
+    function setupScrollRoundtrip() {
+      rules.textContent =
+        "Place the pointer inside the blue scroll panel. Scroll DOWN until the LOWER CHECKPOINT turns yellow, then scroll UP until the TOP FINISH turns green. Do not reverse direction early.";
+      const shell = document.createElement("div");
+      shell.className = "scroll-shell";
+      const scroller = document.createElement("div");
+      scroller.className = "scroll-stage";
+      scroller.id = "scroll-panel";
+      scroller.tabIndex = 0;
+      const top = document.createElement("div");
+      top.className = "scroll-marker";
+      top.textContent = "TOP FINISH";
+      const space = document.createElement("div");
+      space.className = "scroll-space";
+      space.textContent = "Continue scrolling to the visible checkpoint";
+      const bottom = document.createElement("div");
+      bottom.className = "scroll-marker";
+      bottom.textContent = "LOWER CHECKPOINT";
+      scroller.append(top, space, bottom);
+      shell.append(scroller);
+      arena.append(shell);
+      let phase = "down";
+      let checkpointCount = 0;
+      let wheelCount = 0;
+      arena.addEventListener("click", event => fail(
+        "click_forbidden_in_scroll_case",
+        event,
+        {target_id: event.target && event.target.id || "scroll-surface"},
+      ));
+      scroller.addEventListener("keydown", event => fail(
+        "keyboard_forbidden_in_scroll_case",
+        event,
+        {key: event.key, code: event.code},
+      ));
+
+      scroller.addEventListener("wheel", event => {
+        wheelCount++;
+        const direction = event.deltaY > 0 ? "down" : event.deltaY < 0 ? "up" : "zero";
+        report("wheel", event, {
+          target_id: "scroll-panel",
+          direction,
+          delta_x: event.deltaX,
+          delta_y: event.deltaY,
+          delta_mode: event.deltaMode,
+          phase,
+          wheel_count: wheelCount,
+          scroll_top: Math.round(scroller.scrollTop),
+        });
+        if (completed) return fail("input_after_completion", event, {direction});
+        if (direction === "zero") return fail("zero_wheel", event);
+        if (phase === "down" && direction !== "down") {
+          return fail("scroll_reversed_before_checkpoint", event, {direction});
+        }
+        if (phase === "up" && direction !== "up") {
+          return fail("scroll_reversed_after_checkpoint", event, {direction});
+        }
+      }, {passive: true});
+
+      scroller.addEventListener("scroll", event => {
+        const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+        const scrollTop = Math.round(scroller.scrollTop);
+        report("scroll_state", event, {
+          target_id: "scroll-panel", phase, scroll_top: scrollTop,
+          max_scroll: Math.round(maxScroll),
+        });
+        if (phase === "down" && maxScroll > 0 && scroller.scrollTop >= maxScroll - 4) {
+          phase = "up";
+          checkpointCount++;
+          bottom.classList.add("reached");
+          report("scroll_checkpoint", event, {
+            target_id: "scroll-panel", checkpoint_count: checkpointCount,
+            scroll_top: scrollTop, max_scroll: Math.round(maxScroll),
+          });
+        } else if (
+          phase === "up" &&
+          checkpointCount === 1 &&
+          scroller.scrollTop <= 4 &&
+          !completed
+        ) {
+          phase = "complete";
+          top.classList.add("complete");
+          succeed("SCROLL_ROUNDTRIP_COMPLETE", event, {
+            final_dom_state: "complete",
+            phase,
+            checkpoint_count: checkpointCount,
+            scroll_top: scrollTop,
+            wheel_count: wheelCount,
+          });
+        }
+      });
+      return {layout_variant: seed % 2 ? "stripe-a" : "stripe-b"};
+    }
+
+    function setupTypeHotkey() {
+      rules.textContent =
+        "Click the editor. Use Ctrl+A exactly once, type the exact token shown, then press Ctrl+Enter exactly once to submit. Do not paste or press plain Enter.";
+      const tokens = ["CANARY-ALPHA-17", "CANARY-BRAVO-29", "CANARY-DELTA-43", "CANARY-ECHO-61"];
+      const token = tokens[Math.floor(rng() * tokens.length)];
+      const card = document.createElement("div");
+      card.className = "editor-card";
+      card.innerHTML = `<strong>Exact token:</strong><br><span class="token">${token}</span>`;
+      const input = document.createElement("input");
+      input.id = "editor";
+      input.setAttribute("aria-label", "Canary token editor");
+      input.value = `replace-this-${seed % 97}`;
+      const hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = "Submit shortcut: Ctrl+Enter";
+      card.append(input, hint);
+      arena.append(card);
+      let selectAllCount = 0;
+      let submitCount = 0;
+      let clickCount = 0;
+      arena.addEventListener("click", event => {
+        if (event.target !== input) {
+          fail("non_editor_clicked", event, {
+            target_id: event.target && event.target.id || "background",
+          });
+        }
+      });
+
+      input.addEventListener("pointerdown", event => report("pointerdown", event, {
+        target_id: "editor", detail: event.detail,
+      }));
+      input.addEventListener("pointerup", event => report("pointerup", event, {
+        target_id: "editor", detail: event.detail,
+      }));
+      input.addEventListener("click", event => {
+        clickCount++;
+        report("click", event, {
+          target_id: "editor", detail: event.detail, click_count: clickCount,
+        });
+        if (completed) return fail("input_after_completion", event);
+        if (clickCount !== 1) return fail("editor_click_duplicate", event, {click_count: clickCount});
+      });
+      input.addEventListener("beforeinput", event => {
+        report("beforeinput", event, {
+          target_id: "editor",
+          input_type: event.inputType,
+          data: event.data,
+          value_before: input.value,
+        });
+        if (event.inputType === "insertFromPaste") {
+          fail("paste_forbidden", event, {input_type: event.inputType});
+        }
+      });
+      input.addEventListener("input", event => report("input", event, {
+        target_id: "editor",
+        input_type: event.inputType,
+        data: event.data,
+        value: input.value,
+      }));
+      input.addEventListener("keydown", event => {
+        const lower = String(event.key || "").toLowerCase();
+        const chord = event.ctrlKey && lower === "a"
+          ? "ctrl+a"
+          : event.ctrlKey && event.key === "Enter"
+            ? "ctrl+enter"
+            : "";
+        report("keydown", event, {
+          target_id: "editor", key: event.key, code: event.code,
+          ctrl_key: event.ctrlKey, shift_key: event.shiftKey,
+          alt_key: event.altKey, meta_key: event.metaKey,
+          repeat: event.repeat, chord,
+        });
+        if (completed) return fail("input_after_completion", event, {key: event.key});
+        if (event.repeat) return fail("repeated_key", event, {key: event.key});
+        if (chord === "ctrl+a") {
+          selectAllCount++;
+          if (selectAllCount !== 1 || submitCount) {
+            return fail("select_all_duplicate_or_out_of_order", event, {select_all_count: selectAllCount});
+          }
+        } else if (event.key === "Enter") {
+          if (chord !== "ctrl+enter") {
+            event.preventDefault();
+            return fail("plain_enter_forbidden", event);
+          }
+          submitCount++;
+          event.preventDefault();
+          if (
+            event.isTrusted &&
+            selectAllCount === 1 &&
+            submitCount === 1 &&
+            input.value === token &&
+            violations.length === 0
+          ) {
+            input.classList.add("complete");
+            return succeed("TYPE_HOTKEY_COMPLETE", event, {
+              final_dom_state: "complete",
+              final_value: input.value,
+              expected_token: token,
+              select_all_count: selectAllCount,
+              submit_count: submitCount,
+              click_count: clickCount,
+            });
+          }
+          return fail("submit_state_invalid", event, {
+            final_value: input.value,
+            expected_token: token,
+            select_all_count: selectAllCount,
+            submit_count: submitCount,
+          });
+        }
+      });
+      input.addEventListener("keyup", event => {
+        const lower = String(event.key || "").toLowerCase();
+        const chord = event.ctrlKey && lower === "a"
+          ? "ctrl+a"
+          : event.ctrlKey && event.key === "Enter"
+            ? "ctrl+enter"
+            : "";
+        report("keyup", event, {
+          target_id: "editor", key: event.key, code: event.code,
+          ctrl_key: event.ctrlKey, repeat: event.repeat, chord,
+        });
+      });
+      return {
+        layout_variant: seed % 2 ? "editor-a" : "editor-b",
+        expected_token: token,
+        initial_value: `replace-this-${seed % 97}`,
+      };
+    }
+
+    const setups = {
+      click_double: setupClickDouble,
+      scroll_roundtrip: setupScrollRoundtrip,
+      type_hotkey: setupTypeHotkey,
+    };
+    const ready = (setups[scenario] || setupClickDouble)();
+    requestAnimationFrame(() => requestAnimationFrame(() => report("page_ready", null, {
+      final_dom_state: "waiting",
+      ...ready,
+    })));
+  </script>
+</body>
+</html>

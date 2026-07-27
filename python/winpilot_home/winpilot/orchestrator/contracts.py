@@ -6,7 +6,7 @@ import time
 from typing import Any
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..fast.action_contract import validate_batch_actions
 
@@ -50,6 +50,11 @@ class ArpRunStatus(str, Enum):
     DONE = "done"
     FAILED = "failed"
     CANCELED = "canceled"
+
+
+class ArpRuntimeVersion(str, Enum):
+    LEGACY = "legacy"
+    VNEXT = "vnext"
 
 
 class ArpRetryPolicy(BaseModel):
@@ -141,8 +146,11 @@ class EvidenceRequirement(BaseModel):
 
 
 class ArpRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     graph: ArpGraph
     inputs: dict[str, Any] = Field(default_factory=dict)
+    runtime_version: ArpRuntimeVersion = ArpRuntimeVersion.LEGACY
 
 
 def _validate_node_config(node: ArpNode) -> list[str]:
