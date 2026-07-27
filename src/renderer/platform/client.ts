@@ -8,6 +8,7 @@ import type {
   PlatformOverview,
   RunProjection,
   RuntimeEvent,
+  RuntimeVersion,
   AgentSchedule,
   TaskContract,
   DesktopTargetContext,
@@ -396,10 +397,17 @@ export class ControlPlaneClient {
     });
   }
 
-  async startGraph(graph: ArpGraph, inputs: Record<string, unknown> = {}): Promise<ArpExecutionSnapshot> {
+  async startGraph(
+    graph: ArpGraph,
+    inputs: Record<string, unknown> = {},
+    runtimeVersion: RuntimeVersion = 'legacy',
+  ): Promise<ArpExecutionSnapshot> {
+    if (Object.prototype.hasOwnProperty.call(inputs, 'runtime_version')) {
+      throw new Error('runtime_version must be submitted as a top-level run field.');
+    }
     const response = await this.request<{ ok: boolean; run_id: string; run: ArpExecutionSnapshot }>('api/v2/arp/runs', {
       method: 'POST',
-      body: JSON.stringify({ graph, inputs }),
+      body: JSON.stringify({ graph, inputs, runtime_version: runtimeVersion }),
     });
     return response.run;
   }

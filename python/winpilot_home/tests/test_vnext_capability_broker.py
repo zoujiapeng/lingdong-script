@@ -9,6 +9,8 @@ from types import MappingProxyType
 
 import pytest
 
+from vnext_import_boundary_ast import analyze_path
+
 from winpilot.vnext.capabilities import (
     ArtifactState,
     AuthoritativeFrameState,
@@ -1761,14 +1763,21 @@ def test_broker_is_frozen_and_package_is_pure_default_unreachable() -> None:
                         "state",
                     }
 
-    outside_vnext = (
+    product_root = home / "winpilot"
+    vnext_root = product_root / "vnext"
+    live_composition_root = (
+        product_root / "orchestrator" / "vnext_live_canary.py"
+    )
+
+    capability_importers = {
         path
-        for path in (home / "winpilot").rglob("*.py")
-        if "vnext" not in path.parts
-    )
-    assert not any(
-        "vnext.capabilities" in path.read_text(
-            encoding="utf-8", errors="ignore"
-        )
-        for path in outside_vnext
-    )
+        for path in product_root.rglob("*.py")
+        if vnext_root not in path.parents
+        and analyze_path(
+            path,
+            module_name=".".join(
+                path.relative_to(home).with_suffix("").parts
+            ),
+        ).static_bindings("winpilot.vnext.capabilities")
+    }
+    assert capability_importers == {live_composition_root}

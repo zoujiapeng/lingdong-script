@@ -91,7 +91,27 @@ class RuntimeJobManager:
             name=f"runtime-{kind}-{identifier[-6:]}",
             daemon=True,
         )
-        job.thread.start()
+        try:
+            job.thread.start()
+        except Exception as exc:
+            job.status = "failed"
+            job.error = str(exc)
+            job.finished_at = time.time()
+            if job.on_finish:
+                try:
+                    job.on_finish(job)
+                except Exception as callback_exc:
+                    BUS.publish(
+                        "runtime_job_callback_error",
+                        job_id=job.id,
+                        kind=job.kind,
+                        error=str(callback_exc),
+                    )
+            job.done.set()
+            BUS.publish("runtime_job", state="failed", **job.snapshot())
+            with self._lock:
+                self._jobs.pop(identifier, None)
+            raise
         return job
 
     def get(self, job_id: str) -> RuntimeJob | None:
