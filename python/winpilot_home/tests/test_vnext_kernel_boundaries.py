@@ -109,7 +109,9 @@ MODEL_ROLE_FILES = (
 
 EVIDENCE_PLANE_FILES = (
     "__init__.py",
+    "artifacts.py",
     "contracts.py",
+    "journal.py",
     "plane.py",
 )
 

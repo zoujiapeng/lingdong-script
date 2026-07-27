@@ -5,6 +5,7 @@ import ast
 import base64
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
 import threading
 from typing import Any, Callable
@@ -44,9 +45,12 @@ from winpilot.vnext.desktop_adapter import (
     LiveTargetSnapshot,
 )
 from winpilot.vnext.evidence_plane import (
+    FrameArtifactWriter,
+    RuntimeEvidenceJournal,
     RuntimeEvidencePlane,
     RuntimeEvidencePlaneError,
 )
+import winpilot.vnext.evidence_plane.journal as evidence_journal_module
 from winpilot.vnext.mission import TargetBinding
 from winpilot.vnext.runtime import (
     ControllerOutcome,
@@ -108,17 +112,16 @@ class _Trace:
 
     def __post_init__(self) -> None:
         self.records: list[
-            tuple[RawActionReceipt, ActorDecisionEnvelope, dict[str, Any]]
+            tuple[RawActionReceipt, dict[str, Any]]
         ] = []
 
     def record(
         self,
         receipt: RawActionReceipt,
         *,
-        envelope: ActorDecisionEnvelope,
         metadata,
     ) -> None:
-        self.records.append((receipt, envelope, dict(metadata)))
+        self.records.append((receipt, dict(metadata)))
         if self.fail:
             raise RuntimeError("trace unavailable")
 
@@ -283,6 +286,11 @@ class _Harness:
     envelope: ActorDecisionEnvelope
     commit_identity: RuntimeCommitIdentity
     runtime_evidence: RuntimeEvidencePlane | None = None
+    evidence_journal: RuntimeEvidenceJournal | None = None
+    frame_artifact_writer: FrameArtifactWriter | None = None
+    evidence_run_directory: Path | None = None
+    before_image_b64: str | None = None
+    after_image_b64: str | None = None
 
     def run(
         self,
@@ -324,6 +332,39 @@ def _proposal(action: str) -> dict[str, Any]:
     }
 
 
+def _projection_id(state, binding: TargetBinding, action: str) -> str:
+    material = {
+        "format": "broker-projection/1",
+        "mission_id": MISSION_ID,
+        "run_id": RUN_ID,
+        "catalog_fingerprint": "2" * 64,
+        "profile_id": "fixed-standard",
+        "state_fingerprint": "3" * 64,
+        "mission_revision": 0,
+        "obligation_id": OBLIGATION_ID,
+        "turn_index": 0,
+        "execution_route": "visual_actor",
+        "executor_id": None,
+        "target_binding_id": binding.binding_id,
+        "frame_id": state.frame_id,
+        "frame_scope": state.scope,
+        "pointer_lease_id": None,
+        "tool_names": [action],
+        "active_grant_ids": [],
+        "missing_capabilities": [],
+        "projection_reasons": [],
+    }
+    canonical = json.dumps(
+        material,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return "projection-" + hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()[:24]
+
+
 def _envelope(state, binding: TargetBinding, action: str):
     material = {
         "format": ACTOR_ENVELOPE_FORMAT,
@@ -347,8 +388,8 @@ def _envelope(state, binding: TargetBinding, action: str):
         "target_binding_id": binding.binding_id,
         "pointer_disposition": "released",
         "pointer_lease_id": None,
-        "broker_projection_id": "broker-projection",
-        "capability_grant_ids": ["grant-visual-interact"],
+        "broker_projection_id": _projection_id(state, binding, action),
+        "capability_grant_ids": [],
         "allowed_evidence_scope": [CURRENT_EVIDENCE_ID],
         "proposal": _proposal(action),
     }
@@ -381,6 +422,36 @@ def _replace_action_args(
     return ActorDecisionEnvelope.from_dict(raw)
 
 
+def _broker_projection(
+    envelope: ActorDecisionEnvelope,
+) -> dict[str, Any]:
+    return {
+        "format": "broker-projection/1",
+        "projection_id": envelope.broker_projection_id,
+        "mission_id": envelope.mission_id,
+        "run_id": envelope.run_id,
+        "catalog_fingerprint": envelope.catalog_fingerprint,
+        "profile_id": envelope.profile_id,
+        "state_fingerprint": envelope.state_fingerprint,
+        "mission_revision": envelope.mission_revision,
+        "obligation_id": envelope.obligation_id,
+        "turn_index": envelope.turn_index,
+        "execution_route": "visual_actor",
+        "executor_id": None,
+        "target_binding_id": envelope.target_binding_id,
+        "frame_id": envelope.frame_id,
+        "frame_scope": envelope.frame_scope,
+        "pointer_lease_id": envelope.pointer_lease_id,
+        "tool_names": [envelope.proposal.action],
+        "active_grants": [
+            {"grant_id": grant_id}
+            for grant_id in envelope.capability_grant_ids
+        ],
+        "missing_capabilities": [],
+        "projection_reasons": [],
+    }
+
+
 def _harness(
     action: str,
     *,
@@ -389,9 +460,12 @@ def _harness(
     post_input_settle_delay_s: float = 0.12,
     wait: Callable[[float], None] | None = None,
     with_runtime_evidence: bool = False,
+    evidence_run_directory: Path | None = None,
+    action_args: dict[str, Any] | None = None,
 ) -> _Harness:
     authority = FrameAuthority()
     before_b64 = _jpeg(20)
+    after_b64 = _jpeg(220)
     before = authority.commit(
         epoch=EPOCH,
         hwnd=HWND,
@@ -405,7 +479,7 @@ def _harness(
     )
     observer = FrameObserver(
         authority,
-        capture=lambda _hwnd, **_kwargs: _jpeg(220),
+        capture=lambda _hwnd, **_kwargs: after_b64,
         virtual_desktop=lambda: Region(0, 0, 1920, 1080),
         captured_at=lambda: 2.0,
     )
@@ -431,15 +505,34 @@ def _harness(
     permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
     raw = _RawHarness(raw_result)
     trace = _Trace(trace_fail)
-    runtime_evidence = (
-        RuntimeEvidencePlane(
+    if evidence_run_directory is not None:
+        with_runtime_evidence = True
+        evidence_journal = RuntimeEvidenceJournal.create(
+            evidence_run_directory,
             MISSION_ID,
             RUN_ID,
-            clock_ns=lambda: 123_456_789,
         )
-        if with_runtime_evidence
-        else None
-    )
+        frame_artifact_writer = FrameArtifactWriter.create(
+            evidence_run_directory
+        )
+        runtime_evidence = RuntimeEvidencePlane(
+            MISSION_ID,
+            RUN_ID,
+            clock_ns=lambda: 1_500_000_000,
+            journal=evidence_journal,
+        )
+    else:
+        evidence_journal = None
+        frame_artifact_writer = None
+        runtime_evidence = (
+            RuntimeEvidencePlane(
+                MISSION_ID,
+                RUN_ID,
+                clock_ns=lambda: 123_456_789,
+            )
+            if with_runtime_evidence
+            else None
+        )
     wait_calls: list[float] = []
 
     def settle_wait(delay: float) -> None:
@@ -456,27 +549,18 @@ def _harness(
         raw_device=raw.executor(),
         receipt_trace_sink=trace,
         runtime_evidence_plane=runtime_evidence,
+        frame_artifact_writer=frame_artifact_writer,
         post_input_settle_delay_s=post_input_settle_delay_s,
         wait=settle_wait,
     )
     envelope = _envelope(before, binding, action)
+    if action_args is not None:
+        envelope = _replace_action_args(envelope, action_args)
     if runtime_evidence is not None:
-        proposal_wire = envelope.proposal.model_dump(mode="json")
         runtime_evidence.record_actor_decision(
-            decision_id=envelope.decision_id,
-            mission_id=envelope.mission_id,
-            run_id=envelope.run_id,
-            obligation_id=envelope.obligation_id,
-            proposal_kind=envelope.proposal.kind,
-            action=envelope.proposal.action,
-            canonical_arguments=proposal_wire["args"],
+            actor_envelope=envelope.to_dict(),
             tool_schema={"type": "object"},
-            broker_projection={
-                "projection_id": envelope.broker_projection_id,
-            },
-            actor_envelope_sha256=hashlib.sha256(
-                envelope.to_json().encode("utf-8")
-            ).hexdigest(),
+            broker_projection=_broker_projection(envelope),
         )
     frame_identity = RuntimeFrameIdentity(
         frame_id=before.frame_id,
@@ -503,6 +587,58 @@ def _harness(
             RuntimeTargetIdentity.from_binding(binding),
         ),
         runtime_evidence=runtime_evidence,
+        evidence_journal=evidence_journal,
+        frame_artifact_writer=frame_artifact_writer,
+        evidence_run_directory=evidence_run_directory,
+        before_image_b64=before_b64,
+        after_image_b64=after_b64,
+    )
+
+
+def _record_controller_transition(
+    harness: _Harness,
+    transition: Any,
+) -> None:
+    plane = harness.runtime_evidence
+    assert plane is not None
+    current = harness.authority.current
+    assert current is not None
+    plane.record_controller_transition(
+        decision_id=harness.envelope.decision_id,
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        actor_envelope_sha256=hashlib.sha256(
+            harness.envelope.to_json().encode("utf-8")
+        ).hexdigest(),
+        transition=transition.to_dict(),
+        post_frame_identity=RuntimeFrameIdentity(
+            frame_id=current.frame_id,
+            epoch=current.epoch,
+            hwnd=current.hwnd,
+            region=current.region,
+            scope=current.scope,
+            submitted_size=current.submitted_size,
+            image_sha256=current.image_sha256,
+        ).to_dict(),
+    )
+
+
+def _fail_journal_event(
+    monkeypatch: pytest.MonkeyPatch,
+    event_kind: str,
+) -> None:
+    original_write_all = evidence_journal_module._write_all
+    needle = f'"event_kind":"{event_kind}"'.encode("ascii")
+
+    def fail_selected_append(stream, value: bytes) -> None:
+        if needle in bytes(value):
+            raise OSError("synthetic durable append failure")
+        original_write_all(stream, value)
+
+    monkeypatch.setattr(
+        evidence_journal_module,
+        "_write_all",
+        fail_selected_append,
     )
 
 
@@ -544,9 +680,8 @@ def test_exact_atomic_surface_completes_once_with_effect(
     assert harness.authority.current is not None
     assert harness.authority.current.frame_id == 2
     assert len(harness.trace.records) == 1
-    receipt, traced_envelope, metadata = harness.trace.records[0]
+    receipt, metadata = harness.trace.records[0]
     assert receipt.outcome is MutationOutcome.APPLIED
-    assert traced_envelope == harness.envelope
     assert metadata["decision_id"] == harness.envelope.decision_id
 
     if action in {"click", "double_click"}:
@@ -613,6 +748,415 @@ def test_atomic_adapter_records_admission_and_single_raw_receipt() -> None:
         is True
     )
     assert plane.action_bindings[0].physical_attempt_count == 1
+
+
+@pytest.mark.parametrize(
+    (
+        "action",
+        "submitted_arguments",
+        "physical_arguments",
+        "raw_device_route",
+    ),
+    (
+        (
+            "click",
+            {"image_x": 50.0, "image_y": 40.0},
+            {
+                "kind": "pointer_click",
+                "x": 60,
+                "y": 60,
+                "button": "left",
+                "click_count": 1,
+            },
+            "raw_device.admitted_physical_click/0",
+        ),
+        (
+            "double_click",
+            {"image_x": 50.0, "image_y": 40.0},
+            {
+                "kind": "pointer_click",
+                "x": 60,
+                "y": 60,
+                "button": "left",
+                "click_count": 2,
+            },
+            "raw_device.admitted_physical_click/0",
+        ),
+        (
+            "scroll",
+            {
+                "image_x": 50.0,
+                "image_y": 40.0,
+                "amount": -240,
+            },
+            {
+                "kind": "wheel",
+                "x": 60,
+                "y": 60,
+                "signed_wheel_amount": -240,
+                "event_wheel_delta": -28_800,
+            },
+            "raw_device.admitted_physical_scroll/0",
+        ),
+        (
+            "type_text",
+            {"text": "hello"},
+            {"kind": "type_text", "text": "hello"},
+            "raw_device.admitted_physical_type_text/0",
+        ),
+        (
+            "hotkey",
+            {"keys": ["ctrl", "l"]},
+            {
+                "kind": "hotkey",
+                "modifiers": ["ctrl"],
+                "key": "l",
+            },
+            "raw_device.admitted_physical_hotkey/0",
+        ),
+    ),
+)
+def test_durable_attempt_records_exact_submitted_and_physical_arguments(
+    tmp_path: Path,
+    action: str,
+    submitted_arguments: dict[str, Any],
+    physical_arguments: dict[str, Any],
+    raw_device_route: str,
+) -> None:
+    run_directory = tmp_path / "evidence-run"
+    harness = _harness(
+        action,
+        evidence_run_directory=run_directory,
+    )
+    journal = harness.evidence_journal
+    plane = harness.runtime_evidence
+    writer = harness.frame_artifact_writer
+    assert journal is not None
+    assert plane is not None
+    assert writer is not None
+
+    try:
+        result = harness.run()
+
+        assert result.controller_error is None
+        assert result.transition is not None
+        assert result.transition.outcome is ControllerOutcome.COMPLETED
+        assert len(harness.raw.calls) == 1
+        assert len(plane.physical_attempt_records) == 1
+        attempt = plane.physical_attempt_records[0].to_dict()
+        assert attempt["decision_id"] == harness.envelope.decision_id
+        assert attempt["action_id"] == harness.envelope.decision_id
+        assert attempt["action"] == action
+        assert attempt["attempt_index"] == 1
+        assert attempt["submitted_arguments"] == submitted_arguments
+        assert attempt["physical_arguments"] == physical_arguments
+        assert attempt["raw_device_route"] == raw_device_route
+        assert attempt["mechanism"] == "physical_sendinput"
+
+        references = {
+            reference.role.value: reference
+            for reference in plane.frame_artifact_references
+        }
+        assert set(references) == {"before", "after"}
+        expected_images = {
+            "before": harness.before_image_b64,
+            "after": harness.after_image_b64,
+        }
+        expected_frames = {"before": 1, "after": 2}
+        expected_timestamps = {
+            "before": 1_000_000_000,
+            "after": 2_000_000_000,
+        }
+        for role, reference in references.items():
+            encoded = expected_images[role]
+            assert encoded is not None
+            expected_bytes = base64.b64decode(encoded)
+            artifact_path = run_directory / reference.artifact_uri
+            assert artifact_path.read_bytes() == expected_bytes
+            assert reference.frame_id == expected_frames[role]
+            assert (
+                reference.capture_timestamp_ns
+                == expected_timestamps[role]
+            )
+            assert reference.raw_jpeg_sha256 == hashlib.sha256(
+                expected_bytes
+            ).hexdigest()
+            assert (
+                reference.runtime_frame_image_sha256
+                == hashlib.sha256(encoded.encode("ascii")).hexdigest()
+            )
+            assert (
+                reference.frame_identity["image_sha256"]
+                == reference.runtime_frame_image_sha256
+            )
+            reference_wire = reference.to_dict()
+            assert writer.read_frame(
+                mission_id=MISSION_ID,
+                run_id=RUN_ID,
+                decision_id=harness.envelope.decision_id,
+                action_id=harness.envelope.decision_id,
+                role=role,
+                frame_identity=reference_wire["frame_identity"],
+                artifact_uri=reference.artifact_uri,
+                sha256=reference.raw_jpeg_sha256,
+            ) == expected_bytes
+
+        journal.close()
+        replayed_journal = RuntimeEvidenceJournal.open_read_only(
+            run_directory,
+            MISSION_ID,
+            RUN_ID,
+        )
+        replayed = RuntimeEvidencePlane.from_journal(replayed_journal)
+        assert (
+            replayed.physical_attempt_records[0].to_dict()
+            == attempt
+        )
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize(
+    ("event_kind", "receipt_error"),
+    (
+        ("admission", "evidence_admission_rejected"),
+        ("physical_attempt", "evidence_attempt_rejected"),
+    ),
+)
+def test_durable_pre_input_append_failure_never_calls_raw_device(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event_kind: str,
+    receipt_error: str,
+) -> None:
+    harness = _harness(
+        "click",
+        evidence_run_directory=tmp_path / "evidence-run",
+    )
+    journal = harness.evidence_journal
+    assert journal is not None
+    _fail_journal_event(monkeypatch, event_kind)
+
+    try:
+        result = harness.run()
+
+        assert result.controller_error is None
+        assert result.transition is not None
+        assert result.transition.outcome is ControllerOutcome.REJECTED
+        assert result.transition.input_completed is False
+        assert harness.raw.calls == []
+        assert len(harness.trace.records) == 1
+        receipt, _metadata = harness.trace.records[0]
+        assert receipt.outcome is MutationOutcome.NOT_STARTED
+        assert receipt.error_kind == receipt_error
+        assert journal.writable is False
+    finally:
+        journal.close()
+
+
+def test_durable_pre_admission_not_started_replays_as_incomplete(
+    tmp_path: Path,
+) -> None:
+    run_directory = tmp_path / "evidence-run"
+    harness = _harness(
+        "click",
+        evidence_run_directory=run_directory,
+    )
+    journal = harness.evidence_journal
+    assert journal is not None
+    stopped = threading.Event()
+    stopped.set()
+
+    try:
+        result = harness.run(stop_event=stopped)
+
+        assert result.controller_error is None
+        assert result.transition is not None
+        assert result.transition.outcome is ControllerOutcome.REJECTED
+        assert harness.raw.calls == []
+        journal.close()
+
+        report = RuntimeEvidencePlane.rebuild_report(
+            run_directory,
+            MISSION_ID,
+            RUN_ID,
+        )
+        decision_id = harness.envelope.decision_id
+        assert report.status.value == "incomplete"
+        assert report.verification_failures == ()
+        assert f"{decision_id}_raw_receipt" not in report.missing_evidence
+        assert f"{decision_id}_admission" in report.missing_evidence
+        assert f"{decision_id}_physical_attempt" in report.missing_evidence
+        assert f"{decision_id}_action_binding" in report.missing_evidence
+    finally:
+        journal.close()
+
+
+def test_durable_receipt_append_failure_is_unknown_without_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(
+        "type_text",
+        evidence_run_directory=tmp_path / "evidence-run",
+    )
+    journal = harness.evidence_journal
+    plane = harness.runtime_evidence
+    assert journal is not None
+    assert plane is not None
+    _fail_journal_event(monkeypatch, "raw_receipt")
+
+    try:
+        result = harness.run()
+
+        assert result.controller_error is None
+        assert result.transition is not None
+        assert result.transition.outcome is ControllerOutcome.UNKNOWN
+        assert result.transition.input_completed is True
+        assert len(harness.raw.calls) == 1
+        assert len(plane.physical_attempt_records) == 1
+        assert plane.action_bindings == ()
+        assert journal.writable is False
+
+        replay = harness.adapter.execute(harness.envelope)
+
+        assert replay.outcome is ControllerOutcome.REJECTED
+        assert len(harness.raw.calls) == 1
+        assert len(plane.physical_attempt_records) == 1
+    finally:
+        journal.close()
+
+
+def test_durable_transition_append_failure_keeps_one_raw_without_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_directory = tmp_path / "evidence-run"
+    harness = _harness(
+        "click",
+        evidence_run_directory=run_directory,
+    )
+    journal = harness.evidence_journal
+    plane = harness.runtime_evidence
+    assert journal is not None
+    assert plane is not None
+
+    try:
+        result = harness.run()
+        assert result.controller_error is None
+        assert result.transition is not None
+        assert result.transition.outcome is ControllerOutcome.COMPLETED
+        assert len(harness.raw.calls) == 1
+        _fail_journal_event(monkeypatch, "controller_transition")
+
+        with pytest.raises(
+            RuntimeEvidencePlaneError,
+            match="durable evidence append failed closed",
+        ):
+            _record_controller_transition(harness, result.transition)
+
+        assert journal.writable is False
+        assert len(harness.raw.calls) == 1
+        assert plane.action_bindings == ()
+        assert all(
+            event.event_kind != "controller_transition"
+            for event in journal.events
+        )
+        report = plane.build_report(
+            artifact_reader=lambda uri: (
+                run_directory / uri
+            ).read_bytes()
+        )
+        assert report.status.value == "incomplete"
+        assert (
+            f"{harness.envelope.decision_id}_controller_transition"
+            in report.missing_evidence
+        )
+        assert (
+            f"{harness.envelope.decision_id}_action_binding"
+            in report.missing_evidence
+        )
+
+        replay = harness.adapter.execute(harness.envelope)
+
+        assert replay.outcome is ControllerOutcome.REJECTED
+        assert len(harness.raw.calls) == 1
+        assert len(plane.physical_attempt_records) == 1
+        assert plane.action_bindings == ()
+    finally:
+        journal.close()
+
+
+def test_exact_type_text_is_absent_from_ordinary_trace(
+    tmp_path: Path,
+) -> None:
+    sentinel = "SENTINEL-exact-type-text-31"
+    run_directory = tmp_path / "evidence-run"
+    harness = _harness(
+        "type_text",
+        action_args={"text": sentinel},
+        evidence_run_directory=run_directory,
+    )
+    journal = harness.evidence_journal
+    plane = harness.runtime_evidence
+    assert journal is not None
+    assert plane is not None
+
+    try:
+        result = harness.run()
+        assert result.controller_error is None
+        assert result.transition is not None
+        assert result.transition.outcome is ControllerOutcome.COMPLETED
+        _record_controller_transition(harness, result.transition)
+        journal.close()
+
+        trace_wire = [
+            {
+                "receipt": receipt.to_dict(),
+                "metadata": metadata,
+            }
+            for receipt, metadata in harness.trace.records
+        ]
+        assert sentinel not in json.dumps(
+            trace_wire,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        assert all(
+            set(metadata)
+            == {
+                "phase",
+                "controller_action",
+                "decision_id",
+                "mission_id",
+                "run_id",
+                "obligation_id",
+                "frame_id",
+                "frame_epoch",
+                "target_hwnd",
+                "target_binding_id",
+            }
+            for _receipt, metadata in harness.trace.records
+        )
+
+        journal_text = (
+            run_directory / "evidence.jsonl"
+        ).read_text(encoding="utf-8")
+        report = plane.build_report(
+            artifact_reader=lambda uri: (
+                run_directory / uri
+            ).read_bytes()
+        )
+        report_text = json.dumps(
+            report.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        assert report.status.value == "complete"
+        assert sentinel in journal_text
+        assert sentinel in report_text
+    finally:
+        journal.close()
 
 
 def test_action_effect_snapshot_rejects_nested_extra_fields() -> None:
@@ -737,11 +1281,12 @@ def test_wait_exception_after_completed_input_is_unknown_without_replay() -> Non
     assert attempt.transition is not None
     assert attempt.transition.outcome is ControllerOutcome.UNKNOWN
     assert attempt.transition.input_completed is True
-    assert attempt.transition.post_frame_id is None
+    assert attempt.transition.post_frame_id == 2
+    assert len(attempt.transition.post_frame_evidence) == 1
     assert harness.wait_calls == [0.12]
     assert len(harness.raw.calls) == 1
     assert harness.authority.current is not None
-    assert harness.authority.current.frame_id == 1
+    assert harness.authority.current.frame_id == 2
     assert harness.trace.records[0][0].outcome is MutationOutcome.APPLIED
 
 
