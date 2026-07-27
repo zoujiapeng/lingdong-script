@@ -32,6 +32,7 @@ from ..capabilities import (
     ToolRoute,
 )
 from ..evidence import EvidenceRegistry
+from ..evidence_plane import RuntimeEvidencePlane
 from ..mission import (
     EvidenceRef,
     MissionError,
@@ -102,6 +103,7 @@ class MissionRuntime:
         verifier: VisualObligationVerifierPort,
         evidence_registry: EvidenceRegistry,
         mutation_permits: MutationPermitAuthority | None = None,
+        runtime_evidence_plane: RuntimeEvidencePlane | None = None,
     ) -> None:
         if type(reducer) is not MissionReducer:
             raise TypeError("reducer must be MissionReducer")
@@ -120,6 +122,13 @@ class MissionRuntime:
         if reducer.evidence_source is not evidence_registry:
             raise TypeError(
                 "Runtime and MissionReducer must share one EvidenceRegistry"
+            )
+        if (
+            runtime_evidence_plane is not None
+            and type(runtime_evidence_plane) is not RuntimeEvidencePlane
+        ):
+            raise TypeError(
+                "runtime_evidence_plane must be RuntimeEvidencePlane or null"
             )
         for value, method, name in (
             (actor, "propose", "actor"),
@@ -162,6 +171,22 @@ class MissionRuntime:
             raise TypeError(
                 "mutation permit scope must match mission/run"
             )
+        if runtime_evidence_plane is not None and (
+            runtime_evidence_plane.mission_id
+            != reducer.definition.mission_id
+            or runtime_evidence_plane.run_id
+            != reducer.definition.run_id
+        ):
+            raise TypeError(
+                "Runtime evidence plane scope must match mission/run"
+            )
+        if (
+            getattr(controller, "runtime_evidence_plane", None)
+            is not runtime_evidence_plane
+        ):
+            raise TypeError(
+                "Runtime and Controller must share one evidence plane"
+            )
         self._reducer = reducer
         self._profile = profile
         self._broker = broker
@@ -173,6 +198,7 @@ class MissionRuntime:
         self._verifier = verifier
         self._registry = evidence_registry
         self._mutation_permits = permits
+        self._runtime_evidence = runtime_evidence_plane
         self._turn_lock = threading.Lock()
 
     @staticmethod
@@ -825,6 +851,64 @@ class MissionRuntime:
             prior_event_ids=event_ids,
         )
 
+    @staticmethod
+    def _actor_envelope_sha256(
+        envelope: ActorDecisionEnvelope,
+    ) -> str:
+        return hashlib.sha256(
+            envelope.to_json().encode("utf-8")
+        ).hexdigest()
+
+    def _record_actor_decision(
+        self,
+        proposal: DesktopActionProposal,
+        envelope: ActorDecisionEnvelope,
+        broker_projection: BrokerProjection,
+    ) -> None:
+        plane = self._runtime_evidence
+        if plane is None:
+            return
+        canonical_proposal = envelope.proposal
+        if type(canonical_proposal) is not DesktopActionProposal:
+            raise TypeError("evidence requires the bound desktop proposal")
+        proposal_wire = canonical_proposal.model_dump(mode="json")
+        tool_wire = self._catalog.get(canonical_proposal.action).to_dict()
+        plane.record_actor_decision(
+            decision_id=envelope.decision_id,
+            mission_id=envelope.mission_id,
+            run_id=envelope.run_id,
+            obligation_id=envelope.obligation_id,
+            proposal_kind=canonical_proposal.kind,
+            action=canonical_proposal.action,
+            canonical_arguments=proposal_wire["args"],
+            tool_schema=tool_wire["schema"],
+            broker_projection=broker_projection.to_dict(),
+            actor_envelope_sha256=self._actor_envelope_sha256(envelope),
+        )
+
+    def _record_controller_transition(
+        self,
+        envelope: ActorDecisionEnvelope,
+        transition: ControllerTransition,
+        *,
+        post_frame_identity: Mapping[str, Any] | None = None,
+    ) -> None:
+        plane = self._runtime_evidence
+        if plane is None:
+            return
+        plane.record_controller_transition(
+            decision_id=envelope.decision_id,
+            mission_id=envelope.mission_id,
+            run_id=envelope.run_id,
+            actor_envelope_sha256=self._actor_envelope_sha256(envelope),
+            transition=transition.to_dict(),
+            post_frame_identity=(
+                None
+                if post_frame_identity is None
+                else dict(post_frame_identity)
+            ),
+        )
+
     def _run_action(
         self,
         proposal: DesktopActionProposal,
@@ -892,6 +976,21 @@ class MissionRuntime:
                 decision_id=envelope.decision_id,
                 detail="Controller returned an invalid typed transition",
             )
+        identity_matches = bool(
+            transition.action_id == envelope.decision_id
+            and transition.action == proposal.action
+        )
+        if identity_matches and transition.outcome in {
+            ControllerOutcome.REJECTED,
+            ControllerOutcome.UNKNOWN,
+        }:
+            try:
+                self._record_controller_transition(
+                    envelope,
+                    transition,
+                )
+            except Exception:
+                pass
         if (
             transition.outcome is not ControllerOutcome.REJECTED
             and (
@@ -909,8 +1008,7 @@ class MissionRuntime:
                 ),
             )
         if (
-            transition.action_id != envelope.decision_id
-            or transition.action != proposal.action
+            not identity_matches
             or transition.outcome is ControllerOutcome.UNKNOWN
         ):
             return self._block_unknown(
@@ -959,6 +1057,14 @@ class MissionRuntime:
                 action_id=envelope.decision_id,
                 action=proposal.action,
             )
+            try:
+                self._record_controller_transition(
+                    envelope,
+                    transition,
+                    post_frame_identity=after.frame.identity.to_dict(),
+                )
+            except Exception:
+                pass
             event_ids = self._accept(
                 "transition_recorded",
                 payload={
@@ -1207,6 +1313,20 @@ class MissionRuntime:
                 detail=str(exc),
             )
         if type(proposal) is DesktopActionProposal:
+            try:
+                self._record_actor_decision(
+                    proposal,
+                    envelope,
+                    broker_projection,
+                )
+            except Exception as exc:
+                return self._result(
+                    RuntimeStatus.STATE_REJECTED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=envelope.decision_id,
+                    detail=f"Evidence decision failed closed: {exc}",
+                )
             return self._run_action(
                 proposal,
                 envelope,

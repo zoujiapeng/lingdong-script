@@ -21,6 +21,10 @@ from winpilot.vnext.capabilities import (
     ToolSpec,
 )
 from winpilot.vnext.evidence import EvidenceRegistry
+from winpilot.vnext.evidence_plane import (
+    RuntimeEvidencePlane,
+    RuntimeEvidenceReportStatus,
+)
 from winpilot.vnext.mission import (
     EvidencePolicy,
     EvidenceRef,
@@ -400,10 +404,12 @@ class FakeController:
             [ActorDecisionEnvelope],
             tuple[RuntimeFrame, EvidenceRef],
         ],
+        runtime_evidence_plane: RuntimeEvidencePlane | None = None,
     ) -> None:
         self.authority = authority
         self.state = state
         self.make_post_frame = make_post_frame
+        self.runtime_evidence_plane = runtime_evidence_plane
         self.mode = "completed"
         self.calls = 0
         self.envelopes: list[ActorDecisionEnvelope] = []
@@ -508,6 +514,7 @@ class Harness:
     permits: MutationPermitAuthority
     runtime: MissionRuntime
     catalog: ToolCatalog
+    runtime_evidence: RuntimeEvidencePlane | None = None
 
     def make_frame(
         self,
@@ -581,6 +588,8 @@ def _harness(
     catalog: ToolCatalog | None = None,
     bind_target: bool = True,
     profile_provider: bool = True,
+    with_runtime_evidence: bool = False,
+    controller_evidence_mode: str = "same",
 ) -> Harness:
     definition = definition or _definition()
     registry = EvidenceRegistry(definition.mission_id, definition.run_id)
@@ -671,6 +680,15 @@ def _harness(
         definition.mission_id,
         definition.run_id,
     )
+    runtime_evidence = (
+        RuntimeEvidencePlane(
+            definition.mission_id,
+            definition.run_id,
+            clock_ns=lambda: 123_456_789,
+        )
+        if with_runtime_evidence
+        else None
+    )
     holder: dict[str, Harness] = {}
 
     def make_post_frame(
@@ -686,7 +704,17 @@ def _harness(
         authority=permits,
         state=state,
         make_post_frame=make_post_frame,
+        runtime_evidence_plane=(
+            RuntimeEvidencePlane(
+                definition.mission_id,
+                definition.run_id,
+            )
+            if controller_evidence_mode == "different"
+            else runtime_evidence
+        ),
     )
+    if controller_evidence_mode == "absent":
+        del controller.runtime_evidence_plane
     profile = ExecutionPolicy(
         provider_availability=(
             ("obligation_verifier",) if profile_provider else ()
@@ -708,6 +736,7 @@ def _harness(
         verifier=verifier,
         evidence_registry=registry,
         mutation_permits=permits,
+        runtime_evidence_plane=runtime_evidence,
     )
     harness = Harness(
         reducer=reducer,
@@ -719,6 +748,7 @@ def _harness(
         permits=permits,
         runtime=runtime,
         catalog=catalog,
+        runtime_evidence=runtime_evidence,
     )
     holder["harness"] = harness
     return harness
@@ -745,6 +775,54 @@ def test_minimal_runtime_executes_each_approved_action_once(action: str) -> None
         "transition_recorded",
     ]
     assert harness.reducer.card.last_transition.action == action
+
+
+def test_runtime_records_reasoning_free_actor_decision_before_action() -> None:
+    harness = _harness(
+        _action("click"),
+        with_runtime_evidence=True,
+    )
+    plane = harness.runtime_evidence
+    assert plane is not None
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 1
+    assert len(plane.decision_records) == 1
+    record = plane.decision_records[0]
+    assert record.decision_id == result.decision_id
+    assert record.action == "click"
+    assert set(record.to_dict()) == {
+        "format",
+        "decision_id",
+        "mission_id",
+        "obligation_id",
+        "proposal_kind",
+        "action",
+        "canonical_arguments_sha256",
+        "tool_schema_sha256",
+        "broker_projection_sha256",
+    }
+    report = plane.build_report()
+    assert report.status is RuntimeEvidenceReportStatus.INCOMPLETE
+    assert f"{record.decision_id}_admission" in report.missing_evidence
+    assert f"{record.decision_id}_raw_receipt" in report.missing_evidence
+
+
+@pytest.mark.parametrize("mode", ("different", "absent"))
+def test_runtime_requires_one_shared_evidence_plane_owner(
+    mode: str,
+) -> None:
+    with pytest.raises(
+        TypeError,
+        match="must share one evidence plane",
+    ):
+        _harness(
+            _action("click"),
+            with_runtime_evidence=True,
+            controller_evidence_mode=mode,
+        )
 
 
 def test_previous_action_view_is_bounded_and_derived_from_mission_card() -> None:

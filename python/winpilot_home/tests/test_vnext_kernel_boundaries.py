@@ -9,10 +9,12 @@ PACKAGE_ROOT = Path(__file__).parents[1] / "winpilot"
 VNEXT_ROOT = PACKAGE_ROOT / "vnext"
 RUNTIME_ROOT = VNEXT_ROOT / "runtime"
 MODEL_ROLES_ROOT = VNEXT_ROOT / "model_roles"
+EVIDENCE_PLANE_ROOT = VNEXT_ROOT / "evidence_plane"
 KERNEL_ROOTS = (
     VNEXT_ROOT / "__init__.py",
     VNEXT_ROOT / "mission",
     VNEXT_ROOT / "evidence",
+    EVIDENCE_PLANE_ROOT,
 )
 
 FORBIDDEN_IMPORT_PREFIXES = (
@@ -103,6 +105,12 @@ MODEL_ROLE_FILES = (
     "common.py",
     "visual_actor.py",
     "visual_obligation_verifier.py",
+)
+
+EVIDENCE_PLANE_FILES = (
+    "__init__.py",
+    "contracts.py",
+    "plane.py",
 )
 
 MODEL_ROLE_ALLOWED_PRODUCT_PREFIXES = (
@@ -198,6 +206,28 @@ def test_vnext_root_has_no_eager_or_lazy_imports() -> None:
         and node.name == "__getattr__"
         for node in tree.body
     )
+
+
+def test_runtime_evidence_plane_is_exact_pure_and_default_unreachable() -> None:
+    assert tuple(
+        sorted(path.name for path in EVIDENCE_PLANE_ROOT.glob("*.py"))
+    ) == EVIDENCE_PLANE_FILES
+    importers = {
+        path.relative_to(VNEXT_ROOT).as_posix()
+        for path in _source_files(VNEXT_ROOT)
+        if EVIDENCE_PLANE_ROOT not in path.parents
+        and any(
+            _matches_prefix(
+                imported,
+                "winpilot.vnext.evidence_plane",
+            )
+            for imported in _imports(path)
+        )
+    }
+    assert importers == {
+        "desktop_adapter/atomic.py",
+        "runtime/mission_runtime.py",
+    }
 
 
 def test_existing_product_code_cannot_reach_vnext_by_import() -> None:
