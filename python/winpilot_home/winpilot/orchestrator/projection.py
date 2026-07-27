@@ -59,9 +59,18 @@ class RunProjectionStore:
 
     def _new(self, run_id: str, event: dict[str, Any]) -> dict[str, Any]:
         now = float(event.get("ts") or time.time())
+        runtime_version = str(event.get("runtime_version") or "")
+        if runtime_version not in {"legacy", "vnext"}:
+            runtime_version = ""
         return {
             "run_id": run_id,
             "kind": "arp" if str(event.get("type", "")).startswith("arp_") else "agent",
+            "runtime_version": runtime_version,
+            "runtime_budget": copy.deepcopy(
+                event.get("runtime_budget")
+                if isinstance(event.get("runtime_budget"), dict)
+                else {}
+            ),
             "status": "running",
             "manual_paused": False,
             "phase": "starting",
@@ -189,6 +198,24 @@ class RunProjectionStore:
                 self._current_id = run_id
             run["updated_at"] = float(event.get("ts") or time.time())
             run["metrics"]["event_count"] += 1
+            event_runtime_version = str(
+                event.get("runtime_version") or ""
+            )
+            if event_runtime_version in {"legacy", "vnext"}:
+                frozen_runtime_version = str(
+                    run.get("runtime_version") or ""
+                )
+                if (
+                    frozen_runtime_version
+                    and frozen_runtime_version != event_runtime_version
+                ):
+                    run["runtime_version_mismatch"] = {
+                        "frozen": frozen_runtime_version,
+                        "observed": event_runtime_version,
+                        "event_type": event_type,
+                    }
+                else:
+                    run["runtime_version"] = event_runtime_version
             phase = self._phase(event_type, event)
             terminal_before_event = run.get("status") in _TERMINAL
             if (
@@ -210,6 +237,9 @@ class RunProjectionStore:
                 run["graph_id"] = event.get("graph_id")
                 run["kind"] = "arp"
             if event_type == "arp_run_start":
+                runtime_budget = event.get("runtime_budget")
+                if isinstance(runtime_budget, dict):
+                    run["runtime_budget"] = copy.deepcopy(runtime_budget)
                 task_contract = event.get("task_contract")
                 if isinstance(task_contract, dict):
                     run["task_contract"] = copy.deepcopy(task_contract)
@@ -221,6 +251,32 @@ class RunProjectionStore:
             runtime_snapshot = event.get("runtime_snapshot")
             if isinstance(runtime_snapshot, dict):
                 run["arp_snapshot"] = copy.deepcopy(runtime_snapshot)
+                snapshot_runtime_version = str(
+                    runtime_snapshot.get("runtime_version") or ""
+                )
+                if snapshot_runtime_version in {"legacy", "vnext"}:
+                    frozen_runtime_version = str(
+                        run.get("runtime_version") or ""
+                    )
+                    if (
+                        frozen_runtime_version
+                        and frozen_runtime_version
+                        != snapshot_runtime_version
+                    ):
+                        run["runtime_version_mismatch"] = {
+                            "frozen": frozen_runtime_version,
+                            "observed": snapshot_runtime_version,
+                            "event_type": event_type,
+                        }
+                    else:
+                        run["runtime_version"] = snapshot_runtime_version
+                snapshot_runtime_budget = runtime_snapshot.get(
+                    "runtime_budget"
+                )
+                if isinstance(snapshot_runtime_budget, dict):
+                    run["runtime_budget"] = copy.deepcopy(
+                        snapshot_runtime_budget
+                    )
                 if isinstance(runtime_snapshot.get("task_contract"), dict):
                     run["task_contract"] = copy.deepcopy(runtime_snapshot["task_contract"])
                 if isinstance(runtime_snapshot.get("satisfiability"), dict):
@@ -683,6 +739,10 @@ class RunProjectionStore:
     @staticmethod
     def _public(run: dict[str, Any], *, include_details: bool = True) -> dict[str, Any]:
         data = copy.deepcopy(run)
+        if data.get("runtime_version") not in {"legacy", "vnext"}:
+            # Keep the internal value unfrozen until an authoritative event
+            # arrives, while preserving the public legacy-compatible wire type.
+            data["runtime_version"] = "legacy"
         for internal_key in (
             "task_contract",
             "satisfiability",
@@ -781,6 +841,16 @@ class RunProjectionStore:
         snapshot = copy.deepcopy(persisted) if isinstance(persisted, dict) else {}
         snapshot.update({
             "run_id": str(run.get("run_id") or ""),
+            "runtime_version": str(
+                run.get("runtime_version")
+                or snapshot.get("runtime_version")
+                or "legacy"
+            ),
+            "runtime_budget": copy.deepcopy(
+                run.get("runtime_budget")
+                or snapshot.get("runtime_budget")
+                or {}
+            ),
             "graph_id": str(run.get("graph_id") or snapshot.get("graph_id") or ""),
             "graph_name": str(run.get("goal") or snapshot.get("graph_name") or ""),
             "status": str(run.get("status") or snapshot.get("status") or ""),
