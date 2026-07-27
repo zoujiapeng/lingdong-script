@@ -8,11 +8,13 @@ and initial frame must already be bound by their existing authorities.
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import threading
+import time
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -160,6 +162,8 @@ class AtomicDesktopAdapter:
         mutation_permits: MutationPermitAuthority,
         raw_device: RawDeviceExecutor,
         receipt_trace_sink: RawReceiptTraceSink | None = None,
+        post_input_settle_delay_s: float = 0.12,
+        wait: Callable[[float], Any] = time.sleep,
     ) -> None:
         if not isinstance(frame_authority, FrameAuthority):
             raise TypeError("frame_authority must be FrameAuthority")
@@ -200,6 +204,24 @@ class AtomicDesktopAdapter:
         ):
             raise TypeError("receipt_trace_sink must provide record()")
         if (
+            isinstance(post_input_settle_delay_s, bool)
+            or not isinstance(post_input_settle_delay_s, (int, float))
+        ):
+            raise TypeError(
+                "post_input_settle_delay_s must be a finite number"
+            )
+        settle_delay = float(post_input_settle_delay_s)
+        if (
+            not math.isfinite(settle_delay)
+            or settle_delay < 0.0
+            or settle_delay > 1.0
+        ):
+            raise ValueError(
+                "post_input_settle_delay_s must be in the range 0..1"
+            )
+        if not callable(wait):
+            raise TypeError("wait must be callable")
+        if (
             mutation_permits.mission_id == ""
             or mutation_permits.run_id == ""
         ):
@@ -212,6 +234,8 @@ class AtomicDesktopAdapter:
         self._permits = mutation_permits
         self._raw = raw_device
         self._trace = receipt_trace_sink
+        self._post_input_settle_delay_s = settle_delay
+        self._wait = wait
         self._effect = DeterministicActionEffectVerifier()
 
     @property
@@ -301,6 +325,18 @@ class AtomicDesktopAdapter:
         self._record_receipt(receipt, envelope, phase="raw_device")
         if receipt.input_completed is False:
             return self._rejected(envelope, action)
+        if (
+            receipt.input_completed is True
+            and self._post_input_settle_delay_s > 0.0
+        ):
+            try:
+                self._wait(self._post_input_settle_delay_s)
+            except Exception:
+                return self._unknown_transition(
+                    envelope,
+                    action,
+                    input_completed=True,
+                )
         if pinned.before_frame is None:
             return self._unknown_transition(
                 envelope,
