@@ -868,22 +868,20 @@ class MissionRuntime:
         plane = self._runtime_evidence
         if plane is None:
             return
-        canonical_proposal = envelope.proposal
+        canonical_envelope = ActorDecisionEnvelope.from_dict(
+            envelope.to_dict()
+        )
+        canonical_projection = BrokerProjection.from_dict(
+            broker_projection.to_dict()
+        )
+        canonical_proposal = canonical_envelope.proposal
         if type(canonical_proposal) is not DesktopActionProposal:
             raise TypeError("evidence requires the bound desktop proposal")
-        proposal_wire = canonical_proposal.model_dump(mode="json")
         tool_wire = self._catalog.get(canonical_proposal.action).to_dict()
         plane.record_actor_decision(
-            decision_id=envelope.decision_id,
-            mission_id=envelope.mission_id,
-            run_id=envelope.run_id,
-            obligation_id=envelope.obligation_id,
-            proposal_kind=canonical_proposal.kind,
-            action=canonical_proposal.action,
-            canonical_arguments=proposal_wire["args"],
+            actor_envelope=canonical_envelope.to_dict(),
             tool_schema=tool_wire["schema"],
-            broker_projection=broker_projection.to_dict(),
-            actor_envelope_sha256=self._actor_envelope_sha256(envelope),
+            broker_projection=canonical_projection.to_dict(),
         )
 
     def _record_controller_transition(
@@ -980,6 +978,15 @@ class MissionRuntime:
             transition.action_id == envelope.decision_id
             and transition.action == proposal.action
         )
+        if (
+            identity_matches
+            and transition.outcome is ControllerOutcome.REJECTED
+            and transition.input_completed is False
+            and self._stopped(stop_event)
+        ):
+            return self._cancel(
+                detail="run was canceled before input executed"
+            )
         if identity_matches and transition.outcome in {
             ControllerOutcome.REJECTED,
             ControllerOutcome.UNKNOWN,
@@ -989,8 +996,28 @@ class MissionRuntime:
                     envelope,
                     transition,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                if transition.input_completed is False:
+                    return self._result(
+                        RuntimeStatus.STATE_REJECTED,
+                        route=route,
+                        proposal_kind=proposal_kind,
+                        decision_id=envelope.decision_id,
+                        detail=(
+                            "Controller rejection evidence failed closed: "
+                            f"{exc}"
+                        ),
+                    )
+                return self._block_unknown(
+                    obligation_id=obligation_id,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=envelope.decision_id,
+                    detail=(
+                        "Controller outcome evidence failed closed after "
+                        f"admission: {exc}"
+                    ),
+                )
         if (
             transition.outcome is not ControllerOutcome.REJECTED
             and (
@@ -1057,14 +1084,11 @@ class MissionRuntime:
                 action_id=envelope.decision_id,
                 action=proposal.action,
             )
-            try:
-                self._record_controller_transition(
-                    envelope,
-                    transition,
-                    post_frame_identity=after.frame.identity.to_dict(),
-                )
-            except Exception:
-                pass
+            self._record_controller_transition(
+                envelope,
+                transition,
+                post_frame_identity=after.frame.identity.to_dict(),
+            )
             event_ids = self._accept(
                 "transition_recorded",
                 payload={

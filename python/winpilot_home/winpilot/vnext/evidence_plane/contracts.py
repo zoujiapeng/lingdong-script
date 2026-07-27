@@ -1,15 +1,17 @@
 """Canonical, reasoning-free records for the vNext Runtime evidence plane."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
 import math
+from pathlib import PurePosixPath
 import re
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
+from ..capability_names import canonical_capability
 from ..json_contract import (
     BoundedJSONError,
     MAX_SIGNED_64,
@@ -19,11 +21,12 @@ from ..json_contract import (
 from ..mission import ActionEffectSummary, EvidenceRef
 
 
-ACTOR_DECISION_RECORD_FORMAT = "actor-decision-record/0"
-ADMISSION_RECORD_FORMAT = "runtime-admission-record/0"
-ACTION_EXECUTION_BINDING_FORMAT = "action-execution-binding/0"
-FRAME_ARTIFACT_REFERENCE_FORMAT = "frame-artifact-reference/0"
-RUNTIME_EVIDENCE_REPORT_FORMAT = "runtime-evidence-report/0"
+ACTOR_DECISION_RECORD_FORMAT = "actor-decision-record/1"
+ADMISSION_RECORD_FORMAT = "runtime-admission-record/1"
+PHYSICAL_ATTEMPT_RECORD_FORMAT = "physical-attempt-record/1"
+ACTION_EXECUTION_BINDING_FORMAT = "action-execution-binding/1"
+FRAME_ARTIFACT_REFERENCE_FORMAT = "frame-artifact-reference/1"
+RUNTIME_EVIDENCE_REPORT_FORMAT = "runtime-evidence-report/1"
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _ACTION = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -31,6 +34,10 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _DESKTOP_ACTIONS = frozenset(
     {"click", "double_click", "scroll", "type_text", "hotkey"}
 )
+_RUNTIME_ACTOR_TOOLS = _DESKTOP_ACTIONS | {
+    "claim_obligation_done",
+    "blocked",
+}
 _RAW_ACTIONS = _DESKTOP_ACTIONS - {"double_click"}
 _RAW_FIELDS = (
     "action",
@@ -52,6 +59,93 @@ _TRANSITION_FIELDS = (
     "action_effect_evidence",
 )
 _MAX_URI_LENGTH = 4096
+_ACTOR_ENVELOPE_FIELDS = (
+    "format",
+    "decision_id",
+    "mission_id",
+    "run_id",
+    "mission_revision",
+    "mission_projection_sha256",
+    "accepted_mission_event_ids",
+    "obligation_id",
+    "turn_index",
+    "catalog_fingerprint",
+    "profile_id",
+    "state_fingerprint",
+    "frame_id",
+    "frame_epoch",
+    "frame_hwnd",
+    "frame_scope",
+    "frame_region",
+    "submitted_image_size",
+    "frame_image_sha256",
+    "target_binding_id",
+    "pointer_disposition",
+    "pointer_lease_id",
+    "broker_projection_id",
+    "capability_grant_ids",
+    "allowed_evidence_scope",
+    "proposal",
+)
+_DESKTOP_PROPOSAL_FIELDS = (
+    "format",
+    "kind",
+    "action",
+    "args",
+    "local_intent",
+)
+_BROKER_PROJECTION_FIELDS = (
+    "format",
+    "projection_id",
+    "mission_id",
+    "run_id",
+    "catalog_fingerprint",
+    "profile_id",
+    "state_fingerprint",
+    "mission_revision",
+    "obligation_id",
+    "turn_index",
+    "execution_route",
+    "executor_id",
+    "target_binding_id",
+    "frame_id",
+    "frame_scope",
+    "pointer_lease_id",
+    "tool_names",
+    "active_grants",
+    "missing_capabilities",
+    "projection_reasons",
+)
+_CAPABILITY_GRANT_FIELDS = (
+    "format",
+    "grant_id",
+    "mission_id",
+    "run_id",
+    "capability",
+    "obligation_id",
+    "mission_revision",
+    "issued_turn",
+    "expires_after_turns",
+    "policy_reason",
+)
+_NON_EXECUTION_RECORD_FIELDS = frozenset(
+    {
+        "prompt",
+        "prompts",
+        "system_prompt",
+        "user_prompt",
+        "reasoning",
+        "chain_of_thought",
+        "cot",
+        "model_response",
+        "raw_model_response",
+        "provider_response",
+        "raw_provider_response",
+        "provider_internal",
+        "provider_metadata",
+        "hidden_fields",
+    }
+)
 
 
 class RuntimeEvidenceContractError(ValueError):
@@ -105,6 +199,14 @@ def _positive_integer(value: Any, name: str) -> int:
     return value
 
 
+def _nonnegative_integer(value: Any, name: str) -> int:
+    if type(value) is not int or not 0 <= value <= MAX_SIGNED_64:
+        raise RuntimeEvidenceContractError(
+            f"{name} must be a non-negative signed-64 integer"
+        )
+    return value
+
+
 def _optional_boolean(value: Any, name: str) -> bool | None:
     if value is not None and type(value) is not bool:
         raise RuntimeEvidenceContractError(f"{name} must be boolean or null")
@@ -150,6 +252,24 @@ def _thaw(value: Any) -> Any:
     if type(value) is tuple:
         return [_thaw(item) for item in value]
     return value
+
+
+def _reject_non_execution_fields(value: Any, name: str) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if type(key) is not str:
+                raise RuntimeEvidenceContractError(
+                    f"{name} contains a non-string field"
+                )
+            normalized = key.strip().lower().replace("-", "_")
+            if normalized in _NON_EXECUTION_RECORD_FIELDS:
+                raise RuntimeEvidenceContractError(
+                    f"{name} contains forbidden non-execution field {key!r}"
+                )
+            _reject_non_execution_fields(item, f"{name}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_non_execution_fields(item, f"{name}[{index}]")
 
 
 def canonical_sha256(value: Any) -> str:
@@ -232,6 +352,406 @@ def _validate_target_identity(value: Any, name: str) -> Mapping[str, Any]:
         )
     _timestamp_ns(item["epoch"], f"{name}.epoch")
     return _frozen_object(item, name)
+
+
+def _identity_array(value: Any, name: str, *, ordered: bool = False) -> list[str]:
+    if type(value) is not list:
+        raise RuntimeEvidenceContractError(f"{name} must be an array")
+    result = [_identity(item, f"{name}[]") for item in value]
+    if len(result) != len(set(result)):
+        raise RuntimeEvidenceContractError(f"{name} must not contain duplicates")
+    if not ordered and result != sorted(result):
+        raise RuntimeEvidenceContractError(f"{name} must be sorted")
+    return result
+
+
+def _validate_submitted_arguments(
+    action: str,
+    value: Any,
+    name: str = "canonical_arguments",
+) -> Mapping[str, Any]:
+    fields = {
+        "click": ("image_x", "image_y"),
+        "double_click": ("image_x", "image_y"),
+        "scroll": ("image_x", "image_y", "amount"),
+        "type_text": ("text",),
+        "hotkey": ("keys",),
+    }[action]
+    item = _strict_mapping(value, fields, name)
+    if action in {"click", "double_click", "scroll"}:
+        for coordinate in ("image_x", "image_y"):
+            number = item[coordinate]
+            if (
+                type(number) not in {int, float}
+                or not math.isfinite(float(number))
+                or float(number) < 0
+            ):
+                raise RuntimeEvidenceContractError(
+                    f"{name}.{coordinate} must be a finite submitted-image coordinate"
+                )
+    if action == "scroll":
+        amount = item["amount"]
+        if type(amount) is not int or amount == 0 or abs(amount) > 1200:
+            raise RuntimeEvidenceContractError(
+                f"{name}.amount must be a non-zero integer in -1200..1200"
+            )
+    elif action == "type_text":
+        text = item["text"]
+        if type(text) is not str or not 1 <= len(text) <= 4096:
+            raise RuntimeEvidenceContractError(
+                f"{name}.text must be a bounded non-empty string"
+            )
+    elif action == "hotkey":
+        keys = item["keys"]
+        if (
+            type(keys) is not list
+            or not 1 <= len(keys) <= 5
+            or any(type(key) is not str or not key for key in keys)
+            or len(keys) != len(set(keys))
+        ):
+            raise RuntimeEvidenceContractError(
+                f"{name}.keys must be one canonical hotkey chord"
+            )
+    return _frozen_object(item, name)
+
+
+def _validate_actor_envelope(
+    value: Any,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+    envelope = _strict_mapping(
+        value,
+        _ACTOR_ENVELOPE_FIELDS,
+        "actor_envelope",
+    )
+    if envelope["format"] != "actor-envelope/1":
+        raise RuntimeEvidenceContractError("actor_envelope format is not canonical")
+    for name in (
+        "decision_id",
+        "mission_id",
+        "run_id",
+        "obligation_id",
+        "profile_id",
+        "target_binding_id",
+        "broker_projection_id",
+    ):
+        _identity(envelope[name], f"actor_envelope.{name}")
+    _nonnegative_integer(
+        envelope["mission_revision"],
+        "actor_envelope.mission_revision",
+    )
+    _nonnegative_integer(envelope["turn_index"], "actor_envelope.turn_index")
+    for name in (
+        "mission_projection_sha256",
+        "catalog_fingerprint",
+        "state_fingerprint",
+        "frame_image_sha256",
+    ):
+        _sha256(envelope[name], f"actor_envelope.{name}")
+    _identity_array(
+        envelope["accepted_mission_event_ids"],
+        "actor_envelope.accepted_mission_event_ids",
+        ordered=True,
+    )
+    grant_ids = _identity_array(
+        envelope["capability_grant_ids"],
+        "actor_envelope.capability_grant_ids",
+    )
+    _identity_array(
+        envelope["allowed_evidence_scope"],
+        "actor_envelope.allowed_evidence_scope",
+    )
+    if (
+        envelope["frame_scope"] != "target_window"
+        or envelope["pointer_disposition"] != "released"
+        or envelope["pointer_lease_id"] is not None
+    ):
+        raise RuntimeEvidenceContractError(
+            "actor_envelope changed the bounded live-frame contract"
+        )
+    _validate_frame_identity(
+        {
+            "frame_id": envelope["frame_id"],
+            "epoch": envelope["frame_epoch"],
+            "hwnd": envelope["frame_hwnd"],
+            "region": envelope["frame_region"],
+            "scope": envelope["frame_scope"],
+            "submitted_size": envelope["submitted_image_size"],
+            "image_sha256": envelope["frame_image_sha256"],
+            "media_type": "image/jpeg",
+        },
+        "actor_envelope.frame_identity",
+    )
+    proposal = _strict_mapping(
+        envelope["proposal"],
+        _DESKTOP_PROPOSAL_FIELDS,
+        "actor_envelope.proposal",
+    )
+    if (
+        proposal["format"] != "actor-proposal/0"
+        or proposal["kind"] != "desktop_action"
+        or type(proposal["local_intent"]) is not str
+        or not proposal["local_intent"]
+    ):
+        raise RuntimeEvidenceContractError(
+            "actor_envelope proposal is not one bounded desktop action"
+        )
+    action = _action(proposal["action"], "actor_envelope.proposal.action")
+    if action not in _DESKTOP_ACTIONS:
+        raise RuntimeEvidenceContractError("actor_envelope action is not admitted")
+    arguments = _validate_submitted_arguments(
+        action,
+        proposal["args"],
+        "actor_envelope.proposal.args",
+    )
+    return (
+        _frozen_object(envelope, "actor_envelope"),
+        _frozen_object(proposal, "actor_envelope.proposal"),
+        arguments,
+    )
+
+
+def _validate_capability_grant(
+    value: Any,
+    *,
+    envelope: Mapping[str, Any],
+) -> dict[str, Any]:
+    item = _strict_mapping(
+        value,
+        _CAPABILITY_GRANT_FIELDS,
+        "broker_projection.active_grants[]",
+    )
+    if item["format"] != "capability-grant/0":
+        raise RuntimeEvidenceContractError(
+            "active grant format is not canonical"
+        )
+    for name in (
+        "grant_id",
+        "mission_id",
+        "run_id",
+        "obligation_id",
+    ):
+        _identity(item[name], f"active_grant.{name}")
+    try:
+        capability = canonical_capability(item["capability"])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeEvidenceContractError(
+            "active grant capability is not canonical"
+        ) from exc
+    if capability != item["capability"]:
+        raise RuntimeEvidenceContractError(
+            "active grant capability is not canonical"
+        )
+    for name in ("mission_revision", "issued_turn"):
+        _nonnegative_integer(item[name], f"active_grant.{name}")
+    expires = item["expires_after_turns"]
+    if type(expires) is not int or not 1 <= expires <= MAX_SIGNED_64:
+        raise RuntimeEvidenceContractError(
+            "active_grant.expires_after_turns must be positive"
+        )
+    reason = item["policy_reason"]
+    if type(reason) is not str or not reason.strip():
+        raise RuntimeEvidenceContractError(
+            "active_grant.policy_reason must be non-empty"
+        )
+    material = {
+        "format": "capability-grant/0",
+        "mission_id": item["mission_id"],
+        "run_id": item["run_id"],
+        "capability": capability,
+        "obligation_id": item["obligation_id"],
+        "mission_revision": item["mission_revision"],
+        "issued_turn": item["issued_turn"],
+        "expires_after_turns": expires,
+        "policy_reason": reason,
+    }
+    expected_id = "grant-" + hashlib.sha256(
+        json.dumps(
+            material,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    if item["grant_id"] != expected_id:
+        raise RuntimeEvidenceContractError(
+            "active grant identity changed from its canonical scope"
+        )
+    if (
+        item["mission_id"] != envelope["mission_id"]
+        or item["run_id"] != envelope["run_id"]
+        or item["obligation_id"] != envelope["obligation_id"]
+        or item["mission_revision"] != envelope["mission_revision"]
+        or not (
+            item["issued_turn"]
+            <= envelope["turn_index"]
+            < item["issued_turn"] + expires
+        )
+    ):
+        raise RuntimeEvidenceContractError(
+            "active grant is outside the Actor decision lifetime"
+        )
+    return item
+
+
+def _validate_broker_projection(
+    value: Any,
+    *,
+    envelope: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    projection = _strict_mapping(
+        value,
+        _BROKER_PROJECTION_FIELDS,
+        "broker_projection",
+    )
+    if projection["format"] != "broker-projection/1":
+        raise RuntimeEvidenceContractError(
+            "broker_projection format is not canonical"
+        )
+    for name in (
+        "projection_id",
+        "mission_id",
+        "run_id",
+        "profile_id",
+        "obligation_id",
+    ):
+        _identity(projection[name], f"broker_projection.{name}")
+    for name in ("catalog_fingerprint", "state_fingerprint"):
+        _sha256(projection[name], f"broker_projection.{name}")
+    _nonnegative_integer(
+        projection["mission_revision"],
+        "broker_projection.mission_revision",
+    )
+    _nonnegative_integer(
+        projection["turn_index"],
+        "broker_projection.turn_index",
+    )
+    tool_names = projection["tool_names"]
+    if (
+        type(tool_names) is not list
+        or not tool_names
+        or any(
+            _action(item, "broker_projection.tool_names[]")
+            not in _RUNTIME_ACTOR_TOOLS
+            for item in tool_names
+        )
+        or len(tool_names) != len(set(tool_names))
+    ):
+        raise RuntimeEvidenceContractError(
+            "broker_projection.tool_names is not the bounded Actor surface"
+        )
+    active_grants = projection["active_grants"]
+    if type(active_grants) is not list:
+        raise RuntimeEvidenceContractError(
+            "broker_projection.active_grants must be an array"
+        )
+    active_grants = [
+        _validate_capability_grant(item, envelope=envelope)
+        for item in active_grants
+    ]
+    grant_ids = [item["grant_id"] for item in active_grants]
+    if grant_ids != sorted(set(grant_ids)):
+        raise RuntimeEvidenceContractError(
+            "broker_projection.active_grants must be unique and sorted"
+        )
+    projection["active_grants"] = active_grants
+    missing_capabilities = projection["missing_capabilities"]
+    if type(missing_capabilities) is not list:
+        raise RuntimeEvidenceContractError(
+            "broker_projection.missing_capabilities must be an array"
+        )
+    try:
+        canonical_missing = [
+            canonical_capability(item) for item in missing_capabilities
+        ]
+    except (TypeError, ValueError) as exc:
+        raise RuntimeEvidenceContractError(
+            "broker_projection.missing_capabilities is not canonical"
+        ) from exc
+    if canonical_missing != sorted(set(canonical_missing)):
+        raise RuntimeEvidenceContractError(
+            "broker_projection.missing_capabilities must be unique and sorted"
+        )
+    reasons = projection["projection_reasons"]
+    if (
+        type(reasons) is not list
+        or any(type(item) is not str or not item.strip() for item in reasons)
+        or len(reasons) != len(set(reasons))
+    ):
+        raise RuntimeEvidenceContractError(
+            "broker_projection.projection_reasons is not canonical"
+        )
+    if (
+        projection["execution_route"] != "visual_actor"
+        or projection["executor_id"] is not None
+    ):
+        raise RuntimeEvidenceContractError(
+            "broker_projection is not the Visual Actor route"
+        )
+    for name in (
+        "target_binding_id",
+        "frame_scope",
+    ):
+        if projection[name] is None:
+            raise RuntimeEvidenceContractError(
+                f"broker_projection.{name} must be present"
+            )
+    expected = {
+        "projection_id": envelope["broker_projection_id"],
+        "mission_id": envelope["mission_id"],
+        "run_id": envelope["run_id"],
+        "catalog_fingerprint": envelope["catalog_fingerprint"],
+        "profile_id": envelope["profile_id"],
+        "state_fingerprint": envelope["state_fingerprint"],
+        "mission_revision": envelope["mission_revision"],
+        "obligation_id": envelope["obligation_id"],
+        "turn_index": envelope["turn_index"],
+        "target_binding_id": envelope["target_binding_id"],
+        "frame_id": envelope["frame_id"],
+        "frame_scope": envelope["frame_scope"],
+        "pointer_lease_id": envelope["pointer_lease_id"],
+    }
+    if any(projection[name] != expected_value for name, expected_value in expected.items()):
+        raise RuntimeEvidenceContractError(
+            "broker_projection changed Actor envelope identity"
+        )
+    if tuple(grant_ids) != tuple(envelope["capability_grant_ids"]):
+        raise RuntimeEvidenceContractError(
+            "broker_projection active grants changed Actor envelope scope"
+        )
+    projection_material = {
+        "format": "broker-projection/1",
+        "mission_id": projection["mission_id"],
+        "run_id": projection["run_id"],
+        "catalog_fingerprint": projection["catalog_fingerprint"],
+        "profile_id": projection["profile_id"],
+        "state_fingerprint": projection["state_fingerprint"],
+        "mission_revision": projection["mission_revision"],
+        "obligation_id": projection["obligation_id"],
+        "turn_index": projection["turn_index"],
+        "execution_route": projection["execution_route"],
+        "executor_id": projection["executor_id"],
+        "target_binding_id": projection["target_binding_id"],
+        "frame_id": projection["frame_id"],
+        "frame_scope": projection["frame_scope"],
+        "pointer_lease_id": projection["pointer_lease_id"],
+        "tool_names": tool_names,
+        "active_grant_ids": grant_ids,
+        "missing_capabilities": canonical_missing,
+        "projection_reasons": reasons,
+    }
+    expected_projection_id = "projection-" + hashlib.sha256(
+        json.dumps(
+            projection_material,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    if projection["projection_id"] != expected_projection_id:
+        raise RuntimeEvidenceContractError(
+            "broker_projection id does not identify its canonical content"
+        )
+    return _frozen_object(projection, "broker_projection")
 
 
 def _validate_backend_result(value: Any, expected: bool | None) -> None:
@@ -404,43 +924,127 @@ def canonical_controller_transition(value: Any) -> Mapping[str, Any]:
 class ActorDecisionRecord:
     decision_id: str
     mission_id: str
+    run_id: str
+    mission_revision: int
     obligation_id: str
+    turn_index: int
     proposal_kind: str
     action: str
+    canonical_arguments: Mapping[str, Any] = field(repr=False)
     canonical_arguments_sha256: str
-    tool_schema_sha256: str
+    actor_envelope: Mapping[str, Any] = field(repr=False)
+    actor_envelope_sha256: str
+    broker_projection: Mapping[str, Any] = field(repr=False)
     broker_projection_sha256: str
+    tool_schema: Mapping[str, Any] = field(repr=False)
+    tool_schema_sha256: str
     format: str = ACTOR_DECISION_RECORD_FORMAT
 
     def __post_init__(self) -> None:
         if self.format != ACTOR_DECISION_RECORD_FORMAT:
             raise RuntimeEvidenceContractError("unsupported ActorDecisionRecord format")
-        for name in ("decision_id", "mission_id", "obligation_id"):
+        for name in ("decision_id", "mission_id", "run_id", "obligation_id"):
             object.__setattr__(self, name, _identity(getattr(self, name), name))
+        object.__setattr__(
+            self,
+            "mission_revision",
+            _nonnegative_integer(self.mission_revision, "mission_revision"),
+        )
+        object.__setattr__(
+            self,
+            "turn_index",
+            _nonnegative_integer(self.turn_index, "turn_index"),
+        )
         if self.proposal_kind != "desktop_action":
             raise RuntimeEvidenceContractError(
                 "evidence plane accepts only desktop_action decisions"
             )
-        if _action(self.action) not in _DESKTOP_ACTIONS:
+        action = _action(self.action)
+        if action not in _DESKTOP_ACTIONS:
             raise RuntimeEvidenceContractError("decision action is not admitted")
+        arguments = _validate_submitted_arguments(
+            action,
+            _thaw(self.canonical_arguments),
+        )
+        envelope, proposal, envelope_arguments = _validate_actor_envelope(
+            _thaw(self.actor_envelope)
+        )
+        projection = _validate_broker_projection(
+            _thaw(self.broker_projection),
+            envelope=envelope,
+        )
+        schema = _frozen_object(_thaw(self.tool_schema), "tool_schema")
+        _reject_non_execution_fields(envelope, "actor_envelope")
+        _reject_non_execution_fields(projection, "broker_projection")
+        _reject_non_execution_fields(schema, "tool_schema")
+        if schema.get("type") != "object":
+            raise RuntimeEvidenceContractError(
+                "tool_schema must be an object JSON schema"
+            )
+        expected = {
+            "decision_id": envelope["decision_id"],
+            "mission_id": envelope["mission_id"],
+            "run_id": envelope["run_id"],
+            "mission_revision": envelope["mission_revision"],
+            "obligation_id": envelope["obligation_id"],
+            "turn_index": envelope["turn_index"],
+            "proposal_kind": proposal["kind"],
+            "action": proposal["action"],
+        }
+        if any(getattr(self, name) != value for name, value in expected.items()):
+            raise RuntimeEvidenceContractError(
+                "ActorDecisionRecord identity changed from actor_envelope"
+            )
+        if arguments != envelope_arguments:
+            raise RuntimeEvidenceContractError(
+                "ActorDecisionRecord arguments changed from actor_envelope"
+            )
+        hashes = {
+            "canonical_arguments_sha256": canonical_sha256(_thaw(arguments)),
+            "actor_envelope_sha256": canonical_sha256(_thaw(envelope)),
+            "broker_projection_sha256": canonical_sha256(_thaw(projection)),
+            "tool_schema_sha256": canonical_sha256(_thaw(schema)),
+        }
         for name in (
             "canonical_arguments_sha256",
-            "tool_schema_sha256",
+            "actor_envelope_sha256",
             "broker_projection_sha256",
+            "tool_schema_sha256",
         ):
-            object.__setattr__(self, name, _sha256(getattr(self, name), name))
+            digest = _sha256(getattr(self, name), name)
+            if digest != hashes[name]:
+                raise RuntimeEvidenceContractError(
+                    f"{name} does not match its exact canonical payload"
+                )
+        if action not in projection["tool_names"]:
+            raise RuntimeEvidenceContractError(
+                "selected action is absent from BrokerProjection"
+            )
+        object.__setattr__(self, "action", action)
+        object.__setattr__(self, "canonical_arguments", arguments)
+        object.__setattr__(self, "actor_envelope", envelope)
+        object.__setattr__(self, "broker_projection", projection)
+        object.__setattr__(self, "tool_schema", schema)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "format": self.format,
             "decision_id": self.decision_id,
             "mission_id": self.mission_id,
+            "run_id": self.run_id,
+            "mission_revision": self.mission_revision,
             "obligation_id": self.obligation_id,
+            "turn_index": self.turn_index,
             "proposal_kind": self.proposal_kind,
             "action": self.action,
+            "canonical_arguments": _thaw(self.canonical_arguments),
             "canonical_arguments_sha256": self.canonical_arguments_sha256,
-            "tool_schema_sha256": self.tool_schema_sha256,
+            "actor_envelope": _thaw(self.actor_envelope),
+            "actor_envelope_sha256": self.actor_envelope_sha256,
+            "broker_projection": _thaw(self.broker_projection),
             "broker_projection_sha256": self.broker_projection_sha256,
+            "tool_schema": _thaw(self.tool_schema),
+            "tool_schema_sha256": self.tool_schema_sha256,
         }
 
     @classmethod
@@ -451,6 +1055,8 @@ class ActorDecisionRecord:
 @dataclass(frozen=True, slots=True)
 class AdmissionRecord:
     decision_id: str
+    actor_decision_record_sha256: str
+    actor_envelope_sha256: str
     frame_identity: Mapping[str, Any]
     target_identity: Mapping[str, Any]
     mutation_permit_id: str
@@ -463,6 +1069,19 @@ class AdmissionRecord:
             raise RuntimeEvidenceContractError("unsupported AdmissionRecord format")
         object.__setattr__(
             self, "decision_id", _identity(self.decision_id, "decision_id")
+        )
+        object.__setattr__(
+            self,
+            "actor_decision_record_sha256",
+            _sha256(
+                self.actor_decision_record_sha256,
+                "actor_decision_record_sha256",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "actor_envelope_sha256",
+            _sha256(self.actor_envelope_sha256, "actor_envelope_sha256"),
         )
         frame = _validate_frame_identity(_thaw(self.frame_identity), "frame_identity")
         target = _validate_target_identity(
@@ -491,6 +1110,10 @@ class AdmissionRecord:
         return {
             "format": self.format,
             "decision_id": self.decision_id,
+            "actor_decision_record_sha256": (
+                self.actor_decision_record_sha256
+            ),
+            "actor_envelope_sha256": self.actor_envelope_sha256,
             "frame_identity": _thaw(self.frame_identity),
             "target_identity": _thaw(self.target_identity),
             "mutation_permit_id": self.mutation_permit_id,
@@ -500,6 +1123,249 @@ class AdmissionRecord:
 
     @classmethod
     def from_dict(cls, raw: Any) -> "AdmissionRecord":
+        return cls(**_strict_mapping(raw, cls.__dataclass_fields__, cls.__name__))
+
+
+def _validate_physical_arguments(
+    action: str,
+    value: Any,
+) -> Mapping[str, Any]:
+    fields = {
+        "click": ("kind", "x", "y", "button", "click_count"),
+        "double_click": ("kind", "x", "y", "button", "click_count"),
+        "scroll": (
+            "kind",
+            "x",
+            "y",
+            "signed_wheel_amount",
+            "event_wheel_delta",
+        ),
+        "type_text": ("kind", "text"),
+        "hotkey": ("kind", "modifiers", "key"),
+    }[action]
+    item = _strict_mapping(value, fields, "physical_arguments")
+    expected_kind = {
+        "click": "pointer_click",
+        "double_click": "pointer_click",
+        "scroll": "wheel",
+        "type_text": "type_text",
+        "hotkey": "hotkey",
+    }[action]
+    if item["kind"] != expected_kind:
+        raise RuntimeEvidenceContractError(
+            "physical_arguments kind changed from action"
+        )
+    if action in {"click", "double_click", "scroll"}:
+        for name in ("x", "y"):
+            if type(item[name]) is not int:
+                raise RuntimeEvidenceContractError(
+                    f"physical_arguments.{name} must be an integer"
+                )
+    if action in {"click", "double_click"}:
+        expected_count = 2 if action == "double_click" else 1
+        if (
+            item["button"] != "left"
+            or type(item["click_count"]) is not int
+            or item["click_count"] != expected_count
+        ):
+            raise RuntimeEvidenceContractError(
+                "physical click payload is not the admitted left click count"
+            )
+    elif action == "scroll":
+        amount = item["signed_wheel_amount"]
+        delta = item["event_wheel_delta"]
+        if (
+            type(amount) is not int
+            or amount == 0
+            or abs(amount) > 1200
+            or type(delta) is not int
+            or delta != amount * 120
+        ):
+            raise RuntimeEvidenceContractError(
+                "physical wheel payload is not canonical"
+            )
+    elif action == "type_text":
+        text = item["text"]
+        if type(text) is not str or not 1 <= len(text) <= 4096:
+            raise RuntimeEvidenceContractError(
+                "physical type_text payload is not canonical"
+            )
+    else:
+        modifiers = item["modifiers"]
+        key = item["key"]
+        if (
+            type(modifiers) is not list
+            or any(type(value) is not str for value in modifiers)
+            or len(modifiers) != len(set(modifiers))
+            or type(key) is not str
+            or not key
+            or key in modifiers
+        ):
+            raise RuntimeEvidenceContractError(
+                "physical hotkey payload is not canonical"
+            )
+    return _frozen_object(item, "physical_arguments")
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalAttemptRecord:
+    mission_id: str
+    run_id: str
+    obligation_id: str
+    decision_id: str
+    action_id: str
+    action: str
+    attempt_index: int
+    submitted_arguments: Mapping[str, Any] = field(repr=False)
+    physical_arguments: Mapping[str, Any] = field(repr=False)
+    raw_device_route: str
+    mechanism: str
+    target_identity: Mapping[str, Any]
+    frame_identity: Mapping[str, Any]
+    mutation_permit_id: str
+    actor_decision_record_sha256: str
+    admission_record_sha256: str
+    timestamp_ns: int
+    reservation_sha256: str
+    format: str = PHYSICAL_ATTEMPT_RECORD_FORMAT
+
+    def __post_init__(self) -> None:
+        if self.format != PHYSICAL_ATTEMPT_RECORD_FORMAT:
+            raise RuntimeEvidenceContractError(
+                "unsupported PhysicalAttemptRecord format"
+            )
+        for name in (
+            "mission_id",
+            "run_id",
+            "obligation_id",
+            "decision_id",
+            "action_id",
+            "mutation_permit_id",
+        ):
+            object.__setattr__(self, name, _identity(getattr(self, name), name))
+        if self.action_id != self.decision_id:
+            raise RuntimeEvidenceContractError(
+                "physical action_id must equal decision_id"
+            )
+        action = _action(self.action)
+        if action not in _DESKTOP_ACTIONS:
+            raise RuntimeEvidenceContractError("physical action is not admitted")
+        if type(self.attempt_index) is not int or self.attempt_index != 1:
+            raise RuntimeEvidenceContractError("attempt_index must be exactly one")
+        submitted = _validate_submitted_arguments(
+            action,
+            _thaw(self.submitted_arguments),
+            "submitted_arguments",
+        )
+        physical = _validate_physical_arguments(
+            action,
+            _thaw(self.physical_arguments),
+        )
+        if action == "type_text" and physical["text"] != submitted["text"]:
+            raise RuntimeEvidenceContractError(
+                "physical type_text changed submitted text"
+            )
+        if action == "hotkey" and (
+            *physical["modifiers"],
+            physical["key"],
+        ) != tuple(submitted["keys"]):
+            raise RuntimeEvidenceContractError(
+                "physical hotkey changed submitted chord"
+            )
+        if action == "scroll" and (
+            physical["signed_wheel_amount"] != submitted["amount"]
+        ):
+            raise RuntimeEvidenceContractError(
+                "physical wheel amount changed submitted amount"
+            )
+        route = self.raw_device_route
+        expected_route = {
+            "click": "raw_device.admitted_physical_click/0",
+            "double_click": "raw_device.admitted_physical_click/0",
+            "scroll": "raw_device.admitted_physical_scroll/0",
+            "type_text": "raw_device.admitted_physical_type_text/0",
+            "hotkey": "raw_device.admitted_physical_hotkey/0",
+        }[action]
+        if route != expected_route or self.mechanism != "physical_sendinput":
+            raise RuntimeEvidenceContractError(
+                "physical attempt route/mechanism is not canonical"
+            )
+        target = _validate_target_identity(
+            _thaw(self.target_identity),
+            "target_identity",
+        )
+        frame = _validate_frame_identity(
+            _thaw(self.frame_identity),
+            "frame_identity",
+        )
+        if frame["hwnd"] != target["hwnd"] or frame["epoch"] != target["epoch"]:
+            raise RuntimeEvidenceContractError(
+                "physical attempt frame and target identities disagree"
+            )
+        for name in (
+            "actor_decision_record_sha256",
+            "admission_record_sha256",
+        ):
+            object.__setattr__(self, name, _sha256(getattr(self, name), name))
+        object.__setattr__(
+            self,
+            "timestamp_ns",
+            _timestamp_ns(self.timestamp_ns, "timestamp_ns"),
+        )
+        object.__setattr__(self, "action", action)
+        object.__setattr__(self, "submitted_arguments", submitted)
+        object.__setattr__(self, "physical_arguments", physical)
+        object.__setattr__(self, "target_identity", target)
+        object.__setattr__(self, "frame_identity", frame)
+        claimed = _sha256(self.reservation_sha256, "reservation_sha256")
+        if claimed != canonical_sha256(self.reservation_material()):
+            raise RuntimeEvidenceContractError(
+                "reservation_sha256 does not bind the physical attempt"
+            )
+
+    def reservation_material(self) -> dict[str, Any]:
+        return {
+            "format": self.format,
+            "mission_id": self.mission_id,
+            "run_id": self.run_id,
+            "obligation_id": self.obligation_id,
+            "decision_id": self.decision_id,
+            "action_id": self.action_id,
+            "action": self.action,
+            "attempt_index": self.attempt_index,
+            "submitted_arguments": _thaw(self.submitted_arguments),
+            "physical_arguments": _thaw(self.physical_arguments),
+            "raw_device_route": self.raw_device_route,
+            "mechanism": self.mechanism,
+            "target_identity": _thaw(self.target_identity),
+            "frame_identity": _thaw(self.frame_identity),
+            "mutation_permit_id": self.mutation_permit_id,
+            "actor_decision_record_sha256": (
+                self.actor_decision_record_sha256
+            ),
+            "admission_record_sha256": self.admission_record_sha256,
+            "timestamp_ns": self.timestamp_ns,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.reservation_material(),
+            "reservation_sha256": self.reservation_sha256,
+        }
+
+    @classmethod
+    def create(cls, **values: Any) -> "PhysicalAttemptRecord":
+        material = {
+            "format": PHYSICAL_ATTEMPT_RECORD_FORMAT,
+            **values,
+        }
+        return cls(
+            **material,
+            reservation_sha256=canonical_sha256(material),
+        )
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> "PhysicalAttemptRecord":
         return cls(**_strict_mapping(raw, cls.__dataclass_fields__, cls.__name__))
 
 
@@ -515,6 +1381,7 @@ class ActionExecutionBinding:
     controller_transition_sha256: str
     physical_attempt_count: int
     attempt_reservation_sha256: str | None
+    physical_attempt_record_sha256: str | None
     before_frame_identity: Mapping[str, Any]
     after_frame_identity: Mapping[str, Any] | None = None
     before_artifact_reference_sha256: str | None = None
@@ -581,6 +1448,21 @@ class ActionExecutionBinding:
                     "attempt_reservation_sha256",
                 ),
             )
+        if (self.physical_attempt_count == 1) != (
+            self.physical_attempt_record_sha256 is not None
+        ):
+            raise RuntimeEvidenceContractError(
+                "physical attempt and attempt-record hash must be paired"
+            )
+        if self.physical_attempt_record_sha256 is not None:
+            object.__setattr__(
+                self,
+                "physical_attempt_record_sha256",
+                _sha256(
+                    self.physical_attempt_record_sha256,
+                    "physical_attempt_record_sha256",
+                ),
+            )
         before = _validate_frame_identity(
             _thaw(self.before_frame_identity), "before_frame_identity"
         )
@@ -593,8 +1475,8 @@ class ActionExecutionBinding:
         )
         post_id = transition["post_frame_id"]
         if after is not None and (
-            after["frame_id"] != post_id
-            or after["frame_id"] != before["frame_id"] + 1
+            after["frame_id"] != before["frame_id"] + 1
+            or (post_id is not None and after["frame_id"] != post_id)
             or any(
                 after[field] != before[field]
                 for field in (
@@ -638,10 +1520,6 @@ class ActionExecutionBinding:
                 raise RuntimeEvidenceContractError(
                     "action effect changed bound frame identity"
                 )
-        if post_id is None and after is not None:
-            raise RuntimeEvidenceContractError(
-                "after frame identity requires transition post_frame_id"
-            )
         object.__setattr__(self, "action_id", action_id)
         object.__setattr__(self, "decision_id", decision_id)
         object.__setattr__(self, "action", action)
@@ -689,6 +1567,9 @@ class ActionExecutionBinding:
             "attempt_reservation_sha256": (
                 self.attempt_reservation_sha256
             ),
+            "physical_attempt_record_sha256": (
+                self.physical_attempt_record_sha256
+            ),
             "before_frame_identity": _thaw(self.before_frame_identity),
             "after_frame_identity": _thaw(self.after_frame_identity),
             "before_artifact_reference_sha256": (
@@ -706,9 +1587,15 @@ class ActionExecutionBinding:
 
 @dataclass(frozen=True, slots=True)
 class FrameArtifactReference:
+    mission_id: str
+    run_id: str
+    decision_id: str
+    action_id: str
     frame_id: int
+    frame_identity: Mapping[str, Any]
     artifact_uri: str
-    sha256: str
+    raw_jpeg_sha256: str
+    runtime_frame_image_sha256: str
     capture_timestamp_ns: int
     role: FrameArtifactRole | str
     format: str = FRAME_ARTIFACT_REFERENCE_FORMAT
@@ -718,20 +1605,64 @@ class FrameArtifactReference:
             raise RuntimeEvidenceContractError(
                 "unsupported FrameArtifactReference format"
             )
+        for name in (
+            "mission_id",
+            "run_id",
+            "decision_id",
+            "action_id",
+        ):
+            object.__setattr__(self, name, _identity(getattr(self, name), name))
+        if self.action_id != self.decision_id:
+            raise RuntimeEvidenceContractError(
+                "frame artifact action_id must equal decision_id"
+            )
         object.__setattr__(
             self, "frame_id", _positive_integer(self.frame_id, "frame_id")
         )
+        identity = _validate_frame_identity(
+            _thaw(self.frame_identity),
+            "frame_identity",
+        )
+        if identity["frame_id"] != self.frame_id:
+            raise RuntimeEvidenceContractError(
+                "frame artifact frame_id changed from frame identity"
+            )
+        object.__setattr__(self, "frame_identity", identity)
         uri = self.artifact_uri
+        path = PurePosixPath(uri) if type(uri) is str else None
         if (
             type(uri) is not str
             or not uri.strip()
             or len(uri) > _MAX_URI_LENGTH
-            or uri.lstrip().lower().startswith("data:")
+            or path is None
+            or path.is_absolute()
+            or "\\" in uri
+            or ":" in uri
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or not uri.startswith("artifacts/")
+            or path.suffix.lower() != ".jpg"
         ):
             raise RuntimeEvidenceContractError(
-                "artifact_uri must be a bounded external URI or path"
+                "artifact_uri must be a safe relative run JPEG path"
             )
-        object.__setattr__(self, "sha256", _sha256(self.sha256, "sha256"))
+        object.__setattr__(
+            self,
+            "raw_jpeg_sha256",
+            _sha256(self.raw_jpeg_sha256, "raw_jpeg_sha256"),
+        )
+        runtime_hash = _sha256(
+            self.runtime_frame_image_sha256,
+            "runtime_frame_image_sha256",
+        )
+        if runtime_hash != identity["image_sha256"]:
+            raise RuntimeEvidenceContractError(
+                "artifact RuntimeFrame hash changed from frame identity"
+            )
+        object.__setattr__(
+            self,
+            "runtime_frame_image_sha256",
+            runtime_hash,
+        )
         object.__setattr__(
             self,
             "capture_timestamp_ns",
@@ -745,9 +1676,17 @@ class FrameArtifactReference:
     def to_dict(self) -> dict[str, Any]:
         return {
             "format": self.format,
+            "mission_id": self.mission_id,
+            "run_id": self.run_id,
+            "decision_id": self.decision_id,
+            "action_id": self.action_id,
             "frame_id": self.frame_id,
+            "frame_identity": _thaw(self.frame_identity),
             "artifact_uri": self.artifact_uri,
-            "sha256": self.sha256,
+            "raw_jpeg_sha256": self.raw_jpeg_sha256,
+            "runtime_frame_image_sha256": (
+                self.runtime_frame_image_sha256
+            ),
             "capture_timestamp_ns": self.capture_timestamp_ns,
             "role": self.role.value,
         }
@@ -786,8 +1725,11 @@ class RuntimeEvidenceReport:
     status: RuntimeEvidenceReportStatus | str
     actor_decisions: tuple[ActorDecisionRecord, ...]
     admissions: tuple[AdmissionRecord, ...]
+    physical_attempts: tuple[PhysicalAttemptRecord, ...]
     action_bindings: tuple[ActionExecutionBinding, ...]
     frame_artifacts: tuple[FrameArtifactReference, ...]
+    journal_head_sha256: str | None
+    journal_event_count: int
     missing_evidence: tuple[str, ...] = ()
     verification_failures: tuple[str, ...] = ()
     format: str = RUNTIME_EVIDENCE_REPORT_FORMAT
@@ -812,6 +1754,11 @@ class RuntimeEvidenceReport:
         admissions = _record_tuple(
             self.admissions, AdmissionRecord, "admissions"
         )
+        attempts = _record_tuple(
+            self.physical_attempts,
+            PhysicalAttemptRecord,
+            "physical_attempts",
+        )
         bindings = _record_tuple(
             self.action_bindings, ActionExecutionBinding, "action_bindings"
         )
@@ -821,10 +1768,11 @@ class RuntimeEvidenceReport:
         for values, key, name in (
             (decisions, lambda item: item.decision_id, "actor_decisions"),
             (admissions, lambda item: item.decision_id, "admissions"),
+            (attempts, lambda item: item.decision_id, "physical_attempts"),
             (bindings, lambda item: item.action_id, "action_bindings"),
             (
                 artifacts,
-                lambda item: (item.frame_id, item.role.value),
+                lambda item: (item.decision_id, item.role.value),
                 "frame_artifacts",
             ),
         ):
@@ -835,19 +1783,29 @@ class RuntimeEvidenceReport:
                 )
         decision_by_id = {item.decision_id: item for item in decisions}
         admission_by_id = {item.decision_id: item for item in admissions}
+        attempt_by_id = {item.decision_id: item for item in attempts}
         binding_by_id = {item.decision_id: item for item in bindings}
         artifact_by_key = {
-            (item.role, item.frame_id): item for item in artifacts
+            (item.decision_id, item.role): item for item in artifacts
         }
-        if any(item.mission_id != mission_id for item in decisions):
+        if any(
+            item.mission_id != mission_id or item.run_id != self.run_id
+            for item in decisions
+        ):
             raise RuntimeEvidenceContractError(
-                "report contains a decision from another mission"
+                "report contains a decision from another mission/run"
             )
-        if not set(admission_by_id).issubset(decision_by_id) or not set(
-            binding_by_id
-        ).issubset(decision_by_id):
+        if (
+            not set(admission_by_id).issubset(decision_by_id)
+            or not set(attempt_by_id).issubset(decision_by_id)
+            or not set(binding_by_id).issubset(decision_by_id)
+            or any(
+                decision_id not in decision_by_id
+                for decision_id, _role in artifact_by_key
+            )
+        ):
             raise RuntimeEvidenceContractError(
-                "report contains orphan admission/action binding"
+                "report contains an orphan evidence record"
             )
         missing = set(_unique_strings(self.missing_evidence, "missing_evidence"))
         failures = set(
@@ -857,12 +1815,66 @@ class RuntimeEvidenceReport:
         )
         if not decisions:
             missing.add("actor_decision")
-        used_artifacts: set[tuple[FrameArtifactRole, int]] = set()
+        if self.journal_head_sha256 is None:
+            journal_head = None
+            missing.add("durable_journal")
+        else:
+            journal_head = _sha256(
+                self.journal_head_sha256,
+                "journal_head_sha256",
+            )
+        journal_count = _nonnegative_integer(
+            self.journal_event_count,
+            "journal_event_count",
+        )
+        if journal_head is None and journal_count != 0:
+            raise RuntimeEvidenceContractError(
+                "journal event count requires a journal head"
+            )
         for decision_id, decision in decision_by_id.items():
             admission = admission_by_id.get(decision_id)
+            attempt = attempt_by_id.get(decision_id)
             binding = binding_by_id.get(decision_id)
             if admission is None:
                 missing.add(f"{decision_id}_admission")
+            if attempt is None:
+                missing.add(f"{decision_id}_physical_attempt")
+            if admission is not None and (
+                admission.actor_decision_record_sha256
+                != canonical_sha256(decision.to_dict())
+                or admission.actor_envelope_sha256
+                != decision.actor_envelope_sha256
+            ):
+                raise RuntimeEvidenceContractError(
+                    "admission changed Actor decision identity"
+                )
+            if attempt is not None:
+                if (
+                    attempt.mission_id != mission_id
+                    or attempt.run_id != self.run_id
+                    or attempt.obligation_id != decision.obligation_id
+                    or attempt.decision_id != decision_id
+                    or attempt.action_id != decision_id
+                    or attempt.action != decision.action
+                    or attempt.submitted_arguments
+                    != decision.canonical_arguments
+                    or attempt.actor_decision_record_sha256
+                    != canonical_sha256(decision.to_dict())
+                ):
+                    raise RuntimeEvidenceContractError(
+                        "physical attempt is outside decision scope"
+                    )
+                if admission is not None and (
+                    attempt.admission_record_sha256
+                    != canonical_sha256(admission.to_dict())
+                    or attempt.frame_identity != admission.frame_identity
+                    or attempt.target_identity != admission.target_identity
+                    or attempt.mutation_permit_id
+                    != admission.mutation_permit_id
+                ):
+                    raise RuntimeEvidenceContractError(
+                        "physical attempt changed admission identity"
+                    )
             if binding is None:
                 missing.add(f"{decision_id}_action_binding")
                 continue
@@ -894,25 +1906,16 @@ class RuntimeEvidenceReport:
                 raise RuntimeEvidenceContractError(
                     "admission and before frame identity disagree"
                 )
-            expected_reservation = canonical_sha256(
-                {
-                    "action_id": decision_id,
-                    "actor_envelope_sha256": (
-                        binding.actor_envelope_sha256
-                    ),
-                    "admission_sha256": canonical_sha256(
-                        admission.to_dict()
-                    ),
-                }
-            )
-            if (
-                binding.physical_attempt_count == 1
-                and binding.attempt_reservation_sha256
-                != expected_reservation
-            ):
-                raise RuntimeEvidenceContractError(
-                    "physical attempt reservation binding changed"
-                )
+            if attempt is not None:
+                if (
+                    binding.attempt_reservation_sha256
+                    != attempt.reservation_sha256
+                    or binding.physical_attempt_record_sha256
+                    != canonical_sha256(attempt.to_dict())
+                ):
+                    raise RuntimeEvidenceContractError(
+                        "physical attempt binding changed"
+                    )
             for role, frame_id, ref_hash in (
                 (
                     FrameArtifactRole.BEFORE,
@@ -929,11 +1932,24 @@ class RuntimeEvidenceReport:
                 if frame_id is None:
                     missing.add(f"{token}_identity")
                     continue
-                reference = artifact_by_key.get((role, frame_id))
+                reference = artifact_by_key.get((decision_id, role))
                 if reference is None:
                     missing.add(f"{token}_artifact")
                     continue
-                used_artifacts.add((role, frame_id))
+                expected_identity = (
+                    binding.before_frame_identity
+                    if role is FrameArtifactRole.BEFORE
+                    else binding.after_frame_identity
+                )
+                if (
+                    reference.mission_id != mission_id
+                    or reference.run_id != self.run_id
+                    or reference.decision_id != decision_id
+                    or reference.action_id != binding.action_id
+                    or reference.frame_id != frame_id
+                    or reference.frame_identity != expected_identity
+                ):
+                    failures.add(f"{token}_artifact_scope_mismatch")
                 expected_ref_hash = canonical_sha256(reference.to_dict())
                 if ref_hash is None:
                     missing.add(f"{token}_artifact_binding")
@@ -949,17 +1965,13 @@ class RuntimeEvidenceReport:
                     < admission.accepted_timestamp_ns
                 ):
                     failures.add(f"{token}_capture_order_mismatch")
-        if set(artifact_by_key) != used_artifacts:
-            raise RuntimeEvidenceContractError(
-                "report contains an orphan frame artifact"
-            )
         missing_items = tuple(sorted(missing))
         failure_items = tuple(sorted(failures))
         derived_status = (
-            RuntimeEvidenceReportStatus.INCOMPLETE
-            if missing_items
-            else RuntimeEvidenceReportStatus.VERIFICATION_FAILED
+            RuntimeEvidenceReportStatus.VERIFICATION_FAILED
             if failure_items
+            else RuntimeEvidenceReportStatus.INCOMPLETE
+            if missing_items
             else RuntimeEvidenceReportStatus.COMPLETE
         )
         if claimed_status is not derived_status:
@@ -969,8 +1981,11 @@ class RuntimeEvidenceReport:
         object.__setattr__(self, "status", derived_status)
         object.__setattr__(self, "actor_decisions", decisions)
         object.__setattr__(self, "admissions", admissions)
+        object.__setattr__(self, "physical_attempts", attempts)
         object.__setattr__(self, "action_bindings", bindings)
         object.__setattr__(self, "frame_artifacts", artifacts)
+        object.__setattr__(self, "journal_head_sha256", journal_head)
+        object.__setattr__(self, "journal_event_count", journal_count)
         object.__setattr__(self, "missing_evidence", missing_items)
         object.__setattr__(self, "verification_failures", failure_items)
 
@@ -982,8 +1997,13 @@ class RuntimeEvidenceReport:
             "status": self.status.value,
             "actor_decisions": [item.to_dict() for item in self.actor_decisions],
             "admissions": [item.to_dict() for item in self.admissions],
+            "physical_attempts": [
+                item.to_dict() for item in self.physical_attempts
+            ],
             "action_bindings": [item.to_dict() for item in self.action_bindings],
             "frame_artifacts": [item.to_dict() for item in self.frame_artifacts],
+            "journal_head_sha256": self.journal_head_sha256,
+            "journal_event_count": self.journal_event_count,
             "missing_evidence": list(self.missing_evidence),
             "verification_failures": list(self.verification_failures),
         }
@@ -997,6 +2017,7 @@ class RuntimeEvidenceReport:
         for name, record_type in (
             ("actor_decisions", ActorDecisionRecord),
             ("admissions", AdmissionRecord),
+            ("physical_attempts", PhysicalAttemptRecord),
             ("action_bindings", ActionExecutionBinding),
             ("frame_artifacts", FrameArtifactReference),
         ):
@@ -1019,12 +2040,14 @@ __all__ = [
     "ACTOR_DECISION_RECORD_FORMAT",
     "ADMISSION_RECORD_FORMAT",
     "FRAME_ARTIFACT_REFERENCE_FORMAT",
+    "PHYSICAL_ATTEMPT_RECORD_FORMAT",
     "RUNTIME_EVIDENCE_REPORT_FORMAT",
     "ActionExecutionBinding",
     "ActorDecisionRecord",
     "AdmissionRecord",
     "FrameArtifactReference",
     "FrameArtifactRole",
+    "PhysicalAttemptRecord",
     "RuntimeEvidenceContractError",
     "RuntimeEvidenceReport",
     "RuntimeEvidenceReportStatus",

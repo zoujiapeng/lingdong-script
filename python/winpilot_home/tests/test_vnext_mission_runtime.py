@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+import json
 import threading
 from typing import Any, Callable, Mapping
 
@@ -443,6 +444,89 @@ class FakeController:
             current_commit_identity=self.state.snapshot.commit_identity,
         )
         self.admissions.append(admission)
+        evidence_plane = self.runtime_evidence_plane
+        if evidence_plane is not None and admission.allowed:
+            assert admission.permit_id is not None
+            commit = self.state.snapshot.commit_identity
+            envelope_sha256 = hashlib.sha256(
+                envelope.to_json().encode("utf-8")
+            ).hexdigest()
+            evidence_plane.record_admission(
+                decision_id=envelope.decision_id,
+                mission_id=envelope.mission_id,
+                run_id=envelope.run_id,
+                frame_identity=commit.frame.to_dict(),
+                target_identity=commit.target.to_dict(),
+                mutation_permit_id=admission.permit_id,
+                controller_route="vnext_atomic_desktop_adapter",
+                actor_envelope_sha256=envelope_sha256,
+            )
+            args = envelope.proposal.model_dump(mode="json")["args"]
+            action = envelope.proposal.action
+            if action in {"click", "double_click"}:
+                physical = {
+                    "kind": "pointer_click",
+                    "x": int(args["image_x"]),
+                    "y": int(args["image_y"]),
+                    "button": "left",
+                    "click_count": (
+                        2 if action == "double_click" else 1
+                    ),
+                }
+            elif action == "scroll":
+                physical = {
+                    "kind": "wheel",
+                    "x": int(args["image_x"]),
+                    "y": int(args["image_y"]),
+                    "signed_wheel_amount": args["amount"],
+                    "event_wheel_delta": args["amount"] * 120,
+                }
+            elif action == "type_text":
+                physical = {
+                    "kind": "type_text",
+                    "text": args["text"],
+                }
+            else:
+                physical = {
+                    "kind": "hotkey",
+                    "modifiers": list(args["keys"][:-1]),
+                    "key": args["keys"][-1],
+                }
+            route = {
+                "click": "raw_device.admitted_physical_click/0",
+                "double_click": "raw_device.admitted_physical_click/0",
+                "scroll": "raw_device.admitted_physical_scroll/0",
+                "type_text": "raw_device.admitted_physical_type_text/0",
+                "hotkey": "raw_device.admitted_physical_hotkey/0",
+            }[action]
+            evidence_plane.reserve_physical_attempt(
+                decision_id=envelope.decision_id,
+                mission_id=envelope.mission_id,
+                run_id=envelope.run_id,
+                actor_envelope_sha256=envelope_sha256,
+                submitted_arguments=args,
+                physical_arguments=physical,
+                raw_device_route=route,
+                mechanism="physical_sendinput",
+            )
+            evidence_plane.record_raw_receipt(
+                decision_id=envelope.decision_id,
+                mission_id=envelope.mission_id,
+                run_id=envelope.run_id,
+                actor_envelope_sha256=envelope_sha256,
+                receipt={
+                    "action": (
+                        "click" if action == "double_click" else action
+                    ),
+                    "outcome": "applied",
+                    "input_completed": True,
+                    "backend_result": {
+                        "input_completed": True,
+                        "facts": {},
+                    },
+                    "error_kind": None,
+                },
+            )
         if self.on_after_admission is not None:
             self.on_after_admission()
         if self.try_duplicate:
@@ -777,6 +861,37 @@ def test_minimal_runtime_executes_each_approved_action_once(action: str) -> None
     assert harness.reducer.card.last_transition.action == action
 
 
+def test_type_text_is_absent_from_mission_bus_and_reducer_state() -> None:
+    sentinel = "SENTINEL-mission-bus-type-text-31"
+    proposal = _action("type_text")
+    proposal["args"]["text"] = sentinel
+    harness = _harness(proposal)
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert (
+        harness.controller.envelopes[0].proposal.args["text"]
+        == sentinel
+    )
+    reducer_wire = {
+        "events": [
+            event.to_dict()
+            for event in harness.reducer.events
+        ],
+        "projection": harness.reducer.projection.to_dict(),
+        "evidence": [
+            reference.to_dict()
+            for reference in harness.registry.snapshot()
+        ],
+    }
+    assert sentinel not in json.dumps(
+        reducer_wire,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
 def test_runtime_records_reasoning_free_actor_decision_before_action() -> None:
     harness = _harness(
         _action("click"),
@@ -797,17 +912,69 @@ def test_runtime_records_reasoning_free_actor_decision_before_action() -> None:
         "format",
         "decision_id",
         "mission_id",
+        "run_id",
+        "mission_revision",
         "obligation_id",
+        "turn_index",
         "proposal_kind",
         "action",
+        "canonical_arguments",
         "canonical_arguments_sha256",
+        "actor_envelope",
+        "actor_envelope_sha256",
+        "tool_schema",
         "tool_schema_sha256",
+        "broker_projection",
         "broker_projection_sha256",
     }
+    envelope_wire = harness.controller.envelopes[0].to_dict()
+    record_wire = record.to_dict()
+    assert record_wire["actor_envelope"] == envelope_wire
+    assert (
+        record_wire["canonical_arguments"]
+        == envelope_wire["proposal"]["args"]
+    )
     report = plane.build_report()
     assert report.status is RuntimeEvidenceReportStatus.INCOMPLETE
-    assert f"{record.decision_id}_admission" in report.missing_evidence
-    assert f"{record.decision_id}_raw_receipt" in report.missing_evidence
+    assert "durable_journal" in report.missing_evidence
+    assert (
+        f"{record.decision_id}_before_frame_artifact"
+        in report.missing_evidence
+    )
+
+
+def test_transition_evidence_failure_after_input_blocks_without_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(
+        _action("click"),
+        with_runtime_evidence=True,
+    )
+    plane = harness.runtime_evidence
+    assert plane is not None
+
+    def fail_transition(**_kwargs: Any) -> None:
+        raise RuntimeError("synthetic durable transition failure")
+
+    monkeypatch.setattr(
+        plane,
+        "record_controller_transition",
+        fail_transition,
+    )
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    second = harness.runtime.run_one_turn(turn_index=1)
+
+    assert first.status is RuntimeStatus.BLOCKED
+    assert "could not be reconciled" in first.detail
+    assert harness.controller.calls == 1
+    assert harness.permits.consumed_count == 1
+    assert all(
+        event.kind != "transition_recorded"
+        for event in harness.reducer.events
+    )
+    assert second.status is not RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 1
 
 
 @pytest.mark.parametrize("mode", ("different", "absent"))
@@ -1130,7 +1297,10 @@ def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
     assert before.controller.calls == 0
     assert before.reducer.events[-1].kind == "mission_canceled"
 
-    admission = _harness(_action())
+    admission = _harness(
+        _action(),
+        with_runtime_evidence=True,
+    )
     admission_stop = threading.Event()
     admission.controller.stop_before_admission = admission_stop
     admission_result = admission.runtime.run_one_turn(
@@ -1142,6 +1312,14 @@ def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
     assert admission.controller.calls == 1
     assert admission.controller.admissions[0].allowed is False
     assert admission.reducer.events[-1].kind == "mission_canceled"
+    assert all(
+        event.kind != "transition_recorded"
+        for event in admission.reducer.events
+    )
+    admission_plane = admission.runtime_evidence
+    assert admission_plane is not None
+    assert admission_plane.physical_attempt_records == ()
+    assert admission_plane.action_bindings == ()
 
     after = _harness(_action())
     after_stop = threading.Event()

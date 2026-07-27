@@ -45,7 +45,12 @@ from ...visual_runtime.submitted_image_coordinates import (
     SubmittedImageCoordinateMapper,
 )
 from ..actor import ActorDecisionEnvelope, DesktopActionProposal
-from ..evidence_plane import RuntimeEvidencePlane
+from ..evidence_plane import (
+    FrameArtifactReference,
+    FrameArtifactRole,
+    FrameArtifactWriter,
+    RuntimeEvidencePlane,
+)
 from ..mission import EvidenceRef, TargetBinding
 from ..runtime import (
     ControllerOutcome,
@@ -130,7 +135,6 @@ class RawReceiptTraceSink(Protocol):
         self,
         receipt: RawActionReceipt,
         *,
-        envelope: ActorDecisionEnvelope,
         metadata: Mapping[str, TraceScalar],
     ) -> None: ...
 
@@ -148,6 +152,7 @@ class _PreparedAction:
 class _PinnedExecution:
     before_frame: RuntimeFrame | None
     receipt: RawActionReceipt
+    raw_device_called: bool = False
 
 
 class AtomicDesktopAdapter:
@@ -164,6 +169,7 @@ class AtomicDesktopAdapter:
         raw_device: RawDeviceExecutor,
         receipt_trace_sink: RawReceiptTraceSink | None = None,
         runtime_evidence_plane: RuntimeEvidencePlane | None = None,
+        frame_artifact_writer: FrameArtifactWriter | None = None,
         post_input_settle_delay_s: float = 0.12,
         wait: Callable[[float], Any] = time.sleep,
     ) -> None:
@@ -213,6 +219,34 @@ class AtomicDesktopAdapter:
                 "runtime_evidence_plane must be RuntimeEvidencePlane or null"
             )
         if (
+            frame_artifact_writer is not None
+            and type(frame_artifact_writer) is not FrameArtifactWriter
+        ):
+            raise TypeError(
+                "frame_artifact_writer must be FrameArtifactWriter or null"
+            )
+        durable = bool(
+            runtime_evidence_plane is not None
+            and runtime_evidence_plane.durable
+        )
+        if durable != (frame_artifact_writer is not None):
+            raise TypeError(
+                "durable Runtime evidence requires one FrameArtifactWriter"
+            )
+        if durable:
+            assert runtime_evidence_plane is not None
+            assert frame_artifact_writer is not None
+            journal = runtime_evidence_plane.journal
+            assert journal is not None
+            if (
+                frame_artifact_writer.run_directory
+                != journal.run_directory
+                or not frame_artifact_writer.writable
+            ):
+                raise TypeError(
+                    "journal and artifact writer must share one writable run"
+                )
+        if (
             isinstance(post_input_settle_delay_s, bool)
             or not isinstance(post_input_settle_delay_s, (int, float))
         ):
@@ -253,6 +287,8 @@ class AtomicDesktopAdapter:
         self._raw = raw_device
         self._trace = receipt_trace_sink
         self._runtime_evidence = runtime_evidence_plane
+        self._frame_artifacts = frame_artifact_writer
+        self._durable_evidence_enabled = durable
         self._post_input_settle_delay_s = settle_delay
         self._wait = wait
         self._effect = DeterministicActionEffectVerifier()
@@ -345,9 +381,32 @@ class AtomicDesktopAdapter:
             return self._rejected(envelope, action)
 
         receipt = pinned.receipt
-        self._record_receipt(receipt, envelope, phase="raw_device")
+        self._record_trace_receipt(receipt, envelope, phase="raw_device")
+        if not pinned.raw_device_called:
+            evidence_recorded = self._record_evidence_receipt(
+                receipt,
+                envelope,
+            )
+            if receipt.input_completed is False:
+                return self._rejected(envelope, action)
+            return self._unknown_transition(
+                envelope,
+                action,
+                input_completed=(
+                    receipt.input_completed
+                    if evidence_recorded
+                    else None
+                ),
+            )
         if receipt.input_completed is False:
-            return self._rejected(envelope, action)
+            if self._record_evidence_receipt(receipt, envelope):
+                return self._rejected(envelope, action)
+            return self._unknown_transition(
+                envelope,
+                action,
+                input_completed=False,
+            )
+        settle_failed = False
         if (
             receipt.input_completed is True
             and self._post_input_settle_delay_s > 0.0
@@ -355,12 +414,9 @@ class AtomicDesktopAdapter:
             try:
                 self._wait(self._post_input_settle_delay_s)
             except Exception:
-                return self._unknown_transition(
-                    envelope,
-                    action,
-                    input_completed=True,
-                )
+                settle_failed = True
         if pinned.before_frame is None:
+            self._record_evidence_receipt(receipt, envelope)
             return self._unknown_transition(
                 envelope,
                 action,
@@ -376,12 +432,29 @@ class AtomicDesktopAdapter:
                 pinned.before_frame,
             )
         except Exception:
+            self._record_evidence_receipt(receipt, envelope)
             return self._unknown_transition(
                 envelope,
                 action,
                 input_completed=receipt.input_completed,
             )
 
+        if not self._record_evidence_receipt(receipt, envelope):
+            return self._unknown_transition(
+                envelope,
+                action,
+                input_completed=receipt.input_completed,
+                post_frame=post_frame,
+                post_evidence=post_evidence,
+            )
+        if settle_failed:
+            return self._unknown_transition(
+                envelope,
+                action,
+                input_completed=receipt.input_completed,
+                post_frame=post_frame,
+                post_evidence=post_evidence,
+            )
         if receipt.input_completed is None:
             return self._unknown_transition(
                 envelope,
@@ -507,6 +580,14 @@ class AtomicDesktopAdapter:
                     raise ValueError(
                         "allowed admission is missing permit identity"
                     )
+                self._persist_frame_artifact(
+                    envelope,
+                    before_frame,
+                    role=FrameArtifactRole.BEFORE,
+                    capture_timestamp_ns=self._seconds_to_ns(
+                        state.captured_at
+                    ),
+                )
                 evidence_plane.record_admission(
                     decision_id=envelope.decision_id,
                     mission_id=envelope.mission_id,
@@ -552,6 +633,16 @@ class AtomicDesktopAdapter:
                         actor_envelope_sha256=hashlib.sha256(
                             envelope.to_json().encode("utf-8")
                         ).hexdigest(),
+                        submitted_arguments=dict(
+                            envelope.proposal.args
+                        ),
+                        physical_arguments=(
+                            self._physical_attempt_arguments(prepared)
+                        ),
+                        raw_device_route=self._raw_device_route(
+                            prepared.action
+                        ),
+                        mechanism="physical_sendinput",
                     )
                 except Exception:
                     return self._not_started(
@@ -600,7 +691,7 @@ class AtomicDesktopAdapter:
                     "desktop_queue_boundary_exception",
                 )
             )
-        return _PinnedExecution(before_frame, receipt)
+        return _PinnedExecution(before_frame, receipt, raw_started)
 
     def _queued_admission_error(
         self,
@@ -816,6 +907,14 @@ class AtomicDesktopAdapter:
             committed,
             evidence_refs=(evidence.id,),
         )
+        self._persist_frame_artifact(
+            envelope,
+            frame,
+            role=FrameArtifactRole.AFTER,
+            capture_timestamp_ns=self._seconds_to_ns(
+                committed.captured_at
+            ),
+        )
         return frame, evidence
 
     def _prepare_action(
@@ -873,6 +972,57 @@ class AtomicDesktopAdapter:
                 chord=HotkeyChord(tuple(keys)),
             )
         raise ValueError("unsupported atomic desktop action")
+
+    @staticmethod
+    def _physical_attempt_arguments(
+        prepared: _PreparedAction,
+    ) -> dict[str, Any]:
+        """Describe the exact typed payload submitted to RawDevice."""
+
+        if prepared.action in {"click", "double_click"}:
+            assert prepared.point is not None
+            return {
+                "kind": "pointer_click",
+                "x": prepared.point[0],
+                "y": prepared.point[1],
+                "button": "left",
+                "click_count": (
+                    2 if prepared.action == "double_click" else 1
+                ),
+            }
+        if prepared.action == "scroll":
+            assert prepared.point is not None
+            assert prepared.amount is not None
+            return {
+                "kind": "wheel",
+                "x": prepared.point[0],
+                "y": prepared.point[1],
+                "signed_wheel_amount": prepared.amount,
+                "event_wheel_delta": prepared.amount * 120,
+            }
+        if prepared.action == "type_text":
+            assert prepared.text is not None
+            return {
+                "kind": "type_text",
+                "text": prepared.text,
+            }
+        assert prepared.action == "hotkey"
+        assert prepared.chord is not None
+        return {
+            "kind": "hotkey",
+            "modifiers": list(prepared.chord.keys[:-1]),
+            "key": prepared.chord.keys[-1],
+        }
+
+    @staticmethod
+    def _raw_device_route(action: str) -> str:
+        return {
+            "click": "raw_device.admitted_physical_click/0",
+            "double_click": "raw_device.admitted_physical_click/0",
+            "scroll": "raw_device.admitted_physical_scroll/0",
+            "type_text": "raw_device.admitted_physical_type_text/0",
+            "hotkey": "raw_device.admitted_physical_hotkey/0",
+        }[action]
 
     @staticmethod
     def _require_keys(
@@ -1193,15 +1343,70 @@ class AtomicDesktopAdapter:
             ),
         )
 
-    def _record_receipt(
+    def _persist_frame_artifact(
         self,
-        receipt: RawActionReceipt,
+        envelope: ActorDecisionEnvelope,
+        frame: RuntimeFrame,
+        *,
+        role: FrameArtifactRole,
+        capture_timestamp_ns: int,
+    ) -> None:
+        writer = self._frame_artifacts
+        evidence_plane = self._runtime_evidence
+        if writer is None:
+            return
+        if evidence_plane is None or not evidence_plane.durable:
+            raise RuntimeError(
+                "frame artifacts require a durable Runtime evidence plane"
+            )
+        identity = frame.identity.to_dict()
+        result = writer.write_frame(
+            mission_id=envelope.mission_id,
+            run_id=envelope.run_id,
+            decision_id=envelope.decision_id,
+            action_id=envelope.decision_id,
+            role=role.value,
+            frame_identity=identity,
+            image_b64=frame.image_b64,
+            capture_timestamp_ns=capture_timestamp_ns,
+        )
+        evidence_plane.record_frame_artifact(
+            FrameArtifactReference(
+                mission_id=envelope.mission_id,
+                run_id=envelope.run_id,
+                decision_id=envelope.decision_id,
+                action_id=envelope.decision_id,
+                frame_id=result.frame_id,
+                frame_identity=identity,
+                artifact_uri=result.artifact_uri,
+                raw_jpeg_sha256=result.sha256,
+                runtime_frame_image_sha256=frame.image_sha256,
+                capture_timestamp_ns=result.capture_timestamp_ns,
+                role=result.role,
+            )
+        )
+
+    @staticmethod
+    def _seconds_to_ns(value: float) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("capture timestamp must be a finite number")
+        seconds = float(value)
+        if not math.isfinite(seconds) or seconds < 0.0:
+            raise ValueError(
+                "capture timestamp must be finite and non-negative"
+            )
+        nanoseconds = int(seconds * 1_000_000_000)
+        if nanoseconds > (2**63 - 1):
+            raise ValueError("capture timestamp exceeds signed-64 range")
+        return nanoseconds
+
+    def _receipt_metadata(
+        self,
         envelope: ActorDecisionEnvelope,
         *,
         phase: str,
-    ) -> None:
-        sink = self._trace
-        metadata: Mapping[str, TraceScalar] = MappingProxyType(
+    ) -> Mapping[str, TraceScalar]:
+        return MappingProxyType(
             {
                 "phase": phase,
                 "controller_action": envelope.proposal.action,
@@ -1215,29 +1420,60 @@ class AtomicDesktopAdapter:
                 "target_binding_id": envelope.target_binding_id,
             }
         )
-        if sink is not None:
-            try:
-                sink.record(
-                    receipt,
-                    envelope=envelope,
-                    metadata=metadata,
-                )
-            except Exception:
-                pass
+
+    def _record_trace_receipt(
+        self,
+        receipt: RawActionReceipt,
+        envelope: ActorDecisionEnvelope,
+        *,
+        phase: str,
+    ) -> None:
+        sink = self._trace
+        if sink is None:
+            return
+        try:
+            sink.record(
+                receipt,
+                metadata=self._receipt_metadata(envelope, phase=phase),
+            )
+        except Exception:
+            pass
+
+    def _record_evidence_receipt(
+        self,
+        receipt: RawActionReceipt,
+        envelope: ActorDecisionEnvelope,
+    ) -> bool:
         evidence_plane = self._runtime_evidence
-        if evidence_plane is not None:
-            try:
-                evidence_plane.record_raw_receipt(
-                    decision_id=envelope.decision_id,
-                    mission_id=envelope.mission_id,
-                    run_id=envelope.run_id,
-                    actor_envelope_sha256=hashlib.sha256(
-                        envelope.to_json().encode("utf-8")
-                    ).hexdigest(),
-                    receipt=receipt.to_dict(),
-                )
-            except Exception:
-                pass
+        if evidence_plane is None:
+            return True
+        try:
+            evidence_plane.record_raw_receipt(
+                decision_id=envelope.decision_id,
+                mission_id=envelope.mission_id,
+                run_id=envelope.run_id,
+                actor_envelope_sha256=hashlib.sha256(
+                    envelope.to_json().encode("utf-8")
+                ).hexdigest(),
+                receipt=receipt.to_dict(),
+            )
+        except Exception:
+            return False
+        return True
+
+    def _record_receipt(
+        self,
+        receipt: RawActionReceipt,
+        envelope: ActorDecisionEnvelope,
+        *,
+        phase: str,
+    ) -> bool:
+        self._record_trace_receipt(
+            receipt,
+            envelope,
+            phase=phase,
+        )
+        return self._record_evidence_receipt(receipt, envelope)
 
 
 __all__ = [

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
+import itertools
+import json
+from pathlib import Path
 import threading
 from typing import Any
 
@@ -13,9 +17,15 @@ from winpilot.vnext.evidence_plane import (
     ActionExecutionBinding,
     ActorDecisionRecord,
     AdmissionRecord,
+    FrameArtifactWriter,
     FrameArtifactReference,
     FrameArtifactRole,
+    GENESIS_EVENT_SHA256,
+    JOURNAL_FILENAME,
+    PhysicalAttemptRecord,
     RuntimeEvidenceContractError,
+    RuntimeEvidenceJournal,
+    RuntimeEvidenceJournalEvent,
     RuntimeEvidencePlane,
     RuntimeEvidencePlaneError,
     RuntimeEvidenceReport,
@@ -33,7 +43,9 @@ MISSION_ID = "mission-evidence"
 RUN_ID = "run-evidence"
 OBLIGATION_ID = "full-goal"
 DECISION_ID = "decision-evidence"
-ENVELOPE_SHA256 = hashlib.sha256(b"canonical-envelope").hexdigest()
+BEFORE_PAYLOAD = b"\xff\xd8\xff-before-\xff\xd9"
+AFTER_PAYLOAD = b"\xff\xd8\xff-after-\xff\xd9"
+_RUN_COUNTER = itertools.count()
 
 
 def _runtime_image_sha256(payload: bytes) -> str:
@@ -65,6 +77,7 @@ def _target_identity() -> dict[str, Any]:
 
 def _receipt(
     *,
+    action: str = "click",
     outcome: str = "applied",
     input_completed: bool | None = True,
 ) -> dict[str, Any]:
@@ -77,7 +90,7 @@ def _receipt(
     }[mutation_outcome]
     assert input_completed is expected
     return RawActionReceipt(
-        action="click",
+        action=action,
         outcome=mutation_outcome,
         backend_result=(
             RawBackendResult(
@@ -97,10 +110,11 @@ def _receipt(
 
 def _transition(
     *,
+    action: str = "click",
     outcome: str = "completed",
     input_completed: bool | None = True,
     post_frame_id: int | None = 2,
-    after_payload: bytes = b"\xff\xd8\xff-after-\xff\xd9",
+    after_payload: bytes = AFTER_PAYLOAD,
 ) -> dict[str, Any]:
     post_evidence = (
         ()
@@ -124,18 +138,207 @@ def _transition(
     return ControllerTransition(
         outcome=ControllerOutcome(outcome),
         action_id=DECISION_ID,
-        action="click",
+        action=action,
         input_completed=input_completed,
         post_frame_evidence=post_evidence,
         post_frame_id=post_frame_id,
     ).to_dict()
 
 
-def _plane(*, clock_ns=lambda: 123_456_789) -> RuntimeEvidencePlane:
+def _default_arguments(action: str) -> dict[str, Any]:
+    return copy.deepcopy(
+        {
+            "click": {"image_x": 10.0, "image_y": 20.0},
+            "double_click": {"image_x": 10.0, "image_y": 20.0},
+            "scroll": {
+                "image_x": 10.0,
+                "image_y": 20.0,
+                "amount": -240,
+            },
+            "type_text": {"text": "exact text"},
+            "hotkey": {"keys": ["ctrl", "l"]},
+        }[action]
+    )
+
+
+def _projection_id(envelope: dict[str, Any]) -> str:
+    material = {
+        "format": "broker-projection/1",
+        "mission_id": envelope["mission_id"],
+        "run_id": envelope["run_id"],
+        "catalog_fingerprint": envelope["catalog_fingerprint"],
+        "profile_id": envelope["profile_id"],
+        "state_fingerprint": envelope["state_fingerprint"],
+        "mission_revision": envelope["mission_revision"],
+        "obligation_id": envelope["obligation_id"],
+        "turn_index": envelope["turn_index"],
+        "execution_route": "visual_actor",
+        "executor_id": None,
+        "target_binding_id": envelope["target_binding_id"],
+        "frame_id": envelope["frame_id"],
+        "frame_scope": envelope["frame_scope"],
+        "pointer_lease_id": envelope["pointer_lease_id"],
+        "tool_names": [envelope["proposal"]["action"]],
+        "active_grant_ids": [],
+        "missing_capabilities": [],
+        "projection_reasons": [],
+    }
+    canonical = json.dumps(
+        material,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return "projection-" + hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()[:24]
+
+
+def _actor_envelope(
+    *,
+    action: str = "click",
+    arguments: dict[str, Any] | None = None,
+    before_payload: bytes = BEFORE_PAYLOAD,
+) -> dict[str, Any]:
+    envelope = {
+        "format": "actor-envelope/1",
+        "decision_id": DECISION_ID,
+        "mission_id": MISSION_ID,
+        "run_id": RUN_ID,
+        "mission_revision": 0,
+        "mission_projection_sha256": "1" * 64,
+        "accepted_mission_event_ids": ["event-target-bound"],
+        "obligation_id": OBLIGATION_ID,
+        "turn_index": 0,
+        "catalog_fingerprint": "2" * 64,
+        "profile_id": "fixed-standard",
+        "state_fingerprint": "3" * 64,
+        "frame_id": 1,
+        "frame_epoch": 4,
+        "frame_hwnd": 901,
+        "frame_scope": "target_window",
+        "frame_region": [10, 20, 100, 80],
+        "submitted_image_size": [100, 80],
+        "frame_image_sha256": _runtime_image_sha256(before_payload),
+        "target_binding_id": "target-binding",
+        "pointer_disposition": "released",
+        "pointer_lease_id": None,
+        "broker_projection_id": "projection-pending",
+        "capability_grant_ids": [],
+        "allowed_evidence_scope": ["evidence-current-frame"],
+        "proposal": {
+            "format": "actor-proposal/0",
+            "kind": "desktop_action",
+            "action": action,
+            "args": (
+                copy.deepcopy(arguments)
+                if arguments is not None
+                else _default_arguments(action)
+            ),
+            "local_intent": "perform one bounded desktop action",
+        },
+    }
+    envelope["broker_projection_id"] = _projection_id(envelope)
+    return envelope
+
+
+def _tool_schema(action: str = "click") -> dict[str, Any]:
+    properties = {
+        "click": {
+            "image_x": {"type": "number"},
+            "image_y": {"type": "number"},
+        },
+        "double_click": {
+            "image_x": {"type": "number"},
+            "image_y": {"type": "number"},
+        },
+        "scroll": {
+            "image_x": {"type": "number"},
+            "image_y": {"type": "number"},
+            "amount": {"type": "integer"},
+        },
+        "type_text": {"text": {"type": "string"}},
+        "hotkey": {
+            "keys": {
+                "type": "array",
+                "items": {"type": "string"},
+            }
+        },
+    }[action]
+    return {
+        "type": "object",
+        "properties": copy.deepcopy(properties),
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+def _broker_projection(
+    envelope: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "format": "broker-projection/1",
+        "projection_id": envelope["broker_projection_id"],
+        "mission_id": envelope["mission_id"],
+        "run_id": envelope["run_id"],
+        "catalog_fingerprint": envelope["catalog_fingerprint"],
+        "profile_id": envelope["profile_id"],
+        "state_fingerprint": envelope["state_fingerprint"],
+        "mission_revision": envelope["mission_revision"],
+        "obligation_id": envelope["obligation_id"],
+        "turn_index": envelope["turn_index"],
+        "execution_route": "visual_actor",
+        "executor_id": None,
+        "target_binding_id": envelope["target_binding_id"],
+        "frame_id": envelope["frame_id"],
+        "frame_scope": envelope["frame_scope"],
+        "pointer_lease_id": envelope["pointer_lease_id"],
+        "tool_names": [envelope["proposal"]["action"]],
+        "active_grants": [
+            {"grant_id": grant_id}
+            for grant_id in envelope["capability_grant_ids"]
+        ],
+        "missing_capabilities": [],
+        "projection_reasons": [],
+    }
+
+
+def _nested_keys(value: Any) -> set[str]:
+    if type(value) is dict:
+        return set(value).union(
+            *(_nested_keys(item) for item in value.values()),
+            set(),
+        )
+    if type(value) is list:
+        return set().union(
+            *(_nested_keys(item) for item in value),
+            set(),
+        )
+    return set()
+
+
+ENVELOPE_SHA256 = canonical_sha256(_actor_envelope())
+
+
+def _plane(
+    *,
+    clock_ns=lambda: 123_456_789,
+    run_directory: Path | None = None,
+) -> RuntimeEvidencePlane:
+    journal = (
+        None
+        if run_directory is None
+        else RuntimeEvidenceJournal.create(
+            run_directory,
+            MISSION_ID,
+            RUN_ID,
+        )
+    )
     return RuntimeEvidencePlane(
         MISSION_ID,
         RUN_ID,
         clock_ns=clock_ns,
+        journal=journal,
     )
 
 
@@ -143,32 +346,23 @@ def _record_decision(
     plane: RuntimeEvidencePlane,
     *,
     arguments: dict[str, Any] | None = None,
+    action: str = "click",
 ) -> ActorDecisionRecord:
-    return plane.record_actor_decision(
-        decision_id=DECISION_ID,
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        obligation_id=OBLIGATION_ID,
-        proposal_kind="desktop_action",
-        action="click",
-        canonical_arguments=arguments
-        or {"image_x": 10.0, "image_y": 20.0},
-        tool_schema={
-            "type": "object",
-            "properties": {
-                "image_x": {"type": "number"},
-                "image_y": {"type": "number"},
-            },
-            "required": ["image_x", "image_y"],
-            "additionalProperties": False,
-        },
-        broker_projection={
-            "format": "broker-projection/0",
-            "projection_id": "projection-evidence",
-            "tool_names": ["click"],
-        },
-        actor_envelope_sha256=ENVELOPE_SHA256,
+    envelope = _actor_envelope(
+        action=action,
+        arguments=arguments,
     )
+    return plane.record_actor_decision(
+        actor_envelope=envelope,
+        tool_schema=_tool_schema(action),
+        broker_projection=_broker_projection(envelope),
+    )
+
+
+def _decision_envelope_sha256(plane: RuntimeEvidencePlane) -> str:
+    if plane.decision_records:
+        return plane.decision_records[0].actor_envelope_sha256
+    return ENVELOPE_SHA256
 
 
 def _record_admission(
@@ -184,24 +378,93 @@ def _record_admission(
         target_identity=_target_identity(),
         mutation_permit_id="permit-evidence",
         controller_route="vnext_atomic_desktop_adapter",
-        actor_envelope_sha256=ENVELOPE_SHA256,
+        actor_envelope_sha256=_decision_envelope_sha256(plane),
     )
 
 
-def _record_receipt(plane: RuntimeEvidencePlane) -> None:
-    plane.reserve_physical_attempt(
+def _attempt_facts(
+    action: str,
+    submitted_arguments: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    if action in {"click", "double_click"}:
+        return (
+            {
+                "kind": "pointer_click",
+                "x": 20,
+                "y": 40,
+                "button": "left",
+                "click_count": 2 if action == "double_click" else 1,
+            },
+            "raw_device.admitted_physical_click/0",
+        )
+    if action == "scroll":
+        return (
+            {
+                "kind": "wheel",
+                "x": 20,
+                "y": 40,
+                "signed_wheel_amount": submitted_arguments["amount"],
+                "event_wheel_delta": submitted_arguments["amount"] * 120,
+            },
+            "raw_device.admitted_physical_scroll/0",
+        )
+    if action == "type_text":
+        return (
+            {
+                "kind": "type_text",
+                "text": submitted_arguments["text"],
+            },
+            "raw_device.admitted_physical_type_text/0",
+        )
+    keys = submitted_arguments["keys"]
+    return (
+        {
+            "kind": "hotkey",
+            "modifiers": keys[:-1],
+            "key": keys[-1],
+        },
+        "raw_device.admitted_physical_hotkey/0",
+    )
+
+
+def _reserve_attempt(
+    plane: RuntimeEvidencePlane,
+) -> PhysicalAttemptRecord:
+    decision = plane.decision_records[0]
+    submitted = dict(decision.canonical_arguments)
+    physical, route = _attempt_facts(decision.action, submitted)
+    return plane.reserve_physical_attempt(
         decision_id=DECISION_ID,
         mission_id=MISSION_ID,
         run_id=RUN_ID,
-        actor_envelope_sha256=ENVELOPE_SHA256,
+        actor_envelope_sha256=decision.actor_envelope_sha256,
+        submitted_arguments=submitted,
+        physical_arguments=physical,
+        raw_device_route=route,
+        mechanism="physical_sendinput",
     )
+
+
+def _record_raw_receipt(plane: RuntimeEvidencePlane) -> None:
+    decision = plane.decision_records[0]
     plane.record_raw_receipt(
         decision_id=DECISION_ID,
         mission_id=MISSION_ID,
         run_id=RUN_ID,
-        actor_envelope_sha256=ENVELOPE_SHA256,
-        receipt=_receipt(),
+        actor_envelope_sha256=decision.actor_envelope_sha256,
+        receipt=_receipt(
+            action=(
+                "click"
+                if decision.action == "double_click"
+                else decision.action
+            )
+        ),
     )
+
+
+def _record_receipt(plane: RuntimeEvidencePlane) -> None:
+    _reserve_attempt(plane)
+    _record_raw_receipt(plane)
 
 
 def _record_transition(
@@ -209,12 +472,16 @@ def _record_transition(
     *,
     after_payload: bytes,
 ) -> ActionExecutionBinding | None:
+    decision = plane.decision_records[0]
     return plane.record_controller_transition(
         decision_id=DECISION_ID,
         mission_id=MISSION_ID,
         run_id=RUN_ID,
-        actor_envelope_sha256=ENVELOPE_SHA256,
-        transition=_transition(after_payload=after_payload),
+        actor_envelope_sha256=decision.actor_envelope_sha256,
+        transition=_transition(
+            action=decision.action,
+            after_payload=after_payload,
+        ),
         post_frame_identity=_frame_identity(2, after_payload),
     )
 
@@ -225,10 +492,19 @@ def _frame_reference(
     payload: bytes,
     role: FrameArtifactRole,
 ) -> FrameArtifactReference:
+    identity = _frame_identity(frame_id, payload)
     return FrameArtifactReference(
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        decision_id=DECISION_ID,
+        action_id=DECISION_ID,
         frame_id=frame_id,
-        artifact_uri=f"artifact://run-evidence/frame-{frame_id}.jpg",
-        sha256=hashlib.sha256(payload).hexdigest(),
+        frame_identity=identity,
+        artifact_uri=(
+            f"artifacts/{role.value}-frame-{frame_id:020d}.jpg"
+        ),
+        raw_jpeg_sha256=hashlib.sha256(payload).hexdigest(),
+        runtime_frame_image_sha256=identity["image_sha256"],
         capture_timestamp_ns=(
             123_456_788
             if role is FrameArtifactRole.BEFORE
@@ -239,6 +515,7 @@ def _frame_reference(
 
 
 def _complete_plane(
+    tmp_path: Path,
     *,
     include_admission: bool = True,
     include_receipt: bool = True,
@@ -246,46 +523,165 @@ def _complete_plane(
     include_before_artifact: bool = True,
     include_after_artifact: bool = True,
 ) -> tuple[RuntimeEvidencePlane, dict[str, bytes]]:
-    before_payload = b"\xff\xd8\xff-before-\xff\xd9"
-    after_payload = b"\xff\xd8\xff-after-\xff\xd9"
-    plane = _plane()
+    before_payload = BEFORE_PAYLOAD
+    after_payload = AFTER_PAYLOAD
+    run_directory = (
+        tmp_path / f"evidence-run-{next(_RUN_COUNTER)}"
+        if include_before_artifact
+        else None
+    )
+    plane = _plane(run_directory=run_directory)
     _record_decision(plane)
-    if include_admission:
-        _record_admission(plane, before_payload=before_payload)
-    if include_receipt and include_admission:
-        _record_receipt(plane)
-    if include_transition and include_receipt and include_admission:
-        _record_transition(plane, after_payload=after_payload)
-    references = (
-        (
-            _frame_reference(
-                frame_id=1,
-                payload=before_payload,
-                role=FrameArtifactRole.BEFORE,
-            )
-            if include_before_artifact
-            else None
-        ),
-        (
-            _frame_reference(
-                frame_id=2,
-                payload=after_payload,
-                role=FrameArtifactRole.AFTER,
-            )
-            if include_after_artifact
-            else None
-        ),
+    before_reference = _frame_reference(
+        frame_id=1,
+        payload=before_payload,
+        role=FrameArtifactRole.BEFORE,
+    )
+    after_reference = _frame_reference(
+        frame_id=2,
+        payload=after_payload,
+        role=FrameArtifactRole.AFTER,
     )
     payloads: dict[str, bytes] = {}
-    for reference, payload in zip(
-        references,
-        (before_payload, after_payload),
-        strict=True,
+    if include_before_artifact:
+        plane.record_frame_artifact(before_reference)
+        payloads[before_reference.artifact_uri] = before_payload
+    if include_admission:
+        _record_admission(plane, before_payload=before_payload)
+    if include_admission and (
+        include_receipt
+        or include_after_artifact
+        or include_transition
     ):
-        if reference is not None:
-            plane.record_frame_artifact(reference)
-            payloads[reference.artifact_uri] = payload
+        _reserve_attempt(plane)
+    if include_after_artifact and include_admission:
+        plane.record_frame_artifact(after_reference)
+        payloads[after_reference.artifact_uri] = after_payload
+    if include_receipt and include_admission:
+        _record_raw_receipt(plane)
+    if include_transition and include_receipt and include_admission:
+        _record_transition(plane, after_payload=after_payload)
     return plane, payloads
+
+
+def _persist_frame(
+    plane: RuntimeEvidencePlane,
+    writer: FrameArtifactWriter,
+    *,
+    frame_id: int,
+    payload: bytes,
+    role: FrameArtifactRole,
+) -> FrameArtifactReference:
+    identity = _frame_identity(frame_id, payload)
+    timestamp_ns = (
+        123_456_788
+        if role is FrameArtifactRole.BEFORE
+        else 123_456_790
+    )
+    result = writer.write_frame(
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        decision_id=DECISION_ID,
+        action_id=DECISION_ID,
+        role=role.value,
+        frame_identity=identity,
+        image_b64=base64.b64encode(payload).decode("ascii"),
+        capture_timestamp_ns=timestamp_ns,
+    )
+    reference = FrameArtifactReference(
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        decision_id=DECISION_ID,
+        action_id=DECISION_ID,
+        frame_id=frame_id,
+        frame_identity=identity,
+        artifact_uri=result.artifact_uri,
+        raw_jpeg_sha256=result.sha256,
+        runtime_frame_image_sha256=identity["image_sha256"],
+        capture_timestamp_ns=result.capture_timestamp_ns,
+        role=result.role,
+    )
+    return plane.record_frame_artifact(reference)
+
+
+def _complete_persisted_run(
+    tmp_path: Path,
+) -> tuple[Path, str]:
+    run_directory = (
+        tmp_path / f"persisted-run-{next(_RUN_COUNTER)}"
+    )
+    plane = _plane(run_directory=run_directory)
+    writer = FrameArtifactWriter.create(run_directory)
+    _record_decision(plane)
+    _persist_frame(
+        plane,
+        writer,
+        frame_id=1,
+        payload=BEFORE_PAYLOAD,
+        role=FrameArtifactRole.BEFORE,
+    )
+    _record_admission(plane, before_payload=BEFORE_PAYLOAD)
+    _reserve_attempt(plane)
+    _persist_frame(
+        plane,
+        writer,
+        frame_id=2,
+        payload=AFTER_PAYLOAD,
+        role=FrameArtifactRole.AFTER,
+    )
+    _record_raw_receipt(plane)
+    _record_transition(plane, after_payload=AFTER_PAYLOAD)
+    journal = plane.journal
+    assert journal is not None
+    head = journal.head
+    journal.close()
+    return run_directory, head
+
+
+def _rewrite_actor_arguments(
+    run_directory: Path,
+    *,
+    mutation: str,
+) -> None:
+    journal = RuntimeEvidenceJournal.open_read_only(
+        run_directory,
+        MISSION_ID,
+        RUN_ID,
+    )
+    event_wires = [event.to_dict() for event in journal.events]
+    actor_payload = event_wires[0]["payload"]
+    if mutation == "deleted":
+        del actor_payload["canonical_arguments"]
+    else:
+        assert mutation == "tampered"
+        actor_payload["canonical_arguments"]["image_x"] = 999.0
+
+    previous = GENESIS_EVENT_SHA256
+    rewritten: list[RuntimeEvidenceJournalEvent] = []
+    for wire in event_wires:
+        event = RuntimeEvidenceJournalEvent.build(
+            sequence=wire["sequence"],
+            previous_event_sha256=previous,
+            event_kind=wire["event_kind"],
+            mission_id=wire["mission_id"],
+            run_id=wire["run_id"],
+            decision_id=wire["decision_id"],
+            action_id=wire["action_id"],
+            payload=wire["payload"],
+        )
+        rewritten.append(event)
+        previous = event.event_sha256
+    encoded = b"\n".join(
+        json.dumps(
+            event.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        for event in rewritten
+    ) + b"\n"
+    (run_directory / JOURNAL_FILENAME).write_bytes(encoded)
 
 
 def test_actor_decision_record_contains_hashes_without_reasoning() -> None:
@@ -301,29 +697,130 @@ def test_actor_decision_record_contains_hashes_without_reasoning() -> None:
         "format",
         "decision_id",
         "mission_id",
+        "run_id",
+        "mission_revision",
         "obligation_id",
+        "turn_index",
         "proposal_kind",
         "action",
+        "canonical_arguments",
         "canonical_arguments_sha256",
+        "actor_envelope",
+        "actor_envelope_sha256",
+        "tool_schema",
         "tool_schema_sha256",
+        "broker_projection",
         "broker_projection_sha256",
     }
     assert not {
-        "args",
-        "local_intent",
         "reasoning",
         "prompt",
         "model_response",
-    } & set(wire)
+    } & _nested_keys(wire)
+    assert wire["canonical_arguments"] == {
+        "image_x": 10.0,
+        "image_y": 20.0,
+    }
+    assert wire["actor_envelope"] == _actor_envelope(
+        arguments={"image_y": 20.0, "image_x": 10.0},
+    )
+    assert wire["broker_projection"] == _broker_projection(
+        wire["actor_envelope"]
+    )
+    assert wire["tool_schema"] == _tool_schema()
     assert record.canonical_arguments_sha256 == canonical_sha256(
         {"image_x": 10.0, "image_y": 20.0}
     )
+    assert record.actor_envelope_sha256 == canonical_sha256(
+        wire["actor_envelope"]
+    )
+    assert record.broker_projection_sha256 == canonical_sha256(
+        wire["broker_projection"]
+    )
+    assert record.tool_schema_sha256 == canonical_sha256(
+        wire["tool_schema"]
+    )
     assert ActorDecisionRecord.from_dict(wire) == record
+    for forbidden in ("prompt", "reasoning", "model_response"):
+        with pytest.raises(
+            RuntimeEvidenceContractError,
+            match="fields mismatch",
+        ):
+            ActorDecisionRecord.from_dict(
+                {**wire, forbidden: "secret"}
+            )
+
+
+@pytest.mark.parametrize(
+    "forbidden",
+    ("prompt", "reasoning", "model_response"),
+)
+def test_actor_envelope_rejects_nested_model_private_fields(
+    forbidden: str,
+) -> None:
+    record = _record_decision(_plane())
+    wire = record.to_dict()
+    wire["actor_envelope"][forbidden] = "secret"
+
     with pytest.raises(
         RuntimeEvidenceContractError,
-        match="fields mismatch",
+        match="actor_envelope fields mismatch",
     ):
-        ActorDecisionRecord.from_dict({**wire, "reasoning": "secret"})
+        ActorDecisionRecord.from_dict(wire)
+
+
+def test_actor_decision_record_rejects_stale_actor_envelope_sha256() -> None:
+    record = _record_decision(_plane())
+    wire = record.to_dict()
+    assert wire["actor_envelope_sha256"] != "f" * 64
+    wire["actor_envelope_sha256"] = "f" * 64
+
+    with pytest.raises(
+        RuntimeEvidenceContractError,
+        match="actor_envelope_sha256",
+    ):
+        ActorDecisionRecord.from_dict(wire)
+
+
+def test_actor_decision_record_rejects_stale_tool_schema_sha256() -> None:
+    record = _record_decision(_plane())
+    wire = record.to_dict()
+    assert wire["tool_schema_sha256"] != "f" * 64
+    wire["tool_schema_sha256"] = "f" * 64
+
+    with pytest.raises(
+        RuntimeEvidenceContractError,
+        match="tool_schema_sha256",
+    ):
+        ActorDecisionRecord.from_dict(wire)
+
+
+def test_actor_decision_record_rejects_broker_projection_with_stale_canonical_id(
+) -> None:
+    record = _record_decision(_plane())
+    wire = record.to_dict()
+    wire["broker_projection"]["projection_reasons"] = ["changed"]
+
+    with pytest.raises(
+        RuntimeEvidenceContractError,
+        match=(
+            "broker_projection id does not identify its canonical content"
+        ),
+    ):
+        ActorDecisionRecord.from_dict(wire)
+
+
+def test_actor_decision_record_rejects_stale_broker_projection_sha256() -> None:
+    record = _record_decision(_plane())
+    wire = record.to_dict()
+    assert wire["broker_projection_sha256"] != "f" * 64
+    wire["broker_projection_sha256"] = "f" * 64
+
+    with pytest.raises(
+        RuntimeEvidenceContractError,
+        match="broker_projection_sha256",
+    ):
+        ActorDecisionRecord.from_dict(wire)
 
 
 def test_decision_id_cannot_be_reused_even_for_identical_content() -> None:
@@ -405,28 +902,22 @@ def test_one_decision_has_at_most_one_physical_attempt_concurrently() -> None:
     _record_decision(plane)
     _record_admission(
         plane,
-        before_payload=b"\xff\xd8-before-\xff\xd9",
+        before_payload=BEFORE_PAYLOAD,
     )
     barrier = threading.Barrier(3)
-    accepted: list[str] = []
+    accepted: list[PhysicalAttemptRecord] = []
     rejected: list[str] = []
 
-    def worker(label: str) -> None:
+    def worker() -> None:
         barrier.wait()
         try:
-            plane.reserve_physical_attempt(
-                decision_id=DECISION_ID,
-                mission_id=MISSION_ID,
-                run_id=RUN_ID,
-                actor_envelope_sha256=ENVELOPE_SHA256,
-            )
-            accepted.append(label)
+            accepted.append(_reserve_attempt(plane))
         except RuntimeEvidencePlaneError as exc:
             rejected.append(str(exc))
 
     threads = (
-        threading.Thread(target=worker, args=("first",)),
-        threading.Thread(target=worker, args=("second",)),
+        threading.Thread(target=worker),
+        threading.Thread(target=worker),
     )
     for thread in threads:
         thread.start()
@@ -438,6 +929,23 @@ def test_one_decision_has_at_most_one_physical_attempt_concurrently() -> None:
     assert rejected == [
         "decision already reserved its physical attempt"
     ]
+    assert plane.physical_attempt_records == tuple(accepted)
+    attempt = accepted[0]
+    assert attempt.attempt_index == 1
+    assert attempt.submitted_arguments == {
+        "image_x": 10.0,
+        "image_y": 20.0,
+    }
+    assert attempt.physical_arguments == {
+        "kind": "pointer_click",
+        "x": 20,
+        "y": 40,
+        "button": "left",
+        "click_count": 1,
+    }
+    assert attempt.reservation_sha256 == canonical_sha256(
+        attempt.reservation_material()
+    )
 
 
 def test_receipt_without_action_binding_cannot_enter_report() -> None:
@@ -601,8 +1109,10 @@ def test_transition_evidence_scope_and_payload_are_bound() -> None:
         )
 
 
-def test_complete_report_binds_all_records_and_is_deterministic() -> None:
-    plane, payloads = _complete_plane()
+def test_complete_report_binds_all_records_and_is_deterministic(
+    tmp_path: Path,
+) -> None:
+    plane, payloads = _complete_plane(tmp_path)
 
     first = plane.build_report(
         artifact_reader=payloads.__getitem__,
@@ -616,8 +1126,11 @@ def test_complete_report_binds_all_records_and_is_deterministic() -> None:
     assert first.verification_failures == ()
     assert len(first.actor_decisions) == 1
     assert len(first.admissions) == 1
+    assert len(first.physical_attempts) == 1
     assert len(first.action_bindings) == 1
     assert len(first.frame_artifacts) == 2
+    assert first.journal_event_count == 7
+    assert first.journal_head_sha256 is not None
     binding = first.action_bindings[0]
     assert binding.action_id == binding.decision_id == DECISION_ID
     assert binding.before_frame_id == 1
@@ -631,6 +1144,104 @@ def test_complete_report_binds_all_records_and_is_deterministic() -> None:
     assert "passed" not in first.to_dict()
     assert "done" not in first.to_dict()
 
+    journal = plane.journal
+    assert journal is not None
+    journal.close()
+    replayed_journal = RuntimeEvidenceJournal.open_read_only(
+        journal.run_directory,
+        MISSION_ID,
+        RUN_ID,
+    )
+    replayed = RuntimeEvidencePlane.from_journal(
+        replayed_journal,
+        expected_journal_head_sha256=first.journal_head_sha256,
+    )
+    assert replayed.sealed is True
+    assert replayed.build_report(
+        artifact_reader=payloads.__getitem__,
+    ).to_dict() == first.to_dict()
+
+
+def test_restarted_sealed_plane_cannot_reserve_or_call_raw_again(
+    tmp_path: Path,
+) -> None:
+    plane, _payloads = _complete_plane(tmp_path)
+    journal = plane.journal
+    assert journal is not None
+    journal.close()
+    replayed = RuntimeEvidencePlane.from_journal(
+        RuntimeEvidenceJournal.open_read_only(
+            journal.run_directory,
+            MISSION_ID,
+            RUN_ID,
+        )
+    )
+    raw_calls: list[str] = []
+
+    def reserve_then_call_raw() -> None:
+        _reserve_attempt(replayed)
+        raw_calls.append("called")
+
+    with pytest.raises(
+        RuntimeEvidencePlaneError,
+        match="replayed evidence plane is sealed",
+    ):
+        reserve_then_call_raw()
+
+    assert replayed.sealed is True
+    assert len(replayed.physical_attempt_records) == 1
+    assert raw_calls == []
+
+
+def test_rebuild_report_authenticates_complete_journal_and_artifacts(
+    tmp_path: Path,
+) -> None:
+    run_directory, expected_head = _complete_persisted_run(tmp_path)
+
+    report = RuntimeEvidencePlane.rebuild_report(
+        run_directory,
+        MISSION_ID,
+        RUN_ID,
+        expected_journal_head_sha256=expected_head,
+    )
+
+    assert report.status is RuntimeEvidenceReportStatus.COMPLETE
+    assert report.missing_evidence == ()
+    assert report.verification_failures == ()
+    assert len(report.actor_decisions) == 1
+    assert len(report.physical_attempts) == 1
+    assert len(report.action_bindings) == 1
+    assert len(report.frame_artifacts) == 2
+    assert report.journal_head_sha256 == expected_head
+
+
+@pytest.mark.parametrize("mutation", ("deleted", "tampered"))
+def test_rebuild_report_rejects_rehashed_canonical_argument_damage(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    run_directory, _expected_head = _complete_persisted_run(tmp_path)
+    _rewrite_actor_arguments(
+        run_directory,
+        mutation=mutation,
+    )
+
+    report = RuntimeEvidencePlane.rebuild_report(
+        run_directory,
+        MISSION_ID,
+        RUN_ID,
+    )
+
+    assert (
+        report.status
+        is RuntimeEvidenceReportStatus.VERIFICATION_FAILED
+    )
+    assert "durable_journal_corrupted" in (
+        report.verification_failures
+    )
+    assert len(report.physical_attempts) == 0
+    assert len(report.action_bindings) == 0
+
 
 def test_complete_report_cannot_be_self_declared_without_records() -> None:
     with pytest.raises(
@@ -639,22 +1250,27 @@ def test_complete_report_cannot_be_self_declared_without_records() -> None:
     ):
         RuntimeEvidenceReport.from_dict(
             {
-                "format": "runtime-evidence-report/0",
+                "format": "runtime-evidence-report/1",
                 "mission_id": MISSION_ID,
                 "run_id": RUN_ID,
                 "status": "complete",
                 "actor_decisions": [],
                 "admissions": [],
+                "physical_attempts": [],
                 "action_bindings": [],
                 "frame_artifacts": [],
+                "journal_head_sha256": None,
+                "journal_event_count": 0,
                 "missing_evidence": [],
                 "verification_failures": [],
             }
         )
 
 
-def test_binding_retains_recomputable_reasoning_free_snapshots() -> None:
-    plane, payloads = _complete_plane()
+def test_binding_retains_recomputable_reasoning_free_snapshots(
+    tmp_path: Path,
+) -> None:
+    plane, payloads = _complete_plane(tmp_path)
 
     binding = plane.build_report(
         artifact_reader=payloads.__getitem__,
@@ -668,20 +1284,29 @@ def test_binding_retains_recomputable_reasoning_free_snapshots() -> None:
         wire["controller_transition"]
     )
     assert wire["before_frame_identity"] == _frame_identity(
-        1, b"\xff\xd8\xff-before-\xff\xd9"
+        1, BEFORE_PAYLOAD
     )
     assert wire["after_frame_identity"] == _frame_identity(
-        2, b"\xff\xd8\xff-after-\xff\xd9"
+        2, AFTER_PAYLOAD
     )
     assert wire["physical_attempt_count"] == 1
     assert wire["attempt_reservation_sha256"]
+    assert wire["physical_attempt_record_sha256"] == canonical_sha256(
+        plane.physical_attempt_records[0].to_dict()
+    )
     assert wire["before_artifact_reference_sha256"]
     assert wire["after_artifact_reference_sha256"]
-    assert not {"reasoning", "prompt", "model_response"} & set(wire)
+    assert not {
+        "reasoning",
+        "prompt",
+        "model_response",
+    } & _nested_keys(wire)
 
 
-def test_serialized_complete_report_cannot_rewrite_run_scope() -> None:
-    plane, payloads = _complete_plane()
+def test_serialized_complete_report_cannot_rewrite_run_scope(
+    tmp_path: Path,
+) -> None:
+    plane, payloads = _complete_plane(tmp_path)
     wire = plane.build_report(
         artifact_reader=payloads.__getitem__,
     ).to_dict()
@@ -711,8 +1336,29 @@ def test_physical_receipt_requires_admission_and_attempt_reservation() -> None:
         )
 
     report = plane.build_report()
-    assert report.status is RuntimeEvidenceReportStatus.INCOMPLETE
+    assert (
+        report.status
+        is RuntimeEvidenceReportStatus.VERIFICATION_FAILED
+    )
     assert f"{DECISION_ID}_raw_receipt" in report.missing_evidence
+    assert report.verification_failures == (
+        f"{DECISION_ID}_unreserved_raw_receipt",
+    )
+
+
+def test_missing_physical_attempt_never_reports_complete() -> None:
+    plane = _plane()
+    _record_decision(plane)
+    _record_admission(plane, before_payload=BEFORE_PAYLOAD)
+
+    report = plane.build_report()
+
+    assert report.status is RuntimeEvidenceReportStatus.INCOMPLETE
+    assert (
+        f"{DECISION_ID}_physical_attempt"
+        in report.missing_evidence
+    )
+    assert "durable_journal" in report.missing_evidence
 
 
 def test_admission_and_after_frame_cannot_switch_target_identity() -> None:
@@ -760,8 +1406,10 @@ def test_admission_and_after_frame_cannot_switch_target_identity() -> None:
         )
 
 
-def test_unverified_artifacts_and_mixed_missing_failure_are_incomplete() -> None:
-    plane, payloads = _complete_plane()
+def test_unverified_artifacts_and_mixed_missing_failure_fail_closed(
+    tmp_path: Path,
+) -> None:
+    plane, payloads = _complete_plane(tmp_path)
 
     unverified = plane.build_report()
     assert unverified.status is RuntimeEvidenceReportStatus.INCOMPLETE
@@ -770,14 +1418,20 @@ def test_unverified_artifacts_and_mixed_missing_failure_are_incomplete() -> None
     )
 
     partial, partial_payloads = _complete_plane(
+        tmp_path,
         include_after_artifact=False,
     )
     before_ref = partial.frame_artifact_references[0]
-    partial_payloads[before_ref.artifact_uri] = b"tampered"
+    partial_payloads[before_ref.artifact_uri] = (
+        b"\xff\xd8\xff-tampered-\xff\xd9"
+    )
     mixed = partial.build_report(
         artifact_reader=partial_payloads.__getitem__,
     )
-    assert mixed.status is RuntimeEvidenceReportStatus.INCOMPLETE
+    assert (
+        mixed.status
+        is RuntimeEvidenceReportStatus.VERIFICATION_FAILED
+    )
     assert mixed.verification_failures == (
         "before_frame_1_artifact_hash_mismatch",
     )
@@ -787,8 +1441,10 @@ def test_unverified_artifacts_and_mixed_missing_failure_are_incomplete() -> None
     )
 
 
-def test_duplicate_receipt_permanently_fails_verification() -> None:
-    plane, payloads = _complete_plane()
+def test_duplicate_receipt_permanently_fails_verification(
+    tmp_path: Path,
+) -> None:
+    plane, payloads = _complete_plane(tmp_path)
 
     with pytest.raises(
         RuntimeEvidencePlaneError,
@@ -836,11 +1492,13 @@ def test_duplicate_receipt_permanently_fails_verification() -> None:
 def test_missing_any_critical_evidence_makes_report_incomplete(
     missing_part: str,
     expected_fragment: str,
+    tmp_path: Path,
 ) -> None:
     if missing_part == "decision":
         report = _plane().build_report()
     else:
         plane, payloads = _complete_plane(
+            tmp_path,
             include_admission=missing_part != "admission",
             include_receipt=missing_part != "receipt",
             include_transition=missing_part != "transition",
@@ -855,10 +1513,18 @@ def test_missing_any_critical_evidence_makes_report_incomplete(
     assert expected_fragment in report.missing_evidence
 
 
-def test_frame_artifact_hash_change_fails_verification() -> None:
-    plane, payloads = _complete_plane()
-    reference = plane.frame_artifact_references[1]
-    payloads[reference.artifact_uri] = b"\xff\xd8-tampered-\xff\xd9"
+def test_frame_artifact_hash_change_fails_verification(
+    tmp_path: Path,
+) -> None:
+    plane, payloads = _complete_plane(tmp_path)
+    reference = next(
+        item
+        for item in plane.frame_artifact_references
+        if item.role is FrameArtifactRole.AFTER
+    )
+    payloads[reference.artifact_uri] = (
+        b"\xff\xd8\xff-tampered-\xff\xd9"
+    )
 
     report = plane.build_report(
         artifact_reader=payloads.__getitem__,
@@ -874,23 +1540,53 @@ def test_frame_artifact_hash_change_fails_verification() -> None:
     )
 
 
-def test_frame_artifact_must_match_runtime_frame_identity() -> None:
-    plane, payloads = _complete_plane()
-    reference = plane.frame_artifact_references[1]
-    replacement = b"\xff\xd8-replacement-\xff\xd9"
+def test_frame_artifact_must_match_runtime_frame_identity(
+    tmp_path: Path,
+) -> None:
+    plane, payloads = _complete_plane(tmp_path)
+    reference = next(
+        item
+        for item in plane.frame_artifact_references
+        if item.role is FrameArtifactRole.AFTER
+    )
+    replacement = b"\xff\xd8\xff-replacement-\xff\xd9"
     payloads[reference.artifact_uri] = replacement
     changed_reference = FrameArtifactReference(
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        decision_id=DECISION_ID,
+        action_id=DECISION_ID,
         frame_id=reference.frame_id,
-        artifact_uri="artifact://run-evidence/replacement.jpg",
-        sha256=hashlib.sha256(replacement).hexdigest(),
+        frame_identity=reference.frame_identity,
+        artifact_uri="artifacts/replacement-frame-0002.jpg",
+        raw_jpeg_sha256=hashlib.sha256(replacement).hexdigest(),
+        runtime_frame_image_sha256=(
+            reference.runtime_frame_image_sha256
+        ),
         capture_timestamp_ns=reference.capture_timestamp_ns,
         role=reference.role,
     )
-    isolated, isolated_payloads = _complete_plane(
-        include_after_artifact=False,
+    isolated = _plane(
+        run_directory=(
+            tmp_path / f"evidence-run-{next(_RUN_COUNTER)}"
+        )
     )
+    _record_decision(isolated)
+    before_reference = _frame_reference(
+        frame_id=1,
+        payload=BEFORE_PAYLOAD,
+        role=FrameArtifactRole.BEFORE,
+    )
+    isolated.record_frame_artifact(before_reference)
+    _record_admission(isolated, before_payload=BEFORE_PAYLOAD)
+    _reserve_attempt(isolated)
     isolated.record_frame_artifact(changed_reference)
-    isolated_payloads[changed_reference.artifact_uri] = replacement
+    _record_raw_receipt(isolated)
+    _record_transition(isolated, after_payload=AFTER_PAYLOAD)
+    isolated_payloads = {
+        before_reference.artifact_uri: BEFORE_PAYLOAD,
+        changed_reference.artifact_uri: replacement,
+    }
 
     report = isolated.build_report(
         artifact_reader=isolated_payloads.__getitem__,
@@ -915,18 +1611,32 @@ def test_frame_artifact_reference_is_reference_only_and_strict() -> None:
 
     assert set(wire) == {
         "format",
+        "mission_id",
+        "run_id",
+        "decision_id",
+        "action_id",
         "frame_id",
+        "frame_identity",
         "artifact_uri",
-        "sha256",
+        "raw_jpeg_sha256",
+        "runtime_frame_image_sha256",
         "capture_timestamp_ns",
         "role",
     }
     assert FrameArtifactReference.from_dict(wire) == reference
     with pytest.raises(RuntimeEvidenceContractError, match="artifact_uri"):
         FrameArtifactReference(
+            mission_id=MISSION_ID,
+            run_id=RUN_ID,
+            decision_id=DECISION_ID,
+            action_id=DECISION_ID,
             frame_id=1,
+            frame_identity=_frame_identity(1, BEFORE_PAYLOAD),
             artifact_uri="data:image/jpeg;base64,/9j/",
-            sha256="0" * 64,
+            raw_jpeg_sha256="0" * 64,
+            runtime_frame_image_sha256=_runtime_image_sha256(
+                BEFORE_PAYLOAD
+            ),
             capture_timestamp_ns=1,
             role="before",
         )
@@ -939,8 +1649,10 @@ def test_frame_artifact_reference_is_reference_only_and_strict() -> None:
         )
 
 
-def test_action_binding_requires_unique_shared_action_identity() -> None:
-    plane, _payloads = _complete_plane()
+def test_action_binding_requires_unique_shared_action_identity(
+    tmp_path: Path,
+) -> None:
+    plane, _payloads = _complete_plane(tmp_path)
     binding = plane.action_bindings[0]
     wire = binding.to_dict()
 
@@ -978,51 +1690,19 @@ def test_controller_transition_snapshot_is_reasoning_free_and_canonical() -> Non
 
 def test_double_click_may_bind_only_to_raw_click_receipt() -> None:
     plane = _plane()
-    plane.record_actor_decision(
-        decision_id=DECISION_ID,
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        obligation_id=OBLIGATION_ID,
-        proposal_kind="desktop_action",
-        action="double_click",
-        canonical_arguments={"image_x": 10.0, "image_y": 20.0},
-        tool_schema={"type": "object"},
-        broker_projection={"format": "broker-projection/0"},
-        actor_envelope_sha256=ENVELOPE_SHA256,
-    )
+    _record_decision(plane, action="double_click")
     _record_admission(
         plane,
-        before_payload=b"\xff\xd8-before-\xff\xd9",
+        before_payload=BEFORE_PAYLOAD,
     )
-    plane.reserve_physical_attempt(
-        decision_id=DECISION_ID,
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        actor_envelope_sha256=ENVELOPE_SHA256,
-    )
-
-    plane.record_raw_receipt(
-        decision_id=DECISION_ID,
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        actor_envelope_sha256=ENVELOPE_SHA256,
-        receipt=_receipt(),
-    )
-    transition = _transition(
-        after_payload=b"\xff\xd8-after-\xff\xd9"
-    )
-    transition["action"] = "double_click"
-    binding = plane.record_controller_transition(
-        decision_id=DECISION_ID,
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        actor_envelope_sha256=ENVELOPE_SHA256,
-        transition=transition,
-        post_frame_identity=_frame_identity(
-            2,
-            b"\xff\xd8-after-\xff\xd9",
-        ),
+    attempt = _reserve_attempt(plane)
+    _record_raw_receipt(plane)
+    binding = _record_transition(
+        plane,
+        after_payload=AFTER_PAYLOAD,
     )
 
     assert binding is not None
     assert binding.action == "double_click"
+    assert binding.raw_action_receipt["action"] == "click"
+    assert attempt.physical_arguments["click_count"] == 2
