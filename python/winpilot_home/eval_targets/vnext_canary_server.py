@@ -6,7 +6,9 @@ runtime completion claim or a lone JavaScript success event is insufficient.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import sys
 import threading
 import time
@@ -52,6 +54,226 @@ def _events_of(events: list[dict[str, Any]], event_type: str) -> list[dict[str, 
 def _details(event: dict[str, Any]) -> dict[str, Any]:
     value = event.get("details")
     return value if isinstance(value, dict) else {}
+
+
+def _visible_state(event: dict[str, Any], key: str = "visible_state") -> dict[str, Any]:
+    value = _details(event).get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _canonical_hash(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _action_observation(
+    action: str,
+    group: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not group:
+        return {
+            "action": action,
+            "decidable": False,
+            "actual_changed": None,
+            "errors": ["external action group is empty"],
+        }
+    first = group[0]
+    last = group[-1]
+    before = _visible_state(first, "state_before") or _visible_state(first)
+    after = (
+        _visible_state(last, "state_after")
+        or _visible_state(last, "state_after_dispatch")
+        or _visible_state(last)
+    )
+    decidable = bool(before and after)
+    event_facts = [
+        _details(item).get("event")
+        for item in group
+        if isinstance(_details(item).get("event"), dict)
+    ]
+    return {
+        "action": action,
+        "start_event_seq": int(first.get("event_seq") or 0),
+        "end_event_seq": int(last.get("event_seq") or 0),
+        "start_client_wall_time_ms": first.get("client_wall_time_ms"),
+        "end_client_wall_time_ms": last.get("client_wall_time_ms"),
+        "target_ids": list(dict.fromkeys(
+            str(_details(item).get("target_id") or "")
+            for item in group
+            if _details(item).get("target_id")
+        )),
+        "event_types": [str(item.get("type") or "") for item in group],
+        "event_facts": event_facts,
+        "before_state": before,
+        "after_state": after,
+        "before_state_sha256": _canonical_hash(before) if before else "",
+        "after_state_sha256": _canonical_hash(after) if after else "",
+        "decidable": decidable,
+        "actual_changed": (
+            _canonical_hash(before) != _canonical_hash(after)
+            if decidable
+            else None
+        ),
+        "errors": [] if decidable else ["external DOM state is not decidable"],
+    }
+
+
+def derive_action_observations(
+    events: list[dict[str, Any]],
+    *,
+    scenario: str,
+) -> list[dict[str, Any]]:
+    """Derive ordered, browser-owned before/after facts for each GUI action."""
+
+    observations: list[dict[str, Any]] = []
+    if scenario == "click_double":
+        single_end = next(
+            (
+                index
+                for index, item in enumerate(events)
+                if item.get("type") == "click"
+                and _details(item).get("target_id") == "single"
+            ),
+            -1,
+        )
+        double_start = next(
+            (
+                index
+                for index, item in enumerate(events)
+                if item.get("type") == "pointerdown"
+                and _details(item).get("target_id") == "double"
+            ),
+            -1,
+        )
+        double_end = next(
+            (
+                index
+                for index, item in enumerate(events)
+                if item.get("type") == "scenario_success"
+            ),
+            -1,
+        )
+        if single_end >= 1:
+            observations.append(
+                _action_observation("click", events[1:single_end + 1])
+            )
+        if 0 <= double_start <= double_end:
+            observations.append(
+                _action_observation(
+                    "double_click",
+                    events[double_start:double_end + 1],
+                )
+            )
+    elif scenario == "scroll_roundtrip":
+        wheel_indices = [
+            index for index, item in enumerate(events)
+            if item.get("type") == "wheel"
+        ]
+        for position, start in enumerate(wheel_indices):
+            end = (
+                wheel_indices[position + 1]
+                if position + 1 < len(wheel_indices)
+                else len(events)
+            )
+            observations.append(
+                _action_observation("scroll", events[start:end])
+            )
+    elif scenario == "type_hotkey":
+        click_start = next(
+            (
+                index for index, item in enumerate(events)
+                if item.get("type") == "pointerdown"
+            ),
+            -1,
+        )
+        click_end = next(
+            (
+                index for index, item in enumerate(events)
+                if item.get("type") == "click"
+            ),
+            -1,
+        )
+        if 0 <= click_start <= click_end:
+            observations.append(
+                _action_observation("click", events[click_start:click_end + 1])
+            )
+        select_anchor = next(
+            (
+                index for index, item in enumerate(events)
+                if item.get("type") == "keydown"
+                and _details(item).get("chord") == "ctrl+a"
+            ),
+            -1,
+        )
+        select_start = select_anchor - 1
+        select_end = next(
+            (
+                index for index in range(select_anchor + 1, len(events))
+                if events[index].get("type") == "keyup"
+                and _details(events[index]).get("key") == "Control"
+            ),
+            -1,
+        )
+        if 0 <= select_start <= select_anchor <= select_end:
+            observations.append(
+                _action_observation(
+                    "hotkey",
+                    events[select_start:select_end + 1],
+                )
+            )
+        text_start = next(
+            (
+                index for index, item in enumerate(events)
+                if item.get("type") == "beforeinput"
+            ),
+            -1,
+        )
+        submit_anchor = next(
+            (
+                index for index, item in enumerate(events)
+                if item.get("type") == "keydown"
+                and _details(item).get("chord") == "ctrl+enter"
+            ),
+            -1,
+        )
+        text_end = max(
+            (
+                index for index, item in enumerate(events[:submit_anchor])
+                if item.get("type") == "input"
+            ),
+            default=-1,
+        )
+        if 0 <= text_start <= text_end:
+            observations.append(
+                _action_observation(
+                    "type_text",
+                    events[text_start:text_end + 1],
+                )
+            )
+        submit_start = submit_anchor - 1
+        submit_end = max(
+            (
+                index for index, item in enumerate(events)
+                if item.get("type") == "keyup"
+            ),
+            default=-1,
+        )
+        if 0 <= submit_start <= submit_anchor <= submit_end:
+            observations.append(
+                _action_observation(
+                    "hotkey",
+                    events[submit_start:submit_end + 1],
+                )
+            )
+    for index, observation in enumerate(observations, start=1):
+        observation["external_action_index"] = index
+    return observations
 
 
 def _validate_click_double(
@@ -157,6 +379,36 @@ def _validate_type_hotkey(
         errors.append("editor must receive exactly one trusted single click")
     keydowns = _events_of(events, "keydown")
     keyups = _events_of(events, "keyup")
+    keydown_signature = [
+        (
+            str(_details(item).get("key") or ""),
+            str(_details(item).get("chord") or ""),
+            _details(item).get("ctrl_key") is True,
+        )
+        for item in keydowns
+    ]
+    keyup_signature = [
+        (
+            str(_details(item).get("key") or ""),
+            str(_details(item).get("chord") or ""),
+            _details(item).get("ctrl_key") is True,
+        )
+        for item in keyups
+    ]
+    if keydown_signature != [
+        ("Control", "", True),
+        ("a", "ctrl+a", True),
+        ("Control", "", True),
+        ("Enter", "ctrl+enter", True),
+    ]:
+        errors.append(f"keydown sequence is not exact: {keydown_signature!r}")
+    if keyup_signature != [
+        ("a", "ctrl+a", True),
+        ("Control", "", False),
+        ("Enter", "ctrl+enter", True),
+        ("Control", "", False),
+    ]:
+        errors.append(f"keyup sequence is not exact: {keyup_signature!r}")
     select_down = [item for item in keydowns if _details(item).get("chord") == "ctrl+a"]
     select_up = [item for item in keyups if _details(item).get("chord") == "ctrl+a"]
     submit_down = [item for item in keydowns if _details(item).get("chord") == "ctrl+enter"]
@@ -236,6 +488,27 @@ def validate_case_events(
     sequences = [int(item.get("event_seq") or 0) for item in events]
     if sequences != list(range(1, len(events) + 1)):
         errors.append(f"event sequence is not exact and contiguous: {sequences!r}")
+    wall_times = [item.get("client_wall_time_ms") for item in events]
+    monotonic_times = [item.get("client_monotonic_ms") for item in events]
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+        for value in wall_times
+    ) or any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+        for value in monotonic_times
+    ):
+        errors.append("browser event clocks are missing or non-finite")
+    elif (
+        wall_times != sorted(wall_times)
+        or monotonic_times != sorted(monotonic_times)
+    ):
+        errors.append("browser event clocks are not monotonic")
     for item in events:
         identity = (
             str(item.get("case_id") or ""),
@@ -248,6 +521,29 @@ def validate_case_events(
         if item.get("type") in INPUT_EVENT_TYPES and item.get("type") != "page_ready":
             if item.get("trusted") is not True:
                 errors.append(f"untrusted input event at seq={item.get('event_seq')}")
+        details = _details(item)
+        event_facts = details.get("event")
+        if not isinstance(event_facts, dict):
+            errors.append(f"event facts missing at seq={item.get('event_seq')}")
+        if not isinstance(details.get("visible_state"), dict):
+            errors.append(f"visible DOM state missing at seq={item.get('event_seq')}")
+        if item.get("type") in {
+            "pointerdown", "pointerup", "click", "dblclick", "wheel",
+        }:
+            point = (
+                (event_facts or {}).get("screen_x"),
+                (event_facts or {}).get("screen_y"),
+            )
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in point
+            ):
+                errors.append(
+                    f"trusted pointer/wheel coordinates missing at "
+                    f"seq={item.get('event_seq')}"
+                )
     ready_events = _events_of(events, "page_ready")
     if len(ready_events) != 1:
         errors.append(f"expected one page_ready event, observed {len(ready_events)}")
@@ -279,6 +575,25 @@ def validate_case_events(
             errors.extend(_validate_scroll_roundtrip(events, success))
         elif scenario == "type_hotkey":
             errors.extend(_validate_type_hotkey(events, success, ready))
+    action_observations = derive_action_observations(events, scenario=scenario)
+    expected_actions = {
+        "click_double": ["click", "double_click"],
+        "type_hotkey": ["click", "hotkey", "type_text", "hotkey"],
+    }
+    if scenario in expected_actions and [
+        item.get("action") for item in action_observations
+    ] != expected_actions[scenario]:
+        errors.append(
+            "external action observations do not match the exact scenario: "
+            f"{[item.get('action') for item in action_observations]!r}"
+        )
+    if scenario == "scroll_roundtrip" and (
+        len(action_observations) < 2
+        or any(item.get("action") != "scroll" for item in action_observations)
+    ):
+        errors.append("scroll action observations are not complete and bounded")
+    if any(item.get("decidable") is not True for item in action_observations):
+        errors.append("external action state is not independently decidable")
     return {
         "passed": not errors,
         "source": "independent_vnext_canary_browser_oracle",
@@ -293,6 +608,8 @@ def validate_case_events(
         ),
         "wrong_input_count": len(wrong),
         "success_event_count": len(successes),
+        "action_observation_count": len(action_observations),
+        "action_observations": action_observations,
         "errors": errors,
     }
 
@@ -333,6 +650,7 @@ def _state_snapshot(
         "seed": seed,
         "page_id": page_id,
         "events": events,
+        "action_observations": oracle["action_observations"],
         "oracle": oracle,
     }
 
@@ -391,10 +709,13 @@ class Handler(BaseHTTPRequestHandler):
                 "seed": int(event.get("seed") or 0),
                 "page_id": str(event.get("page_id") or "")[:240],
                 "event_seq": int(event.get("event_seq") or 0),
+                "client_wall_time_ms": event.get("client_wall_time_ms"),
+                "client_monotonic_ms": event.get("client_monotonic_ms"),
                 "type": str(event.get("type") or "")[:80],
                 "trusted": event.get("trusted") is True,
                 "details": _safe_value(event.get("details") or {}),
                 "received_at": time.time(),
+                "received_at_ns": time.time_ns(),
             }
         except Exception as exc:
             self._send_json(400, {"ok": False, "error": str(exc)})

@@ -71,6 +71,39 @@
     let reportTail = Promise.resolve();
     let completed = false;
     const violations = [];
+    let visibleState = () => ({
+      scenario,
+      completed,
+      status_class: status.className,
+      status_text: status.textContent,
+    });
+
+    function eventFacts(event) {
+      if (!event) return {};
+      const numberOrNull = value => Number.isFinite(value) ? Number(value) : null;
+      return {
+        client_x: numberOrNull(event.clientX),
+        client_y: numberOrNull(event.clientY),
+        screen_x: numberOrNull(event.screenX),
+        screen_y: numberOrNull(event.screenY),
+        button: Number.isInteger(event.button) ? event.button : null,
+        buttons: Number.isInteger(event.buttons) ? event.buttons : null,
+        key: typeof event.key === "string" ? event.key : null,
+        code: typeof event.code === "string" ? event.code : null,
+        ctrl_key: Boolean(event.ctrlKey),
+        shift_key: Boolean(event.shiftKey),
+        alt_key: Boolean(event.altKey),
+        meta_key: Boolean(event.metaKey),
+        repeat: Boolean(event.repeat),
+        delta_x: numberOrNull(event.deltaX),
+        delta_y: numberOrNull(event.deltaY),
+        delta_mode: Number.isInteger(event.deltaMode) ? event.deltaMode : null,
+      };
+    }
+
+    function snapshotVisibleState() {
+      return JSON.parse(JSON.stringify(visibleState()));
+    }
 
     function rngFactory(value) {
       let a = value || 0x6d2b79f5;
@@ -91,9 +124,15 @@
         seed,
         page_id: pageId,
         event_seq: ++eventSeq,
+        client_wall_time_ms: Date.now(),
+        client_monotonic_ms: performance.now(),
         type,
         trusted: Boolean(event && event.isTrusted),
-        details,
+        details: {
+          event: eventFacts(event),
+          visible_state: snapshotVisibleState(),
+          ...details,
+        },
       };
       reportTail = reportTail
         .then(() => fetch("/event", {
@@ -167,6 +206,19 @@
       });
 
       const counts = {single_click: 0, double_click_events: 0, dblclick: 0};
+      visibleState = () => ({
+        scenario,
+        completed,
+        status_class: status.className,
+        status_text: status.textContent,
+        counts: {...counts},
+        targets: {
+          single_complete: single.classList.contains("complete"),
+          double_complete: double.classList.contains("complete"),
+          distractor_complete: distractor.classList.contains("complete"),
+        },
+        active_element: document.activeElement && document.activeElement.id || "",
+      });
       for (const target of [single, double, distractor]) {
         target.addEventListener("pointerdown", event => report("pointerdown", event, {
           target_id: target.id, detail: event.detail,
@@ -246,6 +298,22 @@
       let phase = "down";
       let checkpointCount = 0;
       let wheelCount = 0;
+      let lastWheelEventSeq = 0;
+      visibleState = () => ({
+        scenario,
+        completed,
+        status_class: status.className,
+        status_text: status.textContent,
+        target_id: "scroll-panel",
+        phase,
+        checkpoint_count: checkpointCount,
+        wheel_count: wheelCount,
+        scroll_top: Math.round(scroller.scrollTop),
+        max_scroll: Math.round(scroller.scrollHeight - scroller.clientHeight),
+        lower_checkpoint_reached: bottom.classList.contains("reached"),
+        top_finish_complete: top.classList.contains("complete"),
+        active_element: document.activeElement && document.activeElement.id || "",
+      });
       arena.addEventListener("click", event => fail(
         "click_forbidden_in_scroll_case",
         event,
@@ -258,8 +326,10 @@
       ));
 
       scroller.addEventListener("wheel", event => {
+        const stateBefore = snapshotVisibleState();
         wheelCount++;
         const direction = event.deltaY > 0 ? "down" : event.deltaY < 0 ? "up" : "zero";
+        lastWheelEventSeq = eventSeq + 1;
         report("wheel", event, {
           target_id: "scroll-panel",
           direction,
@@ -269,6 +339,9 @@
           phase,
           wheel_count: wheelCount,
           scroll_top: Math.round(scroller.scrollTop),
+          action_anchor_seq: lastWheelEventSeq,
+          state_before: stateBefore,
+          state_after_dispatch: snapshotVisibleState(),
         });
         if (completed) return fail("input_after_completion", event, {direction});
         if (direction === "zero") return fail("zero_wheel", event);
@@ -281,11 +354,15 @@
       }, {passive: true});
 
       scroller.addEventListener("scroll", event => {
+        const stateBefore = snapshotVisibleState();
         const maxScroll = scroller.scrollHeight - scroller.clientHeight;
         const scrollTop = Math.round(scroller.scrollTop);
         report("scroll_state", event, {
           target_id: "scroll-panel", phase, scroll_top: scrollTop,
           max_scroll: Math.round(maxScroll),
+          action_anchor_seq: lastWheelEventSeq,
+          state_before: stateBefore,
+          state_after: snapshotVisibleState(),
         });
         if (phase === "down" && maxScroll > 0 && scroller.scrollTop >= maxScroll - 4) {
           phase = "up";
@@ -335,6 +412,23 @@
       let selectAllCount = 0;
       let submitCount = 0;
       let clickCount = 0;
+      const pressedModifiers = new Set();
+      visibleState = () => ({
+        scenario,
+        completed,
+        status_class: status.className,
+        status_text: status.textContent,
+        target_id: "editor",
+        value: input.value,
+        selection_start: input.selectionStart,
+        selection_end: input.selectionEnd,
+        editor_complete: input.classList.contains("complete"),
+        active_element: document.activeElement && document.activeElement.id || "",
+        select_all_count: selectAllCount,
+        submit_count: submitCount,
+        click_count: clickCount,
+        pressed_modifiers: [...pressedModifiers].sort(),
+      });
       arena.addEventListener("click", event => {
         if (event.target !== input) {
           fail("non_editor_clicked", event, {
@@ -375,17 +469,22 @@
         value: input.value,
       }));
       input.addEventListener("keydown", event => {
+        const stateBefore = snapshotVisibleState();
         const lower = String(event.key || "").toLowerCase();
         const chord = event.ctrlKey && lower === "a"
           ? "ctrl+a"
           : event.ctrlKey && event.key === "Enter"
             ? "ctrl+enter"
             : "";
+        if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) {
+          pressedModifiers.add(event.key);
+        }
         report("keydown", event, {
           target_id: "editor", key: event.key, code: event.code,
           ctrl_key: event.ctrlKey, shift_key: event.shiftKey,
           alt_key: event.altKey, meta_key: event.metaKey,
-          repeat: event.repeat, chord,
+          repeat: event.repeat, chord, state_before: stateBefore,
+          state_after_dispatch: snapshotVisibleState(),
         });
         if (completed) return fail("input_after_completion", event, {key: event.key});
         if (event.repeat) return fail("repeated_key", event, {key: event.key});
@@ -427,15 +526,21 @@
         }
       });
       input.addEventListener("keyup", event => {
+        const stateBefore = snapshotVisibleState();
         const lower = String(event.key || "").toLowerCase();
         const chord = event.ctrlKey && lower === "a"
           ? "ctrl+a"
           : event.ctrlKey && event.key === "Enter"
             ? "ctrl+enter"
             : "";
+        if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) {
+          pressedModifiers.delete(event.key);
+        }
         report("keyup", event, {
           target_id: "editor", key: event.key, code: event.code,
           ctrl_key: event.ctrlKey, repeat: event.repeat, chord,
+          state_before: stateBefore,
+          state_after: snapshotVisibleState(),
         });
       });
       return {

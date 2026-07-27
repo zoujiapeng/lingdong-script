@@ -4,6 +4,7 @@ import importlib.util
 import inspect
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +20,15 @@ WORKSPACE = Path(__file__).resolve().parents[3]
 
 
 def _load(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
+    unique_name = f"{name}_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(unique_name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
     return module
 
 
@@ -49,6 +54,13 @@ def _oracle():
         / "eval_targets"
         / "vnext_canary_server.py",
         "vnext_canary_server_test",
+    )
+
+
+def _input_hook():
+    return _load(
+        WORKSPACE / "scripts" / "vnext_canary_input_hook.py",
+        "vnext_canary_input_hook_test",
     )
 
 
@@ -320,6 +332,82 @@ def test_same_visible_electron_identity_is_required():
     assert len(rejected["errors"]) == 2
 
 
+def test_passive_input_hook_normalizes_injected_mouse_and_keyboard_without_installing():
+    hook = _input_hook()
+    mouse = hook.mouse_event_from_raw(
+        hook.WM_MOUSEWHEEL,
+        time_ns=123_000_000,
+        x=410,
+        y=220,
+        mouse_data=(0xFF88 << 16),
+        flags=hook.LLMHF_INJECTED | hook.LLMHF_LOWER_IL_INJECTED,
+        os_event_time_ms=77,
+        foreground_hwnd=991,
+        foreground_root_hwnd=991,
+        window_from_point_hwnd=992,
+    )
+    assert mouse == {
+        "time_ns": 123_000_000,
+        "device": "mouse",
+        "kind": "wheel",
+        "message": hook.WM_MOUSEWHEEL,
+        "mutation": True,
+        "injected": True,
+        "lower_integrity_injected": True,
+        "screen_x": 410,
+        "screen_y": 220,
+        "wheel_delta": -120,
+        "button": "",
+        "os_event_time_ms": 77,
+        "foreground_hwnd": 991,
+        "foreground_root_hwnd": 991,
+        "window_from_point_hwnd": 992,
+    }
+    key = hook.keyboard_event_from_raw(
+        hook.WM_KEYUP,
+        time_ns=124_000_000,
+        vk_code=0x41,
+        scan_code=30,
+        flags=hook.LLKHF_INJECTED | hook.LLKHF_UP,
+        os_event_time_ms=78,
+        foreground_hwnd=991,
+        foreground_root_hwnd=991,
+        window_from_point_hwnd=992,
+    )
+    assert key["kind"] == "key_up"
+    assert key["mutation"] is True
+    assert key["injected"] is True
+    assert key["up"] is True
+    assert key["vk_code"] == 0x41
+
+    move = hook.mouse_event_from_raw(
+        hook.WM_MOUSEMOVE,
+        time_ns=125_000_000,
+        x=411,
+        y=221,
+        mouse_data=0,
+        flags=0,
+        os_event_time_ms=79,
+        foreground_hwnd=991,
+        foreground_root_hwnd=991,
+        window_from_point_hwnd=992,
+    )
+    assert move["mutation"] is False
+    assert move["injected"] is False
+
+
+def test_passive_hook_source_is_read_only_and_always_chains():
+    hook = _input_hook()
+    source = Path(hook.__file__).read_text(encoding="utf-8")
+    assert "CallNextHookEx" in source
+    assert "SetWindowsHookExW" in source
+    assert "PostThreadMessageW" in source
+    assert "SendInput" not in source
+    assert "keybd_event(" not in source
+    assert "mouse_event(" not in source
+    assert "return api.call_next" in source
+
+
 def test_external_oracle_waits_for_late_wrong_input_and_stable_snapshot(
     monkeypatch,
 ):
@@ -370,12 +458,47 @@ def _event_factory(case_id: str, scenario: str, seed: int, page_id: str):
     events: list[dict[str, Any]] = []
 
     def add(event_type: str, *, trusted: bool = True, **details: Any):
+        next_sequence = len(events) + 1
+        details.setdefault(
+            "event",
+            {
+                "client_x": 240 if event_type.startswith("pointer") or event_type in {"click", "dblclick", "wheel"} else None,
+                "client_y": 180 if event_type.startswith("pointer") or event_type in {"click", "dblclick", "wheel"} else None,
+                "screen_x": 320 if event_type.startswith("pointer") or event_type in {"click", "dblclick", "wheel"} else None,
+                "screen_y": 240 if event_type.startswith("pointer") or event_type in {"click", "dblclick", "wheel"} else None,
+                "button": 0 if event_type.startswith("pointer") or event_type in {"click", "dblclick"} else None,
+                "buttons": 0,
+                "key": details.get("key"),
+                "code": details.get("code"),
+                "ctrl_key": details.get("ctrl_key") is True,
+                "shift_key": False,
+                "alt_key": False,
+                "meta_key": False,
+                "repeat": details.get("repeat") is True,
+                "delta_x": details.get("delta_x"),
+                "delta_y": details.get("delta_y"),
+                "delta_mode": 0 if event_type == "wheel" else None,
+            },
+        )
+        details.setdefault(
+            "visible_state",
+            {
+                "scenario": scenario,
+                "revision": next_sequence,
+                "final_dom_state": details.get("final_dom_state", "waiting"),
+                "value": details.get("value", details.get("final_value")),
+                "scroll_top": details.get("scroll_top"),
+                "counts": details.get("counts"),
+            },
+        )
         events.append({
             "case_id": case_id,
             "scenario": scenario,
             "seed": seed,
             "page_id": page_id,
-            "event_seq": len(events) + 1,
+            "event_seq": next_sequence,
+            "client_wall_time_ms": 1_000_000 + next_sequence,
+            "client_monotonic_ms": 1000 + next_sequence,
             "type": event_type,
             "trusted": trusted,
             "details": details,
@@ -491,6 +614,25 @@ def test_independent_oracle_accepts_only_complete_trusted_exact_sequences(factor
     assert verdict["passed"] is True, verdict
     assert verdict["wrong_input_count"] == 0
     assert verdict["success_event_count"] == 1
+    expected_actions = {
+        "click_double": ["click", "double_click"],
+        "scroll_roundtrip": ["scroll", "scroll"],
+        "type_hotkey": ["click", "hotkey", "type_text", "hotkey"],
+    }
+    observed_actions = [
+        item["action"] for item in verdict["action_observations"]
+    ]
+    if scenario == "scroll_roundtrip":
+        assert len(observed_actions) >= 2
+        assert set(observed_actions) == {"scroll"}
+    else:
+        assert observed_actions == expected_actions[scenario]
+    assert all(
+        item["decidable"] is True
+        and item["actual_changed"] is True
+        and item["before_state_sha256"] != item["after_state_sha256"]
+        for item in verdict["action_observations"]
+    )
 
     corrupted = json.loads(json.dumps(events))
     trusted_index = next(
@@ -549,6 +691,53 @@ def test_type_oracle_rejects_correction_or_non_exact_value_progression():
         "deletion, correction" in error
         for error in verdict["errors"]
     )
+
+
+def test_type_oracle_rejects_any_extra_trusted_key_pair():
+    oracle = _oracle()
+    events, case_id, scenario, seed, page_id = _type_events()
+    insert_at = next(
+        index for index, item in enumerate(events)
+        if item["type"] == "beforeinput"
+    )
+    extras = [
+        {
+            **events[insert_at - 1],
+            "type": "keydown",
+            "details": {
+                **events[insert_at - 1]["details"],
+                "key": "ArrowRight",
+                "code": "ArrowRight",
+                "ctrl_key": False,
+                "chord": "",
+            },
+        },
+        {
+            **events[insert_at - 1],
+            "type": "keyup",
+            "details": {
+                **events[insert_at - 1]["details"],
+                "key": "ArrowRight",
+                "code": "ArrowRight",
+                "ctrl_key": False,
+                "chord": "",
+            },
+        },
+    ]
+    events[insert_at:insert_at] = extras
+    for index, item in enumerate(events, start=1):
+        item["event_seq"] = index
+        item["client_wall_time_ms"] = 1_000_000 + index
+        item["client_monotonic_ms"] = 1000 + index
+    verdict = oracle.validate_case_events(
+        events,
+        case_id=case_id,
+        scenario=scenario,
+        seed=seed,
+        page_id=page_id,
+    )
+    assert verdict["passed"] is False
+    assert any("sequence is not exact" in error for error in verdict["errors"])
 
 
 def _client_result_for_trace(path: Path, run_id: str) -> dict[str, Any]:
@@ -862,5 +1051,12 @@ def test_target_is_separate_and_contains_no_forbidden_gesture_surface():
     assert "type_hotkey" in target
     assert "event.isTrusted" in target
     assert "event_seq" in target
+    assert "client_wall_time_ms" in target
+    assert "client_monotonic_ms" in target
+    assert "screen_x" in target
+    assert "screen_y" in target
+    assert "visible_state" in target
+    assert "state_before" in target
+    assert "state_after" in target
     for forbidden in ("setpointercapture", "drag", "held pointer", "roi", "mcp"):
         assert forbidden not in lowered
