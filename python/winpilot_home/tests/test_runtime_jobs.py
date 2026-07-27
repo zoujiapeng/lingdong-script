@@ -4,6 +4,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_runtime_jobs_serialize_shared_resource_but_allow_independent_work():
     from winpilot.runtime_jobs import RuntimeJobManager
@@ -79,6 +81,33 @@ def test_runtime_job_reports_active_jobs_and_runs_finish_callback():
     release.set()
     assert job.done.wait(1.0)
     assert finished == [(job.id, "done")]
+
+
+def test_runtime_job_submit_rolls_back_when_thread_start_fails(monkeypatch):
+    from winpilot.runtime_jobs import RuntimeJobManager
+
+    manager = RuntimeJobManager()
+    finished = []
+
+    def fail_start(_thread):
+        raise RuntimeError("thread start failed")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_start)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        manager.submit(
+            "arp",
+            lambda _stop: {"ok": True},
+            resources=("interactive_runtime",),
+            job_id="job-start-failure",
+            on_finish=lambda job: finished.append(job),
+        )
+
+    assert manager.get("job-start-failure") is None
+    assert manager.busy(resource="interactive_runtime") is False
+    assert len(finished) == 1
+    assert finished[0].status == "failed"
+    assert finished[0].done.is_set()
 
 
 def test_queued_runner_registration_does_not_replace_current_runner():
