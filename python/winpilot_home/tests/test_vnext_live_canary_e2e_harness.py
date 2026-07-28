@@ -1219,6 +1219,52 @@ def test_pointer_os_evidence_requires_window_from_point_target_root():
     ] == [raw_event]
 
 
+def test_off_window_injected_input_only_flags_bound_target_root():
+    harness = _canary_harness()
+    target_identity = _target_identity(991)
+    start = {
+        "job_id": "job-one",
+        "decision_id": "decision-one",
+        "action": "hotkey",
+        "ts": 1.0,
+    }
+    done = {"job_id": "job-one", "ts": 2.0}
+    bound_target = {
+        "hook_seq": 1,
+        "time_ns": 2_500_000_000,
+        "device": "keyboard",
+        "kind": "key_down",
+        "mutation": True,
+        "injected": True,
+        "vk_code": 0x41,
+        "extra_info": 0,
+        "foreground_root_hwnd": 991,
+    }
+    off_target = {
+        **bound_target,
+        "hook_seq": 2,
+        "foreground_root_hwnd": 777,
+    }
+
+    evidence = harness._normalized_os_evidence(
+        {
+            "events": [bound_target, off_target],
+            "hook_seq": 2,
+            "dropped_event_count": 0,
+            "thread_error": "",
+        },
+        start_sequence=0,
+        target_identity=target_identity,
+        starts=[start],
+        dones=[done],
+    )
+
+    assert evidence["normalized_action_events"] == []
+    assert evidence["unexpected_injected_target_mutations"] == [
+        bound_target
+    ]
+
+
 def test_harness_focus_tag_is_excluded_without_masking_product_alt():
     harness = _canary_harness()
     target_identity = _target_identity(991)
@@ -1507,10 +1553,12 @@ def _type_events():
     add("keydown", key="a", code="KeyA", ctrl_key=True, repeat=False, chord="ctrl+a")
     add("keyup", key="a", code="KeyA", ctrl_key=True, repeat=False, chord="ctrl+a")
     add("keyup", key="Control", code="ControlLeft", ctrl_key=False, repeat=False, chord="")
-    add("keydown", target_id="editor", key="C", code="KeyC", ctrl_key=False, repeat=False, chord="")
+    add("keydown", target_id="editor", key="Shift", code="ShiftLeft", ctrl_key=False, shift_key=True, repeat=False, chord="")
+    add("keydown", target_id="editor", key="C", code="KeyC", ctrl_key=False, shift_key=True, repeat=False, chord="")
     add("beforeinput", target_id="editor", input_type="insertText", data=token, value_before=initial)
     add("input", target_id="editor", input_type="insertText", data=token, value=token)
-    add("keyup", target_id="editor", key="C", code="KeyC", ctrl_key=False, repeat=False, chord="")
+    add("keyup", target_id="editor", key="C", code="KeyC", ctrl_key=False, shift_key=True, repeat=False, chord="")
+    add("keyup", target_id="editor", key="Shift", code="ShiftLeft", ctrl_key=False, shift_key=False, repeat=False, chord="")
     add("keydown", key="Control", code="ControlLeft", ctrl_key=True, repeat=False, chord="")
     add("keydown", key="Enter", code="Enter", ctrl_key=True, repeat=False, chord="ctrl+enter")
     add(
@@ -1671,6 +1719,46 @@ def test_type_oracle_rejects_any_extra_trusted_key_pair():
     )
     assert verdict["passed"] is False
     assert any("sequence is not exact" in error for error in verdict["errors"])
+
+
+def test_type_observation_binds_every_strict_keyboard_event_exactly_once():
+    oracle = _oracle()
+    events, case_id, scenario, seed, page_id = _type_events()
+
+    verdict = oracle.validate_case_events(
+        events,
+        case_id=case_id,
+        scenario=scenario,
+        seed=seed,
+        page_id=page_id,
+    )
+
+    assert verdict["passed"] is True, verdict
+    observations = verdict["action_observations"]
+    type_observation = next(
+        item for item in observations if item["action"] == "type_text"
+    )
+    assert type_observation["event_types"] == [
+        "keydown",
+        "keydown",
+        "beforeinput",
+        "input",
+        "keyup",
+        "keyup",
+    ]
+    for event in events:
+        if (
+            event["trusted"] is not True
+            or event["type"] not in oracle.INPUT_EVENT_TYPES
+        ):
+            continue
+        sequence = event["event_seq"]
+        assert sum(
+            observation["start_event_seq"]
+            <= sequence
+            <= observation["end_event_seq"]
+            for observation in observations
+        ) == 1
 
 
 def test_trace_sources_do_not_mutate_strict_runtime_anchor(tmp_path):
