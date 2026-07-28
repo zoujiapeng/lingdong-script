@@ -1342,6 +1342,11 @@ def run_case(
     *,
     output_root: Path,
     reset_session: bool,
+    before_submit: Callable[
+        [ElectronClientDriver, dict[str, Any]],
+        dict[str, Any] | None,
+    ]
+    | None = None,
     after_submit: Callable[[ElectronClientDriver, dict[str, Any]], dict[str, Any] | None]
     | None = None,
     independent_verifier: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
@@ -1431,6 +1436,10 @@ def run_case(
         result["screenshots"] = {
             "before_submit": driver.capture_window("before-submit.png")
         }
+        if before_submit is not None:
+            preparation = before_submit(driver, result)
+            if preparation is not None:
+                result["before_submit_handoff"] = preparation
         driver.button(RUN_TASK).Click()
         submitted_at = time.time()
         result["submitted_at"] = datetime.now().astimezone().isoformat()
