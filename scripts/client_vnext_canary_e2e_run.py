@@ -2485,6 +2485,7 @@ def _normalized_os_evidence(
     *,
     start_sequence: int,
     target_identity: dict[str, Any],
+    control_root_hwnd: int = 0,
     starts: list[dict[str, Any]],
     dones: list[dict[str, Any]],
     runtime_start: float,
@@ -2508,6 +2509,10 @@ def _normalized_os_evidence(
     windows = _queue_windows(starts, dones)
     target_root = int(target_identity.get("root_hwnd") or 0)
     target_hwnd = int(target_identity.get("hwnd") or 0)
+    control_root = int(control_root_hwnd or 0)
+    control_root_is_distinct = bool(
+        control_root > 0 and control_root != target_root
+    )
     relevant: list[dict[str, Any]] = []
     external_untrusted: list[dict[str, Any]] = []
     external_untrusted_target: list[dict[str, Any]] = []
@@ -2543,6 +2548,14 @@ def _normalized_os_evidence(
             target_root=target_root,
             injected=True,
         )
+        injected_control_matches = bool(
+            control_root_is_distinct
+            and _hook_event_targets_bound_root(
+                raw,
+                target_root=control_root,
+                injected=True,
+            )
+        )
         in_runtime = bool(
             wall_time is not None
             and runtime_start <= wall_time <= runtime_end
@@ -2556,10 +2569,16 @@ def _normalized_os_evidence(
             ):
                 external_untrusted_target.append(raw)
             continue
-        if wall_time is not None and not in_runtime:
+        if wall_time is None:
             unexpected_injected_target.append(raw)
             continue
-        if wall_time is None:
+        # Visible UI Automation configures and submits the task through the
+        # exact managed Electron root before vNext starts, and may restore it
+        # after vNext stops. Exempt it only with a trustworthy timestamp that
+        # proves the mutation is outside the mission.
+        if injected_control_matches and not in_runtime:
+            continue
+        if not in_runtime:
             unexpected_injected_target.append(raw)
             continue
         matches = [
@@ -2605,6 +2624,7 @@ def _legacy_os_evidence(
     *,
     start_sequence: int,
     target_identity: dict[str, Any],
+    control_root_hwnd: int = 0,
 ) -> dict[str, Any]:
     raw_events = hook_snapshot.get("events")
     raw_events = raw_events if isinstance(raw_events, list) else []
@@ -2616,6 +2636,10 @@ def _legacy_os_evidence(
         and int(item["hook_seq"]) > int(start_sequence)
     ]
     target_root = int(target_identity.get("root_hwnd") or 0)
+    control_root = int(control_root_hwnd or 0)
+    control_root_is_distinct = bool(
+        control_root > 0 and control_root != target_root
+    )
     type_map = {
         "button_down": "pointerdown",
         "button_up": "pointerup",
@@ -2636,6 +2660,15 @@ def _legacy_os_evidence(
             device == "keyboard"
             and int(raw.get("extra_info") or 0)
             == client_harness.HARNESS_FOCUS_INPUT_TAG
+        ):
+            continue
+        if (
+            control_root_is_distinct
+            and _hook_event_targets_bound_root(
+                raw,
+                target_root=control_root,
+                injected=True,
+            )
         ):
             continue
         target_matches = _hook_event_targets_bound_root(
@@ -2730,6 +2763,7 @@ def _reconcile_vnext_actions(
     hook_snapshot: dict[str, Any],
     hook_start_sequence: int,
     target_identity: dict[str, Any],
+    control_root_hwnd: int,
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -2811,6 +2845,7 @@ def _reconcile_vnext_actions(
         hook_snapshot,
         start_sequence=hook_start_sequence,
         target_identity=exact_target,
+        control_root_hwnd=control_root_hwnd,
         starts=starts,
         dones=dones,
         runtime_start=runtime_start,
@@ -3509,6 +3544,7 @@ def run_runtime_case(
     external_settlement: dict[str, Any] = {}
     client_result: dict[str, Any] = {}
     target_handoff_watcher: dict[str, Any] | None = None
+    managed_control_root_hwnd = 0
     result: dict[str, Any] = {
         "format": "vnext-live-canary-sample-attempt/2",
         "sample_key": sample["sample_key"],
@@ -3543,6 +3579,7 @@ def run_runtime_case(
             ),
             manifest_sealed_time_ns=manifest_sealed_time_ns,
         )
+        managed_control_root_hwnd = int(driver.identity.hwnd)
         result["electron_startup"] = electron_startup
         result["failure_phase"] = "client_control"
         observed_config = _authenticated_config(
@@ -4014,12 +4051,14 @@ def run_runtime_case(
                 hook_snapshot=hook_end,
                 hook_start_sequence=hook_start_sequence,
                 target_identity=target_before,
+                control_root_hwnd=managed_control_root_hwnd,
             )
         except Exception as exc:
             os_evidence = _legacy_os_evidence(
                 hook_end,
                 start_sequence=hook_start_sequence,
                 target_identity=target_before or {"root_hwnd": 0},
+                control_root_hwnd=managed_control_root_hwnd,
             )
             reconciliation = None
             result["runtime_evidence_error"] = (
@@ -4039,6 +4078,7 @@ def run_runtime_case(
             hook_end,
             start_sequence=hook_start_sequence,
             target_identity=target_before or {"root_hwnd": 0},
+            control_root_hwnd=managed_control_root_hwnd,
         )
     result["os_input_evidence"] = os_evidence
     result["trace_file"] = trace_file
