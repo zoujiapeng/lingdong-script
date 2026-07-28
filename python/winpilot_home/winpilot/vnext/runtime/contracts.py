@@ -28,9 +28,9 @@ from ..mission import (
     EvidenceRef,
     MissionCard,
     TargetBinding,
+    is_safe_action_summary,
 )
 from ..verification import ObligationVerificationRequest
-from ...visual_runtime.keyboard_contracts import HotkeyChord
 
 
 RUNTIME_FRAME_FORMAT = "runtime-frame/0"
@@ -110,34 +110,14 @@ def _strings(
 
 
 def _is_safe_action_summary(value: Any) -> bool:
-    if value in {
-        "click",
-        "double_click",
-        "scroll_down",
-        "scroll_up",
-        "type_text",
-    }:
-        return True
-    if type(value) is not str or not value.startswith("hotkey_"):
-        return False
-    keys = tuple(value.removeprefix("hotkey_").split("_"))
-    try:
-        HotkeyChord(keys)
-    except (TypeError, ValueError):
-        return False
-    return True
+    return type(value) is str and any(
+        is_safe_action_summary(action, value)
+        for action in APPROVED_DESKTOP_ACTIONS
+    )
 
 
 def _action_summary_matches(action: str, summary: str) -> bool:
-    if action == "scroll":
-        return summary in {"scroll_down", "scroll_up"}
-    if action in {"click", "double_click", "type_text"}:
-        return summary == action
-    if action == "hotkey":
-        return summary.startswith("hotkey_") and _is_safe_action_summary(
-            summary
-        )
-    return False
+    return is_safe_action_summary(action, summary)
 
 
 def _freeze_json(value: Any) -> Any:

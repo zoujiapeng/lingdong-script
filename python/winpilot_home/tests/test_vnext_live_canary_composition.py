@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from copy import deepcopy
 from dataclasses import dataclass
+from itertools import permutations
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,7 +63,9 @@ from winpilot.vnext.mission import (
     MissionStatus,
     ObligationSpec,
     TargetBinding,
+    is_safe_action_summary,
 )
+from winpilot.vnext.mission import contracts as mission_contracts
 from winpilot.vnext.runtime import (
     MissionRuntimeResult,
     MutationPermitAuthority,
@@ -713,6 +716,46 @@ def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> No
                 "local_intent": "   ",
             }
         )
+
+
+def test_mission_hotkey_summaries_match_the_physical_chord_contract() -> None:
+    primary_keys = sorted(
+        CANONICAL_HOTKEY_KEYS.difference(CANONICAL_HOTKEY_MODIFIERS)
+    )
+    assert (
+        mission_contracts._HOTKEY_SUMMARY_MODIFIERS
+        == CANONICAL_HOTKEY_MODIFIERS
+    )
+    assert mission_contracts._HOTKEY_SUMMARY_PRIMARY_KEYS == frozenset(
+        primary_keys
+    )
+    for modifier_count in range(len(CANONICAL_HOTKEY_MODIFIERS) + 1):
+        for modifiers in permutations(
+            CANONICAL_HOTKEY_MODIFIERS,
+            modifier_count,
+        ):
+            for primary in primary_keys:
+                keys = (*modifiers, primary)
+                try:
+                    HotkeyChord(keys)
+                except ValueError:
+                    physical_valid = False
+                else:
+                    physical_valid = True
+                summary = "hotkey_" + "_".join(keys)
+                assert (
+                    is_safe_action_summary("hotkey", summary)
+                    is physical_valid
+                ), keys
+
+    for summary in (
+        "hotkey_",
+        "hotkey_ctrl",
+        "hotkey_ctrl_ctrl_a",
+        "hotkey_a_ctrl",
+        "hotkey_secret_token",
+    ):
+        assert not is_safe_action_summary("hotkey", summary)
 
 
 def test_exact_capture_rejects_clamping_and_decoded_dimension_mismatch(
