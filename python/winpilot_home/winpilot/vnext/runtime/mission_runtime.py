@@ -54,6 +54,7 @@ from .contracts import (
     APPROVED_DESKTOP_ACTIONS,
     APPROVED_RUNTIME_TOOLS,
     CURRENT_FRAME_EVIDENCE_KIND,
+    MAX_COMPLETED_ACTION_HISTORY,
     POST_ACTION_FRAME_EVIDENCE_KIND,
     VISUAL_VERIFIER_EVIDENCE_KIND,
     VISUAL_VERIFIER_TRUST,
@@ -605,6 +606,25 @@ class MissionRuntime:
             evidence_refs=refs,
         )
 
+    def _completed_action_history(
+        self,
+        obligation_id: str,
+    ) -> tuple[str, ...]:
+        actions: list[str] = []
+        for event in self._reducer.events:
+            if event.kind != "transition_recorded":
+                continue
+            payload = event.payload
+            action = payload.get("action")
+            if (
+                payload.get("obligation_id") == obligation_id
+                and payload.get("input_completed") is True
+                and type(action) is str
+                and action in APPROVED_DESKTOP_ACTIONS
+            ):
+                actions.append(action)
+        return tuple(actions[-MAX_COMPLETED_ACTION_HISTORY:])
+
     def _complete_mission(
         self,
         *,
@@ -725,6 +745,9 @@ class MissionRuntime:
             turn = RuntimeVerifierTurn(
                 request=request,
                 frame=frozen.frame,
+                completed_actions=self._completed_action_history(
+                    obligation_id
+                ),
             )
         except Exception as exc:
             return self._result(
@@ -1226,6 +1249,9 @@ class MissionRuntime:
                 initial.broker_state.frame,
                 self._catalog,
                 broker_projection,
+                completed_actions=self._completed_action_history(
+                    projection.active_obligation_id or ""
+                ),
             )
         except Exception as exc:
             return self._result(
