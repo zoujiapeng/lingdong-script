@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import base64
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import threading
 from typing import Any, Callable
@@ -41,6 +42,10 @@ from winpilot.vnext.actor.envelope import _decision_id
 from winpilot.vnext.desktop_adapter import (
     AtomicDesktopAdapter,
     LiveTargetSnapshot,
+)
+from winpilot.vnext.evidence_plane import (
+    RuntimeEvidencePlane,
+    RuntimeEvidencePlaneError,
 )
 from winpilot.vnext.mission import TargetBinding
 from winpilot.vnext.runtime import (
@@ -277,6 +282,7 @@ class _Harness:
     adapter: AtomicDesktopAdapter
     envelope: ActorDecisionEnvelope
     commit_identity: RuntimeCommitIdentity
+    runtime_evidence: RuntimeEvidencePlane | None = None
 
     def run(
         self,
@@ -382,6 +388,7 @@ def _harness(
     trace_fail: bool = False,
     post_input_settle_delay_s: float = 0.12,
     wait: Callable[[float], None] | None = None,
+    with_runtime_evidence: bool = False,
 ) -> _Harness:
     authority = FrameAuthority()
     before_b64 = _jpeg(20)
@@ -424,6 +431,15 @@ def _harness(
     permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
     raw = _RawHarness(raw_result)
     trace = _Trace(trace_fail)
+    runtime_evidence = (
+        RuntimeEvidencePlane(
+            MISSION_ID,
+            RUN_ID,
+            clock_ns=lambda: 123_456_789,
+        )
+        if with_runtime_evidence
+        else None
+    )
     wait_calls: list[float] = []
 
     def settle_wait(delay: float) -> None:
@@ -439,10 +455,29 @@ def _harness(
         mutation_permits=permits,
         raw_device=raw.executor(),
         receipt_trace_sink=trace,
+        runtime_evidence_plane=runtime_evidence,
         post_input_settle_delay_s=post_input_settle_delay_s,
         wait=settle_wait,
     )
     envelope = _envelope(before, binding, action)
+    if runtime_evidence is not None:
+        proposal_wire = envelope.proposal.model_dump(mode="json")
+        runtime_evidence.record_actor_decision(
+            decision_id=envelope.decision_id,
+            mission_id=envelope.mission_id,
+            run_id=envelope.run_id,
+            obligation_id=envelope.obligation_id,
+            proposal_kind=envelope.proposal.kind,
+            action=envelope.proposal.action,
+            canonical_arguments=proposal_wire["args"],
+            tool_schema={"type": "object"},
+            broker_projection={
+                "projection_id": envelope.broker_projection_id,
+            },
+            actor_envelope_sha256=hashlib.sha256(
+                envelope.to_json().encode("utf-8")
+            ).hexdigest(),
+        )
     frame_identity = RuntimeFrameIdentity(
         frame_id=before.frame_id,
         epoch=before.epoch,
@@ -467,6 +502,7 @@ def _harness(
             frame_identity,
             RuntimeTargetIdentity.from_binding(binding),
         ),
+        runtime_evidence=runtime_evidence,
     )
 
 
@@ -525,6 +561,95 @@ def test_exact_atomic_surface_completes_once_with_effect(
         assert values[4] is ClickMechanism.PHYSICAL
     elif action == "scroll":
         assert harness.raw.calls[0][1] == (*POINT, -240, HWND)
+
+
+def test_atomic_adapter_records_admission_and_single_raw_receipt() -> None:
+    harness = _harness("click", with_runtime_evidence=True)
+    plane = harness.runtime_evidence
+    assert plane is not None
+
+    attempt = harness.run()
+
+    transition = attempt.transition
+    assert transition is not None
+    assert transition.outcome is ControllerOutcome.COMPLETED
+    assert len(harness.raw.calls) == 1
+    assert len(plane.admission_records) == 1
+    admission = plane.admission_records[0]
+    assert admission.decision_id == harness.envelope.decision_id
+    assert admission.mutation_permit_id == attempt.permit_id
+    assert (
+        admission.controller_route
+        == "vnext_atomic_desktop_adapter"
+    )
+    assert admission.accepted_timestamp_ns == 123_456_789
+    assert plane.action_bindings == ()
+
+    current = harness.authority.current
+    assert current is not None
+    plane.record_controller_transition(
+        decision_id=harness.envelope.decision_id,
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        actor_envelope_sha256=hashlib.sha256(
+            harness.envelope.to_json().encode("utf-8")
+        ).hexdigest(),
+        transition=transition.to_dict(),
+        post_frame_identity=RuntimeFrameIdentity(
+            frame_id=current.frame_id,
+            epoch=current.epoch,
+            hwnd=current.hwnd,
+            region=current.region,
+            scope=current.scope,
+            submitted_size=current.submitted_size,
+            image_sha256=current.image_sha256,
+        ).to_dict(),
+    )
+    assert len(plane.action_bindings) == 1
+    assert (
+        plane.action_bindings[0].raw_action_receipt[
+            "input_completed"
+        ]
+        is True
+    )
+    assert plane.action_bindings[0].physical_attempt_count == 1
+
+
+def test_action_effect_snapshot_rejects_nested_extra_fields() -> None:
+    harness = _harness("click", with_runtime_evidence=True)
+    plane = harness.runtime_evidence
+    assert plane is not None
+    attempt = harness.run()
+    transition = attempt.transition
+    assert transition is not None
+    wire = transition.to_dict()
+    assert wire["action_effect"] is not None
+    wire["action_effect"]["reasoning"] = "forbidden"
+    current = harness.authority.current
+    assert current is not None
+
+    with pytest.raises(
+        RuntimeEvidencePlaneError,
+        match="action effect is not canonical",
+    ):
+        plane.record_controller_transition(
+            decision_id=harness.envelope.decision_id,
+            mission_id=MISSION_ID,
+            run_id=RUN_ID,
+            actor_envelope_sha256=hashlib.sha256(
+                harness.envelope.to_json().encode("utf-8")
+            ).hexdigest(),
+            transition=wire,
+            post_frame_identity=RuntimeFrameIdentity(
+                frame_id=current.frame_id,
+                epoch=current.epoch,
+                hwnd=current.hwnd,
+                region=current.region,
+                scope=current.scope,
+                submitted_size=current.submitted_size,
+                image_sha256=current.image_sha256,
+            ).to_dict(),
+        )
 
 
 def test_applied_order_is_raw_then_wait_then_capture(monkeypatch) -> None:
