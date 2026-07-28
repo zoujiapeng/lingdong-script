@@ -250,6 +250,57 @@ def _select_runtime_version(control: Any, runtime_version: str) -> dict[str, str
     return {"runtime_version": selected, "runtime_selector_label": label}
 
 
+def _safe_runtime_jobs(value: Any) -> list[dict[str, Any]]:
+    jobs = value if isinstance(value, list) else []
+    projected: list[dict[str, Any]] = []
+    for item in jobs:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        projected.append(
+            {
+                "job_id": str(item.get("job_id") or ""),
+                "kind": str(item.get("kind") or ""),
+                "status": str(item.get("status") or ""),
+                "created_at": item.get("created_at"),
+                "started_at": item.get("started_at"),
+                "metadata": {
+                    key: str(metadata.get(key) or "")
+                    for key in ("run_id", "runtime_version", "graph_id")
+                },
+                "error": str(item.get("error") or ""),
+            }
+        )
+    return projected
+
+
+def _safe_desktop_action_queue(value: Any) -> dict[str, Any]:
+    queue = value if isinstance(value, dict) else {}
+    return {
+        key: queue.get(key)
+        for key in (
+            "submitted",
+            "completed",
+            "failed",
+            "reentrant",
+            "async_submitted",
+            "async_completed",
+            "async_failed",
+            "async_canceled",
+            "last_job_id",
+            "last_action",
+            "last_elapsed_ms",
+            "last_wait_ms",
+            "parallel_peak",
+            "scope_counts",
+            "async_status",
+            "resource_waiters",
+        )
+        if key in queue
+    }
+
+
 class ElectronClientDriver:
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
@@ -353,6 +404,67 @@ class ElectronClientDriver:
             "running": bool(payload.get("running")),
             "arp_running": bool(payload.get("arp_running")),
             "current_run": compact_current,
+            "runtime_jobs": _safe_runtime_jobs(payload.get("runtime_jobs")),
+            "desktop_action_queue": _safe_desktop_action_queue(
+                payload.get("desktop_action_queue")
+            ),
+        }
+
+    def submission_ui_state(self) -> dict[str, Any]:
+        buttons: list[dict[str, Any]] = []
+        for control in self.buttons():
+            try:
+                buttons.append(
+                    {
+                        "name": str(control.Name or "").strip(),
+                        "enabled": bool(control.IsEnabled),
+                    }
+                )
+            except Exception:
+                continue
+        selectors = [
+            item
+            for item in _visible_descendants(self.window, "ComboBox")
+            if item.Name == RUNTIME_SELECTOR
+        ]
+        edits = _visible_descendants(self.window, "Edit")
+        goal = next(
+            (edit for edit in edits if "鎻忚堪甯屾湜浠ｇ悊" in edit.Name),
+            edits[0] if edits else None,
+        )
+        visible = self.texts()
+        error_markers = (
+            "error",
+            "failed",
+            "target",
+            "hwnd",
+            "澶辫触",
+            "閿欒",
+        )
+        errors = [
+            text
+            for text in visible
+            if any(marker in text.casefold() for marker in error_markers)
+        ]
+        return {
+            "buttons": buttons,
+            "run_button_present": any(
+                item["name"] == RUN_TASK for item in buttons
+            ),
+            "run_button_enabled": any(
+                item["name"] == RUN_TASK and item["enabled"]
+                for item in buttons
+            ),
+            "stop_button_present": any(
+                item["name"] == STOP_TASK for item in buttons
+            ),
+            "runtime_selector_label": (
+                _selected_combobox_label(selectors[0])
+                if len(selectors) == 1
+                else ""
+            ),
+            "goal_input": _control_value(goal) if goal is not None else "",
+            "visible_errors": errors,
         }
 
     def restore_and_focus(self) -> None:
@@ -679,10 +791,11 @@ class ElectronClientDriver:
         expected: str = "terminal",
         persistent_probe_seconds: int = 120,
         previous_run_id: str = "",
+        accepted_run_id: str = "",
     ) -> dict[str, Any]:
         started_at = time.time()
         deadline = time.time() + timeout
-        bound_run_id = ""
+        bound_run_id = str(accepted_run_id or "")
         active_seen = False
         last_progress = 0.0
         last_status = ""
@@ -725,6 +838,7 @@ class ElectronClientDriver:
                 bound_run_id
                 and current_run_id
                 and current_run_id != bound_run_id
+                and current_run_id != previous_run_id
             ):
                 return {
                     "outcome": "run_replaced",
@@ -738,6 +852,24 @@ class ElectronClientDriver:
                 bound_run_id
                 and current_run_id == bound_run_id
                 and runtime_status.get("running")
+            ):
+                active_seen = True
+            bound_job = next(
+                (
+                    job
+                    for job in runtime_status.get("runtime_jobs") or []
+                    if isinstance(job, dict)
+                    and str(
+                        (job.get("metadata") or {}).get("run_id") or ""
+                    )
+                    == bound_run_id
+                ),
+                None,
+            )
+            if (
+                isinstance(bound_job, dict)
+                and str(bound_job.get("status") or "")
+                in {"queued", "waiting_resources", "running", "canceling"}
             ):
                 active_seen = True
 
@@ -1234,6 +1366,45 @@ def run_case(
             int(spec.get("max_steps", 120)),
             str(spec.get("runtime_version") or "legacy"),
         )
+        status_before_click = driver.runtime_status()
+        ui_before_click = driver.submission_ui_state()
+        result["submission_before"] = {
+            "current_run_id": str(
+                (
+                    status_before_click.get("current_run")
+                    if isinstance(
+                        status_before_click.get("current_run"),
+                        dict,
+                    )
+                    else {}
+                ).get("run_id")
+                or ""
+            ),
+            "job_ids": [
+                str(item.get("job_id") or "")
+                for item in status_before_click.get("runtime_jobs") or []
+                if isinstance(item, dict)
+            ],
+            "runtime_status": status_before_click,
+            "ui": ui_before_click,
+        }
+        if ui_before_click.get("run_button_enabled") is not True:
+            raise RuntimeError("visible Electron Run button is not enabled")
+        if (
+            str(spec.get("runtime_version") or "legacy") == "vnext"
+            and _runtime_version_from_label(
+                str(ui_before_click.get("runtime_selector_label") or "")
+            )
+            != "vnext"
+        ):
+            raise RuntimeError(
+                "visible Electron runtime selector did not read back vNext "
+                "immediately before submission"
+            )
+        if ui_before_click.get("goal_input") != spec["task"]:
+            raise RuntimeError(
+                "visible Electron goal changed before submission"
+            )
         result["screenshots"] = {
             "before_submit": driver.capture_window("before-submit.png")
         }
@@ -1257,12 +1428,20 @@ def run_case(
             handoff = after_submit(driver, result)
             if handoff is not None:
                 result["after_submit_handoff"] = handoff
+        else:
+            handoff = None
+        accepted_run_id = str(
+            handoff.get("admitted_run_id")
+            if isinstance(handoff, dict)
+            else ""
+        )
         result["result"] = driver.wait_for_result(
             spec["task"],
             int(spec.get("timeout", 900)),
             expected=str(spec.get("expected") or "terminal"),
             persistent_probe_seconds=int(spec.get("persistent_probe_seconds") or 120),
             previous_run_id=previous_run_id,
+            accepted_run_id=accepted_run_id,
         )
         result["duration_seconds"] = round(time.time() - submitted_at, 3)
         driver.restore_and_focus()
