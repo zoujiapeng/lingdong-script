@@ -2458,16 +2458,20 @@ def _browser_signature_errors(
         if not inputs or observed != canonical_arguments.get("text"):
             errors.append("trusted_text_input_mismatch")
     elif action == "hotkey":
+        def canonical_key(value: Any) -> str:
+            folded = str(value or "").casefold()
+            return "ctrl" if folded == "control" else folded
+
         expected_keys = [
-            str(item).casefold() for item in canonical_arguments.get("keys", [])
+            canonical_key(item) for item in canonical_arguments.get("keys", [])
         ]
         downs = [
-            str(_field(event, "key") or "").casefold()
+            canonical_key(_field(event, "key"))
             for event in events
             if event.get("type") == "keydown"
         ]
         ups = [
-            str(_field(event, "key") or "").casefold()
+            canonical_key(_field(event, "key"))
             for event in events
             if event.get("type") == "keyup"
         ]
