@@ -52,8 +52,14 @@ _TOOL_DESCRIPTIONS = {
     "scroll": (
         "Scroll at one point; amount < 0 scrolls down and amount > 0 scrolls up."
     ),
-    "type_text": "Type the exact literal text into the focused editable control.",
-    "hotkey": "Press one key chord; do not use it for literal text entry.",
+    "type_text": (
+        "Enter the requested literal characters into the focused editable "
+        "control; selected text is replaced."
+    ),
+    "hotkey": (
+        "Press one control chord such as Ctrl+A or Ctrl+Enter; this never "
+        "enters literal text."
+    ),
     "claim_obligation_done": (
         "Claim the visible goal is complete so the verifier checks it."
     ),

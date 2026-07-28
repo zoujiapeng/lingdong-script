@@ -30,6 +30,7 @@ from ..mission import (
     TargetBinding,
 )
 from ..verification import ObligationVerificationRequest
+from ...visual_runtime.keyboard_contracts import HotkeyChord
 
 
 RUNTIME_FRAME_FORMAT = "runtime-frame/0"
@@ -106,6 +107,25 @@ def _strings(
     if len(result) != len(set(result)):
         raise RuntimeContractError(f"{name} must not contain duplicates")
     return result
+
+
+def _is_safe_action_summary(value: Any) -> bool:
+    if value in {
+        "click",
+        "double_click",
+        "scroll_down",
+        "scroll_up",
+        "type_text",
+    }:
+        return True
+    if type(value) is not str or not value.startswith("hotkey_"):
+        return False
+    keys = tuple(value.removeprefix("hotkey_").split("_"))
+    try:
+        HotkeyChord(keys)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _freeze_json(value: Any) -> Any:
@@ -669,7 +689,7 @@ class ActorTurnInput:
     mission: ActorMissionView
     frame: ActorFrameView
     tools: tuple[ActorToolView, ...]
-    completed_actions: tuple[str, ...] = ()
+    completed_action_summaries: tuple[str, ...] = ()
     previous_action: ActorPreviousActionView | None = None
     format: str = ACTOR_TURN_FORMAT
 
@@ -697,23 +717,26 @@ class ActorTurnInput:
             raise RuntimeContractError(
                 "previous_action must be ActorPreviousActionView or null"
             )
-        completed_actions = tuple(self.completed_actions)
+        completed_action_summaries = tuple(
+            self.completed_action_summaries
+        )
         if (
-            len(completed_actions) > MAX_COMPLETED_ACTION_HISTORY
+            len(completed_action_summaries)
+            > MAX_COMPLETED_ACTION_HISTORY
             or any(
-                type(action) is not str
-                or action not in APPROVED_DESKTOP_ACTIONS
-                for action in completed_actions
+                not _is_safe_action_summary(summary)
+                for summary in completed_action_summaries
             )
         ):
             raise RuntimeContractError(
-                "completed_actions exceeds the bounded desktop action history"
+                "completed_action_summaries is outside the bounded "
+                "privacy-safe history"
             )
         object.__setattr__(self, "tools", tools)
         object.__setattr__(
             self,
-            "completed_actions",
-            completed_actions,
+            "completed_action_summaries",
+            completed_action_summaries,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -722,7 +745,9 @@ class ActorTurnInput:
             "mission": self.mission.to_dict(),
             "frame": self.frame.to_dict(),
             "tools": [tool.to_dict() for tool in self.tools],
-            "completed_actions": list(self.completed_actions),
+            "completed_action_summaries": list(
+                self.completed_action_summaries
+            ),
             "previous_action": (
                 None
                 if self.previous_action is None
@@ -740,7 +765,7 @@ class RuntimeVerifierTurn:
 
     request: ObligationVerificationRequest
     frame: RuntimeFrame
-    completed_actions: tuple[str, ...] = ()
+    completed_action_summaries: tuple[str, ...] = ()
     format: str = RUNTIME_VERIFIER_TURN_FORMAT
 
     def __post_init__(self) -> None:
@@ -756,22 +781,25 @@ class RuntimeVerifierTurn:
             raise RuntimeContractError(
                 "verifier turn requires RuntimeFrame"
             )
-        completed_actions = tuple(self.completed_actions)
+        completed_action_summaries = tuple(
+            self.completed_action_summaries
+        )
         if (
-            len(completed_actions) > MAX_COMPLETED_ACTION_HISTORY
+            len(completed_action_summaries)
+            > MAX_COMPLETED_ACTION_HISTORY
             or any(
-                type(action) is not str
-                or action not in APPROVED_DESKTOP_ACTIONS
-                for action in completed_actions
+                not _is_safe_action_summary(summary)
+                for summary in completed_action_summaries
             )
         ):
             raise RuntimeContractError(
-                "completed_actions exceeds the bounded desktop action history"
+                "completed_action_summaries is outside the bounded "
+                "privacy-safe history"
             )
         object.__setattr__(
             self,
-            "completed_actions",
-            completed_actions,
+            "completed_action_summaries",
+            completed_action_summaries,
         )
         request_ids = {ref.id for ref in self.request.evidence_refs}
         if not request_ids <= set(self.frame.evidence_refs):
@@ -793,7 +821,7 @@ def project_actor_turn_input(
     catalog: ToolCatalog,
     projection: BrokerProjection,
     *,
-    completed_actions: Iterable[str] = (),
+    completed_action_summaries: Iterable[str] = (),
 ) -> ActorTurnInput:
     """Project one identity-free bounded view from canonical Runtime facts."""
 
@@ -911,7 +939,9 @@ def project_actor_turn_input(
             fresh=frame_state.fresh,
         ),
         tools=tuple(tools),
-        completed_actions=tuple(completed_actions),
+        completed_action_summaries=tuple(
+            completed_action_summaries
+        ),
         previous_action=previous,
     )
 
