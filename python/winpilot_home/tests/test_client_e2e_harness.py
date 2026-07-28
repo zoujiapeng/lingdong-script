@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load_harness():
@@ -46,6 +47,56 @@ def test_trace_snapshot_tracks_outer_arp_jsonl_files_not_artifact_directories(
     monkeypatch.setattr(harness, "TRACE_ROOT", tmp_path)
 
     assert harness._trace_names() == {"arp-one"}
+
+
+def test_runtime_status_retries_a_transient_managed_endpoint_timeout(
+    monkeypatch,
+):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver._runtime_url = "http://127.0.0.1:1"
+    driver._runtime_token = "test-token"
+    calls = {"count": 0}
+
+    class Response:
+        def __enter__(self):
+            return SimpleNamespace(
+                read=lambda: b"",
+            )
+
+        def __exit__(self, *_args):
+            return False
+
+    def urlopen(_request, *, timeout):
+        assert timeout == 3
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise TimeoutError("transient status timeout")
+        return Response()
+
+    monkeypatch.setattr(harness.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(
+        harness.json,
+        "load",
+        lambda _response: {
+            "running": True,
+            "arp_running": True,
+            "current_run": {
+                "run_id": "arp-test",
+                "kind": "arp",
+                "status": "running",
+                "phase": "executing",
+                "goal": "test",
+                "current_node_id": "full-goal",
+                "current_tool": None,
+                "error": None,
+            },
+        },
+    )
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    assert driver.runtime_status()["current_run"]["run_id"] == "arp-test"
+    assert calls["count"] == 2
 
 
 def test_memory_isolation_requires_client_toggle_contract_and_clean_runner(

@@ -324,8 +324,21 @@ class ElectronClientDriver:
             f"{self._runtime_url}/api/status",
             headers={"Authorization": f"Bearer {self._runtime_token}"},
         )
-        with urllib.request.urlopen(request, timeout=3) as response:
-            payload = json.load(response)
+        deadline = time.monotonic() + 15.0
+        last_error: BaseException | None = None
+        while True:
+            try:
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    payload = json.load(response)
+                break
+            except (OSError, TimeoutError, urllib.error.URLError) as exc:
+                last_error = exc
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "managed runtime status endpoint did not respond "
+                        "within the bounded client probe"
+                    ) from last_error
+                time.sleep(0.25)
         current = payload.get("current_run")
         compact_current = None
         if isinstance(current, dict):
