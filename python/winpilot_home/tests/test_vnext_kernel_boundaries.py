@@ -78,6 +78,24 @@ RUNTIME_FORBIDDEN_IMPORT_PREFIXES = (
     "winpilot.vnext.targeting",
 )
 
+LIVE_DESKTOP_IMPORT_PREFIXES = (
+    "winpilot.action",
+    "winpilot.agent",
+    "winpilot.utils.screenshot",
+    "winpilot.visual_runtime",
+)
+
+ATOMIC_DESKTOP_IMPORTS = (
+    "winpilot.action.desktop_queue",
+    "winpilot.action.raw_device",
+    "winpilot.action.replay_policy",
+    "winpilot.agent.frame_authority",
+    "winpilot.utils.screenshot",
+    "winpilot.visual_runtime.frame_observer",
+    "winpilot.visual_runtime.normalized_frame_coordinates",
+    "winpilot.visual_runtime.submitted_image_coordinates",
+)
+
 
 def _source_files(root: Path) -> tuple[Path, ...]:
     if root.is_file():
@@ -189,4 +207,21 @@ def test_minimal_runtime_tool_surface_cannot_expand_silently() -> None:
     }
     assert APPROVED_RUNTIME_TOOLS == (
         APPROVED_DESKTOP_ACTIONS | APPROVED_OUTCOME_TOOLS
+    )
+
+
+def test_only_atomic_adapter_crosses_the_live_desktop_boundary() -> None:
+    atomic = VNEXT_ROOT / "desktop_adapter" / "atomic.py"
+    crossings = tuple(
+        (path, imported)
+        for path in sorted(VNEXT_ROOT.rglob("*.py"))
+        for imported in _imports(path)
+        if any(
+            _matches_prefix(imported, prefix)
+            for prefix in LIVE_DESKTOP_IMPORT_PREFIXES
+        )
+    )
+    assert {path for path, _imported in crossings} == {atomic}
+    assert tuple(imported for _path, imported in crossings) == (
+        ATOMIC_DESKTOP_IMPORTS
     )
