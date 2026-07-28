@@ -140,8 +140,8 @@ export function RuntimeVersionSelector({
           onChange(selected);
         }}
       >
-        <option value="vnext" disabled={!canaryEnabled}>vNext</option>
         <option value="legacy">Legacy</option>
+        <option value="vnext" disabled={!canaryEnabled}>vNext</option>
       </select>
     </label>
   );
