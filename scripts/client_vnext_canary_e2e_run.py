@@ -3375,6 +3375,11 @@ def run_runtime_case(
             handoff_driver: client_harness.ElectronClientDriver,
             _client_result: dict[str, Any],
         ) -> dict[str, Any]:
+            # The native client captures the foreground target 160 ms after
+            # minimizing. Put the already-known eval HWND in front before any
+            # post-submit HTTP audit so that capture cannot bind whichever
+            # unrelated window Windows happened to restore.
+            evidence = _focus_window(target_hwnd)
             observed = _authenticated_config(
                 handoff_driver,
                 frozen_template=frozen_config_template,
@@ -3383,7 +3388,6 @@ def run_runtime_case(
                 raise RuntimeError(
                     "campaign behavior config changed after visible submission"
                 )
-            evidence = _focus_window(target_hwnd)
             previous_current = (
                 _client_result.get("runtime_before", {}).get("current_run")
             )
