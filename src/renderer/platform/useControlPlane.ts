@@ -4,8 +4,20 @@ import {
   resolveControlPlaneConnection,
   runtimeCompatibilityError,
 } from './client';
-import { buildClientRunInputs } from './executionContext';
-import type { ArpExecutionSnapshot, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
+import {
+  buildClientRunInputs,
+  type ExplicitDesktopHandoffDescriptor,
+} from './executionContext';
+import type {
+  ArpExecutionSnapshot,
+  ArpGraph,
+  CapabilitySpec,
+  GraphValidation,
+  PlatformOverview,
+  RunProjection,
+  RuntimeEvent,
+  RuntimeVersion,
+} from './contracts';
 import type { AutomationIR } from '../utils/automationIR';
 import { taskbarNotificationForTransition, type TaskbarRunState } from './taskbarNotification';
 
@@ -13,6 +25,126 @@ export type ConnectionState = 'connecting' | 'online' | 'degraded' | 'offline';
 
 export const CONTROL_PLANE_FALLBACK_REFRESH_MS = 5_000;
 export const CONTROL_PLANE_EVENT_REFRESH_MS = 80;
+
+const ONE_ATTEMPT = {
+  max_attempts: 1,
+  delay_ms: 0,
+  backoff: 1,
+} as const;
+
+function deterministicGoalKey(goal: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < goal.length; index += 1) {
+    hash = Math.imul(hash ^ goal.charCodeAt(index), 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+export function buildVnextLiveCanaryGraph(goal: string): ArpGraph {
+  const fullGoal = goal.trim();
+  if (!fullGoal) throw new Error('vNext live canary requires a non-empty full goal.');
+  const graphId = `vnext-live-canary-${deterministicGoalKey(fullGoal)}`;
+  return {
+    format: 'arp/1',
+    id: graphId,
+    name: fullGoal,
+    description: '',
+    nodes: [
+      {
+        id: 'start',
+        kind: 'start',
+        name: 'start',
+        config: {},
+        retry: ONE_ATTEMPT,
+        disabled: false,
+        x: 0,
+        y: 0,
+      },
+      {
+        id: 'full-goal',
+        kind: 'agent_goal',
+        name: 'full goal',
+        config: { goal: fullGoal },
+        retry: ONE_ATTEMPT,
+        disabled: false,
+        x: 0,
+        y: 100,
+      },
+      {
+        id: 'end',
+        kind: 'end',
+        name: 'end',
+        config: {},
+        retry: ONE_ATTEMPT,
+        disabled: false,
+        x: 0,
+        y: 200,
+      },
+    ],
+    edges: [
+      {
+        id: 'start-to-full-goal',
+        source: 'start',
+        target: 'full-goal',
+        branch: 'next',
+        label: '',
+      },
+      {
+        id: 'full-goal-to-end',
+        source: 'full-goal',
+        target: 'end',
+        branch: 'next',
+        label: '',
+      },
+    ],
+    variables: {},
+    policy: {
+      max_node_visits: 1,
+      fail_fast: true,
+      require_evidence_on_done: true,
+      allow_shell: false,
+      allow_desktop_mutation: true,
+    },
+    metadata: {},
+  };
+}
+
+type GoalRunClient = Pick<
+  ControlPlaneClient,
+  'compileTask' | 'captureDesktopContext' | 'startGraph'
+>;
+
+export async function startGoalWithRuntime(
+  client: GoalRunClient,
+  goal: string,
+  maxSteps: number,
+  coldStart: boolean,
+  runtimeVersion: RuntimeVersion = 'legacy',
+): Promise<ArpExecutionSnapshot> {
+  const frozenRuntimeVersion = runtimeVersion;
+  if (frozenRuntimeVersion === 'legacy') {
+    const compiled = await client.compileTask(goal, maxSteps, coldStart);
+    const inputs = await buildClientRunInputs(
+      compiled.contract,
+      Date.now(),
+      (handoff) => client.captureDesktopContext(handoff.control_surface_pid),
+    );
+    return client.startGraph(compiled.graph, inputs, frozenRuntimeVersion);
+  }
+
+  const graph = buildVnextLiveCanaryGraph(goal);
+  const handoff: ExplicitDesktopHandoffDescriptor = {
+    format: 'explicit-desktop-handoff/1',
+    task_id: graph.id,
+    desktop_handoff_required: true,
+  };
+  const inputs = await buildClientRunInputs(
+    handoff,
+    Date.now(),
+    (result) => client.captureDesktopContext(result.control_surface_pid),
+  );
+  return client.startGraph(graph, inputs, frozenRuntimeVersion);
+}
 
 export function useControlPlane() {
   const clientRef = useRef<ControlPlaneClient | null>(null);
@@ -187,15 +319,20 @@ export function useControlPlane() {
     return requireClient();
   };
 
-  const startGoal = useCallback(async (goal: string, maxSteps = 30, coldStart = false) => {
+  const startGoal = useCallback(async (
+    goal: string,
+    maxSteps = 30,
+    coldStart = false,
+    runtimeVersion: RuntimeVersion = 'legacy',
+  ) => {
     const client = requireCompatibleClient();
-    const compiled = await client.compileTask(goal, maxSteps, coldStart);
-    const inputs = await buildClientRunInputs(
-      compiled.contract,
-      Date.now(),
-      (handoff) => client.captureDesktopContext(handoff.control_surface_pid),
+    const run = await startGoalWithRuntime(
+      client,
+      goal,
+      maxSteps,
+      coldStart,
+      runtimeVersion,
     );
-    const run = await client.startGraph(compiled.graph, inputs);
     await refresh();
     return run;
   }, [refresh]);

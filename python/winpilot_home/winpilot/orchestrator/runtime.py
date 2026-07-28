@@ -318,6 +318,24 @@ class ArpExecution:
             return {
                 "run_id": self.run_id,
                 "kind": "arp",
+                "runtime_version": str(
+                    self.runtime_state.get("runtime_version") or "legacy"
+                ),
+                "runtime_budget": _json_preview(
+                    self.runtime_state.get("runtime_budget") or {},
+                ),
+                "no_legacy_fallback": (
+                    self.runtime_state.get("no_legacy_fallback") is True
+                ),
+                "runtime_lifecycle": _json_preview(
+                    self.runtime_state.get("runtime_lifecycle") or {},
+                ),
+                "trace_status": str(
+                    self.runtime_state.get("trace_status") or ""
+                ),
+                "trace_error": str(
+                    self.runtime_state.get("trace_error") or ""
+                ),
                 "graph_id": self.graph.id,
                 "graph_name": self.graph.name,
                 "status": self.status.value,
@@ -336,7 +354,8 @@ class ArpExecution:
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
                 "experience_policy": str(
-                    contract_data.get("experience_policy")
+                    self.runtime_state.get("experience_policy")
+                    or contract_data.get("experience_policy")
                     or self.graph.metadata.get("experience_policy")
                     or "allow"
                 ),
@@ -379,6 +398,12 @@ class ArpExecution:
         keys = (
             "run_id",
             "kind",
+            "runtime_version",
+            "runtime_budget",
+            "no_legacy_fallback",
+            "runtime_lifecycle",
+            "trace_status",
+            "trace_error",
             "graph_id",
             "graph_name",
             "status",
@@ -800,13 +825,28 @@ class ArpExecution:
         default = next((edge for edge in outgoing if edge.branch in {"next", "default", "output"}), None)
         return default.target if default else None
 
-    def run(self) -> dict[str, Any]:
+    def _publish_run_done(self) -> None:
+        BUS.publish(
+            "arp_run_done",
+            run_id=self.run_id,
+            runtime_version=str(
+                self.runtime_state.get("runtime_version") or "legacy"
+            ),
+            status=self.status.value,
+            result=_json_preview(self.result),
+            error=self.error,
+            evidence_count=len(self.evidence),
+            runtime_snapshot=self.audit_snapshot(),
+        )
+
+    def run(self, *, publish_done: bool = True) -> dict[str, Any]:
         validation = validate_graph(self.graph)
         if not validation.valid:
             self.status = ArpRunStatus.FAILED
             self.error = "; ".join(validation.errors)
             self.finished_at = time.time()
-            BUS.publish("arp_run_done", run_id=self.run_id, status=self.status.value, error=self.error)
+            if publish_done:
+                self._publish_run_done()
             return self.to_dict()
 
         node_map = {node.id: node for node in self.graph.nodes}
@@ -818,13 +858,21 @@ class ArpExecution:
         BUS.publish(
             "arp_run_start",
             run_id=self.run_id,
+            runtime_version=str(
+                self.runtime_state.get("runtime_version") or "legacy"
+            ),
+            runtime_budget=_json_preview(
+                self.runtime_state.get("runtime_budget") or {},
+            ),
             graph_id=self.graph.id,
             graph_name=self.graph.name,
             node_count=len(self.graph.nodes),
             task_contract=self.graph.metadata.get("task_contract"),
             satisfiability=self.graph.metadata.get("satisfiability"),
             experience_policy=str(
-                self.graph.metadata.get("experience_policy") or "allow"
+                self.runtime_state.get("experience_policy")
+                or self.graph.metadata.get("experience_policy")
+                or "allow"
             ),
         )
 
@@ -955,15 +1003,8 @@ class ArpExecution:
                     logger.debug("communication adapter cleanup failed", exc_info=True)
             self.current_node_id = None
             self.finished_at = time.time()
-            BUS.publish(
-                "arp_run_done",
-                run_id=self.run_id,
-                status=self.status.value,
-                result=_json_preview(self.result),
-                error=self.error,
-                evidence_count=len(self.evidence),
-                runtime_snapshot=self.audit_snapshot(),
-            )
+            if publish_done:
+                self._publish_run_done()
         return self.to_dict()
 
 
@@ -1043,17 +1084,55 @@ class ArpRunManager:
             return execution.to_dict()
         if on_start:
             on_start(execution)
+        finalize_before_done = bool(
+            on_finish
+            and execution.runtime_state.get("runtime_version") == "vnext"
+        )
         try:
-            return execution.run()
+            execution.run(publish_done=not finalize_before_done)
         finally:
             if on_finish:
                 try:
                     on_finish(execution)
-                except Exception:
+                except Exception as exc:
                     logger.exception("ARP on_finish callback failed")
+                    if finalize_before_done:
+                        with execution._lock:
+                            detail = str(
+                                execution.runtime_state.get("trace_error")
+                                or exc
+                            )
+                            execution.status = ArpRunStatus.FAILED
+                            execution.error = (
+                                "vNext runtime finalization failed: "
+                                f"{detail}"
+                            )
+                            execution.finished_at = time.time()
+                            execution.runtime_state["no_legacy_fallback"] = True
+                            if str(
+                                execution.runtime_state.get("trace_status")
+                                or ""
+                            ) in {"", "recording"}:
+                                execution.runtime_state[
+                                    "trace_status"
+                                ] = "finalization_failed"
+                            execution.runtime_state["runtime_lifecycle"] = {
+                                "phase": "finalization",
+                                "terminal": True,
+                                "status": ArpRunStatus.FAILED.value,
+                                "detail": execution.error,
+                                "trace_status": str(
+                                    execution.runtime_state.get("trace_status")
+                                    or "finalization_failed"
+                                ),
+                                "no_legacy_fallback": True,
+                            }
+            if finalize_before_done:
+                execution._publish_run_done()
             with self._lock:
                 self._threads.pop(execution.run_id, None)
                 self._prune_locked()
+        return execution.to_dict()
 
     def busy(self) -> bool:
         with self._lock:

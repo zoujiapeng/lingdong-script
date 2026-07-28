@@ -1796,7 +1796,7 @@ def test_deterministic_replay_produces_identical_evidence_and_effect() -> None:
     assert first.action_effect_evidence == second.action_effect_evidence
 
 
-def test_adapter_package_is_one_narrow_non_product_owner() -> None:
+def test_adapter_package_is_one_narrow_single_composition_owner() -> None:
     home = Path(__file__).resolve().parents[1]
     package = home / "winpilot" / "vnext" / "desktop_adapter"
     assert tuple(sorted(path.name for path in package.glob("*.py"))) == (
@@ -1866,7 +1866,9 @@ def test_adapter_package_is_one_narrow_non_product_owner() -> None:
         source = path.read_text(encoding="utf-8")
         if "vnext.desktop_adapter" in source:
             product_importers.append(path.relative_to(home).as_posix())
-    assert product_importers == []
+    assert product_importers == [
+        "winpilot/orchestrator/vnext_live_canary.py"
+    ]
 
 
 def test_execute_revalidates_a_forged_envelope_instance() -> None:

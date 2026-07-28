@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load_harness():
@@ -46,6 +47,172 @@ def test_trace_snapshot_tracks_outer_arp_jsonl_files_not_artifact_directories(
     monkeypatch.setattr(harness, "TRACE_ROOT", tmp_path)
 
     assert harness._trace_names() == {"arp-one"}
+
+
+def test_runtime_status_retries_a_transient_managed_endpoint_timeout(
+    monkeypatch,
+):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver._runtime_url = "http://127.0.0.1:1"
+    driver._runtime_token = "test-token"
+    calls = {"count": 0}
+
+    class Response:
+        def __enter__(self):
+            return SimpleNamespace(
+                read=lambda: b"",
+            )
+
+        def __exit__(self, *_args):
+            return False
+
+    def urlopen(_request, *, timeout):
+        assert timeout == 3
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise TimeoutError("transient status timeout")
+        return Response()
+
+    monkeypatch.setattr(harness.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(
+        harness.json,
+        "load",
+        lambda _response: {
+            "running": True,
+            "arp_running": True,
+            "runtime_jobs": [
+                {
+                    "job_id": "arp-job-test",
+                    "kind": "arp",
+                    "status": "running",
+                    "created_at": 10.0,
+                    "started_at": 10.1,
+                    "metadata": {
+                        "run_id": "arp-test",
+                        "runtime_version": "vnext",
+                        "graph_id": "vnext-live-canary-test",
+                        "private": "must-not-project",
+                    },
+                    "error": "",
+                    "result": {"canonical_arguments": {"x": 17}},
+                }
+            ],
+            "desktop_action_queue": {
+                "submitted": 1,
+                "completed": 0,
+                "last_action": "click",
+                "async_latest": [
+                    {"physical_arguments": {"x": 17, "y": 19}}
+                ],
+            },
+            "current_run": {
+                "run_id": "arp-test",
+                "kind": "arp",
+                "status": "running",
+                "phase": "executing",
+                "goal": "test",
+                "current_node_id": "full-goal",
+                "current_tool": None,
+                "error": None,
+            },
+        },
+    )
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    status = driver.runtime_status()
+    assert status["current_run"]["run_id"] == "arp-test"
+    assert status["runtime_jobs"] == [
+        {
+            "job_id": "arp-job-test",
+            "kind": "arp",
+            "status": "running",
+            "created_at": 10.0,
+            "started_at": 10.1,
+            "metadata": {
+                "run_id": "arp-test",
+                "runtime_version": "vnext",
+                "graph_id": "vnext-live-canary-test",
+            },
+            "error": "",
+        }
+    ]
+    assert status["desktop_action_queue"] == {
+        "submitted": 1,
+        "completed": 0,
+        "last_action": "click",
+    }
+    serialized = json.dumps(status, sort_keys=True)
+    assert "must-not-project" not in serialized
+    assert "canonical_arguments" not in serialized
+    assert "physical_arguments" not in serialized
+    assert calls["count"] == 2
+
+
+def test_wait_for_result_accepts_vnext_job_before_current_run_projection():
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    statuses = [
+        {
+            "running": True,
+            "arp_running": True,
+            "current_run": {
+                "run_id": "arp-previous",
+                "goal": "previous",
+                "status": "failed",
+            },
+            "runtime_jobs": [
+                {
+                    "job_id": "arp-job-new",
+                    "kind": "arp",
+                    "status": "running",
+                    "metadata": {
+                        "run_id": "arp-new",
+                        "runtime_version": "vnext",
+                        "graph_id": "graph-new",
+                    },
+                }
+            ],
+        },
+        {
+            "running": False,
+            "arp_running": False,
+            "current_run": {
+                "run_id": "arp-new",
+                "goal": "goal",
+                "status": "failed",
+            },
+            "runtime_jobs": [
+                {
+                    "job_id": "arp-job-new",
+                    "kind": "arp",
+                    "status": "failed",
+                    "metadata": {
+                        "run_id": "arp-new",
+                        "runtime_version": "vnext",
+                        "graph_id": "graph-new",
+                    },
+                }
+            ],
+        },
+    ]
+    driver.runtime_status = (
+        lambda: statuses.pop(0) if len(statuses) > 1 else statuses[0]
+    )
+    driver.buttons = lambda: []
+    driver.texts = lambda: []
+    driver._topbar_status = lambda _task: ""
+
+    result = driver.wait_for_result(
+        "goal",
+        5,
+        previous_run_id="arp-previous",
+        accepted_run_id="arp-new",
+    )
+
+    assert result["outcome"] == "terminal"
+    assert result["run_id"] == "arp-new"
+    assert result["status"] == "failed"
 
 
 def test_memory_isolation_requires_client_toggle_contract_and_clean_runner(

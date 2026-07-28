@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
@@ -55,6 +57,609 @@ def test_platform_overview_exposes_contracts_and_capabilities(client):
         for node_type in item.get("flow_node_types", [])
     }
     assert {"agent_goal", "action_batch", "skill_replay", "variable_set", "human_gate"} <= advertised_nodes
+
+
+def test_platform_overview_exposes_fail_closed_vnext_canary_budget(
+    client,
+    monkeypatch,
+):
+    from winpilot import server
+
+    original_get = server.CONFIG.get
+
+    def frozen_get(*path, default=None):
+        if path == ("vnext",):
+            return {
+                "live_canary_enabled": False,
+                "max_turns": 30,
+                "max_runtime_s": 300,
+                "max_model_calls": 60,
+            }
+        return original_get(*path, default=default)
+
+    monkeypatch.setattr(server.CONFIG, "get", frozen_get)
+
+    status = client.get("/api/v2/platform").json()["status"]["vnext"]
+
+    assert status == {
+        "live_canary_enabled": False,
+        "budget": {
+            "max_turns": 30,
+            "max_runtime_s": 300,
+            "max_model_calls": 60,
+        },
+    }
+
+
+def test_public_trace_routes_reject_private_runtime_evidence_paths(
+    client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from winpilot import server
+
+    traces = tmp_path / "traces"
+    private_run = traces / "vnext_runtime_evidence" / "run-private"
+    private_run.mkdir(parents=True)
+    private_text = "PRIVATE-TEXT-public-trace-route-7f2d"
+    (private_run / "evidence.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "physical_attempt",
+                "canonical_arguments": {"text": private_text},
+                "physical_arguments": {
+                    "x": 77889911,
+                    "y": 66778822,
+                    "amount": -99887766,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    artifacts = private_run / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "private.jpg").write_bytes(
+        b"private-runtime-evidence-image"
+    )
+    (traces / "vnext_runtime_evidence.jsonl").write_text(
+        '{"type":"public-trace-owner"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "TRACES_DIR", traces)
+    monkeypatch.setattr(server.trace_mod, "TRACES_DIR", traces)
+    monkeypatch.setattr(server.eval_summary, "TRACES_DIR", traces)
+    downstream_calls: list[str] = []
+    original_read_trace = server.trace_mod.read_trace
+    original_summarize_trace = server.eval_summary.summarize_trace
+    original_export_script = server.trace_mod.export_script
+    original_export_ir = server.trace_mod.export_automation_ir
+    original_ensure_inside = server._ensure_inside
+
+    def observed_read_trace(*args, **kwargs):
+        downstream_calls.append("read_trace")
+        return original_read_trace(*args, **kwargs)
+
+    def observed_summarize_trace(*args, **kwargs):
+        downstream_calls.append("summarize_trace")
+        return original_summarize_trace(*args, **kwargs)
+
+    def observed_export_script(*args, **kwargs):
+        downstream_calls.append("export_script")
+        return original_export_script(*args, **kwargs)
+
+    def observed_export_ir(*args, **kwargs):
+        downstream_calls.append("export_ir")
+        return original_export_ir(*args, **kwargs)
+
+    def observed_ensure_inside(*args, **kwargs):
+        downstream_calls.append("ensure_inside")
+        return original_ensure_inside(*args, **kwargs)
+
+    monkeypatch.setattr(
+        server.trace_mod,
+        "read_trace",
+        observed_read_trace,
+    )
+    monkeypatch.setattr(
+        server.eval_summary,
+        "summarize_trace",
+        observed_summarize_trace,
+    )
+    monkeypatch.setattr(
+        server.trace_mod,
+        "export_script",
+        observed_export_script,
+    )
+    monkeypatch.setattr(
+        server.trace_mod,
+        "export_automation_ir",
+        observed_export_ir,
+    )
+    monkeypatch.setattr(
+        server,
+        "_ensure_inside",
+        observed_ensure_inside,
+    )
+
+    private_urls = (
+        "/api/trace/"
+        "vnext_runtime_evidence%5Crun-private%5Cevidence",
+        "/api/trace/"
+        "vnext_runtime_evidence%5Crun-private%5Cevidence/summary",
+        "/api/export/"
+        "vnext_runtime_evidence%5Crun-private%5Cevidence",
+        "/api/export/"
+        "vnext_runtime_evidence%5Crun-private%5Cevidence/ir",
+    )
+    responses = [client.get(url) for url in private_urls[:2]]
+    responses.extend(client.post(url) for url in private_urls[2:])
+    responses.append(
+        client.get(
+            "/api/trace/vnext_runtime_evidence/shot/"
+            "run-private%5Cartifacts%5Cprivate.jpg"
+        )
+    )
+
+    assert all(response.status_code == 404 for response in responses)
+    assert downstream_calls == []
+    public_wire = "\n".join(response.text for response in responses)
+    assert private_text not in public_wire
+    assert "canonical_arguments" not in public_wire
+    assert "physical_arguments" not in public_wire
+    assert "private-runtime-evidence-image" not in public_wire
+
+
+def test_public_trace_routes_preserve_safe_historical_trace_and_image(
+    client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from winpilot import server
+
+    traces = tmp_path / "traces"
+    run_id = "historical trace"
+    public_summary = {
+        "available": True,
+        "status": "complete",
+        "journal_head_sha256": "a" * 64,
+        "journal_event_count": 9,
+        "report_sha256": "b" * 64,
+        "audit_locator": "vnext-audit-0123456789abcdef0123456789abcdef",
+        "parameter_visibility": "private_runtime_evidence",
+    }
+    traces.mkdir()
+    (traces / f"{run_id}.jsonl").write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "type": "agent_start",
+                    "run_id": run_id,
+                    "task": "historical trace compatibility",
+                    "ts": 1.0,
+                },
+                {
+                    "type": "vnext_canary_done",
+                    "run_id": run_id,
+                    "runtime_evidence": public_summary,
+                    "ts": 2.0,
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    image = traces / run_id / "after 1.jpg"
+    image.parent.mkdir()
+    image.write_bytes(b"safe-public-trace-image")
+    monkeypatch.setattr(server, "TRACES_DIR", traces)
+    monkeypatch.setattr(server.trace_mod, "TRACES_DIR", traces)
+    monkeypatch.setattr(server.eval_summary, "TRACES_DIR", traces)
+
+    detail = client.get("/api/trace/historical%20trace")
+    summary = client.get(
+        "/api/trace/historical%20trace/summary"
+    )
+    screenshot = client.get(
+        "/api/trace/historical%20trace/shot/after%201.jpg"
+    )
+
+    assert detail.status_code == 200
+    assert detail.json()[-1] == {
+        "type": "vnext_canary_done",
+        "run_id": run_id,
+        "runtime_evidence": public_summary,
+        "ts": 2.0,
+    }
+    assert summary.status_code == 200
+    assert summary.json()["run_id"] == run_id
+    assert screenshot.status_code == 200
+    assert screenshot.content == b"safe-public-trace-image"
+
+
+@pytest.mark.parametrize("runtime_version", ["future", "", 7, None])
+def test_arp_run_request_rejects_unknown_runtime_version(
+    client,
+    runtime_version,
+):
+    response = client.post(
+        "/api/v2/arp/runs",
+        json={
+            "graph": _graph_payload(),
+            "inputs": {},
+            "runtime_version": runtime_version,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_arp_run_request_rejects_unknown_top_level_fields(client):
+    response = client.post(
+        "/api/v2/arp/runs",
+        json={
+            "graph": _graph_payload(),
+            "inputs": {},
+            "runtime_version": "legacy",
+            "fallback": "vnext",
+        },
+    )
+
+    assert response.status_code == 422
+    assert any(
+        item["loc"][-1] == "fallback"
+        and item["type"] == "extra_forbidden"
+        for item in response.json()["detail"]
+    )
+
+
+def test_vnext_selection_fails_closed_when_canary_is_disabled(
+    client,
+    monkeypatch,
+):
+    from winpilot import server
+
+    monkeypatch.setattr(
+        server.CONFIG,
+        "snapshot",
+        lambda: {
+            "vnext": {
+                "live_canary_enabled": False,
+                "max_turns": 30,
+                "max_runtime_s": 300,
+                "max_model_calls": 60,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        server.TaskContractCompiler,
+        "compile_graph",
+        lambda *_args, **_kwargs: pytest.fail(
+            "vNext must not invoke the legacy compiler"
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_start_arp_execution",
+        lambda *_args, **_kwargs: pytest.fail(
+            "disabled vNext must not start either runtime"
+        ),
+    )
+
+    response = client.post(
+        "/api/v2/arp/runs",
+        json={
+            "graph": _graph_payload(),
+            "inputs": {},
+            "runtime_version": "vnext",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "vNext live canary is disabled; no legacy fallback was run"
+    )
+
+
+def test_vnext_selection_is_frozen_once_without_legacy_compilation(
+    client,
+    monkeypatch,
+):
+    from winpilot import server
+    from winpilot.orchestrator.contracts import ArpRuntimeVersion
+
+    frozen = {
+        "api": {"model": "test-vision-model"},
+        "vnext": {
+            "live_canary_enabled": True,
+            "max_turns": 30,
+            "max_runtime_s": 300,
+            "max_model_calls": 60,
+        },
+    }
+    calls = []
+    execution = SimpleNamespace(
+        run_id="arp-vnext-frozen",
+        to_dict=lambda: {
+            "run_id": "arp-vnext-frozen",
+            "runtime_version": "vnext",
+            "status": "queued",
+        },
+    )
+    monkeypatch.setattr(server.CONFIG, "snapshot", lambda: frozen)
+    monkeypatch.setattr(
+        server.TaskContractCompiler,
+        "compile_graph",
+        lambda *_args, **_kwargs: pytest.fail(
+            "vNext must not invoke the legacy compiler"
+        ),
+    )
+
+    def start(graph, inputs, *, runtime_version, frozen_config):
+        calls.append((graph, inputs, runtime_version, frozen_config))
+        execution.graph = graph
+        return execution
+
+    monkeypatch.setattr(server, "_start_arp_execution", start)
+
+    response = client.post(
+        "/api/v2/arp/runs",
+        json={
+            "graph": _graph_payload(),
+            "inputs": {"execution_context": {"format": "execution-context/1"}},
+            "runtime_version": "vnext",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["runtime_version"] == "vnext"
+    assert response.json()["run"]["runtime_version"] == "vnext"
+    assert len(calls) == 1
+    assert calls[0][2] is ArpRuntimeVersion.VNEXT
+    assert calls[0][3] is frozen
+
+
+def test_unstarted_vnext_cancel_is_retained_without_touching_trace():
+    from winpilot import server
+    from winpilot.orchestrator.contracts import ArpGraph, ArpRunStatus
+    from winpilot.orchestrator.runtime import ArpExecution
+
+    execution = ArpExecution(ArpGraph.model_validate(_graph_payload()))
+    execution.runtime_state.update({
+        "runtime_version": "vnext",
+        "runtime_budget": {
+            "max_turns": 30,
+            "max_runtime_s": 300,
+            "max_model_calls": 60,
+        },
+        "no_legacy_fallback": True,
+    })
+
+    changed = server._terminalize_unstarted_vnext_execution(
+        execution,
+        status=ArpRunStatus.CANCELED,
+        detail="canceled before resources",
+        trace_status="not_started",
+    )
+
+    assert changed is True
+    assert server._terminalize_unstarted_vnext_execution(
+        execution,
+        status=ArpRunStatus.FAILED,
+        detail="must remain canceled",
+        trace_status="failed_to_start",
+    ) is False
+    snapshot = execution.to_dict()
+    assert snapshot["status"] == "canceled"
+    assert snapshot["runtime_version"] == "vnext"
+    assert snapshot["no_legacy_fallback"] is True
+    assert snapshot["trace_status"] == "not_started"
+    assert snapshot["runtime_lifecycle"] == {
+        "phase": "pre_start",
+        "terminal": True,
+        "status": "canceled",
+        "detail": "canceled before resources",
+        "trace_status": "not_started",
+        "no_legacy_fallback": True,
+    }
+
+
+def test_vnext_trace_start_failure_terminalizes_without_legacy_fallback(
+    monkeypatch,
+):
+    from winpilot import server
+    from winpilot.orchestrator.contracts import (
+        ArpGraph,
+        ArpRuntimeVersion,
+    )
+    from winpilot.orchestrator.runtime import ArpExecution
+    from winpilot.orchestrator import vnext_live_canary
+
+    execution = ArpExecution(ArpGraph.model_validate(_graph_payload()))
+    submitted: dict[str, object] = {}
+    monkeypatch.setattr(
+        vnext_live_canary,
+        "prepare_live_vnext_execution",
+        lambda *_args, **_kwargs: execution,
+    )
+
+    def submit(_kind, runner, **kwargs):
+        submitted.update({"runner": runner, **kwargs})
+        return SimpleNamespace()
+
+    monkeypatch.setattr(server.RUNTIME_JOBS, "submit", submit)
+    monkeypatch.setattr(
+        server.trace_mod.RECORDER,
+        "start",
+        lambda _run_id: (_ for _ in ()).throw(
+            OSError("trace open failed")
+        ),
+    )
+    stop_calls = []
+    monkeypatch.setattr(
+        server.trace_mod.RECORDER,
+        "stop",
+        lambda: stop_calls.append(True),
+    )
+
+    started = server._start_arp_execution(
+        execution.graph,
+        {},
+        runtime_version=ArpRuntimeVersion.VNEXT,
+        frozen_config={},
+    )
+    try:
+        result = submitted["runner"](execution.stop_event)
+    finally:
+        with server.STATE.lock:
+            server.STATE.run_jobs.pop(execution.run_id, None)
+
+    assert started is execution
+    assert result["ok"] is False
+    assert result["runtime_version"] == "vnext"
+    assert execution.status.value == "failed"
+    assert execution.to_dict()["trace_status"] == "failed_to_start"
+    assert execution.to_dict()["no_legacy_fallback"] is True
+    assert stop_calls == []
+
+
+@pytest.mark.parametrize("stop_fails", [False, True])
+def test_vnext_trace_finalization_is_frozen_into_job_run_and_done_event(
+    client,
+    monkeypatch,
+    stop_fails,
+):
+    from winpilot import server
+    from winpilot.orchestrator import vnext_live_canary
+    from winpilot.orchestrator.contracts import (
+        ArpGraph,
+        ArpRuntimeVersion,
+    )
+    from winpilot.orchestrator.runtime import ArpExecution
+    from winpilot.runtime_jobs import RuntimeJobManager
+    from winpilot.utils.log import BUS
+
+    execution = ArpExecution(ArpGraph.model_validate(_graph_payload()))
+    execution.runtime_state.update({
+        "runtime_budget": {
+            "max_turns": 30,
+            "max_runtime_s": 300,
+            "max_model_calls": 60,
+        },
+        "no_legacy_fallback": True,
+        "trace_status": "not_started",
+    })
+    jobs = RuntimeJobManager()
+    monkeypatch.setattr(server, "RUNTIME_JOBS", jobs)
+    monkeypatch.setattr(
+        vnext_live_canary,
+        "prepare_live_vnext_execution",
+        lambda *_args, **_kwargs: execution,
+    )
+    monkeypatch.setattr(
+        server.trace_mod.RECORDER,
+        "owns",
+        lambda run_id: run_id == execution.run_id,
+    )
+
+    if stop_fails:
+        def stop():
+            raise OSError("trace flush failed")
+    else:
+        def stop():
+            return None
+
+    monkeypatch.setattr(server.trace_mod.RECORDER, "stop", stop)
+    events = BUS.subscribe()
+    try:
+        started = server._start_arp_execution(
+            execution.graph,
+            {},
+            runtime_version=ArpRuntimeVersion.VNEXT,
+            frozen_config={},
+        )
+        job = jobs.get(f"arp-job-{execution.run_id}")
+        assert job is not None
+        assert job.done.wait(2.0)
+        observed = []
+        while not events.empty():
+            observed.append(events.get_nowait())
+    finally:
+        BUS.unsubscribe(events)
+        with server.STATE.lock:
+            server.STATE.run_jobs.pop(execution.run_id, None)
+
+    assert started is execution
+    assert job.result["runtime_version"] == "vnext"
+    assert job.result["run"] == execution.to_dict()
+    done_events = [
+        event for event in observed
+        if event.get("type") == "arp_run_done"
+        and event.get("run_id") == execution.run_id
+    ]
+    assert len(done_events) == 1
+    final_snapshot = done_events[0]["runtime_snapshot"]
+    assert final_snapshot == execution.audit_snapshot()
+    assert final_snapshot["runtime_lifecycle"]["terminal"] is True
+    assert final_snapshot["no_legacy_fallback"] is True
+    if stop_fails:
+        assert job.status == "failed"
+        assert job.result["ok"] is False
+        assert job.result["run"]["status"] == "failed"
+        assert job.result["run"]["trace_status"] == "stop_failed"
+        assert "trace flush failed" in job.error
+        assert done_events[0]["status"] == "failed"
+        assert final_snapshot["runtime_lifecycle"]["status"] == "failed"
+        assert final_snapshot["trace_error"] == "trace flush failed"
+    else:
+        assert job.status == "done"
+        assert job.result["ok"] is True
+        assert job.result["run"]["status"] == "done"
+        assert job.result["run"]["trace_status"] == "stopped"
+        assert done_events[0]["status"] == "done"
+        assert final_snapshot["runtime_lifecycle"]["status"] == "done"
+        assert final_snapshot["trace_error"] == ""
+
+
+def test_vnext_submit_failure_rolls_back_execution_and_job_binding(
+    monkeypatch,
+):
+    from winpilot import server
+    from winpilot.orchestrator.contracts import (
+        ArpGraph,
+        ArpRuntimeVersion,
+    )
+    from winpilot.orchestrator.runtime import ArpExecution
+    from winpilot.orchestrator import vnext_live_canary
+
+    execution = ArpExecution(ArpGraph.model_validate(_graph_payload()))
+    monkeypatch.setattr(
+        vnext_live_canary,
+        "prepare_live_vnext_execution",
+        lambda *_args, **_kwargs: execution,
+    )
+    monkeypatch.setattr(
+        server.RUNTIME_JOBS,
+        "submit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("thread start failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        server._start_arp_execution(
+            execution.graph,
+            {},
+            runtime_version=ArpRuntimeVersion.VNEXT,
+            frozen_config={},
+        )
+
+    assert execution.status.value == "failed"
+    assert execution.to_dict()["trace_status"] == "not_started"
+    assert execution.to_dict()["no_legacy_fallback"] is True
+    with server.STATE.lock:
+        assert execution.run_id not in server.STATE.run_jobs
 
 
 def test_frontend_task_contract_compile_endpoint_returns_typed_satisfiable_graph(client):
@@ -154,6 +759,8 @@ def test_validate_and_run_arp_graph_through_api(client):
 
     created = client.post("/api/v2/arp/runs", json={"graph": graph, "inputs": {"source": "test"}})
     assert created.status_code == 200
+    assert created.json()["runtime_version"] == "legacy"
+    assert created.json()["run"]["runtime_version"] == "legacy"
     run_id = created.json()["run_id"]
 
     direct = client.get(f"/api/v2/arp/runs/{run_id}")

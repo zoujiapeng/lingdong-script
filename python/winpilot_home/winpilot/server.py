@@ -59,6 +59,8 @@ from .orchestrator.catalog import capability_catalog
 from .orchestrator.contracts import (
     ArpGraph,
     ArpRunRequest,
+    ArpRunStatus,
+    ArpRuntimeVersion,
     GraphValidation,
     validate_graph,
 )
@@ -194,6 +196,39 @@ def _ensure_inside(path: Path, root: Path, what: str) -> Path:
     except ValueError:
         raise HTTPException(404, f"{what}不存在") from None
     return resolved
+
+
+def _public_trace_leaf(
+    value: str,
+    *,
+    what: str,
+    image: bool = False,
+) -> str:
+    """Accept one bounded Windows-safe public trace path component."""
+
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= 160
+        or value in {".", ".."}
+        or value[-1] in {".", " "}
+        or any(
+            character in '/\\:\0*?"<>|'
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in value
+        )
+        or (
+            image
+            and Path(value).suffix.casefold()
+            not in {".jpg", ".jpeg", ".png"}
+        )
+    ):
+        raise HTTPException(404, f"{what} not found")
+    return value
+
+
+def _public_trace_run_id(run_id: str) -> str:
+    return _public_trace_leaf(run_id, what="trace")
 
 
 def _is_admin() -> bool:
@@ -658,6 +693,17 @@ def status() -> dict[str, Any]:
     busy = STATE.busy_breakdown()
     arp_running = ARP_RUNS.busy()
     model_profile = model_profile_from_config(CONFIG.get("api", default={}))
+    vnext_config = CONFIG.get("vnext", default={})
+    vnext_config = vnext_config if isinstance(vnext_config, dict) else {}
+    vnext_budget = {
+        name: (
+            value
+            if type(value) is int and value > 0
+            else 0
+        )
+        for name in ("max_turns", "max_runtime_s", "max_model_calls")
+        for value in (vnext_config.get(name),)
+    }
     return {
         "running": any(busy.values()) or arp_running,
         "busy": busy,
@@ -679,6 +725,16 @@ def status() -> dict[str, Any]:
             "provider": model_profile.provider,
             "model": model_profile.model,
             "supports_vision": model_profile.supports_vision,
+        },
+        "vnext": {
+            "live_canary_enabled": (
+                vnext_config.get("live_canary_enabled") is True
+            ),
+            "budget": {
+                "max_turns": vnext_budget["max_turns"],
+                "max_runtime_s": vnext_budget["max_runtime_s"],
+                "max_model_calls": vnext_budget["max_model_calls"],
+            },
         },
         "desktop_action_queue": DESKTOP_ACTION_QUEUE.status(),
         # The platform status is polled by the workbench.  Never duplicate a
@@ -962,26 +1018,120 @@ def validate_automation_ir_execution(automation: dict[str, Any]) -> dict[str, An
     return validate_graph(graph).model_dump(mode="json")
 
 
-def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecution:
-    current_session_generation = SESSION.generation()
-    raw_session_generation = graph.metadata.get("session_generation")
-    expected_session_generation = (
-        current_session_generation
-        if raw_session_generation is None
-        else int(raw_session_generation)
-    )
-    if expected_session_generation != current_session_generation:
-        raise RuntimeError(
-            "Session context changed after this task contract was compiled. "
-            "Compile it again before starting the run."
-        )
-    contract_data = graph.metadata.get("task_contract")
-    if isinstance(contract_data, dict):
-        from .tasking.contracts import TaskContract
+def _terminalize_unstarted_vnext_execution(
+    execution: ArpExecution,
+    *,
+    status: ArpRunStatus,
+    detail: str,
+    trace_status: str,
+) -> bool:
+    """Close one vNext execution that never entered ``ArpExecution.run``."""
 
-        task_contract = TaskContract.model_validate(contract_data)
-        CapabilityPlanner.assert_satisfiable(task_contract)
-        CapabilityPlanner.assert_runtime_satisfiable(task_contract)
+    if (
+        execution.runtime_state.get("runtime_version") != "vnext"
+        or status not in {ArpRunStatus.CANCELED, ArpRunStatus.FAILED}
+    ):
+        return False
+    with execution._lock:
+        lifecycle = execution.runtime_state.get("runtime_lifecycle")
+        if isinstance(lifecycle, dict) and lifecycle.get("terminal") is True:
+            return False
+        if execution.started_at is not None:
+            return False
+        if execution.status not in {
+            ArpRunStatus.QUEUED,
+            ArpRunStatus.PAUSED,
+            ArpRunStatus.CANCELED,
+            ArpRunStatus.FAILED,
+        }:
+            return False
+        if status is ArpRunStatus.CANCELED:
+            execution.stop_event.set()
+            execution.pause_controller.resume()
+        execution.status = status
+        execution.current_node_id = None
+        execution.error = str(detail)
+        execution.finished_at = execution.finished_at or time.time()
+        execution.runtime_state["no_legacy_fallback"] = True
+        execution.runtime_state["trace_status"] = str(trace_status)
+        execution.runtime_state["trace_error"] = (
+            str(detail) if trace_status == "failed_to_start" else ""
+        )
+        execution.runtime_state["runtime_lifecycle"] = {
+            "phase": "pre_start",
+            "terminal": True,
+            "status": status.value,
+            "detail": str(detail),
+            "trace_status": str(trace_status),
+            "no_legacy_fallback": True,
+        }
+        return True
+
+
+def _finalize_vnext_trace(
+    execution: ArpExecution,
+    *,
+    trace_status: str,
+    detail: str = "",
+    failed: bool = False,
+) -> None:
+    """Freeze the trace outcome into the vNext execution before its done event."""
+
+    with execution._lock:
+        execution.runtime_state["no_legacy_fallback"] = True
+        execution.runtime_state["trace_status"] = str(trace_status)
+        execution.runtime_state["trace_error"] = str(detail)
+        if failed:
+            failure = (
+                "vNext trace finalization failed"
+                f" ({trace_status}): {detail or 'unknown trace error'}"
+            )
+            previous = str(execution.error or "").strip()
+            execution.status = ArpRunStatus.FAILED
+            execution.error = (
+                f"{previous}; {failure}"
+                if previous and failure not in previous
+                else failure
+            )
+        execution.finished_at = time.time()
+        execution.runtime_state["runtime_lifecycle"] = {
+            "phase": "finalized",
+            "terminal": True,
+            "status": execution.status.value,
+            "detail": str(execution.error or ""),
+            "trace_status": str(trace_status),
+            "no_legacy_fallback": True,
+        }
+
+
+def _start_arp_execution(
+    graph: ArpGraph,
+    inputs: dict[str, Any],
+    *,
+    runtime_version: ArpRuntimeVersion = ArpRuntimeVersion.LEGACY,
+    frozen_config: dict[str, Any] | None = None,
+) -> ArpExecution:
+    expected_session_generation: int | None = None
+    if runtime_version is ArpRuntimeVersion.LEGACY:
+        current_session_generation = SESSION.generation()
+        raw_session_generation = graph.metadata.get("session_generation")
+        expected_session_generation = (
+            current_session_generation
+            if raw_session_generation is None
+            else int(raw_session_generation)
+        )
+        if expected_session_generation != current_session_generation:
+            raise RuntimeError(
+                "Session context changed after this task contract was compiled. "
+                "Compile it again before starting the run."
+            )
+        contract_data = graph.metadata.get("task_contract")
+        if isinstance(contract_data, dict):
+            from .tasking.contracts import TaskContract
+
+            task_contract = TaskContract.model_validate(contract_data)
+            CapabilityPlanner.assert_satisfiable(task_contract)
+            CapabilityPlanner.assert_runtime_satisfiable(task_contract)
     validation = validate_graph(graph)
     if not validation.valid:
         raise ValueError("; ".join(validation.errors))
@@ -989,14 +1139,63 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
         raise RuntimeError("a human or apprentice recording is active")
 
     job_ref: dict[str, str] = {}
+    trace_owner_lock = threading.Lock()
+    trace_started = False
 
     def on_runner(runner: AgentRunner) -> None:
         STATE.bind_runner(runner, job_ref.get("job_id", ""))
 
     def on_start(started: ArpExecution) -> None:
+        nonlocal trace_started
         trace_mod.RECORDER.start(started.run_id)
+        if runtime_version is ArpRuntimeVersion.VNEXT:
+            with trace_owner_lock:
+                trace_started = True
+            started.runtime_state["trace_status"] = "recording"
 
     def on_finish(finished: ArpExecution) -> None:
+        nonlocal trace_started
+        if runtime_version is ArpRuntimeVersion.VNEXT:
+            with trace_owner_lock:
+                owns_trace = trace_started
+                trace_started = False
+            if not owns_trace:
+                return
+            try:
+                recorder_owns_run = trace_mod.RECORDER.owns(
+                    finished.run_id
+                )
+            except Exception as exc:
+                _finalize_vnext_trace(
+                    finished,
+                    trace_status="stop_failed",
+                    detail=str(exc),
+                    failed=True,
+                )
+                return
+            if not recorder_owns_run:
+                _finalize_vnext_trace(
+                    finished,
+                    trace_status="ownership_lost",
+                    detail="vNext trace recorder no longer owns this run",
+                    failed=True,
+                )
+                return
+            try:
+                trace_mod.RECORDER.stop()
+            except Exception as exc:
+                _finalize_vnext_trace(
+                    finished,
+                    trace_status="stop_failed",
+                    detail=str(exc),
+                    failed=True,
+                )
+                return
+            _finalize_vnext_trace(
+                finished,
+                trace_status="stopped",
+            )
+            return
         try:
             finalize_memory_feedback(finished)
         finally:
@@ -1030,7 +1229,7 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
                         else {}
                     ),
                     artifacts=artifacts,
-                    expected_generation=expected_session_generation,
+                    expected_generation=int(expected_session_generation),
                 )
                 BUS.publish(
                     "session",
@@ -1041,38 +1240,124 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
             finally:
                 trace_mod.RECORDER.stop()
 
-    execution = ARP_RUNS.prepare(
-        graph,
-        default_handlers(on_runner),
-        inputs=inputs,
-    )
+    if runtime_version is ArpRuntimeVersion.VNEXT:
+        if frozen_config is None:
+            raise RuntimeError("vNext live canary config was not frozen")
+        from .orchestrator.vnext_live_canary import (
+            prepare_live_vnext_execution,
+        )
+
+        execution = prepare_live_vnext_execution(
+            graph,
+            inputs,
+            frozen_config,
+            run_manager=ARP_RUNS,
+        )
+    else:
+        execution = ARP_RUNS.prepare(
+            graph,
+            default_handlers(on_runner),
+            inputs=inputs,
+        )
+    execution.runtime_state["runtime_version"] = runtime_version.value
     job_id = f"arp-job-{execution.run_id}"
     job_ref["job_id"] = job_id
     with STATE.lock:
         STATE.run_jobs[execution.run_id] = job_id
 
     def worker(_stop: threading.Event) -> dict[str, Any]:
-        snapshot = ARP_RUNS.run_prepared(
-            execution,
-            on_start=on_start,
-            on_finish=on_finish,
-        )
+        try:
+            snapshot = ARP_RUNS.run_prepared(
+                execution,
+                on_start=on_start,
+                on_finish=on_finish,
+            )
+        except Exception as exc:
+            if runtime_version is not ArpRuntimeVersion.VNEXT:
+                raise
+            _terminalize_unstarted_vnext_execution(
+                execution,
+                status=ArpRunStatus.FAILED,
+                detail=f"vNext trace failed to start: {exc}",
+                trace_status="failed_to_start",
+            )
+            snapshot = execution.to_dict()
+        if (
+            runtime_version is ArpRuntimeVersion.VNEXT
+            and execution.started_at is None
+            and snapshot.get("status") == ArpRunStatus.CANCELED.value
+        ):
+            _terminalize_unstarted_vnext_execution(
+                execution,
+                status=ArpRunStatus.CANCELED,
+                detail="vNext run canceled before acquiring runtime resources",
+                trace_status="not_started",
+            )
+            snapshot = execution.to_dict()
         ok = snapshot.get("status") == "done"
         return {
             "ok": ok,
             "run_id": execution.run_id,
+            "runtime_version": runtime_version.value,
             "run": snapshot,
             **({"error": snapshot.get("error") or "ARP run failed"} if not ok else {}),
         }
 
-    RUNTIME_JOBS.submit(
-        "arp",
-        worker,
-        resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
-        metadata={"run_id": execution.run_id, "graph_id": graph.id, "graph_name": graph.name},
-        job_id=job_id,
-        stop_event=execution.stop_event,
-    )
+    def on_job_finish(job: RuntimeJob) -> None:
+        if (
+            runtime_version is not ArpRuntimeVersion.VNEXT
+            or job.started_at is not None
+        ):
+            return
+        canceled = job.status == "canceled" or job.stop_event.is_set()
+        _terminalize_unstarted_vnext_execution(
+            execution,
+            status=(
+                ArpRunStatus.CANCELED
+                if canceled
+                else ArpRunStatus.FAILED
+            ),
+            detail=(
+                "vNext run canceled before acquiring runtime resources"
+                if canceled
+                else (
+                    job.error
+                    or "vNext runtime job failed before worker start"
+                )
+            ),
+            trace_status="not_started",
+        )
+
+    try:
+        RUNTIME_JOBS.submit(
+            "arp",
+            worker,
+            resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
+            metadata={
+                "run_id": execution.run_id,
+                "graph_id": graph.id,
+                "graph_name": graph.name,
+                "runtime_version": runtime_version.value,
+            },
+            job_id=job_id,
+            stop_event=execution.stop_event,
+            on_finish=(
+                on_job_finish
+                if runtime_version is ArpRuntimeVersion.VNEXT
+                else None
+            ),
+        )
+    except Exception as exc:
+        if runtime_version is ArpRuntimeVersion.VNEXT:
+            _terminalize_unstarted_vnext_execution(
+                execution,
+                status=ArpRunStatus.FAILED,
+                detail=f"vNext runtime job submission failed: {exc}",
+                trace_status="not_started",
+            )
+        with STATE.lock:
+            STATE.run_jobs.pop(execution.run_id, None)
+        raise
     return execution
 
 
@@ -1086,17 +1371,35 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
         )
     try:
         graph = req.graph
-        legacy_task = legacy_goal_graph_task(graph)
-        if legacy_task is not None:
-            task, max_steps = legacy_task
-            session_generation, session_context = SESSION.snapshot()
-            _contract, graph = TaskContractCompiler().compile_graph(
-                task,
-                max_steps=max_steps,
-                session_context=session_context,
-            )
-            graph.metadata["session_generation"] = session_generation
-        execution = _start_arp_execution(graph, req.inputs)
+        runtime_version = req.runtime_version
+        frozen_config: dict[str, Any] | None = None
+        if runtime_version is ArpRuntimeVersion.LEGACY:
+            legacy_task = legacy_goal_graph_task(graph)
+            if legacy_task is not None:
+                task, max_steps = legacy_task
+                session_generation, session_context = SESSION.snapshot()
+                _contract, graph = TaskContractCompiler().compile_graph(
+                    task,
+                    max_steps=max_steps,
+                    session_context=session_context,
+                )
+                graph.metadata["session_generation"] = session_generation
+        else:
+            frozen_config = CONFIG.snapshot()
+            vnext_config = frozen_config.get("vnext")
+            if (
+                not isinstance(vnext_config, dict)
+                or vnext_config.get("live_canary_enabled") is not True
+            ):
+                raise RuntimeError(
+                    "vNext live canary is disabled; no legacy fallback was run"
+                )
+        execution = _start_arp_execution(
+            graph,
+            req.inputs,
+            runtime_version=runtime_version,
+            frozen_config=frozen_config,
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
@@ -1104,6 +1407,7 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
     return {
         "ok": True,
         "run_id": execution.run_id,
+        "runtime_version": req.runtime_version.value,
         "run": execution.to_dict(),
         "graph": execution.graph.model_dump(mode="json"),
         "contract": execution.graph.metadata.get("task_contract"),
@@ -1441,7 +1745,8 @@ def evals(limit: int = 20) -> dict[str, Any]:
 
 @app.get("/api/trace/{run_id}/summary")
 def trace_summary(run_id: str) -> dict[str, Any]:
-    summary = eval_summary.summarize_trace(run_id)
+    checked_run_id = _public_trace_run_id(run_id)
+    summary = eval_summary.summarize_trace(checked_run_id)
     if not summary.get("run_id") and not summary.get("tool_count"):
         raise HTTPException(404, "trace summary not found")
     return summary
@@ -1449,7 +1754,7 @@ def trace_summary(run_id: str) -> dict[str, Any]:
 
 @app.get("/api/trace/{run_id}")
 def trace_detail(run_id: str) -> list[dict[str, Any]]:
-    events = trace_mod.read_trace(run_id)
+    events = trace_mod.read_trace(_public_trace_run_id(run_id))
     if not events:
         raise HTTPException(404, "trace 不存在")
     return events
@@ -1457,8 +1762,21 @@ def trace_detail(run_id: str) -> list[dict[str, Any]]:
 
 @app.get("/api/trace/{run_id}/shot/{name}")
 def trace_screenshot(run_id: str, name: str):
+    run_id = _public_trace_run_id(run_id)
+    name = _public_trace_leaf(
+        name,
+        what="trace screenshot",
+        image=True,
+    )
+    if not (TRACES_DIR / f"{run_id}.jsonl").is_file():
+        raise HTTPException(404, "trace screenshot not found")
     path = _ensure_inside(TRACES_DIR / run_id / name, TRACES_DIR, "截图")
-    if not path.exists():
+    path = _ensure_inside(
+        path,
+        TRACES_DIR / run_id,
+        "trace screenshot",
+    )
+    if not path.is_file():
         raise HTTPException(404, "截图不存在")
     return FileResponse(path)
 
@@ -1466,7 +1784,10 @@ def trace_screenshot(run_id: str, name: str):
 @app.post("/api/export/{run_id}")
 def export(run_id: str, req: ExportRequest | None = None) -> dict[str, Any]:
     try:
-        path = trace_mod.export_script(run_id, name=(req.name if req else None))
+        path = trace_mod.export_script(
+            _public_trace_run_id(run_id),
+            name=(req.name if req else None),
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "script": path.name}
@@ -1475,7 +1796,10 @@ def export(run_id: str, req: ExportRequest | None = None) -> dict[str, Any]:
 @app.post("/api/export/{run_id}/ir")
 def export_ir(run_id: str, req: ExportRequest | None = None) -> dict[str, Any]:
     try:
-        path = trace_mod.export_automation_ir(run_id, name=(req.name if req else None))
+        path = trace_mod.export_automation_ir(
+            _public_trace_run_id(run_id),
+            name=(req.name if req else None),
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "ir": path.name}
