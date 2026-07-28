@@ -123,6 +123,7 @@ _CONTINUE_STATUSES = frozenset(
         RuntimeStatus.ACTION_RECORDED,
         RuntimeStatus.PROPOSAL_SUPPRESSED,
         RuntimeStatus.STALE_DISCARDED,
+        RuntimeStatus.VERIFICATION_RECORDED,
     }
 )
 _PRIVATE_RUNTIME_EVIDENCE = "private_runtime_evidence"

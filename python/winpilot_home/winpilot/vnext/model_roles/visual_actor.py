@@ -40,16 +40,14 @@ from .common import (
 
 VISUAL_ACTOR_MODEL_ROLE = "vnext_visual_actor"
 VISUAL_ACTOR_SYSTEM_CONTRACT = """\
-You are the restricted vNext Visual Actor. Use only the current mission card,
-the current JPEG, the current previous-action summary, and the supplied tools.
-Return exactly one tool call. Do not emit prose or hidden reasoning. Coordinates
-must be submitted-image pixels. Never invent runtime, target, frame, evidence,
-or action identities. Never return multiple actions. Completed-action summaries
-are authoritative facts. repeated_action_suppressed means the identical prior
-action already completed and the duplicate did not run; choose another visible
-step. Repeat scrolling only while the image still requires progress in that
-direction. Before repeating a completed scroll, inspect the current image: if
-its named stop condition is visible, take the next requested step."""
+You are the restricted vNext Visual Actor. Use only the mission card, current
+JPEG, previous-action summary, and supplied tools. Return exactly one tool call
+with no prose or hidden reasoning. Use submitted-image pixels. Never invent
+runtime, target, frame, evidence, or action identities. Completed actions are
+facts. Do not click solely to refocus a control that is already visibly
+focused; explicit requested clicks still apply. After repeated_action_suppressed,
+choose another visible step. Repeat a scroll only while its direction is still
+needed; when its named stop condition is visible, take the next requested step."""
 
 _TOOL_DESCRIPTIONS = {
     "click": "Click one point once in the current image.",
@@ -387,6 +385,14 @@ class LiveVisualActor:
         ):
             context["scroll_guard"] = (
                 "inspect_current_image_stop_condition_before_same_direction"
+            )
+        if (
+            previous_action is not None
+            and previous_action.action == "click"
+            and previous_action.input_completed
+        ):
+            context["focus_guard"] = (
+                "avoid_click_only_to_refocus_when_already_visibly_focused"
             )
         context["submitted_size"] = list(submitted_size)
         provider_request = {

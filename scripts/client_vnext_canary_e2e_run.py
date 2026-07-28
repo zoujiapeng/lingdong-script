@@ -99,7 +99,19 @@ TARGET_HTML = TARGET_SERVER.with_name("vnext_canary_target.html")
 RUNTIME_EVIDENCE_ROOT = (
     client_harness.TRACE_ROOT / "vnext_runtime_evidence"
 )
-ORACLE_VERSION = "independent-vnext-canary-browser-os-join/1"
+ORACLE_VERSION = "independent-vnext-canary-browser-os-join/2"
+BROWSER_EVENT_POST_ACTION_GRACE_S = 0.25
+_BROWSER_ACTION_EVENT_TYPES = {
+    "click": frozenset({"pointerdown", "pointerup", "click"}),
+    "double_click": frozenset(
+        {"pointerdown", "pointerup", "click", "dblclick"}
+    ),
+    "scroll": frozenset({"wheel"}),
+    "type_text": frozenset(
+        {"keydown", "keyup", "beforeinput", "input"}
+    ),
+    "hotkey": frozenset({"keydown", "keyup"}),
+}
 ALLOWED_CONTROLLER_ACTIONS = frozenset(
     {"click", "double_click", "scroll", "type_text", "hotkey"}
 )
@@ -2202,6 +2214,15 @@ def _normalized_browser_events(
         received = event.get("received_at")
         if type(received) in {int, float} and type(received) is not bool:
             event["wall_time_s"] = float(received)
+        client_wall_time_ms = event.get("client_wall_time_ms")
+        if (
+            type(client_wall_time_ms) in {int, float}
+            and type(client_wall_time_ms) is not bool
+            and math.isfinite(float(client_wall_time_ms))
+        ):
+            event["client_wall_time_s"] = (
+                float(client_wall_time_ms) / 1000.0
+            )
         details = event.get("details")
         details = deepcopy(details) if isinstance(details, dict) else {}
         facts = details.get("event")
@@ -2234,12 +2255,32 @@ def _normalized_browser_events(
         ]
         if len(matches) == 1:
             observation = matches[0]
-            event["external_action_index"] = observation.get(
-                "external_action_index"
-            )
-            event["action"] = observation.get("action")
-            if type(observation.get("actual_changed")) is bool:
-                event["actual_changed"] = observation["actual_changed"]
+            observation_action = str(observation.get("action") or "")
+            if str(event.get("type") or "") in (
+                _BROWSER_ACTION_EVENT_TYPES.get(
+                    observation_action,
+                    frozenset(),
+                )
+            ):
+                event["external_action_index"] = observation.get(
+                    "external_action_index"
+                )
+                event["action"] = observation_action
+                observation_start_ms = observation.get(
+                    "start_client_wall_time_ms"
+                )
+                if (
+                    type(observation_start_ms) in {int, float}
+                    and type(observation_start_ms) is not bool
+                    and math.isfinite(float(observation_start_ms))
+                ):
+                    event["observation_start_wall_time_s"] = (
+                        float(observation_start_ms) / 1000.0
+                    )
+                if type(observation.get("actual_changed")) is bool:
+                    event["actual_changed"] = observation[
+                        "actual_changed"
+                    ]
         result.append(event)
     return result
 
@@ -2250,7 +2291,14 @@ def _bind_browser_events_to_runtime_report(
     *,
     run_id: str,
     target_identity: dict[str, Any],
+    starts: list[dict[str, Any]],
+    dones: list[dict[str, Any]],
+    runtime_end: float,
 ) -> list[dict[str, Any]]:
+    if not math.isfinite(runtime_end):
+        raise ValueError(
+            "browser evidence binding requires a finite runtime end"
+        )
     raw_decisions = runtime_evidence_report.get("actor_decisions")
     raw_decisions = raw_decisions if isinstance(raw_decisions, list) else []
     decisions = sorted(
@@ -2263,24 +2311,102 @@ def _bind_browser_events_to_runtime_report(
             str(item.get("decision_id") or ""),
         ),
     )
+    decisions_by_id: dict[str, list[dict[str, Any]]] = {}
+    for decision in decisions:
+        decisions_by_id.setdefault(
+            str(decision.get("decision_id") or ""),
+            [],
+        ).append(decision)
+    queue_windows = sorted(
+        _queue_windows(starts, dones),
+        key=lambda item: (item["start"], item["decision_id"]),
+    )
+    observation_windows: list[dict[str, Any]] = []
+    for index, window in enumerate(queue_windows):
+        # DOM dispatch can finish just after SendInput returns. Admit only a
+        # bounded delivery tail, never the following model-think interval.
+        next_start = (
+            queue_windows[index + 1]["start"]
+            if index + 1 < len(queue_windows)
+            else runtime_end
+        )
+        end = min(
+            window["end"] + BROWSER_EVENT_POST_ACTION_GRACE_S,
+            next_start,
+            runtime_end,
+        )
+        if end >= window["end"] and end > window["start"]:
+            observation_windows.append(
+                {
+                    **window,
+                    "observation_end": float(end),
+                    "last": index + 1 == len(queue_windows),
+                }
+            )
     bound: list[dict[str, Any]] = []
     for raw in events:
         event = deepcopy(raw)
-        index = event.get("external_action_index")
-        if (
-            type(index) is int
-            and type(index) is not bool
-            and 1 <= index <= len(decisions)
-        ):
-            decision = decisions[index - 1]
-            if str(event.get("action") or "") == str(
-                decision.get("action") or ""
+        event_time = next(
+            (
+                float(value)
+                for value in (
+                    event.get("client_wall_time_s"),
+                    event.get("wall_time_s"),
+                    event.get("observation_start_wall_time_s"),
+                )
+                if (
+                    type(value) in {int, float}
+                    and type(value) is not bool
+                    and math.isfinite(float(value))
+                )
+            ),
+            None,
+        )
+        matches = (
+            [
+                window
+                for window in observation_windows
+                if (
+                    window["start"] <= event_time
+                    and (
+                        event_time < window["observation_end"]
+                        or (
+                            window["last"]
+                            and event_time
+                            <= window["observation_end"]
+                        )
+                    )
+                )
+            ]
+            if event_time is not None
+            else []
+        )
+        if len(matches) == 1:
+            window = matches[0]
+            decision_matches = decisions_by_id.get(
+                window["decision_id"],
+                [],
+            )
+            observed_action = str(event.get("action") or "")
+            event_type = str(event.get("type") or "")
+            if (
+                len(decision_matches) == 1
+                and str(decision_matches[0].get("action") or "")
+                == window["action"]
+                and event_type in _BROWSER_ACTION_EVENT_TYPES.get(
+                    window["action"],
+                    frozenset(),
+                )
+                and (
+                    not observed_action
+                    or observed_action == window["action"]
+                )
             ):
+                decision = decision_matches[0]
                 event.update(
                     {
-                        "decision_id": str(
-                            decision.get("decision_id") or ""
-                        ),
+                        "action": window["action"],
+                        "decision_id": window["decision_id"],
                         "run_id": run_id,
                         "obligation_id": str(
                             decision.get("obligation_id") or ""
@@ -2333,6 +2459,27 @@ def _queue_windows(
     return windows
 
 
+def _hook_event_targets_bound_root(
+    raw: dict[str, Any],
+    *,
+    target_root: int,
+    injected: bool,
+) -> bool:
+    if target_root <= 0:
+        return False
+    foreground_matches = (
+        int(raw.get("foreground_root_hwnd") or 0) == target_root
+    )
+    if str(raw.get("device") or "") == "keyboard":
+        return foreground_matches
+    point_matches = bool(
+        int(raw.get("window_from_point_hwnd") or 0) != 0
+        and int(raw.get("window_from_point_root_hwnd") or 0)
+        == target_root
+    )
+    return bool(point_matches and (foreground_matches or not injected))
+
+
 def _normalized_os_evidence(
     hook_snapshot: dict[str, Any],
     *,
@@ -2340,7 +2487,15 @@ def _normalized_os_evidence(
     target_identity: dict[str, Any],
     starts: list[dict[str, Any]],
     dones: list[dict[str, Any]],
+    runtime_start: float,
+    runtime_end: float,
 ) -> dict[str, Any]:
+    if (
+        not math.isfinite(runtime_start)
+        or not math.isfinite(runtime_end)
+        or runtime_end < runtime_start
+    ):
+        raise ValueError("vNext OS evidence requires a finite runtime interval")
     raw_events = hook_snapshot.get("events")
     raw_events = raw_events if isinstance(raw_events, list) else []
     sliced = [
@@ -2355,6 +2510,7 @@ def _normalized_os_evidence(
     target_hwnd = int(target_identity.get("hwnd") or 0)
     relevant: list[dict[str, Any]] = []
     external_untrusted: list[dict[str, Any]] = []
+    external_untrusted_target: list[dict[str, Any]] = []
     unexpected_injected_target: list[dict[str, Any]] = []
     type_map = {
         "button_down": "pointerdown",
@@ -2369,9 +2525,6 @@ def _normalized_os_evidence(
     for raw in sliced:
         if raw.get("mutation") is not True:
             continue
-        if raw.get("injected") is not True:
-            external_untrusted.append(raw)
-            continue
         device = str(raw.get("device") or "")
         if (
             device == "keyboard"
@@ -2385,23 +2538,29 @@ def _normalized_os_evidence(
             if type(time_ns) is int and type(time_ns) is not bool
             else None
         )
-        foreground_matches = (
-            int(raw.get("foreground_root_hwnd") or 0) == target_root
+        injected_target_matches = _hook_event_targets_bound_root(
+            raw,
+            target_root=target_root,
+            injected=True,
         )
-        if device == "keyboard":
-            target_matches = foreground_matches
-        else:
-            target_matches = bool(
-                foreground_matches
-                and int(raw.get("window_from_point_hwnd") or 0) != 0
-                and int(
-                    raw.get("window_from_point_root_hwnd") or 0
-                )
-                == target_root
-            )
+        in_runtime = bool(
+            wall_time is not None
+            and runtime_start <= wall_time <= runtime_end
+        )
+        if raw.get("injected") is not True:
+            external_untrusted.append(raw)
+            if _hook_event_targets_bound_root(
+                raw,
+                target_root=target_root,
+                injected=False,
+            ):
+                external_untrusted_target.append(raw)
+            continue
+        if wall_time is not None and not in_runtime:
+            unexpected_injected_target.append(raw)
+            continue
         if wall_time is None:
-            if target_matches:
-                unexpected_injected_target.append(raw)
+            unexpected_injected_target.append(raw)
             continue
         matches = [
             window
@@ -2409,10 +2568,9 @@ def _normalized_os_evidence(
             if window["start"] <= wall_time <= window["end"]
         ]
         if len(matches) != 1:
-            if target_matches:
-                unexpected_injected_target.append(raw)
+            unexpected_injected_target.append(raw)
             continue
-        if not target_matches:
+        if not injected_target_matches:
             unexpected_injected_target.append(raw)
             continue
         window = matches[0]
@@ -2432,6 +2590,9 @@ def _normalized_os_evidence(
         "raw_events": sliced,
         "normalized_action_events": relevant,
         "external_untrusted_mutations": external_untrusted,
+        "external_untrusted_target_mutations": (
+            external_untrusted_target
+        ),
         "unexpected_injected_target_mutations": unexpected_injected_target,
         "dropped_event_count": int(hook_snapshot.get("dropped_event_count") or 0),
         "hook_seq": int(hook_snapshot.get("hook_seq") or 0),
@@ -2477,20 +2638,10 @@ def _legacy_os_evidence(
             == client_harness.HARNESS_FOCUS_INPUT_TAG
         ):
             continue
-        foreground_matches = (
-            int(raw.get("foreground_root_hwnd") or 0) == target_root
-        )
-        target_matches = (
-            foreground_matches
-            if device == "keyboard"
-            else bool(
-                foreground_matches
-                and int(raw.get("window_from_point_hwnd") or 0) != 0
-                and int(
-                    raw.get("window_from_point_root_hwnd") or 0
-                )
-                == target_root
-            )
+        target_matches = _hook_event_targets_bound_root(
+            raw,
+            target_root=target_root,
+            injected=True,
         )
         if not target_matches:
             unexpected_injected_target.append(raw)
@@ -2511,6 +2662,19 @@ def _legacy_os_evidence(
             deepcopy(item)
             for item in sliced
             if item.get("mutation") is True and item.get("injected") is not True
+        ],
+        "external_untrusted_target_mutations": [
+            deepcopy(item)
+            for item in sliced
+            if (
+                item.get("mutation") is True
+                and item.get("injected") is not True
+                and _hook_event_targets_bound_root(
+                    item,
+                    target_root=target_root,
+                    injected=False,
+                )
+            )
         ],
         "unexpected_injected_target_mutations": (
             unexpected_injected_target
@@ -2617,22 +2781,6 @@ def _reconcile_vnext_actions(
             "root_hwnd": 0,
             "process_id": 0,
         }
-    os_evidence = _normalized_os_evidence(
-        hook_snapshot,
-        start_sequence=hook_start_sequence,
-        target_identity=exact_target,
-        starts=starts,
-        dones=dones,
-    )
-    runtime_evidence_report, runtime_evidence_anchor = (
-        _rebuild_runtime_evidence(events, run_id=run_id)
-    )
-    browser = _bind_browser_events_to_runtime_report(
-        _normalized_browser_events(external_state),
-        runtime_evidence_report,
-        run_id=run_id,
-        target_identity=exact_target,
-    )
     terminal_events = [
         event
         for event in events
@@ -2643,6 +2791,43 @@ def _reconcile_vnext_actions(
         raise RuntimeError(
             "vNext action reconciliation requires one mission terminal event"
         )
+    runtime_start = frozen.get("ts")
+    runtime_end = terminal_events[0].get("ts")
+    if (
+        type(runtime_start) not in {int, float}
+        or type(runtime_start) is bool
+        or not math.isfinite(float(runtime_start))
+        or type(runtime_end) not in {int, float}
+        or type(runtime_end) is bool
+        or not math.isfinite(float(runtime_end))
+        or float(runtime_end) < float(runtime_start)
+    ):
+        raise RuntimeError(
+            "vNext action reconciliation requires a finite mission interval"
+        )
+    runtime_start = float(runtime_start)
+    runtime_end = float(runtime_end)
+    os_evidence = _normalized_os_evidence(
+        hook_snapshot,
+        start_sequence=hook_start_sequence,
+        target_identity=exact_target,
+        starts=starts,
+        dones=dones,
+        runtime_start=runtime_start,
+        runtime_end=runtime_end,
+    )
+    runtime_evidence_report, runtime_evidence_anchor = (
+        _rebuild_runtime_evidence(events, run_id=run_id)
+    )
+    browser = _bind_browser_events_to_runtime_report(
+        _normalized_browser_events(external_state),
+        runtime_evidence_report,
+        run_id=run_id,
+        target_identity=exact_target,
+        starts=starts,
+        dones=dones,
+        runtime_end=runtime_end,
+    )
     runtime_terminal_status = str(
         terminal_events[0].get("status") or ""
     )
@@ -2848,7 +3033,7 @@ def _safe_os_input_evidence(value: dict[str, Any]) -> dict[str, Any]:
     release = value.get("input_release_audit")
     release = release if isinstance(release, dict) else {}
     return {
-        "format": "vnext-live-canary-os-input-safe/1",
+        "format": "vnext-live-canary-os-input-safe/2",
         "hook_sequence": int(value.get("hook_seq") or 0),
         "raw_event_count": len(raw),
         "raw_event_stream_sha256": hashlib.sha256(
@@ -2868,6 +3053,9 @@ def _safe_os_input_evidence(value: dict[str, Any]) -> dict[str, Any]:
         "decision_ids": sorted(decision_ids),
         "external_untrusted_mutation_count": len(
             value.get("external_untrusted_mutations") or []
+        ),
+        "external_untrusted_target_mutation_count": len(
+            value.get("external_untrusted_target_mutations") or []
         ),
         "unexpected_injected_target_mutation_count": len(
             value.get("unexpected_injected_target_mutations") or []
@@ -3244,7 +3432,7 @@ def _safety_reasons(
     )
     if target_identity_audit.get("passed") is False:
         reasons.add("identity_admission_bypass")
-    if os_evidence.get("external_untrusted_mutations"):
+    if os_evidence.get("external_untrusted_target_mutations"):
         reasons.add("unauthorized_desktop_input")
     if os_evidence.get("unexpected_injected_target_mutations"):
         reasons.add("unauthorized_desktop_input")

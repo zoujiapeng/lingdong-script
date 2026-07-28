@@ -1151,6 +1151,8 @@ def test_pointer_os_evidence_requires_window_from_point_target_root():
         target_identity=target_identity,
         starts=[start],
         dones=[done],
+        runtime_start=0.5,
+        runtime_end=3.0,
     )
     assert rejected["normalized_action_events"] == []
     assert rejected["unexpected_injected_target_mutations"] == [
@@ -1172,6 +1174,8 @@ def test_pointer_os_evidence_requires_window_from_point_target_root():
         target_identity=target_identity,
         starts=[start],
         dones=[done],
+        runtime_start=0.5,
+        runtime_end=3.0,
     )
     assert len(accepted["normalized_action_events"]) == 1
     assert accepted["unexpected_injected_target_mutations"] == []
@@ -1197,6 +1201,8 @@ def test_pointer_os_evidence_requires_window_from_point_target_root():
         target_identity=target_identity,
         starts=[start],
         dones=[done],
+        runtime_start=0.5,
+        runtime_end=3.0,
     )
     assert rejected_foreground["normalized_action_events"] == []
     assert rejected_foreground[
@@ -1219,7 +1225,7 @@ def test_pointer_os_evidence_requires_window_from_point_target_root():
     ] == [raw_event]
 
 
-def test_off_window_injected_input_only_flags_bound_target_root():
+def test_injected_mutations_outside_exact_action_window_are_unexpected():
     harness = _canary_harness()
     target_identity = _target_identity(991)
     start = {
@@ -1245,11 +1251,20 @@ def test_off_window_injected_input_only_flags_bound_target_root():
         "hook_seq": 2,
         "foreground_root_hwnd": 777,
     }
+    before_runtime_target = {
+        **bound_target,
+        "hook_seq": 3,
+        "time_ns": 250_000_000,
+    }
 
     evidence = harness._normalized_os_evidence(
         {
-            "events": [bound_target, off_target],
-            "hook_seq": 2,
+            "events": [
+                bound_target,
+                off_target,
+                before_runtime_target,
+            ],
+            "hook_seq": 3,
             "dropped_event_count": 0,
             "thread_error": "",
         },
@@ -1257,12 +1272,478 @@ def test_off_window_injected_input_only_flags_bound_target_root():
         target_identity=target_identity,
         starts=[start],
         dones=[done],
+        runtime_start=0.5,
+        runtime_end=3.0,
     )
 
     assert evidence["normalized_action_events"] == []
     assert evidence["unexpected_injected_target_mutations"] == [
-        bound_target
+        bound_target,
+        off_target,
+        before_runtime_target,
     ]
+
+
+def test_browser_evidence_binds_by_runtime_window_after_extra_action():
+    harness = _canary_harness()
+    decisions = [
+        {
+            "turn_index": index,
+            "decision_id": decision_id,
+            "action": action,
+            "obligation_id": "full-goal",
+        }
+        for index, (decision_id, action) in enumerate(
+            (
+                ("decision-click-1", "click"),
+                ("decision-click-extra", "click"),
+                ("decision-hotkey-1", "hotkey"),
+            )
+        )
+    ]
+    starts = [
+        {
+            "job_id": f"job-{index}",
+            "decision_id": decision["decision_id"],
+            "action": decision["action"],
+            "ts": float(index),
+        }
+        for index, decision in enumerate(decisions, start=1)
+    ]
+    dones = [
+        {"job_id": f"job-{index}", "ts": float(index) + 0.05}
+        for index in range(1, 4)
+    ]
+    external_state = {
+        "events": [
+            {
+                "event_seq": 1,
+                "client_wall_time_ms": 800,
+                "type": "page_ready",
+                "trusted": False,
+            },
+            {
+                "event_seq": 2,
+                "client_wall_time_ms": 1_010,
+                "type": "pointerdown",
+                "trusted": True,
+            },
+            {
+                "event_seq": 3,
+                "client_wall_time_ms": 1_120,
+                "type": "click",
+                "trusted": True,
+            },
+            {
+                "event_seq": 5,
+                "client_wall_time_ms": 2_010,
+                "type": "pointerdown",
+                "trusted": True,
+            },
+            {
+                "event_seq": 6,
+                "client_wall_time_ms": 2_150,
+                "type": "click",
+                "trusted": True,
+            },
+            {
+                "event_seq": 7,
+                "client_wall_time_ms": 2_800,
+                "type": "click",
+                "trusted": True,
+            },
+            {
+                "event_seq": 9,
+                "client_wall_time_ms": 3_010,
+                "type": "keydown",
+                "trusted": True,
+            },
+            {
+                "event_seq": 10,
+                "client_wall_time_ms": 3_200,
+                "type": "keyup",
+                "trusted": True,
+            },
+        ],
+        "action_observations": [
+            {
+                "external_action_index": 1,
+                "action": "click",
+                "start_event_seq": 2,
+                "end_event_seq": 3,
+                "start_client_wall_time_ms": 1_010,
+                "actual_changed": True,
+            },
+            {
+                # This is observation 2, but runtime decision 3 because the
+                # model inserted an invalid extra click between them.
+                "external_action_index": 2,
+                "action": "hotkey",
+                "start_event_seq": 9,
+                "end_event_seq": 10,
+                "start_client_wall_time_ms": 3_010,
+                "actual_changed": True,
+            },
+        ],
+    }
+
+    normalized = harness._normalized_browser_events(external_state)
+    bound = harness._bind_browser_events_to_runtime_report(
+        normalized,
+        {"actor_decisions": decisions},
+        run_id="arp-browser-window-binding",
+        target_identity={
+            "target_binding_id": "binding-one",
+            "target_hwnd": 991,
+            "root_hwnd": 991,
+            "process_id": 4242,
+        },
+        starts=starts,
+        dones=dones,
+        runtime_end=4.0,
+    )
+    by_sequence = {item["event_seq"]: item for item in bound}
+
+    assert "decision_id" not in by_sequence[1]
+    assert {
+        by_sequence[index]["decision_id"] for index in (2, 3)
+    } == {"decision-click-1"}
+    assert {
+        by_sequence[index]["decision_id"] for index in (5, 6)
+    } == {"decision-click-extra"}
+    assert "decision_id" not in by_sequence[7]
+    assert {
+        by_sequence[index]["decision_id"] for index in (9, 10)
+    } == {"decision-hotkey-1"}
+    assert by_sequence[5]["action"] == "click"
+    assert "actual_changed" not in by_sequence[5]
+    assert by_sequence[9]["actual_changed"] is True
+
+
+def test_browser_observation_action_cannot_retime_incompatible_events():
+    harness = _canary_harness()
+    decisions = [
+        {
+            "turn_index": 1,
+            "decision_id": "decision-scroll",
+            "action": "scroll",
+            "obligation_id": "full-goal",
+        },
+        {
+            "turn_index": 2,
+            "decision_id": "decision-click",
+            "action": "click",
+            "obligation_id": "full-goal",
+        },
+    ]
+    starts = [
+        {
+            "job_id": "job-scroll",
+            "decision_id": "decision-scroll",
+            "action": "scroll",
+            "ts": 1.0,
+        },
+        {
+            "job_id": "job-click",
+            "decision_id": "decision-click",
+            "action": "click",
+            "ts": 2.0,
+        },
+    ]
+    dones = [
+        {"job_id": "job-scroll", "ts": 1.05},
+        {"job_id": "job-click", "ts": 2.05},
+    ]
+    external_state = {
+        "events": [
+            {
+                "event_seq": 1,
+                "client_wall_time_ms": 1_010,
+                "type": "wheel",
+                "trusted": True,
+            },
+            {
+                "event_seq": 2,
+                "client_wall_time_ms": 2_010,
+                "type": "pointerdown",
+                "trusted": True,
+            },
+            {
+                "event_seq": 3,
+                "client_wall_time_ms": 2_020,
+                "type": "pointerup",
+                "trusted": True,
+            },
+            {
+                "event_seq": 4,
+                "client_wall_time_ms": 2_030,
+                "type": "click",
+                "trusted": True,
+            },
+        ],
+        "action_observations": [
+            {
+                "external_action_index": 1,
+                "action": "scroll",
+                "start_event_seq": 1,
+                "end_event_seq": 4,
+                "start_client_wall_time_ms": 1_010,
+                "actual_changed": True,
+            },
+        ],
+    }
+
+    normalized = harness._normalized_browser_events(external_state)
+    by_sequence = {item["event_seq"]: item for item in normalized}
+    assert by_sequence[1]["action"] == "scroll"
+    assert by_sequence[1]["observation_start_wall_time_s"] == 1.01
+    for sequence in (2, 3, 4):
+        assert "action" not in by_sequence[sequence]
+        assert "observation_start_wall_time_s" not in by_sequence[sequence]
+
+    bound = harness._bind_browser_events_to_runtime_report(
+        normalized,
+        {"actor_decisions": decisions},
+        run_id="arp-observation-action-isolation",
+        target_identity={
+            "target_binding_id": "binding-one",
+            "target_hwnd": 991,
+            "root_hwnd": 991,
+            "process_id": 4242,
+        },
+        starts=starts,
+        dones=dones,
+        runtime_end=3.0,
+    )
+    bound_by_sequence = {
+        item["event_seq"]: item for item in bound
+    }
+    assert bound_by_sequence[1]["decision_id"] == "decision-scroll"
+    assert {
+        bound_by_sequence[sequence]["decision_id"]
+        for sequence in (2, 3, 4)
+    } == {"decision-click"}
+
+
+def test_browser_event_time_splits_repeated_actions_in_one_observation():
+    harness = _canary_harness()
+    oracle = _oracle()
+    raw_events: list[dict[str, Any]] = []
+
+    def event(
+        event_type: str,
+        client_wall_time_ms: int,
+        **facts: Any,
+    ) -> None:
+        raw_events.append(
+            {
+                "event_seq": len(raw_events) + 1,
+                "client_wall_time_ms": client_wall_time_ms,
+                "type": event_type,
+                "trusted": True,
+                "details": {
+                    "event": facts,
+                    "visible_state": {"value": "x"},
+                    "state_before": {"value": "a"},
+                    "state_after": {"value": "b"},
+                    **facts,
+                },
+            }
+        )
+
+    event("page_ready", 500)
+    event("pointerdown", 600, target_id="editor")
+    event("pointerup", 610, target_id="editor")
+    event("click", 620, target_id="editor")
+    event("keydown", 1_000, key="Control")
+    event("keydown", 1_010, key="a", chord="ctrl+a")
+    event("keyup", 1_020, key="a")
+    event("keyup", 1_030, key="Control")
+    for timestamp, key in ((2_010, "x"), (4_010, "y")):
+        event("keydown", timestamp, key=key)
+        event("beforeinput", timestamp + 2)
+        event("input", timestamp + 4)
+        event("keyup", timestamp + 6, key=key)
+    event("keydown", 5_000, key="Control")
+    event(
+        "keydown",
+        5_010,
+        key="Enter",
+        chord="ctrl+enter",
+    )
+    event("keyup", 5_020, key="Enter")
+    event("keyup", 5_030, key="Control")
+
+    observations = oracle.derive_action_observations(
+        raw_events,
+        scenario="type_hotkey",
+    )
+    type_observation = next(
+        item for item in observations
+        if item["action"] == "type_text"
+    )
+    assert type_observation["start_client_wall_time_ms"] == 2_010
+    assert type_observation["start_event_seq"] == 9
+    assert type_observation["end_event_seq"] == 16
+
+    normalized = harness._normalized_browser_events(
+        {
+            "events": raw_events,
+            "action_observations": observations,
+        }
+    )
+    bound = harness._bind_browser_events_to_runtime_report(
+        normalized,
+        {
+            "actor_decisions": [
+                {
+                    "turn_index": 1,
+                    "decision_id": "type-1",
+                    "action": "type_text",
+                    "obligation_id": "full-goal",
+                },
+                {
+                    "turn_index": 2,
+                    "decision_id": "type-2",
+                    "action": "type_text",
+                    "obligation_id": "full-goal",
+                },
+            ]
+        },
+        run_id="arp-repeated-type-observation",
+        target_identity={
+            "target_binding_id": "binding-one",
+            "target_hwnd": 991,
+            "root_hwnd": 991,
+            "process_id": 4242,
+        },
+        starts=[
+            {
+                "job_id": "job-type-1",
+                "decision_id": "type-1",
+                "action": "type_text",
+                "ts": 2.0,
+            },
+            {
+                "job_id": "job-type-2",
+                "decision_id": "type-2",
+                "action": "type_text",
+                "ts": 4.0,
+            },
+        ],
+        dones=[
+            {"job_id": "job-type-1", "ts": 2.05},
+            {"job_id": "job-type-2", "ts": 4.05},
+        ],
+        runtime_end=5.5,
+    )
+    first_batch = [
+        item for item in bound
+        if 2_000 <= item["client_wall_time_ms"] < 2_100
+    ]
+    second_batch = [
+        item for item in bound
+        if 4_000 <= item["client_wall_time_ms"] < 4_100
+    ]
+    assert {item["decision_id"] for item in first_batch} == {"type-1"}
+    assert {item["decision_id"] for item in second_batch} == {"type-2"}
+    assert all(
+        item["client_wall_time_s"] >= 4.01
+        for item in second_batch
+    )
+
+
+def test_external_input_preserves_global_count_and_flags_bound_target():
+    harness = _canary_harness()
+    target_identity = _target_identity(991)
+    base = {
+        "device": "keyboard",
+        "kind": "key_down",
+        "mutation": True,
+        "injected": False,
+        "vk_code": 0x41,
+        "foreground_root_hwnd": 991,
+    }
+    before_runtime = {
+        **base,
+        "hook_seq": 1,
+        "time_ns": 250_000_000,
+    }
+    during_runtime_off_target = {
+        **base,
+        "hook_seq": 2,
+        "time_ns": 1_250_000_000,
+        "foreground_root_hwnd": 777,
+    }
+    during_runtime_target = {
+        **base,
+        "hook_seq": 3,
+        "time_ns": 1_500_000_000,
+    }
+    after_runtime = {
+        **base,
+        "hook_seq": 4,
+        "time_ns": 3_250_000_000,
+    }
+    background_target_pointer = {
+        "hook_seq": 5,
+        "time_ns": 1_750_000_000,
+        "device": "mouse",
+        "kind": "wheel",
+        "mutation": True,
+        "injected": False,
+        "foreground_root_hwnd": 777,
+        "window_from_point_hwnd": 992,
+        "window_from_point_root_hwnd": 991,
+    }
+
+    evidence = harness._normalized_os_evidence(
+        {
+            "events": [
+                before_runtime,
+                during_runtime_off_target,
+                during_runtime_target,
+                after_runtime,
+                background_target_pointer,
+            ],
+            "hook_seq": 5,
+            "dropped_event_count": 0,
+            "thread_error": "",
+        },
+        start_sequence=0,
+        target_identity=target_identity,
+        starts=[
+            {
+                "job_id": "job-one",
+                "decision_id": "decision-one",
+                "action": "hotkey",
+                "ts": 1.0,
+            }
+        ],
+        dones=[{"job_id": "job-one", "ts": 2.0}],
+        runtime_start=0.5,
+        runtime_end=3.0,
+    )
+
+    assert evidence["normalized_action_events"] == []
+    assert evidence["external_untrusted_mutations"] == [
+        before_runtime,
+        during_runtime_off_target,
+        during_runtime_target,
+        after_runtime,
+        background_target_pointer,
+    ]
+    assert evidence["external_untrusted_target_mutations"] == [
+        before_runtime,
+        during_runtime_target,
+        after_runtime,
+        background_target_pointer,
+    ]
+    assert evidence["unexpected_injected_target_mutations"] == []
+    safe = harness._safe_os_input_evidence(evidence)
+    assert safe["format"] == "vnext-live-canary-os-input-safe/2"
+    assert safe["external_untrusted_mutation_count"] == 5
+    assert safe["external_untrusted_target_mutation_count"] == 4
 
 
 def test_harness_focus_tag_is_excluded_without_masking_product_alt():
@@ -1307,6 +1788,8 @@ def test_harness_focus_tag_is_excluded_without_masking_product_alt():
         target_identity=target_identity,
         starts=[start],
         dones=[done],
+        runtime_start=0.5,
+        runtime_end=3.0,
     )
     assert normalized["normalized_action_events"] == []
     assert normalized["unexpected_injected_target_mutations"] == []
@@ -1332,6 +1815,8 @@ def test_harness_focus_tag_is_excluded_without_masking_product_alt():
         target_identity=target_identity,
         starts=[start],
         dones=[done],
+        runtime_start=0.5,
+        runtime_end=3.0,
     )
     assert len(admitted["normalized_action_events"]) == 1
     release = harness._input_release_audit(
@@ -1909,6 +2394,7 @@ def test_action_reconciliation_uses_mission_terminal_status_not_queue_done(
         "type": "vnext_canary_done",
         "run_id": run_id,
         "status": "mission_verified",
+        "ts": 2.0,
     }
     queue_done = {
         "type": "desktop_action_queue",
@@ -1917,10 +2403,11 @@ def test_action_reconciliation_uses_mission_terminal_status_not_queue_done(
         "status": "queue_completed",
     }
     events = [
-        {
-            "type": "vnext_canary_start",
-            "run_id": run_id,
-            "target": {
+            {
+                "type": "vnext_canary_start",
+                "run_id": run_id,
+                "ts": 1.0,
+                "target": {
                 "binding_id": "binding-1",
                 "hwnd": 100,
                 "root_hwnd": 100,
