@@ -1193,6 +1193,26 @@ def _runtime_status_payload(
     return value
 
 
+def _wait_for_runtime_status(
+    driver: client_harness.ElectronClientDriver,
+    *,
+    timeout_s: float = 60.0,
+    poll_interval_s: float = 0.25,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_s
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            return _runtime_status_payload(driver)
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(poll_interval_s)
+    raise RuntimeError(
+        "managed Electron runtime status endpoint did not become ready: "
+        f"{last_error}"
+    )
+
+
 def _verify_runtime_build(
     status: dict[str, Any],
     *,
@@ -1206,15 +1226,17 @@ def _verify_runtime_build(
     current = str(git.get("current_commit") or "")
     dirty = git.get("dirty")
     errors: list[str] = []
-    if loaded != expected_commit:
+    expected_runtime_commit = expected_commit[:12]
+    if loaded != expected_runtime_commit:
         errors.append("runtime loaded_commit differs from the manifest C4 commit")
-    if current != expected_commit:
+    if current != expected_runtime_commit:
         errors.append("runtime current_commit differs from the manifest C4 commit")
     if dirty is not False:
         errors.append("runtime reports a dirty or indeterminate source tree")
     return {
         "passed": not errors,
         "expected_commit": expected_commit,
+        "expected_runtime_commit": expected_runtime_commit,
         "loaded_commit": loaded,
         "current_commit": current,
         "dirty": dirty,
@@ -1286,28 +1308,40 @@ def _start_managed_electron(
             "managed Electron did not expose the visible fixed client: "
             f"{last_error}; cleanup={cleanup!r}"
         )
-    process_identity = psutil.Process(process.pid)
-    create_time_ns = int(float(process_identity.create_time()) * 1_000_000_000)
-    if create_time_ns <= manifest_sealed_time_ns:
+    identities: list[dict[str, Any]] = []
+    try:
+        process_identity = psutil.Process(process.pid)
+        create_time_ns = int(
+            float(process_identity.create_time()) * 1_000_000_000
+        )
+        if create_time_ns <= manifest_sealed_time_ns:
+            raise RuntimeError(
+                "managed Electron creation time does not follow manifest sealing"
+            )
         identities = _process_tree_identities(process)
+        if process.pid not in {item["pid"] for item in identities}:
+            raise RuntimeError(
+                "managed Electron process tree identity is unavailable"
+            )
+        status = _wait_for_runtime_status(driver)
+        build_audit = _verify_runtime_build(
+            status,
+            expected_commit=expected_commit,
+        )
+        if build_audit["passed"] is not True:
+            raise RuntimeError(
+                "managed Electron runtime build is not exact: "
+                f"{build_audit['errors']!r}"
+            )
+    except Exception as exc:
+        if not identities:
+            identities = _process_tree_identities(process)
         cleanup = _terminate_tree(process, known_identities=identities)
         log_stream.close()
         raise RuntimeError(
-            "managed Electron creation time does not follow manifest sealing: "
+            f"managed Electron startup verification failed: {exc}; "
             f"cleanup={cleanup!r}"
-        )
-    identities = _process_tree_identities(process)
-    if process.pid not in {item["pid"] for item in identities}:
-        raise RuntimeError("managed Electron process tree identity is unavailable")
-    status = _runtime_status_payload(driver)
-    build_audit = _verify_runtime_build(status, expected_commit=expected_commit)
-    if build_audit["passed"] is not True:
-        cleanup = _terminate_tree(process, known_identities=identities)
-        log_stream.close()
-        raise RuntimeError(
-            f"managed Electron runtime build is not exact: "
-            f"{build_audit['errors']!r}; cleanup={cleanup!r}"
-        )
+        ) from exc
     startup = {
         "process": {
             "pid": process.pid,

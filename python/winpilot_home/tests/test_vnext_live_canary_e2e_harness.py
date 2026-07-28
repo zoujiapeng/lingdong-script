@@ -359,6 +359,68 @@ def test_closed_matrix_has_two_fixed_seeds_per_family_and_no_sample_overrides():
     assert "WaitForSingleObject(handle, 0)" in source
 
 
+def test_runtime_build_accepts_exact_twelve_character_git_identity():
+    harness = _canary_harness()
+    expected = "70dd508de9505f49300ed0e5c1817d78b7aa96f8"
+    status = {
+        "runtime": {
+            "git": {
+                "loaded_commit": expected[:12],
+                "current_commit": expected[:12],
+                "dirty": False,
+                "branch": "feat/vnext-minimal-live-canary",
+            }
+        }
+    }
+
+    audit = harness._verify_runtime_build(status, expected_commit=expected)
+
+    assert audit["passed"] is True
+    assert audit["expected_commit"] == expected
+    assert audit["expected_runtime_commit"] == expected[:12]
+    status["runtime"]["git"]["current_commit"] = "0" * 12
+    assert harness._verify_runtime_build(
+        status,
+        expected_commit=expected,
+    )["passed"] is False
+    status["runtime"]["git"]["current_commit"] = expected[:12]
+    status["runtime"]["git"]["dirty"] = True
+    assert harness._verify_runtime_build(
+        status,
+        expected_commit=expected,
+    )["passed"] is False
+
+
+def test_runtime_status_wait_retries_only_transient_endpoint_failures(
+    monkeypatch,
+):
+    harness = _canary_harness()
+    calls = {"count": 0}
+    expected = {"runtime": {"git": {"dirty": False}}}
+
+    def status(_driver):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise OSError("runtime endpoint is not listening yet")
+        return expected
+
+    monotonic_values = iter((0.0, 0.0, 0.1, 0.2))
+    monkeypatch.setattr(harness, "_runtime_status_payload", status)
+    monkeypatch.setattr(
+        harness.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    assert harness._wait_for_runtime_status(
+        object(),
+        timeout_s=1.0,
+        poll_interval_s=0.01,
+    ) == expected
+    assert calls["count"] == 3
+
+
 def test_manifest_predeclares_every_unrun_member_before_execution():
     harness = _canary_harness()
     manifest = _manifest(harness)
