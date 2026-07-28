@@ -1083,6 +1083,74 @@ def _publish_action_fact(action: str, **payload: Any) -> None:
         logger.debug("%s action telemetry failed", action, exc_info=True)
 
 
+def _publish_admitted_action_summary(
+    *,
+    action: str,
+    input_completed: bool,
+    via: str,
+    completed_codepoints: int | None = None,
+    key_count: int | None = None,
+) -> None:
+    """Publish a fixed, replay-ineligible summary of one admitted input."""
+
+    if action not in {"click", "scroll", "type_text", "hotkey"}:
+        raise ValueError("unknown admitted action summary")
+    if input_completed is not True:
+        raise ValueError("admitted action summary requires completed input")
+    if via != "physical_sendinput":
+        raise ValueError("admitted action summary via is not public")
+    if completed_codepoints is not None and (
+        type(completed_codepoints) is not int or completed_codepoints < 0
+    ):
+        raise ValueError("completed_codepoints must be a non-negative integer")
+    if key_count is not None and (
+        type(key_count) is not int or key_count < 0
+    ):
+        raise ValueError("key_count must be a non-negative integer")
+    if action == "type_text":
+        if completed_codepoints is None or key_count is not None:
+            raise ValueError("type_text summary requires only completed_codepoints")
+    elif action == "hotkey":
+        if key_count is None or completed_codepoints is not None:
+            raise ValueError("hotkey summary requires only key_count")
+    elif completed_codepoints is not None or key_count is not None:
+        raise ValueError(f"{action} summary cannot contain parameter statistics")
+
+    try:
+        if action == "type_text":
+            BUS.publish(
+                "action",
+                action=action,
+                input_completed=input_completed,
+                via=via,
+                completed_codepoints=completed_codepoints,
+                parameter_visibility="private_runtime_evidence",
+            )
+        elif action == "hotkey":
+            BUS.publish(
+                "action",
+                action=action,
+                input_completed=input_completed,
+                via=via,
+                key_count=key_count,
+                parameter_visibility="private_runtime_evidence",
+            )
+        else:
+            BUS.publish(
+                "action",
+                action=action,
+                input_completed=input_completed,
+                via=via,
+                parameter_visibility="private_runtime_evidence",
+            )
+    except Exception:
+        logger.debug(
+            "%s admitted action telemetry failed",
+            action,
+            exc_info=True,
+        )
+
+
 def _physical_scroll_result(
     input_completed: bool | None,
     *,
@@ -1181,8 +1249,10 @@ def execute_admitted_physical_scroll(
         cursor_restored=cursor_restored,
     )
     if input_completed is True:
-        _publish_action_fact(
-            "scroll", x=x, y=y, amount=amount, via="physical_sendinput",
+        _publish_admitted_action_summary(
+            action="scroll",
+            input_completed=True,
+            via="physical_sendinput",
         )
     return result
 
@@ -1606,7 +1676,12 @@ def _execute_physical_type_text(
         completed_codepoints=completed,
     )
     if publish_action_fact:
-        _publish_action_fact("type_text", length=completed, via="physical_sendinput")
+        _publish_admitted_action_summary(
+            action="type_text",
+            input_completed=True,
+            via="physical_sendinput",
+            completed_codepoints=completed,
+        )
     return result
 
 
@@ -1741,8 +1816,11 @@ def execute_admitted_physical_hotkey(
         )
     result = _execute_physical_hotkey_vks(vks, final_guard=final_guard)
     if result.input_completed is True:
-        _publish_action_fact(
-            "hotkey", key_count=len(chord.keys), via="physical_sendinput",
+        _publish_admitted_action_summary(
+            action="hotkey",
+            input_completed=True,
+            via="physical_sendinput",
+            key_count=len(chord.keys),
         )
     return result
 
