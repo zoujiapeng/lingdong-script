@@ -1092,12 +1092,14 @@ def test_passive_input_hook_normalizes_injected_mouse_and_keyboard_without_insta
         foreground_root_hwnd=991,
         window_from_point_hwnd=992,
         window_from_point_root_hwnd=991,
+        extra_info=0x56584346,
     )
     assert key["kind"] == "key_up"
     assert key["mutation"] is True
     assert key["injected"] is True
     assert key["up"] is True
     assert key["vk_code"] == 0x41
+    assert key["extra_info"] == 0x56584346
 
     move = hook.mouse_event_from_raw(
         hook.WM_MOUSEMOVE,
@@ -1215,6 +1217,82 @@ def test_pointer_os_evidence_requires_window_from_point_target_root():
     assert legacy_rejected[
         "unexpected_injected_target_mutations"
     ] == [raw_event]
+
+
+def test_harness_focus_tag_is_excluded_without_masking_product_alt():
+    harness = _canary_harness()
+    target_identity = _target_identity(991)
+    tag = harness.client_harness.HARNESS_FOCUS_INPUT_TAG
+    start = {
+        "job_id": "job-one",
+        "decision_id": "decision-one",
+        "action": "hotkey",
+        "ts": 1.0,
+    }
+    done = {"job_id": "job-one", "ts": 2.0}
+    tagged_down = {
+        "hook_seq": 1,
+        "time_ns": 1_500_000_000,
+        "device": "keyboard",
+        "kind": "system_key_down",
+        "mutation": True,
+        "injected": True,
+        "vk_code": 0xA4,
+        "extra_info": tag,
+        "foreground_root_hwnd": 991,
+    }
+    tagged_up = {
+        **tagged_down,
+        "hook_seq": 2,
+        "time_ns": 2_500_000_000,
+        "kind": "system_key_up",
+        "foreground_root_hwnd": 777,
+    }
+    snapshot = {
+        "events": [tagged_down, tagged_up],
+        "hook_seq": 2,
+        "dropped_event_count": 0,
+        "thread_error": "",
+    }
+
+    normalized = harness._normalized_os_evidence(
+        snapshot,
+        start_sequence=0,
+        target_identity=target_identity,
+        starts=[start],
+        dones=[done],
+    )
+    assert normalized["normalized_action_events"] == []
+    assert normalized["unexpected_injected_target_mutations"] == []
+
+    legacy = harness._legacy_os_evidence(
+        snapshot,
+        start_sequence=0,
+        target_identity=target_identity,
+    )
+    assert legacy["normalized_action_events"] == []
+    assert legacy["unexpected_injected_target_mutations"] == []
+    assert legacy["input_release_audit"]["passed"] is True
+
+    product_alt = {**tagged_down, "extra_info": 0}
+    admitted = harness._normalized_os_evidence(
+        {
+            "events": [product_alt],
+            "hook_seq": 1,
+            "dropped_event_count": 0,
+            "thread_error": "",
+        },
+        start_sequence=0,
+        target_identity=target_identity,
+        starts=[start],
+        dones=[done],
+    )
+    assert len(admitted["normalized_action_events"]) == 1
+    release = harness._input_release_audit(
+        admitted["normalized_action_events"]
+    )
+    assert release["passed"] is False
+    assert release["key_balance"] == {"164": 1}
 
 
 @pytest.mark.parametrize(
@@ -1429,8 +1507,10 @@ def _type_events():
     add("keydown", key="a", code="KeyA", ctrl_key=True, repeat=False, chord="ctrl+a")
     add("keyup", key="a", code="KeyA", ctrl_key=True, repeat=False, chord="ctrl+a")
     add("keyup", key="Control", code="ControlLeft", ctrl_key=False, repeat=False, chord="")
+    add("keydown", target_id="editor", key="C", code="KeyC", ctrl_key=False, repeat=False, chord="")
     add("beforeinput", target_id="editor", input_type="insertText", data=token, value_before=initial)
     add("input", target_id="editor", input_type="insertText", data=token, value=token)
+    add("keyup", target_id="editor", key="C", code="KeyC", ctrl_key=False, repeat=False, chord="")
     add("keydown", key="Control", code="ControlLeft", ctrl_key=True, repeat=False, chord="")
     add("keydown", key="Enter", code="Enter", ctrl_key=True, repeat=False, chord="ctrl+enter")
     add(

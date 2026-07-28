@@ -379,36 +379,36 @@ def _validate_type_hotkey(
         errors.append("editor must receive exactly one trusted single click")
     keydowns = _events_of(events, "keydown")
     keyups = _events_of(events, "keyup")
-    keydown_signature = [
+    keyboard_events = [
+        item for item in events
+        if item.get("type") in {"keydown", "keyup"}
+    ]
+    hotkey_signature = [
         (
+            str(item.get("type") or ""),
             str(_details(item).get("key") or ""),
             str(_details(item).get("chord") or ""),
             _details(item).get("ctrl_key") is True,
         )
-        for item in keydowns
-    ]
-    keyup_signature = [
-        (
-            str(_details(item).get("key") or ""),
-            str(_details(item).get("chord") or ""),
-            _details(item).get("ctrl_key") is True,
+        for item in keyboard_events
+        if (
+            _details(item).get("key") == "Control"
+            or _details(item).get("chord") in {"ctrl+a", "ctrl+enter"}
         )
-        for item in keyups
     ]
-    if keydown_signature != [
-        ("Control", "", True),
-        ("a", "ctrl+a", True),
-        ("Control", "", True),
-        ("Enter", "ctrl+enter", True),
+    if hotkey_signature != [
+        ("keydown", "Control", "", True),
+        ("keydown", "a", "ctrl+a", True),
+        ("keyup", "a", "ctrl+a", True),
+        ("keyup", "Control", "", False),
+        ("keydown", "Control", "", True),
+        ("keydown", "Enter", "ctrl+enter", True),
+        ("keyup", "Enter", "ctrl+enter", True),
+        ("keyup", "Control", "", False),
     ]:
-        errors.append(f"keydown sequence is not exact: {keydown_signature!r}")
-    if keyup_signature != [
-        ("a", "ctrl+a", True),
-        ("Control", "", False),
-        ("Enter", "ctrl+enter", True),
-        ("Control", "", False),
-    ]:
-        errors.append(f"keyup sequence is not exact: {keyup_signature!r}")
+        errors.append(
+            f"hotkey sequence is not exact: {hotkey_signature!r}"
+        )
     select_down = [item for item in keydowns if _details(item).get("chord") == "ctrl+a"]
     select_up = [item for item in keyups if _details(item).get("chord") == "ctrl+a"]
     submit_down = [item for item in keydowns if _details(item).get("chord") == "ctrl+enter"]
@@ -417,6 +417,69 @@ def _validate_type_hotkey(
         errors.append("Ctrl+A and Ctrl+Enter must each have one keydown and one keyup")
     if any(_details(item).get("repeat") is True for item in keydowns + keyups):
         errors.append("repeated keyboard events are forbidden")
+    select_end = next(
+        (
+            index for index, item in enumerate(events)
+            if item.get("type") == "keyup"
+            and _details(item).get("key") == "Control"
+        ),
+        -1,
+    )
+    submit_anchor = next(
+        (
+            index for index, item in enumerate(events)
+            if item.get("type") == "keydown"
+            and _details(item).get("chord") == "ctrl+enter"
+        ),
+        -1,
+    )
+    submit_start = submit_anchor - 1
+    text_keyboard = (
+        [
+            item for item in events[select_end + 1:submit_start]
+            if item.get("type") in {"keydown", "keyup"}
+        ]
+        if 0 <= select_end < submit_start
+        else []
+    )
+    non_hotkey_keyboard = [
+        item for item in keyboard_events
+        if (
+            _details(item).get("key") != "Control"
+            and _details(item).get("chord") not in {"ctrl+a", "ctrl+enter"}
+        )
+    ]
+    if not text_keyboard or text_keyboard != non_hotkey_keyboard:
+        errors.append(
+            "type_text key events are missing or outside the text action"
+        )
+    text_key_balance: dict[str, int] = {}
+    text_key_order_valid = True
+    for item in text_keyboard:
+        details = _details(item)
+        key = str(details.get("key") or "")
+        if (
+            not key
+            or (key != "Shift" and len(key) != 1)
+            or details.get("target_id") != "editor"
+            or details.get("chord") not in {"", None}
+            or details.get("ctrl_key") is True
+        ):
+            text_key_order_valid = False
+            continue
+        balance = text_key_balance.get(key, 0) + (
+            1 if item.get("type") == "keydown" else -1
+        )
+        text_key_balance[key] = balance
+        if balance < 0:
+            text_key_order_valid = False
+    if (
+        not text_key_order_valid
+        or any(text_key_balance.values())
+    ):
+        errors.append(
+            "type_text key sequence is not exact, balanced, and ordered"
+        )
     before_inputs = _events_of(events, "beforeinput")
     inputs = _events_of(events, "input")
     expected_token = str(_details(ready).get("expected_token") or "")

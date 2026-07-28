@@ -192,13 +192,21 @@ def _focus_window(hwnd: int) -> dict[str, Any]:
         try:
             # The temporary ALT press is the generic Windows foreground-unlock
             # path; it does not send input into the evaluation surface.
-            win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+            win32api.keybd_event(
+                win32con.VK_MENU,
+                0,
+                0,
+                client_harness.HARNESS_FOCUS_INPUT_TAG,
+            )
             win32gui.SetForegroundWindow(hwnd)
         except Exception as error:
             errors.append(f"{type(error).__name__}: {error}")
         finally:
             win32api.keybd_event(
-                win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0,
+                win32con.VK_MENU,
+                0,
+                win32con.KEYEVENTF_KEYUP,
+                client_harness.HARNESS_FOCUS_INPUT_TAG,
             )
         time.sleep(0.18)
         focused = int(win32gui.GetForegroundWindow() or 0) == int(hwnd)

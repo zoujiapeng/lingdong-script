@@ -33,6 +33,7 @@ from PIL import ImageGrab
 WORKSPACE = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = WORKSPACE / "output" / "playwright" / "client-e2e"
 TRACE_ROOT = WORKSPACE / "python" / "winpilot_home" / "traces"
+HARNESS_FOCUS_INPUT_TAG = 0x56584346
 
 CLIENT_TITLE = "灵动脚本"
 NAV_AGENT = "智能代理"
@@ -504,13 +505,21 @@ class ElectronClientDriver:
                 # A balanced ALT tap unlocks SetForegroundWindow without
                 # activating anything inside the client.  Verify the result;
                 # the Win32 call can fail silently under foreground-lock rules.
-                win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+                win32api.keybd_event(
+                    win32con.VK_MENU,
+                    0,
+                    0,
+                    HARNESS_FOCUS_INPUT_TAG,
+                )
                 win32gui.SetForegroundWindow(self.identity.hwnd)
             except Exception as exc:
                 errors.append(f"{type(exc).__name__}: {exc}")
             finally:
                 win32api.keybd_event(
-                    win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0,
+                    win32con.VK_MENU,
+                    0,
+                    win32con.KEYEVENTF_KEYUP,
+                    HARNESS_FOCUS_INPUT_TAG,
                 )
             time.sleep(0.2)
             focused = int(win32gui.GetForegroundWindow() or 0) == int(

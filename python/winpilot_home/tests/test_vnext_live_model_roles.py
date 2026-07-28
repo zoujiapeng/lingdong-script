@@ -286,16 +286,15 @@ def _verifier_response(
     *,
     with_tool: bool = False,
     confidence: Any = None,
+    verified: Any = True,
+    condition_results: Any = None,
 ) -> dict[str, Any]:
+    if condition_results is None:
+        condition_results = ["satisfied", "satisfied"]
     assessment = {
         "format": "verifier-assessment/0",
-        "verified": True,
-        "satisfied_conditions": [
-            "The field contains hello",
-            forbidden_effect_condition("No duplicate text"),
-        ],
-        "missing_conditions": [],
-        "contradictions": [],
+        "verified": verified,
+        "condition_results": condition_results,
         "confidence": confidence,
         "concise_reason": "The current frame visibly satisfies the criteria.",
     }
@@ -399,6 +398,12 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
     }
     assert isinstance(assessment, VerifierAssessment)
     assert assessment.verified is True
+    assert assessment.satisfied_conditions == (
+        "The field contains hello",
+        forbidden_effect_condition("No duplicate text"),
+    )
+    assert assessment.missing_conditions == ()
+    assert assessment.contradictions == ()
     assert clients[0] is not clients[1]
     assert [call["max_retries"] for call in factory_calls] == [0, 0]
     assert len(clients[0].requests) == len(clients[1].requests) == 1
@@ -498,14 +503,20 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
     required_conditions = verifier_context["subject"][
         "required_conditions"
     ]
-    for field in (
-        "satisfied_conditions",
-        "missing_conditions",
-        "contradictions",
-    ):
-        assert verifier_context["output_schema"]["properties"][field][
-            "items"
-        ]["enum"] == required_conditions
+    condition_results_schema = verifier_context["output_schema"][
+        "properties"
+    ]["condition_results"]
+    assert condition_results_schema["items"]["enum"] == [
+        "satisfied",
+        "missing",
+        "contradicted",
+    ]
+    assert condition_results_schema["minItems"] == len(
+        required_conditions
+    )
+    assert condition_results_schema["maxItems"] == len(
+        required_conditions
+    )
     verifier_context_text = (
         verifier_request["messages"][1]["content"][0]["text"]
     )
@@ -867,6 +878,76 @@ def test_verifier_rejects_nonnull_confidence_outside_role_schema() -> None:
     with pytest.raises(LiveModelRoleError, match="confidence must be null"):
         verifier.assess(_verifier_turn())
     assert len(clients[0].requests) == 1
+
+
+def test_verifier_maps_ordered_statuses_to_exact_runtime_conditions() -> None:
+    _, clients = _build_clients(
+        _verifier_response(
+            verified=False,
+            condition_results=["missing", "contradicted"],
+        )
+    )
+    verifier = LiveVisualObligationVerifier(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    assessment = verifier.assess(_verifier_turn())
+
+    assert assessment.verified is False
+    assert assessment.satisfied_conditions == ()
+    assert assessment.missing_conditions == (
+        "The field contains hello",
+    )
+    assert assessment.contradictions == (
+        forbidden_effect_condition("No duplicate text"),
+    )
+
+
+@pytest.mark.parametrize(
+    "response, error",
+    [
+        (
+            _verifier_response(condition_results=["satisfied"]),
+            "exactly 2 statuses",
+        ),
+        (
+            _verifier_response(
+                verified=False,
+                condition_results=["satisfied", "unknown"],
+            ),
+            "must be satisfied, missing, or contradicted",
+        ),
+        (
+            _verifier_response(
+                verified=True,
+                condition_results=["satisfied", "missing"],
+            ),
+            "verified must be true exactly",
+        ),
+        (
+            _verifier_response(
+                verified=False,
+                condition_results=["satisfied", "satisfied"],
+            ),
+            "verified must be true exactly",
+        ),
+    ],
+)
+def test_verifier_fails_closed_on_invalid_ordered_condition_results(
+    response: dict[str, Any],
+    error: str,
+) -> None:
+    _, clients = _build_clients(response)
+    verifier = LiveVisualObligationVerifier(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    with pytest.raises(LiveModelRoleError, match=error):
+        verifier.assess(_verifier_turn())
 
 
 @pytest.mark.parametrize("role_kind", ["actor", "verifier"])
