@@ -3384,6 +3384,27 @@ def run_runtime_case(
                     "campaign behavior config changed after visible submission"
                 )
             evidence = _focus_window(target_hwnd)
+            # The Electron handler minimizes its control surface asynchronously
+            # before asking the runtime to capture the foreground target. Keep
+            # the already-known eval HWND in front across that bounded handoff
+            # window; the product still re-reads and validates every identity
+            # fact before admitting the run.
+            focus_deadline = time.monotonic() + 1.0
+            refocus_count = 0
+            while time.monotonic() < focus_deadline:
+                if int(win32gui.GetForegroundWindow() or 0) != target_hwnd:
+                    _focus_window(target_hwnd)
+                    refocus_count += 1
+                time.sleep(0.05)
+            evidence["bounded_hold_seconds"] = 1.0
+            evidence["refocus_count"] = refocus_count
+            evidence["foreground_verified_after_hold"] = (
+                int(win32gui.GetForegroundWindow() or 0) == target_hwnd
+            )
+            if evidence["foreground_verified_after_hold"] is not True:
+                raise RuntimeError(
+                    "exact target HWND lost foreground during Electron handoff"
+                )
             evidence["identity"] = _window_identity(target_hwnd)
             evidence["screenshot"] = _capture_window(
                 target_hwnd,
