@@ -848,6 +848,32 @@ def test_admitted_type_text_guards_each_character_and_never_queues(monkeypatch):
     assert not hasattr(executor.execute_admitted_physical_type_text, "__wrapped__")
 
 
+def test_admitted_ascii_text_uses_distinct_vk_transitions(
+    monkeypatch,
+) -> None:
+    executor, sent = _keyboard_executor_mocks(monkeypatch)
+    monkeypatch.setattr(
+        executor,
+        "_vk_character_inputs",
+        lambda char: (
+            [("down", char)],
+            [("up", char)],
+        ),
+    )
+
+    result = executor.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND(
+        "CANARY-DELTA-43",
+        hwnd=41,
+        final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+    )
+
+    assert result.input_completed is True
+    assert len(sent) == len("CANARY-DELTA-43")
+    assert executor._should_strict_type_via_vk("CANARY-DELTA-43") is True
+    assert executor._should_strict_type_via_vk("中文") is False
+    assert executor._should_type_via_vk("CANARY-DELTA-43") is False
+
+
 @pytest.mark.parametrize("backend_name,argument", [
     ("ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND", "secret"),
     ("ADMITTED_PHYSICAL_HOTKEY_BACKEND", HotkeyChord(("ctrl", "s"))),
