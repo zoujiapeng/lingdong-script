@@ -1284,6 +1284,130 @@ def test_injected_mutations_outside_exact_action_window_are_unexpected():
     ]
 
 
+def test_managed_control_input_is_exempt_only_outside_vnext_mission():
+    harness = _canary_harness()
+    target_identity = _target_identity(991)
+    base = {
+        "device": "keyboard",
+        "kind": "key_down",
+        "mutation": True,
+        "injected": True,
+        "vk_code": 0x41,
+        "extra_info": 0,
+    }
+    control_before = {
+        **base,
+        "hook_seq": 1,
+        "time_ns": 250_000_000,
+        "foreground_root_hwnd": 888,
+    }
+    control_after = {
+        **base,
+        "hook_seq": 2,
+        "time_ns": 3_250_000_000,
+        "foreground_root_hwnd": 888,
+    }
+    control_during = {
+        **base,
+        "hook_seq": 3,
+        "time_ns": 2_500_000_000,
+        "foreground_root_hwnd": 888,
+    }
+    unknown_before = {
+        **base,
+        "hook_seq": 4,
+        "time_ns": 300_000_000,
+        "foreground_root_hwnd": 777,
+    }
+    target_before = {
+        **base,
+        "hook_seq": 5,
+        "time_ns": 350_000_000,
+        "foreground_root_hwnd": 991,
+    }
+    control_without_time = {
+        **base,
+        "hook_seq": 6,
+        "foreground_root_hwnd": 888,
+    }
+    snapshot = {
+        "events": [
+            control_before,
+            control_after,
+            control_during,
+            unknown_before,
+            target_before,
+            control_without_time,
+        ],
+        "hook_seq": 6,
+        "dropped_event_count": 0,
+        "thread_error": "",
+    }
+
+    evidence = harness._normalized_os_evidence(
+        snapshot,
+        start_sequence=0,
+        target_identity=target_identity,
+        control_root_hwnd=888,
+        starts=[
+            {
+                "job_id": "job-one",
+                "decision_id": "decision-one",
+                "action": "hotkey",
+                "ts": 1.0,
+            }
+        ],
+        dones=[{"job_id": "job-one", "ts": 2.0}],
+        runtime_start=0.5,
+        runtime_end=3.0,
+    )
+    assert evidence["normalized_action_events"] == []
+    assert evidence["unexpected_injected_target_mutations"] == [
+        control_during,
+        unknown_before,
+        target_before,
+        control_without_time,
+    ]
+
+    legacy = harness._legacy_os_evidence(
+        {
+            **snapshot,
+            "events": [control_before, unknown_before],
+        },
+        start_sequence=0,
+        target_identity=target_identity,
+        control_root_hwnd=888,
+    )
+    assert legacy["normalized_action_events"] == []
+    assert legacy["unexpected_injected_target_mutations"] == [
+        unknown_before
+    ]
+
+    target_alias = harness._normalized_os_evidence(
+        {
+            **snapshot,
+            "events": [target_before],
+        },
+        start_sequence=0,
+        target_identity=target_identity,
+        control_root_hwnd=991,
+        starts=[
+            {
+                "job_id": "job-one",
+                "decision_id": "decision-one",
+                "action": "hotkey",
+                "ts": 1.0,
+            }
+        ],
+        dones=[{"job_id": "job-one", "ts": 2.0}],
+        runtime_start=0.5,
+        runtime_end=3.0,
+    )
+    assert target_alias["unexpected_injected_target_mutations"] == [
+        target_before
+    ]
+
+
 def test_browser_evidence_binds_by_runtime_window_after_extra_action():
     harness = _canary_harness()
     decisions = [
@@ -2421,10 +2545,16 @@ def test_action_reconciliation_uses_mission_terminal_status_not_queue_done(
         "_trace_sources",
         lambda _client: (events, [], [queue_done], [], [], "trace.jsonl"),
     )
+    normalized_call: dict[str, Any] = {}
+
+    def normalized_os(*_args, **kwargs):
+        normalized_call.update(kwargs)
+        return {"normalized_action_events": []}
+
     monkeypatch.setattr(
         harness,
         "_normalized_os_evidence",
-        lambda *_args, **_kwargs: {"normalized_action_events": []},
+        normalized_os,
     )
     monkeypatch.setattr(
         harness,
@@ -2473,10 +2603,12 @@ def test_action_reconciliation_uses_mission_terminal_status_not_queue_done(
                 "root_hwnd": 100,
                 "process_id": 200,
             },
+            control_root_hwnd=300,
         )
     )
 
     assert reconciliation == {"passed": True}
+    assert normalized_call["control_root_hwnd"] == 300
     assert observed["runtime_terminal_status"] == "mission_verified"
     assert observed["external_oracle_passed"] is False
 
