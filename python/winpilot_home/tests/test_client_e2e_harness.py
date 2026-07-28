@@ -35,6 +35,12 @@ def test_harness_keeps_the_exact_eleven_and_one_combined_long_goal():
     assert harness.MIXED_CASES["mix-all-11"]["max_steps"] == 400
 
 
+def test_harness_targets_the_primary_runtime_selector_label():
+    harness = _load_harness()
+
+    assert harness.RUNTIME_SELECTOR == "运行时"
+
+
 def test_trace_snapshot_tracks_outer_arp_jsonl_files_not_artifact_directories(
     monkeypatch,
     tmp_path,
