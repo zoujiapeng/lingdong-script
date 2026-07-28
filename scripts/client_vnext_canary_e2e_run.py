@@ -3384,26 +3384,51 @@ def run_runtime_case(
                     "campaign behavior config changed after visible submission"
                 )
             evidence = _focus_window(target_hwnd)
+            previous_current = (
+                _client_result.get("runtime_before", {}).get("current_run")
+            )
+            previous_run_id = str(
+                previous_current.get("run_id")
+                if isinstance(previous_current, dict)
+                else ""
+            )
             # The Electron handler minimizes its control surface asynchronously
             # before asking the runtime to capture the foreground target. Keep
             # the already-known eval HWND in front across that bounded handoff
             # window; the product still re-reads and validates every identity
             # fact before admitting the run.
-            focus_deadline = time.monotonic() + 1.0
+            focus_deadline = time.monotonic() + 12.0
             refocus_count = 0
+            admitted_run_id = ""
             while time.monotonic() < focus_deadline:
                 if int(win32gui.GetForegroundWindow() or 0) != target_hwnd:
                     _focus_window(target_hwnd)
                     refocus_count += 1
+                status = handoff_driver.runtime_status()
+                current = status.get("current_run")
+                current_run_id = str(
+                    current.get("run_id")
+                    if isinstance(current, dict)
+                    else ""
+                )
+                if current_run_id and current_run_id != previous_run_id:
+                    admitted_run_id = current_run_id
+                    break
                 time.sleep(0.05)
-            evidence["bounded_hold_seconds"] = 1.0
+            evidence["bounded_hold_seconds"] = 12.0
             evidence["refocus_count"] = refocus_count
+            evidence["admitted_run_id"] = admitted_run_id
             evidence["foreground_verified_after_hold"] = (
                 int(win32gui.GetForegroundWindow() or 0) == target_hwnd
             )
             if evidence["foreground_verified_after_hold"] is not True:
                 raise RuntimeError(
                     "exact target HWND lost foreground during Electron handoff"
+                )
+            if not admitted_run_id:
+                raise RuntimeError(
+                    "Electron handoff did not admit a new run while the exact "
+                    "target HWND remained foreground"
                 )
             evidence["identity"] = _window_identity(target_hwnd)
             evidence["screenshot"] = _capture_window(
