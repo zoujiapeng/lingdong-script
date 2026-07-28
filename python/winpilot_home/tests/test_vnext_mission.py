@@ -399,6 +399,50 @@ def test_contracts_are_strict_versioned_json_and_canonical_on_wire() -> None:
         })
 
 
+@pytest.mark.parametrize(
+    ("action", "action_summary"),
+    [
+        ("type_text", "secret_token"),
+        ("click", "double_click"),
+        ("scroll", "scroll"),
+        ("scroll", "scroll_sideways"),
+        ("hotkey", "hotkey_secret_token"),
+        ("hotkey", "hotkey_a_ctrl"),
+    ],
+)
+def test_transition_action_summary_rejects_noncanonical_or_sensitive_values(
+    action: str,
+    action_summary: str,
+) -> None:
+    with pytest.raises(InvalidMissionEvent, match="action_summary"):
+        MissionEvent(
+            kind="transition_recorded",
+            mission_id="m1",
+            run_id="r1",
+            payload={
+                "obligation_id": "obligation-1",
+                "action": action,
+                "action_summary": action_summary,
+                "input_completed": True,
+            },
+        )
+
+
+def test_transition_action_summary_requires_plain_text() -> None:
+    with pytest.raises(InvalidMissionEvent, match="action_summary"):
+        MissionEvent(
+            kind="transition_recorded",
+            mission_id="m1",
+            run_id="r1",
+            payload={
+                "obligation_id": "obligation-1",
+                "action": "type_text",
+                "action_summary": {"leak": "x"},
+                "input_completed": True,
+            },
+        )
+
+
 @pytest.mark.parametrize("input_completed", [None, 0, 1, "true", []])
 def test_transition_summary_requires_literal_boolean_input_completion(
     input_completed,

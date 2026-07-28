@@ -168,7 +168,7 @@ def _actor_turn() -> ActorTurnInput:
             fresh=True,
         ),
         tools=tuple(tools),
-        completed_actions=("click", "double_click"),
+        completed_action_summaries=("click", "double_click"),
     )
 
 
@@ -218,7 +218,7 @@ def _verifier_turn() -> RuntimeVerifierTurn:
     return RuntimeVerifierTurn(
         request=request,
         frame=frame,
-        completed_actions=("click", "double_click"),
+        completed_action_summaries=("click", "double_click"),
     )
 
 
@@ -450,8 +450,8 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
     assert "Double-click" in descriptions["double_click"]
     assert "amount < 0 scrolls down" in descriptions["scroll"]
     assert "amount > 0 scrolls up" in descriptions["scroll"]
-    assert "exact literal text" in descriptions["type_text"]
-    assert "do not use it for literal text entry" in descriptions["hotkey"]
+    assert "selected text is replaced" in descriptions["type_text"]
+    assert "never enters literal text" in descriptions["hotkey"]
     assert "verifier checks it" in descriptions["claim_obligation_done"]
     assert "no supplied action can advance" in descriptions["blocked"]
     assert "response_format" not in actor_request
@@ -484,11 +484,11 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
     actor_context = actor_request["messages"][1]["content"][0]["text"]
     actor_context_value = json.loads(actor_context)
     assert "tools" not in actor_context_value
-    assert actor_context_value["completed_actions"] == [
+    assert actor_context_value["completed_action_summaries"] == [
         "click",
         "double_click",
     ]
-    assert verifier_context["completed_actions"] == [
+    assert verifier_context["completed_action_summaries"] == [
         "click",
         "double_click",
     ]
@@ -506,6 +506,8 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
     verifier_context_text = (
         verifier_request["messages"][1]["content"][0]["text"]
     )
+
+
     for forbidden in (
         "mission-secret-id",
         "run-secret-id",
@@ -530,6 +532,25 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
     assert "data:image/jpeg;base64," in (
         verifier_request["messages"][1]["content"][1]["image_url"]["url"]
     )
+
+
+@pytest.mark.parametrize(
+    "summary",
+    ("secret_token", "hotkey_secret_token", "scroll_sideways"),
+)
+def test_model_turn_contracts_reject_arbitrary_action_summaries(
+    summary: str,
+) -> None:
+    with pytest.raises(ValueError, match="privacy-safe"):
+        replace(
+            _actor_turn(),
+            completed_action_summaries=(summary,),
+        )
+    with pytest.raises(ValueError, match="privacy-safe"):
+        replace(
+            _verifier_turn(),
+            completed_action_summaries=(summary,),
+        )
 
 
 def test_consecutive_calls_always_build_fresh_two_message_contexts() -> None:

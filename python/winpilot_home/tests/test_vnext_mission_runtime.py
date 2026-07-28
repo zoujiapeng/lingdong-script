@@ -1027,21 +1027,58 @@ def test_actor_and_verifier_receive_only_completed_action_order() -> None:
     assert first.status is RuntimeStatus.ACTION_RECORDED
     assert second.status is RuntimeStatus.ACTION_RECORDED
     assert verified.status is RuntimeStatus.MISSION_VERIFIED
-    assert harness.actor.turns[0].completed_actions == ()
-    assert harness.actor.turns[1].completed_actions == ("click",)
-    assert harness.actor.turns[2].completed_actions == (
+    assert harness.actor.turns[0].completed_action_summaries == ()
+    assert harness.actor.turns[1].completed_action_summaries == ("click",)
+    assert harness.actor.turns[2].completed_action_summaries == (
         "click",
         "double_click",
     )
-    assert harness.verifier.turns[0].completed_actions == (
+    assert harness.verifier.turns[0].completed_action_summaries == (
         "click",
         "double_click",
     )
     history_wire = json.dumps(
-        harness.verifier.turns[0].completed_actions
+        harness.verifier.turns[0].completed_action_summaries
     )
     assert "image_x" not in history_wire
     assert "text" not in history_wire
+    assert "local_intent" not in history_wire
+
+
+def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
+    scroll_up = _action("scroll")
+    scroll_up["args"]["amount"] = 120
+    harness = _harness(
+        _action("scroll"),
+        scroll_up,
+        _action("hotkey"),
+        _action("type_text"),
+        _claim(),
+    )
+
+    for turn_index in range(4):
+        result = harness.runtime.run_one_turn(turn_index=turn_index)
+        assert result.status is RuntimeStatus.ACTION_RECORDED
+    verified = harness.runtime.run_one_turn(turn_index=4)
+
+    assert verified.status is RuntimeStatus.MISSION_VERIFIED
+    expected = (
+        "scroll_down",
+        "scroll_up",
+        "hotkey_ctrl_a",
+        "type_text",
+    )
+    assert harness.verifier.turns[0].completed_action_summaries == expected
+    transition_summaries = tuple(
+        event.payload["action_summary"]
+        for event in harness.reducer.events
+        if event.kind == "transition_recorded"
+    )
+    assert transition_summaries == expected
+    history_wire = json.dumps(transition_summaries)
+    assert "image_x" not in history_wire
+    assert "image_y" not in history_wire
+    assert "hello" not in history_wire
     assert "local_intent" not in history_wire
 
 

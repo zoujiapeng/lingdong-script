@@ -42,6 +42,43 @@ ACTION_EFFECT_EVIDENCE_KIND = "deterministic_action_effect"
 ACTION_EFFECT_CHANGE_RATIO_THRESHOLD = 0.0
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _MISSING_PAYLOAD = object()
+_SAFE_ACTION_SUMMARY_BY_ACTION = {
+    "click": frozenset({"click"}),
+    "double_click": frozenset({"double_click"}),
+    "scroll": frozenset({"scroll_down", "scroll_up"}),
+    "type_text": frozenset({"type_text"}),
+}
+_HOTKEY_SUMMARY_MODIFIERS = ("ctrl", "alt", "shift", "win")
+_HOTKEY_SUMMARY_PRIMARY_KEYS = frozenset(
+    {
+        "enter",
+        "esc",
+        "tab",
+        "space",
+        "backspace",
+        "delete",
+        "insert",
+        "home",
+        "end",
+        "pageup",
+        "pagedown",
+        "up",
+        "down",
+        "left",
+        "right",
+        "capslock",
+        "numlock",
+        "printscreen",
+        "menu",
+        "plus",
+        "minus",
+        "comma",
+        "period",
+        "slash",
+        *(f"f{index}" for index in range(1, 13)),
+        *tuple("abcdefghijklmnopqrstuvwxyz0123456789"),
+    }
+)
 
 
 def thaw(value: Any) -> Any:
@@ -1894,6 +1931,7 @@ _EVENT_PAYLOAD_FIELDS = {
                 "frame_id",
                 "action_id",
                 "action_effect",
+                "action_summary",
             }
         ),
     ),
@@ -1966,6 +2004,7 @@ _EVENT_TEXT_FIELDS = frozenset(
         "binding_name",
         "reason",
         "action",
+        "action_summary",
         "action_id",
         "visible_effect",
         "claim_fingerprint",
@@ -1986,6 +2025,31 @@ _EVENT_STRING_ARRAY_FIELDS = frozenset(
         "accepted_obligation_verification_ids",
     }
 )
+
+
+def _is_safe_action_summary(action: str, summary: str) -> bool:
+    fixed = _SAFE_ACTION_SUMMARY_BY_ACTION.get(action)
+    if fixed is not None:
+        return summary in fixed
+    if action != "hotkey" or not summary.startswith("hotkey_"):
+        return False
+    keys = tuple(summary.removeprefix("hotkey_").split("_"))
+    if not keys or any(not key for key in keys):
+        return False
+    primary = keys[-1]
+    modifiers = keys[:-1]
+    return (
+        primary in _HOTKEY_SUMMARY_PRIMARY_KEYS
+        and len(modifiers) == len(set(modifiers))
+        and all(key in _HOTKEY_SUMMARY_MODIFIERS for key in modifiers)
+        and tuple(
+            sorted(
+                modifiers,
+                key=_HOTKEY_SUMMARY_MODIFIERS.index,
+            )
+        )
+        == modifiers
+    )
 
 
 def _validate_event_payload(
@@ -2031,6 +2095,19 @@ def _validate_event_payload(
             f"{event_type} payload {field_name!r}",
             InvalidMissionEvent,
         )
+
+    if "action_summary" in payload:
+        action = payload.get("action")
+        summary = payload["action_summary"]
+        if (
+            type(action) is not str
+            or type(summary) is not str
+            or not _is_safe_action_summary(action, summary)
+        ):
+            raise InvalidMissionEvent(
+                "transition_recorded payload 'action_summary' must be the "
+                "privacy-safe semantic summary of its action"
+            )
 
     if "verified" in payload:
         _contract_bool(

@@ -50,6 +50,7 @@ from ..verification import (
     ObligationVerificationResult,
     VerifierAssessment,
 )
+from ...visual_runtime.keyboard_contracts import HotkeyChord
 from .contracts import (
     APPROVED_DESKTOP_ACTIONS,
     APPROVED_RUNTIME_TOOLS,
@@ -610,20 +611,63 @@ class MissionRuntime:
         self,
         obligation_id: str,
     ) -> tuple[str, ...]:
-        actions: list[str] = []
+        summaries: list[str] = []
         for event in self._reducer.events:
             if event.kind != "transition_recorded":
                 continue
             payload = event.payload
             action = payload.get("action")
+            summary = payload.get("action_summary")
+            if summary is None:
+                summary = action
             if (
                 payload.get("obligation_id") == obligation_id
                 and payload.get("input_completed") is True
                 and type(action) is str
-                and action in APPROVED_DESKTOP_ACTIONS
+                and type(summary) is str
+                and self._is_safe_action_summary(action, summary)
             ):
-                actions.append(action)
-        return tuple(actions[-MAX_COMPLETED_ACTION_HISTORY:])
+                summaries.append(summary)
+        return tuple(summaries[-MAX_COMPLETED_ACTION_HISTORY:])
+
+    @staticmethod
+    def _is_safe_action_summary(action: str, summary: str) -> bool:
+        if action == "scroll":
+            return summary in {"scroll_down", "scroll_up"}
+        if action in {"click", "double_click", "type_text"}:
+            return summary == action
+        if action != "hotkey" or not summary.startswith("hotkey_"):
+            return False
+        try:
+            HotkeyChord(
+                tuple(summary.removeprefix("hotkey_").split("_"))
+            )
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def _safe_action_summary(
+        self,
+        proposal: DesktopActionProposal,
+    ) -> str:
+        """Project useful action semantics without text, coordinates, or intent."""
+
+        action = proposal.action
+        args = dict(proposal.args)
+        if action == "scroll":
+            amount = args.get("amount")
+            if type(amount) is int:
+                if amount < 0:
+                    return "scroll_down"
+                if amount > 0:
+                    return "scroll_up"
+        if action == "hotkey":
+            keys = args.get("keys")
+            if isinstance(keys, (list, tuple)):
+                summary = "hotkey_" + "_".join(keys)
+                if self._is_safe_action_summary(action, summary):
+                    return summary
+        return action
 
     def _complete_mission(
         self,
@@ -745,8 +789,8 @@ class MissionRuntime:
             turn = RuntimeVerifierTurn(
                 request=request,
                 frame=frozen.frame,
-                completed_actions=self._completed_action_history(
-                    obligation_id
+                completed_action_summaries=(
+                    self._completed_action_history(obligation_id)
                 ),
             )
         except Exception as exc:
@@ -1123,6 +1167,9 @@ class MissionRuntime:
                     "obligation_id": obligation_id,
                     "action_id": envelope.decision_id,
                     "action": proposal.action,
+                    "action_summary": self._safe_action_summary(
+                        proposal
+                    ),
                     "input_completed": True,
                     "visible_effect": transition.visible_effect,
                     "frame_id": transition.post_frame_id,
@@ -1249,8 +1296,10 @@ class MissionRuntime:
                 initial.broker_state.frame,
                 self._catalog,
                 broker_projection,
-                completed_actions=self._completed_action_history(
-                    projection.active_obligation_id or ""
+                completed_action_summaries=(
+                    self._completed_action_history(
+                        projection.active_obligation_id or ""
+                    )
                 ),
             )
         except Exception as exc:
