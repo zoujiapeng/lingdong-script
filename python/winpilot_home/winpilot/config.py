@@ -153,7 +153,7 @@ _DEFAULTS: dict[str, Any] = {
         },
     },
     "vnext": {
-        "live_canary_enabled": False,
+        "live_canary_enabled": True,
         "max_turns": 30,
         "max_runtime_s": 300,
         "max_model_calls": 60,

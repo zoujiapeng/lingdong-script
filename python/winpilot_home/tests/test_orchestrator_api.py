@@ -59,6 +59,17 @@ def test_platform_overview_exposes_contracts_and_capabilities(client):
     assert {"agent_goal", "action_batch", "skill_replay", "variable_set", "human_gate"} <= advertised_nodes
 
 
+def test_product_and_example_config_default_to_vnext():
+    from winpilot import config
+
+    example = json.loads(
+        (config.ROOT_DIR / "config.example.json").read_text(encoding="utf-8")
+    )
+
+    assert config._DEFAULTS["vnext"]["live_canary_enabled"] is True
+    assert example["vnext"]["live_canary_enabled"] is True
+
+
 def test_platform_overview_exposes_fail_closed_vnext_canary_budget(
     client,
     monkeypatch,

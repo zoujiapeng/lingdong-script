@@ -119,7 +119,7 @@ export async function startGoalWithRuntime(
   goal: string,
   maxSteps: number,
   coldStart: boolean,
-  runtimeVersion: RuntimeVersion = 'legacy',
+  runtimeVersion: RuntimeVersion = 'vnext',
 ): Promise<ArpExecutionSnapshot> {
   const frozenRuntimeVersion = runtimeVersion;
   if (frozenRuntimeVersion === 'legacy') {
@@ -323,7 +323,7 @@ export function useControlPlane() {
     goal: string,
     maxSteps = 30,
     coldStart = false,
-    runtimeVersion: RuntimeVersion = 'legacy',
+    runtimeVersion: RuntimeVersion = 'vnext',
   ) => {
     const client = requireCompatibleClient();
     const run = await startGoalWithRuntime(
