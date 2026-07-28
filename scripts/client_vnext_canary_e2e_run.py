@@ -3536,6 +3536,14 @@ def run_runtime_case(
             )
             return evidence
 
+        def prepare_handoff(
+            _handoff_driver: client_harness.ElectronClientDriver,
+            _client_result: dict[str, Any],
+        ) -> dict[str, Any]:
+            evidence = _focus_window(target_hwnd)
+            evidence["identity"] = _window_identity(target_hwnd)
+            return evidence
+
         def verify_external(_client_result: dict[str, Any]) -> dict[str, Any]:
             nonlocal external_state, external_settlement, external_verdict
             external_state, external_settlement = _settled_external_state(
@@ -3571,6 +3579,7 @@ def run_runtime_case(
             },
             output_root=case_dir / "client",
             reset_session=True,
+            before_submit=prepare_handoff,
             after_submit=handoff,
             independent_verifier=verify_external,
             expected_client_identity=driver.identity,
