@@ -410,7 +410,11 @@ class ElectronClientDriver:
             ),
         }
 
-    def submission_ui_state(self) -> dict[str, Any]:
+    def submission_ui_state(
+        self,
+        *,
+        expected_goal: str = "",
+    ) -> dict[str, Any]:
         buttons: list[dict[str, Any]] = []
         for control in self.buttons():
             try:
@@ -428,9 +432,26 @@ class ElectronClientDriver:
             if item.Name == RUNTIME_SELECTOR
         ]
         edits = _visible_descendants(self.window, "Edit")
+        edit_values: list[tuple[Any, str]] = []
+        for edit in edits:
+            try:
+                edit_values.append((edit, _control_value(edit)))
+            except Exception:
+                continue
         goal = next(
-            (edit for edit in edits if "鎻忚堪甯屾湜浠ｇ悊" in edit.Name),
-            edits[0] if edits else None,
+            (
+                edit
+                for edit, value in edit_values
+                if expected_goal and value == expected_goal
+            ),
+            next(
+                (
+                    edit
+                    for edit, value in edit_values
+                    if value.strip()
+                ),
+                None,
+            ),
         )
         visible = self.texts()
         error_markers = (
@@ -1367,7 +1388,9 @@ def run_case(
             str(spec.get("runtime_version") or "legacy"),
         )
         status_before_click = driver.runtime_status()
-        ui_before_click = driver.submission_ui_state()
+        ui_before_click = driver.submission_ui_state(
+            expected_goal=str(spec["task"]),
+        )
         result["submission_before"] = {
             "current_run_id": str(
                 (
