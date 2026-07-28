@@ -1600,6 +1600,13 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
     package_root = home / "winpilot"
     actor_dir = home / "winpilot" / "vnext" / "actor"
     runtime_dir = home / "winpilot" / "vnext" / "runtime"
+    desktop_adapter_atomic = (
+        home
+        / "winpilot"
+        / "vnext"
+        / "desktop_adapter"
+        / "atomic.py"
+    )
     assert tuple(sorted(path.name for path in actor_dir.glob("*.py"))) == (
         "__init__.py",
         "envelope.py",
@@ -1653,6 +1660,7 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
         for path in package_root.rglob("*.py")
         if "actor" not in path.parts
         and runtime_dir not in path.parents
+        and path != desktop_adapter_atomic
     )
     violations = tuple(
         (path, imported)
@@ -1661,6 +1669,16 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
         if _matches_prefix(imported, "winpilot.vnext.actor")
     )
     assert violations == ()
+    adapter_actor_imports = tuple(
+        imported
+        for imported in _imports(desktop_adapter_atomic, package_root)
+        if _matches_prefix(imported, "winpilot.vnext.actor")
+    )
+    assert adapter_actor_imports == (
+        "winpilot.vnext.actor",
+        "winpilot.vnext.actor.ActorDecisionEnvelope",
+        "winpilot.vnext.actor.DesktopActionProposal",
+    )
 
 
 def test_import_scanner_expands_absolute_and_relative_aliases(
