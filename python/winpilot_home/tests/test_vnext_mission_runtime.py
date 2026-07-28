@@ -1227,6 +1227,59 @@ def test_claim_is_bound_to_frozen_frame_and_independently_verified() -> None:
     assert harness.reducer.projection.status is MissionStatus.VERIFIED
 
 
+def test_rejected_verification_returns_feedback_to_actor_before_bounded_retry() -> None:
+    definition = MissionDefinition(
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        original_goal=GOAL,
+        obligations=(
+            ObligationSpec(
+                id=OBLIGATION_ID,
+                desired_state=GOAL,
+                acceptance_criteria=("the visible result is confirmed",),
+                required_capabilities=("visual.interact",),
+                evidence_policy=EvidencePolicy(
+                    allow_independent_visual_verifier=True,
+                    max_verification_attempts=3,
+                    uncertain_policy="blocked",
+                ),
+            ),
+        ),
+    )
+    harness = _harness(
+        _claim(),
+        _action(),
+        _claim(),
+        definition=definition,
+    )
+    harness.verifier.assessment = VerifierAssessment(
+        verified=False,
+        concise_reason="PRIVATE-SCREEN-SENTINEL",
+    )
+
+    rejected = harness.runtime.run_one_turn(turn_index=0)
+    recovery = harness.runtime.run_one_turn(turn_index=1)
+    harness.verifier.assessment = VerifierAssessment(
+        verified=True,
+        satisfied_conditions=("the visible result is confirmed",),
+        confidence=1.0,
+        concise_reason="the new frame shows the requested result",
+    )
+    verified = harness.runtime.run_one_turn(turn_index=2)
+
+    assert rejected.status is RuntimeStatus.VERIFICATION_RECORDED
+    assert recovery.status is RuntimeStatus.ACTION_RECORDED
+    assert verified.status is RuntimeStatus.MISSION_VERIFIED
+    assert harness.actor.turns[1].mission.failure_kind == "verification_rejected"
+    assert (
+        harness.actor.turns[1].mission.failure_message
+        == "PRIVATE-SCREEN-SENTINEL"
+    )
+    assert harness.actor.turns[1].mission.no_progress_streak == 0
+    assert harness.verifier.calls == 2
+    assert harness.reducer.projection.status is MissionStatus.VERIFIED
+
+
 def test_claim_preserves_required_current_frame_evidence_kind() -> None:
     definition = MissionDefinition(
         mission_id=MISSION_ID,

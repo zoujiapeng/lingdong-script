@@ -814,9 +814,14 @@ class MissionRuntime:
                     ref.id for ref in bound_request.trusted_evidence_refs
                 ),
             )
+            verification_payload = result.to_mission_event_payload(
+                bound_request
+            )
+            if not result.verified:
+                verification_payload["reason"] = assessment.concise_reason
             verification_ids = self._accept(
                 "verification_recorded",
-                payload=result.to_mission_event_payload(bound_request),
+                payload=verification_payload,
                 evidence_refs=result.event_evidence_refs,
                 base_revision=request.mission_revision,
             )

@@ -2035,6 +2035,31 @@ class RuntimeEvidenceReport:
         return cls(**value)
 
 
+def runtime_evidence_report_sha256(
+    report: RuntimeEvidenceReport,
+) -> str:
+    """Hash one fully validated report without re-bounding its aggregate size.
+
+    Every record in ``RuntimeEvidenceReport`` has already crossed the bounded
+    JSON contract independently.  The complete report may legitimately exceed
+    that per-value node limit after a long run, so stream the same canonical
+    JSON bytes instead of copying and re-validating the aggregate.
+    """
+
+    if type(report) is not RuntimeEvidenceReport:
+        raise TypeError("report must be a RuntimeEvidenceReport")
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    for chunk in encoder.iterencode(report.to_dict()):
+        digest.update(chunk.encode("utf-8"))
+    return digest.hexdigest()
+
+
 __all__ = [
     "ACTION_EXECUTION_BINDING_FORMAT",
     "ACTOR_DECISION_RECORD_FORMAT",
@@ -2054,4 +2079,5 @@ __all__ = [
     "canonical_controller_transition",
     "canonical_raw_action_receipt",
     "canonical_sha256",
+    "runtime_evidence_report_sha256",
 ]

@@ -65,6 +65,7 @@ from ..vnext.evidence_plane import (
     RuntimeEvidenceJournal,
     RuntimeEvidencePlane,
     canonical_sha256,
+    runtime_evidence_report_sha256,
 )
 from ..vnext.mission import (
     EvidencePolicy,
@@ -105,6 +106,7 @@ _RUNTIME_EVIDENCE_ROOT = TRACES_DIR / "vnext_runtime_evidence"
 _TARGET_MAX_AGE_MS = 15_000
 _FUTURE_CLOCK_SKEW_MS = 2_000
 _MAX_SUBMITTED_SIDE = 1120
+_MAX_VISUAL_VERIFICATION_ATTEMPTS = 3
 _NON_WHITESPACE_PATTERN = r"\S"
 _BLOCKER_KIND_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 _APPROVED_ACTIONS = frozenset(
@@ -1403,7 +1405,7 @@ def _rebuild_runtime_evidence_anchor(
         "run_id": plane.run_id,
         "journal_head_sha256": report.journal_head_sha256,
         "journal_event_count": report.journal_event_count,
-        "report_sha256": canonical_sha256(report.to_dict()),
+        "report_sha256": runtime_evidence_report_sha256(report),
         "report_status": report.status.value,
         "missing_evidence_count": len(report.missing_evidence),
         "verification_failure_count": len(
@@ -1817,7 +1819,9 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
                     required_capabilities=("visual.interact",),
                     evidence_policy=EvidencePolicy(
                         allow_independent_visual_verifier=True,
-                        max_verification_attempts=1,
+                        max_verification_attempts=(
+                            _MAX_VISUAL_VERIFICATION_ATTEMPTS
+                        ),
                         uncertain_policy="blocked",
                     ),
                 ),
