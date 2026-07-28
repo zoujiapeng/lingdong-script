@@ -854,6 +854,13 @@ def test_admitted_ascii_text_uses_distinct_vk_transitions(
     executor, sent = _keyboard_executor_mocks(monkeypatch)
     monkeypatch.setattr(
         executor,
+        "_should_type_via_vk",
+        lambda _text: pytest.fail(
+            "strict admitted input used the legacy text selector"
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
         "_vk_character_inputs",
         lambda char: (
             [("down", char)],
@@ -871,7 +878,6 @@ def test_admitted_ascii_text_uses_distinct_vk_transitions(
     assert len(sent) == len("CANARY-DELTA-43")
     assert executor._should_strict_type_via_vk("CANARY-DELTA-43") is True
     assert executor._should_strict_type_via_vk("中文") is False
-    assert executor._should_type_via_vk("CANARY-DELTA-43") is False
 
 
 @pytest.mark.parametrize("backend_name,argument", [

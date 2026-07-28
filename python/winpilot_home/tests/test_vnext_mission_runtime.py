@@ -1003,6 +1003,7 @@ def test_previous_action_view_is_bounded_and_derived_from_mission_card() -> None
     previous = harness.actor.turns[1].previous_action
     assert previous is not None
     assert previous.action == "click"
+    assert previous.semantic_summary == "click"
     assert previous.input_completed is True
     assert previous.visible_effect == "post-action frame captured"
     wire = harness.actor.turns[1].to_dict()
@@ -1067,6 +1068,18 @@ def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
         "scroll_up",
         "hotkey_ctrl_a",
         "type_text",
+    )
+    assert (
+        harness.actor.turns[1].previous_action.semantic_summary
+        == "scroll_down"
+    )
+    assert (
+        harness.actor.turns[2].previous_action.semantic_summary
+        == "scroll_up"
+    )
+    assert (
+        harness.actor.turns[3].previous_action.semantic_summary
+        == "hotkey_ctrl_a"
     )
     assert harness.verifier.turns[0].completed_action_summaries == expected
     transition_summaries = tuple(
