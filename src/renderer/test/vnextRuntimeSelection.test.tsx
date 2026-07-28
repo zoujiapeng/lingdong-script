@@ -149,7 +149,6 @@ describe('runtime-version run transport', () => {
       'Complete the visible task',
       999,
       false,
-      'vnext',
     );
 
     expect(compileTask).not.toHaveBeenCalled();
@@ -236,7 +235,7 @@ describe('runtime-version run transport', () => {
   });
 });
 
-describe('per-run experimental selector', () => {
+describe('primary runtime selector', () => {
   function SelectorHarness({ canaryEnabled }: { canaryEnabled: boolean }) {
     const [value, setValue] = useState<RuntimeVersion>('legacy');
     return (
@@ -249,28 +248,20 @@ describe('per-run experimental selector', () => {
     );
   }
 
-  it('defaults to legacy and keeps vNext disabled while the canary is off', () => {
-    render(<SelectorHarness canaryEnabled={false} />);
-
-    expect(screen.getByLabelText('运行时（实验）')).toHaveValue('legacy');
-    expect(screen.getByRole('option', { name: 'vNext' })).toBeDisabled();
-  });
-
-  it('allows vNext only when enabled and resets after submission', async () => {
-    let finishRun: (() => void) | undefined;
-    const startGoal = vi.fn(() => new Promise<void>((resolve) => {
-      finishRun = resolve;
-    }));
-    const plane = {
+  function cockpitPlane(
+    liveCanaryEnabled: boolean | undefined,
+    startGoal = vi.fn(async () => undefined),
+  ) {
+    return {
       currentRun: null,
       arpSnapshot: null,
       runtimeIssue: '',
-      overview: {
+      overview: liveCanaryEnabled === undefined ? undefined : {
         api_version: '2',
         product: 'WinPilot',
         status: {
           vnext: {
-            live_canary_enabled: true,
+            live_canary_enabled: liveCanaryEnabled,
             budget: {
               max_turns: 30,
               max_runtime_s: 300,
@@ -291,11 +282,38 @@ describe('per-run experimental selector', () => {
       decideGate: vi.fn(),
       getClient: vi.fn(),
     };
+  }
+
+  it('keeps vNext unavailable while the canary is explicitly off', () => {
+    render(<SelectorHarness canaryEnabled={false} />);
+
+    expect(screen.getByLabelText('运行时')).toHaveValue('legacy');
+    expect(screen.getByRole('option', { name: 'vNext' })).toBeDisabled();
+  });
+
+  it('keeps vNext while status loads and downgrades only when explicitly disabled', async () => {
+    const { rerender } = render(
+      <AgentCockpit plane={cockpitPlane(undefined) as never} />,
+    );
+    const selector = screen.getByLabelText('运行时');
+
+    expect(selector).toHaveValue('vnext');
+    rerender(<AgentCockpit plane={cockpitPlane(true) as never} />);
+    expect(selector).toHaveValue('vnext');
+    rerender(<AgentCockpit plane={cockpitPlane(false) as never} />);
+    await waitFor(() => expect(selector).toHaveValue('legacy'));
+  });
+
+  it('uses vNext by default and keeps it after submission', async () => {
+    let finishRun: (() => void) | undefined;
+    const startGoal = vi.fn(() => new Promise<void>((resolve) => {
+      finishRun = resolve;
+    }));
+    const plane = cockpitPlane(true, startGoal);
     const user = userEvent.setup();
     render(<AgentCockpit plane={plane as never} />);
 
-    const selector = screen.getByLabelText('运行时（实验）');
-    await user.selectOptions(selector, 'vnext');
+    const selector = screen.getByLabelText('运行时');
     expect(selector).toHaveValue('vnext');
     await user.type(
       screen.getByPlaceholderText('描述希望代理在这台电脑上完成的目标……'),
@@ -311,7 +329,7 @@ describe('per-run experimental selector', () => {
     );
     expect(selector).toBeDisabled();
     finishRun?.();
-    await waitFor(() => expect(selector).toHaveValue('legacy'));
+    await waitFor(() => expect(selector).toHaveValue('vnext'));
     expect(selector).not.toBeDisabled();
   });
 });

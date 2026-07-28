@@ -129,9 +129,9 @@ export function RuntimeVersionSelector({
 }) {
   return (
     <label className="arp-runtime-version-control">
-      <span>实验</span>
+      <span>运行时</span>
       <select
-        aria-label="运行时（实验）"
+        aria-label="运行时"
         value={value}
         disabled={disabled}
         onChange={(event) => {
@@ -140,8 +140,8 @@ export function RuntimeVersionSelector({
           onChange(selected);
         }}
       >
-        <option value="legacy">Legacy</option>
         <option value="vnext" disabled={!canaryEnabled}>vNext</option>
+        <option value="legacy">Legacy</option>
       </select>
     </label>
   );
@@ -904,7 +904,7 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
   const [maxSteps, setMaxSteps] = useState(40);
   const [coldStart, setColdStart] = useState(() => localStorage.getItem('arp-cold-start') === '1');
-  const [runtimeVersion, setRuntimeVersion] = useState<RuntimeVersion>('legacy');
+  const [runtimeVersion, setRuntimeVersion] = useState<RuntimeVersion>('vnext');
   const [submitting, setSubmitting] = useState(false);
   const [controlling, setControlling] = useState(false);
   const [actionError, setActionError] = useState('');
@@ -914,7 +914,8 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
   const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
   const manuallyPaused = Boolean(arp?.manual_paused);
   const runtimeIssue = plane.runtimeIssue;
-  const vnextCanaryEnabled = plane.overview?.status.vnext?.live_canary_enabled === true;
+  const vnextCanaryStatus = plane.overview?.status.vnext?.live_canary_enabled;
+  const vnextCanaryEnabled = vnextCanaryStatus === true;
   const modelProfile = plane.overview?.status.model_profile;
   const metrics = run?.metrics;
   const latestScreenEvent = [...plane.events].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type))
@@ -927,10 +928,10 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
     : '';
 
   useEffect(() => {
-    if (!vnextCanaryEnabled && runtimeVersion === 'vnext') {
+    if (vnextCanaryStatus === false && runtimeVersion === 'vnext') {
       setRuntimeVersion('legacy');
     }
-  }, [runtimeVersion, vnextCanaryEnabled]);
+  }, [runtimeVersion, vnextCanaryStatus]);
 
   const execute = async () => {
     if (!goal.trim() || submitting) return;
@@ -959,7 +960,7 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
       }
     } finally {
       setSubmitting(false);
-      setRuntimeVersion('legacy');
+      setRuntimeVersion('vnext');
     }
   };
 
