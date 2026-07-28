@@ -128,6 +128,18 @@ def _is_safe_action_summary(value: Any) -> bool:
     return True
 
 
+def _action_summary_matches(action: str, summary: str) -> bool:
+    if action == "scroll":
+        return summary in {"scroll_down", "scroll_up"}
+    if action in {"click", "double_click", "type_text"}:
+        return summary == action
+    if action == "hotkey":
+        return summary.startswith("hotkey_") and _is_safe_action_summary(
+            summary
+        )
+    return False
+
+
 def _freeze_json(value: Any) -> Any:
     if type(value) is list:
         return tuple(_freeze_json(item) for item in value)
@@ -513,6 +525,7 @@ class ActorPreviousActionView:
     action: str
     input_completed: bool
     visible_effect: str
+    semantic_summary: str | None = None
     local_visual_change: str | None = None
     frame_comparable: bool | None = None
     target_binding_valid: bool | None = None
@@ -535,6 +548,19 @@ class ActorPreviousActionView:
                 allow_empty=True,
             ),
         )
+        if (
+            self.semantic_summary is not None
+            and (
+                type(self.semantic_summary) is not str
+                or not _action_summary_matches(
+                    self.action,
+                    self.semantic_summary,
+                )
+            )
+        ):
+            raise RuntimeContractError(
+                "previous action semantic summary is invalid"
+            )
         if self.local_visual_change not in (
             None,
             "changed",
@@ -554,6 +580,7 @@ class ActorPreviousActionView:
     def to_dict(self) -> dict[str, Any]:
         return {
             "action": self.action,
+            "semantic_summary": self.semantic_summary,
             "input_completed": self.input_completed,
             "visible_effect": self.visible_effect,
             "local_visual_change": self.local_visual_change,
@@ -825,6 +852,7 @@ def project_actor_turn_input(
 ) -> ActorTurnInput:
     """Project one identity-free bounded view from canonical Runtime facts."""
 
+    completed_summaries = tuple(completed_action_summaries)
     if type(card) is not MissionCard or card.active_obligation is None:
         raise RuntimeContractError(
             "Visual Actor requires one active MissionCard obligation"
@@ -888,6 +916,15 @@ def project_actor_turn_input(
         effect = transition.action_effect
         previous = ActorPreviousActionView(
             action=transition.action,
+            semantic_summary=(
+                completed_summaries[-1]
+                if completed_summaries
+                and _action_summary_matches(
+                    transition.action,
+                    completed_summaries[-1],
+                )
+                else None
+            ),
             input_completed=transition.input_completed,
             visible_effect=transition.visible_effect,
             local_visual_change=(
@@ -939,9 +976,7 @@ def project_actor_turn_input(
             fresh=frame_state.fresh,
         ),
         tools=tuple(tools),
-        completed_action_summaries=tuple(
-            completed_action_summaries
-        ),
+        completed_action_summaries=completed_summaries,
         previous_action=previous,
     )
 

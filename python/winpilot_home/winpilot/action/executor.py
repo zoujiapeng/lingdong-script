@@ -1533,7 +1533,7 @@ def _legacy_physical_type_text(
                 time.sleep(0.08)
         return True
 
-    via_vk = _should_strict_type_via_vk(text)
+    via_vk = _should_type_via_vk(text)
     for char in text:
         if not refocus_if_needed(typed):
             return result(
@@ -1643,7 +1643,7 @@ def _execute_physical_type_text(
 
     requested = len(text)
     completed = 0
-    via_vk = _should_type_via_vk(text)
+    via_vk = _should_strict_type_via_vk(text)
     for char in text:
         decision = _keyboard_guard_decision(final_guard)
         if decision is not FinalKeyboardGuardDecision.ADMITTED:
