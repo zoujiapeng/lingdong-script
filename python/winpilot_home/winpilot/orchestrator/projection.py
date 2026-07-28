@@ -71,6 +71,11 @@ class RunProjectionStore:
                 if isinstance(event.get("runtime_budget"), dict)
                 else {}
             ),
+            "no_legacy_fallback": (
+                event.get("no_legacy_fallback")
+                if type(event.get("no_legacy_fallback")) is bool
+                else None
+            ),
             "status": "running",
             "manual_paused": False,
             "phase": "starting",
@@ -216,6 +221,25 @@ class RunProjectionStore:
                     }
                 else:
                     run["runtime_version"] = event_runtime_version
+            event_no_legacy_fallback = event.get("no_legacy_fallback")
+            if type(event_no_legacy_fallback) is bool:
+                frozen_no_legacy_fallback = run.get(
+                    "no_legacy_fallback"
+                )
+                if (
+                    type(frozen_no_legacy_fallback) is bool
+                    and frozen_no_legacy_fallback
+                    != event_no_legacy_fallback
+                ):
+                    run["no_legacy_fallback_mismatch"] = {
+                        "frozen": frozen_no_legacy_fallback,
+                        "observed": event_no_legacy_fallback,
+                        "event_type": event_type,
+                    }
+                else:
+                    run["no_legacy_fallback"] = (
+                        event_no_legacy_fallback
+                    )
             phase = self._phase(event_type, event)
             terminal_before_event = run.get("status") in _TERMINAL
             if (
@@ -277,6 +301,27 @@ class RunProjectionStore:
                     run["runtime_budget"] = copy.deepcopy(
                         snapshot_runtime_budget
                     )
+                snapshot_no_legacy_fallback = runtime_snapshot.get(
+                    "no_legacy_fallback"
+                )
+                if type(snapshot_no_legacy_fallback) is bool:
+                    frozen_no_legacy_fallback = run.get(
+                        "no_legacy_fallback"
+                    )
+                    if (
+                        type(frozen_no_legacy_fallback) is bool
+                        and frozen_no_legacy_fallback
+                        != snapshot_no_legacy_fallback
+                    ):
+                        run["no_legacy_fallback_mismatch"] = {
+                            "frozen": frozen_no_legacy_fallback,
+                            "observed": snapshot_no_legacy_fallback,
+                            "event_type": event_type,
+                        }
+                    else:
+                        run["no_legacy_fallback"] = (
+                            snapshot_no_legacy_fallback
+                        )
                 if isinstance(runtime_snapshot.get("task_contract"), dict):
                     run["task_contract"] = copy.deepcopy(runtime_snapshot["task_contract"])
                 if isinstance(runtime_snapshot.get("satisfiability"), dict):
@@ -850,6 +895,11 @@ class RunProjectionStore:
                 run.get("runtime_budget")
                 or snapshot.get("runtime_budget")
                 or {}
+            ),
+            "no_legacy_fallback": (
+                run.get("no_legacy_fallback")
+                if type(run.get("no_legacy_fallback")) is bool
+                else snapshot.get("no_legacy_fallback") is True
             ),
             "graph_id": str(run.get("graph_id") or snapshot.get("graph_id") or ""),
             "graph_name": str(run.get("goal") or snapshot.get("graph_name") or ""),

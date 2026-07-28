@@ -155,6 +155,7 @@ export interface RunProjection {
   kind: 'agent' | 'arp';
   runtime_version?: RuntimeVersion;
   runtime_budget?: VnextLiveCanaryBudget | Record<string, unknown>;
+  no_legacy_fallback?: boolean;
   status: string;
   phase: string;
   goal: string;
@@ -178,6 +179,7 @@ export interface ArpExecutionSnapshot {
   graph_name: string;
   runtime_version?: RuntimeVersion;
   runtime_budget?: VnextLiveCanaryBudget | Record<string, unknown>;
+  no_legacy_fallback?: boolean;
   status: string;
   manual_paused?: boolean;
   current_node_id?: string | null;
