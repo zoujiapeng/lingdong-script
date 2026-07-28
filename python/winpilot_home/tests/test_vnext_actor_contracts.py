@@ -1607,6 +1607,13 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
         / "desktop_adapter"
         / "atomic.py"
     )
+    visual_actor = (
+        home
+        / "winpilot"
+        / "vnext"
+        / "model_roles"
+        / "visual_actor.py"
+    )
     assert tuple(sorted(path.name for path in actor_dir.glob("*.py"))) == (
         "__init__.py",
         "envelope.py",
@@ -1661,6 +1668,7 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
         if "actor" not in path.parts
         and runtime_dir not in path.parents
         and path != desktop_adapter_atomic
+        and path != visual_actor
     )
     violations = tuple(
         (path, imported)
@@ -1678,6 +1686,18 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
         "winpilot.vnext.actor",
         "winpilot.vnext.actor.ActorDecisionEnvelope",
         "winpilot.vnext.actor.DesktopActionProposal",
+    )
+    visual_actor_imports = tuple(
+        imported
+        for imported in _imports(visual_actor, package_root)
+        if _matches_prefix(imported, "winpilot.vnext.actor")
+    )
+    assert visual_actor_imports == (
+        "winpilot.vnext.actor",
+        "winpilot.vnext.actor.ACTOR_PROPOSAL_FORMAT",
+        "winpilot.vnext.actor.InvalidActorProposal",
+        "winpilot.vnext.actor.actor_proposal_to_json",
+        "winpilot.vnext.actor.parse_actor_proposal",
     )
 
 
