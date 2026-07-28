@@ -1,0 +1,1267 @@
+"""One-turn, event-sourced minimal Mission Runtime.
+
+The Runtime coordinates injected owners.  It does not call a model SDK,
+capture Windows pixels, perform desktop input, discover targets, or own a
+second completion/evidence ledger.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import threading
+from typing import Any, Iterable, Mapping
+
+from ..actor import (
+    ActorDecisionEnvelope,
+    BlockedReport,
+    ClaimObligationDone,
+    DesktopActionProposal,
+    InvalidActorProposal,
+    bind_actor_decision,
+    parse_actor_proposal,
+    proposal_tool_name,
+)
+from ..capabilities import (
+    BrokerProjection,
+    CapabilityBroker,
+    ExecutionRoute,
+    MutationKind,
+    ToolArgumentValidationError,
+    ToolArgumentValidator,
+    ToolCatalog,
+    ToolRoute,
+)
+from ..evidence import EvidenceRegistry
+from ..mission import (
+    EvidenceRef,
+    MissionError,
+    MissionReducer,
+    MissionStatus,
+    ObligationStatus,
+)
+from ..profiling import ExecutionDepth, ExecutionProfile
+from ..verification import (
+    AcceptedObligationVerification,
+    DeterministicMissionCompletionVerifier,
+    MissionCompletionVerificationRequest,
+    MissionCompletionVerificationResult,
+    ObligationVerificationRequest,
+    ObligationVerificationResult,
+    VerifierAssessment,
+)
+from .contracts import (
+    APPROVED_DESKTOP_ACTIONS,
+    APPROVED_RUNTIME_TOOLS,
+    CURRENT_FRAME_EVIDENCE_KIND,
+    POST_ACTION_FRAME_EVIDENCE_KIND,
+    VISUAL_VERIFIER_EVIDENCE_KIND,
+    VISUAL_VERIFIER_TRUST,
+    ControllerOutcome,
+    ControllerTransition,
+    MissionRuntimeResult,
+    RuntimeSnapshot,
+    RuntimeStatus,
+    RuntimeTargetIdentity,
+    RuntimeVerifierTurn,
+    project_actor_turn_input,
+)
+from .mutation_attempt import call_once_with_permit
+from .mutation_permits import (
+    MutationPermitAuthority,
+    MutationPermitError,
+)
+from .ports import (
+    ActorPort,
+    ControllerPort,
+    RuntimeStatePort,
+    VisualObligationVerifierPort,
+)
+from .post_action_reconcile import (
+    reconcile_post_action,
+    validate_controller_evidence_scope,
+)
+
+
+class MissionRuntimeConfigurationError(ValueError):
+    """The injected slice is outside the authorized minimal canary."""
+
+
+class MissionRuntime:
+    """Coordinate exactly one bounded Actor decision per call."""
+
+    def __init__(
+        self,
+        *,
+        reducer: MissionReducer,
+        profile: ExecutionProfile,
+        broker: CapabilityBroker,
+        catalog: ToolCatalog,
+        actor: ActorPort,
+        state: RuntimeStatePort,
+        controller: ControllerPort,
+        verifier: VisualObligationVerifierPort,
+        evidence_registry: EvidenceRegistry,
+        mutation_permits: MutationPermitAuthority | None = None,
+    ) -> None:
+        if type(reducer) is not MissionReducer:
+            raise TypeError("reducer must be MissionReducer")
+        if type(profile) is not ExecutionProfile:
+            raise TypeError("profile must be ExecutionProfile")
+        if type(broker) is not CapabilityBroker:
+            raise TypeError("broker must be CapabilityBroker")
+        if type(catalog) is not ToolCatalog or broker.catalog != catalog:
+            raise TypeError(
+                "Runtime and Broker must share one ToolCatalog"
+            )
+        if type(evidence_registry) is not EvidenceRegistry:
+            raise TypeError(
+                "evidence_registry must be EvidenceRegistry"
+            )
+        if reducer.evidence_source is not evidence_registry:
+            raise TypeError(
+                "Runtime and MissionReducer must share one EvidenceRegistry"
+            )
+        for value, method, name in (
+            (actor, "propose", "actor"),
+            (state, "observe", "state"),
+            (state, "current", "state"),
+            (controller, "execute", "controller"),
+            (verifier, "assess", "verifier"),
+        ):
+            if not callable(getattr(value, method, None)):
+                raise TypeError(f"{name} must provide {method}()")
+        if (
+            getattr(verifier, "verifier_kind", None)
+            != VISUAL_VERIFIER_TRUST
+        ):
+            raise TypeError(
+                "verifier must be the independent read-only visual role"
+            )
+        if actor is verifier:
+            raise TypeError(
+                "Actor and visual verifier must be independent role instances"
+            )
+        self._validate_minimal_scope(
+            reducer=reducer,
+            profile=profile,
+            catalog=catalog,
+            registry=evidence_registry,
+        )
+        permits = mutation_permits or MutationPermitAuthority(
+            reducer.definition.mission_id,
+            reducer.definition.run_id,
+        )
+        if type(permits) is not MutationPermitAuthority:
+            raise TypeError(
+                "mutation_permits must be MutationPermitAuthority"
+            )
+        if (
+            permits.mission_id != reducer.definition.mission_id
+            or permits.run_id != reducer.definition.run_id
+        ):
+            raise TypeError(
+                "mutation permit scope must match mission/run"
+            )
+        self._reducer = reducer
+        self._profile = profile
+        self._broker = broker
+        self._catalog = catalog
+        self._argument_validator = ToolArgumentValidator(catalog)
+        self._actor = actor
+        self._state = state
+        self._controller = controller
+        self._verifier = verifier
+        self._registry = evidence_registry
+        self._mutation_permits = permits
+        self._turn_lock = threading.Lock()
+
+    @staticmethod
+    def _validate_minimal_scope(
+        *,
+        reducer: MissionReducer,
+        profile: ExecutionProfile,
+        catalog: ToolCatalog,
+        registry: EvidenceRegistry,
+    ) -> None:
+        definition = reducer.definition
+        if (
+            registry.mission_id != definition.mission_id
+            or registry.run_id != definition.run_id
+        ):
+            raise MissionRuntimeConfigurationError(
+                "EvidenceRegistry is outside mission/run"
+            )
+        if len(definition.obligations) != 1:
+            raise MissionRuntimeConfigurationError(
+                "minimal Runtime requires one full-goal obligation"
+            )
+        obligation = definition.obligations[0]
+        if (
+            not obligation.required
+            or obligation.desired_state != definition.original_goal
+            or obligation.depends_on
+            or obligation.input_artifact_refs
+            or obligation.output_binding_names
+            or obligation.required_capabilities != ("visual.interact",)
+        ):
+            raise MissionRuntimeConfigurationError(
+                "obligation is not the single visual full-goal contract"
+            )
+        if not obligation.evidence_policy.allow_independent_visual_verifier:
+            raise MissionRuntimeConfigurationError(
+                "full-goal obligation must opt into independent visual verification"
+            )
+        services = profile.services
+        if (
+            profile.mission_id != definition.mission_id
+            or profile.goal_revision != definition.goal_revision
+            or profile.accepted_depth is not ExecutionDepth.STANDARD
+            or profile.source != "safe_default"
+            or profile.accepted_capabilities != ("visual.interact",)
+            or profile.upgrade_triggers
+            or profile.downgrade_conditions
+            or services.planner
+            or not services.obligation_verifier
+            or services.mission_verifier
+            or services.visual_inspector
+            or services.deep_reasoning
+        ):
+            raise MissionRuntimeConfigurationError(
+                "Runtime requires the fixed safe STANDARD profile"
+            )
+        names = frozenset(tool.name for tool in catalog.tools)
+        if names != APPROVED_RUNTIME_TOOLS:
+            raise MissionRuntimeConfigurationError(
+                "ToolCatalog must contain exactly the minimal canary surface"
+            )
+        for tool in catalog.tools:
+            if tool.route is not ToolRoute.VISUAL_ACTOR:
+                raise MissionRuntimeConfigurationError(
+                    "minimal tools must be Visual Actor owned"
+                )
+            expected = (
+                MutationKind.GUI
+                if tool.name in APPROVED_DESKTOP_ACTIONS
+                else MutationKind.NONE
+            )
+            if tool.mutation_kind is not expected:
+                raise MissionRuntimeConfigurationError(
+                    f"invalid mutation contract for {tool.name!r}"
+                )
+        binding = reducer.projection.target_binding
+        if binding is None:
+            raise MissionRuntimeConfigurationError(
+                "minimal Runtime requires a pre-bound target"
+            )
+        RuntimeTargetIdentity.from_binding(binding)
+
+    @property
+    def reducer(self) -> MissionReducer:
+        return self._reducer
+
+    @property
+    def mutation_permits(self) -> MutationPermitAuthority:
+        return self._mutation_permits
+
+    @staticmethod
+    def _stopped(stop_event: threading.Event | None) -> bool:
+        return bool(stop_event is not None and stop_event.is_set())
+
+    @staticmethod
+    def _result(
+        status: RuntimeStatus,
+        *,
+        route: ExecutionRoute | None = None,
+        proposal_kind: str | None = None,
+        decision_id: str | None = None,
+        event_ids: Iterable[str] = (),
+        detail: str = "",
+    ) -> MissionRuntimeResult:
+        return MissionRuntimeResult(
+            status=status,
+            route=route,
+            proposal_kind=proposal_kind,
+            decision_id=decision_id,
+            accepted_event_ids=tuple(event_ids),
+            detail=detail,
+        )
+
+    def _accept(
+        self,
+        kind: str,
+        *,
+        payload: Mapping[str, Any],
+        base_revision: int,
+        evidence_refs: Iterable[str] = (),
+    ) -> tuple[str, ...]:
+        event = self._reducer.event(
+            kind,
+            payload=dict(payload),
+            base_revision=base_revision,
+            evidence_refs=tuple(evidence_refs),
+        )
+        self._reducer.apply(event)
+        return (event.event_id,)
+
+    def _cancel(
+        self,
+        *,
+        prior_event_ids: Iterable[str] = (),
+        detail: str = "run cancellation was requested",
+    ) -> MissionRuntimeResult:
+        projection = self._reducer.projection
+        if projection.status is MissionStatus.CANCELED:
+            return self._result(
+                RuntimeStatus.CANCELED,
+                event_ids=prior_event_ids,
+                detail=detail,
+            )
+        if projection.status in {
+            MissionStatus.VERIFIED,
+            MissionStatus.FAILED,
+        }:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                event_ids=prior_event_ids,
+                detail=f"cannot cancel terminal mission: {projection.status.value}",
+            )
+        try:
+            event_ids = self._accept(
+                "mission_canceled",
+                payload={"reason": detail},
+                base_revision=projection.revision,
+            )
+        except MissionError as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                event_ids=prior_event_ids,
+                detail=f"cancellation was not accepted: {exc}",
+            )
+        return self._result(
+            RuntimeStatus.CANCELED,
+            event_ids=(*tuple(prior_event_ids), *event_ids),
+            detail=detail,
+        )
+
+    def _snapshot_matches_mission(
+        self,
+        snapshot: RuntimeSnapshot,
+        *,
+        turn_index: int,
+    ) -> bool:
+        projection = self._reducer.projection
+        binding = projection.target_binding
+        if binding is None:
+            return False
+        if snapshot.broker_state.turn_index != turn_index:
+            return False
+        if snapshot.target != RuntimeTargetIdentity.from_binding(binding):
+            return False
+        if (
+            snapshot.frame.hwnd != binding.hwnd
+            or snapshot.frame.epoch != binding.epoch
+            or snapshot.frame.scope != "target_window"
+        ):
+            return False
+        registry = {ref.id: ref for ref in self._registry.snapshot()}
+        if not snapshot.frame.evidence_refs or any(
+            evidence_id not in registry
+            for evidence_id in snapshot.frame.evidence_refs
+        ):
+            return False
+        payload_hash = snapshot.frame.identity.payload_hash
+        return all(
+            registry[evidence_id].mission_id == projection.mission_id
+            and registry[evidence_id].run_id == projection.run_id
+            and registry[evidence_id].obligation_id
+            == projection.active_obligation_id
+            and registry[evidence_id].kind
+            in {
+                CURRENT_FRAME_EVIDENCE_KIND,
+                POST_ACTION_FRAME_EVIDENCE_KIND,
+            }
+            and registry[evidence_id].trust == "deterministic"
+            and registry[evidence_id].frame_id == snapshot.frame.frame_id
+            and registry[evidence_id].payload_hash == payload_hash
+            for evidence_id in snapshot.frame.evidence_refs
+        )
+
+    def _project(self, snapshot: RuntimeSnapshot) -> BrokerProjection:
+        return self._broker.project(
+            self._reducer.projection,
+            self._profile,
+            snapshot.broker_state,
+        )
+
+    def _latest_matches(
+        self,
+        initial: RuntimeSnapshot,
+        broker_projection: BrokerProjection,
+        *,
+        turn_index: int,
+    ) -> bool:
+        projection = self._reducer.projection
+        if (
+            projection.revision != broker_projection.mission_revision
+            or projection.active_obligation_id
+            != broker_projection.obligation_id
+        ):
+            return False
+        latest = self._state.current(
+            projection,
+            turn_index=turn_index,
+        )
+        if (
+            not self._snapshot_matches_mission(
+                latest,
+                turn_index=turn_index,
+            )
+            or latest.authority_key != initial.authority_key
+        ):
+            return False
+        return self._project(latest) == broker_projection
+
+    def _mutation_still_current(
+        self,
+        envelope: ActorDecisionEnvelope,
+        initial: RuntimeSnapshot,
+        broker_projection: BrokerProjection,
+        *,
+        turn_index: int,
+        stop_event: threading.Event | None,
+    ) -> bool:
+        if self._stopped(stop_event):
+            return False
+        projection = self._reducer.projection
+        if (
+            projection.mission_id != envelope.mission_id
+            or projection.run_id != envelope.run_id
+            or projection.revision != envelope.mission_revision
+            or projection.active_obligation_id != envelope.obligation_id
+        ):
+            return False
+        try:
+            return self._latest_matches(
+                initial,
+                broker_projection,
+                turn_index=turn_index,
+            )
+        except Exception:
+            return False
+
+    def _block_unknown(
+        self,
+        *,
+        obligation_id: str,
+        route: ExecutionRoute,
+        proposal_kind: str,
+        decision_id: str,
+        detail: str,
+    ) -> MissionRuntimeResult:
+        self._mutation_permits.close()
+        event_ids: tuple[str, ...] = ()
+        block_error: MissionError | None = None
+        for _ in range(3):
+            projection = self._reducer.projection
+            if projection.active_obligation_id != obligation_id:
+                break
+            try:
+                event_ids = self._accept(
+                    "obligation_blocked",
+                    payload={
+                        "obligation_id": obligation_id,
+                        "blocker_kind": "controller_outcome_unknown",
+                        "reason": (
+                            "desktop mutation outcome is unknown; "
+                            "the action was not replayed"
+                        ),
+                    },
+                    base_revision=projection.revision,
+                )
+                block_error = None
+                break
+            except MissionError as exc:
+                block_error = exc
+        if block_error is not None:
+            detail = (
+                f"{detail}; mutation authority is closed; "
+                f"block was not accepted: {block_error}"
+            )
+        return self._result(
+            RuntimeStatus.BLOCKED,
+            route=route,
+            proposal_kind=proposal_kind,
+            decision_id=decision_id,
+            event_ids=event_ids,
+            detail=detail,
+        )
+
+    @staticmethod
+    def _assessment(
+        raw: VerifierAssessment | Mapping[str, Any],
+    ) -> VerifierAssessment:
+        if type(raw) is VerifierAssessment:
+            return VerifierAssessment.from_dict(raw.to_dict())
+        if isinstance(raw, Mapping):
+            return VerifierAssessment.from_dict(dict(raw))
+        raise TypeError(
+            "visual verifier must return VerifierAssessment or mapping"
+        )
+
+    @staticmethod
+    def _visual_attestation(
+        turn: RuntimeVerifierTurn,
+        assessment: VerifierAssessment,
+    ) -> EvidenceRef:
+        request = turn.request
+        material = {
+            "format": "runtime-visual-verifier-attestation/0",
+            "mission_id": request.mission_id,
+            "run_id": request.run_id,
+            "mission_revision": request.mission_revision,
+            "obligation_id": request.obligation_id,
+            "claim_fingerprint": request.claim_fingerprint,
+            "frame": turn.frame.identity.to_dict(),
+            "input_evidence_refs": [
+                ref.id for ref in request.evidence_refs
+            ],
+            "assessment": assessment.to_dict(),
+        }
+        payload_hash = hashlib.sha256(
+            json.dumps(
+                material,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        return EvidenceRef(
+            id=f"evidence-visual-{payload_hash[:24]}",
+            mission_id=request.mission_id,
+            run_id=request.run_id,
+            obligation_id=request.obligation_id,
+            kind=VISUAL_VERIFIER_EVIDENCE_KIND,
+            trust=VISUAL_VERIFIER_TRUST,
+            payload_hash=payload_hash,
+            frame_id=turn.frame.frame_id,
+        )
+
+    def _verification_request(
+        self,
+        obligation_id: str,
+    ) -> ObligationVerificationRequest:
+        projection = self._reducer.projection
+        state = projection.obligation_state(obligation_id)
+        if (
+            projection.active_obligation_id != obligation_id
+            or state.status is not ObligationStatus.CLAIMED
+            or not state.claim_fingerprint
+        ):
+            raise ValueError(
+                "visual verification requires the current accepted claim"
+            )
+        definition = projection.obligation_definition(obligation_id)
+        refs = self._reducer.evidence_scope.require(
+            state.claim_evidence_refs,
+            obligation_id=obligation_id,
+        )
+        return ObligationVerificationRequest(
+            mission_id=projection.mission_id,
+            run_id=projection.run_id,
+            mission_revision=projection.revision,
+            obligation_id=obligation_id,
+            claim_fingerprint=state.claim_fingerprint,
+            desired_state=definition.desired_state,
+            acceptance_criteria=definition.acceptance_criteria,
+            forbidden_effects=definition.forbidden_effects,
+            evidence_policy=definition.evidence_policy,
+            evidence_refs=refs,
+        )
+
+    def _complete_mission(
+        self,
+        *,
+        route: ExecutionRoute,
+        proposal_kind: str,
+        decision_id: str,
+        prior_event_ids: Iterable[str],
+    ) -> MissionRuntimeResult:
+        projection = self._reducer.projection
+        if projection.status is not MissionStatus.AWAITING_MISSION_VERIFICATION:
+            return self._result(
+                RuntimeStatus.VERIFICATION_RECORDED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                event_ids=prior_event_ids,
+            )
+        obligation = self._reducer.definition.obligations[0]
+        state = projection.obligation_state(obligation.id)
+        if (
+            state.status is not ObligationStatus.VERIFIED
+            or not state.verification_id
+            or not state.verified_evidence_refs
+        ):
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                event_ids=prior_event_ids,
+                detail="verified obligation lacks exact accepted evidence",
+            )
+        try:
+            refs = self._reducer.evidence_scope.require(
+                state.verified_evidence_refs,
+                obligation_id=obligation.id,
+            )
+            request = MissionCompletionVerificationRequest(
+                mission_id=projection.mission_id,
+                run_id=projection.run_id,
+                mission_revision=projection.revision,
+                required_obligations=(
+                    AcceptedObligationVerification(
+                        obligation_id=obligation.id,
+                        accepted_verification_id=state.verification_id,
+                        verified_evidence_refs=state.verified_evidence_refs,
+                        evidence_refs=refs,
+                    ),
+                ),
+            )
+            verifier = DeterministicMissionCompletionVerifier()
+            result = MissionCompletionVerificationResult.bind(
+                request,
+                verifier.verify(request),
+            )
+            self._registry.append(result.aggregate_evidence)
+            event_ids = self._accept(
+                "mission_verified",
+                payload=result.to_mission_event_payload(),
+                evidence_refs=result.event_evidence_refs,
+                base_revision=request.mission_revision,
+            )
+        except Exception as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                event_ids=prior_event_ids,
+                detail=f"mission completion failed closed: {exc}",
+            )
+        if self._reducer.projection.status is not MissionStatus.VERIFIED:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=decision_id,
+                event_ids=(*tuple(prior_event_ids), *event_ids),
+                detail="Reducer did not derive mission verification",
+            )
+        return self._result(
+            RuntimeStatus.MISSION_VERIFIED,
+            route=route,
+            proposal_kind=proposal_kind,
+            decision_id=decision_id,
+            event_ids=(*tuple(prior_event_ids), *event_ids),
+        )
+
+    def _claim_and_verify(
+        self,
+        proposal: ClaimObligationDone,
+        envelope: ActorDecisionEnvelope,
+        frozen: RuntimeSnapshot,
+        *,
+        route: ExecutionRoute,
+        turn_index: int,
+        stop_event: threading.Event | None,
+    ) -> MissionRuntimeResult:
+        del proposal
+        obligation_id = envelope.obligation_id
+        proposal_kind = "claim_obligation_done"
+        if not frozen.frame.evidence_refs:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail="claim requires current run-scoped frame evidence",
+            )
+        try:
+            claim_ids = self._accept(
+                "obligation_claimed",
+                payload={"obligation_id": obligation_id},
+                evidence_refs=frozen.frame.evidence_refs,
+                base_revision=envelope.mission_revision,
+            )
+            request = self._verification_request(obligation_id)
+            turn = RuntimeVerifierTurn(
+                request=request,
+                frame=frozen.frame,
+            )
+        except Exception as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail=f"claim was not accepted: {exc}",
+            )
+        if self._stopped(stop_event):
+            return self._cancel(
+                prior_event_ids=claim_ids,
+                detail="run was canceled before verification",
+            )
+        try:
+            assessment = self._assessment(
+                self._verifier.assess(
+                    turn,
+                    stop_event=stop_event,
+                )
+            )
+        except Exception as exc:
+            if self._stopped(stop_event):
+                return self._cancel(
+                    prior_event_ids=claim_ids,
+                    detail="run was canceled during visual verification",
+                )
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                event_ids=claim_ids,
+                detail=f"visual verifier failed closed: {exc}",
+            )
+        if self._stopped(stop_event):
+            return self._cancel(
+                prior_event_ids=claim_ids,
+                detail="run was canceled after verification returned",
+            )
+        try:
+            current_projection = self._reducer.projection
+            current = self._state.current(
+                current_projection,
+                turn_index=turn_index,
+            )
+            if (
+                current_projection.revision != request.mission_revision
+                or current_projection.active_obligation_id != obligation_id
+                or not self._snapshot_matches_mission(
+                    current,
+                    turn_index=turn_index,
+                )
+                or current.frame.authority_key
+                != frozen.frame.authority_key
+                or current.target != frozen.target
+            ):
+                return self._result(
+                    RuntimeStatus.STALE_DISCARDED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=envelope.decision_id,
+                    event_ids=claim_ids,
+                    detail=(
+                        "claim/frame authority changed while verifier was assessing"
+                    ),
+                )
+            attestation = self._visual_attestation(turn, assessment)
+            self._registry.append(attestation)
+            bound_request = ObligationVerificationRequest(
+                mission_id=request.mission_id,
+                run_id=request.run_id,
+                mission_revision=request.mission_revision,
+                obligation_id=request.obligation_id,
+                claim_fingerprint=request.claim_fingerprint,
+                desired_state=request.desired_state,
+                acceptance_criteria=request.acceptance_criteria,
+                forbidden_effects=request.forbidden_effects,
+                evidence_policy=request.evidence_policy,
+                evidence_refs=(*request.evidence_refs, attestation),
+            )
+            result = ObligationVerificationResult.bind(
+                bound_request,
+                assessment,
+                verifier_kind=VISUAL_VERIFIER_TRUST,
+                evidence_refs=tuple(
+                    ref.id for ref in bound_request.trusted_evidence_refs
+                ),
+            )
+            verification_ids = self._accept(
+                "verification_recorded",
+                payload=result.to_mission_event_payload(bound_request),
+                evidence_refs=result.event_evidence_refs,
+                base_revision=request.mission_revision,
+            )
+        except Exception as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                event_ids=claim_ids,
+                detail=f"verification result failed closed: {exc}",
+            )
+        event_ids = (*claim_ids, *verification_ids)
+        if not result.verified:
+            status = (
+                RuntimeStatus.BLOCKED
+                if self._reducer.projection.status
+                in {MissionStatus.BLOCKED, MissionStatus.FAILED}
+                else RuntimeStatus.VERIFICATION_RECORDED
+            )
+            return self._result(
+                status,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                event_ids=event_ids,
+            )
+        return self._complete_mission(
+            route=route,
+            proposal_kind=proposal_kind,
+            decision_id=envelope.decision_id,
+            prior_event_ids=event_ids,
+        )
+
+    def _run_action(
+        self,
+        proposal: DesktopActionProposal,
+        envelope: ActorDecisionEnvelope,
+        initial: RuntimeSnapshot,
+        broker_projection: BrokerProjection,
+        *,
+        route: ExecutionRoute,
+        turn_index: int,
+        stop_event: threading.Event | None,
+    ) -> MissionRuntimeResult:
+        proposal_kind = proposal.kind
+        obligation_id = envelope.obligation_id
+        try:
+            attempt = call_once_with_permit(
+                authority=self._mutation_permits,
+                envelope=envelope,
+                turn_index=turn_index,
+                commit_identity=initial.commit_identity,
+                still_current=lambda: self._mutation_still_current(
+                    envelope,
+                    initial,
+                    broker_projection,
+                    turn_index=turn_index,
+                    stop_event=stop_event,
+                ),
+                execute=lambda admitted: self._controller.execute(
+                    admitted,
+                    stop_event=stop_event,
+                ),
+            )
+        except MutationPermitError as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail=str(exc),
+            )
+        if attempt.execute_call_count != 1:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail="Controller attempt was not call-once",
+            )
+        if attempt.controller_error is not None:
+            return self._block_unknown(
+                obligation_id=obligation_id,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail=(
+                    "Controller raised after mutation admission: "
+                    f"{attempt.controller_error}"
+                ),
+            )
+        transition = attempt.transition
+        if type(transition) is not ControllerTransition:
+            return self._block_unknown(
+                obligation_id=obligation_id,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail="Controller returned an invalid typed transition",
+            )
+        if (
+            transition.outcome is not ControllerOutcome.REJECTED
+            and (
+                attempt.pending_permit_revoked
+                or not attempt.active_admission_closed
+            )
+        ):
+            return self._block_unknown(
+                obligation_id=obligation_id,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail=(
+                    "Controller reported mutation without consuming Runtime permit"
+                ),
+            )
+        if (
+            transition.action_id != envelope.decision_id
+            or transition.action != proposal.action
+            or transition.outcome is ControllerOutcome.UNKNOWN
+        ):
+            return self._block_unknown(
+                obligation_id=obligation_id,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail="Controller could not prove the mutation outcome",
+            )
+        if transition.outcome is ControllerOutcome.REJECTED:
+            if self._stopped(stop_event):
+                return self._cancel(
+                    detail="run was canceled before input executed"
+                )
+            return self._result(
+                RuntimeStatus.STALE_DISCARDED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail=(
+                    "Controller proved input did not execute; no replay occurred"
+                ),
+            )
+        try:
+            validate_controller_evidence_scope(
+                transition,
+                self._registry,
+                mission_id=self._reducer.definition.mission_id,
+                run_id=self._reducer.definition.run_id,
+                obligation_id=obligation_id,
+                action_id=envelope.decision_id,
+            )
+            self._registry.append_many(transition.produced_evidence)
+            after = self._state.current(
+                self._reducer.projection,
+                turn_index=turn_index,
+            )
+            reconcile_post_action(
+                transition,
+                initial,
+                after,
+                self._registry,
+                mission_id=self._reducer.definition.mission_id,
+                run_id=self._reducer.definition.run_id,
+                obligation_id=obligation_id,
+                action_id=envelope.decision_id,
+                action=proposal.action,
+            )
+            event_ids = self._accept(
+                "transition_recorded",
+                payload={
+                    "obligation_id": obligation_id,
+                    "action_id": envelope.decision_id,
+                    "action": proposal.action,
+                    "input_completed": True,
+                    "visible_effect": transition.visible_effect,
+                    "frame_id": transition.post_frame_id,
+                    **(
+                        {}
+                        if transition.action_effect is None
+                        else {
+                            "action_effect": (
+                                transition.action_effect.to_dict()
+                            )
+                        }
+                    ),
+                },
+                evidence_refs=transition.event_evidence_refs,
+                base_revision=envelope.mission_revision,
+            )
+        except Exception as exc:
+            return self._block_unknown(
+                obligation_id=obligation_id,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail=f"Controller result could not be reconciled: {exc}",
+            )
+        if self._stopped(stop_event):
+            return self._cancel(
+                prior_event_ids=event_ids,
+                detail="run was canceled after the admitted action",
+            )
+        return self._result(
+            RuntimeStatus.ACTION_RECORDED,
+            route=route,
+            proposal_kind=proposal_kind,
+            decision_id=envelope.decision_id,
+            event_ids=event_ids,
+        )
+
+    def run_one_turn(
+        self,
+        *,
+        turn_index: int,
+        stop_event: threading.Event | None = None,
+    ) -> MissionRuntimeResult:
+        if type(turn_index) is not int or turn_index < 0:
+            raise ValueError(
+                "turn_index must be a non-negative integer"
+            )
+        if not self._turn_lock.acquire(blocking=False):
+            return self._result(
+                RuntimeStatus.BUSY,
+                detail="another Runtime turn owns admission",
+            )
+        try:
+            return self._run_locked(
+                turn_index=turn_index,
+                stop_event=stop_event,
+            )
+        finally:
+            self._turn_lock.release()
+
+    def _run_locked(
+        self,
+        *,
+        turn_index: int,
+        stop_event: threading.Event | None,
+    ) -> MissionRuntimeResult:
+        projection = self._reducer.projection
+        if projection.status is MissionStatus.VERIFIED:
+            return self._result(
+                RuntimeStatus.MISSION_VERIFIED,
+                detail="mission was already independently verified",
+            )
+        if projection.status is MissionStatus.CANCELED:
+            return self._result(
+                RuntimeStatus.CANCELED,
+                detail="mission was already canceled",
+            )
+        if projection.status in {
+            MissionStatus.FAILED,
+            MissionStatus.BLOCKED,
+        }:
+            return self._result(
+                RuntimeStatus.BLOCKED,
+                detail=f"mission is not actionable: {projection.status.value}",
+            )
+        if self._mutation_permits.closed:
+            return self._result(
+                RuntimeStatus.BLOCKED,
+                detail=(
+                    "desktop mutation authority is closed after an "
+                    "unreconciled outcome"
+                ),
+            )
+        if self._stopped(stop_event):
+            return self._cancel()
+        try:
+            initial = self._state.observe(
+                projection,
+                turn_index=turn_index,
+            )
+            if not self._snapshot_matches_mission(
+                initial,
+                turn_index=turn_index,
+            ):
+                raise ValueError(
+                    "Runtime snapshot does not match accepted target/evidence"
+                )
+            broker_projection = self._project(initial)
+        except Exception as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                detail=str(exc),
+            )
+        route = broker_projection.execution_route
+        if route is not ExecutionRoute.VISUAL_ACTOR:
+            return self._result(
+                RuntimeStatus.UNAVAILABLE,
+                route=route,
+                detail="Broker route is not Visual Actor",
+            )
+        try:
+            turn = project_actor_turn_input(
+                self._reducer.card,
+                initial.broker_state.frame,
+                self._catalog,
+                broker_projection,
+            )
+        except Exception as exc:
+            return self._result(
+                RuntimeStatus.ACTOR_ERROR,
+                route=route,
+                detail=str(exc),
+            )
+        try:
+            raw = self._actor.propose(
+                turn,
+                image_b64=initial.frame.image_b64,
+                image_media_type=initial.frame.media_type,
+                submitted_size=initial.frame.submitted_size,
+                stop_event=stop_event,
+            )
+        except InvalidActorProposal as exc:
+            if self._stopped(stop_event):
+                return self._cancel(
+                    detail="run was canceled during the Actor call"
+                )
+            return self._result(
+                RuntimeStatus.INVALID_PROPOSAL,
+                route=route,
+                detail=str(exc),
+            )
+        except Exception as exc:
+            if self._stopped(stop_event):
+                return self._cancel(
+                    detail="run was canceled during the Actor call"
+                )
+            return self._result(
+                RuntimeStatus.ACTOR_ERROR,
+                route=route,
+                detail=str(exc),
+            )
+        if self._stopped(stop_event):
+            return self._cancel(
+                detail="run was canceled while Actor was deciding"
+            )
+        try:
+            proposal = parse_actor_proposal(raw)
+        except InvalidActorProposal as exc:
+            return self._result(
+                RuntimeStatus.INVALID_PROPOSAL,
+                route=route,
+                detail=str(exc),
+            )
+        proposal_kind = proposal.kind
+        try:
+            if not self._latest_matches(
+                initial,
+                broker_projection,
+                turn_index=turn_index,
+            ):
+                return self._result(
+                    RuntimeStatus.STALE_DISCARDED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    detail="Runtime authority changed while Actor was deciding",
+                )
+            tool_name = proposal_tool_name(proposal)
+            if (
+                tool_name not in APPROVED_RUNTIME_TOOLS
+                or tool_name not in broker_projection.tool_names
+            ):
+                return self._result(
+                    RuntimeStatus.UNAVAILABLE,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    detail="proposal is outside the minimal Broker surface",
+                )
+            if type(proposal) is DesktopActionProposal:
+                if proposal.action not in APPROVED_DESKTOP_ACTIONS:
+                    return self._result(
+                        RuntimeStatus.INVALID_PROPOSAL,
+                        route=route,
+                        proposal_kind=proposal_kind,
+                        detail="desktop action is not approved",
+                    )
+                self._argument_validator.validate(
+                    proposal.action,
+                    proposal.model_dump(mode="json")["args"],
+                )
+            visible_scope = tuple(
+                evidence_id
+                for evidence_id in initial.frame.evidence_refs
+                if evidence_id
+                in self._reducer.projection.evidence_refs
+            )
+            envelope = bind_actor_decision(
+                mission_reducer=self._reducer,
+                profile=self._profile,
+                state=initial.broker_state,
+                catalog=self._catalog,
+                projection=broker_projection,
+                proposal=proposal,
+                frame_region=initial.frame.region,
+                submitted_image_size=initial.frame.submitted_size,
+                frame_image_sha256=initial.frame.image_sha256,
+                allowed_evidence_scope=visible_scope,
+            )
+        except ToolArgumentValidationError as exc:
+            return self._result(
+                RuntimeStatus.INVALID_PROPOSAL,
+                route=route,
+                proposal_kind=proposal_kind,
+                detail=str(exc),
+            )
+        except Exception as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                detail=str(exc),
+            )
+        if type(proposal) is DesktopActionProposal:
+            return self._run_action(
+                proposal,
+                envelope,
+                initial,
+                broker_projection,
+                route=route,
+                turn_index=turn_index,
+                stop_event=stop_event,
+            )
+        if type(proposal) is ClaimObligationDone:
+            return self._claim_and_verify(
+                proposal,
+                envelope,
+                initial,
+                route=route,
+                turn_index=turn_index,
+                stop_event=stop_event,
+            )
+        if type(proposal) is BlockedReport:
+            reason = "; ".join(proposal.observed_facts)
+            try:
+                event_ids = self._accept(
+                    "obligation_blocked",
+                    payload={
+                        "obligation_id": envelope.obligation_id,
+                        "blocker_kind": proposal.blocker_kind,
+                        "reason": reason or proposal.blocker_kind,
+                    },
+                    base_revision=envelope.mission_revision,
+                )
+            except MissionError as exc:
+                return self._result(
+                    RuntimeStatus.STATE_REJECTED,
+                    route=route,
+                    proposal_kind=proposal_kind,
+                    decision_id=envelope.decision_id,
+                    detail=str(exc),
+                )
+            return self._result(
+                RuntimeStatus.BLOCKED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                event_ids=event_ids,
+            )
+        return self._result(
+            RuntimeStatus.INVALID_PROPOSAL,
+            route=route,
+            proposal_kind=proposal_kind,
+            decision_id=envelope.decision_id,
+            detail="proposal kind is not supported by minimal Runtime",
+        )
+
+
+__all__ = [
+    "MissionRuntime",
+    "MissionRuntimeConfigurationError",
+]

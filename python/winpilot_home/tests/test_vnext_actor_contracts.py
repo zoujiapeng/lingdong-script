@@ -1599,6 +1599,7 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
     home = Path(__file__).resolve().parents[1]
     package_root = home / "winpilot"
     actor_dir = home / "winpilot" / "vnext" / "actor"
+    runtime_dir = home / "winpilot" / "vnext" / "runtime"
     assert tuple(sorted(path.name for path in actor_dir.glob("*.py"))) == (
         "__init__.py",
         "envelope.py",
@@ -1651,6 +1652,7 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
         path
         for path in package_root.rglob("*.py")
         if "actor" not in path.parts
+        and runtime_dir not in path.parents
     )
     violations = tuple(
         (path, imported)
