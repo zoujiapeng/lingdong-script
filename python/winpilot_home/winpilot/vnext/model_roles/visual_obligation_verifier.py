@@ -1,6 +1,7 @@
 """Independent read-only Visual ObligationVerifier model role."""
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import threading
@@ -178,9 +179,19 @@ class LiveVisualObligationVerifier:
             turn.frame.media_type,
             turn.frame.submitted_size,
         )
+        assessment_schema = deepcopy(_ASSESSMENT_SCHEMA)
+        required_conditions = list(turn.request.required_conditions)
+        for field in (
+            "satisfied_conditions",
+            "missing_conditions",
+            "contradictions",
+        ):
+            assessment_schema["properties"][field]["items"]["enum"] = (
+                required_conditions
+            )
         context = {
             "format": turn.format,
-            "output_schema": _ASSESSMENT_SCHEMA,
+            "output_schema": assessment_schema,
             "subject": {
                 "desired_state": turn.request.desired_state,
                 "acceptance_criteria": list(
@@ -193,7 +204,7 @@ class LiveVisualObligationVerifier:
                     turn.request.evidence_policy.to_dict()
                 ),
                 "required_conditions": list(
-                    turn.request.required_conditions
+                    required_conditions
                 ),
             },
             "frame": {
