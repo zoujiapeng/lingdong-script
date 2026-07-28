@@ -37,8 +37,9 @@ VISUAL_VERIFIER_SYSTEM_CONTRACT = """\
 You are the independent read-only vNext Visual ObligationVerifier. Assess only
 the Runtime-bound subject, current frame, and bound evidence in this request.
 You have no tools and no mutation permission. Return only the strict assessment
-JSON object and assess every supplied required condition exactly. Do not provide
-hidden reasoning, new identities, actions, plans, or instructions."""
+JSON object. For each required condition, return one condition_results status
+in the same order. Do not provide hidden reasoning, new identities, actions,
+plans, or instructions."""
 
 _ASSESSMENT_SCHEMA = {
     "type": "object",
@@ -49,17 +50,16 @@ _ASSESSMENT_SCHEMA = {
             "enum": [VERIFIER_ASSESSMENT_FORMAT],
         },
         "verified": {"type": "boolean"},
-        "satisfied_conditions": {
+        "condition_results": {
             "type": "array",
-            "items": {"type": "string", "minLength": 1},
-        },
-        "missing_conditions": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-        },
-        "contradictions": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
+            "items": {
+                "type": "string",
+                "enum": [
+                    "satisfied",
+                    "missing",
+                    "contradicted",
+                ],
+            },
         },
         "confidence": {
             # JSON cannot preserve whether lexical 1 was intended as a Python
@@ -75,13 +75,16 @@ _ASSESSMENT_SCHEMA = {
     "required": [
         "format",
         "verified",
-        "satisfied_conditions",
-        "missing_conditions",
-        "contradictions",
+        "condition_results",
         "confidence",
         "concise_reason",
     ],
 }
+
+_ASSESSMENT_FIELDS = frozenset(_ASSESSMENT_SCHEMA["required"])
+_CONDITION_STATUSES = frozenset(
+    ("satisfied", "missing", "contradicted")
+)
 
 
 def _canonical_json(value: dict[str, Any]) -> str:
@@ -110,7 +113,11 @@ def _decision_id(turn: RuntimeVerifierTurn) -> str:
     return f"visual-verifier-{digest[:24]}"
 
 
-def _assessment_from_response(response: Any) -> VerifierAssessment:
+def _assessment_from_response(
+    response: Any,
+    *,
+    required_conditions: tuple[str, ...],
+) -> VerifierAssessment:
     message = response_message(response)
     require_no_tool_calls(message)
     content = member(message, "content")
@@ -119,17 +126,97 @@ def _assessment_from_response(response: Any) -> VerifierAssessment:
             "Visual ObligationVerifier must return strict JSON text"
         )
     try:
-        assessment = VerifierAssessment.from_dict(
-            strict_json_object(
-                content,
-                "Visual ObligationVerifier assessment",
-            )
+        raw = strict_json_object(
+            content,
+            "Visual ObligationVerifier assessment",
         )
-        if assessment.confidence is not None:
-            raise LiveModelRoleError(
+        fields = frozenset(raw)
+        if fields != _ASSESSMENT_FIELDS:
+            raise ValueError(
+                "fields must be exactly "
+                f"{sorted(_ASSESSMENT_FIELDS)!r}"
+            )
+        if raw["format"] != VERIFIER_ASSESSMENT_FORMAT:
+            raise ValueError(
+                "format must be "
+                f"{VERIFIER_ASSESSMENT_FORMAT!r}"
+            )
+        verified = raw["verified"]
+        if type(verified) is not bool:
+            raise ValueError("verified must be a boolean")
+        condition_results = raw["condition_results"]
+        if type(condition_results) is not list:
+            raise ValueError("condition_results must be an array")
+        if len(condition_results) != len(required_conditions):
+            raise ValueError(
+                "condition_results must contain exactly "
+                f"{len(required_conditions)} statuses"
+            )
+        for index, status in enumerate(condition_results):
+            if (
+                type(status) is not str
+                or status not in _CONDITION_STATUSES
+            ):
+                raise ValueError(
+                    "condition_results"
+                    f"[{index}] must be satisfied, missing, "
+                    "or contradicted"
+                )
+        all_satisfied = all(
+            status == "satisfied" for status in condition_results
+        )
+        if verified is not all_satisfied:
+            raise ValueError(
+                "verified must be true exactly when every condition "
+                "is satisfied"
+            )
+        if raw["confidence"] is not None:
+            raise ValueError(
                 "Visual ObligationVerifier confidence must be null"
             )
-        return assessment
+        concise_reason = raw["concise_reason"]
+        if (
+            type(concise_reason) is not str
+            or not concise_reason.strip()
+        ):
+            raise ValueError(
+                "concise_reason must be a non-empty string"
+            )
+        return VerifierAssessment.from_dict(
+            {
+                "format": VERIFIER_ASSESSMENT_FORMAT,
+                "verified": verified,
+                "satisfied_conditions": [
+                    condition
+                    for condition, status in zip(
+                        required_conditions,
+                        condition_results,
+                        strict=True,
+                    )
+                    if status == "satisfied"
+                ],
+                "missing_conditions": [
+                    condition
+                    for condition, status in zip(
+                        required_conditions,
+                        condition_results,
+                        strict=True,
+                    )
+                    if status == "missing"
+                ],
+                "contradictions": [
+                    condition
+                    for condition, status in zip(
+                        required_conditions,
+                        condition_results,
+                        strict=True,
+                    )
+                    if status == "contradicted"
+                ],
+                "confidence": None,
+                "concise_reason": concise_reason,
+            }
+        )
     except Exception as exc:
         raise LiveModelRoleError(
             f"Visual ObligationVerifier returned invalid assessment: {exc}"
@@ -183,14 +270,15 @@ class LiveVisualObligationVerifier:
         )
         assessment_schema = deepcopy(_ASSESSMENT_SCHEMA)
         required_conditions = list(turn.request.required_conditions)
-        for field in (
-            "satisfied_conditions",
-            "missing_conditions",
-            "contradictions",
-        ):
-            assessment_schema["properties"][field]["items"]["enum"] = (
-                required_conditions
-            )
+        condition_results_schema = assessment_schema["properties"][
+            "condition_results"
+        ]
+        condition_results_schema["minItems"] = len(
+            required_conditions
+        )
+        condition_results_schema["maxItems"] = len(
+            required_conditions
+        )
         context = {
             "format": turn.format,
             "output_schema": assessment_schema,
@@ -276,7 +364,10 @@ class LiveVisualObligationVerifier:
             on_attempt=self._on_attempt,
             runtime=self._runtime,
         )
-        return _assessment_from_response(outcome.response)
+        return _assessment_from_response(
+            outcome.response,
+            required_conditions=tuple(required_conditions),
+        )
 
 
 __all__ = [

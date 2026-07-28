@@ -164,7 +164,6 @@ def mouse_event_from_raw(
         "window_from_point_root_hwnd",
         minimum=0,
     )
-
     kinds: dict[int, tuple[str, bool, str]] = {
         WM_MOUSEMOVE: ("move", False, ""),
         WM_LBUTTONDOWN: ("button_down", True, "left"),
@@ -221,6 +220,7 @@ def keyboard_event_from_raw(
     foreground_root_hwnd: int,
     window_from_point_hwnd: int,
     window_from_point_root_hwnd: int,
+    extra_info: int = 0,
 ) -> dict[str, Any]:
     """Normalize one raw low-level keyboard callback without touching Windows."""
 
@@ -254,6 +254,7 @@ def keyboard_event_from_raw(
         "window_from_point_root_hwnd",
         minimum=0,
     )
+    extra_info = _strict_int(extra_info, "extra_info", minimum=0)
 
     kinds = {
         WM_KEYDOWN: ("key_down", False),
@@ -283,6 +284,7 @@ def keyboard_event_from_raw(
         "foreground_root_hwnd": foreground_root_hwnd,
         "window_from_point_hwnd": window_from_point_hwnd,
         "window_from_point_root_hwnd": window_from_point_root_hwnd,
+        "extra_info": extra_info,
     }
 
 
@@ -641,6 +643,7 @@ class PassiveInputHook:
                         foreground_root_hwnd=root,
                         window_from_point_hwnd=point_window,
                         window_from_point_root_hwnd=point_root,
+                        extra_info=int(raw.dwExtraInfo),
                     )
                 )
         except BaseException:

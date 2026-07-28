@@ -855,7 +855,12 @@ def _focus_window(hwnd: int) -> dict[str, Any]:
     for attempt in range(1, 6):
         try:
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-            win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+            win32api.keybd_event(
+                win32con.VK_MENU,
+                0,
+                0,
+                client_harness.HARNESS_FOCUS_INPUT_TAG,
+            )
             win32gui.SetForegroundWindow(hwnd)
         except Exception as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
@@ -864,7 +869,7 @@ def _focus_window(hwnd: int) -> dict[str, Any]:
                 win32con.VK_MENU,
                 0,
                 win32con.KEYEVENTF_KEYUP,
-                0,
+                client_harness.HARNESS_FOCUS_INPUT_TAG,
             )
         time.sleep(0.15)
         if int(win32gui.GetForegroundWindow() or 0) == int(hwnd):
@@ -2371,6 +2376,13 @@ def _normalized_os_evidence(
         if raw.get("injected") is not True:
             external_untrusted.append(raw)
             continue
+        device = str(raw.get("device") or "")
+        if (
+            device == "keyboard"
+            and int(raw.get("extra_info") or 0)
+            == client_harness.HARNESS_FOCUS_INPUT_TAG
+        ):
+            continue
         time_ns = raw.get("time_ns")
         wall_time = (
             float(time_ns) / 1_000_000_000.0
@@ -2380,21 +2392,12 @@ def _normalized_os_evidence(
         if wall_time is None:
             unexpected_injected_target.append(raw)
             continue
-        device = str(raw.get("device") or "")
         matches = [
             window
             for window in windows
             if window["start"] <= wall_time <= window["end"]
         ]
         if len(matches) != 1:
-            # The harness uses one balanced ALT tap solely to hand foreground
-            # ownership to the already-admitted target before the runtime
-            # acts.  It is recorded raw but is not a runtime action.
-            if (
-                device == "keyboard"
-                and int(raw.get("vk_code") or 0) == win32con.VK_MENU
-            ):
-                continue
             unexpected_injected_target.append(raw)
             continue
         foreground_matches = (
@@ -2472,10 +2475,9 @@ def _legacy_os_evidence(
         device = str(raw.get("device") or "")
         if (
             device == "keyboard"
-            and int(raw.get("vk_code") or 0) == win32con.VK_MENU
+            and int(raw.get("extra_info") or 0)
+            == client_harness.HARNESS_FOCUS_INPUT_TAG
         ):
-            # One balanced ALT tap belongs to the harness handoff, not either
-            # runtime's declared action family.
             continue
         foreground_matches = (
             int(raw.get("foreground_root_hwnd") or 0) == target_root
