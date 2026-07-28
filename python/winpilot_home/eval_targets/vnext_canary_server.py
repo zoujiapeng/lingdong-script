@@ -227,13 +227,6 @@ def derive_action_observations(
                     events[select_start:select_end + 1],
                 )
             )
-        text_start = next(
-            (
-                index for index, item in enumerate(events)
-                if item.get("type") == "beforeinput"
-            ),
-            -1,
-        )
         submit_anchor = next(
             (
                 index for index, item in enumerate(events)
@@ -242,13 +235,12 @@ def derive_action_observations(
             ),
             -1,
         )
-        text_end = max(
-            (
-                index for index, item in enumerate(events[:submit_anchor])
-                if item.get("type") == "input"
-            ),
-            default=-1,
-        )
+        submit_start = submit_anchor - 1
+        # Strict type_text uses real layout-backed key transitions.  Bind the
+        # complete interval between the select-all and submit hotkeys so its
+        # leading keydowns and trailing keyups are not left unauthorized.
+        text_start = select_end + 1
+        text_end = submit_start - 1
         if 0 <= text_start <= text_end:
             observations.append(
                 _action_observation(
@@ -256,7 +248,6 @@ def derive_action_observations(
                     events[text_start:text_end + 1],
                 )
             )
-        submit_start = submit_anchor - 1
         submit_end = max(
             (
                 index for index, item in enumerate(events)

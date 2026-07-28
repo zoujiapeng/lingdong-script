@@ -2385,17 +2385,6 @@ def _normalized_os_evidence(
             if type(time_ns) is int and type(time_ns) is not bool
             else None
         )
-        if wall_time is None:
-            unexpected_injected_target.append(raw)
-            continue
-        matches = [
-            window
-            for window in windows
-            if window["start"] <= wall_time <= window["end"]
-        ]
-        if len(matches) != 1:
-            unexpected_injected_target.append(raw)
-            continue
         foreground_matches = (
             int(raw.get("foreground_root_hwnd") or 0) == target_root
         )
@@ -2410,6 +2399,19 @@ def _normalized_os_evidence(
                 )
                 == target_root
             )
+        if wall_time is None:
+            if target_matches:
+                unexpected_injected_target.append(raw)
+            continue
+        matches = [
+            window
+            for window in windows
+            if window["start"] <= wall_time <= window["end"]
+        ]
+        if len(matches) != 1:
+            if target_matches:
+                unexpected_injected_target.append(raw)
+            continue
         if not target_matches:
             unexpected_injected_target.append(raw)
             continue
