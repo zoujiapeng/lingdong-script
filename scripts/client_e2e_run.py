@@ -41,7 +41,7 @@ NAV_ASSETS = "技能与学习"
 RUN_TASK = "运行任务"
 STOP_TASK = "停止"
 COLD_START = "冷启动（禁用 Skill/长期经验）"
-RUNTIME_SELECTOR = "运行时（实验）"
+RUNTIME_SELECTOR = "运行时"
 CLARIFICATION_HEADING = "任务尚未启动，请先补充必要信息"
 
 ORIGINAL_CASES: dict[str, dict[str, Any]] = {
@@ -727,7 +727,7 @@ class ElectronClientDriver:
         ]
         if len(selectors) != 1:
             raise RuntimeError(
-                f"客户端运行时实验选择器数量不是 1: {len(selectors)}"
+                f"客户端运行时选择器数量不是 1: {len(selectors)}"
             )
         runtime_selection = _select_runtime_version(
             selectors[0],
