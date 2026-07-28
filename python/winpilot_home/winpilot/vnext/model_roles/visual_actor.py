@@ -45,8 +45,10 @@ the current JPEG, the current previous-action summary, and the supplied tools.
 Return exactly one tool call. Do not emit prose or hidden reasoning. Coordinates
 must be submitted-image pixels. Never invent runtime, target, frame, evidence,
 or action identities. Never return multiple actions. Completed-action summaries
-are authoritative: advance to the next visible step, and repeat only when the
-current image visibly requires it."""
+are authoritative facts. repeated_action_suppressed means the identical prior
+action already completed and the duplicate did not run; choose another visible
+step. Repeat scrolling only while the image still requires progress in that
+direction."""
 
 _TOOL_DESCRIPTIONS = {
     "click": "Click one point once in the current image.",

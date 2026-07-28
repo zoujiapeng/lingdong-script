@@ -1095,6 +1095,232 @@ def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
     assert "local_intent" not in history_wire
 
 
+def test_exact_completed_action_is_suppressed_without_physical_attempt() -> None:
+    repeated_click = _action("click")
+    repeated_click["local_intent"] = "a different private explanation"
+    harness = _harness(
+        _action("click"),
+        repeated_click,
+        _action("hotkey"),
+        _blocked(),
+        with_runtime_evidence=True,
+    )
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    suppressed = harness.runtime.run_one_turn(turn_index=1)
+
+    assert first.status is RuntimeStatus.ACTION_RECORDED
+    assert suppressed.status is RuntimeStatus.PROPOSAL_SUPPRESSED
+    assert suppressed.decision_id is None
+    assert harness.controller.calls == 1
+    assert harness.permits.consumed_count == 1
+    assert harness.runtime_evidence is not None
+    assert len(harness.runtime_evidence.decision_records) == 1
+    assert len(harness.runtime_evidence.admission_records) == 1
+    assert len(harness.runtime_evidence.physical_attempt_records) == 1
+    events = harness.reducer.events
+    suppression = events[-1]
+    assert suppression.kind == "proposal_suppressed"
+    assert suppression.payload == {
+        "obligation_id": OBLIGATION_ID,
+        "action": "click",
+        "action_summary": "click",
+        "reason": "repeated_completed_action",
+    }
+    suppression_wire = json.dumps(suppression.to_dict())
+    assert "image_x" not in suppression_wire
+    assert "image_y" not in suppression_wire
+    assert "local_intent" not in suppression_wire
+    assert harness.reducer.projection.last_transition is not None
+    assert harness.reducer.projection.last_transition.action == "click"
+    assert harness.reducer.projection.failure_summary is not None
+    assert (
+        harness.reducer.projection.failure_summary.kind
+        == "repeated_action_suppressed"
+    )
+
+    recovered = harness.runtime.run_one_turn(turn_index=2)
+
+    assert recovered.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 2
+    feedback = harness.actor.turns[2].mission
+    assert feedback.failure_kind == "repeated_action_suppressed"
+    assert feedback.failure_message == (
+        "click was already completed and was not executed again"
+    )
+    assert feedback.no_progress_streak == 0
+    assert harness.actor.turns[2].completed_action_summaries == ("click",)
+    assert harness.reducer.projection.failure_summary is None
+
+
+def test_repeat_gate_allows_distinct_click_and_repeated_scroll() -> None:
+    moved_click = _action("click")
+    moved_click["args"]["image_x"] = 11
+    harness = _harness(
+        _action("click"),
+        moved_click,
+        _action("scroll"),
+        _action("scroll"),
+        with_runtime_evidence=True,
+    )
+
+    results = tuple(
+        harness.runtime.run_one_turn(turn_index=index)
+        for index in range(4)
+    )
+
+    assert all(
+        result.status is RuntimeStatus.ACTION_RECORDED
+        for result in results
+    )
+    assert harness.controller.calls == 4
+    assert harness.permits.consumed_count == 4
+    assert not any(
+        event.kind == "proposal_suppressed"
+        for event in harness.reducer.events
+    )
+
+
+def test_exact_modified_hotkey_and_text_repeats_are_suppressed() -> None:
+    harness = _harness(
+        _action("hotkey"),
+        _action("hotkey"),
+        _action("type_text"),
+        _action("type_text"),
+        with_runtime_evidence=True,
+    )
+
+    statuses = tuple(
+        harness.runtime.run_one_turn(turn_index=index).status
+        for index in range(4)
+    )
+
+    assert statuses == (
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.PROPOSAL_SUPPRESSED,
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.PROPOSAL_SUPPRESSED,
+    )
+    assert harness.controller.calls == 2
+    assert harness.permits.consumed_count == 2
+    assert harness.runtime_evidence is not None
+    assert len(harness.runtime_evidence.physical_attempt_records) == 2
+
+
+def test_repeat_gate_is_bound_to_the_same_target_coordinate_domain() -> None:
+    harness = _harness(
+        _action("click"),
+        with_runtime_evidence=True,
+    )
+    result = harness.runtime.run_one_turn(turn_index=0)
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    proposal = harness.controller.envelopes[0].proposal
+    current = harness.state.snapshot
+
+    assert harness.runtime._repeats_last_completed_action(  # noqa: SLF001
+        proposal,
+        current,
+    )
+
+    moved_frame = replace(
+        current.frame,
+        region=(101, 200, 640, 480),
+    )
+    moved = RuntimeSnapshot(
+        broker_state=replace(
+            current.broker_state,
+            frame=moved_frame.broker_frame(),
+        ),
+        frame=moved_frame,
+        target=current.target,
+    )
+
+    assert not harness.runtime._repeats_last_completed_action(  # noqa: SLF001
+        proposal,
+        moved,
+    )
+
+
+def test_missing_private_prior_decision_fails_closed() -> None:
+    harness = _harness(
+        _action("click"),
+        with_runtime_evidence=True,
+    )
+    harness.reducer.apply(
+        harness.reducer.event(
+            "transition_recorded",
+            payload={
+                "obligation_id": OBLIGATION_ID,
+                "action_id": "decision-not-in-private-evidence",
+                "action": "click",
+                "action_summary": "click",
+                "input_completed": True,
+            },
+        )
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.STATE_REJECTED
+    assert "missing its private decision record" in result.detail
+    assert harness.controller.calls == 0
+    assert harness.permits.consumed_count == 0
+
+
+def test_repeat_suppression_uses_frozen_mission_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(
+        _action("click"),
+        _action("click"),
+        with_runtime_evidence=True,
+    )
+    first = harness.runtime.run_one_turn(turn_index=0)
+    assert first.status is RuntimeStatus.ACTION_RECORDED
+    original = MissionRuntime._latest_matches
+    latest_calls = 0
+
+    def change_revision_after_second_freshness_check(
+        runtime: MissionRuntime,
+        initial: RuntimeSnapshot,
+        broker_projection,
+        *,
+        turn_index: int,
+    ) -> bool:
+        nonlocal latest_calls
+        matched = original(
+            runtime,
+            initial,
+            broker_projection,
+            turn_index=turn_index,
+        )
+        latest_calls += 1
+        if latest_calls == 2 and matched:
+            harness.reducer.apply(
+                harness.reducer.event(
+                    "mission_blocked",
+                    payload={"reason": "synthetic concurrent change"},
+                )
+            )
+        return matched
+
+    monkeypatch.setattr(
+        MissionRuntime,
+        "_latest_matches",
+        change_revision_after_second_freshness_check,
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=1)
+
+    assert result.status is RuntimeStatus.STALE_DISCARDED
+    assert harness.controller.calls == 1
+    assert harness.permits.consumed_count == 1
+    assert not any(
+        event.kind == "proposal_suppressed"
+        for event in harness.reducer.events
+    )
+
+
 def test_actor_result_is_discarded_when_mission_revision_changes() -> None:
     harness = _harness(_action())
     harness.actor.on_propose = lambda: harness.reducer.apply(

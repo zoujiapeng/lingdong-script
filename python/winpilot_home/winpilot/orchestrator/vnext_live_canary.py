@@ -119,7 +119,11 @@ _GUI_GATES = (
     "runtime_healthy",
 )
 _CONTINUE_STATUSES = frozenset(
-    {RuntimeStatus.ACTION_RECORDED, RuntimeStatus.STALE_DISCARDED}
+    {
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.PROPOSAL_SUPPRESSED,
+        RuntimeStatus.STALE_DISCARDED,
+    }
 )
 _PRIVATE_RUNTIME_EVIDENCE = "private_runtime_evidence"
 _RUNTIME_EVIDENCE_REPORT_STATUSES = frozenset(

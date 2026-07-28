@@ -39,6 +39,7 @@ from ..mission import (
     MissionReducer,
     MissionStatus,
     ObligationStatus,
+    StaleRevisionError,
 )
 from ..profiling import ExecutionDepth, ExecutionProfile
 from ..verification import (
@@ -668,6 +669,122 @@ class MissionRuntime:
                 if self._is_safe_action_summary(action, summary):
                     return summary
         return action
+
+    def _repeats_last_completed_action(
+        self,
+        proposal: DesktopActionProposal,
+        initial: RuntimeSnapshot,
+    ) -> bool:
+        if proposal.action not in {
+            "click",
+            "double_click",
+            "hotkey",
+            "type_text",
+        }:
+            return False
+        if proposal.action == "hotkey":
+            keys = proposal.model_dump(mode="json")["args"].get("keys")
+            if not isinstance(keys, (list, tuple)) or len(keys) <= 1:
+                return False
+        transition = self._reducer.card.last_transition
+        plane = self._runtime_evidence
+        if (
+            transition is None
+            or not transition.input_completed
+            or transition.action != proposal.action
+            or not transition.action_id
+            or plane is None
+        ):
+            return False
+        prior = next(
+            (
+                record
+                for record in plane.decision_records
+                if record.decision_id == transition.action_id
+            ),
+            None,
+        )
+        if prior is None:
+            raise RuntimeError(
+                "last completed action is missing its private decision record"
+            )
+        if prior.action != proposal.action:
+            raise RuntimeError(
+                "last completed action disagrees with its decision record"
+            )
+        prior_envelope = prior.actor_envelope
+        same_coordinate_domain = bool(
+            prior_envelope["target_binding_id"]
+            == initial.target.binding_id
+            and prior_envelope["frame_epoch"] == initial.frame.epoch
+            and prior_envelope["frame_hwnd"] == initial.frame.hwnd
+            and tuple(prior_envelope["frame_region"])
+            == initial.frame.region
+            and tuple(prior_envelope["submitted_image_size"])
+            == initial.frame.submitted_size
+        )
+        if not same_coordinate_domain:
+            return False
+        current_arguments = proposal.model_dump(mode="json")["args"]
+        current_arguments_sha256 = hashlib.sha256(
+            json.dumps(
+                current_arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        return (
+            prior.canonical_arguments_sha256
+            == current_arguments_sha256
+        )
+
+    def _suppress_repeated_action(
+        self,
+        proposal: DesktopActionProposal,
+        *,
+        route: ExecutionRoute,
+        proposal_kind: str,
+        obligation_id: str,
+        base_revision: int,
+    ) -> MissionRuntimeResult:
+        try:
+            event_ids = self._accept(
+                "proposal_suppressed",
+                payload={
+                    "obligation_id": obligation_id,
+                    "action": proposal.action,
+                    "action_summary": self._safe_action_summary(proposal),
+                    "reason": "repeated_completed_action",
+                },
+                base_revision=base_revision,
+            )
+        except StaleRevisionError:
+            return self._result(
+                RuntimeStatus.STALE_DISCARDED,
+                route=route,
+                proposal_kind=proposal_kind,
+                detail=(
+                    "Runtime authority changed before repeat suppression"
+                ),
+            )
+        except MissionError as exc:
+            return self._result(
+                RuntimeStatus.STATE_REJECTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                detail=f"repeated proposal suppression failed closed: {exc}",
+            )
+        return self._result(
+            RuntimeStatus.PROPOSAL_SUPPRESSED,
+            route=route,
+            proposal_kind=proposal_kind,
+            event_ids=event_ids,
+            detail=(
+                "exact repeated completed action was not admitted or executed"
+            ),
+        )
 
     def _complete_mission(
         self,
@@ -1384,6 +1501,31 @@ class MissionRuntime:
                     proposal.action,
                     proposal.model_dump(mode="json")["args"],
                 )
+                if self._repeats_last_completed_action(
+                    proposal,
+                    initial,
+                ):
+                    if not self._latest_matches(
+                        initial,
+                        broker_projection,
+                        turn_index=turn_index,
+                    ):
+                        return self._result(
+                            RuntimeStatus.STALE_DISCARDED,
+                            route=route,
+                            proposal_kind=proposal_kind,
+                            detail=(
+                                "Runtime authority changed before repeat "
+                                "suppression"
+                            ),
+                        )
+                    return self._suppress_repeated_action(
+                        proposal,
+                        route=route,
+                        proposal_kind=proposal_kind,
+                        obligation_id=broker_projection.obligation_id,
+                        base_revision=broker_projection.mission_revision,
+                    )
             visible_scope = tuple(
                 evidence_id
                 for evidence_id in initial.frame.evidence_refs

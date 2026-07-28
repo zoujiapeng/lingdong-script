@@ -1922,6 +1922,17 @@ _EVENT_PAYLOAD_FIELDS = {
         frozenset(),
         frozenset({"reason"}),
     ),
+    "proposal_suppressed": (
+        frozenset(
+            {
+                "obligation_id",
+                "action",
+                "action_summary",
+                "reason",
+            }
+        ),
+        frozenset(),
+    ),
     "transition_recorded": (
         frozenset({"obligation_id", "input_completed"}),
         frozenset(
@@ -2108,6 +2119,14 @@ def _validate_event_payload(
                 "transition_recorded payload 'action_summary' must be the "
                 "privacy-safe semantic summary of its action"
             )
+    if (
+        event_type == "proposal_suppressed"
+        and payload["reason"] != "repeated_completed_action"
+    ):
+        raise InvalidMissionEvent(
+            "proposal_suppressed payload 'reason' must be the canonical "
+            "repeated_completed_action code"
+        )
 
     if "verified" in payload:
         _contract_bool(
