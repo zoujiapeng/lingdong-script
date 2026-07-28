@@ -691,6 +691,63 @@ def test_run_projection_unifies_agent_metrics_and_done_evidence():
     assert run["evidence"][0]["reason"] == "target visible"
 
 
+def test_run_projection_freezes_vnext_identity_and_records_mismatch():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    run_id = "projection-vnext-frozen"
+    store.on_event({
+        "type": "trace",
+        "ts": 0.5,
+        "run_id": run_id,
+        "status": "recording",
+    })
+    assert store.get(run_id)["runtime_version"] == "legacy"
+    store.on_event({
+        "type": "arp_run_start",
+        "ts": 1.0,
+        "run_id": run_id,
+        "runtime_version": "vnext",
+        "runtime_budget": {
+            "max_turns": 30,
+            "max_runtime_s": 300,
+            "max_model_calls": 60,
+        },
+        "graph_id": "graph",
+        "graph_name": "Frozen vNext run",
+    })
+    store.on_event({
+        "type": "arp_node_start",
+        "ts": 2.0,
+        "run_id": run_id,
+        "runtime_version": "legacy",
+        "node_id": "full-goal",
+    })
+    store.on_event({
+        "type": "arp_run_done",
+        "ts": 3.0,
+        "run_id": run_id,
+        "runtime_snapshot": {
+            "runtime_version": "legacy",
+            "status": "succeeded",
+        },
+    })
+
+    run = store.get(run_id)
+
+    assert run["runtime_version"] == "vnext"
+    assert run["runtime_budget"] == {
+        "max_turns": 30,
+        "max_runtime_s": 300,
+        "max_model_calls": 60,
+    }
+    assert run["runtime_version_mismatch"] == {
+        "frozen": "vnext",
+        "observed": "legacy",
+        "event_type": "arp_run_done",
+    }
+
+
 def test_run_projection_preserves_manual_pause_across_child_events():
     from winpilot.orchestrator.projection import RunProjectionStore
 
@@ -1334,6 +1391,62 @@ def test_manual_pause_blocks_the_next_node_until_resume():
     thread.join(1)
     assert not thread.is_alive()
     assert execution.status == ArpRunStatus.DONE
+
+
+def test_vnext_run_prepared_returns_and_publishes_post_finish_snapshot():
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
+    from winpilot.orchestrator.runtime import ArpExecution, ArpRunManager
+    from winpilot.utils.log import BUS
+
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [ArpEdge(id="a", source="start", target="end")],
+    )
+    execution = ArpExecution(graph, run_id="vnext-finalized-snapshot")
+    execution.runtime_state.update({
+        "runtime_version": "vnext",
+        "no_legacy_fallback": True,
+        "trace_status": "recording",
+    })
+    manager = ArpRunManager()
+    events = BUS.subscribe()
+
+    def finish(run):
+        run.runtime_state["trace_status"] = "stopped"
+        run.runtime_state["runtime_lifecycle"] = {
+            "phase": "finalized",
+            "terminal": True,
+            "status": "done",
+            "trace_status": "stopped",
+            "no_legacy_fallback": True,
+        }
+
+    try:
+        snapshot = manager.run_prepared(execution, on_finish=finish)
+        observed = []
+        while not events.empty():
+            observed.append(events.get_nowait())
+    finally:
+        BUS.unsubscribe(events)
+
+    done_events = [
+        event for event in observed
+        if event.get("type") == "arp_run_done"
+        and event.get("run_id") == execution.run_id
+    ]
+    assert snapshot["status"] == "done"
+    assert snapshot["trace_status"] == "stopped"
+    assert snapshot["runtime_lifecycle"]["terminal"] is True
+    assert len(done_events) == 1
+    assert done_events[0]["status"] == "done"
+    assert done_events[0]["runtime_snapshot"]["trace_status"] == "stopped"
+    assert (
+        done_events[0]["runtime_snapshot"]["runtime_lifecycle"]["terminal"]
+        is True
+    )
 
 
 def test_run_manager_prunes_old_terminal_runs():
