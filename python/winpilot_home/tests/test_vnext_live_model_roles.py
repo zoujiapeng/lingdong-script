@@ -492,6 +492,17 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
         "click",
         "double_click",
     ]
+    required_conditions = verifier_context["subject"][
+        "required_conditions"
+    ]
+    for field in (
+        "satisfied_conditions",
+        "missing_conditions",
+        "contradictions",
+    ):
+        assert verifier_context["output_schema"]["properties"][field][
+            "items"
+        ]["enum"] == required_conditions
     verifier_context_text = (
         verifier_request["messages"][1]["content"][0]["text"]
     )
