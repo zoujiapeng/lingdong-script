@@ -32,6 +32,7 @@ from winpilot.vnext.runtime import (
     ActorFrameView,
     ActorMissionView,
     ActorObligationView,
+    ActorPreviousActionView,
     ActorToolView,
     ActorTurnInput,
     RuntimeFrame,
@@ -425,6 +426,9 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
     assert "Completed-action summaries are authoritative" in " ".join(
         VISUAL_ACTOR_SYSTEM_CONTRACT.split()
     )
+    assert "named stop condition is visible" in " ".join(
+        VISUAL_ACTOR_SYSTEM_CONTRACT.split()
+    )
     assert (
         verifier_request["messages"][0]["content"]
         == VISUAL_VERIFIER_SYSTEM_CONTRACT
@@ -546,6 +550,83 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
     assert "data:image/jpeg;base64," in (
         verifier_request["messages"][1]["content"][1]["image_url"]["url"]
     )
+
+
+def test_completed_scroll_adds_compact_provider_only_recheck_guard() -> None:
+    _, clients = _build_clients(_tool_response())
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    turn = replace(
+        _actor_turn(),
+        previous_action=ActorPreviousActionView(
+            action="scroll",
+            semantic_summary="scroll_down",
+            input_completed=True,
+            visible_effect="",
+            local_visual_change="changed",
+            frame_comparable=True,
+            target_binding_valid=True,
+        ),
+    )
+
+    actor.propose(
+        turn,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    context = json.loads(
+        clients[0].requests[0]["messages"][1]["content"][0]["text"]
+    )
+    assert context["scroll_guard"] == (
+        "inspect_current_image_stop_condition_before_same_direction"
+    )
+    assert "scroll_guard" not in turn.to_dict()
+
+
+@pytest.mark.parametrize(
+    "previous_action",
+    (
+        None,
+        ActorPreviousActionView(
+            action="scroll",
+            semantic_summary="scroll_down",
+            input_completed=False,
+            visible_effect="",
+        ),
+        ActorPreviousActionView(
+            action="click",
+            semantic_summary="click",
+            input_completed=True,
+            visible_effect="",
+        ),
+    ),
+)
+def test_scroll_recheck_guard_requires_a_completed_scroll(
+    previous_action: ActorPreviousActionView | None,
+) -> None:
+    _, clients = _build_clients(_tool_response())
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    actor.propose(
+        replace(_actor_turn(), previous_action=previous_action),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    context = json.loads(
+        clients[0].requests[0]["messages"][1]["content"][0]["text"]
+    )
+    assert "scroll_guard" not in context
 
 
 @pytest.mark.parametrize(
