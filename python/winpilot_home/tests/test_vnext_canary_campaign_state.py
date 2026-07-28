@@ -175,7 +175,7 @@ def _manifest_kwargs() -> dict[str, Any]:
             "max_runtime_s": 60,
             "max_model_calls": 8,
         },
-        "oracle_version": "external-dom-and-input-oracle/1",
+        "oracle_version": "independent-vnext-canary-browser-os-join/2",
         "c2_unknown_no_replay": {
             "actions_run_id": "30237790573",
             "c2_head": campaign.C2_HEAD,
@@ -239,7 +239,7 @@ def _invalid_data(
         kind="external_oracle",
     )
     os_evidence = {
-        "format": "vnext-live-canary-os-input-safe/1",
+        "format": "vnext-live-canary-os-input-safe/2",
         "hook_sequence": 1,
         "raw_event_count": 1,
         "raw_event_stream_sha256": "1" * 64,
@@ -250,6 +250,7 @@ def _invalid_data(
         "action_counts": {},
         "decision_ids": [],
         "external_untrusted_mutation_count": 1,
+        "external_untrusted_target_mutation_count": 0,
         "unexpected_injected_target_mutation_count": 0,
         "dropped_event_count": 0,
         "thread_error_present": False,
@@ -1883,7 +1884,7 @@ def _safe_os_input_evidence(
         for event in raw_projection
     ]
     return {
-        "format": "vnext-live-canary-os-input-safe/1",
+        "format": "vnext-live-canary-os-input-safe/2",
         "hook_sequence": max(event_sequences, default=0),
         "raw_event_count": len(raw_projection),
         "raw_event_stream_sha256": hashlib.sha256(
@@ -1900,6 +1901,7 @@ def _safe_os_input_evidence(
         },
         "decision_ids": sorted(set(decision_ids)),
         "external_untrusted_mutation_count": 0,
+        "external_untrusted_target_mutation_count": 0,
         "unexpected_injected_target_mutation_count": 0,
         "dropped_event_count": 0,
         "thread_error_present": False,
@@ -1910,6 +1912,42 @@ def _safe_os_input_evidence(
             "error_identity": {"count": 0, "sha256": "3" * 64},
         },
     }
+
+
+def test_safe_os_input_schema_is_selected_by_manifest_oracle_version():
+    current = _safe_os_input_evidence(
+        {"family": "click_double"},
+        None,
+    )
+    legacy = copy.deepcopy(current)
+    legacy["format"] = "vnext-live-canary-os-input-safe/1"
+    legacy.pop("external_untrusted_target_mutation_count")
+
+    assert campaign._validate_safe_os_input_evidence(
+        legacy,
+        oracle_version="independent-vnext-canary-browser-os-join/1",
+    ) == legacy
+    assert campaign._validate_safe_os_input_evidence(
+        current,
+        oracle_version="independent-vnext-canary-browser-os-join/2",
+    ) == current
+
+    with pytest.raises(
+        campaign.CampaignIntegrityError,
+        match="fields are not canonical",
+    ):
+        campaign._validate_safe_os_input_evidence(
+            legacy,
+            oracle_version="independent-vnext-canary-browser-os-join/2",
+        )
+    with pytest.raises(
+        campaign.CampaignIntegrityError,
+        match="fields are not canonical",
+    ):
+        campaign._validate_safe_os_input_evidence(
+            current,
+            oracle_version="independent-vnext-canary-browser-os-join/1",
+        )
 
 
 def _write_safe_attempt_result(
