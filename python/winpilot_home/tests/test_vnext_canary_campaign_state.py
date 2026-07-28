@@ -1455,6 +1455,64 @@ def test_action_evidence_join_uses_real_family_signatures(
     )
 
 
+@pytest.mark.parametrize(
+    ("canonical_keys", "browser_keys"),
+    [
+        (["ctrl", "a"], ["Control", "a"]),
+        (["ctrl", "enter"], ["Control", "Enter"]),
+    ],
+)
+def test_browser_hotkey_signature_accepts_only_dom_control_alias(
+    canonical_keys: list[str],
+    browser_keys: list[str],
+) -> None:
+    events = [
+        *[
+            {"type": "keydown", "key": key, "repeat": False}
+            for key in browser_keys
+        ],
+        *[
+            {"type": "keyup", "key": key, "repeat": False}
+            for key in reversed(browser_keys)
+        ],
+    ]
+
+    assert campaign._browser_signature_errors(
+        action="hotkey",
+        canonical_arguments={"keys": canonical_keys},
+        physical_arguments={},
+        events=events,
+    ) == []
+
+
+@pytest.mark.parametrize("invalid_kind", ["order", "cardinality", "repeat"])
+def test_browser_hotkey_control_alias_keeps_strict_sequence_checks(
+    invalid_kind: str,
+) -> None:
+    events = [
+        {"type": "keydown", "key": "Control", "repeat": False},
+        {"type": "keydown", "key": "a", "repeat": False},
+        {"type": "keyup", "key": "a", "repeat": False},
+        {"type": "keyup", "key": "Control", "repeat": False},
+    ]
+    if invalid_kind == "order":
+        events[0], events[1] = events[1], events[0]
+    elif invalid_kind == "cardinality":
+        events.insert(
+            2,
+            {"type": "keydown", "key": "a", "repeat": False},
+        )
+    else:
+        events[1]["repeat"] = True
+
+    assert campaign._browser_signature_errors(
+        action="hotkey",
+        canonical_arguments={"keys": ["ctrl", "a"]},
+        physical_arguments={},
+        events=events,
+    ) == ["trusted_hotkey_sequence_mismatch"]
+
+
 def test_action_evidence_join_requires_exact_external_action_ids() -> None:
     evidence = _canonical_evidence(actions=["click", "double_click"])
     for event in [
