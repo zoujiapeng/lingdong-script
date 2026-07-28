@@ -767,6 +767,10 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
             ),
             MissionRuntimeResult(RuntimeStatus.STALE_DISCARDED),
             MissionRuntimeResult(
+                RuntimeStatus.PROPOSAL_SUPPRESSED,
+                accepted_event_ids=("event-suppressed",),
+            ),
+            MissionRuntimeResult(
                 RuntimeStatus.MISSION_VERIFIED,
                 accepted_event_ids=("event-verified",),
             ),
@@ -790,10 +794,10 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     assert snapshot["status"] == ArpRunStatus.DONE.value
     assert snapshot["runtime_version"] == "vnext"
     assert snapshot["result"]["status"] == "mission_verified"
-    assert snapshot["result"]["turns_used"] == 3
-    assert snapshot["result"]["model_calls"] == 3
+    assert snapshot["result"]["turns_used"] == 4
+    assert snapshot["result"]["model_calls"] == 4
     assert snapshot["result"]["no_legacy_fallback"] is True
-    assert session.calls == 3
+    assert session.calls == 4
     assert session.closed is True
     assert len(snapshot["evidence"]) == 1
     assert snapshot["evidence"][0]["verified"] is True
@@ -801,7 +805,7 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     done = [item for item in events if item["type"] == "vnext_canary_done"]
     turns = [item for item in events if item["type"] == "vnext_canary_turn"]
     assert len(starts) == len(done) == 1
-    assert len(turns) == 3
+    assert len(turns) == 4
     assert starts[0]["runtime_budget"] == {
         "max_turns": 30,
         "max_runtime_s": 300,

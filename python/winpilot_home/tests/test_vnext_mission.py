@@ -443,6 +443,156 @@ def test_transition_action_summary_requires_plain_text() -> None:
         )
 
 
+def test_proposal_suppression_is_strict_replayable_mission_feedback() -> None:
+    definition = MissionDefinition.from_goal(
+        "complete the visible task",
+        mission_id="m-suppression",
+        run_id="r-suppression",
+    )
+    reducer = MissionReducer(definition)
+    obligation_id = reducer.projection.active_obligation_id
+    assert obligation_id is not None
+    reducer.apply(
+        reducer.event(
+            "transition_recorded",
+            payload={
+                "obligation_id": obligation_id,
+                "action_id": "decision-click-1",
+                "action": "click",
+                "action_summary": "click",
+                "input_completed": True,
+                "visible_effect": "focused the visible editor",
+            },
+        )
+    )
+    before = reducer.projection
+
+    reducer.apply(
+        reducer.event(
+            "proposal_suppressed",
+            payload={
+                "obligation_id": obligation_id,
+                "action": "click",
+                "action_summary": "click",
+                "reason": "repeated_completed_action",
+            },
+        )
+    )
+
+    after = reducer.projection
+    assert after.last_transition == before.last_transition
+    assert after.target_binding == before.target_binding
+    assert after.evidence_refs == before.evidence_refs
+    assert (
+        after.obligation_state(obligation_id).no_progress_streak
+        == before.obligation_state(obligation_id).no_progress_streak
+    )
+    assert after.failure_summary == FailureSummary(
+        kind="repeated_action_suppressed",
+        message="click was already completed and was not executed again",
+        obligation_id=obligation_id,
+    )
+    assert reducer.card.failure_summary == after.failure_summary
+    replayed = MissionReducer.replay(definition, reducer.events)
+    assert replayed.projection.to_dict() == after.to_dict()
+
+    reducer.apply(
+        reducer.event(
+            "transition_recorded",
+            payload={
+                "obligation_id": obligation_id,
+                "action_id": "decision-hotkey-2",
+                "action": "hotkey",
+                "action_summary": "hotkey_ctrl_a",
+                "input_completed": True,
+            },
+        )
+    )
+    assert reducer.projection.failure_summary is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "obligation_id": "full-goal",
+            "action": "click",
+            "action_summary": "click",
+            "reason": "other",
+        },
+        {
+            "obligation_id": "full-goal",
+            "action": "type_text",
+            "action_summary": "secret_token",
+            "reason": "repeated_completed_action",
+        },
+    ],
+)
+def test_proposal_suppression_rejects_noncanonical_feedback(
+    payload,
+) -> None:
+    with pytest.raises(InvalidMissionEvent):
+        MissionEvent(
+            kind="proposal_suppressed",
+            mission_id="m1",
+            run_id="r1",
+            payload=payload,
+        )
+
+
+def test_proposal_suppression_requires_completed_transition_without_evidence() -> None:
+    definition = MissionDefinition.from_goal(
+        "complete the visible task",
+        mission_id="m-suppression-scope",
+        run_id="r-suppression-scope",
+    )
+    obligation_id = MissionReducer(
+        definition
+    ).projection.active_obligation_id
+    assert obligation_id is not None
+    proof = _evidence(
+        "suppression-proof",
+        obligation_id,
+        mission_id=definition.mission_id,
+        run_id=definition.run_id,
+    )
+    reducer = MissionReducer(definition, evidence=(proof,))
+    payload = {
+        "obligation_id": obligation_id,
+        "action": "click",
+        "action_summary": "click",
+        "reason": "repeated_completed_action",
+    }
+
+    with pytest.raises(IllegalTransitionError, match="prior transition"):
+        reducer.apply(
+            reducer.event(
+                "proposal_suppressed",
+                payload=payload,
+            )
+        )
+
+    reducer.apply(
+        reducer.event(
+            "transition_recorded",
+            payload={
+                "obligation_id": obligation_id,
+                "action": "click",
+                "action_summary": "click",
+                "input_completed": True,
+            },
+        )
+    )
+    with pytest.raises(EvidenceScopeError, match="cannot claim physical"):
+        reducer.apply(
+            reducer.event(
+                "proposal_suppressed",
+                payload=payload,
+                evidence_refs=(proof.id,),
+            )
+        )
+
+
 @pytest.mark.parametrize("input_completed", [None, 0, 1, "true", []])
 def test_transition_summary_requires_literal_boolean_input_completion(
     input_completed,
