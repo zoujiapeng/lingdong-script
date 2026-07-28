@@ -152,6 +152,12 @@ _DEFAULTS: dict[str, Any] = {
             "allow_desktop_mutation": True,
         },
     },
+    "vnext": {
+        "live_canary_enabled": False,
+        "max_turns": 30,
+        "max_runtime_s": 300,
+        "max_model_calls": 60,
+    },
     "server": {"host": "127.0.0.1", "port": 8765},
 }
 

@@ -40,6 +40,7 @@ NAV_ASSETS = "技能与学习"
 RUN_TASK = "运行任务"
 STOP_TASK = "停止"
 COLD_START = "冷启动（禁用 Skill/长期经验）"
+RUNTIME_SELECTOR = "运行时（实验）"
 CLARIFICATION_HEADING = "任务尚未启动，请先补充必要信息"
 
 ORIGINAL_CASES: dict[str, dict[str, Any]] = {
@@ -137,6 +138,29 @@ class ClientIdentity:
     workspace_verified: bool
 
 
+def _client_identity_audit(
+    observed: ClientIdentity,
+    expected: ClientIdentity,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    if observed.pid != expected.pid:
+        errors.append("Electron PID changed after suite preflight")
+    if observed.hwnd != expected.hwnd:
+        errors.append("Electron HWND changed after suite preflight")
+    if os.path.normcase(os.path.normpath(observed.executable)) != os.path.normcase(
+        os.path.normpath(expected.executable)
+    ):
+        errors.append("Electron executable changed after suite preflight")
+    if observed.workspace_verified is not True or expected.workspace_verified is not True:
+        errors.append("Electron workspace identity is not verified")
+    return {
+        "passed": not errors,
+        "observed": asdict(observed),
+        "expected": asdict(expected),
+        "errors": errors,
+    }
+
+
 def _slug(value: str) -> str:
     safe = re.sub(r"[^0-9A-Za-z._-]+", "-", value).strip("-")
     return safe[:80] or "case"
@@ -180,6 +204,50 @@ def _toggle(control: Any) -> None:
     if pattern is None:
         raise RuntimeError(f"控件不支持 TogglePattern: {control.ControlTypeName}")
     pattern.Toggle()
+
+
+def _runtime_version_from_label(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+    if normalized == "legacy" or normalized.startswith("legacy"):
+        return "legacy"
+    if normalized == "vnext" or normalized.startswith("vnext"):
+        return "vnext"
+    return ""
+
+
+def _selected_combobox_label(control: Any) -> str:
+    value_pattern = control.GetPattern(auto.PatternId.ValuePattern)
+    if value_pattern is not None:
+        value = str(value_pattern.Value or "").strip()
+        if value:
+            return value
+    selection_pattern = control.GetPattern(auto.PatternId.SelectionPattern)
+    if selection_pattern is not None:
+        selected = list(selection_pattern.GetSelection() or ())
+        if len(selected) == 1:
+            return str(selected[0].Name or "").strip()
+    return ""
+
+
+def _select_runtime_version(control: Any, runtime_version: str) -> dict[str, str]:
+    requested = str(runtime_version or "").strip().casefold()
+    if requested not in {"legacy", "vnext"}:
+        raise ValueError(f"不支持的运行时版本: {runtime_version!r}")
+    control.Click()
+    # The owned renderer select is ordered Legacy, vNext.  Keyboard selection
+    # avoids coordinates and remains inside the visible UIA entrypoint.
+    auto.SendKeys("{Home}")
+    if requested == "vnext":
+        auto.SendKeys("{Down}")
+    auto.SendKeys("{Enter}")
+    time.sleep(0.2)
+    label = _selected_combobox_label(control)
+    selected = _runtime_version_from_label(label)
+    if selected != requested:
+        raise RuntimeError(
+            f"运行时选择回读不一致: requested={requested!r}, label={label!r}"
+        )
+    return {"runtime_version": selected, "runtime_selector_label": label}
 
 
 class ElectronClientDriver:
@@ -452,7 +520,12 @@ class ElectronClientDriver:
         self.navigate(NAV_AGENT)
         return {"before": before, "after": after, "cleared": cleared, "proof": proof}
 
-    def configure_goal(self, task: str, max_steps: int) -> dict[str, Any]:
+    def configure_goal(
+        self,
+        task: str,
+        max_steps: int,
+        runtime_version: str = "legacy",
+    ) -> dict[str, Any]:
         self.restore_and_focus()
         try:
             self.navigate(NAV_AGENT)
@@ -490,6 +563,20 @@ class ElectronClientDriver:
         auto.SendKeys("{Tab}")
         time.sleep(0.2)
 
+        selectors = [
+            item
+            for item in _visible_descendants(self.window, "ComboBox")
+            if item.Name == RUNTIME_SELECTOR
+        ]
+        if len(selectors) != 1:
+            raise RuntimeError(
+                f"客户端运行时实验选择器数量不是 1: {len(selectors)}"
+            )
+        runtime_selection = _select_runtime_version(
+            selectors[0],
+            runtime_version,
+        )
+
         value = _control_value(goal)
         if value != task:
             raise RuntimeError(f"客户端目标输入不一致: {value!r}")
@@ -497,6 +584,7 @@ class ElectronClientDriver:
             "task_input": value,
             "cold_start_toggle": _toggle_state(checkbox),
             "max_steps": max_steps,
+            **runtime_selection,
         }
 
     def stop_active_run(self, *, timeout: int = 30) -> dict[str, Any]:
@@ -781,7 +869,11 @@ def _trace_names() -> set[str]:
     }
 
 
-def _bound_trace_evidence(run_id: str, task: str) -> dict[str, Any]:
+def _bound_trace_evidence(
+    run_id: str,
+    task: str,
+    runtime_version: str = "legacy",
+) -> dict[str, Any]:
     """Bind evidence to the exact outer run submitted by the visible client."""
 
     run_id = str(run_id or "").strip()
@@ -819,17 +911,31 @@ def _bound_trace_evidence(run_id: str, task: str) -> dict[str, Any]:
             continue
         task_starts = [
             event for event in path_starts
-            if str((event.get("task_contract") or {}).get("task") or "") == str(task or "")
+            if (
+                str(event.get("graph_name") or "") == str(task or "")
+                or str(
+                    (event.get("task_contract") or {}).get("task") or ""
+                )
+                == str(task or "")
+            )
         ]
         client_starts = [
             event for event in path_agent_starts
             if str(event.get("run_id") or "") == run_id
             and str(event.get("task") or "") == str(task or "")
         ]
-        legacy_outer_start = any(
-            str(event.get("run_id") or "") == run_id for event in task_starts
+        exact_outer_start = any(
+            str(event.get("run_id") or "") == run_id
+            and str(event.get("runtime_version") or "legacy")
+            == runtime_version
+            for event in task_starts
         )
-        if task_starts and (client_starts or legacy_outer_start):
+        bound = (
+            exact_outer_start
+            if runtime_version == "vnext"
+            else bool(client_starts or exact_outer_start)
+        )
+        if task_starts and bound:
             matched_paths.append(path)
             starts = path_starts
             agent_starts = path_agent_starts
@@ -838,6 +944,7 @@ def _bound_trace_evidence(run_id: str, task: str) -> dict[str, Any]:
     return {
         "passed": bool(run_id and path is not None),
         "run_id": run_id,
+        "runtime_version": runtime_version,
         "trace_ids": [path.stem] if path is not None else [],
         "trace_file": str(path) if path is not None else "",
         "start_event_count": len(starts),
@@ -855,6 +962,7 @@ def _memory_isolation_evidence(
     *,
     require_empty_session: bool = False,
     required_context_run_id: str = "",
+    runtime_version: str = "legacy",
 ) -> dict[str, Any]:
     """Verify that a client cold-start run did not replay long-term experience."""
 
@@ -876,6 +984,10 @@ def _memory_isolation_evidence(
                 if not isinstance(event, dict):
                     continue
                 if event.get("type") == "arp_run_start":
+                    if event.get("experience_policy"):
+                        policies.append(
+                            str(event.get("experience_policy") or "")
+                        )
                     contract = event.get("task_contract")
                     if isinstance(contract, dict):
                         policies.append(str(contract.get("experience_policy") or ""))
@@ -916,7 +1028,9 @@ def _memory_isolation_evidence(
         for context in session_contexts
     )
     context_ok = (
-        session_empty
+        True
+        if runtime_version == "vnext" and not session_contexts
+        else session_empty
         if require_empty_session
         else required_context_present
         if required_context_run_id
@@ -927,10 +1041,15 @@ def _memory_isolation_evidence(
             toggle_on
             and contracts_disabled
             and runners_clean
+            and (
+                runtime_version != "vnext"
+                or not agent_starts
+            )
             and context_ok
             and not parse_errors
         ),
         "cold_start_toggle": int(configuration.get("cold_start_toggle") or 0),
+        "runtime_version": runtime_version,
         "contract_experience_policies": policies,
         "agent_starts": agent_starts,
         "require_empty_session": require_empty_session,
@@ -1061,6 +1180,7 @@ def run_case(
     | None = None,
     independent_verifier: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     required_context_run_id: str = "",
+    expected_client_identity: ClientIdentity | None = None,
 ) -> dict[str, Any]:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     output_dir = output_root / f"{timestamp}-{_slug(name)}"
@@ -1076,6 +1196,15 @@ def run_case(
         "entrypoint": "electron_client_windows_uia",
     }
     try:
+        if expected_client_identity is not None:
+            result["client_identity_audit"] = _client_identity_audit(
+                driver.identity,
+                expected_client_identity,
+            )
+            if result["client_identity_audit"]["passed"] is not True:
+                raise RuntimeError(
+                    "visible Electron client identity changed after suite preflight"
+                )
         runtime_before = driver.runtime_status()
         result["runtime_before"] = runtime_before
         previous_current = runtime_before.get("current_run")
@@ -1088,7 +1217,9 @@ def run_case(
         else:
             result["session_reset"] = {"skipped": True, "reason": "same scenario context"}
         result["configuration"] = driver.configure_goal(
-            spec["task"], int(spec.get("max_steps", 120))
+            spec["task"],
+            int(spec.get("max_steps", 120)),
+            str(spec.get("runtime_version") or "legacy"),
         )
         result["screenshots"] = {
             "before_submit": driver.capture_window("before-submit.png")
@@ -1153,9 +1284,13 @@ def run_case(
             pass
     finally:
         bound_run_id = str((result.get("result") or {}).get("run_id") or "")
+        runtime_version = str(
+            spec.get("runtime_version") or "legacy"
+        )
         result["trace_binding"] = _bound_trace_evidence(
             bound_run_id,
             str(result.get("task") or ""),
+            runtime_version,
         )
         result["bound_trace_ids"] = list(
             result["trace_binding"].get("trace_ids") or []
@@ -1168,6 +1303,7 @@ def run_case(
             dict(result.get("configuration") or {}),
             require_empty_session=reset_session,
             required_context_run_id=required_context_run_id,
+            runtime_version=runtime_version,
         )
         result["execution_evidence"] = _execution_evidence(
             list(result["bound_trace_ids"]),

@@ -7,6 +7,16 @@ export interface DesktopHandoffResult {
   reason?: string;
 }
 
+export interface ExplicitDesktopHandoffDescriptor {
+  format: 'explicit-desktop-handoff/1';
+  task_id: string;
+  desktop_handoff_required: true;
+}
+
+export type ClientRunContextDescriptor =
+  | TaskContract
+  | ExplicitDesktopHandoffDescriptor;
+
 const DESKTOP_STAGE_TYPES = new Set<TaskStageType>([
   'OpenApplication',
   'FocusWindow',
@@ -50,7 +60,18 @@ function isDesktopCapability(capability: string): boolean {
  * yield foreground ownership before execution.  This deliberately consumes
  * typed stages/capabilities instead of reparsing the user's words.
  */
-export function requiresDesktopHandoff(contract: TaskContract): boolean {
+function isExplicitDesktopHandoff(
+  descriptor: ClientRunContextDescriptor,
+): descriptor is ExplicitDesktopHandoffDescriptor {
+  return descriptor.format === 'explicit-desktop-handoff/1';
+}
+
+export function requiresDesktopHandoff(
+  contract: ClientRunContextDescriptor,
+): boolean {
+  if (isExplicitDesktopHandoff(contract)) {
+    return contract.desktop_handoff_required;
+  }
   if (contract.session || contract.intent?.interaction?.active) return true;
   return contract.stages.some((stage) => {
     if (DESKTOP_STAGE_TYPES.has(stage.type)) return true;
@@ -64,10 +85,13 @@ export function requiresDesktopHandoff(contract: TaskContract): boolean {
 }
 
 export async function buildClientRunInputs(
-  contract: TaskContract,
+  contract: ClientRunContextDescriptor,
   submittedAt = Date.now(),
   captureTarget?: (handoff: DesktopHandoffResult) => Promise<DesktopTargetContext>,
 ): Promise<Record<string, unknown>> {
+  if (isExplicitDesktopHandoff(contract) && !contract.task_id.trim()) {
+    throw new Error('Explicit desktop handoff requires a non-empty task id.');
+  }
   const desktopHandoffRequired = requiresDesktopHandoff(contract);
   const bridge = window.electronAPI;
   let handoff: DesktopHandoffResult | null = null;

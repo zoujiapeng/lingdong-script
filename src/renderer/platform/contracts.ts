@@ -1,5 +1,7 @@
 export const ARP_FORMAT = 'arp/1' as const;
 
+export type RuntimeVersion = 'legacy' | 'vnext';
+
 export type ArpNodeKind =
   | 'start'
   | 'end'
@@ -151,6 +153,8 @@ export interface RunMetrics {
 export interface RunProjection {
   run_id: string;
   kind: 'agent' | 'arp';
+  runtime_version?: RuntimeVersion;
+  runtime_budget?: VnextLiveCanaryBudget | Record<string, unknown>;
   status: string;
   phase: string;
   goal: string;
@@ -172,6 +176,8 @@ export interface ArpExecutionSnapshot {
   run_id: string;
   graph_id: string;
   graph_name: string;
+  runtime_version?: RuntimeVersion;
+  runtime_budget?: VnextLiveCanaryBudget | Record<string, unknown>;
   status: string;
   manual_paused?: boolean;
   current_node_id?: string | null;
@@ -682,6 +688,17 @@ export interface PerceptionDaemonStatus {
   [key: string]: unknown;
 }
 
+export interface VnextLiveCanaryBudget {
+  max_turns: number;
+  max_runtime_s: number;
+  max_model_calls: number;
+}
+
+export interface VnextRuntimeStatus {
+  live_canary_enabled: boolean;
+  budget?: VnextLiveCanaryBudget;
+}
+
 export interface PlatformStatus {
   running?: boolean;
   busy?: Record<string, boolean>;
@@ -702,6 +719,7 @@ export interface PlatformStatus {
   desktop_action_queue?: DesktopActionQueueStatus;
   runtime_jobs?: RuntimeJobSnapshot[];
   perception_daemon?: PerceptionDaemonStatus;
+  vnext?: VnextRuntimeStatus;
   current_run?: RunProjection | null;
   [key: string]: unknown;
 }

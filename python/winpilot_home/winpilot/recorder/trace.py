@@ -117,6 +117,16 @@ class TraceRecorder:
             self._accepting = True
         BUS.publish("trace", state="recording", run_id=run_id)
 
+    def owns(self, run_id: str) -> bool:
+        """Return whether this recorder is accepting the exact run."""
+
+        with self._lock:
+            return bool(
+                self._accepting
+                and self._file is not None
+                and self._run_id == run_id
+            )
+
     def stop(self) -> None:
         with self._lock:
             run_id = self._run_id
