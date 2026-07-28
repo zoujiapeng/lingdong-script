@@ -107,5 +107,10 @@ GUI、Controller、感知、坐标、截图范围、上下文或 done gate 发�
 4. 运行与风险相称的验证，记录真实结果，不把模型自报 done 当成功。
 5. 提交前运行 `git diff --check` 并复核没有密钥、运行数据或无关文件。
 
-`master` 是唯一长期主分支。临时开发分支应短期存在，合并后删除；提交信息使用
-清晰的命令式摘要，例如 `fix: fail closed on stale visual frames`。
+### 分支纪律
+
+- `master` 是唯一长期产品分支；legacy 是显式兼容 runtime，不建立独立长期分支。
+- 一个任务只使用一个短期 feature、fix 或 refactor 分支，合并后立即删除。
+- 重大迁移点使用 annotated tag 保存，不使用长期 archive branch。
+- 禁止维护长期 stacked PR 链；依赖 PR 超过 3 个时，先合并底层再继续。
+- 提交信息使用清晰的命令式摘要，例如 `fix: fail closed on stale visual frames`。
