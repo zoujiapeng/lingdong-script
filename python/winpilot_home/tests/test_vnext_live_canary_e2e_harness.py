@@ -6,6 +6,7 @@ import importlib.util
 import inspect
 import json
 import sys
+import time
 from types import SimpleNamespace
 import uuid
 from pathlib import Path
@@ -156,6 +157,65 @@ def _canary_harness():
         WORKSPACE / "scripts" / "client_vnext_canary_e2e_run.py",
         "client_vnext_canary_e2e_run_test",
     )
+
+
+def test_target_handoff_watcher_waits_for_electron_minimize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _canary_harness()
+    electron_hwnd = 101
+    target_hwnd = 202
+    state = {
+        "minimized": False,
+        "foreground": electron_hwnd,
+    }
+    focus_calls: list[int] = []
+
+    monkeypatch.setattr(
+        harness.win32gui,
+        "IsIconic",
+        lambda hwnd: hwnd == electron_hwnd and state["minimized"],
+    )
+    monkeypatch.setattr(
+        harness.win32gui,
+        "GetForegroundWindow",
+        lambda: state["foreground"],
+    )
+    monkeypatch.setattr(
+        harness.win32gui,
+        "GetAncestor",
+        lambda hwnd, _relation: hwnd,
+    )
+
+    def focus(hwnd: int) -> dict[str, Any]:
+        focus_calls.append(hwnd)
+        state["foreground"] = hwnd
+        return {"focused": True}
+
+    monkeypatch.setattr(harness, "_focus_window", focus)
+    watcher = harness._start_target_handoff_watcher(
+        electron_hwnd=electron_hwnd,
+        target_hwnd=target_hwnd,
+        timeout_s=0.5,
+        poll_s=0.001,
+    )
+    time.sleep(0.02)
+    assert focus_calls == []
+    assert state["foreground"] == electron_hwnd
+
+    state["minimized"] = True
+    deadline = time.monotonic() + 0.5
+    while (
+        watcher["evidence"]["target_focused"] is not True
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.001)
+
+    evidence = harness._finish_target_handoff_watcher(watcher)
+    assert focus_calls == [target_hwnd]
+    assert evidence["electron_minimized_observed"] is True
+    assert evidence["target_focused"] is True
+    assert evidence["thread_alive"] is False
 
 
 def _oracle():

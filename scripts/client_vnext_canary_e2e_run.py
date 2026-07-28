@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -868,6 +869,85 @@ def _focus_window(hwnd: int) -> dict[str, Any]:
         if int(win32gui.GetForegroundWindow() or 0) == int(hwnd):
             return {"focused": True, "attempt": attempt, "errors": errors}
     raise RuntimeError(f"could not focus exact target HWND {hwnd}; errors={errors}")
+
+
+def _start_target_handoff_watcher(
+    *,
+    electron_hwnd: int,
+    target_hwnd: int,
+    timeout_s: float = 12.0,
+    poll_s: float = 0.01,
+) -> dict[str, Any]:
+    """Focus the prevalidated target as soon as Electron begins its handoff."""
+    stop = threading.Event()
+    started_monotonic = time.monotonic()
+    deadline_monotonic = started_monotonic + timeout_s
+    evidence: dict[str, Any] = {
+        "started": True,
+        "electron_minimized_observed": False,
+        "target_focused": False,
+        "focus_attempts": 0,
+        "errors": [],
+    }
+
+    def watch() -> None:
+        while (
+            not stop.is_set()
+            and time.monotonic() < deadline_monotonic
+        ):
+            try:
+                minimized = bool(win32gui.IsIconic(electron_hwnd))
+                if minimized:
+                    evidence["electron_minimized_observed"] = True
+                    foreground = int(win32gui.GetForegroundWindow() or 0)
+                    foreground_root = int(
+                        win32gui.GetAncestor(foreground, win32con.GA_ROOT)
+                        or foreground
+                    ) if foreground else 0
+                    if foreground_root != target_hwnd:
+                        evidence["focus_attempts"] += 1
+                        _focus_window(target_hwnd)
+                    foreground = int(win32gui.GetForegroundWindow() or 0)
+                    foreground_root = int(
+                        win32gui.GetAncestor(foreground, win32con.GA_ROOT)
+                        or foreground
+                    ) if foreground else 0
+                    if foreground_root == target_hwnd:
+                        evidence["target_focused"] = True
+            except Exception as exc:
+                evidence["errors"].append(
+                    f"{type(exc).__name__}: {exc}"
+                )
+            stop.wait(poll_s)
+        evidence["finished"] = True
+
+    thread = threading.Thread(
+        target=watch,
+        name="vnext-electron-target-handoff",
+        daemon=True,
+    )
+    thread.start()
+    return {
+        "stop": stop,
+        "thread": thread,
+        "evidence": evidence,
+        "started_monotonic": started_monotonic,
+        "deadline_monotonic": deadline_monotonic,
+    }
+
+
+def _finish_target_handoff_watcher(
+    watcher: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not watcher:
+        return {"started": False}
+    stop = watcher["stop"]
+    thread = watcher["thread"]
+    stop.set()
+    thread.join(timeout=1.0)
+    evidence = dict(watcher["evidence"])
+    evidence["thread_alive"] = thread.is_alive()
+    return evidence
 
 
 def _window_identity(hwnd: int) -> dict[str, Any]:
@@ -3239,6 +3319,7 @@ def run_runtime_case(
     external_verdict: dict[str, Any] = {}
     external_settlement: dict[str, Any] = {}
     client_result: dict[str, Any] = {}
+    target_handoff_watcher: dict[str, Any] | None = None
     result: dict[str, Any] = {
         "format": "vnext-live-canary-sample-attempt/2",
         "sample_key": sample["sample_key"],
@@ -3376,10 +3457,14 @@ def run_runtime_case(
             _client_result: dict[str, Any],
         ) -> dict[str, Any]:
             # The native client captures the foreground target 160 ms after
-            # minimizing. Put the already-known eval HWND in front before any
-            # post-submit HTTP audit so that capture cannot bind whichever
-            # unrelated window Windows happened to restore.
+            # minimizing. The submit watcher puts the already-known eval HWND
+            # in front during that transition; stop it before auditing the
+            # accepted job and continue within the same 12-second bound.
+            watcher_evidence = _finish_target_handoff_watcher(
+                target_handoff_watcher
+            )
             evidence = _focus_window(target_hwnd)
+            evidence["submit_watcher"] = watcher_evidence
             observed = _authenticated_config(
                 handoff_driver,
                 frozen_template=frozen_config_template,
@@ -3411,14 +3496,21 @@ def run_runtime_case(
             # the already-known eval HWND in front across that bounded handoff
             # window; the product still re-reads and validates every identity
             # fact before admitting the run.
-            focus_deadline = time.monotonic() + 12.0
+            focus_deadline = float(
+                (target_handoff_watcher or {}).get(
+                    "deadline_monotonic",
+                    time.monotonic() + 12.0,
+                )
+            )
             focus_started = time.monotonic()
             refocus_count = 0
             admitted_run_id = ""
             admitted_job_id = ""
             timeline: list[dict[str, Any]] = []
             _client_result["submission_timeline"] = timeline
-            while time.monotonic() < focus_deadline:
+            first_sample = True
+            while first_sample or time.monotonic() < focus_deadline:
+                first_sample = False
                 foreground_hwnd = int(
                     win32gui.GetForegroundWindow() or 0
                 )
@@ -3540,8 +3632,19 @@ def run_runtime_case(
             _handoff_driver: client_harness.ElectronClientDriver,
             _client_result: dict[str, Any],
         ) -> dict[str, Any]:
-            evidence = _focus_window(target_hwnd)
+            nonlocal target_handoff_watcher
+            evidence = {
+                "focused": (
+                    int(win32gui.GetForegroundWindow() or 0)
+                    == int(_handoff_driver.identity.hwnd)
+                ),
+            }
             evidence["identity"] = _window_identity(target_hwnd)
+            target_handoff_watcher = _start_target_handoff_watcher(
+                electron_hwnd=int(_handoff_driver.identity.hwnd),
+                target_hwnd=target_hwnd,
+            )
+            evidence["watcher_started"] = True
             return evidence
 
         def verify_external(_client_result: dict[str, Any]) -> dict[str, Any]:
@@ -3632,6 +3735,12 @@ def run_runtime_case(
             )
     finally:
         cleanup_errors: list[str] = []
+        watcher_cleanup = _finish_target_handoff_watcher(
+            target_handoff_watcher
+        )
+        if watcher_cleanup.get("thread_alive") is True:
+            cleanup_errors.append("target handoff watcher did not stop")
+        result["target_handoff_watcher_cleanup"] = watcher_cleanup
         try:
             if target_hwnd and win32gui.IsWindow(target_hwnd):
                 win32gui.PostMessage(target_hwnd, win32con.WM_CLOSE, 0, 0)
