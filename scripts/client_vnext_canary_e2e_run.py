@@ -2139,11 +2139,7 @@ def _trace_sources(
     str,
 ]:
     events, trace_file = _load_trace_events(client_result)
-    indexed: list[dict[str, Any]] = []
-    for index, raw in enumerate(events, start=1):
-        event = deepcopy(raw)
-        event.setdefault("trace_sequence", index)
-        indexed.append(event)
+    indexed = [deepcopy(raw) for raw in events]
     starts = [
         event
         for event in indexed
@@ -3459,6 +3455,7 @@ def run_runtime_case(
             handoff_driver: client_harness.ElectronClientDriver,
             _client_result: dict[str, Any],
         ) -> dict[str, Any]:
+            nonlocal target_before
             # The native client captures the foreground target 160 ms after
             # minimizing. The submit watcher puts the already-known eval HWND
             # in front during that transition; stop it before auditing the
@@ -3467,6 +3464,12 @@ def run_runtime_case(
                 target_handoff_watcher
             )
             evidence = _focus_window(target_hwnd)
+            target_before = _window_identity(target_hwnd)
+            result["target_before"] = deepcopy(target_before)
+            result["screenshots"]["target_before"] = _capture_window(
+                target_hwnd,
+                case_dir / "target-before.png",
+            )
             evidence["submit_watcher"] = watcher_evidence
             observed = _authenticated_config(
                 handoff_driver,

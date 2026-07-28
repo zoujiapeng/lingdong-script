@@ -109,6 +109,13 @@ def test_runtime_status_retries_a_transient_managed_endpoint_timeout(
             "current_run": {
                 "run_id": "arp-test",
                 "kind": "arp",
+                "runtime_version": "vnext",
+                "runtime_budget": {
+                    "max_turns": 30,
+                    "max_runtime_s": 300,
+                    "max_model_calls": 60,
+                },
+                "no_legacy_fallback": True,
                 "status": "running",
                 "phase": "executing",
                 "goal": "test",
@@ -122,6 +129,13 @@ def test_runtime_status_retries_a_transient_managed_endpoint_timeout(
 
     status = driver.runtime_status()
     assert status["current_run"]["run_id"] == "arp-test"
+    assert status["current_run"]["runtime_version"] == "vnext"
+    assert status["current_run"]["runtime_budget"] == {
+        "max_turns": 30,
+        "max_runtime_s": 300,
+        "max_model_calls": 60,
+    }
+    assert status["current_run"]["no_legacy_fallback"] is True
     assert status["runtime_jobs"] == [
         {
             "job_id": "arp-job-test",

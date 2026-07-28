@@ -1673,6 +1673,37 @@ def test_type_oracle_rejects_any_extra_trusted_key_pair():
     assert any("sequence is not exact" in error for error in verdict["errors"])
 
 
+def test_trace_sources_do_not_mutate_strict_runtime_anchor(tmp_path):
+    harness = _canary_harness()
+    run_id = "arp-strict-anchor"
+    anchor = {
+        "type": "runtime_evidence_sealed",
+        "ts": 1.25,
+        "runtime_version": "vnext",
+        "no_legacy_fallback": True,
+        "mission_id": "mission-strict-anchor",
+        "run_id": run_id,
+        "journal_head_sha256": "a" * 64,
+        "journal_event_count": 1,
+        "report_sha256": "b" * 64,
+        "report_status": "complete",
+        "missing_evidence_count": 0,
+        "verification_failure_count": 0,
+    }
+    trace = tmp_path / "strict-anchor.jsonl"
+    trace.write_text(json.dumps(anchor) + "\n", encoding="utf-8")
+
+    events, *_rest = harness._trace_sources(
+        {"trace_binding": {"trace_file": str(trace)}}
+    )
+
+    assert events == [anchor]
+    assert harness._runtime_evidence_anchor(
+        events,
+        run_id=run_id,
+    ) == anchor
+
+
 def _client_result_for_trace(path: Path, run_id: str) -> dict[str, Any]:
     return {
         "result": {

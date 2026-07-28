@@ -397,8 +397,10 @@ class ElectronClientDriver:
             compact_current = {
                 key: current.get(key)
                 for key in (
-                    "run_id", "kind", "status", "phase", "goal",
-                    "current_node_id", "current_tool", "error",
+                    "run_id", "kind", "runtime_version",
+                    "runtime_budget", "no_legacy_fallback",
+                    "status", "phase", "goal", "current_node_id",
+                    "current_tool", "error",
                 )
             }
         return {

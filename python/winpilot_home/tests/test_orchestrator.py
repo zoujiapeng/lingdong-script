@@ -708,6 +708,7 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
         "ts": 1.0,
         "run_id": run_id,
         "runtime_version": "vnext",
+        "no_legacy_fallback": True,
         "runtime_budget": {
             "max_turns": 30,
             "max_runtime_s": 300,
@@ -721,6 +722,7 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
         "ts": 2.0,
         "run_id": run_id,
         "runtime_version": "legacy",
+        "no_legacy_fallback": False,
         "node_id": "full-goal",
     })
     store.on_event({
@@ -729,6 +731,7 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
         "run_id": run_id,
         "runtime_snapshot": {
             "runtime_version": "legacy",
+            "no_legacy_fallback": False,
             "status": "succeeded",
         },
     })
@@ -736,6 +739,12 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
     run = store.get(run_id)
 
     assert run["runtime_version"] == "vnext"
+    assert run["no_legacy_fallback"] is True
+    assert run["no_legacy_fallback_mismatch"] == {
+        "frozen": True,
+        "observed": False,
+        "event_type": "arp_run_done",
+    }
     assert run["runtime_budget"] == {
         "max_turns": 30,
         "max_runtime_s": 300,
