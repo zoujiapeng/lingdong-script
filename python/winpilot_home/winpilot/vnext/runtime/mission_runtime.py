@@ -40,6 +40,7 @@ from ..mission import (
     MissionStatus,
     ObligationStatus,
     StaleRevisionError,
+    is_safe_action_summary,
 )
 from ..profiling import ExecutionDepth, ExecutionProfile
 from ..verification import (
@@ -51,7 +52,6 @@ from ..verification import (
     ObligationVerificationResult,
     VerifierAssessment,
 )
-from ...visual_runtime.keyboard_contracts import HotkeyChord
 from .contracts import (
     APPROVED_DESKTOP_ACTIONS,
     APPROVED_RUNTIME_TOOLS,
@@ -626,26 +626,10 @@ class MissionRuntime:
                 and payload.get("input_completed") is True
                 and type(action) is str
                 and type(summary) is str
-                and self._is_safe_action_summary(action, summary)
+                and is_safe_action_summary(action, summary)
             ):
                 summaries.append(summary)
         return tuple(summaries[-MAX_COMPLETED_ACTION_HISTORY:])
-
-    @staticmethod
-    def _is_safe_action_summary(action: str, summary: str) -> bool:
-        if action == "scroll":
-            return summary in {"scroll_down", "scroll_up"}
-        if action in {"click", "double_click", "type_text"}:
-            return summary == action
-        if action != "hotkey" or not summary.startswith("hotkey_"):
-            return False
-        try:
-            HotkeyChord(
-                tuple(summary.removeprefix("hotkey_").split("_"))
-            )
-        except (TypeError, ValueError):
-            return False
-        return True
 
     def _safe_action_summary(
         self,
@@ -666,7 +650,7 @@ class MissionRuntime:
             keys = args.get("keys")
             if isinstance(keys, (list, tuple)):
                 summary = "hotkey_" + "_".join(keys)
-                if self._is_safe_action_summary(action, summary):
+                if is_safe_action_summary(action, summary):
                     return summary
         return action
 

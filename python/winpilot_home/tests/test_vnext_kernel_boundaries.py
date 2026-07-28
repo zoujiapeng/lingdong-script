@@ -49,6 +49,11 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.evidence_plane", "RuntimeEvidenceJournal", None),
     ("winpilot.vnext.evidence_plane", "RuntimeEvidencePlane", None),
     ("winpilot.vnext.evidence_plane", "canonical_sha256", None),
+    (
+        "winpilot.vnext.evidence_plane",
+        "runtime_evidence_report_sha256",
+        None,
+    ),
     ("winpilot.vnext.mission", "EvidencePolicy", None),
     ("winpilot.vnext.mission", "EvidenceRef", None),
     ("winpilot.vnext.mission", "MissionDefinition", None),

@@ -2038,7 +2038,11 @@ _EVENT_STRING_ARRAY_FIELDS = frozenset(
 )
 
 
-def _is_safe_action_summary(action: str, summary: str) -> bool:
+def is_safe_action_summary(action: str, summary: str) -> bool:
+    """Validate the canonical privacy-safe summary owned by Mission events."""
+
+    if type(action) is not str or type(summary) is not str:
+        return False
     fixed = _SAFE_ACTION_SUMMARY_BY_ACTION.get(action)
     if fixed is not None:
         return summary in fixed
@@ -2113,7 +2117,7 @@ def _validate_event_payload(
         if (
             type(action) is not str
             or type(summary) is not str
-            or not _is_safe_action_summary(action, summary)
+            or not is_safe_action_summary(action, summary)
         ):
             raise InvalidMissionEvent(
                 "transition_recorded payload 'action_summary' must be the "
@@ -2962,5 +2966,6 @@ __all__ = [
     "JSONValue", "EvidencePolicy", "ObligationSpec", "EvidenceRef", "ArtifactRef",
     "TargetBinding", "VerifiedFact", "TransitionSummary", "FailureSummary",
     "MissionDefinition", "MissionEvent", "ObligationProjection", "MissionProjection",
-    "ActiveObligationCard", "MissionCard", "EvidenceScope", "thaw",
+    "ActiveObligationCard", "MissionCard", "EvidenceScope",
+    "is_safe_action_summary", "thaw",
 ]
