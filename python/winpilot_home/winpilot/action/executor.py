@@ -164,6 +164,9 @@ _VK = {
 _EXTENDED_VKS = {0x2E, 0x2D, 0x24, 0x23, 0x21, 0x22, 0x26, 0x28, 0x25, 0x27, 0x5B, 0x5D}
 _VK_SHIFT, _VK_CTRL, _VK_ALT = 0x10, 0x11, 0x12
 _VK_TEXT_CHARS = set(string.digits + "+-*/=.,")
+_STRICT_VK_TEXT_CHARS = set(
+    string.ascii_letters + string.digits + string.punctuation + " "
+)
 
 
 def _vk_of(key: str) -> int:
@@ -214,6 +217,15 @@ def _press_vk_code(vk: int) -> None:
 
 def _should_type_via_vk(text: str) -> bool:
     return bool(text) and all(char in _VK_TEXT_CHARS for char in text)
+
+
+def _should_strict_type_via_vk(text: str) -> bool:
+    """Prefer distinct layout-backed key transitions for exact ASCII text."""
+
+    return bool(text) and all(
+        char == "\n" or char in _STRICT_VK_TEXT_CHARS
+        for char in text
+    )
 
 
 def _dry_run() -> bool:
@@ -1521,7 +1533,7 @@ def _legacy_physical_type_text(
                 time.sleep(0.08)
         return True
 
-    via_vk = _should_type_via_vk(text)
+    via_vk = _should_strict_type_via_vk(text)
     for char in text:
         if not refocus_if_needed(typed):
             return result(

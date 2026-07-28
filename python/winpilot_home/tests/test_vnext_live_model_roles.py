@@ -417,6 +417,9 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
         actor_request["messages"][0]["content"]
         == VISUAL_ACTOR_SYSTEM_CONTRACT
     )
+    assert "Completed-action summaries are authoritative" in " ".join(
+        VISUAL_ACTOR_SYSTEM_CONTRACT.split()
+    )
     assert (
         verifier_request["messages"][0]["content"]
         == VISUAL_VERIFIER_SYSTEM_CONTRACT

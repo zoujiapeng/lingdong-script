@@ -19,7 +19,9 @@ from winpilot.vnext.evidence_plane import (
     ActorDecisionRecord,
     PhysicalAttemptRecord,
     RuntimeEvidenceReport,
+    RuntimeEvidenceReportStatus,
     canonical_sha256,
+    runtime_evidence_report_sha256,
 )
 from winpilot.vnext.model_roles import (
     VISUAL_ACTOR_MODEL_ROLE,
@@ -1629,37 +1631,20 @@ def test_runtime_evidence_is_rebuilt_from_private_journal_and_anchor(
     harness = _canary_harness()
     run_id = "arp-evidence-run"
     mission_id = "mission-evidence-run"
-    report_wire = {
-        "format": "runtime-evidence-report/1",
-        "mission_id": mission_id,
-        "run_id": run_id,
-        "status": "complete",
-        "actor_decisions": [],
-        "admissions": [],
-        "physical_attempts": [],
-        "action_bindings": [],
-        "frame_artifacts": [],
-        "journal_head_sha256": "a" * 64,
-        "journal_event_count": 7,
-        "missing_evidence": [],
-        "verification_failures": [],
-    }
-
-    class Status:
-        value = "complete"
-
-    class Report:
-        def __init__(self):
-            self.mission_id = mission_id
-            self.run_id = run_id
-            self.journal_head_sha256 = "a" * 64
-            self.journal_event_count = 7
-            self.status = Status()
-            self.missing_evidence = ()
-            self.verification_failures = ()
-
-        def to_dict(self):
-            return json.loads(json.dumps(report_wire))
+    report = RuntimeEvidenceReport(
+        mission_id=mission_id,
+        run_id=run_id,
+        status=RuntimeEvidenceReportStatus.INCOMPLETE,
+        actor_decisions=(),
+        admissions=(),
+        physical_attempts=(),
+        action_bindings=(),
+        frame_artifacts=(),
+        journal_head_sha256="a" * 64,
+        journal_event_count=7,
+        missing_evidence=("actor_decision",),
+    )
+    report_wire = report.to_dict()
 
     calls: list[tuple[Path, str, str, str | None]] = []
 
@@ -1672,7 +1657,7 @@ def test_runtime_evidence_is_rebuilt_from_private_journal_and_anchor(
                 expected_journal_head_sha256,
             )
         )
-        return Report()
+        return report
 
     monkeypatch.setattr(
         harness.RuntimeEvidencePlane,
@@ -1688,9 +1673,9 @@ def test_runtime_evidence_is_rebuilt_from_private_journal_and_anchor(
         "run_id": run_id,
         "journal_head_sha256": "a" * 64,
         "journal_event_count": 7,
-        "report_sha256": harness.canonical_sha256(report_wire),
-        "report_status": "complete",
-        "missing_evidence_count": 0,
+        "report_sha256": runtime_evidence_report_sha256(report),
+        "report_status": "incomplete",
+        "missing_evidence_count": 1,
         "verification_failure_count": 0,
     }
     rebuilt, safe_anchor = harness._rebuild_runtime_evidence(

@@ -50,6 +50,7 @@ import vnext_canary_input_hook as input_hook  # noqa: E402
 from winpilot.vnext.evidence_plane import (  # noqa: E402
     RuntimeEvidencePlane,
     canonical_sha256,
+    runtime_evidence_report_sha256,
 )
 
 
@@ -1584,7 +1585,7 @@ def _rebuild_runtime_evidence(
         "run_id": report.run_id,
         "journal_head_sha256": report.journal_head_sha256,
         "journal_event_count": report.journal_event_count,
-        "report_sha256": canonical_sha256(wire),
+        "report_sha256": runtime_evidence_report_sha256(report),
         "report_status": report.status.value,
         "missing_evidence_count": len(report.missing_evidence),
         "verification_failure_count": len(report.verification_failures),
