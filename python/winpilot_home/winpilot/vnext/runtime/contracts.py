@@ -51,6 +51,7 @@ APPROVED_OUTCOME_TOOLS = frozenset(
     {"claim_obligation_done", "blocked"}
 )
 APPROVED_RUNTIME_TOOLS = APPROVED_DESKTOP_ACTIONS | APPROVED_OUTCOME_TOOLS
+MAX_COMPLETED_ACTION_HISTORY = 64
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _TOOL = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -668,6 +669,7 @@ class ActorTurnInput:
     mission: ActorMissionView
     frame: ActorFrameView
     tools: tuple[ActorToolView, ...]
+    completed_actions: tuple[str, ...] = ()
     previous_action: ActorPreviousActionView | None = None
     format: str = ACTOR_TURN_FORMAT
 
@@ -695,7 +697,24 @@ class ActorTurnInput:
             raise RuntimeContractError(
                 "previous_action must be ActorPreviousActionView or null"
             )
+        completed_actions = tuple(self.completed_actions)
+        if (
+            len(completed_actions) > MAX_COMPLETED_ACTION_HISTORY
+            or any(
+                type(action) is not str
+                or action not in APPROVED_DESKTOP_ACTIONS
+                for action in completed_actions
+            )
+        ):
+            raise RuntimeContractError(
+                "completed_actions exceeds the bounded desktop action history"
+            )
         object.__setattr__(self, "tools", tools)
+        object.__setattr__(
+            self,
+            "completed_actions",
+            completed_actions,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -703,6 +722,7 @@ class ActorTurnInput:
             "mission": self.mission.to_dict(),
             "frame": self.frame.to_dict(),
             "tools": [tool.to_dict() for tool in self.tools],
+            "completed_actions": list(self.completed_actions),
             "previous_action": (
                 None
                 if self.previous_action is None
@@ -720,6 +740,7 @@ class RuntimeVerifierTurn:
 
     request: ObligationVerificationRequest
     frame: RuntimeFrame
+    completed_actions: tuple[str, ...] = ()
     format: str = RUNTIME_VERIFIER_TURN_FORMAT
 
     def __post_init__(self) -> None:
@@ -735,6 +756,23 @@ class RuntimeVerifierTurn:
             raise RuntimeContractError(
                 "verifier turn requires RuntimeFrame"
             )
+        completed_actions = tuple(self.completed_actions)
+        if (
+            len(completed_actions) > MAX_COMPLETED_ACTION_HISTORY
+            or any(
+                type(action) is not str
+                or action not in APPROVED_DESKTOP_ACTIONS
+                for action in completed_actions
+            )
+        ):
+            raise RuntimeContractError(
+                "completed_actions exceeds the bounded desktop action history"
+            )
+        object.__setattr__(
+            self,
+            "completed_actions",
+            completed_actions,
+        )
         request_ids = {ref.id for ref in self.request.evidence_refs}
         if not request_ids <= set(self.frame.evidence_refs):
             raise RuntimeContractError(
@@ -754,6 +792,8 @@ def project_actor_turn_input(
     frame_state: AuthoritativeFrameState,
     catalog: ToolCatalog,
     projection: BrokerProjection,
+    *,
+    completed_actions: Iterable[str] = (),
 ) -> ActorTurnInput:
     """Project one identity-free bounded view from canonical Runtime facts."""
 
@@ -871,6 +911,7 @@ def project_actor_turn_input(
             fresh=frame_state.fresh,
         ),
         tools=tuple(tools),
+        completed_actions=tuple(completed_actions),
         previous_action=previous,
     )
 
@@ -1145,6 +1186,7 @@ __all__ = [
     "APPROVED_DESKTOP_ACTIONS",
     "APPROVED_OUTCOME_TOOLS",
     "APPROVED_RUNTIME_TOOLS",
+    "MAX_COMPLETED_ACTION_HISTORY",
     "RuntimeContractError",
     "RuntimeFrameIdentity",
     "RuntimeTargetIdentity",

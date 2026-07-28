@@ -168,6 +168,7 @@ def _actor_turn() -> ActorTurnInput:
             fresh=True,
         ),
         tools=tuple(tools),
+        completed_actions=("click", "double_click"),
     )
 
 
@@ -214,7 +215,11 @@ def _verifier_turn() -> RuntimeVerifierTurn:
         ).hexdigest(),
         evidence_refs=(evidence.id,),
     )
-    return RuntimeVerifierTurn(request=request, frame=frame)
+    return RuntimeVerifierTurn(
+        request=request,
+        frame=frame,
+        completed_actions=("click", "double_click"),
+    )
 
 
 def _tool_response(
@@ -477,7 +482,16 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
         }.isdisjoint(_schema_keywords(schema))
 
     actor_context = actor_request["messages"][1]["content"][0]["text"]
-    assert "tools" not in json.loads(actor_context)
+    actor_context_value = json.loads(actor_context)
+    assert "tools" not in actor_context_value
+    assert actor_context_value["completed_actions"] == [
+        "click",
+        "double_click",
+    ]
+    assert verifier_context["completed_actions"] == [
+        "click",
+        "double_click",
+    ]
     verifier_context_text = (
         verifier_request["messages"][1]["content"][0]["text"]
     )

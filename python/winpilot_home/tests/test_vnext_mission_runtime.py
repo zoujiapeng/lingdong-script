@@ -1013,6 +1013,38 @@ def test_previous_action_view_is_bounded_and_derived_from_mission_card() -> None
     assert str(HWND) not in str(wire)
 
 
+def test_actor_and_verifier_receive_only_completed_action_order() -> None:
+    harness = _harness(
+        _action("click"),
+        _action("double_click"),
+        _claim(),
+    )
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    second = harness.runtime.run_one_turn(turn_index=1)
+    verified = harness.runtime.run_one_turn(turn_index=2)
+
+    assert first.status is RuntimeStatus.ACTION_RECORDED
+    assert second.status is RuntimeStatus.ACTION_RECORDED
+    assert verified.status is RuntimeStatus.MISSION_VERIFIED
+    assert harness.actor.turns[0].completed_actions == ()
+    assert harness.actor.turns[1].completed_actions == ("click",)
+    assert harness.actor.turns[2].completed_actions == (
+        "click",
+        "double_click",
+    )
+    assert harness.verifier.turns[0].completed_actions == (
+        "click",
+        "double_click",
+    )
+    history_wire = json.dumps(
+        harness.verifier.turns[0].completed_actions
+    )
+    assert "image_x" not in history_wire
+    assert "text" not in history_wire
+    assert "local_intent" not in history_wire
+
+
 def test_actor_result_is_discarded_when_mission_revision_changes() -> None:
     harness = _harness(_action())
     harness.actor.on_propose = lambda: harness.reducer.apply(

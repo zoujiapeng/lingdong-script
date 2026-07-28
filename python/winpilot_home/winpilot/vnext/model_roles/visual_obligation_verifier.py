@@ -99,6 +99,7 @@ def _decision_id(turn: RuntimeVerifierTurn) -> str:
         "request": turn.request.to_dict(),
         "frame": turn.frame.identity.to_dict(),
         "frame_evidence_refs": list(turn.frame.evidence_refs),
+        "completed_actions": list(turn.completed_actions),
     }
     digest = hashlib.sha256(
         _canonical_json(material).encode("utf-8")
@@ -199,6 +200,7 @@ class LiveVisualObligationVerifier:
                 "authoritative_current_jpeg": True,
                 "submitted_size": list(submitted_size),
             },
+            "completed_actions": list(turn.completed_actions),
             "evidence": [
                 {
                     "kind": ref.kind,
