@@ -3392,32 +3392,127 @@ def run_runtime_case(
                 if isinstance(previous_current, dict)
                 else ""
             )
+            before_job_ids = {
+                str(item)
+                for item in (
+                    _client_result.get("submission_before", {}).get(
+                        "job_ids",
+                        [],
+                    )
+                )
+                if str(item)
+            }
             # The Electron handler minimizes its control surface asynchronously
             # before asking the runtime to capture the foreground target. Keep
             # the already-known eval HWND in front across that bounded handoff
             # window; the product still re-reads and validates every identity
             # fact before admitting the run.
             focus_deadline = time.monotonic() + 12.0
+            focus_started = time.monotonic()
             refocus_count = 0
             admitted_run_id = ""
+            admitted_job_id = ""
+            timeline: list[dict[str, Any]] = []
+            _client_result["submission_timeline"] = timeline
             while time.monotonic() < focus_deadline:
-                if int(win32gui.GetForegroundWindow() or 0) != target_hwnd:
+                foreground_hwnd = int(
+                    win32gui.GetForegroundWindow() or 0
+                )
+                foreground_root = int(
+                    win32gui.GetAncestor(
+                        foreground_hwnd,
+                        win32con.GA_ROOT,
+                    )
+                    or foreground_hwnd
+                ) if foreground_hwnd else 0
+                if foreground_root != target_hwnd:
                     _focus_window(target_hwnd)
                     refocus_count += 1
+                    foreground_hwnd = int(
+                        win32gui.GetForegroundWindow() or 0
+                    )
+                    foreground_root = int(
+                        win32gui.GetAncestor(
+                            foreground_hwnd,
+                            win32con.GA_ROOT,
+                        )
+                        or foreground_hwnd
+                    ) if foreground_hwnd else 0
                 status = handoff_driver.runtime_status()
+                try:
+                    ui = handoff_driver.submission_ui_state()
+                except Exception as exc:
+                    ui = {
+                        "inspection_error": f"{type(exc).__name__}: {exc}",
+                        "buttons": [],
+                        "visible_errors": [],
+                    }
                 current = status.get("current_run")
                 current_run_id = str(
                     current.get("run_id")
                     if isinstance(current, dict)
                     else ""
                 )
-                if current_run_id and current_run_id != previous_run_id:
-                    admitted_run_id = current_run_id
+                new_arp_jobs = [
+                    job
+                    for job in status.get("runtime_jobs") or []
+                    if (
+                        isinstance(job, dict)
+                        and str(job.get("job_id") or "")
+                        not in before_job_ids
+                        and str(job.get("kind") or "") == "arp"
+                        and str(
+                            (job.get("metadata") or {}).get(
+                                "runtime_version"
+                            )
+                            or ""
+                        )
+                        == "vnext"
+                        and str(
+                            (job.get("metadata") or {}).get("run_id")
+                            or ""
+                        )
+                    )
+                ]
+                timeline.append(
+                    {
+                        "elapsed_ms": round(
+                            (time.monotonic() - focus_started) * 1000,
+                            3,
+                        ),
+                        "electron_foreground": (
+                            foreground_root
+                            == int(handoff_driver.identity.hwnd)
+                        ),
+                        "target_foreground": (
+                            foreground_root == target_hwnd
+                        ),
+                        "arp_running": status.get("arp_running") is True,
+                        "current_run": current,
+                        "new_runtime_jobs": new_arp_jobs,
+                        "desktop_action_queue": status.get(
+                            "desktop_action_queue",
+                            {},
+                        ),
+                        "ui": ui,
+                    }
+                )
+                if new_arp_jobs:
+                    admitted = new_arp_jobs[0]
+                    admitted_job_id = str(
+                        admitted.get("job_id") or ""
+                    )
+                    admitted_run_id = str(
+                        (admitted.get("metadata") or {}).get("run_id")
+                        or ""
+                    )
                     break
-                time.sleep(0.05)
+                time.sleep(0.1)
             evidence["bounded_hold_seconds"] = 12.0
             evidence["refocus_count"] = refocus_count
+            evidence["admitted_job_id"] = admitted_job_id
             evidence["admitted_run_id"] = admitted_run_id
+            evidence["timeline_sample_count"] = len(timeline)
             evidence["foreground_verified_after_hold"] = (
                 int(win32gui.GetForegroundWindow() or 0) == target_hwnd
             )
