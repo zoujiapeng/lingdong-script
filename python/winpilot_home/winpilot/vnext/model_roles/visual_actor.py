@@ -48,7 +48,8 @@ or action identities. Never return multiple actions. Completed-action summaries
 are authoritative facts. repeated_action_suppressed means the identical prior
 action already completed and the duplicate did not run; choose another visible
 step. Repeat scrolling only while the image still requires progress in that
-direction."""
+direction. Before repeating a completed scroll, inspect the current image: if
+its named stop condition is visible, take the next requested step."""
 
 _TOOL_DESCRIPTIONS = {
     "click": "Click one point once in the current image.",
@@ -378,6 +379,15 @@ class LiveVisualActor:
         tools = _tool_definitions(turn)
         context = turn.to_dict()
         context.pop("tools")
+        previous_action = turn.previous_action
+        if (
+            previous_action is not None
+            and previous_action.action == "scroll"
+            and previous_action.input_completed
+        ):
+            context["scroll_guard"] = (
+                "inspect_current_image_stop_condition_before_same_direction"
+            )
         context["submitted_size"] = list(submitted_size)
         provider_request = {
             "model": self._model,
