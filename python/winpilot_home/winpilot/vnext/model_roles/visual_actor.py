@@ -46,6 +46,22 @@ Return exactly one tool call. Do not emit prose or hidden reasoning. Coordinates
 must be submitted-image pixels. Never invent runtime, target, frame, evidence,
 or action identities. Never return multiple actions."""
 
+_TOOL_DESCRIPTIONS = {
+    "click": "Click one point once in the current image.",
+    "double_click": "Double-click one point once in the current image.",
+    "scroll": (
+        "Scroll at one point; amount < 0 scrolls down and amount > 0 scrolls up."
+    ),
+    "type_text": "Type the exact literal text into the focused editable control.",
+    "hotkey": "Press one key chord; do not use it for literal text entry.",
+    "claim_obligation_done": (
+        "Claim the visible goal is complete so the verifier checks it."
+    ),
+    "blocked": (
+        "Report a visible blocker only when no supplied action can advance the goal."
+    ),
+}
+
 _STRICT_SCHEMA_KEYS = frozenset(
     {
         "additionalProperties",
@@ -231,11 +247,7 @@ def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": tool.name,
-                "description": (
-                    "Submit one approved desktop action."
-                    if tool.name in APPROVED_DESKTOP_ACTIONS
-                    else "Report one Runtime outcome."
-                ),
+                "description": _TOOL_DESCRIPTIONS[tool.name],
                 "parameters": _actor_parameters(tool),
                 "strict": True,
             },
@@ -354,10 +366,9 @@ class LiveVisualActor:
             image_b64, image_media_type, submitted_size
         )
         tools = _tool_definitions(turn)
-        context = {
-            **turn.to_dict(),
-            "submitted_size": list(submitted_size),
-        }
+        context = turn.to_dict()
+        context.pop("tools")
+        context["submitted_size"] = list(submitted_size)
         provider_request = {
             "model": self._model,
             "messages": [

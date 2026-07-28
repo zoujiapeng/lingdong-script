@@ -605,11 +605,14 @@ def _apply_event(
         effect = transition.action_effect
         previous = states[obligation_id]
         streak = previous.no_progress_streak
-        if effect is not None and effect.input_completed:
+        if (
+            effect is not None
+            and effect.input_completed
+            and effect.target_binding_valid
+            and effect.frame_comparable
+        ):
             if effect.local_visual_change is LocalVisualChange.UNCHANGED:
                 streak += 1
-            elif effect.local_visual_change is LocalVisualChange.CHANGED:
-                streak = 0
         states[obligation_id] = replace(previous, no_progress_streak=streak)
         updated = replace(
             projection,
@@ -755,6 +758,7 @@ def _apply_event(
                         verification_id=verification_id,
                         verified_claim_fingerprint=previous.claim_fingerprint,
                         verification_attempt_count=attempt_count,
+                        no_progress_streak=0,
                         last_reason=_payload_text(payload, "verifier_kind", "verified"),
                     )
                     if item.id == obligation_id else item
@@ -762,7 +766,11 @@ def _apply_event(
                 ),
                 failure_summary=None,
             )
-        reason = _payload_text(payload, "reason") or ", ".join(missing or contradictions) or "verification rejected"
+        reason = (
+            ", ".join(missing or contradictions)
+            or _payload_text(payload, "reason")
+            or "verification rejected"
+        )
         failure = FailureSummary(
             kind=_payload_text(payload, "failure_kind", "verification_rejected"),
             message=reason,

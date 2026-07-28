@@ -31,6 +31,7 @@ from winpilot.vnext.evidence_plane import (
     RuntimeEvidenceReport,
     RuntimeEvidenceReportStatus,
     canonical_sha256,
+    runtime_evidence_report_sha256,
 )
 from winpilot.vnext.mission import EvidenceRef
 from winpilot.vnext.runtime import (
@@ -1160,6 +1161,50 @@ def test_complete_report_binds_all_records_and_is_deterministic(
     assert replayed.build_report(
         artifact_reader=payloads.__getitem__,
     ).to_dict() == first.to_dict()
+
+
+def test_report_hash_is_compatible_and_streams_large_valid_aggregate() -> None:
+    small = _plane()
+    _record_decision(small)
+    small_report = small.build_report()
+
+    assert runtime_evidence_report_sha256(
+        small_report
+    ) == canonical_sha256(small_report.to_dict())
+
+    large = _plane()
+    for index in range(50):
+        envelope = _actor_envelope()
+        envelope["decision_id"] = f"decision-evidence-{index:04d}"
+        envelope["mission_revision"] = index
+        envelope["turn_index"] = index
+        envelope["frame_id"] = index + 1
+        envelope["broker_projection_id"] = _projection_id(envelope)
+        large.record_actor_decision(
+            actor_envelope=envelope,
+            tool_schema=_tool_schema(),
+            broker_projection=_broker_projection(envelope),
+        )
+    large_report = large.build_report()
+
+    for record in large_report.actor_decisions:
+        assert canonical_sha256(record.to_dict())
+    with pytest.raises(
+        RuntimeEvidenceContractError,
+        match="node count exceeds 4096",
+    ):
+        canonical_sha256(large_report.to_dict())
+    expected = hashlib.sha256(
+        json.dumps(
+            large_report.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert runtime_evidence_report_sha256(large_report) == expected
+    assert runtime_evidence_report_sha256(large_report) == expected
 
 
 def test_restarted_sealed_plane_cannot_reserve_or_call_raw_again(

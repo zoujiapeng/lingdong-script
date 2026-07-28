@@ -437,6 +437,18 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
         "claim_obligation_done",
         "blocked",
     }
+    descriptions = {
+        tool["function"]["name"]: tool["function"]["description"]
+        for tool in actor_request["tools"]
+    }
+    assert "once" in descriptions["click"]
+    assert "Double-click" in descriptions["double_click"]
+    assert "amount < 0 scrolls down" in descriptions["scroll"]
+    assert "amount > 0 scrolls up" in descriptions["scroll"]
+    assert "exact literal text" in descriptions["type_text"]
+    assert "do not use it for literal text entry" in descriptions["hotkey"]
+    assert "verifier checks it" in descriptions["claim_obligation_done"]
+    assert "no supplied action can advance" in descriptions["blocked"]
     assert "response_format" not in actor_request
     assert "tools" not in verifier_request
     assert "tool_choice" not in verifier_request
@@ -465,6 +477,7 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
         }.isdisjoint(_schema_keywords(schema))
 
     actor_context = actor_request["messages"][1]["content"][0]["text"]
+    assert "tools" not in json.loads(actor_context)
     verifier_context_text = (
         verifier_request["messages"][1]["content"][0]["text"]
     )

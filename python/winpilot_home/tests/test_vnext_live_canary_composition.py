@@ -873,6 +873,35 @@ def test_product_failure_detail_is_typed_status_only() -> None:
     )
 
 
+def test_public_turn_projection_omits_private_verifier_feedback() -> None:
+    sentinel = "PRIVATE-SCREEN-SENTINEL"
+    target = canary._freeze_prebound_target(
+        _graph(),
+        _inputs(),
+        dependencies=_dependencies(),
+    )
+
+    projected = canary._public_turn_snapshot(
+        {
+            "mission_revision": 3,
+            "mission_status": MissionStatus.RUNNING.value,
+            "target_binding_id": target.binding_id,
+            "target_hwnd": target.hwnd,
+            "frame_id": 2,
+            "frame_epoch": target.captured_at_ms,
+            "frame_evidence_refs": [],
+            "action_effect": None,
+            "failure_message": sentinel,
+            "failure_summary": {"message": sentinel},
+        },
+        target=target,
+    )
+
+    assert sentinel not in json.dumps(projected, sort_keys=True)
+    assert "failure_message" not in projected
+    assert "failure_summary" not in projected
+
+
 def test_model_transport_payload_is_absent_from_bus_and_node_result() -> None:
     sentinel = "EXACT_TYPE_TEXT_PROMPT_OR_MODEL_RESPONSE"
     session = _FakeSession(
@@ -1689,6 +1718,26 @@ def test_initial_capture_dimension_mismatch_stops_before_model_or_raw(
     assert verifier_client.requests == []
     assert raw_calls == []
     assert session._authority.current is None
+
+
+def test_live_session_keeps_verifier_recovery_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session, _raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[_jpeg(640, 480)],
+        clients=(_RawClient(), _RawClient()),
+        evidence_root=tmp_path,
+        install_safe_backends=False,
+    )
+    try:
+        obligation = session._reducer.definition.obligations[0]
+
+        assert obligation.evidence_policy.max_verification_attempts == 3
+        assert obligation.evidence_policy.uncertain_policy == "blocked"
+    finally:
+        session.close()
 
 
 def test_post_capture_dimension_mismatch_is_unknown_and_never_replayed(

@@ -543,9 +543,9 @@ def test_action_effect_streak_is_derived_only_from_accepted_events() -> None:
             reducer.projection.obligation_state("obligation-1").no_progress_streak
         )
 
-    assert observed == [1, 2, 2, 0, 1]
+    assert observed == [1, 2, 2, 2, 3]
     card = reducer.card
-    assert card.no_progress_streak == 1
+    assert card.no_progress_streak == 3
     assert card.last_transition is not None
     assert card.last_transition.action_effect == material[-1][0]
 
@@ -584,8 +584,6 @@ def test_randomized_action_effect_replay_matches_suffix_policy() -> None:
             reducer.apply(_transition_with_effect(reducer, summary))
             if summary.local_visual_change is LocalVisualChange.UNCHANGED:
                 expected += 1
-            elif summary.local_visual_change is LocalVisualChange.CHANGED:
-                expected = 0
         assert reducer.projection.obligation_state(
             "obligation-1"
         ).no_progress_streak == expected
@@ -713,7 +711,7 @@ def test_action_effect_feedback_does_not_cross_obligation_boundary() -> None:
     reducer.apply(_verify_event(reducer, "first", verification.id))
 
     assert reducer.projection.active_obligation_id == "second"
-    assert reducer.projection.obligation_state("first").no_progress_streak == 1
+    assert reducer.projection.obligation_state("first").no_progress_streak == 0
     assert reducer.projection.obligation_state("second").no_progress_streak == 0
     assert reducer.card.no_progress_streak == 0
     assert reducer.card.last_transition is None
