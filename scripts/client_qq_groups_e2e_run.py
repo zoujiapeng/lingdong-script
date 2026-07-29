@@ -1072,7 +1072,6 @@ def client_case_spec(*, timeout: int, max_steps: int) -> dict[str, Any]:
         "max_steps": int(max_steps),
         "timeout": int(timeout),
         "runtime_version": "vnext",
-        "execution_constraint": "gui_required",
         "expected": "terminal",
     }
 
@@ -1163,7 +1162,6 @@ def run_qq_groups_case(
         "entrypoint": "electron_client_windows_uia",
         "task": TASK,
         "runtime_version": "vnext",
-        "execution_constraint": "gui_required",
         "oracle": verdict,
         "client_result": _sanitized_client_result(result),
         "private_artifacts": {

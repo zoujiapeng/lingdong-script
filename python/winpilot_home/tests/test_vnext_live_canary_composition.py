@@ -47,7 +47,6 @@ from winpilot.visual_runtime.frame_observer import FrameObserver
 from winpilot.vnext.actor import InvalidActorProposal, parse_actor_proposal
 from winpilot.vnext.capabilities import (
     ExecutionMedium,
-    InteractionMode,
     ToolArgumentValidationError,
     ToolArgumentValidator,
 )
@@ -1988,7 +1987,6 @@ def test_pause_invalidates_actor_frame_but_not_atomic_post_reconcile_frame() -> 
         authority=authority,
         observer=FrameObserver(authority),
         pause_controller=pause,
-        interaction_mode=InteractionMode.GUI_REQUIRED,
     )
 
     initial_broker_state = state.current(
@@ -1996,10 +1994,6 @@ def test_pause_invalidates_actor_frame_but_not_atomic_post_reconcile_frame() -> 
         turn_index=0,
     ).broker_state
     assert initial_broker_state.paused is True
-    assert (
-        initial_broker_state.interaction_mode
-        is InteractionMode.GUI_REQUIRED
-    )
 
     second = authority.commit(
         epoch=7,
@@ -2023,40 +2017,21 @@ def test_pause_invalidates_actor_frame_but_not_atomic_post_reconcile_frame() -> 
     assert state.current(reducer.projection, turn_index=0).broker_state.paused is False
 
 
-@pytest.mark.parametrize(
-    ("constraint", "expected"),
-    [
-        ("auto", InteractionMode.AUTO),
-        ("gui_required", InteractionMode.GUI_REQUIRED),
-    ],
-)
-def test_goal_admission_constraint_maps_into_live_broker_mode(
-    constraint: str,
-    expected: InteractionMode,
-) -> None:
-    reason = (
-        "explicit_gui_required"
-        if constraint == "gui_required"
-        else "gui_first_auto_default"
-    )
+def test_goal_admission_audit_is_validated_without_runtime_policy() -> None:
     context = {
         "runtime_state": {
             "goal_admission": {
                 "format": "goal-admission/1",
                 "goal": GOAL,
-                "execution_constraint": constraint,
                 "route": "live_gui",
                 "runtime_version": "vnext",
-                "reason": reason,
+                "reason": "single_semantic_agent",
                 "no_legacy_fallback": True,
             },
         },
     }
 
-    assert canary._interaction_mode_from_goal_admission(
-        context,
-        goal=GOAL,
-    ) is expected
+    assert canary._validate_goal_admission(context, goal=GOAL) is None
 
 
 class _RawClient:
@@ -2257,7 +2232,6 @@ def _real_session_with_captures(
     clock: list[float] | None = None,
     deadline: float = 310.0,
     install_safe_backends: bool = True,
-    interaction_mode: InteractionMode = InteractionMode.AUTO,
     hit_test_root: Any = None,
     target_reader: Any = None,
     on_click: Any = None,
@@ -2335,7 +2309,6 @@ def _real_session_with_captures(
         ),
         dependencies=deps,
         deadline=lambda: deadline,
-        interaction_mode=interaction_mode,
         pause_controller=None,
     )
     return (
@@ -2345,7 +2318,7 @@ def _real_session_with_captures(
     )
 
 
-def test_gui_required_fresh_observation_is_auditable_without_pixel_data(
+def test_fresh_observation_is_auditable_without_pixel_data(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2359,7 +2332,6 @@ def test_gui_required_fresh_observation_is_auditable_without_pixel_data(
         ],
         client=_RawClient(_click_responses()),
         evidence_root=tmp_path / "runtime-evidence",
-        interaction_mode=InteractionMode.GUI_REQUIRED,
     )
     trace_root = tmp_path / "public-traces"
     monkeypatch.setattr(trace, "TRACES_DIR", trace_root)
@@ -2406,7 +2378,6 @@ def test_gui_required_fresh_observation_is_auditable_without_pixel_data(
         "run_id",
         "mission_id",
         "obligation_id",
-        "interaction_mode",
         "execution_medium",
         "observation_kind",
         "target_binding_id",
@@ -2419,7 +2390,6 @@ def test_gui_required_fresh_observation_is_auditable_without_pixel_data(
         "evidence_refs",
         "parameter_visibility",
     }
-    assert observation["interaction_mode"] == "gui_required"
     assert observation["execution_medium"] == "control"
     assert observation["observation_kind"] == (
         "fresh_authoritative_target_frame"
@@ -2495,7 +2465,6 @@ def test_completed_click_adopts_stable_cross_process_foreground_next_turn(
         ],
         client=_RawClient(_click_responses()),
         evidence_root=tmp_path / "runtime-evidence",
-        interaction_mode=InteractionMode.GUI_REQUIRED,
         target_reader=reader,
         on_click=lambda: foreground.__setitem__(0, next_hwnd),
     )
@@ -2555,7 +2524,6 @@ def test_hit_test_race_is_durably_reobserved_before_one_real_input(
         ],
         client=_RawClient(_click_responses() * 2),
         evidence_root=evidence_root,
-        interaction_mode=InteractionMode.GUI_REQUIRED,
         hit_test_root=hit_test_root,
     )
     try:

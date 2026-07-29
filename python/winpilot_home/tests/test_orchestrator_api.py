@@ -460,18 +460,9 @@ def test_vnext_selection_is_frozen_once_without_legacy_compilation(
     assert calls[0][3] is frozen
 
 
-@pytest.mark.parametrize(
-    ("constraint", "reason"),
-    [
-        ("auto", "gui_first_auto_default"),
-        ("gui_required", "explicit_gui_required"),
-    ],
-)
 def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
     client,
     monkeypatch,
-    constraint,
-    reason,
 ):
     from winpilot import server
     from winpilot.orchestrator.contracts import ArpRuntimeVersion
@@ -516,7 +507,6 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
         "/api/v2/goals/runs",
         json={
             "goal": "  Complete the visible task  ",
-            "execution_constraint": constraint,
             "execution_context": context,
         },
     )
@@ -527,10 +517,9 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
     assert payload["admission"] == {
         "format": "goal-admission/1",
         "goal": "Complete the visible task",
-        "execution_constraint": constraint,
         "route": "live_gui",
         "runtime_version": "vnext",
-        "reason": reason,
+        "reason": "single_semantic_agent",
         "no_legacy_fallback": True,
     }
     assert len(calls) == 1
@@ -550,16 +539,24 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
     }
 
 
-@pytest.mark.parametrize("field", ["graph", "runtime_version"])
+@pytest.mark.parametrize(
+    "field",
+    ["execution_constraint", "graph", "runtime_version"],
+)
 def test_product_goal_admission_rejects_client_owned_projection_fields(
     client,
     field,
 ):
     body = {
         "goal": "Complete the visible task",
-        "execution_constraint": "gui_required",
         "execution_context": _client_execution_context(),
-        field: {} if field == "graph" else "vnext",
+        field: (
+            {}
+            if field == "graph"
+            else "gui_required"
+            if field == "execution_constraint"
+            else "vnext"
+        ),
     }
 
     response = client.post("/api/v2/goals/runs", json=body)
@@ -590,7 +587,6 @@ def test_product_goal_admission_rejects_client_owned_task_identity(
         "/api/v2/goals/runs",
         json={
             "goal": "Complete the visible task",
-            "execution_constraint": "gui_required",
             "execution_context": context,
         },
     )
@@ -630,7 +626,6 @@ def test_product_goal_admission_fails_closed_without_legacy_fallback(
         "/api/v2/goals/runs",
         json={
             "goal": "Complete the visible task",
-            "execution_constraint": "auto",
             "execution_context": _client_execution_context(),
         },
     )
@@ -671,10 +666,9 @@ def test_start_execution_freezes_goal_admission_before_job_submission(
     audit = {
         "format": "goal-admission/1",
         "goal": "Complete the visible task",
-        "execution_constraint": "gui_required",
         "route": "live_gui",
         "runtime_version": "vnext",
-        "reason": "explicit_gui_required",
+        "reason": "single_semantic_agent",
         "no_legacy_fallback": True,
     }
 

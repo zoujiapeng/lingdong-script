@@ -35,16 +35,15 @@ def test_harness_keeps_the_exact_eleven_and_one_combined_long_goal():
     assert harness.MIXED_CASES["mix-all-11"]["max_steps"] == 400
 
 
-def test_harness_targets_the_primary_execution_constraint_selector_label():
-    harness = _load_harness()
+def test_harness_has_no_execution_policy_selector_argument():
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "scripts"
+        / "client_e2e_run.py"
+    ).read_text(encoding="utf-8")
 
-    assert harness.EXECUTION_CONSTRAINT_SELECTOR == "执行约束"
-    assert harness._execution_constraint_from_label("自动选择") == "auto"
-    assert (
-        harness._execution_constraint_from_label("必须使用 GUI")
-        == "gui_required"
-    )
-    assert harness._execution_constraint_from_label("Legacy") == ""
+    assert "--execution-constraint" not in source
+    assert "EXECUTION_CONSTRAINT_SELECTOR" not in source
 
 
 def test_visible_client_is_verified_foreground_before_goal_submission():
@@ -623,7 +622,7 @@ def test_vnext_memory_report_marks_an_absent_session_context_as_empty(
 
     evidence = harness._memory_isolation_evidence(
         ["arp-vnext"],
-        {"execution_constraint": "gui_required"},
+        {},
         require_empty_session=True,
         runtime_version="vnext",
     )
@@ -917,7 +916,7 @@ def test_vnext_execution_evidence_projects_raw_receipts_and_terminal_event(
     assert evidence["parse_errors"] == []
 
 
-def test_gui_required_trace_accepts_only_vnext_os_input_receipts(
+def test_gui_execution_trace_accepts_only_vnext_os_input_receipts(
     monkeypatch,
     tmp_path,
 ):
@@ -959,7 +958,7 @@ def test_gui_required_trace_accepts_only_vnext_os_input_receipts(
     )
     monkeypatch.setattr(harness, "TRACE_ROOT", tmp_path)
 
-    evidence = harness._gui_constraint_trace_evidence(
+    evidence = harness._gui_execution_trace_evidence(
         ["arp-gui"],
         "arp-gui",
     )
@@ -978,7 +977,7 @@ def test_gui_required_trace_accepts_only_vnext_os_input_receipts(
         + "\n",
         encoding="utf-8",
     )
-    rejected = harness._gui_constraint_trace_evidence(
+    rejected = harness._gui_execution_trace_evidence(
         ["arp-gui"],
         "arp-gui",
     )
@@ -990,7 +989,7 @@ def test_gui_required_trace_accepts_only_vnext_os_input_receipts(
     )
 
 
-def test_gui_required_trace_rejects_receipt_from_different_outer_run(
+def test_gui_execution_trace_rejects_receipt_from_different_outer_run(
     monkeypatch,
     tmp_path,
 ):
@@ -1032,7 +1031,7 @@ def test_gui_required_trace_rejects_receipt_from_different_outer_run(
     )
     monkeypatch.setattr(harness, "TRACE_ROOT", tmp_path)
 
-    evidence = harness._gui_constraint_trace_evidence(
+    evidence = harness._gui_execution_trace_evidence(
         ["arp-gui"],
         "arp-gui",
     )
@@ -1045,7 +1044,7 @@ def test_gui_required_trace_rejects_receipt_from_different_outer_run(
     )
 
 
-def test_gui_required_trace_rejects_mismatched_mission_or_task_binding(
+def test_gui_execution_trace_rejects_mismatched_mission_or_task_binding(
     monkeypatch,
     tmp_path,
 ):
@@ -1098,7 +1097,7 @@ def test_gui_required_trace_rejects_mismatched_mission_or_task_binding(
     )
     monkeypatch.setattr(harness, "TRACE_ROOT", tmp_path)
 
-    evidence = harness._gui_constraint_trace_evidence(
+    evidence = harness._gui_execution_trace_evidence(
         ["arp-gui"],
         "arp-gui",
     )
@@ -1115,27 +1114,20 @@ def test_gui_required_trace_rejects_mismatched_mission_or_task_binding(
     )
 
 
-def test_gui_required_execution_validity_requires_admission_and_gui_trace():
+def test_execution_validity_does_not_depend_on_frontend_policy_state():
     harness = _load_harness()
     result = {
         "expected": "terminal",
-        "configuration": {"execution_constraint": "gui_required"},
         "result": {"outcome": "terminal", "status": "done"},
         "memory_isolation": {"passed": True},
         "trace_binding": {
             "passed": True,
             "no_legacy_fallback": True,
-            "goal_admission": {
-                "execution_constraint": "gui_required",
-                "route": "live_gui",
-            },
         },
-        "gui_constraint_trace": {"passed": True},
+        "gui_execution_trace": {"passed": False},
     }
 
     assert harness._case_execution_valid(result) is True
-    result["gui_constraint_trace"] = {"passed": False}
-    assert harness._case_execution_valid(result) is False
 
 
 def test_runtime_done_without_an_independent_oracle_is_not_a_pass():

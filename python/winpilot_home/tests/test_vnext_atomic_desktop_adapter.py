@@ -989,12 +989,29 @@ def test_durable_attempt_records_exact_submitted_and_physical_arguments(
 ) -> None:
     run_directory = tmp_path / "evidence-run"
     expected_hit_point = POINT
-    if action == "scroll":
+    if action in {"click", "double_click", "scroll"}:
         expected_hit_point = _map_submitted_test_point(
             submitted_arguments["image_x"],
             submitted_arguments["image_y"],
         )
-        assert expected_hit_point == (47, 49)
+        assert expected_hit_point == (
+            physical_arguments["x"],
+            physical_arguments["y"],
+        )
+    elif action == "drag":
+        assert _map_submitted_test_point(
+            submitted_arguments["image_x1"],
+            submitted_arguments["image_y1"],
+        ) == (physical_arguments["x1"], physical_arguments["y1"])
+        assert _map_submitted_test_point(
+            submitted_arguments["image_x2"],
+            submitted_arguments["image_y2"],
+        ) == (physical_arguments["x2"], physical_arguments["y2"])
+        if "image_points" in submitted_arguments:
+            assert [
+                _map_submitted_test_point(*point)
+                for point in submitted_arguments["image_points"]
+            ] == [tuple(point) for point in physical_arguments["points"]]
     harness = _harness(
         action,
         action_args=submitted_arguments,

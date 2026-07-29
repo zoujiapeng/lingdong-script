@@ -9,7 +9,6 @@ import type {
   ArpExecutionSnapshot,
   CapabilitySpec,
   ClientExecutionContext,
-  ExecutionConstraint,
   GraphValidation,
   PlatformOverview,
   RunProjection,
@@ -36,10 +35,9 @@ async function releaseDesktopHandoffBestEffort(): Promise<void> {
   }
 }
 
-export async function startGoalWithConstraint(
+export async function startGoalWithDesktopHandoff(
   client: GoalRunClient,
   goal: string,
-  executionConstraint: ExecutionConstraint = 'auto',
 ): Promise<ArpExecutionSnapshot> {
   const fullGoal = goal.trim();
   if (!fullGoal) throw new Error('Goal run requires a non-empty goal.');
@@ -57,7 +55,6 @@ export async function startGoalWithConstraint(
   try {
     run = await client.startGoalRun(
       fullGoal,
-      executionConstraint,
       executionContext,
     );
   } catch (error) {
@@ -249,15 +246,11 @@ export function useControlPlane() {
     return requireClient();
   };
 
-  const startGoal = useCallback(async (
-    goal: string,
-    executionConstraint: ExecutionConstraint = 'auto',
-  ) => {
+  const startGoal = useCallback(async (goal: string) => {
     const client = requireCompatibleClient();
-    const run = await startGoalWithConstraint(
+    const run = await startGoalWithDesktopHandoff(
       client,
       goal,
-      executionConstraint,
     );
     await refresh();
     return run;

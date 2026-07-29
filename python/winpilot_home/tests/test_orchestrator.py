@@ -699,10 +699,9 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
     admission = {
         "format": "goal-admission/1",
         "goal": "Frozen vNext run",
-        "execution_constraint": "gui_required",
         "route": "live_gui",
         "runtime_version": "vnext",
-        "reason": "explicit_gui_required",
+        "reason": "single_semantic_agent",
         "no_legacy_fallback": True,
     }
     store.on_event({
@@ -744,7 +743,7 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
             "no_legacy_fallback": False,
             "goal_admission": {
                 **admission,
-                "execution_constraint": "auto",
+                "reason": "tampered",
             },
             "status": "succeeded",
         },
@@ -759,7 +758,7 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
         "frozen": admission,
         "observed": {
             **admission,
-            "execution_constraint": "auto",
+            "reason": "tampered",
         },
         "event_type": "arp_run_done",
     }

@@ -45,11 +45,6 @@ class ExecutionRoute(str, Enum):
     BLOCKED = "blocked"
 
 
-class InteractionMode(str, Enum):
-    AUTO = "auto"
-    GUI_REQUIRED = "gui_required"
-
-
 class ExecutionMedium(str, Enum):
     LOCAL = "local"
     GUI = "gui"
@@ -569,7 +564,6 @@ __all__ = [
     "CapabilityContractError",
     "ToolRoute",
     "ExecutionRoute",
-    "InteractionMode",
     "ExecutionMedium",
     "MutationKind",
     "PointerDisposition",

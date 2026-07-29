@@ -533,9 +533,6 @@ def _client_case_spec(source: dict[str, Any]) -> dict[str, Any]:
         "max_steps": int(source["max_steps"]),
         "timeout": int(source["timeout"]),
         "runtime_version": str(source.get("runtime_version") or "vnext"),
-        "execution_constraint": str(
-            source.get("execution_constraint") or "auto"
-        ),
     }
 
 
@@ -582,9 +579,6 @@ def run_visual_case(
         "task": source["task"],
         "entrypoint": "electron_client_windows_uia",
         "runtime_version": str(source.get("runtime_version") or "vnext"),
-        "execution_constraint": str(
-            source.get("execution_constraint") or "auto"
-        ),
         "goal_admission_required": True,
         "ground_truth": str(
             source.get("ground_truth") or "trusted_browser_pointer_events"

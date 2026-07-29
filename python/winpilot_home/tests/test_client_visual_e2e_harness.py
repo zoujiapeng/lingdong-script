@@ -62,8 +62,6 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     }
     assert all(
         harness.VISUAL_CASES[name]["runtime_version"] == "vnext"
-        and harness.VISUAL_CASES[name].get("execution_constraint", "auto")
-        == "auto"
         for name in harness.SUITES["goal-admission"]
     )
     assert {
@@ -77,16 +75,8 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
         "必须使用GUI和真实鼠标完成当前界面上的测试。",
         "必须使用GUI和真实鼠标键盘，帮我在当前开启的页面里答完所有题。",
     }
-    assert (
-        harness.VISUAL_CASES["dynamic-hold"].get(
-            "execution_constraint",
-            "auto",
-        )
-        == "auto"
-    )
     quiz_case = harness.VISUAL_CASES["answer-all-questions"]
     assert quiz_case["runtime_version"] == "vnext"
-    assert quiz_case.get("execution_constraint", "auto") == "auto"
     assert quiz_case["ground_truth"] == (
         "trusted_browser_form_submit_and_server_evaluation"
     )
@@ -108,7 +98,7 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     )
 
 
-def test_client_case_specs_preserve_spoken_gui_constraints():
+def test_client_case_specs_preserve_spoken_gui_requirements():
     harness = _load_harness()
 
     source = harness.VISUAL_CASES["precise-click"]
@@ -119,7 +109,6 @@ def test_client_case_specs_preserve_spoken_gui_constraints():
         "max_steps": 12,
         "timeout": 360,
         "runtime_version": "vnext",
-        "execution_constraint": "auto",
     }
 
     quiz_spec = harness._client_case_spec(
@@ -130,7 +119,6 @@ def test_client_case_specs_preserve_spoken_gui_constraints():
         "max_steps": 40,
         "timeout": 600,
         "runtime_version": "vnext",
-        "execution_constraint": "auto",
     }
     assert "scenario" not in quiz_spec
     assert "seed" not in quiz_spec

@@ -48,7 +48,6 @@ from ..vnext.capabilities import (
     BrokerRuntimeState,
     CapabilityBroker,
     ExecutionMedium,
-    InteractionMode,
     MutationKind,
     PointerDisposition,
     PointerLeaseState,
@@ -274,7 +273,6 @@ class _SessionBuild:
     model: _ModelConfig
     dependencies: _CompositionDependencies
     deadline: Callable[[], float]
-    interaction_mode: InteractionMode = InteractionMode.AUTO
     pause_controller: Any = None
 
 
@@ -1104,8 +1102,6 @@ def _tool_catalog() -> ToolCatalog:
                     _DRAG_GATES
                     if name == "drag"
                     else _GUI_GATES
-                    if mutation is MutationKind.GUI
-                    else ()
                 ),
                 order=order,
             )
@@ -1246,7 +1242,6 @@ class _LiveRuntimeState:
         authority: FrameAuthority,
         observer: FrameObserver,
         pause_controller: Any,
-        interaction_mode: InteractionMode = InteractionMode.AUTO,
     ) -> None:
         if workspace is None:
             if (
@@ -1302,7 +1297,6 @@ class _LiveRuntimeState:
         self._authority = authority
         self._observer = observer
         self._pause_controller = pause_controller
-        self._interaction_mode = InteractionMode(interaction_mode)
         self._pointer_state_reader: Callable[[], PointerLeaseState] | None = None
 
     def bind_pointer_state_reader(
@@ -1470,7 +1464,6 @@ class _LiveRuntimeState:
             run_id=self._registry.run_id,
             mission_id=self._registry.mission_id,
             obligation_id=_OBLIGATION_ID,
-            interaction_mode=self._interaction_mode.value,
             execution_medium=ExecutionMedium.CONTROL.value,
             observation_kind="fresh_authoritative_target_frame",
             target_binding_id=binding.binding_id,
@@ -1548,7 +1541,6 @@ class _LiveRuntimeState:
             broker_state=BrokerRuntimeState(
                 turn_index=turn_index,
                 available_capabilities=("visual.interact",),
-                interaction_mode=self._interaction_mode,
                 target=TargetState(
                     binding_id=binding.binding_id,
                     hwnd=binding.hwnd,
@@ -2278,7 +2270,6 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
             authority=authority,
             observer=observer,
             pause_controller=build.pause_controller,
-            interaction_mode=build.interaction_mode,
         )
     except Exception as exc:
         cleanup_errors: list[Exception] = []
@@ -2889,23 +2880,22 @@ def _public_runtime_evidence_summary(
     }
 
 
-def _interaction_mode_from_goal_admission(
+def _validate_goal_admission(
     context: Mapping[str, Any],
     *,
     goal: str,
-) -> InteractionMode:
+) -> None:
     runtime_state = context.get("runtime_state")
     if not isinstance(runtime_state, Mapping):
-        return InteractionMode.AUTO
+        return
     raw = runtime_state.get("goal_admission")
     if raw is None:
-        return InteractionMode.AUTO
+        return
     if not isinstance(raw, Mapping):
         raise RuntimeError("vNext goal admission audit is not an object")
     expected_fields = {
         "format",
         "goal",
-        "execution_constraint",
         "route",
         "runtime_version",
         "reason",
@@ -2913,24 +2903,15 @@ def _interaction_mode_from_goal_admission(
     }
     if set(raw) != expected_fields:
         raise RuntimeError("vNext goal admission audit fields are not exact")
-    constraint = raw.get("execution_constraint")
-    expected_reason = (
-        "explicit_gui_required"
-        if constraint == InteractionMode.GUI_REQUIRED.value
-        else "gui_first_auto_default"
-        if constraint == InteractionMode.AUTO.value
-        else ""
-    )
     if (
         raw.get("format") != "goal-admission/1"
         or raw.get("goal") != goal
         or raw.get("route") != "live_gui"
         or raw.get("runtime_version") != _RUNTIME_VERSION
-        or raw.get("reason") != expected_reason
+        or raw.get("reason") != "single_semantic_agent"
         or raw.get("no_legacy_fallback") is not True
     ):
         raise RuntimeError("vNext goal admission audit is inconsistent")
-    return InteractionMode(constraint)
 
 
 class _PreparedHandler:
@@ -3015,7 +2996,7 @@ class _PreparedHandler:
                 f"{run_id}|{self._graph.id}".encode("utf-8")
             ).hexdigest()[:24]
         )
-        interaction_mode = _interaction_mode_from_goal_admission(
+        _validate_goal_admission(
             context,
             goal=self._goal,
         )
@@ -3034,7 +3015,6 @@ class _PreparedHandler:
             runtime_version=_RUNTIME_VERSION,
             runtime_budget=budget_wire,
             no_legacy_fallback=True,
-            interaction_mode=interaction_mode.value,
             model=self._model.model,
             target=self._target.trace_identity(),
         )
@@ -3065,7 +3045,6 @@ class _PreparedHandler:
             model=self._model,
             dependencies=self._dependencies,
             deadline=lambda: deadline[0],
-            interaction_mode=interaction_mode,
             pause_controller=pause_controller,
         )
         try:

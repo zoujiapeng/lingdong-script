@@ -34,13 +34,6 @@ class GoalAdmissionUnavailable(GoalAdmissionError):
     """The selected server-owned route is not currently available."""
 
 
-class GoalExecutionConstraint(str, Enum):
-    """A user constraint, never a client-selected implementation version."""
-
-    AUTO = "auto"
-    GUI_REQUIRED = "gui_required"
-
-
 class GoalExecutionRoute(str, Enum):
     LIVE_GUI = "live_gui"
 
@@ -51,14 +44,12 @@ class GoalRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     goal: str = Field(min_length=1)
-    execution_constraint: GoalExecutionConstraint = GoalExecutionConstraint.AUTO
     execution_context: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
 class GoalAdmissionDecision:
     goal: str
-    execution_constraint: GoalExecutionConstraint
     route: GoalExecutionRoute
     runtime_version: ArpRuntimeVersion
     reason: str
@@ -69,7 +60,6 @@ class GoalAdmissionDecision:
         return {
             "format": self.format,
             "goal": self.goal,
-            "execution_constraint": self.execution_constraint.value,
             "route": self.route.value,
             "runtime_version": self.runtime_version.value,
             "reason": self.reason,
@@ -79,7 +69,6 @@ class GoalAdmissionDecision:
 
 def admit_goal(
     goal: str,
-    execution_constraint: GoalExecutionConstraint,
     *,
     live_gui_enabled: bool,
 ) -> GoalAdmissionDecision:
@@ -90,24 +79,15 @@ def admit_goal(
     normalized_goal = goal.strip()
     if not normalized_goal:
         raise GoalAdmissionError("goal must not be empty")
-    try:
-        constraint = GoalExecutionConstraint(execution_constraint)
-    except (TypeError, ValueError) as exc:
-        raise GoalAdmissionError("unsupported execution constraint") from exc
     if live_gui_enabled is not True:
         raise GoalAdmissionUnavailable(
             "vNext live canary is disabled; no legacy fallback was run"
         )
     return GoalAdmissionDecision(
         goal=normalized_goal,
-        execution_constraint=constraint,
         route=GoalExecutionRoute.LIVE_GUI,
         runtime_version=ArpRuntimeVersion.VNEXT,
-        reason=(
-            "explicit_gui_required"
-            if constraint is GoalExecutionConstraint.GUI_REQUIRED
-            else "gui_first_auto_default"
-        ),
+        reason="single_semantic_agent",
     )
 
 
@@ -145,7 +125,6 @@ __all__ = [
     "GoalAdmissionDecision",
     "GoalAdmissionError",
     "GoalAdmissionUnavailable",
-    "GoalExecutionConstraint",
     "GoalExecutionRoute",
     "GoalRunRequest",
     "admit_goal",

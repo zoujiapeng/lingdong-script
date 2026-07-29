@@ -1393,7 +1393,6 @@ def start_goal_run(req: GoalRunRequest) -> dict[str, Any]:
         vnext_config = frozen_config.get("vnext")
         admission = admit_goal(
             req.goal,
-            req.execution_constraint,
             live_gui_enabled=(
                 isinstance(vnext_config, dict)
                 and vnext_config.get("live_canary_enabled") is True

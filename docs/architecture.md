@@ -26,7 +26,7 @@ PlatformWorkbench
   -> LiveVisualActor / GUI transaction
 ```
 
-`POST /api/v2/goals/runs` 是主 Agent 用户入口。请求只携带 `goal`、`execution_constraint` 和客户端采集的 `execution_context`；不接受客户端选择的 `graph`、`runtime_version` 或 `task_id`。服务端当前唯一选择 vNext，构造规范图并生成、绑定图身份；vNext 不可用时请求失败，不静默回退 Legacy。
+`POST /api/v2/goals/runs` 是主 Agent 用户入口。请求只携带 `goal` 和客户端采集的 `execution_context`；不接受客户端选择的执行媒介、`graph`、`runtime_version` 或 `task_id`。服务端当前唯一选择 vNext，构造规范图并生成、绑定图身份；vNext 不可用时请求失败，不静默回退 Legacy。
 
 `/api/chat`、MCP、CLI、scheduler 和 integration runner 可以复用内部能力，但不能形成行为不同的第二套 GUI 产品入口。直接 POST API 也不能代替 Electron 客户端 E2E。`/api/v2/task-contracts/compile` 与可由客户端提交图和 runtime 的 `/api/v2/arp/runs` 暂留给 Studio、自动化编辑和兼容调用，不属于主 Agent 的意图或 runtime 选择链。
 
@@ -79,24 +79,13 @@ pre-frame
 
 ## 控制平面
 
-### Goal Admission 与执行约束
+### 原始目标与执行媒介
 
-Goal Admission 是主 Agent 的服务端决策边界。它保留完整用户目标，只选择执行路由，不按应用名、任务关键词或预写步骤决定工具。当前支持两个约束：
+主 Agent 不再有前端“执行约束”选择器，也没有对应的请求字段、Goal Admission 状态或 Broker `InteractionMode`。用户口头强调“必须使用 GUI”时，这句话只存在于原始 `goal`，由同一个语义 Agent 理解；系统不再要求用户把同一意图重复编码到系统开关，也不增加关键词路由器或第二个 Task Profiler。
 
-- `auto`：当前采用 GUI-first，服务端选择 vNext `live_gui` 路由；
-- `gui_required`：用户明确要求必须使用 GUI，约束贯穿到 vNext Broker 的运行时状态。
+当前 live vNext 工具目录仍只有 GUI/control 工具，因此当前产品事实上只能走 GUI。它尚未实现“GUI、命令行、provider 同时可见后由模型自主选择”，不能把删除选择器误报成混合执行已经完成。将来接入 shell 或 provider 时，必须把它们作为同一 Agent 的普通工具放入同一轮选择；`execution_medium` 只描述工具实际如何执行，不再承载用户策略。Runtime 只保留工具 schema、当前可信画面、窗口/指针所有权和不可逆外部动作边界等机械约束，不解释任务类型。
 
-`gui_required` 不是提示词建议。每个 `ToolSpec` 都声明 `execution_medium`：`gui`、`control`、`local` 或 `external`。Broker 在投影工具面时拒绝 provider/deterministic executor，只允许 Visual Actor 的 `gui` mutation 与非 mutation 的 `control` 工具；没有合格工具时返回 blocked，不降级到 shell、provider、Legacy 或未分类工具。未声明的非 mutation 工具按 `local` 处理，不能因 `mutation_kind=none` 绕过门禁。
-
-“必须使用 GUI”不等于“必须制造一次无意义点击”。交互任务必须有绑定当前
-run/mission 的 applied OS-input receipt，并由外部状态验证结果；如果目标在
-初始界面已经满足，或目标本身只是读取界面，Visual Actor 可以在零 mutation
-下 claim，但 control 工具只会在当前绑定窗口存在新鲜、权威的
-`target_window` 帧时投影。每次此类观察产生不含像素、坐标和文本的
-`vnext_gui_observation` 审计事件。陈旧帧、串 run 回执或未绑定窗口均不能
-作为 GUI 使用证据。
-
-客户端 `execution_context` 只描述本次桌面交接。服务端在生成规范图之后绑定 `task_id`，因此客户端上下文不能借机注入图身份或选择 runtime。更完整的迁移边界、兼容面和退出门见 [vNext 迁移](vnext-migration.md)。
+客户端 `execution_context` 只描述本次桌面交接。服务端在生成规范图之后绑定 `task_id`，因此客户端上下文不能借机注入图身份或选择 runtime。真实验收检查“Agent 实际用了什么”和外部结果，不检查前端策略状态。更完整的迁移边界、兼容面和退出门见 [vNext 迁移](vnext-migration.md)。
 
 ### Task Contract（Studio/兼容）
 
@@ -284,7 +273,7 @@ GUI 架构改动至少需要：
 ## 文档事实源
 
 - 本文：架构、不变量和当前债务；
-- [vnext-migration.md](vnext-migration.md)：主入口、执行约束、Legacy 兼容边界和删除退出门；
+- [vnext-migration.md](vnext-migration.md)：主入口、模型工具选择、Legacy 兼容边界和删除退出门；
 - [winpilot-agent.md](winpilot-agent.md)：工具、Controller、done gate 等实现细节；
 - [testing.md](testing.md)：测试分类和通过定义；
 - [frontend.md](frontend.md)：客户端入口和刷新/历史呈现；

@@ -5,7 +5,6 @@ import type {
   ChatGPTDesktopIntegration,
   CurrentRunResponse,
   ClientExecutionContext,
-  ExecutionConstraint,
   GraphValidation,
   PlatformOverview,
   RunProjection,
@@ -445,7 +444,6 @@ export class ControlPlaneClient {
 
   async startGoalRun(
     goal: string,
-    executionConstraint: ExecutionConstraint,
     executionContext: ClientExecutionContext,
   ): Promise<ArpExecutionSnapshot> {
     const response = await this.request<{
@@ -456,7 +454,6 @@ export class ControlPlaneClient {
       method: 'POST',
       body: JSON.stringify({
         goal,
-        execution_constraint: executionConstraint,
         execution_context: executionContext,
       }),
     });

@@ -15,7 +15,6 @@ from winpilot.vnext.capabilities import (
     CapabilityBroker,
     ExecutionMedium,
     ExecutionRoute,
-    InteractionMode,
     MutationKind,
     PointerDisposition,
     PointerLeaseState,
@@ -738,7 +737,6 @@ def _harness(
     profile_provider: bool = False,
     with_runtime_evidence: bool = False,
     controller_evidence_mode: str = "same",
-    interaction_mode: InteractionMode = InteractionMode.AUTO,
 ) -> Harness:
     definition = definition or _definition()
     registry = EvidenceRegistry(definition.mission_id, definition.run_id)
@@ -810,7 +808,6 @@ def _harness(
         broker_state=BrokerRuntimeState(
             turn_index=0,
             available_capabilities=("visual.interact",),
-            interaction_mode=interaction_mode,
             target=TargetState(
                 binding.binding_id,
                 binding.hwnd,
@@ -984,11 +981,8 @@ def test_keep_holding_blocks_when_controller_returns_released_pointer() -> None:
     assert harness.controller.calls == 1
 
 
-def test_gui_required_can_verify_already_satisfied_goal_without_mutation() -> None:
-    harness = _harness(
-        _claim(),
-        interaction_mode=InteractionMode.GUI_REQUIRED,
-    )
+def test_actor_can_verify_already_satisfied_goal_without_mutation() -> None:
+    harness = _harness(_claim())
 
     assert harness.runtime.verified_completion_result is None
     result = harness.runtime.run_one_turn(turn_index=0)
@@ -1018,11 +1012,8 @@ def test_gui_required_can_verify_already_satisfied_goal_without_mutation() -> No
     )
 
 
-def test_gui_required_claim_fails_closed_without_fresh_observation() -> None:
-    harness = _harness(
-        _claim(),
-        interaction_mode=InteractionMode.GUI_REQUIRED,
-    )
+def test_claim_fails_closed_without_fresh_observation() -> None:
+    harness = _harness(_claim())
     stale_frame = replace(
         harness.state.snapshot.broker_state.frame,
         fresh=False,

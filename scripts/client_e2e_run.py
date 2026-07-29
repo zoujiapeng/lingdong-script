@@ -43,7 +43,6 @@ RUN_TASK = "运行任务"
 STOP_TASK = "停止"
 COLD_START = "冷启动（禁用 Skill/长期经验）"
 RUNTIME_SELECTOR = "运行时"
-EXECUTION_CONSTRAINT_SELECTOR = "执行约束"
 CLARIFICATION_HEADING = "任务尚未启动，请先补充必要信息"
 
 ORIGINAL_CASES: dict[str, dict[str, Any]] = {
@@ -289,46 +288,6 @@ def _select_runtime_version(control: Any, runtime_version: str) -> dict[str, str
             f"运行时选择回读不一致: requested={requested!r}, label={label!r}"
         )
     return {"runtime_version": selected, "runtime_selector_label": label}
-
-
-def _execution_constraint_from_label(value: str) -> str:
-    normalized = re.sub(r"[\s_-]+", "", str(value or "").strip().casefold())
-    if normalized in {"auto", "自动", "自动选择"}:
-        return "auto"
-    if normalized in {
-        "guirequired",
-        "必须gui",
-        "必须使用gui",
-        "只使用gui",
-    }:
-        return "gui_required"
-    return ""
-
-
-def _select_execution_constraint(
-    control: Any,
-    execution_constraint: str,
-) -> dict[str, str]:
-    requested = str(execution_constraint or "").strip().casefold()
-    if requested not in {"auto", "gui_required"}:
-        raise ValueError(f"不支持的执行约束: {execution_constraint!r}")
-    control.Click()
-    auto.SendKeys("{Home}")
-    if requested == "gui_required":
-        auto.SendKeys("{Down}")
-    auto.SendKeys("{Enter}")
-    time.sleep(0.2)
-    label = _selected_combobox_label(control)
-    selected = _execution_constraint_from_label(label)
-    if selected != requested:
-        raise RuntimeError(
-            "执行约束选择回读不一致: "
-            f"requested={requested!r}, label={label!r}"
-        )
-    return {
-        "execution_constraint": selected,
-        "execution_constraint_selector_label": label,
-    }
 
 
 def _admitted_run_id(handoff: Any) -> str:
@@ -580,10 +539,10 @@ class ElectronClientDriver:
             "Button",
             name=RUN_TASK,
         )
-        constraint_selector = _first_visible_descendant(
+        policy_selector = _first_visible_descendant(
             self.window,
             "ComboBox",
-            name=EXECUTION_CONSTRAINT_SELECTOR,
+            name="执行约束",
         )
         goal = _first_visible_descendant(
             self.window,
@@ -604,11 +563,7 @@ class ElectronClientDriver:
             "run_button_enabled": run_enabled,
             "stop_button_present": False,
             "runtime_selector_label": "",
-            "execution_constraint_selector_label": (
-                _selected_combobox_label(constraint_selector)
-                if constraint_selector is not None
-                else ""
-            ),
+            "policy_selector_present": policy_selector is not None,
             "goal_input": goal_value,
             "visible_errors": (
                 ["visible goal does not match the submitted task"]
@@ -692,12 +647,6 @@ class ElectronClientDriver:
                         self.window,
                         "Edit",
                         name_contains="描述希望代理",
-                    )
-                    is not None
-                    and _first_visible_descendant(
-                        self.window,
-                        "ComboBox",
-                        name=EXECUTION_CONSTRAINT_SELECTOR,
                     )
                     is not None
                 ):
@@ -821,7 +770,6 @@ class ElectronClientDriver:
         task: str,
         max_steps: int | None = None,
         runtime_version: str = "vnext",
-        execution_constraint: str = "auto",
     ) -> dict[str, Any]:
         self.restore_and_focus()
         try:
@@ -842,22 +790,18 @@ class ElectronClientDriver:
                 "主 Agent 入口只接受服务端准入的 vNext 运行；"
                 "Legacy 已移出该用户入口"
             )
-        constraint_selector = _first_visible_descendant(
+        policy_selector = _first_visible_descendant(
             self.window,
             "ComboBox",
-            name=EXECUTION_CONSTRAINT_SELECTOR,
+            name="执行约束",
         )
-        if constraint_selector is None:
+        if policy_selector is not None:
             raise RuntimeError(
-                "客户端执行约束选择器不可见"
+                "客户端仍暴露已经删除的执行约束选择器"
             )
         selection = {
             "runtime_version": "vnext",
             "runtime_selector_label": "",
-            **_select_execution_constraint(
-                constraint_selector,
-                execution_constraint,
-            ),
         }
 
         value = _control_value(goal)
@@ -1422,11 +1366,7 @@ def _memory_isolation_evidence(
         if required_context_run_id
         else True
     )
-    primary_vnext_entry = bool(
-        runtime_version == "vnext"
-        and configuration.get("execution_constraint")
-        in {"auto", "gui_required"}
-    )
+    primary_vnext_entry = runtime_version == "vnext"
     return {
         "passed": bool(
             (toggle_on or primary_vnext_entry)
@@ -1553,11 +1493,11 @@ def _execution_evidence(trace_ids: list[str]) -> dict[str, Any]:
     }
 
 
-def _gui_constraint_trace_evidence(
+def _gui_execution_trace_evidence(
     trace_ids: list[str],
     outer_run_id: str,
 ) -> dict[str, Any]:
-    """Fail closed unless a GUI-required run used only vNext OS input receipts."""
+    """Audit whether this run actually used vNext OS input receipts."""
 
     outer_run_id = str(outer_run_id or "").strip()
     gui_actions = {
@@ -1722,27 +1662,11 @@ def _case_execution_valid(result: dict[str, Any]) -> bool:
         if expected == "persistent"
         else outcome == "terminal" and status == "done"
     )
-    constraint = str(
-        (result.get("configuration") or {}).get("execution_constraint")
-        or "auto"
-    )
     trace_binding = result.get("trace_binding") or {}
-    admission = trace_binding.get("goal_admission") or {}
-    constraint_ok = (
-        True
-        if constraint != "gui_required"
-        else (
-            admission.get("execution_constraint") == "gui_required"
-            and admission.get("route") == "live_gui"
-            and trace_binding.get("no_legacy_fallback") is True
-            and (result.get("gui_constraint_trace") or {}).get("passed") is True
-        )
-    )
     return bool(
         runtime_ok
         and (result.get("memory_isolation") or {}).get("passed") is True
         and trace_binding.get("passed") is True
-        and constraint_ok
     )
 
 
@@ -1820,7 +1744,6 @@ def run_case(
             spec["task"],
             int(spec.get("max_steps", 120)),
             str(spec.get("runtime_version") or "vnext"),
-            str(spec.get("execution_constraint") or "auto"),
         )
         # UIA can edit and invoke an off-foreground window. A real user cannot.
         # Make the control surface foreground and verify it before the native
@@ -1852,19 +1775,9 @@ def run_case(
         }
         if ui_before_click.get("run_button_enabled") is not True:
             raise RuntimeError("visible Electron Run button is not enabled")
-        requested_constraint = str(
-            spec.get("execution_constraint") or "auto"
-        )
-        visible_constraint = str(
-            ui_before_click.get("execution_constraint_selector_label") or ""
-        )
-        if visible_constraint and (
-            _execution_constraint_from_label(visible_constraint)
-            != requested_constraint
-        ):
+        if ui_before_click.get("policy_selector_present") is True:
             raise RuntimeError(
-                "visible Electron execution constraint did not match "
-                "immediately before submission"
+                "visible Electron client still exposes execution policy controls"
             )
         if ui_before_click.get("goal_input") != spec["task"]:
             raise RuntimeError(
@@ -1887,7 +1800,6 @@ def run_case(
                     "name": name,
                     "task": spec["task"],
                     "client_pid": driver.identity.pid,
-                    "execution_constraint": requested_constraint,
                 },
                 ensure_ascii=False,
             ),
@@ -1976,7 +1888,7 @@ def run_case(
         result["execution_evidence"] = _execution_evidence(
             list(result["bound_trace_ids"]),
         )
-        result["gui_constraint_trace"] = _gui_constraint_trace_evidence(
+        result["gui_execution_trace"] = _gui_execution_trace_evidence(
             list(result["bound_trace_ids"]),
             bound_run_id,
         )
@@ -2105,12 +2017,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--name", default="ad-hoc")
     parser.add_argument(
-        "--execution-constraint",
-        choices=["auto", "gui_required"],
-        default="auto",
-        help="select the visible Agent execution constraint",
-    )
-    parser.add_argument(
         "--max-steps", type=int, default=None,
         help="override the selected case's step limit (ad-hoc default: 120)",
     )
@@ -2150,7 +2056,6 @@ def main() -> int:
             "max_steps": args.max_steps if args.max_steps is not None else 120,
             "timeout": args.timeout if args.timeout is not None else 900,
             "runtime_version": "vnext",
-            "execution_constraint": args.execution_constraint,
         }
     else:
         raise SystemExit("必须指定 --case、--mixed、--suite、--task 或 --list")
