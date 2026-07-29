@@ -4,10 +4,18 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from .contracts import ModelAttempt, ModelRequestEnvelope, ModelRetryPolicy, RetryKind
+
+
+_TRANSIENT_MULTIMODAL_REJECTION_MESSAGES = frozenset(
+    {
+        "multimodal data is corrupted or cannot be processed.",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,10 +49,41 @@ def _status_code(exc: Exception) -> int | None:
         return None
 
 
+def _is_transient_multimodal_rejection(exc: Exception) -> bool:
+    """Recognize one provider-side decoder failure from structured error data.
+
+    The same locally complete JPEG request can occasionally receive this 400
+    after identical-shape multimodal requests succeeded.  Treat only the exact
+    structured provider response as transient; exception-message matching
+    would make unrelated programming and request-schema errors retryable.
+    """
+
+    if _status_code(exc) != 400:
+        return False
+    body = getattr(exc, "body", None)
+    if not isinstance(body, Mapping):
+        return False
+    error = body.get("error", body)
+    if not isinstance(error, Mapping):
+        return False
+    error_type = str(error.get("type") or "").strip().casefold()
+    if error_type != "badrequesterror":
+        return False
+    code = str(error.get("code") or "").strip()
+    if code and code != "400":
+        return False
+    message = " ".join(str(error.get("message") or "").split()).casefold()
+    return message in _TRANSIENT_MULTIMODAL_REJECTION_MESSAGES
+
+
 def _retryable_transport_error(exc: Exception) -> bool:
     code = _status_code(exc)
     if code is not None:
-        return code in {408, 409, 429} or 500 <= code <= 599
+        return (
+            code in {408, 409, 429}
+            or 500 <= code <= 599
+            or _is_transient_multimodal_rejection(exc)
+        )
     if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
         return True
     # Keep this allowlist explicit: matching arbitrary exception messages such

@@ -18,10 +18,10 @@ from ..json_contract import (
 )
 
 
-TOOL_SPEC_FORMAT = "tool-spec/0"
+TOOL_SPEC_FORMAT = "tool-spec/1"
 TOOL_CATALOG_FORMAT = "tool-catalog/0"
 CAPABILITY_GRANT_FORMAT = "capability-grant/0"
-BROKER_STATE_FORMAT = "broker-runtime-state/1"
+BROKER_STATE_FORMAT = "broker-runtime-state/2"
 BROKER_PROJECTION_FORMAT = "broker-projection/1"
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _TOOL = re.compile(r"[a-z][a-z0-9_]{1,63}")
@@ -43,6 +43,18 @@ class ExecutionRoute(str, Enum):
     DETERMINISTIC = "deterministic"
     PROVIDER = "provider"
     BLOCKED = "blocked"
+
+
+class InteractionMode(str, Enum):
+    AUTO = "auto"
+    GUI_REQUIRED = "gui_required"
+
+
+class ExecutionMedium(str, Enum):
+    LOCAL = "local"
+    GUI = "gui"
+    CONTROL = "control"
+    EXTERNAL = "external"
 
 
 class MutationKind(str, Enum):
@@ -190,6 +202,7 @@ class ToolSpec:
     schema: Mapping[str, Any]
     route: ToolRoute | str
     mutation_kind: MutationKind | str
+    execution_medium: ExecutionMedium | str | None = None
     required_any_capabilities: tuple[str, ...] = ()
     prerequisites: tuple[str, ...] = ()
     authorization_scope: str | None = None
@@ -228,6 +241,23 @@ class ToolSpec:
                 "tool.mutation_kind",
             ),
         )
+        raw_medium = self.execution_medium
+        if raw_medium is None:
+            if self.mutation_kind is MutationKind.GUI:
+                medium = ExecutionMedium.GUI
+            elif self.mutation_kind is MutationKind.EXTERNAL:
+                medium = ExecutionMedium.EXTERNAL
+            else:
+                # Unclassified non-mutation tools are deliberately not
+                # GUI-safe. A control-plane tool must opt in explicitly.
+                medium = ExecutionMedium.LOCAL
+        else:
+            medium = _enum_value(
+                raw_medium,
+                ExecutionMedium,
+                "tool.execution_medium",
+            )
+        object.__setattr__(self, "execution_medium", medium)
         if self.route is ToolRoute.VISUAL_ACTOR and self.mutation_kind is MutationKind.EXTERNAL:
             raise CapabilityContractError(
                 "visual actor tools cannot perform external mutations"
@@ -235,6 +265,47 @@ class ToolSpec:
         if self.route is not ToolRoute.VISUAL_ACTOR and self.mutation_kind is MutationKind.GUI:
             raise CapabilityContractError(
                 "provider/deterministic tools cannot mutate the GUI"
+            )
+        if (
+            self.mutation_kind is MutationKind.GUI
+            and self.execution_medium is not ExecutionMedium.GUI
+        ):
+            raise CapabilityContractError(
+                "GUI mutation tools require the GUI execution medium"
+            )
+        if (
+            self.execution_medium is ExecutionMedium.GUI
+            and (
+                self.route is not ToolRoute.VISUAL_ACTOR
+                or self.mutation_kind is not MutationKind.GUI
+            )
+        ):
+            raise CapabilityContractError(
+                "GUI execution medium requires a Visual Actor GUI mutation"
+            )
+        if (
+            self.execution_medium is ExecutionMedium.CONTROL
+            and (
+                self.route is not ToolRoute.VISUAL_ACTOR
+                or self.mutation_kind is not MutationKind.NONE
+            )
+        ):
+            raise CapabilityContractError(
+                "control execution medium requires a non-mutating Visual Actor tool"
+            )
+        if (
+            self.mutation_kind is MutationKind.EXTERNAL
+            and self.execution_medium is not ExecutionMedium.EXTERNAL
+        ):
+            raise CapabilityContractError(
+                "external mutation tools require the external execution medium"
+            )
+        if (
+            self.execution_medium is ExecutionMedium.EXTERNAL
+            and self.mutation_kind is not MutationKind.EXTERNAL
+        ):
+            raise CapabilityContractError(
+                "external execution medium requires an external mutation"
             )
         object.__setattr__(
             self, "required_any_capabilities",
@@ -286,6 +357,7 @@ class ToolSpec:
             "schema": _thaw_frozen_json(self.schema),
             "route": self.route.value,
             "mutation_kind": self.mutation_kind.value,
+            "execution_medium": self.execution_medium.value,
             "required_any_capabilities": list(self.required_any_capabilities),
             "prerequisites": list(self.prerequisites),
             "authorization_scope": self.authorization_scope,
@@ -296,7 +368,8 @@ class ToolSpec:
     def from_dict(cls, raw: object) -> "ToolSpec":
         fields = (
             "format", "name", "schema", "route", "mutation_kind",
-            "required_any_capabilities", "prerequisites", "authorization_scope", "order",
+            "execution_medium", "required_any_capabilities", "prerequisites",
+            "authorization_scope", "order",
         )
         value = _strict(raw, fields, "ToolSpec")
         _wire_array(
@@ -488,6 +561,8 @@ __all__ = [
     "CapabilityContractError",
     "ToolRoute",
     "ExecutionRoute",
+    "InteractionMode",
+    "ExecutionMedium",
     "MutationKind",
     "PointerDisposition",
     "TOOL_PREREQUISITES",

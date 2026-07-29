@@ -23,6 +23,7 @@ from typing import Any, Protocol
 from ..config import TRACES_DIR
 from ..action.executor import (
     ADMITTED_PHYSICAL_CLICK_BACKEND,
+    ADMITTED_PHYSICAL_DRAG_BACKEND,
     ADMITTED_PHYSICAL_HOTKEY_BACKEND,
     ADMITTED_PHYSICAL_SCROLL_BACKEND,
     ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
@@ -42,11 +43,13 @@ from ..modeling.openai_transport import create_openai_client
 from ..modeling.runtime import ModelCallRuntime
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS
-from ..utils.screenshot import Region, virtual_screen_region
+from ..utils.screenshot import Region, virtual_screen_region, window_region
 from ..visual_runtime.frame_observer import FrameObserver
 from ..vnext.capabilities import (
     BrokerRuntimeState,
     CapabilityBroker,
+    ExecutionMedium,
+    InteractionMode,
     MutationKind,
     PointerDisposition,
     PointerLeaseState,
@@ -96,7 +99,14 @@ from ..vnext.runtime import (
     RuntimeStatus,
     RuntimeTargetIdentity,
 )
-from .contracts import ArpGraph, ArpNode, ArpNodeKind
+from .contracts import (
+    ArpEdge,
+    ArpGraph,
+    ArpNode,
+    ArpNodeKind,
+    ArpPolicy,
+    ArpRetryPolicy,
+)
 from .runtime import ArpExecution, NodeResult
 
 
@@ -107,10 +117,12 @@ _TARGET_MAX_AGE_MS = 15_000
 _FUTURE_CLOCK_SKEW_MS = 2_000
 _MAX_SUBMITTED_SIDE = 1120
 _MAX_VISUAL_VERIFICATION_ATTEMPTS = 3
+_MAX_CONSECUTIVE_INVALID_PROPOSALS = 2
+_MAX_CONSECUTIVE_ACTOR_ERRORS = 2
 _NON_WHITESPACE_PATTERN = r"\S"
 _BLOCKER_KIND_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 _APPROVED_ACTIONS = frozenset(
-    {"click", "double_click", "scroll", "type_text", "hotkey"}
+    {"click", "double_click", "drag", "scroll", "type_text", "hotkey"}
 )
 _GUI_GATES = (
     "target_bound",
@@ -257,6 +269,7 @@ class _SessionBuild:
     model: _ModelConfig
     dependencies: _CompositionDependencies
     deadline: Callable[[], float]
+    interaction_mode: InteractionMode = InteractionMode.AUTO
     pause_controller: Any = None
 
 
@@ -292,7 +305,7 @@ def _positive_number(value: Any, name: str) -> float:
 
 
 def _fnv1a_utf16(text: str) -> str:
-    """Match the renderer's JavaScript ``charCodeAt`` FNV-1a graph key."""
+    """Return the stable UTF-16 FNV-1a key used by live graph identity."""
 
     value = 0x811C9DC5
     encoded = text.encode("utf-16-le", errors="surrogatepass")
@@ -300,6 +313,92 @@ def _fnv1a_utf16(text: str) -> str:
         code_unit = encoded[index] | (encoded[index + 1] << 8)
         value = ((value ^ code_unit) * 0x01000193) & 0xFFFFFFFF
     return f"{value:08x}"
+
+
+def build_exact_live_vnext_graph(goal: str) -> ArpGraph:
+    """Project one full goal into the exact graph accepted by the live runtime."""
+
+    if type(goal) is not str:
+        raise ValueError("vNext live canary goal must be a literal string")
+    normalized_goal = goal.strip()
+    if not normalized_goal:
+        raise ValueError("vNext live canary requires a non-empty full goal")
+    graph = ArpGraph(
+        id=f"vnext-live-canary-{_fnv1a_utf16(normalized_goal)}",
+        name=normalized_goal,
+        description="",
+        nodes=[
+            ArpNode(
+                id="start",
+                kind=ArpNodeKind.START,
+                name="start",
+                config={},
+                retry=ArpRetryPolicy(
+                    max_attempts=1,
+                    delay_ms=0,
+                    backoff=1,
+                ),
+                disabled=False,
+                x=0,
+                y=0,
+            ),
+            ArpNode(
+                id="full-goal",
+                kind=ArpNodeKind.AGENT_GOAL,
+                name="full goal",
+                config={"goal": normalized_goal},
+                retry=ArpRetryPolicy(
+                    max_attempts=1,
+                    delay_ms=0,
+                    backoff=1,
+                ),
+                disabled=False,
+                x=0,
+                y=100,
+            ),
+            ArpNode(
+                id="end",
+                kind=ArpNodeKind.END,
+                name="end",
+                config={},
+                retry=ArpRetryPolicy(
+                    max_attempts=1,
+                    delay_ms=0,
+                    backoff=1,
+                ),
+                disabled=False,
+                x=0,
+                y=200,
+            ),
+        ],
+        edges=[
+            ArpEdge(
+                id="start-to-full-goal",
+                source="start",
+                target="full-goal",
+                branch="next",
+                label="",
+            ),
+            ArpEdge(
+                id="full-goal-to-end",
+                source="full-goal",
+                target="end",
+                branch="next",
+                label="",
+            ),
+        ],
+        variables={},
+        policy=ArpPolicy(
+            max_node_visits=1,
+            fail_fast=True,
+            require_evidence_on_done=True,
+            allow_shell=False,
+            allow_desktop_mutation=True,
+        ),
+        metadata={},
+    )
+    _validate_exact_graph(graph)
+    return graph
 
 
 def _validate_exact_graph(graph: ArpGraph) -> str:
@@ -484,8 +583,8 @@ def _read_win32_target(hwnd: int) -> _TargetFacts | None:
         root = int(win32gui.GetAncestor(value, 2) or value)
         _thread_id, process_id = win32process.GetWindowThreadProcessId(value)
         executable = _process_executable_identity(int(process_id))
-        rect = tuple(int(item) for item in win32gui.GetWindowRect(value))
-        if len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
+        region = window_region(value)
+        if region.width <= 0 or region.height <= 0:
             return None
         foreground = int(win32gui.GetForegroundWindow() or 0)
         foreground_root = (
@@ -503,10 +602,10 @@ def _read_win32_target(hwnd: int) -> _TargetFacts | None:
             title=str(win32gui.GetWindowText(value) or ""),
             class_name=str(win32gui.GetClassName(value) or ""),
             region=(
-                rect[0],
-                rect[1],
-                rect[2] - rect[0],
-                rect[3] - rect[1],
+                region.left,
+                region.top,
+                region.width,
+                region.height,
             ),
             foreground_root_hwnd=foreground_root,
         )
@@ -517,9 +616,28 @@ def _read_win32_target(hwnd: int) -> _TargetFacts | None:
 def _hit_test_win32_root(x: int, y: int) -> int | None:
     try:
         import win32gui
+        import win32process
 
         hwnd = int(win32gui.WindowFromPoint((int(x), int(y))) or 0)
-        return int(win32gui.GetAncestor(hwnd, 2) or hwnd) if hwnd else None
+        if not hwnd:
+            return None
+        root = int(win32gui.GetAncestor(hwnd, 2) or hwnd)
+        root_owner = int(win32gui.GetAncestor(root, 3) or root)
+        if root_owner == root:
+            return root
+
+        # WinUI can surface ordinary in-app controls through visible,
+        # owned top-level popup site bridges. GA_ROOT intentionally stops at
+        # that bridge, while GA_ROOTOWNER reaches the application window.
+        # Collapse the popup only within one process; cross-process overlays
+        # and unrelated sibling windows remain distinct.
+        _root_thread, root_pid = (
+            win32process.GetWindowThreadProcessId(root)
+        )
+        _owner_thread, owner_pid = (
+            win32process.GetWindowThreadProcessId(root_owner)
+        )
+        return root_owner if int(root_pid) == int(owner_pid) else root
     except Exception:
         return None
 
@@ -626,15 +744,19 @@ def _freeze_prebound_target(
         handoff.get("prepared_at"),
         "execution_context.desktop_handoff.prepared_at",
     )
+    if handoff.get("required") is not True:
+        raise ValueError("Electron desktop handoff was not required")
+    if handoff.get("yielded") is not True:
+        raise ValueError("Electron desktop handoff did not yield foreground")
     if (
-        handoff.get("required") is not True
-        or handoff.get("yielded") is not True
-        or handoff.get("strategy")
+        handoff.get("strategy")
         != "foreground_after_control_surface_yield"
-        or type(handoff.get("reason")) is not str
-        or prepared_at < submitted_at
     ):
-        raise ValueError("Electron desktop handoff is not exact or was not yielded")
+        raise ValueError("Electron desktop handoff strategy is not exact")
+    if type(handoff.get("reason")) is not str:
+        raise ValueError("Electron desktop handoff reason is not a string")
+    if prepared_at < submitted_at:
+        raise ValueError("Electron desktop handoff predates goal submission")
     target = _plain_dict(
         context.get("target_window"),
         "execution_context.target_window",
@@ -700,20 +822,31 @@ def _freeze_prebound_target(
         rect[2] - rect[0],
         rect[3] - rect[1],
     )
-    if (
-        type(current) is not _TargetFacts
-        or current.hwnd != hwnd
-        or current.root_hwnd != hwnd
-        or current.process_id != process_id
-        or not current.executable_identity
-        or current.title != title
-        or current.class_name != class_name
-        or current.region != expected_region
-        or current.foreground_root_hwnd != hwnd
-    ):
+    mismatches: list[str] = []
+    if type(current) is not _TargetFacts:
+        mismatches.append("unavailable")
+    else:
+        if current.hwnd != hwnd:
+            mismatches.append("hwnd")
+        if current.root_hwnd != hwnd:
+            mismatches.append("root_hwnd")
+        if current.process_id != process_id:
+            mismatches.append("process_id")
+        if not current.executable_identity:
+            mismatches.append("executable_identity")
+        if current.title != title:
+            mismatches.append("title")
+        if current.class_name != class_name:
+            mismatches.append("class_name")
+        if current.region != expected_region:
+            mismatches.append("region")
+        if current.foreground_root_hwnd != hwnd:
+            mismatches.append("foreground_root_hwnd")
+    if mismatches:
         raise ValueError(
-            "current HWND/PID/class/root/foreground/region does not match Electron target"
+            "current Electron target mismatch: " + ",".join(mismatches)
         )
+    assert current is not None
     binding_material = {
         "hwnd": hwnd,
         "root_hwnd": current.root_hwnd,
@@ -772,6 +905,15 @@ def _tool_catalog() -> ToolCatalog:
     schemas = {
         "click": point,
         "double_click": point,
+        "drag": _object_schema(
+            {
+                "image_x1": {"type": "number", "minimum": 0},
+                "image_y1": {"type": "number", "minimum": 0},
+                "image_x2": {"type": "number", "minimum": 0},
+                "image_y2": {"type": "number", "minimum": 0},
+            },
+            ["image_x1", "image_y1", "image_x2", "image_y2"],
+        ),
         "scroll": _object_schema(
             {
                 "image_x": {"type": "number", "minimum": 0},
@@ -847,6 +989,7 @@ def _tool_catalog() -> ToolCatalog:
     names = (
         "click",
         "double_click",
+        "drag",
         "scroll",
         "type_text",
         "hotkey",
@@ -873,6 +1016,11 @@ def _tool_catalog() -> ToolCatalog:
                 schema=schemas[name],
                 route=ToolRoute.VISUAL_ACTOR,
                 mutation_kind=mutation,
+                execution_medium=(
+                    ExecutionMedium.GUI
+                    if mutation is MutationKind.GUI
+                    else ExecutionMedium.CONTROL
+                ),
                 required_any_capabilities=(
                     ("visual.interact",)
                     if mutation is MutationKind.GUI
@@ -1019,6 +1167,7 @@ class _LiveRuntimeState:
         authority: FrameAuthority,
         observer: FrameObserver,
         pause_controller: Any,
+        interaction_mode: InteractionMode = InteractionMode.AUTO,
     ) -> None:
         self._reducer = reducer
         self._registry = registry
@@ -1028,6 +1177,7 @@ class _LiveRuntimeState:
         self._authority = authority
         self._observer = observer
         self._pause_controller = pause_controller
+        self._interaction_mode = InteractionMode(interaction_mode)
 
     def _frame_ref(self, state: FrameState) -> EvidenceRef:
         identity = RuntimeFrameIdentity(
@@ -1096,6 +1246,26 @@ class _LiveRuntimeState:
             evidence_refs=(self._target_evidence.id, frame_ref.id),
         )
         self._reducer.apply(event)
+        BUS.publish(
+            "vnext_gui_observation",
+            runtime_version=_RUNTIME_VERSION,
+            no_legacy_fallback=True,
+            run_id=self._registry.run_id,
+            mission_id=self._registry.mission_id,
+            obligation_id=_OBLIGATION_ID,
+            interaction_mode=self._interaction_mode.value,
+            execution_medium=ExecutionMedium.CONTROL.value,
+            observation_kind="fresh_authoritative_target_frame",
+            target_binding_id=self._binding.binding_id,
+            target_hwnd=self._binding.hwnd,
+            frame_id=committed.frame_id,
+            frame_epoch=committed.epoch,
+            frame_scope=committed.scope,
+            authoritative=True,
+            fresh=True,
+            evidence_refs=[frame_ref.id],
+            parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
+        )
         return committed
 
     def _runtime_frame(self, state: FrameState) -> RuntimeFrame:
@@ -1160,6 +1330,7 @@ class _LiveRuntimeState:
             broker_state=BrokerRuntimeState(
                 turn_index=turn_index,
                 available_capabilities=("visual.interact",),
+                interaction_mode=self._interaction_mode,
                 target=TargetState(
                     binding_id=self._binding.binding_id,
                     hwnd=self._binding.hwnd,
@@ -1538,6 +1709,7 @@ class _LiveCanarySession:
             "target_hwnd": self._binding.hwnd,
             "frame_id": frame.frame_id if frame is not None else None,
             "frame_epoch": frame.epoch if frame is not None else None,
+            "result": self._runtime.verified_completion_result,
         }
 
     def turn_snapshot(self) -> Mapping[str, Any]:
@@ -1874,6 +2046,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
             authority=authority,
             observer=observer,
             pause_controller=build.pause_controller,
+            interaction_mode=build.interaction_mode,
         )
     except Exception as exc:
         cleanup_errors: list[Exception] = []
@@ -1899,6 +2072,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
         raw = RawDeviceExecutor(
             RawDeviceBackends(
                 admitted_physical_click=ADMITTED_PHYSICAL_CLICK_BACKEND,
+                admitted_physical_drag=ADMITTED_PHYSICAL_DRAG_BACKEND,
                 admitted_physical_scroll=ADMITTED_PHYSICAL_SCROLL_BACKEND,
                 admitted_physical_type_text=ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
                 admitted_physical_hotkey=ADMITTED_PHYSICAL_HOTKEY_BACKEND,
@@ -2378,6 +2552,13 @@ def _public_completion_snapshot(
     mission_status = source.get("mission_status")
     if mission_status not in {status.value for status in MissionStatus}:
         mission_status = ""
+    result = source.get("result")
+    if (
+        type(result) is not str
+        or not result.strip()
+        or len(result) > 16_384
+    ):
+        result = None
     frame_id = _public_optional_positive_int(source.get("frame_id"))
     bindings: list[dict[str, Any]] = []
     raw_bindings = source.get("verified_evidence_bindings")
@@ -2428,6 +2609,7 @@ def _public_completion_snapshot(
         "frame_epoch": _public_optional_nonnegative_int(
             source.get("frame_epoch")
         ),
+        "result": result,
     }
 
 
@@ -2508,6 +2690,50 @@ def _public_runtime_evidence_summary(
     }
 
 
+def _interaction_mode_from_goal_admission(
+    context: Mapping[str, Any],
+    *,
+    goal: str,
+) -> InteractionMode:
+    runtime_state = context.get("runtime_state")
+    if not isinstance(runtime_state, Mapping):
+        return InteractionMode.AUTO
+    raw = runtime_state.get("goal_admission")
+    if raw is None:
+        return InteractionMode.AUTO
+    if not isinstance(raw, Mapping):
+        raise RuntimeError("vNext goal admission audit is not an object")
+    expected_fields = {
+        "format",
+        "goal",
+        "execution_constraint",
+        "route",
+        "runtime_version",
+        "reason",
+        "no_legacy_fallback",
+    }
+    if set(raw) != expected_fields:
+        raise RuntimeError("vNext goal admission audit fields are not exact")
+    constraint = raw.get("execution_constraint")
+    expected_reason = (
+        "explicit_gui_required"
+        if constraint == InteractionMode.GUI_REQUIRED.value
+        else "gui_first_auto_default"
+        if constraint == InteractionMode.AUTO.value
+        else ""
+    )
+    if (
+        raw.get("format") != "goal-admission/1"
+        or raw.get("goal") != goal
+        or raw.get("route") != "live_gui"
+        or raw.get("runtime_version") != _RUNTIME_VERSION
+        or raw.get("reason") != expected_reason
+        or raw.get("no_legacy_fallback") is not True
+    ):
+        raise RuntimeError("vNext goal admission audit is inconsistent")
+    return InteractionMode(constraint)
+
+
 class _PreparedHandler:
     def __init__(
         self,
@@ -2576,11 +2802,23 @@ class _PreparedHandler:
                 branch="fail",
                 error="vNext run identity is unavailable",
             )
+        runtime_state = context.get("runtime_state")
+        if type(runtime_state) is not dict:
+            return NodeResult(
+                ok=False,
+                branch="fail",
+                error="vNext private runtime state is unavailable",
+            )
+        runtime_state.pop("user_result", None)
         mission_id = (
             "vnext-mission-"
             + hashlib.sha256(
                 f"{run_id}|{self._graph.id}".encode("utf-8")
             ).hexdigest()[:24]
+        )
+        interaction_mode = _interaction_mode_from_goal_admission(
+            context,
+            goal=self._goal,
         )
         runtime_evidence_anchor: Mapping[str, Any] | None = None
         runtime_evidence_summary = (
@@ -2597,6 +2835,7 @@ class _PreparedHandler:
             runtime_version=_RUNTIME_VERSION,
             runtime_budget=budget_wire,
             no_legacy_fallback=True,
+            interaction_mode=interaction_mode.value,
             model=self._model.model,
             target=self._target.trace_identity(),
         )
@@ -2612,6 +2851,8 @@ class _PreparedHandler:
         )
         session: _SessionPort | None = None
         turns_used = 0
+        consecutive_invalid_proposals = 0
+        consecutive_actor_errors = 0
         terminal_status = RuntimeStatus.STATE_REJECTED
         detail = ""
         accepted_event_ids: tuple[str, ...] = ()
@@ -2625,6 +2866,7 @@ class _PreparedHandler:
             model=self._model,
             dependencies=self._dependencies,
             deadline=lambda: deadline[0],
+            interaction_mode=interaction_mode,
             pause_controller=pause_controller,
         )
         try:
@@ -2686,6 +2928,32 @@ class _PreparedHandler:
                     turns_used += 1
                     terminal_status = result.status
                     detail = _public_runtime_detail(result.status)
+                    if result.status is RuntimeStatus.INVALID_PROPOSAL:
+                        consecutive_invalid_proposals += 1
+                    else:
+                        consecutive_invalid_proposals = 0
+                    if result.status is RuntimeStatus.ACTOR_ERROR:
+                        consecutive_actor_errors += 1
+                    else:
+                        consecutive_actor_errors = 0
+                    redecision_budget_available = bool(
+                        turn_index + 1 < self._budget.max_turns
+                        and session.model_calls
+                        < self._budget.max_model_calls
+                        and not bounded_stop.is_set()
+                    )
+                    invalid_proposal_recovery_available = (
+                        result.status is RuntimeStatus.INVALID_PROPOSAL
+                        and consecutive_invalid_proposals
+                        < _MAX_CONSECUTIVE_INVALID_PROPOSALS
+                        and redecision_budget_available
+                    )
+                    actor_error_recovery_available = (
+                        result.status is RuntimeStatus.ACTOR_ERROR
+                        and consecutive_actor_errors
+                        < _MAX_CONSECUTIVE_ACTOR_ERRORS
+                        and redecision_budget_available
+                    )
                     if (
                         result.status is RuntimeStatus.UNAVAILABLE
                         and bool(
@@ -2736,10 +3004,49 @@ class _PreparedHandler:
                         accepted_event_ids=list(
                             result.accepted_event_ids
                         ),
+                        recovery=(
+                            {
+                                "kind": (
+                                    "bounded_invalid_proposal_redecision"
+                                    if result.status
+                                    is RuntimeStatus.INVALID_PROPOSAL
+                                    else "bounded_actor_error_redecision"
+                                ),
+                                "consecutive_attempt": (
+                                    consecutive_invalid_proposals
+                                    if result.status
+                                    is RuntimeStatus.INVALID_PROPOSAL
+                                    else consecutive_actor_errors
+                                ),
+                                "max_consecutive_attempts": (
+                                    _MAX_CONSECUTIVE_INVALID_PROPOSALS
+                                    if result.status
+                                    is RuntimeStatus.INVALID_PROPOSAL
+                                    else _MAX_CONSECUTIVE_ACTOR_ERRORS
+                                ),
+                                "available": (
+                                    invalid_proposal_recovery_available
+                                    if result.status
+                                    is RuntimeStatus.INVALID_PROPOSAL
+                                    else actor_error_recovery_available
+                                ),
+                            }
+                            if result.status
+                            in {
+                                RuntimeStatus.INVALID_PROPOSAL,
+                                RuntimeStatus.ACTOR_ERROR,
+                            }
+                            else None
+                        ),
                         runtime_snapshot=turn_snapshot,
                     )
                     if terminal_status is RuntimeStatus.MISSION_VERIFIED:
                         break
+                    if (
+                        invalid_proposal_recovery_available
+                        or actor_error_recovery_available
+                    ):
+                        continue
                     if terminal_status not in _CONTINUE_STATUSES:
                         break
                 else:
@@ -2825,6 +3132,15 @@ class _PreparedHandler:
                 run_id=run_id,
                 target=self._target,
             )
+            completion_result = snapshot.pop("result", None)
+            if terminal_status is RuntimeStatus.MISSION_VERIFIED:
+                if type(completion_result) is str:
+                    runtime_state["user_result"] = completion_result
+                elif self._dependencies.session_builder is None:
+                    terminal_status = RuntimeStatus.STATE_REJECTED
+                    detail = (
+                        "vNext verified completion result failed closed"
+                    )
             output = {
                 **snapshot,
                 "runtime_version": _RUNTIME_VERSION,
@@ -2961,4 +3277,7 @@ def prepare_live_vnext_execution(
     return execution
 
 
-__all__ = ["prepare_live_vnext_execution"]
+__all__ = [
+    "build_exact_live_vnext_graph",
+    "prepare_live_vnext_execution",
+]

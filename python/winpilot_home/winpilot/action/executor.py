@@ -34,6 +34,7 @@ from ..utils.log import BUS, logger
 from .desktop_queue import queued_desktop_action
 from .raw_device import (
     AdmittedPhysicalClickBackend,
+    AdmittedPhysicalDragBackend,
     AdmittedPhysicalHotkeyBackend,
     AdmittedPhysicalScrollBackend,
     AdmittedPhysicalTypeTextBackend,
@@ -898,6 +899,8 @@ def _stroke_path(
     duration_s: float,
     *,
     hwnd: int | None = None,
+    before_press: Callable[[], bool] | None = None,
+    progress: dict[str, int | bool] | None = None,
 ) -> bool:
     """Press at the first waypoint, move through the path, release at the end.
     Shared by drag() and draw_strokes() so stroke registration is identical."""
@@ -906,6 +909,13 @@ def _stroke_path(
         or not _cooperative_action_still_owned(hwnd)
     ):
         return False
+    if progress is not None:
+        progress.update(
+            button_pressed=False,
+            moves_completed=0,
+            release_cleanup_attempted=False,
+            release_cleanup_completed=False,
+        )
     _abs_mouse_move(*waypoints[0])  # absolute move so the press lands as real input
     time.sleep(0.04)
     expected_cursor = waypoints[0]
@@ -916,9 +926,17 @@ def _stroke_path(
         )
     ):
         return False
+    if before_press is not None:
+        try:
+            if not before_press():
+                return False
+        except Exception:
+            return False
     pressed = False
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTDOWN)])
     pressed = True
+    if progress is not None:
+        progress["button_pressed"] = True
     time.sleep(0.02)  # let the app register the press before moving
 
     try:
@@ -942,6 +960,10 @@ def _stroke_path(
                     int(a[1] + (b[1] - a[1]) * i / steps),
                 )
                 _emit_move(*expected_cursor)
+                if progress is not None:
+                    progress["moves_completed"] = (
+                        int(progress["moves_completed"]) + 1
+                    )
                 time.sleep(max(0.002, seg_dur / steps))
         time.sleep(0.015)
         return bool(
@@ -952,7 +974,160 @@ def _stroke_path(
         )
     finally:
         if pressed:
+            if progress is not None:
+                progress["release_cleanup_attempted"] = True
             _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
+            if progress is not None:
+                progress["release_cleanup_completed"] = True
+
+
+def _physical_drag_result(
+    input_completed: bool | None,
+    *,
+    error: str = "",
+    guard_decision: FinalPointerGuardDecision | None = None,
+    cursor_restored: bool | None = None,
+    release_cleanup_attempted: bool = False,
+    release_cleanup_completed: bool = False,
+) -> RawBackendResult:
+    facts: dict[str, Any] = {
+        "ok": input_completed is True,
+        "via": (
+            "physical_sendinput"
+            if guard_decision in {None, FinalPointerGuardDecision.ADMITTED}
+            else "final_target_guard"
+        ),
+    }
+    if error:
+        facts.update({"blocked": True, "error": error})
+    if guard_decision is not None:
+        facts["guard_decision"] = guard_decision.value
+    if cursor_restored is not None:
+        facts["cursor_restored"] = cursor_restored
+    if release_cleanup_attempted:
+        facts.update(
+            release_cleanup_attempted=True,
+            release_cleanup_completed=release_cleanup_completed,
+        )
+    return RawBackendResult(input_completed, facts)
+
+
+def execute_admitted_physical_drag(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    hwnd: int | None = None,
+    *,
+    final_guard: FinalPointerGuard,
+) -> RawBackendResult:
+    """Run one already-queued physical press-move-release gesture."""
+
+    if (
+        any(type(value) is not int for value in (x1, y1, x2, y2))
+        or (x1, y1) == (x2, y2)
+        or not callable(final_guard)
+    ):
+        return _physical_drag_result(
+            False,
+            error="invalid admitted physical drag",
+        )
+    if _dry_run():
+        return RawBackendResult(False, {"ok": True, "dry_run": True})
+
+    try:
+        saved = tuple(map(int, _cursor_pos()))
+    except Exception:
+        return _physical_drag_result(
+            False,
+            error="drag cursor position unavailable",
+        )
+
+    start = (x1, y1)
+    end = (x2, y2)
+    guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
+    progress: dict[str, int | bool] = {
+        "button_pressed": False,
+        "moves_completed": 0,
+        "release_cleanup_attempted": False,
+        "release_cleanup_completed": False,
+    }
+
+    def before_press() -> bool:
+        nonlocal guard_decision
+        try:
+            cursor_before = tuple(map(int, _cursor_pos()))
+            decision = final_guard(*cursor_before)
+            cursor_after = tuple(map(int, _cursor_pos()))
+        except Exception:
+            decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
+            cursor_before = cursor_after = ()
+        guard_decision = (
+            decision
+            if isinstance(decision, FinalPointerGuardDecision)
+            else FinalPointerGuardDecision.TARGET_UNAVAILABLE
+        )
+        if (
+            guard_decision is FinalPointerGuardDecision.ADMITTED
+            and (cursor_before != start or cursor_after != cursor_before)
+        ):
+            guard_decision = FinalPointerGuardDecision.POINTER_POSITION_CHANGED
+        return guard_decision is FinalPointerGuardDecision.ADMITTED
+
+    completed = False
+    error = ""
+    try:
+        completed = _stroke_path(
+            [start, end],
+            0.4,
+            hwnd=hwnd,
+            before_press=before_press,
+            progress=progress,
+        )
+        if not completed:
+            error = (
+                f"final pointer guard rejected: {guard_decision.value}"
+                if not progress["button_pressed"]
+                else "drag outcome unknown after physical input began"
+            )
+    except Exception:
+        error = (
+            "drag outcome unknown after physical input began"
+            if progress["button_pressed"]
+            else "drag input did not start"
+        )
+    finally:
+        cursor_restored = _restore_cursor_after_agent_input(saved, end, hwnd)
+
+    input_completed = (
+        True
+        if completed
+        else None
+        if progress["button_pressed"]
+        else False
+    )
+    result = _physical_drag_result(
+        input_completed,
+        error=error,
+        guard_decision=guard_decision,
+        cursor_restored=cursor_restored,
+        release_cleanup_attempted=bool(progress["button_pressed"]),
+        release_cleanup_completed=bool(
+            progress["release_cleanup_completed"]
+        ),
+    )
+    if input_completed is True:
+        _publish_admitted_action_summary(
+            action="drag",
+            input_completed=True,
+            via="physical_sendinput",
+        )
+    return result
+
+
+ADMITTED_PHYSICAL_DRAG_BACKEND = AdmittedPhysicalDragBackend(
+    execute_admitted_physical_drag
+)
 
 
 @queued_desktop_action("drag")
@@ -1105,7 +1280,7 @@ def _publish_admitted_action_summary(
 ) -> None:
     """Publish a fixed, replay-ineligible summary of one admitted input."""
 
-    if action not in {"click", "scroll", "type_text", "hotkey"}:
+    if action not in {"click", "scroll", "drag", "type_text", "hotkey"}:
         raise ValueError("unknown admitted action summary")
     if input_completed is not True:
         raise ValueError("admitted action summary requires completed input")

@@ -1,6 +1,17 @@
 export const ARP_FORMAT = 'arp/1' as const;
 
 export type RuntimeVersion = 'legacy' | 'vnext';
+export type ExecutionConstraint = 'auto' | 'gui_required';
+
+export interface GoalAdmissionAudit {
+  format: 'goal-admission/1';
+  goal: string;
+  execution_constraint: ExecutionConstraint;
+  route: 'live_gui';
+  runtime_version: 'vnext';
+  reason: 'gui_first_auto_default' | 'explicit_gui_required';
+  no_legacy_fallback: true;
+}
 
 export type ArpNodeKind =
   | 'start'
@@ -156,6 +167,7 @@ export interface RunProjection {
   runtime_version?: RuntimeVersion;
   runtime_budget?: VnextLiveCanaryBudget | Record<string, unknown>;
   no_legacy_fallback?: boolean;
+  goal_admission?: GoalAdmissionAudit | Record<string, unknown>;
   status: string;
   phase: string;
   goal: string;
@@ -180,6 +192,7 @@ export interface ArpExecutionSnapshot {
   runtime_version?: RuntimeVersion;
   runtime_budget?: VnextLiveCanaryBudget | Record<string, unknown>;
   no_legacy_fallback?: boolean;
+  goal_admission?: GoalAdmissionAudit | Record<string, unknown>;
   status: string;
   manual_paused?: boolean;
   current_node_id?: string | null;
@@ -615,6 +628,21 @@ export interface DesktopTargetContext {
   usable: boolean;
   failure_type: string;
   reason: string;
+}
+
+export interface ClientExecutionContext {
+  format: 'execution-context/1';
+  entrypoint: 'native_agent_cockpit' | 'web_workbench';
+  submitted_at: number;
+  desktop_handoff: {
+    required: true;
+    strategy: 'foreground_after_control_surface_yield';
+    yielded: boolean;
+    control_surface_pid: number;
+    prepared_at: number;
+    reason: string;
+  };
+  target_window: DesktopTargetContext | null;
 }
 
 export interface RuntimeSourceIdentity {

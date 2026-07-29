@@ -42,6 +42,35 @@ def _graph_payload():
     }
 
 
+def _client_execution_context():
+    return {
+        "format": "execution-context/1",
+        "entrypoint": "native_agent_cockpit",
+        "submitted_at": 1_000,
+        "desktop_handoff": {
+            "required": True,
+            "strategy": "foreground_after_control_surface_yield",
+            "yielded": True,
+            "control_surface_pid": 700,
+            "prepared_at": 1_001,
+            "reason": "",
+        },
+        "target_window": {
+            "format": "desktop-target/1",
+            "hwnd": 800,
+            "title": "External target",
+            "process_id": 900,
+            "class_name": "TargetWindow",
+            "rect": [0, 0, 1200, 800],
+            "captured_at": 1_002,
+            "foreground_verified": True,
+            "usable": True,
+            "failure_type": "",
+            "reason": "",
+        },
+    }
+
+
 def test_platform_overview_exposes_contracts_and_capabilities(client):
     response = client.get("/api/v2/platform")
 
@@ -429,6 +458,254 @@ def test_vnext_selection_is_frozen_once_without_legacy_compilation(
     assert len(calls) == 1
     assert calls[0][2] is ArpRuntimeVersion.VNEXT
     assert calls[0][3] is frozen
+
+
+@pytest.mark.parametrize(
+    ("constraint", "reason"),
+    [
+        ("auto", "gui_first_auto_default"),
+        ("gui_required", "explicit_gui_required"),
+    ],
+)
+def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
+    client,
+    monkeypatch,
+    constraint,
+    reason,
+):
+    from winpilot import server
+    from winpilot.orchestrator.contracts import ArpRuntimeVersion
+    from winpilot.orchestrator import vnext_live_canary
+
+    frozen = {
+        "api": {"model": "test-vision-model"},
+        "vnext": {
+            "live_canary_enabled": True,
+            "max_turns": 30,
+            "max_runtime_s": 300,
+            "max_model_calls": 60,
+        },
+    }
+    calls = []
+    monkeypatch.setattr(server, "runtime_source_drifted", lambda: False)
+    monkeypatch.setattr(server.CONFIG, "snapshot", lambda: frozen)
+    monkeypatch.setattr(
+        server.TaskContractCompiler,
+        "compile_graph",
+        lambda *_args, **_kwargs: pytest.fail(
+            "product goal admission must not invoke the legacy compiler"
+        ),
+    )
+
+    def start(graph, inputs, **kwargs):
+        calls.append((graph, inputs, kwargs))
+        return SimpleNamespace(
+            run_id="arp-goal-admission",
+            graph=graph,
+            to_dict=lambda: {
+                "run_id": "arp-goal-admission",
+                "graph_id": graph.id,
+                "runtime_version": "vnext",
+                "status": "queued",
+            },
+        )
+
+    monkeypatch.setattr(server, "_start_arp_execution", start)
+    context = _client_execution_context()
+    response = client.post(
+        "/api/v2/goals/runs",
+        json={
+            "goal": "  Complete the visible task  ",
+            "execution_constraint": constraint,
+            "execution_context": context,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["runtime_version"] == "vnext"
+    assert payload["admission"] == {
+        "format": "goal-admission/1",
+        "goal": "Complete the visible task",
+        "execution_constraint": constraint,
+        "route": "live_gui",
+        "runtime_version": "vnext",
+        "reason": reason,
+        "no_legacy_fallback": True,
+    }
+    assert len(calls) == 1
+    graph, inputs, kwargs = calls[0]
+    assert vnext_live_canary._validate_exact_graph(graph) == (
+        "Complete the visible task"
+    )
+    assert graph.metadata == {}
+    assert graph.policy.allow_shell is False
+    assert graph.policy.allow_desktop_mutation is True
+    assert kwargs["runtime_version"] is ArpRuntimeVersion.VNEXT
+    assert kwargs["frozen_config"] is frozen
+    assert kwargs["goal_admission"] == payload["admission"]
+    assert inputs["execution_context"] == {
+        **context,
+        "task_id": graph.id,
+    }
+
+
+@pytest.mark.parametrize("field", ["graph", "runtime_version"])
+def test_product_goal_admission_rejects_client_owned_projection_fields(
+    client,
+    field,
+):
+    body = {
+        "goal": "Complete the visible task",
+        "execution_constraint": "gui_required",
+        "execution_context": _client_execution_context(),
+        field: {} if field == "graph" else "vnext",
+    }
+
+    response = client.post("/api/v2/goals/runs", json=body)
+
+    assert response.status_code == 422
+    assert any(
+        item["loc"][-1] == field and item["type"] == "extra_forbidden"
+        for item in response.json()["detail"]
+    )
+
+
+def test_product_goal_admission_rejects_client_owned_task_identity(
+    client,
+    monkeypatch,
+):
+    from winpilot import server
+
+    monkeypatch.setattr(server, "runtime_source_drifted", lambda: False)
+    monkeypatch.setattr(
+        server.CONFIG,
+        "snapshot",
+        lambda: {"vnext": {"live_canary_enabled": True}},
+    )
+    context = _client_execution_context()
+    context["task_id"] = "client-owned-task"
+
+    response = client.post(
+        "/api/v2/goals/runs",
+        json={
+            "goal": "Complete the visible task",
+            "execution_constraint": "gui_required",
+            "execution_context": context,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "unknown=['task_id']" in response.json()["detail"]
+
+
+def test_product_goal_admission_fails_closed_without_legacy_fallback(
+    client,
+    monkeypatch,
+):
+    from winpilot import server
+
+    monkeypatch.setattr(server, "runtime_source_drifted", lambda: False)
+    monkeypatch.setattr(
+        server.CONFIG,
+        "snapshot",
+        lambda: {"vnext": {"live_canary_enabled": False}},
+    )
+    monkeypatch.setattr(
+        server.TaskContractCompiler,
+        "compile_graph",
+        lambda *_args, **_kwargs: pytest.fail(
+            "disabled vNext must not compile a legacy task"
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_start_arp_execution",
+        lambda *_args, **_kwargs: pytest.fail(
+            "disabled vNext must not start either runtime"
+        ),
+    )
+
+    response = client.post(
+        "/api/v2/goals/runs",
+        json={
+            "goal": "Complete the visible task",
+            "execution_constraint": "auto",
+            "execution_context": _client_execution_context(),
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "vNext live canary is disabled; no legacy fallback was run"
+    )
+
+
+def test_start_execution_freezes_goal_admission_before_job_submission(
+    monkeypatch,
+):
+    from winpilot import server
+    from winpilot.orchestrator.contracts import ArpRuntimeVersion
+    from winpilot.orchestrator import vnext_live_canary
+
+    graph = vnext_live_canary.build_exact_live_vnext_graph(
+        "Complete the visible task"
+    )
+    execution = SimpleNamespace(
+        run_id="arp-goal-admission-audit",
+        runtime_state={},
+        stop_event=threading.Event(),
+    )
+    submitted = []
+    monkeypatch.setattr(server.human_mod.RECORDER, "is_recording", lambda: False)
+    monkeypatch.setattr(
+        vnext_live_canary,
+        "prepare_live_vnext_execution",
+        lambda *_args, **_kwargs: execution,
+    )
+    monkeypatch.setattr(
+        server.RUNTIME_JOBS,
+        "submit",
+        lambda *args, **kwargs: submitted.append((args, kwargs)),
+    )
+    audit = {
+        "format": "goal-admission/1",
+        "goal": "Complete the visible task",
+        "execution_constraint": "gui_required",
+        "route": "live_gui",
+        "runtime_version": "vnext",
+        "reason": "explicit_gui_required",
+        "no_legacy_fallback": True,
+    }
+
+    try:
+        started = server._start_arp_execution(
+            graph,
+            {"execution_context": {}},
+            runtime_version=ArpRuntimeVersion.VNEXT,
+            frozen_config={"vnext": {"live_canary_enabled": True}},
+            goal_admission=audit,
+        )
+    finally:
+        with server.STATE.lock:
+            server.STATE.run_jobs.pop(execution.run_id, None)
+
+    assert started is execution
+    assert submitted
+    assert execution.runtime_state["runtime_version"] == "vnext"
+    assert execution.runtime_state["goal_admission"] == audit
+    assert execution.runtime_state["goal_admission"] is not audit
+
+    from winpilot.orchestrator.runtime import ArpExecution
+
+    persisted = ArpExecution(graph)
+    persisted.runtime_state.update({
+        "runtime_version": "vnext",
+        "no_legacy_fallback": True,
+        "goal_admission": dict(audit),
+    })
+    assert persisted.to_dict()["goal_admission"] == audit
+    assert persisted.audit_snapshot()["goal_admission"] == audit
 
 
 def test_unstarted_vnext_cancel_is_retained_without_touching_trace():

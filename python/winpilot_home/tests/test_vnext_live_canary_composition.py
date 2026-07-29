@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from copy import deepcopy
 from dataclasses import dataclass
+import hashlib
 from itertools import permutations
 import json
 from pathlib import Path
@@ -36,6 +37,7 @@ from winpilot.orchestrator.contracts import (
     ArpRunStatus,
 )
 from winpilot.orchestrator.runtime import ArpRunManager
+from winpilot.orchestrator import goal_admission
 from winpilot.orchestrator import vnext_live_canary as canary
 from winpilot.agent.frame_authority import FrameAuthority
 from winpilot.utils.log import BUS
@@ -44,6 +46,8 @@ from winpilot.visual_runtime.keyboard_contracts import HotkeyChord
 from winpilot.visual_runtime.frame_observer import FrameObserver
 from winpilot.vnext.actor import InvalidActorProposal, parse_actor_proposal
 from winpilot.vnext.capabilities import (
+    ExecutionMedium,
+    InteractionMode,
     ToolArgumentValidationError,
     ToolArgumentValidator,
 )
@@ -411,6 +415,139 @@ def _dependencies(
     )
 
 
+def test_live_target_reader_uses_visible_dwm_bounds_for_maximized_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import win32gui
+    import win32process
+
+    monkeypatch.setattr(win32gui, "IsWindow", lambda _hwnd: True)
+    monkeypatch.setattr(win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(win32gui, "GetAncestor", lambda hwnd, _flag: hwnd)
+    monkeypatch.setattr(win32gui, "GetForegroundWindow", lambda: HWND)
+    monkeypatch.setattr(win32gui, "GetWindowText", lambda _hwnd: "Canary Target")
+    monkeypatch.setattr(win32gui, "GetClassName", lambda _hwnd: "CanaryWindow")
+    monkeypatch.setattr(
+        win32gui,
+        "GetWindowRect",
+        lambda _hwnd: pytest.fail("raw resize-border bounds must not be used"),
+    )
+    monkeypatch.setattr(
+        win32process,
+        "GetWindowThreadProcessId",
+        lambda _hwnd: (1, PID),
+    )
+    monkeypatch.setattr(
+        canary,
+        "_process_executable_identity",
+        lambda _pid: r"c:\apps\canary.exe",
+    )
+    monkeypatch.setattr(
+        canary,
+        "window_region",
+        lambda _hwnd: Region(0, 0, 1920, 1040),
+    )
+
+    facts = canary._read_win32_target(HWND)
+
+    assert facts is not None
+    assert facts.region == (0, 0, 1920, 1040)
+
+
+def test_hit_test_normalizes_same_process_owned_popup_to_root_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import win32gui
+    import win32process
+
+    popup = HWND + 1
+    monkeypatch.setattr(
+        win32gui,
+        "WindowFromPoint",
+        lambda _point: popup,
+    )
+    monkeypatch.setattr(
+        win32gui,
+        "GetAncestor",
+        lambda hwnd, flag: (
+            HWND if hwnd == popup and flag == 3 else hwnd
+        ),
+    )
+    monkeypatch.setattr(
+        win32process,
+        "GetWindowThreadProcessId",
+        lambda _hwnd: (1, PID),
+    )
+
+    assert canary._hit_test_win32_root(300, 400) == HWND
+
+
+def test_hit_test_keeps_cross_process_owned_popup_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import win32gui
+    import win32process
+
+    popup = HWND + 1
+    monkeypatch.setattr(
+        win32gui,
+        "WindowFromPoint",
+        lambda _point: popup,
+    )
+    monkeypatch.setattr(
+        win32gui,
+        "GetAncestor",
+        lambda hwnd, flag: (
+            HWND if hwnd == popup and flag == 3 else hwnd
+        ),
+    )
+    monkeypatch.setattr(
+        win32process,
+        "GetWindowThreadProcessId",
+        lambda hwnd: (1, PID + 1 if hwnd == popup else PID),
+    )
+
+    assert canary._hit_test_win32_root(300, 400) == popup
+
+
+def test_hit_test_keeps_unowned_same_process_sibling_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import win32gui
+
+    sibling = HWND + 2
+    monkeypatch.setattr(
+        win32gui,
+        "WindowFromPoint",
+        lambda _point: sibling,
+    )
+    monkeypatch.setattr(
+        win32gui,
+        "GetAncestor",
+        lambda hwnd, _flag: hwnd,
+    )
+
+    assert canary._hit_test_win32_root(300, 400) == sibling
+
+
+def test_server_owned_graph_builder_emits_the_exact_live_contract() -> None:
+    graph = canary.build_exact_live_vnext_graph(f"  {GOAL}  ")
+
+    assert canary._validate_exact_graph(graph) == GOAL
+    assert graph.name == GOAL
+    assert graph.metadata == {}
+    assert graph.variables == {}
+    assert [node.kind for node in graph.nodes] == [
+        ArpNodeKind.START,
+        ArpNodeKind.AGENT_GOAL,
+        ArpNodeKind.END,
+    ]
+    assert graph.nodes[1].config == {"goal": GOAL}
+    assert graph.policy.allow_shell is False
+    assert graph.policy.allow_desktop_mutation is True
+
+
 def test_prepare_registers_only_exact_agent_goal_and_emits_no_live_trace() -> None:
     session = _FakeSession(
         [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
@@ -486,11 +623,12 @@ def test_pre_composition_cancel_seals_unique_empty_evidence_without_io(
     try:
         result = execution.handlers[ArpNodeKind.AGENT_GOAL](
             next(node for node in graph.nodes if node.id == "full-goal"),
-            {
-                "run_id": run_id,
-                "pause_controller": CancelBeforeComposition(),
-            },
-            stop_event,
+                {
+                    "run_id": run_id,
+                    "pause_controller": CancelBeforeComposition(),
+                    "runtime_state": {},
+                },
+                stop_event,
         )
     finally:
         BUS.remove_sink(events.append)
@@ -622,14 +760,17 @@ def test_execution_context_is_exact_and_fresh(change: Any, match: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "current",
+    ("current", "mismatch"),
     (
-        _facts(process_id=PID + 1),
-        _facts(foreground_root_hwnd=HWND + 1),
-        _facts(region=(101, 200, 640, 480)),
+        (_facts(process_id=PID + 1), "process_id"),
+        (_facts(foreground_root_hwnd=HWND + 1), "foreground_root_hwnd"),
+        (_facts(region=(101, 200, 640, 480)), "region"),
     ),
 )
-def test_current_target_identity_mismatch_fails_before_session(current: Any) -> None:
+def test_current_target_identity_mismatch_fails_before_session(
+    current: Any,
+    mismatch: str,
+) -> None:
     built = False
 
     def builder(_build: Any) -> _FakeSession:
@@ -647,7 +788,10 @@ def test_current_target_identity_mismatch_fails_before_session(current: Any) -> 
         session_builder=builder,
     )
 
-    with pytest.raises(ValueError, match="current HWND"):
+    with pytest.raises(
+        ValueError,
+        match=rf"current Electron target mismatch: {mismatch}",
+    ):
         canary.prepare_live_vnext_execution(
             _graph(),
             _inputs(),
@@ -689,6 +833,16 @@ def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> No
         ]
         == r"\S"
     )
+    media = {
+        tool.name: tool.execution_medium
+        for tool in catalog.tools
+    }
+    assert {
+        media[name]
+        for name in canary._APPROVED_ACTIONS
+    } == {ExecutionMedium.GUI}
+    assert media["claim_obligation_done"] is ExecutionMedium.CONTROL
+    assert media["blocked"] is ExecutionMedium.CONTROL
 
     with pytest.raises(ValueError, match="ordered modifiers"):
         HotkeyChord(("shift", "ctrl", "a"))
@@ -863,6 +1017,199 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     assert done[0]["status"] == "mission_verified"
 
 
+def test_handler_recovers_from_one_invalid_proposal_without_prompt_repair() -> None:
+    private_detail = "PRIVATE INVALID MODEL RESPONSE"
+    session = _FakeSession(
+        [
+            MissionRuntimeResult(
+                RuntimeStatus.INVALID_PROPOSAL,
+                detail=private_detail,
+            ),
+            MissionRuntimeResult(
+                RuntimeStatus.MISSION_VERIFIED,
+                accepted_event_ids=("event-verified",),
+            ),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    manager = ArpRunManager()
+    execution = canary.prepare_live_vnext_execution(
+        _graph(),
+        _inputs(),
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(session=session),
+    )
+    BUS.add_sink(events.append)
+    try:
+        snapshot = manager.run_prepared(execution)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"]["status"] == "mission_verified"
+    assert snapshot["result"]["turns_used"] == 2
+    assert session.calls == 2
+    turns = [
+        item for item in events if item["type"] == "vnext_canary_turn"
+    ]
+    assert turns[0]["status"] == "invalid_proposal"
+    assert turns[0]["recovery"] == {
+        "kind": "bounded_invalid_proposal_redecision",
+        "consecutive_attempt": 1,
+        "max_consecutive_attempts": 2,
+        "available": True,
+    }
+    assert turns[1]["recovery"] is None
+    assert private_detail not in json.dumps(
+        {"snapshot": snapshot, "events": events},
+        ensure_ascii=False,
+    )
+
+
+def test_handler_stops_after_two_consecutive_invalid_proposals() -> None:
+    session = _FakeSession(
+        [
+            MissionRuntimeResult(RuntimeStatus.INVALID_PROPOSAL),
+            MissionRuntimeResult(RuntimeStatus.INVALID_PROPOSAL),
+            MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    manager = ArpRunManager()
+    execution = canary.prepare_live_vnext_execution(
+        _graph(),
+        _inputs(),
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(session=session),
+    )
+    BUS.add_sink(events.append)
+    try:
+        snapshot = manager.run_prepared(execution)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert snapshot["status"] == ArpRunStatus.FAILED.value
+    assert snapshot["error"] == "vNext Runtime returned invalid_proposal"
+    assert session.calls == 2
+    assert session.closed is True
+    turns = [
+        item for item in events if item["type"] == "vnext_canary_turn"
+    ]
+    assert [item["recovery"]["available"] for item in turns] == [
+        True,
+        False,
+    ]
+    assert turns[-1]["recovery"]["consecutive_attempt"] == 2
+
+
+def test_successful_turn_resets_invalid_proposal_recovery_streak() -> None:
+    session = _FakeSession(
+        [
+            MissionRuntimeResult(RuntimeStatus.INVALID_PROPOSAL),
+            MissionRuntimeResult(RuntimeStatus.ACTION_RECORDED),
+            MissionRuntimeResult(RuntimeStatus.INVALID_PROPOSAL),
+            MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
+        ]
+    )
+    manager = ArpRunManager()
+    execution = canary.prepare_live_vnext_execution(
+        _graph(),
+        _inputs(),
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(session=session),
+    )
+
+    snapshot = manager.run_prepared(execution)
+
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"]["turns_used"] == 4
+    assert session.calls == 4
+
+
+def test_handler_redecides_once_after_actor_transport_error() -> None:
+    private_detail = "HTTP 400 PRIVATE PROVIDER BODY"
+    session = _FakeSession(
+        [
+            MissionRuntimeResult(
+                RuntimeStatus.ACTOR_ERROR,
+                detail=private_detail,
+            ),
+            MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    manager = ArpRunManager()
+    execution = canary.prepare_live_vnext_execution(
+        _graph(),
+        _inputs(),
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(session=session),
+    )
+    BUS.add_sink(events.append)
+    try:
+        snapshot = manager.run_prepared(execution)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"]["turns_used"] == 2
+    assert session.calls == 2
+    turns = [
+        item for item in events if item["type"] == "vnext_canary_turn"
+    ]
+    assert turns[0]["status"] == "actor_error"
+    assert turns[0]["recovery"] == {
+        "kind": "bounded_actor_error_redecision",
+        "consecutive_attempt": 1,
+        "max_consecutive_attempts": 2,
+        "available": True,
+    }
+    assert private_detail not in json.dumps(
+        {"snapshot": snapshot, "events": events},
+        ensure_ascii=False,
+    )
+
+
+def test_handler_preserves_second_consecutive_actor_error_as_terminal() -> None:
+    session = _FakeSession(
+        [
+            MissionRuntimeResult(RuntimeStatus.ACTOR_ERROR),
+            MissionRuntimeResult(RuntimeStatus.ACTOR_ERROR),
+            MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    manager = ArpRunManager()
+    execution = canary.prepare_live_vnext_execution(
+        _graph(),
+        _inputs(),
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(session=session),
+    )
+    BUS.add_sink(events.append)
+    try:
+        snapshot = manager.run_prepared(execution)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert snapshot["status"] == ArpRunStatus.FAILED.value
+    assert snapshot["error"] == "vNext Runtime returned actor_error"
+    assert session.calls == 2
+    turns = [
+        item for item in events if item["type"] == "vnext_canary_turn"
+    ]
+    assert [item["recovery"]["available"] for item in turns] == [
+        True,
+        False,
+    ]
+    assert turns[-1]["recovery"]["consecutive_attempt"] == 2
+
+
 def test_handler_stops_on_blocked_without_retry_and_closes() -> None:
     session = _FakeSession(
         [
@@ -1004,6 +1351,11 @@ def test_public_result_source_projects_only_safe_runtime_evidence(
     from winpilot.orchestrator.projection import RunProjectionStore
     from winpilot.recorder import trace
 
+    user_result = (
+        "Photography group: planning a weekend photo walk.\n"
+        "Running group: confirming Saturday's meeting time."
+    )
+
     class PrivateSnapshotSession(_FakeSession):
         def _private_report(self) -> dict[str, Any]:
             actor_envelope = {
@@ -1081,6 +1433,7 @@ def test_public_result_source_projects_only_safe_runtime_evidence(
             snapshot = super().completion_snapshot()
             snapshot.update(
                 {
+                    "result": user_result,
                     "runtime_evidence_report": self._private_report(),
                     "actor_envelope": self._private_report()[
                         "actor_decisions"
@@ -1186,6 +1539,30 @@ def test_public_result_source_projects_only_safe_runtime_evidence(
     ]
     assert len(done) == 1
     assert done[0]["runtime_evidence"] == summary
+    arp_done = [
+        event
+        for event in events
+        if event["type"] == "arp_run_done"
+    ]
+    assert len(arp_done) == 1
+    assert arp_done[0]["user_result"] == user_result
+    assert public_projection["result"] == user_result
+    assert "result" not in snapshot["result"]
+    trace_wire = json.dumps(records, ensure_ascii=False)
+    assert user_result not in trace_wire
+    persisted_done = [
+        record
+        for record in records
+        if record["type"] == "arp_run_done"
+    ]
+    assert len(persisted_done) == 1
+    assert persisted_done[0]["user_result"] == {
+        "private_text_redacted": True,
+        "text_char_count": len(user_result),
+        "text_sha256": hashlib.sha256(
+            user_result.encode("utf-8")
+        ).hexdigest(),
+    }
 
 
 def test_raw_receipt_trace_projects_fixed_safe_summary(
@@ -1467,9 +1844,18 @@ def test_pause_invalidates_actor_frame_but_not_atomic_post_reconcile_frame() -> 
         authority=authority,
         observer=FrameObserver(authority),
         pause_controller=pause,
+        interaction_mode=InteractionMode.GUI_REQUIRED,
     )
 
-    assert state.current(reducer.projection, turn_index=0).broker_state.paused is True
+    initial_broker_state = state.current(
+        reducer.projection,
+        turn_index=0,
+    ).broker_state
+    assert initial_broker_state.paused is True
+    assert (
+        initial_broker_state.interaction_mode
+        is InteractionMode.GUI_REQUIRED
+    )
 
     second = authority.commit(
         epoch=7,
@@ -1491,6 +1877,42 @@ def test_pause_invalidates_actor_frame_but_not_atomic_post_reconcile_frame() -> 
     )
 
     assert state.current(reducer.projection, turn_index=0).broker_state.paused is False
+
+
+@pytest.mark.parametrize(
+    ("constraint", "expected"),
+    [
+        ("auto", InteractionMode.AUTO),
+        ("gui_required", InteractionMode.GUI_REQUIRED),
+    ],
+)
+def test_goal_admission_constraint_maps_into_live_broker_mode(
+    constraint: str,
+    expected: InteractionMode,
+) -> None:
+    reason = (
+        "explicit_gui_required"
+        if constraint == "gui_required"
+        else "gui_first_auto_default"
+    )
+    context = {
+        "runtime_state": {
+            "goal_admission": {
+                "format": "goal-admission/1",
+                "goal": GOAL,
+                "execution_constraint": constraint,
+                "route": "live_gui",
+                "runtime_version": "vnext",
+                "reason": reason,
+                "no_legacy_fallback": True,
+            },
+        },
+    }
+
+    assert canary._interaction_mode_from_goal_admission(
+        context,
+        goal=GOAL,
+    ) is expected
 
 
 class _RawClient:
@@ -1673,6 +2095,8 @@ def _real_session_with_captures(
     clock: list[float] | None = None,
     deadline: float = 310.0,
     install_safe_backends: bool = True,
+    interaction_mode: InteractionMode = InteractionMode.AUTO,
+    hit_test_root: Any = None,
 ) -> tuple[Any, list[str], list[dict[str, Any]]]:
     clock = clock or [10.0]
     capture_values = list(images)
@@ -1714,7 +2138,11 @@ def _real_session_with_captures(
         wall_clock=lambda: NOW_MS / 1000.0,
         monotonic=lambda: clock[0],
         target_reader=lambda _hwnd: _facts(),
-        hit_test_root=lambda _x, _y: HWND,
+        hit_test_root=(
+            (lambda _x, _y: HWND)
+            if hit_test_root is None
+            else hit_test_root
+        ),
         client_factory=factory,
         runtime_evidence_root=evidence_root,
     )
@@ -1736,12 +2164,180 @@ def _real_session_with_captures(
         ),
         dependencies=deps,
         deadline=lambda: deadline,
+        interaction_mode=interaction_mode,
         pause_controller=None,
     )
     return (
         canary._build_live_session(build),
         raw_calls,
         factory_calls,
+    )
+
+
+def test_gui_required_fresh_observation_is_auditable_without_pixel_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from winpilot.recorder import trace
+
+    session, raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[
+            _jpeg(640, 480, level=120),
+            _jpeg(640, 480, level=180),
+        ],
+        clients=(_RawClient(_click_response()), _RawClient()),
+        evidence_root=tmp_path / "runtime-evidence",
+        interaction_mode=InteractionMode.GUI_REQUIRED,
+    )
+    trace_root = tmp_path / "public-traces"
+    monkeypatch.setattr(trace, "TRACES_DIR", trace_root)
+    recorder = trace.TraceRecorder()
+    events: list[dict[str, Any]] = []
+    BUS.add_sink(events.append)
+    try:
+        recorder.start("arp-test-live-frames")
+        result = session.run_one_turn(
+            turn_index=0,
+            stop_event=threading.Event(),
+        )
+        session.close()
+        recorder.stop()
+    finally:
+        recorder.stop()
+        BUS.remove_sink(events.append)
+        BUS.remove_sink(recorder._on_event)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert raw_calls == ["click"]
+    observation = next(
+        item
+        for item in events
+        if item["type"] == "vnext_gui_observation"
+    )
+    assert set(observation) == {
+        "type",
+        "ts",
+        "runtime_version",
+        "no_legacy_fallback",
+        "run_id",
+        "mission_id",
+        "obligation_id",
+        "interaction_mode",
+        "execution_medium",
+        "observation_kind",
+        "target_binding_id",
+        "target_hwnd",
+        "frame_id",
+        "frame_epoch",
+        "frame_scope",
+        "authoritative",
+        "fresh",
+        "evidence_refs",
+        "parameter_visibility",
+    }
+    assert observation["interaction_mode"] == "gui_required"
+    assert observation["execution_medium"] == "control"
+    assert observation["observation_kind"] == (
+        "fresh_authoritative_target_frame"
+    )
+    assert observation["target_binding_id"] == session._binding.binding_id
+    assert observation["target_hwnd"] == HWND
+    assert observation["frame_id"] == 1
+    assert observation["frame_epoch"] == session._binding.epoch
+    assert observation["frame_scope"] == "target_window"
+    assert observation["authoritative"] is True
+    assert observation["fresh"] is True
+    assert len(observation["evidence_refs"]) == 1
+    assert (
+        observation["parameter_visibility"]
+        == "private_runtime_evidence"
+    )
+    records = [
+        json.loads(line)
+        for line in (
+            trace_root / "arp-test-live-frames.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    traced = [
+        item
+        for item in records
+        if item["type"] == "vnext_gui_observation"
+    ]
+    assert len(traced) == 1
+    assert traced[0]["evidence_refs"] == observation["evidence_refs"]
+    _assert_private_runtime_evidence_absent(
+        {"bus": observation, "trace": traced}
+    )
+
+
+def test_hit_test_race_is_durably_reobserved_before_one_real_input(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    hit_tests = 0
+
+    def hit_test_root(_x: int, _y: int) -> int:
+        nonlocal hit_tests
+        hit_tests += 1
+        return HWND + 1 if hit_tests == 1 else HWND
+
+    evidence_root = tmp_path / "runtime-evidence"
+    session, raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[
+            _jpeg(640, 480, level=100),
+            _jpeg(640, 480, level=120),
+            _jpeg(640, 480, level=180),
+        ],
+        clients=(_RawClient(_click_response()), _RawClient()),
+        evidence_root=evidence_root,
+        interaction_mode=InteractionMode.GUI_REQUIRED,
+        hit_test_root=hit_test_root,
+    )
+    try:
+        first = session.run_one_turn(
+            turn_index=0,
+            stop_event=threading.Event(),
+        )
+        second = session.run_one_turn(
+            turn_index=1,
+            stop_event=threading.Event(),
+        )
+        bindings = session._runtime_evidence.action_bindings
+
+        assert first.status is RuntimeStatus.STALE_DISCARDED
+        assert second.status is RuntimeStatus.ACTION_RECORDED
+        assert raw_calls == ["click"]
+        assert len(bindings) == 2
+        rejected = next(
+            binding
+            for binding in bindings
+            if binding.raw_action_receipt["outcome"] == "not_started"
+        )
+        applied = next(
+            binding
+            for binding in bindings
+            if binding.raw_action_receipt["outcome"] == "applied"
+        )
+        assert rejected.physical_attempt_count == 0
+        assert (
+            rejected.raw_action_receipt["error_kind"]
+            == "hit_test_changed"
+        )
+        assert applied.physical_attempt_count == 1
+    finally:
+        session.close()
+
+    report = RuntimeEvidencePlane.rebuild_report(
+        evidence_root / "arp-test-live-frames",
+        "vnext-mission-test-live-frames",
+        "arp-test-live-frames",
+    )
+    assert len(report.action_bindings) == 2
+    assert not any(
+        item.endswith("_action_binding")
+        for item in report.missing_evidence
     )
 
 
@@ -2473,7 +3069,7 @@ def test_changed_target_after_explicit_start_seals_unique_incomplete_evidence(
     try:
         result = execution.handlers[ArpNodeKind.AGENT_GOAL](
             next(node for node in graph.nodes if node.id == "full-goal"),
-            {"run_id": run_id},
+            {"run_id": run_id, "runtime_state": {}},
             threading.Event(),
         )
     finally:
@@ -2804,12 +3400,13 @@ def test_real_composition_builds_independent_zero_retry_roles_and_closes(
         )
         assert {
             tool.name for tool in runtime._catalog.tools
-        } == {
-            "click",
-            "double_click",
-            "scroll",
-            "type_text",
-            "hotkey",
+            } == {
+                "click",
+                "double_click",
+                "drag",
+                "scroll",
+                "type_text",
+                "hotkey",
             "claim_obligation_done",
             "blocked",
         }
@@ -3068,3 +3665,13 @@ def test_composition_root_has_no_forbidden_product_imports_or_fallback() -> None
     assert "winpilot.mcp" not in source
     assert "fallback_to_legacy" not in source
     assert source.count("from ..vnext") >= 1
+
+
+def test_goal_admission_has_no_legacy_tasking_or_agent_dependency() -> None:
+    source = Path(goal_admission.__file__).read_text(encoding="utf-8")
+
+    assert "tasking" not in source
+    assert "TaskContractCompiler" not in source
+    assert "AgentRunner" not in source
+    assert "default_handlers" not in source
+    assert "legacy_goal_graph_task" not in source

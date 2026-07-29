@@ -12,6 +12,7 @@ from .contracts import (
     CapabilityContractError,
     CapabilityGrant,
     ExecutionRoute,
+    InteractionMode,
     PointerDisposition,
     ToolRoute,
     FORBIDDEN_ACTOR_TOOLS,
@@ -257,6 +258,7 @@ class ExecutorOffer:
 class BrokerRuntimeState:
     turn_index: int
     available_capabilities: tuple[str, ...]
+    interaction_mode: InteractionMode | str = InteractionMode.AUTO
     target: TargetState = field(default_factory=TargetState)
     frame: AuthoritativeFrameState = field(default_factory=AuthoritativeFrameState)
     pointer: PointerLeaseState = field(default_factory=PointerLeaseState)
@@ -277,6 +279,15 @@ class BrokerRuntimeState:
             or self.turn_index > _MAX_INTEGER
         ):
             raise CapabilityContractError("invalid broker runtime state")
+        object.__setattr__(
+            self,
+            "interaction_mode",
+            _enum_value(
+                self.interaction_mode,
+                InteractionMode,
+                "interaction_mode",
+            ),
+        )
         object.__setattr__(
             self,
             "available_capabilities",
@@ -355,6 +366,7 @@ class BrokerRuntimeState:
         return {
             "format": self.format, "turn_index": self.turn_index,
             "available_capabilities": list(self.available_capabilities),
+            "interaction_mode": self.interaction_mode.value,
             "target": self.target.to_dict(), "frame": self.frame.to_dict(),
             "pointer": self.pointer.to_dict(),
             "artifacts": [item.to_dict() for item in self.artifacts],
@@ -370,9 +382,10 @@ class BrokerRuntimeState:
     @classmethod
     def from_dict(cls, raw: object) -> "BrokerRuntimeState":
         fields = (
-            "format", "turn_index", "available_capabilities", "target", "frame",
-            "pointer", "artifacts", "executor_offers", "authorization_scopes",
-            "runtime_healthy", "paused", "canceled", "fingerprint",
+            "format", "turn_index", "available_capabilities",
+            "interaction_mode", "target", "frame", "pointer", "artifacts",
+            "executor_offers", "authorization_scopes", "runtime_healthy",
+            "paused", "canceled", "fingerprint",
         )
         value = _strict(raw, fields, "BrokerRuntimeState")
         fingerprint = value.pop("fingerprint")

@@ -116,6 +116,36 @@ def _canonical_transition(value: Any) -> Mapping[str, Any]:
         raise RuntimeEvidencePlaneError(str(exc)) from exc
 
 
+def _actor_frame_identity(decision: _DecisionState) -> dict[str, Any]:
+    envelope = decision.record.actor_envelope
+    return {
+        "frame_id": envelope["frame_id"],
+        "epoch": envelope["frame_epoch"],
+        "hwnd": envelope["frame_hwnd"],
+        "region": envelope["frame_region"],
+        "scope": envelope["frame_scope"],
+        "submitted_size": envelope["submitted_image_size"],
+        "image_sha256": envelope["frame_image_sha256"],
+        "media_type": "image/jpeg",
+    }
+
+
+def _is_pre_admission_rejection(
+    receipt: Mapping[str, Any],
+    transition: Mapping[str, Any],
+) -> bool:
+    return bool(
+        receipt["outcome"] == "not_started"
+        and receipt["input_completed"] is False
+        and transition["outcome"] == "rejected"
+        and transition["input_completed"] is False
+        and transition["post_frame_id"] is None
+        and not transition["post_frame_evidence"]
+        and transition["action_effect"] is None
+        and transition["action_effect_evidence"] is None
+    )
+
+
 class RuntimeEvidencePlane:
     """The only run-scoped owner of the canonical execution audit chain.
 
@@ -532,9 +562,9 @@ class RuntimeEvidencePlane:
                 )
             admission = self._admissions.get(decision_id)
             receipt = self._receipts.get(decision_id)
-            if admission is None or receipt is None:
+            if receipt is None:
                 raise RuntimeEvidencePlaneError(
-                    "Controller transition requires admission and raw receipt"
+                    "Controller transition requires a raw receipt"
                 )
             attempt = self._attempts.get(decision_id)
             before_ref = self._frame_artifacts.get(
@@ -543,6 +573,37 @@ class RuntimeEvidencePlane:
             after_ref = self._frame_artifacts.get(
                 (decision_id, FrameArtifactRole.AFTER)
             )
+            pre_admission_rejection = bool(
+                admission is None
+                and attempt is None
+                and _is_pre_admission_rejection(
+                    receipt.snapshot,
+                    snapshot,
+                )
+            )
+            if admission is None and not pre_admission_rejection:
+                raise RuntimeEvidencePlaneError(
+                    "Controller transition requires admission unless "
+                    "input was proven not started"
+                )
+            before_identity = (
+                _actor_frame_identity(decision)
+                if admission is None
+                else admission.frame_identity
+            )
+            if before_ref is not None and (
+                before_ref.frame_identity != before_identity
+            ):
+                raise RuntimeEvidencePlaneError(
+                    "before artifact changed Controller frame identity"
+                )
+            if pre_admission_rejection and (
+                after_ref is not None
+                or post_frame_identity is not None
+            ):
+                raise RuntimeEvidencePlaneError(
+                    "pre-admission rejection cannot bind an after frame"
+                )
             refs = list(snapshot["post_frame_evidence"])
             effect_ref = snapshot["action_effect_evidence"]
             if effect_ref is not None:
@@ -600,7 +661,7 @@ class RuntimeEvidencePlane:
                     if attempt is not None
                     else None
                 ),
-                before_frame_identity=admission.frame_identity,
+                before_frame_identity=before_identity,
                 after_frame_identity=resolved_after_identity,
                 before_artifact_reference_sha256=(
                     canonical_sha256(before_ref.to_dict())
@@ -1190,8 +1251,25 @@ class RuntimeEvidencePlane:
                     if after is None
                     else canonical_sha256(after.to_dict())
                 )
-                if (
+                pre_admission_rejection = bool(
                     admission is None
+                    and attempt is None
+                    and receipt is not None
+                    and _is_pre_admission_rejection(
+                        receipt.snapshot,
+                        transition,
+                    )
+                )
+                expected_before_identity = (
+                    _actor_frame_identity(decision)
+                    if admission is None
+                    else admission.frame_identity
+                )
+                if (
+                    (
+                        admission is None
+                        and not pre_admission_rejection
+                    )
                     or receipt is None
                     or decision_id in self._transitions
                     or binding.decision_id != decision_id
@@ -1199,7 +1277,8 @@ class RuntimeEvidencePlane:
                     or binding.action != decision.record.action
                     or binding.controller_transition != transition
                     or binding.raw_action_receipt != receipt.snapshot
-                    or binding.before_frame_identity != admission.frame_identity
+                    or binding.before_frame_identity
+                    != expected_before_identity
                     or binding.actor_envelope_sha256
                     != decision.actor_envelope_sha256
                     or binding.physical_attempt_count
@@ -1216,6 +1295,13 @@ class RuntimeEvidencePlane:
                         after is not None
                         and binding.after_frame_identity
                         != after.frame_identity
+                    )
+                    or (
+                        pre_admission_rejection
+                        and (
+                            after is not None
+                            or binding.after_frame_identity is not None
+                        )
                     )
                     or (
                         any(

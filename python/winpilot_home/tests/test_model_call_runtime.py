@@ -232,6 +232,96 @@ def test_runtime_does_not_retry_non_transient_http_statuses(status) -> None:
     assert caught.value.request_retry_count == 0
 
 
+def test_runtime_retries_exact_structured_multimodal_decoder_400() -> None:
+    class ProviderError(Exception):
+        status_code = 400
+        body = {
+            "error": {
+                "code": "400",
+                "message": (
+                    "Multimodal data is corrupted or cannot be processed."
+                ),
+                "param": "",
+                "type": "BadRequestError",
+            }
+        }
+
+    received = []
+
+    def send_once(request):
+        received.append(request)
+        if len(received) == 1:
+            raise ProviderError("provider rejected the current image")
+        return "ok"
+
+    outcome = ModelCallRuntime(sleeper=lambda _delay: None).execute(
+        _envelope(),
+        send_once,
+        policy=ModelRetryPolicy(max_attempts=2, initial_backoff_s=0),
+    )
+
+    assert outcome.response == "ok"
+    assert len(received) == 2
+    assert received[0] == received[1]
+    assert [attempt.retryable for attempt in outcome.attempts] == [
+        True,
+        False,
+    ]
+    assert {
+        attempt.request_fingerprint for attempt in outcome.attempts
+    } == {_envelope().request_fingerprint}
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        None,
+        {
+            "error": {
+                "code": "400",
+                "message": (
+                    "Multimodal data is corrupted or cannot be processed."
+                ),
+                "type": "invalid_request_error",
+            }
+        },
+        {
+            "error": {
+                "code": "400",
+                "message": "The tool schema is invalid.",
+                "type": "BadRequestError",
+            }
+        },
+    ),
+)
+def test_runtime_does_not_retry_spoofed_or_other_multimodal_400s(
+    body,
+) -> None:
+    class ProviderError(Exception):
+        status_code = 400
+
+    error = ProviderError(
+        "Multimodal data is corrupted or cannot be processed."
+    )
+    error.body = body
+    calls = 0
+
+    def send_once(_request):
+        nonlocal calls
+        calls += 1
+        raise error
+
+    with pytest.raises(ModelCallError) as caught:
+        ModelCallRuntime(sleeper=lambda _delay: None).execute(
+            _envelope(),
+            send_once,
+            policy=ModelRetryPolicy(max_attempts=2, initial_backoff_s=0),
+        )
+
+    assert calls == 1
+    assert caught.value.attempts[0].retryable is False
+
+
 def test_runtime_honors_cancellation_before_first_send() -> None:
     stopped = threading.Event()
     stopped.set()

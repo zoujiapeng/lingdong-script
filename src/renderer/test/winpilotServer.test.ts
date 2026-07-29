@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import * as http from 'http';
 import * as net from 'net';
 
 vi.mock('electron', () => ({
@@ -11,6 +12,7 @@ import {
   MIN_RENDERER_SAFE_PORT,
   rendererSafePortCandidates,
   runtimeCompatibilityProblem,
+  waitReady,
 } from '../../main/winpilotServer';
 
 function compatibleRuntime() {
@@ -86,5 +88,41 @@ describe('WinPilot 托管服务兼容性提示', () => {
 
   it('兼容时不返回错误', () => {
     expect(runtimeCompatibilityProblem(compatibleRuntime())).toBe('');
+  });
+
+  it('慢启动超时只安排一个后续探针且就绪后不残留重试', async () => {
+    let requests = 0;
+    const server = http.createServer((request, response) => {
+      requests += 1;
+      if (requests === 1) {
+        // Leave the first response open until the client-side readiness
+        // timeout destroys it, matching a temporarily stalled Python status
+        // handler during a cold start.
+        request.once('close', () => response.destroy());
+        return;
+      }
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify(compatibleRuntime()));
+    });
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        if (typeof address === 'object' && address) resolve(address.port);
+        else reject(new Error('test server did not bind a TCP port'));
+      });
+    });
+
+    try {
+      await waitReady(port, {
+        timeoutMs: 500,
+        requestTimeoutMs: 30,
+        retryDelayMs: 10,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(requests).toBe(2);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

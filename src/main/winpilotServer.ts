@@ -170,42 +170,89 @@ export async function findFreePort(): Promise<number> {
   throw new Error('未找到浏览器可访问的本地端口');
 }
 
+export interface RuntimeReadinessProbeOptions {
+  timeoutMs?: number;
+  requestTimeoutMs?: number;
+  retryDelayMs?: number;
+}
+
 /** Poll until the managed child exposes the runtime contract this app expects. */
-function waitReady(port: number, timeoutMs = 30000): Promise<void> {
+export function waitReady(
+  port: number,
+  options: RuntimeReadinessProbeOptions = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 30000;
+  const requestTimeoutMs = options.requestTimeoutMs ?? 2000;
+  const retryDelayMs = options.retryDelayMs ?? 400;
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let retryTimer: NodeJS.Timeout | null = null;
+
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      if (error) reject(error);
+      else resolve();
+    };
+
+    const retry = () => {
+      if (settled || retryTimer) return;
+      if (Date.now() > deadline) {
+        finish(new Error('WinPilot 服务未能就绪'));
+        return;
+      }
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        probe();
+      }, retryDelayMs);
+    };
+
     const probe = () => {
+      if (settled) return;
+      let attemptFinished = false;
+      const retryOnce = () => {
+        if (attemptFinished || settled) return;
+        attemptFinished = true;
+        retry();
+      };
       const req = http.get({
         host: HOST,
         port,
         path: '/api/status',
-        timeout: 2000,
+        timeout: requestTimeoutMs,
         headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
       }, (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
         res.on('end', () => {
-          if (res.statusCode !== 200) { retry(); return; }
+          if (attemptFinished || settled) return;
+          if (res.statusCode !== 200) { retryOnce(); return; }
           try {
             const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
             const compatibilityProblem = runtimeCompatibilityProblem(payload);
             if (!compatibilityProblem) {
-              resolve();
+              attemptFinished = true;
+              finish();
               return;
             }
             _lastError = `${compatibilityProblem} 需要重启。`;
           } catch {
             _lastError = '托管的 Python 运行时返回了无效的状态数据。';
           }
-          retry();
+          retryOnce();
         });
       });
-      req.on('error', retry);
-      req.on('timeout', () => { req.destroy(); retry(); });
-    };
-    const retry = () => {
-      if (Date.now() > deadline) reject(new Error('WinPilot 服务未能就绪'));
-      else setTimeout(probe, 400);
+      req.once('error', retryOnce);
+      // Destroying the request emits ``error``. Let that one path schedule the
+      // retry so a slow startup cannot double the number of live probes.
+      req.once('timeout', () => {
+        req.destroy(new Error('managed runtime readiness probe timed out'));
+      });
     };
     probe();
   });

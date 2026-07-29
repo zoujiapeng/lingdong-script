@@ -114,7 +114,7 @@ class RawActionReceipt:
     error_kind: str | None = None
 
     def __post_init__(self) -> None:
-        if self.action not in {"scroll", "click", "type_text", "hotkey"}:
+        if self.action not in {"scroll", "click", "drag", "type_text", "hotkey"}:
             raise ValueError("unknown raw receipt action")
         if not isinstance(self.outcome, MutationOutcome):
             raise ValueError("raw receipt outcome must be MutationOutcome")
@@ -203,6 +203,22 @@ class AdmittedPhysicalScrollBackend:
 
 
 @dataclass(frozen=True, slots=True)
+class AdmittedPhysicalDragBackend:
+    """Marks an unqueued physical press-move-release backend."""
+
+    execute: RawBackend
+
+    def __post_init__(self) -> None:
+        if not callable(self.execute):
+            raise TypeError("admitted physical drag backend must be callable")
+        if hasattr(self.execute, "__wrapped__"):
+            raise TypeError("admitted physical drag backend cannot wrap a decorated entry")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+        return self.execute(*args, **kwargs)
+
+
+@dataclass(frozen=True, slots=True)
 class AdmittedPhysicalTypeTextBackend:
     """Marks an unqueued, single-mechanism physical text backend."""
 
@@ -239,6 +255,7 @@ class RawDeviceBackends:
     scroll: RawBackend | None = None
     click: RawBackend | None = None
     admitted_physical_click: AdmittedPhysicalClickBackend | None = None
+    admitted_physical_drag: AdmittedPhysicalDragBackend | None = None
     admitted_physical_scroll: AdmittedPhysicalScrollBackend | None = None
     admitted_physical_type_text: AdmittedPhysicalTypeTextBackend | None = None
     admitted_physical_hotkey: AdmittedPhysicalHotkeyBackend | None = None
@@ -259,6 +276,12 @@ class RawDeviceBackends:
         ):
             raise TypeError(
                 "admitted_physical_scroll must be AdmittedPhysicalScrollBackend or null"
+            )
+        if self.admitted_physical_drag is not None and not isinstance(
+            self.admitted_physical_drag, AdmittedPhysicalDragBackend
+        ):
+            raise TypeError(
+                "admitted_physical_drag must be AdmittedPhysicalDragBackend or null"
             )
         if self.admitted_physical_type_text is not None and not isinstance(
             self.admitted_physical_type_text, AdmittedPhysicalTypeTextBackend
@@ -294,6 +317,7 @@ class RawDeviceExecutor:
 
         pairs = (
             ("click", self._backends.admitted_physical_click),
+            ("drag", self._backends.admitted_physical_drag),
             ("scroll", self._backends.admitted_physical_scroll),
             ("type_text", self._backends.admitted_physical_type_text),
             ("hotkey", self._backends.admitted_physical_hotkey),
@@ -472,6 +496,42 @@ class RawDeviceExecutor:
             mechanism=mechanism, **call_kwargs,
         )
 
+    def drag(
+        self,
+        context: RawActionContext,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        *,
+        final_guard: FinalPointerGuard,
+    ) -> RawActionReceipt:
+        context_error = self._context_error(context)
+        if context_error is not None:
+            return self._receipt(
+                "drag", MutationOutcome.NOT_STARTED,
+                error_kind=context_error,
+            )
+        if (
+            any(type(value) is not int for value in (x1, y1, x2, y2))
+            or (x1, y1) == (x2, y2)
+            or not callable(final_guard)
+        ):
+            return self._receipt(
+                "drag", MutationOutcome.NOT_STARTED,
+                error_kind="invalid_args",
+            )
+        return self._call(
+            "drag",
+            self._backends.admitted_physical_drag,
+            x1,
+            y1,
+            x2,
+            y2,
+            hwnd=context.target_hwnd,
+            final_guard=final_guard,
+        )
+
     def type_text(
         self,
         context: RawActionContext,
@@ -530,7 +590,8 @@ class RawDeviceExecutor:
 
 
 __all__ = [
-    "AdmittedPhysicalClickBackend", "AdmittedPhysicalHotkeyBackend",
+    "AdmittedPhysicalClickBackend", "AdmittedPhysicalDragBackend",
+    "AdmittedPhysicalHotkeyBackend",
     "AdmittedPhysicalScrollBackend", "AdmittedPhysicalTypeTextBackend",
     "CANONICAL_HOTKEY_KEYS", "CANONICAL_HOTKEY_MODIFIERS",
     "ClickCount", "ClickMechanism",

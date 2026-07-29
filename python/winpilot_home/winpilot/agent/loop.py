@@ -5735,6 +5735,31 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             payload["action"] = tool_name
         return payload
 
+    def _fast_wrapped_pointer_session(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> dict[str, str]:
+        if tool_name not in {"mouse_down", "move_mouse", "mouse_up"}:
+            return {}
+        status_fn = getattr(self.session, "_pointer_hold_status", None)
+        status = status_fn() if callable(status_fn) else {"active": False}
+        held_button = (
+            str(status.get("button") or "").strip().casefold()
+            if isinstance(status, dict) and status.get("active")
+            else ""
+        )
+        requested_button = str(
+            args.get("button") or held_button or "left",
+        ).strip().casefold()
+        if tool_name == "mouse_down":
+            return {"before": held_button, "after": requested_button}
+        if tool_name == "move_mouse" and held_button:
+            return {"before": held_button, "after": held_button}
+        if tool_name == "mouse_up" and held_button:
+            return {"before": held_button, "after": ""}
+        return {}
+
     @staticmethod
     def _fast_wrapped_result(tool_name: str, args: dict[str, Any], batch_result: ToolResult) -> ToolResult:
         try:
@@ -5787,6 +5812,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "validation_errors",
             "controller_state",
             "native_action_executed",
+            "pointer_session",
         ):
             if key in data:
                 wrapped[key] = data.get(key)
@@ -5830,6 +5856,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         batch_args = {
             "actions": [self._normalise_fast_wrapped_action(tool_name, args)],
         }
+        pointer_session = self._fast_wrapped_pointer_session(tool_name, args)
+        if pointer_session:
+            batch_args["pointer_session"] = pointer_session
         if tool_name in {"draw_strokes", "drag"}:
             batch_args["sync"] = False
         batch_result = self.session.dispatch("run_action_batch", batch_args)

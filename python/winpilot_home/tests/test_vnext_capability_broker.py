@@ -19,8 +19,10 @@ from winpilot.vnext.capabilities import (
     CapabilityBroker,
     CapabilityContractError,
     CapabilityGrant,
+    ExecutionMedium,
     ExecutionRoute,
     ExecutorOffer,
+    InteractionMode,
     MutationKind,
     PointerDisposition,
     PointerLeaseState,
@@ -82,6 +84,7 @@ def _tool(
     capabilities: tuple[str, ...] = (),
     prerequisites: tuple[str, ...] = (),
     authorization_scope: str | None = None,
+    execution_medium: ExecutionMedium | None = None,
     order: int,
 ) -> ToolSpec:
     return ToolSpec(
@@ -89,6 +92,7 @@ def _tool(
         schema=_schema(),
         route=route,
         mutation_kind=mutation,
+        execution_medium=execution_medium,
         required_any_capabilities=capabilities,
         prerequisites=prerequisites,
         authorization_scope=authorization_scope,
@@ -103,6 +107,7 @@ def _catalog() -> ToolCatalog:
                 "observe",
                 ToolRoute.VISUAL_ACTOR,
                 MutationKind.NONE,
+                execution_medium=ExecutionMedium.CONTROL,
                 order=1,
             ),
             _tool(
@@ -110,6 +115,7 @@ def _catalog() -> ToolCatalog:
                 ToolRoute.VISUAL_ACTOR,
                 MutationKind.NONE,
                 capabilities=("visual.read_text",),
+                execution_medium=ExecutionMedium.CONTROL,
                 order=2,
             ),
             _tool(
@@ -156,24 +162,28 @@ def _catalog() -> ToolCatalog:
                 "wait",
                 ToolRoute.VISUAL_ACTOR,
                 MutationKind.NONE,
+                execution_medium=ExecutionMedium.CONTROL,
                 order=8,
             ),
             _tool(
                 "request_capability",
                 ToolRoute.VISUAL_ACTOR,
                 MutationKind.NONE,
+                execution_medium=ExecutionMedium.CONTROL,
                 order=9,
             ),
             _tool(
                 "claim_obligation_done",
                 ToolRoute.VISUAL_ACTOR,
                 MutationKind.NONE,
+                execution_medium=ExecutionMedium.CONTROL,
                 order=10,
             ),
             _tool(
                 "blocked",
                 ToolRoute.VISUAL_ACTOR,
                 MutationKind.NONE,
+                execution_medium=ExecutionMedium.CONTROL,
                 order=11,
             ),
             _tool(
@@ -188,6 +198,7 @@ def _catalog() -> ToolCatalog:
                     "runtime_healthy",
                 ),
                 authorization_scope="external.send",
+                execution_medium=ExecutionMedium.EXTERNAL,
                 order=20,
             ),
             _tool(
@@ -203,6 +214,7 @@ def _catalog() -> ToolCatalog:
                     "runtime_healthy",
                 ),
                 authorization_scope="external.send",
+                execution_medium=ExecutionMedium.EXTERNAL,
                 order=21,
             ),
         )
@@ -703,6 +715,85 @@ def test_catalog_and_runtime_state_are_strict_content_addressed_values() -> None
         BrokerRuntimeState.from_dict(
             {**state.to_dict(), "task_text": "benchmark case"}
         )
+
+
+def test_execution_medium_defaults_fail_closed_and_round_trips() -> None:
+    local = ToolSpec(
+        "run_shell",
+        _schema(),
+        ToolRoute.VISUAL_ACTOR,
+        MutationKind.NONE,
+    )
+    gui = _tool(
+        "click",
+        ToolRoute.VISUAL_ACTOR,
+        MutationKind.GUI,
+        capabilities=("visual.interact",),
+        prerequisites=GUI_GATES,
+        order=1,
+    )
+    control = _tool(
+        "blocked",
+        ToolRoute.VISUAL_ACTOR,
+        MutationKind.NONE,
+        execution_medium=ExecutionMedium.CONTROL,
+        order=2,
+    )
+
+    assert local.execution_medium is ExecutionMedium.LOCAL
+    assert gui.execution_medium is ExecutionMedium.GUI
+    assert control.execution_medium is ExecutionMedium.CONTROL
+    for tool in (local, gui, control):
+        assert ToolSpec.from_dict(tool.to_dict()) == tool
+
+    local_catalog = ToolCatalog((local,))
+    control_catalog = ToolCatalog((control,))
+    assert local_catalog.fingerprint != control_catalog.fingerprint
+
+    with pytest.raises(CapabilityContractError, match="execution medium"):
+        _tool(
+            "unsafe_click",
+            ToolRoute.VISUAL_ACTOR,
+            MutationKind.GUI,
+            capabilities=("visual.interact",),
+            prerequisites=GUI_GATES,
+            execution_medium=ExecutionMedium.LOCAL,
+            order=1,
+        )
+    invalid = local.to_dict()
+    invalid["execution_medium"] = "gui_only"
+    with pytest.raises(CapabilityContractError, match="literal string"):
+        ToolSpec.from_dict(invalid)
+    legacy = local.to_dict()
+    legacy["format"] = "tool-spec/0"
+    with pytest.raises(CapabilityContractError, match="unsupported"):
+        ToolSpec.from_dict(legacy)
+
+
+def test_interaction_mode_is_strict_and_content_addressed() -> None:
+    automatic = _state()
+    gui_required = _state(
+        interaction_mode=InteractionMode.GUI_REQUIRED,
+    )
+
+    assert automatic.interaction_mode is InteractionMode.AUTO
+    assert gui_required.interaction_mode is InteractionMode.GUI_REQUIRED
+    assert automatic.fingerprint != gui_required.fingerprint
+    assert (
+        BrokerRuntimeState.from_dict(gui_required.to_dict())
+        == gui_required
+    )
+
+    tampered = gui_required.to_dict()
+    tampered["interaction_mode"] = InteractionMode.AUTO.value
+    with pytest.raises(CapabilityContractError, match="fingerprint"):
+        BrokerRuntimeState.from_dict(tampered)
+    with pytest.raises(CapabilityContractError, match="literal string"):
+        _state(interaction_mode="gui_only")
+    legacy = gui_required.to_dict()
+    legacy["format"] = "broker-runtime-state/1"
+    with pytest.raises(CapabilityContractError, match="invalid"):
+        BrokerRuntimeState.from_dict(legacy)
 
 
 def test_catalog_schema_is_immutable_and_bounded_json_fails_closed() -> None:
@@ -1206,6 +1297,213 @@ def test_live_receipted_provider_route_is_mutually_exclusive_with_gui() -> None:
     assert projection.executor_id == "provider-1"
     assert projection.target_binding_id is None
     assert projection.frame_id is None
+
+
+def test_gui_required_rejects_provider_and_deterministic_executor_offers() -> None:
+    provider_mission = _mission("communication.send_text")
+    provider_state = _state(
+        executor_offers=(_provider_offer(),),
+        authorization_scopes=("external.send", "recipient.bound"),
+    )
+    broker = CapabilityBroker(_catalog())
+
+    automatic_provider = broker.project(
+        provider_mission,
+        _profile(provider_mission),
+        provider_state,
+    )
+    gui_provider = broker.project(
+        provider_mission,
+        _profile(provider_mission),
+        replace(
+            provider_state,
+            interaction_mode=InteractionMode.GUI_REQUIRED,
+        ),
+    )
+
+    assert automatic_provider.execution_route is ExecutionRoute.PROVIDER
+    assert gui_provider.execution_route is ExecutionRoute.VISUAL_ACTOR
+    assert gui_provider.executor_id is None
+    assert "send_text" not in gui_provider.tool_names
+    assert gui_provider.projection_reasons == (
+        "gui_required_policy_enforced",
+        "visual_actor_surface_projected",
+    )
+
+    deterministic_tool = _tool(
+        "deterministic_read",
+        ToolRoute.DETERMINISTIC,
+        MutationKind.NONE,
+        capabilities=("visual.read_text",),
+        prerequisites=("runtime_healthy",),
+        execution_medium=ExecutionMedium.LOCAL,
+        order=30,
+    )
+    deterministic_catalog = ToolCatalog(
+        (*_catalog().tools, deterministic_tool)
+    )
+    deterministic_offer = ExecutorOffer(
+        executor_id="deterministic-reader",
+        route=ToolRoute.DETERMINISTIC,
+        supported_capabilities=("visual.read_text",),
+        tool_names=("deterministic_read",),
+        available=True,
+        live=True,
+    )
+    deterministic_mission = _mission("visual.read_text")
+    deterministic_state = _state(
+        executor_offers=(deterministic_offer,),
+    )
+    deterministic_broker = CapabilityBroker(deterministic_catalog)
+
+    assert (
+        deterministic_broker.project(
+            deterministic_mission,
+            _profile(deterministic_mission),
+            deterministic_state,
+        ).execution_route
+        is ExecutionRoute.DETERMINISTIC
+    )
+    gui_deterministic = deterministic_broker.project(
+        deterministic_mission,
+        _profile(deterministic_mission),
+        replace(
+            deterministic_state,
+            interaction_mode=InteractionMode.GUI_REQUIRED,
+        ),
+    )
+    assert gui_deterministic.execution_route is ExecutionRoute.VISUAL_ACTOR
+    assert gui_deterministic.executor_id is None
+    assert "deterministic_read" not in gui_deterministic.tool_names
+
+
+def test_gui_required_excludes_unclassified_nonmutation_tools() -> None:
+    catalog = ToolCatalog(
+        (
+            _tool(
+                "click",
+                ToolRoute.VISUAL_ACTOR,
+                MutationKind.GUI,
+                capabilities=("visual.interact",),
+                prerequisites=GUI_GATES,
+                order=1,
+            ),
+            _tool(
+                "run_shell",
+                ToolRoute.VISUAL_ACTOR,
+                MutationKind.NONE,
+                order=2,
+            ),
+            _tool(
+                "blocked",
+                ToolRoute.VISUAL_ACTOR,
+                MutationKind.NONE,
+                execution_medium=ExecutionMedium.CONTROL,
+                order=3,
+            ),
+        )
+    )
+    mission = _mission()
+    profile = _profile(mission)
+    broker = CapabilityBroker(catalog)
+
+    automatic = broker.project(mission, profile, _state())
+    gui_required = broker.project(
+        mission,
+        profile,
+        _state(interaction_mode=InteractionMode.GUI_REQUIRED),
+    )
+
+    assert "run_shell" in automatic.tool_names
+    assert gui_required.execution_route is ExecutionRoute.VISUAL_ACTOR
+    assert gui_required.tool_names == ("click", "blocked")
+    assert all(
+        catalog.get(name).execution_medium
+        in {ExecutionMedium.GUI, ExecutionMedium.CONTROL}
+        for name in gui_required.tool_names
+    )
+
+    local_only = CapabilityBroker(
+        ToolCatalog(
+            (
+                _tool(
+                    "run_shell",
+                    ToolRoute.VISUAL_ACTOR,
+                    MutationKind.NONE,
+                    order=1,
+                ),
+            )
+        )
+    ).project(
+        mission,
+        profile,
+        _state(interaction_mode=InteractionMode.GUI_REQUIRED),
+    )
+    assert local_only.execution_route is ExecutionRoute.BLOCKED
+    assert local_only.tool_names == ()
+    assert local_only.projection_reasons == (
+        "gui_required_route_unavailable",
+    )
+
+
+@pytest.mark.parametrize(
+    "runtime_changes",
+    (
+        {
+            "frame": AuthoritativeFrameState(
+                9, 101, 3, True, False, "target_window"
+            ),
+        },
+        {
+            "frame": AuthoritativeFrameState(
+                9, 101, 3, False, True, "target_window"
+            ),
+        },
+        {"target": TargetState("target-1", 101, 3, False)},
+    ),
+)
+def test_gui_required_control_surface_requires_authoritative_gui_observation(
+    runtime_changes,
+) -> None:
+    catalog = ToolCatalog(
+        (
+            _tool(
+                "claim_obligation_done",
+                ToolRoute.VISUAL_ACTOR,
+                MutationKind.NONE,
+                execution_medium=ExecutionMedium.CONTROL,
+                order=1,
+            ),
+        )
+    )
+    mission = _mission()
+    profile = _profile(mission)
+    broker = CapabilityBroker(catalog)
+
+    observed = broker.project(
+        mission,
+        profile,
+        _state(interaction_mode=InteractionMode.GUI_REQUIRED),
+    )
+    missing_observation = broker.project(
+        mission,
+        profile,
+        _state(
+            interaction_mode=InteractionMode.GUI_REQUIRED,
+            **runtime_changes,
+        ),
+    )
+
+    assert observed.execution_route is ExecutionRoute.VISUAL_ACTOR
+    assert observed.tool_names == ("claim_obligation_done",)
+    assert observed.target_binding_id == "target-1"
+    assert observed.frame_id == 9
+    assert observed.frame_scope == "target_window"
+    assert missing_observation.execution_route is ExecutionRoute.BLOCKED
+    assert missing_observation.tool_names == ()
+    assert missing_observation.projection_reasons == (
+        "gui_required_route_unavailable",
+    )
 
 
 @pytest.mark.parametrize(

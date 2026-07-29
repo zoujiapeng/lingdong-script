@@ -31,14 +31,8 @@ def volume_set(level: float) -> bool:
         volume.SetMasterVolumeLevelScalar(scalar, None)
         return True
     except ImportError:
-        # fallback: 通过快捷键模拟
-        try:
-            import pyautogui
-            # 模拟音量增加/减少到目标水平（粗略）
-            pyautogui.press("volumemute")
-            return True
-        except Exception:
-            return False
+        # Muting is not a valid fallback for setting an exact level.
+        return False
 
 
 @feature(
@@ -71,12 +65,7 @@ def volume_mute(mute: bool = None) -> dict:
         current_level = round(volume.GetMasterVolumeLevelScalar() * 100, 1)
         return {"success": True, "result": {"muted": bool(current_mute), "volume": current_level}}
     except ImportError:
-        try:
-            import pyautogui
-            pyautogui.press("volumemute")
-            return {"success": True, "result": {"muted": None, "volume": None}}
-        except Exception:
-            return {"success": False, "error": "pycaw/音量控制不可用"}
+        return {"success": False, "error": "pycaw/音量控制不可用"}
 
 
 @feature(

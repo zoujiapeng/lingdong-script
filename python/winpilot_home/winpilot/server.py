@@ -64,6 +64,13 @@ from .orchestrator.contracts import (
     GraphValidation,
     validate_graph,
 )
+from .orchestrator.goal_admission import (
+    GoalAdmissionError,
+    GoalAdmissionUnavailable,
+    GoalRunRequest,
+    admit_goal,
+    bind_client_execution_context,
+)
 from .orchestrator.projection import RUN_PROJECTIONS
 from .orchestrator.runtime import ARP_RUNS, ArpExecution
 from .orchestrator.graph_compiler import legacy_goal_graph_task
@@ -1110,7 +1117,15 @@ def _start_arp_execution(
     *,
     runtime_version: ArpRuntimeVersion = ArpRuntimeVersion.LEGACY,
     frozen_config: dict[str, Any] | None = None,
+    goal_admission: dict[str, Any] | None = None,
 ) -> ArpExecution:
+    if (
+        goal_admission is not None
+        and runtime_version is not ArpRuntimeVersion.VNEXT
+    ):
+        raise RuntimeError(
+            "server-owned goal admission may only start the vNext runtime"
+        )
     expected_session_generation: int | None = None
     if runtime_version is ArpRuntimeVersion.LEGACY:
         current_session_generation = SESSION.generation()
@@ -1260,6 +1275,8 @@ def _start_arp_execution(
             inputs=inputs,
         )
     execution.runtime_state["runtime_version"] = runtime_version.value
+    if goal_admission is not None:
+        execution.runtime_state["goal_admission"] = dict(goal_admission)
     job_id = f"arp-job-{execution.run_id}"
     job_ref["job_id"] = job_id
     with STATE.lock:
@@ -1359,6 +1376,61 @@ def _start_arp_execution(
             STATE.run_jobs.pop(execution.run_id, None)
         raise
     return execution
+
+
+@app.post("/api/v2/goals/runs")
+def start_goal_run(req: GoalRunRequest) -> dict[str, Any]:
+    """Admit one product goal without accepting a client-owned graph/runtime."""
+
+    if runtime_source_drifted():
+        raise HTTPException(
+            409,
+            "WinPilot Python sources changed after this service started. "
+            "Restart the runtime before starting another frontend task.",
+        )
+    try:
+        frozen_config = CONFIG.snapshot()
+        vnext_config = frozen_config.get("vnext")
+        admission = admit_goal(
+            req.goal,
+            req.execution_constraint,
+            live_gui_enabled=(
+                isinstance(vnext_config, dict)
+                and vnext_config.get("live_canary_enabled") is True
+            ),
+        )
+        from .orchestrator.vnext_live_canary import (
+            build_exact_live_vnext_graph,
+        )
+
+        graph = build_exact_live_vnext_graph(admission.goal)
+        inputs = bind_client_execution_context(
+            req.execution_context,
+            task_id=graph.id,
+        )
+        audit = admission.to_dict()
+        execution = _start_arp_execution(
+            graph,
+            inputs,
+            runtime_version=admission.runtime_version,
+            frozen_config=frozen_config,
+            goal_admission=audit,
+        )
+    except GoalAdmissionUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (GoalAdmissionError, ValueError) as exc:
+        logger.warning("Goal admission rejected before run start: %s", exc)
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "ok": True,
+        "run_id": execution.run_id,
+        "runtime_version": admission.runtime_version.value,
+        "admission": audit,
+        "run": execution.to_dict(),
+        "graph": graph.model_dump(mode="json"),
+    }
 
 
 @app.post("/api/v2/arp/runs")

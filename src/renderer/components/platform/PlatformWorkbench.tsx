@@ -8,7 +8,6 @@ import {
   Check,
   CheckCircle2,
   ChevronRight,
-  CircleHelp,
   CircleStop,
   Clock3,
   Database,
@@ -47,19 +46,18 @@ import { PropertyPanel } from '../PropertyPanel/PropertyPanel';
 import { useStore } from '../../store';
 import type { UIState } from '../../types';
 import { useControlPlane } from '../../platform/useControlPlane';
-import { TaskClarificationRequired } from '../../platform/client';
 import type {
   AgentSchedule,
   ArpExecutionSnapshot,
   ArpGraph,
   ChatGPTDesktopIntegration,
   CurrentRunResponse,
+  ExecutionConstraint,
   GraphValidation,
   InteractionActionState,
   InteractionRuntimeState,
   RunProjection,
   RuntimeEvent,
-  RuntimeVersion,
   StageRuntimeTrace,
   TaskContract,
 } from '../../platform/contracts';
@@ -116,32 +114,26 @@ const TOOL_LABELS: Record<string, string> = {
   capture_artifact: '创建工件', send_artifact: '发送工件', verify_delivery: '验证送达', open_conversation: '打开会话',
 };
 
-export function RuntimeVersionSelector({
+export function ExecutionConstraintSelector({
   value,
-  canaryEnabled,
   disabled,
   onChange,
 }: {
-  value: RuntimeVersion;
-  canaryEnabled: boolean;
+  value: ExecutionConstraint;
   disabled: boolean;
-  onChange: (value: RuntimeVersion) => void;
+  onChange: (value: ExecutionConstraint) => void;
 }) {
   return (
     <label className="arp-runtime-version-control">
-      <span>运行时</span>
+      <span>执行约束</span>
       <select
-        aria-label="运行时"
+        aria-label="执行约束"
         value={value}
         disabled={disabled}
-        onChange={(event) => {
-          const selected = event.target.value as RuntimeVersion;
-          if (selected === 'vnext' && !canaryEnabled) return;
-          onChange(selected);
-        }}
+        onChange={(event) => onChange(event.target.value as ExecutionConstraint)}
       >
-        <option value="legacy">Legacy</option>
-        <option value="vnext" disabled={!canaryEnabled}>vNext</option>
+        <option value="auto">自动选择</option>
+        <option value="gui_required">必须使用 GUI</option>
       </select>
     </label>
   );
@@ -902,22 +894,20 @@ function TaskContractRuntimeSection({
 
 export function AgentCockpit({ plane }: { plane: Plane }) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
-  const [maxSteps, setMaxSteps] = useState(40);
-  const [coldStart, setColdStart] = useState(() => localStorage.getItem('arp-cold-start') === '1');
-  const [runtimeVersion, setRuntimeVersion] = useState<RuntimeVersion>('vnext');
+  const [executionConstraint, setExecutionConstraint] = useState<ExecutionConstraint>('auto');
   const [submitting, setSubmitting] = useState(false);
   const [controlling, setControlling] = useState(false);
   const [actionError, setActionError] = useState('');
-  const [clarificationQuestions, setClarificationQuestions] = useState<string[]>([]);
   const run = plane.currentRun;
   const arp = plane.arpSnapshot;
   const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
   const manuallyPaused = Boolean(arp?.manual_paused);
   const runtimeIssue = plane.runtimeIssue;
-  const vnextCanaryStatus = plane.overview?.status.vnext?.live_canary_enabled;
-  const vnextCanaryEnabled = vnextCanaryStatus === true;
   const modelProfile = plane.overview?.status.model_profile;
   const metrics = run?.metrics;
+  const visibleResult = typeof run?.result === 'string'
+    ? run.result.trim()
+    : '';
   const latestScreenEvent = [...plane.events].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type))
     || [...(run?.timeline || [])].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type));
   const screenshot = [...(run?.evidence || [])].reverse().find((item) => item.type === 'screenshot' && item.path);
@@ -927,12 +917,6 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
     ? plane.getClient().traceScreenshotUrl(run.run_id, String(screenshot.path))
     : '';
 
-  useEffect(() => {
-    if (vnextCanaryStatus === false && runtimeVersion === 'vnext') {
-      setRuntimeVersion('legacy');
-    }
-  }, [runtimeVersion, vnextCanaryStatus]);
-
   const execute = async () => {
     if (!goal.trim() || submitting) return;
     if (runtimeIssue) {
@@ -941,26 +925,17 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
     }
     setSubmitting(true);
     setActionError('');
-    setClarificationQuestions([]);
-    const frozenRuntimeVersion = runtimeVersion;
+    const frozenExecutionConstraint = executionConstraint;
     try {
       localStorage.setItem('arp-last-goal', goal.trim());
-      localStorage.setItem('arp-cold-start', coldStart ? '1' : '0');
       await plane.startGoal(
         goal.trim(),
-        maxSteps,
-        coldStart,
-        frozenRuntimeVersion,
+        frozenExecutionConstraint,
       );
     } catch (error) {
-      if (error instanceof TaskClarificationRequired) {
-        setClarificationQuestions(error.questions);
-      } else {
-        setActionError(error instanceof Error ? error.message : String(error));
-      }
+      setActionError(error instanceof Error ? error.message : String(error));
     } finally {
       setSubmitting(false);
-      setRuntimeVersion('vnext');
     }
   };
 
@@ -996,26 +971,17 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
         <textarea
           className="arp-goal-input"
           value={goal}
-          onChange={(event) => {
-            setGoal(event.target.value);
-            setClarificationQuestions([]);
-          }}
+          onChange={(event) => setGoal(event.target.value)}
           onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') execute(); }}
           placeholder="描述希望代理在这台电脑上完成的目标……"
           disabled={active}
         />
         <div className="arp-command-actions">
-          <RuntimeVersionSelector
-            value={runtimeVersion}
-            canaryEnabled={vnextCanaryEnabled}
+          <ExecutionConstraintSelector
+            value={executionConstraint}
             disabled={active || submitting}
-            onChange={setRuntimeVersion}
+            onChange={setExecutionConstraint}
           />
-          <label className="arp-step-control">步骤上限<input type="number" min={1} max={400} value={maxSteps} onChange={(event) => setMaxSteps(Number(event.target.value) || 40)} disabled={active || runtimeVersion === 'vnext'} /></label>
-          <label className="arp-cold-start-control" title="禁用 Skill 重放与长期经验提示；仍保留当前对话中的短期指代，用于真实冷启动验收">
-            <input type="checkbox" checked={coldStart} onChange={(event) => setColdStart(event.target.checked)} disabled={active} />
-            冷启动（禁用 Skill/长期经验）
-          </label>
           <div className="arp-action-spacer" />
           {active ? (
             <>
@@ -1035,16 +1001,6 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
             </button>
           )}
         </div>
-        {clarificationQuestions.length > 0 && (
-          <div className="arp-clarification" role="status">
-            <CircleHelp size={15} />
-            <div>
-              <strong>任务尚未启动，请先补充必要信息</strong>
-              <span>{clarificationQuestions.join('；')}</span>
-              <small>把答案补充到上面的指令中，然后重新运行。</small>
-            </div>
-          </div>
-        )}
         {actionError && <div className="arp-inline-error"><XCircle size={14} />{actionError}</div>}
         {runtimeIssue && !actionError && <div className="arp-inline-error"><XCircle size={14} />{runtimeIssue} 当前控制器版本不兼容，应用会自动替换空闲控制器；如果刚刚热更新过，请重启一次桌面应用。</div>}
         {modelProfile?.model && modelProfile?.supports_vision === false && <div className="arp-inline-error"><Eye size={14} />{String(modelProfile.model)} 不接受图像输入。像素密集型 GUI 任务将使用较慢的感知/控制器回退路径，请选择支持视觉的主模型。</div>}
@@ -1062,6 +1018,15 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
         <PhaseRail run={run} />
         <div className="arp-runtime-focus"><span>节点</span><code>{run?.current_node_id || '-'}</code><span>工具</span><code>{TOOL_LABELS[run?.current_tool || ''] || run?.current_tool || '-'}</code></div>
       </section>
+
+      {visibleResult && run?.status === 'done' && (
+        <section className="arp-panel arp-result-panel" aria-label="任务结果" role="status">
+          <div className="arp-panel-heading">
+            <div><CheckCircle2 size={15} /><strong>任务结果</strong></div>
+          </div>
+          <div className="arp-result-content">{visibleResult}</div>
+        </section>
+      )}
 
       {arp && (
         <TaskContractRuntimeSection

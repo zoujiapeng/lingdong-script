@@ -45,6 +45,7 @@ _MISSING_PAYLOAD = object()
 _SAFE_ACTION_SUMMARY_BY_ACTION = {
     "click": frozenset({"click"}),
     "double_click": frozenset({"double_click"}),
+    "drag": frozenset({"drag"}),
     "scroll": frozenset({"scroll_down", "scroll_up"}),
     "type_text": frozenset({"type_text"}),
 }

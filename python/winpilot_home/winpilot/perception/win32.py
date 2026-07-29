@@ -19,6 +19,7 @@ import win32gui
 import win32process
 
 from ..utils.log import logger
+from ..utils.screenshot import window_region
 from .model import UIElement
 
 _CLASS_ROLE = {
@@ -72,8 +73,8 @@ def list_windows() -> list[dict]:
         ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
         if ex_style & win32con.WS_EX_TOOLWINDOW:
             return True
-        rect = win32gui.GetWindowRect(hwnd)
-        if rect[2] - rect[0] < 50 or rect[3] - rect[1] < 50:
+        region = window_region(hwnd)
+        if region.width < 50 or region.height < 50:
             return True
         try:
             _tid, pid = win32process.GetWindowThreadProcessId(hwnd)
@@ -84,7 +85,12 @@ def list_windows() -> list[dict]:
                 "hwnd": hwnd,
                 "title": title,
                 "class_name": win32gui.GetClassName(hwnd),
-                "rect": list(rect),
+                "rect": [
+                    region.left,
+                    region.top,
+                    region.right,
+                    region.bottom,
+                ],
                 "pid": pid,
             }
         )

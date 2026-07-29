@@ -696,6 +696,15 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
 
     store = RunProjectionStore()
     run_id = "projection-vnext-frozen"
+    admission = {
+        "format": "goal-admission/1",
+        "goal": "Frozen vNext run",
+        "execution_constraint": "gui_required",
+        "route": "live_gui",
+        "runtime_version": "vnext",
+        "reason": "explicit_gui_required",
+        "no_legacy_fallback": True,
+    }
     store.on_event({
         "type": "trace",
         "ts": 0.5,
@@ -709,6 +718,7 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
         "run_id": run_id,
         "runtime_version": "vnext",
         "no_legacy_fallback": True,
+        "goal_admission": admission,
         "runtime_budget": {
             "max_turns": 30,
             "max_runtime_s": 300,
@@ -732,6 +742,10 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
         "runtime_snapshot": {
             "runtime_version": "legacy",
             "no_legacy_fallback": False,
+            "goal_admission": {
+                **admission,
+                "execution_constraint": "auto",
+            },
             "status": "succeeded",
         },
     })
@@ -740,6 +754,15 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
 
     assert run["runtime_version"] == "vnext"
     assert run["no_legacy_fallback"] is True
+    assert run["goal_admission"] == admission
+    assert run["goal_admission_mismatch"] == {
+        "frozen": admission,
+        "observed": {
+            **admission,
+            "execution_constraint": "auto",
+        },
+        "event_type": "arp_run_done",
+    }
     assert run["no_legacy_fallback_mismatch"] == {
         "frozen": True,
         "observed": False,

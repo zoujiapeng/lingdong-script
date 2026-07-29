@@ -7,9 +7,11 @@ on the agent reporting its own success.
 from __future__ import annotations
 
 import json
+import random
 import sys
 import threading
 import time
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -27,10 +29,143 @@ STATE: dict[str, Any] = {
 }
 
 
+def _quiz_questions(seed: int) -> list[dict[str, Any]]:
+    """Build a deterministic mixed quiz without publishing its answer key."""
+
+    rng = random.Random(int(seed))
+    add_left = rng.randint(17, 46)
+    add_right = rng.randint(18, 49)
+    product_left = rng.randint(4, 9)
+    product_right = rng.randint(4, 9)
+    copy_word = rng.choice(("星河", "海风", "晨光", "松果", "云帆"))
+    comparison = rng.sample(range(21, 99), 4)
+
+    def choice(
+        question_id: str,
+        prompt: str,
+        answer: str,
+        distractors: list[str],
+    ) -> dict[str, Any]:
+        options = [answer, *distractors]
+        rng.shuffle(options)
+        return {
+            "id": question_id,
+            "kind": "single_choice",
+            "prompt": prompt,
+            "options": options,
+            "_answer": answer,
+        }
+
+    add_answer = add_left + add_right
+    questions = [
+        choice(
+            "addition",
+            f"{add_left} + {add_right} 等于多少？",
+            str(add_answer),
+            [str(add_answer - 1), str(add_answer + 2), str(add_answer + 10)],
+        ),
+        choice(
+            "capital",
+            "中国的首都是哪座城市？",
+            "北京",
+            ["上海", "广州", "成都"],
+        ),
+        choice(
+            "largest",
+            "下面四个数中，哪一个最大？",
+            str(max(comparison)),
+            [str(item) for item in comparison if item != max(comparison)],
+        ),
+        {
+            "id": "product",
+            "kind": "text",
+            "prompt": f"请计算 {product_left} × {product_right}，只填写数字。",
+            "_answer": str(product_left * product_right),
+        },
+        {
+            "id": "copy",
+            "kind": "text",
+            "prompt": f"请把方括号里的词原样填入输入框：[{copy_word}]",
+            "_answer": copy_word,
+        },
+        {
+            "id": "lowercase",
+            "kind": "text",
+            "prompt": "请把字母 GUI 全部改成小写后填入输入框。",
+            "_answer": "gui",
+        },
+    ]
+    rng.shuffle(questions)
+    return questions
+
+
+def _public_quiz_spec(seed: int) -> dict[str, Any]:
+    questions = [
+        {
+            key: value
+            for key, value in question.items()
+            if not key.startswith("_")
+        }
+        for question in _quiz_questions(seed)
+    ]
+    return {
+        "seed": int(seed),
+        "question_count": len(questions),
+        "questions": questions,
+    }
+
+
+def _normalize_quiz_answer(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return unicodedata.normalize("NFKC", value).strip().casefold()
+
+
+def _evaluate_quiz_submission(seed: int, answers: Any) -> dict[str, Any]:
+    questions = _quiz_questions(seed)
+    submitted = answers if isinstance(answers, dict) else {}
+    question_ids = [str(item["id"]) for item in questions]
+    correctness = [
+        _normalize_quiz_answer(submitted.get(question["id"]))
+        == _normalize_quiz_answer(question["_answer"])
+        for question in questions
+    ]
+    answered_ids = [
+        question_id
+        for question_id in question_ids
+        if _normalize_quiz_answer(submitted.get(question_id))
+    ]
+    correct_count = sum(correctness)
+    return {
+        "succeeded": correct_count == len(questions),
+        "server_verified": True,
+        "all_correct": correct_count == len(questions),
+        "question_count": len(questions),
+        "answer_count": len(answered_ids),
+        "correct_count": correct_count,
+        "question_ids": question_ids,
+        "question_types": [str(item["kind"]) for item in questions],
+    }
+
+
 def _accepted_success_event(events: list[dict[str, Any]], index: int) -> bool:
     """Accept dynamic-hold success only after a trusted in-goal release."""
 
     event = events[index]
+    if event.get("scenario") == "quiz_all":
+        details = event.get("details") or {}
+        question_count = int(details.get("question_count") or 0)
+        return bool(
+            event.get("type") == "quiz_submit"
+            and event.get("trusted") is True
+            and event.get("succeeded") is True
+            and details.get("succeeded") is True
+            and details.get("server_verified") is True
+            and details.get("all_correct") is True
+            and question_count >= 6
+            and int(details.get("answer_count") or 0) == question_count
+            and int(details.get("correct_count") or 0) == question_count
+        )
     if not (
         event.get("type") == "scenario_success"
         and event.get("trusted") is True
@@ -132,6 +267,32 @@ def _safe_value(value: Any, *, depth: int = 0) -> Any:
     return str(value)[:240]
 
 
+def _prepare_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize browser evidence and replace quiz claims with server judgment."""
+
+    safe: dict[str, Any] = {
+        key: event.get(key)
+        for key in (
+            "case_id", "scenario", "seed", "type", "trusted", "pointer_type",
+            "client_x", "client_y", "screen_x", "screen_y", "move_count",
+            "succeeded",
+        )
+    }
+    safe["details"] = _safe_value(event.get("details") or {})
+    safe["received_at"] = time.time()
+    if (
+        safe.get("scenario") == "quiz_all"
+        and safe.get("type") == "quiz_submit"
+    ):
+        evaluation = _evaluate_quiz_submission(
+            int(safe.get("seed") or 0),
+            (event.get("details") or {}).get("answers"),
+        )
+        safe["succeeded"] = evaluation["succeeded"]
+        safe["details"] = evaluation
+    return safe
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "WinPilotVisualE2E/2"
 
@@ -154,6 +315,15 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query, keep_blank_values=False)
             case_id = str((query.get("case") or [""])[0] or "")
             self._send_json(200, _state_snapshot(case_id))
+            return
+        if path == "/quiz-spec":
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            try:
+                seed = int((query.get("seed") or ["1"])[0])
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "invalid seed"})
+                return
+            self._send_json(200, _public_quiz_spec(seed))
             return
         if path in {"/", "/visual_interaction_target.html"}:
             data = TARGET.read_bytes()
@@ -178,16 +348,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json(400, {"ok": False, "error": str(exc)})
             return
-        safe: dict[str, Any] = {
-            key: event.get(key)
-            for key in (
-                "case_id", "scenario", "seed", "type", "trusted", "pointer_type",
-                "client_x", "client_y", "screen_x", "screen_y", "move_count",
-                "succeeded",
-            )
-        }
-        safe["details"] = _safe_value(event.get("details") or {})
-        safe["received_at"] = time.time()
+        safe = _prepare_event(event)
         with STATE_LOCK:
             STATE["events"].append(safe)
             STATE["events"] = STATE["events"][-240:]
@@ -198,7 +359,11 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["scenario"] = str(safe.get("scenario") or "")
                 STATE["seed"] = int(safe.get("seed") or 0)
                 STATE["success_event"] = safe
-        self._send_json(200, {"ok": True})
+        self._send_json(200, {
+            "ok": True,
+            "succeeded": safe.get("succeeded") is True,
+            "details": safe.get("details") or {},
+        })
 
 
 def main() -> None:

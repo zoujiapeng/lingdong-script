@@ -327,6 +327,9 @@ class ArpExecution:
                 "no_legacy_fallback": (
                     self.runtime_state.get("no_legacy_fallback") is True
                 ),
+                "goal_admission": _json_preview(
+                    self.runtime_state.get("goal_admission") or {},
+                ),
                 "runtime_lifecycle": _json_preview(
                     self.runtime_state.get("runtime_lifecycle") or {},
                 ),
@@ -401,6 +404,7 @@ class ArpExecution:
             "runtime_version",
             "runtime_budget",
             "no_legacy_fallback",
+            "goal_admission",
             "runtime_lifecycle",
             "trace_status",
             "trace_error",
@@ -826,6 +830,14 @@ class ArpExecution:
         return default.target if default else None
 
     def _publish_run_done(self) -> None:
+        user_result = self.runtime_state.get("user_result")
+        if (
+            self.status is not ArpRunStatus.DONE
+            or type(user_result) is not str
+            or not user_result.strip()
+            or len(user_result) > 16_384
+        ):
+            user_result = None
         BUS.publish(
             "arp_run_done",
             run_id=self.run_id,
@@ -837,6 +849,11 @@ class ArpExecution:
             error=self.error,
             evidence_count=len(self.evidence),
             runtime_snapshot=self.audit_snapshot(),
+            **(
+                {"user_result": user_result}
+                if user_result is not None
+                else {}
+            ),
         )
 
     def run(self, *, publish_done: bool = True) -> dict[str, Any]:
@@ -863,6 +880,12 @@ class ArpExecution:
             ),
             runtime_budget=_json_preview(
                 self.runtime_state.get("runtime_budget") or {},
+            ),
+            no_legacy_fallback=(
+                self.runtime_state.get("no_legacy_fallback") is True
+            ),
+            goal_admission=_json_preview(
+                self.runtime_state.get("goal_admission") or {},
             ),
             graph_id=self.graph.id,
             graph_name=self.graph.name,

@@ -76,6 +76,11 @@ class RunProjectionStore:
                 if type(event.get("no_legacy_fallback")) is bool
                 else None
             ),
+            "goal_admission": copy.deepcopy(
+                event.get("goal_admission")
+                if isinstance(event.get("goal_admission"), dict)
+                else {}
+            ),
             "status": "running",
             "manual_paused": False,
             "phase": "starting",
@@ -240,6 +245,23 @@ class RunProjectionStore:
                     run["no_legacy_fallback"] = (
                         event_no_legacy_fallback
                     )
+            event_goal_admission = event.get("goal_admission")
+            if isinstance(event_goal_admission, dict) and event_goal_admission:
+                frozen_goal_admission = run.get("goal_admission")
+                if (
+                    isinstance(frozen_goal_admission, dict)
+                    and frozen_goal_admission
+                    and frozen_goal_admission != event_goal_admission
+                ):
+                    run["goal_admission_mismatch"] = {
+                        "frozen": copy.deepcopy(frozen_goal_admission),
+                        "observed": copy.deepcopy(event_goal_admission),
+                        "event_type": event_type,
+                    }
+                else:
+                    run["goal_admission"] = copy.deepcopy(
+                        event_goal_admission
+                    )
             phase = self._phase(event_type, event)
             terminal_before_event = run.get("status") in _TERMINAL
             if (
@@ -321,6 +343,33 @@ class RunProjectionStore:
                     else:
                         run["no_legacy_fallback"] = (
                             snapshot_no_legacy_fallback
+                        )
+                snapshot_goal_admission = runtime_snapshot.get(
+                    "goal_admission"
+                )
+                if (
+                    isinstance(snapshot_goal_admission, dict)
+                    and snapshot_goal_admission
+                ):
+                    frozen_goal_admission = run.get("goal_admission")
+                    if (
+                        isinstance(frozen_goal_admission, dict)
+                        and frozen_goal_admission
+                        and frozen_goal_admission
+                        != snapshot_goal_admission
+                    ):
+                        run["goal_admission_mismatch"] = {
+                            "frozen": copy.deepcopy(
+                                frozen_goal_admission
+                            ),
+                            "observed": copy.deepcopy(
+                                snapshot_goal_admission
+                            ),
+                            "event_type": event_type,
+                        }
+                    else:
+                        run["goal_admission"] = copy.deepcopy(
+                            snapshot_goal_admission
                         )
                 if isinstance(runtime_snapshot.get("task_contract"), dict):
                     run["task_contract"] = copy.deepcopy(runtime_snapshot["task_contract"])
@@ -671,7 +720,12 @@ class RunProjectionStore:
             elif event_type == "arp_run_done":
                 run["manual_paused"] = False
                 run["status"] = str(event.get("status") or "done")
-                run["result"] = _compact(event.get("result"))
+                user_result = event.get("user_result")
+                run["result"] = (
+                    user_result
+                    if type(user_result) is str and user_result.strip()
+                    else _compact(event.get("result"))
+                )
                 run["error"] = str(event.get("error") or "")
                 run["current_node_id"] = None
                 run["current_tool"] = None
@@ -900,6 +954,11 @@ class RunProjectionStore:
                 run.get("no_legacy_fallback")
                 if type(run.get("no_legacy_fallback")) is bool
                 else snapshot.get("no_legacy_fallback") is True
+            ),
+            "goal_admission": copy.deepcopy(
+                run.get("goal_admission")
+                or snapshot.get("goal_admission")
+                or {}
             ),
             "graph_id": str(run.get("graph_id") or snapshot.get("graph_id") or ""),
             "graph_name": str(run.get("goal") or snapshot.get("graph_name") or ""),

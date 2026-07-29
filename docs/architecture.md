@@ -17,17 +17,18 @@
 ```text
 PlatformWorkbench
   -> useControlPlane.startGoal
-  -> POST /api/v2/task-contracts/compile
-  -> POST /api/v2/arp/runs
-  -> ArpExecution
-  -> task_stage handler
-  -> StageRuntime
-  -> one ExecuteDesktopTask visual stage
-  -> AgentRunner
-  -> FrameAuthority / FastGuiController / RunStateMachine / FailureRecoveryLayer
+  -> POST /api/v2/goals/runs
+  -> server-owned Goal Admission
+  -> server-built exact vNext graph
+  -> vNext ArpExecution
+  -> MissionRuntime
+  -> CapabilityBroker
+  -> LiveVisualActor / GUI transaction
 ```
 
-`/api/chat`、MCP、CLI、scheduler 和 integration runner 可以复用内部能力，但不能形成行为不同的第二套 GUI 产品入口。直接 POST API 也不能代替 Electron 客户端 E2E。
+`POST /api/v2/goals/runs` 是主 Agent 用户入口。请求只携带 `goal`、`execution_constraint` 和客户端采集的 `execution_context`；不接受客户端选择的 `graph`、`runtime_version` 或 `task_id`。服务端当前唯一选择 vNext，构造规范图并生成、绑定图身份；vNext 不可用时请求失败，不静默回退 Legacy。
+
+`/api/chat`、MCP、CLI、scheduler 和 integration runner 可以复用内部能力，但不能形成行为不同的第二套 GUI 产品入口。直接 POST API 也不能代替 Electron 客户端 E2E。`/api/v2/task-contracts/compile` 与可由客户端提交图和 runtime 的 `/api/v2/arp/runs` 暂留给 Studio、自动化编辑和兼容调用，不属于主 Agent 的意图或 runtime 选择链。
 
 ### 2. 一个完整目标和一条执行主线
 
@@ -78,7 +79,26 @@ pre-frame
 
 ## 控制平面
 
-### Task Contract
+### Goal Admission 与执行约束
+
+Goal Admission 是主 Agent 的服务端决策边界。它保留完整用户目标，只选择执行路由，不按应用名、任务关键词或预写步骤决定工具。当前支持两个约束：
+
+- `auto`：当前采用 GUI-first，服务端选择 vNext `live_gui` 路由；
+- `gui_required`：用户明确要求必须使用 GUI，约束贯穿到 vNext Broker 的运行时状态。
+
+`gui_required` 不是提示词建议。每个 `ToolSpec` 都声明 `execution_medium`：`gui`、`control`、`local` 或 `external`。Broker 在投影工具面时拒绝 provider/deterministic executor，只允许 Visual Actor 的 `gui` mutation 与非 mutation 的 `control` 工具；没有合格工具时返回 blocked，不降级到 shell、provider、Legacy 或未分类工具。未声明的非 mutation 工具按 `local` 处理，不能因 `mutation_kind=none` 绕过门禁。
+
+“必须使用 GUI”不等于“必须制造一次无意义点击”。交互任务必须有绑定当前
+run/mission 的 applied OS-input receipt，并由外部状态验证结果；如果目标在
+初始界面已经满足，或目标本身只是读取界面，Visual Actor 可以在零 mutation
+下 claim，但 control 工具只会在当前绑定窗口存在新鲜、权威的
+`target_window` 帧时投影。每次此类观察产生不含像素、坐标和文本的
+`vnext_gui_observation` 审计事件。陈旧帧、串 run 回执或未绑定窗口均不能
+作为 GUI 使用证据。
+
+客户端 `execution_context` 只描述本次桌面交接。服务端在生成规范图之后绑定 `task_id`，因此客户端上下文不能借机注入图身份或选择 runtime。更完整的迁移边界、兼容面和退出门见 [vNext 迁移](vnext-migration.md)。
+
+### Task Contract（Studio/兼容）
 
 Task Contract 把用户目标表达为：
 
@@ -90,15 +110,17 @@ Task Contract 把用户目标表达为：
 - completion obligation；
 - `experience_policy`。
 
-编译器适合表达“先得到工件，再发送工件”这类显式数据依赖，不适合替模型预写未知 GUI 的每一次点击。客户端 GUI 请求无论 parser 识别出什么任务词，都只生成一个 `ExecuteDesktopTask`；typed intent 继续用于审计和非 GUI 路由，但该视觉阶段以原始目标作为不透明语义输入。无法从用户语句确定的信息应由 Agent 到达对应界面后观察决定。
+编译器适合表达“先得到工件，再发送工件”这类显式数据依赖，不适合替模型预写未知 GUI 的每一次点击。该链当前由 `/api/v2/task-contracts/compile` 暂留给 Studio 和兼容调用，不再替主 Agent 选择 intent 或 runtime。无法从用户语句确定的信息应由 Agent 到达对应界面后观察决定。
 
-### ARP
+### ARP 兼容入口
 
 `arp/1` 是可执行图契约，负责阶段顺序、失败边、等待、人类门和运行审计。它不应成为第二个 GUI planner。Task Contract 进入 ARP 后，未知视觉步骤仍由同一个 bounded Agent/Controller 闭环处理。
 
-### StageRuntime
+服务端仍在内部用 ArpExecution 承载 vNext run 的生命周期，但主 Agent 的规范图只能由 Goal Admission 在服务端构造。允许调用方提交图和 `runtime_version` 的 `/api/v2/arp/runs` 是 Studio/兼容入口，不能被重新接回智能代理提交页。
 
-StageRuntime 是阶段生命周期 owner：能力预检、工件传递、可选能力、执行与验证。对普通 GUI 目标，它保真传递完整目标并启动同一个视觉闭环，不重新解析鼠标动作语言，也不替模型编写恢复步骤。
+### StageRuntime（Legacy）
+
+StageRuntime 是旧 Task Contract/TASK_STAGE 链的阶段生命周期 owner：能力预检、工件传递、可选能力、执行与验证。它仍服务兼容调用，但不是 vNext 主 Agent 的 owner；新能力不得为了兼容在 StageRuntime 与 MissionRuntime 各实现一份。
 
 ### 四个运行时 owner
 
@@ -109,7 +131,7 @@ StageRuntime 是阶段生命周期 owner：能力预检、工件传递、可选�
 | `RunStateMachine` | 记录运行 phase、因果债务、未验证动作和终态转换 | 解释用户目标、生成计划或发起恢复动作 |
 | `FailureRecoveryLayer` | 对失败作事实分类并附加可追溯元数据 | 自动重试、自动切换 UIA/OCR/MCP 或替模型决定下一步 |
 
-四者服务于同一个 `AgentRunner` 循环，不形成四个 planner。失败后先使旧 frame/anchor/计划依据失效，捕获新权威帧，再让模型结合完整目标与失败事实决定继续观察、换路径、等待、阻塞或失败。对于外部参与者、动画或异步界面，模型还可以显式等待有界的视觉变化；runtime 只返回变化后的新帧，不解释变化的业务含义，也不替模型选下一步。
+这些 owner 是仍需迁移或复用的基础能力边界，不应形成多个 planner。vNext 主线由 `MissionRuntime`、Broker 和 Visual Actor 组合这些能力；Legacy `AgentRunner` 的重复 owner 按依赖逐步退出。失败后先使旧 frame/anchor/计划依据失效，捕获新权威帧，再让模型结合完整目标与失败事实决定继续观察、换路径、等待、阻塞或失败。对于外部参与者、动画或异步界面，模型还可以显式等待有界的视觉变化；runtime 只返回变化后的新帧，不解释变化的业务含义，也不替模型选下一步。
 
 ## 视觉与感知
 
@@ -167,7 +189,7 @@ StageRuntime 是阶段生命周期 owner：能力预检、工件传递、可选�
 
 “打开应用”不意味着无条件启动新实例。窗口标题、进程、可见状态、登录态线索和当前画面需要一起判断。应用别名只能帮助发现候选，不能决定操作流程。
 
-当前实现已经在 `perception/apps.py` 与通用启动工具中接入 Start Menu、`Get-StartApps`、App Paths、快捷方式目标、可执行/进程身份、已运行实例复用和启动前后窗口证据；本地抖音冷启动 E2E 已证明这条多源路径能找到桌面客户端，而不是退回网页。窗口、托盘、登录态、alias、focus 与 launch 仍分散在多个 owner，因此这是一项已经落地但尚未完全收敛的基础能力。
+当前实现已经在 `perception/apps.py` 与通用启动工具中接入 Start Menu、`Get-StartApps`、App Paths、快捷方式目标、可执行/进程身份、已运行实例复用和启动前后窗口证据。窗口、托盘、登录态、alias、focus 与 launch 仍分散在多个 owner；迁移切片需要重新通过真实客户端 E2E，不能继承旧 runtime 或历史 run 的结论。
 
 ## 动作执行
 
@@ -236,14 +258,15 @@ MCP 是显式可选的 capability source。只有能力、授权、输入输出�
 
 全面审查确认以下问题仍在代码中，文档不能掩盖：
 
-1. `agent/loop.py` 体积过大；`FrameAuthority`、`FastGuiController`、`RunStateMachine` 与 `FailureRecoveryLayer` 虽已建立边界，旧逻辑尚未全部迁出和去重。
-2. `TaskContractCompiler`、`StageRuntime`、`InteractionStageEngine`、`SubgoalExecutor` 和 Controller 存在重复解释。
-3. 某些 communication/application adapter 仍含布局、别名或任务族特化。
-4. 原生配置已默认关闭 UIA/OCR，但 `fusion.observe` 等兼容入口仍保留旧 provider 顺序；必须继续防止非默认调用面把结构化信号升级成视觉语义或失败后的自动 fallback cascade。
-5. `/api/chat`、legacy IPC、FlowScript 和旧 feature 系统仍增加维护面。
-6. 当前整改版本尚未用真实 Electron 客户端完成 11 个任务和混合长任务的全量验收，不能继承历史 run 的通过结论或据此宣称通用成功率。
+1. `/api/v2/task-contracts/compile`、`/api/v2/arp/runs` 和 Legacy runtime 仍为 Studio/兼容调用存活；必须先清点并迁移消费者，再删除提供者。
+2. `agent/loop.py` 体积过大；`FrameAuthority`、`FastGuiController`、`RunStateMachine` 与 `FailureRecoveryLayer` 虽已建立边界，旧逻辑尚未全部迁出和去重。
+3. `TaskContractCompiler`、`StageRuntime`、`InteractionStageEngine`、`SubgoalExecutor` 和 Controller 存在重复解释。
+4. 某些 communication/application adapter 仍含布局、别名或任务族特化。
+5. 原生配置已默认关闭 UIA/OCR，但 `fusion.observe` 等兼容入口仍保留旧 provider 顺序；必须继续防止非默认调用面把结构化信号升级成视觉语义或失败后的自动 fallback cascade。
+6. `/api/chat`、legacy IPC、FlowScript 和旧 feature 系统仍增加维护面。
+7. 当前整改版本尚未用真实 Electron 客户端完成 11 个任务和混合长任务的全量验收，不能继承历史 run 的通过结论或据此宣称通用成功率。
 
-整改优先级见 [GUI Agent 架构审计](GUI_AGENT_ARCHITECTURE_AUDIT.md)。
+当前切片的删除顺序与退出门见 [vNext 迁移](vnext-migration.md)，更广泛的整改优先级见 [GUI Agent 架构审计](GUI_AGENT_ARCHITECTURE_AUDIT.md)。
 
 ## 验收原则
 
@@ -261,6 +284,7 @@ GUI 架构改动至少需要：
 ## 文档事实源
 
 - 本文：架构、不变量和当前债务；
+- [vnext-migration.md](vnext-migration.md)：主入口、执行约束、Legacy 兼容边界和删除退出门；
 - [winpilot-agent.md](winpilot-agent.md)：工具、Controller、done gate 等实现细节；
 - [testing.md](testing.md)：测试分类和通过定义；
 - [frontend.md](frontend.md)：客户端入口和刷新/历史呈现；
