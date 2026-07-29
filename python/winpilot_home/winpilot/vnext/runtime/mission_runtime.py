@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from typing import Any, Iterable, Mapping
 
@@ -32,7 +33,10 @@ from ..capabilities import (
     ToolRoute,
 )
 from ..evidence import EvidenceRegistry
-from ..evidence_plane import RuntimeEvidencePlane
+from ..evidence_plane import (
+    ActionExecutionBinding,
+    RuntimeEvidencePlane,
+)
 from ..mission import (
     EvidenceRef,
     MissionError,
@@ -85,9 +89,96 @@ from .post_action_reconcile import (
     validate_controller_evidence_scope,
 )
 
+_REPEATED_POINT_TOLERANCE_PX = 4.0
+_MAX_REPEATED_CLICK_CLUSTER_PX = 24.0
+_REPEATED_CLICK_CLUSTER_SCALE = 0.03
+_INTENT_TOKEN = re.compile(r"[a-z0-9]+|[\u3400-\u9fff]+")
+_GENERIC_INTENT_TOKENS = frozenset(
+    {
+        "a",
+        "activate",
+        "an",
+        "and",
+        "at",
+        "bar",
+        "box",
+        "button",
+        "click",
+        "color",
+        "control",
+        "current",
+        "enter",
+        "field",
+        "focus",
+        "for",
+        "in",
+        "into",
+        "item",
+        "of",
+        "on",
+        "once",
+        "open",
+        "option",
+        "press",
+        "requested",
+        "select",
+        "target",
+        "the",
+        "to",
+        "type",
+        "visible",
+        "with",
+    }
+)
+_RECOVERABLE_NOT_STARTED_ERROR_KINDS = frozenset(
+    {
+        "desktop_queue_canceled",
+        "frame_changed_after_queue",
+        "frame_unavailable",
+        "hit_test_changed",
+        "hit_test_changed_after_queue",
+        "permit_commit_identity_changed",
+        "permit_runtime_state_changed",
+        "permit_runtime_state_unavailable",
+        "permit_changed_after_queue",
+        "point_outside_target_after_queue",
+        "stale_authoritative_frame",
+        "target_changed_after_queue",
+        "target_identity_changed",
+        "target_unavailable",
+    }
+)
+
 
 class MissionRuntimeConfigurationError(ValueError):
     """The injected slice is outside the authorized minimal canary."""
+
+
+def _intent_anchor_tokens(value: str) -> frozenset[str]:
+    tokens = {
+        token
+        for token in _INTENT_TOKEN.findall(value.lower())
+        if (
+            token not in _GENERIC_INTENT_TOKENS
+            and (
+                len(token) >= 3
+                or any("\u3400" <= character <= "\u9fff" for character in token)
+            )
+        )
+    }
+    return frozenset(tokens)
+
+
+def _click_cluster_tolerance(
+    submitted_size: tuple[int, int],
+) -> float:
+    return max(
+        _REPEATED_POINT_TOLERANCE_PX,
+        min(
+            _MAX_REPEATED_CLICK_CLUSTER_PX,
+            min(submitted_size) * _REPEATED_CLICK_CLUSTER_SCALE,
+        ),
+    )
 
 
 class MissionRuntime:
@@ -202,6 +293,7 @@ class MissionRuntime:
         self._registry = evidence_registry
         self._mutation_permits = permits
         self._runtime_evidence = runtime_evidence_plane
+        self._verified_completion_result: str | None = None
         self._turn_lock = threading.Lock()
 
     @staticmethod
@@ -291,6 +383,14 @@ class MissionRuntime:
     @property
     def mutation_permits(self) -> MutationPermitAuthority:
         return self._mutation_permits
+
+    @property
+    def verified_completion_result(self) -> str | None:
+        """Return Actor-authored result text only after mission verification."""
+
+        if self._reducer.projection.status is not MissionStatus.VERIFIED:
+            return None
+        return self._verified_completion_result
 
     @staticmethod
     def _stopped(stop_event: threading.Event | None) -> bool:
@@ -710,6 +810,109 @@ class MissionRuntime:
         if not same_coordinate_domain:
             return False
         current_arguments = proposal.model_dump(mode="json")["args"]
+        if proposal.action in {"click", "double_click"}:
+            prior_arguments = prior.canonical_arguments
+            near_last_point = bool(
+                abs(
+                    float(current_arguments["image_x"])
+                    - float(prior_arguments["image_x"])
+                )
+                <= _REPEATED_POINT_TOLERANCE_PX
+                and abs(
+                    float(current_arguments["image_y"])
+                    - float(prior_arguments["image_y"])
+                )
+                <= _REPEATED_POINT_TOLERANCE_PX
+            )
+            if near_last_point:
+                return True
+            records = {
+                record.decision_id: record
+                for record in plane.decision_records
+            }
+            consecutive: list[Any] = []
+            for event in reversed(self._reducer.events):
+                if event.kind != "transition_recorded":
+                    continue
+                payload = event.payload
+                if (
+                    payload.get("input_completed") is not True
+                    or payload.get("action") != proposal.action
+                ):
+                    break
+                decision_id = payload.get("action_id")
+                record = (
+                    records.get(decision_id)
+                    if type(decision_id) is str
+                    else None
+                )
+                if record is None:
+                    raise RuntimeError(
+                        "completed click cluster is missing its private "
+                        "decision record"
+                    )
+                consecutive.append(record)
+                if len(consecutive) == 2:
+                    break
+            if len(consecutive) < 2:
+                return False
+            if any(
+                not (
+                    record.actor_envelope["target_binding_id"]
+                    == initial.target.binding_id
+                    and record.actor_envelope["frame_epoch"]
+                    == initial.frame.epoch
+                    and record.actor_envelope["frame_hwnd"]
+                    == initial.frame.hwnd
+                    and tuple(record.actor_envelope["frame_region"])
+                    == initial.frame.region
+                    and tuple(
+                        record.actor_envelope["submitted_image_size"]
+                    )
+                    == initial.frame.submitted_size
+                )
+                for record in consecutive
+            ):
+                return False
+            intents = [
+                proposal.local_intent,
+                *(
+                    record.actor_envelope["proposal"]["local_intent"]
+                    for record in consecutive
+                ),
+            ]
+            anchors = [
+                _intent_anchor_tokens(intent)
+                for intent in intents
+            ]
+            if not anchors or not set.intersection(
+                *(set(tokens) for tokens in anchors)
+            ):
+                return False
+            points = [
+                (
+                    float(current_arguments["image_x"]),
+                    float(current_arguments["image_y"]),
+                ),
+                *(
+                    (
+                        float(record.canonical_arguments["image_x"]),
+                        float(record.canonical_arguments["image_y"]),
+                    )
+                    for record in consecutive
+                ),
+            ]
+            tolerance = _click_cluster_tolerance(
+                initial.frame.submitted_size
+            )
+            return bool(
+                max(point[0] for point in points)
+                - min(point[0] for point in points)
+                <= tolerance
+                and max(point[1] for point in points)
+                - min(point[1] for point in points)
+                <= tolerance
+            )
         current_arguments_sha256 = hashlib.sha256(
             json.dumps(
                 current_arguments,
@@ -766,7 +969,8 @@ class MissionRuntime:
             proposal_kind=proposal_kind,
             event_ids=event_ids,
             detail=(
-                "exact repeated completed action was not admitted or executed"
+                "equivalent repeated completed action was not admitted or "
+                "executed"
             ),
         )
 
@@ -868,7 +1072,6 @@ class MissionRuntime:
         turn_index: int,
         stop_event: threading.Event | None,
     ) -> MissionRuntimeResult:
-        del proposal
         obligation_id = envelope.obligation_id
         proposal_kind = "claim_obligation_done"
         if not frozen.frame.evidence_refs:
@@ -1017,12 +1220,15 @@ class MissionRuntime:
                 decision_id=envelope.decision_id,
                 event_ids=event_ids,
             )
-        return self._complete_mission(
+        completion = self._complete_mission(
             route=route,
             proposal_kind=proposal_kind,
             decision_id=envelope.decision_id,
             prior_event_ids=event_ids,
         )
+        if completion.status is RuntimeStatus.MISSION_VERIFIED:
+            self._verified_completion_result = proposal.concise_claim
+        return completion
 
     @staticmethod
     def _actor_envelope_sha256(
@@ -1063,11 +1269,11 @@ class MissionRuntime:
         transition: ControllerTransition,
         *,
         post_frame_identity: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> ActionExecutionBinding | None:
         plane = self._runtime_evidence
         if plane is None:
-            return
-        plane.record_controller_transition(
+            return None
+        return plane.record_controller_transition(
             decision_id=envelope.decision_id,
             mission_id=envelope.mission_id,
             run_id=envelope.run_id,
@@ -1165,7 +1371,7 @@ class MissionRuntime:
             ControllerOutcome.UNKNOWN,
         }:
             try:
-                self._record_controller_transition(
+                action_binding = self._record_controller_transition(
                     envelope,
                     transition,
                 )
@@ -1223,6 +1429,24 @@ class MissionRuntime:
                 return self._cancel(
                     detail="run was canceled before input executed"
                 )
+            if action_binding is not None:
+                error_kind = action_binding.raw_action_receipt[
+                    "error_kind"
+                ]
+                if (
+                    error_kind
+                    not in _RECOVERABLE_NOT_STARTED_ERROR_KINDS
+                ):
+                    return self._result(
+                        RuntimeStatus.STATE_REJECTED,
+                        route=route,
+                        proposal_kind=proposal_kind,
+                        decision_id=envelope.decision_id,
+                        detail=(
+                            "Controller rejected input with a "
+                            "non-recoverable precondition"
+                        ),
+                    )
             return self._result(
                 RuntimeStatus.STALE_DISCARDED,
                 route=route,

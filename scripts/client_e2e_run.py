@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -42,6 +43,7 @@ RUN_TASK = "运行任务"
 STOP_TASK = "停止"
 COLD_START = "冷启动（禁用 Skill/长期经验）"
 RUNTIME_SELECTOR = "运行时"
+EXECUTION_CONSTRAINT_SELECTOR = "执行约束"
 CLARIFICATION_HEADING = "任务尚未启动，请先补充必要信息"
 
 ORIGINAL_CASES: dict[str, dict[str, Any]] = {
@@ -179,6 +181,41 @@ def _visible_descendants(window: Any, control_type: str) -> list[Any]:
     return items
 
 
+def _first_visible_descendant(
+    window: Any,
+    control_type: str,
+    *,
+    name: str = "",
+    prefix: bool = False,
+) -> Any | None:
+    """Find one named control without materializing the Chromium UIA tree.
+
+    Asset pages can contain hundreds of trace rows.  Walking every descendant
+    and reading ``IsOffscreen`` for every node makes Chromium's accessibility
+    provider do quadratic-looking work when a caller only needs one sidebar
+    or toolbar button.  Keep the lookup lazy, and check the cheap identifying
+    properties before asking the provider for visibility.
+    """
+
+    expected_type = f"{control_type}Control"
+    for control, _depth in auto.WalkControl(window, includeTop=False):
+        try:
+            if control.ControlTypeName != expected_type:
+                continue
+            control_name = str(control.Name or "").strip()
+            if name and not (
+                control_name == name
+                or prefix and control_name.startswith(name)
+            ):
+                continue
+            if control.IsOffscreen:
+                continue
+            return control
+        except Exception:
+            continue
+    return None
+
+
 def _control_value(control: Any) -> str:
     pattern = control.GetPattern(auto.PatternId.ValuePattern)
     if pattern is None:
@@ -249,6 +286,94 @@ def _select_runtime_version(control: Any, runtime_version: str) -> dict[str, str
             f"运行时选择回读不一致: requested={requested!r}, label={label!r}"
         )
     return {"runtime_version": selected, "runtime_selector_label": label}
+
+
+def _execution_constraint_from_label(value: str) -> str:
+    normalized = re.sub(r"[\s_-]+", "", str(value or "").strip().casefold())
+    if normalized in {"auto", "自动", "自动选择"}:
+        return "auto"
+    if normalized in {
+        "guirequired",
+        "必须gui",
+        "必须使用gui",
+        "只使用gui",
+    }:
+        return "gui_required"
+    return ""
+
+
+def _select_execution_constraint(
+    control: Any,
+    execution_constraint: str,
+) -> dict[str, str]:
+    requested = str(execution_constraint or "").strip().casefold()
+    if requested not in {"auto", "gui_required"}:
+        raise ValueError(f"不支持的执行约束: {execution_constraint!r}")
+    control.Click()
+    auto.SendKeys("{Home}")
+    if requested == "gui_required":
+        auto.SendKeys("{Down}")
+    auto.SendKeys("{Enter}")
+    time.sleep(0.2)
+    label = _selected_combobox_label(control)
+    selected = _execution_constraint_from_label(label)
+    if selected != requested:
+        raise RuntimeError(
+            "执行约束选择回读不一致: "
+            f"requested={requested!r}, label={label!r}"
+        )
+    return {
+        "execution_constraint": selected,
+        "execution_constraint_selector_label": label,
+    }
+
+
+def _admitted_run_id(handoff: Any) -> str:
+    if not isinstance(handoff, dict):
+        return ""
+    return str(handoff.get("admitted_run_id") or "")
+
+
+def _runtime_goal_matches_submission(
+    runtime_goal: Any,
+    task: str,
+    runtime_version: str,
+) -> bool:
+    normalized_goal = re.sub(r"\s+", " ", str(runtime_goal or "")).strip()
+    normalized_task = re.sub(r"\s+", " ", str(task or "")).strip()
+    if not normalized_task or not normalized_goal:
+        return False
+    candidates = {normalized_task}
+    if str(runtime_version or "legacy").casefold() != "vnext":
+        # The legacy compiler deliberately projects the full contract task to
+        # an 80-character graph display name. Runtime status exposes that
+        # display name as ``goal`` even though the TaskContract and child Agent
+        # retain the complete task. Accept only that exact documented
+        # projection, never an arbitrary prefix.
+        candidates.add(
+            re.sub(r"\s+", " ", str(task or "")[:80]).strip()
+        )
+    return normalized_goal in candidates
+
+
+def _active_run_matches_submission(
+    runtime_status: Any,
+    task: str,
+    previous_run_id: str,
+) -> bool:
+    if not isinstance(runtime_status, dict) or runtime_status.get("running") is not True:
+        return False
+    current = runtime_status.get("current_run")
+    if not isinstance(current, dict):
+        return False
+    current_run_id = str(current.get("run_id") or "")
+    if not current_run_id or current_run_id == str(previous_run_id or ""):
+        return False
+    return _runtime_goal_matches_submission(
+        current.get("goal"),
+        task,
+        str(current.get("runtime_version") or "legacy"),
+    )
 
 
 def _safe_runtime_jobs(value: Any) -> list[dict[str, Any]]:
@@ -371,26 +496,46 @@ class ElectronClientDriver:
                 continue
         raise RuntimeError("未找到 Electron 管理的 WinPilot 运行时连接")
 
-    def runtime_status(self) -> dict[str, Any]:
-        request = urllib.request.Request(
-            f"{self._runtime_url}/api/status",
-            headers={"Authorization": f"Bearer {self._runtime_token}"},
-        )
-        deadline = time.monotonic() + 15.0
+    def runtime_status(
+        self,
+        *,
+        probe_timeout_s: float = 15.0,
+        request_timeout_s: float = 3.0,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + max(1.0, float(probe_timeout_s))
         last_error: BaseException | None = None
         while True:
+            remaining = max(0.1, deadline - time.monotonic())
+            request = urllib.request.Request(
+                f"{self._runtime_url}/api/status",
+                headers={"Authorization": f"Bearer {self._runtime_token}"},
+            )
             try:
-                with urllib.request.urlopen(request, timeout=3) as response:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=min(max(0.1, float(request_timeout_s)), remaining),
+                ) as response:
                     payload = json.load(response)
                 break
+            except urllib.error.HTTPError as exc:
+                if exc.code in {401, 403}:
+                    raise RuntimeError(
+                        "managed runtime rejected the Electron control token"
+                    ) from exc
+                last_error = exc
             except (OSError, TimeoutError, urllib.error.URLError) as exc:
                 last_error = exc
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        "managed runtime status endpoint did not respond "
-                        "within the bounded client probe"
-                    ) from last_error
-                time.sleep(0.25)
+            if time.monotonic() >= deadline:
+                detail = (
+                    f"{type(last_error).__name__}: {last_error}"
+                    if last_error is not None
+                    else "unknown transport error"
+                )
+                raise RuntimeError(
+                    "managed runtime status endpoint did not respond "
+                    f"within the bounded client probe ({detail})"
+                ) from last_error
+            time.sleep(0.25)
         current = payload.get("current_run")
         compact_current = None
         if isinstance(current, dict):
@@ -399,6 +544,7 @@ class ElectronClientDriver:
                 for key in (
                     "run_id", "kind", "runtime_version",
                     "runtime_budget", "no_legacy_fallback",
+                    "goal_admission",
                     "status", "phase", "goal", "current_node_id",
                     "current_tool", "error",
                 )
@@ -412,6 +558,14 @@ class ElectronClientDriver:
                 payload.get("desktop_action_queue")
             ),
         }
+
+    def wait_for_runtime_ready(self) -> dict[str, Any]:
+        """Perform the one cold-start probe without amplifying slow requests."""
+
+        return self.runtime_status(
+            probe_timeout_s=45.0,
+            request_timeout_s=30.0,
+        )
 
     def submission_ui_state(
         self,
@@ -429,10 +583,15 @@ class ElectronClientDriver:
                 )
             except Exception:
                 continue
-        selectors = [
+        runtime_selectors = [
             item
             for item in _visible_descendants(self.window, "ComboBox")
             if item.Name == RUNTIME_SELECTOR
+        ]
+        constraint_selectors = [
+            item
+            for item in _visible_descendants(self.window, "ComboBox")
+            if item.Name == EXECUTION_CONSTRAINT_SELECTOR
         ]
         edits = _visible_descendants(self.window, "Edit")
         edit_values: list[tuple[Any, str]] = []
@@ -483,8 +642,13 @@ class ElectronClientDriver:
                 item["name"] == STOP_TASK for item in buttons
             ),
             "runtime_selector_label": (
-                _selected_combobox_label(selectors[0])
-                if len(selectors) == 1
+                _selected_combobox_label(runtime_selectors[0])
+                if len(runtime_selectors) == 1
+                else ""
+            ),
+            "execution_constraint_selector_label": (
+                _selected_combobox_label(constraint_selectors[0])
+                if len(constraint_selectors) == 1
                 else ""
             ),
             "goal_input": _control_value(goal) if goal is not None else "",
@@ -561,9 +725,11 @@ class ElectronClientDriver:
                 refreshed = auto.ControlFromHandle(self.identity.hwnd)
                 if refreshed is not None and refreshed.Exists(maxSearchSeconds=0.2):
                     self.window = refreshed
-                if NAV_AGENT in {
-                    item.Name.strip() for item in self.buttons()
-                }:
+                if _first_visible_descendant(
+                    self.window,
+                    "Button",
+                    name=NAV_AGENT,
+                ) is not None:
                     return True
                 # Chromium may expose the Document text before its descendant
                 # Button providers settle after a minimized window is restored.
@@ -615,14 +781,15 @@ class ElectronClientDriver:
         return values
 
     def button(self, title: str, *, prefix: bool = False) -> Any:
-        matches = []
-        for control in self.buttons():
-            name = control.Name.strip()
-            if name == title or prefix and name.startswith(title):
-                matches.append(control)
-        if not matches:
+        match = _first_visible_descendant(
+            self.window,
+            "Button",
+            name=title,
+            prefix=prefix,
+        )
+        if match is None:
             raise RuntimeError(f"客户端中未找到按钮: {title}")
-        return matches[0]
+        return match
 
     def navigate(self, title: str) -> None:
         self.button(title).Click()
@@ -663,12 +830,15 @@ class ElectronClientDriver:
         deadline = time.time() + 15
         while time.time() < deadline:
             time.sleep(0.3)
-            now = self.button("会话 ", prefix=True).Name.strip()
+            # React retains this tab button while its count changes.  Reusing
+            # the UIA element avoids repeatedly traversing every trace card on
+            # the Assets page while waiting for the visible count to reach 0.
+            now = session_button.Name.strip()
             if re.search(r"\b0$", now):
                 break
         else:
             raise RuntimeError("通过客户端清空会话后，会话计数未归零")
-        after_name = self.button("会话 ", prefix=True).Name.strip()
+        after_name = session_button.Name.strip()
         after_match = re.search(r"(\d+)$", after_name)
         after = int(after_match.group(1)) if after_match else -1
         if after != 0:
@@ -680,8 +850,9 @@ class ElectronClientDriver:
     def configure_goal(
         self,
         task: str,
-        max_steps: int,
-        runtime_version: str = "legacy",
+        max_steps: int | None = None,
+        runtime_version: str = "vnext",
+        execution_constraint: str = "auto",
     ) -> dict[str, Any]:
         self.restore_and_focus()
         try:
@@ -702,46 +873,75 @@ class ElectronClientDriver:
             (item for item in checkboxes if item.Name == COLD_START),
             None,
         )
-        if checkbox is None:
-            raise RuntimeError("客户端冷启动开关不可见")
-        if _toggle_state(checkbox) != 1:
-            _toggle(checkbox)
-            time.sleep(0.2)
-        if _toggle_state(checkbox) != 1:
-            raise RuntimeError("无法通过客户端开启冷启动")
+        if checkbox is not None:
+            if _toggle_state(checkbox) != 1:
+                _toggle(checkbox)
+                time.sleep(0.2)
+            if _toggle_state(checkbox) != 1:
+                raise RuntimeError("无法通过客户端开启冷启动")
 
         spinners = _visible_descendants(self.window, "Spinner")
-        if not spinners:
-            raise RuntimeError("客户端步骤上限控件不可见")
-        spinner = spinners[0]
-        spinner.Click()
-        auto.SendKeys("{Ctrl}a")
-        auto.SendKeys(str(max_steps))
-        auto.SendKeys("{Tab}")
-        time.sleep(0.2)
+        if spinners and max_steps is not None:
+            spinner = spinners[0]
+            spinner.Click()
+            auto.SendKeys("{Ctrl}a")
+            auto.SendKeys(str(max_steps))
+            auto.SendKeys("{Tab}")
+            time.sleep(0.2)
 
-        selectors = [
+        constraint_selectors = [
+            item
+            for item in _visible_descendants(self.window, "ComboBox")
+            if item.Name == EXECUTION_CONSTRAINT_SELECTOR
+        ]
+        runtime_selectors = [
             item
             for item in _visible_descendants(self.window, "ComboBox")
             if item.Name == RUNTIME_SELECTOR
         ]
-        if len(selectors) != 1:
+        if len(constraint_selectors) == 1:
+            if str(runtime_version or "vnext").casefold() != "vnext":
+                raise RuntimeError(
+                    "主 Agent 入口只接受服务端准入的 vNext 运行；"
+                    "Legacy 已移出该用户入口"
+                )
+            selection = {
+                "runtime_version": "vnext",
+                "runtime_selector_label": "",
+                **_select_execution_constraint(
+                    constraint_selectors[0],
+                    execution_constraint,
+                ),
+            }
+        elif len(runtime_selectors) == 1:
+            # Compatibility for archived campaigns running against a pre-
+            # migration client. New product E2E must use the constraint path.
+            selection = {
+                **_select_runtime_version(
+                    runtime_selectors[0],
+                    runtime_version,
+                ),
+                "execution_constraint": "",
+                "execution_constraint_selector_label": "",
+            }
+        else:
             raise RuntimeError(
-                f"客户端运行时选择器数量不是 1: {len(selectors)}"
+                "客户端执行约束选择器数量不是 1: "
+                f"{len(constraint_selectors)}"
             )
-        runtime_selection = _select_runtime_version(
-            selectors[0],
-            runtime_version,
-        )
 
         value = _control_value(goal)
         if value != task:
             raise RuntimeError(f"客户端目标输入不一致: {value!r}")
         return {
             "task_input": value,
-            "cold_start_toggle": _toggle_state(checkbox),
+            "cold_start_control_present": checkbox is not None,
+            "cold_start_toggle": (
+                _toggle_state(checkbox) if checkbox is not None else 0
+            ),
+            "max_steps_control_present": bool(spinners),
             "max_steps": max_steps,
-            **runtime_selection,
+            **selection,
         }
 
     def stop_active_run(self, *, timeout: int = 30) -> dict[str, Any]:
@@ -766,9 +966,11 @@ class ElectronClientDriver:
         runtime_stopped = False
         while time.time() < deadline:
             try:
-                run_button_restored = RUN_TASK in {
-                    button.Name.strip() for button in self.buttons()
-                }
+                run_button_restored = _first_visible_descendant(
+                    self.window,
+                    "Button",
+                    name=RUN_TASK,
+                ) is not None
             except Exception:
                 run_button_restored = False
             try:
@@ -824,6 +1026,10 @@ class ElectronClientDriver:
         persistent_probe_seconds: int = 120,
         previous_run_id: str = "",
         accepted_run_id: str = "",
+        independent_completion_probe: Callable[
+            [dict[str, Any]], dict[str, Any] | None
+        ]
+        | None = None,
     ) -> dict[str, Any]:
         started_at = time.time()
         deadline = time.time() + timeout
@@ -832,7 +1038,7 @@ class ElectronClientDriver:
         last_progress = 0.0
         last_status = ""
         runtime_status: dict[str, Any] = {}
-        normalized_task = re.sub(r"\s+", " ", str(task or "")).strip()
+        last_independent_probe: dict[str, Any] = {}
         while time.time() < deadline:
             now = time.time()
             try:
@@ -848,15 +1054,22 @@ class ElectronClientDriver:
                 current_runtime.get("goal")
                 if isinstance(current_runtime, dict) else ""
             )
-            normalized_goal = re.sub(r"\s+", " ", current_goal).strip()
             if (
                 not bound_run_id
                 and current_run_id
                 and current_run_id != previous_run_id
             ):
-                if normalized_goal == normalized_task:
+                current_runtime_version = str(
+                    current_runtime.get("runtime_version")
+                    if isinstance(current_runtime, dict) else "legacy"
+                )
+                if _runtime_goal_matches_submission(
+                    current_goal,
+                    task,
+                    current_runtime_version,
+                ):
                     bound_run_id = current_run_id
-                elif normalized_goal and runtime_status.get("running"):
+                elif current_goal.strip() and runtime_status.get("running"):
                     return {
                         "outcome": "submission_mismatch",
                         "status": "failed",
@@ -905,6 +1118,80 @@ class ElectronClientDriver:
             ):
                 active_seen = True
 
+            if (
+                independent_completion_probe is not None
+                and bound_run_id
+                and active_seen
+            ):
+                try:
+                    probe = dict(
+                        independent_completion_probe(
+                            {
+                                "run_id": bound_run_id,
+                                "active_seen": active_seen,
+                                "elapsed_seconds": round(
+                                    now - started_at,
+                                    3,
+                                ),
+                                "runtime": runtime_status,
+                            }
+                        )
+                        or {}
+                    )
+                except Exception as error:
+                    probe = {
+                        "passed": False,
+                        "status": "probe_error",
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                probe["passed"] = probe.get("passed") is True
+                last_independent_probe = probe
+                if probe["passed"]:
+                    return {
+                        "outcome": "independent_success",
+                        "status": "running"
+                        if runtime_status.get("running")
+                        else "terminal",
+                        "run_id": bound_run_id,
+                        "active_seen": active_seen,
+                        "runtime": runtime_status,
+                        "independent_verdict": probe,
+                    }
+
+            # Runtime state is the authoritative, non-invasive terminal
+            # signal.  Check it before walking Chromium's accessibility tree:
+            # large trace/history pages can make that traversal take minutes,
+            # even though the managed run has already finished.
+            if (
+                bound_run_id
+                and runtime_status
+                and current_run_id == bound_run_id
+                and not runtime_status.get("running")
+            ):
+                runtime_terminal = str(
+                    current_runtime.get("status")
+                    if isinstance(current_runtime, dict) else ""
+                ).casefold()
+                if runtime_terminal in {
+                    "done", "completed", "success", "fail", "failed", "error",
+                    "reply", "blocked", "canceled", "cancelled", "stopped",
+                }:
+                    return {
+                        "outcome": "terminal",
+                        "status": (
+                            "done"
+                            if runtime_terminal in {"done", "completed", "success"}
+                            else "canceled"
+                            if runtime_terminal in {"canceled", "cancelled", "stopped"}
+                            else "failed"
+                        ),
+                        "status_label": runtime_terminal,
+                        "run_id": bound_run_id,
+                        "active_seen": active_seen,
+                        "visible_text": [],
+                        "runtime": runtime_status,
+                    }
+
             # The client may be intentionally in the background while the
             # agent controls another application. UIA is best-effort during
             # that interval; the managed runtime status is the non-invasive
@@ -950,35 +1237,6 @@ class ElectronClientDriver:
                     "visible_text": texts,
                     "runtime": runtime_status,
                 }
-            if (
-                bound_run_id
-                and runtime_status
-                and current_run_id == bound_run_id
-                and not runtime_status.get("running")
-            ):
-                runtime_terminal = str(
-                    current_runtime.get("status")
-                    if isinstance(current_runtime, dict) else ""
-                ).casefold()
-                if runtime_terminal in {
-                    "done", "completed", "success", "fail", "failed", "error",
-                    "reply", "blocked", "canceled", "cancelled", "stopped",
-                }:
-                    return {
-                        "outcome": "terminal",
-                        "status": (
-                            "done"
-                            if runtime_terminal in {"done", "completed", "success"}
-                            else "canceled"
-                            if runtime_terminal in {"canceled", "cancelled", "stopped"}
-                            else "failed"
-                        ),
-                        "status_label": runtime_terminal,
-                        "run_id": bound_run_id,
-                        "active_seen": active_seen,
-                        "visible_text": texts,
-                        "runtime": runtime_status,
-                    }
             status = self._topbar_status(task)
             if status:
                 last_status = status
@@ -1033,6 +1291,7 @@ class ElectronClientDriver:
             "active_seen": active_seen,
             "visible_text": self.texts(),
             "runtime": runtime_status,
+            "independent_verdict": last_independent_probe,
         }
 
 
@@ -1118,6 +1377,16 @@ def _bound_trace_evidence(
             agent_starts = path_agent_starts
             break
     path = matched_paths[0] if len(matched_paths) == 1 else None
+    bound_start = next(
+        (
+            event
+            for event in starts
+            if str(event.get("run_id") or "") == run_id
+            and str(event.get("runtime_version") or "legacy")
+            == runtime_version
+        ),
+        {},
+    )
     return {
         "passed": bool(run_id and path is not None),
         "run_id": run_id,
@@ -1129,6 +1398,14 @@ def _bound_trace_evidence(
         "matching_trace_count": len(matched_paths),
         "candidate_trace_count": len(paths),
         "candidate_trace_files": [str(item) for item in paths[:8]],
+        "goal_admission": (
+            dict(bound_start.get("goal_admission") or {})
+            if isinstance(bound_start.get("goal_admission"), dict)
+            else {}
+        ),
+        "no_legacy_fallback": (
+            bound_start.get("no_legacy_fallback") is True
+        ),
         "parse_errors": parse_errors,
     }
 
@@ -1194,8 +1471,12 @@ def _memory_isolation_evidence(
         not item["has_experience"] and not item["experience_enabled"]
         for item in agent_starts
     )
-    session_empty = bool(session_contexts) and all(
-        not context for context in session_contexts
+    session_empty = (
+        all(not context for context in session_contexts)
+        if runtime_version == "vnext"
+        else bool(session_contexts) and all(
+            not context for context in session_contexts
+        )
     )
     required_context_present = bool(session_contexts) and any(
         any(
@@ -1213,9 +1494,14 @@ def _memory_isolation_evidence(
         if required_context_run_id
         else True
     )
+    primary_vnext_entry = bool(
+        runtime_version == "vnext"
+        and configuration.get("execution_constraint")
+        in {"auto", "gui_required"}
+    )
     return {
         "passed": bool(
-            toggle_on
+            (toggle_on or primary_vnext_entry)
             and contracts_disabled
             and runners_clean
             and (
@@ -1263,6 +1549,37 @@ def _execution_evidence(trace_ids: list[str]) -> dict[str, Any]:
                 event_type = str(event.get("type") or "")
                 if event_type in {"arp_run_done", "arp_run_failed", "arp_run_canceled"}:
                     terminal_events.append(event_type)
+                if event_type == "vnext_canary_done":
+                    terminal_events.append(event_type)
+                    continue
+                if event_type == "vnext_raw_receipt":
+                    tool = str(
+                        event.get("controller_action")
+                        or event.get("raw_action")
+                        or ""
+                    )
+                    if not tool:
+                        continue
+                    attempts.append(tool)
+                    if (
+                        event.get("outcome") == "applied"
+                        and event.get("input_completed") is True
+                    ):
+                        successful.append(tool)
+                    continue
+                if event_type == "vnext_canary_turn":
+                    proposal_kind = str(event.get("proposal_kind") or "")
+                    if proposal_kind in {
+                        "claim_obligation_done",
+                        "blocked",
+                    }:
+                        attempts.append(proposal_kind)
+                        if (
+                            proposal_kind == "claim_obligation_done"
+                            and event.get("status") == "mission_verified"
+                        ):
+                            successful.append(proposal_kind)
+                    continue
                 if event_type != "agent_tool":
                     continue
                 tool = str(event.get("tool") or "")
@@ -1308,6 +1625,156 @@ def _execution_evidence(trace_ids: list[str]) -> dict[str, Any]:
     }
 
 
+def _gui_constraint_trace_evidence(
+    trace_ids: list[str],
+    outer_run_id: str,
+) -> dict[str, Any]:
+    """Fail closed unless a GUI-required run used only vNext OS input receipts."""
+
+    outer_run_id = str(outer_run_id or "").strip()
+    gui_actions = {
+        "click", "double_click", "drag", "scroll", "type_text", "hotkey",
+    }
+    inspected: list[str] = []
+    applied_actions: list[str] = []
+    forbidden_events: list[str] = []
+    parse_errors: list[str] = []
+    indexed_events: list[tuple[str, int, dict[str, Any]]] = []
+    outer_run_start_seen = False
+    bound_mission_ids: set[str] = set()
+    bound_task_ids: set[str] = set()
+    for trace_id in trace_ids:
+        path = TRACE_ROOT / f"{trace_id}.jsonl"
+        if not path.is_file():
+            continue
+        inspected.append(str(path))
+        try:
+            for line_number, raw_line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(),
+                start=1,
+            ):
+                if not raw_line.strip():
+                    continue
+                event = json.loads(raw_line)
+                if not isinstance(event, dict):
+                    continue
+                indexed_events.append((path.name, line_number, event))
+                event_type = str(event.get("type") or "")
+                if (
+                    event_type == "arp_run_start"
+                    and str(event.get("run_id") or "") == outer_run_id
+                ):
+                    outer_run_start_seen = True
+                    graph_id = str(event.get("graph_id") or "").strip()
+                    if graph_id:
+                        bound_task_ids.add(graph_id)
+                    task_contract = event.get("task_contract")
+                    if isinstance(task_contract, dict):
+                        task_id = str(
+                            task_contract.get("task_id") or ""
+                        ).strip()
+                        if task_id:
+                            bound_task_ids.add(task_id)
+                if (
+                    event_type == "vnext_canary_start"
+                    and str(event.get("run_id") or "") == outer_run_id
+                ):
+                    mission_id = str(event.get("mission_id") or "").strip()
+                    if mission_id:
+                        bound_mission_ids.add(mission_id)
+        except Exception as error:
+            parse_errors.append(f"{path.name}: {type(error).__name__}: {error}")
+
+    for path_name, line_number, event in indexed_events:
+        try:
+            event_type = str(event.get("type") or "")
+            if event_type in {"agent_start", "agent_tool", "task_stage_start"}:
+                forbidden_events.append(
+                    f"{path_name}:{line_number}:{event_type}"
+                )
+            runtime_version = str(event.get("runtime_version") or "")
+            if runtime_version and runtime_version != "vnext":
+                forbidden_events.append(
+                    f"{path_name}:{line_number}:"
+                    f"runtime_version={runtime_version}"
+                )
+            if event.get("no_legacy_fallback") is False:
+                forbidden_events.append(
+                    f"{path_name}:{line_number}:legacy_fallback_allowed"
+                )
+            if event_type != "vnext_raw_receipt":
+                continue
+            receipt_run_id = str(event.get("run_id") or "").strip()
+            if receipt_run_id != outer_run_id:
+                forbidden_events.append(
+                    f"{path_name}:{line_number}:receipt_run_id="
+                    f"{receipt_run_id or '<empty>'};expected="
+                    f"{outer_run_id or '<empty>'}"
+                )
+                continue
+            mission_id = str(event.get("mission_id") or "").strip()
+            if mission_id and mission_id not in bound_mission_ids:
+                forbidden_events.append(
+                    f"{path_name}:{line_number}:receipt_mission_id="
+                    f"{mission_id};not_bound_to_outer_run"
+                )
+                continue
+            receipt_task_ids = {
+                str(event.get(field) or "").strip()
+                for field in ("task_id", "graph_id")
+                if str(event.get(field) or "").strip()
+            }
+            if (
+                receipt_task_ids
+                and not receipt_task_ids.issubset(bound_task_ids)
+            ):
+                forbidden_events.append(
+                    f"{path_name}:{line_number}:receipt_task_binding="
+                    f"{','.join(sorted(receipt_task_ids))};"
+                    "not_bound_to_outer_run"
+                )
+                continue
+            action = str(
+                event.get("controller_action")
+                or event.get("raw_action")
+                or ""
+            )
+            if action not in gui_actions:
+                forbidden_events.append(
+                    f"{path_name}:{line_number}:"
+                    f"non_gui_action={action or '<empty>'}"
+                )
+                continue
+            if (
+                event.get("outcome") == "applied"
+                and event.get("input_completed") is True
+                and event.get("no_legacy_fallback") is True
+            ):
+                applied_actions.append(action)
+        except Exception as error:
+            parse_errors.append(
+                f"{path_name}:{line_number}: {type(error).__name__}: {error}"
+            )
+    return {
+        "passed": bool(
+            outer_run_id
+            and outer_run_start_seen
+            and inspected
+            and applied_actions
+            and not forbidden_events
+            and not parse_errors
+        ),
+        "outer_run_id": outer_run_id,
+        "outer_run_start_seen": outer_run_start_seen,
+        "bound_mission_ids": sorted(bound_mission_ids),
+        "bound_task_ids": sorted(bound_task_ids),
+        "inspected_trace_files": inspected,
+        "applied_gui_actions": applied_actions,
+        "forbidden_events": forbidden_events,
+        "parse_errors": parse_errors,
+    }
+
+
 def _case_execution_valid(result: dict[str, Any]) -> bool:
     """Check the client/run plumbing without claiming the GUI goal succeeded."""
 
@@ -1318,17 +1785,36 @@ def _case_execution_valid(result: dict[str, Any]) -> bool:
     status = str(run_result.get("status") or "")
     expected = str(result.get("expected") or "terminal")
     runtime_ok = (
-        (
+        outcome == "independent_success"
+        if expected == "independent_success"
+        else (
             outcome == "persistent_active"
             and (result.get("execution_evidence") or {}).get("persistent_ready") is True
         )
         if expected == "persistent"
         else outcome == "terminal" and status == "done"
     )
+    constraint = str(
+        (result.get("configuration") or {}).get("execution_constraint")
+        or "auto"
+    )
+    trace_binding = result.get("trace_binding") or {}
+    admission = trace_binding.get("goal_admission") or {}
+    constraint_ok = (
+        True
+        if constraint != "gui_required"
+        else (
+            admission.get("execution_constraint") == "gui_required"
+            and admission.get("route") == "live_gui"
+            and trace_binding.get("no_legacy_fallback") is True
+            and (result.get("gui_constraint_trace") or {}).get("passed") is True
+        )
+    )
     return bool(
         runtime_ok
         and (result.get("memory_isolation") or {}).get("passed") is True
-        and (result.get("trace_binding") or {}).get("passed") is True
+        and trace_binding.get("passed") is True
+        and constraint_ok
     )
 
 
@@ -1361,6 +1847,10 @@ def run_case(
     after_submit: Callable[[ElectronClientDriver, dict[str, Any]], dict[str, Any] | None]
     | None = None,
     independent_verifier: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    independent_completion_probe: Callable[
+        [dict[str, Any]], dict[str, Any] | None
+    ]
+    | None = None,
     required_context_run_id: str = "",
     expected_client_identity: ClientIdentity | None = None,
 ) -> dict[str, Any]:
@@ -1387,7 +1877,7 @@ def run_case(
                 raise RuntimeError(
                     "visible Electron client identity changed after suite preflight"
                 )
-        runtime_before = driver.runtime_status()
+        runtime_before = driver.wait_for_runtime_ready()
         result["runtime_before"] = runtime_before
         previous_current = runtime_before.get("current_run")
         previous_run_id = str(
@@ -1401,8 +1891,13 @@ def run_case(
         result["configuration"] = driver.configure_goal(
             spec["task"],
             int(spec.get("max_steps", 120)),
-            str(spec.get("runtime_version") or "legacy"),
+            str(spec.get("runtime_version") or "vnext"),
+            str(spec.get("execution_constraint") or "auto"),
         )
+        # UIA can edit and invoke an off-foreground window. A real user cannot.
+        # Make the control surface foreground and verify it before the native
+        # entrypoint is allowed to yield that foreground to the desktop target.
+        driver.restore_and_focus()
         status_before_click = driver.runtime_status()
         ui_before_click = driver.submission_ui_state(
             expected_goal=str(spec["task"]),
@@ -1429,15 +1924,18 @@ def run_case(
         }
         if ui_before_click.get("run_button_enabled") is not True:
             raise RuntimeError("visible Electron Run button is not enabled")
-        if (
-            str(spec.get("runtime_version") or "legacy") == "vnext"
-            and _runtime_version_from_label(
-                str(ui_before_click.get("runtime_selector_label") or "")
-            )
-            != "vnext"
+        requested_constraint = str(
+            spec.get("execution_constraint") or "auto"
+        )
+        visible_constraint = str(
+            ui_before_click.get("execution_constraint_selector_label") or ""
+        )
+        if visible_constraint and (
+            _execution_constraint_from_label(visible_constraint)
+            != requested_constraint
         ):
             raise RuntimeError(
-                "visible Electron runtime selector did not read back vNext "
+                "visible Electron execution constraint did not match "
                 "immediately before submission"
             )
         if ui_before_click.get("goal_input") != spec["task"]:
@@ -1461,7 +1959,7 @@ def run_case(
                     "name": name,
                     "task": spec["task"],
                     "client_pid": driver.identity.pid,
-                    "cold_start": True,
+                    "execution_constraint": requested_constraint,
                 },
                 ensure_ascii=False,
             ),
@@ -1473,11 +1971,7 @@ def run_case(
                 result["after_submit_handoff"] = handoff
         else:
             handoff = None
-        accepted_run_id = str(
-            handoff.get("admitted_run_id")
-            if isinstance(handoff, dict)
-            else ""
-        )
+        accepted_run_id = _admitted_run_id(handoff)
         result["result"] = driver.wait_for_result(
             spec["task"],
             int(spec.get("timeout", 900)),
@@ -1485,8 +1979,21 @@ def run_case(
             persistent_probe_seconds=int(spec.get("persistent_probe_seconds") or 120),
             previous_run_id=previous_run_id,
             accepted_run_id=accepted_run_id,
+            independent_completion_probe=independent_completion_probe,
         )
         result["duration_seconds"] = round(time.time() - submitted_at, 3)
+        if result["result"].get("outcome") not in {
+            "terminal",
+            "timeout",
+            "persistent_active",
+        }:
+            cleanup_status = driver.runtime_status()
+            if _active_run_matches_submission(
+                cleanup_status,
+                str(spec["task"]),
+                previous_run_id,
+            ):
+                result["nonterminal_cleanup"] = driver.stop_active_run()
         driver.restore_and_focus()
         result["screenshots"].update(
             {
@@ -1519,9 +2026,7 @@ def run_case(
             pass
     finally:
         bound_run_id = str((result.get("result") or {}).get("run_id") or "")
-        runtime_version = str(
-            spec.get("runtime_version") or "legacy"
-        )
+        runtime_version = str(spec.get("runtime_version") or "vnext")
         result["trace_binding"] = _bound_trace_evidence(
             bound_run_id,
             str(result.get("task") or ""),
@@ -1542,6 +2047,10 @@ def run_case(
         )
         result["execution_evidence"] = _execution_evidence(
             list(result["bound_trace_ids"]),
+        )
+        result["gui_constraint_trace"] = _gui_constraint_trace_evidence(
+            list(result["bound_trace_ids"]),
+            bound_run_id,
         )
         if independent_verifier is None:
             result["task_verdict"] = {
@@ -1604,7 +2113,8 @@ def run_suite(
     report: dict[str, Any] = {
         "suite": suite,
         "entrypoint": "electron_client_windows_uia",
-        "cold_start_required": True,
+        "goal_admission_required": True,
+        "runtime_version": "vnext",
         "started_at": datetime.now().astimezone().isoformat(),
         "cases": [],
     }
@@ -1667,6 +2177,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--name", default="ad-hoc")
     parser.add_argument(
+        "--execution-constraint",
+        choices=["auto", "gui_required"],
+        default="auto",
+        help="select the visible Agent execution constraint",
+    )
+    parser.add_argument(
         "--max-steps", type=int, default=None,
         help="override the selected case's step limit (ad-hoc default: 120)",
     )
@@ -1705,6 +2221,8 @@ def main() -> int:
             "task": args.task,
             "max_steps": args.max_steps if args.max_steps is not None else 120,
             "timeout": args.timeout if args.timeout is not None else 900,
+            "runtime_version": "vnext",
+            "execution_constraint": args.execution_constraint,
         }
     else:
         raise SystemExit("必须指定 --case、--mixed、--suite、--task 或 --list")

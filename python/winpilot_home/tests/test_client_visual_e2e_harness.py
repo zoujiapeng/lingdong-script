@@ -45,16 +45,42 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     assert harness.SUITES["smoke"] == (
         "drag-fit", "slider", "dynamic-hold", "game-drag-v2",
     )
+    assert harness.SUITES["goal-admission"] == (
+        "precise-click", "ordered-clicks",
+    )
+    assert harness.SUITES["exam"] == ("answer-all-questions",)
     assert {
         item["scenario"] for item in harness.VISUAL_CASES.values()
-    } == {"drag_fit", "slider", "corridor_drag", "dynamic_hold"}
+    } == {
+        "drag_fit",
+        "precise_click",
+        "ordered_clicks",
+        "slider",
+        "corridor_drag",
+        "dynamic_hold",
+        "quiz_all",
+    }
+    assert all(
+        harness.VISUAL_CASES[name]["runtime_version"] == "vnext"
+        and harness.VISUAL_CASES[name]["execution_constraint"] == "gui_required"
+        for name in harness.SUITES["goal-admission"]
+    )
     assert {
         harness.VISUAL_CASES[name]["expected_variant"]
         for name in ("corridor-v0", "corridor-v1", "game-drag-v2", "corridor-v3")
     } == {0, 1, 2, 3}
     assert {
         item["task"] for item in harness.VISUAL_CASES.values()
-    } == {"完成当前界面上的测试。"}
+    } == {
+        "完成当前界面上的测试。",
+        "帮我在当前开启的页面里答完所有题",
+    }
+    quiz_case = harness.VISUAL_CASES["answer-all-questions"]
+    assert quiz_case["runtime_version"] == "vnext"
+    assert quiz_case["execution_constraint"] == "gui_required"
+    assert quiz_case["ground_truth"] == (
+        "trusted_browser_form_submit_and_server_evaluation"
+    )
     leaked_recipe = " ".join(
         item["task"] for item in harness.VISUAL_CASES.values()
     ).casefold()
@@ -71,6 +97,179 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     assert "植物大战僵尸" not in " ".join(
         item["task"] for item in harness.VISUAL_CASES.values()
     )
+
+
+def test_goal_admission_cases_forward_the_gui_constraint():
+    harness = _load_harness()
+
+    source = harness.VISUAL_CASES["precise-click"]
+    spec = harness._client_case_spec(source)
+
+    assert spec == {
+        "task": "完成当前界面上的测试。",
+        "max_steps": 12,
+        "timeout": 360,
+        "runtime_version": "vnext",
+        "execution_constraint": "gui_required",
+    }
+
+    quiz_spec = harness._client_case_spec(
+        harness.VISUAL_CASES["answer-all-questions"],
+    )
+    assert quiz_spec == {
+        "task": "帮我在当前开启的页面里答完所有题",
+        "max_steps": 40,
+        "timeout": 600,
+        "runtime_version": "vnext",
+        "execution_constraint": "gui_required",
+    }
+    assert "scenario" not in quiz_spec
+    assert "seed" not in quiz_spec
+
+
+def test_target_focus_preserves_bound_geometry_unless_minimized(monkeypatch):
+    harness = _load_harness()
+    hwnd = 4242
+    restore_calls: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(harness.win32gui, "IsWindow", lambda value: value == hwnd)
+    monkeypatch.setattr(harness.win32gui, "IsIconic", lambda _value: False)
+    monkeypatch.setattr(
+        harness.win32gui,
+        "ShowWindow",
+        lambda value, mode: restore_calls.append((value, mode)),
+    )
+    monkeypatch.setattr(harness.win32gui, "BringWindowToTop", lambda _value: None)
+    monkeypatch.setattr(harness.win32gui, "SetForegroundWindow", lambda _value: None)
+    monkeypatch.setattr(harness.win32gui, "GetForegroundWindow", lambda: hwnd)
+    monkeypatch.setattr(harness.win32gui, "GetWindowText", lambda _value: "target")
+    monkeypatch.setattr(harness.win32api, "keybd_event", lambda *_args: None)
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    assert harness._focus_window(hwnd)["focused"] is True
+    assert restore_calls == []
+
+    monkeypatch.setattr(harness.win32gui, "IsIconic", lambda _value: True)
+    assert harness._focus_window(hwnd)["focused"] is True
+    assert restore_calls == [(hwnd, harness.win32con.SW_RESTORE)]
+
+
+def test_external_verdict_requires_precise_click_geometry_and_no_wrong_click():
+    harness = _load_harness()
+    state = _state(
+        "precise_click",
+        {
+            "target_index": 0,
+            "target": {"left": 30, "top": 40, "right": 92, "bottom": 102},
+        },
+        moves=0,
+    )
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="precise_click", seed=17,
+    )
+
+    assert verdict["passed"] is True
+    state["events"].insert(0, {
+        "type": "scenario_failure",
+        "trusted": True,
+        "details": {"clicked_index": 4, "target_index": 0},
+    })
+    failed = harness.external_verdict(
+        state, case_id="case-1", scenario="precise_click", seed=17,
+    )
+    assert failed["passed"] is False
+    assert "a trusted wrong-object click preceded success" in failed["errors"]
+
+
+def test_external_verdict_requires_complete_trusted_ordered_click_progression():
+    harness = _load_harness()
+    box = {"left": 30, "top": 40, "right": 98, "bottom": 108}
+    state = _state(
+        "ordered_clicks",
+        {
+            "click_sequence": [1, 2, 3],
+            "required_sequence": [1, 2, 3],
+            "targets": [dict(box), dict(box), dict(box)],
+        },
+        moves=0,
+    )
+    state["events"][:0] = [
+        {
+            "type": "sequence_click",
+            "trusted": True,
+            "details": {"clicked": [1], "expected_next": 2},
+        },
+        {
+            "type": "sequence_click",
+            "trusted": True,
+            "details": {"clicked": [1, 2], "expected_next": 3},
+        },
+        {
+            "type": "sequence_click",
+            "trusted": True,
+            "details": {"clicked": [1, 2, 3], "expected_next": None},
+        },
+    ]
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="ordered_clicks", seed=17,
+    )
+
+    assert verdict["passed"] is True
+    state["events"].pop(1)
+    failed = harness.external_verdict(
+        state, case_id="case-1", scenario="ordered_clicks", seed=17,
+    )
+    assert failed["passed"] is False
+    assert "trusted sequence-click progression is incomplete" in failed["errors"]
+
+
+def test_external_verdict_requires_server_verified_mixed_scroll_quiz():
+    harness = _load_harness()
+    question_ids = [f"q-{index}" for index in range(6)]
+    question_types = [
+        "single_choice",
+        "text",
+        "single_choice",
+        "text",
+        "single_choice",
+        "text",
+    ]
+    state = _state(
+        "quiz_all",
+        {
+            "server_verified": True,
+            "all_correct": True,
+            "question_count": 6,
+            "answer_count": 6,
+            "correct_count": 6,
+            "question_ids": question_ids,
+            "question_types": question_types,
+        },
+        moves=0,
+    )
+    state["success_event"]["type"] = "quiz_submit"
+    state["events"].insert(0, {
+        "type": "page_ready",
+        "details": {
+            "requires_page_scroll": True,
+            "question_ids": question_ids,
+            "question_types": question_types,
+        },
+    })
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="quiz_all", seed=17,
+    )
+
+    assert verdict["passed"] is True
+    state["success_event"]["details"]["server_verified"] = False
+    failed = harness.external_verdict(
+        state, case_id="case-1", scenario="quiz_all", seed=17,
+    )
+    assert failed["passed"] is False
+    assert "quiz submission was not independently evaluated" in failed["errors"]
 
 
 def test_external_verdict_requires_complete_object_placement():

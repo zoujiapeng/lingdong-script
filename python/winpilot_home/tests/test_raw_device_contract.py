@@ -10,6 +10,7 @@ import pytest
 
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
+    AdmittedPhysicalDragBackend,
     AdmittedPhysicalHotkeyBackend,
     AdmittedPhysicalScrollBackend,
     AdmittedPhysicalTypeTextBackend,
@@ -65,6 +66,8 @@ def test_raw_device_requires_an_explicit_typed_backend() -> None:
         RawDeviceBackends(scroll=object())
     with pytest.raises(TypeError, match="AdmittedPhysicalScrollBackend"):
         RawDeviceBackends(admitted_physical_scroll=object())
+    with pytest.raises(TypeError, match="AdmittedPhysicalDragBackend"):
+        RawDeviceBackends(admitted_physical_drag=object())
     with pytest.raises(TypeError, match="AdmittedPhysicalTypeTextBackend"):
         RawDeviceBackends(admitted_physical_type_text=object())
     with pytest.raises(TypeError, match="AdmittedPhysicalHotkeyBackend"):
@@ -541,6 +544,33 @@ def test_final_guard_uses_only_explicit_admitted_backend() -> None:
     )
     assert unavailable.outcome is MutationOutcome.NOT_STARTED
     assert unavailable.error_kind == "backend_unavailable"
+
+
+def test_drag_uses_one_typed_admitted_backend_and_preserves_unknown() -> None:
+    calls = []
+
+    def admitted(x1, y1, x2, y2, *, hwnd, final_guard):
+        calls.append((x1, y1, x2, y2, hwnd))
+        assert final_guard(x1, y1) is FinalPointerGuardDecision.ADMITTED
+        return RawBackendResult(None, {"via": "physical_sendinput"})
+
+    raw = RawDeviceExecutor(
+        RawDeviceBackends(
+            admitted_physical_drag=AdmittedPhysicalDragBackend(admitted)
+        )
+    )
+    receipt = raw.drag(
+        _context(),
+        10,
+        20,
+        30,
+        40,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+
+    assert calls == [(10, 20, 30, 40, 41)]
+    assert receipt.outcome is MutationOutcome.OUTCOME_UNKNOWN
+    assert receipt.input_completed is None
 
 
 def _physical_executor_mocks(monkeypatch, events):

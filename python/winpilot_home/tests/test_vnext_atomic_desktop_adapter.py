@@ -16,6 +16,7 @@ import pytest
 
 from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
+    AdmittedPhysicalDragBackend,
     AdmittedPhysicalHotkeyBackend,
     AdmittedPhysicalScrollBackend,
     AdmittedPhysicalTypeTextBackend,
@@ -103,7 +104,9 @@ def _map_submitted_test_point(image_x: object, image_y: object) -> tuple[int, in
 class _Probe:
     current: LiveTargetSnapshot
     hit_root: int | None = HWND
-    expected_hit_point: tuple[int, int] = POINT
+    expected_hit_point: (
+        tuple[int, int] | tuple[tuple[int, int], ...]
+    ) = POINT
     on_snapshot: Callable[[int], None] | None = None
     on_hit_test: Callable[[int], None] | None = None
 
@@ -119,7 +122,11 @@ class _Probe:
         return self.current
 
     def hit_test_root(self, x: int, y: int) -> int | None:
-        assert (x, y) == self.expected_hit_point
+        expected = self.expected_hit_point
+        if expected and isinstance(expected[0], tuple):
+            assert (x, y) in expected
+        else:
+            assert (x, y) == expected
         self.hit_test_calls += 1
         if self.on_hit_test is not None:
             self.on_hit_test(self.hit_test_calls)
@@ -220,6 +227,26 @@ class _RawHarness:
             )
         return RawBackendResult(self.result, {"via": "physical_sendinput"})
 
+    def drag(
+        self,
+        x1,
+        y1,
+        x2,
+        y2,
+        *,
+        hwnd,
+        final_guard,
+    ) -> RawBackendResult:
+        self.calls.append(("drag", (x1, y1, x2, y2, hwnd)))
+        self._run_before_guard()
+        decision = final_guard(x1, y1)
+        if decision is not FinalPointerGuardDecision.ADMITTED:
+            return RawBackendResult(
+                False,
+                {"guard_decision": decision.value},
+            )
+        return RawBackendResult(self.result, {"via": "physical_sendinput"})
+
     def type_text(
         self,
         text,
@@ -272,6 +299,9 @@ class _RawHarness:
             RawDeviceBackends(
                 admitted_physical_click=AdmittedPhysicalClickBackend(
                     self.click
+                ),
+                admitted_physical_drag=AdmittedPhysicalDragBackend(
+                    self.drag
                 ),
                 admitted_physical_scroll=AdmittedPhysicalScrollBackend(
                     self.scroll
@@ -335,6 +365,12 @@ def _proposal(action: str) -> dict[str, Any]:
     args = {
         "click": {"image_x": 50.0, "image_y": 40.0},
         "double_click": {"image_x": 50.0, "image_y": 40.0},
+        "drag": {
+            "image_x1": 50.0,
+            "image_y1": 40.0,
+            "image_x2": 80.0,
+            "image_y2": 60.0,
+        },
         "scroll": {
             "image_x": 50.0,
             "image_y": 40.0,
@@ -522,7 +558,14 @@ def _harness(
             region=REGION,
             foreground_root_hwnd=HWND,
         ),
-        expected_hit_point=expected_hit_point,
+        expected_hit_point=(
+            (
+                expected_hit_point,
+                _map_submitted_test_point(80.0, 60.0),
+            )
+            if action == "drag"
+            else expected_hit_point
+        ),
     )
     permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
     raw = _RawHarness(raw_result)
@@ -669,6 +712,7 @@ def _fail_journal_event(
     (
         ("click", "click"),
         ("double_click", "click"),
+        ("drag", "drag"),
         ("scroll", "scroll"),
         ("type_text", "type_text"),
         ("hotkey", "hotkey"),
@@ -805,6 +849,24 @@ def test_atomic_adapter_records_admission_and_single_raw_receipt() -> None:
             "raw_device.admitted_physical_click/0",
         ),
         (
+            "drag",
+            {
+                "image_x1": 50.0,
+                "image_y1": 40.0,
+                "image_x2": 80.0,
+                "image_y2": 60.0,
+            },
+            {
+                "kind": "pointer_drag",
+                "x1": 60,
+                "y1": 60,
+                "x2": 90,
+                "y2": 80,
+                "button": "left",
+            },
+            "raw_device.admitted_physical_drag/0",
+        ),
+        (
             "scroll",
             {
                 "image_x": 37.0,
@@ -899,6 +961,15 @@ def test_durable_attempt_records_exact_submitted_and_physical_arguments(
                 physical_arguments["x"],
                 physical_arguments["y"],
                 physical_arguments["signed_wheel_amount"],
+                HWND,
+            )
+        elif action == "drag":
+            assert raw_action == "drag"
+            assert raw_arguments == (
+                physical_arguments["x1"],
+                physical_arguments["y1"],
+                physical_arguments["x2"],
+                physical_arguments["y2"],
                 HWND,
             )
         elif action == "type_text":
@@ -1852,7 +1923,6 @@ def test_adapter_package_is_one_narrow_single_composition_owner() -> None:
     for forbidden_call in (
         "activate_window",
         "launch",
-        "drag",
         "draw",
         "held_pointer",
     ):

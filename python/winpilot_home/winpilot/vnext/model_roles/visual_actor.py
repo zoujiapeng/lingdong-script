@@ -52,6 +52,7 @@ needed; when its named stop condition is visible, take the next requested step."
 _TOOL_DESCRIPTIONS = {
     "click": "Click one point once in the current image.",
     "double_click": "Double-click one point once in the current image.",
+    "drag": "Drag once from one image point to another.",
     "scroll": (
         "Scroll at one point; amount < 0 scrolls down and amount > 0 scrolls up."
     ),

@@ -9,7 +9,9 @@ from ..mission import MissionProjection, MissionStatus
 from ..profiling import ExecutionProfile
 from .contracts import (
     CapabilityGrant,
+    ExecutionMedium,
     ExecutionRoute,
+    InteractionMode,
     MutationKind,
     PointerDisposition,
     ToolCatalog,
@@ -23,6 +25,8 @@ from .state import (
     ExecutorOffer,
     _broker_projection_id,
 )
+
+_POINTER_ACTIVATION_TOOLS = frozenset({"click", "double_click"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +42,23 @@ class CapabilityBroker:
     @staticmethod
     def _active_id(mission: MissionProjection) -> str:
         return str(mission.active_obligation_id or "mission")
+
+    @staticmethod
+    def _temporarily_withheld_tools(
+        mission: MissionProjection,
+    ) -> frozenset[str]:
+        failure = mission.failure_summary
+        transition = mission.last_transition
+        if (
+            failure is None
+            or failure.kind != "repeated_action_suppressed"
+            or transition is None
+            or not transition.input_completed
+        ):
+            return frozenset()
+        if transition.action in _POINTER_ACTIVATION_TOOLS:
+            return _POINTER_ACTIVATION_TOOLS
+        return frozenset({transition.action})
 
     @staticmethod
     def _target_bound(mission: MissionProjection, state: BrokerRuntimeState) -> bool:
@@ -148,6 +169,25 @@ class CapabilityBroker:
     ) -> bool:
         if tool.route is not ToolRoute.VISUAL_ACTOR:
             return False
+        if (
+            state.interaction_mode is InteractionMode.GUI_REQUIRED
+            and tool.execution_medium not in {
+                ExecutionMedium.GUI,
+                ExecutionMedium.CONTROL,
+            }
+        ):
+            return False
+        if (
+            state.interaction_mode is InteractionMode.GUI_REQUIRED
+            and not cls._frame_valid(mission, state)
+        ):
+            # A non-mutating control decision may satisfy an already-complete
+            # or read-only goal, but it counts as GUI execution only when it
+            # is grounded in a fresh authoritative observation of the bound
+            # target.  GUI mutation tools already require the same frame
+            # below; keeping the gate here also covers claim/blocked tools
+            # without manufacturing an input action.
+            return False
         if tool.required_any_capabilities and not (
             set(tool.required_any_capabilities) & capabilities
         ):
@@ -249,6 +289,13 @@ class CapabilityBroker:
             if (
                 tool.route is ToolRoute.VISUAL_ACTOR
                 and tool.mutation_kind is MutationKind.NONE
+                and (
+                    state.interaction_mode is not InteractionMode.GUI_REQUIRED
+                    or (
+                        tool.execution_medium is ExecutionMedium.CONTROL
+                        and self._frame_valid(mission, state)
+                    )
+                )
                 and self._prerequisites_met(tool, mission, state)
             ):
                 result.append(name)
@@ -260,6 +307,8 @@ class CapabilityBroker:
         mission: MissionProjection,
         state: BrokerRuntimeState,
     ) -> tuple[ExecutorOffer, tuple[str, ...]] | None:
+        if state.interaction_mode is InteractionMode.GUI_REQUIRED:
+            return None
         for offer in sorted(
             state.executor_offers,
             key=lambda item: (item.route is ToolRoute.PROVIDER, item.executor_id),
@@ -476,9 +525,11 @@ class CapabilityBroker:
             )
 
         capabilities = required
+        withheld = self._temporarily_withheld_tools(mission)
         tools = tuple(
             tool.name
             for tool in self.catalog.tools
+            if tool.name not in withheld
             if self._tool_eligible(
                 tool, mission, state, capabilities
             )
@@ -492,7 +543,11 @@ class CapabilityBroker:
                 tool_names=(),
                 grants=valid_grants,
                 missing=(),
-                reasons=("no_tool_prerequisites_satisfied",),
+                reasons=(
+                    ("gui_required_route_unavailable",)
+                    if state.interaction_mode is InteractionMode.GUI_REQUIRED
+                    else ("no_tool_prerequisites_satisfied",)
+                ),
             )
         return self._finish(
             mission,
@@ -502,7 +557,26 @@ class CapabilityBroker:
             tool_names=tools,
             grants=valid_grants,
             missing=(),
-            reasons=("visual_actor_surface_projected",),
+            reasons=(
+                (
+                    "gui_required_policy_enforced",
+                    "visual_actor_surface_projected",
+                    *(
+                        ("repeated_action_temporarily_withheld",)
+                        if withheld
+                        else ()
+                    ),
+                )
+                if state.interaction_mode is InteractionMode.GUI_REQUIRED
+                else (
+                    "visual_actor_surface_projected",
+                    *(
+                        ("repeated_action_temporarily_withheld",)
+                        if withheld
+                        else ()
+                    ),
+                )
+            ),
         )
 
 

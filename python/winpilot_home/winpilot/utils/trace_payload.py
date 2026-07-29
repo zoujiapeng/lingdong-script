@@ -16,6 +16,7 @@ _RAW_FRAME_KEYS = {
     "image_b64",
     "screenshot_b64",
 }
+_PRIVATE_TEXT_KEYS = {"user_result"}
 
 
 def _frame_id_in_text(value: Any) -> int | None:
@@ -102,6 +103,14 @@ def sanitize_trace_payload(value: Any, *, frame_id: int | None = None) -> Any:
     for key, child in value.items():
         key_text = str(key)
         key_norm = key_text.casefold()
+        if key_norm in _PRIVATE_TEXT_KEYS and isinstance(child, str):
+            encoded = child.encode("utf-8", errors="replace")
+            out[key_text] = {
+                "private_text_redacted": True,
+                "text_char_count": len(child),
+                "text_sha256": hashlib.sha256(encoded).hexdigest(),
+            }
+            continue
         if key_norm in {"image_url", "input_image"}:
             url = child.get("url") if isinstance(child, dict) else child
             metadata = _frame_metadata(url, frame_id=local_frame_id)

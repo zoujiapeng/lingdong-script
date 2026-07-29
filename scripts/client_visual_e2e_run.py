@@ -4,8 +4,8 @@
 The task is entered through the real client with cold start enabled.  After the
 Run button is clicked, the controlled browser target is returned to the
 foreground so the desktop agent receives the same visible scene a user would.
-Success is decided by trusted browser pointer events, never by the agent's own
-completion text or by a direct backend invocation.
+Success is decided by trusted browser events and scenario-owned state, never
+by the agent's own completion text or by a direct backend invocation.
 """
 
 from __future__ import annotations
@@ -54,8 +54,37 @@ DEFAULT_OUTPUT = WORKSPACE / "output" / "playwright" / "client-visual-e2e"
 # only in the visible randomized page; a passing run must understand that frame
 # and its later state changes just as a user would.
 VISUAL_TEST_TASK = "完成当前界面上的测试。"
+ANSWER_ALL_QUESTIONS_TASK = "帮我在当前开启的页面里答完所有题"
 
 VISUAL_CASES: dict[str, dict[str, Any]] = {
+    "answer-all-questions": {
+        "scenario": "quiz_all",
+        "task": ANSWER_ALL_QUESTIONS_TASK,
+        "seed": 8675309,
+        "max_steps": 40,
+        "timeout": 600,
+        "runtime_version": "vnext",
+        "execution_constraint": "gui_required",
+        "ground_truth": "trusted_browser_form_submit_and_server_evaluation",
+    },
+    "precise-click": {
+        "scenario": "precise_click",
+        "task": VISUAL_TEST_TASK,
+        "seed": 424242,
+        "max_steps": 12,
+        "timeout": 360,
+        "runtime_version": "vnext",
+        "execution_constraint": "gui_required",
+    },
+    "ordered-clicks": {
+        "scenario": "ordered_clicks",
+        "task": VISUAL_TEST_TASK,
+        "seed": 515151,
+        "max_steps": 18,
+        "timeout": 420,
+        "runtime_version": "vnext",
+        "execution_constraint": "gui_required",
+    },
     "drag-fit": {
         "scenario": "drag_fit",
         "task": VISUAL_TEST_TASK,
@@ -114,6 +143,8 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
 
 SUITES = {
     "smoke": ("drag-fit", "slider", "dynamic-hold", "game-drag-v2"),
+    "goal-admission": ("precise-click", "ordered-clicks"),
+    "exam": ("answer-all-questions",),
     "all": tuple(VISUAL_CASES),
 }
 
@@ -184,7 +215,11 @@ def _find_window(title: str, *, timeout: float = 25.0) -> int:
 def _focus_window(hwnd: int) -> dict[str, Any]:
     if not hwnd or not win32gui.IsWindow(hwnd):
         raise RuntimeError("target window no longer exists")
-    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    # Preserve the exact geometry already captured by the native foreground
+    # handoff. SW_RESTORE also un-maximizes a visible window, which invalidates
+    # the server-owned target binding before the first Runtime frame.
+    if win32gui.IsIconic(hwnd):
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
     win32gui.BringWindowToTop(hwnd)
     focused = False
     errors: list[str] = []
@@ -269,7 +304,7 @@ def external_verdict(
     event = state.get("success_event") or {}
     details = event.get("details") or {}
     if state.get("success") is not True:
-        errors.append("no trusted scenario_success event")
+        errors.append("no accepted trusted success event")
     if state.get("case_id") != case_id:
         errors.append("case id mismatch")
     if state.get("scenario") != scenario:
@@ -370,6 +405,111 @@ def external_verdict(
                 errors.append("trusted pointerup did not complete inside the final goal")
         if move_count < 2:
             errors.append("dynamic held gesture did not span multiple pointer moves")
+    elif scenario == "precise_click":
+        target_index = details.get("target_index")
+        target = details.get("target") or {}
+        trusted_failures = [
+            item for item in state.get("events") or []
+            if (
+                item.get("type") == "scenario_failure"
+                and item.get("trusted") is True
+            )
+        ]
+        if (
+            not isinstance(target_index, int)
+            or isinstance(target_index, bool)
+            or not 0 <= target_index < 12
+        ):
+            errors.append("precise target index is invalid")
+        if not all(
+            key in target for key in ("left", "top", "right", "bottom")
+        ):
+            errors.append("precise target geometry is incomplete")
+        if trusted_failures:
+            errors.append("a trusted wrong-object click preceded success")
+    elif scenario == "ordered_clicks":
+        trusted_sequence = [
+            item for item in state.get("events") or []
+            if (
+                item.get("type") == "sequence_click"
+                and item.get("trusted") is True
+            )
+        ]
+        trusted_sequence.sort(
+            key=lambda item: len((item.get("details") or {}).get("clicked") or [])
+        )
+        clicked_progress = [
+            (item.get("details") or {}).get("clicked")
+            for item in trusted_sequence
+        ]
+        expected_progress = [
+            (item.get("details") or {}).get("expected_next")
+            for item in trusted_sequence
+        ]
+        targets = details.get("targets") or []
+        trusted_failures = [
+            item for item in state.get("events") or []
+            if (
+                item.get("type") == "scenario_failure"
+                and item.get("trusted") is True
+            )
+        ]
+        if details.get("click_sequence") != [1, 2, 3]:
+            errors.append("completed click sequence is not 1,2,3")
+        if details.get("required_sequence") != [1, 2, 3]:
+            errors.append("required click sequence is not 1,2,3")
+        if clicked_progress != [[1], [1, 2], [1, 2, 3]]:
+            errors.append("trusted sequence-click progression is incomplete")
+        if expected_progress != [2, 3, None]:
+            errors.append("trusted expected-next progression is invalid")
+        if (
+            len(targets) != 3
+            or any(
+                not isinstance(target, dict)
+                or not all(
+                    key in target
+                    for key in ("left", "top", "right", "bottom")
+                )
+                for target in targets
+            )
+        ):
+            errors.append("ordered target geometry is incomplete")
+        if trusted_failures:
+            errors.append("a trusted wrong-sequence click preceded success")
+    elif scenario == "quiz_all":
+        ready = next(
+            (
+                item for item in reversed(state.get("events") or [])
+                if item.get("type") == "page_ready"
+            ),
+            {},
+        )
+        ready_details = ready.get("details") or {}
+        question_count = int(details.get("question_count") or 0)
+        question_ids = details.get("question_ids") or []
+        question_types = details.get("question_types") or []
+        if event.get("type") != "quiz_submit":
+            errors.append("quiz success did not come from a form submission")
+        if details.get("server_verified") is not True:
+            errors.append("quiz submission was not independently evaluated")
+        if details.get("all_correct") is not True:
+            errors.append("quiz submission was not completely correct")
+        if (
+            question_count < 6
+            or int(details.get("answer_count") or 0) != question_count
+            or int(details.get("correct_count") or 0) != question_count
+            or len(question_ids) != question_count
+        ):
+            errors.append("quiz completion counts are incomplete")
+        if (
+            len(question_types) != question_count
+            or set(question_types) != {"single_choice", "text"}
+        ):
+            errors.append("quiz did not cover both choice and text inputs")
+        if ready_details.get("requires_page_scroll") is not True:
+            errors.append("quiz page did not require visible scrolling")
+        if ready_details.get("question_ids") != question_ids:
+            errors.append("submitted quiz does not match the visible question set")
     else:
         errors.append(f"unsupported scenario: {scenario}")
 
@@ -380,6 +520,20 @@ def external_verdict(
         "pointer_type": event.get("pointer_type"),
         "move_count": move_count,
         "details": details,
+    }
+
+
+def _client_case_spec(source: dict[str, Any]) -> dict[str, Any]:
+    """Build only the values a user can submit through the main Agent entry."""
+
+    return {
+        "task": str(source["task"]),
+        "max_steps": int(source["max_steps"]),
+        "timeout": int(source["timeout"]),
+        "runtime_version": str(source.get("runtime_version") or "vnext"),
+        "execution_constraint": str(
+            source.get("execution_constraint") or "auto"
+        ),
     }
 
 
@@ -425,8 +579,14 @@ def run_visual_case(
         "seed": seed,
         "task": source["task"],
         "entrypoint": "electron_client_windows_uia",
-        "cold_start_required": True,
-        "ground_truth": "trusted_browser_pointer_events",
+        "runtime_version": str(source.get("runtime_version") or "vnext"),
+        "execution_constraint": str(
+            source.get("execution_constraint") or "auto"
+        ),
+        "goal_admission_required": True,
+        "ground_truth": str(
+            source.get("ground_truth") or "trusted_browser_pointer_events"
+        ),
         "started_at": started_at,
     }
     try:
@@ -489,12 +649,41 @@ def run_visual_case(
         oracle_result: dict[str, Any] = {}
 
         def verify_external_state(_client_result: dict[str, Any]) -> dict[str, Any]:
+            def complete(value: dict[str, Any]) -> bool:
+                events = value.get("events") or []
+                if scenario == "quiz_all":
+                    return value.get("success") is True or any(
+                        item.get("type") == "quiz_submit"
+                        and item.get("trusted") is True
+                        for item in events
+                    )
+                if any(
+                    item.get("type") == "scenario_failure"
+                    and item.get("trusted") is True
+                    for item in events
+                ):
+                    return True
+                if value.get("success") is not True:
+                    return False
+                if scenario != "ordered_clicks":
+                    return True
+                return len([
+                    item for item in events
+                    if (
+                        item.get("type") == "sequence_click"
+                        and item.get("trusted") is True
+                    )
+                ]) == 3
+
             state = _wait_json(
                 state_url,
-                lambda value: value.get("success") is True
-                or bool(value.get("events")),
-                timeout=5,
+                complete,
+                timeout=8,
             )
+            # The final sequence_click and scenario_success are separate fetches.
+            # Re-read once after they have both had time to reach the oracle.
+            time.sleep(0.2)
+            state = _json_get(state_url)
             verdict = external_verdict(
                 state,
                 case_id=case_id,
@@ -508,11 +697,7 @@ def run_visual_case(
 
         client_result = client_harness.run_case(
             name,
-            {
-                "task": source["task"],
-                "max_steps": int(source["max_steps"]),
-                "timeout": int(source["timeout"]),
-            },
+            _client_case_spec(source),
             output_root=case_dir / "client",
             reset_session=True,
             after_submit=handoff,
@@ -585,7 +770,7 @@ def main() -> int:
             break
     report = {
         "entrypoint": "electron_client_windows_uia",
-        "cold_start_required": True,
+        "goal_admission_required": True,
         "case_count": len(results),
         "passed_count": sum(item.get("passed") is True for item in results),
         "results": results,

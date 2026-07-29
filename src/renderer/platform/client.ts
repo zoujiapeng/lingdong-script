@@ -4,6 +4,8 @@ import type {
   CapabilitySpec,
   ChatGPTDesktopIntegration,
   CurrentRunResponse,
+  ClientExecutionContext,
+  ExecutionConstraint,
   GraphValidation,
   PlatformOverview,
   RunProjection,
@@ -408,6 +410,26 @@ export class ControlPlaneClient {
     const response = await this.request<{ ok: boolean; run_id: string; run: ArpExecutionSnapshot }>('api/v2/arp/runs', {
       method: 'POST',
       body: JSON.stringify({ graph, inputs, runtime_version: runtimeVersion }),
+    });
+    return response.run;
+  }
+
+  async startGoalRun(
+    goal: string,
+    executionConstraint: ExecutionConstraint,
+    executionContext: ClientExecutionContext,
+  ): Promise<ArpExecutionSnapshot> {
+    const response = await this.request<{
+      ok: boolean;
+      run_id: string;
+      run: ArpExecutionSnapshot;
+    }>('api/v2/goals/runs', {
+      method: 'POST',
+      body: JSON.stringify({
+        goal,
+        execution_constraint: executionConstraint,
+        execution_context: executionContext,
+      }),
     });
     return response.run;
   }

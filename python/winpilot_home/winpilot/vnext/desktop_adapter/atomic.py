@@ -68,7 +68,7 @@ from ..verification import (
 
 
 _ACTIONS = frozenset(
-    {"click", "double_click", "scroll", "type_text", "hotkey"}
+    {"click", "double_click", "drag", "scroll", "type_text", "hotkey"}
 )
 _POST_FRAME_KIND = "post_action_frame"
 _JPEG_MEDIA_TYPE = "image/jpeg"
@@ -143,6 +143,7 @@ class RawReceiptTraceSink(Protocol):
 class _PreparedAction:
     action: str
     point: PhysicalPoint | None = None
+    end_point: PhysicalPoint | None = None
     amount: int | None = None
     text: str | None = None
     chord: HotkeyChord | None = None
@@ -200,12 +201,13 @@ class AtomicDesktopAdapter:
             raise TypeError("raw_device must be RawDeviceExecutor")
         if set(raw_device.admitted_action_names) != {
             "click",
+            "drag",
             "scroll",
             "type_text",
             "hotkey",
         }:
             raise ValueError(
-                "RawDevice must expose exactly the four admitted physical primitives"
+                "RawDevice must expose exactly the five admitted physical primitives"
             )
         if receipt_trace_sink is not None and not callable(
             getattr(receipt_trace_sink, "record", None)
@@ -544,13 +546,12 @@ class AtomicDesktopAdapter:
                 before_frame,
                 self._not_started(prepared.action, "target_identity_changed"),
             )
-        if prepared.point is not None and not self._point_hits_target(
-            prepared.point
-        ):
-            return _PinnedExecution(
-                before_frame,
-                self._not_started(prepared.action, "hit_test_changed"),
-            )
+        for point in self._prepared_points(prepared):
+            if not self._point_hits_target(point):
+                return _PinnedExecution(
+                    before_frame,
+                    self._not_started(prepared.action, "hit_test_changed"),
+                )
         if stop_event is not None and stop_event.is_set():
             return _PinnedExecution(
                 before_frame,
@@ -718,10 +719,10 @@ class AtomicDesktopAdapter:
             require_foreground=True,
         ):
             return "target_changed_after_queue"
-        if prepared.point is not None:
-            if not self._inside(prepared.point, before_frame.region):
+        for point in self._prepared_points(prepared):
+            if not self._inside(point, before_frame.region):
                 return "point_outside_target_after_queue"
-            if not self._point_hits_target(prepared.point):
+            if not self._point_hits_target(point):
                 return "hit_test_changed_after_queue"
         commit_identity = RuntimeCommitIdentity(
             before_frame.identity,
@@ -754,6 +755,7 @@ class AtomicDesktopAdapter:
 
         if prepared.point is not None:
             expected_point = prepared.point
+            guarded_points = self._prepared_points(prepared)
 
             def pointer_guard(
                 cursor_x: int,
@@ -764,13 +766,14 @@ class AtomicDesktopAdapter:
                 if (cursor_x, cursor_y) != expected_point:
                     return FinalPointerGuardDecision.POINTER_POSITION_CHANGED
                 snapshot = self._safe_snapshot()
-                decision = self._pointer_target_decision(
-                    snapshot,
-                    expected_region=before_frame.region,
-                    point=expected_point,
-                )
-                if decision is not FinalPointerGuardDecision.ADMITTED:
-                    return decision
+                for guarded_point in guarded_points:
+                    decision = self._pointer_target_decision(
+                        snapshot,
+                        expected_region=before_frame.region,
+                        point=guarded_point,
+                    )
+                    if decision is not FinalPointerGuardDecision.ADMITTED:
+                        return decision
                 if not self._permits.revalidate_active_admission(
                     envelope,
                     current_commit_identity=active_identity,
@@ -790,6 +793,16 @@ class AtomicDesktopAdapter:
                         else ClickCount.SINGLE
                     ),
                     ClickMechanism.PHYSICAL,
+                    final_guard=pointer_guard,
+                )
+            if prepared.action == "drag":
+                assert prepared.end_point is not None
+                return self._raw.drag(
+                    context,
+                    expected_point[0],
+                    expected_point[1],
+                    prepared.end_point[0],
+                    prepared.end_point[1],
                     final_guard=pointer_guard,
                 )
             assert prepared.amount is not None
@@ -846,10 +859,11 @@ class AtomicDesktopAdapter:
         ):
             raise RuntimeError("target changed before post-action capture")
         assert first is not None
-        if prepared.point is not None and not self._point_hits_target(
-            prepared.point
-        ):
-            raise RuntimeError("hit test changed before post-action capture")
+        for point in self._prepared_points(prepared):
+            if not self._point_hits_target(point):
+                raise RuntimeError(
+                    "hit test changed before post-action capture"
+                )
 
         region = Region(*first.region)
         captured = self._observer.capture(
@@ -871,10 +885,11 @@ class AtomicDesktopAdapter:
             require_foreground=True,
         ):
             raise RuntimeError("target changed before post-action commit")
-        if prepared.point is not None and not self._point_hits_target(
-            prepared.point
-        ):
-            raise RuntimeError("hit test changed before post-action commit")
+        for point in self._prepared_points(prepared):
+            if not self._point_hits_target(point):
+                raise RuntimeError(
+                    "hit test changed before post-action commit"
+                )
         current = self._authority.current
         if current is None or not self._frame_state_matches(current, before):
             raise RuntimeError("frame changed before post-action commit")
@@ -896,10 +911,11 @@ class AtomicDesktopAdapter:
             require_foreground=True,
         ):
             raise RuntimeError("target changed after post-action commit")
-        if prepared.point is not None and not self._point_hits_target(
-            prepared.point
-        ):
-            raise RuntimeError("hit test changed after post-action commit")
+        for point in self._prepared_points(prepared):
+            if not self._point_hits_target(point):
+                raise RuntimeError(
+                    "hit test changed after post-action commit"
+                )
 
         identity = self._runtime_frame_identity(committed)
         evidence = self._post_frame_evidence(envelope, identity)
@@ -949,6 +965,36 @@ class AtomicDesktopAdapter:
                 action=action,
                 point=point,
                 amount=amount,
+            )
+        if action == "drag":
+            self._require_keys(
+                args,
+                {"image_x1", "image_y1", "image_x2", "image_y2"},
+            )
+            self._require_image_point(
+                args,
+                keys=("image_x1", "image_y1"),
+            )
+            self._require_image_point(
+                args,
+                keys=("image_x2", "image_y2"),
+            )
+            start = self._map_point(
+                envelope,
+                args,
+                image_keys=("image_x1", "image_y1"),
+            )
+            end = self._map_point(
+                envelope,
+                args,
+                image_keys=("image_x2", "image_y2"),
+            )
+            if start == end:
+                raise ValueError("drag endpoints must map to distinct pixels")
+            return _PreparedAction(
+                action=action,
+                point=start,
+                end_point=end,
             )
         if action == "type_text":
             self._require_keys(args, {"text"})
@@ -1000,6 +1046,17 @@ class AtomicDesktopAdapter:
                 "signed_wheel_amount": prepared.amount,
                 "event_wheel_delta": prepared.amount * 120,
             }
+        if prepared.action == "drag":
+            assert prepared.point is not None
+            assert prepared.end_point is not None
+            return {
+                "kind": "pointer_drag",
+                "x1": prepared.point[0],
+                "y1": prepared.point[1],
+                "x2": prepared.end_point[0],
+                "y2": prepared.end_point[1],
+                "button": "left",
+            }
         if prepared.action == "type_text":
             assert prepared.text is not None
             return {
@@ -1019,6 +1076,7 @@ class AtomicDesktopAdapter:
         return {
             "click": "raw_device.admitted_physical_click/0",
             "double_click": "raw_device.admitted_physical_click/0",
+            "drag": "raw_device.admitted_physical_drag/0",
             "scroll": "raw_device.admitted_physical_scroll/0",
             "type_text": "raw_device.admitted_physical_type_text/0",
             "hotkey": "raw_device.admitted_physical_hotkey/0",
@@ -1033,10 +1091,14 @@ class AtomicDesktopAdapter:
             raise ValueError("atomic action arguments do not match exact schema")
 
     @staticmethod
-    def _require_image_point(args: Mapping[str, Any]) -> None:
+    def _require_image_point(
+        args: Mapping[str, Any],
+        *,
+        keys: tuple[str, str] = ("image_x", "image_y"),
+    ) -> None:
         if any(
             type(args[name]) not in {int, float}
-            for name in ("image_x", "image_y")
+            for name in keys
         ):
             raise ValueError(
                 "image coordinates must be exact JSON numbers"
@@ -1046,18 +1108,30 @@ class AtomicDesktopAdapter:
     def _map_point(
         envelope: ActorDecisionEnvelope,
         args: Mapping[str, Any],
+        *,
+        image_keys: tuple[str, str] = ("image_x", "image_y"),
     ) -> PhysicalPoint:
         mapped, _ = SubmittedImageCoordinateMapper(
             envelope.submitted_image_size
         ).map_point_pair(
             args,
-            image_keys=("image_x", "image_y"),
+            image_keys=image_keys,
             frame_keys=("frame_x", "frame_y"),
             context=envelope.proposal.action,
         )
         return NormalizedFrameCoordinateMapper(
             envelope.frame_region
         ).map_point(mapped["frame_x"], mapped["frame_y"])
+
+    @staticmethod
+    def _prepared_points(
+        prepared: _PreparedAction,
+    ) -> tuple[PhysicalPoint, ...]:
+        return tuple(
+            point
+            for point in (prepared.point, prepared.end_point)
+            if point is not None
+        )
 
     def _envelope_matches_frozen_target(
         self,

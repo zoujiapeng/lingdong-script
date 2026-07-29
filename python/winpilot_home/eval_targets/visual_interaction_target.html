@@ -69,6 +69,24 @@
     .legend { position: absolute; padding: 10px 13px; border-radius: 10px; background: #fff;
       border: 2px solid #9eabbc; line-height: 1.6; font-weight: 800; }
     .red { color: #d5222a; } .black { color: #111; }
+    .arena.quiz-arena { height: auto; min-height: 390px; padding: 18px; overflow: visible;
+      touch-action: auto; user-select: text; background: #f5f7fb; }
+    .quiz-form { display: grid; gap: 18px; }
+    .quiz-card { min-width: 0; margin: 0; padding: 17px 19px 19px; border: 2px solid #c7d1df;
+      border-radius: 12px; background: #fff; }
+    .quiz-card legend { padding: 0 7px; font-size: 18px; font-weight: 800; color: #233654; }
+    .quiz-options { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr));
+      gap: 10px 16px; margin-top: 11px; }
+    .quiz-option { display: flex; align-items: center; gap: 9px; min-height: 42px; padding: 8px 12px;
+      border: 1px solid #b6c3d5; border-radius: 8px; background: #f8fafc; font-size: 17px; }
+    .quiz-option input { width: 19px; height: 19px; accent-color: #245fbd; }
+    .quiz-text { width: min(560px, 100%); height: 44px; margin-top: 11px; padding: 8px 12px;
+      border: 2px solid #9eacc1; border-radius: 8px; background: #fff; color: #17263d;
+      font: 17px "Segoe UI", system-ui, sans-serif; }
+    .quiz-submit { justify-self: start; min-width: 180px; height: 48px; padding: 0 22px;
+      border: 0; border-radius: 9px; background: #1769c2; color: #fff; cursor: pointer;
+      font-size: 18px; font-weight: 800; box-shadow: 0 5px 12px rgba(23,105,194,.24); }
+    .quiz-submit:disabled { opacity: .6; cursor: wait; }
   </style>
 </head>
 <body>
@@ -113,7 +131,8 @@
         screen_y: event && Math.round(event.screenY) || 0,
         move_count: moveCount, succeeded: Boolean(details.succeeded), details };
       return fetch('/event', {method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload), cache:'no-store'}).catch(() => {});
+        body:JSON.stringify(payload), cache:'no-store'})
+        .then(response=>response.ok?response.json():null).catch(() => null);
     }
     function markSuccess(message, event, details = {}) {
       status.className = 'status success'; status.textContent = message;
@@ -334,10 +353,64 @@
       readyDetails={board:box(canvas),user_cell:userCell,cell_size:cell,legend:box(legend)};
     }
 
-    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn};
-    (setups[scenario]||setupDragFit)();
-    requestAnimationFrame(()=>requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
-      viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails})));
+    async function setupQuizAll() {
+      heading.textContent='综合知识小测';
+      instruction.textContent='请回答全部题目，然后点击“提交全部答案”。页面可以滚动。';
+      arena.classList.add('quiz-arena');
+      const response=await fetch(`/quiz-spec?seed=${encodeURIComponent(seed)}`,{cache:'no-store'});
+      if(!response.ok)throw new Error('quiz spec unavailable');
+      const spec=await response.json();
+      const form=document.createElement('form');form.className='quiz-form';form.autocomplete='off';
+      spec.questions.forEach((question,index)=>{
+        const card=document.createElement('fieldset');card.className='quiz-card';
+        const legend=document.createElement('legend');legend.textContent=`第 ${index+1} 题：${question.prompt}`;card.append(legend);
+        if(question.kind==='single_choice'){
+          const options=document.createElement('div');options.className='quiz-options';
+          question.options.forEach((option,optionIndex)=>{
+            const label=document.createElement('label');label.className='quiz-option';
+            const input=document.createElement('input');input.type='radio';input.name=question.id;
+            input.value=option;input.required=true;input.id=`${question.id}-${optionIndex}`;
+            const text=document.createElement('span');text.textContent=option;label.append(input,text);options.append(label);
+          });
+          card.append(options);
+        }else{
+          const input=document.createElement('input');input.className='quiz-text';input.type='text';
+          input.name=question.id;input.required=true;input.autocomplete='off';
+          input.setAttribute('aria-label',`第 ${index+1} 题答案`);card.append(input);
+        }
+        form.append(card);
+      });
+      const submit=document.createElement('button');submit.className='quiz-submit';submit.type='submit';
+      submit.textContent='提交全部答案';form.append(submit);arena.append(form);
+      form.addEventListener('submit',async event=>{
+        if(!event.isTrusted)return;
+        event.preventDefault();submit.disabled=true;
+        const data=new FormData(form),answers={};
+        spec.questions.forEach(question=>{const value=data.get(question.id);answers[question.id]=typeof value==='string'?value:'';});
+        const result=await report('quiz_submit',event,{answers});
+        submit.disabled=false;
+        if(result&&result.succeeded){
+          status.className='status success';status.textContent='全部题目回答正确';
+        }else{
+          status.className='status failure';status.textContent='仍有答案不正确，请检查后重新提交';
+        }
+      });
+      readyDetails={
+        question_count:spec.question_count,
+        question_ids:spec.questions.map(question=>question.id),
+        question_types:spec.questions.map(question=>question.kind),
+        requires_page_scroll:document.documentElement.scrollHeight>window.innerHeight,
+      };
+    }
+
+    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn,quiz_all:setupQuizAll};
+    Promise.resolve((setups[scenario]||setupDragFit)()).then(()=>
+      requestAnimationFrame(()=>requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
+        viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails})))
+    ).catch(error=>{
+      status.className='status failure';status.textContent='PAGE_SETUP_FAILED';
+      report('page_error',null,{succeeded:false,error:String(error)});
+    });
   </script>
 </body>
 </html>

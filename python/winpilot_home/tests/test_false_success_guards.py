@@ -2754,6 +2754,63 @@ def test_top_level_click_uses_fast_controller_without_explicit_batch():
     assert payload["metrics"]["screen_wait_count"] == 1
 
 
+def test_top_level_pointer_tools_preserve_one_cross_frame_controller_session():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner("complete the visible interaction")
+    held = {"button": ""}
+    calls = []
+
+    runner.session._pointer_hold_status = lambda: {
+        "active": bool(held["button"]),
+        "button": held["button"],
+    }
+
+    def fake_dispatch(name, args):
+        calls.append((name, args))
+        pointer = dict(args.get("pointer_session") or {})
+        held["button"] = str(pointer.get("after") or "")
+        return ToolResult(json.dumps({
+            "ok": True,
+            "verified": True,
+            "pointer_session": {
+                "active": bool(held["button"]),
+                "button": held["button"],
+                **pointer,
+            },
+            "results": [
+                {
+                    "action": args["actions"][0]["action"],
+                    "ok": True,
+                    "verified": True,
+                    "data": {"ok": True},
+                },
+            ],
+        }))
+
+    runner.session.dispatch = fake_dispatch
+
+    down = json.loads(runner._dispatch_with_fast_visual_wrap(
+        "mouse_down",
+        {"x": 10, "y": 20, "button": "left"},
+    ).text)
+    runner._dispatch_with_fast_visual_wrap("move_mouse", {"x": 30, "y": 40})
+    up = json.loads(runner._dispatch_with_fast_visual_wrap(
+        "mouse_up",
+        {"x": 50, "y": 60},
+    ).text)
+
+    assert [item[1]["pointer_session"] for item in calls] == [
+        {"before": "", "after": "left"},
+        {"before": "left", "after": "left"},
+        {"before": "left", "after": ""},
+    ]
+    assert down["pointer_session"]["active"] is True
+    assert up["pointer_session"]["active"] is False
+    assert held["button"] == ""
 
 
 def test_fast_visual_wrapper_preserves_scope_failure_instead_of_hiding_it():

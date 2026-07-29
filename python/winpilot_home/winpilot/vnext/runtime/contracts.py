@@ -46,7 +46,7 @@ VISUAL_VERIFIER_EVIDENCE_KIND = "visual_obligation_verification"
 VISUAL_VERIFIER_TRUST = "independent_visual_model"
 
 APPROVED_DESKTOP_ACTIONS = frozenset(
-    {"click", "double_click", "scroll", "type_text", "hotkey"}
+    {"click", "double_click", "drag", "scroll", "type_text", "hotkey"}
 )
 APPROVED_OUTCOME_TOOLS = frozenset(
     {"claim_obligation_done", "blocked"}

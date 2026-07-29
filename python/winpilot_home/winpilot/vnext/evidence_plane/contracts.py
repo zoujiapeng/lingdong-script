@@ -32,7 +32,7 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _ACTION = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _DESKTOP_ACTIONS = frozenset(
-    {"click", "double_click", "scroll", "type_text", "hotkey"}
+    {"click", "double_click", "drag", "scroll", "type_text", "hotkey"}
 )
 _RUNTIME_ACTOR_TOOLS = _DESKTOP_ACTIONS | {
     "claim_obligation_done",
@@ -373,22 +373,39 @@ def _validate_submitted_arguments(
     fields = {
         "click": ("image_x", "image_y"),
         "double_click": ("image_x", "image_y"),
+        "drag": ("image_x1", "image_y1", "image_x2", "image_y2"),
         "scroll": ("image_x", "image_y", "amount"),
         "type_text": ("text",),
         "hotkey": ("keys",),
     }[action]
     item = _strict_mapping(value, fields, name)
-    if action in {"click", "double_click", "scroll"}:
-        for coordinate in ("image_x", "image_y"):
-            number = item[coordinate]
-            if (
-                type(number) not in {int, float}
-                or not math.isfinite(float(number))
-                or float(number) < 0
-            ):
-                raise RuntimeEvidenceContractError(
-                    f"{name}.{coordinate} must be a finite submitted-image coordinate"
-                )
+    coordinate_names = (
+        ("image_x1", "image_y1", "image_x2", "image_y2")
+        if action == "drag"
+        else ("image_x", "image_y")
+        if action in {"click", "double_click", "scroll"}
+        else ()
+    )
+    for coordinate in coordinate_names:
+        number = item[coordinate]
+        if (
+            type(number) not in {int, float}
+            or not math.isfinite(float(number))
+            or float(number) < 0
+        ):
+            raise RuntimeEvidenceContractError(
+                f"{name}.{coordinate} must be a finite submitted-image coordinate"
+            )
+    if action == "drag" and (
+        item["image_x1"],
+        item["image_y1"],
+    ) == (
+        item["image_x2"],
+        item["image_y2"],
+    ):
+        raise RuntimeEvidenceContractError(
+            f"{name} drag endpoints must be distinct"
+        )
     if action == "scroll":
         amount = item["amount"]
         if type(amount) is not int or amount == 0 or abs(amount) > 1200:
@@ -1133,6 +1150,7 @@ def _validate_physical_arguments(
     fields = {
         "click": ("kind", "x", "y", "button", "click_count"),
         "double_click": ("kind", "x", "y", "button", "click_count"),
+        "drag": ("kind", "x1", "y1", "x2", "y2", "button"),
         "scroll": (
             "kind",
             "x",
@@ -1147,6 +1165,7 @@ def _validate_physical_arguments(
     expected_kind = {
         "click": "pointer_click",
         "double_click": "pointer_click",
+        "drag": "pointer_drag",
         "scroll": "wheel",
         "type_text": "type_text",
         "hotkey": "hotkey",
@@ -1161,6 +1180,12 @@ def _validate_physical_arguments(
                 raise RuntimeEvidenceContractError(
                     f"physical_arguments.{name} must be an integer"
                 )
+    elif action == "drag":
+        for name in ("x1", "y1", "x2", "y2"):
+            if type(item[name]) is not int:
+                raise RuntimeEvidenceContractError(
+                    f"physical_arguments.{name} must be an integer"
+                )
     if action in {"click", "double_click"}:
         expected_count = 2 if action == "double_click" else 1
         if (
@@ -1170,6 +1195,14 @@ def _validate_physical_arguments(
         ):
             raise RuntimeEvidenceContractError(
                 "physical click payload is not the admitted left click count"
+            )
+    elif action == "drag":
+        if (
+            item["button"] != "left"
+            or (item["x1"], item["y1"]) == (item["x2"], item["y2"])
+        ):
+            raise RuntimeEvidenceContractError(
+                "physical drag payload is not a distinct left-button gesture"
             )
     elif action == "scroll":
         amount = item["signed_wheel_amount"]
@@ -1282,6 +1315,7 @@ class PhysicalAttemptRecord:
         expected_route = {
             "click": "raw_device.admitted_physical_click/0",
             "double_click": "raw_device.admitted_physical_click/0",
+            "drag": "raw_device.admitted_physical_drag/0",
             "scroll": "raw_device.admitted_physical_scroll/0",
             "type_text": "raw_device.admitted_physical_type_text/0",
             "hotkey": "raw_device.admitted_physical_hotkey/0",

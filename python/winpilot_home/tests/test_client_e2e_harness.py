@@ -35,10 +35,114 @@ def test_harness_keeps_the_exact_eleven_and_one_combined_long_goal():
     assert harness.MIXED_CASES["mix-all-11"]["max_steps"] == 400
 
 
-def test_harness_targets_the_primary_runtime_selector_label():
+def test_harness_targets_the_primary_execution_constraint_selector_label():
     harness = _load_harness()
 
-    assert harness.RUNTIME_SELECTOR == "运行时"
+    assert harness.EXECUTION_CONSTRAINT_SELECTOR == "执行约束"
+    assert harness._execution_constraint_from_label("自动选择") == "auto"
+    assert (
+        harness._execution_constraint_from_label("必须使用 GUI")
+        == "gui_required"
+    )
+    assert harness._execution_constraint_from_label("Legacy") == ""
+
+
+def test_visible_client_is_verified_foreground_before_goal_submission():
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "scripts"
+        / "client_e2e_run.py"
+    ).read_text(encoding="utf-8")
+    run_case = source[source.index("def run_case(") : source.index("def run_suite(")]
+
+    configured = run_case.index('result["configuration"] = driver.configure_goal(')
+    foregrounded = run_case.index("driver.restore_and_focus()", configured)
+    clicked = run_case.index("driver.button(RUN_TASK).Click()", foregrounded)
+
+    assert configured < foregrounded < clicked
+
+
+def test_named_button_lookup_short_circuits_a_large_accessibility_tree(
+    monkeypatch,
+):
+    harness = _load_harness()
+    visited = []
+
+    class Control:
+        def __init__(self, name, control_type="ButtonControl"):
+            self.Name = name
+            self.ControlTypeName = control_type
+            self.IsOffscreen = False
+
+    def walk(_window, *, includeTop):
+        assert includeTop is False
+        controls = [
+            Control("document", "DocumentControl"),
+            Control(harness.NAV_AGENT),
+        ]
+        controls.extend(Control(f"trace-{index}") for index in range(10_000))
+        for control in controls:
+            visited.append(control.Name)
+            yield control, 1
+
+    monkeypatch.setattr(harness.auto, "WalkControl", walk)
+
+    match = harness._first_visible_descendant(
+        object(),
+        "Button",
+        name=harness.NAV_AGENT,
+    )
+
+    assert match.Name == harness.NAV_AGENT
+    assert visited == ["document", harness.NAV_AGENT]
+
+
+def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
+    monkeypatch,
+    tmp_path,
+):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver.output_dir = tmp_path
+    navigated = []
+    lookups = []
+
+    class SessionButton:
+        Name = "会话 27"
+
+        def Click(self):
+            return None
+
+    session = SessionButton()
+
+    class ClearButton:
+        def Click(self):
+            session.Name = "会话 0"
+
+    driver.restore_and_focus = lambda: None
+    driver.navigate = lambda title: navigated.append(title)
+    driver.capture_window = lambda name: str(tmp_path / name)
+
+    def button(title, *, prefix=False):
+        lookups.append((title, prefix))
+        if title == "会话 ":
+            return session
+        if title == "清空会话记忆":
+            return ClearButton()
+        raise AssertionError(title)
+
+    driver.button = button
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    result = driver.clear_session_through_client()
+
+    assert result["before"] == 27
+    assert result["after"] == 0
+    assert navigated == [harness.NAV_ASSETS, harness.NAV_AGENT]
+    assert lookups == [
+        ("会话 ", True),
+        ("清空会话记忆", False),
+    ]
 
 
 def test_trace_snapshot_tracks_outer_arp_jsonl_files_not_artifact_directories(
@@ -169,6 +273,51 @@ def test_runtime_status_retries_a_transient_managed_endpoint_timeout(
     assert calls["count"] == 2
 
 
+def test_runtime_status_rejects_a_wrong_control_token_without_retrying(
+    monkeypatch,
+):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver._runtime_url = "http://127.0.0.1:1"
+    driver._runtime_token = "wrong-token"
+    calls = {"count": 0}
+
+    def urlopen(request, *, timeout):
+        calls["count"] += 1
+        raise harness.urllib.error.HTTPError(
+            request.full_url,
+            401,
+            "Authentication required",
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(harness.urllib.request, "urlopen", urlopen)
+
+    try:
+        driver.runtime_status()
+    except RuntimeError as exc:
+        assert str(exc) == "managed runtime rejected the Electron control token"
+    else:
+        raise AssertionError("wrong managed runtime token was accepted")
+    assert calls["count"] == 1
+
+
+def test_cold_start_runtime_probe_uses_one_long_request_budget():
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    calls = []
+    driver.runtime_status = lambda **kwargs: calls.append(kwargs) or {"running": False}
+
+    assert driver.wait_for_runtime_ready() == {"running": False}
+    assert calls == [
+        {
+            "probe_timeout_s": 45.0,
+            "request_timeout_s": 30.0,
+        }
+    ]
+
+
 def test_wait_for_result_accepts_vnext_job_before_current_run_projection():
     harness = _load_harness()
     driver = object.__new__(harness.ElectronClientDriver)
@@ -233,6 +382,104 @@ def test_wait_for_result_accepts_vnext_job_before_current_run_projection():
     assert result["outcome"] == "terminal"
     assert result["run_id"] == "arp-new"
     assert result["status"] == "failed"
+
+
+def test_optional_handoff_without_admitted_run_id_does_not_bind_literal_none():
+    harness = _load_harness()
+
+    assert harness._admitted_run_id(
+        {"target_hwnd": 991, "focused": True},
+    ) == ""
+    assert harness._admitted_run_id(
+        {"admitted_run_id": None},
+    ) == ""
+    assert harness._admitted_run_id(
+        {"admitted_run_id": "arp-new"},
+    ) == "arp-new"
+
+
+def test_cleanup_scope_matches_only_the_active_submitted_run():
+    harness = _load_harness()
+
+    assert harness._active_run_matches_submission(
+        {
+            "running": True,
+            "current_run": {
+                "run_id": "arp-new",
+                "goal": "  target   task ",
+            },
+        },
+        "target task",
+        "arp-old",
+    ) is True
+    assert harness._active_run_matches_submission(
+        {
+            "running": True,
+            "current_run": {
+                "run_id": "arp-new",
+                "goal": "another task",
+            },
+        },
+        "target task",
+        "arp-old",
+    ) is False
+    assert harness._active_run_matches_submission(
+        {
+            "running": True,
+            "current_run": {
+                "run_id": "arp-old",
+                "goal": "target task",
+            },
+        },
+        "target task",
+        "arp-old",
+    ) is False
+
+
+def test_legacy_graph_name_projection_matches_without_accepting_arbitrary_prefixes():
+    harness = _load_harness()
+    task = (
+        "Calculate 37 times 19 in the current Calculator and leave the final "
+        "result displayed."
+    )
+    assert len(task) > 80
+
+    assert harness._runtime_goal_matches_submission(
+        task[:80],
+        task,
+        "legacy",
+    ) is True
+    assert harness._runtime_goal_matches_submission(
+        task[:79],
+        task,
+        "legacy",
+    ) is False
+    assert harness._runtime_goal_matches_submission(
+        task[:80],
+        task,
+        "vnext",
+    ) is False
+
+
+def test_cleanup_scope_accepts_exact_legacy_graph_name_projection():
+    harness = _load_harness()
+    task = (
+        "Calculate 37 times 19 in the current Calculator and leave the final "
+        "result displayed."
+    )
+
+    assert harness._active_run_matches_submission(
+        {
+            "running": True,
+            "current_run": {
+                "run_id": "arp-new",
+                "runtime_version": "legacy",
+                "goal": task[:80],
+            },
+        },
+        task,
+        "arp-old",
+    ) is True
 
 
 def test_memory_isolation_requires_client_toggle_contract_and_clean_runner(
@@ -318,6 +565,35 @@ def test_independent_session_reset_requires_empty_contract_context(
         require_empty_session=True,
     )
     assert contaminated["passed"] is False
+
+
+def test_vnext_memory_report_marks_an_absent_session_context_as_empty(
+    monkeypatch,
+    tmp_path,
+):
+    harness = _load_harness()
+    trace = tmp_path / "arp-vnext.jsonl"
+    trace.write_text(
+        json.dumps({
+            "type": "arp_run_start",
+            "runtime_version": "vnext",
+            "experience_policy": "disabled",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(harness, "TRACE_ROOT", tmp_path)
+
+    evidence = harness._memory_isolation_evidence(
+        ["arp-vnext"],
+        {"execution_constraint": "gui_required"},
+        require_empty_session=True,
+        runtime_version="vnext",
+    )
+
+    assert evidence["passed"] is True
+    assert evidence["cold_start_toggle"] == 0
+    assert evidence["session_contexts"] == []
+    assert evidence["session_empty"] is True
 
 
 def test_trace_binding_uses_only_the_exact_client_run(monkeypatch, tmp_path):
@@ -417,6 +693,58 @@ def test_wait_for_result_binds_one_matching_run_and_rejects_replacement(monkeypa
     assert replaced["replacement_run_id"] == "arp-other"
 
 
+def test_wait_for_result_binds_legacy_run_with_truncated_graph_name(monkeypatch):
+    harness = _load_harness()
+    task = (
+        "Calculate 37 times 19 in the current Calculator and leave the final "
+        "result displayed."
+    )
+    statuses = [
+        {
+            "running": True,
+            "current_run": {
+                "run_id": "arp-target",
+                "runtime_version": "legacy",
+                "goal": task[:80],
+                "status": "running",
+            },
+        },
+        {
+            "running": False,
+            "current_run": {
+                "run_id": "arp-target",
+                "runtime_version": "legacy",
+                "goal": task[:80],
+                "status": "done",
+            },
+        },
+    ]
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver.runtime_status = (
+        lambda: statuses.pop(0) if len(statuses) > 1 else statuses[0]
+    )
+    def fail_if_uia_is_walked():
+        raise AssertionError("terminal runtime state must short-circuit UIA")
+
+    driver.buttons = fail_if_uia_is_walked
+    driver.texts = fail_if_uia_is_walked
+    driver._topbar_status = lambda _task: ""
+    clock = [0.0]
+
+    def now():
+        clock[0] += 0.1
+        return clock[0]
+
+    monkeypatch.setattr(harness.time, "time", now)
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    result = driver.wait_for_result(task, 5, previous_run_id="arp-old")
+
+    assert result["outcome"] == "terminal"
+    assert result["run_id"] == "arp-target"
+    assert result["status"] == "done"
+
+
 def test_wait_for_result_returns_runtime_fail_without_waiting_for_timeout(monkeypatch):
     harness = _load_harness()
     driver = object.__new__(harness.ElectronClientDriver)
@@ -496,6 +824,280 @@ def test_persistent_evidence_requires_a_bound_conversation_and_monitoring(
     result["execution_evidence"] = {"persistent_ready": False}
     assert harness._case_execution_valid(result) is False
     assert harness._case_passed(result) is False
+
+
+def test_vnext_execution_evidence_projects_raw_receipts_and_terminal_event(
+    monkeypatch,
+    tmp_path,
+):
+    harness = _load_harness()
+    trace = tmp_path / "arp-vnext.jsonl"
+    trace.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {
+                    "type": "vnext_raw_receipt",
+                    "controller_action": "hotkey",
+                    "outcome": "applied",
+                    "input_completed": True,
+                },
+                {
+                    "type": "vnext_raw_receipt",
+                    "controller_action": "click",
+                    "outcome": "rejected",
+                    "input_completed": False,
+                },
+                {
+                    "type": "vnext_canary_turn",
+                    "proposal_kind": "claim_obligation_done",
+                    "status": "mission_verified",
+                },
+                {
+                    "type": "vnext_canary_done",
+                    "status": "mission_verified",
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(harness, "TRACE_ROOT", tmp_path)
+
+    evidence = harness._execution_evidence(["arp-vnext"])
+
+    assert evidence["tool_attempts"] == [
+        "hotkey",
+        "click",
+        "claim_obligation_done",
+    ]
+    assert evidence["successful_tools"] == [
+        "hotkey",
+        "claim_obligation_done",
+    ]
+    assert evidence["terminal_events"] == ["vnext_canary_done"]
+    assert evidence["parse_errors"] == []
+
+
+def test_gui_required_trace_accepts_only_vnext_os_input_receipts(
+    monkeypatch,
+    tmp_path,
+):
+    harness = _load_harness()
+    trace = tmp_path / "arp-gui.jsonl"
+    trace.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {
+                    "type": "arp_run_start",
+                    "run_id": "arp-gui",
+                    "graph_id": "graph-gui",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                },
+                {
+                    "type": "vnext_canary_start",
+                    "run_id": "arp-gui",
+                    "mission_id": "mission-gui",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                },
+                {
+                    "type": "vnext_raw_receipt",
+                    "run_id": "arp-gui",
+                    "mission_id": "mission-gui",
+                    "task_id": "graph-gui",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                    "controller_action": "click",
+                    "outcome": "applied",
+                    "input_completed": True,
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(harness, "TRACE_ROOT", tmp_path)
+
+    evidence = harness._gui_constraint_trace_evidence(
+        ["arp-gui"],
+        "arp-gui",
+    )
+
+    assert evidence["passed"] is True
+    assert evidence["applied_gui_actions"] == ["click"]
+    assert evidence["bound_mission_ids"] == ["mission-gui"]
+    assert evidence["bound_task_ids"] == ["graph-gui"]
+    trace.write_text(
+        trace.read_text(encoding="utf-8")
+        + json.dumps({
+            "type": "agent_tool",
+            "tool": "run_shell",
+            "runtime_version": "legacy",
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    rejected = harness._gui_constraint_trace_evidence(
+        ["arp-gui"],
+        "arp-gui",
+    )
+    assert rejected["passed"] is False
+    assert any("agent_tool" in item for item in rejected["forbidden_events"])
+    assert any(
+        "runtime_version=legacy" in item
+        for item in rejected["forbidden_events"]
+    )
+
+
+def test_gui_required_trace_rejects_receipt_from_different_outer_run(
+    monkeypatch,
+    tmp_path,
+):
+    harness = _load_harness()
+    trace = tmp_path / "arp-gui.jsonl"
+    trace.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {
+                    "type": "arp_run_start",
+                    "run_id": "arp-gui",
+                    "graph_id": "graph-gui",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                },
+                {
+                    "type": "vnext_canary_start",
+                    "run_id": "arp-gui",
+                    "mission_id": "mission-gui",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                },
+                {
+                    "type": "vnext_raw_receipt",
+                    "run_id": "arp-other",
+                    "mission_id": "mission-gui",
+                    "task_id": "graph-gui",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                    "controller_action": "click",
+                    "outcome": "applied",
+                    "input_completed": True,
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(harness, "TRACE_ROOT", tmp_path)
+
+    evidence = harness._gui_constraint_trace_evidence(
+        ["arp-gui"],
+        "arp-gui",
+    )
+
+    assert evidence["passed"] is False
+    assert evidence["applied_gui_actions"] == []
+    assert any(
+        "receipt_run_id=arp-other;expected=arp-gui" in item
+        for item in evidence["forbidden_events"]
+    )
+
+
+def test_gui_required_trace_rejects_mismatched_mission_or_task_binding(
+    monkeypatch,
+    tmp_path,
+):
+    harness = _load_harness()
+    trace = tmp_path / "arp-gui.jsonl"
+    trace.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {
+                    "type": "arp_run_start",
+                    "run_id": "arp-gui",
+                    "graph_id": "graph-gui",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                },
+                {
+                    "type": "vnext_canary_start",
+                    "run_id": "arp-gui",
+                    "mission_id": "mission-gui",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                },
+                {
+                    "type": "vnext_raw_receipt",
+                    "run_id": "arp-gui",
+                    "mission_id": "mission-other",
+                    "task_id": "graph-gui",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                    "controller_action": "click",
+                    "outcome": "applied",
+                    "input_completed": True,
+                },
+                {
+                    "type": "vnext_raw_receipt",
+                    "run_id": "arp-gui",
+                    "mission_id": "mission-gui",
+                    "task_id": "graph-other",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                    "controller_action": "click",
+                    "outcome": "applied",
+                    "input_completed": True,
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(harness, "TRACE_ROOT", tmp_path)
+
+    evidence = harness._gui_constraint_trace_evidence(
+        ["arp-gui"],
+        "arp-gui",
+    )
+
+    assert evidence["passed"] is False
+    assert evidence["applied_gui_actions"] == []
+    assert any(
+        "receipt_mission_id=mission-other" in item
+        for item in evidence["forbidden_events"]
+    )
+    assert any(
+        "receipt_task_binding=graph-other" in item
+        for item in evidence["forbidden_events"]
+    )
+
+
+def test_gui_required_execution_validity_requires_admission_and_gui_trace():
+    harness = _load_harness()
+    result = {
+        "expected": "terminal",
+        "configuration": {"execution_constraint": "gui_required"},
+        "result": {"outcome": "terminal", "status": "done"},
+        "memory_isolation": {"passed": True},
+        "trace_binding": {
+            "passed": True,
+            "no_legacy_fallback": True,
+            "goal_admission": {
+                "execution_constraint": "gui_required",
+                "route": "live_gui",
+            },
+        },
+        "gui_constraint_trace": {"passed": True},
+    }
+
+    assert harness._case_execution_valid(result) is True
+    result["gui_constraint_trace"] = {"passed": False}
+    assert harness._case_execution_valid(result) is False
 
 
 def test_runtime_done_without_an_independent_oracle_is_not_a_pass():

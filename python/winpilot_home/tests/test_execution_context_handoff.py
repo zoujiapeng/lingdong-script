@@ -6,6 +6,7 @@ from winpilot.tasking.execution_context import (
     normalize_execution_context,
     validated_handoff_target,
 )
+from winpilot.utils.screenshot import Region
 
 
 def _inputs(*, yielded: bool, required: bool = True, pid: int = 4412) -> dict:
@@ -94,6 +95,52 @@ def test_foreground_capture_records_external_window_after_client_yields():
     assert target["hwnd"] == 99
     assert target["process_id"] == 8824
     assert target["captured_at"] == 1250
+
+
+def test_foreground_inventory_uses_visible_dwm_bounds_for_maximized_window(
+    monkeypatch,
+):
+    from winpilot.perception import win32
+
+    monkeypatch.setattr(
+        win32.win32gui,
+        "EnumWindows",
+        lambda callback, param: callback(99, param),
+    )
+    monkeypatch.setattr(win32.win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(win32.win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(win32, "_window_text", lambda _hwnd: "Maximized target")
+    monkeypatch.setattr(win32.win32gui, "GetWindowLong", lambda *_args: 0)
+    monkeypatch.setattr(
+        win32.win32gui,
+        "GetWindowRect",
+        lambda _hwnd: (-9, -9, 1929, 1049),
+    )
+    monkeypatch.setattr(
+        win32,
+        "window_region",
+        lambda _hwnd: Region(0, 0, 1920, 1040),
+    )
+    monkeypatch.setattr(
+        win32.win32process,
+        "GetWindowThreadProcessId",
+        lambda _hwnd: (1, 8824),
+    )
+    monkeypatch.setattr(
+        win32.win32gui,
+        "GetClassName",
+        lambda _hwnd: "TargetWindow",
+    )
+
+    windows = win32.list_windows()
+
+    assert windows == [{
+        "hwnd": 99,
+        "title": "Maximized target",
+        "class_name": "TargetWindow",
+        "rect": [0, 0, 1920, 1040],
+        "pid": 8824,
+    }]
 
 
 def test_foreground_capture_rejects_the_native_client_process():

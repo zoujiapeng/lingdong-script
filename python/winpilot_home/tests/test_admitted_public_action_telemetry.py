@@ -218,6 +218,17 @@ def _run_scroll(executor):
     )
 
 
+def _run_drag(executor):
+    return executor.ADMITTED_PHYSICAL_DRAG_BACKEND(
+        PRIVATE_X,
+        PRIVATE_Y,
+        PRIVATE_X + 16,
+        PRIVATE_Y + 16,
+        hwnd=41,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+
+
 def _run_type_text(executor):
     return executor.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND(
         PRIVATE_TEXT,
@@ -373,6 +384,23 @@ def test_real_admitted_scroll_publishes_only_fixed_public_summary(
     assert len(sent) == 1
     assert len(published) == 1
     _assert_public_action_event(published[0], action="scroll")
+
+
+def test_real_admitted_drag_publishes_only_fixed_public_summary(
+    strict_backend_environment,
+) -> None:
+    executor, sent = strict_backend_environment
+    events = BUS.subscribe()
+    try:
+        result = _run_drag(executor)
+        published = _action_events(events)
+    finally:
+        BUS.unsubscribe(events)
+
+    assert result.input_completed is True
+    assert sent
+    assert len(published) == 1
+    _assert_public_action_event(published[0], action="drag")
 
 
 def test_real_admitted_type_text_publishes_only_codepoint_count(

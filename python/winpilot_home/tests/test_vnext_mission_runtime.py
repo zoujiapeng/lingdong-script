@@ -8,11 +8,15 @@ from typing import Any, Callable, Mapping
 
 import pytest
 
+import winpilot.vnext.runtime.mission_runtime as mission_runtime_module
 from winpilot.vnext.actor import ACTOR_PROPOSAL_FORMAT, ActorDecisionEnvelope
 from winpilot.vnext.capabilities import (
     AuthoritativeFrameState,
     BrokerRuntimeState,
     CapabilityBroker,
+    ExecutionMedium,
+    ExecutionRoute,
+    InteractionMode,
     MutationKind,
     PointerDisposition,
     PointerLeaseState,
@@ -94,6 +98,20 @@ def _point_schema() -> dict[str, Any]:
     }
 
 
+def _drag_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "image_x1": {"type": "number", "minimum": 0},
+            "image_y1": {"type": "number", "minimum": 0},
+            "image_x2": {"type": "number", "minimum": 0},
+            "image_y2": {"type": "number", "minimum": 0},
+        },
+        "required": ["image_x1", "image_y1", "image_x2", "image_y2"],
+    }
+
+
 def _scroll_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -152,6 +170,11 @@ def _tool(
         schema=schema,
         route=ToolRoute.VISUAL_ACTOR,
         mutation_kind=mutation,
+        execution_medium=(
+            ExecutionMedium.GUI
+            if mutation is MutationKind.GUI
+            else ExecutionMedium.CONTROL
+        ),
         required_any_capabilities=(
             ("visual.interact",)
             if mutation is MutationKind.GUI
@@ -166,6 +189,7 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
     schemas = {
         "click": _point_schema(),
         "double_click": _point_schema(),
+        "drag": _drag_schema(),
         "scroll": _scroll_schema(),
         "type_text": _text_schema(),
         "hotkey": _hotkey_schema(),
@@ -178,7 +202,14 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
             order=order,
         )
         for order, name in enumerate(
-            ("click", "double_click", "scroll", "type_text", "hotkey"),
+            (
+                "click",
+                "double_click",
+                "drag",
+                "scroll",
+                "type_text",
+                "hotkey",
+            ),
             start=1,
         )
     ]
@@ -246,6 +277,13 @@ def _action(action: str = "click") -> dict[str, Any]:
     args: dict[str, Any]
     if action in {"click", "double_click"}:
         args = {"image_x": 10, "image_y": 20}
+    elif action == "drag":
+        args = {
+            "image_x1": 10,
+            "image_y1": 20,
+            "image_x2": 30,
+            "image_y2": 40,
+        }
     elif action == "scroll":
         args = {"image_x": 10, "image_y": 20, "amount": -120}
     elif action == "type_text":
@@ -674,6 +712,7 @@ def _harness(
     profile_provider: bool = True,
     with_runtime_evidence: bool = False,
     controller_evidence_mode: str = "same",
+    interaction_mode: InteractionMode = InteractionMode.AUTO,
 ) -> Harness:
     definition = definition or _definition()
     registry = EvidenceRegistry(definition.mission_id, definition.run_id)
@@ -746,6 +785,7 @@ def _harness(
         broker_state=BrokerRuntimeState(
             turn_index=0,
             available_capabilities=("visual.interact",),
+            interaction_mode=interaction_mode,
             target=TargetState(
                 binding.binding_id,
                 binding.hwnd,
@@ -840,7 +880,7 @@ def _harness(
 
 @pytest.mark.parametrize(
     "action",
-    ("click", "double_click", "scroll", "type_text", "hotkey"),
+    ("click", "double_click", "drag", "scroll", "type_text", "hotkey"),
 )
 def test_minimal_runtime_executes_each_approved_action_once(action: str) -> None:
     harness = _harness(_action(action))
@@ -859,6 +899,66 @@ def test_minimal_runtime_executes_each_approved_action_once(action: str) -> None
         "transition_recorded",
     ]
     assert harness.reducer.card.last_transition.action == action
+
+
+def test_gui_required_can_verify_already_satisfied_goal_without_mutation() -> None:
+    harness = _harness(
+        _claim(),
+        interaction_mode=InteractionMode.GUI_REQUIRED,
+    )
+
+    assert harness.runtime.verified_completion_result is None
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.MISSION_VERIFIED
+    assert (
+        harness.runtime.verified_completion_result
+        == "the requested state is visibly present"
+    )
+    assert harness.actor.calls == 1
+    assert harness.verifier.calls == 1
+    assert harness.controller.calls == 0
+    assert harness.permits.consumed_count == 0
+    assert harness.actor.turns[0].frame.authoritative is True
+    assert harness.actor.turns[0].frame.fresh is True
+    assert harness.verifier.turns[0].frame.evidence_refs == ("e-frame-1",)
+    assert [event.kind for event in harness.reducer.events] == [
+        "target_bound",
+        "obligation_claimed",
+        "verification_recorded",
+        "mission_verified",
+    ]
+    assert "the requested state is visibly present" not in json.dumps(
+        [event.to_dict() for event in harness.reducer.events]
+    )
+
+
+def test_gui_required_claim_fails_closed_without_fresh_observation() -> None:
+    harness = _harness(
+        _claim(),
+        interaction_mode=InteractionMode.GUI_REQUIRED,
+    )
+    stale_frame = replace(
+        harness.state.snapshot.broker_state.frame,
+        fresh=False,
+    )
+    harness.state.snapshot = RuntimeSnapshot(
+        broker_state=replace(
+            harness.state.snapshot.broker_state,
+            frame=stale_frame,
+        ),
+        frame=harness.state.snapshot.frame,
+        target=harness.state.snapshot.target,
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.UNAVAILABLE
+    assert result.route is ExecutionRoute.BLOCKED
+    assert harness.actor.calls == 0
+    assert harness.verifier.calls == 0
+    assert harness.controller.calls == 0
+    assert harness.reducer.projection.status is MissionStatus.RUNNING
 
 
 def test_type_text_is_absent_from_mission_bus_and_reducer_state() -> None:
@@ -1153,9 +1253,129 @@ def test_exact_completed_action_is_suppressed_without_physical_attempt() -> None
     assert harness.reducer.projection.failure_summary is None
 
 
+def test_pointer_jitter_is_suppressed_then_pointer_tools_cool_down() -> None:
+    jittered_click = _action("click")
+    jittered_click["args"] = {"image_x": 12, "image_y": 17}
+    later_click = _action("click")
+    later_click["args"] = {"image_x": 40, "image_y": 50}
+    harness = _harness(
+        _action("click"),
+        jittered_click,
+        _action("type_text"),
+        later_click,
+        with_runtime_evidence=True,
+    )
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    suppressed = harness.runtime.run_one_turn(turn_index=1)
+    typed = harness.runtime.run_one_turn(turn_index=2)
+    clicked_later = harness.runtime.run_one_turn(turn_index=3)
+
+    assert (
+        first.status,
+        suppressed.status,
+        typed.status,
+        clicked_later.status,
+    ) == (
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.PROPOSAL_SUPPRESSED,
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.ACTION_RECORDED,
+    )
+    assert harness.controller.calls == 3
+    assert harness.permits.consumed_count == 3
+    assert [
+        envelope.proposal.action
+        for envelope in harness.controller.envelopes
+    ] == ["click", "type_text", "click"]
+    cooled_tools = {
+        tool.name for tool in harness.actor.turns[2].tools
+    }
+    assert "click" not in cooled_tools
+    assert "double_click" not in cooled_tools
+    assert "type_text" in cooled_tools
+    restored_tools = {
+        tool.name for tool in harness.actor.turns[3].tools
+    }
+    assert {"click", "double_click"} <= restored_tools
+    assert harness.reducer.projection.failure_summary is None
+
+
+def test_three_click_semantic_cluster_suppresses_wider_pointer_jitter() -> None:
+    first = _action("click")
+    first["local_intent"] = "click the search bar"
+    second = _action("click")
+    second["args"] = {"image_x": 16, "image_y": 20}
+    second["local_intent"] = "focus the search field"
+    third = _action("click")
+    third["args"] = {"image_x": 11, "image_y": 20}
+    third["local_intent"] = "activate the search input"
+    harness = _harness(
+        first,
+        second,
+        third,
+        _action("type_text"),
+        with_runtime_evidence=True,
+    )
+
+    statuses = tuple(
+        harness.runtime.run_one_turn(turn_index=index).status
+        for index in range(4)
+    )
+
+    assert statuses == (
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.PROPOSAL_SUPPRESSED,
+        RuntimeStatus.ACTION_RECORDED,
+    )
+    assert [
+        envelope.proposal.action
+        for envelope in harness.controller.envelopes
+    ] == ["click", "click", "type_text"]
+
+
+def test_click_cluster_does_not_merge_adjacent_distinct_intents() -> None:
+    first = _action("click")
+    first["local_intent"] = "select red color"
+    second = _action("click")
+    second["args"] = {"image_x": 16, "image_y": 20}
+    second["local_intent"] = "select blue color"
+    third = _action("click")
+    third["args"] = {"image_x": 11, "image_y": 20}
+    third["local_intent"] = "select green color"
+    harness = _harness(
+        first,
+        second,
+        third,
+        with_runtime_evidence=True,
+    )
+
+    statuses = tuple(
+        harness.runtime.run_one_turn(turn_index=index).status
+        for index in range(3)
+    )
+
+    assert statuses == (
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.ACTION_RECORDED,
+    )
+    assert harness.controller.calls == 3
+
+
+def test_click_cluster_tolerance_scales_and_caps_for_large_frames() -> None:
+    assert mission_runtime_module._click_cluster_tolerance(  # noqa: SLF001
+        (1120, 795)
+    ) >= 20
+    assert mission_runtime_module._click_cluster_tolerance(  # noqa: SLF001
+        (4000, 3000)
+    ) == 24
+
+
 def test_repeat_gate_allows_distinct_click_and_repeated_scroll() -> None:
     moved_click = _action("click")
-    moved_click["args"]["image_x"] = 11
+    moved_click["args"]["image_x"] = 20
     harness = _harness(
         _action("click"),
         moved_click,

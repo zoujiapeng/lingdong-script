@@ -35,6 +35,8 @@ LIVE_COMPOSITION_VNEXT_MODULES = (
 LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.capabilities", "BrokerRuntimeState", None),
     ("winpilot.vnext.capabilities", "CapabilityBroker", None),
+    ("winpilot.vnext.capabilities", "ExecutionMedium", None),
+    ("winpilot.vnext.capabilities", "InteractionMode", None),
     ("winpilot.vnext.capabilities", "MutationKind", None),
     ("winpilot.vnext.capabilities", "PointerDisposition", None),
     ("winpilot.vnext.capabilities", "PointerLeaseState", None),
@@ -783,6 +785,7 @@ def test_minimal_runtime_tool_surface_cannot_expand_silently() -> None:
     assert APPROVED_DESKTOP_ACTIONS == {
         "click",
         "double_click",
+        "drag",
         "scroll",
         "type_text",
         "hotkey",

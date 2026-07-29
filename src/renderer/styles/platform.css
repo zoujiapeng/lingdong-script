@@ -405,6 +405,8 @@
 .arp-panel-heading > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
 .arp-panel-heading strong { font-size: 10px; font-weight: 700; }
 .arp-panel-heading > span { font-size: 9px; color: var(--arp-text-muted); }
+.arp-result-panel { margin-top: 10px; }
+.arp-result-content { max-height: 240px; padding: 12px 14px; overflow: auto; color: var(--arp-text); font-size: 11px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .arp-timeline-panel, .arp-run-detail { display: flex; flex-direction: column; }
 .arp-timeline { min-height: 0; flex: 1; overflow: auto; padding: 3px 11px; }
 .arp-timeline-row { min-height: 43px; display: grid; grid-template-columns: 7px 57px minmax(0, 1fr); align-items: start; gap: 7px; padding: 8px 0; border-bottom: 1px solid var(--arp-line); }
