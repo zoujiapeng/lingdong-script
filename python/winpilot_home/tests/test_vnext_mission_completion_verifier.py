@@ -139,14 +139,14 @@ def test_accepted_verification_rejects_missing_or_extra_evidence(
 @pytest.mark.parametrize("trust", ("actor_claim", "model_self", "telemetry_only"))
 def test_actor_or_telemetry_evidence_is_rejected_by_actual_trust(trust: str) -> None:
     ref = _evidence("proof", obligation_id="goal", trust=trust)
-    with pytest.raises(ValidationError, match="not independent"):
+    with pytest.raises(ValidationError, match="not admissible"):
         _accepted("goal", "verification-goal", (ref,))
 
 
 @pytest.mark.parametrize("kind", ("claim", "model_claim"))
 def test_claim_kind_cannot_hide_behind_deterministic_trust(kind: str) -> None:
     ref = _evidence("proof", obligation_id="goal", kind=kind)
-    with pytest.raises(ValidationError, match="not independent"):
+    with pytest.raises(ValidationError, match="not admissible"):
         _accepted("goal", "verification-goal", (ref,))
 
 

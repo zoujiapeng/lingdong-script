@@ -318,8 +318,8 @@ class ActorDecisionEnvelope(BaseModel):
     submitted_image_size: tuple[_POSITIVE_INT, _POSITIVE_INT]
     frame_image_sha256: str
     target_binding_id: str
-    pointer_disposition: Literal["released"]
-    pointer_lease_id: None
+    pointer_disposition: Literal["released", "held"]
+    pointer_lease_id: str | None
     broker_projection_id: str
     capability_grant_ids: tuple[str, ...]
     allowed_evidence_scope: tuple[str, ...]
@@ -367,12 +367,34 @@ class ActorDecisionEnvelope(BaseModel):
     def _image_sha256(cls, value: Any) -> str:
         return _sha256(value, "frame_image_sha256")
 
+    @field_validator("pointer_lease_id", mode="before")
+    @classmethod
+    def _pointer_lease(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        return _identity(value, "pointer_lease_id")
+
     @field_validator("proposal", mode="before")
     @classmethod
     def _proposal(cls, value: Any) -> ActorProposal:
         if type(value) is dict:
             return parse_actor_proposal(value)
         return _canonical_proposal(value)
+
+    @model_validator(mode="after")
+    def _pointer_contract(self) -> "ActorDecisionEnvelope":
+        if self.pointer_disposition == PointerDisposition.RELEASED.value:
+            if self.pointer_lease_id is not None:
+                raise ValueError("released pointer cannot retain lease_id")
+        else:
+            if self.pointer_lease_id is None:
+                raise ValueError("held pointer requires lease_id")
+            if (
+                type(self.proposal) is not DesktopActionProposal
+                or self.proposal.action != "drag"
+            ):
+                raise ValueError("held pointer permits only drag")
+        return self
 
     @model_validator(mode="after")
     def _content_identity(self) -> "ActorDecisionEnvelope":
@@ -613,12 +635,7 @@ def bind_actor_decision(
             raise ValueError("BrokerProjection is not a Visual Actor route")
         if not state.runtime_healthy or state.paused or state.canceled:
             raise ValueError("Runtime is not writable")
-        if (
-            state.pointer.disposition is not PointerDisposition.RELEASED
-            or state.pointer.lease_id is not None
-            or projection.pointer_lease_id is not None
-        ):
-            raise ValueError("pointer must be released")
+        pointer = state.pointer
 
         target = mission.target_binding
         if (
@@ -720,8 +737,8 @@ def bind_actor_decision(
             "submitted_image_size": list(image_size),
             "frame_image_sha256": image_sha,
             "target_binding_id": target.binding_id,
-            "pointer_disposition": PointerDisposition.RELEASED.value,
-            "pointer_lease_id": None,
+            "pointer_disposition": pointer.disposition.value,
+            "pointer_lease_id": pointer.lease_id,
             "broker_projection_id": projection.projection_id,
             "capability_grant_ids": list(grant_ids),
             "allowed_evidence_scope": list(evidence_scope),

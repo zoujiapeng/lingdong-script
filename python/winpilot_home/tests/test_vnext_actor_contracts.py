@@ -80,6 +80,11 @@ GUI_GATES = (
     "pointer_released",
     "runtime_healthy",
 )
+DRAG_GATES = (
+    "target_bound",
+    "authoritative_frame",
+    "runtime_healthy",
+)
 
 
 def _module_name(path: Path, package_root: Path) -> str:
@@ -152,6 +157,26 @@ def _point_schema() -> dict:
     }
 
 
+def _drag_schema() -> dict:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "image_x1": {"type": "number", "minimum": 0},
+            "image_y1": {"type": "number", "minimum": 0},
+            "image_x2": {"type": "number", "minimum": 0},
+            "image_y2": {"type": "number", "minimum": 0},
+            "keep_holding": {"type": "boolean"},
+        },
+        "required": [
+            "image_x1",
+            "image_y1",
+            "image_x2",
+            "image_y2",
+        ],
+    }
+
+
 def _tool(
     name: str,
     mutation: MutationKind,
@@ -206,6 +231,22 @@ def _catalog() -> ToolCatalog:
     ):
         tools.append(_tool(name, MutationKind.NONE, order=order))
     return ToolCatalog(tuple(tools))
+
+
+def _catalog_with_drag() -> ToolCatalog:
+    return ToolCatalog(
+        (
+            *_catalog().tools,
+            _tool(
+                "drag",
+                MutationKind.GUI,
+                capabilities=("visual.interact",),
+                prerequisites=DRAG_GATES,
+                schema=_drag_schema(),
+                order=6,
+            ),
+        )
+    )
 
 
 def _mission_reducer(
@@ -306,12 +347,18 @@ def _state(**overrides) -> BrokerRuntimeState:
     return BrokerRuntimeState(**values)
 
 
-def _runtime():
+def _runtime(
+    *,
+    pointer: PointerLeaseState | None = None,
+    catalog: ToolCatalog | None = None,
+):
     reducer = _mission_reducer()
     mission = reducer.projection
     profile = _profile(mission)
-    state = _state()
-    catalog = _catalog()
+    state = _state(
+        **({} if pointer is None else {"pointer": pointer})
+    )
+    catalog = catalog or _catalog()
     projection = CapabilityBroker(catalog).project(
         mission, profile, state
     )
@@ -347,6 +394,31 @@ def _bind(**overrides) -> ActorDecisionEnvelope:
     }
     values.update(overrides)
     return bind_actor_decision(**values)
+
+
+def _held_runtime():
+    return _runtime(
+        pointer=PointerLeaseState(
+            PointerDisposition.HELD,
+            "pointer-lease-current",
+            True,
+        ),
+        catalog=_catalog_with_drag(),
+    )
+
+
+def _held_drag() -> DesktopActionProposal:
+    return _action(
+        action="drag",
+        args={
+            "image_x1": 10,
+            "image_y1": 20,
+            "image_x2": 30,
+            "image_y2": 40,
+            "keep_holding": True,
+        },
+        local_intent="continue the held drag",
+    )
 
 
 def _all_proposals():
@@ -824,6 +896,62 @@ def test_runtime_binder_derives_all_authority_and_round_trips() -> None:
         "frame_id",
         "broker_projection_id",
     })
+
+
+def test_runtime_binder_preserves_one_owned_held_drag_lease() -> None:
+    reducer, _mission, profile, state, catalog, projection = _held_runtime()
+    envelope = bind_actor_decision(
+        mission_reducer=reducer,
+        profile=profile,
+        state=state,
+        catalog=catalog,
+        projection=projection,
+        proposal=_held_drag(),
+        frame_region=(-1200, 0, 1200, 800),
+        submitted_image_size=(900, 600),
+        frame_image_sha256="b" * 64,
+        allowed_evidence_scope=("e-target",),
+    )
+    assert envelope.pointer_disposition == "held"
+    assert envelope.pointer_lease_id == "pointer-lease-current"
+    assert envelope.proposal.action == "drag"
+    assert ActorDecisionEnvelope.from_dict(envelope.to_dict()) == envelope
+
+
+def test_held_envelope_rejects_missing_lease_and_non_drag_proposals() -> None:
+    reducer, _mission, profile, state, catalog, projection = _held_runtime()
+    common = {
+        "mission_reducer": reducer,
+        "profile": profile,
+        "state": state,
+        "catalog": catalog,
+        "projection": projection,
+        "frame_region": (-1200, 0, 1200, 800),
+        "submitted_image_size": (900, 600),
+        "frame_image_sha256": "b" * 64,
+        "allowed_evidence_scope": ("e-target",),
+    }
+    with pytest.raises(
+        InvalidActorAdmission,
+        match="proposal tool is outside BrokerProjection",
+    ):
+        bind_actor_decision(**common, proposal=_action())
+
+    raw = bind_actor_decision(
+        **common,
+        proposal=_held_drag(),
+    ).to_dict()
+    with pytest.raises(InvalidActorEnvelope, match="requires lease_id"):
+        ActorDecisionEnvelope.from_dict(
+            {**raw, "pointer_lease_id": None}
+        )
+    with pytest.raises(
+        InvalidActorEnvelope,
+        match="released pointer cannot retain",
+    ):
+        ActorDecisionEnvelope.from_dict(
+            {**raw, "pointer_disposition": "released"}
+        )
 
 
 def test_envelope_is_content_addressed_and_tamper_evident() -> None:

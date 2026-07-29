@@ -154,14 +154,6 @@ def require_empty_content(message: Any) -> None:
         )
 
 
-def require_no_tool_calls(message: Any) -> None:
-    tool_calls = member(message, "tool_calls")
-    if tool_calls not in (None, (), []):
-        raise LiveModelRoleError(
-            "Visual ObligationVerifier has no tool permission"
-        )
-
-
 __all__ = [
     "MAX_LIVE_MODEL_JSON_RESPONSE_CHARS",
     "MAX_LIVE_MODEL_NAME_CHARS",
@@ -171,7 +163,6 @@ __all__ = [
     "member",
     "require_empty_content",
     "require_jpeg",
-    "require_no_tool_calls",
     "require_positive_int",
     "require_positive_timeout",
     "require_text",

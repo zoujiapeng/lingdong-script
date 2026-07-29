@@ -105,6 +105,7 @@ def reconcile_post_action(
     obligation_id: str,
     action_id: str,
     action: str,
+    keep_holding: bool = False,
 ) -> PostActionReconciliation:
     """Prove one completed mutation against exact immutable Runtime facts."""
 
@@ -126,6 +127,14 @@ def reconcile_post_action(
     if any(type(value) is not str or not value.strip() for value in expected_text):
         raise PostActionReconciliationError(
             "reconciliation identities must be non-empty strings"
+        )
+    if type(keep_holding) is not bool:
+        raise PostActionReconciliationError(
+            "keep_holding must be boolean"
+        )
+    if keep_holding and action != "drag":
+        raise PostActionReconciliationError(
+            "only drag may keep the pointer held"
         )
     if transition.outcome is not ControllerOutcome.COMPLETED:
         raise PostActionReconciliationError(
@@ -152,11 +161,48 @@ def reconcile_post_action(
         or after.broker_state.paused
         or after.broker_state.canceled
         or not after.broker_state.runtime_healthy
-        or after.broker_state.pointer.disposition
-        is not PointerDisposition.RELEASED
     ):
         raise PostActionReconciliationError(
             "Controller post frame is not current authoritative and fresh"
+        )
+    before_pointer = before.broker_state.pointer
+    after_pointer = after.broker_state.pointer
+    if (
+        before_pointer.disposition is PointerDisposition.UNKNOWN
+        or after_pointer.disposition is PointerDisposition.UNKNOWN
+        or (
+            before_pointer.disposition is PointerDisposition.HELD
+            and (
+                action != "drag"
+                or not before_pointer.physically_owned
+                or before_pointer.lease_id is None
+            )
+        )
+    ):
+        raise PostActionReconciliationError(
+            "pointer state is not safely reconcilable"
+        )
+    if keep_holding:
+        held_after = bool(
+            after_pointer.disposition is PointerDisposition.HELD
+            and after_pointer.physically_owned
+            and after_pointer.lease_id is not None
+        )
+        same_continuation_lease = bool(
+            before_pointer.disposition is PointerDisposition.RELEASED
+            or after_pointer.lease_id == before_pointer.lease_id
+        )
+        if not held_after or not same_continuation_lease:
+            raise PostActionReconciliationError(
+                "held drag did not preserve one owned pointer lease"
+            )
+    elif (
+        after_pointer.disposition is not PointerDisposition.RELEASED
+        or after_pointer.lease_id is not None
+        or after_pointer.physically_owned
+    ):
+        raise PostActionReconciliationError(
+            "completed action did not release the pointer"
         )
     if (
         transition.post_frame_evidence_refs

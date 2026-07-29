@@ -48,6 +48,7 @@ from .raw_device import (
     MAX_TYPE_TEXT_CODEPOINTS,
     MouseButton,
     RawBackendResult,
+    _canonical_drag_points,
 )
 
 user32 = ctypes.windll.user32
@@ -894,6 +895,50 @@ def _emit_move(x: int, y: int) -> None:
     _abs_mouse_move(x, y)
 
 
+def _move_path_while_pressed(
+    waypoints: list[tuple[int, int]],
+    duration_s: float,
+    *,
+    hwnd: int | None = None,
+    progress: dict[str, int | bool] | None = None,
+) -> bool:
+    """Move an already-held pointer without changing button state."""
+
+    expected_cursor = waypoints[0]
+    seg_lens = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+                for a, b in zip(waypoints, waypoints[1:])]
+    total = max(sum(seg_lens), 1.0)
+    for (a, b), seg in zip(zip(waypoints, waypoints[1:]), seg_lens):
+        # Keep at most ~8px between events without resampling short paths.
+        steps = max(1, int(math.ceil(seg / 8.0)))
+        seg_dur = duration_s * (seg / total)
+        for i in range(1, steps + 1):
+            if (
+                not _target_window_still_foreground(hwnd)
+                or not _cooperative_action_still_owned(
+                    hwnd, expected_cursor=expected_cursor,
+                )
+            ):
+                return False
+            expected_cursor = (
+                int(a[0] + (b[0] - a[0]) * i / steps),
+                int(a[1] + (b[1] - a[1]) * i / steps),
+            )
+            _emit_move(*expected_cursor)
+            if progress is not None:
+                progress["moves_completed"] = (
+                    int(progress.get("moves_completed", 0)) + 1
+                )
+            time.sleep(max(0.002, seg_dur / steps))
+    time.sleep(0.015)
+    return bool(
+        _target_window_still_foreground(hwnd)
+        and _cooperative_action_still_owned(
+            hwnd, expected_cursor=expected_cursor,
+        )
+    )
+
+
 def _stroke_path(
     waypoints: list[tuple[int, int]],
     duration_s: float,
@@ -940,37 +985,11 @@ def _stroke_path(
     time.sleep(0.02)  # let the app register the press before moving
 
     try:
-        seg_lens = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
-                    for a, b in zip(waypoints, waypoints[1:])]
-        total = max(sum(seg_lens), 1.0)
-        for (a, b), seg in zip(zip(waypoints, waypoints[1:]), seg_lens):
-            # Keep at most ~8px between events without resampling short paths.
-            steps = max(1, int(math.ceil(seg / 8.0)))
-            seg_dur = duration_s * (seg / total)
-            for i in range(1, steps + 1):
-                if (
-                    not _target_window_still_foreground(hwnd)
-                    or not _cooperative_action_still_owned(
-                        hwnd, expected_cursor=expected_cursor,
-                    )
-                ):
-                    return False
-                expected_cursor = (
-                    int(a[0] + (b[0] - a[0]) * i / steps),
-                    int(a[1] + (b[1] - a[1]) * i / steps),
-                )
-                _emit_move(*expected_cursor)
-                if progress is not None:
-                    progress["moves_completed"] = (
-                        int(progress["moves_completed"]) + 1
-                    )
-                time.sleep(max(0.002, seg_dur / steps))
-        time.sleep(0.015)
-        return bool(
-            _target_window_still_foreground(hwnd)
-            and _cooperative_action_still_owned(
-                hwnd, expected_cursor=expected_cursor,
-            )
+        return _move_path_while_pressed(
+            waypoints,
+            duration_s,
+            hwnd=hwnd,
+            progress=progress,
         )
     finally:
         if pressed:
@@ -989,6 +1008,10 @@ def _physical_drag_result(
     cursor_restored: bool | None = None,
     release_cleanup_attempted: bool = False,
     release_cleanup_completed: bool = False,
+    segment_phase: str | None = None,
+    held_before: bool | None = None,
+    held_after: bool | None = None,
+    moves_completed: int | None = None,
 ) -> RawBackendResult:
     facts: dict[str, Any] = {
         "ok": input_completed is True,
@@ -1004,12 +1027,241 @@ def _physical_drag_result(
         facts["guard_decision"] = guard_decision.value
     if cursor_restored is not None:
         facts["cursor_restored"] = cursor_restored
+    if segment_phase is not None:
+        facts["segment_phase"] = segment_phase
+    if held_before is not None:
+        facts["held_before"] = held_before
+    if held_after is not None:
+        facts["held_after"] = held_after
+    if moves_completed is not None:
+        facts["moves_completed"] = moves_completed
     if release_cleanup_attempted:
         facts.update(
             release_cleanup_attempted=True,
             release_cleanup_completed=release_cleanup_completed,
         )
     return RawBackendResult(input_completed, facts)
+
+
+def _left_button_owned_by_agent() -> bool:
+    with _held_mouse_lock:
+        return "left" in _held_mouse_buttons
+
+
+def _record_left_button_owned() -> bool:
+    with _held_mouse_lock:
+        if "left" in _held_mouse_buttons:
+            return False
+        _held_mouse_buttons.add("left")
+        return True
+
+
+def _best_effort_release_left(*, force: bool = False) -> tuple[bool, bool, bool | None]:
+    """Return (attempted, completed, held_after) for one unconditional UP."""
+
+    if not force and not _left_button_owned_by_agent():
+        return False, False, False
+    try:
+        _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
+    except Exception:
+        return True, False, None
+    with _held_mouse_lock:
+        _held_mouse_buttons.discard("left")
+    return True, True, False
+
+
+def _held_drag_guard_decision(
+    start: tuple[int, int],
+    final_guard: FinalPointerGuard,
+) -> FinalPointerGuardDecision:
+    try:
+        cursor_before = tuple(map(int, _cursor_pos()))
+        decision = final_guard(*cursor_before)
+        cursor_after = tuple(map(int, _cursor_pos()))
+    except Exception:
+        return FinalPointerGuardDecision.TARGET_UNAVAILABLE
+    canonical = (
+        decision
+        if isinstance(decision, FinalPointerGuardDecision)
+        else FinalPointerGuardDecision.TARGET_UNAVAILABLE
+    )
+    if (
+        canonical is FinalPointerGuardDecision.ADMITTED
+        and (cursor_before != start or cursor_after != cursor_before)
+    ):
+        return FinalPointerGuardDecision.POINTER_POSITION_CHANGED
+    return canonical
+
+
+def _held_drag_failure(
+    phase: str,
+    *,
+    error: str,
+    guard_decision: FinalPointerGuardDecision | None,
+    held_before: bool,
+    moves_completed: int,
+) -> RawBackendResult:
+    attempted, released, held_after = _best_effort_release_left(force=True)
+    return _physical_drag_result(
+        None,
+        error=error,
+        guard_decision=guard_decision,
+        release_cleanup_attempted=attempted,
+        release_cleanup_completed=released,
+        segment_phase=phase,
+        held_before=held_before,
+        held_after=held_after,
+        moves_completed=moves_completed,
+    )
+
+
+def _execute_held_drag_segment(
+    path: list[tuple[int, int]],
+    *,
+    hwnd: int | None,
+    final_guard: FinalPointerGuard,
+    phase: str,
+) -> RawBackendResult:
+    start = path[0]
+    held_before = _left_button_owned_by_agent()
+    progress: dict[str, int | bool] = {"moves_completed": 0}
+    guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
+
+    if phase == "begin":
+        if held_before:
+            return _held_drag_failure(
+                phase,
+                error="left button already held before drag begin",
+                guard_decision=None,
+                held_before=True,
+                moves_completed=0,
+            )
+        if (
+            not _target_window_still_foreground(hwnd)
+            or not _cooperative_action_still_owned(hwnd)
+        ):
+            return _held_drag_failure(
+                phase,
+                error="held drag target unavailable before input",
+                guard_decision=guard_decision,
+                held_before=False,
+                moves_completed=0,
+            )
+        try:
+            _abs_mouse_move(*start)
+            time.sleep(0.04)
+        except Exception:
+            return _held_drag_failure(
+                phase,
+                error="held drag could not reach start point",
+                guard_decision=guard_decision,
+                held_before=False,
+                moves_completed=0,
+            )
+    elif not held_before:
+        return _held_drag_failure(
+            phase,
+            error="held drag lost left-button ownership",
+            guard_decision=None,
+            held_before=False,
+            moves_completed=0,
+        )
+
+    if (
+        not _target_window_still_foreground(hwnd)
+        or not _cooperative_action_still_owned(
+            hwnd, expected_cursor=start,
+        )
+    ):
+        return _held_drag_failure(
+            phase,
+            error="held drag target or pointer ownership changed",
+            guard_decision=guard_decision,
+            held_before=held_before,
+            moves_completed=0,
+        )
+
+    guard_decision = _held_drag_guard_decision(start, final_guard)
+    if guard_decision is not FinalPointerGuardDecision.ADMITTED:
+        return _held_drag_failure(
+            phase,
+            error=f"final pointer guard rejected: {guard_decision.value}",
+            guard_decision=guard_decision,
+            held_before=held_before,
+            moves_completed=0,
+        )
+
+    if phase == "begin":
+        if not _record_left_button_owned():
+            return _held_drag_failure(
+                phase,
+                error="left button ownership changed before drag begin",
+                guard_decision=guard_decision,
+                held_before=False,
+                moves_completed=0,
+            )
+        try:
+            _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTDOWN)])
+            time.sleep(0.02)
+        except Exception:
+            return _held_drag_failure(
+                phase,
+                error="held drag DOWN outcome unknown",
+                guard_decision=guard_decision,
+                held_before=False,
+                moves_completed=0,
+            )
+
+    try:
+        completed = _move_path_while_pressed(
+            path,
+            0.4,
+            hwnd=hwnd,
+            progress=progress,
+        )
+    except Exception:
+        completed = False
+    moves_completed = int(progress["moves_completed"])
+    if not completed:
+        return _held_drag_failure(
+            phase,
+            error="held drag outcome unknown after physical input began",
+            guard_decision=guard_decision,
+            held_before=held_before,
+            moves_completed=moves_completed,
+        )
+
+    if phase in {"begin", "continue"}:
+        return _physical_drag_result(
+            True,
+            guard_decision=guard_decision,
+            segment_phase=phase,
+            held_before=held_before,
+            held_after=True,
+            moves_completed=moves_completed,
+        )
+
+    attempted, released, held_after = _best_effort_release_left(force=True)
+    if not released:
+        # The required FINISH UP was uncertain; make one additional best-effort
+        # UP inside the common failure path, without replaying any movement.
+        return _held_drag_failure(
+            phase,
+            error="held drag final UP outcome unknown",
+            guard_decision=guard_decision,
+            held_before=held_before,
+            moves_completed=moves_completed,
+        )
+    return _physical_drag_result(
+        True,
+        guard_decision=guard_decision,
+        release_cleanup_attempted=attempted,
+        release_cleanup_completed=released,
+        segment_phase=phase,
+        held_before=held_before,
+        held_after=held_after,
+        moves_completed=moves_completed,
+    )
 
 
 def execute_admitted_physical_drag(
@@ -1019,21 +1271,110 @@ def execute_admitted_physical_drag(
     y2: int,
     hwnd: int | None = None,
     *,
-    final_guard: FinalPointerGuard,
+    points: list[tuple[int, int]] | tuple[tuple[int, int], ...] = (),
+    final_guard: FinalPointerGuard | None = None,
+    pointer_already_held: bool = False,
+    keep_holding: bool = False,
+    hold_token: str | None = None,
+    cleanup_only: bool = False,
 ) -> RawBackendResult:
-    """Run one already-queued physical press-move-release gesture."""
+    """Run one atomic drag or one token-gated held-drag segment."""
 
+    canonical_points = _canonical_drag_points(points)
+    held_mode = pointer_already_held or keep_holding
+    stationary_finish = bool(
+        pointer_already_held is True
+        and keep_holding is False
+        and not canonical_points
+        and (x1, y1) == (x2, y2)
+    )
+    valid_hold_token = (
+        type(hold_token) is str
+        and bool(hold_token)
+        and len(hold_token) <= 256
+    )
     if (
-        any(type(value) is not int for value in (x1, y1, x2, y2))
-        or (x1, y1) == (x2, y2)
-        or not callable(final_guard)
+        type(pointer_already_held) is not bool
+        or type(keep_holding) is not bool
+        or type(cleanup_only) is not bool
+        or canonical_points is None
+        or (
+            cleanup_only
+            and (
+                not pointer_already_held
+                or keep_holding
+                or not valid_hold_token
+            )
+        )
+        or (
+            not cleanup_only
+            and (
+                any(type(value) is not int for value in (x1, y1, x2, y2))
+                or (
+                    (x1, y1) == (x2, y2)
+                    and not stationary_finish
+                )
+                or not callable(final_guard)
+                or (held_mode and not valid_hold_token)
+                or (not held_mode and hold_token is not None)
+            )
+        )
     ):
         return _physical_drag_result(
             False,
             error="invalid admitted physical drag",
         )
+
+    phase = (
+        "cleanup"
+        if cleanup_only
+        else "continue"
+        if pointer_already_held and keep_holding
+        else "finish"
+        if pointer_already_held
+        else "begin"
+        if keep_holding
+        else "atomic"
+    )
     if _dry_run():
+        if phase != "atomic":
+            return _physical_drag_result(
+                True,
+                segment_phase=phase,
+                held_before=pointer_already_held,
+                held_after=keep_holding if phase != "cleanup" else False,
+                moves_completed=0,
+            )
         return RawBackendResult(False, {"ok": True, "dry_run": True})
+
+    if cleanup_only:
+        held_before = _left_button_owned_by_agent()
+        attempted, released, held_after = _best_effort_release_left(force=True)
+        return _physical_drag_result(
+            True if released else None,
+            error="" if released else "held drag cleanup UP outcome unknown",
+            release_cleanup_attempted=attempted,
+            release_cleanup_completed=released,
+            segment_phase=phase,
+            held_before=held_before,
+            held_after=held_after,
+            moves_completed=0,
+        )
+
+    start = (x1, y1)
+    end = (x2, y2)
+    path = (
+        [start]
+        if stationary_finish
+        else [start, *canonical_points, end]
+    )
+    if held_mode:
+        return _execute_held_drag_segment(
+            path,
+            hwnd=hwnd,
+            final_guard=final_guard,
+            phase=phase,
+        )
 
     try:
         saved = tuple(map(int, _cursor_pos()))
@@ -1043,8 +1384,6 @@ def execute_admitted_physical_drag(
             error="drag cursor position unavailable",
         )
 
-    start = (x1, y1)
-    end = (x2, y2)
     guard_decision = FinalPointerGuardDecision.TARGET_UNAVAILABLE
     progress: dict[str, int | bool] = {
         "button_pressed": False,
@@ -1078,7 +1417,7 @@ def execute_admitted_physical_drag(
     error = ""
     try:
         completed = _stroke_path(
-            [start, end],
+            path,
             0.4,
             hwnd=hwnd,
             before_press=before_press,
@@ -1960,11 +2299,16 @@ def _execute_physical_hotkey_vks(
     ):
         guard_after = _keyboard_guard_decision(final_guard)
 
+    # ``input_completed`` answers whether the complete physical chord reached
+    # SendInput, not whether the original window stayed foreground afterwards.
+    # Focus-changing chords (Win, Alt+Tab, Enter in launchers/dialogs) are
+    # successful precisely when that post-input guard changes.  Preserve the
+    # guard decision as a diagnostic, but do not turn a fully sent and fully
+    # released chord into an unknown physical outcome.
     completed = bool(
         down_completed
         and release_completed
         and not release_had_error
-        and guard_after is FinalKeyboardGuardDecision.ADMITTED
     )
     if completed:
         return _keyboard_result(
@@ -1972,6 +2316,11 @@ def _execute_physical_hotkey_vks(
             key_count=len(vks),
             release_cleanup_attempted=release_attempted,
             release_cleanup_completed=release_completed,
+            guard_decision=(
+                guard_after
+                if guard_after is not FinalKeyboardGuardDecision.ADMITTED
+                else None
+            ),
         )
     return _keyboard_result(
         None,

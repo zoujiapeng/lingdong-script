@@ -19,7 +19,12 @@ CANONICAL_HOTKEY_KEYS = frozenset({
 
 @dataclass(frozen=True, slots=True)
 class HotkeyChord:
-    """Canonical modifiers followed by exactly one non-modifier key."""
+    """One key, or canonical modifiers followed by one primary key.
+
+    A standalone modifier is a complete key press.  This matters for keys such
+    as ``win`` whose ordinary GUI meaning is produced by pressing and releasing
+    that key without a second key.
+    """
 
     keys: tuple[str, ...]
 
@@ -31,10 +36,14 @@ class HotkeyChord:
             not 1 <= len(keys) <= len(CANONICAL_HOTKEY_MODIFIERS) + 1
             or any(type(key) is not str or key not in CANONICAL_HOTKEY_KEYS for key in keys)
             or len(keys) != len(set(keys))
-            or keys[-1] in CANONICAL_HOTKEY_MODIFIERS
+            or (
+                len(keys) > 1
+                and keys[-1] in CANONICAL_HOTKEY_MODIFIERS
+            )
         ):
             raise ValueError(
-                "hotkey keys must be unique canonical names ending in a primary key"
+                "hotkey keys must be one key or unique canonical names ending "
+                "in a primary key"
             )
         modifiers = keys[:-1]
         if (

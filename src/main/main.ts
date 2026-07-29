@@ -32,17 +32,37 @@ let _cachedRendererState: any = null;
 let apiServer: http.Server | null = null;
 const LOCAL_CONTROL_TOKEN = process.env.LINGDONG_CONTROL_TOKEN || randomBytes(32).toString('base64url');
 const _taskbarNotifiedRuns = new Set<string>();
+let _desktopHandoffPending = false;
+let _desktopHandoffRunId = '';
 
 type TaskbarNotificationKind = 'success' | 'error' | 'info';
+
+function releaseDesktopHandoff(window = mainWindow): void {
+  _desktopHandoffPending = false;
+  _desktopHandoffRunId = '';
+  if (!window || window.isDestroyed()) return;
+  window.setSkipTaskbar(false);
+}
 
 function notifyTaskbarAttention(
   title: string,
   body: string,
   kind: TaskbarNotificationKind = 'info',
   runId = '',
+  releaseHandoff = false,
 ): boolean {
   const window = mainWindow;
-  if (!window || window.isDestroyed()) return false;
+  if (!window || window.isDestroyed()) {
+    return false;
+  }
+  if (
+    releaseHandoff
+    && _desktopHandoffPending
+    && runId
+    && runId === _desktopHandoffRunId
+  ) {
+    releaseDesktopHandoff(window);
+  }
   if (runId && _taskbarNotifiedRuns.has(runId)) return true;
   if (runId) {
     if (_taskbarNotifiedRuns.size >= 200) _taskbarNotifiedRuns.clear();
@@ -72,7 +92,8 @@ function notifyTaskbarAttention(
         silent: false,
       });
       notification.on('click', () => {
-        if (!window.isVisible()) window.show();
+        if (window.isMinimized()) window.restore();
+        else if (!window.isVisible()) window.show();
         window.focus();
         clearAttention();
       });
@@ -534,12 +555,17 @@ ipcMain.handle('window:prepare-desktop-handoff', async () => {
   }
 
   try {
-    // Minimizing lets Windows restore the application that was in front before
-    // the user opened the workbench.  The renderer remains alive and submits
-    // the already-compiled graph while the external target owns foreground.
+    // Keep the renderer alive, but remove the control surface from the task
+    // desktop while the external target owns foreground. A minimized Electron
+    // window still participates in Alt+Tab and can trap a GUI agent in its own
+    // launcher. Only the matching terminal run restores the taskbar entry.
+    _desktopHandoffPending = true;
+    _desktopHandoffRunId = '';
+    window.setSkipTaskbar(true);
     if (!window.isMinimized()) window.minimize();
     await new Promise((resolve) => setTimeout(resolve, 160));
     const yielded = !window.isFocused();
+    if (!yielded) releaseDesktopHandoff(window);
     return {
       yielded,
       control_surface_pid: process.pid,
@@ -547,6 +573,7 @@ ipcMain.handle('window:prepare-desktop-handoff', async () => {
       ...(yielded ? {} : { reason: 'control_surface_still_focused' }),
     };
   } catch (error) {
+    releaseDesktopHandoff(window);
     return {
       yielded: false,
       control_surface_pid: process.pid,
@@ -554,6 +581,18 @@ ipcMain.handle('window:prepare-desktop-handoff', async () => {
       reason: error instanceof Error ? error.message : String(error),
     };
   }
+});
+
+ipcMain.handle('window:bind-desktop-handoff', (_, runId: string) => {
+  const canonicalRunId = String(runId || '').trim();
+  if (!_desktopHandoffPending || !canonicalRunId) return false;
+  _desktopHandoffRunId = canonicalRunId;
+  return true;
+});
+
+ipcMain.handle('window:release-desktop-handoff', () => {
+  releaseDesktopHandoff();
+  return true;
 });
 
 ipcMain.handle('dialog:openFile', async (_, filters?: { name: string; extensions: string[] }[]) => {
@@ -682,6 +721,7 @@ function startAgentProcess(goal: string, config?: Record<string, any>, supervise
             ).slice(0, 220),
             success ? 'success' : stopped ? 'info' : 'error',
             String(msg.run_id || ''),
+            true,
           );
         } else if (msg.type === 'agent_error') {
           notifyTaskbarAttention(
@@ -689,6 +729,7 @@ function startAgentProcess(goal: string, config?: Record<string, any>, supervise
             String(msg.error || msg.message || msg.run_id || '').slice(0, 220),
             'error',
             String(msg.run_id || ''),
+            true,
           );
         }
         mainWindow?.webContents.send('agent-message', msg);
@@ -1396,8 +1437,20 @@ ipcMain.handle('notification:show', (_, title: string, body: string) => {
 
 ipcMain.handle(
   'taskbar:notify',
-  (_, title: string, body: string, kind: TaskbarNotificationKind = 'info', runId = '') =>
-    notifyTaskbarAttention(title, body, kind, runId),
+  (
+    _,
+    title: string,
+    body: string,
+    kind: TaskbarNotificationKind = 'info',
+    runId = '',
+    releaseHandoff = false,
+  ) => notifyTaskbarAttention(
+    title,
+    body,
+    kind,
+    runId,
+    releaseHandoff === true,
+  ),
 );
 
 // --- Schedule IPC ---

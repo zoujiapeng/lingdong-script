@@ -45,7 +45,10 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.capabilities", "ToolRoute", None),
     ("winpilot.vnext.capabilities", "ToolSpec", None),
     ("winpilot.vnext.desktop_adapter", "AtomicDesktopAdapter", None),
+    ("winpilot.vnext.desktop_adapter", "DesktopWorkspace", None),
     ("winpilot.vnext.desktop_adapter", "LiveTargetSnapshot", None),
+    ("winpilot.vnext.desktop_adapter", "WorkspaceObservation", None),
+    ("winpilot.vnext.desktop_adapter", "WorkspaceSurface", None),
     ("winpilot.vnext.evidence", "EvidenceRegistry", None),
     ("winpilot.vnext.evidence_plane", "FrameArtifactWriter", None),
     ("winpilot.vnext.evidence_plane", "RuntimeEvidenceJournal", None),
@@ -56,7 +59,6 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
         "runtime_evidence_report_sha256",
         None,
     ),
-    ("winpilot.vnext.mission", "EvidencePolicy", None),
     ("winpilot.vnext.mission", "EvidenceRef", None),
     ("winpilot.vnext.mission", "MissionDefinition", None),
     ("winpilot.vnext.mission", "MissionReducer", None),
@@ -64,10 +66,7 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.mission", "ObligationSpec", None),
     ("winpilot.vnext.mission", "TargetBinding", None),
     ("winpilot.vnext.model_roles", "VISUAL_ACTOR_MODEL_ROLE", None),
-    ("winpilot.vnext.model_roles", "VISUAL_VERIFIER_KIND", None),
-    ("winpilot.vnext.model_roles", "VISUAL_VERIFIER_MODEL_ROLE", None),
     ("winpilot.vnext.model_roles", "LiveVisualActor", None),
-    ("winpilot.vnext.model_roles", "LiveVisualObligationVerifier", None),
     ("winpilot.vnext.profiling", "ExecutionPolicy", None),
     ("winpilot.vnext.runtime", "CURRENT_FRAME_EVIDENCE_KIND", None),
     ("winpilot.vnext.runtime", "MissionRuntime", None),
@@ -123,6 +122,7 @@ RUNTIME_FILES = (
     "mutation_permits.py",
     "ports.py",
     "post_action_reconcile.py",
+    "task_state.py",
 )
 
 RUNTIME_FORBIDDEN_IMPORT_PREFIXES = (
@@ -174,7 +174,6 @@ MODEL_ROLE_FILES = (
     "__init__.py",
     "common.py",
     "visual_actor.py",
-    "visual_obligation_verifier.py",
 )
 
 EVIDENCE_PLANE_FILES = (
@@ -850,10 +849,7 @@ def test_live_model_roles_are_exact_isolated_and_use_only_model_runtime() -> Non
             for imported in _imports(path)
         )
     }
-    assert modeling_importers == {
-        "visual_actor.py",
-        "visual_obligation_verifier.py",
-    }
+    assert modeling_importers == {"visual_actor.py"}
     vnext_modeling_importers = {
         path.relative_to(VNEXT_ROOT).as_posix()
         for path in _source_files(VNEXT_ROOT)
@@ -864,5 +860,4 @@ def test_live_model_roles_are_exact_isolated_and_use_only_model_runtime() -> Non
     }
     assert vnext_modeling_importers == {
         "model_roles/visual_actor.py",
-        "model_roles/visual_obligation_verifier.py",
     }

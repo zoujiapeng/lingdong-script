@@ -3,13 +3,23 @@
 from .atomic import (
     AtomicDesktopAdapter,
     DesktopTargetProbe,
+    DesktopWorkspacePort,
     LiveTargetSnapshot,
     RawReceiptTraceSink,
+)
+from .workspace import (
+    DesktopWorkspace,
+    WorkspaceObservation,
+    WorkspaceSurface,
 )
 
 __all__ = [
     "AtomicDesktopAdapter",
     "DesktopTargetProbe",
+    "DesktopWorkspace",
+    "DesktopWorkspacePort",
     "LiveTargetSnapshot",
     "RawReceiptTraceSink",
+    "WorkspaceObservation",
+    "WorkspaceSurface",
 ]

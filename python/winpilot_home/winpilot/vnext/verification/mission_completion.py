@@ -27,9 +27,10 @@ MISSION_COMPLETION_REQUEST_FORMAT = "mission-completion-verification-request/0"
 MISSION_COMPLETION_RESULT_FORMAT = "mission-completion-verification-result/0"
 MISSION_COMPLETION_AGGREGATE_FORMAT = "mission-completion-aggregate/0"
 MISSION_COMPLETION_SCOPE = "mission"
-# Mission completion accepts only evidence tiers that are independent of the
-# GUI-writing Actor.  The visual tier is deliberately distinct from model_self.
-MISSION_COMPLETION_TRUST = TRUST_ORDER + ("independent_visual_model",)
+# Mission completion mechanically aggregates an already accepted obligation
+# verification and its exact run-scoped evidence. The verification event keeps
+# the semantic owner explicit (for example, actor_claim).
+MISSION_COMPLETION_TRUST = TRUST_ORDER
 _DISALLOWED_TRUST = frozenset(("actor_claim", "model_self", "telemetry_only"))
 _DISALLOWED_KIND = frozenset(("claim", "model_claim"))
 _AGGREGATE_KIND = "mission_completion_aggregate"
@@ -68,7 +69,7 @@ class AcceptedObligationVerification(_WireModel):
             if ref.obligation_id not in (None, "", self.obligation_id):
                 raise ValueError(f"evidence {ref.id!r} belongs to another obligation")
             if ref.trust in _DISALLOWED_TRUST or ref.kind in _DISALLOWED_KIND:
-                raise ValueError(f"evidence {ref.id!r} is not independent")
+                raise ValueError(f"evidence {ref.id!r} is not admissible")
             if ref.trust not in MISSION_COMPLETION_TRUST:
                 raise ValueError(f"evidence {ref.id!r} has unsupported trust")
         return self
@@ -186,7 +187,7 @@ class DeterministicMissionCompletionVerifier:
             confidence=1.0,
             concise_reason=(
                 "every required obligation has one accepted verification and "
-                "exact independent run-scoped evidence"
+                "exact run-scoped evidence"
             ),
         )
 
@@ -253,9 +254,9 @@ class MissionCompletionVerificationResult(_WireModel):
         if aggregate.id != expected_evidence_id or self.verification_id != expected_verification_id:
             raise ValueError("mission completion identities are not canonical")
         if aggregate.id in self.obligation_evidence_refs:
-            raise ValueError("aggregate evidence must have an independent identity")
+            raise ValueError("aggregate evidence must have a distinct identity")
         if self.verification_id in self.accepted_obligation_verification_ids:
-            raise ValueError("mission verification identity must be independent")
+            raise ValueError("mission verification identity must be distinct")
         return self
 
     @classmethod

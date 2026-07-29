@@ -45,6 +45,10 @@ from ...visual_runtime.submitted_image_coordinates import (
     SubmittedImageCoordinateMapper,
 )
 from ..actor import ActorDecisionEnvelope, DesktopActionProposal
+from ..capabilities import (
+    PointerDisposition,
+    PointerLeaseState,
+)
 from ..evidence_plane import (
     FrameArtifactReference,
     FrameArtifactRole,
@@ -73,6 +77,11 @@ _ACTIONS = frozenset(
 _POST_FRAME_KIND = "post_action_frame"
 _JPEG_MEDIA_TYPE = "image/jpeg"
 _MAX_SCROLL_AMOUNT = 1200
+_MAX_DRAG_INTERMEDIATE_POINTS = 32
+# One spatial turn can make an Actor call followed by a Grounder call.  Keep
+# the emergency lease longer than their combined production timeout; normal
+# release is the next drag segment or session.close(), not this fallback.
+_DEFAULT_HELD_POINTER_TIMEOUT_S = 300.0
 
 PhysicalRegion = tuple[int, int, int, int]
 PhysicalPoint = tuple[int, int]
@@ -128,6 +137,21 @@ class DesktopTargetProbe(Protocol):
     def hit_test_root(self, x: int, y: int) -> int | None: ...
 
 
+class DesktopWorkspacePort(DesktopTargetProbe, Protocol):
+    """Mutable target owner; adoption is allowed only between actions."""
+
+    @property
+    def binding(self) -> TargetBinding: ...
+
+    def finish_action(
+        self,
+        *,
+        action_id: str,
+        action: str,
+        input_completed: bool | None,
+    ) -> None: ...
+
+
 class RawReceiptTraceSink(Protocol):
     """Best-effort sink for the complete immutable RawDevice receipt."""
 
@@ -144,6 +168,11 @@ class _PreparedAction:
     action: str
     point: PhysicalPoint | None = None
     end_point: PhysicalPoint | None = None
+    points: tuple[PhysicalPoint, ...] | None = None
+    keep_holding: bool = False
+    hold_control_present: bool = False
+    started_held: bool = False
+    pointer_lease_id: str | None = None
     amount: int | None = None
     text: str | None = None
     chord: HotkeyChord | None = None
@@ -156,6 +185,13 @@ class _PinnedExecution:
     raw_device_called: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _HeldPointerLease:
+    lease_id: str
+    cursor: PhysicalPoint
+    expires_at: float
+
+
 class AtomicDesktopAdapter:
     """Execute exactly one admitted desktop proposal through existing owners."""
 
@@ -166,6 +202,7 @@ class AtomicDesktopAdapter:
         frame_observer: FrameObserver,
         frozen_target_binding: TargetBinding,
         target_probe: DesktopTargetProbe,
+        desktop_workspace: DesktopWorkspacePort | None = None,
         mutation_permits: MutationPermitAuthority,
         raw_device: RawDeviceExecutor,
         receipt_trace_sink: RawReceiptTraceSink | None = None,
@@ -173,6 +210,8 @@ class AtomicDesktopAdapter:
         frame_artifact_writer: FrameArtifactWriter | None = None,
         post_input_settle_delay_s: float = 0.12,
         wait: Callable[[float], Any] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        held_pointer_timeout_s: float = _DEFAULT_HELD_POINTER_TIMEOUT_S,
     ) -> None:
         if not isinstance(frame_authority, FrameAuthority):
             raise TypeError("frame_authority must be FrameAuthority")
@@ -189,10 +228,31 @@ class AtomicDesktopAdapter:
         frozen_target_binding = TargetBinding.from_dict(
             frozen_target_binding.to_dict()
         )
-        if not callable(getattr(target_probe, "snapshot", None)):
+        probe: DesktopTargetProbe = (
+            desktop_workspace
+            if desktop_workspace is not None
+            else target_probe
+        )
+        if not callable(getattr(probe, "snapshot", None)):
             raise TypeError("target_probe must provide snapshot()")
-        if not callable(getattr(target_probe, "hit_test_root", None)):
+        if not callable(getattr(probe, "hit_test_root", None)):
             raise TypeError("target_probe must provide hit_test_root()")
+        if desktop_workspace is not None:
+            workspace_binding = getattr(
+                desktop_workspace,
+                "binding",
+                None,
+            )
+            if (
+                type(workspace_binding) is not TargetBinding
+                or workspace_binding != frozen_target_binding
+                or not callable(
+                    getattr(desktop_workspace, "finish_action", None)
+                )
+            ):
+                raise TypeError(
+                    "desktop_workspace must own the initial target binding"
+                )
         if type(mutation_permits) is not MutationPermitAuthority:
             raise TypeError(
                 "mutation_permits must be MutationPermitAuthority"
@@ -266,6 +326,17 @@ class AtomicDesktopAdapter:
             )
         if not callable(wait):
             raise TypeError("wait must be callable")
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        if (
+            isinstance(held_pointer_timeout_s, bool)
+            or not isinstance(held_pointer_timeout_s, (int, float))
+            or not math.isfinite(float(held_pointer_timeout_s))
+            or not 1.0 <= float(held_pointer_timeout_s) <= 300.0
+        ):
+            raise ValueError(
+                "held_pointer_timeout_s must be in the range 1..300"
+            )
         if (
             mutation_permits.mission_id == ""
             or mutation_permits.run_id == ""
@@ -283,8 +354,9 @@ class AtomicDesktopAdapter:
 
         self._authority = frame_authority
         self._observer = frame_observer
-        self._binding = frozen_target_binding
-        self._probe = target_probe
+        self._fixed_binding = frozen_target_binding
+        self._workspace = desktop_workspace
+        self._probe = probe
         self._permits = mutation_permits
         self._raw = raw_device
         self._trace = receipt_trace_sink
@@ -293,6 +365,12 @@ class AtomicDesktopAdapter:
         self._durable_evidence_enabled = durable
         self._post_input_settle_delay_s = settle_delay
         self._wait = wait
+        self._clock = clock
+        self._held_pointer_timeout_s = float(held_pointer_timeout_s)
+        self._pointer_lock = threading.RLock()
+        self._held_pointer: _HeldPointerLease | None = None
+        self._pointer_uncertain = False
+        self._closed = False
         self._effect = DeterministicActionEffectVerifier()
 
     @property
@@ -302,6 +380,15 @@ class AtomicDesktopAdapter:
         return self._permits
 
     @property
+    def _binding(self) -> TargetBinding:
+        workspace = self._workspace
+        return (
+            self._fixed_binding
+            if workspace is None
+            else workspace.binding
+        )
+
+    @property
     def frozen_target_binding(self) -> TargetBinding:
         return self._binding
 
@@ -309,7 +396,89 @@ class AtomicDesktopAdapter:
     def runtime_evidence_plane(self) -> RuntimeEvidencePlane | None:
         return self._runtime_evidence
 
+    def pointer_state(self) -> PointerLeaseState:
+        with self._pointer_lock:
+            lease = self._held_pointer
+            if (
+                lease is not None
+                and not self._pointer_uncertain
+                and self._clock() >= lease.expires_at
+            ):
+                self._release_held_pointer_locked()
+                lease = self._held_pointer
+            if lease is None:
+                return PointerLeaseState(PointerDisposition.RELEASED)
+            if self._pointer_uncertain:
+                return PointerLeaseState(
+                    PointerDisposition.UNKNOWN,
+                    lease.lease_id,
+                    False,
+                )
+            return PointerLeaseState(
+                PointerDisposition.HELD,
+                lease.lease_id,
+                True,
+            )
+
+    def close(self) -> None:
+        with self._pointer_lock:
+            if self._closed:
+                return
+            released = self._release_held_pointer_locked()
+            if not released:
+                # One bounded retry handles a transient backend uncertainty
+                # without turning close into an unbounded input loop.
+                released = self._release_held_pointer_locked()
+            if released:
+                self._closed = True
+        if not released:
+            raise RuntimeError("held pointer cleanup could not be confirmed")
+
     def execute(
+        self,
+        envelope: ActorDecisionEnvelope,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> ControllerTransition:
+        with self._pointer_lock:
+            if self._closed:
+                raise RuntimeError("atomic desktop adapter is closed")
+            return self._execute_open(
+                envelope,
+                stop_event=stop_event,
+            )
+
+    def _execute_open(
+        self,
+        envelope: ActorDecisionEnvelope,
+        *,
+        stop_event: threading.Event | None,
+    ) -> ControllerTransition:
+        transition: ControllerTransition | None = None
+        try:
+            transition = self._execute_once(
+                envelope,
+                stop_event=stop_event,
+            )
+        except Exception:
+            self._release_held_pointer()
+            raise
+        preserves_hold = bool(
+            transition.outcome is ControllerOutcome.COMPLETED
+            and transition.input_completed
+            and type(envelope.proposal) is DesktopActionProposal
+            and envelope.proposal.action == "drag"
+            and envelope.proposal.args.get("keep_holding") is True
+        )
+        if not preserves_hold and not self._release_held_pointer():
+            return self._unknown_transition(
+                envelope,
+                transition.action,
+                input_completed=transition.input_completed,
+            )
+        return transition
+
+    def _execute_once(
         self,
         envelope: ActorDecisionEnvelope,
         *,
@@ -417,6 +586,19 @@ class AtomicDesktopAdapter:
                 self._wait(self._post_input_settle_delay_s)
             except Exception:
                 settle_failed = True
+        workspace = self._workspace
+        if workspace is not None:
+            try:
+                workspace.finish_action(
+                    action_id=envelope.decision_id,
+                    action=action,
+                    input_completed=receipt.input_completed,
+                )
+            except Exception:
+                # Input has already reached the OS.  Workspace discovery is
+                # recovery metadata for the next observation, not authority
+                # to rewrite the completed receipt or replay the action.
+                pass
         if pinned.before_frame is None:
             self._record_evidence_receipt(receipt, envelope)
             return self._unknown_transition(
@@ -797,13 +979,28 @@ class AtomicDesktopAdapter:
                 )
             if prepared.action == "drag":
                 assert prepared.end_point is not None
-                return self._raw.drag(
+                arguments: dict[str, Any] = {
+                    "final_guard": pointer_guard,
+                }
+                if prepared.points is not None:
+                    arguments["points"] = list(prepared.points)
+                if prepared.hold_control_present:
+                    arguments.update(
+                        pointer_already_held=prepared.started_held,
+                        keep_holding=prepared.keep_holding,
+                        hold_token=prepared.pointer_lease_id,
+                    )
+                receipt = self._raw.drag(
                     context,
                     expected_point[0],
                     expected_point[1],
                     prepared.end_point[0],
                     prepared.end_point[1],
-                    final_guard=pointer_guard,
+                    **arguments,
+                )
+                return self._update_pointer_after_drag(
+                    prepared,
+                    receipt,
                 )
             assert prepared.amount is not None
             return self._raw.scroll(
@@ -845,25 +1042,122 @@ class AtomicDesktopAdapter:
             final_guard=keyboard_guard,
         )
 
+    def _update_pointer_after_drag(
+        self,
+        prepared: _PreparedAction,
+        receipt: RawActionReceipt,
+    ) -> RawActionReceipt:
+        if not prepared.hold_control_present:
+            return receipt
+        facts = (
+            {}
+            if receipt.backend_result is None
+            else dict(receipt.backend_result.facts)
+        )
+        held_after = facts.get("held_after")
+        if receipt.input_completed is True:
+            if prepared.keep_holding:
+                if (
+                    held_after is not True
+                    or prepared.pointer_lease_id is None
+                    or prepared.end_point is None
+                ):
+                    with self._pointer_lock:
+                        if (
+                            self._held_pointer is None
+                            and prepared.pointer_lease_id is not None
+                        ):
+                            self._held_pointer = _HeldPointerLease(
+                                lease_id=prepared.pointer_lease_id,
+                                cursor=prepared.end_point or (0, 0),
+                                expires_at=self._clock(),
+                            )
+                        self._pointer_uncertain = True
+                    return self._unknown(
+                        "drag",
+                        "held_pointer_state_unconfirmed",
+                    )
+                with self._pointer_lock:
+                    self._held_pointer = _HeldPointerLease(
+                        lease_id=prepared.pointer_lease_id,
+                        cursor=prepared.end_point,
+                        expires_at=(
+                            self._clock() + self._held_pointer_timeout_s
+                        ),
+                    )
+                    self._pointer_uncertain = False
+            else:
+                if prepared.started_held and held_after is not False:
+                    with self._pointer_lock:
+                        self._pointer_uncertain = True
+                    return self._unknown(
+                        "drag",
+                        "held_pointer_release_unconfirmed",
+                    )
+                with self._pointer_lock:
+                    self._held_pointer = None
+                    self._pointer_uncertain = False
+            return receipt
+
+        if prepared.started_held or prepared.keep_holding:
+            with self._pointer_lock:
+                if self._held_pointer is None and prepared.pointer_lease_id:
+                    self._held_pointer = _HeldPointerLease(
+                        lease_id=prepared.pointer_lease_id,
+                        cursor=(
+                            prepared.end_point
+                            if prepared.end_point is not None
+                            else prepared.point
+                            if prepared.point is not None
+                            else (0, 0)
+                        ),
+                        expires_at=self._clock(),
+                    )
+                self._pointer_uncertain = True
+        return receipt
+
+    def _release_held_pointer(self) -> bool:
+        with self._pointer_lock:
+            return self._release_held_pointer_locked()
+
+    def _release_held_pointer_locked(self) -> bool:
+        lease = self._held_pointer
+        if lease is None:
+            self._pointer_uncertain = False
+            return True
+        try:
+            receipt = self._raw.release_held_drag(lease.lease_id)
+        except Exception:
+            self._pointer_uncertain = True
+            return False
+        if receipt.input_completed is not True:
+            self._pointer_uncertain = True
+            return False
+        self._held_pointer = None
+        self._pointer_uncertain = False
+        return True
+
     def _capture_post_action(
         self,
         envelope: ActorDecisionEnvelope,
         prepared: _PreparedAction,
         before: RuntimeFrame,
     ) -> tuple[RuntimeFrame, EvidenceRef]:
+        dynamic_workspace = self._workspace is not None
         first = self._safe_snapshot()
         if not self._target_is_current(
             first,
             expected_region=None,
-            require_foreground=True,
+            require_foreground=not dynamic_workspace,
         ):
             raise RuntimeError("target changed before post-action capture")
         assert first is not None
-        for point in self._prepared_points(prepared):
-            if not self._point_hits_target(point):
-                raise RuntimeError(
-                    "hit test changed before post-action capture"
-                )
+        if not dynamic_workspace:
+            for point in self._prepared_points(prepared):
+                if not self._point_hits_target(point):
+                    raise RuntimeError(
+                        "hit test changed before post-action capture"
+                    )
 
         region = Region(*first.region)
         captured = self._observer.capture(
@@ -882,14 +1176,15 @@ class AtomicDesktopAdapter:
         if not self._target_is_current(
             second,
             expected_region=first.region,
-            require_foreground=True,
+            require_foreground=not dynamic_workspace,
         ):
             raise RuntimeError("target changed before post-action commit")
-        for point in self._prepared_points(prepared):
-            if not self._point_hits_target(point):
-                raise RuntimeError(
-                    "hit test changed before post-action commit"
-                )
+        if not dynamic_workspace:
+            for point in self._prepared_points(prepared):
+                if not self._point_hits_target(point):
+                    raise RuntimeError(
+                        "hit test changed before post-action commit"
+                    )
         current = self._authority.current
         if current is None or not self._frame_state_matches(current, before):
             raise RuntimeError("frame changed before post-action commit")
@@ -908,14 +1203,15 @@ class AtomicDesktopAdapter:
         if not self._target_is_current(
             final_target,
             expected_region=committed.region,
-            require_foreground=True,
+            require_foreground=not dynamic_workspace,
         ):
             raise RuntimeError("target changed after post-action commit")
-        for point in self._prepared_points(prepared):
-            if not self._point_hits_target(point):
-                raise RuntimeError(
-                    "hit test changed after post-action commit"
-                )
+        if not dynamic_workspace:
+            for point in self._prepared_points(prepared):
+                if not self._point_hits_target(point):
+                    raise RuntimeError(
+                        "hit test changed after post-action commit"
+                    )
 
         identity = self._runtime_frame_identity(committed)
         evidence = self._post_frame_evidence(envelope, identity)
@@ -967,10 +1263,29 @@ class AtomicDesktopAdapter:
                 amount=amount,
             )
         if action == "drag":
-            self._require_keys(
-                args,
-                {"image_x1", "image_y1", "image_x2", "image_y2"},
-            )
+            endpoint_keys = {
+                "image_x1",
+                "image_y1",
+                "image_x2",
+                "image_y2",
+            }
+            optional_keys = {"image_points", "keep_holding"}
+            if (
+                not endpoint_keys <= set(args)
+                or not set(args) <= endpoint_keys | optional_keys
+            ):
+                raise ValueError(
+                    "atomic action arguments do not match exact schema"
+                )
+            hold_control_present = "keep_holding" in args
+            keep_holding = args.get("keep_holding", False)
+            if type(keep_holding) is not bool:
+                raise ValueError("keep_holding must be boolean")
+            started_held = envelope.pointer_disposition == "held"
+            if started_held and not hold_control_present:
+                raise ValueError(
+                    "held drag continuation requires keep_holding"
+                )
             self._require_image_point(
                 args,
                 keys=("image_x1", "image_y1"),
@@ -989,12 +1304,72 @@ class AtomicDesktopAdapter:
                 args,
                 image_keys=("image_x2", "image_y2"),
             )
-            if start == end:
+            pointer_lease_id: str | None = None
+            if started_held:
+                with self._pointer_lock:
+                    lease = self._held_pointer
+                    if (
+                        lease is None
+                        or self._pointer_uncertain
+                        or envelope.pointer_lease_id != lease.lease_id
+                    ):
+                        raise ValueError(
+                            "held drag continuation lease is not current"
+                        )
+                    start = lease.cursor
+                    pointer_lease_id = lease.lease_id
+            elif keep_holding:
+                digest = hashlib.sha256(
+                    (
+                        f"{envelope.mission_id}|{envelope.run_id}|"
+                        f"{envelope.decision_id}"
+                    ).encode("utf-8")
+                ).hexdigest()
+                pointer_lease_id = f"pointer-lease-{digest[:24]}"
+            points: tuple[PhysicalPoint, ...] | None = None
+            if "image_points" in args:
+                raw_points = args["image_points"]
+                if (
+                    not isinstance(raw_points, (list, tuple))
+                    or len(raw_points) > _MAX_DRAG_INTERMEDIATE_POINTS
+                ):
+                    raise ValueError(
+                        "image_points must be an array with at most 32 points"
+                    )
+                mapped_points: list[PhysicalPoint] = []
+                for index, raw_point in enumerate(raw_points):
+                    if (
+                        not isinstance(raw_point, (list, tuple))
+                        or len(raw_point) != 2
+                    ):
+                        raise ValueError(
+                            f"image_points[{index}] must be [x,y]"
+                        )
+                    point_args = {
+                        "image_x": raw_point[0],
+                        "image_y": raw_point[1],
+                    }
+                    self._require_image_point(point_args)
+                    mapped_points.append(
+                        self._map_point(envelope, point_args)
+                    )
+                points = tuple(mapped_points)
+            stationary_release = bool(
+                started_held
+                and not keep_holding
+                and not points
+            )
+            if start == end and not stationary_release:
                 raise ValueError("drag endpoints must map to distinct pixels")
             return _PreparedAction(
                 action=action,
                 point=start,
                 end_point=end,
+                points=points,
+                keep_holding=keep_holding,
+                hold_control_present=hold_control_present,
+                started_held=started_held,
+                pointer_lease_id=pointer_lease_id,
             )
         if action == "type_text":
             self._require_keys(args, {"text"})
@@ -1049,7 +1424,7 @@ class AtomicDesktopAdapter:
         if prepared.action == "drag":
             assert prepared.point is not None
             assert prepared.end_point is not None
-            return {
+            arguments = {
                 "kind": "pointer_drag",
                 "x1": prepared.point[0],
                 "y1": prepared.point[1],
@@ -1057,6 +1432,17 @@ class AtomicDesktopAdapter:
                 "y2": prepared.end_point[1],
                 "button": "left",
             }
+            if prepared.points is not None:
+                arguments["points"] = [
+                    [point[0], point[1]]
+                    for point in prepared.points
+                ]
+            if prepared.hold_control_present:
+                arguments.update(
+                    started_held=prepared.started_held,
+                    keep_holding=prepared.keep_holding,
+                )
+            return arguments
         if prepared.action == "type_text":
             assert prepared.text is not None
             return {
@@ -1127,9 +1513,14 @@ class AtomicDesktopAdapter:
     def _prepared_points(
         prepared: _PreparedAction,
     ) -> tuple[PhysicalPoint, ...]:
+        path = prepared.points or ()
         return tuple(
             point
-            for point in (prepared.point, prepared.end_point)
+            for point in (
+                prepared.point,
+                *path,
+                prepared.end_point,
+            )
             if point is not None
         )
 
@@ -1138,6 +1529,7 @@ class AtomicDesktopAdapter:
         envelope: ActorDecisionEnvelope,
     ) -> bool:
         binding = self._binding
+        pointer = self.pointer_state()
         return bool(
             envelope.mission_id == self._permits.mission_id
             and envelope.run_id == self._permits.run_id
@@ -1146,6 +1538,9 @@ class AtomicDesktopAdapter:
             and envelope.frame_epoch == binding.epoch
             and envelope.frame_scope == "target_window"
             and envelope.allowed_evidence_scope
+            and envelope.pointer_disposition
+            == pointer.disposition.value
+            and envelope.pointer_lease_id == pointer.lease_id
         )
 
     def _safe_snapshot(self) -> LiveTargetSnapshot | None:

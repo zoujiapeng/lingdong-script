@@ -30,21 +30,23 @@ from ..mission import (
     TargetBinding,
     is_safe_action_summary,
 )
-from ..verification import ObligationVerificationRequest
+from .task_state import (
+    ActorTaskState,
+    ActorTaskStateError,
+    ActorTaskStateUpdate,
+    ActorTurnDecision,
+    TASK_STATE_UPDATE_SCHEMA,
+)
 
 
 RUNTIME_FRAME_FORMAT = "runtime-frame/0"
 RUNTIME_SNAPSHOT_FORMAT = "runtime-snapshot/0"
 ACTOR_TURN_FORMAT = "runtime-actor-turn/0"
-RUNTIME_VERIFIER_TURN_FORMAT = "runtime-verifier-turn/0"
 CONTROLLER_TRANSITION_FORMAT = "controller-transition/0"
 MISSION_RUNTIME_RESULT_FORMAT = "mission-runtime-result/0"
 
 CURRENT_FRAME_EVIDENCE_KIND = "current_frame"
 POST_ACTION_FRAME_EVIDENCE_KIND = "post_action_frame"
-VISUAL_VERIFIER_EVIDENCE_KIND = "visual_obligation_verification"
-VISUAL_VERIFIER_TRUST = "independent_visual_model"
-
 APPROVED_DESKTOP_ACTIONS = frozenset(
     {"click", "double_click", "drag", "scroll", "type_text", "hotkey"}
 )
@@ -500,12 +502,13 @@ class ActorObligationView:
 
 @dataclass(frozen=True, slots=True)
 class ActorPreviousActionView:
-    """A bounded fact derived from MissionCard, never a second history ledger."""
+    """One bounded prior-action fact, never a second history ledger."""
 
     action: str
     input_completed: bool
     visible_effect: str
     semantic_summary: str | None = None
+    local_intent: str | None = None
     local_visual_change: str | None = None
     frame_comparable: bool | None = None
     target_binding_valid: bool | None = None
@@ -541,6 +544,12 @@ class ActorPreviousActionView:
             raise RuntimeContractError(
                 "previous action semantic summary is invalid"
             )
+        if self.local_intent is not None:
+            object.__setattr__(
+                self,
+                "local_intent",
+                _text(self.local_intent, "local_intent"),
+            )
         if self.local_visual_change not in (
             None,
             "changed",
@@ -561,6 +570,7 @@ class ActorPreviousActionView:
         return {
             "action": self.action,
             "semantic_summary": self.semantic_summary,
+            "local_intent": self.local_intent,
             "input_completed": self.input_completed,
             "visible_effect": self.visible_effect,
             "local_visual_change": self.local_visual_change,
@@ -696,8 +706,10 @@ class ActorTurnInput:
     mission: ActorMissionView
     frame: ActorFrameView
     tools: tuple[ActorToolView, ...]
+    task_state: ActorTaskState | None = None
     completed_action_summaries: tuple[str, ...] = ()
     previous_action: ActorPreviousActionView | None = None
+    pointer_held: bool = False
     format: str = ACTOR_TURN_FORMAT
 
     def __post_init__(self) -> None:
@@ -709,6 +721,10 @@ class ActorTurnInput:
             )
         if type(self.frame) is not ActorFrameView:
             raise RuntimeContractError("Actor turn requires ActorFrameView")
+        if self.task_state is None:
+            object.__setattr__(self, "task_state", ActorTaskState.initial())
+        elif type(self.task_state) is not ActorTaskState:
+            raise RuntimeContractError("Actor turn requires ActorTaskState")
         tools = tuple(self.tools)
         if not tools or any(type(tool) is not ActorToolView for tool in tools):
             raise RuntimeContractError(
@@ -724,6 +740,8 @@ class ActorTurnInput:
             raise RuntimeContractError(
                 "previous_action must be ActorPreviousActionView or null"
             )
+        if type(self.pointer_held) is not bool:
+            raise RuntimeContractError("pointer_held must be boolean")
         completed_action_summaries = tuple(
             self.completed_action_summaries
         )
@@ -751,6 +769,7 @@ class ActorTurnInput:
             "format": self.format,
             "mission": self.mission.to_dict(),
             "frame": self.frame.to_dict(),
+            "task_state": self.task_state.to_dict(),
             "tools": [tool.to_dict() for tool in self.tools],
             "completed_action_summaries": list(
                 self.completed_action_summaries
@@ -760,66 +779,11 @@ class ActorTurnInput:
                 if self.previous_action is None
                 else self.previous_action.to_dict()
             ),
+            "pointer_held": self.pointer_held,
         }
 
     def to_json(self) -> str:
         return _canonical_json(self.to_dict())
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeVerifierTurn:
-    """Exact read-only claim/frame input; the verifier cannot mutate either."""
-
-    request: ObligationVerificationRequest
-    frame: RuntimeFrame
-    completed_action_summaries: tuple[str, ...] = ()
-    format: str = RUNTIME_VERIFIER_TURN_FORMAT
-
-    def __post_init__(self) -> None:
-        if self.format != RUNTIME_VERIFIER_TURN_FORMAT:
-            raise RuntimeContractError(
-                "unsupported RuntimeVerifierTurn format"
-            )
-        if type(self.request) is not ObligationVerificationRequest:
-            raise RuntimeContractError(
-                "verifier turn requires ObligationVerificationRequest"
-            )
-        if type(self.frame) is not RuntimeFrame:
-            raise RuntimeContractError(
-                "verifier turn requires RuntimeFrame"
-            )
-        completed_action_summaries = tuple(
-            self.completed_action_summaries
-        )
-        if (
-            len(completed_action_summaries)
-            > MAX_COMPLETED_ACTION_HISTORY
-            or any(
-                not _is_safe_action_summary(summary)
-                for summary in completed_action_summaries
-            )
-        ):
-            raise RuntimeContractError(
-                "completed_action_summaries is outside the bounded "
-                "privacy-safe history"
-            )
-        object.__setattr__(
-            self,
-            "completed_action_summaries",
-            completed_action_summaries,
-        )
-        request_ids = {ref.id for ref in self.request.evidence_refs}
-        if not request_ids <= set(self.frame.evidence_refs):
-            raise RuntimeContractError(
-                "verifier evidence is outside the frozen current frame"
-            )
-        if any(
-            ref.frame_id not in (None, self.frame.frame_id)
-            for ref in self.request.evidence_refs
-        ):
-            raise RuntimeContractError(
-                "verifier evidence belongs to another frame"
-            )
 
 
 def project_actor_turn_input(
@@ -828,6 +792,8 @@ def project_actor_turn_input(
     catalog: ToolCatalog,
     projection: BrokerProjection,
     *,
+    task_state: ActorTaskState | None = None,
+    previous_action_local_intent: str | None = None,
     completed_action_summaries: Iterable[str] = (),
 ) -> ActorTurnInput:
     """Project one identity-free bounded view from canonical Runtime facts."""
@@ -905,6 +871,7 @@ def project_actor_turn_input(
                 )
                 else None
             ),
+            local_intent=previous_action_local_intent,
             input_completed=transition.input_completed,
             visible_effect=transition.visible_effect,
             local_visual_change=(
@@ -956,8 +923,10 @@ def project_actor_turn_input(
             fresh=frame_state.fresh,
         ),
         tools=tuple(tools),
+        task_state=task_state,
         completed_action_summaries=completed_summaries,
         previous_action=previous,
+        pointer_held=projection.pointer_lease_id is not None,
     )
 
 
@@ -1143,7 +1112,6 @@ class ControllerTransition:
 
 class RuntimeStatus(str, Enum):
     ACTION_RECORDED = "action_recorded"
-    PROPOSAL_SUPPRESSED = "proposal_suppressed"
     VERIFICATION_REQUIRED = "verification_required"
     VERIFICATION_RECORDED = "verification_recorded"
     MISSION_VERIFIED = "mission_verified"
@@ -1222,13 +1190,10 @@ __all__ = [
     "RUNTIME_FRAME_FORMAT",
     "RUNTIME_SNAPSHOT_FORMAT",
     "ACTOR_TURN_FORMAT",
-    "RUNTIME_VERIFIER_TURN_FORMAT",
     "CONTROLLER_TRANSITION_FORMAT",
     "MISSION_RUNTIME_RESULT_FORMAT",
     "CURRENT_FRAME_EVIDENCE_KIND",
     "POST_ACTION_FRAME_EVIDENCE_KIND",
-    "VISUAL_VERIFIER_EVIDENCE_KIND",
-    "VISUAL_VERIFIER_TRUST",
     "APPROVED_DESKTOP_ACTIONS",
     "APPROVED_OUTCOME_TOOLS",
     "APPROVED_RUNTIME_TOOLS",
@@ -1245,7 +1210,11 @@ __all__ = [
     "ActorFrameView",
     "ActorToolView",
     "ActorTurnInput",
-    "RuntimeVerifierTurn",
+    "ActorTaskState",
+    "ActorTaskStateError",
+    "ActorTaskStateUpdate",
+    "ActorTurnDecision",
+    "TASK_STATE_UPDATE_SCHEMA",
     "project_actor_turn_input",
     "ControllerOutcome",
     "ControllerTransition",

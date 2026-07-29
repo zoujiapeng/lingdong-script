@@ -8,7 +8,6 @@ from typing import Any, Callable, Mapping
 
 import pytest
 
-import winpilot.vnext.runtime.mission_runtime as mission_runtime_module
 from winpilot.vnext.actor import ACTOR_PROPOSAL_FORMAT, ActorDecisionEnvelope
 from winpilot.vnext.capabilities import (
     AuthoritativeFrameState,
@@ -44,8 +43,9 @@ from winpilot.vnext.runtime import (
     APPROVED_RUNTIME_TOOLS,
     CURRENT_FRAME_EVIDENCE_KIND,
     POST_ACTION_FRAME_EVIDENCE_KIND,
-    VISUAL_VERIFIER_EVIDENCE_KIND,
     ActorTurnInput,
+    ActorTaskStateUpdate,
+    ActorTurnDecision,
     ControllerOutcome,
     ControllerTransition,
     MissionRuntime,
@@ -58,9 +58,7 @@ from winpilot.vnext.runtime import (
     RuntimeSnapshot,
     RuntimeStatus,
     RuntimeTargetIdentity,
-    RuntimeVerifierTurn,
 )
-from winpilot.vnext.verification import VerifierAssessment
 
 
 MISSION_ID = "mission-runtime"
@@ -74,6 +72,11 @@ GUI_GATES = (
     "target_bound",
     "authoritative_frame",
     "pointer_released",
+    "runtime_healthy",
+)
+DRAG_GATES = (
+    "target_bound",
+    "authoritative_frame",
     "runtime_healthy",
 )
 
@@ -107,6 +110,7 @@ def _drag_schema() -> dict[str, Any]:
             "image_y1": {"type": "number", "minimum": 0},
             "image_x2": {"type": "number", "minimum": 0},
             "image_y2": {"type": "number", "minimum": 0},
+            "keep_holding": {"type": "boolean"},
         },
         "required": ["image_x1", "image_y1", "image_x2", "image_y2"],
     }
@@ -180,7 +184,13 @@ def _tool(
             if mutation is MutationKind.GUI
             else ()
         ),
-        prerequisites=GUI_GATES if mutation is MutationKind.GUI else (),
+        prerequisites=(
+            DRAG_GATES
+            if name == "drag"
+            else GUI_GATES
+            if mutation is MutationKind.GUI
+            else ()
+        ),
         order=order,
     )
 
@@ -273,7 +283,11 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
     return ToolCatalog(tuple(tools))
 
 
-def _action(action: str = "click") -> dict[str, Any]:
+def _action(
+    action: str = "click",
+    *,
+    keep_holding: bool | None = None,
+) -> dict[str, Any]:
     args: dict[str, Any]
     if action in {"click", "double_click"}:
         args = {"image_x": 10, "image_y": 20}
@@ -284,6 +298,8 @@ def _action(action: str = "click") -> dict[str, Any]:
             "image_x2": 30,
             "image_y2": 40,
         }
+        if keep_holding is not None:
+            args["keep_holding"] = keep_holding
     elif action == "scroll":
         args = {"image_x": 10, "image_y": 20, "amount": -120}
     elif action == "type_text":
@@ -318,8 +334,24 @@ def _blocked() -> dict[str, Any]:
     }
 
 
+def _task_decision(
+    proposal: Mapping[str, Any],
+    *,
+    scratchpad: str | None = None,
+) -> ActorTurnDecision:
+    return ActorTurnDecision(
+        proposal=proposal,
+        task_state_update=ActorTaskStateUpdate.from_dict(
+            {"scratchpad": scratchpad}
+        ),
+    )
+
+
 class FakeActor:
-    def __init__(self, *proposals: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        *proposals: ActorTurnDecision | Mapping[str, Any],
+    ) -> None:
         self.proposals = list(proposals)
         self.turns: list[ActorTurnInput] = []
         self.calls = 0
@@ -334,7 +366,7 @@ class FakeActor:
         image_media_type: str,
         submitted_size: tuple[int, int],
         stop_event: threading.Event | None = None,
-    ) -> Mapping[str, Any]:
+    ) -> ActorTurnDecision | Mapping[str, Any]:
         assert image_b64
         assert image_media_type == "image/jpeg"
         assert submitted_size == (320, 240)
@@ -347,38 +379,8 @@ class FakeActor:
             raise self.raise_error
         if not self.proposals:
             raise AssertionError("unexpected Actor call")
-        return dict(self.proposals.pop(0))
-
-
-class FakeVerifier:
-    verifier_kind = "independent_visual_model"
-
-    def __init__(self, assessment: VerifierAssessment | None = None) -> None:
-        self.assessment = assessment or VerifierAssessment(
-            verified=True,
-            satisfied_conditions=("the visible result is confirmed",),
-            confidence=1.0,
-            concise_reason="the exact frozen frame satisfies the criterion",
-        )
-        self.turns: list[RuntimeVerifierTurn] = []
-        self.calls = 0
-        self.on_assess: Callable[[], None] | None = None
-        self.raise_error: Exception | None = None
-
-    def assess(
-        self,
-        turn: RuntimeVerifierTurn,
-        *,
-        stop_event: threading.Event | None = None,
-    ) -> VerifierAssessment:
-        assert stop_event is None or isinstance(stop_event, threading.Event)
-        self.calls += 1
-        self.turns.append(turn)
-        if self.on_assess is not None:
-            self.on_assess()
-        if self.raise_error is not None:
-            raise self.raise_error
-        return self.assessment
+        proposal = self.proposals.pop(0)
+        return proposal if type(proposal) is ActorTurnDecision else dict(proposal)
 
 
 class FakeState:
@@ -422,11 +424,21 @@ class FakeState:
             raise RuntimeError("synthetic current-state failure")
         return self._for_turn(turn_index)
 
-    def install_frame(self, frame: RuntimeFrame) -> None:
+    def install_frame(
+        self,
+        frame: RuntimeFrame,
+        *,
+        pointer: PointerLeaseState | None = None,
+    ) -> None:
         self.snapshot = RuntimeSnapshot(
             broker_state=replace(
                 self.snapshot.broker_state,
                 frame=frame.broker_frame(),
+                pointer=(
+                    self.snapshot.broker_state.pointer
+                    if pointer is None
+                    else pointer
+                ),
             ),
             frame=frame,
             target=self.snapshot.target,
@@ -461,6 +473,7 @@ class FakeController:
         self.on_after_admission: Callable[[], None] | None = None
         self.stop_before_admission: threading.Event | None = None
         self.stop_after_action: threading.Event | None = None
+        self.pointer_after_override: PointerLeaseState | None = None
 
     def execute(
         self,
@@ -470,6 +483,8 @@ class FakeController:
     ) -> ControllerTransition:
         self.calls += 1
         self.envelopes.append(envelope)
+        args = envelope.proposal.model_dump(mode="json")["args"]
+        action = envelope.proposal.action
         if self.stop_before_admission is not None:
             self.stop_before_admission.set()
         changed_frame: RuntimeFrame | None = None
@@ -609,7 +624,21 @@ class FakeController:
                 input_completed=True,
             )
         frame, post_evidence = self.make_post_frame(envelope)
-        self.state.install_frame(frame)
+        pointer_after = PointerLeaseState(PointerDisposition.RELEASED)
+        if action == "drag" and args.get("keep_holding", False):
+            before_pointer = self.state.snapshot.broker_state.pointer
+            pointer_after = PointerLeaseState(
+                PointerDisposition.HELD,
+                (
+                    before_pointer.lease_id
+                    if before_pointer.disposition is PointerDisposition.HELD
+                    else "pointer-lease-runtime"
+                ),
+                True,
+            )
+        if self.pointer_after_override is not None:
+            pointer_after = self.pointer_after_override
+        self.state.install_frame(frame, pointer=pointer_after)
         if self.finish_before_return:
             assert self.authority.finish_admission(envelope.decision_id)
         if self.stop_after_action is not None:
@@ -630,7 +659,6 @@ class Harness:
     reducer: MissionReducer
     registry: EvidenceRegistry
     actor: FakeActor
-    verifier: FakeVerifier
     state: FakeState
     controller: FakeController
     permits: MutationPermitAuthority
@@ -696,20 +724,18 @@ def _definition(
                 desired_state=GOAL,
                 acceptance_criteria=("the visible result is confirmed",),
                 required_capabilities=("visual.interact",),
-                evidence_policy=EvidencePolicy(
-                    allow_independent_visual_verifier=True,
-                ),
+                evidence_policy=EvidencePolicy(),
             ),
         ),
     )
 
 
 def _harness(
-    *proposals: Mapping[str, Any],
+    *proposals: ActorTurnDecision | Mapping[str, Any],
     definition: MissionDefinition | None = None,
     catalog: ToolCatalog | None = None,
     bind_target: bool = True,
-    profile_provider: bool = True,
+    profile_provider: bool = False,
     with_runtime_evidence: bool = False,
     controller_evidence_mode: str = "same",
     interaction_mode: InteractionMode = InteractionMode.AUTO,
@@ -718,7 +744,6 @@ def _harness(
     registry = EvidenceRegistry(definition.mission_id, definition.run_id)
     reducer = MissionReducer(definition, evidence=registry)
     actor = FakeActor(*(proposals or (_action(),)))
-    verifier = FakeVerifier()
     catalog = catalog or _catalog()
 
     image_b64 = "ZnJhbWUtMDE="
@@ -857,7 +882,6 @@ def _harness(
         actor=actor,
         state=state,
         controller=controller,
-        verifier=verifier,
         evidence_registry=registry,
         mutation_permits=permits,
         runtime_evidence_plane=runtime_evidence,
@@ -866,7 +890,6 @@ def _harness(
         reducer=reducer,
         registry=registry,
         actor=actor,
-        verifier=verifier,
         state=state,
         controller=controller,
         permits=permits,
@@ -901,6 +924,66 @@ def test_minimal_runtime_executes_each_approved_action_once(action: str) -> None
     assert harness.reducer.card.last_transition.action == action
 
 
+def test_cross_frame_held_drag_preserves_then_releases_one_lease() -> None:
+    harness = _harness(
+        _action("drag", keep_holding=True),
+        _action("drag", keep_holding=True),
+        _action("drag", keep_holding=False),
+    )
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    first_pointer = harness.state.snapshot.broker_state.pointer
+    second = harness.runtime.run_one_turn(turn_index=1)
+    second_pointer = harness.state.snapshot.broker_state.pointer
+    third = harness.runtime.run_one_turn(turn_index=2)
+    third_pointer = harness.state.snapshot.broker_state.pointer
+
+    assert (
+        first.status,
+        second.status,
+        third.status,
+    ) == (
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.ACTION_RECORDED,
+    )
+    assert first_pointer.disposition is PointerDisposition.HELD
+    assert first_pointer.physically_owned is True
+    assert second_pointer == first_pointer
+    assert third_pointer == PointerLeaseState(PointerDisposition.RELEASED)
+    assert harness.actor.turns[0].pointer_held is False
+    assert harness.actor.turns[1].pointer_held is True
+    assert harness.actor.turns[2].pointer_held is True
+    assert tuple(
+        tool.name for tool in harness.actor.turns[1].tools
+    ) == ("drag",)
+    assert [
+        envelope.pointer_disposition
+        for envelope in harness.controller.envelopes
+    ] == ["released", "held", "held"]
+    assert [
+        envelope.pointer_lease_id
+        for envelope in harness.controller.envelopes
+    ] == [
+        None,
+        "pointer-lease-runtime",
+        "pointer-lease-runtime",
+    ]
+
+
+def test_keep_holding_blocks_when_controller_returns_released_pointer() -> None:
+    harness = _harness(_action("drag", keep_holding=True))
+    harness.controller.pointer_after_override = PointerLeaseState(
+        PointerDisposition.RELEASED
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.BLOCKED
+    assert "could not be reconciled" in result.detail
+    assert harness.controller.calls == 1
+
+
 def test_gui_required_can_verify_already_satisfied_goal_without_mutation() -> None:
     harness = _harness(
         _claim(),
@@ -916,18 +999,20 @@ def test_gui_required_can_verify_already_satisfied_goal_without_mutation() -> No
         == "the requested state is visibly present"
     )
     assert harness.actor.calls == 1
-    assert harness.verifier.calls == 1
     assert harness.controller.calls == 0
     assert harness.permits.consumed_count == 0
     assert harness.actor.turns[0].frame.authoritative is True
     assert harness.actor.turns[0].frame.fresh is True
-    assert harness.verifier.turns[0].frame.evidence_refs == ("e-frame-1",)
     assert [event.kind for event in harness.reducer.events] == [
         "target_bound",
         "obligation_claimed",
         "verification_recorded",
         "mission_verified",
     ]
+    claim, verification = harness.reducer.events[1:3]
+    assert claim.evidence_refs == ("e-frame-1",)
+    assert verification.evidence_refs == ("e-frame-1",)
+    assert verification.payload["verifier_kind"] == "actor_claim"
     assert "the requested state is visibly present" not in json.dumps(
         [event.to_dict() for event in harness.reducer.events]
     )
@@ -956,7 +1041,6 @@ def test_gui_required_claim_fails_closed_without_fresh_observation() -> None:
     assert result.status is RuntimeStatus.UNAVAILABLE
     assert result.route is ExecutionRoute.BLOCKED
     assert harness.actor.calls == 0
-    assert harness.verifier.calls == 0
     assert harness.controller.calls == 0
     assert harness.reducer.projection.status is MissionStatus.RUNNING
 
@@ -990,6 +1074,74 @@ def test_type_text_is_absent_from_mission_bus_and_reducer_state() -> None:
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+def test_ephemeral_task_state_crosses_turns_but_not_durable_evidence() -> None:
+    sentinel = "PRIVATE-GROUP-SUMMARY-7f4c"
+    harness = _harness(
+        _task_decision(
+            _action("click"),
+            scratchpad=(
+                f"Summarize groups. Covered {sentinel}; one group remains. "
+                f"{sentinel}: discussing a release. "
+                f"Artifact C:/private/{sentinel}.txt. "
+                "Stop when every visible group has a concise summary."
+            ),
+        ),
+        _task_decision(
+            _action("scroll"),
+            scratchpad=f"All visible groups including {sentinel} summarized.",
+        ),
+        with_runtime_evidence=True,
+    )
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    second = harness.runtime.run_one_turn(turn_index=1)
+
+    assert first.status is RuntimeStatus.ACTION_RECORDED
+    assert second.status is RuntimeStatus.ACTION_RECORDED
+    state = harness.runtime.task_state
+    assert sentinel in harness.actor.turns[1].task_state.scratchpad
+    assert state.scratchpad == (
+        f"All visible groups including {sentinel} summarized."
+    )
+    plane = harness.runtime_evidence
+    assert plane is not None
+    durable_wire = {
+        "events": [event.to_dict() for event in harness.reducer.events],
+        "projection": harness.reducer.projection.to_dict(),
+        "evidence": plane.build_report().to_dict(),
+    }
+    assert sentinel not in json.dumps(durable_wire, ensure_ascii=False)
+    assert "task_state_update" not in json.dumps(
+        durable_wire,
+        ensure_ascii=False,
+    )
+
+
+def test_stale_or_invalid_actor_decision_does_not_commit_task_state() -> None:
+    update = {"scratchpad": "must_not_commit private-item"}
+    stale = _harness(_task_decision(_action(), **update))
+    stale.actor.on_propose = lambda: stale.reducer.apply(
+        stale.reducer.event(
+            "mission_blocked",
+            payload={"reason": "synthetic concurrent change"},
+        )
+    )
+    initial = stale.runtime.task_state
+
+    stale_result = stale.runtime.run_one_turn(turn_index=0)
+
+    assert stale_result.status is RuntimeStatus.STALE_DISCARDED
+    assert stale.runtime.task_state == initial
+
+    invalid = _harness(_task_decision(_action("observe"), **update))
+    invalid_initial = invalid.runtime.task_state
+
+    invalid_result = invalid.runtime.run_one_turn(turn_index=0)
+
+    assert invalid_result.status is RuntimeStatus.INVALID_PROPOSAL
+    assert invalid.runtime.task_state == invalid_initial
 
 
 def test_runtime_records_reasoning_free_actor_decision_before_action() -> None:
@@ -1077,6 +1229,35 @@ def test_transition_evidence_failure_after_input_blocks_without_replay(
     assert harness.controller.calls == 1
 
 
+def test_rejection_evidence_failure_before_input_recovers_with_fresh_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(
+        _action("click"),
+        with_runtime_evidence=True,
+    )
+    harness.controller.mode = "rejected"
+    plane = harness.runtime_evidence
+    assert plane is not None
+
+    def fail_transition(**_kwargs: Any) -> None:
+        raise RuntimeError("synthetic durable rejection failure")
+
+    monkeypatch.setattr(
+        plane,
+        "record_controller_transition",
+        fail_transition,
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.STALE_DISCARDED
+    assert "input did not execute" in result.detail
+    assert "diagnostic evidence was unavailable" in result.detail
+    assert harness.controller.calls == 1
+    assert harness.permits.consumed_count == 1
+
+
 @pytest.mark.parametrize("mode", ("different", "absent"))
 def test_runtime_requires_one_shared_evidence_plane_owner(
     mode: str,
@@ -1092,8 +1273,12 @@ def test_runtime_requires_one_shared_evidence_plane_owner(
         )
 
 
-def test_previous_action_view_is_bounded_and_derived_from_mission_card() -> None:
-    harness = _harness(_action("click"), _blocked())
+def test_previous_action_view_keeps_one_bounded_completed_intent() -> None:
+    harness = _harness(
+        _action("click"),
+        _blocked(),
+        with_runtime_evidence=True,
+    )
     assert harness.runtime.run_one_turn(turn_index=0).status is RuntimeStatus.ACTION_RECORDED
 
     result = harness.runtime.run_one_turn(turn_index=1)
@@ -1104,6 +1289,7 @@ def test_previous_action_view_is_bounded_and_derived_from_mission_card() -> None
     assert previous is not None
     assert previous.action == "click"
     assert previous.semantic_summary == "click"
+    assert previous.local_intent == "perform one click"
     assert previous.input_completed is True
     assert previous.visible_effect == "post-action frame captured"
     wire = harness.actor.turns[1].to_dict()
@@ -1114,7 +1300,39 @@ def test_previous_action_view_is_bounded_and_derived_from_mission_card() -> None
     assert str(HWND) not in str(wire)
 
 
-def test_actor_and_verifier_receive_only_completed_action_order() -> None:
+def test_previous_action_intent_does_not_depend_on_private_evidence() -> None:
+    harness = _harness(_action("click"), _blocked())
+    assert harness.runtime.run_one_turn(turn_index=0).status is RuntimeStatus.ACTION_RECORDED
+
+    result = harness.runtime.run_one_turn(turn_index=1)
+
+    assert result.status is RuntimeStatus.BLOCKED
+    previous = harness.actor.turns[1].previous_action
+    assert previous is not None
+    assert previous.local_intent == "perform one click"
+
+
+def test_rejected_action_does_not_replace_last_completed_intent() -> None:
+    harness = _harness(
+        _action("click"),
+        _action("scroll"),
+        _blocked(),
+    )
+    completed = harness.runtime.run_one_turn(turn_index=0)
+    harness.controller.mode = "rejected"
+    rejected = harness.runtime.run_one_turn(turn_index=1)
+    blocked = harness.runtime.run_one_turn(turn_index=2)
+
+    assert completed.status is RuntimeStatus.ACTION_RECORDED
+    assert rejected.status is RuntimeStatus.STALE_DISCARDED
+    assert blocked.status is RuntimeStatus.BLOCKED
+    previous = harness.actor.turns[2].previous_action
+    assert previous is not None
+    assert previous.action == "click"
+    assert previous.local_intent == "perform one click"
+
+
+def test_actor_receives_only_completed_action_order() -> None:
     harness = _harness(
         _action("click"),
         _action("double_click"),
@@ -1134,12 +1352,8 @@ def test_actor_and_verifier_receive_only_completed_action_order() -> None:
         "click",
         "double_click",
     )
-    assert harness.verifier.turns[0].completed_action_summaries == (
-        "click",
-        "double_click",
-    )
     history_wire = json.dumps(
-        harness.verifier.turns[0].completed_action_summaries
+        harness.actor.turns[2].completed_action_summaries
     )
     assert "image_x" not in history_wire
     assert "text" not in history_wire
@@ -1181,7 +1395,7 @@ def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
         harness.actor.turns[3].previous_action.semantic_summary
         == "hotkey_ctrl_a"
     )
-    assert harness.verifier.turns[0].completed_action_summaries == expected
+    assert harness.actor.turns[4].completed_action_summaries == expected
     transition_summaries = tuple(
         event.payload["action_summary"]
         for event in harness.reducer.events
@@ -1195,350 +1409,30 @@ def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
     assert "local_intent" not in history_wire
 
 
-def test_exact_completed_action_is_suppressed_without_physical_attempt() -> None:
-    repeated_click = _action("click")
-    repeated_click["local_intent"] = "a different private explanation"
+def test_repeated_actions_are_executed_without_task_level_suppression() -> None:
     harness = _harness(
         _action("click"),
-        repeated_click,
+        _action("click"),
         _action("hotkey"),
-        _blocked(),
-        with_runtime_evidence=True,
-    )
-
-    first = harness.runtime.run_one_turn(turn_index=0)
-    suppressed = harness.runtime.run_one_turn(turn_index=1)
-
-    assert first.status is RuntimeStatus.ACTION_RECORDED
-    assert suppressed.status is RuntimeStatus.PROPOSAL_SUPPRESSED
-    assert suppressed.decision_id is None
-    assert harness.controller.calls == 1
-    assert harness.permits.consumed_count == 1
-    assert harness.runtime_evidence is not None
-    assert len(harness.runtime_evidence.decision_records) == 1
-    assert len(harness.runtime_evidence.admission_records) == 1
-    assert len(harness.runtime_evidence.physical_attempt_records) == 1
-    events = harness.reducer.events
-    suppression = events[-1]
-    assert suppression.kind == "proposal_suppressed"
-    assert suppression.payload == {
-        "obligation_id": OBLIGATION_ID,
-        "action": "click",
-        "action_summary": "click",
-        "reason": "repeated_completed_action",
-    }
-    suppression_wire = json.dumps(suppression.to_dict())
-    assert "image_x" not in suppression_wire
-    assert "image_y" not in suppression_wire
-    assert "local_intent" not in suppression_wire
-    assert harness.reducer.projection.last_transition is not None
-    assert harness.reducer.projection.last_transition.action == "click"
-    assert harness.reducer.projection.failure_summary is not None
-    assert (
-        harness.reducer.projection.failure_summary.kind
-        == "repeated_action_suppressed"
-    )
-
-    recovered = harness.runtime.run_one_turn(turn_index=2)
-
-    assert recovered.status is RuntimeStatus.ACTION_RECORDED
-    assert harness.controller.calls == 2
-    feedback = harness.actor.turns[2].mission
-    assert feedback.failure_kind == "repeated_action_suppressed"
-    assert feedback.failure_message == (
-        "click was already completed and was not executed again"
-    )
-    assert feedback.no_progress_streak == 0
-    assert harness.actor.turns[2].completed_action_summaries == ("click",)
-    assert harness.reducer.projection.failure_summary is None
-
-
-def test_pointer_jitter_is_suppressed_then_pointer_tools_cool_down() -> None:
-    jittered_click = _action("click")
-    jittered_click["args"] = {"image_x": 12, "image_y": 17}
-    later_click = _action("click")
-    later_click["args"] = {"image_x": 40, "image_y": 50}
-    harness = _harness(
-        _action("click"),
-        jittered_click,
+        _action("hotkey"),
         _action("type_text"),
-        later_click,
-        with_runtime_evidence=True,
-    )
-
-    first = harness.runtime.run_one_turn(turn_index=0)
-    suppressed = harness.runtime.run_one_turn(turn_index=1)
-    typed = harness.runtime.run_one_turn(turn_index=2)
-    clicked_later = harness.runtime.run_one_turn(turn_index=3)
-
-    assert (
-        first.status,
-        suppressed.status,
-        typed.status,
-        clicked_later.status,
-    ) == (
-        RuntimeStatus.ACTION_RECORDED,
-        RuntimeStatus.PROPOSAL_SUPPRESSED,
-        RuntimeStatus.ACTION_RECORDED,
-        RuntimeStatus.ACTION_RECORDED,
-    )
-    assert harness.controller.calls == 3
-    assert harness.permits.consumed_count == 3
-    assert [
-        envelope.proposal.action
-        for envelope in harness.controller.envelopes
-    ] == ["click", "type_text", "click"]
-    cooled_tools = {
-        tool.name for tool in harness.actor.turns[2].tools
-    }
-    assert "click" not in cooled_tools
-    assert "double_click" not in cooled_tools
-    assert "type_text" in cooled_tools
-    restored_tools = {
-        tool.name for tool in harness.actor.turns[3].tools
-    }
-    assert {"click", "double_click"} <= restored_tools
-    assert harness.reducer.projection.failure_summary is None
-
-
-def test_three_click_semantic_cluster_suppresses_wider_pointer_jitter() -> None:
-    first = _action("click")
-    first["local_intent"] = "click the search bar"
-    second = _action("click")
-    second["args"] = {"image_x": 16, "image_y": 20}
-    second["local_intent"] = "focus the search field"
-    third = _action("click")
-    third["args"] = {"image_x": 11, "image_y": 20}
-    third["local_intent"] = "activate the search input"
-    harness = _harness(
-        first,
-        second,
-        third,
         _action("type_text"),
         with_runtime_evidence=True,
     )
 
     statuses = tuple(
         harness.runtime.run_one_turn(turn_index=index).status
-        for index in range(4)
-    )
-
-    assert statuses == (
-        RuntimeStatus.ACTION_RECORDED,
-        RuntimeStatus.ACTION_RECORDED,
-        RuntimeStatus.PROPOSAL_SUPPRESSED,
-        RuntimeStatus.ACTION_RECORDED,
-    )
-    assert [
-        envelope.proposal.action
-        for envelope in harness.controller.envelopes
-    ] == ["click", "click", "type_text"]
-
-
-def test_click_cluster_does_not_merge_adjacent_distinct_intents() -> None:
-    first = _action("click")
-    first["local_intent"] = "select red color"
-    second = _action("click")
-    second["args"] = {"image_x": 16, "image_y": 20}
-    second["local_intent"] = "select blue color"
-    third = _action("click")
-    third["args"] = {"image_x": 11, "image_y": 20}
-    third["local_intent"] = "select green color"
-    harness = _harness(
-        first,
-        second,
-        third,
-        with_runtime_evidence=True,
-    )
-
-    statuses = tuple(
-        harness.runtime.run_one_turn(turn_index=index).status
-        for index in range(3)
-    )
-
-    assert statuses == (
-        RuntimeStatus.ACTION_RECORDED,
-        RuntimeStatus.ACTION_RECORDED,
-        RuntimeStatus.ACTION_RECORDED,
-    )
-    assert harness.controller.calls == 3
-
-
-def test_click_cluster_tolerance_scales_and_caps_for_large_frames() -> None:
-    assert mission_runtime_module._click_cluster_tolerance(  # noqa: SLF001
-        (1120, 795)
-    ) >= 20
-    assert mission_runtime_module._click_cluster_tolerance(  # noqa: SLF001
-        (4000, 3000)
-    ) == 24
-
-
-def test_repeat_gate_allows_distinct_click_and_repeated_scroll() -> None:
-    moved_click = _action("click")
-    moved_click["args"]["image_x"] = 20
-    harness = _harness(
-        _action("click"),
-        moved_click,
-        _action("scroll"),
-        _action("scroll"),
-        with_runtime_evidence=True,
-    )
-
-    results = tuple(
-        harness.runtime.run_one_turn(turn_index=index)
-        for index in range(4)
+        for index in range(6)
     )
 
     assert all(
-        result.status is RuntimeStatus.ACTION_RECORDED
-        for result in results
+        status is RuntimeStatus.ACTION_RECORDED
+        for status in statuses
     )
-    assert harness.controller.calls == 4
-    assert harness.permits.consumed_count == 4
-    assert not any(
-        event.kind == "proposal_suppressed"
-        for event in harness.reducer.events
-    )
-
-
-def test_exact_modified_hotkey_and_text_repeats_are_suppressed() -> None:
-    harness = _harness(
-        _action("hotkey"),
-        _action("hotkey"),
-        _action("type_text"),
-        _action("type_text"),
-        with_runtime_evidence=True,
-    )
-
-    statuses = tuple(
-        harness.runtime.run_one_turn(turn_index=index).status
-        for index in range(4)
-    )
-
-    assert statuses == (
-        RuntimeStatus.ACTION_RECORDED,
-        RuntimeStatus.PROPOSAL_SUPPRESSED,
-        RuntimeStatus.ACTION_RECORDED,
-        RuntimeStatus.PROPOSAL_SUPPRESSED,
-    )
-    assert harness.controller.calls == 2
-    assert harness.permits.consumed_count == 2
+    assert harness.controller.calls == 6
+    assert harness.permits.consumed_count == 6
     assert harness.runtime_evidence is not None
-    assert len(harness.runtime_evidence.physical_attempt_records) == 2
-
-
-def test_repeat_gate_is_bound_to_the_same_target_coordinate_domain() -> None:
-    harness = _harness(
-        _action("click"),
-        with_runtime_evidence=True,
-    )
-    result = harness.runtime.run_one_turn(turn_index=0)
-    assert result.status is RuntimeStatus.ACTION_RECORDED
-    proposal = harness.controller.envelopes[0].proposal
-    current = harness.state.snapshot
-
-    assert harness.runtime._repeats_last_completed_action(  # noqa: SLF001
-        proposal,
-        current,
-    )
-
-    moved_frame = replace(
-        current.frame,
-        region=(101, 200, 640, 480),
-    )
-    moved = RuntimeSnapshot(
-        broker_state=replace(
-            current.broker_state,
-            frame=moved_frame.broker_frame(),
-        ),
-        frame=moved_frame,
-        target=current.target,
-    )
-
-    assert not harness.runtime._repeats_last_completed_action(  # noqa: SLF001
-        proposal,
-        moved,
-    )
-
-
-def test_missing_private_prior_decision_fails_closed() -> None:
-    harness = _harness(
-        _action("click"),
-        with_runtime_evidence=True,
-    )
-    harness.reducer.apply(
-        harness.reducer.event(
-            "transition_recorded",
-            payload={
-                "obligation_id": OBLIGATION_ID,
-                "action_id": "decision-not-in-private-evidence",
-                "action": "click",
-                "action_summary": "click",
-                "input_completed": True,
-            },
-        )
-    )
-
-    result = harness.runtime.run_one_turn(turn_index=0)
-
-    assert result.status is RuntimeStatus.STATE_REJECTED
-    assert "missing its private decision record" in result.detail
-    assert harness.controller.calls == 0
-    assert harness.permits.consumed_count == 0
-
-
-def test_repeat_suppression_uses_frozen_mission_revision(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    harness = _harness(
-        _action("click"),
-        _action("click"),
-        with_runtime_evidence=True,
-    )
-    first = harness.runtime.run_one_turn(turn_index=0)
-    assert first.status is RuntimeStatus.ACTION_RECORDED
-    original = MissionRuntime._latest_matches
-    latest_calls = 0
-
-    def change_revision_after_second_freshness_check(
-        runtime: MissionRuntime,
-        initial: RuntimeSnapshot,
-        broker_projection,
-        *,
-        turn_index: int,
-    ) -> bool:
-        nonlocal latest_calls
-        matched = original(
-            runtime,
-            initial,
-            broker_projection,
-            turn_index=turn_index,
-        )
-        latest_calls += 1
-        if latest_calls == 2 and matched:
-            harness.reducer.apply(
-                harness.reducer.event(
-                    "mission_blocked",
-                    payload={"reason": "synthetic concurrent change"},
-                )
-            )
-        return matched
-
-    monkeypatch.setattr(
-        MissionRuntime,
-        "_latest_matches",
-        change_revision_after_second_freshness_check,
-    )
-
-    result = harness.runtime.run_one_turn(turn_index=1)
-
-    assert result.status is RuntimeStatus.STALE_DISCARDED
-    assert harness.controller.calls == 1
-    assert harness.permits.consumed_count == 1
-    assert not any(
-        event.kind == "proposal_suppressed"
-        for event in harness.reducer.events
-    )
+    assert len(harness.runtime_evidence.physical_attempt_records) == 6
 
 
 def test_actor_result_is_discarded_when_mission_revision_changes() -> None:
@@ -1629,17 +1523,34 @@ def test_unknown_controller_outcome_is_blocked_and_never_replayed(
     assert "not replayed" in harness.reducer.events[-1].payload["reason"]
 
 
-def test_applied_input_with_unreconciled_outcome_is_preserved_and_blocked() -> None:
-    harness = _harness(_action(), _action())
+def test_applied_input_without_post_frame_continues_with_fresh_observation() -> None:
+    harness = _harness(_action(), _blocked())
     harness.controller.mode = "unknown_applied"
 
     first = harness.runtime.run_one_turn(turn_index=0)
     second = harness.runtime.run_one_turn(turn_index=1)
 
-    assert first.status is RuntimeStatus.BLOCKED
+    assert first.status is RuntimeStatus.ACTION_RECORDED
     assert second.status is RuntimeStatus.BLOCKED
     assert harness.controller.calls == 1
-    assert "not replayed" in harness.reducer.events[-1].payload["reason"]
+    transition = next(
+        event
+        for event in harness.reducer.events
+        if event.kind == "transition_recorded"
+    )
+    assert transition.payload == {
+        "obligation_id": OBLIGATION_ID,
+        "action_id": first.decision_id,
+        "action": "click",
+        "action_summary": "click",
+        "input_completed": True,
+    }
+    assert transition.evidence_refs == ()
+    previous = harness.actor.turns[1].previous_action
+    assert previous is not None
+    assert previous.action == "click"
+    assert previous.input_completed is True
+    assert previous.local_intent == "perform one click"
 
 
 def test_unknown_outcome_closes_mutation_after_concurrent_revision() -> None:
@@ -1727,84 +1638,34 @@ def test_post_action_state_failure_is_blocked_after_one_input_attempt() -> None:
     )
 
 
-def test_claim_is_bound_to_frozen_frame_and_independently_verified() -> None:
+def test_claim_binds_current_frame_and_completes_deterministically() -> None:
     harness = _harness(_claim())
 
     result = harness.runtime.run_one_turn(turn_index=0)
 
     assert result.status is RuntimeStatus.MISSION_VERIFIED
     assert harness.controller.calls == 0
-    assert harness.verifier.calls == 1
-    turn = harness.verifier.turns[0]
-    assert turn.frame.frame_id == 1
-    assert tuple(ref.id for ref in turn.request.evidence_refs) == ("e-frame-1",)
     assert [event.kind for event in harness.reducer.events] == [
         "target_bound",
         "obligation_claimed",
         "verification_recorded",
         "mission_verified",
     ]
-    visual_refs = [
+    claim, verification, completion = harness.reducer.events[1:]
+    assert claim.evidence_refs == ("e-frame-1",)
+    assert verification.evidence_refs == ("e-frame-1",)
+    assert verification.payload["verified"] is True
+    assert verification.payload["verifier_kind"] == "actor_claim"
+    assert completion.evidence_refs[0] == "e-frame-1"
+    aggregate = next(
         ref
         for ref in harness.registry.snapshot()
-        if ref.kind == VISUAL_VERIFIER_EVIDENCE_KIND
-    ]
-    assert len(visual_refs) == 1
-    assert visual_refs[0].trust == "independent_visual_model"
-    assert visual_refs[0].frame_id == 1
-    assert harness.reducer.projection.status is MissionStatus.VERIFIED
-
-
-def test_rejected_verification_returns_feedback_to_actor_before_bounded_retry() -> None:
-    definition = MissionDefinition(
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        original_goal=GOAL,
-        obligations=(
-            ObligationSpec(
-                id=OBLIGATION_ID,
-                desired_state=GOAL,
-                acceptance_criteria=("the visible result is confirmed",),
-                required_capabilities=("visual.interact",),
-                evidence_policy=EvidencePolicy(
-                    allow_independent_visual_verifier=True,
-                    max_verification_attempts=3,
-                    uncertain_policy="blocked",
-                ),
-            ),
-        ),
+        if ref.id == completion.evidence_refs[-1]
     )
-    harness = _harness(
-        _claim(),
-        _action(),
-        _claim(),
-        definition=definition,
-    )
-    harness.verifier.assessment = VerifierAssessment(
-        verified=False,
-        concise_reason="PRIVATE-SCREEN-SENTINEL",
-    )
-
-    rejected = harness.runtime.run_one_turn(turn_index=0)
-    recovery = harness.runtime.run_one_turn(turn_index=1)
-    harness.verifier.assessment = VerifierAssessment(
-        verified=True,
-        satisfied_conditions=("the visible result is confirmed",),
-        confidence=1.0,
-        concise_reason="the new frame shows the requested result",
-    )
-    verified = harness.runtime.run_one_turn(turn_index=2)
-
-    assert rejected.status is RuntimeStatus.VERIFICATION_RECORDED
-    assert recovery.status is RuntimeStatus.ACTION_RECORDED
-    assert verified.status is RuntimeStatus.MISSION_VERIFIED
-    assert harness.actor.turns[1].mission.failure_kind == "verification_rejected"
-    assert (
-        harness.actor.turns[1].mission.failure_message
-        == "PRIVATE-SCREEN-SENTINEL"
-    )
-    assert harness.actor.turns[1].mission.no_progress_streak == 0
-    assert harness.verifier.calls == 2
+    assert aggregate.trust == "deterministic"
+    assert aggregate.obligation_id is None
+    obligation = harness.reducer.projection.obligation_state(OBLIGATION_ID)
+    assert obligation.verified_evidence_refs == ("e-frame-1",)
     assert harness.reducer.projection.status is MissionStatus.VERIFIED
 
 
@@ -1821,7 +1682,6 @@ def test_claim_preserves_required_current_frame_evidence_kind() -> None:
                 required_capabilities=("visual.interact",),
                 evidence_policy=EvidencePolicy(
                     required_evidence_kinds=(CURRENT_FRAME_EVIDENCE_KIND,),
-                    allow_independent_visual_verifier=True,
                 ),
             ),
         ),
@@ -1834,33 +1694,7 @@ def test_claim_preserves_required_current_frame_evidence_kind() -> None:
     verification = harness.reducer.events[-2]
     assert verification.kind == "verification_recorded"
     assert "e-frame-1" in verification.evidence_refs
-    assert any(
-        ref.kind == VISUAL_VERIFIER_EVIDENCE_KIND
-        for ref in harness.registry.snapshot()
-    )
-
-
-def test_verifier_result_is_discarded_when_claim_revision_changes() -> None:
-    harness = _harness(_claim())
-    harness.verifier.on_assess = lambda: harness.reducer.apply(
-        harness.reducer.event(
-            "mission_canceled",
-            payload={"reason": "synthetic concurrent cancellation"},
-        )
-    )
-
-    result = harness.runtime.run_one_turn(turn_index=0)
-
-    assert result.status is RuntimeStatus.STALE_DISCARDED
-    assert [event.kind for event in harness.reducer.events] == [
-        "target_bound",
-        "obligation_claimed",
-        "mission_canceled",
-    ]
-    assert not any(
-        ref.kind == VISUAL_VERIFIER_EVIDENCE_KIND
-        for ref in harness.registry.snapshot()
-    )
+    assert verification.payload["verifier_kind"] == "actor_claim"
 
 
 def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
@@ -1919,7 +1753,7 @@ def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
     ]
 
 
-def test_actor_and_verifier_exceptions_after_stop_are_cancellation() -> None:
+def test_actor_exception_after_stop_is_cancellation() -> None:
     actor_harness = _harness(_action())
     actor_stop = threading.Event()
     actor_harness.actor.on_propose = actor_stop.set
@@ -1933,25 +1767,6 @@ def test_actor_and_verifier_exceptions_after_stop_are_cancellation() -> None:
     assert actor_result.status is RuntimeStatus.CANCELED
     assert actor_harness.controller.calls == 0
     assert actor_harness.reducer.events[-1].kind == "mission_canceled"
-
-    verifier_harness = _harness(_claim())
-    verifier_stop = threading.Event()
-    verifier_harness.verifier.on_assess = verifier_stop.set
-    verifier_harness.verifier.raise_error = RuntimeError(
-        "model call canceled"
-    )
-
-    verifier_result = verifier_harness.runtime.run_one_turn(
-        turn_index=0,
-        stop_event=verifier_stop,
-    )
-
-    assert verifier_result.status is RuntimeStatus.CANCELED
-    assert [event.kind for event in verifier_harness.reducer.events] == [
-        "target_bound",
-        "obligation_claimed",
-        "mission_canceled",
-    ]
 
 
 def test_identical_fake_run_replays_deterministically() -> None:
@@ -1990,9 +1805,7 @@ def test_minimal_runtime_rejects_scope_expansion_at_construction() -> None:
                         id="first",
                         desired_state=GOAL,
                         required_capabilities=("visual.interact",),
-                        evidence_policy=EvidencePolicy(
-                            allow_independent_visual_verifier=True,
-                        ),
+                        evidence_policy=EvidencePolicy(),
                     ),
                     ObligationSpec(id="second", desired_state="second"),
                 )
@@ -2009,7 +1822,7 @@ def test_minimal_runtime_rejects_scope_expansion_at_construction() -> None:
         MissionRuntimeConfigurationError,
         match="fixed safe STANDARD profile",
     ):
-        _harness(_action(), profile_provider=False)
+        _harness(_action(), profile_provider=True)
 
 
 def test_actor_sees_exact_minimal_tool_surface_and_invalid_action_fails_closed() -> None:

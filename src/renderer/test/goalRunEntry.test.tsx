@@ -124,7 +124,13 @@ describe('primary goal-run transport', () => {
       control_surface_pid: 7712,
       prepared_at: 800,
     }));
-    (window as any).electronAPI = { prepareDesktopHandoff };
+    const bindDesktopHandoff = vi.fn(async () => true);
+    const releaseDesktopHandoff = vi.fn(async () => true);
+    (window as any).electronAPI = {
+      prepareDesktopHandoff,
+      bindDesktopHandoff,
+      releaseDesktopHandoff,
+    };
     const captureDesktopContext = vi.fn(async () => target());
     const startGoalRun = vi.fn(async (
       _goal: string,
@@ -138,6 +144,8 @@ describe('primary goal-run transport', () => {
     );
 
     expect(prepareDesktopHandoff).toHaveBeenCalledOnce();
+    expect(bindDesktopHandoff).toHaveBeenCalledWith('run-goal-test');
+    expect(releaseDesktopHandoff).not.toHaveBeenCalled();
     expect(captureDesktopContext).toHaveBeenCalledWith(7712);
     expect(startGoalRun).toHaveBeenCalledOnce();
     const [goal, constraint, context] = startGoalRun.mock.calls[0];
@@ -154,6 +162,37 @@ describe('primary goal-run transport', () => {
       target_window: target(),
     });
     expect(context).not.toHaveProperty('task_id');
+  });
+
+  it('keeps a created run truthful when taskbar handoff binding degrades', async () => {
+    const prepareDesktopHandoff = vi.fn(async () => ({
+      yielded: true,
+      control_surface_pid: 7712,
+      prepared_at: 800,
+    }));
+    const bindDesktopHandoff = vi.fn(async () => {
+      throw new Error('ipc unavailable');
+    });
+    const releaseDesktopHandoff = vi.fn(async () => {
+      throw new Error('release unavailable');
+    });
+    (window as any).electronAPI = {
+      prepareDesktopHandoff,
+      bindDesktopHandoff,
+      releaseDesktopHandoff,
+    };
+    const created = snapshot();
+
+    const result = await startGoalWithConstraint(
+      {
+        captureDesktopContext: vi.fn(async () => target()),
+        startGoalRun: vi.fn(async () => created),
+      } as never,
+      'Complete the visible task',
+    );
+
+    expect(result).toBe(created);
+    expect(releaseDesktopHandoff).toHaveBeenCalledOnce();
   });
 
   it('keeps compileTask and startGraph available as Studio compatibility APIs', async () => {

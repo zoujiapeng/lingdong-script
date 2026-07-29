@@ -151,6 +151,12 @@ def _default_arguments(action: str) -> dict[str, Any]:
         {
             "click": {"image_x": 10.0, "image_y": 20.0},
             "double_click": {"image_x": 10.0, "image_y": 20.0},
+            "drag": {
+                "image_x1": 10.0,
+                "image_y1": 20.0,
+                "image_x2": 70.0,
+                "image_y2": 60.0,
+            },
             "scroll": {
                 "image_x": 10.0,
                 "image_y": 20.0,
@@ -200,6 +206,8 @@ def _actor_envelope(
     action: str = "click",
     arguments: dict[str, Any] | None = None,
     before_payload: bytes = BEFORE_PAYLOAD,
+    pointer_disposition: str = "released",
+    pointer_lease_id: str | None = None,
 ) -> dict[str, Any]:
     envelope = {
         "format": "actor-envelope/1",
@@ -222,8 +230,8 @@ def _actor_envelope(
         "submitted_image_size": [100, 80],
         "frame_image_sha256": _runtime_image_sha256(before_payload),
         "target_binding_id": "target-binding",
-        "pointer_disposition": "released",
-        "pointer_lease_id": None,
+        "pointer_disposition": pointer_disposition,
+        "pointer_lease_id": pointer_lease_id,
         "broker_projection_id": "projection-pending",
         "capability_grant_ids": [],
         "allowed_evidence_scope": ["evidence-current-frame"],
@@ -252,6 +260,12 @@ def _tool_schema(action: str = "click") -> dict[str, Any]:
         "double_click": {
             "image_x": {"type": "number"},
             "image_y": {"type": "number"},
+        },
+        "drag": {
+            "image_x1": {"type": "number"},
+            "image_y1": {"type": "number"},
+            "image_x2": {"type": "number"},
+            "image_y2": {"type": "number"},
         },
         "scroll": {
             "image_x": {"type": "number"},
@@ -348,10 +362,14 @@ def _record_decision(
     *,
     arguments: dict[str, Any] | None = None,
     action: str = "click",
+    pointer_disposition: str = "released",
+    pointer_lease_id: str | None = None,
 ) -> ActorDecisionRecord:
     envelope = _actor_envelope(
         action=action,
         arguments=arguments,
+        pointer_disposition=pointer_disposition,
+        pointer_lease_id=pointer_lease_id,
     )
     return plane.record_actor_decision(
         actor_envelope=envelope,
@@ -386,6 +404,8 @@ def _record_admission(
 def _attempt_facts(
     action: str,
     submitted_arguments: dict[str, Any],
+    *,
+    started_held: bool = False,
 ) -> tuple[dict[str, Any], str]:
     if action in {"click", "double_click"}:
         return (
@@ -409,6 +429,24 @@ def _attempt_facts(
             },
             "raw_device.admitted_physical_scroll/0",
         )
+    if action == "drag":
+        physical = {
+            "kind": "pointer_drag",
+            "x1": 20,
+            "y1": 40,
+            "x2": 80,
+            "y2": 80,
+            "button": "left",
+        }
+        if "image_points" in submitted_arguments:
+            physical["points"] = [
+                [int(point[0]) + 10, int(point[1]) + 20]
+                for point in submitted_arguments["image_points"]
+            ]
+        if "keep_holding" in submitted_arguments:
+            physical["started_held"] = started_held
+            physical["keep_holding"] = submitted_arguments["keep_holding"]
+        return physical, "raw_device.admitted_physical_drag/0"
     if action == "type_text":
         return (
             {
@@ -430,10 +468,16 @@ def _attempt_facts(
 
 def _reserve_attempt(
     plane: RuntimeEvidencePlane,
+    *,
+    started_held: bool = False,
 ) -> PhysicalAttemptRecord:
     decision = plane.decision_records[0]
     submitted = dict(decision.canonical_arguments)
-    physical, route = _attempt_facts(decision.action, submitted)
+    physical, route = _attempt_facts(
+        decision.action,
+        submitted,
+        started_held=started_held,
+    )
     return plane.reserve_physical_attempt(
         decision_id=DECISION_ID,
         mission_id=MISSION_ID,
@@ -949,6 +993,395 @@ def test_one_decision_has_at_most_one_physical_attempt_concurrently() -> None:
     )
 
 
+def test_drag_evidence_keeps_legacy_endpoint_only_records_compatible() -> None:
+    plane = _plane()
+    decision = _record_decision(plane, action="drag")
+    _record_admission(plane, before_payload=BEFORE_PAYLOAD)
+
+    attempt = _reserve_attempt(plane)
+
+    assert decision.to_dict()["canonical_arguments"] == _default_arguments(
+        "drag"
+    )
+    assert attempt.to_dict()["submitted_arguments"] == _default_arguments(
+        "drag"
+    )
+    assert attempt.to_dict()["physical_arguments"] == {
+        "kind": "pointer_drag",
+        "x1": 20,
+        "y1": 40,
+        "x2": 80,
+        "y2": 80,
+        "button": "left",
+    }
+    assert ActorDecisionRecord.from_dict(decision.to_dict()) == decision
+    assert PhysicalAttemptRecord.from_dict(attempt.to_dict()) == attempt
+
+
+def test_drag_evidence_accepts_paired_submitted_and_physical_paths() -> None:
+    submitted = {
+        **_default_arguments("drag"),
+        "image_points": [[25.5, 30], [40, 50.25]],
+    }
+    plane = _plane()
+    decision = _record_decision(
+        plane,
+        action="drag",
+        arguments=submitted,
+    )
+    _record_admission(plane, before_payload=BEFORE_PAYLOAD)
+
+    attempt = _reserve_attempt(plane)
+
+    assert decision.to_dict()["canonical_arguments"] == submitted
+    assert attempt.to_dict()["submitted_arguments"] == submitted
+    assert attempt.to_dict()["physical_arguments"]["points"] == [
+        [35, 50],
+        [50, 70],
+    ]
+    assert PhysicalAttemptRecord.from_dict(attempt.to_dict()) == attempt
+
+
+def test_drag_hold_evidence_round_trips_from_released_pointer() -> None:
+    submitted = {
+        **_default_arguments("drag"),
+        "keep_holding": True,
+    }
+    plane = _plane()
+    decision = _record_decision(
+        plane,
+        action="drag",
+        arguments=submitted,
+    )
+    _record_admission(plane, before_payload=BEFORE_PAYLOAD)
+
+    attempt = _reserve_attempt(plane)
+
+    assert decision.to_dict()["actor_envelope"]["pointer_disposition"] == (
+        "released"
+    )
+    assert decision.to_dict()["actor_envelope"]["pointer_lease_id"] is None
+    assert attempt.to_dict()["physical_arguments"] == {
+        "kind": "pointer_drag",
+        "x1": 20,
+        "y1": 40,
+        "x2": 80,
+        "y2": 80,
+        "button": "left",
+        "started_held": False,
+        "keep_holding": True,
+    }
+    assert ActorDecisionRecord.from_dict(decision.to_dict()) == decision
+    assert PhysicalAttemptRecord.from_dict(attempt.to_dict()) == attempt
+
+
+def test_drag_hold_evidence_round_trips_held_pointer_continuation() -> None:
+    submitted = {
+        **_default_arguments("drag"),
+        "image_points": [[25.5, 30], [40, 50.25]],
+        "keep_holding": False,
+    }
+    plane = _plane()
+    decision = _record_decision(
+        plane,
+        action="drag",
+        arguments=submitted,
+        pointer_disposition="held",
+        pointer_lease_id="pointer-lease-1",
+    )
+    _record_admission(plane, before_payload=BEFORE_PAYLOAD)
+
+    attempt = _reserve_attempt(plane, started_held=True)
+    decision_wire = decision.to_dict()
+    attempt_wire = attempt.to_dict()
+
+    assert decision_wire["actor_envelope"]["pointer_disposition"] == "held"
+    assert decision_wire["actor_envelope"]["pointer_lease_id"] == (
+        "pointer-lease-1"
+    )
+    assert decision_wire["broker_projection"]["pointer_lease_id"] == (
+        "pointer-lease-1"
+    )
+    assert attempt_wire["physical_arguments"]["points"] == [
+        [35, 50],
+        [50, 70],
+    ]
+    assert attempt_wire["physical_arguments"]["started_held"] is True
+    assert attempt_wire["physical_arguments"]["keep_holding"] is False
+    assert ActorDecisionRecord.from_dict(decision_wire) == decision
+    assert PhysicalAttemptRecord.from_dict(attempt_wire) == attempt
+
+
+def test_drag_hold_evidence_accepts_only_held_stationary_release() -> None:
+    submitted = {
+        "image_x1": 70.0,
+        "image_y1": 60.0,
+        "image_x2": 70.0,
+        "image_y2": 60.0,
+        "image_points": [],
+        "keep_holding": False,
+    }
+    plane = _plane()
+    decision = _record_decision(
+        plane,
+        action="drag",
+        arguments=submitted,
+        pointer_disposition="held",
+        pointer_lease_id="pointer-lease-1",
+    )
+    _record_admission(plane, before_payload=BEFORE_PAYLOAD)
+    attempt = plane.reserve_physical_attempt(
+        decision_id=DECISION_ID,
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        actor_envelope_sha256=decision.actor_envelope_sha256,
+        submitted_arguments=submitted,
+        physical_arguments={
+            "kind": "pointer_drag",
+            "x1": 80,
+            "y1": 80,
+            "x2": 80,
+            "y2": 80,
+            "button": "left",
+            "points": [],
+            "started_held": True,
+            "keep_holding": False,
+        },
+        raw_device_route="raw_device.admitted_physical_drag/0",
+        mechanism="physical_sendinput",
+    )
+
+    assert decision.to_dict()["canonical_arguments"] == submitted
+    assert PhysicalAttemptRecord.from_dict(attempt.to_dict()) == attempt
+    with pytest.raises(
+        RuntimeEvidenceContractError,
+        match="only a held-pointer release",
+    ):
+        _record_decision(
+            _plane(),
+            action="drag",
+            arguments=submitted,
+        )
+
+
+@pytest.mark.parametrize(
+    ("pointer_disposition", "pointer_lease_id", "action", "message"),
+    (
+        (
+            "released",
+            "pointer-lease-1",
+            "drag",
+            "must not carry a pointer lease",
+        ),
+        ("held", None, "drag", "canonical identity"),
+        ("unknown", None, "drag", "must be released or held"),
+        ("held", "pointer-lease-1", "click", "only a drag proposal"),
+    ),
+)
+def test_actor_envelope_rejects_invalid_pointer_hold_states(
+    pointer_disposition: str,
+    pointer_lease_id: str | None,
+    action: str,
+    message: str,
+) -> None:
+    envelope = _actor_envelope(
+        action=action,
+        pointer_disposition=pointer_disposition,
+        pointer_lease_id=pointer_lease_id,
+    )
+
+    with pytest.raises(RuntimeEvidenceContractError, match=message):
+        _plane().record_actor_decision(
+            actor_envelope=envelope,
+            tool_schema=_tool_schema(action),
+            broker_projection=_broker_projection(envelope),
+        )
+
+
+def test_held_actor_envelope_rejects_projection_pointer_lease_mismatch() -> None:
+    envelope = _actor_envelope(
+        action="drag",
+        arguments={
+            **_default_arguments("drag"),
+            "keep_holding": False,
+        },
+        pointer_disposition="held",
+        pointer_lease_id="pointer-lease-1",
+    )
+    projection = _broker_projection(envelope)
+    projection["pointer_lease_id"] = "pointer-lease-other"
+
+    with pytest.raises(
+        RuntimeEvidenceContractError,
+        match="changed Actor envelope identity",
+    ):
+        _plane().record_actor_decision(
+            actor_envelope=envelope,
+            tool_schema=_tool_schema("drag"),
+            broker_projection=projection,
+        )
+
+
+def test_drag_evidence_rejects_non_boolean_submitted_keep_holding() -> None:
+    with pytest.raises(
+        RuntimeEvidenceContractError,
+        match="keep_holding must be boolean",
+    ):
+        _record_decision(
+            _plane(),
+            action="drag",
+            arguments={
+                **_default_arguments("drag"),
+                "keep_holding": 1,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("image_points", "message"),
+    (
+        ([[1, 2]] * 33, "at most 32"),
+        ([[1, 2, 3]], "two-number point"),
+        ([[-1, 2]], "finite non-negative"),
+        ([[float("inf"), 2]], "must be finite"),
+        ([[True, 2]], "finite non-negative"),
+    ),
+)
+def test_drag_evidence_rejects_invalid_submitted_paths(
+    image_points: list[Any],
+    message: str,
+) -> None:
+    valid = _record_decision(
+        _plane(),
+        action="drag",
+        arguments={
+            **_default_arguments("drag"),
+            "image_points": [[25, 30]],
+        },
+    )
+    wire = valid.to_dict()
+    wire["canonical_arguments"]["image_points"] = image_points
+    wire["actor_envelope"]["proposal"]["args"]["image_points"] = copy.deepcopy(
+        image_points
+    )
+
+    with pytest.raises(RuntimeEvidenceContractError, match=message):
+        ActorDecisionRecord.from_dict(wire)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    (
+        (
+            lambda wire: wire["physical_arguments"].pop("points"),
+            "path fields must be paired",
+        ),
+        (
+            lambda wire: wire["submitted_arguments"].pop("image_points"),
+            "path fields must be paired",
+        ),
+        (
+            lambda wire: wire["physical_arguments"]["points"].append([60, 70]),
+            "paths must have equal length",
+        ),
+        (
+            lambda wire: wire["physical_arguments"].__setitem__(
+                "points",
+                [[1, 2]] * 33,
+            ),
+            "at most 32",
+        ),
+        (
+            lambda wire: wire["physical_arguments"].__setitem__(
+                "points",
+                [[1.5, 2]],
+            ),
+            "two-integer point",
+        ),
+    ),
+)
+def test_drag_evidence_rejects_mismatched_or_invalid_physical_paths(
+    mutate: Any,
+    message: str,
+) -> None:
+    plane = _plane()
+    _record_decision(
+        plane,
+        action="drag",
+        arguments={
+            **_default_arguments("drag"),
+            "image_points": [[25, 30]],
+        },
+    )
+    _record_admission(plane, before_payload=BEFORE_PAYLOAD)
+    attempt = _reserve_attempt(plane)
+    wire = attempt.to_dict()
+    mutate(wire)
+
+    with pytest.raises(RuntimeEvidenceContractError, match=message):
+        PhysicalAttemptRecord.from_dict(wire)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    (
+        (
+            lambda wire: wire["physical_arguments"].pop("started_held"),
+            "physical_arguments fields mismatch",
+        ),
+        (
+            lambda wire: wire["physical_arguments"].__setitem__(
+                "started_held",
+                1,
+            ),
+            "started_held must be boolean",
+        ),
+        (
+            lambda wire: wire["physical_arguments"].pop("keep_holding"),
+            "physical_arguments fields mismatch",
+        ),
+        (
+            lambda wire: (
+                wire["physical_arguments"].pop("started_held"),
+                wire["physical_arguments"].pop("keep_holding"),
+            ),
+            "hold fields must be paired",
+        ),
+        (
+            lambda wire: wire["submitted_arguments"].pop("keep_holding"),
+            "hold fields must be paired",
+        ),
+        (
+            lambda wire: wire["physical_arguments"].__setitem__(
+                "keep_holding",
+                False,
+            ),
+            "keep_holding changed submitted intent",
+        ),
+    ),
+)
+def test_drag_evidence_rejects_invalid_physical_hold_states(
+    mutate: Any,
+    message: str,
+) -> None:
+    plane = _plane()
+    _record_decision(
+        plane,
+        action="drag",
+        arguments={
+            **_default_arguments("drag"),
+            "keep_holding": True,
+        },
+    )
+    _record_admission(plane, before_payload=BEFORE_PAYLOAD)
+    attempt = _reserve_attempt(plane)
+    wire = attempt.to_dict()
+    mutate(wire)
+
+    with pytest.raises(RuntimeEvidenceContractError, match=message):
+        PhysicalAttemptRecord.from_dict(wire)
+
+
 def test_receipt_without_action_binding_cannot_enter_report() -> None:
     plane = _plane()
     _record_decision(plane)
@@ -1406,7 +1839,10 @@ def test_missing_physical_attempt_never_reports_complete() -> None:
     assert "durable_journal" in report.missing_evidence
 
 
-def test_admission_and_after_frame_cannot_switch_target_identity() -> None:
+@pytest.mark.parametrize("outcome", ("completed", "unknown"))
+def test_admission_and_after_frame_cannot_switch_target_identity(
+    outcome: str,
+) -> None:
     plane = _plane()
     _record_decision(plane)
     target = _target_identity()
@@ -1437,6 +1873,10 @@ def test_admission_and_after_frame_cannot_switch_target_identity() -> None:
     _record_receipt(plane)
     after = _frame_identity(2, b"\xff\xd8-after-\xff\xd9")
     after["hwnd"] += 1
+    transition = _transition(outcome=outcome)
+    transition["post_frame_evidence"][0]["payload_hash"] = canonical_sha256(
+        after
+    )
     with pytest.raises(
         RuntimeEvidenceContractError,
         match="one target commit",
@@ -1446,7 +1886,70 @@ def test_admission_and_after_frame_cannot_switch_target_identity() -> None:
             mission_id=MISSION_ID,
             run_id=RUN_ID,
             actor_envelope_sha256=ENVELOPE_SHA256,
-            transition=_transition(),
+            transition=transition,
+            post_frame_identity=after,
+        )
+
+
+def test_unknown_applied_transition_can_record_same_window_geometry_change() -> None:
+    plane = _plane()
+    _record_decision(plane)
+    _record_admission(
+        plane,
+        before_payload=b"\xff\xd8-before-\xff\xd9",
+    )
+    _record_receipt(plane)
+    after = _frame_identity(2, AFTER_PAYLOAD)
+    after["region"] = [20, 30, 800, 600]
+    after["submitted_size"] = [800, 600]
+    transition = _transition(
+        outcome="unknown",
+        input_completed=True,
+    )
+    transition["post_frame_evidence"][0]["payload_hash"] = canonical_sha256(
+        after
+    )
+
+    binding = plane.record_controller_transition(
+        decision_id=DECISION_ID,
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        actor_envelope_sha256=ENVELOPE_SHA256,
+        transition=transition,
+        post_frame_identity=after,
+    )
+
+    assert binding.controller_transition["outcome"] == "unknown"
+    assert binding.to_dict()["after_frame_identity"] == after
+    assert ActionExecutionBinding.from_dict(binding.to_dict()) == binding
+
+
+def test_completed_transition_cannot_relax_frame_geometry() -> None:
+    plane = _plane()
+    _record_decision(plane)
+    _record_admission(
+        plane,
+        before_payload=b"\xff\xd8-before-\xff\xd9",
+    )
+    _record_receipt(plane)
+    after = _frame_identity(2, AFTER_PAYLOAD)
+    after["region"] = [20, 30, 800, 600]
+    after["submitted_size"] = [800, 600]
+    transition = _transition()
+    transition["post_frame_evidence"][0]["payload_hash"] = canonical_sha256(
+        after
+    )
+
+    with pytest.raises(
+        RuntimeEvidenceContractError,
+        match="one target commit",
+    ):
+        plane.record_controller_transition(
+            decision_id=DECISION_ID,
+            mission_id=MISSION_ID,
+            run_id=RUN_ID,
+            actor_envelope_sha256=ENVELOPE_SHA256,
+            transition=transition,
             post_frame_identity=after,
         )
 

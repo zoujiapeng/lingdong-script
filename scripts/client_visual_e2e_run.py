@@ -54,7 +54,10 @@ DEFAULT_OUTPUT = WORKSPACE / "output" / "playwright" / "client-visual-e2e"
 # only in the visible randomized page; a passing run must understand that frame
 # and its later state changes just as a user would.
 VISUAL_TEST_TASK = "完成当前界面上的测试。"
-ANSWER_ALL_QUESTIONS_TASK = "帮我在当前开启的页面里答完所有题"
+SPOKEN_GUI_VISUAL_TEST_TASK = "必须使用GUI和真实鼠标完成当前界面上的测试。"
+ANSWER_ALL_QUESTIONS_TASK = (
+    "必须使用GUI和真实鼠标键盘，帮我在当前开启的页面里答完所有题。"
+)
 
 VISUAL_CASES: dict[str, dict[str, Any]] = {
     "answer-all-questions": {
@@ -64,26 +67,23 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "max_steps": 40,
         "timeout": 600,
         "runtime_version": "vnext",
-        "execution_constraint": "gui_required",
         "ground_truth": "trusted_browser_form_submit_and_server_evaluation",
     },
     "precise-click": {
         "scenario": "precise_click",
-        "task": VISUAL_TEST_TASK,
+        "task": SPOKEN_GUI_VISUAL_TEST_TASK,
         "seed": 424242,
         "max_steps": 12,
         "timeout": 360,
         "runtime_version": "vnext",
-        "execution_constraint": "gui_required",
     },
     "ordered-clicks": {
         "scenario": "ordered_clicks",
-        "task": VISUAL_TEST_TASK,
+        "task": SPOKEN_GUI_VISUAL_TEST_TASK,
         "seed": 515151,
         "max_steps": 18,
         "timeout": 420,
         "runtime_version": "vnext",
-        "execution_constraint": "gui_required",
     },
     "drag-fit": {
         "scenario": "drag_fit",
@@ -101,7 +101,9 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
     },
     "dynamic-hold": {
         "scenario": "dynamic_hold",
-        "task": VISUAL_TEST_TASK,
+        # Keep the selector on auto: GUI is a user-spoken requirement, not a
+        # hidden harness execution constraint.
+        "task": SPOKEN_GUI_VISUAL_TEST_TASK,
         "seed": 161803,
         "max_steps": 36,
         "timeout": 420,

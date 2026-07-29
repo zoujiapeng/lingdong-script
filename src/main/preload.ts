@@ -64,6 +64,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // own the foreground when the first authoritative frame is captured.
   prepareDesktopHandoff: () =>
     ipcRenderer.invoke('window:prepare-desktop-handoff'),
+  bindDesktopHandoff: (runId: string) =>
+    ipcRenderer.invoke('window:bind-desktop-handoff', runId),
+  releaseDesktopHandoff: () =>
+    ipcRenderer.invoke('window:release-desktop-handoff'),
 
   // Agent messages (from main process)
   onAgentMessage: (callback: (msg: any) => void) => {
@@ -162,5 +166,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     body: string,
     kind: 'success' | 'error' | 'info' = 'info',
     runId = '',
-  ) => ipcRenderer.invoke('taskbar:notify', title, body, kind, runId),
+    releaseHandoff = false,
+  ) => ipcRenderer.invoke(
+    'taskbar:notify',
+    title,
+    body,
+    kind,
+    runId,
+    releaseHandoff,
+  ),
 });

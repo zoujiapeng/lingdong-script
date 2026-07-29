@@ -84,6 +84,7 @@ export interface ElectronAPI {
     body: string,
     kind?: 'success' | 'error' | 'info',
     runId?: string,
+    releaseHandoff?: boolean,
   ) => Promise<boolean>;
 
   // Agent control
@@ -106,6 +107,8 @@ export interface ElectronAPI {
     prepared_at: number;
     reason?: string;
   }>;
+  bindDesktopHandoff: (runId: string) => Promise<boolean>;
+  releaseDesktopHandoff: () => Promise<boolean>;
 
   // Agent messages
   onAgentMessage: (callback: (msg: any) => void) => () => void;

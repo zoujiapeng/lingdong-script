@@ -6,13 +6,12 @@ from typing import Any, Mapping, Protocol
 
 from ..actor import ActorDecisionEnvelope
 from ..mission import MissionProjection
-from ..verification import VerifierAssessment
 from .contracts import (
     ActorTurnInput,
     ControllerTransition,
     RuntimeSnapshot,
-    RuntimeVerifierTurn,
 )
+from .task_state import ActorTurnDecision
 
 
 class ActorPort(Protocol):
@@ -26,7 +25,7 @@ class ActorPort(Protocol):
         image_media_type: str,
         submitted_size: tuple[int, int],
         stop_event: Event | None = None,
-    ) -> Mapping[str, Any]: ...
+    ) -> ActorTurnDecision | Mapping[str, Any]: ...
 
 
 class RuntimeStatePort(Protocol):
@@ -58,22 +57,8 @@ class ControllerPort(Protocol):
     ) -> ControllerTransition: ...
 
 
-class VisualObligationVerifierPort(Protocol):
-    """Assess one exact claim/frame without any desktop mutation surface."""
-
-    verifier_kind: str
-
-    def assess(
-        self,
-        turn: RuntimeVerifierTurn,
-        *,
-        stop_event: Event | None = None,
-    ) -> VerifierAssessment | Mapping[str, Any]: ...
-
-
 __all__ = [
     "ActorPort",
     "RuntimeStatePort",
     "ControllerPort",
-    "VisualObligationVerifierPort",
 ]
