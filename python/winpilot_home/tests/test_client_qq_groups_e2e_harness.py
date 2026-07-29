@@ -80,7 +80,7 @@ def _qq_state(group_names, active, *, scroll_percent=0.0):
     return nodes
 
 
-def test_client_receives_only_original_goal_and_gui_constraint():
+def test_client_receives_only_the_original_natural_language_goal():
     harness = _load_harness()
 
     assert harness.TASK == (
@@ -93,7 +93,6 @@ def test_client_receives_only_original_goal_and_gui_constraint():
         "max_steps": 30,
         "timeout": 600,
         "runtime_version": "vnext",
-        "execution_constraint": "gui_required",
         "expected": "terminal",
     }
     assert "qq_hwnd" not in spec
@@ -281,9 +280,7 @@ def test_harness_wires_handoff_probe_and_redacts_base_stdout(
             "name": name,
             "expected": spec["expected"],
             "entrypoint": "electron_client_windows_uia",
-            "configuration": {
-                "execution_constraint": "gui_required",
-            },
+            "configuration": {},
             "duration_seconds": 1.0,
             "result": {
                 "outcome": "terminal",
@@ -313,7 +310,6 @@ def test_harness_wires_handoff_probe_and_redacts_base_stdout(
     assert report["client_result"]["run"]["run_id"] == "arp-qq"
     assert "visible_text" not in json.dumps(report, ensure_ascii=False)
     assert calls["spec"]["task"] == harness.TASK
-    assert calls["spec"]["execution_constraint"] == "gui_required"
     assert calls["after_submit"] is not None
     assert calls["independent_completion_probe"] is not None
     assert calls["independent_verifier"] is not None

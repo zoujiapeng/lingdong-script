@@ -8,7 +8,7 @@
 | --- | --- |
 | [../README.md](../README.md) | 项目目标、原则、能力边界、启动和验证 |
 | [architecture.md](architecture.md) | GUI Agent 架构、不变量、数据流和当前债务 |
-| [vnext-migration.md](vnext-migration.md) | 主 Agent 服务端入口、GUI 执行约束、Legacy 兼容边界和删除退出门 |
+| [vnext-migration.md](vnext-migration.md) | 主 Agent 服务端入口、模型自选工具、Legacy 兼容边界和删除退出门 |
 | [testing.md](testing.md) | 真实 Electron 客户端 E2E、冷启动、上下文和外部 oracle 规范 |
 | [GUI_AGENT_ARCHITECTURE_AUDIT.md](GUI_AGENT_ARCHITECTURE_AUDIT.md) | 全量架构审计、整改顺序和变更准入门 |
 | [../CLAUDE.md](../CLAUDE.md) | AI/开发者接手最短说明 |

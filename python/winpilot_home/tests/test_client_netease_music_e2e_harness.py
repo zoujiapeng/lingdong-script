@@ -88,7 +88,7 @@ def _successful_nodes():
     ]
 
 
-def test_client_gets_only_original_goal_and_gui_required_selector():
+def test_client_gets_only_original_natural_language_goal():
     harness = _load_harness()
 
     assert harness.TASK == (
@@ -101,7 +101,6 @@ def test_client_gets_only_original_goal_and_gui_required_selector():
         "max_steps": 40,
         "timeout": 600,
         "runtime_version": "vnext",
-        "execution_constraint": "gui_required",
         "expected": "independent_success",
     }
     assert "netease_hwnd" not in spec
@@ -378,7 +377,6 @@ def test_harness_wires_visible_handoff_and_independent_probe(monkeypatch, tmp_pa
 
     assert result["passed"] is True
     assert calls["spec"]["task"] == harness.TASK
-    assert calls["spec"]["execution_constraint"] == "gui_required"
     assert calls["reset_session"] is True
     assert calls["before_submit"] is not None
     assert calls["after_submit"] is not None

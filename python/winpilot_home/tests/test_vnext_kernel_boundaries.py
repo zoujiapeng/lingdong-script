@@ -36,7 +36,6 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.capabilities", "BrokerRuntimeState", None),
     ("winpilot.vnext.capabilities", "CapabilityBroker", None),
     ("winpilot.vnext.capabilities", "ExecutionMedium", None),
-    ("winpilot.vnext.capabilities", "InteractionMode", None),
     ("winpilot.vnext.capabilities", "MutationKind", None),
     ("winpilot.vnext.capabilities", "PointerDisposition", None),
     ("winpilot.vnext.capabilities", "PointerLeaseState", None),

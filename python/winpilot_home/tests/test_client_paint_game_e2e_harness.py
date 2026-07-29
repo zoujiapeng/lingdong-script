@@ -62,7 +62,7 @@ def _draw_red_x(
     return image
 
 
-def test_client_receives_only_the_unchanged_goal_and_gui_constraint():
+def test_client_receives_only_the_unchanged_natural_language_goal():
     harness = _load_paint_harness()
 
     assert harness.TASK == (
@@ -76,7 +76,6 @@ def test_client_receives_only_the_unchanged_goal_and_gui_constraint():
         "max_steps": 30,
         "timeout": 480,
         "runtime_version": "vnext",
-        "execution_constraint": "gui_required",
         "expected": "independent_success",
     }
     assert "expected_cell" not in spec
@@ -364,7 +363,7 @@ def test_independent_success_is_opt_in_for_case_validity():
             "outcome": "independent_success",
             "status": "running",
         },
-        "configuration": {"execution_constraint": "auto"},
+        "configuration": {},
         "memory_isolation": {"passed": True},
         "trace_binding": {"passed": True},
     }

@@ -994,7 +994,6 @@ def client_case_spec(*, timeout: int, max_steps: int) -> dict[str, Any]:
         "max_steps": int(max_steps),
         "timeout": int(timeout),
         "runtime_version": "vnext",
-        "execution_constraint": "gui_required",
         "expected": "independent_success",
     }
 
@@ -1077,7 +1076,6 @@ def run_netease_music_case(
         "entrypoint": "electron_client_windows_uia",
         "task": TASK,
         "runtime_version": "vnext",
-        "execution_constraint": "gui_required",
         "initial_focus": initial_focus,
         "baseline": baseline,
         "oracle": oracle.final_verdict(),

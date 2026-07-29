@@ -64,24 +64,15 @@
 | 4. 网易云搜索梁静茹、播放第一首、音量 5% | 打开/聚焦应用、搜索、列表选择、播放状态、音量控制和多项 oracle | **0 次通过**。正式 run `arp-20260729-135144-143e4f` 有 3 次点击后模型请求 `BadRequestError`，终态 `actor_error`；外部 UIA/CoreAudio oracle 均为假 | 一次模型错误不可恢复；目标/窗口切换能力不可靠；音量必须明确为应用内或 Windows 会话音量 |
 | 5. 查看所有 QQ 群最近消息并汇总，口头要求必须 GUI | 口头约束理解、群列表枚举、逐群覆盖、消息抽取、临时语义记忆、最终文本输出 | **0 次通过**。修复窗口绑定后，run `arp-20260729-160636-4a880c` 完成 27 次有效输入（5 click、22 scroll），30 次模型调用后预算耗尽，未 claim、未验证、无汇总 | 只有机械 GUI 循环，没有“已看群/未看群/每群事实/结束条件”；长尾连续滚动仍被像素变化记作进展 |
 
-### 3.1 任务 5 的口头 GUI 约束实验
+### 3.1 口头 GUI 要求成为唯一输入
 
-本轮特意把客户端选择器保持在 **Auto**，只在自然语言提示词中写：
+历史实验曾把客户端选择器保持在 **Auto**，只在自然语言提示词中写：
 
 > 一定要用 GUI 完成，不要使用命令行、API 或软件专用适配器。
 
-run `arp-20260729-160636-4a880c` 的 Goal Admission 完整保留了这句话，但 `execution_constraint` 仍记录为 `auto`，路由原因为 `gui_first_auto_default`。这说明系统这次走 GUI 是因为当前默认路由本来就是 GUI，不是因为它理解并约束了用户口头要求。
+run `arp-20260729-160636-4a880c` 证明原始目标能完整到达 Visual Actor，也证明额外选择器没有帮助 Agent 理解任务。2026-07-30 已把选择器及其请求、准入、Broker 和证据状态链完整删除。
 
-正确设计不应再添加一套关键词路由器，也不应要求用户操作单独的系统开关。原始提示词必须是唯一真相；语义 Agent 的第一次决策应产生：
-
-```text
-ExecutionIntent
-  interaction_mode: gui_only | gui_preferred | mixed
-  cited_user_span: 原提示词中的约束原文
-  external_effect_policy: read_only | confirm_at_boundary | allowed
-```
-
-运行时只负责依据这个语义意图开放或关闭 shell/API 等能力，不再第二次猜用户意图。
+正确设计不再产生第二份 `ExecutionIntent` 或 `interaction_mode`。原始提示词是唯一真相；同一个语义 Agent 在看见当前画面和全部允许工具后选择 GUI、命令行或 provider。当前 live vNext 尚只有 GUI/control 工具，所以“自主混合选择”仍是未实现能力，不能用隐藏默认值伪装完成。将来增加其他工具时也不增加关键词 router、预检 Agent 或新的用户开关。
 
 ## 4. 仓库、分支和增量规模
 
@@ -667,9 +658,9 @@ arp-20260729-190610-bc9e08:
 
 因此当前实现已完整删除 Grounder contract、角色、第二次 provider 请求、预算接线和坐标覆盖逻辑，空间 turn 由单个 Visual Actor 直接决定。Broker schema、submitted-image 坐标绑定和 OS 输入前验证仍保留。删除后，同一随机试卷 `seed=1008554491` 在 `arp-20260730-031847-19f493` 中以 16 次真实鼠标键盘动作完成滚屏、6 道混合题和提交，外部服务器判定 6/6 全对；当时尚存的独立视觉 verifier 随后才接受完成声明。
 
-### 11.7 口头 GUI 约束不再增加独立预检 Agent
+### 11.7 口头 GUI 要求不再产生第二套策略状态
 
-代码审计确认：下拉保持 Auto 时，原始目标会完整进入 Visual Actor，但 Goal Admission 不会把口头“必须使用 GUI”提升成 Broker 的结构化 `gui_required`。当前运行仍然只走 GUI，是因为 live graph 关闭 shell，工具目录也只有 GUI/control，不是因为额外系统开关理解了这句话。
+历史代码审计确认：原始目标会完整进入 Visual Actor；当前运行只走 GUI，是因为 live graph 关闭 shell，工具目录也只有 GUI/control，不是因为额外系统开关理解了口头要求。
 
 曾按“让同一基础模型先做二分类”的最小方案做真实探针，但结果否定了该方案：
 
@@ -677,11 +668,11 @@ arp-20260729-190610-bc9e08:
 - 5 秒时，模型把明确的“必须使用 GUI”错误判成 `unspecified_or_mixed`；
 - 额外调用还会消耗 Electron 已捕获目标仅 15 秒的新鲜期。
 
-因此该预检实现已完整回退，没有留下关键词表、第三个 Agent 或死代码。当前决定是：
+因此该预检实现已完整回退，没有留下关键词表、第三个 Agent 或死代码。2026-07-30 又继续删除了前端选择器和贯穿请求、准入、Broker、fingerprint、trace 的执行模式状态。当前决定是：
 
 - 现阶段继续由收到完整原始目标的 Visual Actor 遵守口头约束，因为可执行目录本来就只有 GUI；
-- 将来真正开放 shell/provider 之前，必须把约束解析搭载在首个语义 Actor 决策中，并在解析完成前只暴露 GUI/control；
-- 不为这个问题增加独立模型往返、关键词路由器或新的用户开关。
+- 将来真正开放 shell/provider 时，把它们与 GUI 工具同时交给同一个语义 Agent 选择，不再先解析成另一份模式状态；
+- 不为这个问题增加独立模型往返、关键词路由器、Task Profiler 或新的用户开关。
 
 ### 11.8 第一次可信定位闭环暴露的停止失败
 
@@ -811,16 +802,16 @@ y = round(image_y * 1020 / 594)
 - 模型精度不足通过可替换模型基准暴露，不进入 runtime 补偿；
 - 若未来发现同一正确提交图坐标被稳定执行到错误物理位置，才修坐标基础设施。
 
-当前工作树的最终非 GUI 回归：
+当前工作树在 2026-07-30 删除执行策略链后的非 GUI 回归：
 
 ```text
-Python winpilot_home: 3374 passed / 0 failed / 13 real deselected
+Python winpilot_home: 3367 passed / 13 skipped / 0 failed
 Python 根目录独立套件: 2508 passed / 0 failed
-TypeScript/Vitest: 22 files / 225 tests passed
+TypeScript/Vitest: 22 files / 224 tests passed
 TypeScript typecheck、renderer/main/CLI/AI build: passed
 ```
 
-被排除的 real 标记不被包装成通过；本节上方两个 fresh GUI run 分别由真实 Electron 入口和独立浏览器 oracle 验证。
+13 个 skipped 不被包装成通过；真实 GUI 结果以 13.7 的当前源码运行记录为准。
 
 ## 12. 立即决策
 
@@ -834,4 +825,163 @@ TypeScript typecheck、renderer/main/CLI/AI build: passed
 8. 安全只放在不可逆外部边界；读取、导航、绘图、切换窗口和准备工件不应被普遍打断。
 9. 模型视觉定位或 schema 精度不足优先通过模型替换解决；runtime 不增加坐标补偿、目标吸附或当前模型专用输出修复。
 
-当前切片已经完成随机 `corridor_drag` 和跨帧 `dynamic_hold` 两个可信 GUI 闭环，但仍没有达到通用可靠或人类水平。下一步应继续修正观察帧、比较视觉模型，并把同一精简动作面放进更大规模的随机组合长任务；继续扩充提示规则、动作工具或应用适配器只会重复过去的失败。
+历史切片曾完成随机 `corridor_drag` 和跨帧 `dynamic_hold` 两个可信 GUI 闭环，但仍没有达到通用可靠或人类水平；13.7 的新随机样本再次证明单次通过不能继承为当前成功率。下一步应继续比较视觉模型，并把同一精简动作面放进更大规模的随机组合长任务；继续扩充提示规则、动作工具或应用适配器只会重复过去的失败。
+
+## 13. 2026-07-30 最新落地状态
+
+### 13.1 可恢复状态与本轮规模
+
+本轮先把完整架构重置状态提交并推送为恢复点：
+
+```text
+branch: codex/lean-gui-agent-core
+checkpoint: 6ab5a9d checkpoint lean GUI agent architecture
+remote: origin/codex/lean-gui-agent-core
+```
+
+随后在该恢复点上继续净删除前端执行策略链。产品、测试和脚本 diff 为
+`+115/-699`；新增文字主要是把原则、当前失败和恢复方法写入文档。没有增加
+planner、模型角色、动作原语或应用适配器。
+
+### 13.2 前端执行策略链已完整删除
+
+删除范围不是隐藏一个下拉框，而是整条重复意图链：
+
+```text
+ExecutionConstraintSelector
+  -> renderer state
+  -> request.execution_constraint
+  -> GoalExecutionConstraint
+  -> GoalAdmissionAudit.execution_constraint
+  -> InteractionMode
+  -> BrokerRuntimeState fingerprint
+  -> Broker policy branches
+  -> GUI-mode trace/evidence fields
+  -> E2E selector automation
+```
+
+当前 `POST /api/v2/goals/runs` 只接收 `goal + execution_context`。用户口头
+强调 GUI 时，这句话不会被复制为第二份结构化模式。当前 live vNext 仍只有
+GUI/control 工具，因此混合 GUI/CLI 自主选择尚未实现；后续必须由同一个
+Agent 在同一工具面直接选择，不能再增加前端开关、关键词 router 或预检模型。
+
+### 13.3 坐标责任边界
+
+坐标验收只检查以下等式：
+
+```text
+模型提交的 image 坐标
+  -> 唯一的 submitted-image/frame 映射
+  -> evidence 中的 physical_arguments
+  -> RawDevice 实际收到的物理坐标
+```
+
+现有原子 Adapter 回归已对 click、double-click、drag、带路径 drag、scroll
+逐点比较提交值和物理执行值，共 7 个动作形态通过。测试不读取目标 bbox，
+不判断按钮中心，也不做 offset、snap、重瞄或任务答案修正。目标是否命中只由
+独立 E2E oracle 判断；若映射一致但未命中，归因到模型视觉定位或观察质量。
+
+### 13.4 分支收敛门
+
+恢复点 `6ab5a9d` 的分支关系快照（相对当时的
+`codex/lean-gui-agent-core`；后续提交只会增加当前分支独有计数）：
+
+| 分支 | 当前分支独有 | 对方独有 | 处理 |
+| --- | ---: | ---: | --- |
+| `master` | 2 | 0 | 已是祖先，无代码可合并 |
+| `codex/vnext-gui-e2e-foundation` | 1 | 0 | 已是祖先，无代码可合并 |
+| `codex/vnext-agent-core` | 92 | 193 | 禁止整体 merge；逐能力审查 |
+| `fix/pr10-python-ci` | 92 | 194 | 只多一个 CI/路径修复候选；不得连同 193 个提交带入 |
+| `recovery/c4-canonical-from-d418-local` | 43 | 1 | 恢复快照，不作为运行主线 |
+| `recovery/c4-fa2e9caf-local` | 45 | 2 | 恢复快照，不作为运行主线 |
+| `test/pr15-legacy-electron-oracle` | 89 | 2 | 只评估 oracle 是否仍有独立价值 |
+
+每个候选能力采用同一流程：
+
+1. 用当前主线先构造随机、独立 oracle 的失败样本；
+2. 从旧分支只提取最小 owner，不连带旧 planner/状态/prompt；
+3. 在至少两个不同任务族上复验；
+4. 只有成功率或可恢复性有实质提升，且没有应用规则、提示增长和 owner 重复时保留；
+5. 同一 PR 删除被替代实现；不能长期双写；
+6. 无提升或只修当前模型偏差时丢弃候选。
+
+第一候选能力轴是“目标发现/激活/跨窗口恢复”，因为它直接阻塞跨应用任务；
+但在当前源码没有可重复失败与复验结果前，不 cherry-pick
+`vnext-agent-core` 的 target-acquisition 提交簇。
+
+### 13.5 Pi Agent 源码引入计划
+
+Pi 的当前上游已从 `badlogic/pi-mono` 迁到
+[`earendil-works/pi`](https://github.com/earendil-works/pi)，当前包名是
+`@earendil-works/pi-agent-core`。它适合评估替换的是“模型消息 → tool call
+→ tool result → 下一轮”这一小段 owner；它不提供 Windows 画面、坐标映射、
+窗口工作区、真实输入或外部 oracle。
+
+采用顺序：
+
+1. 不在当前主线直接安装，也不把 Pi 包再包一层新 runtime；
+2. 在短命 spike 分支用 Pi `Agent` 类和顺序工具执行复刻当前 Visual Actor
+   最小循环；使用 `Agent` 而不是低层 observational stream，保证消息事件在
+   tool preflight 前完成；
+3. 工具面仍是当前六种 GUI 动作与 claim/blocked，系统 prompt 不增加软件
+   规则；当前 JPEG、原始目标和有界 task state 直接进入同一 Agent；
+4. 先用 scripted provider 做行为同构测试，再跑 precise-click、
+   dynamic-hold、随机试卷和一个跨窗口随机组合任务；
+5. 只有 E2E 不回退、模型调用/错误恢复更清楚，并能在同一 PR 删除
+   `LiveVisualActor`/`ModelCallRuntime` 的等价 owner 时才落地；
+6. 若需要长期 Python↔Node 双循环、额外 RPC 状态机或大量 glue code，停止
+   引入；语言边界造成的新增复杂度会抵消 Pi 的简洁性。
+
+Pi 的 `beforeToolCall` 只可承载 schema、当前帧和物理所有权等机械检查，不能
+重建当前已删除的执行策略、应用白名单或任务路由。Pi 的 provider、steering、
+并行工具等其他能力均不默认引入；桌面 mutation 保持顺序，一动作一新帧。
+
+### 13.6 当前模型职责与压力
+
+当前单一 Visual Actor 负责：
+
+- 理解完整原始目标和口头要求；
+- 从当前 JPEG 选择语义目标与精确坐标；
+- 在小工具面中选择下一动作；
+- 维护有界 task state；
+- 根据新画面判断继续、blocked 或 claim。
+
+Runtime 负责当前画面真实性、坐标机械映射、窗口/指针所有权、真实输入和
+回执；它不替模型修目标、补坐标或规划应用流程。这个职责划分方向正确，但
+模型压力仍偏高：一个模型调用同时承担视觉定位、长任务覆盖记忆、动作 schema
+精度和停止判断。解决顺序应是更准确的可替换视觉模型、无遮挡观察和短小
+task state；不应重新拆出 Grounder、Verifier、Profiler 或在 prompt 中教学。
+
+现状只能称为“单一 GUI 主循环和基础动作链已打通”，不能称为通用可靠。
+当前精确源码只有最新随机精确点击 formal pass；最新动态长按出现外部任务
+成功但 Runtime 失败，最新随机三步点击则暴露模型重复错误动作直至耗尽回合。
+五个长任务没有获得当前精确源码上的 5/5。新架构思想基本正确，能力成熟度
+仍不足。
+
+### 13.7 当前源码 E2E 正反证据
+
+本轮先通过 GUI 刷新 Electron 客户端，使托管 Python 子进程重新加载当前工作
+树。第一次 `precise-click` 与 Python 全量回归并发时，`/api/status` 探测超时，
+没有进入 Agent 回合，也没有任何坐标动作；全量回归结束后同一 seed 重跑通过。
+这条失败保留为测试调度证据，不伪装为模型失败。
+
+| 用例 | seed / run | Runtime | 独立 oracle | 结论 |
+| --- | --- | --- | --- | --- |
+| `precise-click` | `7302026` / `arp-20260730-071320-ef6fb9` | done | passed | 当前 formal pass |
+| `dynamic-hold` | `7302031` / `arp-20260730-071613-c3e9ae` | `state_rejected` | passed | 任务到达成功态，但释放发生在失败清理，系统没有闭环 |
+| `ordered-clicks` | `7302032` / `arp-20260730-072342-178e5f` | turn budget exhausted | failed | 第一步正确，之后重复同一错误点击至 30 回合 |
+
+精确点击坐标证据只比较模型提交与物理执行：
+
+```text
+submitted image: 1120 x 595
+frame region:    (0, 0, 1920, 1021)
+model submitted: (418, 147)
+unique mapping:  (717, 252)
+physical attempt:(717, 252)
+exact match:     true
+```
+
+这里没有读取 target bbox 或计算按钮中心。外部 oracle 另行确认可信鼠标事件命中
+随机目标。动态长按和有序点击的失败也不通过新增重复动作 gate、任务提示或坐标
+补偿修复；它们进入后续模型对比基准和最小 loop owner 评估。

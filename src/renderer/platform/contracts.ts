@@ -1,15 +1,13 @@
 export const ARP_FORMAT = 'arp/1' as const;
 
 export type RuntimeVersion = 'legacy' | 'vnext';
-export type ExecutionConstraint = 'auto' | 'gui_required';
 
 export interface GoalAdmissionAudit {
   format: 'goal-admission/1';
   goal: string;
-  execution_constraint: ExecutionConstraint;
   route: 'live_gui';
   runtime_version: 'vnext';
-  reason: 'gui_first_auto_default' | 'explicit_gui_required';
+  reason: 'single_semantic_agent';
   no_legacy_fallback: true;
 }
 

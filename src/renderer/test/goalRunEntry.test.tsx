@@ -1,20 +1,15 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  AgentCockpit,
-  ExecutionConstraintSelector,
-} from '../components/platform/PlatformWorkbench';
+import { AgentCockpit } from '../components/platform/PlatformWorkbench';
 import { ControlPlaneClient } from '../platform/client';
 import type {
   ArpExecutionSnapshot,
   ArpGraph,
   ClientExecutionContext,
   DesktopTargetContext,
-  ExecutionConstraint,
 } from '../platform/contracts';
-import { startGoalWithConstraint } from '../platform/useControlPlane';
+import { startGoalWithDesktopHandoff } from '../platform/useControlPlane';
 
 function target(): DesktopTargetContext {
   return {
@@ -85,7 +80,7 @@ afterEach(() => {
 });
 
 describe('primary goal-run transport', () => {
-  it('posts only the goal, execution constraint, and client-owned context', async () => {
+  it('posts only the goal and client-owned context', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       ok: true,
       run_id: 'run-goal-test',
@@ -99,7 +94,6 @@ describe('primary goal-run transport', () => {
 
     await client.startGoalRun(
       'Complete the visible task',
-      'gui_required',
       executionContext(),
     );
 
@@ -110,7 +104,6 @@ describe('primary goal-run transport', () => {
     const submitted = JSON.parse(String(init?.body));
     expect(submitted).toEqual({
       goal: 'Complete the visible task',
-      execution_constraint: 'gui_required',
       execution_context: executionContext(),
     });
     expect(submitted).not.toHaveProperty('graph');
@@ -134,11 +127,10 @@ describe('primary goal-run transport', () => {
     const captureDesktopContext = vi.fn(async () => target());
     const startGoalRun = vi.fn(async (
       _goal: string,
-      _constraint: ExecutionConstraint,
       _context: ClientExecutionContext,
     ) => snapshot());
 
-    await startGoalWithConstraint(
+    await startGoalWithDesktopHandoff(
       { captureDesktopContext, startGoalRun } as never,
       '  Complete the visible task  ',
     );
@@ -148,9 +140,8 @@ describe('primary goal-run transport', () => {
     expect(releaseDesktopHandoff).not.toHaveBeenCalled();
     expect(captureDesktopContext).toHaveBeenCalledWith(7712);
     expect(startGoalRun).toHaveBeenCalledOnce();
-    const [goal, constraint, context] = startGoalRun.mock.calls[0];
+    const [goal, context] = startGoalRun.mock.calls[0];
     expect(goal).toBe('Complete the visible task');
-    expect(constraint).toBe('auto');
     expect(context).toMatchObject({
       format: 'execution-context/1',
       entrypoint: 'native_agent_cockpit',
@@ -183,7 +174,7 @@ describe('primary goal-run transport', () => {
     };
     const created = snapshot();
 
-    const result = await startGoalWithConstraint(
+    const result = await startGoalWithDesktopHandoff(
       {
         captureDesktopContext: vi.fn(async () => target()),
         startGoalRun: vi.fn(async () => created),
@@ -222,18 +213,7 @@ describe('primary goal-run transport', () => {
   });
 });
 
-describe('primary execution constraint', () => {
-  function SelectorHarness() {
-    const [value, setValue] = useState<ExecutionConstraint>('auto');
-    return (
-      <ExecutionConstraintSelector
-        value={value}
-        disabled={false}
-        onChange={setValue}
-      />
-    );
-  }
-
+describe('primary agent surface', () => {
   function cockpitPlane(
     startGoal = vi.fn(async () => undefined),
     currentRun: unknown = null,
@@ -254,20 +234,7 @@ describe('primary execution constraint', () => {
     };
   }
 
-  it('defaults to auto and exposes an explicit GUI-required choice', async () => {
-    const user = userEvent.setup();
-    render(<SelectorHarness />);
-
-    const selector = screen.getByLabelText('执行约束');
-    expect(selector).toHaveValue('auto');
-    expect(screen.getByRole('option', { name: '自动选择' })).toHaveValue('auto');
-    expect(screen.getByRole('option', { name: '必须使用 GUI' })).toHaveValue('gui_required');
-
-    await user.selectOptions(selector, 'gui_required');
-    expect(selector).toHaveValue('gui_required');
-  });
-
-  it('submits the selected constraint without runtime or compiler parameters', async () => {
+  it('submits the natural-language goal without execution policy controls', async () => {
     let finishRun: (() => void) | undefined;
     const startGoal = vi.fn(() => new Promise<void>((resolve) => {
       finishRun = resolve;
@@ -275,20 +242,16 @@ describe('primary execution constraint', () => {
     const user = userEvent.setup();
     render(<AgentCockpit plane={cockpitPlane(startGoal) as never} />);
 
-    const selector = screen.getByLabelText('执行约束');
-    expect(selector).toHaveValue('auto');
-    await user.selectOptions(selector, 'gui_required');
     await user.type(screen.getByRole('textbox'), 'Complete the visible task');
     await user.click(screen.getByRole('button', { name: '运行任务' }));
 
-    expect(startGoal).toHaveBeenCalledWith(
-      'Complete the visible task',
-      'gui_required',
-    );
-    expect(selector).toBeDisabled();
+    expect(startGoal).toHaveBeenCalledWith('Complete the visible task');
+    expect(screen.queryByLabelText('执行约束')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '运行任务' })).toBeDisabled();
     finishRun?.();
-    await waitFor(() => expect(selector).not.toBeDisabled());
-    expect(selector).toHaveValue('gui_required');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '运行任务' })).not.toBeDisabled();
+    });
   });
 
   it('shows the verified run result on the primary Agent surface', () => {

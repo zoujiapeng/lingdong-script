@@ -52,7 +52,6 @@ import type {
   ArpGraph,
   ChatGPTDesktopIntegration,
   CurrentRunResponse,
-  ExecutionConstraint,
   GraphValidation,
   InteractionActionState,
   InteractionRuntimeState,
@@ -113,31 +112,6 @@ const TOOL_LABELS: Record<string, string> = {
   drag: '拖拽', open_app: '打开应用', focus_window: '聚焦窗口', observe: '观察', done: '完成',
   capture_artifact: '创建工件', send_artifact: '发送工件', verify_delivery: '验证送达', open_conversation: '打开会话',
 };
-
-export function ExecutionConstraintSelector({
-  value,
-  disabled,
-  onChange,
-}: {
-  value: ExecutionConstraint;
-  disabled: boolean;
-  onChange: (value: ExecutionConstraint) => void;
-}) {
-  return (
-    <label className="arp-runtime-version-control">
-      <span>执行约束</span>
-      <select
-        aria-label="执行约束"
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.value as ExecutionConstraint)}
-      >
-        <option value="auto">自动选择</option>
-        <option value="gui_required">必须使用 GUI</option>
-      </select>
-    </label>
-  );
-}
 
 function viewFromStore(mode: UIState['viewMode']): PlatformView {
   if (mode === 'studio' || mode === 'canvas' || mode === 'pseudocode') return 'studio';
@@ -894,7 +868,6 @@ function TaskContractRuntimeSection({
 
 export function AgentCockpit({ plane }: { plane: Plane }) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
-  const [executionConstraint, setExecutionConstraint] = useState<ExecutionConstraint>('auto');
   const [submitting, setSubmitting] = useState(false);
   const [controlling, setControlling] = useState(false);
   const [actionError, setActionError] = useState('');
@@ -925,13 +898,9 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
     }
     setSubmitting(true);
     setActionError('');
-    const frozenExecutionConstraint = executionConstraint;
     try {
       localStorage.setItem('arp-last-goal', goal.trim());
-      await plane.startGoal(
-        goal.trim(),
-        frozenExecutionConstraint,
-      );
+      await plane.startGoal(goal.trim());
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setActionError(message);
@@ -983,11 +952,6 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
           disabled={active}
         />
         <div className="arp-command-actions">
-          <ExecutionConstraintSelector
-            value={executionConstraint}
-            disabled={active || submitting}
-            onChange={setExecutionConstraint}
-          />
           <div className="arp-action-spacer" />
           {active ? (
             <>
