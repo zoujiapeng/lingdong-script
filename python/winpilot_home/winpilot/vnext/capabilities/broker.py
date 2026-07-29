@@ -26,9 +26,6 @@ from .state import (
     _broker_projection_id,
 )
 
-_POINTER_ACTIVATION_TOOLS = frozenset({"click", "double_click"})
-
-
 @dataclass(frozen=True, slots=True)
 class CapabilityBroker:
     """Project one bounded tool surface from immutable accepted facts."""
@@ -42,23 +39,6 @@ class CapabilityBroker:
     @staticmethod
     def _active_id(mission: MissionProjection) -> str:
         return str(mission.active_obligation_id or "mission")
-
-    @staticmethod
-    def _temporarily_withheld_tools(
-        mission: MissionProjection,
-    ) -> frozenset[str]:
-        failure = mission.failure_summary
-        transition = mission.last_transition
-        if (
-            failure is None
-            or failure.kind != "repeated_action_suppressed"
-            or transition is None
-            or not transition.input_completed
-        ):
-            return frozenset()
-        if transition.action in _POINTER_ACTIVATION_TOOLS:
-            return _POINTER_ACTIVATION_TOOLS
-        return frozenset({transition.action})
 
     @staticmethod
     def _target_bound(mission: MissionProjection, state: BrokerRuntimeState) -> bool:
@@ -159,6 +139,14 @@ class CapabilityBroker:
         }
         return all(checks[item] for item in tool.prerequisites)
 
+    @staticmethod
+    def _pointer_is_owned_held(state: BrokerRuntimeState) -> bool:
+        return bool(
+            state.pointer.disposition is PointerDisposition.HELD
+            and state.pointer.physically_owned
+            and state.pointer.lease_id
+        )
+
     @classmethod
     def _tool_eligible(
         cls,
@@ -168,6 +156,14 @@ class CapabilityBroker:
         capabilities: set[str],
     ) -> bool:
         if tool.route is not ToolRoute.VISUAL_ACTOR:
+            return False
+        pointer_held = cls._pointer_is_owned_held(state)
+        if state.pointer.disposition is PointerDisposition.UNKNOWN:
+            return False
+        if (
+            state.pointer.disposition is PointerDisposition.HELD
+            and (not pointer_held or tool.name != "drag")
+        ):
             return False
         if (
             state.interaction_mode is InteractionMode.GUI_REQUIRED
@@ -201,7 +197,6 @@ class CapabilityBroker:
             if (
                 mission.status is not MissionStatus.RUNNING
                 or not cls._runtime_writable(state)
-                or state.pointer.disposition is not PointerDisposition.RELEASED
                 or not cls._target_bound(mission, state)
                 or not cls._frame_valid(mission, state)
                 or not tool.required_any_capabilities
@@ -435,7 +430,14 @@ class CapabilityBroker:
                 missing=(),
                 reasons=("runtime_not_writable",),
             )
-        if state.pointer.disposition is not PointerDisposition.RELEASED:
+        pointer_held = self._pointer_is_owned_held(state)
+        if (
+            state.pointer.disposition is PointerDisposition.UNKNOWN
+            or (
+                state.pointer.disposition is PointerDisposition.HELD
+                and not pointer_held
+            )
+        ):
             tools = self._named_nonmutation_tools(
                 ("wait", "blocked"), mission, state
             )
@@ -447,7 +449,7 @@ class CapabilityBroker:
                 tool_names=tools,
                 grants=(),
                 missing=(),
-                reasons=("pointer_not_released",),
+                reasons=("pointer_not_owned",),
             )
 
         obligation = mission.obligation_definition(active_id)
@@ -504,7 +506,11 @@ class CapabilityBroker:
                 reasons=("required_capability_not_accepted",),
             )
 
-        offered = self._offer(required, mission, state)
+        offered = None if pointer_held else self._offer(
+            required,
+            mission,
+            state,
+        )
         if offered is not None:
             offer, tools = offered
             route = (
@@ -525,11 +531,9 @@ class CapabilityBroker:
             )
 
         capabilities = required
-        withheld = self._temporarily_withheld_tools(mission)
         tools = tuple(
             tool.name
             for tool in self.catalog.tools
-            if tool.name not in withheld
             if self._tool_eligible(
                 tool, mission, state, capabilities
             )
@@ -561,21 +565,9 @@ class CapabilityBroker:
                 (
                     "gui_required_policy_enforced",
                     "visual_actor_surface_projected",
-                    *(
-                        ("repeated_action_temporarily_withheld",)
-                        if withheld
-                        else ()
-                    ),
                 )
                 if state.interaction_mode is InteractionMode.GUI_REQUIRED
-                else (
-                    "visual_actor_surface_projected",
-                    *(
-                        ("repeated_action_temporarily_withheld",)
-                        if withheld
-                        else ()
-                    ),
-                )
+                else ("visual_actor_surface_projected",)
             ),
         )
 

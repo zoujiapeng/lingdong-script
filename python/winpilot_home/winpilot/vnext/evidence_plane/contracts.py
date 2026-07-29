@@ -59,6 +59,7 @@ _TRANSITION_FIELDS = (
     "action_effect_evidence",
 )
 _MAX_URI_LENGTH = 4096
+_MAX_DRAG_PATH_POINTS = 32
 _ACTOR_ENVELOPE_FIELDS = (
     "format",
     "decision_id",
@@ -370,7 +371,7 @@ def _validate_submitted_arguments(
     value: Any,
     name: str = "canonical_arguments",
 ) -> Mapping[str, Any]:
-    fields = {
+    fields: tuple[str, ...] = {
         "click": ("image_x", "image_y"),
         "double_click": ("image_x", "image_y"),
         "drag": ("image_x1", "image_y1", "image_x2", "image_y2"),
@@ -378,6 +379,11 @@ def _validate_submitted_arguments(
         "type_text": ("text",),
         "hotkey": ("keys",),
     }[action]
+    if action == "drag" and type(value) is dict:
+        if "image_points" in value:
+            fields = (*fields, "image_points")
+        if "keep_holding" in value:
+            fields = (*fields, "keep_holding")
     item = _strict_mapping(value, fields, name)
     coordinate_names = (
         ("image_x1", "image_y1", "image_x2", "image_y2")
@@ -396,15 +402,49 @@ def _validate_submitted_arguments(
             raise RuntimeEvidenceContractError(
                 f"{name}.{coordinate} must be a finite submitted-image coordinate"
             )
-    if action == "drag" and (
+    stationary_drag = action == "drag" and (
         item["image_x1"],
         item["image_y1"],
     ) == (
         item["image_x2"],
         item["image_y2"],
+    )
+    if stationary_drag and not (
+        item.get("keep_holding") is False
+        and not item.get("image_points")
     ):
         raise RuntimeEvidenceContractError(
             f"{name} drag endpoints must be distinct"
+        )
+    if action == "drag" and "image_points" in item:
+        points = item["image_points"]
+        if type(points) is not list or len(points) > _MAX_DRAG_PATH_POINTS:
+            raise RuntimeEvidenceContractError(
+                f"{name}.image_points must be an array of at most "
+                f"{_MAX_DRAG_PATH_POINTS} points"
+            )
+        for index, point in enumerate(points):
+            if type(point) is not list or len(point) != 2:
+                raise RuntimeEvidenceContractError(
+                    f"{name}.image_points[{index}] must be a two-number point"
+                )
+            if any(
+                type(coordinate) not in {int, float}
+                or not math.isfinite(float(coordinate))
+                or float(coordinate) < 0
+                for coordinate in point
+            ):
+                raise RuntimeEvidenceContractError(
+                    f"{name}.image_points[{index}] must contain finite "
+                    "non-negative submitted-image coordinates"
+                )
+    if (
+        action == "drag"
+        and "keep_holding" in item
+        and type(item["keep_holding"]) is not bool
+    ):
+        raise RuntimeEvidenceContractError(
+            f"{name}.keep_holding must be boolean"
         )
     if action == "scroll":
         amount = item["amount"]
@@ -477,13 +517,25 @@ def _validate_actor_envelope(
         envelope["allowed_evidence_scope"],
         "actor_envelope.allowed_evidence_scope",
     )
-    if (
-        envelope["frame_scope"] != "target_window"
-        or envelope["pointer_disposition"] != "released"
-        or envelope["pointer_lease_id"] is not None
-    ):
+    if envelope["frame_scope"] != "target_window":
         raise RuntimeEvidenceContractError(
             "actor_envelope changed the bounded live-frame contract"
+        )
+    pointer_disposition = envelope["pointer_disposition"]
+    pointer_lease_id = envelope["pointer_lease_id"]
+    if pointer_disposition == "released":
+        if pointer_lease_id is not None:
+            raise RuntimeEvidenceContractError(
+                "released actor_envelope must not carry a pointer lease"
+            )
+    elif pointer_disposition == "held":
+        _identity(
+            pointer_lease_id,
+            "actor_envelope.pointer_lease_id",
+        )
+    else:
+        raise RuntimeEvidenceContractError(
+            "actor_envelope.pointer_disposition must be released or held"
         )
     _validate_frame_identity(
         {
@@ -520,6 +572,24 @@ def _validate_actor_envelope(
         proposal["args"],
         "actor_envelope.proposal.args",
     )
+    if (
+        action == "drag"
+        and (
+            arguments["image_x1"],
+            arguments["image_y1"],
+        ) == (
+            arguments["image_x2"],
+            arguments["image_y2"],
+        )
+        and pointer_disposition != "held"
+    ):
+        raise RuntimeEvidenceContractError(
+            "stationary drag is only a held-pointer release"
+        )
+    if pointer_disposition == "held" and action != "drag":
+        raise RuntimeEvidenceContractError(
+            "held actor_envelope permits only a drag proposal"
+        )
     return (
         _frozen_object(envelope, "actor_envelope"),
         _frozen_object(proposal, "actor_envelope.proposal"),
@@ -1147,7 +1217,7 @@ def _validate_physical_arguments(
     action: str,
     value: Any,
 ) -> Mapping[str, Any]:
-    fields = {
+    fields: tuple[str, ...] = {
         "click": ("kind", "x", "y", "button", "click_count"),
         "double_click": ("kind", "x", "y", "button", "click_count"),
         "drag": ("kind", "x1", "y1", "x2", "y2", "button"),
@@ -1161,6 +1231,11 @@ def _validate_physical_arguments(
         "type_text": ("kind", "text"),
         "hotkey": ("kind", "modifiers", "key"),
     }[action]
+    if action == "drag" and type(value) is dict:
+        if "points" in value:
+            fields = (*fields, "points")
+        if "started_held" in value or "keep_holding" in value:
+            fields = (*fields, "started_held", "keep_holding")
     item = _strict_mapping(value, fields, "physical_arguments")
     expected_kind = {
         "click": "pointer_click",
@@ -1186,6 +1261,28 @@ def _validate_physical_arguments(
                 raise RuntimeEvidenceContractError(
                     f"physical_arguments.{name} must be an integer"
                 )
+        if "points" in item:
+            points = item["points"]
+            if type(points) is not list or len(points) > _MAX_DRAG_PATH_POINTS:
+                raise RuntimeEvidenceContractError(
+                    "physical_arguments.points must be an array of at most "
+                    f"{_MAX_DRAG_PATH_POINTS} points"
+                )
+            for index, point in enumerate(points):
+                if (
+                    type(point) is not list
+                    or len(point) != 2
+                    or any(type(coordinate) is not int for coordinate in point)
+                ):
+                    raise RuntimeEvidenceContractError(
+                        "physical_arguments.points"
+                        f"[{index}] must be a two-integer point"
+                    )
+        for name in ("started_held", "keep_holding"):
+            if name in item and type(item[name]) is not bool:
+                raise RuntimeEvidenceContractError(
+                    f"physical_arguments.{name} must be boolean"
+                )
     if action in {"click", "double_click"}:
         expected_count = 2 if action == "double_click" else 1
         if (
@@ -1197,9 +1294,18 @@ def _validate_physical_arguments(
                 "physical click payload is not the admitted left click count"
             )
     elif action == "drag":
+        stationary_finish = bool(
+            item.get("started_held") is True
+            and item.get("keep_holding") is False
+            and not item.get("points")
+            and (item["x1"], item["y1"]) == (item["x2"], item["y2"])
+        )
         if (
             item["button"] != "left"
-            or (item["x1"], item["y1"]) == (item["x2"], item["y2"])
+            or (
+                (item["x1"], item["y1"]) == (item["x2"], item["y2"])
+                and not stationary_finish
+            )
         ):
             raise RuntimeEvidenceContractError(
                 "physical drag payload is not a distinct left-button gesture"
@@ -1294,6 +1400,36 @@ class PhysicalAttemptRecord:
             action,
             _thaw(self.physical_arguments),
         )
+        if action == "drag":
+            has_submitted_path = "image_points" in submitted
+            has_physical_path = "points" in physical
+            if has_submitted_path != has_physical_path:
+                raise RuntimeEvidenceContractError(
+                    "submitted and physical drag path fields must be paired"
+                )
+            if (
+                has_submitted_path
+                and len(submitted["image_points"]) != len(physical["points"])
+            ):
+                raise RuntimeEvidenceContractError(
+                    "submitted and physical drag paths must have equal length"
+                )
+            has_submitted_hold = "keep_holding" in submitted
+            has_physical_hold = (
+                "started_held" in physical
+                or "keep_holding" in physical
+            )
+            if has_submitted_hold != has_physical_hold:
+                raise RuntimeEvidenceContractError(
+                    "submitted and physical drag hold fields must be paired"
+                )
+            if (
+                has_submitted_hold
+                and physical["keep_holding"] != submitted["keep_holding"]
+            ):
+                raise RuntimeEvidenceContractError(
+                    "physical drag keep_holding changed submitted intent"
+                )
         if action == "type_text" and physical["text"] != submitted["text"]:
             raise RuntimeEvidenceContractError(
                 "physical type_text changed submitted text"
@@ -1508,19 +1644,24 @@ class ActionExecutionBinding:
             )
         )
         post_id = transition["post_frame_id"]
+        stable_fields = (
+            "epoch",
+            "hwnd",
+            "scope",
+            "media_type",
+        )
+        geometry_change_is_unresolved_applied_input = (
+            transition["outcome"] == "unknown"
+            and transition["input_completed"] is True
+        )
+        if not geometry_change_is_unresolved_applied_input:
+            stable_fields += ("region", "submitted_size")
         if after is not None and (
             after["frame_id"] != before["frame_id"] + 1
             or (post_id is not None and after["frame_id"] != post_id)
             or any(
                 after[field] != before[field]
-                for field in (
-                    "epoch",
-                    "hwnd",
-                    "region",
-                    "scope",
-                    "submitted_size",
-                    "media_type",
-                )
+                for field in stable_fields
             )
         ):
             raise RuntimeEvidenceContractError(

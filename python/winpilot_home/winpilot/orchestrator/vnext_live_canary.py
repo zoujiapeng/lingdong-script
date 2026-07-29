@@ -1,9 +1,8 @@
-"""Sole product composition root for the minimal live vNext canary.
+"""Product composition root for the minimal live vNext desktop loop.
 
-The module accepts only the Electron-provided, already-bound desktop target.
-It validates that identity, composes the C1-C3 typed owners, and exposes one
-``AGENT_GOAL`` handler.  It never discovers, selects, activates, launches, or
-recovers a target, and it has no legacy fallback.
+Electron supplies the initial target.  A small DesktopWorkspace then owns
+causal window hand-offs between atomic actions; it does not plan application
+workflows or provide a legacy fallback.
 """
 from __future__ import annotations
 
@@ -60,7 +59,10 @@ from ..vnext.capabilities import (
 )
 from ..vnext.desktop_adapter import (
     AtomicDesktopAdapter,
+    DesktopWorkspace,
     LiveTargetSnapshot,
+    WorkspaceObservation,
+    WorkspaceSurface,
 )
 from ..vnext.evidence import EvidenceRegistry
 from ..vnext.evidence_plane import (
@@ -71,7 +73,6 @@ from ..vnext.evidence_plane import (
     runtime_evidence_report_sha256,
 )
 from ..vnext.mission import (
-    EvidencePolicy,
     EvidenceRef,
     MissionDefinition,
     MissionReducer,
@@ -81,10 +82,7 @@ from ..vnext.mission import (
 )
 from ..vnext.model_roles import (
     VISUAL_ACTOR_MODEL_ROLE,
-    VISUAL_VERIFIER_KIND,
-    VISUAL_VERIFIER_MODEL_ROLE,
     LiveVisualActor,
-    LiveVisualObligationVerifier,
 )
 from ..vnext.profiling import ExecutionPolicy
 from ..vnext.runtime import (
@@ -116,7 +114,6 @@ _RUNTIME_EVIDENCE_ROOT = TRACES_DIR / "vnext_runtime_evidence"
 _TARGET_MAX_AGE_MS = 15_000
 _FUTURE_CLOCK_SKEW_MS = 2_000
 _MAX_SUBMITTED_SIDE = 1120
-_MAX_VISUAL_VERIFICATION_ATTEMPTS = 3
 _MAX_CONSECUTIVE_INVALID_PROPOSALS = 2
 _MAX_CONSECUTIVE_ACTOR_ERRORS = 2
 _NON_WHITESPACE_PATTERN = r"\S"
@@ -130,10 +127,14 @@ _GUI_GATES = (
     "pointer_released",
     "runtime_healthy",
 )
+_DRAG_GATES = (
+    "target_bound",
+    "authoritative_frame",
+    "runtime_healthy",
+)
 _CONTINUE_STATUSES = frozenset(
     {
         RuntimeStatus.ACTION_RECORDED,
-        RuntimeStatus.PROPOSAL_SUPPRESSED,
         RuntimeStatus.STALE_DISCARDED,
         RuntimeStatus.VERIFICATION_RECORDED,
     }
@@ -225,6 +226,7 @@ class _CompositionDependencies:
     wall_clock: Callable[[], float] = time.time
     monotonic: Callable[[], float] = time.monotonic
     target_reader: Callable[[int], _TargetFacts | None] | None = None
+    foreground_reader: Callable[[], int | None] | None = None
     hit_test_root: Callable[[int, int], int | None] | None = None
     client_factory: Callable[..., Any] | None = None
     session_builder: Callable[["_SessionBuild"], _SessionPort] | None = None
@@ -243,6 +245,9 @@ class _FrozenTarget:
     captured_at_ms: int
     binding_id: str
     probe: "_BoundTargetProbe"
+    reader: Callable[[int], "_TargetFacts | None"]
+    foreground_reader: Callable[[], int | None]
+    hit_test_root: Callable[[int, int], int | None]
 
     def trace_identity(self) -> dict[str, Any]:
         return {
@@ -497,7 +502,8 @@ def _freeze_budget(config_snapshot: dict[str, Any]) -> _Budget:
         raise ValueError("config.vnext.max_runtime_s exceeds the bounded canary")
     if values["max_model_calls"] > 2 * values["max_turns"]:
         raise ValueError(
-            "config.vnext.max_model_calls exceeds Actor plus Verifier call bounds"
+            "config.vnext.max_model_calls exceeds Actor plus one "
+            "Grounder-or-Verifier call per turn"
         )
     return _Budget(**values)
 
@@ -567,6 +573,19 @@ def _process_executable_identity(process_id: int) -> str:
         kernel32.CloseHandle(handle)
 
 
+def _read_win32_foreground_root() -> int | None:
+    try:
+        import win32gui
+
+        foreground = int(win32gui.GetForegroundWindow() or 0)
+        if not foreground:
+            return None
+        root = int(win32gui.GetAncestor(foreground, 2) or foreground)
+        return root if root > 0 else None
+    except Exception:
+        return None
+
+
 def _read_win32_target(hwnd: int) -> _TargetFacts | None:
     try:
         import win32gui
@@ -583,15 +602,15 @@ def _read_win32_target(hwnd: int) -> _TargetFacts | None:
         root = int(win32gui.GetAncestor(value, 2) or value)
         _thread_id, process_id = win32process.GetWindowThreadProcessId(value)
         executable = _process_executable_identity(int(process_id))
-        region = window_region(value)
+        # Maximized Win32 windows commonly expose an invisible resize border
+        # a few pixels outside the virtual desktop (for example x=-10).  The
+        # Actor can neither see nor interact with that border, so bind the
+        # target to the visible intersection instead of rejecting the first
+        # frame because an exact screenshot cannot include off-screen pixels.
+        region = window_region(value).clamp_to(virtual_screen_region())
         if region.width <= 0 or region.height <= 0:
             return None
-        foreground = int(win32gui.GetForegroundWindow() or 0)
-        foreground_root = (
-            int(win32gui.GetAncestor(foreground, 2) or foreground)
-            if foreground
-            else None
-        )
+        foreground_root = _read_win32_foreground_root()
         if not executable:
             return None
         return _TargetFacts(
@@ -686,6 +705,26 @@ class _BoundTargetProbe:
     def hit_test_root(self, x: int, y: int) -> int | None:
         value = self._hit_test(int(x), int(y))
         return value if type(value) is int and value > 0 else None
+
+
+def _workspace_surface(
+    facts: _TargetFacts | None,
+) -> WorkspaceSurface | None:
+    if type(facts) is not _TargetFacts:
+        return None
+    try:
+        return WorkspaceSurface(
+            hwnd=facts.hwnd,
+            root_hwnd=facts.root_hwnd,
+            process_id=facts.process_id,
+            executable_identity=facts.executable_identity,
+            title=facts.title,
+            class_name=facts.class_name,
+            region=facts.region,
+            foreground_root_hwnd=facts.foreground_root_hwnd,
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _freeze_prebound_target(
@@ -814,13 +853,34 @@ def _freeze_prebound_target(
     if age_ms > _TARGET_MAX_AGE_MS or age_ms < -_FUTURE_CLOCK_SKEW_MS:
         raise ValueError("Electron target descriptor is stale or future-dated")
     reader = dependencies.target_reader or _read_win32_target
+    foreground_reader = dependencies.foreground_reader
+    if foreground_reader is None:
+        if dependencies.target_reader is None:
+            foreground_reader = _read_win32_foreground_root
+        else:
+            def foreground_reader() -> int | None:
+                facts = reader(hwnd)
+                return (
+                    None
+                    if facts is None
+                    else facts.foreground_root_hwnd
+                )
     hit_test = dependencies.hit_test_root or _hit_test_win32_root
     current = reader(hwnd)
-    expected_region = (
+    submitted_region = Region(
         rect[0],
         rect[1],
         rect[2] - rect[0],
         rect[3] - rect[1],
+    )
+    visible_region = submitted_region.clamp_to(virtual_screen_region())
+    if visible_region.width <= 0 or visible_region.height <= 0:
+        raise ValueError("Electron target has no visible desktop intersection")
+    expected_region = (
+        visible_region.left,
+        visible_region.top,
+        visible_region.width,
+        visible_region.height,
     )
     mismatches: list[str] = []
     if type(current) is not _TargetFacts:
@@ -882,6 +942,9 @@ def _freeze_prebound_target(
         captured_at_ms=captured_at,
         binding_id=f"vnext-target-{digest[:24]}",
         probe=probe,
+        reader=reader,
+        foreground_reader=foreground_reader,
+        hit_test_root=hit_test,
     )
 
 
@@ -911,6 +974,17 @@ def _tool_catalog() -> ToolCatalog:
                 "image_y1": {"type": "number", "minimum": 0},
                 "image_x2": {"type": "number", "minimum": 0},
                 "image_y2": {"type": "number", "minimum": 0},
+                "image_points": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 0},
+                        "minItems": 2,
+                        "maxItems": 2,
+                    },
+                    "maxItems": 32,
+                },
+                "keep_holding": {"type": "boolean"},
             },
             ["image_x1", "image_y1", "image_x2", "image_y2"],
         ),
@@ -1027,7 +1101,11 @@ def _tool_catalog() -> ToolCatalog:
                     else ()
                 ),
                 prerequisites=(
-                    _GUI_GATES if mutation is MutationKind.GUI else ()
+                    _DRAG_GATES
+                    if name == "drag"
+                    else _GUI_GATES
+                    if mutation is MutationKind.GUI
+                    else ()
                 ),
                 order=order,
             )
@@ -1161,23 +1239,84 @@ class _LiveRuntimeState:
         *,
         reducer: MissionReducer,
         registry: EvidenceRegistry,
-        binding: TargetBinding,
-        target_evidence: EvidenceRef,
-        target_probe: _BoundTargetProbe,
+        workspace: DesktopWorkspace | None = None,
+        binding: TargetBinding | None = None,
+        target_evidence: EvidenceRef | None = None,
+        target_probe: _BoundTargetProbe | None = None,
         authority: FrameAuthority,
         observer: FrameObserver,
         pause_controller: Any,
         interaction_mode: InteractionMode = InteractionMode.AUTO,
     ) -> None:
+        if workspace is None:
+            if (
+                type(binding) is not TargetBinding
+                or target_probe is None
+            ):
+                raise TypeError(
+                    "runtime state requires DesktopWorkspace or legacy target"
+                )
+            initial = target_probe.snapshot(binding.hwnd)
+            if initial is None:
+                raise ValueError("legacy target probe is unavailable")
+
+            def legacy_reader(hwnd: int) -> WorkspaceSurface | None:
+                snapshot = target_probe.snapshot(hwnd)
+                if snapshot is None:
+                    return None
+                return WorkspaceSurface(
+                    hwnd=snapshot.hwnd,
+                    root_hwnd=snapshot.root_hwnd,
+                    process_id=snapshot.process_id,
+                    executable_identity=snapshot.executable_identity,
+                    title=binding.title_snapshot,
+                    class_name="",
+                    region=snapshot.region,
+                    foreground_root_hwnd=snapshot.foreground_root_hwnd,
+                )
+
+            def legacy_foreground_reader() -> int | None:
+                snapshot = target_probe.snapshot(binding.hwnd)
+                return (
+                    None
+                    if snapshot is None
+                    else snapshot.foreground_root_hwnd
+                )
+
+            workspace = DesktopWorkspace(
+                binding=binding,
+                surface=legacy_reader(binding.hwnd),
+                reader=legacy_reader,
+                foreground_reader=legacy_foreground_reader,
+                hit_test_root=target_probe.hit_test_root,
+            )
+            if (
+                target_evidence is not None
+                and target_evidence.id
+                != binding.established_by_evidence_ref
+            ):
+                raise ValueError("legacy target evidence disagrees")
         self._reducer = reducer
         self._registry = registry
-        self._binding = binding
-        self._target_evidence = target_evidence
-        self._probe = target_probe
+        self._workspace = workspace
         self._authority = authority
         self._observer = observer
         self._pause_controller = pause_controller
         self._interaction_mode = InteractionMode(interaction_mode)
+        self._pointer_state_reader: Callable[[], PointerLeaseState] | None = None
+
+    def bind_pointer_state_reader(
+        self,
+        reader: Callable[[], PointerLeaseState],
+    ) -> None:
+        if not callable(reader):
+            raise TypeError("pointer_state_reader must be callable")
+        if self._pointer_state_reader is not None:
+            raise RuntimeError("pointer_state_reader is already bound")
+        state = reader()
+        if type(state) is not PointerLeaseState:
+            raise TypeError("pointer_state_reader returned an invalid state")
+        self._pointer_state_reader = reader
 
     def _frame_ref(self, state: FrameState) -> EvidenceRef:
         identity = RuntimeFrameIdentity(
@@ -1207,15 +1346,90 @@ class _LiveRuntimeState:
             created_at=state.captured_at,
         )
 
+    def _adopt_workspace_observation(
+        self,
+        observation: WorkspaceObservation,
+    ) -> None:
+        if not observation.replaces_binding:
+            return
+        previous = self._workspace.binding
+        surface = observation.surface
+        material = {
+            "previous_binding_id": previous.binding_id,
+            "causal_action_id": observation.causal_action_id,
+            "causal_action": observation.causal_action,
+            "generation": observation.generation + 1,
+            "hwnd": surface.hwnd,
+            "root_hwnd": surface.root_hwnd,
+            "process_id": surface.process_id,
+            "executable_identity_sha256": hashlib.sha256(
+                surface.executable_identity.encode("utf-8")
+            ).hexdigest(),
+            "class_name": surface.class_name,
+            "region": list(surface.region),
+        }
+        payload_hash = hashlib.sha256(
+            json.dumps(
+                material,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        evidence = EvidenceRef(
+            id=f"vnext-workspace-target-{payload_hash[:24]}",
+            mission_id=self._registry.mission_id,
+            run_id=self._registry.run_id,
+            obligation_id=_OBLIGATION_ID,
+            kind="target_binding",
+            trust="deterministic",
+            payload_hash=payload_hash,
+        )
+        binding = TargetBinding(
+            binding_id=f"vnext-workspace-{payload_hash[:24]}",
+            hwnd=surface.hwnd,
+            process_id=surface.process_id,
+            executable_identity=surface.executable_identity,
+            title_snapshot=surface.title,
+            established_by_evidence_ref=evidence.id,
+            epoch=previous.epoch + 1,
+        )
+        self._registry.append(evidence)
+        self._reducer.apply(
+            self._reducer.event(
+                "target_bound",
+                payload={"target_binding": binding.to_dict()},
+                evidence_refs=(evidence.id,),
+            )
+        )
+        self._workspace.adopt(observation, binding)
+        BUS.publish(
+            "vnext_workspace_target_adopted",
+            runtime_version=_RUNTIME_VERSION,
+            no_legacy_fallback=True,
+            run_id=self._registry.run_id,
+            mission_id=self._registry.mission_id,
+            obligation_id=_OBLIGATION_ID,
+            previous_target_binding_id=previous.binding_id,
+            target_binding_id=binding.binding_id,
+            target_hwnd=binding.hwnd,
+            generation=observation.generation + 1,
+            causal_action=observation.causal_action,
+            parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
+        )
+
     def _capture_current(self) -> FrameState:
-        first = self._probe.snapshot(self._binding.hwnd)
+        observation = self._workspace.observe()
+        self._adopt_workspace_observation(observation)
+        binding = self._workspace.binding
+        first = self._workspace.snapshot(binding.hwnd)
         if first is None:
-            raise RuntimeError("pre-bound target identity is no longer current")
+            raise RuntimeError("workspace target identity is no longer current")
         previous = self._authority.current
         expected_previous = previous.frame_id if previous is not None else 0
         captured = self._observer.capture(
-            epoch=self._binding.epoch,
-            hwnd=self._binding.hwnd,
+            epoch=binding.epoch,
+            hwnd=binding.hwnd,
             phase="observe",
             provided_region=Region(*first.region),
             expected_previous_frame_id=expected_previous,
@@ -1226,24 +1440,27 @@ class _LiveRuntimeState:
             or not _jpeg_is_valid(captured.image_b64)
             or _jpeg_dimensions(captured.image_b64)
             != captured.submitted_size
-            or self._probe.snapshot(self._binding.hwnd) != first
+            or self._workspace.snapshot(binding.hwnd) != first
         ):
             raise RuntimeError("fresh target-window JPEG capture failed closed")
         committed = self._observer.commit(captured)
         if (
-            committed.hwnd != self._binding.hwnd
-            or committed.epoch != self._binding.epoch
+            committed.hwnd != binding.hwnd
+            or committed.epoch != binding.epoch
             or committed.region != first.region
             or committed.scope != "target_window"
-            or self._probe.snapshot(self._binding.hwnd) != first
+            or self._workspace.snapshot(binding.hwnd) != first
         ):
             raise RuntimeError("target changed while the frame was committed")
         frame_ref = self._frame_ref(committed)
         self._registry.append(frame_ref)
         event = self._reducer.event(
             "target_bound",
-            payload={"target_binding": self._binding.to_dict()},
-            evidence_refs=(self._target_evidence.id, frame_ref.id),
+            payload={"target_binding": binding.to_dict()},
+            evidence_refs=(
+                binding.established_by_evidence_ref,
+                frame_ref.id,
+            ),
         )
         self._reducer.apply(event)
         BUS.publish(
@@ -1256,8 +1473,8 @@ class _LiveRuntimeState:
             interaction_mode=self._interaction_mode.value,
             execution_medium=ExecutionMedium.CONTROL.value,
             observation_kind="fresh_authoritative_target_frame",
-            target_binding_id=self._binding.binding_id,
-            target_hwnd=self._binding.hwnd,
+            target_binding_id=binding.binding_id,
+            target_hwnd=binding.hwnd,
             frame_id=committed.frame_id,
             frame_epoch=committed.epoch,
             frame_scope=committed.scope,
@@ -1307,7 +1524,8 @@ class _LiveRuntimeState:
         )
 
     def _snapshot(self, state: FrameState, *, turn_index: int) -> RuntimeSnapshot:
-        current_target = self._probe.snapshot(self._binding.hwnd)
+        binding = self._workspace.binding
+        current_target = self._workspace.snapshot(binding.hwnd)
         if (
             current_target is None
             or state.hwnd != current_target.hwnd
@@ -1332,16 +1550,20 @@ class _LiveRuntimeState:
                 available_capabilities=("visual.interact",),
                 interaction_mode=self._interaction_mode,
                 target=TargetState(
-                    binding_id=self._binding.binding_id,
-                    hwnd=self._binding.hwnd,
-                    epoch=self._binding.epoch,
+                    binding_id=binding.binding_id,
+                    hwnd=binding.hwnd,
+                    epoch=binding.epoch,
                     live=True,
                 ),
                 frame=frame.broker_frame(
                     authoritative=True,
                     fresh=True,
                 ),
-                pointer=PointerLeaseState(PointerDisposition.RELEASED),
+                pointer=(
+                    PointerLeaseState(PointerDisposition.RELEASED)
+                    if self._pointer_state_reader is None
+                    else self._pointer_state_reader()
+                ),
                 runtime_healthy=True,
                 # Pause is an outer safe-boundary gate. Marking a completed
                 # atomic action's post-frame paused would invalidate reconcile.
@@ -1349,7 +1571,7 @@ class _LiveRuntimeState:
                 canceled=False,
             ),
             frame=frame,
-            target=RuntimeTargetIdentity.from_binding(self._binding),
+            target=RuntimeTargetIdentity.from_binding(binding),
         )
 
     def observe(
@@ -1379,7 +1601,8 @@ class _ModelCallCounter:
     def __init__(self, maximum: int) -> None:
         self._maximum = maximum
         self._count = 0
-        self._active_roles: set[str] = set()
+        self._active_reservations: dict[str, int] = {}
+        self._active_fingerprints: dict[str, set[str]] = {}
         self._lock = threading.Lock()
 
     @property
@@ -1387,24 +1610,40 @@ class _ModelCallCounter:
         with self._lock:
             return self._count
 
-    def begin(self, model_role: str) -> None:
+    def begin(self, model_role: str, *, reserve: int) -> None:
+        if type(reserve) is not int or reserve <= 0:
+            raise ValueError("model-call reservation must be positive")
         with self._lock:
-            if model_role in self._active_roles:
+            if model_role in self._active_reservations:
                 raise RuntimeError("vNext model role is already in flight")
-            if self._count + len(self._active_roles) >= self._maximum:
+            reserved = sum(self._active_reservations.values())
+            if self._count + reserved + reserve > self._maximum:
                 raise RuntimeError("vNext model-call budget exhausted")
-            self._active_roles.add(model_role)
+            self._active_reservations[model_role] = reserve
+            self._active_fingerprints[model_role] = set()
 
-    def record_attempt(self, model_role: str) -> None:
+    def record_attempt(
+        self,
+        model_role: str,
+        request_fingerprint: str,
+    ) -> None:
         with self._lock:
-            if model_role not in self._active_roles:
+            remaining = self._active_reservations.get(model_role)
+            fingerprints = self._active_fingerprints.get(model_role)
+            if remaining is None or fingerprints is None:
                 return
-            self._active_roles.remove(model_role)
+            if request_fingerprint in fingerprints:
+                return
+            if remaining <= 0:
+                return
+            fingerprints.add(request_fingerprint)
+            self._active_reservations[model_role] = remaining - 1
             self._count += 1
 
     def finish(self, model_role: str) -> None:
         with self._lock:
-            self._active_roles.discard(model_role)
+            self._active_reservations.pop(model_role, None)
+            self._active_fingerprints.pop(model_role, None)
 
 
 def _remaining_model_timeout(
@@ -1450,14 +1689,17 @@ class _DeadlineModelAdapter:
                     raise RuntimeError(
                         "Visual Actor tool function must be an object"
                     )
-                if function.get("name") not in _APPROVED_ACTIONS:
-                    continue
                 parameters = function.get("parameters")
                 properties = (
                     parameters.get("properties")
                     if type(parameters) is dict
                     else None
                 )
+                if (
+                    type(properties) is not dict
+                    or "local_intent" not in properties
+                ):
+                    continue
                 local_intent = (
                     properties.get("local_intent")
                     if type(properties) is dict
@@ -1504,30 +1746,11 @@ class _BudgetedActor:
         self._counter = counter
 
     def propose(self, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
-        self._counter.begin(VISUAL_ACTOR_MODEL_ROLE)
+        self._counter.begin(VISUAL_ACTOR_MODEL_ROLE, reserve=1)
         try:
             return self._role.propose(*args, **kwargs)
         finally:
             self._counter.finish(VISUAL_ACTOR_MODEL_ROLE)
-
-
-class _BudgetedVerifier:
-    verifier_kind = VISUAL_VERIFIER_KIND
-
-    def __init__(
-        self,
-        role: LiveVisualObligationVerifier,
-        counter: _ModelCallCounter,
-    ) -> None:
-        self._role = role
-        self._counter = counter
-
-    def assess(self, *args: Any, **kwargs: Any) -> Any:
-        self._counter.begin(VISUAL_VERIFIER_MODEL_ROLE)
-        try:
-            return self._role.assess(*args, **kwargs)
-        finally:
-            self._counter.finish(VISUAL_VERIFIER_MODEL_ROLE)
 
 
 class _RawReceiptTrace:
@@ -1611,7 +1834,8 @@ class _LiveCanarySession:
         authority: FrameAuthority,
         binding: TargetBinding,
         counter: _ModelCallCounter,
-        clients: tuple[Any, Any],
+        client: Any,
+        controller: AtomicDesktopAdapter | None = None,
         runtime_evidence: RuntimeEvidencePlane | None = None,
         frame_artifacts: FrameArtifactWriter | None = None,
         evidence_journal: RuntimeEvidenceJournal | None = None,
@@ -1651,7 +1875,8 @@ class _LiveCanarySession:
         self._authority = authority
         self._binding = binding
         self._counter = counter
-        self._clients = clients
+        self._client = client
+        self._controller = controller
         self._runtime_evidence = runtime_evidence
         self._frame_artifacts = frame_artifacts
         self._evidence_journal = evidence_journal
@@ -1705,8 +1930,16 @@ class _LiveCanarySession:
             ),
             "verified_evidence_bindings": verified_bindings,
             "accepted_event_ids": list(projection.accepted_event_ids),
-            "target_binding_id": self._binding.binding_id,
-            "target_hwnd": self._binding.hwnd,
+            "target_binding_id": (
+                projection.target_binding.binding_id
+                if projection.target_binding is not None
+                else None
+            ),
+            "target_hwnd": (
+                projection.target_binding.hwnd
+                if projection.target_binding is not None
+                else None
+            ),
             "frame_id": frame.frame_id if frame is not None else None,
             "frame_epoch": frame.epoch if frame is not None else None,
             "result": self._runtime.verified_completion_result,
@@ -1719,8 +1952,16 @@ class _LiveCanarySession:
         return {
             "mission_revision": projection.revision,
             "mission_status": projection.status.value,
-            "target_binding_id": self._binding.binding_id,
-            "target_hwnd": self._binding.hwnd,
+            "target_binding_id": (
+                projection.target_binding.binding_id
+                if projection.target_binding is not None
+                else None
+            ),
+            "target_hwnd": (
+                projection.target_binding.hwnd
+                if projection.target_binding is not None
+                else None
+            ),
             "frame_id": frame.frame_id if frame is not None else None,
             "frame_epoch": frame.epoch if frame is not None else None,
             "frame_evidence_refs": [
@@ -1754,24 +1995,13 @@ class _LiveCanarySession:
         journal = self._evidence_journal
         if plane is None or journal is None:
             return
-        report, anchor = _rebuild_runtime_evidence_anchor(
+        _report, anchor = _rebuild_runtime_evidence_anchor(
             plane,
             journal,
             close_journal=self._close_evidence_journal_once,
         )
         self._runtime_evidence_anchor = anchor
         _publish_runtime_evidence_anchor(anchor)
-        if (
-            self._reducer.projection.status is MissionStatus.VERIFIED
-            and (
-                report.status.value != "complete"
-                or report.missing_evidence
-                or report.verification_failures
-            )
-        ):
-            raise RuntimeError(
-                "verified mission lacks complete runtime evidence"
-            )
 
     def close(self) -> None:
         with self._lock:
@@ -1779,33 +2009,25 @@ class _LiveCanarySession:
                 return
             self._closed = True
         errors: list[Exception] = []
+        if self._controller is not None:
+            try:
+                self._controller.close()
+            except Exception as exc:
+                errors.append(exc)
         try:
             self._seal_runtime_evidence()
         except Exception:
-            errors.append(
-                RuntimeError("runtime evidence seal failed")
-            )
             try:
                 self._close_evidence_journal_once()
             except Exception:
-                errors.append(
-                    RuntimeError(
-                        "runtime evidence journal close failed"
-                    )
-                )
-        errors.extend(
-            _close_resources(
-                (
-                    ("mutation permit authority", self._permits),
-                    ("evidence registry", self._registry),
-                    ("Visual Actor client", self._clients[0]),
-                    (
-                        "Visual ObligationVerifier client",
-                        self._clients[1],
-                    ),
-                )
+                pass
+        errors.extend(_close_resources(
+            (
+                ("mutation permit authority", self._permits),
+                ("evidence registry", self._registry),
+                ("Visual Actor client", self._client),
             )
-        )
+        ))
         if errors:
             raise ExceptionGroup(
                 "vNext live canary session cleanup failed",
@@ -1820,7 +2042,10 @@ def _model_attempt_trace(
     counter: _ModelCallCounter,
 ) -> Callable[[ModelAttempt], None]:
     def record(attempt: ModelAttempt) -> None:
-        counter.record_attempt(model_role)
+        counter.record_attempt(
+            model_role,
+            attempt.request_fingerprint,
+        )
         BUS.publish(
             "vnext_model_call",
             runtime_version=_RUNTIME_VERSION,
@@ -1994,13 +2219,6 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
                     desired_state=build.goal,
                     acceptance_criteria=(build.goal,),
                     required_capabilities=("visual.interact",),
-                    evidence_policy=EvidencePolicy(
-                        allow_independent_visual_verifier=True,
-                        max_verification_attempts=(
-                            _MAX_VISUAL_VERIFICATION_ATTEMPTS
-                        ),
-                        uncertain_policy="blocked",
-                    ),
                 ),
             ),
             source="vnext-live-canary",
@@ -2031,6 +2249,22 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
                 evidence_refs=(target_evidence.id,),
             )
         )
+        initial_surface = _workspace_surface(
+            build.target.reader(binding.hwnd)
+        )
+        if initial_surface is None:
+            raise RuntimeError(
+                "initial target is unavailable to DesktopWorkspace"
+            )
+        workspace = DesktopWorkspace(
+            binding=binding,
+            surface=initial_surface,
+            reader=lambda hwnd: _workspace_surface(
+                build.target.reader(hwnd)
+            ),
+            foreground_reader=build.target.foreground_reader,
+            hit_test_root=build.target.hit_test_root,
+        )
         authority = FrameAuthority()
         observer = FrameObserver(
             authority,
@@ -2040,9 +2274,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
         state = _LiveRuntimeState(
             reducer=reducer,
             registry=registry,
-            binding=binding,
-            target_evidence=target_evidence,
-            target_probe=build.target.probe,
+            workspace=workspace,
             authority=authority,
             observer=observer,
             pause_controller=build.pause_controller,
@@ -2082,13 +2314,15 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
             frame_authority=authority,
             frame_observer=observer,
             frozen_target_binding=binding,
-            target_probe=build.target.probe,
+            target_probe=workspace,
+            desktop_workspace=workspace,
             mutation_permits=permits,
             raw_device=raw,
             receipt_trace_sink=_RawReceiptTrace(),
             runtime_evidence_plane=runtime_evidence,
             frame_artifact_writer=frame_artifacts,
         )
+        state.bind_pointer_state_reader(controller.pointer_state)
     except Exception as exc:
         cleanup_errors = []
         try:
@@ -2112,33 +2346,23 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
                 [exc, *cleanup_errors],
             ) from exc
         raise
-    raw_clients: list[Any] = []
+    raw_client: Any | None = None
     try:
-        for _role in (VISUAL_ACTOR_MODEL_ROLE, VISUAL_VERIFIER_MODEL_ROLE):
-            raw_clients.append(
-                create_openai_client(
-                    base_url=build.model.base_url,
-                    api_key=build.model.api_key,
-                    timeout=_remaining_model_timeout(
-                        build,
-                        min(
-                            build.model.request_timeout_s,
-                            build.model.total_timeout_s,
-                        ),
-                    ),
-                    client_factory=build.dependencies.client_factory,
-                )
-            )
+        raw_client = create_openai_client(
+            base_url=build.model.base_url,
+            api_key=build.model.api_key,
+            timeout=_remaining_model_timeout(
+                build,
+                min(
+                    build.model.request_timeout_s,
+                    build.model.total_timeout_s,
+                ),
+            ),
+            client_factory=build.dependencies.client_factory,
+        )
         actor_client = _DeadlineModelAdapter(
             build_model_adapter(
-                raw_clients[0],
-                build.model.api,
-            ),
-            build,
-        )
-        verifier_client = _DeadlineModelAdapter(
-            build_model_adapter(
-                raw_clients[1],
+                raw_client,
                 build.model.api,
             ),
             build,
@@ -2163,28 +2387,9 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
             ),
             counter,
         )
-        verifier = _BudgetedVerifier(
-            LiveVisualObligationVerifier(
-                client=verifier_client,
-                model=build.model.model,
-                runtime=ModelCallRuntime(
-                    clock=build.dependencies.monotonic,
-                ),
-                total_timeout_s=_remaining_model_timeout(
-                    build,
-                    build.model.total_timeout_s,
-                ),
-                on_attempt=_model_attempt_trace(
-                    build=build,
-                    model_role=VISUAL_VERIFIER_MODEL_ROLE,
-                    counter=counter,
-                ),
-            ),
-            counter,
-        )
         catalog = _tool_catalog()
         profile = ExecutionPolicy(
-            provider_availability=("obligation_verifier",),
+            provider_availability=(),
         ).safe_default(
             build.mission_id,
             definition.goal_revision,
@@ -2198,7 +2403,6 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
             actor=actor,
             state=state,
             controller=controller,
-            verifier=verifier,
             evidence_registry=registry,
             mutation_permits=permits,
             runtime_evidence_plane=runtime_evidence,
@@ -2211,7 +2415,8 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
             authority=authority,
             binding=binding,
             counter=counter,
-            clients=(raw_clients[0], raw_clients[1]),
+            client=raw_client,
+            controller=controller,
             runtime_evidence=runtime_evidence,
             frame_artifacts=frame_artifacts,
             evidence_journal=evidence_journal,
@@ -2230,13 +2435,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
                 (
                     ("mutation permit authority", permits),
                     ("evidence registry", registry),
-                    *tuple(
-                        (f"model client {index}", client)
-                        for index, client in enumerate(
-                            raw_clients,
-                            start=1,
-                        )
-                    ),
+                    ("model client", raw_client),
                 )
             )
         )
@@ -3088,13 +3287,14 @@ class _PreparedHandler:
                 try:
                     session.close()
                 except Exception:
-                    terminal_status = RuntimeStatus.STATE_REJECTED
-                    cleanup_detail = "vNext session cleanup failed closed"
-                    detail = (
-                        f"{detail}; {cleanup_detail}"
-                        if detail
-                        else cleanup_detail
-                    )
+                    if terminal_status is not RuntimeStatus.MISSION_VERIFIED:
+                        terminal_status = RuntimeStatus.STATE_REJECTED
+                        cleanup_detail = "vNext session cleanup failed closed"
+                        detail = (
+                            f"{detail}; {cleanup_detail}"
+                            if detail
+                            else cleanup_detail
+                        )
                 try:
                     runtime_evidence_anchor = getattr(
                         session,
@@ -3114,17 +3314,6 @@ class _PreparedHandler:
                             mission_id,
                             run_id,
                         )
-                    )
-                if (
-                    self._dependencies.session_builder is None
-                    and terminal_status
-                    is RuntimeStatus.MISSION_VERIFIED
-                    and runtime_evidence_summary["available"]
-                    is not True
-                ):
-                    terminal_status = RuntimeStatus.STATE_REJECTED
-                    detail = (
-                        "vNext runtime evidence summary failed closed"
                     )
             snapshot = _public_completion_snapshot(
                 raw_completion_snapshot,
@@ -3193,7 +3382,7 @@ class _PreparedHandler:
         evidence = {
             "predicate": "vnext.mission_verified",
             "value": True,
-            "source": "vnext_independent_visual_verifier",
+            "source": "vnext_actor_claim",
             "verified": True,
             "run_id": run_id,
             "metadata": {

@@ -1923,17 +1923,6 @@ _EVENT_PAYLOAD_FIELDS = {
         frozenset(),
         frozenset({"reason"}),
     ),
-    "proposal_suppressed": (
-        frozenset(
-            {
-                "obligation_id",
-                "action",
-                "action_summary",
-                "reason",
-            }
-        ),
-        frozenset(),
-    ),
     "transition_recorded": (
         frozenset({"obligation_id", "input_completed"}),
         frozenset(
@@ -2055,7 +2044,13 @@ def is_safe_action_summary(action: str, summary: str) -> bool:
     primary = keys[-1]
     modifiers = keys[:-1]
     return (
-        primary in _HOTKEY_SUMMARY_PRIMARY_KEYS
+        (
+            primary in _HOTKEY_SUMMARY_PRIMARY_KEYS
+            or (
+                len(keys) == 1
+                and primary in _HOTKEY_SUMMARY_MODIFIERS
+            )
+        )
         and len(modifiers) == len(set(modifiers))
         and all(key in _HOTKEY_SUMMARY_MODIFIERS for key in modifiers)
         and tuple(
@@ -2124,15 +2119,6 @@ def _validate_event_payload(
                 "transition_recorded payload 'action_summary' must be the "
                 "privacy-safe semantic summary of its action"
             )
-    if (
-        event_type == "proposal_suppressed"
-        and payload["reason"] != "repeated_completed_action"
-    ):
-        raise InvalidMissionEvent(
-            "proposal_suppressed payload 'reason' must be the canonical "
-            "repeated_completed_action code"
-        )
-
     if "verified" in payload:
         _contract_bool(
             payload["verified"],

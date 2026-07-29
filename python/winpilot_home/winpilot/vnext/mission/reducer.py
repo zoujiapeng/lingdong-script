@@ -590,43 +590,6 @@ def _apply_event(
     if event_type == "target_invalidated":
         return replace(projection, target_binding=None, last_error=_payload_text(payload, "reason"))
 
-    if event_type == "proposal_suppressed":
-        obligation_id = _payload_text(payload, "obligation_id")
-        if projection.active_obligation_id != obligation_id:
-            raise IllegalTransitionError(
-                "suppressed proposal must be bound to the active obligation"
-            )
-        if event.evidence_refs:
-            raise EvidenceScopeError(
-                "suppressed proposal cannot claim physical evidence"
-            )
-        transition = projection.last_transition
-        if (
-            transition is None
-            or transition.obligation_id != obligation_id
-            or not transition.input_completed
-        ):
-            raise IllegalTransitionError(
-                "suppressed proposal requires a completed prior transition"
-            )
-        action = _payload_text(payload, "action")
-        if transition.action != action:
-            raise IllegalTransitionError(
-                "suppressed proposal action must match the prior transition"
-            )
-        summary = _payload_text(payload, "action_summary")
-        return replace(
-            projection,
-            failure_summary=FailureSummary(
-                kind="repeated_action_suppressed",
-                message=(
-                    f"{summary} was already completed and was not "
-                    "executed again"
-                ),
-                obligation_id=obligation_id,
-            ),
-        )
-
     if event_type == "transition_recorded":
         obligation_id = _payload_text(payload, "obligation_id", projection.active_obligation_id or "")
         if not obligation_id or projection.active_obligation_id != obligation_id:
@@ -657,13 +620,6 @@ def _apply_event(
                 states[item.id] for item in projection.definition.obligations
             ),
             last_transition=transition,
-            failure_summary=(
-                None
-                if projection.failure_summary is not None
-                and projection.failure_summary.kind
-                == "repeated_action_suppressed"
-                else projection.failure_summary
-            ),
         )
         return _merge_evidence(updated, refs)
 
@@ -963,7 +919,7 @@ def _apply_event(
             )
         verification_id = _payload_text(payload, "verification_id")
         if not verification_id:
-            raise IllegalTransitionError("mission_verified requires an independent verification_id")
+            raise IllegalTransitionError("mission_verified requires a distinct verification_id")
         if verification_id in {
             state.verification_id
             for state in states.values()
@@ -1071,7 +1027,7 @@ def reduce_projection(
         and event.kind != "mission_verified"
     ):
         raise IllegalTransitionError(
-            "only an independent mission_verified event may close the mission"
+            "only a mission_verified event may close the mission"
         )
     scope = EvidenceScope.from_source(
         projection.mission_id, projection.run_id, evidence,

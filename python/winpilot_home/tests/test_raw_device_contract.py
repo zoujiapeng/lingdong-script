@@ -370,7 +370,7 @@ def _call_keyboard(raw, action, argument, guard=None):
 
 
 @pytest.mark.parametrize("keys", [
-    (), ("ctrl",), ("ctrl",) * 7, ("ctrl", "ctrl"), ("control", "s"),
+    (), ("ctrl",) * 7, ("ctrl", "ctrl"), ("control", "s"),
     ("CTRL", "s"), (" ctrl", "s"), ("unknown",), (1,),
     ("s", "ctrl"), ("shift", "ctrl", "s"), ("ctrl", "s", "a"),
     ("ctrl", "alt"), ("a", "b"), "ctrl+s", ["ctrl", "s"], b"ctrl+s",
@@ -382,6 +382,7 @@ def test_hotkey_chord_rejects_noncanonical_or_ambiguous_keys(keys) -> None:
 
 def test_hotkey_chord_accepts_canonical_modifier_prefix_and_one_primary() -> None:
     assert HotkeyChord(("enter",)).keys == ("enter",)
+    assert HotkeyChord(("win",)).keys == ("win",)
     chord = HotkeyChord(("ctrl", "alt", "shift", "win", "f12"))
     assert chord.keys == ("ctrl", "alt", "shift", "win", "f12")
     assert all(key in CANONICAL_HOTKEY_KEYS for key in chord.keys)
@@ -573,6 +574,271 @@ def test_drag_uses_one_typed_admitted_backend_and_preserves_unknown() -> None:
     assert receipt.input_completed is None
 
 
+def test_drag_preserves_ordered_intermediate_points_in_one_backend_call() -> None:
+    calls = []
+
+    def admitted(x1, y1, x2, y2, *, hwnd, points, final_guard):
+        calls.append((x1, y1, x2, y2, hwnd, points))
+        assert final_guard(x1, y1) is FinalPointerGuardDecision.ADMITTED
+        return RawBackendResult(True, {"via": "physical_sendinput"})
+
+    raw = RawDeviceExecutor(
+        RawDeviceBackends(
+            admitted_physical_drag=AdmittedPhysicalDragBackend(admitted)
+        )
+    )
+    receipt = raw.drag(
+        _context(),
+        10,
+        20,
+        50,
+        60,
+        points=[[20, 20], (20, 50), [40, 50]],
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+
+    assert receipt.outcome is MutationOutcome.APPLIED
+    assert calls == [
+        (
+            10,
+            20,
+            50,
+            60,
+            41,
+            ((20, 20), (20, 50), (40, 50)),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "points",
+    (
+        None,
+        "10,20",
+        [(1,)],
+        [(1, 2, 3)],
+        [(True, 2)],
+        [(1.5, 2)],
+        [(1, 2)] * 33,
+    ),
+)
+def test_drag_rejects_invalid_intermediate_points_before_backend(points) -> None:
+    calls = []
+
+    def admitted(*args, **kwargs):
+        calls.append((args, kwargs))
+        return RawBackendResult(True, {"via": "physical_sendinput"})
+
+    raw = RawDeviceExecutor(
+        RawDeviceBackends(
+            admitted_physical_drag=AdmittedPhysicalDragBackend(admitted)
+        )
+    )
+    receipt = raw.drag(
+        _context(),
+        10,
+        20,
+        30,
+        40,
+        points=points,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+
+    assert receipt.outcome is MutationOutcome.NOT_STARTED
+    assert receipt.error_kind == "invalid_args"
+    assert calls == []
+
+
+def _held_drag_raw(calls, *, fail_segment: bool = False):
+    side_calls = []
+
+    def admitted(
+        x1,
+        y1,
+        x2,
+        y2,
+        *,
+        hwnd,
+        final_guard,
+        points=(),
+        pointer_already_held=False,
+        keep_holding=False,
+        hold_token=None,
+        cleanup_only=False,
+    ):
+        phase = (
+            "cleanup"
+            if cleanup_only
+            else "continue"
+            if pointer_already_held and keep_holding
+            else "finish"
+            if pointer_already_held
+            else "begin"
+            if keep_holding
+            else "atomic"
+        )
+        calls.append((
+            phase,
+            (x1, y1),
+            (x2, y2),
+            hwnd,
+            tuple(points),
+            hold_token,
+        ))
+        if fail_segment and not cleanup_only:
+            raise OSError("injected held segment uncertainty")
+        return RawBackendResult(True, {
+            "segment_phase": phase,
+            "held_after": keep_holding and not cleanup_only,
+        })
+
+    def side_backend(*args, **kwargs):
+        side_calls.append((args, kwargs))
+        return RawBackendResult(True, {"via": "side"})
+
+    raw = RawDeviceExecutor(RawDeviceBackends(
+        scroll=side_backend,
+        click=side_backend,
+        admitted_physical_drag=AdmittedPhysicalDragBackend(admitted),
+        admitted_physical_type_text=AdmittedPhysicalTypeTextBackend(side_backend),
+        admitted_physical_hotkey=AdmittedPhysicalHotkeyBackend(side_backend),
+    ))
+    return raw, side_calls
+
+
+def test_held_drag_token_owns_all_raw_input_until_finish() -> None:
+    calls = []
+    raw, side_calls = _held_drag_raw(calls)
+    token = "held-drag-contract-1"
+    guard = lambda _x, _y: FinalPointerGuardDecision.ADMITTED
+
+    try:
+        begin = raw.drag(
+            _context(), 10, 20, 20, 30,
+            final_guard=guard,
+            keep_holding=True,
+            hold_token=token,
+        )
+        assert begin.outcome is MutationOutcome.APPLIED
+
+        # The owner is module-level, not scoped to one RawDeviceExecutor.
+        other_calls = []
+        other = RawDeviceExecutor(RawDeviceBackends(
+            scroll=lambda *args, **kwargs: (
+                other_calls.append((args, kwargs))
+                or RawBackendResult(True, {})
+            ),
+        ))
+        blocked = [
+            other.scroll(_context(), 1, 2, -1),
+            raw.click(
+                _context(), 1, 2, MouseButton.LEFT, ClickCount.SINGLE,
+                ClickMechanism.PHYSICAL,
+            ),
+            raw.type_text(
+                _context(), "x",
+                final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+            ),
+            raw.hotkey(
+                _context(), HotkeyChord(("ctrl", "s")),
+                final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+            ),
+            raw.drag(_context(), 1, 2, 3, 4, final_guard=guard),
+        ]
+        assert all(
+            item.outcome is MutationOutcome.NOT_STARTED
+            and item.error_kind == "held_drag_active"
+            for item in blocked
+        )
+        assert side_calls == []
+        assert other_calls == []
+
+        wrong_token = raw.drag(
+            _context(), 20, 30, 30, 40,
+            final_guard=guard,
+            pointer_already_held=True,
+            keep_holding=True,
+            hold_token="not-the-owner",
+        )
+        wrong_start = raw.drag(
+            _context(), 21, 30, 30, 40,
+            final_guard=guard,
+            pointer_already_held=True,
+            keep_holding=True,
+            hold_token=token,
+        )
+        assert (wrong_token.outcome, wrong_token.error_kind) == (
+            MutationOutcome.NOT_STARTED,
+            "held_drag_token_mismatch",
+        )
+        assert (wrong_start.outcome, wrong_start.error_kind) == (
+            MutationOutcome.NOT_STARTED,
+            "held_drag_start_mismatch",
+        )
+        assert len(calls) == 1
+
+        continued = raw.drag(
+            _context(), 20, 30, 30, 40,
+            points=((25, 31),),
+            final_guard=guard,
+            pointer_already_held=True,
+            keep_holding=True,
+            hold_token=token,
+        )
+        finished = raw.drag(
+            _context(), 30, 40, 30, 40,
+            final_guard=guard,
+            pointer_already_held=True,
+            hold_token=token,
+        )
+        assert continued.outcome is MutationOutcome.APPLIED
+        assert finished.outcome is MutationOutcome.APPLIED
+        assert [item[0] for item in calls] == ["begin", "continue", "finish"]
+        assert calls[1][4] == ((25, 31),)
+
+        assert other.scroll(_context(), 1, 2, -1).outcome is (
+            MutationOutcome.APPLIED
+        )
+        assert len(other_calls) == 1
+    finally:
+        raw.release_held_drag(token)
+
+
+def test_failed_held_drag_keeps_owner_until_idempotent_cleanup() -> None:
+    calls = []
+    raw, side_calls = _held_drag_raw(calls, fail_segment=True)
+    token = "held-drag-contract-uncertain"
+
+    begin = raw.drag(
+        _context(), 10, 20, 20, 30,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+        keep_holding=True,
+        hold_token=token,
+    )
+    assert (begin.outcome, begin.error_kind) == (
+        MutationOutcome.OUTCOME_UNKNOWN,
+        "backend_exception",
+    )
+    assert raw.scroll(_context(), 1, 2, -1).error_kind == "held_drag_active"
+    assert side_calls == []
+
+    mismatched = raw.release_held_drag("different-owner")
+    assert (mismatched.outcome, mismatched.error_kind) == (
+        MutationOutcome.NOT_STARTED,
+        "held_drag_token_mismatch",
+    )
+    assert [item[0] for item in calls] == ["begin"]
+
+    cleanup = raw.release_held_drag(token)
+    second_cleanup = raw.release_held_drag(token)
+    assert cleanup.outcome is MutationOutcome.APPLIED
+    assert cleanup.backend_result.facts["held_after"] is False
+    assert second_cleanup.outcome is MutationOutcome.APPLIED
+    assert second_cleanup.backend_result.facts["cleanup_noop"] is True
+    assert [item[0] for item in calls] == ["begin", "cleanup"]
+    assert raw.scroll(_context(), 1, 2, -1).outcome is MutationOutcome.APPLIED
+
+
 def _physical_executor_mocks(monkeypatch, events):
     from winpilot.action import executor
 
@@ -586,6 +852,195 @@ def _physical_executor_mocks(monkeypatch, events):
     monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
     return executor
+
+
+def test_admitted_drag_executes_one_held_polyline_in_order(monkeypatch) -> None:
+    events = []
+    executor = _physical_executor_mocks(monkeypatch, events)
+    captured = []
+    monkeypatch.setattr(
+        executor,
+        "_restore_cursor_after_agent_input",
+        lambda saved, expected, hwnd: (
+            captured.append(("restore", saved, expected, hwnd)) or True
+        ),
+    )
+
+    def stroke(path, duration_s, *, hwnd, before_press, progress):
+        assert before_press() is True
+        captured.append(("stroke", path, duration_s, hwnd))
+        progress.update(
+            button_pressed=True,
+            moves_completed=4,
+            release_cleanup_attempted=True,
+            release_cleanup_completed=True,
+        )
+        return True
+
+    monkeypatch.setattr(executor, "_stroke_path", stroke)
+
+    result = executor.execute_admitted_physical_drag(
+        10,
+        20,
+        50,
+        60,
+        hwnd=41,
+        points=((20, 20), (20, 50), (40, 50)),
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+
+    assert result.input_completed is True
+    assert captured == [
+        (
+            "stroke",
+            [(10, 20), (20, 20), (20, 50), (40, 50), (50, 60)],
+            0.4,
+            41,
+        ),
+        ("restore", (10, 20), (50, 60), 41),
+    ]
+
+
+def test_admitted_drag_begin_continue_finish_preserve_one_physical_hold(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    events = []
+    cursor = {"point": (10, 20)}
+    guards = []
+    with executor._held_mouse_lock:
+        executor._held_mouse_buttons.discard("left")
+
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_target_window_still_foreground", lambda _hwnd: True)
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(executor, "_cursor_pos", lambda: cursor["point"])
+    monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
+    monkeypatch.setattr(
+        executor,
+        "_send_inputs",
+        lambda inputs: events.append(("input", inputs[0])),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_abs_mouse_move",
+        lambda x, y: (
+            events.append(("preposition", x, y)),
+            cursor.__setitem__("point", (x, y)),
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_restore_cursor_after_agent_input",
+        lambda *_args: pytest.fail("held segment restored the shared cursor"),
+    )
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    def move(path, duration_s, *, hwnd, progress):
+        events.append(("stroke", tuple(path), duration_s, hwnd))
+        progress["moves_completed"] = int(progress["moves_completed"]) + 1
+        cursor["point"] = path[-1]
+        return True
+
+    def guard(x, y):
+        guards.append((x, y))
+        return FinalPointerGuardDecision.ADMITTED
+
+    monkeypatch.setattr(executor, "_move_path_while_pressed", move)
+    try:
+        begin = executor.execute_admitted_physical_drag(
+            10, 20, 20, 30,
+            hwnd=41,
+            final_guard=guard,
+            keep_holding=True,
+            hold_token="physical-held-contract",
+        )
+        continued = executor.execute_admitted_physical_drag(
+            20, 30, 30, 40,
+            hwnd=41,
+            final_guard=guard,
+            pointer_already_held=True,
+            keep_holding=True,
+            hold_token="physical-held-contract",
+        )
+        finished = executor.execute_admitted_physical_drag(
+            30, 40, 30, 40,
+            hwnd=41,
+            final_guard=guard,
+            pointer_already_held=True,
+            hold_token="physical-held-contract",
+        )
+    finally:
+        with executor._held_mouse_lock:
+            executor._held_mouse_buttons.discard("left")
+
+    assert [result.input_completed for result in (begin, continued, finished)] == [
+        True, True, True,
+    ]
+    assert [
+        result.facts["segment_phase"]
+        for result in (begin, continued, finished)
+    ] == ["begin", "continue", "finish"]
+    assert guards == [(10, 20), (20, 30), (30, 40)]
+    assert [
+        event for event in events if event[0] == "input"
+    ] == [
+        ("input", executor.win32con.MOUSEEVENTF_LEFTDOWN),
+        ("input", executor.win32con.MOUSEEVENTF_LEFTUP),
+    ]
+    assert [event for event in events if event[0] == "preposition"] == [
+        ("preposition", 10, 20),
+    ]
+    assert [event[0] for event in events].count("stroke") == 3
+    assert [event[1] for event in events if event[0] == "stroke"][-1] == (
+        (30, 40),
+    )
+
+
+def test_failed_held_segment_releases_without_cursor_restore(monkeypatch) -> None:
+    from winpilot.action import executor
+
+    sent = []
+    with executor._held_mouse_lock:
+        executor._held_mouse_buttons.discard("left")
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_target_window_still_foreground", lambda _hwnd: True)
+    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
+    monkeypatch.setattr(executor, "_cursor_pos", lambda: (10, 20))
+    monkeypatch.setattr(executor, "_abs_mouse_move", lambda _x, _y: None)
+    monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.append(inputs[0]))
+    monkeypatch.setattr(
+        executor,
+        "_move_path_while_pressed",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_restore_cursor_after_agent_input",
+        lambda *_args: pytest.fail("failed held segment restored cursor"),
+    )
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    try:
+        result = executor.execute_admitted_physical_drag(
+            10, 20, 20, 30,
+            hwnd=41,
+            final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+            keep_holding=True,
+            hold_token="physical-held-failure",
+        )
+        assert result.input_completed is None
+        assert sent == [
+            executor.win32con.MOUSEEVENTF_LEFTDOWN,
+            executor.win32con.MOUSEEVENTF_LEFTUP,
+        ]
+        assert result.facts["release_cleanup_completed"] is True
+        assert executor.agent_holds_mouse_button("left") is False
+    finally:
+        with executor._held_mouse_lock:
+            executor._held_mouse_buttons.discard("left")
 
 
 def test_admitted_backend_guards_immediately_before_down_without_queue(monkeypatch):
@@ -843,7 +1298,12 @@ def _keyboard_executor_mocks(monkeypatch):
     monkeypatch.setattr(
         executor,
         "_vk_of",
-        lambda key: {"ctrl": 0x11, "shift": 0x10, "s": 0x53}[key],
+        lambda key: {
+            "ctrl": 0x11,
+            "shift": 0x10,
+            "win": 0x5B,
+            "s": 0x53,
+        }[key],
     )
     return executor, sent
 
@@ -1003,6 +1463,29 @@ def test_admitted_hotkey_sends_one_chord_and_always_releases_in_reverse(
         executor.execute_admitted_physical_hotkey
     )
     assert not hasattr(executor.execute_admitted_physical_hotkey, "__wrapped__")
+
+
+def test_admitted_hotkey_foreground_change_after_complete_chord_is_applied(
+    monkeypatch,
+) -> None:
+    executor, sent = _keyboard_executor_mocks(monkeypatch)
+    decisions = iter((
+        FinalKeyboardGuardDecision.ADMITTED,
+        FinalKeyboardGuardDecision.FOREGROUND_CHANGED,
+    ))
+
+    result = executor.ADMITTED_PHYSICAL_HOTKEY_BACKEND(
+        HotkeyChord(("win",)),
+        hwnd=41,
+        final_guard=lambda: next(decisions),
+    )
+
+    assert result.input_completed is True
+    assert len(sent) == 2
+    assert result.facts["guard_decision"] == (
+        FinalKeyboardGuardDecision.FOREGROUND_CHANGED.value
+    )
+    assert result.facts["release_cleanup_completed"] is True
 
 
 @pytest.mark.parametrize("fail_at", [1, 2, 3])

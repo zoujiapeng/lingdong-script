@@ -47,7 +47,9 @@ from winpilot.vnext.actor import (
 from winpilot.vnext.actor.envelope import _decision_id
 from winpilot.vnext.desktop_adapter import (
     AtomicDesktopAdapter,
+    DesktopWorkspace,
     LiveTargetSnapshot,
+    WorkspaceSurface,
 )
 from winpilot.vnext.evidence_plane import (
     FrameArtifactWriter,
@@ -235,9 +237,44 @@ class _RawHarness:
         y2,
         *,
         hwnd,
+        points=(),
         final_guard,
+        pointer_already_held=False,
+        keep_holding=False,
+        hold_token=None,
+        cleanup_only=False,
     ) -> RawBackendResult:
-        self.calls.append(("drag", (x1, y1, x2, y2, hwnd)))
+        if cleanup_only:
+            self.calls.append(("drag_cleanup", (hold_token, hwnd)))
+            return RawBackendResult(
+                True,
+                {
+                    "via": "physical_sendinput",
+                    "segment_phase": "cleanup",
+                    "held_before": True,
+                    "held_after": False,
+                },
+            )
+        arguments = (
+            (
+                x1,
+                y1,
+                x2,
+                y2,
+                tuple(points),
+                hwnd,
+                pointer_already_held,
+                keep_holding,
+                hold_token,
+            )
+            if pointer_already_held or keep_holding
+            else (
+                (x1, y1, x2, y2, tuple(points), hwnd)
+                if points
+                else (x1, y1, x2, y2, hwnd)
+            )
+        )
+        self.calls.append(("drag", arguments))
         self._run_before_guard()
         decision = final_guard(x1, y1)
         if decision is not FinalPointerGuardDecision.ADMITTED:
@@ -245,7 +282,20 @@ class _RawHarness:
                 False,
                 {"guard_decision": decision.value},
             )
-        return RawBackendResult(self.result, {"via": "physical_sendinput"})
+        facts: dict[str, Any] = {"via": "physical_sendinput"}
+        if pointer_already_held or keep_holding:
+            facts.update(
+                segment_phase=(
+                    "continue"
+                    if pointer_already_held and keep_holding
+                    else "finish"
+                    if pointer_already_held
+                    else "begin"
+                ),
+                held_before=pointer_already_held,
+                held_after=keep_holding,
+            )
+        return RawBackendResult(self.result, facts)
 
     def type_text(
         self,
@@ -549,6 +599,20 @@ def _harness(
         established_by_evidence_ref="evidence-target-bound",
         epoch=EPOCH,
     )
+    drag_guard_points: tuple[tuple[int, int], ...] | None = None
+    if action == "drag":
+        drag_arguments = action_args or _proposal("drag")["args"]
+        drag_guard_points = (
+            expected_hit_point,
+            *(
+                _map_submitted_test_point(point[0], point[1])
+                for point in drag_arguments.get("image_points", [])
+            ),
+            _map_submitted_test_point(
+                drag_arguments["image_x2"],
+                drag_arguments["image_y2"],
+            ),
+        )
     probe = _Probe(
         LiveTargetSnapshot(
             hwnd=HWND,
@@ -558,14 +622,7 @@ def _harness(
             region=REGION,
             foreground_root_hwnd=HWND,
         ),
-        expected_hit_point=(
-            (
-                expected_hit_point,
-                _map_submitted_test_point(80.0, 60.0),
-            )
-            if action == "drag"
-            else expected_hit_point
-        ),
+        expected_hit_point=drag_guard_points or expected_hit_point,
     )
     permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
     raw = _RawHarness(raw_result)
@@ -867,6 +924,26 @@ def test_atomic_adapter_records_admission_and_single_raw_receipt() -> None:
             "raw_device.admitted_physical_drag/0",
         ),
         (
+            "drag",
+            {
+                "image_x1": 50.0,
+                "image_y1": 40.0,
+                "image_x2": 80.0,
+                "image_y2": 60.0,
+                "image_points": [[60.0, 20.0], [70.0, 50.0]],
+            },
+            {
+                "kind": "pointer_drag",
+                "x1": 60,
+                "y1": 60,
+                "x2": 90,
+                "y2": 80,
+                "button": "left",
+                "points": [[70, 40], [80, 70]],
+            },
+            "raw_device.admitted_physical_drag/0",
+        ),
+        (
             "scroll",
             {
                 "image_x": 37.0,
@@ -965,13 +1042,26 @@ def test_durable_attempt_records_exact_submitted_and_physical_arguments(
             )
         elif action == "drag":
             assert raw_action == "drag"
-            assert raw_arguments == (
-                physical_arguments["x1"],
-                physical_arguments["y1"],
-                physical_arguments["x2"],
-                physical_arguments["y2"],
-                HWND,
-            )
+            if "points" in physical_arguments:
+                assert raw_arguments == (
+                    physical_arguments["x1"],
+                    physical_arguments["y1"],
+                    physical_arguments["x2"],
+                    physical_arguments["y2"],
+                    tuple(
+                        tuple(point)
+                        for point in physical_arguments["points"]
+                    ),
+                    HWND,
+                )
+            else:
+                assert raw_arguments == (
+                    physical_arguments["x1"],
+                    physical_arguments["y1"],
+                    physical_arguments["x2"],
+                    physical_arguments["y2"],
+                    HWND,
+                )
         elif action == "type_text":
             assert raw_action == "type_text"
             assert raw_arguments == (
@@ -1854,6 +1944,169 @@ def test_trace_sink_failure_does_not_change_controller_fact() -> None:
     assert len(harness.trace.records) == 1
 
 
+def test_held_drag_releases_at_current_point_without_an_extra_move() -> None:
+    begin_args = {
+        "image_x1": 50.0,
+        "image_y1": 40.0,
+        "image_x2": 80.0,
+        "image_y2": 60.0,
+        "keep_holding": True,
+    }
+    harness = _harness("drag", action_args=begin_args)
+
+    try:
+        first = harness.run()
+        assert first.controller_error is None
+        assert first.transition is not None
+        assert first.transition.outcome is ControllerOutcome.COMPLETED
+        held = harness.adapter.pointer_state()
+        assert held.disposition.value == "held"
+        assert held.physically_owned is True
+        assert held.lease_id is not None
+        assert harness.raw.calls == [
+            (
+                "drag",
+                (
+                    60,
+                    60,
+                    90,
+                    80,
+                    (),
+                    HWND,
+                    False,
+                    True,
+                    held.lease_id,
+                ),
+            )
+        ]
+
+        current = harness.authority.current
+        assert current is not None
+        finish_args = {
+            "image_x1": 80.0,
+            "image_y1": 60.0,
+            "image_x2": 80.0,
+            "image_y2": 60.0,
+            "keep_holding": False,
+        }
+        finish_envelope = _replace_action_args(
+            _envelope(current, harness.binding, "drag"),
+            finish_args,
+        )
+        finish_envelope = _replace_envelope(
+            finish_envelope,
+            turn_index=1,
+            pointer_disposition="held",
+            pointer_lease_id=held.lease_id,
+        )
+        harness.probe.expected_hit_point = ((90, 80), (90, 80))
+        frame_identity = RuntimeFrameIdentity(
+            frame_id=current.frame_id,
+            epoch=current.epoch,
+            hwnd=current.hwnd,
+            region=current.region,
+            scope=current.scope,
+            submitted_size=current.submitted_size,
+            image_sha256=current.image_sha256,
+        )
+
+        second = call_once_with_permit(
+            authority=harness.permits,
+            envelope=finish_envelope,
+            turn_index=1,
+            commit_identity=RuntimeCommitIdentity(
+                frame_identity,
+                RuntimeTargetIdentity.from_binding(harness.binding),
+            ),
+            still_current=lambda: True,
+            execute=harness.adapter.execute,
+        )
+
+        assert second.controller_error is None
+        assert second.transition is not None
+        assert second.transition.outcome is ControllerOutcome.COMPLETED
+        released = harness.adapter.pointer_state()
+        assert released.disposition.value == "released"
+        assert released.lease_id is None
+        assert harness.raw.calls[1] == (
+            "drag",
+            (
+                90,
+                80,
+                90,
+                80,
+                (),
+                HWND,
+                True,
+                False,
+                held.lease_id,
+            ),
+        )
+    finally:
+        harness.adapter.close()
+
+
+def test_adapter_close_retries_then_releases_an_unfinished_held_drag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(
+        "drag",
+        action_args={
+            "image_x1": 50.0,
+            "image_y1": 40.0,
+            "image_x2": 80.0,
+            "image_y2": 60.0,
+            "keep_holding": True,
+        },
+    )
+
+    try:
+        result = harness.run()
+        assert result.controller_error is None
+        assert result.transition is not None
+        assert result.transition.outcome is ControllerOutcome.COMPLETED
+        lease_id = harness.adapter.pointer_state().lease_id
+        assert lease_id is not None
+
+        original_release = harness.adapter._raw.release_held_drag
+        cleanup_attempts = 0
+
+        def flaky_release(token: str) -> RawActionReceipt:
+            nonlocal cleanup_attempts
+            cleanup_attempts += 1
+            if cleanup_attempts == 1:
+                raise RuntimeError("transient cleanup failure")
+            return original_release(token)
+
+        monkeypatch.setattr(
+            harness.adapter._raw,
+            "release_held_drag",
+            flaky_release,
+        )
+        harness.adapter.close()
+
+        state = harness.adapter.pointer_state()
+        assert state.disposition.value == "released"
+        assert state.lease_id is None
+        assert cleanup_attempts == 2
+        assert harness.raw.calls[-1] == (
+            "drag_cleanup",
+            (lease_id, HWND),
+        )
+    finally:
+        harness.adapter.close()
+
+
+def test_closed_adapter_rejects_new_input() -> None:
+    harness = _harness("click")
+    harness.adapter.close()
+
+    with pytest.raises(RuntimeError, match="adapter is closed"):
+        harness.adapter.execute(harness.envelope)
+
+    assert harness.raw.calls == []
+
+
 def test_deterministic_replay_produces_identical_evidence_and_effect() -> None:
     first = _harness("click").run().transition
     second = _harness("click").run().transition
@@ -1873,6 +2126,7 @@ def test_adapter_package_is_one_narrow_single_composition_owner() -> None:
     assert tuple(sorted(path.name for path in package.glob("*.py"))) == (
         "__init__.py",
         "atomic.py",
+        "workspace.py",
     )
     atomic_source = (package / "atomic.py").read_text(encoding="utf-8")
     lowered = atomic_source.lower()
@@ -2009,3 +2263,74 @@ def test_scroll_uses_fixed_standard_bounds(
     assert len(harness.raw.calls) == (
         1 if outcome is ControllerOutcome.COMPLETED else 0
     )
+
+
+def test_completed_click_keeps_old_action_atomic_then_offers_new_foreground() -> None:
+    harness = _harness("click")
+    foreground = [HWND]
+    next_hwnd = HWND + 100
+
+    def surface(hwnd: int) -> WorkspaceSurface | None:
+        if hwnd == HWND:
+            return WorkspaceSurface(
+                hwnd=HWND,
+                root_hwnd=HWND,
+                process_id=PROCESS_ID,
+                executable_identity=harness.binding.executable_identity,
+                title="Old",
+                class_name="OldWindow",
+                region=REGION,
+                foreground_root_hwnd=foreground[0],
+            )
+        if hwnd == next_hwnd:
+            return WorkspaceSurface(
+                hwnd=next_hwnd,
+                root_hwnd=next_hwnd,
+                process_id=PROCESS_ID + 1,
+                executable_identity="C:/next.exe",
+                title="Next",
+                class_name="NextWindow",
+                region=(200, 100, 640, 480),
+                foreground_root_hwnd=foreground[0],
+            )
+        return None
+
+    workspace = DesktopWorkspace(
+        binding=harness.binding,
+        surface=surface(HWND),
+        reader=surface,
+        foreground_reader=lambda: foreground[0],
+        hit_test_root=lambda _x, _y: HWND,
+        wait=lambda _seconds: None,
+    )
+
+    def settle(_delay: float) -> None:
+        foreground[0] = next_hwnd
+
+    adapter = AtomicDesktopAdapter(
+        frame_authority=harness.authority,
+        frame_observer=harness.observer,
+        frozen_target_binding=harness.binding,
+        target_probe=workspace,
+        desktop_workspace=workspace,
+        mutation_permits=harness.permits,
+        raw_device=harness.raw.executor(),
+        receipt_trace_sink=harness.trace,
+        post_input_settle_delay_s=0.12,
+        wait=settle,
+    )
+
+    harness.adapter = adapter
+    attempt = harness.run()
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    transition = attempt.transition
+
+    assert (
+        transition.outcome is ControllerOutcome.COMPLETED
+    ), [item[0].error_kind for item in harness.trace.records]
+    assert transition.input_completed is True
+    assert workspace.binding == harness.binding
+    successor = workspace.observe()
+    assert successor.replaces_binding
+    assert successor.surface.hwnd == next_hwnd

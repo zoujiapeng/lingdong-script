@@ -933,7 +933,13 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
         frozenExecutionConstraint,
       );
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setActionError(message);
+      void window.electronAPI?.notifyTaskbar?.(
+        '任务未启动',
+        message,
+        'error',
+      );
     } finally {
       setSubmitting(false);
     }

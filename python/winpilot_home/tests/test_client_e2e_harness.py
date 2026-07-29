@@ -97,6 +97,44 @@ def test_named_button_lookup_short_circuits_a_large_accessibility_tree(
     assert visited == ["document", harness.NAV_AGENT]
 
 
+def test_partial_name_lookup_short_circuits_the_goal_editor(
+    monkeypatch,
+):
+    harness = _load_harness()
+    visited = []
+
+    class Control:
+        ControlTypeName = "EditControl"
+        IsOffscreen = False
+
+        def __init__(self, name):
+            self.Name = name
+
+    def walk(_window, *, includeTop):
+        assert includeTop is False
+        for control in (
+            Control("filter"),
+            Control("描述希望代理在这台电脑上完成的目标……"),
+            Control("late"),
+        ):
+            visited.append(control.Name)
+            yield control, 1
+
+    monkeypatch.setattr(harness.auto, "WalkControl", walk)
+
+    match = harness._first_visible_descendant(
+        object(),
+        "Edit",
+        name_contains="描述希望代理",
+    )
+
+    assert match.Name.startswith("描述希望代理")
+    assert visited == [
+        "filter",
+        "描述希望代理在这台电脑上完成的目标……",
+    ]
+
+
 def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
     monkeypatch,
     tmp_path,

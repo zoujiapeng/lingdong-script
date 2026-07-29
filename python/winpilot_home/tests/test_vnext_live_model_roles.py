@@ -1,8 +1,7 @@
-"""Focused fake-provider tests for the two isolated vNext live model roles."""
+"""Focused fake-provider tests for the vNext live visual actor."""
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -16,32 +15,24 @@ from winpilot.modeling import (
     RetryKind,
     create_openai_client,
 )
-from winpilot.vnext.mission import EvidencePolicy, EvidenceRef
 from winpilot.vnext.actor import InvalidActorProposal
 from winpilot.vnext.model_roles import (
     MAX_LIVE_MODEL_JSON_RESPONSE_CHARS,
     MAX_LIVE_MODEL_OUTPUT_TOKENS,
     MAX_LIVE_MODEL_TOTAL_TIMEOUT_S,
     VISUAL_ACTOR_SYSTEM_CONTRACT,
-    VISUAL_VERIFIER_SYSTEM_CONTRACT,
     LiveModelRoleError,
     LiveVisualActor,
-    LiveVisualObligationVerifier,
 )
 from winpilot.vnext.runtime import (
+    ActorTaskStateUpdate,
+    ActorTurnDecision,
     ActorFrameView,
     ActorMissionView,
     ActorObligationView,
     ActorPreviousActionView,
     ActorToolView,
     ActorTurnInput,
-    RuntimeFrame,
-    RuntimeVerifierTurn,
-)
-from winpilot.vnext.verification import (
-    ObligationVerificationRequest,
-    VerifierAssessment,
-    forbidden_effect_condition,
 )
 
 
@@ -66,6 +57,33 @@ def _actor_turn() -> ActorTurnInput:
     action_schemas = {
         "click": _point_schema(),
         "double_click": _point_schema(),
+        "drag": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "image_x1": {"type": "number", "minimum": 0},
+                "image_y1": {"type": "number", "minimum": 0},
+                "image_x2": {"type": "number", "minimum": 0},
+                "image_y2": {"type": "number", "minimum": 0},
+                "image_points": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 0},
+                        "minItems": 2,
+                        "maxItems": 2,
+                    },
+                    "maxItems": 32,
+                },
+                "keep_holding": {"type": "boolean"},
+            },
+            "required": [
+                "image_x1",
+                "image_y1",
+                "image_x2",
+                "image_y2",
+            ],
+        },
         "scroll": {
             "type": "object",
             "additionalProperties": False,
@@ -173,56 +191,6 @@ def _actor_turn() -> ActorTurnInput:
     )
 
 
-def _verifier_turn() -> RuntimeVerifierTurn:
-    frame_id = 7
-    evidence = EvidenceRef(
-        id="evidence-current-frame",
-        mission_id="mission-secret-id",
-        run_id="run-secret-id",
-        obligation_id="obligation-secret-id",
-        kind="current_frame",
-        trust="provider_receipt",
-        payload_hash="1" * 64,
-        frame_id=frame_id,
-    )
-    request = ObligationVerificationRequest(
-        mission_id=evidence.mission_id,
-        run_id=evidence.run_id,
-        mission_revision=4,
-        obligation_id=evidence.obligation_id or "",
-        claim_fingerprint="2" * 64,
-        desired_state="The greeting is visible",
-        acceptance_criteria=("The field contains hello",),
-        forbidden_effects=("No duplicate text",),
-        evidence_policy=EvidencePolicy(
-            required_evidence_kinds=("current_frame",),
-            preferred_evidence_kinds=(),
-            allow_independent_visual_verifier=True,
-            max_verification_attempts=1,
-            uncertain_policy="blocked",
-        ),
-        evidence_refs=(evidence,),
-    )
-    frame = RuntimeFrame(
-        frame_id=frame_id,
-        epoch=3,
-        hwnd=91234,
-        region=(100, 200, 640, 480),
-        scope="target_window",
-        submitted_size=(640, 480),
-        image_b64=_JPEG_B64,
-        image_sha256=hashlib.sha256(
-            _JPEG_B64.encode("ascii")
-        ).hexdigest(),
-        evidence_refs=(evidence.id,),
-    )
-    return RuntimeVerifierTurn(
-        request=request,
-        frame=frame,
-        completed_action_summaries=("click", "double_click"),
-    )
-
-
 def _tool_response(
     name: str = "type_text",
     arguments: dict[str, Any] | str | None = None,
@@ -230,11 +198,15 @@ def _tool_response(
     content: Any = None,
     count: int = 1,
 ) -> dict[str, Any]:
+    state_update = {"scratchpad": None}
     if arguments is None:
         arguments = {
             "text": "hello",
             "local_intent": "enter the requested greeting once",
         }
+    if type(arguments) is dict:
+        arguments = dict(arguments)
+        arguments.setdefault("task_state_update", state_update)
     encoded = (
         arguments
         if type(arguments) is str
@@ -283,36 +255,6 @@ def _actor_shape_response(
     return response
 
 
-def _verifier_response(
-    *,
-    with_tool: bool = False,
-    confidence: Any = None,
-    verified: Any = True,
-    condition_results: Any = None,
-) -> dict[str, Any]:
-    if condition_results is None:
-        condition_results = ["satisfied", "satisfied"]
-    assessment = {
-        "format": "verifier-assessment/0",
-        "verified": verified,
-        "condition_results": condition_results,
-        "confidence": confidence,
-        "concise_reason": "The current frame visibly satisfies the criteria.",
-    }
-    message: dict[str, Any] = {
-        "role": "assistant",
-        "content": json.dumps(assessment, separators=(",", ":")),
-    }
-    if with_tool:
-        message["tool_calls"] = [
-            {
-                "type": "function",
-                "function": {"name": "click", "arguments": "{}"},
-            }
-        ]
-    return {"choices": [{"message": message}]}
-
-
 def _schema_keywords(value: Any) -> set[str]:
     if type(value) is dict:
         return set(value).union(
@@ -335,9 +277,15 @@ class _RecordingClient:
 
     def _create(self, **request: Any) -> Any:
         self.requests.append(request)
-        if isinstance(self.response, BaseException):
-            raise self.response
-        return self.response
+        response = self.response
+        if type(response) is list:
+            index = len(self.requests) - 1
+            if index >= len(response):
+                raise AssertionError("Unexpected extra provider request")
+            response = response[index]
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 def _build_clients(
@@ -362,98 +310,67 @@ def _build_clients(
     return factory_calls, clients
 
 
-def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
-    factory_calls, clients = _build_clients(
-        _tool_response(),
-        _verifier_response(),
-    )
+def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
+    factory_calls, clients = _build_clients(_tool_response())
     actor_attempts = []
-    verifier_attempts = []
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
         on_attempt=actor_attempts.append,
     )
-    verifier = LiveVisualObligationVerifier(
-        client=clients[1],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-        on_attempt=verifier_attempts.append,
-    )
 
-    proposal = actor.propose(
+    decision = actor.propose(
         _actor_turn(),
         image_b64=_JPEG_B64,
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
     )
-    assessment = verifier.assess(_verifier_turn())
 
-    assert proposal == {
+    assert type(decision) is ActorTurnDecision
+    assert dict(decision.proposal) == {
         "action": "type_text",
         "args": {"text": "hello"},
         "format": "actor-proposal/0",
         "kind": "desktop_action",
         "local_intent": "enter the requested greeting once",
     }
-    assert isinstance(assessment, VerifierAssessment)
-    assert assessment.verified is True
-    assert assessment.satisfied_conditions == (
-        "The field contains hello",
-        forbidden_effect_condition("No duplicate text"),
+    assert decision.task_state_update == ActorTaskStateUpdate.from_dict(
+        {"scratchpad": None}
     )
-    assert assessment.missing_conditions == ()
-    assert assessment.contradictions == ()
-    assert clients[0] is not clients[1]
-    assert [call["max_retries"] for call in factory_calls] == [0, 0]
-    assert len(clients[0].requests) == len(clients[1].requests) == 1
+    assert [call["max_retries"] for call in factory_calls] == [0]
+    assert len(clients[0].requests) == 1
     assert [attempt.kind for attempt in actor_attempts] == [
-        RetryKind.INITIAL_REQUEST
-    ]
-    assert [attempt.kind for attempt in verifier_attempts] == [
         RetryKind.INITIAL_REQUEST
     ]
 
     actor_request = clients[0].requests[0]
-    verifier_request = clients[1].requests[0]
     assert len(actor_request["messages"]) == 2
-    assert len(verifier_request["messages"]) == 2
     assert (
         actor_request["messages"][0]["content"]
         == VISUAL_ACTOR_SYSTEM_CONTRACT
     )
-    assert "Completed actions are facts" in " ".join(
-        VISUAL_ACTOR_SYSTEM_CONTRACT.split()
-    )
-    assert "explicit requested clicks still apply" in " ".join(
-        VISUAL_ACTOR_SYSTEM_CONTRACT.split()
-    )
-    assert "named stop condition is visible" in " ".join(
-        VISUAL_ACTOR_SYSTEM_CONTRACT.split()
-    )
-    assert (
-        verifier_request["messages"][0]["content"]
-        == VISUAL_VERIFIER_SYSTEM_CONTRACT
-    )
-    assert (
-        actor_request["messages"][0]["content"]
-        != verifier_request["messages"][0]["content"]
-    )
+    actor_contract = " ".join(VISUAL_ACTOR_SYSTEM_CONTRACT.split())
+    assert len(actor_contract.split()) < 60
+    assert "current authoritative JPEG" in actor_contract
+    assert "exact submitted-image pixels" in actor_contract
+    assert "goal is visibly complete, call claim_obligation_done" in actor_contract
+    assert "When pointer_held is true" in actor_contract
     assert actor_request["tool_choice"] == "auto"
     assert "parallel_tool_calls" not in actor_request
     assert "n" not in actor_request
     assert "max_tokens" not in actor_request
     assert actor_request["max_completion_tokens"] == 768
-    assert len(actor_request["tools"]) == 7
+    assert len(actor_request["tools"]) == 8
     assert {
         tool["function"]["name"] for tool in actor_request["tools"]
     } == {
         "click",
         "double_click",
+        "drag",
         "scroll",
         "type_text",
-        "hotkey",
+        "press_key",
         "claim_obligation_done",
         "blocked",
     }
@@ -463,27 +380,22 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
     }
     assert "once" in descriptions["click"]
     assert "Double-click" in descriptions["double_click"]
+    assert "ordered intermediate image_points" in descriptions["drag"]
     assert "amount < 0 scrolls down" in descriptions["scroll"]
     assert "amount > 0 scrolls up" in descriptions["scroll"]
     assert "selected text is replaced" in descriptions["type_text"]
-    assert "never enters literal text" in descriptions["hotkey"]
-    assert "verifier checks it" in descriptions["claim_obligation_done"]
+    assert "one key or one ordered key chord" in descriptions["press_key"]
+    assert "never enters literal text" in descriptions["press_key"]
+    assert "without further mutation" in descriptions["claim_obligation_done"]
     assert "no supplied action can advance" in descriptions["blocked"]
     assert "response_format" not in actor_request
-    assert "tools" not in verifier_request
-    assert "tool_choice" not in verifier_request
-    assert "parallel_tool_calls" not in verifier_request
-    assert verifier_request["response_format"] == {"type": "json_object"}
-    assert "max_tokens" not in verifier_request
-    assert verifier_request["max_completion_tokens"] == 768
     strict_schemas = [
         tool["function"]["parameters"]
         for tool in actor_request["tools"]
     ]
-    verifier_context = json.loads(
-        verifier_request["messages"][1]["content"][0]["text"]
-    )
-    strict_schemas.append(verifier_context["output_schema"])
+    for schema in strict_schemas:
+        assert "task_state_update" in schema["properties"]
+        assert "task_state_update" in schema["required"]
     for schema in strict_schemas:
         assert {
             "allOf",
@@ -499,154 +411,76 @@ def test_roles_use_independent_zero_retry_clients_and_fresh_contexts() -> None:
     actor_context = actor_request["messages"][1]["content"][0]["text"]
     actor_context_value = json.loads(actor_context)
     assert "tools" not in actor_context_value
+    assert actor_context_value["mission"]["original_goal"] == (
+        "Type the requested greeting"
+    )
+    assert actor_context_value["task_state"] == {"scratchpad": ""}
     assert actor_context_value["completed_action_summaries"] == [
         "click",
         "double_click",
     ]
-    assert verifier_context["completed_action_summaries"] == [
-        "click",
-        "double_click",
-    ]
-    required_conditions = verifier_context["subject"][
-        "required_conditions"
-    ]
-    condition_results_schema = verifier_context["output_schema"][
-        "properties"
-    ]["condition_results"]
-    assert condition_results_schema["items"]["enum"] == [
-        "satisfied",
-        "missing",
-        "contradicted",
-    ]
-    assert condition_results_schema["minItems"] == len(
-        required_conditions
-    )
-    assert condition_results_schema["maxItems"] == len(
-        required_conditions
-    )
-    verifier_context_text = (
-        verifier_request["messages"][1]["content"][0]["text"]
-    )
-
-
-    for forbidden in (
-        "mission-secret-id",
-        "run-secret-id",
-        "obligation-secret-id",
-        "evidence-current-frame",
-        "91234",
-        "1111111111111111",
-        "2222222222222222",
-    ):
-        assert forbidden not in actor_context
-        assert forbidden not in verifier_context_text
-    assert "current_frame" in verifier_context_text
-    assert "provider_receipt" in verifier_context_text
-    assert "required_conditions" in verifier_context_text
-    assert (
-        "forbidden_effect_absent:No duplicate text"
-        in verifier_context_text
-    )
     assert "data:image/jpeg;base64," in (
         actor_request["messages"][1]["content"][1]["image_url"]["url"]
     )
-    assert "data:image/jpeg;base64," in (
-        verifier_request["messages"][1]["content"][1]["image_url"]["url"]
+
+
+def test_press_key_model_tool_maps_to_existing_hotkey_runtime_action() -> None:
+    _, clients = _build_clients(
+        _tool_response(
+            name="press_key",
+            arguments={
+                "keys": ["9"],
+                "local_intent": "press the requested visible key",
+            },
+        )
     )
-
-
-def test_completed_scroll_adds_compact_provider_only_recheck_guard() -> None:
-    _, clients = _build_clients(_tool_response())
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
     )
-    turn = replace(
-        _actor_turn(),
-        previous_action=ActorPreviousActionView(
-            action="scroll",
-            semantic_summary="scroll_down",
-            input_completed=True,
-            visible_effect="",
-            local_visual_change="changed",
-            frame_comparable=True,
-            target_binding_valid=True,
-        ),
-    )
 
-    actor.propose(
-        turn,
+    decision = actor.propose(
+        _actor_turn(),
         image_b64=_JPEG_B64,
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
     )
 
-    context = json.loads(
-        clients[0].requests[0]["messages"][1]["content"][0]["text"]
-    )
-    assert context["scroll_guard"] == (
-        "inspect_current_image_stop_condition_before_same_direction"
-    )
-    assert "scroll_guard" not in turn.to_dict()
-
-
-def test_completed_click_adds_compact_provider_only_focus_guard() -> None:
-    _, clients = _build_clients(_tool_response())
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-    turn = replace(
-        _actor_turn(),
-        previous_action=ActorPreviousActionView(
-            action="click",
-            semantic_summary="click",
-            input_completed=True,
-            visible_effect="",
-            local_visual_change="changed",
-            frame_comparable=True,
-            target_binding_valid=True,
-        ),
-    )
-
-    actor.propose(
-        turn,
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
-    context = json.loads(
-        clients[0].requests[0]["messages"][1]["content"][0]["text"]
-    )
-    assert context["focus_guard"] == (
-        "avoid_click_only_to_refocus_when_already_visibly_focused"
-    )
-    assert "focus_guard" not in turn.to_dict()
+    assert dict(decision.proposal) == {
+        "action": "hotkey",
+        "args": {"keys": ["9"]},
+        "format": "actor-proposal/0",
+        "kind": "desktop_action",
+        "local_intent": "press the requested visible key",
+    }
 
 
 @pytest.mark.parametrize(
     "previous_action",
     (
-        None,
         ActorPreviousActionView(
             action="scroll",
             semantic_summary="scroll_down",
-            input_completed=False,
+            input_completed=True,
             visible_effect="",
+            local_visual_change="changed",
+            frame_comparable=True,
+            target_binding_valid=True,
         ),
         ActorPreviousActionView(
             action="click",
             semantic_summary="click",
             input_completed=True,
             visible_effect="",
+            local_visual_change="changed",
+            frame_comparable=True,
+            target_binding_valid=True,
         ),
     ),
 )
-def test_scroll_recheck_guard_requires_a_completed_scroll(
-    previous_action: ActorPreviousActionView | None,
+def test_previous_action_is_passed_without_runtime_strategy_hint(
+    previous_action: ActorPreviousActionView,
 ) -> None:
     _, clients = _build_clients(_tool_response())
     actor = LiveVisualActor(
@@ -665,47 +499,8 @@ def test_scroll_recheck_guard_requires_a_completed_scroll(
     context = json.loads(
         clients[0].requests[0]["messages"][1]["content"][0]["text"]
     )
+    assert context["previous_action"] == previous_action.to_dict()
     assert "scroll_guard" not in context
-
-
-@pytest.mark.parametrize(
-    "previous_action",
-    (
-        None,
-        ActorPreviousActionView(
-            action="click",
-            semantic_summary="click",
-            input_completed=False,
-            visible_effect="",
-        ),
-        ActorPreviousActionView(
-            action="double_click",
-            semantic_summary="double_click",
-            input_completed=True,
-            visible_effect="",
-        ),
-    ),
-)
-def test_focus_guard_requires_a_completed_click(
-    previous_action: ActorPreviousActionView | None,
-) -> None:
-    _, clients = _build_clients(_tool_response())
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    actor.propose(
-        replace(_actor_turn(), previous_action=previous_action),
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
-    context = json.loads(
-        clients[0].requests[0]["messages"][1]["content"][0]["text"]
-    )
     assert "focus_guard" not in context
 
 
@@ -713,7 +508,7 @@ def test_focus_guard_requires_a_completed_click(
     "summary",
     ("secret_token", "hotkey_secret_token", "scroll_sideways"),
 )
-def test_model_turn_contracts_reject_arbitrary_action_summaries(
+def test_actor_turn_contract_rejects_arbitrary_action_summaries(
     summary: str,
 ) -> None:
     with pytest.raises(ValueError, match="privacy-safe"):
@@ -721,30 +516,16 @@ def test_model_turn_contracts_reject_arbitrary_action_summaries(
             _actor_turn(),
             completed_action_summaries=(summary,),
         )
-    with pytest.raises(ValueError, match="privacy-safe"):
-        replace(
-            _verifier_turn(),
-            completed_action_summaries=(summary,),
-        )
 
 
 def test_consecutive_calls_always_build_fresh_two_message_contexts() -> None:
-    _, clients = _build_clients(
-        _tool_response(),
-        _verifier_response(),
-    )
+    _, clients = _build_clients([_tool_response(), _tool_response()])
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
     )
-    verifier = LiveVisualObligationVerifier(
-        client=clients[1],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
     turn = _actor_turn()
-    verifier_turn = _verifier_turn()
 
     actor.propose(
         turn,
@@ -762,25 +543,12 @@ def test_consecutive_calls_always_build_fresh_two_message_contexts() -> None:
         submitted_size=(640, 480),
     )
 
-    verifier.assess(verifier_turn)
-    clients[1].requests[0]["messages"].append(
-        {"role": "assistant", "content": "private prior assessment"}
-    )
-    verifier.assess(verifier_turn)
-
     assert len(clients[0].requests[1]["messages"]) == 2
-    assert len(clients[1].requests[1]["messages"]) == 2
     assert "private prior reasoning" not in json.dumps(
         clients[0].requests[1]["messages"]
     )
-    assert "private prior assessment" not in json.dumps(
-        clients[1].requests[1]["messages"]
-    )
     assert clients[0].requests[0]["messages"] is not (
         clients[0].requests[1]["messages"]
-    )
-    assert clients[1].requests[0]["messages"] is not (
-        clients[1].requests[1]["messages"]
     )
 
 
@@ -868,8 +636,8 @@ def test_actor_permissions_are_the_exact_broker_projected_subset() -> None:
         _tool_response(
             name="click",
             arguments={
-                "image_x": 4,
-                "image_y": 5,
+                "image_x": 400,
+                "image_y": 300,
                 "local_intent": "click the visible control once",
             },
         )
@@ -881,16 +649,102 @@ def test_actor_permissions_are_the_exact_broker_projected_subset() -> None:
         model="vision-model",
         runtime=ModelCallRuntime(),
     )
-    assert actor.propose(
+    decision = actor.propose(
         turn,
         image_b64=_JPEG_B64,
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
-    )["action"] == "click"
+    )
+    assert decision.proposal["action"] == "click"
+    assert decision.proposal["args"] == {
+        "image_x": 400,
+        "image_y": 300,
+    }
     assert [
         tool["function"]["name"]
         for tool in clients[0].requests[0]["tools"]
     ] == ["click"]
+    assert len(clients[0].requests) == 1
+
+
+def test_actor_preserves_an_ordered_optional_runtime_drag_path() -> None:
+    _, clients = _build_clients(
+        _tool_response(
+            name="drag",
+            arguments={
+                "image_x1": 40,
+                "image_y1": 50,
+                "image_x2": 500,
+                "image_y2": 400,
+                "image_points": [[120, 60], [250, 220], [420, 260]],
+                "keep_holding": True,
+                "local_intent": (
+                    "drag around the visible obstacle through the opening"
+                ),
+            },
+        )
+    )
+    turn = _actor_turn()
+    drag = next(tool for tool in turn.tools if tool.name == "drag")
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    decision = actor.propose(
+        replace(turn, tools=(drag,), pointer_held=True),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["args"] == {
+        "image_x1": 40,
+        "image_y1": 50,
+        "image_x2": 500,
+        "image_y2": 400,
+        "image_points": [[120, 60], [250, 220], [420, 260]],
+        "keep_holding": True,
+    }
+    actor_schema = clients[0].requests[0]["tools"][0]["function"][
+        "parameters"
+    ]
+    assert "image_points" in actor_schema["required"]
+    assert "keep_holding" in actor_schema["required"]
+    assert actor_schema["properties"]["image_points"]["maxItems"] == 32
+    assert len(clients[0].requests) == 1
+
+
+def test_actor_rejects_malformed_task_state_without_echoing_private_text() -> None:
+    sentinel = "PRIVATE-STATE-MUST-NOT-ECHO"
+    _, clients = _build_clients(
+        _tool_response(
+            arguments={
+                "text": "hello",
+                "local_intent": "type once",
+                "task_state_update": {"unexpected": sentinel},
+            },
+        )
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    with pytest.raises(
+        InvalidActorProposal,
+        match="exactly scratchpad",
+    ) as caught:
+        actor.propose(
+            _actor_turn(),
+            image_b64=_JPEG_B64,
+            image_media_type="image/jpeg",
+            submitted_size=(640, 480),
+        )
+
+    assert sentinel not in str(caught.value)
 
 
 def test_actor_rejects_unknown_strict_schema_keywords_before_transport() -> None:
@@ -965,177 +819,29 @@ def test_actor_maps_only_the_two_approved_runtime_outcomes(
         model="vision-model",
         runtime=ModelCallRuntime(),
     )
-    assert actor.propose(
+    assert dict(actor.propose(
         _actor_turn(),
         image_b64=_JPEG_B64,
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
-    ) == expected
+    ).proposal) == expected
 
 
-def test_verifier_has_no_tool_permission_and_requires_its_own_schema() -> None:
-    _, clients = _build_clients(
-        _verifier_response(with_tool=True),
-        {
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": json.dumps(
-                            {
-                                "verified": True,
-                                "satisfied_conditions": [],
-                            }
-                        ),
-                    }
-                }
-            ]
-        },
-    )
-    first = LiveVisualObligationVerifier(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-    second = LiveVisualObligationVerifier(
-        client=clients[1],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-    with pytest.raises(LiveModelRoleError, match="no tool permission"):
-        first.assess(_verifier_turn())
-    with pytest.raises(LiveModelRoleError, match="invalid assessment"):
-        second.assess(_verifier_turn())
-
-
-@pytest.mark.parametrize("role", [None, "user"])
-def test_verifier_requires_explicit_assistant_response_role(
-    role: str | None,
-) -> None:
-    response = _verifier_response()
-    message = response["choices"][0]["message"]
-    if role is None:
-        del message["role"]
-    else:
-        message["role"] = role
-    _, clients = _build_clients(response)
-    verifier = LiveVisualObligationVerifier(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-    with pytest.raises(LiveModelRoleError, match="not assistant"):
-        verifier.assess(_verifier_turn())
-
-
-def test_verifier_rejects_nonnull_confidence_outside_role_schema() -> None:
-    _, clients = _build_clients(_verifier_response(confidence=1.0))
-    verifier = LiveVisualObligationVerifier(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    with pytest.raises(LiveModelRoleError, match="confidence must be null"):
-        verifier.assess(_verifier_turn())
-    assert len(clients[0].requests) == 1
-
-
-def test_verifier_maps_ordered_statuses_to_exact_runtime_conditions() -> None:
-    _, clients = _build_clients(
-        _verifier_response(
-            verified=False,
-            condition_results=["missing", "contradicted"],
-        )
-    )
-    verifier = LiveVisualObligationVerifier(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    assessment = verifier.assess(_verifier_turn())
-
-    assert assessment.verified is False
-    assert assessment.satisfied_conditions == ()
-    assert assessment.missing_conditions == (
-        "The field contains hello",
-    )
-    assert assessment.contradictions == (
-        forbidden_effect_condition("No duplicate text"),
-    )
-
-
-@pytest.mark.parametrize(
-    "response, error",
-    [
-        (
-            _verifier_response(condition_results=["satisfied"]),
-            "exactly 2 statuses",
-        ),
-        (
-            _verifier_response(
-                verified=False,
-                condition_results=["satisfied", "unknown"],
-            ),
-            "must be satisfied, missing, or contradicted",
-        ),
-        (
-            _verifier_response(
-                verified=True,
-                condition_results=["satisfied", "missing"],
-            ),
-            "verified must be true exactly",
-        ),
-        (
-            _verifier_response(
-                verified=False,
-                condition_results=["satisfied", "satisfied"],
-            ),
-            "verified must be true exactly",
-        ),
-    ],
-)
-def test_verifier_fails_closed_on_invalid_ordered_condition_results(
-    response: dict[str, Any],
-    error: str,
-) -> None:
-    _, clients = _build_clients(response)
-    verifier = LiveVisualObligationVerifier(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    with pytest.raises(LiveModelRoleError, match=error):
-        verifier.assess(_verifier_turn())
-
-
-@pytest.mark.parametrize("role_kind", ["actor", "verifier"])
-def test_each_role_uses_call_once_transport_policy(role_kind: str) -> None:
+def test_actor_uses_call_once_transport_policy() -> None:
     _, clients = _build_clients(TimeoutError("transient transport failure"))
-    if role_kind == "actor":
-        role = LiveVisualActor(
-            client=clients[0],
-            model="vision-model",
-            runtime=ModelCallRuntime(sleeper=lambda _delay: None),
-        )
-        invoke = lambda: role.propose(
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(sleeper=lambda _delay: None),
+    )
+
+    with pytest.raises(ModelCallError) as caught:
+        actor.propose(
             _actor_turn(),
             image_b64=_JPEG_B64,
             image_media_type="image/jpeg",
             submitted_size=(640, 480),
         )
-    else:
-        role = LiveVisualObligationVerifier(
-            client=clients[0],
-            model="vision-model",
-            runtime=ModelCallRuntime(sleeper=lambda _delay: None),
-        )
-        invoke = lambda: role.assess(_verifier_turn())
-
-    with pytest.raises(ModelCallError) as caught:
-        invoke()
     assert len(clients[0].requests) == 1
     assert len(caught.value.attempts) == 1
     assert caught.value.request_retry_count == 0
@@ -1158,17 +864,10 @@ def test_role_configuration_budgets_have_hard_upper_bounds(
     kwargs: dict[str, Any],
     error: str,
 ) -> None:
-    _, clients = _build_clients(_tool_response(), _verifier_response())
+    _, clients = _build_clients(_tool_response())
     with pytest.raises(LiveModelRoleError, match=error):
         LiveVisualActor(
             client=clients[0],
-            model="vision-model",
-            runtime=ModelCallRuntime(),
-            **kwargs,
-        )
-    with pytest.raises(LiveModelRoleError, match=error):
-        LiveVisualObligationVerifier(
-            client=clients[1],
             model="vision-model",
             runtime=ModelCallRuntime(),
             **kwargs,
@@ -1179,17 +878,9 @@ def test_role_json_outputs_have_a_hard_character_bound() -> None:
     oversized = "{" + (
         " " * MAX_LIVE_MODEL_JSON_RESPONSE_CHARS
     ) + "}"
-    _, clients = _build_clients(
-        _tool_response(arguments=oversized),
-        {"choices": [{"message": {"role": "assistant", "content": oversized}}]},
-    )
+    _, clients = _build_clients(_tool_response(arguments=oversized))
     actor = LiveVisualActor(
         client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-    verifier = LiveVisualObligationVerifier(
-        client=clients[1],
         model="vision-model",
         runtime=ModelCallRuntime(),
     )
@@ -1200,5 +891,3 @@ def test_role_json_outputs_have_a_hard_character_bound() -> None:
             image_media_type="image/jpeg",
             submitted_size=(640, 480),
         )
-    with pytest.raises(LiveModelRoleError, match="exceeds"):
-        verifier.assess(_verifier_turn())

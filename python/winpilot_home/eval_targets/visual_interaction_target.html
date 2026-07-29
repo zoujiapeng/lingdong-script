@@ -134,12 +134,17 @@
         body:JSON.stringify(payload), cache:'no-store'})
         .then(response=>response.ok?response.json():null).catch(() => null);
     }
+    function revealStatus() {
+      status.scrollIntoView({block:'nearest', inline:'nearest'});
+    }
     function markSuccess(message, event, details = {}) {
       status.className = 'status success'; status.textContent = message;
+      revealStatus();
       report('scenario_success', event, {...details, succeeded:true});
     }
     function markFailure(message, event, details = {}) {
       status.className = 'status failure'; status.textContent = message;
+      revealStatus();
       report('scenario_failure', event, {...details, succeeded:false});
     }
     function place(element, left, top, width, height) {
@@ -394,6 +399,7 @@
         }else{
           status.className='status failure';status.textContent='仍有答案不正确，请检查后重新提交';
         }
+        revealStatus();
       });
       readyDetails={
         question_count:spec.question_count,
@@ -409,6 +415,7 @@
         viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails})))
     ).catch(error=>{
       status.className='status failure';status.textContent='PAGE_SETUP_FAILED';
+      revealStatus();
       report('page_error',null,{succeeded:false,error:String(error)});
     });
   </script>

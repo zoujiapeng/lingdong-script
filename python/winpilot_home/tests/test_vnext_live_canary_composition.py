@@ -60,7 +60,6 @@ from winpilot.vnext.evidence_plane import (
     canonical_sha256,
 )
 from winpilot.vnext.mission import (
-    EvidencePolicy,
     EvidenceRef,
     MissionDefinition,
     MissionReducer,
@@ -455,6 +454,46 @@ def test_live_target_reader_uses_visible_dwm_bounds_for_maximized_window(
     assert facts.region == (0, 0, 1920, 1040)
 
 
+def test_live_target_reader_clips_invisible_maximized_resize_border(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import win32gui
+    import win32process
+
+    monkeypatch.setattr(win32gui, "IsWindow", lambda _hwnd: True)
+    monkeypatch.setattr(win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(win32gui, "GetAncestor", lambda hwnd, _flag: hwnd)
+    monkeypatch.setattr(win32gui, "GetForegroundWindow", lambda: HWND)
+    monkeypatch.setattr(win32gui, "GetWindowText", lambda _hwnd: "Canary Target")
+    monkeypatch.setattr(win32gui, "GetClassName", lambda _hwnd: "CanaryWindow")
+    monkeypatch.setattr(
+        win32process,
+        "GetWindowThreadProcessId",
+        lambda _hwnd: (1, PID),
+    )
+    monkeypatch.setattr(
+        canary,
+        "_process_executable_identity",
+        lambda _pid: r"c:\apps\canary.exe",
+    )
+    monkeypatch.setattr(
+        canary,
+        "window_region",
+        lambda _hwnd: Region(-10, 0, 1940, 1040),
+    )
+    monkeypatch.setattr(
+        canary,
+        "virtual_screen_region",
+        lambda: Region(0, 0, 1920, 1040),
+    )
+
+    facts = canary._read_win32_target(HWND)
+
+    assert facts is not None
+    assert facts.region == (0, 0, 1920, 1040)
+
+
 def test_hit_test_normalizes_same_process_owned_popup_to_root_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -802,6 +841,33 @@ def test_current_target_identity_mismatch_fails_before_session(
     assert built is False
 
 
+def test_prebound_target_normalizes_client_rect_to_visible_desktop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _inputs()
+    inputs["execution_context"]["target_window"]["rect"] = [
+        -10,
+        0,
+        1930,
+        1040,
+    ]
+    monkeypatch.setattr(
+        canary,
+        "virtual_screen_region",
+        lambda: Region(0, 0, 1920, 1040),
+    )
+
+    target = canary._freeze_prebound_target(
+        _graph(),
+        inputs,
+        dependencies=_dependencies(
+            reader=lambda _hwnd: _facts(region=(0, 0, 1920, 1040)),
+        ),
+    )
+
+    assert target.region == (0, 0, 1920, 1040)
+
+
 def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> None:
     catalog = canary._tool_catalog()
     schemas = {
@@ -818,6 +884,44 @@ def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> No
     assert set(hotkey["items"]["enum"]) == set(CANONICAL_HOTKEY_KEYS)
     assert hotkey["maxItems"] == len(CANONICAL_HOTKEY_MODIFIERS) + 1 == 5
     assert hotkey["uniqueItems"] is True
+    drag = schemas["drag"]
+    assert tuple(drag["required"]) == (
+        "image_x1",
+        "image_y1",
+        "image_x2",
+        "image_y2",
+    )
+    assert drag["properties"]["image_points"]["maxItems"] == 32
+    assert drag["properties"]["image_points"]["items"]["minItems"] == 2
+    assert drag["properties"]["image_points"]["items"]["maxItems"] == 2
+    assert drag["properties"]["keep_holding"] == {"type": "boolean"}
+    validator = ToolArgumentValidator(catalog)
+    straight = {
+        "image_x1": 10,
+        "image_y1": 20,
+        "image_x2": 300,
+        "image_y2": 200,
+    }
+    assert validator.validate("drag", straight) == straight
+    curved = {
+        **straight,
+        "image_points": [[80, 40], [160, 120]],
+        "keep_holding": False,
+    }
+    assert validator.validate("drag", curved) == curved
+    with pytest.raises(ToolArgumentValidationError):
+        validator.validate(
+            "drag",
+            {**straight, "image_points": [[1, 2, 3]]},
+        )
+    with pytest.raises(ToolArgumentValidationError):
+        validator.validate(
+            "drag",
+            {
+                **straight,
+                "image_points": [[index, index] for index in range(33)],
+            },
+        )
     blocker = schemas["blocked"]["properties"]["blocker_kind"]
     assert blocker["maxLength"] == 64
     assert blocker["pattern"] == r"^[a-z][a-z0-9_]{0,63}$"
@@ -883,6 +987,12 @@ def test_mission_hotkey_summaries_match_the_physical_chord_contract() -> None:
     assert mission_contracts._HOTKEY_SUMMARY_PRIMARY_KEYS == frozenset(
         primary_keys
     )
+    for modifier in CANONICAL_HOTKEY_MODIFIERS:
+        assert HotkeyChord((modifier,)).keys == (modifier,)
+        assert is_safe_action_summary(
+            "hotkey",
+            f"hotkey_{modifier}",
+        )
     for modifier_count in range(len(CANONICAL_HOTKEY_MODIFIERS) + 1):
         for modifiers in permutations(
             CANONICAL_HOTKEY_MODIFIERS,
@@ -904,7 +1014,6 @@ def test_mission_hotkey_summaries_match_the_physical_chord_contract() -> None:
 
     for summary in (
         "hotkey_",
-        "hotkey_ctrl",
         "hotkey_ctrl_ctrl_a",
         "hotkey_a_ctrl",
         "hotkey_secret_token",
@@ -964,12 +1073,8 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
             ),
             MissionRuntimeResult(RuntimeStatus.STALE_DISCARDED),
             MissionRuntimeResult(
-                RuntimeStatus.PROPOSAL_SUPPRESSED,
-                accepted_event_ids=("event-suppressed",),
-            ),
-            MissionRuntimeResult(
                 RuntimeStatus.VERIFICATION_RECORDED,
-                accepted_event_ids=("event-verifier-rejected",),
+                accepted_event_ids=("event-verification-recorded",),
             ),
             MissionRuntimeResult(
                 RuntimeStatus.MISSION_VERIFIED,
@@ -995,10 +1100,10 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     assert snapshot["status"] == ArpRunStatus.DONE.value
     assert snapshot["runtime_version"] == "vnext"
     assert snapshot["result"]["status"] == "mission_verified"
-    assert snapshot["result"]["turns_used"] == 5
-    assert snapshot["result"]["model_calls"] == 5
+    assert snapshot["result"]["turns_used"] == 4
+    assert snapshot["result"]["model_calls"] == 4
     assert snapshot["result"]["no_legacy_fallback"] is True
-    assert session.calls == 5
+    assert session.calls == 4
     assert session.closed is True
     assert len(snapshot["evidence"]) == 1
     assert snapshot["evidence"][0]["verified"] is True
@@ -1006,7 +1111,7 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     done = [item for item in events if item["type"] == "vnext_canary_done"]
     turns = [item for item in events if item["type"] == "vnext_canary_turn"]
     assert len(starts) == len(done) == 1
-    assert len(turns) == 5
+    assert len(turns) == 4
     assert turns[-2]["status"] == "verification_recorded"
     assert starts[0]["runtime_budget"] == {
         "max_turns": 30,
@@ -1215,7 +1320,7 @@ def test_handler_stops_on_blocked_without_retry_and_closes() -> None:
         [
             MissionRuntimeResult(
                 RuntimeStatus.BLOCKED,
-                detail="independent verifier could not establish the goal",
+                detail="the requested state could not be established",
             ),
             MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
         ]
@@ -1264,6 +1369,48 @@ def test_completion_snapshot_error_still_closes_and_fails_closed() -> None:
     assert snapshot["evidence"] == []
 
 
+def test_verified_result_survives_unavailable_diagnostic_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class VerifiedSessionWithoutDiagnosticAnchor(_FakeSession):
+        def completion_snapshot(self) -> dict[str, Any]:
+            snapshot = super().completion_snapshot()
+            snapshot["result"] = "the requested state is visibly present"
+            return snapshot
+
+        def close(self) -> None:
+            self.closed = True
+            raise RuntimeError("diagnostic cleanup unavailable")
+
+    session = VerifiedSessionWithoutDiagnosticAnchor(
+        [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
+    )
+
+    def build(build_spec: Any) -> _FakeSession:
+        session.mission_id = build_spec.mission_id
+        session.run_id = build_spec.run_id
+        session.target_binding_id = build_spec.target.binding_id
+        session.frame_epoch = build_spec.target.captured_at_ms
+        return session
+
+    monkeypatch.setattr(canary, "_build_live_session", build)
+    manager = ArpRunManager()
+    execution = canary.prepare_live_vnext_execution(
+        _graph(),
+        _inputs(),
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(),
+    )
+
+    snapshot = manager.run_prepared(execution)
+
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"]["status"] == RuntimeStatus.MISSION_VERIFIED.value
+    assert snapshot["result"]["runtime_evidence"]["available"] is False
+    assert session.closed is True
+
+
 def test_product_failure_detail_is_typed_status_only() -> None:
     assert canary._public_runtime_detail(
         RuntimeStatus.STATE_REJECTED
@@ -1272,7 +1419,7 @@ def test_product_failure_detail_is_typed_status_only() -> None:
     )
 
 
-def test_public_turn_projection_omits_private_verifier_feedback() -> None:
+def test_public_turn_projection_omits_private_failure_feedback() -> None:
     sentinel = "PRIVATE-SCREEN-SENTINEL"
     target = canary._freeze_prebound_target(
         _graph(),
@@ -1759,9 +1906,6 @@ def test_pause_invalidates_actor_frame_but_not_atomic_post_reconcile_frame() -> 
                 desired_state=GOAL,
                 acceptance_criteria=(GOAL,),
                 required_capabilities=("visual.interact",),
-                evidence_policy=EvidencePolicy(
-                    allow_independent_visual_verifier=True,
-                ),
             ),
         ),
     )
@@ -1937,9 +2081,15 @@ class _RawClient:
         self.requests.append(request)
         if self.on_request is not None:
             return self.on_request(request)
-        if isinstance(self.response, BaseException):
-            raise self.response
-        return self.response
+        response = self.response
+        if type(response) is list:
+            index = len(self.requests) - 1
+            if index >= len(response):
+                raise AssertionError("Unexpected extra provider request")
+            response = response[index]
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
     def close(self) -> None:
         self.close_calls += 1
@@ -1976,8 +2126,8 @@ def _runtime_evidence_resources(
     )
 
 
-def _click_response() -> dict[str, Any]:
-    return {
+def _click_responses() -> list[dict[str, Any]]:
+    planned = {
         "choices": [
             {
                 "message": {
@@ -1992,6 +2142,9 @@ def _click_response() -> dict[str, Any]:
                                     {
                                         "image_x": 20,
                                         "image_y": 20,
+                                        "task_state_update": {
+                                            "scratchpad": None,
+                                        },
                                         "local_intent": (
                                             "activate the requested control once"
                                         ),
@@ -2005,10 +2158,11 @@ def _click_response() -> dict[str, Any]:
             }
         ]
     }
+    return [planned]
 
 
-def _scroll_response() -> dict[str, Any]:
-    return {
+def _scroll_responses() -> list[dict[str, Any]]:
+    planned = {
         "choices": [
             {
                 "message": {
@@ -2024,6 +2178,9 @@ def _scroll_response() -> dict[str, Any]:
                                         "image_x": 37,
                                         "image_y": 29,
                                         "amount": -713,
+                                        "task_state_update": {
+                                            "scratchpad": None,
+                                        },
                                         "local_intent": (
                                             "scroll the requested surface once"
                                         ),
@@ -2037,11 +2194,14 @@ def _scroll_response() -> dict[str, Any]:
             }
         ]
     }
+    return [planned]
 
 
 def _install_safe_backends(
     monkeypatch: pytest.MonkeyPatch,
     calls: list[str],
+    *,
+    on_click: Any = None,
 ) -> None:
     def click(
         x: int,
@@ -2055,6 +2215,8 @@ def _install_safe_backends(
     ) -> RawBackendResult:
         del button, count, mechanism, hwnd
         assert final_guard(x, y).value == "admitted"
+        if on_click is not None:
+            on_click()
         calls.append("click")
         return RawBackendResult(
             True,
@@ -2090,13 +2252,15 @@ def _real_session_with_captures(
     monkeypatch: pytest.MonkeyPatch,
     *,
     images: list[str],
-    clients: tuple[_RawClient, _RawClient],
+    client: _RawClient,
     evidence_root: Path,
     clock: list[float] | None = None,
     deadline: float = 310.0,
     install_safe_backends: bool = True,
     interaction_mode: InteractionMode = InteractionMode.AUTO,
     hit_test_root: Any = None,
+    target_reader: Any = None,
+    on_click: Any = None,
 ) -> tuple[Any, list[str], list[dict[str, Any]]]:
     clock = clock or [10.0]
     capture_values = list(images)
@@ -2126,18 +2290,25 @@ def _real_session_with_captures(
     )
     raw_calls: list[str] = []
     if install_safe_backends:
-        _install_safe_backends(monkeypatch, raw_calls)
+        _install_safe_backends(
+            monkeypatch,
+            raw_calls,
+            on_click=on_click,
+        )
     factory_calls: list[dict[str, Any]] = []
-    pending_clients = list(clients)
 
     def factory(**kwargs: Any) -> _RawClient:
         factory_calls.append(kwargs)
-        return pending_clients.pop(0)
+        return client
 
     deps = canary._CompositionDependencies(
         wall_clock=lambda: NOW_MS / 1000.0,
         monotonic=lambda: clock[0],
-        target_reader=lambda _hwnd: _facts(),
+        target_reader=(
+            (lambda _hwnd: _facts())
+            if target_reader is None
+            else target_reader
+        ),
         hit_test_root=(
             (lambda _x, _y: HWND)
             if hit_test_root is None
@@ -2186,7 +2357,7 @@ def test_gui_required_fresh_observation_is_auditable_without_pixel_data(
             _jpeg(640, 480, level=120),
             _jpeg(640, 480, level=180),
         ],
-        clients=(_RawClient(_click_response()), _RawClient()),
+        client=_RawClient(_click_responses()),
         evidence_root=tmp_path / "runtime-evidence",
         interaction_mode=InteractionMode.GUI_REQUIRED,
     )
@@ -2209,7 +2380,19 @@ def test_gui_required_fresh_observation_is_auditable_without_pixel_data(
         BUS.remove_sink(recorder._on_event)
 
     assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert session.model_calls == 1
     assert raw_calls == ["click"]
+    model_events = [
+        item
+        for item in events
+        if item["type"] == "vnext_model_call"
+    ]
+    assert [item["model_role"] for item in model_events] == [
+        canary.VISUAL_ACTOR_MODEL_ROLE,
+    ]
+    assert len(
+        {item["request_fingerprint"] for item in model_events}
+    ) == 1
     observation = next(
         item
         for item in events
@@ -2271,6 +2454,86 @@ def test_gui_required_fresh_observation_is_auditable_without_pixel_data(
     )
 
 
+def test_completed_click_adopts_stable_cross_process_foreground_next_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    next_hwnd = HWND + 50
+    foreground = [HWND]
+
+    def reader(hwnd: int) -> canary._TargetFacts | None:
+        if hwnd == HWND:
+            return canary._TargetFacts(
+                hwnd=HWND,
+                root_hwnd=HWND,
+                process_id=PID,
+                executable_identity=r"c:\apps\canary.exe",
+                title="Canary Target",
+                class_name="CanaryWindow",
+                region=REGION,
+                foreground_root_hwnd=foreground[0],
+            )
+        if hwnd == next_hwnd:
+            return canary._TargetFacts(
+                hwnd=next_hwnd,
+                root_hwnd=next_hwnd,
+                process_id=PID + 1,
+                executable_identity=r"c:\apps\successor.exe",
+                title="Successor",
+                class_name="SuccessorWindow",
+                region=REGION,
+                foreground_root_hwnd=foreground[0],
+            )
+        return None
+
+    session, raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[
+            _jpeg(640, 480, level=100),
+            _jpeg(640, 480, level=120),
+            _jpeg(640, 480, level=180),
+        ],
+        client=_RawClient(_click_responses()),
+        evidence_root=tmp_path / "runtime-evidence",
+        interaction_mode=InteractionMode.GUI_REQUIRED,
+        target_reader=reader,
+        on_click=lambda: foreground.__setitem__(0, next_hwnd),
+    )
+    events: list[dict[str, Any]] = []
+    BUS.add_sink(events.append)
+    try:
+        first = session.run_one_turn(
+            turn_index=0,
+            stop_event=threading.Event(),
+        )
+        assert first.status is RuntimeStatus.ACTION_RECORDED
+        assert session._reducer.projection.target_binding.hwnd == HWND
+
+        observed = session._runtime._state.observe(
+            session._reducer.projection,
+            turn_index=1,
+        )
+        replacement = session._reducer.projection.target_binding
+        assert replacement is not None
+        assert replacement.hwnd == next_hwnd
+        assert observed.frame.hwnd == next_hwnd
+        assert observed.target.hwnd == next_hwnd
+        assert session._authority.current.hwnd == next_hwnd
+    finally:
+        session.close()
+        BUS.remove_sink(events.append)
+
+    assert raw_calls == ["click"]
+    adoption = [
+        item
+        for item in events
+        if item["type"] == "vnext_workspace_target_adopted"
+    ]
+    assert len(adoption) == 1
+    assert adoption[0]["target_hwnd"] == next_hwnd
+    assert adoption[0]["causal_action"] == "click"
+
+
 def test_hit_test_race_is_durably_reobserved_before_one_real_input(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2290,7 +2553,7 @@ def test_hit_test_race_is_durably_reobserved_before_one_real_input(
             _jpeg(640, 480, level=120),
             _jpeg(640, 480, level=180),
         ],
-        clients=(_RawClient(_click_response()), _RawClient()),
+        client=_RawClient(_click_responses() * 2),
         evidence_root=evidence_root,
         interaction_mode=InteractionMode.GUI_REQUIRED,
         hit_test_root=hit_test_root,
@@ -2345,12 +2608,11 @@ def test_initial_capture_dimension_mismatch_stops_before_model_or_raw(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    actor_client = _RawClient(_click_response())
-    verifier_client = _RawClient()
+    actor_client = _RawClient(_click_responses())
     session, raw_calls, _factory_calls = _real_session_with_captures(
         monkeypatch,
         images=[_jpeg(639, 480)],
-        clients=(actor_client, verifier_client),
+        client=actor_client,
         evidence_root=tmp_path,
     )
     try:
@@ -2363,44 +2625,22 @@ def test_initial_capture_dimension_mismatch_stops_before_model_or_raw(
 
     assert result.status is RuntimeStatus.STATE_REJECTED
     assert actor_client.requests == []
-    assert verifier_client.requests == []
     assert raw_calls == []
     assert session._authority.current is None
 
 
-def test_live_session_keeps_verifier_recovery_bounded(
+def test_post_capture_failure_defers_to_fresh_observation_without_replay(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    session, _raw_calls, _factory_calls = _real_session_with_captures(
-        monkeypatch,
-        images=[_jpeg(640, 480)],
-        clients=(_RawClient(), _RawClient()),
-        evidence_root=tmp_path,
-        install_safe_backends=False,
-    )
-    try:
-        obligation = session._reducer.definition.obligations[0]
-
-        assert obligation.evidence_policy.max_verification_attempts == 3
-        assert obligation.evidence_policy.uncertain_policy == "blocked"
-    finally:
-        session.close()
-
-
-def test_post_capture_dimension_mismatch_is_unknown_and_never_replayed(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    actor_client = _RawClient(_click_response())
-    verifier_client = _RawClient()
+    actor_client = _RawClient(_click_responses())
     session, raw_calls, _factory_calls = _real_session_with_captures(
         monkeypatch,
         images=[
             _jpeg(640, 480),
             _jpeg(639, 480),
         ],
-        clients=(actor_client, verifier_client),
+        client=actor_client,
         evidence_root=tmp_path,
     )
     try:
@@ -2415,15 +2655,21 @@ def test_post_capture_dimension_mismatch_is_unknown_and_never_replayed(
     finally:
         session.close()
 
-    assert first.status is RuntimeStatus.BLOCKED
-    assert second.status is RuntimeStatus.BLOCKED
+    assert first.status is RuntimeStatus.ACTION_RECORDED
+    assert second.status is RuntimeStatus.STATE_REJECTED
     assert raw_calls == ["click"]
     assert len(actor_client.requests) == 1
     tools = {
         tool["function"]["name"]: tool["function"]["parameters"]
         for tool in actor_client.requests[0]["tools"]
     }
-    for name in {"click", "double_click", "scroll", "type_text", "hotkey"}:
+    for name in {
+        "click",
+        "double_click",
+        "scroll",
+        "type_text",
+        "press_key",
+    }:
         assert (
             tools[name]["properties"]["local_intent"]["pattern"]
             == r"\S"
@@ -2442,11 +2688,10 @@ def test_each_model_call_is_clamped_to_one_second_remaining_deadline(
         raise TimeoutError("slow fake exceeded its request timeout")
 
     actor_client = _RawClient(on_request=slow_request)
-    verifier_client = _RawClient()
     session, raw_calls, factory_calls = _real_session_with_captures(
         monkeypatch,
         images=[_jpeg(640, 480)],
-        clients=(actor_client, verifier_client),
+        client=actor_client,
         evidence_root=tmp_path,
         clock=clock,
         deadline=11.0,
@@ -2461,7 +2706,6 @@ def test_each_model_call_is_clamped_to_one_second_remaining_deadline(
 
     assert [call["timeout"] for call in factory_calls] == [
         pytest.approx(1.0),
-        pytest.approx(1.0),
     ]
     assert len(actor_client.requests) == 1
     assert raw_calls == []
@@ -2473,15 +2717,14 @@ def test_completed_action_seals_one_authenticated_evidence_anchor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    actor_client = _RawClient(_click_response())
-    verifier_client = _RawClient()
+    actor_client = _RawClient(_click_responses())
     session, raw_calls, _factory_calls = _real_session_with_captures(
         monkeypatch,
         images=[
             _jpeg(640, 480, level=120),
             _jpeg(640, 480, level=180),
         ],
-        clients=(actor_client, verifier_client),
+        client=actor_client,
         evidence_root=tmp_path,
     )
     events: list[dict[str, Any]] = []
@@ -2621,15 +2864,14 @@ def test_real_composition_scroll_keeps_public_summary_private_and_evidence_exact
             ),
         )
 
-    actor_client = _RawClient(_scroll_response())
-    verifier_client = _RawClient()
+    actor_client = _RawClient(_scroll_responses())
     session, fake_raw_calls, _factory_calls = _real_session_with_captures(
         monkeypatch,
         images=[
             _jpeg(640, 480, level=120),
             _jpeg(640, 480, level=180),
         ],
-        clients=(actor_client, verifier_client),
+        client=actor_client,
         evidence_root=tmp_path,
         install_safe_backends=False,
     )
@@ -3241,9 +3483,9 @@ def test_controller_setup_failure_seals_and_closes_all_created_owners_once(
 @pytest.mark.parametrize(
     "failure_stage,expected_clients",
     (
-        ("second_model_client", 1),
-        ("mission_runtime", 2),
-        ("live_session", 2),
+        ("model_client", 0),
+        ("mission_runtime", 1),
+        ("live_session", 1),
     ),
 )
 def test_model_runtime_session_setup_failure_seals_and_closes_once(
@@ -3263,7 +3505,7 @@ def test_model_runtime_session_setup_failure_seals_and_closes_once(
     error_text = f"synthetic {failure_stage} setup failure"
 
     def factory(**_kwargs: Any) -> _RawClient:
-        if failure_stage == "second_model_client" and clients:
+        if failure_stage == "model_client":
             raise RuntimeError(error_text)
         client = _RawClient()
         clients.append(client)
@@ -3333,7 +3575,7 @@ def test_model_runtime_session_setup_failure_seals_and_closes_once(
     _assert_single_incomplete_anchor(events, tmp_path, build)
 
 
-def test_real_composition_builds_independent_zero_retry_roles_and_closes(
+def test_real_composition_builds_zero_retry_actor_and_closes(
     tmp_path: Path,
 ) -> None:
     calls: list[dict[str, Any]] = []
@@ -3375,11 +3617,9 @@ def test_real_composition_builds_independent_zero_retry_roles_and_closes(
     try:
         session = canary._build_live_session(build)
 
-        assert len(clients) == 2
-        assert clients[0] is not clients[1]
-        assert [item["max_retries"] for item in calls] == [0, 0]
+        assert len(clients) == 1
+        assert [item["max_retries"] for item in calls] == [0]
         runtime = session._runtime
-        assert runtime._actor is not runtime._verifier
         assert runtime._controller.mutation_permits is runtime.mutation_permits
         assert runtime._runtime_evidence is session._runtime_evidence
         assert (
@@ -3468,7 +3708,7 @@ def test_session_rejects_mismatched_runtime_evidence_resources(
                 authority=FrameAuthority(),
                 binding=object(),
                 counter=object(),
-                clients=(object(), object()),
+                client=object(),
                 runtime_evidence=plane,
                 frame_artifacts=other_writer,
                 evidence_journal=journal,
@@ -3478,7 +3718,7 @@ def test_session_rejects_mismatched_runtime_evidence_resources(
         other_journal.close()
 
 
-def test_evidence_rebuild_failure_closes_journal_once_without_leaking(
+def test_evidence_rebuild_failure_is_diagnostic_and_closes_resources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3489,7 +3729,6 @@ def test_evidence_rebuild_failure_closes_journal_once_without_leaking(
     permits = MutationPermitAuthority(plane.mission_id, plane.run_id)
     registry = EvidenceRegistry(plane.mission_id, plane.run_id)
     actor_client = _RawClient()
-    verifier_client = _RawClient()
     session = canary._LiveCanarySession(
         runtime=object(),
         reducer=object(),
@@ -3498,7 +3737,7 @@ def test_evidence_rebuild_failure_closes_journal_once_without_leaking(
         authority=FrameAuthority(),
         binding=object(),
         counter=object(),
-        clients=(actor_client, verifier_client),
+        client=actor_client,
         runtime_evidence=plane,
         frame_artifacts=writer,
         evidence_journal=journal,
@@ -3532,8 +3771,7 @@ def test_evidence_rebuild_failure_closes_journal_once_without_leaking(
     events: list[dict[str, Any]] = []
     BUS.add_sink(events.append)
     try:
-        with pytest.raises(ExceptionGroup) as caught:
-            session.close()
+        session.close()
         session.close()
     finally:
         BUS.remove_sink(events.append)
@@ -3542,19 +3780,15 @@ def test_evidence_rebuild_failure_closes_journal_once_without_leaking(
     assert permits.closed is True
     assert registry.closed is True
     assert actor_client.closed is True
-    assert verifier_client.closed is True
     assert session.runtime_evidence_anchor is None
     assert not any(
         event["type"] == "runtime_evidence_sealed"
         for event in events
     )
     assert sentinel not in json.dumps(events, sort_keys=True)
-    messages = [str(error) for error in caught.value.exceptions]
-    assert messages == ["runtime evidence seal failed"]
-    assert sentinel not in json.dumps(messages)
 
 
-def test_verified_session_fails_closed_on_incomplete_evidence_report(
+def test_verified_session_keeps_success_on_incomplete_evidence_report(
     tmp_path: Path,
 ) -> None:
     plane, writer, journal = _runtime_evidence_resources(
@@ -3564,7 +3798,6 @@ def test_verified_session_fails_closed_on_incomplete_evidence_report(
     permits = MutationPermitAuthority(plane.mission_id, plane.run_id)
     registry = EvidenceRegistry(plane.mission_id, plane.run_id)
     actor_client = _RawClient()
-    verifier_client = _RawClient()
     reducer = SimpleNamespace(
         projection=SimpleNamespace(status=MissionStatus.VERIFIED)
     )
@@ -3576,7 +3809,7 @@ def test_verified_session_fails_closed_on_incomplete_evidence_report(
         authority=FrameAuthority(),
         binding=object(),
         counter=object(),
-        clients=(actor_client, verifier_client),
+        client=actor_client,
         runtime_evidence=plane,
         frame_artifacts=writer,
         evidence_journal=journal,
@@ -3584,11 +3817,7 @@ def test_verified_session_fails_closed_on_incomplete_evidence_report(
     events: list[dict[str, Any]] = []
     BUS.add_sink(events.append)
     try:
-        with pytest.raises(
-            ExceptionGroup,
-            match="session cleanup failed",
-        ):
-            session.close()
+        session.close()
         session.close()
     finally:
         BUS.remove_sink(events.append)
@@ -3605,7 +3834,6 @@ def test_verified_session_fails_closed_on_incomplete_evidence_report(
     assert permits.closed is True
     assert registry.closed is True
     assert actor_client.closed is True
-    assert verifier_client.closed is True
 
 
 def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
@@ -3623,9 +3851,6 @@ def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
     permits = CloseResource("permits", fail=True)
     registry = CloseResource("registry", fail=False)
     actor_client = _RawClient(close_error="actor close unavailable")
-    verifier_client = _RawClient(
-        close_error="verifier close unavailable"
-    )
     session = canary._LiveCanarySession(
         runtime=object(),
         reducer=object(),
@@ -3634,7 +3859,7 @@ def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
         authority=FrameAuthority(),
         binding=object(),
         counter=object(),
-        clients=(actor_client, verifier_client),
+        client=actor_client,
     )
 
     with pytest.raises(ExceptionGroup) as caught:
@@ -3642,15 +3867,10 @@ def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
 
     assert permits.calls == registry.calls == 1
     assert actor_client.closed is True
-    assert verifier_client.closed is True
     messages = [str(error) for error in caught.value.exceptions]
-    assert len(messages) == 3
+    assert len(messages) == 2
     assert any("mutation permit authority" in message for message in messages)
     assert any("Visual Actor client" in message for message in messages)
-    assert any(
-        "Visual ObligationVerifier client" in message
-        for message in messages
-    )
 
 
 def test_composition_root_has_no_forbidden_product_imports_or_fallback() -> None:

@@ -66,7 +66,6 @@ CANARY_TASK = "Complete the task shown in the current visible window exactly as 
 RUNTIMES = ("legacy", "vnext")
 VNEXT_MODEL_ROLES = frozenset({
     "vnext_visual_actor",
-    "vnext_visual_obligation_verifier",
 })
 FROZEN_RUNTIME_BUDGET = {
     "max_turns": 30,
@@ -1855,7 +1854,7 @@ def _trace_audit(
             any(role not in VNEXT_MODEL_ROLES for role in roles)
             or not VNEXT_MODEL_ROLES.issubset(roles)
         ):
-            errors.append(f"vNext model role trace is not exact and independent: {roles!r}")
+            errors.append(f"vNext model role trace is not actor-only: {roles!r}")
         if any(str(item.get("mission_id") or "") != mission_id for item in model_events):
             errors.append("vNext model call mission binding mismatch")
     else:
@@ -3768,14 +3767,6 @@ def run_runtime_case(
                         or foreground_hwnd
                     ) if foreground_hwnd else 0
                 status = handoff_driver.runtime_status()
-                try:
-                    ui = handoff_driver.submission_ui_state()
-                except Exception as exc:
-                    ui = {
-                        "inspection_error": f"{type(exc).__name__}: {exc}",
-                        "buttons": [],
-                        "visible_errors": [],
-                    }
                 current = status.get("current_run")
                 current_run_id = str(
                     current.get("run_id")
@@ -3823,7 +3814,6 @@ def run_runtime_case(
                             "desktop_action_queue",
                             {},
                         ),
-                        "ui": ui,
                     }
                 )
                 if new_arp_jobs:

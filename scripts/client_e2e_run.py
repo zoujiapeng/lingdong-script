@@ -186,6 +186,7 @@ def _first_visible_descendant(
     control_type: str,
     *,
     name: str = "",
+    name_contains: str = "",
     prefix: bool = False,
 ) -> Any | None:
     """Find one named control without materializing the Chromium UIA tree.
@@ -207,6 +208,8 @@ def _first_visible_descendant(
                 control_name == name
                 or prefix and control_name.startswith(name)
             ):
+                continue
+            if name_contains and name_contains not in control_name:
                 continue
             if control.IsOffscreen:
                 continue
@@ -572,87 +575,46 @@ class ElectronClientDriver:
         *,
         expected_goal: str = "",
     ) -> dict[str, Any]:
-        buttons: list[dict[str, Any]] = []
-        for control in self.buttons():
-            try:
-                buttons.append(
-                    {
-                        "name": str(control.Name or "").strip(),
-                        "enabled": bool(control.IsEnabled),
-                    }
-                )
-            except Exception:
-                continue
-        runtime_selectors = [
-            item
-            for item in _visible_descendants(self.window, "ComboBox")
-            if item.Name == RUNTIME_SELECTOR
-        ]
-        constraint_selectors = [
-            item
-            for item in _visible_descendants(self.window, "ComboBox")
-            if item.Name == EXECUTION_CONSTRAINT_SELECTOR
-        ]
-        edits = _visible_descendants(self.window, "Edit")
-        edit_values: list[tuple[Any, str]] = []
-        for edit in edits:
-            try:
-                edit_values.append((edit, _control_value(edit)))
-            except Exception:
-                continue
-        goal = next(
-            (
-                edit
-                for edit, value in edit_values
-                if expected_goal and value == expected_goal
-            ),
-            next(
-                (
-                    edit
-                    for edit, value in edit_values
-                    if value.strip()
-                ),
-                None,
-            ),
+        run_button = _first_visible_descendant(
+            self.window,
+            "Button",
+            name=RUN_TASK,
         )
-        visible = self.texts()
-        error_markers = (
-            "error",
-            "failed",
-            "target",
-            "hwnd",
-            "澶辫触",
-            "閿欒",
+        constraint_selector = _first_visible_descendant(
+            self.window,
+            "ComboBox",
+            name=EXECUTION_CONSTRAINT_SELECTOR,
         )
-        errors = [
-            text
-            for text in visible
-            if any(marker in text.casefold() for marker in error_markers)
-        ]
+        goal = _first_visible_descendant(
+            self.window,
+            "Edit",
+            name_contains="描述希望代理",
+        )
+        goal_value = _control_value(goal) if goal is not None else ""
+        run_enabled = bool(
+            run_button is not None and run_button.IsEnabled
+        )
         return {
-            "buttons": buttons,
-            "run_button_present": any(
-                item["name"] == RUN_TASK for item in buttons
+            "buttons": (
+                [{"name": RUN_TASK, "enabled": run_enabled}]
+                if run_button is not None
+                else []
             ),
-            "run_button_enabled": any(
-                item["name"] == RUN_TASK and item["enabled"]
-                for item in buttons
-            ),
-            "stop_button_present": any(
-                item["name"] == STOP_TASK for item in buttons
-            ),
-            "runtime_selector_label": (
-                _selected_combobox_label(runtime_selectors[0])
-                if len(runtime_selectors) == 1
-                else ""
-            ),
+            "run_button_present": run_button is not None,
+            "run_button_enabled": run_enabled,
+            "stop_button_present": False,
+            "runtime_selector_label": "",
             "execution_constraint_selector_label": (
-                _selected_combobox_label(constraint_selectors[0])
-                if len(constraint_selectors) == 1
+                _selected_combobox_label(constraint_selector)
+                if constraint_selector is not None
                 else ""
             ),
-            "goal_input": _control_value(goal) if goal is not None else "",
-            "visible_errors": errors,
+            "goal_input": goal_value,
+            "visible_errors": (
+                ["visible goal does not match the submitted task"]
+                if expected_goal and goal_value != expected_goal
+                else []
+            ),
         }
 
     def restore_and_focus(self) -> None:
@@ -725,20 +687,27 @@ class ElectronClientDriver:
                 refreshed = auto.ControlFromHandle(self.identity.hwnd)
                 if refreshed is not None and refreshed.Exists(maxSearchSeconds=0.2):
                     self.window = refreshed
+                if (
+                    _first_visible_descendant(
+                        self.window,
+                        "Edit",
+                        name_contains="描述希望代理",
+                    )
+                    is not None
+                    and _first_visible_descendant(
+                        self.window,
+                        "ComboBox",
+                        name=EXECUTION_CONSTRAINT_SELECTOR,
+                    )
+                    is not None
+                ):
+                    return True
                 if _first_visible_descendant(
                     self.window,
                     "Button",
                     name=NAV_AGENT,
                 ) is not None:
                     return True
-                # Chromium may expose the Document text before its descendant
-                # Button providers settle after a minimized window is restored.
-                # The task editor and run control together distinguish the
-                # actual agent page from a partial shell or a blank renderer.
-                for document in _visible_descendants(self.window, "Document"):
-                    value = str(document.Name or "")
-                    if NAV_AGENT in value and RUN_TASK in value:
-                        return True
                 return False
             except Exception:
                 return False
@@ -859,87 +828,46 @@ class ElectronClientDriver:
             self.navigate(NAV_AGENT)
         except RuntimeError:
             pass
-        edits = _visible_descendants(self.window, "Edit")
-        if not edits:
-            raise RuntimeError("客户端目标输入框不可见")
-        goal = next(
-            (edit for edit in edits if "描述希望代理" in edit.Name),
-            edits[0],
+        goal = _first_visible_descendant(
+            self.window,
+            "Edit",
+            name_contains="描述希望代理",
         )
+        if goal is None:
+            raise RuntimeError("客户端目标输入框不可见")
         _set_control_value(goal, task)
 
-        checkboxes = _visible_descendants(self.window, "CheckBox")
-        checkbox = next(
-            (item for item in checkboxes if item.Name == COLD_START),
-            None,
-        )
-        if checkbox is not None:
-            if _toggle_state(checkbox) != 1:
-                _toggle(checkbox)
-                time.sleep(0.2)
-            if _toggle_state(checkbox) != 1:
-                raise RuntimeError("无法通过客户端开启冷启动")
-
-        spinners = _visible_descendants(self.window, "Spinner")
-        if spinners and max_steps is not None:
-            spinner = spinners[0]
-            spinner.Click()
-            auto.SendKeys("{Ctrl}a")
-            auto.SendKeys(str(max_steps))
-            auto.SendKeys("{Tab}")
-            time.sleep(0.2)
-
-        constraint_selectors = [
-            item
-            for item in _visible_descendants(self.window, "ComboBox")
-            if item.Name == EXECUTION_CONSTRAINT_SELECTOR
-        ]
-        runtime_selectors = [
-            item
-            for item in _visible_descendants(self.window, "ComboBox")
-            if item.Name == RUNTIME_SELECTOR
-        ]
-        if len(constraint_selectors) == 1:
-            if str(runtime_version or "vnext").casefold() != "vnext":
-                raise RuntimeError(
-                    "主 Agent 入口只接受服务端准入的 vNext 运行；"
-                    "Legacy 已移出该用户入口"
-                )
-            selection = {
-                "runtime_version": "vnext",
-                "runtime_selector_label": "",
-                **_select_execution_constraint(
-                    constraint_selectors[0],
-                    execution_constraint,
-                ),
-            }
-        elif len(runtime_selectors) == 1:
-            # Compatibility for archived campaigns running against a pre-
-            # migration client. New product E2E must use the constraint path.
-            selection = {
-                **_select_runtime_version(
-                    runtime_selectors[0],
-                    runtime_version,
-                ),
-                "execution_constraint": "",
-                "execution_constraint_selector_label": "",
-            }
-        else:
+        if str(runtime_version or "vnext").casefold() != "vnext":
             raise RuntimeError(
-                "客户端执行约束选择器数量不是 1: "
-                f"{len(constraint_selectors)}"
+                "主 Agent 入口只接受服务端准入的 vNext 运行；"
+                "Legacy 已移出该用户入口"
             )
+        constraint_selector = _first_visible_descendant(
+            self.window,
+            "ComboBox",
+            name=EXECUTION_CONSTRAINT_SELECTOR,
+        )
+        if constraint_selector is None:
+            raise RuntimeError(
+                "客户端执行约束选择器不可见"
+            )
+        selection = {
+            "runtime_version": "vnext",
+            "runtime_selector_label": "",
+            **_select_execution_constraint(
+                constraint_selector,
+                execution_constraint,
+            ),
+        }
 
         value = _control_value(goal)
         if value != task:
             raise RuntimeError(f"客户端目标输入不一致: {value!r}")
         return {
             "task_input": value,
-            "cold_start_control_present": checkbox is not None,
-            "cold_start_toggle": (
-                _toggle_state(checkbox) if checkbox is not None else 0
-            ),
-            "max_steps_control_present": bool(spinners),
+            "cold_start_control_present": False,
+            "cold_start_toggle": 0,
+            "max_steps_control_present": False,
             "max_steps": max_steps,
             **selection,
         }

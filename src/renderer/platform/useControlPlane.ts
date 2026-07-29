@@ -8,6 +8,7 @@ import { buildClientExecutionContext } from './executionContext';
 import type {
   ArpExecutionSnapshot,
   CapabilitySpec,
+  ClientExecutionContext,
   ExecutionConstraint,
   GraphValidation,
   PlatformOverview,
@@ -27,6 +28,14 @@ type GoalRunClient = Pick<
   'captureDesktopContext' | 'startGoalRun'
 >;
 
+async function releaseDesktopHandoffBestEffort(): Promise<void> {
+  try {
+    await window.electronAPI?.releaseDesktopHandoff?.();
+  } catch {
+    // The run/start error remains authoritative even if the UI bridge is gone.
+  }
+}
+
 export async function startGoalWithConstraint(
   client: GoalRunClient,
   goal: string,
@@ -34,15 +43,36 @@ export async function startGoalWithConstraint(
 ): Promise<ArpExecutionSnapshot> {
   const fullGoal = goal.trim();
   if (!fullGoal) throw new Error('Goal run requires a non-empty goal.');
-  const executionContext = await buildClientExecutionContext(
-    Date.now(),
-    (result) => client.captureDesktopContext(result.control_surface_pid),
-  );
-  return client.startGoalRun(
-    fullGoal,
-    executionConstraint,
-    executionContext,
-  );
+  let executionContext: ClientExecutionContext;
+  try {
+    executionContext = await buildClientExecutionContext(
+      Date.now(),
+      (result) => client.captureDesktopContext(result.control_surface_pid),
+    );
+  } catch (error) {
+    await releaseDesktopHandoffBestEffort();
+    throw error;
+  }
+  let run: ArpExecutionSnapshot;
+  try {
+    run = await client.startGoalRun(
+      fullGoal,
+      executionConstraint,
+      executionContext,
+    );
+  } catch (error) {
+    await releaseDesktopHandoffBestEffort();
+    throw error;
+  }
+  try {
+    const bound = await window.electronAPI?.bindDesktopHandoff?.(run.run_id);
+    if (bound === false) {
+      await releaseDesktopHandoffBestEffort();
+    }
+  } catch {
+    await releaseDesktopHandoffBestEffort();
+  }
+  return run;
 }
 
 export function useControlPlane() {
@@ -202,6 +232,7 @@ export function useControlPlane() {
       notification.body,
       notification.kind,
       notification.runId,
+      true,
     );
   }, [currentRun]);
 

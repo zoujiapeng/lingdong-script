@@ -23,10 +23,7 @@ from winpilot.vnext.evidence_plane import (
     canonical_sha256,
     runtime_evidence_report_sha256,
 )
-from winpilot.vnext.model_roles import (
-    VISUAL_ACTOR_MODEL_ROLE,
-    VISUAL_VERIFIER_MODEL_ROLE,
-)
+from winpilot.vnext.model_roles import VISUAL_ACTOR_MODEL_ROLE
 
 
 WORKSPACE = Path(__file__).resolve().parents[3]
@@ -3486,7 +3483,6 @@ def test_trace_audit_binds_frozen_vnext_and_rejects_legacy_or_fallback(tmp_path)
     harness = _canary_harness()
     assert harness.VNEXT_MODEL_ROLES == frozenset({
         VISUAL_ACTOR_MODEL_ROLE,
-        VISUAL_VERIFIER_MODEL_ROLE,
     })
     run_id = "arp-vnext-canary"
     target_hwnd = 991
@@ -3533,13 +3529,6 @@ def test_trace_audit_binds_frozen_vnext_and_rejects_legacy_or_fallback(tmp_path)
             "mission_id": mission_id,
             "model": "model-one",
             "model_role": VISUAL_ACTOR_MODEL_ROLE,
-        },
-        {
-            "type": "vnext_model_call",
-            "run_id": run_id,
-            "mission_id": mission_id,
-            "model": "model-one",
-            "model_role": VISUAL_VERIFIER_MODEL_ROLE,
         },
         {
             "type": "vnext_raw_receipt",
@@ -3607,7 +3596,7 @@ def test_trace_audit_binds_frozen_vnext_and_rejects_legacy_or_fallback(tmp_path)
             "status": "mission_verified",
             "target_binding_id": "binding-1",
             "turns_used": 3,
-            "model_calls": 4,
+            "model_calls": 3,
         },
     ]
     trace = tmp_path / "vnext.jsonl"

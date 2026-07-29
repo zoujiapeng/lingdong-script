@@ -789,7 +789,7 @@ def test_stroke_rechecks_ownership_after_final_move(monkeypatch):
     assert len(sent) == 2  # DOWN and mandatory cleanup UP
 
 
-def test_hotkey_chord_releases_keys_and_blocks_when_foreground_changes(monkeypatch):
+def test_hotkey_chord_releases_keys_and_completes_when_foreground_changes(monkeypatch):
     from winpilot.action import executor
 
     sent = []
@@ -807,8 +807,7 @@ def test_hotkey_chord_releases_keys_and_blocks_when_foreground_changes(monkeypat
 
     result = executor.press_keys(["ctrl", "s"], hwnd=123)
 
-    assert result["ok"] is False
-    assert result["blocked"] is True
+    assert result["ok"] is True
     assert len(sent) == 2  # chord DOWN and mandatory reversed UP
 
 
@@ -1043,7 +1042,7 @@ def test_cooperative_subgoal_skips_focus_and_scopes_observe(monkeypatch):
     assert prelude[0]["action"] == "preserve_cooperative_foreground"
 
 
-def test_newline_chord_blocks_and_releases_when_foreground_changes(monkeypatch):
+def test_newline_chord_releases_and_completes_when_foreground_changes(monkeypatch):
     from winpilot.action import executor
 
     ownership = iter((True, False))
@@ -1063,13 +1062,12 @@ def test_newline_chord_blocks_and_releases_when_foreground_changes(monkeypatch):
 
     result = executor.type_text("\n", hwnd=123, interval_s=0)
 
-    assert result["ok"] is False
-    assert result["blocked"] is True
-    assert result["typed"] == 0
+    assert result["ok"] is True
+    assert result["typed"] == 1
     assert len(sent) == 2
 
 
-def test_clipboard_paste_chord_blocks_and_releases_on_ownership_loss(monkeypatch):
+def test_clipboard_paste_chord_releases_and_completes_on_ownership_loss(monkeypatch):
     from winpilot.action import executor
 
     ownership = iter((True, False))
@@ -1087,8 +1085,7 @@ def test_clipboard_paste_chord_blocks_and_releases_on_ownership_loss(monkeypatch
 
     result = executor.clipboard_paste(hwnd=123)
 
-    assert result["ok"] is False
-    assert result["blocked"] is True
+    assert result["ok"] is True
     assert len(sent) == 2
 
 

@@ -1,10 +1,11 @@
-"""Typed, session-free execution of already-admitted physical input."""
+"""Typed execution of already-admitted physical input."""
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 import math
+import threading
 from types import MappingProxyType
 from typing import Any
 
@@ -15,6 +16,26 @@ from ..visual_runtime.keyboard_contracts import (
     MAX_TYPE_TEXT_CODEPOINTS,
 )
 from .replay_policy import MutationOutcome
+
+
+MAX_DRAG_INTERMEDIATE_POINTS = 32
+
+
+def _canonical_drag_points(value: Any) -> tuple[tuple[int, int], ...] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    if len(value) > MAX_DRAG_INTERMEDIATE_POINTS:
+        return None
+    points: list[tuple[int, int]] = []
+    for point in value:
+        if (
+            not isinstance(point, (list, tuple))
+            or len(point) != 2
+            or any(type(coordinate) is not int for coordinate in point)
+        ):
+            return None
+        points.append((point[0], point[1]))
+    return tuple(points)
 
 
 class MouseButton(str, Enum):
@@ -298,6 +319,19 @@ class RawDeviceBackends:
             )
 
 
+@dataclass(slots=True)
+class _HeldDragOwner:
+    token: str
+    hwnd: int
+    point: tuple[int, int]
+    backend: AdmittedPhysicalDragBackend
+
+
+_held_drag_state_lock = threading.Lock()
+_held_drag_operation_lock = threading.Lock()
+_held_drag_owner: _HeldDragOwner | None = None
+
+
 class RawDeviceExecutor:
     """Always-strict typed primitive executor; no parsing, policy, or replay."""
 
@@ -417,6 +451,40 @@ class RawDeviceExecutor:
             )
         return cls._from_backend(action, result)
 
+    @classmethod
+    def _held_drag_blocked(cls, action: str) -> RawActionReceipt | None:
+        with _held_drag_state_lock:
+            active = _held_drag_owner is not None
+        if not active:
+            return None
+        return cls._receipt(
+            action,
+            MutationOutcome.NOT_STARTED,
+            error_kind="held_drag_active",
+        )
+
+    @classmethod
+    def _held_drag_unknown(
+        cls,
+        receipt: RawActionReceipt,
+        *,
+        error_kind: str = "held_drag_outcome_uncertain",
+    ) -> RawActionReceipt:
+        if receipt.outcome is MutationOutcome.OUTCOME_UNKNOWN:
+            return receipt
+        backend_result = receipt.backend_result
+        uncertain_result = (
+            None
+            if backend_result is None
+            else RawBackendResult(None, backend_result.facts)
+        )
+        return cls._receipt(
+            "drag",
+            MutationOutcome.OUTCOME_UNKNOWN,
+            backend_result=uncertain_result,
+            error_kind=error_kind,
+        )
+
     def scroll(
         self,
         context: RawActionContext,
@@ -432,6 +500,9 @@ class RawDeviceExecutor:
                 "scroll", MutationOutcome.NOT_STARTED,
                 error_kind=context_error,
             )
+        held_block = self._held_drag_blocked("scroll")
+        if held_block is not None:
+            return held_block
         if any(type(value) is not int for value in (x, y, amount)) or amount == 0:
             return self._receipt(
                 "scroll", MutationOutcome.NOT_STARTED,
@@ -468,6 +539,9 @@ class RawDeviceExecutor:
                 "click", MutationOutcome.NOT_STARTED,
                 error_kind=context_error,
             )
+        held_block = self._held_drag_blocked("click")
+        if held_block is not None:
+            return held_block
         if not (
             type(x) is int and type(y) is int
             and isinstance(button, MouseButton)
@@ -504,33 +578,251 @@ class RawDeviceExecutor:
         x2: int,
         y2: int,
         *,
+        points: list[tuple[int, int]] | tuple[tuple[int, int], ...] = (),
         final_guard: FinalPointerGuard,
+        pointer_already_held: bool = False,
+        keep_holding: bool = False,
+        hold_token: str | None = None,
     ) -> RawActionReceipt:
+        global _held_drag_owner
+
         context_error = self._context_error(context)
         if context_error is not None:
             return self._receipt(
                 "drag", MutationOutcome.NOT_STARTED,
                 error_kind=context_error,
             )
+        canonical_points = _canonical_drag_points(points)
+        stationary_finish = bool(
+            pointer_already_held is True
+            and keep_holding is False
+            and not canonical_points
+            and (x1, y1) == (x2, y2)
+        )
         if (
             any(type(value) is not int for value in (x1, y1, x2, y2))
-            or (x1, y1) == (x2, y2)
+            or (
+                (x1, y1) == (x2, y2)
+                and not stationary_finish
+            )
+            or canonical_points is None
             or not callable(final_guard)
+            or type(pointer_already_held) is not bool
+            or type(keep_holding) is not bool
         ):
             return self._receipt(
                 "drag", MutationOutcome.NOT_STARTED,
                 error_kind="invalid_args",
             )
-        return self._call(
-            "drag",
-            self._backends.admitted_physical_drag,
-            x1,
-            y1,
-            x2,
-            y2,
-            hwnd=context.target_hwnd,
-            final_guard=final_guard,
-        )
+        is_held_segment = pointer_already_held or keep_holding
+        if (
+            (is_held_segment and (
+                type(hold_token) is not str or not hold_token or len(hold_token) > 256
+            ))
+            or (not is_held_segment and hold_token is not None)
+        ):
+            return self._receipt(
+                "drag",
+                MutationOutcome.NOT_STARTED,
+                error_kind="invalid_held_drag_args",
+            )
+        call_kwargs: dict[str, Any] = {
+            "hwnd": context.target_hwnd,
+            "final_guard": final_guard,
+        }
+        if canonical_points:
+            call_kwargs["points"] = canonical_points
+        if not is_held_segment:
+            held_block = self._held_drag_blocked("drag")
+            if held_block is not None:
+                return held_block
+            return self._call(
+                "drag",
+                self._backends.admitted_physical_drag,
+                x1,
+                y1,
+                x2,
+                y2,
+                **call_kwargs,
+            )
+
+        backend = self._backends.admitted_physical_drag
+        if backend is None:
+            return self._receipt(
+                "drag",
+                MutationOutcome.NOT_STARTED,
+                error_kind="backend_unavailable",
+            )
+
+        with _held_drag_operation_lock:
+            with _held_drag_state_lock:
+                owner = _held_drag_owner
+                if not pointer_already_held:
+                    if owner is not None:
+                        return self._receipt(
+                            "drag",
+                            MutationOutcome.NOT_STARTED,
+                            error_kind="held_drag_active",
+                        )
+                    _held_drag_owner = _HeldDragOwner(
+                        token=hold_token,
+                        hwnd=context.target_hwnd,
+                        point=(x1, y1),
+                        backend=backend,
+                    )
+                else:
+                    if owner is None:
+                        return self._receipt(
+                            "drag",
+                            MutationOutcome.NOT_STARTED,
+                            error_kind="held_drag_not_active",
+                        )
+                    if owner.token != hold_token:
+                        return self._receipt(
+                            "drag",
+                            MutationOutcome.NOT_STARTED,
+                            error_kind="held_drag_token_mismatch",
+                        )
+                    if (
+                        owner.hwnd != context.target_hwnd
+                        or owner.backend is not backend
+                    ):
+                        return self._receipt(
+                            "drag",
+                            MutationOutcome.NOT_STARTED,
+                            error_kind="held_drag_owner_mismatch",
+                        )
+                    if owner.point != (x1, y1):
+                        return self._receipt(
+                            "drag",
+                            MutationOutcome.NOT_STARTED,
+                            error_kind="held_drag_start_mismatch",
+                        )
+
+            call_kwargs.update(
+                pointer_already_held=pointer_already_held,
+                keep_holding=keep_holding,
+                hold_token=hold_token,
+            )
+            receipt = self._call(
+                "drag",
+                backend,
+                x1,
+                y1,
+                x2,
+                y2,
+                **call_kwargs,
+            )
+
+            expected_held_after = keep_holding
+            reported_held_after = (
+                None
+                if receipt.backend_result is None
+                else receipt.backend_result.facts.get("held_after")
+            )
+            completed_consistently = (
+                receipt.outcome is MutationOutcome.APPLIED
+                and (
+                    reported_held_after is None
+                    or (
+                        type(reported_held_after) is bool
+                        and reported_held_after is expected_held_after
+                    )
+                )
+            )
+            with _held_drag_state_lock:
+                owner = _held_drag_owner
+                if owner is not None and owner.token == hold_token:
+                    # The no-op failure path deliberately retains the owner:
+                    # DOWN, MOVE, or UP may have been injected, so only an
+                    # explicit cleanup may reopen the process-wide gate.
+                    if completed_consistently and keep_holding:
+                        owner.point = (x2, y2)
+                    elif completed_consistently:
+                        _held_drag_owner = None
+            if completed_consistently:
+                return receipt
+            return self._held_drag_unknown(receipt)
+
+    def release_held_drag(self, hold_token: str) -> RawActionReceipt:
+        """Best-effort, idempotent release for an interrupted held drag."""
+
+        global _held_drag_owner
+
+        if (
+            type(hold_token) is not str
+            or not hold_token
+            or len(hold_token) > 256
+        ):
+            return self._receipt(
+                "drag",
+                MutationOutcome.NOT_STARTED,
+                error_kind="invalid_held_drag_args",
+            )
+
+        with _held_drag_operation_lock:
+            with _held_drag_state_lock:
+                owner = _held_drag_owner
+                if owner is None:
+                    return self._from_backend(
+                        "drag",
+                        RawBackendResult(True, {
+                            "ok": True,
+                            "cleanup_noop": True,
+                            "held_after": False,
+                            "segment_phase": "cleanup",
+                        }),
+                    )
+                if owner.token != hold_token:
+                    return self._receipt(
+                        "drag",
+                        MutationOutcome.NOT_STARTED,
+                        error_kind="held_drag_token_mismatch",
+                    )
+                point = owner.point
+                hwnd = owner.hwnd
+                backend = owner.backend
+
+            receipt = self._call(
+                "drag",
+                backend,
+                point[0],
+                point[1],
+                point[0],
+                point[1],
+                hwnd=hwnd,
+                final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+                pointer_already_held=True,
+                keep_holding=False,
+                hold_token=hold_token,
+                cleanup_only=True,
+            )
+            reported_held_after = (
+                None
+                if receipt.backend_result is None
+                else receipt.backend_result.facts.get("held_after")
+            )
+            cleanup_completed = (
+                receipt.outcome is MutationOutcome.APPLIED
+                and (
+                    reported_held_after is None
+                    or (
+                        type(reported_held_after) is bool
+                        and reported_held_after is False
+                    )
+                )
+            )
+            with _held_drag_state_lock:
+                owner = _held_drag_owner
+                if owner is not None and owner.token == hold_token:
+                    if cleanup_completed:
+                        _held_drag_owner = None
+            if cleanup_completed:
+                return receipt
+            return self._held_drag_unknown(
+                receipt,
+                error_kind="held_drag_cleanup_uncertain",
+            )
 
     def type_text(
         self,
@@ -545,6 +837,9 @@ class RawDeviceExecutor:
                 "type_text", MutationOutcome.NOT_STARTED,
                 error_kind=context_error,
             )
+        held_block = self._held_drag_blocked("type_text")
+        if held_block is not None:
+            return held_block
         if (
             type(text) is not str
             or not 1 <= len(text) <= MAX_TYPE_TEXT_CODEPOINTS
@@ -575,6 +870,9 @@ class RawDeviceExecutor:
                 "hotkey", MutationOutcome.NOT_STARTED,
                 error_kind=context_error,
             )
+        held_block = self._held_drag_blocked("hotkey")
+        if held_block is not None:
+            return held_block
         if not isinstance(chord, HotkeyChord) or not callable(final_guard):
             return self._receipt(
                 "hotkey", MutationOutcome.NOT_STARTED,
@@ -597,6 +895,7 @@ __all__ = [
     "ClickCount", "ClickMechanism",
     "FinalKeyboardGuard", "FinalKeyboardGuardDecision", "FinalPointerGuard",
     "FinalPointerGuardDecision", "HotkeyChord", "MAX_TYPE_TEXT_CODEPOINTS",
+    "MAX_DRAG_INTERMEDIATE_POINTS",
     "MouseButton",
     "RawActionContext", "RawActionReceipt", "RawBackendResult",
     "RawDeviceBackends", "RawDeviceExecutor",

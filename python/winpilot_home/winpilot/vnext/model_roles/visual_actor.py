@@ -22,7 +22,11 @@ from ..actor import (
 from ..runtime.contracts import (
     APPROVED_DESKTOP_ACTIONS,
     APPROVED_RUNTIME_TOOLS,
+    TASK_STATE_UPDATE_SCHEMA,
+    ActorTaskStateError,
+    ActorTaskStateUpdate,
     ActorToolView,
+    ActorTurnDecision,
     ActorTurnInput,
 )
 from .common import (
@@ -40,19 +44,20 @@ from .common import (
 
 VISUAL_ACTOR_MODEL_ROLE = "vnext_visual_actor"
 VISUAL_ACTOR_SYSTEM_CONTRACT = """\
-You are the restricted vNext Visual Actor. Use only the mission card, current
-JPEG, previous-action summary, and supplied tools. Return exactly one tool call
-with no prose or hidden reasoning. Use submitted-image pixels. Never invent
-runtime, target, frame, evidence, or action identities. Completed actions are
-facts. Do not click solely to refocus a control that is already visibly
-focused; explicit requested clicks still apply. After repeated_action_suppressed,
-choose another visible step. Repeat a scroll only while its direction is still
-needed; when its named stop condition is visible, take the next requested step."""
+Use original_goal, the current authoritative JPEG, task_state, previous action,
+and supplied tools to choose exactly one tool call. Return no prose. Use
+coordinates in the exact submitted-image pixels. If the goal is visibly
+complete, call claim_obligation_done. When pointer_held is true, continue or
+finish that drag."""
 
 _TOOL_DESCRIPTIONS = {
     "click": "Click one point once in the current image.",
     "double_click": "Double-click one point once in the current image.",
-    "drag": "Drag once from one image point to another.",
+    "drag": (
+        "Drag once from one image point to another, optionally following "
+        "ordered intermediate image_points; use [] for a straight path. "
+        "keep_holding preserves the same press for a later visual turn."
+    ),
     "scroll": (
         "Scroll at one point; amount < 0 scrolls down and amount > 0 scrolls up."
     ),
@@ -61,17 +66,25 @@ _TOOL_DESCRIPTIONS = {
         "control; selected text is replaced."
     ),
     "hotkey": (
-        "Press one control chord such as Ctrl+A or Ctrl+Enter; this never "
-        "enters literal text."
+        "Press one key or one ordered key chord; this never enters literal "
+        "text."
     ),
     "claim_obligation_done": (
-        "Claim the visible goal is complete so the verifier checks it."
+        "Finish without further mutation when the current image shows the "
+        "requested result."
     ),
     "blocked": (
         "Report a visible blocker only when no supplied action can advance the goal."
     ),
 }
 
+_MODEL_TOOL_NAMES = {
+    "hotkey": "press_key",
+}
+_RUNTIME_TOOL_NAMES = {
+    model_name: runtime_name
+    for runtime_name, model_name in _MODEL_TOOL_NAMES.items()
+}
 _STRICT_SCHEMA_KEYS = frozenset(
     {
         "additionalProperties",
@@ -226,6 +239,19 @@ def _actor_parameters(tool: ActorToolView) -> dict[str, Any]:
         raise LiveModelRoleError(
             f"Actor tool {tool.name!r} has invalid required fields"
         )
+    # Runtime keeps image_points optional so old four-coordinate proposals and
+    # journals remain valid. Strict provider schemas require every property,
+    # so the model-facing projection represents a straight drag as [].
+    if tool.name == "drag":
+        for optional_name in ("image_points", "keep_holding"):
+            if optional_name in properties and optional_name not in required:
+                required = [*required, optional_name]
+    if "task_state_update" in properties or "task_state_update" in required:
+        raise LiveModelRoleError(
+            f"Actor tool {tool.name!r} shadows task_state_update"
+        )
+    properties["task_state_update"] = TASK_STATE_UPDATE_SCHEMA
+    required = [*required, "task_state_update"]
     if tool.requires_local_intent:
         if "local_intent" in properties or "local_intent" in required:
             raise LiveModelRoleError(
@@ -256,7 +282,7 @@ def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
-                "name": tool.name,
+                "name": _MODEL_TOOL_NAMES.get(tool.name, tool.name),
                 "description": _TOOL_DESCRIPTIONS[tool.name],
                 "parameters": _actor_parameters(tool),
                 "strict": True,
@@ -273,7 +299,7 @@ def _decode_arguments(raw: Any) -> dict[str, Any]:
 def _proposal_from_response(
     response: Any,
     allowed_names: frozenset[str],
-) -> dict[str, Any]:
+) -> ActorTurnDecision:
     message = response_message(response)
     require_empty_content(message)
     tool_calls = member(message, "tool_calls")
@@ -295,23 +321,30 @@ def _proposal_from_response(
     name = member(function, "name")
     if type(name) is not str or name not in allowed_names:
         raise LiveModelRoleError("Visual Actor returned an unapproved tool")
+    runtime_name = _RUNTIME_TOOL_NAMES.get(name, name)
     arguments = _decode_arguments(member(function, "arguments"))
-    if name in APPROVED_DESKTOP_ACTIONS:
+    try:
+        state_update = ActorTaskStateUpdate.from_dict(
+            arguments.pop("task_state_update", None)
+        )
+    except ActorTaskStateError as exc:
+        raise LiveModelRoleError(str(exc)) from exc
+    if runtime_name in APPROVED_DESKTOP_ACTIONS:
         local_intent = arguments.pop("local_intent", None)
         raw_proposal = {
             "format": ACTOR_PROPOSAL_FORMAT,
             "kind": "desktop_action",
-            "action": name,
+            "action": runtime_name,
             "args": arguments,
             "local_intent": local_intent,
         }
-    elif name == "claim_obligation_done":
+    elif runtime_name == "claim_obligation_done":
         raw_proposal = {
             "format": ACTOR_PROPOSAL_FORMAT,
             "kind": "claim_obligation_done",
             **arguments,
         }
-    elif name == "blocked":
+    elif runtime_name == "blocked":
         raw_proposal = {
             "format": ACTOR_PROPOSAL_FORMAT,
             "kind": "blocked",
@@ -320,7 +353,10 @@ def _proposal_from_response(
     else:  # pragma: no cover - guarded by the exact minimal tool set
         raise LiveModelRoleError("Visual Actor returned an unsupported outcome")
     proposal = parse_actor_proposal(raw_proposal)
-    return json.loads(actor_proposal_to_json(proposal))
+    return ActorTurnDecision(
+        proposal=json.loads(actor_proposal_to_json(proposal)),
+        task_state_update=state_update,
+    )
 
 
 class LiveVisualActor:
@@ -359,7 +395,7 @@ class LiveVisualActor:
         image_media_type: str,
         submitted_size: tuple[int, int],
         stop_event: threading.Event | None = None,
-    ) -> Mapping[str, Any]:
+    ) -> ActorTurnDecision:
         if type(turn) is not ActorTurnInput:
             raise LiveModelRoleError(
                 "Visual Actor requires canonical ActorTurnInput"
@@ -378,23 +414,6 @@ class LiveVisualActor:
         tools = _tool_definitions(turn)
         context = turn.to_dict()
         context.pop("tools")
-        previous_action = turn.previous_action
-        if (
-            previous_action is not None
-            and previous_action.action == "scroll"
-            and previous_action.input_completed
-        ):
-            context["scroll_guard"] = (
-                "inspect_current_image_stop_condition_before_same_direction"
-            )
-        if (
-            previous_action is not None
-            and previous_action.action == "click"
-            and previous_action.input_completed
-        ):
-            context["focus_guard"] = (
-                "avoid_click_only_to_refocus_when_already_visibly_focused"
-            )
         context["submitted_size"] = list(submitted_size)
         provider_request = {
             "model": self._model,
@@ -445,14 +464,18 @@ class LiveVisualActor:
             runtime=self._runtime,
         )
         try:
-            return _proposal_from_response(
+            decision = _proposal_from_response(
                 outcome.response,
-                frozenset(tool.name for tool in turn.tools),
+                frozenset(
+                    _MODEL_TOOL_NAMES.get(tool.name, tool.name)
+                    for tool in turn.tools
+                ),
             )
         except InvalidActorProposal:
             raise
         except LiveModelRoleError as exc:
             raise InvalidActorProposal(str(exc)) from exc
+        return decision
 
 
 __all__ = [

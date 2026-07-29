@@ -145,16 +145,43 @@ export class ControlPlaneClient {
     this.token = token;
   }
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(new URL(path.replace(/^\//, ''), this.baseUrl), {
-      ...init,
-      headers: {
-        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
-        ...init?.headers,
-      },
-    });
-    return readJson<T>(response);
+  private async request<T>(
+    path: string,
+    init?: RequestInit,
+    timeoutMs?: number,
+  ): Promise<T> {
+    if (!timeoutMs) {
+      const response = await fetch(new URL(path.replace(/^\//, ''), this.baseUrl), {
+        ...init,
+        headers: {
+          ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+          ...init?.headers,
+        },
+      });
+      return readJson<T>(response);
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(new URL(path.replace(/^\//, ''), this.baseUrl), {
+        ...init,
+        signal: init?.signal || controller.signal,
+        headers: {
+          ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+          ...init?.headers,
+        },
+      });
+      return await readJson<T>(response);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`控制平面请求在 ${Math.round(timeoutMs / 1000)} 秒内未完成。`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   overview(): Promise<PlatformOverview> {
@@ -173,6 +200,8 @@ export class ControlPlaneClient {
   async captureDesktopContext(excludeProcessId = 0): Promise<DesktopTargetContext> {
     const response = await this.request<{ ok: boolean; target: DesktopTargetContext }>(
       `api/v2/desktop-context?exclude_process_id=${Math.max(0, Math.trunc(excludeProcessId))}`,
+      undefined,
+      15_000,
     );
     return response.target;
   }

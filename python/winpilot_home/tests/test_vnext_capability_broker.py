@@ -66,6 +66,11 @@ GUI_GATES = (
     "pointer_released",
     "runtime_healthy",
 )
+DRAG_GATES = (
+    "target_bound",
+    "authoritative_frame",
+    "runtime_healthy",
+)
 
 
 def _schema() -> dict:
@@ -216,6 +221,22 @@ def _catalog() -> ToolCatalog:
                 authorization_scope="external.send",
                 execution_medium=ExecutionMedium.EXTERNAL,
                 order=21,
+            ),
+        )
+    )
+
+
+def _catalog_with_drag() -> ToolCatalog:
+    return ToolCatalog(
+        (
+            *_catalog().tools,
+            _tool(
+                "drag",
+                ToolRoute.VISUAL_ACTOR,
+                MutationKind.GUI,
+                capabilities=("visual.interact",),
+                prerequisites=DRAG_GATES,
+                order=12,
             ),
         )
     )
@@ -886,6 +907,27 @@ def test_gui_tools_require_capability_and_all_standard_gates() -> None:
             prerequisites=GUI_GATES,
             order=1,
         )
+    drag = _tool(
+        "drag",
+        ToolRoute.VISUAL_ACTOR,
+        MutationKind.GUI,
+        capabilities=("visual.interact",),
+        prerequisites=DRAG_GATES,
+        order=1,
+    )
+    assert "pointer_released" not in drag.prerequisites
+    with pytest.raises(CapabilityContractError, match="require target"):
+        _tool(
+            "drag",
+            ToolRoute.VISUAL_ACTOR,
+            MutationKind.GUI,
+            capabilities=("visual.interact",),
+            prerequisites=(
+                "target_bound",
+                "authoritative_frame",
+            ),
+            order=1,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1149,18 +1191,36 @@ def test_mismatched_target_is_not_echoed_and_removes_gui() -> None:
     )
 
 
+def test_owned_held_pointer_projects_only_drag_with_the_same_lease() -> None:
+    mission = _mission()
+    projection = CapabilityBroker(_catalog_with_drag()).project(
+        mission,
+        _profile(mission),
+        _state(
+            pointer=PointerLeaseState(
+                PointerDisposition.HELD,
+                "pointer-lease-1",
+                True,
+            )
+        ),
+    )
+    assert projection.execution_route is ExecutionRoute.VISUAL_ACTOR
+    assert projection.tool_names == ("drag",)
+    assert projection.pointer_lease_id == "pointer-lease-1"
+
+
 @pytest.mark.parametrize(
     "pointer",
     (
         PointerLeaseState(
-            PointerDisposition.HELD, "pointer-lease-1", True
+            PointerDisposition.HELD, "pointer-lease-1", False
         ),
         PointerLeaseState(PointerDisposition.UNKNOWN),
     ),
 )
-def test_nonreleased_pointer_only_exposes_nonmutation_tools(pointer) -> None:
+def test_unowned_or_unknown_pointer_is_blocked(pointer) -> None:
     mission = _mission()
-    catalog = _catalog()
+    catalog = _catalog_with_drag()
     projection = CapabilityBroker(catalog).project(
         mission, _profile(mission), _state(pointer=pointer)
     )

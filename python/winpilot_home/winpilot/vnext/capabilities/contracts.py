@@ -81,11 +81,14 @@ TOOL_PREREQUISITES = frozenset({
     "receipt_capable",
     "runtime_healthy",
 })
-_STANDARD_GUI_GATES = frozenset({
+_CORE_GUI_GATES = frozenset({
     "target_bound",
     "authoritative_frame",
-    "pointer_released",
     "runtime_healthy",
+})
+_STANDARD_GUI_GATES = frozenset({
+    *_CORE_GUI_GATES,
+    "pointer_released",
 })
 _MAX_INTEGER = MAX_SIGNED_64
 FORBIDDEN_ACTOR_TOOLS = frozenset({
@@ -320,10 +323,15 @@ class ToolSpec:
             raise CapabilityContractError(f"unknown prerequisites {sorted(unknown)!r}")
         object.__setattr__(self, "prerequisites", prerequisites)
         prerequisite_set = set(prerequisites)
+        required_gui_gates = (
+            _CORE_GUI_GATES
+            if self.name == "drag"
+            else _STANDARD_GUI_GATES
+        )
         if (
             self.route is ToolRoute.VISUAL_ACTOR
             and self.mutation_kind is MutationKind.GUI
-            and not _STANDARD_GUI_GATES <= prerequisite_set
+            and not required_gui_gates <= prerequisite_set
         ):
             raise CapabilityContractError(
                 "GUI mutation tools require target, frame, and runtime gates"
