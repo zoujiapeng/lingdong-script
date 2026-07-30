@@ -1066,3 +1066,70 @@ external oracle: target index 3 hit, passed
 本次生产代码净增 82 行，测试承担主要增量；动作面、角色数、执行入口和系统提示词
 均未增长。后续优先比较更准确的视觉模型并扩大随机组合 E2E，不以当前模型误差为
 理由继续扩张 runtime。
+
+### 13.10 一笔原生交换、Pi 边界与完整矩阵
+
+`ordered-clicks` 的重复首目标不是坐标或鼠标问题，而是 Visual Actor 每回合只收到
+新 JPEG 和压缩状态，provider 看不到上一笔自己发出的 tool call。短命 Pi
+`0.83.0` spike 直接使用 `@earendil-works/pi-agent-core` 的原生消息序列，在两个
+随机 seed 上都以三次点击通过有序目标；同一 spike 的随机试卷仍会选错算术答案。
+这说明有效增量是标准 tool transcript，不是新增 Agent、策略或应用知识。
+
+主线没有安装 Pi、没有加入 Node↔Python RPC，也没有复制它的 runtime。当前
+`LiveVisualActor` 只借用这一条已被 E2E 证明的语义：下一回合最多携带最近一笔
+`user image → assistant tool call → tool result`，再附新 JPEG；随后覆盖旧交换。
+系统提示词仍为 45 个英文单词，角色数、动作面、前端选项和长期记忆均未增长。
+同一固定 seed 的 `ordered-clicks` 从持续重复第一个目标，变为：
+
+```text
+run:             arp-20260730-213217-3cb01b
+real GUI input:  click 1 -> click 2 -> click 3 -> claim
+Runtime:         mission_verified
+external oracle: strict sequence [1, 2, 3], passed
+```
+
+随后在当前精确工作树上运行完整 10 项可见 Electron 矩阵：
+
+| 用例 | run | 独立 oracle |
+| --- | --- | --- |
+| `answer-all-questions` | `arp-20260730-215634-8994d6` | failed，6 题答完但只有 5 题正确 |
+| `precise-click` | `arp-20260730-215908-c488c6` | passed |
+| `ordered-clicks` | `arp-20260730-215942-32271e` | passed |
+| `drag-fit` | `arp-20260730-220026-721b2b` | passed |
+| `slider` | `arp-20260730-220105-cf5c4d` | passed |
+| `dynamic-hold` | `arp-20260730-220143-68d8e8` | passed |
+| `corridor-v0` | `arp-20260730-220226-07be9c` | failed，路径离开通道 |
+| `corridor-v1` | `arp-20260730-220303-e5a9bc` | failed，直线穿过通道外区域 |
+| `game-drag-v2` | `arp-20260730-220341-3f8260` | failed，折线切角 |
+| `corridor-v3` | `arp-20260730-220415-2d3f1a` | failed，折线切角 |
+
+总计 `5/10`。这不是“绝大部分可用”，也没有因总数未增加就否定改动：
+`ordered-clicks` 的结构性多轮遗忘被一笔通用 transcript 修复，而原本偶发通过的
+试卷暴露为模型算术波动。四个 corridor 的 `actor_decision` 与
+`physical_attempt` 逐点一致，真实浏览器还记录了完整 pointermove；错误在模型提交
+的几何路径中已经存在。
+
+试卷的另一轮失败把键盘责任边界也闭合了。题目是 `8×9`，模型第一次提交：
+
+```json
+{"text":"81"}
+```
+
+在看到 `5/6` 后，它执行 `click → Ctrl+A → type_text`，但第二次提交仍明确为：
+
+```json
+{"text":"81"}
+```
+
+两次 `physical_attempt` 都逐字收到 `81`，回执均为 `2/2 codepoints`，纠错前后
+帧也显示 `81`。另用同一 admitted physical `SendInput` 路径在可见 Chrome 输入框
+做通用探针，`72`、`81→72`、ASCII、中文、emoji 和 `Ctrl+A` 覆盖均与 UIA
+最终 ValuePattern 逐码点一致。因此不修改 `type_text`，也不添加乘法、答题或
+“发现错误后换答案”的提示规则。
+
+本轮停止继续扩张 runtime 的条件已经满足：剩余已复现失败属于当前模型智力和视觉
+几何精度，不属于机械 owner。下一步是把 Visual Actor 保持为可替换模型边界，接入
+更强的原生视觉模型做同矩阵 A/B；若新模型直接提高试卷与 corridor 成功率，现有
+runtime 不应随模型升级再改。Pi 只有在未来能替换并删除 Python 模型循环 owner、
+且跨任务 E2E 明显更好时才整体引入；当前结论是“借一条消息语义，不引入第二套
+runtime”。提交前 WinPilot 全量回归为 `3373 passed, 13 skipped`。

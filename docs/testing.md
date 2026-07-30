@@ -7,18 +7,21 @@ are runtime primitives only; the 11 sample tasks must not be converted into
 prompt or controller rules.  See [`visual-runtime-principles.md`](visual-runtime-principles.md)
 for the invariants and the client-entry evaluation contract.
 
-最近一次真实验证（2026-07-19）使用 `npm run dev` 启动的可见 Electron 客户端，
-`cold_start=1` 且 session 为空，运行 `game-drag-v2`。Agent 确实发出了可信的
-鼠标拖拽事件，但模型误读了弯曲通道，trusted-browser oracle 判定失败；这不是
-“入口成功”的伪通过。报告：
-`output/playwright/client-visual-e2e/20260719-213401-suite/`。后续整改应优先改进
-通用视觉判断、路径表达和失败后的重新观察，不得为该靶场添加路线规则。
+最近一次受控矩阵验证（2026-07-30）使用 `npm run dev` 启动的可见 Electron
+客户端、空 session、真实鼠标键盘和独立浏览器 oracle。10 项中 5 项通过：
+`precise-click`、`ordered-clicks`、`drag-fit`、`slider`、`dynamic-hold`；
+`answer-all-questions` 为 5/6，四个 corridor 变体均因模型提交的路径离开可见
+通道而失败。报告：
+`output/playwright/native-exchange-all-20260730/20260730-215611-suite/`。
+这只能叫受控 GUI 能力矩阵，不能冒充真实消费软件成功率。
 
 本文定义什么可以叫“真实客户端 E2E”、什么可以计为通过，以及如何使用 11 个真实任务和组合长任务而不把它们写进生产逻辑。
 
 ## 当前基线
 
-2026-07-19 的当前工作树已经通过可见 Electron 客户端执行了冷启动 E2E，但尚未完成 11 个真实任务和混合长任务的全量验收。每个结果按它实际拥有的 oracle 单独记账：
+真实消费软件的下列记录来自 2026-07-19 历史工作树，不代表当前精确源码已经
+复验。当前源码仍未完成 11 个真实任务和混合长任务的全量验收。每个结果按它
+实际拥有的 oracle 单独记账：
 
 | 场景 | 当前证据 | 结论 |
 | --- | --- | --- |

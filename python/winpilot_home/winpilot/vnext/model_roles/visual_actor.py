@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable
 
@@ -359,8 +360,52 @@ def _proposal_from_response(
     )
 
 
+def _history_exchange(
+    response: Any,
+) -> tuple[dict[str, Any], str, str] | None:
+    """Keep one provider-native tool call for the next visual turn."""
+    message = response_message(response)
+    calls = member(message, "tool_calls")
+    if (
+        isinstance(calls, (str, bytes))
+        or not isinstance(calls, Sequence)
+        or len(calls) != 1
+    ):
+        return None
+    call = calls[0]
+    call_id = member(call, "id")
+    function = member(call, "function")
+    name = member(function, "name") if function is not None else None
+    arguments = member(function, "arguments") if function is not None else None
+    if (
+        type(call_id) is not str
+        or not call_id
+        or type(name) is not str
+        or type(arguments) is not str
+    ):
+        return None
+    assistant: dict[str, Any] = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arguments,
+                },
+            }
+        ],
+    }
+    reasoning = member(message, "reasoning_content")
+    if type(reasoning) is str:
+        assistant["reasoning_content"] = reasoning
+    return assistant, call_id, _RUNTIME_TOOL_NAMES.get(name, name)
+
+
 class LiveVisualActor:
-    """One isolated visual decision with no identity or mutation authority."""
+    """Visual decisions with one bounded native exchange and no mutation authority."""
 
     def __init__(
         self,
@@ -386,6 +431,9 @@ class LiveVisualActor:
         if on_attempt is not None and not callable(on_attempt):
             raise LiveModelRoleError("on_attempt must be callable or null")
         self._on_attempt = on_attempt
+        self._previous_exchange: (
+            tuple[dict[str, Any], dict[str, Any], str, str] | None
+        ) = None
 
     def propose(
         self,
@@ -415,6 +463,51 @@ class LiveVisualActor:
         context = turn.to_dict()
         context.pop("tools")
         context["submitted_size"] = list(submitted_size)
+        user_message = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": _canonical_json(context),
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": (
+                            "data:image/jpeg;base64,"
+                            f"{image_b64}"
+                        )
+                    },
+                },
+            ],
+        }
+        native_context: list[dict[str, Any]] = []
+        previous = self._previous_exchange
+        if (
+            previous is not None
+            and turn.previous_action is not None
+            and turn.previous_action.input_completed
+            and turn.previous_action.action == previous[3]
+        ):
+            native_context.extend(
+                (
+                    deepcopy(previous[0]),
+                    deepcopy(previous[1]),
+                    {
+                        "role": "tool",
+                        "tool_call_id": previous[2],
+                        "content": _canonical_json(
+                            {
+                                "previous_action": (
+                                    turn.previous_action.to_dict()
+                                )
+                            }
+                        ),
+                    },
+                )
+            )
+        else:
+            self._previous_exchange = None
         provider_request = {
             "model": self._model,
             "messages": [
@@ -422,24 +515,8 @@ class LiveVisualActor:
                     "role": "system",
                     "content": VISUAL_ACTOR_SYSTEM_CONTRACT,
                 },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": _canonical_json(context),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": (
-                                    "data:image/jpeg;base64,"
-                                    f"{image_b64}"
-                                )
-                            },
-                        },
-                    ],
-                },
+                *native_context,
+                user_message,
             ],
             "tools": tools,
             # MiMo's documented Chat Completions surface supports only
@@ -475,6 +552,17 @@ class LiveVisualActor:
             raise
         except LiveModelRoleError as exc:
             raise InvalidActorProposal(str(exc)) from exc
+        exchange = _history_exchange(outcome.response)
+        self._previous_exchange = (
+            None
+            if exchange is None
+            else (
+                deepcopy(user_message),
+                exchange[0],
+                exchange[1],
+                exchange[2],
+            )
+        )
         return decision
 
 
