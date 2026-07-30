@@ -753,7 +753,7 @@ def _freeze_prebound_target(
         raise ValueError(
             "vNext live canary requires the matching native Electron execution context"
         )
-    submitted_at = _positive_int(
+    _positive_int(
         context.get("submitted_at"),
         "execution_context.submitted_at",
     )
@@ -792,8 +792,6 @@ def _freeze_prebound_target(
         raise ValueError("Electron desktop handoff strategy is not exact")
     if type(handoff.get("reason")) is not str:
         raise ValueError("Electron desktop handoff reason is not a string")
-    if prepared_at < submitted_at:
-        raise ValueError("Electron desktop handoff predates goal submission")
     target = _plain_dict(
         context.get("target_window"),
         "execution_context.target_window",

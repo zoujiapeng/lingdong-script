@@ -985,3 +985,45 @@ exact match:     true
 这里没有读取 target bbox 或计算按钮中心。外部 oracle 另行确认可信鼠标事件命中
 随机目标。动态长按和有序点击的失败也不通过新增重复动作 gate、任务提示或坐标
 补偿修复；它们进入后续模型对比基准和最小 loop owner 评估。
+
+### 13.8 负优化审查与当前复测
+
+对 `dynamic-hold` 的 `state_rejected` 加入临时诊断后，干净环境连续出现两个正式
+通过样本：
+
+| run | GUI 动作 | Runtime | 独立 oracle |
+| --- | --- | --- | --- |
+| `arp-20260730-142803-6c5ab7` | 3 drag + claim | `mission_verified` | passed |
+| `arp-20260730-143437-d927e0` | 2 drag + claim | `mission_verified` | passed |
+
+第二个样本是在删除全部临时诊断、通过 GUI 重载当前源码后运行的。它只有一次可信
+`pointerdown`、80 次移动和一次目标内 `pointerup`。因此前一个失败不足以证明坐标
+转换或 held-pointer 基础设施存在稳定缺陷；没有保留诊断事件，也没有增加静止拖拽
+规则、提示教学或模型精度补偿。
+
+随后 `precise-click` 在进入 Agent 前失败：Electron 显示
+`Electron desktop handoff predates goal submission`，没有新 run、trace 或物理动作。
+根因是一条跨 Renderer/Electron 主进程的毫秒时间戳先后比较。该时间来自客户端自报，
+不能建立安全边界，而目标仍会独立验证 handoff 已让出、捕获晚于 handoff、15 秒
+新鲜度、当前 HWND/process/region/foreground 身份和实时 hit-test。当前修复只删除
+这条冗余比较，并把既有组合测试的两个客户端时钟设置为相差 1 ms；没有增加容差、
+重试器、owner 或状态。
+
+GUI 重载后，`precise-click` 正式通过：
+
+```text
+run:             arp-20260730-145535-209895
+model submitted: (419, 143)
+unique mapping:  (719, 246)
+physical attempt:(719, 246)
+exact match:     true
+Runtime:         mission_verified
+external oracle: passed
+```
+
+本轮生产代码总增量为 -2 行：删除 2 行判断，并去掉 1 个不再需要的赋值左值；测试
+只增加 1 行说明并调整 1 个夹具值。WinPilot 全量回归为
+`3367 passed, 13 skipped`，根目录回归为 `2508 passed`，前端为
+`224 passed`，production build 通过。这轮的结论不是
+“多加规则后更可靠”，而是删掉一个不能提供真实保证、却会随机阻断合法用户入口的
+约束后，真实闭环恢复；模型偶发精度问题仍交给模型对比和随机样本统计，不写入系统。

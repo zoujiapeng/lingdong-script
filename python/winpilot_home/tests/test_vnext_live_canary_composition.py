@@ -267,7 +267,8 @@ def _inputs(*, captured_at: int = NOW_MS - 500) -> dict[str, Any]:
                 "strategy": "foreground_after_control_surface_yield",
                 "yielded": True,
                 "control_surface_pid": CONTROL_PID,
-                "prepared_at": NOW_MS - 800,
+                # Renderer and Electron main-process clocks can differ by 1 ms.
+                "prepared_at": NOW_MS - 1_001,
                 "reason": "",
             },
             "target_window": {
