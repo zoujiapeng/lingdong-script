@@ -2,11 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   Archive,
+  ArrowUp,
   Bot,
   BrainCircuit,
   Braces,
   Check,
   CheckCircle2,
+  Command,
   ChevronRight,
   CircleStop,
   Clock3,
@@ -18,13 +20,17 @@ import {
   GitBranch,
   History,
   Library,
+  Layers3,
   ListChecks,
   Loader2,
-  Moon,
+  Maximize2,
+  Minimize2,
+  Minus,
   Network,
   PanelLeft,
   Pause,
   Play,
+  Plus,
   Radio,
   RefreshCw,
   Save,
@@ -32,7 +38,8 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
-  Sun,
+  Sparkles,
+  Square,
   TerminalSquare,
   UserCheck,
   Workflow,
@@ -72,22 +79,26 @@ import {
 type PlatformView = 'agent' | 'studio' | 'runs' | 'assets' | 'system';
 type Plane = ReturnType<typeof useControlPlane>;
 
-const NAV_ITEMS: Array<{ id: PlatformView; label: string; icon: React.ElementType }> = [
-  { id: 'agent', label: '智能代理', icon: Bot },
-  { id: 'studio', label: '流程工作台', icon: GitBranch },
-  { id: 'runs', label: '运行记录', icon: History },
-  { id: 'assets', label: '技能与学习', icon: Library },
-  { id: 'system', label: '系统设置', icon: Settings },
-];
-
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'paused']);
+const UNSUCCESSFUL_STATUSES = new Set([
+  'failed',
+  'fail',
+  'error',
+  'canceled',
+  'cancelled',
+  'stopped',
+  'interrupted',
+  'blocked',
+]);
 const PHASES = ['planning', 'deciding', 'perceiving', 'acting', 'verifying'];
 const PHASE_LABELS: Record<string, string> = {
   planning: '规划', deciding: '决策', perceiving: '感知', acting: '执行', verifying: '验证',
 };
 const STATUS_LABELS: Record<string, string> = {
   queued: '排队中', running: '运行中', paused: '已暂停', done: '已完成', completed: '已完成',
-  success: '成功', failed: '失败', error: '错误', canceled: '已取消', idle: '就绪',
+  success: '成功', reply: '已回复', failed: '失败', fail: '失败', error: '错误',
+  canceled: '已取消', cancelled: '已取消', stopped: '已停止', interrupted: '已中断',
+  blocked: '已阻塞', idle: '就绪',
   provisional: '待验证', active: '有效', verified: '已验证', rejected: '已拒绝', inactive: '未启用',
   waiting_external: '等待外部参与者', external_change_observed: '已检测到外部变化',
 };
@@ -623,8 +634,8 @@ export function TaskRuntimeAuditPanel({
 }
 
 function statusTone(status?: string): string {
-  if (status === 'done' || status === 'completed' || status === 'success') return 'success';
-  if (status === 'failed' || status === 'error' || status === 'canceled') return 'danger';
+  if (status === 'done' || status === 'completed' || status === 'success' || status === 'reply') return 'success';
+  if (UNSUCCESSFUL_STATUSES.has(status || '')) return 'danger';
   if (status === 'paused') return 'warning';
   if (status === 'running' || status === 'queued' || status === 'waiting_external') return 'active';
   return 'neutral';
@@ -866,60 +877,409 @@ function TaskContractRuntimeSection({
   );
 }
 
-export function AgentCockpit({ plane }: { plane: Plane }) {
+interface AgentCockpitProps {
+  plane: Plane;
+  onOpenResources?: () => void;
+  onOpenSystem?: () => void;
+  onOpenWorkbench?: () => void;
+  onOpenCommand?: () => void;
+  onCompact?: () => void;
+}
+
+function visualRunTone(run: RunProjection | null): string {
+  if (!run) return 'idle';
+  if (run.phase === 'awaiting_human') return 'waiting';
+  const tone = statusTone(run.status);
+  if (tone === 'success') return 'done';
+  if (tone === 'danger') return 'stopped';
+  if (run.status === 'paused') return 'paused';
+  return ACTIVE_STATUSES.has(run.status) ? 'running' : 'idle';
+}
+
+function runActivityLabel(run: RunProjection | null): string {
+  if (!run) return '等待任务';
+  if (run.phase === 'awaiting_human') return '等待你的确认';
+  if (run.status === 'paused') return '任务已暂停';
+  if (run.status === 'reply') return 'Agent 已回复';
+  if (statusTone(run.status) === 'success') return '任务已完成';
+  if (statusTone(run.status) === 'danger') return STATUS_LABELS[run.status] || '任务未完成';
+  const tool = TOOL_LABELS[run.current_tool || ''] || run.current_tool;
+  return tool ? `正在${tool}` : PHASE_LABELS[run.phase] || 'Agent 正在处理';
+}
+
+function runVisualProgress(run: RunProjection | null): number {
+  if (!run) return 0;
+  if (statusTone(run.status) === 'success') return 100;
+  if (statusTone(run.status) === 'danger') return 100;
+  const index = PHASES.indexOf(run.phase);
+  if (index < 0) return run.phase === 'awaiting_human' ? 72 : 12;
+  return Math.round(((index + 1) / (PHASES.length + 1)) * 100);
+}
+
+const AGENT_THREAD_STORAGE_KEY = 'arp-agent-thread-run-ids';
+const AGENT_THREAD_LIMIT = 40;
+
+interface AgentThreadState {
+  persisted: boolean;
+  runIds: string[];
+}
+
+function readAgentThreadState(): AgentThreadState {
+  try {
+    const raw = localStorage.getItem(AGENT_THREAD_STORAGE_KEY);
+    if (raw === null) return { persisted: false, runIds: [] };
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return { persisted: true, runIds: [] };
+    const runIds = parsed
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .slice(-AGENT_THREAD_LIMIT);
+    return { persisted: true, runIds: [...new Set(runIds)] };
+  } catch {
+    return { persisted: false, runIds: [] };
+  }
+}
+
+function persistAgentThread(runIds: string[]) {
+  try {
+    localStorage.setItem(AGENT_THREAD_STORAGE_KEY, JSON.stringify(runIds));
+  } catch {
+    // A transient storage failure must not prevent a real Agent run.
+  }
+}
+
+function CollapsibleAgentText({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const isLong = text.length > 720 || text.split(/\r?\n/).length > 10;
+  return (
+    <div className="ld-agent-response-text">
+      <p className={isLong && !expanded ? 'is-collapsed' : ''}>{text}</p>
+      {isLong && (
+        <button
+          className="ld-agent-response-expand"
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? '收起长内容' : '展开全文'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AgentConversationTurn({
+  run,
+  isLatest,
+  gateMessage,
+  onOpenDetails,
+  onDecideGate,
+}: {
+  run: RunProjection;
+  isLatest: boolean;
+  gateMessage: string;
+  onOpenDetails?: () => void;
+  onDecideGate: (approved: boolean) => void;
+}) {
+  const tone = visualRunTone(run);
+  const active = ACTIVE_STATUSES.has(run.status);
+  const successful = statusTone(run.status) === 'success';
+  const unsuccessful = statusTone(run.status) === 'danger';
+  const directReply = run.status === 'reply';
+  const currentTool = TOOL_LABELS[run.current_tool || ''] || run.current_tool || '尚未选择工具';
+  const resultText = displayValue(run.result).trim();
+
+  return (
+    <section className="ld-conversation-turn" aria-label="对话轮次" data-run-id={run.run_id}>
+      <article className="ld-message-row user">
+        <div className="ld-message-content">
+          <p>{run.goal}</p>
+          <small>{formatTime(run.started_at)}</small>
+        </div>
+      </article>
+
+      {active && (
+        <article className="ld-runtime-message" aria-label="Agent 当前状态">
+          <div className={`ld-runtime-glyph ${tone}`}><Bot size={15} /></div>
+          <div>
+            <span>{runActivityLabel(run)}</span>
+            <strong>{PHASE_LABELS[run.phase] || STATUS_LABELS[run.status] || '正在准备'}</strong>
+            <small>{run.current_node_id ? `节点 ${run.current_node_id}` : '保持原始目标与当前画面同步'}{run.current_tool ? ` · ${currentTool}` : ''}</small>
+          </div>
+        </article>
+      )}
+
+      {isLatest && run.phase === 'awaiting_human' && (
+        <section className="ld-gate-card" aria-label="需要人工确认">
+          <div className="ld-gate-icon"><UserCheck size={18} /></div>
+          <div><span>需要确认</span><strong>{gateMessage}</strong><p>Agent 已停在当前边界，选择后才会继续。</p></div>
+          <div className="ld-gate-actions">
+            <button type="button" onClick={() => onDecideGate(false)}>拒绝</button>
+            <button type="button" className="primary" onClick={() => onDecideGate(true)}>批准并继续</button>
+          </div>
+        </section>
+      )}
+
+      {!active && successful && (
+        <article className={`ld-agent-response ${directReply ? 'reply' : 'complete'}`} aria-label="任务结果" role="status">
+          <div className="ld-agent-response-icon">{directReply ? <Bot size={16} /> : <CheckCircle2 size={16} />}</div>
+          <div className="ld-agent-response-body">
+            <div className="ld-agent-response-meta">
+              <strong>{directReply ? 'Agent 回复' : '任务已完成'}</strong>
+              <small>{formatTime(run.finished_at || run.updated_at)}</small>
+            </div>
+            <CollapsibleAgentText text={resultText || (directReply ? 'Agent 已回复。' : '任务已完成。')} />
+            {onOpenDetails && (
+              <button className="ld-agent-response-details" type="button" onClick={onOpenDetails}>
+                <ShieldCheck size={13} />运行详情
+              </button>
+            )}
+          </div>
+        </article>
+      )}
+
+      {!active && unsuccessful && (
+        <article className="ld-agent-response failure" role="alert">
+          <div className="ld-agent-response-icon"><XCircle size={16} /></div>
+          <div className="ld-agent-response-body">
+            <div className="ld-agent-response-meta">
+              <strong>{STATUS_LABELS[run.status] || '任务未完成'}</strong>
+              <small>{formatTime(run.finished_at || run.updated_at)}</small>
+            </div>
+            <CollapsibleAgentText text={run.error || '打开运行详情可查看失败位置、事件与证据。'} />
+            {onOpenDetails && (
+              <button className="ld-agent-response-details" type="button" onClick={onOpenDetails}>
+                查看详情
+              </button>
+            )}
+          </div>
+        </article>
+      )}
+    </section>
+  );
+}
+
+export function AgentCockpit({
+  plane,
+  onOpenResources,
+  onOpenSystem,
+  onOpenWorkbench,
+  onOpenCommand,
+  onCompact,
+}: AgentCockpitProps) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
   const [submitting, setSubmitting] = useState(false);
   const [controlling, setControlling] = useState(false);
   const [actionError, setActionError] = useState('');
-  const run = plane.currentRun;
+  const [composerFocused, setComposerFocused] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [threadState, setThreadState] = useState<AgentThreadState>(readAgentThreadState);
+  const [runDetails, setRunDetails] = useState<Record<string, RunProjection>>({});
+  const taskScrollRef = useRef<HTMLDivElement | null>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const followConversationTail = useRef(true);
+  const threadRunKey = threadState.runIds.join('|');
+  const runLookup = useMemo(() => {
+    const lookup = new Map<string, RunProjection>();
+    for (const item of plane.runs || []) lookup.set(item.run_id, item);
+    for (const item of Object.values(runDetails)) lookup.set(item.run_id, item);
+    if (plane.currentRun) lookup.set(plane.currentRun.run_id, plane.currentRun);
+    return lookup;
+  }, [plane.runs, plane.currentRun, runDetails]);
+  const conversationRuns = useMemo(
+    () => threadState.runIds
+      .map((runId) => runLookup.get(runId))
+      .filter((item): item is RunProjection => Boolean(item)),
+    [runLookup, threadRunKey],
+  );
+  const hasConversation = threadState.runIds.length > 0
+    || (!threadState.persisted && Boolean(plane.currentRun));
+  const run = conversationRuns[conversationRuns.length - 1]
+    || (!threadState.persisted ? plane.currentRun : null);
   const arp = plane.arpSnapshot;
   const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
+  const runtimeBusy = Boolean(plane.currentRun && ACTIVE_STATUSES.has(plane.currentRun.status));
   const manuallyPaused = Boolean(arp?.manual_paused);
   const runtimeIssue = plane.runtimeIssue;
   const modelProfile = plane.overview?.status.model_profile;
-  const metrics = run?.metrics;
-  const visibleResult = typeof run?.result === 'string'
-    ? run.result.trim()
+  const showComposer = !hasConversation;
+  const showFollowupComposer = hasConversation;
+  const modelLabel = String(modelProfile?.model || 'Visual Actor');
+  const connectionLabel = plane.connection === 'online'
+    ? '运行时在线'
+    : plane.connection === 'degraded'
+      ? '运行时降级'
+      : plane.connection === 'offline'
+        ? '运行时离线'
+        : '正在连接运行时';
+  const gateMessage = run?.phase === 'awaiting_human'
+    ? String([...plane.events].reverse().find((event) => event.type === 'arp_human_gate')?.message || run.current_node_id || '请确认是否继续当前操作')
     : '';
-  const latestScreenEvent = [...plane.events].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type))
-    || [...(run?.timeline || [])].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type));
-  const screenshot = [...(run?.evidence || [])].reverse().find((item) => item.type === 'screenshot' && item.path);
-  const screenshotKind = String(screenshot?.kind || 'screen').replaceAll('_', ' ');
-  const screenshotRegion = screenshot?.region as Record<string, unknown> | undefined;
-  const screenshotUrl = screenshot && plane.baseUrl && run
-    ? plane.getClient().traceScreenshotUrl(run.run_id, String(screenshot.path))
-    : '';
+
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const closeModelMenu = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.ld-composer-config-field')) return;
+      setModelMenuOpen(false);
+    };
+    window.addEventListener('pointerdown', closeModelMenu);
+    return () => window.removeEventListener('pointerdown', closeModelMenu);
+  }, [modelMenuOpen]);
+
+  useEffect(() => {
+    const field = composerInputRef.current;
+    if (!field) return;
+    const maxHeight = showFollowupComposer ? 196 : 236;
+    field.style.height = '0px';
+    const nextHeight = Math.min(field.scrollHeight, maxHeight);
+    field.style.height = `${nextHeight}px`;
+    field.style.overflowY = field.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  }, [goal, showFollowupComposer]);
+
+  useEffect(() => {
+    const current = plane.currentRun;
+    if (!current) return;
+    setRunDetails((items) => {
+      const previous = items[current.run_id];
+      if (
+        previous
+        && previous.updated_at === current.updated_at
+        && previous.status === current.status
+        && displayValue(previous.result) === displayValue(current.result)
+        && previous.error === current.error
+      ) {
+        return items;
+      }
+      return { ...items, [current.run_id]: current };
+    });
+  }, [plane.currentRun]);
+
+  useEffect(() => {
+    const current = plane.currentRun;
+    if (threadState.persisted || !current?.run_id) return;
+    const next = [current.run_id];
+    persistAgentThread(next);
+    setThreadState({ persisted: true, runIds: next });
+  }, [plane.currentRun?.run_id, threadState.persisted]);
+
+  useEffect(() => {
+    if (!plane.baseUrl || !threadState.runIds.length) return;
+    const missing = threadState.runIds.filter(
+      (runId) => runId !== plane.currentRun?.run_id && !runDetails[runId],
+    );
+    if (!missing.length) return;
+    let disposed = false;
+    let client: ReturnType<Plane['getClient']>;
+    try {
+      client = plane.getClient();
+    } catch {
+      return;
+    }
+    void Promise.all(missing.map(async (runId) => {
+      try {
+        return (await client.run(runId)).run;
+      } catch {
+        return null;
+      }
+    })).then((loaded) => {
+      if (disposed) return;
+      setRunDetails((items) => {
+        const next = { ...items };
+        let changed = false;
+        for (const item of loaded) {
+          if (!item) continue;
+          next[item.run_id] = item;
+          changed = true;
+        }
+        return changed ? next : items;
+      });
+    });
+    return () => { disposed = true; };
+  }, [plane.baseUrl, threadRunKey]);
+
+  useEffect(() => {
+    if (run?.run_id) setGoal('');
+  }, [run?.run_id]);
+
+  const conversationTailKey = conversationRuns
+    .map((item) => `${item.run_id}:${item.status}:${item.updated_at}:${displayValue(item.result).length}`)
+    .join('|');
+
+  useEffect(() => {
+    if (!followConversationTail.current) return;
+    const frame = requestAnimationFrame(() => {
+      const viewport = taskScrollRef.current;
+      if (!viewport) return;
+      if (typeof viewport.scrollTo === 'function') {
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+      } else {
+        viewport.scrollTop = viewport.scrollHeight;
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [conversationTailKey, showFollowupComposer]);
 
   const execute = async () => {
     if (!goal.trim() || submitting) return;
+    if (runtimeBusy) {
+      setActionError('当前任务仍在运行；可以先写好下一条消息，完成后再发送。');
+      return;
+    }
     if (runtimeIssue) {
       setActionError(`${runtimeIssue} 任务未启动。`);
       return;
     }
     setSubmitting(true);
     setActionError('');
+    followConversationTail.current = true;
     try {
       localStorage.setItem('arp-last-goal', goal.trim());
-      await plane.startGoal(goal.trim());
+      const started = await plane.startGoal(goal.trim());
+      if (started?.run_id) {
+        setThreadState((previous) => {
+          const existing = previous.runIds.length
+            ? previous.runIds
+            : (run?.run_id ? [run.run_id] : []);
+          const next = [
+            ...existing.filter((runId) => runId !== started.run_id),
+            started.run_id,
+          ].slice(-AGENT_THREAD_LIMIT);
+          persistAgentThread(next);
+          return { persisted: true, runIds: next };
+        });
+      }
+      setGoal('');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setActionError(message);
-      void window.electronAPI?.notifyTaskbar?.(
-        '任务未启动',
-        message,
-        'error',
-      );
+      void window.electronAPI?.notifyTaskbar?.('任务未启动', message, 'error');
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const startNewConversation = () => {
+    persistAgentThread([]);
+    setThreadState({ persisted: true, runIds: [] });
+    setRunDetails({});
+    setGoal('');
+    setActionError('');
+    setActivityOpen(false);
+    followConversationTail.current = true;
   };
 
   const stop = async () => {
     if (controlling) return;
     setControlling(true);
     setActionError('');
-    try { await plane.cancelCurrent(); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); }
-    finally { setControlling(false); }
+    try {
+      await plane.cancelCurrent();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setControlling(false);
+    }
   };
 
   const togglePause = async () => {
@@ -936,124 +1296,232 @@ export function AgentCockpit({ plane }: { plane: Plane }) {
     }
   };
 
-  return (
-    <div className="arp-page arp-agent-page">
-      <section className="arp-command-surface">
-        <div className="arp-section-heading">
-          <div><span className="arp-kicker">任务目标</span><h2>智能代理指令</h2></div>
-          {run ? <StatusPill status={run.status} /> : <StatusPill label="就绪" />}
-        </div>
-        <textarea
-          className="arp-goal-input"
-          value={goal}
-          onChange={(event) => setGoal(event.target.value)}
-          onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') execute(); }}
-          placeholder="描述希望代理在这台电脑上完成的目标……"
-          disabled={active}
-        />
-        <div className="arp-command-actions">
-          <div className="arp-action-spacer" />
-          {active ? (
-            <>
-              {run?.phase !== 'awaiting_human' && (
-                <button className="arp-button" onClick={togglePause} disabled={controlling}>
-                  {manuallyPaused ? <Play size={15} fill="currentColor" /> : <Pause size={15} />}
-                  {manuallyPaused ? '继续' : '暂停'}
-                </button>
-              )}
-              <button className="arp-button arp-button-danger" onClick={stop} disabled={controlling}>
-                {controlling ? <Loader2 size={15} className="arp-spin" /> : <CircleStop size={15} />}停止
-              </button>
-            </>
-          ) : (
-            <button className="arp-button arp-button-primary" onClick={execute} disabled={!goal.trim() || submitting || Boolean(runtimeIssue)}>
-              {submitting ? <Loader2 size={15} className="arp-spin" /> : <Play size={15} fill="currentColor" />}运行任务
+  const renderComposerField = (compact = false) => (
+    <>
+      <textarea
+        ref={composerInputRef}
+        className="ld-composer-input"
+        aria-label="消息输入"
+        rows={1}
+        spellCheck={false}
+        autoComplete="off"
+        value={goal}
+        onChange={(event) => setGoal(event.target.value)}
+        onFocus={() => setComposerFocused(true)}
+        onBlur={() => setComposerFocused(false)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            void execute();
+          }
+        }}
+        placeholder={runtimeBusy
+          ? 'Agent 正在处理；可以先写好下一条消息…'
+          : compact
+            ? '继续说明下一步…'
+            : '描述任务或直接告诉 Agent 你需要什么…'}
+        disabled={submitting}
+      />
+      <div className="ld-composer-footer">
+        <button className="ld-round-control" type="button" onClick={onOpenCommand} aria-label="添加上下文" title="添加上下文或打开隐藏功能（Ctrl+K）">
+          <Plus size={18} />
+        </button>
+        <div
+          className={`ld-composer-context ${compact || composerFocused || goal.trim() || modelMenuOpen ? '' : 'soft-hidden'}`}
+          aria-label="输入框运行上下文"
+        >
+          <span className="ld-composer-config-field">
+            <button
+              className="ld-composer-config-trigger"
+              type="button"
+              aria-expanded={modelMenuOpen}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setModelMenuOpen((value) => !value)}
+            >
+              {modelLabel}
             </button>
+            {modelMenuOpen && (
+              <span className="ld-composer-inline-options" role="listbox" aria-label="模型选项">
+                <button
+                  type="button"
+                  role="option"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    setModelMenuOpen(false);
+                    onOpenSystem?.();
+                  }}
+                >
+                  模型与接口设置
+                </button>
+              </span>
+            )}
+          </span>
+          <span className="ld-composer-context-separator">·</span>
+          <span className="ld-composer-runtime"><i className={`ld-status-dot ${plane.connection || 'connecting'}`} />{connectionLabel}</span>
+        </div>
+        <span className="ld-send-hint" hidden={!goal.trim()}>Enter 发送 · Shift + Enter 换行</span>
+        <button
+          className={`ld-round-control ld-send-control ${goal.trim() ? 'ready' : ''}`}
+          type="button"
+          aria-label="发送消息"
+          onClick={() => void execute()}
+          disabled={!goal.trim() || submitting || runtimeBusy || Boolean(runtimeIssue)}
+        >
+          {submitting ? <Loader2 size={17} className="arp-spin" /> : <ArrowUp size={18} />}
+        </button>
+      </div>
+    </>
+  );
+
+  if (showComposer) {
+    return (
+      <div className="ld-agent-stage ld-agent-stage-pristine">
+        <section className="ld-composer-window ld-floating-window" aria-label="新建对话">
+          <button
+            className="ld-corner-entry"
+            type="button"
+            onClick={onOpenResources}
+            aria-label="打开资料"
+            title="运行记录、技能与设置"
+          >
+            <Layers3 size={14} />
+          </button>
+          <span className="ld-drag-hint" aria-hidden="true" />
+          {renderComposerField()}
+          {composerFocused && !goal.trim() && (
+            <div className="ld-starter-popover" aria-label="快速入口">
+              <span>所有能力默认收起，需要时再打开</span>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenResources}><History size={14} /><span><strong>运行与资料</strong><small>历史、技能、记忆和设置</small></span><ChevronRight size={14} /></button>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenWorkbench}><Activity size={14} /><span><strong>执行工作台</strong><small>步骤、画面、证据和运行审计</small></span><ChevronRight size={14} /></button>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenCommand}><Command size={14} /><span><strong>命令面板</strong><small>直接搜索任何隐藏功能</small></span><ChevronRight size={14} /></button>
+            </div>
+          )}
+          {(actionError || runtimeIssue || plane.error || (modelProfile?.model && modelProfile.supports_vision === false)) && (
+            <div className="ld-composer-notices">
+              {(actionError || runtimeIssue || plane.error) && (
+                <div className="ld-composer-notice" role="alert">
+                  <XCircle size={13} />
+                  <span>{actionError || runtimeIssue || plane.error}</span>
+                </div>
+              )}
+              {modelProfile?.model && modelProfile.supports_vision === false && (
+                <div className="ld-composer-notice warning">
+                  <Eye size={13} />
+                  <span>{String(modelProfile.model)} 不接受图像输入；视觉任务能力会受限。</span>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      </div>
+    );
+  }
+
+  const tone = visualRunTone(run);
+  const progress = runVisualProgress(run);
+  const currentTool = TOOL_LABELS[run?.current_tool || ''] || run?.current_tool || '尚未选择工具';
+  const visibleConversationRuns = conversationRuns.length
+    ? conversationRuns
+    : (run ? [run] : []);
+  const conversationCount = Math.max(threadState.runIds.length, visibleConversationRuns.length);
+
+  return (
+    <div className="ld-agent-stage ld-agent-stage-run">
+      <article className={`ld-task-window ld-floating-window status-${tone} ${showFollowupComposer ? 'has-followup-composer' : ''}`}>
+        <header className="ld-task-window-header">
+          <button className="ld-task-identity" type="button" onClick={onOpenResources} aria-label="打开资料" title="打开运行记录和资料">
+            <span className={`ld-window-signal ${tone}`} />
+            <span>
+              <strong>{visibleConversationRuns[0]?.goal || '当前对话'}</strong>
+              <small>{conversationCount} 轮 · {STATUS_LABELS[run?.status || ''] || run?.status || '正在恢复'}</small>
+            </span>
+          </button>
+          <div className="ld-task-window-actions">
+            <button type="button" aria-label="新建对话" title={runtimeBusy ? '当前任务结束后可新建对话' : '新建对话'} disabled={runtimeBusy} onClick={startNewConversation}><Plus size={15} /></button>
+            <button type="button" aria-label="打开工作台" title="执行、画面、上下文与证据" onClick={onOpenWorkbench}><Activity size={15} /></button>
+            <button type="button" aria-label="收起为迷你悬浮窗" title="收起为迷你悬浮窗" onClick={onCompact}><Minimize2 size={15} /></button>
+          </div>
+        </header>
+
+        <div
+          className="ld-task-scroll"
+          ref={taskScrollRef}
+          onScroll={(event) => {
+            const viewport = event.currentTarget;
+            followConversationTail.current = (
+              viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+            ) < 84;
+          }}
+        >
+          <div className="ld-conversation-column">
+            {visibleConversationRuns.map((item, index) => (
+              <AgentConversationTurn
+                key={item.run_id}
+                run={item}
+                isLatest={index === visibleConversationRuns.length - 1}
+                gateMessage={index === visibleConversationRuns.length - 1 ? gateMessage : ''}
+                onOpenDetails={onOpenResources}
+                onDecideGate={(approved) => { void plane.decideGate(approved); }}
+              />
+            ))}
+
+            {!visibleConversationRuns.length && (
+              <article className="ld-runtime-message ld-conversation-loading" aria-label="正在恢复对话">
+                <div className="ld-runtime-glyph running"><Loader2 size={15} className="arp-spin" /></div>
+                <div><span>对话记录</span><strong>正在恢复</strong><small>从原有运行记录读取完整结果。</small></div>
+              </article>
+            )}
+
+            {(actionError || runtimeIssue) && (
+              <div className="ld-inline-alert" role="alert"><XCircle size={14} /><span>{actionError || runtimeIssue}</span></div>
+            )}
+          </div>
+        </div>
+
+        <div className={`ld-task-dock ${showFollowupComposer ? 'with-composer' : ''}`}>
+          <section
+            className={`ld-activity-capsule ${tone} ${activityOpen ? 'is-open' : ''}`}
+            aria-label="运行状态；悬停或点击查看完整执行"
+          >
+            <div className="ld-activity-details">
+              <div className="ld-activity-details-scroll">
+                <div className="ld-activity-head">
+                  <div><StatusPill status={run?.status} /><strong>{run?.goal}</strong></div>
+                  <span>{formatElapsed(run?.started_at, run?.finished_at)}</span>
+                </div>
+                <PhaseRail run={run} />
+                <dl className="ld-runtime-facts">
+                  <div><dt>当前节点</dt><dd>{run?.current_node_id || '-'}</dd></div>
+                  <div><dt>当前工具</dt><dd>{currentTool}</dd></div>
+                  <div><dt>事件</dt><dd>{run?.timeline.length || plane.events.length}</dd></div>
+                  <div><dt>证据</dt><dd>{run?.evidence.length || 0}</dd></div>
+                </dl>
+                <div className="ld-runtime-controls">
+                  {active && run?.phase !== 'awaiting_human' && <button type="button" onClick={() => void togglePause()} disabled={controlling}>{manuallyPaused ? <Play size={13} /> : <Pause size={13} />}{manuallyPaused ? '继续' : '暂停'}</button>}
+                  {active && <button type="button" onClick={() => void stop()} disabled={controlling}>{controlling ? <Loader2 size={13} className="arp-spin" /> : <CircleStop size={13} />}停止</button>}
+                  <button type="button" onClick={onOpenWorkbench}><Maximize2 size={13} />打开完整执行</button>
+                </div>
+                <RunTimeline run={run} events={plane.events} compact />
+              </div>
+            </div>
+            <button
+              className="ld-activity-summary"
+              type="button"
+              aria-expanded={activityOpen}
+              onClick={() => setActivityOpen((value) => !value)}
+            >
+              <span className="ld-progress-ring" style={{ '--ld-progress': `${progress}%` } as React.CSSProperties}><i /></span>
+              <span><strong>{runActivityLabel(run)}</strong><small>{currentTool}</small></span>
+              <small>{formatElapsed(run?.started_at, run?.finished_at)}</small>
+            </button>
+          </section>
+          {showFollowupComposer && (
+            <section className="ld-compact-composer" aria-label="继续输入">
+              {renderComposerField(true)}
+            </section>
           )}
         </div>
-        {actionError && <div className="arp-inline-error"><XCircle size={14} />{actionError}</div>}
-        {runtimeIssue && !actionError && <div className="arp-inline-error"><XCircle size={14} />{runtimeIssue} 当前控制器版本不兼容，应用会自动替换空闲控制器；如果刚刚热更新过，请重启一次桌面应用。</div>}
-        {modelProfile?.model && modelProfile?.supports_vision === false && <div className="arp-inline-error"><Eye size={14} />{String(modelProfile.model)} 不接受图像输入。像素密集型 GUI 任务将使用较慢的感知/控制器回退路径，请选择支持视觉的主模型。</div>}
-      </section>
-
-      {run?.phase === 'awaiting_human' && (
-        <section className="arp-gate-banner">
-          <div><UserCheck size={18} /><div><strong>需要人工确认</strong><span>{String([...plane.events].reverse().find((event) => event.type === 'arp_human_gate')?.message || run.current_node_id || '')}</span></div></div>
-          <div><button className="arp-button" onClick={() => plane.decideGate(false)}>拒绝</button><button className="arp-button arp-button-primary" onClick={() => plane.decideGate(true)}>批准</button></div>
-        </section>
-      )}
-
-      <section className="arp-live-strip">
-        <div className="arp-live-title"><Radio size={15} /><span>{run?.goal || '当前没有运行中的任务'}</span></div>
-        <PhaseRail run={run} />
-        <div className="arp-runtime-focus"><span>节点</span><code>{run?.current_node_id || '-'}</code><span>工具</span><code>{TOOL_LABELS[run?.current_tool || ''] || run?.current_tool || '-'}</code></div>
-      </section>
-
-      {visibleResult && run?.status === 'done' && (
-        <section className="arp-panel arp-result-panel" aria-label="任务结果" role="status">
-          <div className="arp-panel-heading">
-            <div><CheckCircle2 size={15} /><strong>任务结果</strong></div>
-          </div>
-          <div className="arp-result-content">{visibleResult}</div>
-        </section>
-      )}
-
-      {arp && (
-        <TaskContractRuntimeSection
-          arp={arp}
-          events={plane.events}
-          artifactUrl={(artifactId) => plane.getClient().artifactUrl(arp.run_id, artifactId)}
-        />
-      )}
-
-      <section className="arp-metrics-row">
-        <Metric label="截图" value={metrics?.screen_capture_latency_avg_ms || 0} unit="毫秒" />
-        <Metric label="感知" value={metrics?.perception_latency_avg_ms || 0} unit="毫秒" />
-        <Metric label="决策" value={metrics?.action_decision_latency_avg_ms || 0} unit="毫秒" />
-        <Metric label="执行" value={metrics?.action_execution_latency_avg_ms || 0} unit="毫秒" />
-        <Metric label="执行后验证" value={metrics?.post_action_verify_latency_avg_ms || 0} unit="毫秒" />
-        <Metric label="模型调用" value={metrics?.model_call_count || 0} />
-        <Metric label="阶段重试" value={metrics?.retry_count || 0} />
-        <Metric label="控制器总耗时" value={metrics?.controller_elapsed_total_ms || 0} unit="毫秒" />
-        <Metric label="快速验证" value={`${Math.round((metrics?.semantic_verify_fast_path_rate || 0) * 100)}%`} />
-        <Metric label="重规划率" value={`${Math.round((metrics?.replan_frequency || 0) * 100)}%`} />
-        <Metric label="视觉模型调用率" value={`${Math.round((metrics?.vlm_call_frequency || 0) * 100)}%`} />
-        <Metric label="技能复用率" value={`${Math.round((metrics?.skill_reuse_rate || 0) * 100)}%`} />
-        <Metric label="锚点命中率" value={`${Math.round((metrics?.anchor_cache_hit_rate || 0) * 100)}%`} />
-      </section>
-
-      <div className="arp-agent-grid">
-        <section className="arp-panel arp-timeline-panel">
-          <div className="arp-panel-heading"><div><ListChecks size={15} /><strong>实时时间线</strong></div><span>{run?.timeline.length || plane.events.length} 个事件</span></div>
-          <RunTimeline run={run} events={plane.events} />
-        </section>
-        <div className="arp-agent-side">
-          <section className="arp-panel arp-world-panel">
-            <div className="arp-panel-heading"><div><Eye size={15} /><strong>当前画面状态</strong></div>{latestScreenEvent && <span className="arp-live-pulse">实时</span>}</div>
-            {screenshotUrl ? (
-              <div className="arp-evidence-preview">
-                <img className="arp-evidence-image" src={screenshotUrl} alt="最近一次运行证据" />
-                <span className={screenshot?.transient ? 'transient' : ''}>
-                  <ShieldCheck size={11} />{screenshotKind}
-                  {screenshotRegion && <code>{String(screenshotRegion.left ?? 0)},{String(screenshotRegion.top ?? 0)} · {String(screenshotRegion.width ?? 0)}×{String(screenshotRegion.height ?? 0)}</code>}
-                </span>
-              </div>
-            ) : <div className="arp-screen-empty"><Eye size={22} /><span>等待视觉证据</span></div>}
-            <dl className="arp-world-state">
-              <div><dt>屏幕信号</dt><dd>{EVENT_LABELS[latestScreenEvent?.type || ''] || latestScreenEvent?.type || '就绪'}</dd></div>
-              <div><dt>更新时间</dt><dd>{formatTime(latestScreenEvent?.ts)}</dd></div>
-              <div><dt>证据数量</dt><dd>{run?.evidence.length || 0}</dd></div>
-              <div><dt>完成检查</dt><dd>{metrics?.done_check_passed || 0}/{metrics?.done_checks || 0}</dd></div>
-            </dl>
-          </section>
-          <section className="arp-panel arp-evidence-panel">
-            <div className="arp-panel-heading"><div><ShieldCheck size={15} /><strong>证据</strong></div></div>
-            {(run?.evidence || []).length ? run!.evidence.slice(-5).reverse().map((item, index) => (
-              <div className="arp-evidence-row" key={index}><CheckCircle2 size={14} /><span>{displayValue(item.reason || item.kind || item.type || item.path)}</span></div>
-            )) : <EmptyState icon={ShieldCheck} title="尚未收集证据" />}
-          </section>
-        </div>
-      </div>
+      </article>
     </div>
   );
 }
@@ -1175,7 +1643,7 @@ export function RunsView({ plane }: { plane: Plane }) {
       const statusMatches = statusFilter === 'all'
         || (statusFilter === 'active' && ACTIVE_STATUSES.has(status))
         || (statusFilter === 'success' && ['done', 'completed', 'success'].includes(status))
-        || (statusFilter === 'failed' && ['failed', 'error', 'canceled'].includes(status));
+        || (statusFilter === 'failed' && UNSUCCESSFUL_STATUSES.has(status));
       const textMatches = !needle
         || `${run.goal} ${run.run_id} ${run.kind}`.toLocaleLowerCase().includes(needle);
       return statusMatches && textMatches;
@@ -1623,8 +2091,57 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (val
   return <label className="arp-toggle-row"><span>{label}</span><button type="button" className={`arp-toggle ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)} aria-pressed={checked}><span /></button></label>;
 }
 
+function DayNightToggle({ isNight, onToggle }: { isNight: boolean; onToggle: () => void }) {
+  return (
+    <div className="ld-theme-toggle-control">
+      <button
+        className="ld-dnt-toggle"
+        type="button"
+        role="switch"
+        data-state={isNight ? 'night' : 'day'}
+        aria-checked={isNight}
+        aria-label="切换日间与夜间模式"
+        title="切换界面主题"
+        onClick={onToggle}
+        style={{ '--dnt-scale': 0.48, width: 177, height: 69.6 } as React.CSSProperties}
+      >
+        <span className="ld-dnt-scene" aria-hidden="true">
+          <span className="ld-dnt-track">
+            <span className="ld-dnt-sky ld-dnt-sky-day" />
+            <span className="ld-dnt-sky ld-dnt-sky-night" />
+            <span className="ld-dnt-rays">
+              <span className="ld-dnt-ray ld-dnt-ray-inner" />
+              <span className="ld-dnt-ray ld-dnt-ray-middle" />
+              <span className="ld-dnt-ray ld-dnt-ray-outer" />
+            </span>
+            <span className="ld-dnt-stars">
+              {Array.from({ length: 11 }, (_, index) => <span className="ld-dnt-star" key={`star-${index}`} />)}
+            </span>
+            <span className="ld-dnt-cloud-layer ld-dnt-cloud-shadow">
+              {Array.from({ length: 7 }, (_, index) => <span className="ld-dnt-cloud" key={`shadow-cloud-${index}`} />)}
+            </span>
+            <span className="ld-dnt-cloud-layer ld-dnt-cloud-front">
+              {Array.from({ length: 7 }, (_, index) => <span className="ld-dnt-cloud" key={`front-cloud-${index}`} />)}
+            </span>
+            <span className="ld-dnt-orb">
+              <span className="ld-dnt-orb-face ld-dnt-sun" />
+              <span className="ld-dnt-orb-face ld-dnt-moon">
+                <span className="ld-dnt-crater ld-dnt-crater-one" />
+                <span className="ld-dnt-crater ld-dnt-crater-two" />
+                <span className="ld-dnt-crater ld-dnt-crater-three" />
+              </span>
+            </span>
+            <span className="ld-dnt-rim" />
+          </span>
+        </span>
+      </button>
+    </div>
+  );
+}
+
 function SystemView({ plane }: { plane: Plane }) {
   const themeMode = useStore((state) => state.ui.themeMode);
+  const darkMode = useStore((state) => state.ui.dark_mode);
   const setUI = useStore((state) => state.setUI);
   const [config, setConfig] = useState<Record<string, any> | null>(null);
   const [saving, setSaving] = useState(false);
@@ -1749,7 +2266,15 @@ function SystemView({ plane }: { plane: Plane }) {
             <div><dt>世界模型</dt><dd>{config ? (config.agent?.world_model !== false ? '启用' : '停用') : '-'}</dd></div>
             <div><dt>视觉模型状态</dt><dd>{platformStatus ? (platformStatus.vlm_configured ? '已配置' : platformStatus.vlm_reason || '未配置') : '-'}</dd></div>
           </dl>
-          <div className="arp-theme-control"><span>主题</span><div>{(['light', 'dark', 'system'] as const).map((mode) => <button key={mode} className={themeMode === mode ? 'active' : ''} onClick={() => setUI({ themeMode: mode })}>{mode === 'light' ? <Sun size={13} /> : mode === 'dark' ? <Moon size={13} /> : <Settings size={13} />}{mode === 'light' ? '浅色' : mode === 'dark' ? '深色' : '跟随系统'}</button>)}</div></div>
+          <div className="arp-theme-control ld-theme-showcase">
+            <div className="ld-theme-copy">
+              <span>界面主题</span>
+              <button type="button" className={themeMode === 'system' ? 'active' : ''} onClick={() => setUI({ themeMode: 'system' })}>
+                {themeMode === 'system' ? '正在跟随系统' : '跟随系统'}
+              </button>
+            </div>
+            <DayNightToggle isNight={darkMode} onToggle={() => setUI({ themeMode: darkMode ? 'light' : 'dark' })} />
+          </div>
         </section>
         <section className="arp-panel arp-config-panel arp-runtime-health-panel">
           <div className="arp-panel-heading"><div><Activity size={15} /><strong>执行运行时</strong></div><StatusPill status={activeRuntimeJobs.length ? 'running' : 'idle'} label={activeRuntimeJobs.length ? `${activeRuntimeJobs.length} 个活动任务` : '空闲'} /></div>
@@ -1823,53 +2348,470 @@ function SystemView({ plane }: { plane: Plane }) {
   );
 }
 
+type ResourceView = 'runs' | 'assets' | 'system';
+type WorkbenchView = 'activity' | 'context' | 'flow';
+
+function MiniRunWindow({
+  plane,
+  onExpand,
+  onOpenWorkbench,
+}: {
+  plane: Plane;
+  onExpand: () => void;
+  onOpenWorkbench: () => void;
+}) {
+  const run = plane.currentRun;
+  const tone = visualRunTone(run);
+  const progress = runVisualProgress(run);
+
+  if (!run) return null;
+
+  return (
+    <div className="ld-mini-stage" aria-label="迷你任务悬浮窗">
+      <aside className={`ld-mini-run ld-floating-window ${tone}`}>
+        <button className="ld-mini-main" type="button" onClick={onExpand} aria-label="返回完整任务窗口">
+          <span className="ld-progress-ring" style={{ '--ld-progress': `${progress}%` } as React.CSSProperties}><i /></span>
+          <span><strong>{runActivityLabel(run)}</strong><small>{run.goal}</small></span>
+          <span>{formatElapsed(run.started_at, run.finished_at)}</span>
+        </button>
+        <button className="ld-mini-detail" type="button" onClick={onOpenWorkbench} aria-label="打开执行详情" title="打开执行详情">
+          <Maximize2 size={13} />
+        </button>
+      </aside>
+    </div>
+  );
+}
+
+function ResourceDrawer({
+  plane,
+  view,
+  onView,
+  onClose,
+  onOpenFlow,
+}: {
+  plane: Plane;
+  view: ResourceView;
+  onView: (view: ResourceView) => void;
+  onClose: () => void;
+  onOpenFlow: () => void;
+}) {
+  return (
+    <>
+      <button className="ld-layer-scrim" type="button" aria-label="关闭资料浮层" onClick={onClose} />
+      <aside className="ld-resource-drawer ld-floating-window" aria-label="资料">
+        <header className="ld-layer-header">
+          <div><span>灵动脚本</span><strong>资料</strong></div>
+          <button type="button" onClick={onClose} aria-label="关闭资料"><X size={17} /></button>
+        </header>
+        <nav className="ld-layer-tabs" aria-label="资料区域">
+          <button type="button" className={view === 'runs' ? 'active' : ''} onClick={() => onView('runs')}><History size={14} /><span>运行记录</span></button>
+          <button type="button" className={view === 'assets' ? 'active' : ''} onClick={() => onView('assets')}><Library size={14} /><span>技能与记忆</span></button>
+          <button type="button" className={view === 'system' ? 'active' : ''} onClick={() => onView('system')}><Settings size={14} /><span>设置</span></button>
+        </nav>
+        <div className="ld-resource-body">
+          {view === 'runs' && <RunsView plane={plane} />}
+          {view === 'assets' && <AssetsView plane={plane} openStudio={onOpenFlow} />}
+          {view === 'system' && <SystemView plane={plane} />}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function RuntimeWorkbench({
+  plane,
+  view,
+  onView,
+  onClose,
+  onOpenFlow,
+}: {
+  plane: Plane;
+  view: WorkbenchView;
+  onView: (view: WorkbenchView) => void;
+  onClose: () => void;
+  onOpenFlow: () => void;
+}) {
+  const run = plane.currentRun;
+  const arp = plane.arpSnapshot;
+  const script = useStore((state) => state.script);
+  const [controlling, setControlling] = useState(false);
+  const [controlError, setControlError] = useState('');
+  const metrics = run?.metrics;
+  const latestScreenEvent = [...plane.events].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type))
+    || [...(run?.timeline || [])].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type));
+  const screenshot = [...(run?.evidence || [])].reverse().find((item) => item.type === 'screenshot' && item.path);
+  const screenshotKind = String(screenshot?.kind || 'screen').replaceAll('_', ' ');
+  const screenshotRegion = screenshot?.region as Record<string, unknown> | undefined;
+  const screenshotUrl = screenshot && plane.baseUrl && run
+    ? plane.getClient().traceScreenshotUrl(run.run_id, String(screenshot.path))
+    : '';
+  const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
+  const manuallyPaused = Boolean(arp?.manual_paused);
+
+  const control = async (action: 'pause' | 'resume' | 'stop') => {
+    if (controlling) return;
+    setControlling(true);
+    setControlError('');
+    try {
+      if (action === 'pause') await plane.pauseCurrent();
+      if (action === 'resume') await plane.resumeCurrent();
+      if (action === 'stop') await plane.cancelCurrent();
+    } catch (error) {
+      setControlError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setControlling(false);
+    }
+  };
+
+  return (
+    <>
+      <button className="ld-layer-scrim" type="button" aria-label="关闭工作台浮层" onClick={onClose} />
+      <aside className="ld-workbench-drawer ld-floating-window" aria-label="工作台">
+        <header className="ld-layer-header">
+          <div><span>灵动脚本</span><strong>工作台</strong></div>
+          <button type="button" onClick={onClose} aria-label="关闭工作台"><X size={17} /></button>
+        </header>
+        <nav className="ld-layer-tabs" aria-label="工作台区域">
+          <button type="button" className={view === 'activity' ? 'active' : ''} onClick={() => onView('activity')}><Activity size={14} /><span>执行</span></button>
+          <button type="button" className={view === 'context' ? 'active' : ''} onClick={() => onView('context')}><Layers3 size={14} /><span>上下文与证据</span></button>
+          <button type="button" className={view === 'flow' ? 'active' : ''} onClick={() => onView('flow')}><GitBranch size={14} /><span>流程</span></button>
+        </nav>
+        <div className="ld-workbench-body">
+          {view === 'activity' && (
+            <section className="ld-workbench-section">
+              {run ? (
+                <>
+                  <div className="ld-workbench-task">
+                    <div><StatusPill status={run.status} /><strong>{run.goal}</strong><small>{run.run_id}</small></div>
+                    <span>{formatElapsed(run.started_at, run.finished_at)}</span>
+                  </div>
+                  <PhaseRail run={run} />
+                  <dl className="ld-runtime-facts large">
+                    <div><dt>阶段</dt><dd>{PHASE_LABELS[run.phase] || run.phase || '-'}</dd></div>
+                    <div><dt>节点</dt><dd>{run.current_node_id || '-'}</dd></div>
+                    <div><dt>工具</dt><dd>{TOOL_LABELS[run.current_tool || ''] || run.current_tool || '-'}</dd></div>
+                    <div><dt>事件</dt><dd>{run.timeline.length || plane.events.length}</dd></div>
+                  </dl>
+                  {active && (
+                    <div className="ld-runtime-controls">
+                      {run.phase !== 'awaiting_human' && <button type="button" onClick={() => void control(manuallyPaused ? 'resume' : 'pause')} disabled={controlling}>{manuallyPaused ? <Play size={13} /> : <Pause size={13} />}{manuallyPaused ? '继续' : '暂停'}</button>}
+                      <button type="button" className="danger" onClick={() => void control('stop')} disabled={controlling}>{controlling ? <Loader2 size={13} className="arp-spin" /> : <CircleStop size={13} />}停止</button>
+                    </div>
+                  )}
+                  {controlError && <div className="ld-inline-alert" role="alert"><XCircle size={13} />{controlError}</div>}
+                  <div className="ld-subsection-heading"><span><ListChecks size={14} />事件时间线</span><small>{run.timeline.length || plane.events.length} 条</small></div>
+                  <RunTimeline run={run} events={plane.events} />
+                  <details className="ld-disclosure">
+                    <summary><Gauge size={14} /><span>性能与执行统计</span><ChevronRight size={13} /></summary>
+                    <div className="arp-metrics-row compact">
+                      <Metric label="截图" value={metrics?.screen_capture_latency_avg_ms || 0} unit="毫秒" />
+                      <Metric label="感知" value={metrics?.perception_latency_avg_ms || 0} unit="毫秒" />
+                      <Metric label="决策" value={metrics?.action_decision_latency_avg_ms || 0} unit="毫秒" />
+                      <Metric label="执行" value={metrics?.action_execution_latency_avg_ms || 0} unit="毫秒" />
+                      <Metric label="执行后验证" value={metrics?.post_action_verify_latency_avg_ms || 0} unit="毫秒" />
+                      <Metric label="模型调用" value={metrics?.model_call_count || 0} />
+                      <Metric label="阶段重试" value={metrics?.retry_count || 0} />
+                      <Metric label="重规划率" value={`${Math.round((metrics?.replan_frequency || 0) * 100)}%`} />
+                    </div>
+                  </details>
+                </>
+              ) : <EmptyState icon={Activity} title="当前没有运行" detail="提交任务后，阶段、事件和控制会在这里出现。" />}
+            </section>
+          )}
+
+          {view === 'context' && (
+            <section className="ld-workbench-section">
+              <div className="ld-subsection-heading"><span><Eye size={14} />当前画面</span>{latestScreenEvent && <small className="arp-live-pulse">实时</small>}</div>
+              {screenshotUrl ? (
+                <div className="arp-evidence-preview">
+                  <img className="arp-evidence-image" src={screenshotUrl} alt="最近一次运行证据" />
+                  <span className={screenshot?.transient ? 'transient' : ''}>
+                    <ShieldCheck size={11} />{screenshotKind}
+                    {screenshotRegion && <code>{String(screenshotRegion.left ?? 0)},{String(screenshotRegion.top ?? 0)} · {String(screenshotRegion.width ?? 0)}×{String(screenshotRegion.height ?? 0)}</code>}
+                  </span>
+                </div>
+              ) : <div className="arp-screen-empty"><Eye size={22} /><span>等待视觉证据</span></div>}
+              <dl className="arp-world-state">
+                <div><dt>屏幕信号</dt><dd>{EVENT_LABELS[latestScreenEvent?.type || ''] || latestScreenEvent?.type || '就绪'}</dd></div>
+                <div><dt>更新时间</dt><dd>{formatTime(latestScreenEvent?.ts)}</dd></div>
+                <div><dt>证据数量</dt><dd>{run?.evidence.length || 0}</dd></div>
+                <div><dt>完成检查</dt><dd>{metrics?.done_check_passed || 0}/{metrics?.done_checks || 0}</dd></div>
+              </dl>
+              <div className="ld-subsection-heading"><span><ShieldCheck size={14} />最近证据</span><small>{run?.evidence.length || 0} 条</small></div>
+              <div className="ld-evidence-stack">
+                {(run?.evidence || []).slice(-8).reverse().map((item, index) => (
+                  <div className="arp-evidence-row" key={index}><CheckCircle2 size={14} /><span>{displayValue(item.reason || item.kind || item.type || item.path)}</span></div>
+                ))}
+                {!run?.evidence.length && <EmptyState icon={ShieldCheck} title="尚未收集证据" />}
+              </div>
+              {arp ? (
+                <TaskContractRuntimeSection
+                  arp={arp}
+                  events={plane.events}
+                  artifactUrl={(artifactId) => plane.getClient().artifactUrl(arp.run_id, artifactId)}
+                />
+              ) : <div className="arp-detail-note"><Archive size={14} />运行合同、工件和完成证据会在任务启动后出现。</div>}
+            </section>
+          )}
+
+          {view === 'flow' && (
+            <section className="ld-workbench-section ld-flow-preview-section">
+              <div className="ld-flow-preview-copy"><span>隐藏式工作区</span><strong>流程编辑器只在需要时出现</strong><p>当前流程保留完整节点库、属性面板、拖拽、连线、验证与真实运行能力。</p></div>
+              <button className="ld-flow-preview" type="button" onClick={onOpenFlow} aria-label="展开流程工作台">
+                <div><Sparkles size={18} /><strong>{script.meta.name}</strong><span>{script.nodes.length} 个节点 · {script.edges.length} 条连线</span></div>
+                <Maximize2 size={17} />
+              </button>
+              <button className="arp-button arp-button-primary" type="button" onClick={onOpenFlow}><GitBranch size={14} />展开完整编辑器</button>
+            </section>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+interface FloatingCommand {
+  id: string;
+  label: string;
+  detail: string;
+  icon: React.ElementType;
+  action: () => void;
+}
+
+function CommandPalette({
+  commands,
+  query,
+  onQuery,
+  onClose,
+}: {
+  commands: FloatingCommand[];
+  query: string;
+  onQuery: (query: string) => void;
+  onClose: () => void;
+}) {
+  const needle = query.trim().toLocaleLowerCase();
+  const visible = commands.filter((command) => !needle || `${command.label} ${command.detail}`.toLocaleLowerCase().includes(needle));
+  const runCommand = (command: FloatingCommand) => {
+    onClose();
+    command.action();
+  };
+
+  return (
+    <div className="ld-command-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="ld-command-palette" role="dialog" aria-modal="true" aria-label="命令面板">
+        <div className="ld-command-input">
+          <Search size={18} />
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => onQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && visible[0]) runCommand(visible[0]);
+              if (event.key === 'Escape') onClose();
+            }}
+            placeholder="搜索隐藏功能或命令…"
+            aria-label="搜索命令"
+          />
+          <kbd>Esc</kbd>
+        </div>
+        <div className="ld-command-list">
+          {visible.map((command, index) => {
+            const Icon = command.icon;
+            return (
+              <button key={command.id} type="button" className={index === 0 ? 'active' : ''} onClick={() => runCommand(command)}>
+                <span><Icon size={15} /></span>
+                <span><strong>{command.label}</strong><small>{command.detail}</small></span>
+                <ChevronRight size={14} />
+              </button>
+            );
+          })}
+          {!visible.length && <EmptyState icon={Search} title="没有匹配命令" detail="换一个更短的关键词。" />}
+        </div>
+        <footer><span><kbd>Enter</kbd> 打开</span><span><kbd>Esc</kbd> 关闭</span><span><kbd>Ctrl K</kbd> 随时呼出</span></footer>
+      </section>
+    </div>
+  );
+}
+
 export function PlatformWorkbench() {
   const plane = useControlPlane();
+  const desktopWindowApi = window.electronAPI;
   const storeMode = useStore((state) => state.ui.viewMode);
   const setViewMode = useStore((state) => state.setViewMode);
-  const currentView = viewFromStore(storeMode);
-  const setView = (view: PlatformView) => setViewMode(view);
+  const initialView = viewFromStore(storeMode);
+  const [windowMode, setWindowMode] = useState<'expanded' | 'compact'>('expanded');
+  const [resourceView, setResourceView] = useState<ResourceView | null>(
+    initialView === 'runs' || initialView === 'assets' || initialView === 'system' ? initialView : null,
+  );
+  const [workbenchView, setWorkbenchView] = useState<WorkbenchView | null>(null);
+  const [flowOpen, setFlowOpen] = useState(initialView === 'studio');
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState('');
 
   useEffect(() => {
     useStore.getState().fetchFeatures();
   }, []);
 
+  useEffect(() => {
+    if (!plane.currentRun && windowMode === 'compact') setWindowMode('expanded');
+  }, [plane.currentRun, windowMode]);
+
+  const openAgent = useCallback(() => {
+    setViewMode('agent');
+    setWindowMode('expanded');
+    setResourceView(null);
+    setWorkbenchView(null);
+    setFlowOpen(false);
+  }, [setViewMode]);
+
+  const openResources = useCallback((view: ResourceView = 'runs') => {
+    setViewMode(view);
+    setResourceView(view);
+    setWorkbenchView(null);
+    setFlowOpen(false);
+  }, [setViewMode]);
+
+  const openWorkbench = useCallback((view: WorkbenchView = 'activity') => {
+    setViewMode('agent');
+    setWorkbenchView(view);
+    setResourceView(null);
+    setFlowOpen(false);
+  }, [setViewMode]);
+
+  const openFlow = useCallback(() => {
+    setViewMode('studio');
+    setFlowOpen(true);
+    setResourceView(null);
+    setWorkbenchView(null);
+  }, [setViewMode]);
+
+  const closeFlow = useCallback(() => {
+    setFlowOpen(false);
+    setViewMode('agent');
+  }, [setViewMode]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'k') {
+        event.preventDefault();
+        setCommandOpen((value) => !value);
+        setCommandQuery('');
+        return;
+      }
+      if (event.key !== 'Escape') return;
+      if (commandOpen) {
+        setCommandOpen(false);
+        setCommandQuery('');
+      } else if (flowOpen) {
+        closeFlow();
+      } else if (resourceView) {
+        setResourceView(null);
+        setViewMode('agent');
+      } else if (workbenchView) {
+        setWorkbenchView(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [closeFlow, commandOpen, flowOpen, resourceView, setViewMode, workbenchView]);
+
+  const closeCommand = () => {
+    setCommandOpen(false);
+    setCommandQuery('');
+  };
+
+  const commands: FloatingCommand[] = [
+    { id: 'agent', label: '智能代理', detail: '新建任务或返回当前任务', icon: Bot, action: openAgent },
+    { id: 'activity', label: '当前执行', detail: '阶段、事件、控制和性能统计', icon: Activity, action: () => openWorkbench('activity') },
+    { id: 'context', label: '上下文与证据', detail: '当前画面、证据、工件与完成合同', icon: Layers3, action: () => openWorkbench('context') },
+    { id: 'runs', label: '运行记录', detail: '搜索历史任务并查看完整运行详情', icon: History, action: () => openResources('runs') },
+    { id: 'assets', label: '技能与记忆', detail: '已验证技能、轨迹和经验记忆', icon: Library, action: () => openResources('assets') },
+    { id: 'flow', label: '流程工作台', detail: '打开完整可编辑流程图', icon: GitBranch, action: openFlow },
+    { id: 'system', label: '系统设置', detail: '模型、运行时、计划、连接与能力注册表', icon: Settings, action: () => openResources('system') },
+  ];
+
   return (
-    <div className="arp-app">
-      <div className="arp-window-titlebar" aria-label="灵动脚本窗口标题栏">
-        <div className="arp-window-title"><Bot size={14} /><strong>灵动脚本</strong><span>WinPilot</span></div>
-      </div>
-      <div className="arp-shell">
-        <aside className="arp-sidebar">
-        <div className="arp-brand"><div className="arp-brand-mark"><Bot size={18} /></div><div><strong>WinPilot</strong><span>智能代理运行平台</span></div></div>
-        <nav>
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            return <button key={item.id} aria-label={item.label} title={item.label} className={currentView === item.id ? 'active' : ''} onClick={() => setView(item.id)}><Icon size={16} /><span>{item.label}</span>{currentView === item.id && <ChevronRight size={13} />}</button>;
-          })}
-        </nav>
-        <div className="arp-sidebar-status">
-          <span className={`arp-connection-dot ${plane.connection}`} />
-          <div><strong>{plane.connection === 'online' ? '在线' : plane.connection === 'connecting' ? '连接中' : plane.connection === 'degraded' ? '降级' : '离线'}</strong><span>{plane.baseUrl ? new URL(plane.baseUrl).host : '正在启动运行时'}</span></div>
-        </div>
-        </aside>
-        <main className="arp-workspace">
-        <header className="arp-topbar">
-          <div className="arp-breadcrumb"><span>工作区</span><ChevronRight size={13} /><strong>{NAV_ITEMS.find((item) => item.id === currentView)?.label}</strong></div>
-          {plane.error && <div className="arp-topbar-error"><XCircle size={13} />{plane.error}</div>}
-          <div className="arp-topbar-run">
-            {plane.currentRun && <><Clock3 size={13} /><span>{plane.currentRun.goal || plane.currentRun.run_id}</span><StatusPill status={plane.currentRun.status} /></>}
+    <div className="arp-app ld-floating-app">
+      <div className="ld-native-titlebar" aria-label="灵动脚本窗口标题栏">
+        <button type="button" className="ld-title-brand" onClick={openAgent} aria-label="返回智能代理"><Bot size={13} /><strong>灵动脚本</strong></button>
+        <button type="button" className="ld-title-status" onClick={() => openResources('system')} aria-label="查看运行时状态" title={plane.baseUrl || '运行时正在启动'}>
+          <span className={`ld-status-dot ${plane.connection}`} />
+          <span>{plane.connection === 'online' ? '在线' : plane.connection === 'degraded' ? '降级' : plane.connection === 'offline' ? '离线' : '连接中'}</span>
+        </button>
+        {desktopWindowApi?.minimizeWindow && (
+          <div className="ld-window-controls" aria-label="窗口控制">
+            <button type="button" onClick={() => void desktopWindowApi.minimizeWindow?.()} aria-label="最小化窗口" title="最小化">
+              <Minus size={14} />
+            </button>
+            <button type="button" onClick={() => void desktopWindowApi.toggleMaximizeWindow?.()} aria-label="最大化或还原窗口" title="最大化或还原">
+              <Square size={11} />
+            </button>
+            <button className="close" type="button" onClick={() => void desktopWindowApi.closeWindow?.()} aria-label="关闭窗口" title="关闭">
+              <X size={14} />
+            </button>
           </div>
-        </header>
-        <div className="arp-view">
-          {currentView === 'agent' && <AgentCockpit plane={plane} />}
-          {currentView === 'studio' && <Studio plane={plane} />}
-          {currentView === 'runs' && <RunsView plane={plane} />}
-          {currentView === 'assets' && <AssetsView plane={plane} openStudio={() => setView('studio')} />}
-          {currentView === 'system' && <SystemView plane={plane} />}
-        </div>
-        </main>
+        )}
       </div>
+      <main className="ld-floating-stage" aria-label="灵动脚本桌面悬浮工作区">
+        {windowMode === 'compact' && plane.currentRun ? (
+          <MiniRunWindow plane={plane} onExpand={() => setWindowMode('expanded')} onOpenWorkbench={() => openWorkbench('activity')} />
+        ) : (
+          <AgentCockpit
+            plane={plane}
+            onOpenResources={() => openResources('runs')}
+            onOpenSystem={() => openResources('system')}
+            onOpenWorkbench={() => openWorkbench(plane.currentRun ? 'activity' : 'flow')}
+            onOpenCommand={() => { setCommandOpen(true); setCommandQuery(''); }}
+            onCompact={() => { if (plane.currentRun) setWindowMode('compact'); }}
+          />
+        )}
+      </main>
+
+      {resourceView && (
+        <ResourceDrawer
+          plane={plane}
+          view={resourceView}
+          onView={(view) => { setResourceView(view); setViewMode(view); }}
+          onClose={() => { setResourceView(null); setViewMode('agent'); }}
+          onOpenFlow={openFlow}
+        />
+      )}
+
+      {workbenchView && (
+        <RuntimeWorkbench
+          plane={plane}
+          view={workbenchView}
+          onView={setWorkbenchView}
+          onClose={() => setWorkbenchView(null)}
+          onOpenFlow={openFlow}
+        />
+      )}
+
+      {flowOpen && (
+        <>
+          <button className="ld-layer-scrim flow" type="button" aria-label="关闭流程工作台浮层" onClick={closeFlow} />
+          <section className="ld-flow-window ld-floating-window" aria-label="流程工作台">
+            <header className="ld-flow-window-header">
+              <div><span>流程工作台</span><strong>完整编辑、验证与运行</strong></div>
+              <button type="button" onClick={closeFlow} aria-label="关闭流程工作台"><X size={17} /></button>
+            </header>
+            <div className="ld-flow-window-body"><Studio plane={plane} /></div>
+          </section>
+        </>
+      )}
+
+      {commandOpen && (
+        <CommandPalette
+          commands={commands}
+          query={commandQuery}
+          onQuery={setCommandQuery}
+          onClose={closeCommand}
+        />
+      )}
+
+      <button className="ld-command-orb" type="button" onClick={() => { setCommandOpen(true); setCommandQuery(''); }} aria-label="打开命令面板" title="Ctrl+K">
+        <Command size={14} />
+      </button>
     </div>
   );
 }

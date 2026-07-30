@@ -56,9 +56,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   restartWinpilot: () =>
     ipcRenderer.invoke('winpilot:restart'),
 
-  // Keep the native Windows caption buttons visually aligned with the renderer theme.
+  // Keep the transparent custom window surface aligned with the renderer theme.
   setTitleBarTheme: (theme: 'light' | 'dark') =>
     ipcRenderer.invoke('window:set-titlebar-theme', theme),
+  minimizeWindow: () =>
+    ipcRenderer.invoke('window:minimize'),
+  toggleMaximizeWindow: () =>
+    ipcRenderer.invoke('window:toggle-maximize'),
+  closeWindow: () =>
+    ipcRenderer.invoke('window:close'),
 
   // Desktop agents need the target application, not this control surface, to
   // own the foreground when the first authoritative frame is captured.

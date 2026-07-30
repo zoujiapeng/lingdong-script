@@ -7,19 +7,50 @@
 如何避免再次出现“后端已经有事实，前端却看不到”或“界面能创建但运行时不能执行”
 的问题。
 
-## 五个生产入口
+## 单一悬浮入口与按需工作区
 
-| 入口 | 当前职责 | 主要运行时事实 |
-| --- | --- | --- |
-| 智能代理 | 输入原始自然语言目标、设置步骤上限、选择冷启动、停止当前任务 | vNext mission、Visual Actor 工具、实时画面、动作回执和 completion obligation |
-| 流程工作台 | 编辑、校验并运行 `automation-ir/1` / `arp/1` 投影 | 前端编译器与后端 capability catalog 的交集、IR fingerprint、真实 ARP 运行 |
-| 运行记录 | 搜索/筛选统一 Agent/ARP run，并按需加载单次完整详情 | run 摘要、timeline、typed stage trace、capabilities、artifacts、evidence、失败分类和完成合同 |
-| 技能与学习 | 区分已验证 Skill、draft/invalid script、trace、长期 Memory 与进程内 session | replay 可信状态、脚本摘要、适用条件、结构化 verification 和 lineage |
-| 系统设置 | 修改模型/感知/Controller/集成配置并查看运行时健康 | runtime contract/source/Git 身份、RuntimeJob、Desktop Action Queue、异步动作、Perception daemon、MCP readiness |
+客户端默认只显示一个圆角悬浮任务输入窗。固定侧栏和常驻 dashboard 已移除；次要
+信息不会被删除，而是按使用频率分层收起：
 
-导航与真实渲染分支都集中在 `PlatformWorkbench.tsx`。新增顶层能力时，不能只在
-后端返回字段：必须明确它属于上述哪个入口、加载态/空态/失败态如何显示，以及它
-是否需要历史恢复。
+| 层级 | 打开方式 | 当前职责 | 主要运行时事实 |
+| --- | --- | --- | --- |
+| 智能代理 | 默认主窗 | 原样输入自然语言目标；运行中只显示目标、真实阶段、人工确认、失败或已验证结果 | vNext mission、Visual Actor 当前动作、completion obligation |
+| 当前执行 | 任务窗底部活动胶囊，或右侧“工作台” | 暂停/继续/停止、阶段、事件、画面、上下文、证据和运行审计 | 实时 run、timeline、typed stage trace、artifacts、evidence |
+| 运行与资料 | 输入窗角标、聚焦后的快速入口，或 `Ctrl+K` | 历史运行、Skill/Memory、系统设置 | 完整 run 详情、replay 可信状态、runtime health、集成和 capability catalog |
+| 流程工作台 | 右侧工作台的“流程”，或 `Ctrl+K` | 按需展开完整编辑、校验并运行 `automation-ir/1` / `arp/1` 投影 | 编译器与 capability catalog 的交集、IR fingerprint、真实 ARP 运行 |
+
+运行详情仍然完整可达，但默认不会把 token、事件列表、证据 metadata、模型配置和
+系统健康同时铺在任务主面上。活动胶囊负责渐进披露当前节点、工具、阶段和必要控制；
+右侧工作台负责完整执行事实；左侧资料浮层负责跨任务信息。人机确认、失败原因和
+已验证结果属于任务语义，不能因为界面收缩而隐藏到无法发现的位置。
+
+Windows 客户端使用 Electron 42+ 的透明无框 `BrowserWindow`、Windows 原生圆角合成
+与渲染器自绘标题栏，外层保留大圆角和自定义最小化/最大化/关闭控件；圆角之外不得使用
+原生阴影或 CSS 外投影，像素必须完全透明。渲染器只用 `border-radius` 与
+`overflow: hidden` 约束内容，不能用 `BrowserWindow.setShape()` 拼接整数像素矩形，
+也不能再叠加会创建硬裁剪合成层的外框 `clip-path`。主题底层只使用 `--ld-page` 纯色，
+不叠加背景图片、网点、渐变或装饰圆形。模型名称沿用输入框内的文字式展开入口；主题
+设置沿用 newui 的日夜动效开关。技能与学习在常规窗口宽度下使用紧凑 2×2 网格，
+窄于 700px 时才回退为可滚动单列。
+
+任务进入完成、回复、失败、中断、停止或取消等终态后，主结果和失败事实继续保留，同时
+在底部持续显示紧凑输入条。首轮与长对话复用 newui 原始 composer 的同一套文本区、
+圆形上下文入口、文字式模型入口和发送控件；任务态只应用模板自带的 compact 尺寸，
+不能再替换为另一套 follow-up 输入框。当前对话按提交顺序保存最近 40 个 product run id，历史摘要
+来自 `/api/v2/runs`，完整结果按需从 `/api/v2/runs/{run_id}` 恢复；因此刷新页面后仍能
+继续浏览同一段长对话，而不会把全部 result 塞进 5 秒轮询。长回复默认折叠为 8 行，用户
+可随时展开全文。运行期间输入条也保持可见并允许提前起草，但发送和新建对话会暂时禁用，
+避免绕过原有单活跃任务边界。
+
+这个连续对话层只组织前端记录，不改写执行语义：每次发送仍把本轮完整原句作为一个新的
+`goal` 交给原有 `/api/v2/goals/runs`，不会拼接历史、注入 prompt、切换 runtime 或增加
+第二个 Agent。点击“新建对话”只清空当前前端会话索引，不删除 trace、运行记录或证据；
+旧轮次仍可从“运行与资料”查看。输入条不会替换活动胶囊、失败原因、证据入口或工作台。
+
+所有入口与真实渲染分支都集中在 `PlatformWorkbench.tsx`。新增前端能力时，不能只在
+后端返回字段：必须明确它属于默认任务面、当前执行、资料还是流程工作台，定义其
+加载态/空态/失败态，并说明是否需要历史恢复。不能恢复固定侧栏、执行模式开关、
+关键词路由或其他前端执行策略。
 
 ## 自然语言任务的真实路径
 
@@ -105,7 +136,9 @@ feature registry 加载参数 schema，这是历史流程编辑兼容，不会�
 当前生产路径：
 
 - `App.tsx`：主题、快捷键、文件打开和唯一 Workbench mount；
-- `PlatformWorkbench.tsx`：五个产品入口和运行审计；
+- `PlatformWorkbench.tsx`：悬浮任务主窗、活动胶囊、资料/执行浮层、命令面板和完整
+  运行审计；
+- `styles/floating.css`：悬浮层级、圆角窗口、紧凑/响应式布局及深浅色视觉 token；
 - `platform/contracts.ts`：前后端类型；
 - `platform/client.ts`：鉴权 REST/WebSocket client；
 - `platform/useControlPlane.ts`：连接、事件合并、刷新与 runtime identity gate；
@@ -156,8 +189,9 @@ TypeScript 的 renderer、Electron main、CLI 和 AI 配置都启用
 - mock 单元测试：contract/client/view helper、组件 loading/empty/error、capability gating；
 - 组件集成：历史 run 通过真实 client shape 按需加载合同/trace/artifact/evidence；
 - Python API 集成：通用 cancel、轻量 run/job 列表、持久化 audit、受保护 artifact；
-- 浏览器视觉验收：启动当前 FastAPI 与 Vite，通过产品导航点击运行记录和系统设置，
-  检查真实历史 run、缩略图、滚动布局、筛选及控制台错误；
+- 浏览器视觉验收：启动当前 FastAPI 与 Vite，从悬浮任务窗依次打开资料、执行工作台、
+  命令面板和完整流程编辑器，检查真实历史 run、缩略图、滚动布局、筛选、小窗口响应式
+  布局及控制台错误；
 - Windows E2E：必须从可见 Electron“智能代理”走 `/api/v2/goals/runs`，使用外部
   ground truth 或真实目标应用证据，不能用 mock 命名为 E2E。
 
