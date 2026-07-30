@@ -197,6 +197,7 @@ def _tool_response(
     *,
     content: Any = None,
     count: int = 1,
+    call_id: str = "call-1",
 ) -> dict[str, Any]:
     state_update = {"scratchpad": None}
     if arguments is None:
@@ -220,13 +221,14 @@ def _tool_response(
                     "content": content,
                     "tool_calls": [
                         {
+                            "id": f"{call_id}-{index}",
                             "type": "function",
                             "function": {
                                 "name": name,
                                 "arguments": encoded,
                             },
                         }
-                        for _ in range(count)
+                        for index in range(count)
                     ],
                 }
             }
@@ -518,8 +520,12 @@ def test_actor_turn_contract_rejects_arbitrary_action_summaries(
         )
 
 
-def test_consecutive_calls_always_build_fresh_two_message_contexts() -> None:
-    _, clients = _build_clients([_tool_response(), _tool_response()])
+def test_consecutive_calls_keep_only_the_latest_native_tool_exchange() -> None:
+    _, clients = _build_clients([
+        _tool_response(call_id="first"),
+        _tool_response(call_id="second"),
+        _tool_response(call_id="third"),
+    ])
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
@@ -536,20 +542,47 @@ def test_consecutive_calls_always_build_fresh_two_message_contexts() -> None:
     clients[0].requests[0]["messages"].append(
         {"role": "assistant", "content": "private prior reasoning"}
     )
-    actor.propose(
+    completed = replace(
         turn,
+        previous_action=ActorPreviousActionView(
+            action="type_text",
+            input_completed=True,
+            visible_effect="changed",
+        ),
+    )
+    actor.propose(
+        completed,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    actor.propose(
+        completed,
         image_b64=_JPEG_B64,
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
     )
 
-    assert len(clients[0].requests[1]["messages"]) == 2
+    second_messages = clients[0].requests[1]["messages"]
+    assert [message["role"] for message in second_messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "user",
+    ]
+    assert second_messages[2]["tool_calls"][0]["id"] == "first-0"
+    assert second_messages[3]["tool_call_id"] == "first-0"
+    assert json.loads(second_messages[3]["content"]) == {
+        "previous_action": completed.previous_action.to_dict(),
+    }
     assert "private prior reasoning" not in json.dumps(
-        clients[0].requests[1]["messages"]
+        second_messages
     )
-    assert clients[0].requests[0]["messages"] is not (
-        clients[0].requests[1]["messages"]
-    )
+    third_messages = clients[0].requests[2]["messages"]
+    assert len(third_messages) == 5
+    assert third_messages[2]["tool_calls"][0]["id"] == "second-0"
+    assert "first-0" not in json.dumps(third_messages)
 
 
 @pytest.mark.parametrize(
