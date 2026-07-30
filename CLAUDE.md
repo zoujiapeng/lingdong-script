@@ -24,30 +24,18 @@
 
 ## 当前 Git / GitHub 状态
 
-- 唯一长期目标分支：`master`。
-- 当前唯一活动集成分支：`codex/lean-gui-agent-core`。
-- 在明确完成分支统一前，不要再创建平行开发分支；后续改动继续放在当前活动分支。
-- Draft PR #45：`codex/vnext-gui-e2e-foundation -> master`。
-- Draft PR #46：`codex/lean-gui-agent-core -> codex/vnext-gui-e2e-foundation`。
-- #45/#46 是恢复与审查载体，不是应整体合并的架构大包。
+- GitHub 默认分支、当前活动分支和唯一长期产品分支均为 `master`。
+- 2026-07-30 将原 `codex/lean-gui-agent-core` 的完整 HEAD 快进到 `master`；没有
+  force push、历史改写、merge commit 或冻结分支整体合并。
+- 原 Draft PR #45/#46 已由这次直接提升取代，不是合并依据。
+- 其余具名分支全部只读冻结；只有当前 `master` 的真实 E2E 先证明能力缺口时，才可
+  审查其单个候选提交。禁止继续向这些分支提交或把它们整体 merge 回来。
+- 后续正常开发直接提交到 `master`；不要再建立另一条长期产品分支。
 - 本地未跟踪 `CON` 属于用户，不能读取后擅自解释、暂存、删除、改名或覆盖。
 
-2026-07-30 本次交接提交后的本地分支快照（左列为当前分支独有提交，右列为
-对方独有提交）：
-
-| 分支 | 当前独有 | 对方独有 | 处理 |
-| --- | ---: | ---: | --- |
-| `master` | 7 | 0 | 已是祖先；最终唯一长期分支 |
-| `codex/vnext-gui-e2e-foundation` | 6 | 0 | 已是祖先；停止独立演化 |
-| `codex/vnext-agent-core` | 97 | 193 | 冻结；禁止整体 merge |
-| `fix/pr10-python-ci` | 97 | 194 | 只逐项审查额外 CI 候选 |
-| `recovery/c4-canonical-from-d418-local` | 48 | 1 | 恢复快照，不作为产品线 |
-| `recovery/c4-fa2e9caf-local` | 50 | 2 | 恢复快照，不作为产品线 |
-| `test/pr15-legacy-electron-oracle` | 94 | 2 | 只审查独立 oracle 候选 |
-
-最终统一时，以 `master` 为唯一长期分支。先在当前活动分支逐项验证需要保留的能力，
-再把通过门槛的小提交落到 `master`，关闭恢复 PR，删除其余本地和远端临时分支。
-不要通过一次性 merge 所有冻结分支来换取“只剩一个分支”的表面整洁。
+提升前的分支差异、恢复 PR 和审查依据保存在
+`docs/GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md` 第 13.11/13.12 节。它们是历史
+证据，不是新的分支工作流。
 
 ## 当前唯一产品主链
 
@@ -219,22 +207,19 @@ corridor 直接改善，Runtime 不应随模型升级再变化。没有可用的
 10. 不与真实 GUI E2E 并发跑重型全量测试；曾经因此让 `/api/status` 超时，属于测试
     调度干扰而非模型失败。
 
-## 分支统一执行门
+## 剩余冻结分支审计门
 
-后续统一成唯一分支时：
-
-1. 冻结除当前活动分支和 `master` 外的所有分支，不再提交。
-2. 对每个对方独有提交先在当前主线构造随机失败样本。
-3. 只提取最小能力，不 cherry-pick 其旧 planner、prompt、state 或重复 owner。
+1. 所有新工作只在 `master`；冻结分支不再演化。
+2. 先在当前 `master` 构造随机失败样本，再审查对应旧提交。
+3. 只提取最小能力，不 cherry-pick 旧 planner、prompt、state 或重复 owner。
 4. 至少两个任务族 E2E 有实质收益且代码规模合理才保留；无收益立即丢弃。
 5. 同一提交删除被替代实现，禁止长期双写。
-6. 当前选定状态通过全量回归、受控矩阵和真实长任务后，落到 `master`。
-7. 关闭 #45/#46，删除其余临时本地/远端分支，最终只保留 `master`。
+6. 不为“清理分支”整体 merge 冻结历史；审计完的分支直接删除。
 
 ## 新 Codex 窗口的第一组操作
 
 ```powershell
-git switch codex/lean-gui-agent-core
+git switch master
 git pull --ff-only
 git status -sb
 git log -8 --oneline --decorate
@@ -245,10 +230,10 @@ git log -8 --oneline --decorate
 优先级：
 
 1. 找到可用的更强原生视觉模型，使用同一 10 项矩阵做干净 A/B。
-2. 若没有更强模型，开始分支候选逐项审计；不扩张 Runtime 补模型。
+2. 只有当前 E2E 证明缺口时才审查冻结分支候选；不扩张 Runtime 补模型。
 3. 只在 submitted/canonical/physical/终态首次分叉能复现时修基础设施。
 4. 重跑五项真实任务及随机组合长任务，保留失败证据。
-5. 达到门槛后执行唯一分支收敛。
+5. 审计完成的冻结分支直接删除，保持 `master` 为唯一产品主线。
 
 常用验证：
 

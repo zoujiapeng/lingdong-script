@@ -155,29 +155,18 @@ Legacy 产品/兼容消费者
 - 旧 wire format 如仍需读取，仅存在于隔离的只读迁移器；
 - 单元、常规回归和真实客户端 E2E 均在删除后的当前版本重新通过。
 
-## 唯一分支收敛
+## 主分支提升与冻结分支边界
 
-`master` 是唯一长期分支。完成收敛前，`codex/lean-gui-agent-core` 是唯一活动
-集成分支；不要再创建平行开发分支。Draft PR #45/#46 是恢复与逐项审查载体，
-不是整体 merge 单元。
+2026-07-30，GitHub 已有默认分支 `master` 是
+`codex/lean-gui-agent-core` 的严格祖先，因此直接将当前完整 HEAD 快进到
+`master`。这次提升没有 force push、历史改写、merge commit 或把任何冻结分支整体
+并入主线。`master` 从此是默认、活动和唯一长期产品分支；原活动分支及 Draft
+PR #45/#46 均由提升后的 `master` 取代。
 
-2026-07-30 本次交接提交后，相对当前活动分支的本地提交差异：
-
-| 分支 | 当前独有 | 对方独有 | 决策 |
-| --- | ---: | ---: | --- |
-| `master` | 7 | 0 | 最终唯一长期分支 |
-| `codex/vnext-gui-e2e-foundation` | 6 | 0 | 已是祖先，停止演化 |
-| `codex/vnext-agent-core` | 97 | 193 | 冻结，禁止整体 merge |
-| `fix/pr10-python-ci` | 97 | 194 | 只审查额外 CI 候选 |
-| `recovery/c4-canonical-from-d418-local` | 48 | 1 | 仅恢复 |
-| `recovery/c4-fa2e9caf-local` | 50 | 2 | 仅恢复 |
-| `test/pr15-legacy-electron-oracle` | 94 | 2 | 只审查 oracle 候选 |
-
-每个对方独有能力先在当前主线构造随机失败样本，只提取最小 owner，并在至少两个
-任务族上用外部 oracle 复验。没有实质收益、只补当前模型精度、扩大 prompt/state
-或不能删除旧 owner 的候选一律丢弃。通过门槛的小提交最终落到 `master`，随后关闭
-#45/#46 并删除其他本地和远端临时分支；不能靠一次性合并冻结分支获得表面上的
-“唯一分支”。
+其余分支仍只作只读恢复或审计输入。每个独有能力先在当前 `master` 构造随机失败
+样本，只提取最小 owner，并在至少两个任务族上用外部 oracle 复验。没有实质收益、
+只补当前模型精度、扩大 prompt/state 或不能删除旧 owner 的候选一律丢弃。不能为
+获得表面上的“唯一分支”整体 merge 冻结历史；审计完成的引用直接删除。
 
 ## 当前验证状态
 

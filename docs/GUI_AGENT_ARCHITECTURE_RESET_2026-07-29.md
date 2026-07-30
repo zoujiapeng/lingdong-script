@@ -1161,3 +1161,24 @@ oracle 的实质收益。不能整体 merge 冻结架构来追求表面上的单
 `bf29783 fix: preserve one visual tool exchange`；后续首要实验仍是更强原生视觉
 模型在完全相同 10 项矩阵上的干净 A/B，而不是继续添加 prompt、角色、工具或
 验证层。
+
+### 13.12 当前分支提升为主分支
+
+用户随后明确要求让当前分支成为主分支。GitHub 默认分支本来已经是 `master`；核对
+显示远端 `master` 是 `codex/lean-gui-agent-core` 当前 HEAD 的严格祖先，因此采用
+纯 fast-forward 提升，而不是开新 PR、创建 merge commit、force push 或重写历史。
+本次提升包含第 13.11 节的稳定交接文档，但没有把任何其他冻结分支整体合并进来。
+
+提升完成后的规则是：
+
+- `master` 同时是 GitHub 默认分支、当前活动分支和唯一长期产品分支；
+- 后续 Codex 第一条命令改为 `git switch master`，所有正常改动直接进入
+  `master`；
+- 原 `codex/lean-gui-agent-core` 与 Draft PR #45/#46 由 `master` 上的相同提交
+  取代，不再作为开发入口；
+- 其他具名分支维持只读冻结。只有当前 `master` 的随机 E2E 先证明缺口时，才逐项
+  审查最小候选；禁止整体 merge 冻结架构；
+- 审计完成的冻结引用直接删除，不能为了分支数量而把未经验证的代码合入产品。
+
+这仍是 Git/文档状态变更，不是新的运行时能力或 E2E 结果。最后运行时代码、
+`3373 passed, 13 skipped` 回归和 `5/10` 可见 Electron 矩阵均保持不变。
