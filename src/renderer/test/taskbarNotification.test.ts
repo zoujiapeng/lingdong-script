@@ -43,6 +43,18 @@ describe('taskbarNotificationForTransition', () => {
     });
   });
 
+  it('treats a recovered interrupted run as stopped', () => {
+    expect(taskbarNotificationForTransition(
+      { runId: 'run-1', status: 'running' },
+      run('interrupted', { error: 'Recovered incomplete persisted run' }),
+    )).toEqual({
+      title: '任务已停止',
+      body: 'Recovered incomplete persisted run',
+      kind: 'info',
+      runId: 'run-1',
+    });
+  });
+
   it('notifies a new terminal run that completed between overview polls', () => {
     expect(taskbarNotificationForTransition(
       { runId: 'old-run', status: 'done' },

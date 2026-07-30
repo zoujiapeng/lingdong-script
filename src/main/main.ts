@@ -1,6 +1,6 @@
 ﻿import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu, Notification } from 'electron';
 import * as path from 'path';
-import { nativeTheme } from 'electron';
+import { screen, type Rectangle } from 'electron';
 import * as fs from 'fs';
 import * as os from 'os';
 import { randomBytes } from 'crypto';
@@ -34,6 +34,7 @@ const LOCAL_CONTROL_TOKEN = process.env.LINGDONG_CONTROL_TOKEN || randomBytes(32
 const _taskbarNotifiedRuns = new Set<string>();
 let _desktopHandoffPending = false;
 let _desktopHandoffRunId = '';
+let _floatingWindowNormalBounds: Rectangle | null = null;
 
 type TaskbarNotificationKind = 'success' | 'error' | 'info';
 
@@ -326,9 +327,7 @@ function launchTarget(target: string): void {
 
 function createWindow() {
   const startMinimized = process.argv.includes('--minimized');
-  const initialTitleBar = nativeTheme.shouldUseDarkColors
-    ? { color: '#202629', symbolColor: '#edf2f3', height: 36 }
-    : { color: '#ffffff', symbolColor: '#172126', height: 36 };
+  const customFloatingFrame = process.platform === 'win32';
 
   setMainWindow(new BrowserWindow({
     width: 900,
@@ -337,11 +336,14 @@ function createWindow() {
     minHeight: 500,
     center: true,
     title: '灵动脚本',
-    backgroundColor: '#eef2f8',
-    ...(process.platform === 'win32' ? {
-      titleBarStyle: 'hidden' as const,
-      titleBarOverlay: initialTitleBar,
+    backgroundColor: customFloatingFrame ? '#00000000' : '#eef2f8',
+    transparent: customFloatingFrame,
+    frame: !customFloatingFrame,
+    hasShadow: !customFloatingFrame,
+    ...(customFloatingFrame ? {
       autoHideMenuBar: true,
+      backgroundMaterial: 'none',
+      roundedCorners: true,
     } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -350,6 +352,7 @@ function createWindow() {
     },
     show: false,
   }));
+  _floatingWindowNormalBounds = mainWindow!.getBounds();
 
   mainWindow!.webContents.session.setPermissionRequestHandler(
     (_wc, permission, callback) => {
@@ -533,12 +536,43 @@ ipcMain.on('state:response', (_, state) => {
   _cachedRendererState = state;
 });
 
-ipcMain.handle('window:set-titlebar-theme', (_, theme: 'light' | 'dark') => {
+ipcMain.handle('window:set-titlebar-theme', () => {
   const window = mainWindow;
-  if (process.platform !== 'win32' || !window || window.isDestroyed()) return false;
-  window.setTitleBarOverlay(theme === 'dark'
-    ? { color: '#202629', symbolColor: '#edf2f3', height: 36 }
-    : { color: '#ffffff', symbolColor: '#172126', height: 36 });
+  if (!window || window.isDestroyed()) return false;
+  if (process.platform === 'win32') window.setBackgroundColor('#00000000');
+  return true;
+});
+
+ipcMain.handle('window:minimize', () => {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return false;
+  window.minimize();
+  return true;
+});
+
+ipcMain.handle('window:toggle-maximize', () => {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return false;
+  const currentBounds = window.getBounds();
+  const workArea = screen.getDisplayMatching(currentBounds).workArea;
+  const fillsWorkArea = (
+    currentBounds.width >= workArea.width - 2
+    && currentBounds.height >= workArea.height - 2
+  );
+  if (window.isMaximized() || fillsWorkArea) {
+    window.unmaximize();
+    if (_floatingWindowNormalBounds) window.setBounds(_floatingWindowNormalBounds);
+    return false;
+  }
+  _floatingWindowNormalBounds = currentBounds;
+  window.maximize();
+  return true;
+});
+
+ipcMain.handle('window:close', () => {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return false;
+  window.close();
   return true;
 });
 

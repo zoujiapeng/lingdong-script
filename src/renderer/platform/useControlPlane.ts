@@ -184,7 +184,20 @@ export function useControlPlane() {
           const terminal = (
             event.type === 'agent_done'
             || event.type === 'arp_run_done'
-            || ['done', 'failed', 'canceled'].includes(String(event.status || event.state || '').toLowerCase())
+            || [
+              'done',
+              'completed',
+              'success',
+              'reply',
+              'failed',
+              'fail',
+              'error',
+              'canceled',
+              'cancelled',
+              'stopped',
+              'interrupted',
+              'blocked',
+            ].includes(String(event.status || event.state || '').toLowerCase())
           );
           refreshTimer.current = setTimeout(
             terminal ? refresh : refreshLiveRun,

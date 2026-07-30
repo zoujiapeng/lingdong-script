@@ -1,7 +1,7 @@
 export type TaskOutcomeKind = 'success' | 'error' | 'info';
 
 const UNCONDITIONAL_SUCCESS_STATUSES = new Set(['done', 'completed', 'success']);
-const STOPPED_STATUSES = new Set(['canceled', 'cancelled', 'stopped']);
+const STOPPED_STATUSES = new Set(['canceled', 'cancelled', 'stopped', 'interrupted']);
 const FAILURE_STATUSES = new Set(['failed', 'fail', 'error', 'blocked']);
 const TERMINAL_STATUSES = new Set([
   ...UNCONDITIONAL_SUCCESS_STATUSES,

@@ -5,6 +5,9 @@ import { useStore } from './store';
 import { automationDocumentToFlowScript } from './utils/automationIR';
 import './styles/globals.css';
 import './styles/platform.css';
+import './styles/floating.css';
+
+document.documentElement.classList.toggle('electron-frame', Boolean(window.electronAPI));
 
 export default function App() {
   const themeMode = useStore((state) => state.ui.themeMode);
