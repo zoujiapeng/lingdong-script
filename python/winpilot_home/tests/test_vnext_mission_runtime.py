@@ -1135,6 +1135,16 @@ def test_stale_or_invalid_actor_decision_does_not_commit_task_state() -> None:
     assert invalid.runtime.task_state == invalid_initial
 
 
+def test_pre_action_current_state_failure_is_discarded_before_input() -> None:
+    harness = _harness(_action())
+    harness.state.raise_current_on = 1
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.STALE_DISCARDED
+    assert harness.controller.calls == 0
+
+
 def test_runtime_records_reasoning_free_actor_decision_before_action() -> None:
     harness = _harness(
         _action("click"),

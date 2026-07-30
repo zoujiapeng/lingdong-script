@@ -4,7 +4,7 @@ The workspace does not plan, launch applications, or execute input.  It owns
 only the current logical window and a causal, two-observation hand-off from a
 completed action to a newly foreground window.  An action keeps using the
 binding that grounded its frame; a pending hand-off can be adopted only by the
-next observation.
+next two observations.
 """
 from __future__ import annotations
 
@@ -101,6 +101,7 @@ class _PendingTransition:
     action_id: str
     action: str
     generation: int
+    observations_left: int
 
 
 class DesktopWorkspace:
@@ -111,6 +112,7 @@ class DesktopWorkspace:
     )
     _SUCCESSOR_SAMPLES = 5
     _SUCCESSOR_SAMPLE_DELAY_S = 0.05
+    _SUCCESSOR_OBSERVATIONS = 2
 
     def __init__(
         self,
@@ -223,7 +225,17 @@ class DesktopWorkspace:
                         causal_action_id=pending.action_id,
                         causal_action=pending.action,
                     )
-                self._pending = None
+                self._pending = (
+                    None
+                    if pending.observations_left <= 1
+                    else _PendingTransition(
+                        source_binding_id=pending.source_binding_id,
+                        action_id=pending.action_id,
+                        action=pending.action,
+                        generation=pending.generation,
+                        observations_left=pending.observations_left - 1,
+                    )
+                )
 
             current = self._reader(self._binding.hwnd)
             if (
@@ -313,6 +325,7 @@ class DesktopWorkspace:
                 action_id=action_id,
                 action=action,
                 generation=self._generation,
+                observations_left=self._SUCCESSOR_OBSERVATIONS,
             )
 
 
