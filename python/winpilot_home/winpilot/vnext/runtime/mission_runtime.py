@@ -463,10 +463,13 @@ class MissionRuntime:
             != broker_projection.obligation_id
         ):
             return False
-        latest = self._state.current(
-            projection,
-            turn_index=turn_index,
-        )
+        try:
+            latest = self._state.current(
+                projection,
+                turn_index=turn_index,
+            )
+        except Exception:
+            return False
         if (
             not self._snapshot_matches_mission(
                 latest,

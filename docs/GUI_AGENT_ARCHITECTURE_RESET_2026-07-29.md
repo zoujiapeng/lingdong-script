@@ -1027,3 +1027,42 @@ external oracle: passed
 `224 passed`，production build 通过。这轮的结论不是
 “多加规则后更可靠”，而是删掉一个不能提供真实保证、却会随机阻断合法用户入口的
 约束后，真实闭环恢复；模型偶发精度问题仍交给模型对比和随机样本统计，不写入系统。
+
+### 13.9 模态窗口生命周期闭环
+
+Krita 的“菜单 → 新建对话框 → 主窗口”真实 GUI 运行暴露出四个通用基础设施缺口：
+Windows/Qt 有时让已禁用 owner 继续保持 Win32 foreground；菜单是同进程独立 popup；
+对话框出现或消失可能恰好跨过一次截图提交；任务完成证据仍错误绑定启动 HWND。
+最小修复只让 runtime 识别唯一可见的 owned modal、把同进程临时 popup 视为当前逻辑
+前台、在捕获期间目标确实变化时立即重捕获一次，并让完成证据校验当前 workspace
+目标。没有加入 Krita 名称、菜单坐标、固定等待、全局偏移、控件吸附或新提示词。
+
+修复后的正式闭环为：
+
+```text
+run:             arp-20260730-182347-e23c5c
+window path:     1709054 -> 88020202 -> 1709054
+GUI actions:     3 clicks, all applied
+stale proposal:  1 discarded before input
+Runtime:         mission_verified
+client:          done, execution_valid=true
+```
+
+同一源码上的独立随机精确点击也通过：
+
+```text
+seed / run:      732041 / arp-20260730-183324-84f0ca
+GUI actions:     1 real click
+Runtime:         mission_verified
+external oracle: target index 3 hit, passed
+```
+
+原始长任务 `arp-20260730-182632-de1599` 已不再被窗口或命中校验阻断，30 次点击均
+真实执行，但模型画出两个小点后连续 23 次选择前景色控件下边缘，最终耗尽回合，未
+保存也未进入 QQ。提交图到物理坐标的换算一致，落点在转换前就贴近控件边界；因此
+不增加坐标补偿或 Krita 特判。这次正反样本把责任边界分开：runtime 修窗口与坐标
+机械一致性，模型负责语义目标和精确选点。
+
+本次生产代码净增 82 行，测试承担主要增量；动作面、角色数、执行入口和系统提示词
+均未增长。后续优先比较更准确的视觉模型并扩大随机组合 E2E，不以当前模型误差为
+理由继续扩张 runtime。

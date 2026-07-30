@@ -574,11 +574,47 @@ def _process_executable_identity(process_id: int) -> str:
 def _read_win32_foreground_root() -> int | None:
     try:
         import win32gui
+        import win32process
 
         foreground = int(win32gui.GetForegroundWindow() or 0)
         if not foreground:
             return None
         root = int(win32gui.GetAncestor(foreground, 2) or foreground)
+        if win32gui.IsWindowEnabled(root):
+            return root
+
+        _thread_id, root_pid = (
+            win32process.GetWindowThreadProcessId(root)
+        )
+        owned: list[int] = []
+
+        def collect(hwnd: int, _extra: Any) -> bool:
+            candidate = int(hwnd)
+            if (
+                candidate == root
+                or not win32gui.IsWindowVisible(candidate)
+                or not win32gui.IsWindowEnabled(candidate)
+                or win32gui.IsIconic(candidate)
+                or int(win32gui.GetAncestor(candidate, 2) or candidate)
+                != candidate
+            ):
+                return True
+            _candidate_thread, candidate_pid = (
+                win32process.GetWindowThreadProcessId(candidate)
+            )
+            if int(candidate_pid) != int(root_pid):
+                return True
+            owner = int(win32gui.GetWindow(candidate, 4) or 0)
+            while owner:
+                if owner == root:
+                    owned.append(candidate)
+                    break
+                owner = int(win32gui.GetWindow(owner, 4) or 0)
+            return True
+
+        win32gui.EnumWindows(collect, None)
+        if len(owned) == 1:
+            return owned[0]
         return root if root > 0 else None
     except Exception:
         return None
@@ -639,22 +675,14 @@ def _hit_test_win32_root(x: int, y: int) -> int | None:
         if not hwnd:
             return None
         root = int(win32gui.GetAncestor(hwnd, 2) or hwnd)
-        root_owner = int(win32gui.GetAncestor(root, 3) or root)
-        if root_owner == root:
+        foreground = _read_win32_foreground_root()
+        if not foreground or root == foreground:
             return root
-
-        # WinUI can surface ordinary in-app controls through visible,
-        # owned top-level popup site bridges. GA_ROOT intentionally stops at
-        # that bridge, while GA_ROOTOWNER reaches the application window.
-        # Collapse the popup only within one process; cross-process overlays
-        # and unrelated sibling windows remain distinct.
-        _root_thread, root_pid = (
-            win32process.GetWindowThreadProcessId(root)
+        _root_thread, root_pid = win32process.GetWindowThreadProcessId(root)
+        _foreground_thread, foreground_pid = (
+            win32process.GetWindowThreadProcessId(foreground)
         )
-        _owner_thread, owner_pid = (
-            win32process.GetWindowThreadProcessId(root_owner)
-        )
-        return root_owner if int(root_pid) == int(owner_pid) else root
+        return foreground if int(root_pid) == int(foreground_pid) else root
     except Exception:
         return None
 
@@ -1410,7 +1438,11 @@ class _LiveRuntimeState:
             parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
         )
 
-    def _capture_current(self) -> FrameState:
+    def _capture_current(
+        self,
+        *,
+        retry_target_transition: bool = True,
+    ) -> FrameState:
         observation = self._workspace.observe()
         self._adopt_workspace_observation(observation)
         binding = self._workspace.binding
@@ -1432,17 +1464,27 @@ class _LiveRuntimeState:
             or not _jpeg_is_valid(captured.image_b64)
             or _jpeg_dimensions(captured.image_b64)
             != captured.submitted_size
-            or self._workspace.snapshot(binding.hwnd) != first
         ):
             raise RuntimeError("fresh target-window JPEG capture failed closed")
+        if self._workspace.snapshot(binding.hwnd) != first:
+            if retry_target_transition:
+                return self._capture_current(
+                    retry_target_transition=False,
+                )
+            raise RuntimeError("target changed during frame capture")
         committed = self._observer.commit(captured)
         if (
             committed.hwnd != binding.hwnd
             or committed.epoch != binding.epoch
             or committed.region != first.region
             or committed.scope != "target_window"
-            or self._workspace.snapshot(binding.hwnd) != first
         ):
+            raise RuntimeError("target changed while the frame was committed")
+        if self._workspace.snapshot(binding.hwnd) != first:
+            if retry_target_transition:
+                return self._capture_current(
+                    retry_target_transition=False,
+                )
             raise RuntimeError("target changed while the frame was committed")
         frame_ref = self._frame_ref(committed)
         self._registry.append(frame_ref)
@@ -1930,7 +1972,13 @@ class _LiveCanarySession:
                 if projection.target_binding is not None
                 else None
             ),
+            "target_epoch": (
+                projection.target_binding.epoch
+                if projection.target_binding is not None
+                else None
+            ),
             "frame_id": frame.frame_id if frame is not None else None,
+            "frame_hwnd": frame.hwnd if frame is not None else None,
             "frame_epoch": frame.epoch if frame is not None else None,
             "result": self._runtime.verified_completion_result,
         }
@@ -2485,11 +2533,13 @@ def _completion_binding_error(
     *,
     mission_id: str,
     run_id: str,
-    target: _FrozenTarget,
 ) -> str | None:
     verified_refs = snapshot.get("verified_evidence_refs")
     bindings = snapshot.get("verified_evidence_bindings")
     frame_id = snapshot.get("frame_id")
+    target_binding_id = snapshot.get("target_binding_id")
+    target_hwnd = snapshot.get("target_hwnd")
+    target_epoch = snapshot.get("target_epoch")
     if (
         snapshot.get("mission_id") != mission_id
         or snapshot.get("run_id") != run_id
@@ -2507,11 +2557,16 @@ def _completion_binding_error(
         or len(verified_refs) != len(set(verified_refs))
         or type(bindings) is not list
         or len(bindings) != len(verified_refs)
-        or snapshot.get("target_binding_id") != target.binding_id
-        or snapshot.get("target_hwnd") != target.hwnd
+        or type(target_binding_id) is not str
+        or not target_binding_id
+        or type(target_hwnd) is not int
+        or target_hwnd <= 0
+        or type(target_epoch) is not int
+        or target_epoch <= 0
+        or snapshot.get("frame_hwnd") != target_hwnd
         or type(frame_id) is not int
         or frame_id <= 0
-        or snapshot.get("frame_epoch") != target.captured_at_ms
+        or snapshot.get("frame_epoch") != target_epoch
     ):
         return (
             "vNext Runtime status lacked exact run-bound "
@@ -2712,8 +2767,14 @@ def _public_turn_snapshot(
             source.get("mission_revision")
         ),
         "mission_status": mission_status,
-        "target_binding_id": target.binding_id,
-        "target_hwnd": target.hwnd,
+        "target_binding_id": (
+            _public_identity(source.get("target_binding_id"))
+            or target.binding_id
+        ),
+        "target_hwnd": (
+            _public_optional_positive_int(source.get("target_hwnd"))
+            or target.hwnd
+        ),
         "frame_id": _public_optional_positive_int(
             source.get("frame_id")
         ),
@@ -2791,8 +2852,14 @@ def _public_completion_snapshot(
         "accepted_event_ids": _public_identity_list(
             source.get("accepted_event_ids")
         ),
-        "target_binding_id": target.binding_id,
-        "target_hwnd": target.hwnd,
+        "target_binding_id": (
+            _public_identity(source.get("target_binding_id"))
+            or target.binding_id
+        ),
+        "target_hwnd": (
+            _public_optional_positive_int(source.get("target_hwnd"))
+            or target.hwnd
+        ),
         "frame_id": frame_id,
         "frame_epoch": _public_optional_nonnegative_int(
             source.get("frame_epoch")
@@ -3256,7 +3323,6 @@ class _PreparedHandler:
                         raw_completion_snapshot,
                         mission_id=mission_id,
                         run_id=run_id,
-                        target=self._target,
                     )
                     if binding_error is not None:
                         terminal_status = RuntimeStatus.STATE_REJECTED
@@ -3330,8 +3396,8 @@ class _PreparedHandler:
                 model_calls=model_calls,
                 detail=detail[:500],
                 runtime_evidence=runtime_evidence_summary,
-                target_binding_id=self._target.binding_id,
-                target_hwnd=self._target.hwnd,
+                target_binding_id=snapshot.get("target_binding_id"),
+                target_hwnd=snapshot.get("target_hwnd"),
                 frame_id=snapshot.get("frame_id"),
                 frame_epoch=snapshot.get("frame_epoch"),
                 mission_verification_id=snapshot.get(
@@ -3376,8 +3442,8 @@ class _PreparedHandler:
                     "verified_evidence_refs",
                     [],
                 ),
-                "target_binding_id": self._target.binding_id,
-                "target_hwnd": self._target.hwnd,
+                "target_binding_id": snapshot.get("target_binding_id"),
+                "target_hwnd": snapshot.get("target_hwnd"),
                 "frame_id": snapshot.get("frame_id"),
                 "frame_epoch": snapshot.get("frame_epoch"),
             },

@@ -377,7 +377,9 @@ class _FakeSession:
             ),
             "target_binding_id": self.target_binding_id,
             "target_hwnd": HWND,
+            "target_epoch": self.frame_epoch,
             "frame_id": 9,
+            "frame_hwnd": HWND,
             "frame_epoch": self.frame_epoch,
         }
 
@@ -494,23 +496,33 @@ def test_live_target_reader_clips_invisible_maximized_resize_border(
     assert facts.region == (0, 0, 1920, 1040)
 
 
-def test_hit_test_normalizes_same_process_owned_popup_to_root_owner(
+def test_foreground_reader_selects_only_enabled_owned_modal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import win32gui
     import win32process
 
-    popup = HWND + 1
+    dialog = HWND + 1
+    monkeypatch.setattr(win32gui, "GetForegroundWindow", lambda: HWND)
+    monkeypatch.setattr(win32gui, "GetAncestor", lambda hwnd, _flag: hwnd)
     monkeypatch.setattr(
         win32gui,
-        "WindowFromPoint",
-        lambda _point: popup,
+        "IsWindowEnabled",
+        lambda hwnd: hwnd == dialog,
+    )
+    monkeypatch.setattr(win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(
+        win32gui,
+        "GetWindow",
+        lambda hwnd, _flag: HWND if hwnd == dialog else 0,
     )
     monkeypatch.setattr(
         win32gui,
-        "GetAncestor",
-        lambda hwnd, flag: (
-            HWND if hwnd == popup and flag == 3 else hwnd
+        "EnumWindows",
+        lambda callback, extra: (
+            callback(HWND, extra),
+            callback(dialog, extra),
         ),
     )
     monkeypatch.setattr(
@@ -519,14 +531,13 @@ def test_hit_test_normalizes_same_process_owned_popup_to_root_owner(
         lambda _hwnd: (1, PID),
     )
 
-    assert canary._hit_test_win32_root(300, 400) == HWND
+    assert canary._read_win32_foreground_root() == dialog
 
 
-def test_hit_test_keeps_cross_process_owned_popup_distinct(
+def test_hit_test_keeps_owned_top_level_surface_exact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import win32gui
-    import win32process
 
     popup = HWND + 1
     monkeypatch.setattr(
@@ -537,17 +548,44 @@ def test_hit_test_keeps_cross_process_owned_popup_distinct(
     monkeypatch.setattr(
         win32gui,
         "GetAncestor",
-        lambda hwnd, flag: (
-            HWND if hwnd == popup and flag == 3 else hwnd
-        ),
+        lambda hwnd, flag: HWND if flag == 3 else hwnd,
     )
     monkeypatch.setattr(
-        win32process,
-        "GetWindowThreadProcessId",
-        lambda hwnd: (1, PID + 1 if hwnd == popup else PID),
+        canary,
+        "_read_win32_foreground_root",
+        lambda: popup,
     )
 
     assert canary._hit_test_win32_root(300, 400) == popup
+
+
+@pytest.mark.parametrize(
+    ("popup_pid", "expected"),
+    ((PID, HWND), (PID + 1, HWND + 1)),
+)
+def test_hit_test_maps_only_same_process_popup_to_foreground_surface(
+    monkeypatch: pytest.MonkeyPatch,
+    popup_pid: int,
+    expected: int,
+) -> None:
+    import win32gui
+    import win32process
+
+    popup = HWND + 1
+    monkeypatch.setattr(win32gui, "WindowFromPoint", lambda _point: popup)
+    monkeypatch.setattr(win32gui, "GetAncestor", lambda hwnd, _flag: hwnd)
+    monkeypatch.setattr(
+        win32process,
+        "GetWindowThreadProcessId",
+        lambda hwnd: (1, popup_pid if hwnd == popup else PID),
+    )
+    monkeypatch.setattr(
+        canary,
+        "_read_win32_foreground_root",
+        lambda: HWND,
+    )
+
+    assert canary._hit_test_win32_root(300, 400) == expected
 
 
 def test_hit_test_keeps_unowned_same_process_sibling_distinct(
@@ -1446,6 +1484,57 @@ def test_public_turn_projection_omits_private_failure_feedback() -> None:
     assert sentinel not in json.dumps(projected, sort_keys=True)
     assert "failure_message" not in projected
     assert "failure_summary" not in projected
+
+
+def test_completion_projection_follows_current_workspace_target() -> None:
+    target = canary._freeze_prebound_target(
+        _graph(),
+        _inputs(),
+        dependencies=_dependencies(),
+    )
+    successor_hwnd = HWND + 1
+    successor_epoch = target.captured_at_ms + 1
+    source = {
+        "mission_id": "mission-current-target",
+        "run_id": "run-current-target",
+        "mission_status": MissionStatus.VERIFIED.value,
+        "mission_verification_id": "mission-verification-current",
+        "obligation_verification_id": "obligation-verification-current",
+        "verified_evidence_refs": ["e-current"],
+        "verified_evidence_bindings": [
+            {
+                "id": "e-current",
+                "mission_id": "mission-current-target",
+                "run_id": "run-current-target",
+                "obligation_id": "full-goal",
+                "frame_id": 9,
+            }
+        ],
+        "target_binding_id": "vnext-workspace-successor",
+        "target_hwnd": successor_hwnd,
+        "target_epoch": successor_epoch,
+        "frame_id": 9,
+        "frame_hwnd": successor_hwnd,
+        "frame_epoch": successor_epoch,
+    }
+
+    assert (
+        canary._completion_binding_error(
+            source,
+            mission_id="mission-current-target",
+            run_id="run-current-target",
+        )
+        is None
+    )
+    projected = canary._public_completion_snapshot(
+        source,
+        mission_id="mission-current-target",
+        run_id="run-current-target",
+        target=target,
+    )
+
+    assert projected["target_binding_id"] == "vnext-workspace-successor"
+    assert projected["target_hwnd"] == successor_hwnd
 
 
 def test_model_transport_payload_is_absent_from_bus_and_node_result() -> None:
@@ -2596,6 +2685,47 @@ def test_initial_capture_dimension_mismatch_stops_before_model_or_raw(
     assert actor_client.requests == []
     assert raw_calls == []
     assert session._authority.current is None
+
+
+def test_observation_retries_one_target_transition_during_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session, raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[
+            _jpeg(640, 480, level=100),
+            _jpeg(640, 480, level=120),
+        ],
+        client=_RawClient(_click_responses()),
+        evidence_root=tmp_path,
+    )
+    workspace = session._runtime._state._workspace
+    original_snapshot = workspace.snapshot
+    snapshot_calls = 0
+
+    def snapshot(hwnd: int) -> Any:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return None if snapshot_calls == 2 else original_snapshot(hwnd)
+
+    monkeypatch.setattr(workspace, "snapshot", snapshot)
+    try:
+        observed = session._runtime._state.observe(
+            session._reducer.projection,
+            turn_index=0,
+        )
+    finally:
+        session.close()
+
+    assert observed.frame.hwnd == HWND
+    assert session._authority.current.frame_id == observed.frame.frame_id
+    assert (
+        session._authority.current.image_sha256
+        == observed.frame.image_sha256
+    )
+    assert snapshot_calls >= 5
+    assert raw_calls == []
 
 
 def test_post_capture_failure_defers_to_fresh_observation_without_replay(

@@ -239,6 +239,25 @@ def test_delayed_foreground_successor_is_sampled_within_causal_window() -> None:
     assert observation.surface.hwnd == HWND_B
 
 
+def test_successor_can_arrive_after_one_intervening_observation() -> None:
+    topology = _Topology()
+    workspace = _workspace(topology)
+    workspace.finish_action(
+        action_id="decision-1",
+        action="click",
+        input_completed=True,
+    )
+
+    assert not workspace.observe().replaces_binding
+    topology.foreground = HWND_B
+
+    observation = workspace.observe()
+
+    assert observation.replaces_binding
+    assert observation.surface.hwnd == HWND_B
+    assert observation.causal_action_id == "decision-1"
+
+
 def test_current_window_geometry_can_change_between_actions() -> None:
     topology = _Topology()
     workspace = _workspace(topology)
