@@ -1,12 +1,18 @@
 # WinPilot Agent 实现说明
 
-本文补充 [architecture.md](architecture.md) 的实现细节。总体原则和当前债务以前者与 [GUI_AGENT_ARCHITECTURE_AUDIT.md](GUI_AGENT_ARCHITECTURE_AUDIT.md) 为准。
+> Legacy 实现参考：本文描述仍在仓库中的 `AgentRunner`/Controller 兼容路径，不是
+> 当前 Electron“智能代理”的 vNext 产品主链。当前事实和继续工作边界以
+> [../CLAUDE.md](../CLAUDE.md)、[architecture.md](architecture.md) 和
+> [vnext-migration.md](vnext-migration.md) 为准。不得按本文把 Task Contract、
+> StageRuntime 或 AgentRunner 接回 vNext。
 
-## 构建与入口
+以下内容只用于审计、迁移或删除 Legacy owner。
+
+## Legacy 构建与入口
 
 `python/winpilot_home/winpilot/agent/router.py` 根据 `RuntimeProfile` 构建同一个 `AgentRunner`。GUI、Coding、MCP、Replay 和 Memory 是同一 runner 的能力开关，不是多个用户可见 Agent。
 
-正式客户端路径：
+冻结前的 Legacy 客户端路径：
 
 ```text
 PlatformWorkbench

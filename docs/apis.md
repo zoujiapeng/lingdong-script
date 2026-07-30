@@ -122,7 +122,8 @@ artifact endpoint 同时支持进程内 execution 和重启后的 manifest。man
 
 ### 运行语义边界
 
-- 原生视觉模型收到的不是固定全屏图。`controller.target_window_capture_enabled=true` 时，只在目标 hwnd 有效、可见、位于前台、几何可信、任务不要求桌面或多窗口上下文且裁剪确有收益时使用目标窗口；其余情况保守回退完整虚拟桌面。每帧都会给出 `scope`、`reason`、物理 `screen_region` 和精确提交图片尺寸。native 模型用 `image_*` 图片像素，runtime 再映射到内部 0..1000 坐标空间与物理桌面；关闭该配置可强制全桌面做 A/B 对照。
+- 原生视觉模型收到的不是固定全屏图。`controller.target_window_capture_enabled=true` 时，只在目标 hwnd 有效、可见、位于前台、几何可信、任务不要求桌面或多窗口上下文且裁剪确有收益时使用目标窗口；其余情况保守回退完整虚拟桌面。每帧都会给出 `scope`、`reason`、物理 `screen_region` 和精确提交图片尺寸。当前 vNext 模型直接使用 submitted-image 的精确 `image_*` 像素，`AtomicDesktopAdapter` 只映射一次到物理区域；Legacy 内部若仍保存归一化字段，它们不得进入模型合同或形成第二次映射。关闭该配置可强制全桌面做 A/B 对照。
+- 下述较大的 `InteractionAction`/Controller 能力表同时包含 Legacy/Studio API；当前 vNext Visual Actor 的模型工具面以 [visual-runtime-principles.md](visual-runtime-principles.md) 为准，不会自动获得全部兼容动作。
 - 实时交互在 `SurfaceBinding` 中额外校验目标 hwnd、窗口 client authority、frame identity 和 `InteractionRegion`。client bounds 是安全包络而不是自动 action region；区域含糊、帧陈旧、前台所有权丢失或动作逃逸时请求 fail-closed，不会把全桌面坐标猜成目标坐标。
 - `InteractionAction` 支持 `click`、独立的 `double_click`、`hover`、`move_mouse`、`drag`、`draw_strokes`、`scroll`、`select_color`、`type_text`、`hotkey`、`hold_key` 和 `wait_stable`。native 模型还可用受约束的顶层 `mouse_down` / `move_mouse` / `mouse_up` 跨新鲜帧完成按下后目标才出现的交互；runtime 只允许一个有超时的 held-pointer session，并在取消、失焦、异常或终态强制释放。Controller batch 中的按下/释放仍必须平衡。长拖拽或连续路径的新鲜度 preflight 使用沿路径均匀抽样的多个局部 ROI（当前上限 12），而不是只比较一个容易稀释局部变化的大包围框。
 - 每个空间动作在映射坐标前验证 observation artifact 的 current-run/purpose/sendable/HWND、实际 capture region、声明 frame region、尺寸、session 和 frame lineage；读取 artifact 时重新核验文件大小、SHA-256 与图像尺寸。`grounding_mode` 区分对象锚点、语义控件、自由路径、相对手势与有界坐标，`effect_region_binding` 则显式绑定 source/target/surface/independent。

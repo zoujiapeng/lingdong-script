@@ -1,5 +1,9 @@
 # 录制、Trace、Replay
 
+> 本文同时覆盖 vNext trace 与 Legacy ARP/AgentRunner replay。当前 Electron
+> “智能代理”入口是 `/api/v2/goals/runs`；Task Contract、客户端 `/arp/runs`、
+> StageRuntime 和 AgentRunner 只属于 Studio/兼容说明，不能按本文接回产品主链。
+
 WinPilot 的复用链路是：
 
 ```text
@@ -32,7 +36,11 @@ API 集成诊断可用脚本生成证据报告；它不等于真实客户端 E2E
 python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http://127.0.0.1:8765
 ```
 
-脚本走公开 `/api/chat`，不会直接调用内部 runner。当前原生前端目标先由 `/api/v2/task-contracts/compile` 生成 typed contract，再走 `/api/v2/arp/runs`；可复用阶段按 `stage_type + parameters + app_version` 尝试参数化 Skill，miss/fail 只恢复当前阶段。确定性阶段由 StageRuntime、Controller、ArtifactStore 或 DomainAdapter 直接执行，只有语义创建/编辑或异常恢复才进入有界 AgentRunner。两条入口共享 RuntimeJob、桌面资源、trace 和证据规则，但不强制共享同一个 ToolSession/LLM loop。
+脚本走公开 `/api/chat`，不会直接调用内部 runner。当前原生前端目标把原始 goal
+提交到 `/api/v2/goals/runs`，由一条 vNext mission/Visual Actor 链执行。显式
+Studio/兼容消费者仍可经 `/api/v2/task-contracts/compile` 和 `/api/v2/arp/runs`
+运行 typed stage、Skill 或确定性 Adapter；这条 Legacy 链共享部分 RuntimeJob、
+桌面资源、trace 和证据基础设施，但不是 vNext fallback，也不能替代客户端 E2E。
 
 当前低延迟 GUI 靶场位于 `python/winpilot_home/eval_targets/gui_agent_target.html`。它用于测试通用原子动作、自动 `screen_watch`、recent/action ROI、changed-only 观察和 fresh-screen done gate，不是生产功能的专属规则，也不是当前 native 客户端 E2E 入口。
 

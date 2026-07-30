@@ -6,20 +6,21 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [../CLAUDE.md](../CLAUDE.md) | 新 Codex/开发者接手入口、当前分支状态、已否定实验和下一步 |
 | [../README.md](../README.md) | 项目目标、原则、能力边界、启动和验证 |
 | [architecture.md](architecture.md) | GUI Agent 架构、不变量、数据流和当前债务 |
 | [vnext-migration.md](vnext-migration.md) | 主 Agent 服务端入口、模型自选工具、Legacy 兼容边界和删除退出门 |
 | [testing.md](testing.md) | 真实 Electron 客户端 E2E、冷启动、上下文和外部 oracle 规范 |
 | [GUI_AGENT_ARCHITECTURE_AUDIT.md](GUI_AGENT_ARCHITECTURE_AUDIT.md) | 全量架构审计、整改顺序和变更准入门 |
-| [../CLAUDE.md](../CLAUDE.md) | AI/开发者接手最短说明 |
+| [GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md](GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md) | 本轮全分支审计、负优化实验、Pi 边界和当前 E2E 正反证据 |
 
 ## 子系统文档
 
 | 文档 | 内容 |
 | --- | --- |
-| [winpilot-agent.md](winpilot-agent.md) | AgentRunner、工具、Controller、视觉闭环和 done gate |
-| [frontend.md](frontend.md) | 原生 Electron 工作台、运行记录、刷新和兼容边界 |
-| [apis.md](apis.md) | Electron HTTP、WinPilot REST/WebSocket、IPC 与 MCP |
+| [winpilot-agent.md](winpilot-agent.md) | Legacy AgentRunner、工具、Controller 和 done gate 实现参考 |
+| [frontend.md](frontend.md) | 原生 Electron 工作台、vNext 目标入口、运行记录和兼容边界 |
+| [apis.md](apis.md) | Electron HTTP、vNext/Legacy REST、WebSocket、IPC 与 MCP |
 | [model-providers.md](model-providers.md) | 模型 provider、视觉路由、thinking、cache 和 cost |
 | [memory-graph.md](memory-graph.md) | Memory Graph、Skill、session context 和反馈 |
 | [replay-recording.md](replay-recording.md) | Trace、Artifact、Automation IR、Replay 与 WPS 兼容 |
@@ -56,4 +57,5 @@
 - Trace/IR/Replay：`replay-recording.md`；
 - 架构债务和整改顺序：`GUI_AGENT_ARCHITECTURE_AUDIT.md`。
 
-不要把临时交接文档、绝对路径、旧工作树行数或单次 run 细节提交成长期文档。
+不要新建一次性窗口笔记或提交本机绝对路径。跨窗口稳定规则更新
+`../CLAUDE.md`；具体 run 留在日期化架构审计、trace、eval 或 report。
