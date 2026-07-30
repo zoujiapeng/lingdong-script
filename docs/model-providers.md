@@ -6,15 +6,18 @@
 
 ## 当前调用路径
 
-WinPilot 只有一个 `AgentRunner`。GUI、编程和仓库任务共享同一条
-OpenAI-compatible Chat Completions 调用路径；编程能力由 RuntimeProfile
-启用，不存在第二套 Coding Agent 主循环。
+当前产品 GUI 主线不是 Legacy `AgentRunner`。它由
+`vnext/model_roles/visual_actor.py` 的单一 `LiveVisualActor` 通过
+`modeling/ModelCallRuntime` 调用 OpenAI-compatible Chat Completions。Legacy
+`AgentRunner`、编程/仓库 profile 和较大工具历史仍为兼容路径，不能反向决定
+vNext 行为。
 
-`python/winpilot_home/winpilot/model_adapter.py` 是薄适配层：
+共享的 provider 代码仍保持薄适配：
 
 - `ModelProfile` 归一化 provider、模型名和原生视觉能力。
 - `OpenAICompatibleAdapter` 保持
   `client.chat.completions.create(...)` 的调用形状。
+- `modeling/ModelCallRuntime` 负责 deadline、attempt 记录和 usage；
 - `request_extra_body()` 处理 MiMo / Reasonix 的 thinking 参数。
 - `normalize_usage()`、`accumulate_usage()` 归一化 token、缓存和成本。
 
@@ -60,8 +63,9 @@ thinking、价格过滤或 usage 特判。
 - 上游将来若为 Pro 正式开放图片输入，需要先做真实接口探测、补回归测试，
   再更新 `model_supports_vision()`，不能仅凭名称放开。
 
-原生视觉路径在初始回合、`observe` 后和每笔视觉事务后注入新鲜画面。画面可能
-是经过验证的前台目标窗口裁剪，也可能是完整虚拟桌面；每帧都会声明其范围。
+原生视觉路径在初始回合和每笔视觉事务后注入新鲜画面。当前 live vNext 不向模型
+暴露 Legacy `observe(image_region=...)`；画面可能是经过验证的前台目标窗口，也
+可能是完整虚拟桌面，每帧都会声明范围和提交图片尺寸。
 `controller.target_window_capture_enabled=true` 只允许在前台、单窗口且范围可信时
 裁剪，含多窗口或全局语义的任务会退回全桌面。关闭该设置可强制全桌面截图。
 真实画面是权威观测，UIA/OCR/规则只是补充，不能覆盖相反的像素事实。
@@ -85,28 +89,30 @@ text-only 路径不会收到不可见的截图字节。它必须依赖 UIA、Win
 `reasoning_content`，造成不稳定或不完整输出，并建议在调用工具时关闭 thinking。
 这与 GUI 实测中的截断、伪工具文本和参数不完整问题一致。
 
-因此 WinPilot 现在把 provider 的 reasoning 和 GUI 运行状态分开处理：
+当前可复现 vNext 基线明确使用：
 
-- `api.thinking=true` 或显式 `{"type":"enabled"|"disabled"}` 是用户配置，优先级最高；
-- `api.thinking=false` 仍是默认值，但对本身默认关闭 thinking 的原生视觉 provider，
-  `controller.native_visual_thinking_mode="adaptive"` 会在首帧、画面未变、动作被阻止、
-  完成验收失败或恢复中的回合临时打开 reasoning；动作已经由新帧和因果证据确认后，
-  例行回合才走轻量路径；
-- `controller.native_visual_thinking_mode` 可设为 `off`、`adaptive` 或 `always`。它只读取
-  当前 frame/action/verification evidence，不匹配任务词、应用名或 11 个样例；
-- `api.extra_body` 可做显式高级覆盖；调用者需要自行承担兼容性、延迟和截断风险。
+- `api.thinking=false`；
+- Visual Actor `temperature=0.0`；
+- 每个决策最多一次 provider attempt；
+- 最近一笔原生 tool exchange；若 provider 返回 `reasoning_content`，只随该交换
+  原样回传一次。
 
-每次请求还受 `api.request_timeout_s`、`api.request_total_timeout_s` 和
-`api.max_retries` 约束。总截止时间到达时，late response 会在工具分发前被丢弃；
-因此重试不会重复已经执行的 GUI 动作。GUI 工具调用截断恢复仍会关闭 thinking，
-以给完整函数参数保留输出预算。该策略适用于所有原生视觉任务，不是画图或连续
-指针专属能力，也不会让 `mimo-v2.5-pro` 获得视觉能力。
+在相同 corridor 上临时设置 `thinking=true` 仍失败且更慢，因此已经回退，没有把
+`adaptive` reasoning 策略接入 vNext。配置和 Legacy `AgentRunner` 中仍存在
+`controller.native_visual_thinking_mode`，它属于兼容债务，不是当前产品主线的
+目标架构。未来模型需要不同 reasoning 参数时，应作为显式模型 profile 在同一
+E2E 矩阵 A/B；不能根据任务词、应用名或失败类型自动切换。
+
+vNext 请求仍受 runner 总截止时间约束，late response 在工具分发前丢弃；已经执行
+的 GUI 动作不会因模型调用失败而重放。该边界也不会让
+`mimo-v2.5-pro` 获得图片能力。
 
 ## 缓存
 
-WinPilot 的缓存策略是 `stable_prefix`：尽量保持消息前缀稳定并 append-only，
-只在上下文过大时折叠旧的 `observe`、`read_text` 和 `list_windows` 结果。
-这能让支持前缀缓存的上游提高命中率，但不承诺任何 provider 一定缓存。
+当前 vNext Visual Actor 不维护 Legacy 的 append-only 长历史；它只保留最近一笔
+原生 exchange，因此缓存收益服从这个有界消息形状。Legacy `AgentRunner` 仍有
+`stable_prefix` 和旧 `observe`/`read_text`/`list_windows` 折叠逻辑，但不得为提高
+cache 命中把它重新接回产品主线。任何 provider 都不承诺一定缓存。
 
 `normalize_usage()` 当前识别：
 

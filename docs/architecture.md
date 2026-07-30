@@ -32,9 +32,16 @@ PlatformWorkbench
 
 ### 2. 一个完整目标和一条执行主线
 
-Task Contract 必须保留用户原始目标，普通未知 GUI 目标进入一个 `ExecuteDesktopTask` 视觉阶段。模型可在运行中调整、替换或放弃工作计划；最新画面与动作结果优先于旧计划的一致性。任务不能在看见界面前被 compiler 拆成一串应用专属微步骤，也不能因任务名称切换到另一套 Agent、工具或提示词。
+Goal Admission 把用户原始目标直接绑定到一个 full-goal vNext mission。模型可在运行中
+调整、替换或放弃工作计划；最新画面与动作结果优先于旧计划的一致性。任务不能在
+看见界面前被 compiler 拆成一串应用专属微步骤，也不能因任务名称切换到另一套
+Agent、工具或提示词。Task Contract 只属于 Studio/兼容链。
 
-原生客户端使用一个小而固定的通用操作面：观察/窗口、点击/输入/滚动、拖拽/连续指针、等待和终态。复合目标由模型在“新帧 → 一个决定 → 一笔动作 → 新证据”的循环中完成，不靠公开宏工具承载写死流程。运行时可以拒绝过期坐标、失去所有权的窗口或非法输入事务，但不能因为模型改变了语义判断而把它拉回旧策略。
+原生客户端当前使用一个小而固定的模型操作面：点击、双击、输入、快捷键、滚动、
+拖拽/折线路径/跨帧按住，以及 claim/blocked。复合目标由模型在“新帧 → 一个决定
+→ 一笔动作 → 新证据”的循环中完成，不靠公开宏工具承载写死流程。运行时可以拒绝
+过期坐标、失去所有权的窗口或非法输入事务，但不能因为模型改变了语义判断而把它
+拉回旧策略。
 
 ### 3. 一个可见状态权威
 
@@ -46,7 +53,10 @@ Task Contract 必须保留用户原始目标，普通未知 GUI 目标进入一�
 - screen/window epoch；
 - 坐标空间与 DPI 信息。
 
-原生模型的空间工具使用它实际收到的完整图片像素（`image_x/image_y`、`image_points`、`image_strokes`）。runtime 校验坐标仍位于这张图片内，再根据同一帧的尺寸和 capture region 映射到内部归一化坐标与物理桌面。模型不需要猜 Windows 坐标，也不能把另一张截图、缩略图或旧帧的像素继续用于当前动作。
+原生模型的空间工具使用它实际收到的完整图片像素（`image_x/image_y`、
+`image_points`）。runtime 校验坐标仍位于这张图片内，再根据同一帧的尺寸和
+capture region 唯一映射到物理桌面；不经过第二套归一化语义坐标。模型不需要猜
+Windows 坐标，也不能把另一张截图、缩略图或旧帧的像素继续用于当前动作。
 
 UIA、Win32、OCR、传统 CV 和 VLM fallback 都是有 provenance 的观测信号。它们只有在与当前窗口、当前帧和像素区域一致时才能帮助定位；不能仅因 UIA 树丰富或 OCR 有文字就否决模型从画面得到的语义。
 
@@ -75,7 +85,10 @@ pre-frame
 - **stage success**：阶段工件或义务满足；
 - **task completion**：用户的最终目标由当前证据满足。
 
-只有最后一层可以让外层 run 进入可信完成。模型总结、工具 `ok` 或 runtime `done` 都只是候选状态。对播放、弹窗、动画等瞬态效果，done verifier 可以读取有界的动作后视觉 checkpoint；这些历史帧只能证明先前发生过什么，不能替代用户要求持续保持的当前状态。
+只有最后一层可以让外层 run 进入可信完成。模型总结、工具 `ok` 或 runtime `done`
+都只是候选状态。当前 vNext 由模型提交 claim，再由 obligation/evidence 链检查其
+运行时一致性；测试中的真实业务成功仍由独立应用/browser oracle 判断。历史帧只能
+证明先前发生过什么，不能替代用户要求持续保持的当前状态。
 
 ## 控制平面
 
@@ -111,26 +124,42 @@ Task Contract 把用户目标表达为：
 
 StageRuntime 是旧 Task Contract/TASK_STAGE 链的阶段生命周期 owner：能力预检、工件传递、可选能力、执行与验证。它仍服务兼容调用，但不是 vNext 主 Agent 的 owner；新能力不得为了兼容在 StageRuntime 与 MissionRuntime 各实现一份。
 
-### 四个运行时 owner
+### vNext 当前 owner
 
 | Owner | 唯一职责 | 明确禁止 |
 | --- | --- | --- |
-| `FrameAuthority` | 原子发布当前 `FrameState`：frame id、epoch、hwnd、region、scope、图像身份和时间 | 自己截图、理解画面、选择目标或动作 |
-| `FastGuiController` | 将一笔外部动作规范化为原子事务，执行输入并产出局部效果证据 | 规划完整任务、持有第二份帧真相、宣布任务完成 |
-| `RunStateMachine` | 记录运行 phase、因果债务、未验证动作和终态转换 | 解释用户目标、生成计划或发起恢复动作 |
-| `FailureRecoveryLayer` | 对失败作事实分类并附加可追溯元数据 | 自动重试、自动切换 UIA/OCR/MCP 或替模型决定下一步 |
+| `LiveVisualActor` | 理解完整目标和当前 JPEG，选择一笔工具调用 | 物理输入、应用脚本、第二角色委派 |
+| `MissionRuntime` | 顺序驱动模型、动作、新帧与 obligation | 关键词规划、纠正模型答案 |
+| `FrameAuthority` / workspace | 发布当前 frame、epoch、hwnd、region、图像身份 | 理解画面或选择目标 |
+| `CapabilityBroker` | 投影 schema、当前可写性、窗口/指针所有权 | 根据任务类型预选路线 |
+| `AtomicDesktopAdapter` / `RawDevice` | 唯一坐标映射、真实输入和机械回执 | snap、offset、语义成功 |
+| `RuntimeEvidencePlane` | 绑定 actor、canonical、physical 和 frame 证据 | 充当第二个语义 verifier |
 
-这些 owner 是仍需迁移或复用的基础能力边界，不应形成多个 planner。vNext 主线由 `MissionRuntime`、Broker 和 Visual Actor 组合这些能力；Legacy `AgentRunner` 的重复 owner 按依赖逐步退出。失败后先使旧 frame/anchor/计划依据失效，捕获新权威帧，再让模型结合完整目标与失败事实决定继续观察、换路径、等待、阻塞或失败。对于外部参与者、动画或异步界面，模型还可以显式等待有界的视觉变化；runtime 只返回变化后的新帧，不解释变化的业务含义，也不替模型选下一步。
+这些 owner 不应形成多个 planner。Legacy `AgentRunner`、FastGuiController、
+RunStateMachine 和 FailureRecoveryLayer 中可复用的基础能力，只能逐项迁移或删除，
+不能整体接回 vNext。失败后使旧 frame 失效，捕获新权威帧，再让同一个模型结合完整
+目标与失败事实决定继续、换路径或 blocked；runtime 不解释业务含义。
 
 ## 视觉与感知
 
 ### 原生视觉主路径
 
-当主模型明确支持图像时，普通 GUI 回合直接附加当前权威 JPEG。模型从画面理解语义并提出一笔 typed transaction；动作后重新捕获权威帧，再进入下一回合。
+当主模型明确支持图像时，普通 GUI 回合直接附加当前权威 JPEG、完整原始目标、
+有界 task state、上一动作事实，以及最多最近一笔 provider 原生
+`user image → assistant tool call → tool result`。模型从画面理解语义并提出一笔
+typed transaction；动作后重新捕获权威帧，下一回合覆盖旧 exchange。这里没有无界
+聊天历史、第二 planner 或独立 Grounder/Verifier。
 
-模型推理预算也属于运行时基础设施，而不是任务规则：首帧、画面未变、动作被阻止、完成验收失败或恢复中的回合允许 provider 使用较深的原生视觉推理；在动作已被新帧和因果证据确认后，例行回合才可使用轻量模式。每次 provider 请求同时受 SDK 单次超时和 AgentRunner 总截止时间约束；超时响应在进入工具分发前丢弃，有限重试不会重复执行已经发生的 GUI 动作。
+当前已复验基线固定 `api.thinking=false`、Visual Actor
+`temperature=0.0`、最大提交图片边 1120，并且每个决策最多一次 provider attempt。
+临时打开 thinking、把图片边提高到 1600、移除 temperature zero 均没有提高 E2E，
+已经回退。Runtime 不根据任务词、失败类型或当前 benchmark 自动切换推理模式；未来
+更换模型时用同一外部-oracle 矩阵 A/B，不随模型升级添加补偿规则。
 
-如果完整帧中某个区域确实需要更多细节，模型可以调用 `observe(image_region=...)`。这是当前权威图片像素到物理区域的一次通用映射，裁剪图会成为下一张权威帧，后续动作使用裁剪图自己的坐标；它不是画板、棋盘、浏览器或某个应用的特例，也不调用 OCR/UIA 来决定裁剪区域。
+当前 live vNext 最小工具目录不向模型暴露 Legacy
+`observe(image_region=...)`。Legacy crop、UIA、OCR、CV 和 watcher 仍是兼容债务，
+不是 vNext 失败后的自动 fallback。若未来证明当前观察结构上不足，新增观察原语也
+必须先在不同任务族通过 E2E，不能为 corridor、棋盘或某个应用单独加入。
 
 当前默认配置关闭 UIA、OCR 与 predictive OCR，`native_vision_direct=true`。这使默认路径先看图；结构化 provider 仍是可显式选择的兼容/提速能力，不是被删除的能力。
 
@@ -140,7 +169,7 @@ StageRuntime 是旧 Task Contract/TASK_STAGE 链的阶段生命周期 owner：�
 - 不把模型未请求的 UIA/OCR/CV/MCP 结果塞进视觉回合；它们只是明确选择的辅助探针；
 - 不把缩放后的 JPEG 像素当物理桌面坐标；
 - 不在一个模型回合连续执行多笔未经新帧验证的空间动作；
-- 看不清目标、规则或结果时继续观察或 `blocked`，不猜。
+- 看不清目标、规则或结果时使用新权威帧重新判断或 `blocked`，不猜。
 
 ### 显式结构化辅助路径
 
@@ -184,7 +213,7 @@ StageRuntime 是旧 Task Contract/TASK_STAGE 链的阶段生命周期 owner：�
 
 ### 通用动作集合
 
-Controller 当前覆盖或编排：
+仓库中的 Controller/Legacy 路径覆盖或编排：
 
 - pointer move、click、double click、hover；
 - scroll；
@@ -194,7 +223,13 @@ Controller 当前覆盖或编排：
 - wait for stable/change；
 - mouse down / move / mouse up 的跨帧 held-pointer session。
 
-`wait(until_change=true, persistent=true)` 是外部参与者、动画或异步界面的通用等待原语：它只负责在绑定窗口或模型指定 ROI 上保持 watcher，并返回“是否观察到已稳定的变化”；变化代表什么、下一步做什么仍由模型结合新帧决定。应用聊天、棋局或某个测试的等待逻辑不得下沉到该工具。
+当前 live vNext 模型工具面只投影 click、double click、drag/path/held-pointer、
+scroll、type text、hotkey、claim 和 blocked。上述 hover、timed key、独立 wait 和
+裸 mouse-down/up 仍是兼容/底层能力，不得写成当前模型已经可自主选择。
+
+Legacy `wait(until_change=true, persistent=true)` 只负责在绑定窗口或 ROI 上观察稳定
+变化；即使未来进入 vNext，变化含义和下一步仍必须由同一模型结合新帧决定。聊天、
+棋局或某个测试的等待逻辑不得下沉到 watcher。
 
 连续路径不是绘画专属通道。移动滑块、摆放对象、调整时间轴、手写和画图共用相同的指针、区域、路径、新鲜度与验证基础设施；任何 stage 都不能决定这些通用能力是否可用。
 

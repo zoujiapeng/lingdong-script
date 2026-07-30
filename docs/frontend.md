@@ -11,7 +11,7 @@
 
 | 入口 | 当前职责 | 主要运行时事实 |
 | --- | --- | --- |
-| 智能代理 | 输入自然语言目标、设置步骤上限、选择冷启动、停止当前任务、处理人工门 | Task Contract、当前 stage、能力可满足性、模型/Controller 工具、工件、证据、Completion Contract、实时画面和指标 |
+| 智能代理 | 输入原始自然语言目标、设置步骤上限、选择冷启动、停止当前任务 | vNext mission、Visual Actor 工具、实时画面、动作回执和 completion obligation |
 | 流程工作台 | 编辑、校验并运行 `automation-ir/1` / `arp/1` 投影 | 前端编译器与后端 capability catalog 的交集、IR fingerprint、真实 ARP 运行 |
 | 运行记录 | 搜索/筛选统一 Agent/ARP run，并按需加载单次完整详情 | run 摘要、timeline、typed stage trace、capabilities、artifacts、evidence、失败分类和完成合同 |
 | 技能与学习 | 区分已验证 Skill、draft/invalid script、trace、长期 Memory 与进程内 session | replay 可信状态、脚本摘要、适用条件、结构化 verification 和 lineage |
@@ -25,21 +25,20 @@
 
 ```text
 智能代理输入
-  → POST /api/v2/task-contracts/compile
-  → task-contract/1 + typed arp/1 graph
-  → POST /api/v2/arp/runs
-  → StageRuntime / Controller / Adapter / bounded AgentRunner
+  → POST /api/v2/goals/runs { original goal, execution_context }
+  → Goal Admission
+  → one full-goal mission / LiveVisualActor
+  → CapabilityBroker / AtomicDesktopAdapter / RawDevice
   → BUS + WebSocket
   → GET /api/v2/runs/current（活跃详情）
   → GET /api/v2/runs/{run_id}（按需历史详情）
 ```
 
-前端不会把整句目标直接转换成单个 `agent_goal`。跨应用、工件、通信和实时互动的
-阶段、能力、工具与 verifier 都来自同一个 Task Contract。运行控制始终绑定父 ARP：
-“暂停/继续”分别调用 `POST /api/v2/runs/{run_id}/pause|resume`，“停止”调用
-`POST /api/v2/runs/{run_id}/cancel`。暂停是协作式安全边界：已经开始的单个点击、
-拖拽或工具动作先收尾，下一次模型决策或工具动作才冻结，避免留下按住的鼠标或
-半截拖拽；人工确认门仍使用独立的批准/拒绝流程。
+前端把整句目标原样提交给 Goal Admission，不编译 Task Contract，不提交执行模式，
+也不根据关键词选择 GUI、shell 或 provider。运行控制绑定返回的 run；停止使用统一
+run cancel。取消是协作式机械边界：已经开始的单个输入先安全收尾，held pointer
+必须释放。流程工作台和历史兼容入口仍可显式使用 Task Contract/ARP，但它们不是
+“智能代理”的 fallback，也不能替代真实产品 E2E。
 
 ## 刷新与延迟策略
 
@@ -159,18 +158,17 @@ TypeScript 的 renderer、Electron main、CLI 和 AI 配置都启用
 - Python API 集成：通用 cancel、轻量 run/job 列表、持久化 audit、受保护 artifact；
 - 浏览器视觉验收：启动当前 FastAPI 与 Vite，通过产品导航点击运行记录和系统设置，
   检查真实历史 run、缩略图、滚动布局、筛选及控制台错误；
-- Windows E2E：必须走 `/api/v2/task-contracts/compile → /api/v2/arp/runs`，使用外部
+- Windows E2E：必须从可见 Electron“智能代理”走 `/api/v2/goals/runs`，使用外部
   ground truth 或真实目标应用证据，不能用 mock 命名为 E2E。
 
 浏览器组件验收可以读取持久化 run，核对 stage、artifact、evidence 和 completion
 展示，但它只证明前端审计链路，不是重新执行真实 GUI，也不能替代 Electron 客户端
 E2E。
 
-持续交互的前端状态与终态分离：只有 Task Contract 声明需要真人继续时，运行卡才显示
-`waiting_external`、“等待外部参与者”和“持续会话尚未终结”。Agent 当前回合已通过会
-单独显示，用户未继续时显示“外部参与者未响应”，不会渲染为整个任务“已完成”，也不会
-把普通自主任务的失败改成等待。共享回合需要外部参与者时应从自主终态矩阵排除，
-详细通过定义见 `testing.md`。
+Legacy 持续交互记录仍可显示 `waiting_external`，但 vNext 主 Agent 不由前端或
+Task Contract 推断任务应等待。模型只能从原始 goal、当前画面和可见工具决定继续、
+claim 或 blocked；前端不能把普通自主任务失败改写成等待或完成。共享回合的测试
+边界见 `testing.md`。
 
 ## 已知限制
 

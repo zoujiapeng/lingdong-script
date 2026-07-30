@@ -1133,3 +1133,31 @@ external oracle: strict sequence [1, 2, 3], passed
 runtime 不应随模型升级再改。Pi 只有在未来能替换并删除 Python 模型循环 owner、
 且跨任务 E2E 明显更好时才整体引入；当前结论是“借一条消息语义，不引入第二套
 runtime”。提交前 WinPilot 全量回归为 `3373 passed, 13 skipped`。
+
+### 13.11 Codex 窗口交接与唯一分支收敛
+
+2026-07-30 在更换 Codex 窗口前，把本轮稳定思想、禁止项、精确测试状态和继续工作
+顺序收敛到仓库入口，而不是新增一份脱离主文档的临时聊天纪要：
+
+- 根目录 `AGENTS.md` 约束所有后续 Codex：先读 `CLAUDE.md`、以真实不确定任务 E2E
+  为中心、只修证据首次分叉层、不得用应用规则或模型补偿扩张系统，并且不得触碰
+  用户未跟踪的 `CON`；
+- 根目录 `CLAUDE.md` 保存当前唯一产品链、owner 边界、45 词提示词、一笔原生
+  exchange、坐标/键盘/窗口结论、负 A/B、Pi 边界、`5/10` 矩阵、五项长任务实况和
+  下一窗口的操作顺序；
+- `docs/architecture.md`、`docs/visual-runtime-principles.md`、
+  `docs/model-providers.md` 与 `docs/vnext-migration.md` 同步改成当前 vNext 事实，
+  旧 Task Contract、StageRuntime、AgentRunner、observe/wait 只标为 Legacy 或待删
+  兼容面，不能再被误读为产品主链。
+
+分支策略同时固定：`master` 是最终唯一长期分支；
+`codex/lean-gui-agent-core` 在正式收敛前是唯一活动集成分支，不再创建平行开发
+分支。Draft PR #45/#46 和其他冻结分支只作逐项恢复、审查或 oracle 候选；任何能力
+都必须先在当前主线复现缺口、以最小 owner 提取，并在至少两个不同任务族取得外部
+oracle 的实质收益。不能整体 merge 冻结架构来追求表面上的单分支。通过门槛的小
+提交最终落到 `master`，再关闭恢复 PR 并删除其他本地、远端临时分支。
+
+本节和交接文档不改变运行时代码，也不把 `5/10` 写成成功。最后一笔运行时代码仍是
+`bf29783 fix: preserve one visual tool exchange`；后续首要实验仍是更强原生视觉
+模型在完全相同 10 项矩阵上的干净 A/B，而不是继续添加 prompt、角色、工具或
+验证层。

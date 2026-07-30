@@ -54,15 +54,26 @@ renderer selector
 
 `ToolSpec.execution_medium` 暂时保留为执行事实和审计字段，不再参与用户意图的二次编码。Broker 只做工具 schema、runtime 可写性、目标/画面新鲜度和指针所有权等机械准入。真实 E2E 报告记录实际 OS 输入、shell 或 provider 回执，而不是验证某个策略选项。
 
-## 下一切片：同一 Agent 的工具选择
+## 已完成的 Pi 对照与下一切片
 
-在引入任何非 GUI 工具前，先用 Pi Agent 风格的最小“模型 → 工具 → 新观察”循环做隔离对照：
+短命、未进入主依赖的 Pi Agent `0.83.0` spike 已完成。它证明 provider 原生
+`user image → assistant tool call → tool result → new image` 序列能让
+`ordered-clicks` 在两个随机 seed 上按序完成，但同一 spike 仍会算错随机试卷。
 
-- 原始目标、当前 JPEG、有界 task state 和全部允许工具进入同一次模型决策；
-- GUI、shell 与 provider 都是普通工具，不由另一个模型或确定性 router 预选；
-- 每轮桌面 mutation 仍顺序执行并取得新画面；
-- 不增加应用名规则、执行媒介关键词表或软件专属 prompt；
-- 只有随机任务 E2E 显著提升、owner 数下降且产品净代码不增长时，才替换现有 loop。
+主线因此只保留最近一笔原生 tool exchange：
+
+- 不安装 Pi 包；
+- 不增加 Node↔Python RPC 或第二 runtime；
+- 不增加角色、动作、应用规则和 prompt；
+- 下一回合覆盖旧 exchange，避免无界聊天历史。
+
+Pi 只有在能整体替换并删除 Python 模型循环 owner、且跨任务 E2E 明显更好时才
+整体引入。当前下一切片不是继续包 Pi，而是：
+
+1. 用更强原生视觉模型在完全相同的 10 项矩阵做 A/B；
+2. 若模型直接改善试卷和 corridor，不改 Runtime；
+3. 未来加入 shell/provider 时，让同一个 Visual Actor 同时看到全部工具并自主
+   选择，仍不增加 profiler、关键词 router、前端执行开关或第二 planner。
 
 ## 暂留兼容面
 
@@ -144,26 +155,52 @@ Legacy 产品/兼容消费者
 - 旧 wire format 如仍需读取，仅存在于隔离的只读迁移器；
 - 单元、常规回归和真实客户端 E2E 均在删除后的当前版本重新通过。
 
+## 唯一分支收敛
+
+`master` 是唯一长期分支。完成收敛前，`codex/lean-gui-agent-core` 是唯一活动
+集成分支；不要再创建平行开发分支。Draft PR #45/#46 是恢复与逐项审查载体，
+不是整体 merge 单元。
+
+2026-07-30 本次交接提交后，相对当前活动分支的本地提交差异：
+
+| 分支 | 当前独有 | 对方独有 | 决策 |
+| --- | ---: | ---: | --- |
+| `master` | 7 | 0 | 最终唯一长期分支 |
+| `codex/vnext-gui-e2e-foundation` | 6 | 0 | 已是祖先，停止演化 |
+| `codex/vnext-agent-core` | 97 | 193 | 冻结，禁止整体 merge |
+| `fix/pr10-python-ci` | 97 | 194 | 只审查额外 CI 候选 |
+| `recovery/c4-canonical-from-d418-local` | 48 | 1 | 仅恢复 |
+| `recovery/c4-fa2e9caf-local` | 50 | 2 | 仅恢复 |
+| `test/pr15-legacy-electron-oracle` | 94 | 2 | 只审查 oracle 候选 |
+
+每个对方独有能力先在当前主线构造随机失败样本，只提取最小 owner，并在至少两个
+任务族上用外部 oracle 复验。没有实质收益、只补当前模型精度、扩大 prompt/state
+或不能删除旧 owner 的候选一律丢弃。通过门槛的小提交最终落到 `master`，随后关闭
+#45/#46 并删除其他本地和远端临时分支；不能靠一次性合并冻结分支获得表面上的
+“唯一分支”。
+
 ## 当前验证状态
 
-2026-07-29 的历史套件曾通过前端策略选择器提交。该机制已于
-2026-07-30 从前端、请求、准入、Broker 和证据链删除，历史 run 只作为回归
-参照，不能证明删除后的当前源码。当前源码必须从可见 Electron 页面只提交
-自然语言 `goal`，并由独立浏览器页面的可信事件验收。
+前端策略链删除、窗口生命周期和一笔原生 exchange 落地后的当前精确源码，已从
+可见 Electron 页面只提交自然语言 `goal`，用真实鼠标键盘和独立浏览器 oracle
+完成 10 项受控矩阵：
 
-| 场景 | 结果 | 关键证据 |
+| 场景 | 结果 | 归因 |
 | --- | --- | --- |
-| `precise-click` | 历史通过；等待删除策略链后的当前源码复验 | run `arp-20260729-092531-f79981`；外部 oracle 收到可信 `scenario_success` |
-| `ordered-clicks` | 失败并登记 | run `arp-20260729-084046-1de1ed`；完成第一个 marker 后产生 10 个可信 `scenario_failure`，最终 `vNext turn budget exhausted`；见 [GitHub #42](https://github.com/zoujiapeng/lingdong-script/issues/42) |
+| `precise-click` | passed | 提交坐标唯一映射与物理参数一致 |
+| `ordered-clicks` | passed | 最近一笔原生 exchange 修复跨帧遗忘 |
+| `drag-fit` | passed | 真实物理拖放 |
+| `slider` | passed | 真实物理拖动 |
+| `dynamic-hold` | passed | 跨帧 held-pointer 完整释放 |
+| `answer-all-questions` | failed，5/6 | 模型两次把 `8×9` 提交为 `81` |
+| 四个 corridor 变体 | failed | 模型折线与物理折线一致，但路径切角/出界 |
 
-两条历史 run 均证明当时的 `architecture_version=vnext`、
-`route=live_gui`、`no_legacy_fallback=true`，且没有 Legacy
-`agent_start`/`agent_tool`、shell 或 provider fallback。首轮双场景套件位于
-`output/playwright/client-goal-admission-e2e/20260729-083913-suite/`；
-收紧 run/mission 证据绑定后的复验报告位于
-`output/playwright/client-post-review-e2e-20260729-092429/20260729-092430-suite/`。
+总计 `5/10`。WinPilot 全量回归为 `3373 passed, 13 skipped`。详细 run 与
+submitted/physical 证据见
+[`GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md`](GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md)
+第 13.10 节。
 
-策略选择器删除后的当前源码尚未完成本轮真实客户端复验，因此“真实客户端
-验收”退出门尚未满足。`ordered-clicks` 的状态推进问题必须在
-观察/动作边界修复并重新跑通；不得用任务特化提示词、关键词 planner、
-硬编码 marker 顺序或 Legacy fallback 关闭该问题。
+这证明 Goal Admission、单 Visual Actor、坐标/键盘/窗口基础链和短多轮状态已经能
+闭环，但“真实客户端验收”总退出门仍未满足：五项原始长任务没有当前源码 5/5，
+随机 corridor 和试卷仍暴露当前模型智力/视觉几何瓶颈。不得用任务提示、答案修正、
+路径规则、Legacy fallback 或更多 verifier 关闭这些失败。

@@ -1,52 +1,96 @@
 # Visual runtime principles
 
-This project treats the model's current pixels as the primary source of
-meaning.  The runtime owns only the mechanics that every GUI task needs:
-frame identity and coordinate mapping, one canonical input transaction, fresh
-post-action evidence, and bounded recovery.  It must not encode the rules of a
-particular application, game, drawing exercise, or test sentence.
+The current pixels seen by the model are the primary source of GUI meaning.
+The runtime owns only mechanics shared by arbitrary desktop tasks: frame and
+window identity, one coordinate mapping, one canonical input transaction,
+fresh post-action observation, physical-input cleanup, and bounded failure.
+It must not encode an application's workflow, a game's rules, a test answer,
+or a correction for the current model.
+
+## Current primary loop
+
+The live vNext path is:
+
+```text
+original goal + authoritative JPEG + bounded task state
+  + at most one previous native tool exchange
+-> one Visual Actor tool call
+-> one physical transaction
+-> a new authoritative JPEG
+```
+
+The previous native exchange is exactly the most recent user image, assistant
+tool call, and physical-result summary. It is replaced after the next tool
+call. There is no unbounded conversation history, second planner, Grounder,
+Verifier, task classifier, or application prompt.
 
 ## Reasoning and latency
 
-Native visual reasoning is adaptive.  The first frame, unchanged pixels,
-failed verification, a blocked action, a stale frame, and a rejected terminal
-claim receive the provider's deeper reasoning mode.  A routine turn following
-a visibly verified mutation may use the provider's lightweight mode.  This
-decision uses live frame/action evidence only; it never matches task keywords.
-An explicit `api.thinking=true` setting remains authoritative.
+The validated baseline uses `api.thinking=false`,
+`temperature=0.0`, a maximum submitted-image side of 1120, and one provider
+attempt per Visual Actor decision. Enabling thinking made a corridor run
+slower without fixing it; increasing the image side to 1600 and removing
+temperature zero also regressed tests. Those experiments were reverted.
 
-Every provider call has both a per-call SDK timeout and a runner-owned total
-deadline.  A timed-out response is abandoned before tool dispatch.  A bounded
-retry may retry the same decision with lightweight reasoning; it cannot replay
-an already executed GUI action.
+The primary vNext runtime must not automatically toggle provider reasoning
+from task keywords or action outcomes. A future model profile may use its own
+documented settings, but it must be compared on the same external-oracle
+matrix. If a stronger model fixes arithmetic or geometry directly, no runtime
+rule should accompany the model upgrade.
+
+Every provider call still has a total deadline. A response that does not
+produce one admitted tool call is never repaired by executing guessed prose,
+and an already executed GUI action is never replayed by a model retry.
 
 ## Visual observation
 
-The ordinary frame remains the model's authority.  When the model needs more
-detail, `observe` accepts an optional `image_region` in the current frame's
-pixel coordinates.  The runtime maps that crop back to the physical capture
-region, captures it atomically, and makes the resulting crop the next
-authoritative frame.  Actions then use the crop's own image coordinates.  This
-is a generic zoom primitive, not a board/canvas/browser heuristic.
+Each normal turn receives the current authoritative target-window JPEG or,
+when the task/window scope requires it, the complete virtual desktop. The
+submitted image declares its exact pixel dimensions. Model coordinates use
+those pixels and are mapped exactly once into the authoritative physical
+region.
 
-UIA, OCR, CV, and MCP are secondary probes.  They are used only when the model
-or a capability contract explicitly asks for structured evidence; they never
-silently replace pixels or choose a target selected by the model.
+The current minimal live tool catalog does not expose the Legacy
+`observe(image_region=...)` crop tool. Legacy observe/UIA/OCR/CV code remains
+as compatibility debt, not as an automatic fallback for vNext failures.
+Adding a model-selected crop or another observation primitive requires
+cross-task E2E evidence that the current observation is structurally
+insufficient; it must not be introduced to repair one benchmark.
 
-## External turns
+UIA, OCR, CV, and MCP are secondary facts. They may be used only when their
+source, target window, frame, and expected value are explicit. They never
+silently replace pixels, choose a target for the model, or turn a model error
+into an infrastructure success.
 
-`wait(until_change=true, persistent=true)` arms a generic watcher for a settled
-change in the bound window or an explicit ROI.  It publishes
-`interaction_wait_external_change` while armed and returns whether a stable
-external transition was observed.  Typed interaction stages may use the same
-watcher through their persistent `WAIT_FOR_EXTERNAL_CHANGE` stage.  No app or
-conversation-specific waiting rule belongs in the Agent prompt.
+## Actions and external turns
 
-## Evaluation
+The minimal live surface is click, double click, drag/path/held-pointer,
+scroll, literal text entry, one key chord, claim, and blocked. It contains no
+save, draw, answer, chat, music, or application macro.
 
-End-to-end evaluation must submit the original natural-language task through
-the visible Electron client, with memory disabled/cold start when testing
-hard skills.  The 11 examples are probes, not production rules.  Add unknown
-tasks and mixed multi-turn tasks; record the frame/action trace, model wait,
-controller time, recovery reason, and an independent application oracle.  A
-unit test or a direct API call is not a client E2E pass.
+Dynamic interfaces that reveal a target after mouse-down use the same drag
+lifecycle across new authoritative frames. Timeout, lost focus, cancellation,
+or failure must release the physical button. Generic Legacy wait/watch
+capabilities still exist, but they are not currently a model-facing vNext
+primitive and must not be documented as one.
+
+## Evaluation and change admission
+
+E2E evaluation submits the original natural-language task through the visible
+Electron client. Hard-skill tests use an empty session and independent
+application or browser evidence. The sample tasks are probes, not production
+rules.
+
+Diagnose every failure in this order:
+
+```text
+model arguments
+-> canonical arguments
+-> physical_attempt
+-> operating-system/application state
+```
+
+Change only the first layer that diverges. Matching submitted and physical
+coordinates rule out a coordinate-transport bug; matching submitted and
+physical text rules out a keyboard-transport bug. A unit test, tool `ok`,
+pixel delta, runtime `done`, or model claim is not a client E2E pass.

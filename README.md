@@ -55,7 +55,7 @@ Electron「智能代理」
 
 - 多源应用发现、已运行实例优先、启动后进程/窗口身份核对、前台恢复和全虚拟桌面回退；
 - 权威帧身份与窗口裁剪；模型空间工具使用所见当前图片的精确像素坐标，runtime 只映射一次到权威帧和物理桌面；
-- 点击、双击、文本输入、快捷键、滚轮、拖拽、连续路径、限时按键，以及等待外部画面变化后取得新权威帧；
+- 当前 live 模型面提供点击、双击、文本输入、快捷键、滚轮、拖拽和连续/跨帧 held-pointer；Legacy 兼容层仍有独立限时按键与等待 watcher，但它们不是当前模型工具；
 - 按下后目标才出现时，跨权威帧保留一个有超时和强制清理的 held-pointer session；
 - 动作前新鲜度检查、动作后因果区域验证、trace、artifact 和 completion obligation；
 - run 级冷启动、session 引用、可选 MCP、Memory Graph 和已验证 Skill replay；
@@ -139,6 +139,7 @@ npm run e2e:client:mixed
 
 ## 文档
 
+- [AI / Codex 接手入口](CLAUDE.md)
 - [文档索引](docs/README.md)
 - [架构与运行原理](docs/architecture.md)
 - [视觉运行时原则](docs/visual-runtime-principles.md)
@@ -150,6 +151,7 @@ npm run e2e:client:mixed
 - [Memory Graph](docs/memory-graph.md)
 - [Trace / Replay / Automation IR](docs/replay-recording.md)
 - [GUI Agent 架构审计](docs/GUI_AGENT_ARCHITECTURE_AUDIT.md)
+- [2026-07-29/30 架构重置与 E2E 证据](docs/GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全政策](SECURITY.md)
 
