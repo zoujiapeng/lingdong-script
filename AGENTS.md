@@ -19,9 +19,9 @@ Non-negotiable rules:
   external-oracle E2E on at least two different task families.
 - Spoken GUI requirements remain in the user's goal; do not restore frontend
   execution-policy controls or keyword routing.
-- Until branch consolidation is explicitly completed, continue on
-  `codex/lean-gui-agent-core`; do not create another parallel development
-  branch. `master` is the only intended long-term branch.
+- Work on `master`, the GitHub default and only active long-term branch. Treat
+  all remaining named branches as read-only recovery/audit inputs; do not
+  create another parallel product branch.
 - Never stage, modify, rename, or delete the local untracked `CON`.
 - Use explicit file paths when staging. Never use `git add .` in this mixed
   worktree.
