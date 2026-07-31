@@ -18,6 +18,7 @@ from pathlib import Path
 import threading
 import time
 from typing import Any, Protocol
+import uuid
 
 from ..config import TRACES_DIR
 from ..action.executor import (
@@ -36,9 +37,17 @@ from ..action.raw_device import (
     RawDeviceExecutor,
 )
 from ..agent.frame_authority import FrameAuthority, FrameState
-from ..model_adapter import build_model_adapter, model_profile_from_config
+from ..integrations.connector_gateway import ConnectorGateway
+from ..model_adapter import (
+    accumulate_usage,
+    build_model_adapter,
+    empty_usage_total,
+    model_profile_from_config,
+    native_provider_protocol,
+)
 from ..modeling.contracts import ModelAttempt
 from ..modeling.openai_transport import create_openai_client
+from ..modeling.provider_protocols import ProviderProtocolAdapter
 from ..modeling.runtime import ModelCallRuntime
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS
@@ -82,6 +91,7 @@ from ..vnext.mission import (
 from ..vnext.model_roles import (
     VISUAL_ACTOR_MODEL_ROLE,
     LiveVisualActor,
+    VisualActorTurnAdmission,
 )
 from ..vnext.profiling import ExecutionPolicy
 from ..vnext.runtime import (
@@ -230,6 +240,8 @@ class _CompositionDependencies:
     client_factory: Callable[..., Any] | None = None
     session_builder: Callable[["_SessionBuild"], _SessionPort] | None = None
     runtime_evidence_root: Path | None = None
+    connector_factory: Callable[[], Any] | None = None
+    provider_transport_factory: Callable[[], Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +274,176 @@ class _FrozenTarget:
         }
 
 
+class DesktopLeaseError(ValueError):
+    """A desktop lease transition or target binding was rejected."""
+
+
+class DesktopLeaseSlot:
+    """One run-bound target handoff delivered after the Actor requests it."""
+
+    def __init__(
+        self,
+        *,
+        graph: ArpGraph,
+        dependencies: _CompositionDependencies,
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
+        self.lease_id = f"lease-{uuid.uuid4().hex}"
+        self._graph = graph
+        self._dependencies = dependencies
+        self._thread_id = thread_id
+        self._turn_id = turn_id
+        self._run_id = ""
+        self._state = "idle"
+        self._target: _FrozenTarget | None = None
+        self._error = ""
+        self._condition = threading.Condition(threading.RLock())
+
+    def request(self, run_id: str) -> dict[str, Any]:
+        with self._condition:
+            if self._state != "idle" or not run_id:
+                raise DesktopLeaseError("desktop lease cannot be requested")
+            self._run_id = run_id
+            self._state = "waiting"
+            snapshot = self.snapshot()
+        BUS.publish(
+            "desktop_lease_requested",
+            run_id=run_id,
+            thread_id=self._thread_id,
+            turn_id=self._turn_id,
+            lease_id=self.lease_id,
+            status="waiting",
+        )
+        return snapshot
+
+    def bind(
+        self,
+        *,
+        run_id: str,
+        lease_id: str,
+        inputs: dict[str, Any],
+    ) -> _FrozenTarget:
+        with self._condition:
+            if (
+                self._state != "waiting"
+                or run_id != self._run_id
+                or lease_id != self.lease_id
+            ):
+                raise DesktopLeaseError("desktop lease does not match the run")
+            self._state = "validating"
+        try:
+            target = _freeze_prebound_target(
+                self._graph,
+                deepcopy(inputs),
+                dependencies=self._dependencies,
+            )
+        except Exception as exc:
+            with self._condition:
+                rejected = self._state == "validating"
+                if rejected:
+                    self._state = "waiting"
+                    self._error = str(exc)
+                detail = self._error or str(exc)
+                self._condition.notify_all()
+            if rejected:
+                BUS.publish(
+                    "desktop_lease_rejected",
+                    run_id=run_id,
+                    thread_id=self._thread_id,
+                    turn_id=self._turn_id,
+                    lease_id=self.lease_id,
+                    status="waiting",
+                    error=str(exc),
+                )
+            raise DesktopLeaseError(detail) from exc
+        with self._condition:
+            if self._state != "validating":
+                raise DesktopLeaseError(
+                    "desktop lease closed during target validation"
+                )
+            self._target = target
+            self._error = ""
+            self._state = "delivered"
+            self._condition.notify_all()
+        BUS.publish(
+            "desktop_lease_bound",
+            run_id=run_id,
+            thread_id=self._thread_id,
+            turn_id=self._turn_id,
+            lease_id=self.lease_id,
+            status="delivered",
+            target=target.trace_identity(),
+        )
+        return target
+
+    def fail(
+        self,
+        *,
+        run_id: str,
+        lease_id: str,
+        reason: str,
+    ) -> None:
+        with self._condition:
+            if (
+                self._state not in {"waiting", "validating"}
+                or run_id != self._run_id
+                or lease_id != self.lease_id
+            ):
+                raise DesktopLeaseError("desktop lease does not match the run")
+            self._state = "closed"
+            self._error = str(reason or "desktop handoff failed")
+            self._condition.notify_all()
+        BUS.publish(
+            "desktop_lease_failed",
+            run_id=run_id,
+            thread_id=self._thread_id,
+            turn_id=self._turn_id,
+            lease_id=self.lease_id,
+            status="closed",
+            error=self._error,
+        )
+
+    def wait(
+        self,
+        *,
+        stop_event: Any,
+        deadline: Callable[[], float],
+        clock: Callable[[], float],
+    ) -> _FrozenTarget:
+        with self._condition:
+            while self._state in {"waiting", "validating"}:
+                if stop_event.is_set():
+                    self._state = "closed"
+                    self._error = "run canceled while awaiting desktop lease"
+                    self._condition.notify_all()
+                    break
+                remaining = float(deadline()) - float(clock())
+                if remaining <= 0:
+                    self._state = "closed"
+                    self._error = "desktop lease timed out"
+                    self._condition.notify_all()
+                    break
+                self._condition.wait(timeout=min(0.1, remaining))
+            if self._state == "delivered" and self._target is not None:
+                return self._target
+            raise DesktopLeaseError(
+                self._error or "desktop lease closed without a target"
+            )
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._condition:
+            return {
+                "format": "desktop-lease/1",
+                "run_id": self._run_id,
+                "thread_id": self._thread_id,
+                "turn_id": self._turn_id,
+                "lease_id": self.lease_id,
+                "status": self._state,
+                "error": self._error,
+            }
+
+
 @dataclass(frozen=True, slots=True)
 class _SessionBuild:
     graph: ArpGraph
@@ -273,6 +455,7 @@ class _SessionBuild:
     model: _ModelConfig
     dependencies: _CompositionDependencies
     deadline: Callable[[], float]
+    actor_bundle: PreparedLiveActor
     pause_controller: Any = None
 
 
@@ -514,9 +697,11 @@ def _freeze_model(
     base_url = str(api.get("base_url") or "").strip()
     api_key = str(api.get("api_key") or "").strip()
     model = str(api.get("model") or "").strip()
-    if not base_url or not api_key or not model:
+    native_protocol = native_provider_protocol(api)
+    if not api_key or not model or (not base_url and native_protocol is None):
         raise ValueError(
-            "vNext live canary requires one configured vision model endpoint"
+            "vNext live canary requires one configured vision model endpoint; "
+            "an explicit native provider may use its default base URL"
         )
     profile = model_profile_from_config(api)
     if not profile.supports_vision:
@@ -1642,17 +1827,20 @@ class _ModelCallCounter:
         with self._lock:
             return self._count
 
-    def begin(self, model_role: str, *, reserve: int) -> None:
+    def begin(self, model_role: str, *, reserve: int) -> int:
         if type(reserve) is not int or reserve <= 0:
             raise ValueError("model-call reservation must be positive")
         with self._lock:
             if model_role in self._active_reservations:
                 raise RuntimeError("vNext model role is already in flight")
             reserved = sum(self._active_reservations.values())
-            if self._count + reserved + reserve > self._maximum:
+            available = self._maximum - self._count - reserved
+            if available <= 0:
                 raise RuntimeError("vNext model-call budget exhausted")
-            self._active_reservations[model_role] = reserve
+            admitted = min(reserve, available)
+            self._active_reservations[model_role] = admitted
             self._active_fingerprints[model_role] = set()
+            return admitted
 
     def record_attempt(
         self,
@@ -1678,13 +1866,13 @@ class _ModelCallCounter:
             self._active_fingerprints.pop(model_role, None)
 
 
-def _remaining_model_timeout(
-    build: _SessionBuild,
+def _remaining_timeout(
+    *,
+    clock: Callable[[], float],
+    deadline: Callable[[], float],
     configured_timeout_s: float,
 ) -> float:
-    remaining = float(build.deadline()) - float(
-        build.dependencies.monotonic()
-    )
+    remaining = float(deadline()) - float(clock())
     if not 0 < remaining < float("inf"):
         raise RuntimeError("vNext runtime time budget exhausted")
     return min(float(configured_timeout_s), remaining)
@@ -1693,20 +1881,30 @@ def _remaining_model_timeout(
 class _DeadlineModelAdapter:
     """Add the frozen run's remaining deadline to every SDK request."""
 
-    def __init__(self, adapter: Any, build: _SessionBuild) -> None:
+    def __init__(
+        self,
+        adapter: Any,
+        *,
+        model: _ModelConfig,
+        clock: Callable[[], float],
+        deadline: Callable[[], float],
+    ) -> None:
         self._adapter = adapter
-        self._build = build
+        self._model = model
+        self._clock = clock
+        self._deadline = deadline
 
     def prepare_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
-        prepared = self._adapter.prepare_chat_completion(**kwargs)
-        if type(prepared) is not dict:
-            raise RuntimeError("model adapter returned a non-object request")
-        request = deepcopy(prepared)
-        request["timeout"] = _remaining_model_timeout(
-            self._build,
-            min(
-                self._build.model.request_timeout_s,
-                self._build.model.total_timeout_s,
+        # Deadline and schema guards belong to the canonical Actor request.
+        # Native adapters translate only after these generic invariants hold,
+        # so the Runtime freezes the exact provider wire request.
+        request = deepcopy(kwargs)
+        request["timeout"] = _remaining_timeout(
+            clock=self._clock,
+            deadline=self._deadline,
+            configured_timeout_s=min(
+                self._model.request_timeout_s,
+                self._model.total_timeout_s,
             ),
         )
         tools = request.get("tools")
@@ -1746,7 +1944,10 @@ class _DeadlineModelAdapter:
                         "Visual Actor local_intent schema is unavailable"
                     )
                 local_intent["pattern"] = _NON_WHITESPACE_PATTERN
-        return request
+        prepared = self._adapter.prepare_chat_completion(**request)
+        if type(prepared) is not dict:
+            raise RuntimeError("model adapter returned a non-object request")
+        return prepared
 
     def send_prepared_chat_completion(
         self,
@@ -1778,11 +1979,67 @@ class _BudgetedActor:
         self._counter = counter
 
     def propose(self, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
-        self._counter.begin(VISUAL_ACTOR_MODEL_ROLE, reserve=1)
+        admitted = self._counter.begin(
+            VISUAL_ACTOR_MODEL_ROLE,
+            reserve=self._role.model_call_reservation,
+        )
         try:
+            kwargs["_model_call_limit"] = admitted
             return self._role.propose(*args, **kwargs)
         finally:
             self._counter.finish(VISUAL_ACTOR_MODEL_ROLE)
+
+    def begin_turn(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> VisualActorTurnAdmission:
+        admitted = self._counter.begin(
+            VISUAL_ACTOR_MODEL_ROLE,
+            reserve=self._role.model_call_reservation,
+        )
+        try:
+            kwargs["_model_call_limit"] = admitted
+            return self._role.begin_turn(*args, **kwargs)
+        finally:
+            self._counter.finish(VISUAL_ACTOR_MODEL_ROLE)
+
+
+class PreparedLiveActor:
+    """Exactly-once model resources shared by text admission and visual work."""
+
+    def __init__(
+        self,
+        *,
+        raw_client: Any,
+        actor: _BudgetedActor,
+        counter: _ModelCallCounter,
+        usage_total: dict[str, Any],
+    ) -> None:
+        self.raw_client = raw_client
+        self.actor = actor
+        self.counter = counter
+        self._usage_total = usage_total
+        self._closed = False
+        self._lock = threading.Lock()
+
+    @property
+    def usage_total(self) -> dict[str, Any]:
+        return deepcopy(self._usage_total)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        errors = _close_resources(
+            (("Visual Actor client", self.raw_client),)
+        )
+        if errors:
+            raise ExceptionGroup(
+                "Visual Actor resource cleanup failed",
+                list(errors),
+            )
 
 
 class _RawReceiptTrace:
@@ -2075,7 +2332,9 @@ class _LiveCanarySession:
 
 def _model_attempt_trace(
     *,
-    build: _SessionBuild,
+    run_id: str,
+    mission_id: str,
+    model: _ModelConfig,
     model_role: str,
     counter: _ModelCallCounter,
 ) -> Callable[[ModelAttempt], None]:
@@ -2088,9 +2347,9 @@ def _model_attempt_trace(
             "vnext_model_call",
             runtime_version=_RUNTIME_VERSION,
             no_legacy_fallback=True,
-            run_id=build.run_id,
-            mission_id=build.mission_id,
-            model=build.model.model,
+            run_id=run_id,
+            mission_id=mission_id,
+            model=model.model,
             model_role=model_role,
             attempt=attempt.attempt,
             ok=attempt.ok,
@@ -2101,6 +2360,134 @@ def _model_attempt_trace(
         )
 
     return record
+
+
+def _build_actor_resources(
+    *,
+    run_id: str,
+    mission_id: str,
+    budget: _Budget,
+    model: _ModelConfig,
+    dependencies: _CompositionDependencies,
+    deadline: Callable[[], float],
+) -> PreparedLiveActor:
+    raw_client: Any | None = None
+    try:
+        request_timeout = _remaining_timeout(
+            clock=dependencies.monotonic,
+            deadline=deadline,
+            configured_timeout_s=min(
+                model.request_timeout_s,
+                model.total_timeout_s,
+            ),
+        )
+        native_protocol = native_provider_protocol(model.api)
+        if native_protocol is None:
+            raw_client = create_openai_client(
+                base_url=model.base_url,
+                api_key=model.api_key,
+                timeout=request_timeout,
+                client_factory=dependencies.client_factory,
+            )
+            model_adapter: Any = build_model_adapter(raw_client, model.api)
+        else:
+            raw_headers = model.api.get("custom_headers")
+            if raw_headers is None:
+                raw_headers = model.api.get("headers")
+            if raw_headers is not None and not isinstance(raw_headers, Mapping):
+                raise ValueError("config.api.custom_headers must be an object")
+            raw_client = ProviderProtocolAdapter(
+                family=native_protocol,
+                base_url=model.base_url,
+                api_key=model.api_key,
+                model=model.model,
+                timeout=request_timeout,
+                custom_headers=(
+                    dict(raw_headers)
+                    if isinstance(raw_headers, Mapping)
+                    else None
+                ),
+                transport=(
+                    dependencies.provider_transport_factory()
+                    if dependencies.provider_transport_factory is not None
+                    else None
+                ),
+            )
+            model_adapter = raw_client
+        counter = _ModelCallCounter(budget.max_model_calls)
+        actor_client = _DeadlineModelAdapter(
+            model_adapter,
+            model=model,
+            clock=dependencies.monotonic,
+            deadline=deadline,
+        )
+        usage_total = empty_usage_total()
+        usage_profile = model_profile_from_config(model.api)
+
+        def record_usage(response: Any) -> None:
+            step_usage = accumulate_usage(
+                usage_total,
+                response,
+                profile=usage_profile,
+                api=model.api,
+            )
+            if step_usage is None:
+                return
+            BUS.publish(
+                "agent_usage",
+                runtime_version=_RUNTIME_VERSION,
+                no_legacy_fallback=True,
+                run_id=run_id,
+                mission_id=mission_id,
+                model_role=VISUAL_ACTOR_MODEL_ROLE,
+                step_usage=step_usage,
+                total=deepcopy(usage_total),
+            )
+
+        actor = _BudgetedActor(
+            LiveVisualActor(
+                client=actor_client,
+                model=model.model,
+                runtime=ModelCallRuntime(
+                    clock=dependencies.monotonic,
+                ),
+                total_timeout_s=_remaining_timeout(
+                    clock=dependencies.monotonic,
+                    deadline=deadline,
+                    configured_timeout_s=model.total_timeout_s,
+                ),
+                on_attempt=_model_attempt_trace(
+                    run_id=run_id,
+                    mission_id=mission_id,
+                    model=model,
+                    model_role=VISUAL_ACTOR_MODEL_ROLE,
+                    counter=counter,
+                ),
+                connector_gateway=(
+                    dependencies.connector_factory()
+                    if dependencies.connector_factory is not None
+                    else None
+                ),
+                on_response=record_usage,
+            ),
+            counter,
+        )
+        return PreparedLiveActor(
+            raw_client=raw_client,
+            actor=actor,
+            counter=counter,
+            usage_total=usage_total,
+        )
+    except Exception as exc:
+        cleanup_errors = _close_resources(
+            (("Visual Actor client", raw_client),)
+        )
+        if cleanup_errors:
+            raise ExceptionGroup(
+                "Visual Actor composition and cleanup failed",
+                [exc, *cleanup_errors],
+            ) from exc
+        raise
 
 
 def _target_evidence(
@@ -2383,47 +2770,9 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
                 [exc, *cleanup_errors],
             ) from exc
         raise
-    raw_client: Any | None = None
     try:
-        raw_client = create_openai_client(
-            base_url=build.model.base_url,
-            api_key=build.model.api_key,
-            timeout=_remaining_model_timeout(
-                build,
-                min(
-                    build.model.request_timeout_s,
-                    build.model.total_timeout_s,
-                ),
-            ),
-            client_factory=build.dependencies.client_factory,
-        )
-        actor_client = _DeadlineModelAdapter(
-            build_model_adapter(
-                raw_client,
-                build.model.api,
-            ),
-            build,
-        )
-        counter = _ModelCallCounter(build.budget.max_model_calls)
-        actor = _BudgetedActor(
-            LiveVisualActor(
-                client=actor_client,
-                model=build.model.model,
-                runtime=ModelCallRuntime(
-                    clock=build.dependencies.monotonic,
-                ),
-                total_timeout_s=_remaining_model_timeout(
-                    build,
-                    build.model.total_timeout_s,
-                ),
-                on_attempt=_model_attempt_trace(
-                    build=build,
-                    model_role=VISUAL_ACTOR_MODEL_ROLE,
-                    counter=counter,
-                ),
-            ),
-            counter,
-        )
+        actor_bundle = build.actor_bundle
+        counter = actor_bundle.counter
         catalog = _tool_catalog()
         profile = ExecutionPolicy(
             provider_availability=(),
@@ -2437,7 +2786,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
             profile=profile,
             broker=CapabilityBroker(catalog),
             catalog=catalog,
-            actor=actor,
+            actor=actor_bundle.actor,
             state=state,
             controller=controller,
             evidence_registry=registry,
@@ -2452,7 +2801,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
             authority=authority,
             binding=binding,
             counter=counter,
-            client=raw_client,
+            client=actor_bundle,
             controller=controller,
             runtime_evidence=runtime_evidence,
             frame_artifacts=frame_artifacts,
@@ -2472,7 +2821,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
                 (
                     ("mutation permit authority", permits),
                     ("evidence registry", registry),
-                    ("model client", raw_client),
+                    ("model resources", build.actor_bundle),
                 )
             )
         )
@@ -2971,7 +3320,7 @@ def _validate_goal_admission(
     if (
         raw.get("format") != "goal-admission/1"
         or raw.get("goal") != goal
-        or raw.get("route") != "live_gui"
+        or raw.get("route") != "live_agent"
         or raw.get("runtime_version") != _RUNTIME_VERSION
         or raw.get("reason") != "single_semantic_agent"
         or raw.get("no_legacy_fallback") is not True
@@ -2985,17 +3334,19 @@ class _PreparedHandler:
         *,
         graph: ArpGraph,
         goal: str,
-        target: _FrozenTarget,
         budget: _Budget,
         model: _ModelConfig,
         dependencies: _CompositionDependencies,
+        history: tuple[dict[str, str], ...],
+        desktop_lease: DesktopLeaseSlot,
     ) -> None:
         self._graph = graph
         self._goal = goal
-        self._target = target
         self._budget = budget
         self._model = model
         self._dependencies = dependencies
+        self._history = tuple(deepcopy(history))
+        self._desktop_lease = desktop_lease
         self._claimed = False
         self._lock = threading.Lock()
 
@@ -3055,6 +3406,7 @@ class _PreparedHandler:
                 error="vNext private runtime state is unavailable",
             )
         runtime_state.pop("user_result", None)
+        runtime_state.pop("model_usage", None)
         mission_id = (
             "vnext-mission-"
             + hashlib.sha256(
@@ -3065,24 +3417,7 @@ class _PreparedHandler:
             context,
             goal=self._goal,
         )
-        runtime_evidence_anchor: Mapping[str, Any] | None = None
-        runtime_evidence_summary = (
-            _unavailable_runtime_evidence_summary(
-                mission_id,
-                run_id,
-            )
-        )
         budget_wire = self._budget.to_dict()
-        BUS.publish(
-            "vnext_canary_start",
-            run_id=run_id,
-            mission_id=mission_id,
-            runtime_version=_RUNTIME_VERSION,
-            runtime_budget=budget_wire,
-            no_legacy_fallback=True,
-            model=self._model.model,
-            target=self._target.trace_identity(),
-        )
         pause_controller = context.get("pause_controller")
         deadline = [
             self._dependencies.monotonic()
@@ -3092,6 +3427,138 @@ class _PreparedHandler:
             stop_event,
             clock=self._dependencies.monotonic,
             deadline=lambda: deadline[0],
+        )
+        actor_bundle: PreparedLiveActor | None = None
+        try:
+            actor_bundle = _build_actor_resources(
+                run_id=run_id,
+                mission_id=mission_id,
+                budget=self._budget,
+                model=self._model,
+                dependencies=self._dependencies,
+                deadline=lambda: deadline[0],
+            )
+            BUS.publish(
+                "vnext_canary_start",
+                run_id=run_id,
+                mission_id=mission_id,
+                runtime_version=_RUNTIME_VERSION,
+                runtime_budget=budget_wire,
+                no_legacy_fallback=True,
+                model=self._model.model,
+            )
+            if not self._wait_if_paused(
+                pause_controller,
+                stop_event,
+                deadline,
+            ):
+                raise RuntimeError(
+                    "run canceled before the initial Actor turn"
+                )
+            admission = actor_bundle.actor.begin_turn(
+                self._goal,
+                history=self._history,
+                stop_event=bounded_stop,
+            )
+            if admission.kind == "reply":
+                runtime_state["user_result"] = admission.reply
+                model_usage = actor_bundle.usage_total
+                runtime_state["model_usage"] = model_usage
+                output = {
+                    "runtime_version": _RUNTIME_VERSION,
+                    "runtime_budget": budget_wire,
+                    "no_legacy_fallback": True,
+                    "status": "reply",
+                    "turns_used": 1,
+                    "model_calls": actor_bundle.counter.count,
+                }
+                if model_usage.get("prompt_tokens") or model_usage.get(
+                    "completion_tokens"
+                ):
+                    output["model_usage"] = model_usage
+                BUS.publish(
+                    "vnext_canary_done",
+                    run_id=run_id,
+                    mission_id=mission_id,
+                    runtime_version=_RUNTIME_VERSION,
+                    runtime_budget=budget_wire,
+                    no_legacy_fallback=True,
+                    status="reply",
+                    turns_used=1,
+                    model_calls=actor_bundle.counter.count,
+                    model_usage=model_usage,
+                    detail="",
+                )
+                actor_bundle.close()
+                return NodeResult(
+                    ok=True,
+                    branch="reply",
+                    output=output,
+                )
+            if admission.kind != "desktop":
+                raise RuntimeError(
+                    "initial Actor turn returned an unsupported result"
+                )
+            runtime_state["desktop_lease"] = (
+                self._desktop_lease.request(run_id)
+            )
+            target = self._desktop_lease.wait(
+                stop_event=bounded_stop,
+                deadline=lambda: deadline[0],
+                clock=self._dependencies.monotonic,
+            )
+            runtime_state["desktop_lease"] = (
+                self._desktop_lease.snapshot()
+            )
+            runtime_state["target_binding_id"] = target.binding_id
+        except Exception as exc:
+            runtime_state["desktop_lease"] = (
+                self._desktop_lease.snapshot()
+            )
+            model_usage = (
+                actor_bundle.usage_total
+                if actor_bundle is not None
+                else empty_usage_total()
+            )
+            runtime_state["model_usage"] = model_usage
+            if actor_bundle is not None:
+                try:
+                    actor_bundle.close()
+                except Exception:
+                    pass
+            detail = str(exc) or "vNext initial Actor turn failed"
+            BUS.publish(
+                "vnext_canary_done",
+                run_id=run_id,
+                mission_id=mission_id,
+                runtime_version=_RUNTIME_VERSION,
+                runtime_budget=budget_wire,
+                no_legacy_fallback=True,
+                status=(
+                    RuntimeStatus.CANCELED.value
+                    if stop_event.is_set()
+                    else RuntimeStatus.STATE_REJECTED.value
+                ),
+                turns_used=0,
+                model_calls=(
+                    actor_bundle.counter.count
+                    if actor_bundle is not None
+                    else 0
+                ),
+                model_usage=model_usage,
+                detail=detail[:500],
+            )
+            return NodeResult(
+                ok=False,
+                branch="canceled" if stop_event.is_set() else "fail",
+                error=detail,
+            )
+        runtime_evidence_anchor: Mapping[str, Any] | None = None
+        runtime_evidence_summary = (
+            _unavailable_runtime_evidence_summary(
+                mission_id,
+                run_id,
+            )
         )
         session: _SessionPort | None = None
         turns_used = 0
@@ -3105,11 +3572,12 @@ class _PreparedHandler:
             goal=self._goal,
             run_id=run_id,
             mission_id=mission_id,
-            target=self._target,
+            target=target,
             budget=self._budget,
             model=self._model,
             dependencies=self._dependencies,
             deadline=lambda: deadline[0],
+            actor_bundle=actor_bundle,
             pause_controller=pause_controller,
         )
         try:
@@ -3226,12 +3694,12 @@ class _PreparedHandler:
                         raw_turn_snapshot = session.turn_snapshot()
                         turn_snapshot = _public_turn_snapshot(
                             raw_turn_snapshot,
-                            target=self._target,
+                            target=target,
                         )
                     except Exception:
                         turn_snapshot = _public_turn_snapshot(
                             {},
-                            target=self._target,
+                            target=target,
                         )
                     BUS.publish(
                         "vnext_canary_turn",
@@ -3299,13 +3767,15 @@ class _PreparedHandler:
             terminal_status = RuntimeStatus.STATE_REJECTED
             detail = "vNext live canary failed closed"
         finally:
+            model_usage = actor_bundle.usage_total
+            runtime_state["model_usage"] = model_usage
             raw_completion_snapshot: dict[str, Any] = {
                 "mission_id": mission_id,
                 "run_id": run_id,
-                "target_binding_id": self._target.binding_id,
-                "target_hwnd": self._target.hwnd,
+                "target_binding_id": target.binding_id,
+                "target_hwnd": target.hwnd,
             }
-            model_calls = 0
+            model_calls = actor_bundle.counter.count
             if session is not None:
                 try:
                     model_calls = session.model_calls
@@ -3358,11 +3828,21 @@ class _PreparedHandler:
                             run_id,
                         )
                     )
+            try:
+                actor_bundle.close()
+            except Exception:
+                if terminal_status is not RuntimeStatus.MISSION_VERIFIED:
+                    terminal_status = RuntimeStatus.STATE_REJECTED
+                    detail = (
+                        f"{detail}; model resource cleanup failed"
+                        if detail
+                        else "model resource cleanup failed"
+                    )
             snapshot = _public_completion_snapshot(
                 raw_completion_snapshot,
                 mission_id=mission_id,
                 run_id=run_id,
-                target=self._target,
+                target=target,
             )
             completion_result = snapshot.pop("result", None)
             if terminal_status is RuntimeStatus.MISSION_VERIFIED:
@@ -3384,6 +3864,10 @@ class _PreparedHandler:
                 "accepted_event_ids": list(accepted_event_ids),
                 "runtime_evidence": runtime_evidence_summary,
             }
+            if model_usage.get("prompt_tokens") or model_usage.get(
+                "completion_tokens"
+            ):
+                output["model_usage"] = model_usage
             BUS.publish(
                 "vnext_canary_done",
                 run_id=run_id,
@@ -3394,6 +3878,7 @@ class _PreparedHandler:
                 status=terminal_status.value,
                 turns_used=turns_used,
                 model_calls=model_calls,
+                model_usage=model_usage,
                 detail=detail[:500],
                 runtime_evidence=runtime_evidence_summary,
                 target_binding_id=snapshot.get("target_binding_id"),
@@ -3462,11 +3947,16 @@ def prepare_live_vnext_execution(
     config_snapshot: dict[str, Any],
     *,
     run_manager: Any,
+    thread_id: str,
+    turn_id: str,
+    history: tuple[dict[str, str], ...],
     _dependencies: _CompositionDependencies | None = None,
 ) -> ArpExecution:
     """Validate and register one default-unreachable live vNext execution."""
 
-    dependencies = _dependencies or _CompositionDependencies()
+    dependencies = _dependencies or _CompositionDependencies(
+        connector_factory=ConnectorGateway,
+    )
     if type(config_snapshot) is not dict:
         raise ValueError("vNext live canary config snapshot must be a dict")
     frozen_config = deepcopy(config_snapshot)
@@ -3474,10 +3964,18 @@ def prepare_live_vnext_execution(
     budget = _freeze_budget(frozen_config)
     model = _freeze_model(frozen_config, budget)
     frozen_inputs = deepcopy(_plain_dict(inputs, "inputs"))
-    target = _freeze_prebound_target(
-        graph,
-        frozen_inputs,
+    if frozen_inputs:
+        raise ValueError(
+            "initial vNext Agent inputs must not pre-bind a desktop target"
+        )
+    if not thread_id or not turn_id:
+        raise ValueError("vNext Agent execution requires thread and turn ids")
+    frozen_history = tuple(deepcopy(history))
+    desktop_lease = DesktopLeaseSlot(
+        graph=graph,
         dependencies=dependencies,
+        thread_id=thread_id,
+        turn_id=turn_id,
     )
     prepare = getattr(run_manager, "prepare", None)
     if not callable(prepare):
@@ -3485,10 +3983,11 @@ def prepare_live_vnext_execution(
     handler = _PreparedHandler(
         graph=graph,
         goal=goal,
-        target=target,
         budget=budget,
         model=model,
         dependencies=dependencies,
+        history=frozen_history,
+        desktop_lease=desktop_lease,
     )
     execution = prepare(
         graph,
@@ -3503,13 +4002,18 @@ def prepare_live_vnext_execution(
             "runtime_budget": budget.to_dict(),
             "no_legacy_fallback": True,
             "experience_policy": "disabled",
-            "target_binding_id": target.binding_id,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "desktop_lease": desktop_lease.snapshot(),
+            "_desktop_lease": desktop_lease,
         }
     )
     return execution
 
 
 __all__ = [
+    "DesktopLeaseError",
+    "DesktopLeaseSlot",
     "build_exact_live_vnext_graph",
     "prepare_live_vnext_execution",
 ]

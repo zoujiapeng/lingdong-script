@@ -1182,3 +1182,717 @@ oracle 的实质收益。不能整体 merge 冻结架构来追求表面上的单
 
 这仍是 Git/文档状态变更，不是新的运行时能力或 E2E 结果。最后运行时代码、
 `3373 passed, 13 skipped` 回归和 `5/10` 可见 Electron 矩阵均保持不变。
+
+### 13.13 浮动前端的真实输入验收
+
+2026-07-31 在 `master` 上重新核对可见客户端入口时发现，历史 E2E 虽然通过真实
+鼠标点击目标应用，但 Electron goal 仍由 UIA `ValuePattern.SetValue` 写入。它不
+满足“用户像人一样从前端发送消息”的新验收口径，历史 `5/10` 因此只保留为模型
+对照，不能冒充当前入口通过。
+
+本轮只修改测试基础设施：UIA 继续定位和读回控件，goal 改为 Windows `SendInput`
+逐 UTF-16 unit 键入，再用真实鼠标点击可见“发送消息”。同时适配浮动前端的资料
+入口，并删除“运行时仍 running、但出现后续发送框就算 terminal”的旧 harness
+误判。没有修改 Runtime、工具 schema、系统提示词或模型角色。
+
+按此口径重跑完整矩阵为 `6/10`：试卷本次 6/6，原五个 GUI 通过项继续通过，四个
+corridor 继续失败。四个失败的模型参数、canonical/physical 参数和真实浏览器事件
+已经闭合：v0/v1 提交直线路径，v2/v3 提交的折线路径仍切角；RawDevice 原样执行，
+浏览器分别记录 64–79 个可信 pointer move，最小通道余量为
+`-74/-73/-42/-14`。失败首次出现在模型路径参数，不进入 Runtime 补偿。
+
+冻结分支只读审计没有发现值得 merge 的能力；旧 vNext 和 recovery 树会恢复大量
+profiler、verifier、runtime selector、target pipeline 和重复状态 owner，均不进入
+主线。Pi 状态也不变：只保留最近一笔原生 tool transcript 的已验证语义；没有 Pi
+依赖、RPC 或第二 Runtime。下一项仍是更强原生视觉模型在同一矩阵上的干净 A/B。
+同一源码的 WinPilot 全量回归为 `3377 passed, 13 skipped`。
+
+### 13.14 动作摘要删除 A/B、终态判定与模型切换阻塞
+
+本轮唯一生产候选是删除 Visual Actor 的累计
+`completed_action_summaries`，以及只服务该历史投影的
+`previous_action.semantic_summary` 通路。系统提示词仍为 45 个英文词，八个
+工具、一个原始 goal、一个 `LiveVisualActor` 和一条视觉执行线均未变化。
+
+修复测试终态误判后的有效删除臂报告为
+`output/playwright/completed-history-delete-20260731-r2/20260731-062444-suite/`，
+结果 `5/10`：`precise-click`、`ordered-clicks`、`drag-fit`、`slider` 和
+`dynamic-hold` 通过；试卷提交全部 6 题但只有 5 题正确，30 个 Agent GUI 动作后
+耗尽回合；四个 corridor 仍失败。当前生产保留态的同口径基线是 `6/10`。
+`ordered-clicks` 在删除臂仍通过，不能据此证明累计摘要必需；试卷单样本也不能
+单独建立因果。但删除没有跨任务收益且总结果下降，v0 的重复拖拽增加、v1/v2
+最小净空也变差，因此未达到架构准入门。生产删除已完整回退，当前仍暂留有界
+动作摘要。这是未获准删除，不是为某类任务新增规则。v3 的物理输入没有被浏览器
+事件捕获，存在测试观测歧义，没有用它作为修改 Runtime 的依据。
+
+删除臂第一次运行无效并已排除：匹配 run 的 `current_run` 和 `runtime_jobs`
+仍为 running，但 `/api/status` 顶层 `running` 短暂为 false，旧 harness 又把
+重新出现的“发送消息”当成 terminal，于约 1.9 秒、零 GUI 动作时提前关闭目标，
+随后 Runtime 才报告 `state_rejected`。保留的改动仅在测试 harness：终态判断
+优先检查匹配 run/job 的 `queued/waiting_resources/running/canceling` 状态，再
+参考聚合投影和前端按钮。r2 在该修复后完成完整矩阵；这是测试真实性修复，不是
+Agent 能力提升。
+
+更强模型 A/B 的前置 transport smoke 只发送一张最小 JPEG 和一个通用 tool
+schema；`gpt-5.6-sol` 在返回任何模型响应前收到 HTTP 401
+`AuthenticationError`。当前归因是 credential/infrastructure，不是模型失败，
+也没有形成模型 A/B 结果；没有为此修改 provider gate 或 Runtime。下一轮唯一
+最高价值实验仍是恢复有效 credential 后，在完全相同的 10 项矩阵上做更强原生
+视觉模型 A/B。
+
+### 13.15 原生 Explorer 长任务与重复 goal 去重负实验
+
+用户暂时排除模型切换后，本轮先补了一条非浏览器、真实消费软件链路。测试先在
+原生 Explorer 打开只含三个随机标识文本文件的隔离目录，再从可见 Electron
+新对话中用操作系统键盘输入完整目标、用真实鼠标点击发送，最后把控制权交给
+Explorer。目标要求依次重命名三个文件、新建目录并移动其中两个文件；命令行只
+用于测试 setup 和独立文件系统 oracle，没有代替 Agent 的界面动作。
+
+生产保留态对照 run `arp-20260731-072140-0f4b81` 有一次首轮
+`APIConnectionError`，随后恢复并完成 29 次真实输入。每次
+`physical_attempt` 都落在正确 Explorer HWND，模型参数、canonical 参数和物理
+参数逐项一致；但外部终态只有
+`cobalt-7Q4M.txt / jade-7Q4M.txt / north-7Q4M.txt.txt`，没有目录。模型在
+Explorer 只选中基础文件名、扩展名保留的重命名状态下输入了完整 `.txt`，然后
+多轮重复同一选择、F2、输入和确认序列。首个分歧在模型对可见应用状态的理解与
+自我纠错，不在窗口绑定、坐标换算或键盘实现。
+
+随后只做一个 `+0/-3` 的生产候选：从 Actor 的 provider 序列化视图删除与
+`original_goal` 完全重复的 `desired_state`、`acceptance_criteria` 和固定
+`required_capabilities`；canonical 对象仍保留全部字段，系统提示词、工具面、
+角色和执行线不变。聚焦测试为 `29 passed`。实验 run
+`arp-20260731-073504-a24efb` 的 29 次真实输入同样全部 applied，并最终正确完成
+前两个重命名；但第 30 turn 后的外部终态仍是
+`center-7Q4M.txt.txt / north-7Q4M.txt / south-7Q4M.txt`，没有创建目录或移动
+文件。最后一次模型调用还把 `click.image_y` 生成为错误类型，Runtime 按 schema
+拒绝并以 `invalid_proposal` 结束。
+
+重启 Electron 后，前端把这个已失败 run 恢复成“已中断”。只读追链确认这是另一
+条通用基础设施缺口：trace 已有 `vnext_canary_done` 和失败的 `arp_node_done`，
+但外层 `arp_run_done` 在 trace recorder 关闭后才发布，只存在于当时的内存
+BUS/WebSocket；重启恢复投影因此按设计把缺少外层终态的 run 标为 interrupted。
+它影响历史状态真实性，不改变 Explorer 外部终态或本次模型归因。本轮不把 node
+终态冒充 run 终态，也不为这条旁路问题修改生产代码。
+
+删除臂有部分进展，但没有完成用户任务；单样本又受到对照首轮连接错误和模型采样
+波动混杂，不能建立因果，更不能把“走得更远”当作 E2E pass。三行生产删除和对应
+测试已完整回退。没有增加 Explorer 规则、扩展名修正、重复点击 gate、额外回合、
+提示教学或新模型角色。
+
+Pi `0.83.0` 的只读复核也没有改变结论：可复用的只是主线已搬入的最近一笔原生
+tool exchange；Pi 不提供 Windows 目标发现、激活、截图或输入。冻结
+`codex/vnext-agent-core` 的 target acquisition 又与大量 profiler/verifier 和
+重复 owner 耦合，当前没有两任务族基础设施失败证据，不能 merge。
+
+模型切换暂停期间，下一轮唯一最高价值实验是对上述三字段去重做严格的重复配对
+A/B：至少覆盖原生文件组织和原生文本编辑两个任务族，保持同一前端物理输入、
+外部 oracle、回合预算和模型配置；只有完整任务成功率跨族提高才保留，否则继续
+维持当前零生产改动状态。
+
+### 13.16 GitHub 未完成项与真实软件全量复验
+
+2026-07-31 本轮先同步并核对 GitHub 全部开放 issue、历史 PR 和未解决 review
+thread，再按当前单视觉主线逐项运行仍有意义且可安全执行的 E2E。所有有效 run
+都从可见 Electron 空会话用操作系统键盘输入目标、用真实鼠标发送，再把前台交给
+目标窗口；命令行只做 fixture、runner 和独立 oracle。Runtime、45 词系统提示、
+八个工具、模型角色和视觉执行线均未改变，生产代码为 `+0/-0`。
+
+受控矩阵的干净重跑报告在
+`output/playwright/github-open-e2e-20260731/controlled-suite-r2/20260731-081832-suite/`，
+结果为 `5/10`：
+
+- `precise-click`、`ordered-clicks`、`drag-fit`、`slider`、`dynamic-hold`
+  通过；
+- 随机试卷只有 4/6；
+- `corridor-v0/v1/game-drag-v2/corridor-v3` 的最小净空分别是
+  `-24/-69/-12/-9`。
+
+失败样本的模型参数、canonical 参数和物理轨迹一致；浏览器 trusted oracle
+首先看到错误答案或出界路径。第一次矩阵运行因 runner stdout 管道被提前关闭而
+抛出 `OSError`，只记测试干扰，不计产品结果。
+
+本轮真实软件和原始任务结果如下。表中的“通过”要求同时有 Runtime 正常终止和
+屏幕、文件或客户端回复等外部证据；通用 runner 因未配置 case verifier 仍会把
+这些样本自动标成 `unverified`，不能反过来否定外部事实。
+
+| 探针 | run | 外部结果 | 首次分歧 |
+| --- | --- | --- | --- |
+| Notepad #41 | `arp-20260731-083528-c1551a` | 文件精确为 `E2E-ALPHA-729`，磁盘 SHA256 为 `DBB27DB7B57FDC2D1532D9BA3198AC1454140080604CF7209FE2FC0151F55381`；通过 | 通用 runner 未接 verifier，属于测试假阴性 |
+| Calculator #40 | `arp-20260731-083823-b89317` | 30 次真实点击后显示 `11`，不是 `703` | 模型定位和重复清除；canonical/physical 一致 |
+| Paint #44 | `arp-20260731-084409-027ab9` | 期望格内外红像素均为 0，没有红 X | 模型停留在颜色控件，没有选择绘图动作 |
+| 网易云“梁静茹 + 5%” | `arp-20260731-085045-937f4d` | 歌曲已播放，但应用可见音量约 2%，CoreAudio 主音量为 0% 且静音，均不是 5% | 模型精度/停止失败；oracle 另有应用音量与主音量混淆 |
+| QQ 群摘要 | `arp-20260731-085623-10423f` | 真实画面进入至少一个群，但没有跨群覆盖或汇总，30 turn 耗尽 | 模型覆盖/停止失败；oracle 又把已进入群误报为 0 |
+| QQ 空间“点赞看到的所有说说” | `arp-20260731-111613-e99fd9` | 从 QQ 主窗口因果接管 QQ（浏览）窗口；30 turn / 193.218 秒、30 次物理动作全部 applied。至少三条灰色赞变成蓝色，但终态当前视口仍至少有两条灰色未赞，外部 oracle 失败 | 模型从第 19 turn 起连续 11 次点击同一错误位置，覆盖、自纠错和停止失败；窗口接管、canonical 和物理输入没有分歧 |
+| Krita 手机 | `arp-20260731-090305-4ab344` | 创建 1080×1920 文档并画出粉红竖矩形，仅是部分手机轮廓；未完成、未保存 | 16 次模型调用耗时 291.916 秒，物理执行 2.336 秒；300 秒是终止点，但只有一个任务族证据 |
+| 网易云“周杰伦第一首” | `arp-20260731-092235-f09538` | 搜索结果第一行与底部播放器为同一首周杰伦歌曲，处于播放态；通过 | 无产品分歧 |
+| 抖音 `kimi k3` | `arp-20260731-093313-aecc7c` | 搜索框和结果页均显示 `kimi k3`；通过 | 无产品分歧 |
+| Wireshark 最近流量 | `arp-20260731-093836-612d39` | 打开最近捕获的 109 个包，并在 Electron 汇总 DHCP、ICMPv6、IGMPv2、LLMNR、NBNS；与包列表一致，通过 | 无产品分歧；仍缺固定 pcap 的自动事实 oracle |
+| Paint 画花 | `arp-20260731-094242-05b4de` | 21 次点击全部在颜色面板循环，画布保持空白 | 模型动作选择循环；不是 300 秒预算导致 |
+| “那你干嘛” | `arp-20260731-094953-8117f7` | 模型文字上识别为非可执行对话，却仍无意义点击 Paint 画布 | 模型意图判断与动作选择自相矛盾 |
+| “演示能力” | `arp-20260731-095141-028681` | 模型声称画出字母 H，外部画面只有两条竖线 | 模型视觉自验和停止错误 |
+| OneNote → Word | `arp-20260731-095532-c14984` | 当前笔记 fixture 存在；模型进入 File/Export 后 blocked，未出现 Word 窗口或工件 | 模型规划/恢复，没有采用复制、启动 Word、粘贴的通用路径 |
+
+原始网易云第一次提交以及抖音的启动器 HWND 两次提交都在 Agent 启动前被
+`current Electron target mismatch` 拒绝。前者没有先建立目标前台基线，后者的
+启动器随后换成真实主窗口；改用稳定主窗口后同源码通过。这些只记为
+fixture/handoff 测试干扰，不计模型失败，也没有据此增加 target discovery owner。
+
+`client_e2e_run.py` 的 original/mixed 目录仍不能作为正式验收统计：
+
+- 通用 case 没有 `independent_verifier`；
+- `max_steps` 只是报告元数据，实际 Runtime 仍是
+  `30 turns / 300 seconds / 60 model calls`；
+- vNext 的 persistent 判定仍依赖 Legacy `open_conversation/read/wait` 事件；
+- mixed 仍是拼接字符串，不是 turns、工件依赖、阶段 oracle 和 final oracle。
+
+因此不能把批量 `passed=false` 写成产品 0/N，也不能把 Runtime `done` 写成任务
+通过。QQ 空间点赞已经作为上表单项真实运行，并至少产生三次外部点赞；它仍因没有
+覆盖当前可见说说而失败。再次复跑仍须在下一次真实点赞前满足动作时确认。发送
+截图/图片、Krita→QQ 发文件和持续聊天仍包含外部代表性动作；`mix-drawing-handoff`
+和 `mix-all-11` 因而没有静默运行。旧 immutable paired campaign 还绑定已冻结的
+Legacy/vNext 双线，不为跑历史账本恢复 selector 或第二 Runtime。
+
+本轮没有新的生产实验获准，也没有新增生产实验需要回退。既有最近一笔原生
+tool exchange、单 `LiveVisualActor` 和机械执行链继续保留；上一轮三字段
+`+0/-3` 删除臂和更早的累计动作摘要删除臂都因没有跨任务完成率收益而保持回退。
+模型失败覆盖算术、路径几何、应用状态理解、重复动作、长任务规划、自纠错和停止；
+基础设施缺口是 original/mixed oracle、QQ/网易云 oracle 债务和外层终态持久化；
+测试干扰是 stdout 管道、未预激活目标和启动器 HWND 变化。上述基础设施问题均
+没有解释真实外部任务失败，本轮不修改 Runtime。
+
+当前架构仍符合一个原始 goal、一个 LiveVisualActor、一条视觉执行线和小型通用
+工具面的思想。模型同时承担意图、视觉、schema、短期状态、恢复和停止，压力仍高；
+Krita 中 300 秒有 291.916 秒消耗在模型调用，说明长任务吞吐受模型延迟影响，
+但现有证据没有达到两个任务族“正确持续推进却被同一机械边界截断”的准入门。
+
+Pi 计划不变：只保留已搬入并通过 E2E 的最近一笔原生 exchange 语义，不安装 Pi
+依赖、不加 Node↔Python RPC、不建立第二 Runtime。只有 Pi 能整体替换并删除当前
+模型循环 owner，且跨任务族 E2E 明显提高时才继续引入。
+
+模型切换暂停期间，下一轮唯一最高价值实验仍是对上一轮三字段去重做严格重复配对
+A/B：同一源码、模型、预算和真实前端入口，至少覆盖 Explorer 文件组织与 Notepad
+文本编辑，并只按外部 oracle 的完整任务成功率决定是否保留；如果仍无跨族收益，
+继续维持零生产改动。
+
+### 13.17 三字段去重严格交叉配对
+
+2026-07-31 按 13.16 预注册口径完成两组交叉顺序、两个原生任务族、A/B 各两次的
+8-run 小样本。A 是当前保留态；B 只从 Actor provider 视图删除与
+`original_goal` 重复的 `desired_state`、`acceptance_criteria` 和固定
+`required_capabilities`，canonical 合同、系统提示、工具面、模型、预算与执行线
+均不变。每次都从可见 Electron 空会话用操作系统键盘输入原始目标、用真实鼠标
+发送，再由 Agent 操作 Explorer 或 Notepad；只按文件系统或磁盘内容 oracle 判定。
+
+| 配对 | 臂 | Explorer | Notepad |
+| --- | --- | --- | --- |
+| P1 | A | `arp-20260731-120025-838593`；失败，20 次 applied 后 300 秒耗尽；双扩展且无目录/移动 | `arp-20260731-120818-078de7`；精确 `E2E-ALPHA-N1X7`，通过 |
+| P1 | B | `arp-20260731-121614-10690b`；失败，29 次 applied 后 turn 耗尽；双扩展/重复拼接且无目录/移动 | `arp-20260731-122329-291212`；Runtime done，但外部为 `E2-ALPHA-N1X7`，失败 |
+| P2 | B | `arp-20260731-122716-1f3bc5`；失败，30 次 applied 后 turn 耗尽；三个双扩展且无目录/移动 | `arp-20260731-123127-cdd90f`；精确 `E2E-ALPHA-N2K9`，通过 |
+| P2 | A | `arp-20260731-124027-c371a4`；失败，26 次 applied、2 次安全拒绝后 invalid proposal；无目录/移动 | `arp-20260731-124427-4677c7`；精确 `E2E-ALPHA-N2K9`，通过 |
+
+原始外部计分为 A：Explorer `0/2`、Notepad `2/2`；B：Explorer `0/2`、
+Notepad `1/2`。B 没有带来任何 Explorer 完整成功，也没有跨任务族收益，故三行
+生产删除和对应候选测试均完整回退，当前生产代码仍为 `+0/-0`。B 的 Notepad
+原始分数较低不能直接证明字段删除造成负化：该 run 的模型 proposal、canonical、
+submitted 和 physical 参数均精确为 14 字符 `E2E-ALPHA-N1X7`，RawDevice 也报告
+`requested=14/completed=14`，但紧随其后的封存画面和磁盘都少第三个 `E`。首次
+分歧在物理输入意图/回执与应用外部状态之间，属于输入交付/应用边界基础设施样本，
+但现有单样本不能确定是 SendInput、事件调度还是应用处理；模型随后仍 claim done，
+则另有视觉复核和停止错误。
+
+配对做了 P1 A→B、P2 B→A 的顺序反转，模型、预算、fixture 和工具合同一致；但
+真实 Explorer 的首帧选中态和导航栏布局仍有轻微漂移，run artifact 也没有封存
+每臂源码 hash 或完整 provider request。因此本轮只能证明 B 未达到保留门，不能把
+原始 `2/4` 对 `1/4` 写成字段删除导致回归的强因果结论。
+
+四次 Explorer 的首次任务分歧均在模型层：进入重命名后，屏幕只选中文件主名，
+模型却显式输入带 `.txt` 的完整名字；proposal、canonical、physical 与外部
+双扩展逐项一致。
+后续重复输入、地址栏误触、额外 Enter 打开关联应用、恢复失败和错误 schema 都发生
+在建目录或移动之前。provider 延迟和 turn/时间预算是终止因素，不是这些任务错误的
+起点；窗口绑定、跨窗口接管与 stale action 拒绝按合同工作。
+
+此前 P1-A 两次尝试在发送前被 runner 拒绝，原因是长中文目标换行后 UIA
+`ValuePattern` 只返回首个视觉行。runner 仍只用操作系统键盘写入，但现在可用只读
+`TextPattern` 核对完整可见文档；聚焦 harness 回归为 `41 passed`。这两次没有
+run id 的样本被排除，不属于上述 8 次有效运行，也不解释有效任务失败。
+
+当前架构仍是一个原始 goal、一个 `LiveVisualActor`、一条视觉执行线和小型通用
+工具面；没有增加提示词、角色、分类器、应用规则或修正器。模型同时承担意图理解、
+视觉状态、schema、长程计划、恢复、自验和停止，Explorer 的重复耗散说明压力仍高；
+本轮没有把这些模型失败下放给 Runtime。
+
+Pi 引入计划不变：只保留已经搬入且有 E2E 证据的最近一笔原生 tool exchange
+语义，不安装 Pi 依赖、不加 Node↔Python RPC、不建立第二 Runtime。只有 Pi 能整体
+替换并删除当前模型循环 owner，且在不同任务族提高完整成功率时才继续搬运。
+
+下一轮唯一最高价值实验是不改生产代码，先用同一可见 Electron 入口，在两个不同
+原生任务族重复验证短字符串尤其相邻重复字符的 `type_text` 交付，并同时封存模型、
+canonical、physical、紧随帧和外部 oracle。只有“前三层完整、外部仍丢字”跨族
+复现，才允许对通用 SendInput 边界做单变量 A/B；否则维持当前输入实现。
+
+### 13.18 `type_text` 跨原生任务族交付复验
+
+2026-07-31 按 13.17 的停止规则冻结了 4 个 token，长度为
+`12/12/48/48`，每个分别运行一次 Notepad 精确替换保存和 Explorer 唯一子目录
+重命名，共 8 个槽位；顺序为 P1 Notepad→Explorer、P2 Explorer→Notepad、
+P3 Notepad→Explorer、P4 Explorer→Notepad。所有运行保持同一
+`mimo-v2.5`、vNext `30 turns / 300 seconds / 60 calls`、空 session、可见
+Electron、操作系统键盘输入原始 goal 和真实鼠标发送。Explorer 改用无扩展名目录
+重命名，排除了文件扩展名选区这一模型语义混杂；命令行只准备 fixture 和读取外部
+oracle。
+
+| 槽位 | 任务族与 run | `type_text` 交付 | 独立外部结果 |
+| --- | --- | --- | --- |
+| P1 | Notepad `arp-20260731-144901-8331bd` | `12/12` | 精确 12 bytes；SHA256 `0F3A19EBA066F15CDF69FAE9D722D6501F25B4C57A586E62F8DF772B0659BFDA` |
+| P1 | Explorer `arp-20260731-145621-d06db3` | `12/12` | 唯一目标目录；sentinel `B46716CFFB544EEFE6C7634409E33BEABC200529D90122F441AD70E3A67F6526` |
+| P2 | Explorer `arp-20260731-145917-baeed3` | `12/12` | 唯一目标目录；sentinel `F642C96E436E4C610627A69BF3565045F838E787B06AFDAA272E72128C958008` |
+| P2 | Notepad `arp-20260731-150420-e73e76` | `12/12` | 精确 12 bytes；SHA256 `3A6DF86714CB2A74C1DEF5B0FF473D90D3C443A8CBE73EFA997D8FCD2FAE7E27` |
+| P3 | Notepad `arp-20260731-151623-4610da` | 两次均 `48/48` | 精确 48 bytes；SHA256 `0D3AD0DA445C1ADA06FB060FAB3ECBD1B087599CB163FB3D9B6B0A14852F7F8B` |
+| P3 | Explorer `arp-20260731-152205-793011` | `48/48` | 唯一目标目录；sentinel `B0476452BA49329FF8EA9B6DED0F9D8C72203D313E2A311343D9FB2B6DD6DC78` |
+| P4 | Explorer `arp-20260731-152534-35173c` | `48/48` | 唯一目标目录；sentinel `1A3D2153F941013C7D01A35D89953E13B47F4DCCDCBB3193FCAFC16255A3DFCC` |
+| P4 | Notepad `arp-20260731-152945-6bbca3` | 五次均 `48/48` | 失败；磁盘仍为初始 18 bytes，300 秒耗尽 |
+
+8/8 槽位都至少有一次模型 proposal、canonical、submitted 和 physical 文本与
+预注册 token 完全相同，RawDevice `requested=completed=token length`，目标 HWND
+正确，且约 300–470ms 后的稳定帧没有字符丢失；同一槽位内的重复输入不能膨胀样本
+数。因此 13.17 的单次缺 `E` 仍是输入交付/应用边界历史观察，但本轮没有跨族复现，
+不准入 `type_text` 或 SendInput 生产改动，也不能反向宣称该边界永远无故障。
+
+真实完整任务结果为 `7/8`。唯一失败的 P4 Notepad 在第一次
+`click → Ctrl+A → type_text` 后，内存已经是精确 48 字符，标题为 dirty，状态栏为
+第 1 行第 49 列；但约 592×411 的小目标帧水平滚到最右，只显示从 `DEE...` 开始的
+后缀。模型把不可见前缀误判为未输入，随后重复 5 次完整输入，从未执行 `Ctrl+S`，
+最终耗尽时间预算。首次任务分歧在正确输入后的模型进度、自验与停止决策；provider
+长延迟放大耗散，窗口绑定、canonical 和物理输入没有先分歧。小窗口是合法桌面状态
+和明确压力源，不是测试干扰，也不支持自动最大化、Notepad 规则或提示教学。
+
+用户指出窗口尺寸后，另做了一次不计入预注册 8 槽位的探索性单变量对照。全新最大化
+Notepad 在相同 token、goal、模型和预算下运行
+`arp-20260731-154047-e6f06f`，模型只执行
+`click → Ctrl+A → type_text → Ctrl+S`，磁盘严格为 48 bytes，SHA256
+`AD2D6588D5437A0534683476D5D7A2FE9726BE22E381772C3F521C1B9C5FB14A`，外部任务
+已经成功。保存后的模型调用先等待 83.479 秒并返回 `APITimeoutError`，重试又返回
+`APIConnectionError`，所以 Runtime 最终为 `actor_error`，没有 claim done。该
+样本应双口径记录为“用户任务 pass、Runtime 终态健康 fail”；它中等强度支持水平
+视口是循环触发器，但单次探索不足以证明充分因果。
+
+本轮另有两次非文本按键的跨族边界观察：P3 Notepad 首次 `Ctrl+A`、P4 Explorer
+首次 `Enter` 都是 proposal、canonical、physical 和回执完整，但稳定外部画面未
+生效，模型随后自行纠正。它们不允许加入重复按键规则，却使下一轮可以只读准入一个
+通用 physical-key/focus/application-consumption 单变量复验：沿同一真实前端，
+在至少两个任务族固定复现当前态与一个现有通用输入实现的测试臂，只有两个任务族的
+外部成功率都提高才考虑替换并删除现 owner。生产代码本轮仍为 `+0/-0`，没有候选
+获准，也没有新候选需要回退。
+
+架构仍是一个原始 goal、一个 `LiveVisualActor`、一条视觉执行线和小型通用工具面。
+模型仍同时承担视觉状态、计划、恢复、自验和停止，小视口循环说明压力很高，但这些
+职责没有下放给 Runtime。Pi 计划不变：只保留已经证明的最近一笔原生 tool exchange
+语义；除非 Pi 源码能整体替换并删除当前模型循环 owner 且跨任务族提高完整成功率，
+否则不安装依赖、不加 RPC、不建立第二 Runtime。
+
+### 13.19 聊天常驻与按需桌面租约：当前链路失败、候选未准入
+
+2026-07-31 用当前 `master`
+`fba5d7bb6dcb13c46e93dbc29bc3cef44e560622` 做了真实可见 Electron
+复现。先从前端新建对话，再启动一个受控空白 Notepad 作为唯一外部目标；用操作系统
+键盘输入“请只回答：`CHAT-VISIBLE-7Q31`，不要操作电脑。”，并用真实鼠标点击发送。
+发送前 Electron 可见；发送点击结束后立即读取窗口就得到
+`window is minimized`，而 ARP 尚未开始模型调用。run
+`arp-20260731-171040-dafc25` 随后绑定 Notepad HWND `25301608`，读取一张
+权威外部帧，用一次 `mimo-v2.5` Visual Actor 调用
+`claim_obligation_done`，零 `physical_attempt`，最终记作
+`mission_verified`。
+
+产品终态没有自行 `restore/show`；必须由测试者手动激活 Electron 才能看到
+“任务完成”和
+`Answered CHAT-VISIBLE-7Q31 as requested without operating the computer.`。
+这不是 direct reply，也没有让聊天窗口在等待期间保持可见。证据在
+`python/winpilot_home/traces/arp-20260731-171040-dafc25.jsonl` 和被 Git 忽略的
+`output/playwright/chat-desktop-lease-spike-20260731/live-electron-chat-baseline.json`。
+因此当前失败首先属于入口/窗口生命周期基础设施：所有消息都在模型判断前执行
+`prepareDesktopHandoff → setSkipTaskbar(true) → minimize`；当前 vNext 又只接收
+预绑定 GUI target。模型本次没有产生物理误操作，但把聊天写成带视觉证据的任务完成，
+属于该错误协议允许的后续语义错误。
+当前 UI 还只是把独立 run 排成对话外观；新一轮没有把该 thread 的前一轮用户/模型
+交换交给模型，因此也尚不具备 Codex 式上下文聊天。后续只能复用有界的最近原生
+exchange，不得为此恢复无界历史、长期 memory owner 或第二 conversation role。
+
+同时做了不改生产代码的同模型 transport 冻结实验。唯一通用工具是零参数
+`observe_desktop`，`tool_choice=auto`、temperature 0、每例一次请求：
+
+| 实验臂 | 严格结果 | 观察 |
+| --- | --- | --- |
+| 113 字系统提示 | `7/12` | 两个聊天样本错误申请桌面；三个 GUI 样本同时返回 tool 和 prose，违反当前严格协议 |
+| 零系统提示 | `9/12` | 6/6 GUI 均干净申请桌面；两个聊天请求分别连接错误和超时；算术样本仍错误申请桌面 |
+| 零提示受干扰样本原样复跑 | `1/2` | 天空解释恢复为直接回复；问候仍连接错误 |
+
+零提示明显优于增加教学，也消除了 GUI 的 tool+prose 形状问题；但在有 provider
+响应的普通聊天里仍有算术误申请桌面，问候又尚无稳定结果。不能用关键词 router、
+额外 prompt 或答案修正关闭这些失败。一个 deterministic、零生产代码的协议原型
+另外证明：同一 adapter、同一 `vnext_visual_actor`、零 classifier、零系统提示，
+可以解析 direct reply、observe-only 和 observe-with-content，并拒绝未知工具与空
+响应；它只证明数据契约，不证明当前模型选择质量。
+
+正确候选不是“前端先判断聊天”，也不是复活 Legacy `/api/chat`。它应保持一个原始
+goal 和同一个 `LiveVisualActor` 实例：首轮无截图直接回复，或调用
+`observe_desktop`；只有后者才发布带 `run_id + lease_id` 的一次性桌面租约，Electron
+同步让出前台并确认后，后端才冻结 target、取得首帧并把同一 Actor 继续接入现有
+`MissionRuntime`。匹配租约的成功、失败或取消必须由产品自行
+`restore/show`，stale run 不得恢复别的运行。直接回复必须是独立 `reply` 终态、
+零物理动作，不能伪造 mission evidence。
+
+这一正确切片预计需要约 `250–330` 行净新增生产代码并跨越 Actor 构造、延迟 target、
+ARP reply 终态、租约 HTTP、renderer 和 Electron 生命周期。当前选择实验未达到足以
+承担这项结构改动的准入线，因此本轮生产代码仍是 `+0/-0`；保留根因、外部 E2E
+失败证据、零提示方向和测试型协议原型，回退“删掉 minimize”“按异步 action-start
+事件隐藏”“第二模型/旧聊天链”以及立即落地整套租约的候选。
+
+下一轮唯一最高价值实验仍不改生产代码：在 provider 稳定窗口对冻结的零提示
+reply/observe 矩阵做预注册重复，并以 direct reply 精确文本、desktop lease 选择、
+tool shape 和错误率为唯一 oracle。只有聊天与至少两个 GUI 任务族均达到准入线，才
+实现 run-bound lease，再执行真实鼠标键盘的
+`chat-visible → controlled GUI → contextual chat-visible`；最后一轮必须能回答前一
+GUI 轮产生的随机值，且在任何 harness 强制恢复窗口之前判定产品是否自行恢复。
+
+当前架构在 GUI 执行内部仍满足一个 goal、一个 Visual Actor 和一条视觉线，但产品
+入口还不符合新架构思想：它在模型表达意图前把所有消息预分类为 GUI，事实上剥夺了
+同一模型聊天或未来选择 shell/provider 的能力。模型在 GUI 后仍承担视觉、计划、
+恢复、自验和停止，压力很高；正确按需租约不会再加角色，只把“是否需要外部状态”
+还给同一个模型。Pi 引入计划不变：仅复用已证明的原生 tool exchange 语义；Pi
+当前没有可直接搬入的 Windows handoff/restore owner，不安装依赖、不加 RPC，也不
+为聊天建立第二 Runtime。
+
+### 13.20 同一 Actor 的 Thread/Turn、按需桌面与连续对话：准入并通过
+
+本轮按 Codex 公开的产品合同而不是软件样式做职责对齐：一个 Thread 包含连续
+Turns，一次 Turn 包含用户输入、模型回复或工具动作；computer use 是同一 Turn 中
+模型可选的能力，不是前端预分类出来的另一类任务。实现没有接回 `/api/chat`，也没有
+增加 conversation responder、关键词 router 或第二模型。`LiveVisualActor` 在零
+系统提示的首轮只看到有界原生文本历史和一个零参数通用工具
+`observe_desktop`：它可以直接产生 `reply`，也可以申请桌面。只有后者才发布一次性
+`run_id + lease_id`，Electron 收到请求后再让出前台、冻结当时的精确 target，并把
+同一个 Actor 接入原有视觉线。
+
+服务端新增小型内存 Thread/Turn owner：同一 Thread 同时只允许一个活动 Turn，只把
+有真实用户结果的成功 `reply/done` 放入未来历史，最多 12 条原生消息、16 KiB；
+失败 Turn 不污染上下文。前端只保存不透明 `thread_id` 和 run id，新建对话显式
+重置。它不是长期 memory、没有摘要模型；当前服务进程重启后 thread 不持久化，是
+明确剩余边界。
+
+桌面租约使用 `idle → waiting → validating → delivered/closed` 的精确状态机。
+目标验证和 bind 只接受同一 run/lease；响应丢失时前端先查询服务端真实状态，
+`delivered` 不得误恢复，仍为 `waiting` 时也必须等精确 fail 返回 `closed` 后才能
+恢复。matching terminal 由 Electron 自行 `restore/show`，非当前 run 的准确终态也
+会释放它自己的 handoff；stale、重复或别的 run 不能改变当前窗口。未开始就失败的
+vNext job 现在同样发布 `arp_run_done`，避免 Thread 和窗口永久停在 queued。
+
+生产实现共修改 15 个文件，`+1372/-155`，净增 1217 行。规模高于 13.19 的早期
+`250–330` 行估计，主要是此前估计遗漏了 server-owned Thread/Turn、响应丢失和
+TOCTOU、非当前 run 恢复、未启动 terminal 清理及跨 Python/Electron 的合同测试面。
+这是本轮最明显的架构成本；没有用应用规则或更多 prompt 换取代码量。测试与文档不计
+入该生产行数。
+
+合同验证为：
+
+- Visual Actor `33 passed`；
+- live canary composition `79 passed`；
+- orchestrator API/runtime `84 passed`；
+- Thread Store `2 passed`；
+- 聚焦生产回归合计 `153 passed`；
+- Electron harness `36 passed`，QQ harness `7 passed`；
+- renderer `22 files / 234 passed`，TypeScript typecheck 通过；
+- 最终 Python 全量 `3388 passed, 13 skipped`。此前两项失败只是 contract version
+  与静态 export 快照，更新后完整重跑已清零。
+
+真实验收在当前源码的冷启动 Electron 上完成，随机 nonce 为 `c419bb42`，同一
+Thread 为 `thread-f0d94cfbf8c843a59f5f59ec94584fb3`。所有消息都从可见前端用操作
+系统键盘输入并以真实鼠标发送：
+
+| 顺序 | 目标与外部结果 | 桌面/窗口 |
+| --- | --- | --- |
+| 1–4 | 精确回复 `A-c419bb42`、基于上文改为 `B-c419bb42`、算出 `95`、倒序为 `gamma beta alpha` | 均为 `reply`；lease idle；Electron 全程可见 |
+| 5 | 记住选择 `B` | 首次 provider `Connection error`；普通用户原样重发后回复 `B`，失败 Turn 未进入历史 |
+| 6 | 同时回忆第 3 轮与最近选择 | 精确回复 `95-B`；lease idle |
+| 7 | 明确要求只用鼠标键盘把当前 Notepad 全文替换并保存 | Actor 首轮后才申请 lease；精确绑定 HWND `4919522`；三笔 applied 原始动作 `Ctrl+A → type_text → Ctrl+S`；产品终态自行恢复 |
+| 8 | 恢复后追问上一轮保存的完整文本 | 首次 provider `Connection error`；原样重发后精确回复 `DESKTOP-c419bb42`；同一 Thread、lease idle、零 target/physical evidence |
+
+桌面任务的独立文件 oracle 为 16 bytes `DESKTOP-c419bb42`，SHA256
+`AF4166A750386EABFA8D2141045366EEEBDB62AE397642D2ABEEDC5859D6ECB8`；
+第 8 轮后 hash 和 mtime 均未再变化。第 7 轮外部任务完成，但模型最终文本是
+“已完成：文本已全部替换……”而不是目标要求的严格“只回复已完成”，因此双口径记录
+为“桌面结果 pass、回复格式轻微 model fail”，不能把外部成功抹掉，也不能用 Runtime
+修正文案。两次 `Connection error` 都发生在一次模型 transport、租约 idle、零动作
+之前，属于 provider/基础设施干扰；原样重发成功，不支持增加 Runtime 自动重试。
+
+保留的实验是零首轮系统提示、唯一 `observe_desktop`、同一 Actor 跨租约继续、有界
+成功 Turn 原生历史、run-bound lease 和产品自主恢复。13.19 的 113 字教学提示继续
+按负优化回退；前端预隐藏/预绑定、旧聊天链、第二角色、关键词路由、自动最大化、
+应用 prompt、答案修正和重复动作/重试规则均未准入。本轮没有新的生产候选因负优化
+而回滚。
+
+新架构现在符合“一个原始 goal、一个语义 Actor、一条视觉执行线、小型通用工具面”
+的核心思想。新增 Thread Store 和 lease 只拥有机械生命周期，不理解任务；模型职责
+没有下放给 router，但模型仍同时承担意图、直接回复、是否观察桌面，以及进入 GUI
+后的视觉、计划、恢复、自验和停止，长桌面任务压力依旧很高。12 条/16 KiB 窗口避免
+无界压力，却还没有跨进程延续。Pi 源码本轮没有新增搬运：继续保留已引入且经 E2E
+证明的原生 tool-exchange 语义；只有 Pi 的 turn/history/cancellation owner 能整体
+替换并删除当前 owner、且跨任务族提高外部成功率时才搬入，不安装整套依赖、不加
+Node→Python RPC、不建立第二 Runtime。
+
+下一轮唯一最高价值实验不改生产代码：在同一可见 Electron Thread 中预注册至少
+20 个随机交错 Turn，混合普通聊天、跨轮引用和至少两个不同原生桌面任务族；每个
+桌面轮生成只能由外部 oracle 读取的随机 token，后续聊天必须回忆它，同时注入一次
+provider 失败和一次 stale lease 回复。唯一计分是用户外部结果、窗口生命周期、
+历史隔离和精确动作证据，先测出长时压力分歧层，再决定是否需要删除或替换 owner。
+
+### 13.21 通用 Connector、原生模型协议与真实缓存观测
+
+本轮没有为 GitHub 或任何服务增加 adapter、关键词 router、任务分类器或第二模型。
+同一个 `LiveVisualActor` 在文本首轮与视觉回合都可看到两个短通用工具：
+`search_connector_tools` 与 `call_connector_tool`。只有显式登记的 remote HTTP / stdio
+MCP server 会进入目录；connector 结果回到同一 Actor，后续仍由它选择 reply、继续
+connector 或申请桌面。`ConnectorGateway` 只是机械边界：目录、参数和结果有上限，
+远端数据标为不可信，工具 ref 绑定完整 descriptor fingerprint；Gateway 重发现后，
+MCP client 又在同一物理 `call_tool` 前核对完整 descriptor 与 annotations。当前 live
+Actor 始终不授予 external mutation，只有 `readOnlyHint=true` 且非 destructive 的工具
+可执行；整次发现/调用共享 deadline/cancel，不重试含糊远端动作。
+
+`.mcp.example.json` 使用 GitHub 官方 remote MCP、server-side readonly 与有限
+toolsets，credential 只从环境注入。仓库没有写入任何 token，也没有内置 OAuth 流程；
+同一 generic 配置结构是未来其他 connector 的基础，不存在 GitHub 生产分支。
+
+生产规模必须如实记录。相对 13.20，本轮 connector、usage 与 native provider protocol
+切片为 `+2207/-114`；连同 13.20 尚未提交的 Thread/Turn 与 lease，当前完整生产工作树
+相对起始 `master` 为 `+3579/-269`。测试、E2E runner、fixture、文档和
+`.mcp.example.json` 不计入生产行数。净增仍然很大，主要来自新的三协议 adapter
+`provider_protocols.py` 和 connector/Actor composition；这不是“代码越多越完整”的
+收益，native adapter 在真实 provider 通过前只能算 provisional，下一轮不得继续扩张。
+
+通用可见 Electron 证据分为两个有效报告：
+
+| 报告 | 结果 | 独立证据 |
+| --- | --- | --- |
+| `output/playwright/client-thread-connector-e2e/20260731-211729-thread-connector/report.json` | 20 个连续聊天 Turn `20/20` | 同一 Thread、20 个唯一 run；第 18 轮引入的随机 marker 在第 20 轮精确回忆。报告末尾另有一个不计入 `20/20` 的 connector probe，模型没有调用 fixture，故整个聚合报告仍为 failed |
+| `output/playwright/client-thread-connector-e2e/20260731-214024-thread-connector/report.json` | GitHub-like exact read 与 connector→Notepad 外部结果 `2/2` | append-only fixture invocation log；第二项又用真实 GUI 动作把 30-byte 随机值精确保存，文件 hash/mtime 一致 |
+
+第二份报告的 exact read 使用 3 次模型响应；组合任务使用 19 次，执行过
+`click/type_text/hotkey` 等 9 笔 applied GUI 动作。组合任务在文件 oracle 已通过时 run
+仍为 `running`，因此只证明用户外部结果已经成立，不证明模型停止判断可靠。两份最终
+报告均从可见 Electron 用操作系统键盘输入并以真实鼠标发送；此前 runner-error 的
+迭代样本不计成功率，最终 `214024` 报告没有测试干扰。
+
+GitHub 官方 remote 的 transport 也有独立实证。Gateway 先发现 read-only
+`get_commit` descriptor，再物理调用：
+
+```text
+owner=zoujiapeng
+repo=lingdong-script
+sha=master
+detail=none
+receipt.status=succeeded
+```
+
+返回值包含经独立 `gh api` 核对的当前 SHA
+`fba5d7bb6dcb13c46e93dbc29bc3cef44e560622`；receipt 同时保存 tool fingerprint 与
+result hash。此前 `get_file_contents` 也完成了真实物理调用。这里没有记录 credential
+值。
+
+首个中文可见 Electron run `arp-20260731-214538-485580` 不能作为干净模型样本：
+before-submit 截图已经显示目标中的中文被转换为大量 `?`。它后续虽得到 970 字符、最近
+40 个 commit 的回复，但首个分歧发生在测试输入编码，必须标记 invalid/interfered，不能
+归因模型、connector 或 Runtime。
+
+随后使用 ASCII 原始目标做可见复验。报告为
+`output/playwright/github-connector-e2e-ascii/20260731-220236/report.json`，run 为
+`arp-20260731-220327-1ed4e4`：before-submit 与服务端 Goal Admission 均保存完整目标；
+GitHub 官方 remote 有真实会话/POST；零 GUI 动作。五次模型响应后，Actor 选择了一个
+当前目录未批准的工具，Runtime 以 `state_rejected` fail closed，detail 为
+`Actor initial turn returned an unapproved tool`，最终回复为空。usage 为 `8126` prompt、
+`539` completion、`4160` cache hit、`3966` miss、`0` creation。这个才是有效的端到端
+task fail：transport 已工作，首个分歧属于模型工具选择/停止；Runtime 的拒绝语义正确，
+禁止新增 `latest-SHA` formatter、列表截断、参数改写或 GitHub prompt。
+
+只读审计仍留下两个 connector 证据/兼容债务：当前官方 GitHub E2E 报告没有把每次
+tool/args/result-hash receipt 持久化到公开 trace，直接 Gateway smoke 只能补强 transport
+而不能替代 run-scoped receipt；旧 `agent/mcp_tools.py` 还是绕过 Gateway 的重复 Legacy
+owner。显式 config 最高优先级和 120 秒目录 cache 按完整 server 配置 fingerprint 隔离
+已经修复，聚焦测试 `21 passed`，不再列作未修 P1。这些基础设施债务没有证据解释
+ASCII run 的未批准工具，不能抢在 history-depth 实验前扩张 Runtime；未来若修，优先
+在测试/trace 侧保存无正文的 generic physical receipt，并逐项删除重复 owner。
+
+缓存结论也需要修正为仓库整体与当前主线两层：冻结 Legacy `agent/loop.py` 确有
+cache-friendly stable prefix——在 32 KiB 前保持 append-only history，并把 session
+continuity 放在前缀中保护 DeepSeek prefix cache。当前唯一活动 vNext 不走该 owner；
+已删除的 `cache_strategy` 只是从未生效的标签。vNext 不发送 OpenAI
+`prompt_cache_key`、Anthropic `cache_control` 或 Gemini `cachedContent`，也不为缓存
+恢复无界历史或重复旧截图，只记录 provider 对自然稳定请求部分返回的 usage。
+
+20-turn 聚合报告（含其末尾额外 connector probe）真实记录 `21626` prompt、`734`
+completion、`13248` cache hit、`8378` miss、`0` creation；新鲜 Thread 的两项
+connector 报告记录 `92964` prompt、`1785` completion、`53376` hit、`39588` miss、
+`0` creation。说明 `agent_usage` 与 run `model_usage` 已能看见上游自动缓存命中；它不
+证明 vNext 主动创建了缓存，也不支持把 Legacy append-only owner 搬回产品主线。
+
+模型后端保留既有 OpenAI-compatible Chat Completions，并以显式
+`api.protocol` / `api.api_style` 支持 OpenAI Responses、Anthropic Messages 与 Gemini
+`generateContent`。`api.provider` 只保留元数据语义；wire 不按 provider、模型名或
+`base_url` 推断，避免把聚合器
+上的 Claude/Gemini 模型误送原生接口；adapter 当前只覆盖非流式文本、Base64 图片、
+function tools 和原生 reasoning/signature replay sidecar。三条原生协议只有确定性
+transport/转换测试。审计发现的 provider 误切 wire 与 Anthropic 丢失 canonical
+`strict:true` 已修复，相关 5 个测试文件 `214 passed`；但没有真实 provider credential
+联机 E2E，仍必须标为 provisional，不能用 Python 全量回归声称“已适配大部分模型 API”。
+
+本轮保留：
+
+- 同一 Actor 的两个 generic connector 工具及 read-only Gateway；fixture 两个任务族
+  外部结果和 GitHub 官方物理调用已证明它不是应用专属旁路；
+- 显式 MCP 配置、环境变量替换、descriptor/fingerprint 重检、单次 deadline/cancel、
+  bounded untrusted result 与 receipt；
+- vNext `agent_usage` / `model_usage`，因为真实长 Thread 已返回非零 cache hit；
+- 删除无效 `cache_strategy` 标签；不新增主动 cache owner；
+- 三条 native protocol adapter 仅 provisional 保留，默认 OpenAI-compatible 路径不变；
+  provider 元数据不切 wire，Anthropic `strict:true` 不再从 canonical schema 丢失。
+
+本轮没有因负优化回滚新的生产候选；早期 harness 失败只是测试迭代，未计入有效矩阵。
+明确拒绝、从未准入的是 external mutation、GitHub formatter/参数修正、关键词预路由、
+connector 失败后的 GUI 自动 fallback、远端自动重试、协议按模型名/URL猜测、主动 cache
+control、无界历史和重复截图。官方 GitHub 任务失败也没有触发任何 Runtime 补丁。
+
+当前失败分层如下：
+
+- **模型**：20-turn 报告末尾额外 connector probe 没有产生远端调用；干净 ASCII
+  GitHub run 在五次响应后选择未批准工具且未形成回复；connector→Notepad 外部成功时
+  仍未停止。
+- **基础设施**：Responses/Anthropic/Gemini 没有可用于真实联机验收的 credential；
+  因此只能 provisional，不能归因模型或宣称成功。GitHub transport 已被物理证据排除。
+- **测试干扰**：中文 GitHub run 的 before-submit 编码破坏是明确干扰；早期
+  connector→Notepad runner-error 也已排除。最终两份 fixture 报告与 ASCII GitHub run
+  是有效样本，没有焦点/并发干扰可解释其结果。
+
+最终回归为 Python `3458 passed, 13 skipped, 1 warning`、renderer `234 passed`，TypeScript
+typecheck 通过。它们证明合同未回退，不能覆盖 ASCII GitHub 的端到端失败或 native
+provider 的未验证状态。
+
+新架构仍符合一个原始 goal、一个 `LiveVisualActor`、一条视觉执行线和小型通用工具面。
+`ConnectorGateway` 与 `ProviderProtocolAdapter` 都是机械 transport owner，不理解任务，
+没有新增 planner；但模型职责和压力确实增加：它现在同时承担聊天、是否申请桌面、
+connector 目录搜索、schema/参数选择、远端结果理解，以及 GUI 中的视觉、动作、自纠错
+和停止。20 个纯聊天 Turn 通过只证明有界近期历史可工作；末尾 connector 未调用、
+ASCII GitHub 选择未批准工具和组合任务未及时停止共同说明，当前瓶颈已更多落在同一模型
+面对工具目录与长上下文时的选择压力。解决方式不是再拆角色或增加 router，而是用单
+变量矩阵测清压力随历史深度是否增长。
+
+Pi 本轮没有新增源码。继续只保留已由跨帧 E2E 证明的一笔 provider 原生 tool exchange；
+只有 Pi 的 turn/history/cancellation owner 能整体替换并删除当前 Python owner、且跨
+任务族外部完成率提高时才引入，不安装整套依赖、不加 Node→Python RPC、不双 Runtime。
+
+Operit 已审查到提交 `0921f749a087c4a52a2202abdf32491ae335dd41`。本轮没有逐字复制
+其 Kotlin/Android runtime：Operit 以 LGPL-3.0 发布，且整体搬运会形成第二套 provider/Agent
+owner。当前 Python native adapters 只按已审查的 Responses/Claude/Gemini 协议族与
+replay 思路做 clean-room 实现。下一步不是继续照搬；先用真实三家 credential 验证。
+只有某段 Operit 实现能替换并删除当前 adapter、遵守许可证且取得跨 provider 实证时，
+才最小搬运并在同一变更删除旧 owner；否则应回退 provisional adapter，而不是继续加码。
+
+下一轮唯一最高价值实验不改生产代码：做严格配对的“history depth” A/B。使用完全
+相同的随机 read-only fixture schema、token、模型和外部 invocation/file oracle，A 在
+新 Thread 第 1 轮执行 connector read→Notepad，B 先完成 20 个随机聊天 Turn，再在第
+21 轮执行同一任务；记录模型原始工具/参数、canonical 参数、物理 MCP 调用、文件终态、
+terminal 与 usage。它只改变历史深度，能直接判断长上下文是否导致 connector 选择与
+停止退化；在结果出来前不增加 prompt、router、摘要模型、工具筛选器或 Runtime 修正。
+
+### 13.22 History-depth pilot：不准入 Runtime 修改
+
+本轮按 13.21 的结论只改测试设施，生产代码为 `+0/-0`；当前完整生产工作树仍维持
+13.21 的 `+3579/-269`。系统提示词、模型、Runtime、connector 工具面、Thread Store 和
+桌面租约均未改变。测试 runner 现在可以用相同 fixture/token/config/task/output path，
+分别冷启动两个可见 Electron 客户端：新 Thread 第 1 轮直接执行目标，或先从前端完成
+20 个普通聊天 Turn 再在第 21 轮执行同一目标。目标必须等 Agent 自主 terminal，文件
+严格按原文相等，GUI oracle 必须整条 trace 通过，不能再用文件先出现或 `strip()` 提前
+记成功。
+
+测试侧临时 `sitecustomize` 只在 runner 托管的 `serve.py` 进程启用。它不改请求、返回、
+重试或控制流，只记录私有、run-scoped 的：模型原始 connector 参数、Gateway 实际那次
+canonical 解析、receipt，以及 Actor 首轮真正放入 provider request 的 history
+message count/chars/roles/hash；正文不进入公开报告。20 个历史聊天 Turn 还必须逐轮证明
+零 connector、零 desktop lease、零 GUI observation/action，否则整臂无效。fixture/source/
+path control 也从硬编码 `true` 改为两臂实测 hash。固定 A→B 已改成 seed 决定先后顺序；
+但单对仍只能叫 pilot，只有多个 seed 的 AB/BA 对消 warm-up 后才可做因果判断。
+
+首个完整 pilot 报告为
+`output/playwright/history-depth-ab/20260731-230951-history-depth-ab/report.json`，seed 为
+`12392593358426046889`。两臂 task、fixture、path、Runtime/model identity 相同并各自
+冷启动；当时报告把失败 target 的 Thread ID 错从 accepted sequence 读取，因而错误写成
+`separate_threads=false`。实际 target Thread 分别为
+`thread-23fad055a79b48cc86fe170bc714fa2b` 与
+`thread-4057ef86f5ec4fb680b03a9356d124ea`；runner 已改为从 target 回退读取，但旧报告仍必须
+保留为 control projection 有缺陷的 pilot，不能重写成 formal pass。
+
+| 臂 | Connector/历史 | GUI 与外部终态 | 首个分歧 |
+| --- | --- | --- | --- |
+| 新 Thread，第 1 轮，`arp-20260731-231038-e42244` | raw→canonical→receipt→fixture `1/1`，参数一致 | token 已精确写进 Notepad；打开 Save As 并写入正确绝对路径后，后续 Save proposal 多次在物理输入前被 `target_identity_changed` 拒绝；文件不存在，30 turn 耗尽 | 该样本首先是 Runtime 身份 guard；但随后同源码复验未复现，单样本不能形成通用基础设施修复 |
+| 前端 20 Turn 后第 21 轮，`arp-20260731-232202-615dff` | 20 个聊天 `20/20`；target connector 链正确执行两次 | target 零 GUI 动作；两次有界重新决策仍给出非法 visual proposal，7 次模型调用后 `invalid_proposal` | 模型 proposal/tool-contract 层；不得用提示教学或 Runtime repair |
+
+两臂都失败且失败层不同，所以这个单对既不证明 history 负优化，也不证明没有负优化。
+target usage 分别为 `128428/2986/98816/29612` 与
+`29656/953/24896/4760`（prompt/completion/cache-hit/cache-miss）；前者又有更长 GUI
+回合，不能用 token 总数直接比较 history 成本。B 的 20 个聊天 Turn 累计
+`19986/789/13504/6482`，只说明 bounded Thread 与真实 cache telemetry 仍工作。
+
+为判断首臂 guard 是否是通用基础设施缺陷，又在相同生产源码上做了一次新鲜 Thread
+诊断：
+`output/playwright/target-identity-diagnostic/20260731-232607-target-identity/fresh-thread-first-turn/report.json`，
+run 为 `arp-20260731-232655-3f7c7a`。它没有复现 target identity mismatch；connector
+参数链再次正确执行两次，13 笔 GUI 动作均有 applied 物理证据。Save As 的 Windows
+原生文件名编辑框默认选区并不等同全选，模型又先单击再输入，使可见值成为
+`*.txtC:\Users\zou\cne2e-identity-8d418e.txt`，两次收到“文件名无效”仍重复同类策略，
+文件最终不存在。这里 Windows 编辑控件的选区与单击语义是外部应用真实行为；
+`model args → canonical → physical_attempt` 没有变形，Agent 的策略没有根据可见选区和
+错误框纠正。最后一次输入在已交付 `7/38` 字符后发生 `foreground_changed`，Runtime
+以 `outcome_unknown/blocked` fail closed 是正确的，自动重试可能重复部分文本。
+因此不加 Windows adapter、自动全选、重复保存或坐标修正。
+
+最早一次 suite 在任何用户任务前失败：Vite 已 ready 但 runner 经代理误判、第二个
+冷启动在 Runtime ready 前查询 status、sidecar 尚未把工作目录加入 import path。这三项
+均是测试基础设施干扰，已在测试侧修复并排除，不计模型或产品成功率。一次性
+target-identity monkeypatch 在未复现通用缺陷后已删除；保留的是可复用的实际 history
+投影、raw/canonical/receipt 参数链和严格外部 oracle。新探针又通过单轮可见 Electron
+预检 `arp-20260731-235249-105256`：首轮实际 provider messages 为 1、history 为 0，
+并且 connector/lease/GUI 计数全部为 0。随后两轮预检的第二轮
+`arp-20260731-235909-f4d259` 精确回忆随机 marker，实际 provider messages 为 3、history
+为 2 条/48 字符、roles 为 `user,assistant`，证明新投影观察到的不是硬编码上限；同时
+模型为这个纯文本问题申请了 desktop lease 并观察一次 GUI，新的 text-only oracle 因此
+正确将该 history prefill 判为无效。它是 oracle 的负向样本，不计能力通过率，也不触发
+Runtime 修正。对旧正式 B 的 20 个聊天 run 逐项回查原始 trace、private report 和 probe，
+则 `20/20` 均为零 raw/Gateway connector、零 lease/observation、零 tool attempt/GUI action；
+旧 prefill 实际未污染桌面，只是当时报告没有强制这道门。聚焦回归为 `34 passed`。
+发布前完整回归为 Python `3462 passed, 13 skipped, 1 warning`、renderer
+`234 passed`，TypeScript typecheck 通过；这些证明累计合同未回退，不改变 pilot 的失败
+归因。
+
+本轮保留与回退：
+
+- **保留**：严格 paired runner、随机臂顺序、实际 history hash 投影、历史聊天零副作用
+  oracle、实际 Gateway canonical 解析观测、严格文件/terminal/窗口生命周期判定；
+- **回退**：只服务于一次 guard 排查的 target-identity monkeypatch；
+- **未准入**：任何生产提示、router、摘要模型、自动重试、Save As/Windows 专属规则、
+  connector formatter 或 Runtime 修正。
+
+当前有效失败分层是：B、新鲜诊断和两轮负向预检分别属于模型工具协议、Windows GUI
+策略与不必要桌面选择；首个 A 样本出现过未复现的基础设施 guard 信号；首次启动与旧
+`separate_threads` 字段属于测试干扰。没有任何一项达到“至少两个不同任务族稳定复现”
+的生产改动门。
+
+新架构 owner 没有增加，仍是一个原始 goal、一个 `LiveVisualActor`、一条视觉执行线和
+小型通用工具面。模型继续同时承担聊天、connector 选择、是否租用桌面、Windows 控件
+语义、视觉动作、自纠错与停止，压力很高；本 pilot 只暴露压力样本，尚未证明压力由
+history depth 造成。Pi 与 Operit 计划均不变：不引入第二 Runtime；只有源码片段能整体
+替换并删除现有 owner、遵守许可证且跨任务族提高外部完成率时才搬运。native provider
+adapter 仍因缺真实 credential E2E 而 provisional，本轮不继续扩张。
+
+下一轮唯一最高价值实验仍不改生产代码：把 target 改成“已存在、已打开的随机文本文件
+中，用 connector 值全量替换并保存”，移除 Save As 这个与 history 无关的高方差步骤；
+用当前实际 history/零副作用探针跑至少四个随机 seed、AB/BA 对消顺序。只有 fresh 基线
+稳定通过且 history 臂在相同 raw→canonical→physical→file/terminal 层重复退化，才讨论
+history owner；否则继续把失败留在模型样本层。

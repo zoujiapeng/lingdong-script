@@ -14,7 +14,7 @@ from typing import Any
 from .config import ROOT_DIR
 
 
-RUNTIME_CONTRACT_VERSION = 2
+RUNTIME_CONTRACT_VERSION = 3
 
 # Source drift is a compatibility/safety signal, so keep its cache deliberately
 # short. Git metadata is diagnostic only and can tolerate a slightly longer

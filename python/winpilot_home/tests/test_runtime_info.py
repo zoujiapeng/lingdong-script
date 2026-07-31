@@ -19,7 +19,7 @@ def test_runtime_fingerprint_exposes_non_secret_service_identity(runtime_info_mo
 
     info = runtime_fingerprint()
 
-    assert info["contract_version"] == 2
+    assert info["contract_version"] == 3
     assert info["pid"]
     assert info["repo_root"]
     assert info["winpilot_home"]

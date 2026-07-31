@@ -17,26 +17,26 @@ POST /api/v2/goals/runs
 ```json
 {
   "goal": "完整用户目标",
-  "execution_context": {
-    "format": "...",
-    "entrypoint": "...",
-    "submitted_at": 0,
-    "desktop_handoff": {},
-    "target_window": {}
-  }
+  "thread_id": "可选的不透明对话标识"
 }
 ```
 
-顶层只允许 `goal` 和 `execution_context`。客户端不得提交：
+顶层只允许 `goal` 和可选 `thread_id`。客户端不得提交：
 
 - 执行媒介或策略；
+- 预绑定 desktop target 或 execution context；
 - `graph`；
 - `runtime_version`；
 - `task_id`。
 
-服务端 Goal Admission 保留完整目标，当前唯一选择 vNext `live_gui` 路由，构造 exact vNext graph，并把服务端生成的图身份绑定到执行上下文。它不读取应用名或任务关键词来选择 Legacy、工具或固定步骤。vNext live route 不可用时返回失败，不执行 Legacy fallback。
+服务端 Goal Admission 保留完整目标，当前唯一选择 vNext `live_gui` 路由并构造 exact
+vNext graph。它不读取应用名或任务关键词来选择 Legacy、工具或固定步骤。vNext live
+route 不可用时返回失败，不执行 Legacy fallback。
 
-客户端 `execution_context` 是桌面交接事实，不是运行时选择权。它只包含入口、提交时间、桌面 handoff 和目标窗口等客户端可观察信息；`task_id` 在服务端构图后注入。
+同一个 `LiveVisualActor` 先直接回复、调用显式配置的通用 connector，或请求
+`observe_desktop`。只有最后一种选择才创建 run-bound lease；Electron 让出前台后，
+客户端再用精确 `run_id + lease_id` 交付 desktop target。该交接是机械事实，不是
+运行时选择权。
 
 ### 删除前端执行策略
 
@@ -50,9 +50,53 @@ renderer selector
   -> trace/evidence policy field
 ```
 
-用户口头强调 GUI 时，只提交原始 `goal`。当前 live vNext 工具目录仍只有 GUI/control 工具，所以当前运行不会改走 shell 或 provider；但这只是当前工具事实，不是新的隐藏 GUI 策略。后续加入命令行或 provider 时，同一个 Agent 必须看到这些工具并自行选择，不能再增加独立 profiler、关键词路由、前端开关或第二套 planner。
+用户口头强调 GUI 时，只提交原始 `goal`。显式配置 MCP 后，同一个 Actor 当前会同时
+看到两个通用 connector 工具与 reply/GUI 决策；没有配置时工具不出现。它们不读取
+任务关键词，当前只准入 read-only 远端调用。shell 与 external mutation 尚未加入；
+后续仍必须让同一个 Agent 直接看到工具，不能增加 profiler、关键词路由、前端开关
+或第二套 planner。
 
 `ToolSpec.execution_medium` 暂时保留为执行事实和审计字段，不再参与用户意图的二次编码。Broker 只做工具 schema、runtime 可写性、目标/画面新鲜度和指针所有权等机械准入。真实 E2E 报告记录实际 OS 输入、shell 或 provider 回执，而不是验证某个策略选项。
+
+## Connector、模型协议与缓存切片
+
+`LiveVisualActor` 现在在文本首轮和视觉回合都能看到
+`search_connector_tools` / `call_connector_tool`。目录只来自显式 MCP 配置，结果回到
+同一个 Actor；没有 connector 角色、service adapter 或 router。调用只允许明确
+`readOnlyHint=true` 且非 destructive 的 descriptor，并在发现、Gateway 和物理
+`call_tool` 边界重新核对 fingerprint/descriptor，服从同一 deadline/cancel。外部写入
+授权没有进入 live 产品。
+
+`.mcp.example.json` 提供 GitHub 官方 remote MCP 的只读配置和有限 toolsets，token 只
+通过 `${env:GITHUB_PAT_TOKEN}` 注入。仓库不携带 credential，也不实现 OAuth 登录；
+同一 remote HTTP / stdio 配置结构是其他 connector 的基础，不增加 GitHub 专属代码。
+通用 fixture 的可见 Electron 长 Thread 已完成 20 个聊天 Turn `20/20`，新鲜 Thread
+的 GitHub-like read 与 connector→Notepad 外部结果为 `2/2`。GitHub 官方 remote 也已
+完成真实 discover、`get_file_contents` 与 `get_commit` 物理调用；后者对
+`owner=zoujiapeng, repo=lingdong-script, sha=master, detail=none` 返回独立 `gh api`
+核对的 SHA。首个中文 Electron run 在 before-submit 已把目标损坏为大量 `?`，只能记
+测试输入干扰。随后 ASCII run `arp-20260731-220327-1ed4e4` 完整提交目标，官方 remote
+有真实会话/POST；五次模型响应后 Actor 选择未批准工具，Runtime 以
+`state_rejected` fail closed，回复为空、零 GUI 动作，usage 为 `8126` prompt、`539`
+completion、`4160` hit、`3966` miss。这个干净任务的首次分歧属于
+模型工具选择/停止，不属于 transport，也不准入 GitHub 专属修正。显式 MCP 配置最高
+优先级与按 server 配置 fingerprint 隔离目录缓存已经修复，聚焦测试 `21 passed`。
+
+模型后端保留 OpenAI-compatible Chat Completions，同时支持通过
+`openai_responses`、`anthropic`、`gemini` wire。协议只由
+`api.protocol` / `api.api_style` 显式选择；`api.provider`、模型名和 `base_url` 都不
+切换 wire。adapter 当前仅覆盖非流式文本、Base64 图片、function tools 与原生 replay
+sidecar。审计发现的 provider 误切 wire 与 Anthropic 丢失 canonical `strict:true` 已
+修复，相关 5 个测试文件 `214 passed`；三条线路尚未经过真实 provider credential
+调用，只能作为 provisional 实现，外部兼容仍是未验证边界。
+
+缓存审计删除了从未生效的 `cache_strategy` 标签，但仓库整体不是零稳定前缀：冻结
+Legacy `agent/loop.py` 在 32 KiB 前保持 append-only history，并把 session continuity
+放在 cache-friendly prefix。当前唯一活动 vNext 不走该 owner，也不创建
+`prompt_cache_key`、`cache_control` 或 `cachedContent`；它只利用请求自然稳定部分的
+provider 自动缓存。20-turn 报告累计 `21626` prompt、`13248` cache hit、`8378`
+miss、`0` creation；`agent_usage` / run `model_usage` 已真实记录这些上游字段，但观测
+不等于 vNext 主动创建缓存。
 
 ## 已完成的 Pi 对照与下一切片
 
@@ -68,12 +112,14 @@ renderer selector
 - 下一回合覆盖旧 exchange，避免无界聊天历史。
 
 Pi 只有在能整体替换并删除 Python 模型循环 owner、且跨任务 E2E 明显更好时才
-整体引入。当前下一切片不是继续包 Pi，而是：
+整体引入。当前下一切片不是继续包 Pi，也不是切换模型，而是：
 
-1. 用更强原生视觉模型在完全相同的 10 项矩阵做 A/B；
-2. 若模型直接改善试卷和 corridor，不改 Runtime；
-3. 未来加入 shell/provider 时，让同一个 Visual Actor 同时看到全部工具并自主
-   选择，仍不增加 profiler、关键词 router、前端执行开关或第二 planner。
+1. `type_text` 跨 Notepad/Explorer 的冻结复验已得到 delivery `8/8`、外部任务
+   `7/8`，没有字符丢失复现，故不修改当前文本输入实现；
+2. 不改生产代码，只在至少两个任务族对 physical-key/focus/application-consumption
+   做一个测试型单变量 A/B；只有两族外部完整成功率都提高才替换并删除旧 owner；
+3. connector 已按同一 Actor 的通用工具落位；未来加入 shell 或外部 mutation 时也
+   必须复用同一选择面，仍不增加 profiler、关键词 router、前端开关或第二 planner。
 
 ## 暂留兼容面
 
@@ -181,15 +227,58 @@ PR #45/#46 均由提升后的 `master` 取代。
 | `drag-fit` | passed | 真实物理拖放 |
 | `slider` | passed | 真实物理拖动 |
 | `dynamic-hold` | passed | 跨帧 held-pointer 完整释放 |
-| `answer-all-questions` | failed，5/6 | 模型两次把 `8×9` 提交为 `81` |
+| `answer-all-questions` | failed，4/6 | 与此前 6/6、5/6 和错误 `81` 样本共同说明模型波动 |
 | 四个 corridor 变体 | failed | 模型折线与物理折线一致，但路径切角/出界 |
 
-总计 `5/10`。WinPilot 全量回归为 `3373 passed, 13 skipped`。详细 run 与
-submitted/physical 证据见
-[`GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md`](GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md)
-第 13.10 节。
+总计 `5/10`。本次目标由操作系统键盘输入可见 Electron，再用真实鼠标发送；
+UIA 只定位和读回。报告见
+`output/playwright/github-open-e2e-20260731/controlled-suite-r2/20260731-081832-suite/`。
+同一源码的 WinPilot 全量回归为 `3377 passed, 13 skipped`。
 
 这证明 Goal Admission、单 Visual Actor、坐标/键盘/窗口基础链和短多轮状态已经能
 闭环，但“真实客户端验收”总退出门仍未满足：五项原始长任务没有当前源码 5/5，
-随机 corridor 和试卷仍暴露当前模型智力/视觉几何瓶颈。不得用任务提示、答案修正、
-路径规则、Legacy fallback 或更多 verifier 关闭这些失败。
+随机 corridor 仍暴露当前模型视觉几何瓶颈，试卷的一次通过也不能抹去此前算术
+失败。不得用任务提示、答案修正、路径规则、Legacy fallback 或更多 verifier
+关闭这些失败。本次没有修改生产 Runtime；动作面、角色数和 45 词系统提示均未
+增长。
+
+同一轮原生软件复验得到 Notepad 精确落盘，以及网易云周杰伦、抖音 `kimi k3`、
+Wireshark 最近流量摘要的外部核对通过；Calculator、Paint、Krita、QQ 群摘要、
+QQ 空间点赞、能力演示和 OneNote→Word 仍失败或 blocked。生产代码 `+0/-0`，
+详细 run、oracle 债务和动作时确认阻塞见架构重置文档 13.16。模型切换当前暂停；
+三字段去重的 8-run 严格交叉配对已完成：A 为 Explorer `0/2`、Notepad `2/2`，
+B 为 Explorer `0/2`、Notepad 原始结果 `1/2`，且 B 的缺字样本发生在输入交付/
+应用边界，具体根因待跨族复现，不能证明字段删除导致回归。删除臂因没有跨族完整
+成功率收益而回退。后续 `type_text` 跨族冻结复验的 8 个槽位均有完整参数、回执和
+稳定后帧，没有丢字；外部任务 `7/8`。唯一失败是小窗口水平视口只显示后缀后，模型
+重复重输且从未保存；最大化探索对照已精确落盘，但保存后的 provider 超时/断连使
+Runtime 误报失败。详细证据见架构重置文档 13.18。下一实验只检查跨族通用按键消费
+边界，不新增提示、自动最大化、重复按键规则或应用适配。
+
+后续 13.19 的真实前端复现证明当前 goal 入口在模型判断前无条件最小化 Electron，
+纯聊天也被预绑定到 GUI target，终态又没有由产品自行恢复。当前迁移出口因此新增一项
+前置门：同一个 `LiveVisualActor` 必须能在零系统提示下直接回复或申请
+`observe_desktop`，只有 run-bound lease 才允许隐藏；matching
+success/fail/cancel 必须 `restore/show`。测试型零提示矩阵严格 `9/12`，虽比 113 字
+提示的 `7/12` 更好且 6/6 GUI 均申请桌面，仍有聊天误租约与 provider 干扰，尚不
+准入预计净增 `250–330` 行的生产切片。下一唯一实验改为稳定 provider 下重复冻结的
+零提示 reply/lease 矩阵；不增加 router、第二模型角色、旧聊天链或提示教学。通用
+按键消费 A/B 顺延。
+
+13.20 已满足这项前置门并取代上述候选状态。主入口现在只提交 `goal + optional
+thread_id`；同一个 `LiveVisualActor` 在零系统提示首轮直接回复或请求
+`observe_desktop`，只有后者才触发精确 run-bound lease、Electron yield、target
+bind 和原有视觉线。matching terminal 自行恢复窗口；response loss、TOCTOU、
+stale/non-current run 和未启动 terminal 都有机械合同。服务端有界 Thread/Turn
+只把成功且有用户结果的原生交换交给下一轮，不增加第二模型或长期 memory。
+
+真实可见 Electron 已在同一 Thread 完成
+`6 个连续聊天 → 1 个显式鼠标键盘 Notepad 保存 → 1 个上下文追问`：外部文件精确为
+`DESKTOP-c419bb42`，恢复后追问也精确回复该值；聊天 Turn 均为 `reply`、lease idle，
+桌面 Turn 只在 Actor 请求后隐藏并在终态自行恢复。两次一次性 provider
+`Connection error` 经普通用户原样重发成功，失败 Turn 未污染历史。该迁移切片为
+生产 `+1372/-155`，比预估大，所以下一轮冻结生产改动，只用至少 20 Turn、两个原生
+任务族的随机交错矩阵验证长时收益。当前剩余迁移边界是 Thread 跨服务重启持久化、
+pause 与 waiting lease 的真实 E2E、长历史下 connector 选择压力、provisional native
+model protocol 的真实凭据验收，以及未来把 shell/外部 mutation 与 GUI 同时交给同一
+模型；它们都不得通过预分类器实现。

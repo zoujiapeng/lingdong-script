@@ -330,6 +330,15 @@ class ArpExecution:
                 "goal_admission": _json_preview(
                     self.runtime_state.get("goal_admission") or {},
                 ),
+                "thread_id": str(
+                    self.runtime_state.get("thread_id") or ""
+                ),
+                "turn_id": str(
+                    self.runtime_state.get("turn_id") or ""
+                ),
+                "desktop_lease": _json_preview(
+                    self.runtime_state.get("desktop_lease") or {},
+                ),
                 "runtime_lifecycle": _json_preview(
                     self.runtime_state.get("runtime_lifecycle") or {},
                 ),
@@ -405,6 +414,9 @@ class ArpExecution:
             "runtime_budget",
             "no_legacy_fallback",
             "goal_admission",
+            "thread_id",
+            "turn_id",
+            "desktop_lease",
             "runtime_lifecycle",
             "trace_status",
             "trace_error",
@@ -729,6 +741,12 @@ class ArpExecution:
             contract_result = self._task_contract_completion(node)
             if contract_result is not None:
                 return contract_result
+            if last is not None and last.ok and last.branch == "reply":
+                return NodeResult(
+                    ok=True,
+                    branch="reply",
+                    output=last.output,
+                )
             if self.graph.policy.require_evidence_on_done and not has_verified_evidence(self.evidence):
                 return NodeResult(ok=False, error="run reached end without verified evidence")
             return NodeResult(ok=True)
@@ -832,7 +850,7 @@ class ArpExecution:
     def _publish_run_done(self) -> None:
         user_result = self.runtime_state.get("user_result")
         if (
-            self.status is not ArpRunStatus.DONE
+            self.status not in {ArpRunStatus.DONE, ArpRunStatus.REPLY}
             or type(user_result) is not str
             or not user_result.strip()
             or len(user_result) > 16_384
@@ -999,7 +1017,11 @@ class ArpExecution:
                 if node.kind == ArpNodeKind.END:
                     if not result.ok:
                         raise RuntimeError(result.error or "end evidence policy failed")
-                    self.status = ArpRunStatus.DONE
+                    self.status = (
+                        ArpRunStatus.REPLY
+                        if result.branch == "reply"
+                        else ArpRunStatus.DONE
+                    )
                     self.result = result.output if result.output is not None else last.output if last else None
                     break
                 next_node = self._next_node(node.id, result.branch, ok=result.ok)

@@ -20,25 +20,28 @@
 
 ```text
 Electron「智能代理」
-  -> POST /api/v2/goals/runs { goal, execution_context }
-  -> Goal Admission（不含执行模式）
-  -> 一个 full-goal mission / 一个 Visual Actor
-  -> 当前权威 JPEG + 有界 task state + 小工具面
-  -> 模型选择一笔动作
-  -> CapabilityBroker 只投影机械可用工具
-  -> AtomicDesktopAdapter 唯一坐标映射
-  -> RawDevice 真实键鼠输入
-  -> 新权威帧 / 回执 / 下一模型回合
-  -> claim 或 blocked
+  -> POST /api/v2/goals/runs { goal, optional thread_id }
+  -> server-owned Thread / Turn + Goal Admission
+  -> 同一个 LiveVisualActor：direct reply、通用 connector 调用或 observe_desktop
+       -> reply 终态（窗口始终可见）
+       -> 显式配置的 MCP：search/call 后仍由同一个 Actor 继续决定
+       -> run-bound desktop lease（此时才让出前台）
+          -> 精确 target + 当前权威 JPEG + 小工具面
+          -> 模型一笔动作 / 新帧 / 同一视觉线
+          -> claim 或 blocked
+  -> matching terminal 由产品自行恢复窗口
 ```
 
-这是当前 GUI 产品验收的唯一语义入口。内部仍会托管 ARP job 和兼容数据，但它们不能获得第二份任务计划或执行策略。`/api/chat`、MCP、CLI、直接 API runner 和 FlowScript 仍有开发或兼容用途，不能替代客户端 E2E，也不能发展成另一套产品主循环。
+这是当前 GUI 产品验收的唯一语义入口。内部仍会托管 ARP job 和兼容数据，但它们不能获得第二份任务计划或执行策略。显式 MCP 只作为同一 Actor 的普通工具；`/api/chat`、CLI、直接 API runner、FlowScript 或直接 MCP 调用仍不能替代客户端 E2E，也不能发展成另一套产品主循环。
 
 ## 核心组成
 
 | 组件 | 职责 | 不应承担 |
 | --- | --- | --- |
-| `LiveVisualActor` | 看原始 goal、当前 JPEG 和有界状态，选择一个工具调用 | 物理输入、应用脚本、隐藏执行策略 |
+| `AgentThreadStore` | 保存有界成功 Turn 文本并绑定 run 终态 | 长期记忆、摘要模型、执行选择 |
+| `LiveVisualActor` | 直接回复、选择 connector 或请求桌面；进入视觉线后看 JPEG 并选一笔工具 | 物理输入、应用脚本、隐藏执行策略 |
+| `ConnectorGateway` | 向同一 Actor 暴露显式配置的 MCP 目录和只读调用回执 | 服务专属 adapter、关键词路由、外部写入授权 |
+| `DesktopLeaseSlot` / Electron | 精确配对桌面让出、target 交付和窗口恢复 | 预判任务类型、替模型选择 GUI |
 | `MissionRuntime` | 驱动模型 → 工具 → 新帧循环，保存最小任务状态 | 关键词规划、修正目标、替模型重试策略 |
 | `FrameAuthority` | 原子发布帧、窗口、区域、epoch 和提交图片尺寸 | 解释画面或选择动作 |
 | `CapabilityBroker` | 根据当前帧、窗口和指针所有权投影可执行工具 | 根据任务类型选择 GUI/CLI 或禁止模型策略 |
@@ -58,25 +61,71 @@ Electron「智能代理」
 - 当前 live 模型面提供点击、双击、文本输入、快捷键、滚轮、拖拽和连续/跨帧 held-pointer；Legacy 兼容层仍有独立限时按键与等待 watcher，但它们不是当前模型工具；
 - 按下后目标才出现时，跨权威帧保留一个有超时和强制清理的 held-pointer session；
 - 动作前新鲜度检查、动作后因果区域验证、trace、artifact 和 completion obligation；
-- run 级冷启动、session 引用、可选 MCP、Memory Graph 和已验证 Skill replay；
+- 同一模型的 direct reply 与按需桌面租约；只有模型请求桌面后才隐藏，matching
+  terminal 自行恢复；
+- 有界 Thread/Turn 上下文：只保留最近成功且有用户结果的原生文本交换，失败 Turn
+  不污染下一轮；
+- 两个通用 connector 工具 `search_connector_tools` / `call_connector_tool`；它们只发现
+  显式配置的 MCP，并与 reply/GUI 同时交给同一个 Actor，不经过关键词 router；
+- connector 当前只执行明确标注 `readOnlyHint=true` 且未标注 destructive 的工具；
+  调用前重新核对完整 descriptor，并服从同一 deadline/cancel；
+- run 级冷启动、session 引用、Memory Graph 和已验证 Skill replay；
 - 真实 Electron 客户端 E2E harness 与浏览器侧可信指针 oracle。
 
 原生视觉配置默认关闭 UIA、OCR 和 predictive OCR；这些结构化 provider 仍可在来源、当前帧和预期收益明确时显式启用，但动作失败不会自动触发它们。
 
-### 当前验证快照（2026-07-30）
+模型后端保留 OpenAI-compatible Chat Completions 默认路径，并新增显式选择的
+OpenAI Responses、Anthropic Messages 和 Gemini `generateContent` 原生协议。wire
+协议只由 `api.protocol` / `api.api_style` 显式选择；`api.provider`、模型名和
+`base_url` 都不切换 wire。审计发现的 provider 误切 wire 与 Anthropic 丢失
+canonical `strict:true` 已修复，相关 5 个测试文件 `214 passed`。当前范围是非流式文本、
+Base64 图片和 function tools；真实三家 credential/接口尚未完成验收。
 
-- 当前改动后的 WinPilot 全量回归为 `3373 passed, 13 skipped`；这只证明合同没有回退，不能替代下面的真实 GUI oracle。
-- 当前精确工作树通过可见 Electron 客户端跑完 10 项受控矩阵，独立浏览器 oracle 为 `5/10`：精确点击、有序三击、普通拖放、滑块和动态按住通过；随机试卷与四个走廊拖拽失败。
+仓库整体存在冻结 Legacy 的稳定前缀机制：`agent/loop.py` 在 32 KiB 前保持
+append-only history，并把 session continuity 放在 cache-friendly prefix。当前唯一活动
+vNext 不走这个 owner，只可能利用请求自然稳定部分的 provider 自动缓存，也不发送
+`prompt_cache_key`、Anthropic `cache_control` 或 Gemini `cachedContent`；vNext 记录
+provider 返回的 cache hit/write token，观测本身不等于创建缓存。
+
+### 当前验证快照（2026-07-31）
+
+- 当前切片 Python 全量 `3458 passed, 13 skipped, 1 warning`，renderer `234 passed` 且
+  typecheck 通过；测试通过不能替代下面的真实 GUI oracle。
+- 通用 fixture 的可见 Electron 长 Thread 完成 20 个聊天 Turn `20/20`；同一报告
+  （含其末尾额外 connector probe）累计 `21626` prompt tokens，其中 provider 报告
+  `13248` cache hits、`8378` misses、`0` cache creation。报告：
+  `output/playwright/client-thread-connector-e2e/20260731-211729-thread-connector/report.json`。
+- 新鲜 Thread 的 GitHub-like read 与 connector→Notepad 组合任务外部结果为 `2/2`；
+  后者用真实 GUI 把 connector 随机值精确落盘，但独立 oracle 通过时 run 仍在
+  `running`，所以它不证明停止判断已经可靠。报告：
+  `output/playwright/client-thread-connector-e2e/20260731-214024-thread-connector/report.json`。
+- GitHub 官方 remote MCP 已完成真实 discover、`get_file_contents`，以及返回独立
+  `gh api` 同一 master SHA 的 `get_commit` 物理调用。首个中文 Electron run 在
+  before-submit 已把目标转成大量 `?`，只能记测试输入干扰；随后 ASCII run
+  `arp-20260731-220327-1ed4e4` 完整提交目标，官方 remote 有真实会话/POST，但五次
+  模型响应后以 `Actor initial turn returned an unapproved tool` fail closed，回复为空、
+  零 GUI 动作；usage 为 `8126` prompt、`539` completion、`4160` hit、`3966` miss。
+  这个干净任务失败属于模型工具选择/停止，不属于 transport。报告：
+  `output/playwright/github-connector-e2e-ascii/20260731-220236/report.json`。
+- 同一可见 Electron Thread 已连续完成 7 个 direct reply 和一个显式鼠标键盘
+  Notepad Turn；聊天期间不请求 lease，桌面轮只在 Actor 请求后隐藏，终态自行恢复，
+  随后的上下文回复能精确回忆桌面轮随机 token。
+- Notepad 外部文件精确保存为 `DESKTOP-c419bb42`；两次一次性 provider
+  `Connection error` 经普通用户重发恢复，失败 Turn 没有污染历史。桌面结果通过，
+  但其最终回复比“只回复已完成”更长，属于模型格式偏差。
+- 当前生产保留态通过可见 Electron 客户端跑完 10 项受控矩阵，独立浏览器 oracle 为 `5/10`：精确点击、有序三击、普通拖放、滑块和动态按住通过；试卷 4/6，四个走廊拖拽失败。
+- 原始目标由操作系统键盘键入可见 Electron，再由真实鼠标点击“发送消息”；UIA 只用于定位和读回控件。
 - Visual Actor 只保留最近一笔 provider 原生 `user → assistant tool call → tool result` 交换，不增加角色、动作或提示词。有序三击因此从重复第一目标直至耗尽回合，变为三次真实点击后通过。
-- 试卷失败为 `5/6`。证据链显示模型第一次和纠错时都提交 `81` 作为 `8×9` 的答案；`physical_attempt` 也原样收到 `81`。同一 `SendInput` 路径的独立可见 GUI 探针验证了数字、ASCII、中文、emoji 和 `Ctrl+A` 覆盖逐码点一致，因此没有修改键盘工具。
-- 四个走廊失败中，模型提交的折线与物理执行折线逐点一致；路径本身切角或没有沿走廊。没有加入通道规则、物体半径教学、坐标补偿或重瞄器。
+- 试卷本次为 4/6；同一源码此前有 6/6、5/6 和错误提交 `81`，因此只能归为模型样本波动，不能写成算术能力修复。
+- 四个走廊失败中，模型提交的路径与物理执行一致，但路径自身切角或出界；没有加入通道规则、坐标补偿或重瞄器。
 
 这些样本说明基础动作、坐标、键盘和短多轮状态链可以闭环，但当前视觉模型的算术、几何规划、自我纠错和随机长任务可靠性仍明显不足。单次通过不能换算为成功率；仓库中的固定任务只是回归探针，任务空间不是 11 类或任何有限分类。详细正反证据见 [架构重置审计](docs/GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md)。
 
 仍然存在的重要工程债务：
 
 - live vNext 已收敛为一个 Visual Actor，但 Mission/Projection/Evidence 合同仍然偏重；只有真实 E2E 证明某项校验能阻止基础设施错误时才保留；
-- 当前工具面仍主要是 GUI/control，自主混合选择 GUI、命令行和 provider 尚未实现；实现时必须让同一个模型直接看见工具，不能再增加前端执行选项或预分类 Agent；
+- 同一 Actor 已能在 GUI/control 与显式配置的只读 connector 间选择；shell 和外部
+  mutation 尚未接入，后续也必须直接加入同一工具面，不能增加前端执行选项或预分类 Agent；
 - Legacy 的 `AgentRunner`、Task Contract、StageRuntime、Controller、UIA/OCR 和应用索引仍很大；它们只可作为逐能力候选，不能整体合并回主循环；
 - 一笔原生交换足以修复当前有序三击的跨帧遗忘，但不能替代长任务状态、模型算术和几何推理；不得把更多历史、Verifier 或任务规则默认塞回主循环；
 - 真实消费软件、多窗口、托盘、弹窗、动画目标、游戏、高 DPI 和多显示器的随机覆盖不足；
@@ -95,6 +144,17 @@ npm run dev
 ```
 
 Electron 主进程控制面默认监听 `127.0.0.1:7880`。WinPilot FastAPI 由 Electron 动态选择端口并托管启动；不要直接运行 `uvicorn winpilot.server:app`。模型配置可从客户端“系统设置”或本机忽略文件 `python/winpilot_home/config.json` 修改。
+
+GitHub 使用官方 remote MCP 示例；仓库不内置 token，也没有 OAuth 登录流程：
+
+```powershell
+$env:GITHUB_PAT_TOKEN = '<GitHub token>'
+$env:WINPILOT_MCP_CONFIG = (Resolve-Path .mcp.example.json)
+npm run dev
+```
+
+示例在 server 与 Agent 两侧都保持只读。其他 remote HTTP 或 stdio connector 复用同一
+`.mcp.json` 结构和两个通用工具，不应新增服务专属 adapter。
 
 ## 验证
 

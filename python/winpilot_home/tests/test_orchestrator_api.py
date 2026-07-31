@@ -71,6 +71,50 @@ def _client_execution_context():
     }
 
 
+def _waiting_desktop_lease(monkeypatch, *, run_id):
+    from winpilot.orchestrator import vnext_live_canary as canary
+    from winpilot.orchestrator.runtime import ArpExecution
+    from winpilot.utils.screenshot import Region
+
+    graph = canary.build_exact_live_vnext_graph(
+        "Complete the visible task"
+    )
+    facts = canary._TargetFacts(
+        hwnd=800,
+        root_hwnd=800,
+        process_id=900,
+        executable_identity=r"c:\apps\external-target.exe",
+        title="External target",
+        class_name="TargetWindow",
+        region=(0, 0, 1200, 800),
+        foreground_root_hwnd=800,
+    )
+    dependencies = canary._CompositionDependencies(
+        wall_clock=lambda: 1.002,
+        target_reader=lambda hwnd: facts if hwnd == facts.hwnd else None,
+        foreground_reader=lambda: facts.hwnd,
+        hit_test_root=lambda _x, _y: facts.hwnd,
+    )
+    monkeypatch.setattr(
+        canary,
+        "virtual_screen_region",
+        lambda: Region(0, 0, 1920, 1080),
+    )
+    lease = canary.DesktopLeaseSlot(
+        graph=graph,
+        dependencies=dependencies,
+        thread_id="thread-api-lease",
+        turn_id="turn-api-lease",
+    )
+    lease.request(run_id)
+    execution = ArpExecution(graph)
+    execution.runtime_state.update({
+        "desktop_lease": lease.snapshot(),
+        "_desktop_lease": lease,
+    })
+    return execution, lease
+
+
 def test_platform_overview_exposes_contracts_and_capabilities(client):
     response = client.get("/api/v2/platform")
 
@@ -478,8 +522,24 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
         },
     }
     calls = []
+    history = (
+        {"role": "user", "content": "Remember marker A"},
+        {"role": "assistant", "content": "I will remember marker A"},
+    )
     monkeypatch.setattr(server, "runtime_source_drifted", lambda: False)
     monkeypatch.setattr(server.CONFIG, "snapshot", lambda: frozen)
+    monkeypatch.setattr(
+        server.AGENT_THREADS,
+        "begin_turn",
+        lambda goal, *, thread_id="": (
+            "thread-existing",
+            "turn-new",
+            list(history),
+        )
+        if goal == "Complete the visible task"
+        and thread_id == "thread-existing"
+        else pytest.fail("goal admission lost the requested thread binding"),
+    )
     monkeypatch.setattr(
         server.TaskContractCompiler,
         "compile_graph",
@@ -502,12 +562,11 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
         )
 
     monkeypatch.setattr(server, "_start_arp_execution", start)
-    context = _client_execution_context()
     response = client.post(
         "/api/v2/goals/runs",
         json={
             "goal": "  Complete the visible task  ",
-            "execution_context": context,
+            "thread_id": "thread-existing",
         },
     )
 
@@ -517,11 +576,13 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
     assert payload["admission"] == {
         "format": "goal-admission/1",
         "goal": "Complete the visible task",
-        "route": "live_gui",
+        "route": "live_agent",
         "runtime_version": "vnext",
         "reason": "single_semantic_agent",
         "no_legacy_fallback": True,
     }
+    assert payload["thread_id"] == "thread-existing"
+    assert payload["turn_id"] == "turn-new"
     assert len(calls) == 1
     graph, inputs, kwargs = calls[0]
     assert vnext_live_canary._validate_exact_graph(graph) == (
@@ -533,15 +594,20 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
     assert kwargs["runtime_version"] is ArpRuntimeVersion.VNEXT
     assert kwargs["frozen_config"] is frozen
     assert kwargs["goal_admission"] == payload["admission"]
-    assert inputs["execution_context"] == {
-        **context,
-        "task_id": graph.id,
-    }
+    assert inputs == {}
+    assert kwargs["thread_id"] == "thread-existing"
+    assert kwargs["turn_id"] == "turn-new"
+    assert kwargs["thread_history"] == history
 
 
 @pytest.mark.parametrize(
     "field",
-    ["execution_constraint", "graph", "runtime_version"],
+    [
+        "execution_context",
+        "execution_constraint",
+        "graph",
+        "runtime_version",
+    ],
 )
 def test_product_goal_admission_rejects_client_owned_projection_fields(
     client,
@@ -549,9 +615,10 @@ def test_product_goal_admission_rejects_client_owned_projection_fields(
 ):
     body = {
         "goal": "Complete the visible task",
-        "execution_context": _client_execution_context(),
         field: (
-            {}
+            _client_execution_context()
+            if field == "execution_context"
+            else {}
             if field == "graph"
             else "gui_required"
             if field == "execution_constraint"
@@ -566,33 +633,6 @@ def test_product_goal_admission_rejects_client_owned_projection_fields(
         item["loc"][-1] == field and item["type"] == "extra_forbidden"
         for item in response.json()["detail"]
     )
-
-
-def test_product_goal_admission_rejects_client_owned_task_identity(
-    client,
-    monkeypatch,
-):
-    from winpilot import server
-
-    monkeypatch.setattr(server, "runtime_source_drifted", lambda: False)
-    monkeypatch.setattr(
-        server.CONFIG,
-        "snapshot",
-        lambda: {"vnext": {"live_canary_enabled": True}},
-    )
-    context = _client_execution_context()
-    context["task_id"] = "client-owned-task"
-
-    response = client.post(
-        "/api/v2/goals/runs",
-        json={
-            "goal": "Complete the visible task",
-            "execution_context": context,
-        },
-    )
-
-    assert response.status_code == 400
-    assert "unknown=['task_id']" in response.json()["detail"]
 
 
 def test_product_goal_admission_fails_closed_without_legacy_fallback(
@@ -624,16 +664,154 @@ def test_product_goal_admission_fails_closed_without_legacy_fallback(
 
     response = client.post(
         "/api/v2/goals/runs",
-        json={
-            "goal": "Complete the visible task",
-            "execution_context": _client_execution_context(),
-        },
+        json={"goal": "Complete the visible task"},
     )
 
     assert response.status_code == 409
     assert response.json()["detail"] == (
         "vNext live canary is disabled; no legacy fallback was run"
     )
+
+
+def test_goal_desktop_lease_bind_requires_exact_ids_and_valid_target_once(
+    client,
+    monkeypatch,
+):
+    from winpilot import server
+
+    run_id = "arp-desktop-lease-bind"
+    execution, lease = _waiting_desktop_lease(
+        monkeypatch,
+        run_id=run_id,
+    )
+    monkeypatch.setattr(server.ARP_RUNS, "get", lambda _run_id: execution)
+    context = _client_execution_context()
+
+    wrong_run = client.post(
+        "/api/v2/goals/runs/arp-other-run/desktop-lease",
+        json={
+            "lease_id": lease.lease_id,
+            "execution_context": context,
+        },
+    )
+    assert wrong_run.status_code == 409
+    assert wrong_run.json()["detail"] == (
+        "desktop lease does not match the run"
+    )
+
+    wrong_lease = client.post(
+        f"/api/v2/goals/runs/{run_id}/desktop-lease",
+        json={
+            "lease_id": "lease-other",
+            "execution_context": context,
+        },
+    )
+    assert wrong_lease.status_code == 409
+    assert wrong_lease.json()["detail"] == (
+        "desktop lease does not match the run"
+    )
+
+    invalid_context = _client_execution_context()
+    invalid_context["target_window"]["usable"] = False
+    invalid_target = client.post(
+        f"/api/v2/goals/runs/{run_id}/desktop-lease",
+        json={
+            "lease_id": lease.lease_id,
+            "execution_context": invalid_context,
+        },
+    )
+    assert invalid_target.status_code == 409
+    assert invalid_target.json()["detail"] == (
+        "Electron target descriptor is not an exact usable target"
+    )
+    assert lease.snapshot()["status"] == "waiting"
+    assert execution.inputs == {}
+
+    bound = client.post(
+        f"/api/v2/goals/runs/{run_id}/desktop-lease",
+        json={
+            "lease_id": lease.lease_id,
+            "execution_context": context,
+        },
+    )
+    assert bound.status_code == 200
+    payload = bound.json()
+    assert payload["run_id"] == run_id
+    assert payload["lease"]["run_id"] == run_id
+    assert payload["lease"]["lease_id"] == lease.lease_id
+    assert payload["lease"]["status"] == "delivered"
+    assert payload["target"]["hwnd"] == 800
+    assert execution.inputs["execution_context"] == {
+        **context,
+        "task_id": execution.graph.id,
+    }
+
+    duplicate = client.post(
+        f"/api/v2/goals/runs/{run_id}/desktop-lease",
+        json={
+            "lease_id": lease.lease_id,
+            "execution_context": context,
+        },
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == (
+        "desktop lease does not match the run"
+    )
+    assert lease.snapshot()["status"] == "delivered"
+
+
+def test_goal_desktop_lease_fail_requires_exact_ids_and_closes_once(
+    client,
+    monkeypatch,
+):
+    from winpilot import server
+
+    run_id = "arp-desktop-lease-fail"
+    execution, lease = _waiting_desktop_lease(
+        monkeypatch,
+        run_id=run_id,
+    )
+    monkeypatch.setattr(server.ARP_RUNS, "get", lambda _run_id: execution)
+
+    wrong_run = client.post(
+        "/api/v2/goals/runs/arp-other-run/desktop-lease/fail",
+        json={"lease_id": lease.lease_id, "reason": "handoff failed"},
+    )
+    assert wrong_run.status_code == 409
+    assert wrong_run.json()["detail"] == (
+        "desktop lease does not match the run"
+    )
+
+    wrong_lease = client.post(
+        f"/api/v2/goals/runs/{run_id}/desktop-lease/fail",
+        json={"lease_id": "lease-other", "reason": "handoff failed"},
+    )
+    assert wrong_lease.status_code == 409
+    assert wrong_lease.json()["detail"] == (
+        "desktop lease does not match the run"
+    )
+
+    failed = client.post(
+        f"/api/v2/goals/runs/{run_id}/desktop-lease/fail",
+        json={"lease_id": lease.lease_id, "reason": "handoff failed"},
+    )
+    assert failed.status_code == 200
+    payload = failed.json()
+    assert payload["run_id"] == run_id
+    assert payload["lease"]["run_id"] == run_id
+    assert payload["lease"]["lease_id"] == lease.lease_id
+    assert payload["lease"]["status"] == "closed"
+    assert payload["lease"]["error"] == "handoff failed"
+
+    duplicate = client.post(
+        f"/api/v2/goals/runs/{run_id}/desktop-lease/fail",
+        json={"lease_id": lease.lease_id, "reason": "second failure"},
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == (
+        "desktop lease does not match the run"
+    )
+    assert lease.snapshot()["error"] == "handoff failed"
 
 
 def test_start_execution_freezes_goal_admission_before_job_submission(
@@ -653,10 +831,22 @@ def test_start_execution_freezes_goal_admission_before_job_submission(
     )
     submitted = []
     monkeypatch.setattr(server.human_mod.RECORDER, "is_recording", lambda: False)
+    prepared = []
+
+    def prepare(*args, **kwargs):
+        prepared.append((args, kwargs))
+        return execution
+
     monkeypatch.setattr(
         vnext_live_canary,
         "prepare_live_vnext_execution",
-        lambda *_args, **_kwargs: execution,
+        prepare,
+    )
+    bound = []
+    monkeypatch.setattr(
+        server.AGENT_THREADS,
+        "bind_run",
+        lambda **kwargs: bound.append(kwargs),
     )
     monkeypatch.setattr(
         server.RUNTIME_JOBS,
@@ -666,19 +856,26 @@ def test_start_execution_freezes_goal_admission_before_job_submission(
     audit = {
         "format": "goal-admission/1",
         "goal": "Complete the visible task",
-        "route": "live_gui",
+        "route": "live_agent",
         "runtime_version": "vnext",
         "reason": "single_semantic_agent",
         "no_legacy_fallback": True,
     }
+    history = (
+        {"role": "user", "content": "Earlier question"},
+        {"role": "assistant", "content": "Earlier answer"},
+    )
 
     try:
         started = server._start_arp_execution(
             graph,
-            {"execution_context": {}},
+            {},
             runtime_version=ArpRuntimeVersion.VNEXT,
             frozen_config={"vnext": {"live_canary_enabled": True}},
             goal_admission=audit,
+            thread_id="thread-audit",
+            turn_id="turn-audit",
+            thread_history=history,
         )
     finally:
         with server.STATE.lock:
@@ -689,6 +886,16 @@ def test_start_execution_freezes_goal_admission_before_job_submission(
     assert execution.runtime_state["runtime_version"] == "vnext"
     assert execution.runtime_state["goal_admission"] == audit
     assert execution.runtime_state["goal_admission"] is not audit
+    assert len(prepared) == 1
+    assert prepared[0][0][1] == {}
+    assert prepared[0][1]["thread_id"] == "thread-audit"
+    assert prepared[0][1]["turn_id"] == "turn-audit"
+    assert prepared[0][1]["history"] == history
+    assert bound == [{
+        "thread_id": "thread-audit",
+        "turn_id": "turn-audit",
+        "run_id": execution.run_id,
+    }]
 
     from winpilot.orchestrator.runtime import ArpExecution
 
@@ -702,12 +909,20 @@ def test_start_execution_freezes_goal_admission_before_job_submission(
     assert persisted.audit_snapshot()["goal_admission"] == audit
 
 
-def test_unstarted_vnext_cancel_is_retained_without_touching_trace():
+def test_unstarted_vnext_cancel_is_retained_without_touching_trace(
+    monkeypatch,
+):
     from winpilot import server
     from winpilot.orchestrator.contracts import ArpGraph, ArpRunStatus
     from winpilot.orchestrator.runtime import ArpExecution
 
     execution = ArpExecution(ArpGraph.model_validate(_graph_payload()))
+    published = []
+    monkeypatch.setattr(
+        ArpExecution,
+        "_publish_run_done",
+        lambda self: published.append(self.status.value),
+    )
     execution.runtime_state.update({
         "runtime_version": "vnext",
         "runtime_budget": {
@@ -726,12 +941,14 @@ def test_unstarted_vnext_cancel_is_retained_without_touching_trace():
     )
 
     assert changed is True
+    assert published == ["canceled"]
     assert server._terminalize_unstarted_vnext_execution(
         execution,
         status=ArpRunStatus.FAILED,
         detail="must remain canceled",
         trace_status="failed_to_start",
     ) is False
+    assert published == ["canceled"]
     snapshot = execution.to_dict()
     assert snapshot["status"] == "canceled"
     assert snapshot["runtime_version"] == "vnext"

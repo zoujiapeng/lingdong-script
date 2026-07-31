@@ -87,6 +87,8 @@ CONTROL_PID = 999
 RECT = [100, 200, 740, 680]
 REGION = (100, 200, 640, 480)
 GOAL = "Make the requested visible state exist"
+THREAD_ID = "thread-vnext-composition"
+TURN_ID = "turn-vnext-composition"
 PRIVATE_TEXT = "PRIVATE-TEXT-c4-public-projection-7f2d"
 PRIVATE_CHORD = "ctrl+shift+f11"
 PRIVATE_X = 77_889_911
@@ -307,6 +309,112 @@ def _config() -> dict[str, Any]:
     }
 
 
+def _observe_desktop_response() -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-observe-desktop",
+                            "type": "function",
+                            "function": {
+                                "name": "observe_desktop",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+
+def _direct_reply_response(reply: str) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": reply,
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+
+
+def _prepare(
+    graph: ArpGraph,
+    inputs: dict[str, Any],
+    config_snapshot: dict[str, Any],
+    *,
+    run_manager: Any,
+    _dependencies: canary._CompositionDependencies,
+    history: tuple[dict[str, str], ...] = (),
+) -> Any:
+    return canary.prepare_live_vnext_execution(
+        graph,
+        inputs,
+        config_snapshot,
+        run_manager=run_manager,
+        thread_id=THREAD_ID,
+        turn_id=TURN_ID,
+        history=history,
+        _dependencies=_dependencies,
+    )
+
+
+def _run_with_desktop_lease(
+    execution: Any,
+    action: Any,
+    *,
+    inputs: dict[str, Any] | None = None,
+) -> Any:
+    """Deliver the exact target only after the Actor requests one lease."""
+
+    lease = execution.runtime_state["_desktop_lease"]
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def deliver() -> None:
+        while not stop.wait(0.001):
+            snapshot = lease.snapshot()
+            if snapshot["status"] == "waiting":
+                try:
+                    lease.bind(
+                        run_id=snapshot["run_id"],
+                        lease_id=snapshot["lease_id"],
+                        inputs=deepcopy(inputs or _inputs()),
+                    )
+                except BaseException as exc:  # surfaced in the test thread
+                    errors.append(exc)
+                return
+            if snapshot["status"] in {"closed", "delivered"}:
+                return
+
+    worker = threading.Thread(target=deliver, daemon=True)
+    worker.start()
+    try:
+        result = action()
+    finally:
+        stop.set()
+        worker.join(timeout=2.0)
+    assert not worker.is_alive()
+    if errors:
+        raise errors[0]
+    return result
+
+
+def _run_prepared(manager: ArpRunManager, execution: Any) -> dict[str, Any]:
+    return _run_with_desktop_lease(
+        execution,
+        lambda: manager.run_prepared(execution),
+    )
+
+
 def _facts(
     *,
     process_id: int = PID,
@@ -387,6 +495,22 @@ class _FakeSession:
         self.closed = True
 
 
+class _StubActorBundle:
+    def __init__(self) -> None:
+        self.actor = SimpleNamespace(
+            propose=lambda *_args, **_kwargs: pytest.fail(
+                "stub Actor must not be invoked during composition"
+            )
+        )
+        self.counter = SimpleNamespace(count=0)
+        self.closed = False
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
 def _dependencies(
     *,
     session: _FakeSession | None = None,
@@ -401,14 +525,18 @@ def _dependencies(
         session.run_id = build_spec.run_id
         session.target_binding_id = build_spec.target.binding_id
         session.frame_epoch = build_spec.target.captured_at_ms
+        session.model_calls = build_spec.actor_bundle.counter.count
         return session
+
+    def default_client_factory(**_kwargs: Any) -> Any:
+        return _RawClient(_observe_desktop_response())
 
     return canary._CompositionDependencies(
         wall_clock=lambda: NOW_MS / 1000.0,
         monotonic=lambda: 10.0,
         target_reader=reader or (lambda _hwnd: _facts()),
         hit_test_root=lambda _x, _y: HWND,
-        client_factory=client_factory,
+        client_factory=client_factory or default_client_factory,
         session_builder=(
             build if session is not None else None
         ),
@@ -633,9 +761,9 @@ def test_prepare_registers_only_exact_agent_goal_and_emits_no_live_trace() -> No
     BUS.add_sink(events.append)
     try:
         manager = ArpRunManager()
-        execution = canary.prepare_live_vnext_execution(
+        execution = _prepare(
             _graph(),
-            _inputs(),
+            {},
             _config(),
             run_manager=manager,
             _dependencies=_dependencies(session=session),
@@ -644,6 +772,8 @@ def test_prepare_registers_only_exact_agent_goal_and_emits_no_live_trace() -> No
         BUS.remove_sink(events.append)
 
     assert execution.handlers.keys() == {ArpNodeKind.AGENT_GOAL}
+    assert execution.inputs == {}
+    lease = execution.runtime_state["_desktop_lease"]
     assert execution.runtime_state == {
         "runtime_version": "vnext",
         "runtime_budget": {
@@ -653,25 +783,312 @@ def test_prepare_registers_only_exact_agent_goal_and_emits_no_live_trace() -> No
         },
         "no_legacy_fallback": True,
         "experience_policy": "disabled",
-        "target_binding_id": execution.runtime_state["target_binding_id"],
+        "thread_id": THREAD_ID,
+        "turn_id": TURN_ID,
+        "desktop_lease": lease.snapshot(),
+        "_desktop_lease": lease,
     }
+    assert lease.snapshot()["status"] == "idle"
+    assert lease.snapshot()["run_id"] == ""
     assert not [event for event in events if event["type"].startswith("vnext_")]
 
 
-def test_pre_composition_cancel_seals_unique_empty_evidence_without_io(
+def test_prepare_rejects_any_initial_desktop_binding() -> None:
+    with pytest.raises(
+        ValueError,
+        match="must not pre-bind a desktop target",
+    ):
+        _prepare(
+            _graph(),
+            _inputs(),
+            _config(),
+            run_manager=ArpRunManager(),
+            _dependencies=_dependencies(),
+        )
+
+
+def test_direct_reply_is_terminal_without_desktop_session_or_evidence(
+    tmp_path: Path,
+) -> None:
+    reply = "The answer is available without using the desktop."
+    clients: list[_RawClient] = []
+    session_builds: list[Any] = []
+
+    def client_factory(**_kwargs: Any) -> _RawClient:
+        client = _RawClient(_direct_reply_response(reply))
+        clients.append(client)
+        return client
+
+    def forbidden_session(build: Any) -> Any:
+        session_builds.append(build)
+        raise AssertionError("direct reply must not compose a desktop session")
+
+    def forbidden_target(_hwnd: int) -> Any:
+        raise AssertionError("direct reply must not inspect a desktop target")
+
+    dependencies = canary._CompositionDependencies(
+        wall_clock=lambda: NOW_MS / 1000.0,
+        monotonic=lambda: 10.0,
+        target_reader=forbidden_target,
+        hit_test_root=lambda _x, _y: pytest.fail(
+            "direct reply must not hit-test the desktop"
+        ),
+        client_factory=client_factory,
+        session_builder=forbidden_session,
+        runtime_evidence_root=tmp_path,
+    )
+    history = (
+        {"role": "user", "content": "Remember the token amber."},
+        {"role": "assistant", "content": "I will remember amber."},
+    )
+    manager = ArpRunManager()
+    execution = _prepare(
+        _graph(),
+        {},
+        _config(),
+        run_manager=manager,
+        history=history,
+        _dependencies=dependencies,
+    )
+    events: list[dict[str, Any]] = []
+    BUS.add_sink(events.append)
+    try:
+        snapshot = _run_prepared(manager, execution)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert snapshot["status"] == ArpRunStatus.REPLY.value
+    assert snapshot["result"] == {
+        "runtime_version": "vnext",
+        "runtime_budget": {
+            "max_turns": 30,
+            "max_runtime_s": 300,
+            "max_model_calls": 60,
+        },
+        "no_legacy_fallback": True,
+        "status": "reply",
+        "turns_used": 1,
+        "model_calls": 1,
+    }
+    assert snapshot["evidence"] == []
+    assert execution.runtime_state["user_result"] == reply
+    assert execution.runtime_state["_desktop_lease"].snapshot()["status"] == "idle"
+    assert session_builds == []
+    assert len(clients) == 1
+    assert clients[0].closed is True
+    assert len(clients[0].requests) == 1
+    assert clients[0].requests[0]["messages"] == [
+        *history,
+        {"role": "user", "content": GOAL},
+    ]
+    event_types = [event["type"] for event in events]
+    assert not any(
+        event_type.startswith("desktop_lease_")
+        for event_type in event_types
+    )
+    assert "vnext_canary_turn" not in event_types
+    assert "runtime_evidence_sealed" not in event_types
+    done = [event for event in events if event["type"] == "arp_run_done"]
+    assert len(done) == 1
+    assert done[0]["status"] == ArpRunStatus.REPLY.value
+    assert done[0]["user_result"] == reply
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_name", "payload", "expected_url"),
+    (
+        (
+            "responses",
+            "gpt-4o-mini",
+            {
+                "id": "resp-native",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "native reply"}
+                        ],
+                    }
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            },
+            "https://api.openai.com/v1/responses",
+        ),
+        (
+            "anthropic",
+            "claude-sonnet-4-20250514",
+            {
+                "id": "msg-native",
+                "model": "claude-sonnet-4-20250514",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "native reply"}],
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            },
+            "https://api.anthropic.com/v1/messages",
+        ),
+        (
+            "gemini",
+            "gemini-2.5-pro",
+            {
+                "responseId": "gem-native",
+                "modelVersion": "gemini-2.5-pro",
+                "candidates": [
+                        {
+                            "finishReason": "STOP",
+                            "content": {
+                                "role": "model",
+                                "parts": [{"text": "native reply"}],
+                            },
+                        }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 10,
+                    "candidatesTokenCount": 2,
+                    "totalTokenCount": 12,
+                },
+            },
+            (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                "gemini-2.5-pro:generateContent"
+            ),
+        ),
+    ),
+)
+def test_native_provider_protocols_cross_deadline_boundary_and_report_usage(
+    provider: str,
+    model_name: str,
+    payload: dict[str, Any],
+    expected_url: str,
+) -> None:
+    config = _config()
+    config["api"] = {
+        **config["api"],
+        "provider": provider,
+        "protocol": provider,
+        "base_url": "",
+        "model": model_name,
+    }
+    budget = canary._freeze_budget(config)
+    model = canary._freeze_model(config, budget)
+    transport = _NativeTransport(payload)
+    dependencies = canary._CompositionDependencies(
+        monotonic=lambda: 10.0,
+        client_factory=lambda **_kwargs: pytest.fail(
+            "native protocols must not construct the OpenAI SDK client"
+        ),
+        provider_transport_factory=lambda: transport,
+    )
+    events: list[dict[str, Any]] = []
+    BUS.add_sink(events.append)
+    bundle = None
+    try:
+        bundle = canary._build_actor_resources(
+            run_id=f"run-native-{provider}",
+            mission_id=f"mission-native-{provider}",
+            budget=budget,
+            model=model,
+            dependencies=dependencies,
+            deadline=lambda: 200.0,
+        )
+        admission = bundle.actor.begin_turn(
+            "Reply directly.",
+            stop_event=threading.Event(),
+        )
+    finally:
+        if bundle is not None:
+            bundle.close()
+        BUS.remove_sink(events.append)
+
+    assert admission.kind == "reply"
+    assert admission.reply == "native reply"
+    assert transport.closed is True
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["url"] == expected_url
+    assert transport.calls[0]["timeout"] == 75.0
+    assert bundle is not None
+    assert bundle.usage_total["prompt_tokens"] == 10
+    assert bundle.usage_total["completion_tokens"] == 2
+    usage_events = [event for event in events if event["type"] == "agent_usage"]
+    assert len(usage_events) == 1
+    assert usage_events[0]["total"]["prompt_tokens"] == 10
+    assert usage_events[0]["model_role"] == "vnext_visual_actor"
+
+
+def test_vnext_usage_and_cache_tokens_reach_runtime_and_terminal_event(
+    tmp_path: Path,
+) -> None:
+    response = _direct_reply_response("usage reply")
+    response["usage"] = {
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "prompt_tokens_details": {
+            "cached_tokens": 60,
+            "cache_write_tokens": 20,
+        },
+    }
+    client = _RawClient(response)
+    manager = ArpRunManager()
+    execution = _prepare(
+        _graph(),
+        {},
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(
+            client_factory=lambda **_kwargs: client,
+            evidence_root=tmp_path,
+        ),
+    )
+    events: list[dict[str, Any]] = []
+    BUS.add_sink(events.append)
+    try:
+        snapshot = _run_prepared(manager, execution)
+    finally:
+        BUS.remove_sink(events.append)
+
+    expected = {
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "cache_hit_tokens": 60,
+        "cache_miss_tokens": 20,
+        "cache_creation_tokens": 20,
+        "reasoning_tokens": 0,
+        "cost_cny": 0.0,
+        "cost_estimated": False,
+        "cost_currency": "CNY",
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+    }
+    assert snapshot["status"] == ArpRunStatus.REPLY.value
+    assert snapshot["result"]["model_usage"] == expected
+    assert execution.runtime_state["model_usage"] == expected
+    usage = [event for event in events if event["type"] == "agent_usage"]
+    assert len(usage) == 1
+    assert usage[0]["total"] == expected
+    done = [event for event in events if event["type"] == "vnext_canary_done"]
+    assert len(done) == 1
+    assert done[0]["model_usage"] == expected
+
+
+def test_cancel_before_initial_actor_turn_closes_model_without_desktop_io(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     raw_constructions: list[bool] = []
     client_calls: list[dict[str, Any]] = []
+    clients: list[_RawClient] = []
 
     def forbidden_raw(*_args: Any, **_kwargs: Any) -> Any:
         raw_constructions.append(True)
         raise AssertionError("RawDevice must not be constructed")
 
-    def forbidden_client(**kwargs: Any) -> Any:
+    def client_factory(**kwargs: Any) -> Any:
         client_calls.append(kwargs)
-        raise AssertionError("model client must not be constructed")
+        client = _RawClient(_observe_desktop_response())
+        clients.append(client)
+        return client
 
     class CancelBeforeComposition:
         paused = True
@@ -683,13 +1100,13 @@ def test_pre_composition_cancel_seals_unique_empty_evidence_without_io(
 
     monkeypatch.setattr(canary, "RawDeviceExecutor", forbidden_raw)
     graph = _graph()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         graph,
-        _inputs(),
+        {},
         _config(),
         run_manager=ArpRunManager(),
         _dependencies=_dependencies(
-            client_factory=forbidden_client,
+            client_factory=client_factory,
             evidence_root=tmp_path,
         ),
     )
@@ -712,31 +1129,18 @@ def test_pre_composition_cancel_seals_unique_empty_evidence_without_io(
 
     assert result.ok is False
     assert result.branch == "canceled"
-    assert result.output["runtime_version"] == "vnext"
-    assert result.output["no_legacy_fallback"] is True
-    assert result.output["model_calls"] == 0
+    assert result.output is None
+    assert "canceled before the initial Actor turn" in result.error
     assert raw_constructions == []
-    assert client_calls == []
+    assert len(client_calls) == len(clients) == 1
+    assert clients[0].closed is True
+    assert clients[0].requests == []
     sealed = [
         event
         for event in events
         if event["type"] == "runtime_evidence_sealed"
     ]
-    assert len(sealed) == 1
-    anchor = sealed[0]
-    assert anchor["run_id"] == run_id
-    assert anchor["journal_event_count"] == 0
-    assert anchor["report_status"] == "incomplete"
-    assert anchor["no_legacy_fallback"] is True
-    report = RuntimeEvidencePlane.rebuild_report(
-        tmp_path / run_id,
-        anchor["mission_id"],
-        run_id,
-        expected_journal_head_sha256=anchor[
-            "journal_head_sha256"
-        ],
-    )
-    assert canonical_sha256(report.to_dict()) == anchor["report_sha256"]
+    assert sealed == []
     assert [
         event["type"]
         for event in events
@@ -748,7 +1152,6 @@ def test_pre_composition_cancel_seals_unique_empty_evidence_without_io(
         }
     ] == [
         "vnext_canary_start",
-        "runtime_evidence_sealed",
         "vnext_canary_done",
     ]
 
@@ -770,9 +1173,9 @@ def test_exact_graph_rejects_every_expansion(mutate: Any) -> None:
     graph = ArpGraph.model_validate(raw)
 
     with pytest.raises(ValueError, match="vNext|AGENT_GOAL"):
-        canary.prepare_live_vnext_execution(
+        _prepare(
             graph,
-            _inputs(),
+            {},
             _config(),
             run_manager=ArpRunManager(),
             _dependencies=_dependencies(
@@ -818,21 +1221,18 @@ def test_exact_graph_rejects_every_expansion(mutate: Any) -> None:
         ),
     ),
 )
-def test_execution_context_is_exact_and_fresh(change: Any, match: str) -> None:
+def test_desktop_lease_target_context_is_exact_and_fresh(
+    change: Any,
+    match: str,
+) -> None:
     inputs = _inputs()
     change(inputs)
 
     with pytest.raises(ValueError, match=match):
-        canary.prepare_live_vnext_execution(
+        canary._freeze_prebound_target(
             _graph(),
             inputs,
-            _config(),
-            run_manager=ArpRunManager(),
-            _dependencies=_dependencies(
-                session=_FakeSession(
-                    [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
-                )
-            ),
+            dependencies=_dependencies(),
         )
 
 
@@ -869,12 +1269,10 @@ def test_current_target_identity_mismatch_fails_before_session(
         ValueError,
         match=rf"current Electron target mismatch: {mismatch}",
     ):
-        canary.prepare_live_vnext_execution(
+        canary._freeze_prebound_target(
             _graph(),
             _inputs(),
-            _config(),
-            run_manager=ArpRunManager(),
-            _dependencies=deps,
+            dependencies=deps,
         )
     assert built is False
 
@@ -1122,16 +1520,16 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     )
     events: list[dict[str, Any]] = []
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
     )
     BUS.add_sink(events.append)
     try:
-        snapshot = manager.run_prepared(execution)
+        snapshot = _run_prepared(manager, execution)
     finally:
         BUS.remove_sink(events.append)
 
@@ -1139,9 +1537,10 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     assert snapshot["runtime_version"] == "vnext"
     assert snapshot["result"]["status"] == "mission_verified"
     assert snapshot["result"]["turns_used"] == 4
-    assert snapshot["result"]["model_calls"] == 4
+    assert snapshot["result"]["model_calls"] == 5
     assert snapshot["result"]["no_legacy_fallback"] is True
     assert session.calls == 4
+    assert session.model_calls == 5
     assert session.closed is True
     assert len(snapshot["evidence"]) == 1
     assert snapshot["evidence"][0]["verified"] is True
@@ -1158,6 +1557,16 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     }
     assert starts[0]["no_legacy_fallback"] is True
     assert done[0]["status"] == "mission_verified"
+    event_types = [item["type"] for item in events]
+    assert event_types.index("vnext_model_call") < event_types.index(
+        "desktop_lease_requested"
+    )
+    assert event_types.index("desktop_lease_requested") < event_types.index(
+        "desktop_lease_bound"
+    )
+    assert event_types.index("desktop_lease_bound") < event_types.index(
+        "vnext_canary_turn"
+    )
 
 
 def test_handler_recovers_from_one_invalid_proposal_without_prompt_repair() -> None:
@@ -1176,16 +1585,16 @@ def test_handler_recovers_from_one_invalid_proposal_without_prompt_repair() -> N
     )
     events: list[dict[str, Any]] = []
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
     )
     BUS.add_sink(events.append)
     try:
-        snapshot = manager.run_prepared(execution)
+        snapshot = _run_prepared(manager, execution)
     finally:
         BUS.remove_sink(events.append)
 
@@ -1220,16 +1629,16 @@ def test_handler_stops_after_two_consecutive_invalid_proposals() -> None:
     )
     events: list[dict[str, Any]] = []
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
     )
     BUS.add_sink(events.append)
     try:
-        snapshot = manager.run_prepared(execution)
+        snapshot = _run_prepared(manager, execution)
     finally:
         BUS.remove_sink(events.append)
 
@@ -1257,15 +1666,15 @@ def test_successful_turn_resets_invalid_proposal_recovery_streak() -> None:
         ]
     )
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
     )
 
-    snapshot = manager.run_prepared(execution)
+    snapshot = _run_prepared(manager, execution)
 
     assert snapshot["status"] == ArpRunStatus.DONE.value
     assert snapshot["result"]["turns_used"] == 4
@@ -1285,16 +1694,16 @@ def test_handler_redecides_once_after_actor_transport_error() -> None:
     )
     events: list[dict[str, Any]] = []
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
     )
     BUS.add_sink(events.append)
     try:
-        snapshot = manager.run_prepared(execution)
+        snapshot = _run_prepared(manager, execution)
     finally:
         BUS.remove_sink(events.append)
 
@@ -1327,16 +1736,16 @@ def test_handler_preserves_second_consecutive_actor_error_as_terminal() -> None:
     )
     events: list[dict[str, Any]] = []
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
     )
     BUS.add_sink(events.append)
     try:
-        snapshot = manager.run_prepared(execution)
+        snapshot = _run_prepared(manager, execution)
     finally:
         BUS.remove_sink(events.append)
 
@@ -1364,15 +1773,15 @@ def test_handler_stops_on_blocked_without_retry_and_closes() -> None:
         ]
     )
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
     )
 
-    snapshot = manager.run_prepared(execution)
+    snapshot = _run_prepared(manager, execution)
 
     assert snapshot["status"] == ArpRunStatus.FAILED.value
     assert session.calls == 1
@@ -1391,15 +1800,15 @@ def test_completion_snapshot_error_still_closes_and_fails_closed() -> None:
         [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
     )
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
     )
 
-    snapshot = manager.run_prepared(execution)
+    snapshot = _run_prepared(manager, execution)
 
     assert snapshot["status"] == ArpRunStatus.FAILED.value
     assert "completion snapshot failed closed" in snapshot["error"]
@@ -1433,15 +1842,15 @@ def test_verified_result_survives_unavailable_diagnostic_summary(
 
     monkeypatch.setattr(canary, "_build_live_session", build)
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(),
     )
 
-    snapshot = manager.run_prepared(execution)
+    snapshot = _run_prepared(manager, execution)
 
     assert snapshot["status"] == ArpRunStatus.DONE.value
     assert snapshot["result"]["status"] == RuntimeStatus.MISSION_VERIFIED.value
@@ -1551,9 +1960,9 @@ def test_model_transport_payload_is_absent_from_bus_and_node_result() -> None:
         ]
     )
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
@@ -1561,7 +1970,7 @@ def test_model_transport_payload_is_absent_from_bus_and_node_result() -> None:
     events: list[dict[str, Any]] = []
     BUS.add_sink(events.append)
     try:
-        snapshot = manager.run_prepared(execution)
+        snapshot = _run_prepared(manager, execution)
     finally:
         BUS.remove_sink(events.append)
 
@@ -1712,9 +2121,9 @@ def test_public_result_source_projects_only_safe_runtime_evidence(
         ]
     )
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
@@ -1727,7 +2136,7 @@ def test_public_result_source_projects_only_safe_runtime_evidence(
     BUS.add_sink(events.append)
     try:
         recorder.start(execution.run_id)
-        snapshot = manager.run_prepared(execution)
+        snapshot = _run_prepared(manager, execution)
         recorder.stop()
     finally:
         recorder.stop()
@@ -1957,9 +2366,9 @@ def test_invalid_completion_binding_is_non_success_before_done_event(
         [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
     )
     manager = ArpRunManager()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         _graph(),
-        _inputs(),
+        {},
         _config(),
         run_manager=manager,
         _dependencies=_dependencies(session=session),
@@ -1967,7 +2376,7 @@ def test_invalid_completion_binding_is_non_success_before_done_event(
     events: list[dict[str, Any]] = []
     BUS.add_sink(events.append)
     try:
-        result = manager.run_prepared(execution)
+        result = _run_prepared(manager, execution)
     finally:
         BUS.remove_sink(events.append)
 
@@ -2113,7 +2522,7 @@ def test_goal_admission_audit_is_validated_without_runtime_policy() -> None:
             "goal_admission": {
                 "format": "goal-admission/1",
                 "goal": GOAL,
-                "route": "live_gui",
+                "route": "live_agent",
                 "runtime_version": "vnext",
                 "reason": "single_semantic_agent",
                 "no_legacy_fallback": True,
@@ -2161,6 +2570,20 @@ class _RawClient:
         self.closed = True
         if self.close_error:
             raise RuntimeError(self.close_error)
+
+
+class _NativeTransport:
+    def __init__(self, response: dict[str, Any]) -> None:
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+        self.closed = False
+
+    def post_json(self, **request: Any) -> dict[str, Any]:
+        self.calls.append(deepcopy(request))
+        return deepcopy(self.response)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _runtime_evidence_resources(
@@ -2382,6 +2805,16 @@ def _real_session_with_captures(
         runtime_evidence_root=evidence_root,
     )
     graph = _graph()
+    budget = canary._freeze_budget(_config())
+    model = canary._freeze_model(_config(), budget)
+    actor_bundle = canary._build_actor_resources(
+        run_id="arp-test-live-frames",
+        mission_id="vnext-mission-test-live-frames",
+        budget=budget,
+        model=model,
+        dependencies=deps,
+        deadline=lambda: deadline,
+    )
     build = canary._SessionBuild(
         graph=graph,
         goal=GOAL,
@@ -2392,13 +2825,11 @@ def _real_session_with_captures(
             _inputs(),
             dependencies=deps,
         ),
-        budget=canary._freeze_budget(_config()),
-        model=canary._freeze_model(
-            _config(),
-            canary._freeze_budget(_config()),
-        ),
+        budget=budget,
+        model=model,
         dependencies=deps,
         deadline=lambda: deadline,
+        actor_bundle=actor_bundle,
         pause_controller=None,
     )
     return (
@@ -3093,6 +3524,7 @@ def _composition_build(
         model=canary._freeze_model(_config(), budget),
         dependencies=dependencies,
         deadline=lambda: 310.0,
+        actor_bundle=_StubActorBundle(),
         pause_controller=None,
     )
 
@@ -3174,6 +3606,7 @@ def test_evidence_setup_failure_precedes_models_and_raw_device(
         model=canary._freeze_model(_config(), budget),
         dependencies=deps,
         deadline=lambda: 310.0,
+        actor_bundle=_StubActorBundle(),
         pause_controller=None,
     )
 
@@ -3241,6 +3674,7 @@ def test_registry_setup_failure_seals_unique_incomplete_evidence_once(
         model=canary._freeze_model(_config(), budget),
         dependencies=deps,
         deadline=lambda: 310.0,
+        actor_bundle=_StubActorBundle(),
         pause_controller=None,
     )
     events: list[dict[str, Any]] = []
@@ -3330,6 +3764,7 @@ def test_pre_controller_composition_failure_seals_evidence_and_closes_registry_o
         model=canary._freeze_model(_config(), budget),
         dependencies=deps,
         deadline=lambda: 310.0,
+        actor_bundle=_StubActorBundle(),
         pause_controller=None,
     )
 
@@ -3370,87 +3805,108 @@ def test_pre_controller_composition_failure_seals_evidence_and_closes_registry_o
     assert canonical_sha256(report.to_dict()) == anchor["report_sha256"]
 
 
-def test_changed_target_after_explicit_start_seals_unique_incomplete_evidence(
+def test_run_bound_lease_rejects_target_changed_after_actor_request(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     current_target = [_facts()]
     raw_constructions: list[bool] = []
     client_calls: list[dict[str, Any]] = []
+    clients: list[_RawClient] = []
 
     def forbidden_raw(*_args: Any, **_kwargs: Any) -> Any:
         raw_constructions.append(True)
         raise AssertionError("RawDevice must not be constructed")
 
-    def forbidden_client(**kwargs: Any) -> Any:
+    def client_factory(**kwargs: Any) -> Any:
         client_calls.append(kwargs)
-        raise AssertionError("model client must not be constructed")
+        client = _RawClient(_observe_desktop_response())
+        clients.append(client)
+        return client
 
     dependencies = canary._CompositionDependencies(
         wall_clock=lambda: NOW_MS / 1000.0,
         monotonic=lambda: 10.0,
         target_reader=lambda _hwnd: current_target[0],
         hit_test_root=lambda _x, _y: HWND,
-        client_factory=forbidden_client,
+        client_factory=client_factory,
         runtime_evidence_root=tmp_path,
     )
     graph = _graph()
-    execution = canary.prepare_live_vnext_execution(
+    execution = _prepare(
         graph,
-        _inputs(),
+        {},
         _config(),
         run_manager=ArpRunManager(),
         _dependencies=dependencies,
     )
     current_target[0] = _facts(process_id=PID + 1)
     run_id = "arp-test-changed-target-after-start"
+    lease = execution.runtime_state["_desktop_lease"]
+    results: list[Any] = []
     events: list[dict[str, Any]] = []
     monkeypatch.setattr(canary, "RawDeviceExecutor", forbidden_raw)
-    BUS.add_sink(events.append)
-    try:
-        result = execution.handlers[ArpNodeKind.AGENT_GOAL](
-            next(node for node in graph.nodes if node.id == "full-goal"),
-            {"run_id": run_id, "runtime_state": {}},
-            threading.Event(),
+
+    def invoke_handler() -> None:
+        results.append(
+            execution.handlers[ArpNodeKind.AGENT_GOAL](
+                next(node for node in graph.nodes if node.id == "full-goal"),
+                {"run_id": run_id, "runtime_state": {}},
+                threading.Event(),
+            )
         )
+
+    BUS.add_sink(events.append)
+    worker = threading.Thread(target=invoke_handler, daemon=True)
+    try:
+        worker.start()
+        for _ in range(2_000):
+            lease_snapshot = lease.snapshot()
+            if lease_snapshot["status"] == "waiting":
+                break
+            threading.Event().wait(0.001)
+        else:
+            pytest.fail("Actor did not request the desktop lease")
+        with pytest.raises(
+            canary.DesktopLeaseError,
+            match="process_id",
+        ):
+            lease.bind(
+                run_id=run_id,
+                lease_id=lease_snapshot["lease_id"],
+                inputs=_inputs(),
+            )
+        lease.fail(
+            run_id=run_id,
+            lease_id=lease_snapshot["lease_id"],
+            reason="target changed before desktop lease binding",
+        )
+        worker.join(timeout=2.0)
     finally:
         BUS.remove_sink(events.append)
 
+    assert not worker.is_alive()
+    assert len(results) == 1
+    result = results[0]
     assert result.ok is False
     assert result.branch == "fail"
-    assert result.output["runtime_version"] == "vnext"
-    assert result.output["no_legacy_fallback"] is True
-    assert result.output["model_calls"] == 0
+    assert result.output is None
+    assert "target changed before desktop lease binding" in result.error
     assert raw_constructions == []
-    assert client_calls == []
-    selected_events = [
-        event
-        for event in events
-        if event["type"]
-        in {
-            "vnext_canary_start",
-            "runtime_evidence_sealed",
-            "vnext_canary_done",
-        }
+    assert len(client_calls) == len(clients) == 1
+    assert len(clients[0].requests) == 1
+    assert clients[0].closed is True
+    event_types = [event["type"] for event in events]
+    assert [
+        event_type
+        for event_type in event_types
+        if event_type.startswith("desktop_lease_")
+    ] == [
+        "desktop_lease_requested",
+        "desktop_lease_rejected",
+        "desktop_lease_failed",
     ]
-    assert [event["type"] for event in selected_events] == [
-        "vnext_canary_start",
-        "runtime_evidence_sealed",
-        "vnext_canary_done",
-    ]
-    anchor = selected_events[1]
-    assert anchor["run_id"] == run_id
-    assert anchor["journal_event_count"] == 0
-    assert anchor["report_status"] == "incomplete"
-    report = RuntimeEvidencePlane.rebuild_report(
-        tmp_path / run_id,
-        anchor["mission_id"],
-        run_id,
-        expected_journal_head_sha256=anchor[
-            "journal_head_sha256"
-        ],
-    )
-    assert canonical_sha256(report.to_dict()) == anchor["report_sha256"]
+    assert "runtime_evidence_sealed" not in event_types
 
 
 def test_expired_target_before_runtime_composition_seals_incomplete_evidence(
@@ -3582,9 +4038,8 @@ def test_controller_setup_failure_seals_and_closes_all_created_owners_once(
 @pytest.mark.parametrize(
     "failure_stage,expected_clients",
     (
-        ("model_client", 0),
-        ("mission_runtime", 1),
-        ("live_session", 1),
+        ("mission_runtime", 0),
+        ("live_session", 0),
     ),
 )
 def test_model_runtime_session_setup_failure_seals_and_closes_once(
@@ -3604,8 +4059,6 @@ def test_model_runtime_session_setup_failure_seals_and_closes_once(
     error_text = f"synthetic {failure_stage} setup failure"
 
     def factory(**_kwargs: Any) -> _RawClient:
-        if failure_stage == "model_client":
-            raise RuntimeError(error_text)
         client = _RawClient()
         clients.append(client)
         return client
@@ -3666,6 +4119,8 @@ def test_model_runtime_session_setup_failure_seals_and_closes_once(
     assert len(clients) == expected_clients
     assert all(client.closed for client in clients)
     assert all(client.close_calls == 1 for client in clients)
+    assert build.actor_bundle.closed is True
+    assert build.actor_bundle.close_calls == 1
     assert len(journal_closes) == 1
     assert len(registry_closes) == 1
     assert registry_closes[0].closed is True
@@ -3698,6 +4153,14 @@ def test_real_composition_builds_zero_retry_actor_and_closes(
     )
     budget = canary._freeze_budget(_config())
     model = canary._freeze_model(_config(), budget)
+    actor_bundle = canary._build_actor_resources(
+        run_id="arp-test-live-composition",
+        mission_id="vnext-mission-test-live-composition",
+        budget=budget,
+        model=model,
+        dependencies=deps,
+        deadline=lambda: 310.0,
+    )
     build = canary._SessionBuild(
         graph=graph,
         goal=GOAL,
@@ -3708,6 +4171,7 @@ def test_real_composition_builds_zero_retry_actor_and_closes(
         model=model,
         dependencies=deps,
         deadline=lambda: 310.0,
+        actor_bundle=actor_bundle,
         pause_controller=None,
     )
 

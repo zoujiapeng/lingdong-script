@@ -9,6 +9,8 @@ import type {
   ArpExecutionSnapshot,
   CapabilitySpec,
   ClientExecutionContext,
+  CurrentRunResponse,
+  GoalRunStart,
   GraphValidation,
   PlatformOverview,
   RunProjection,
@@ -22,9 +24,9 @@ export type ConnectionState = 'connecting' | 'online' | 'degraded' | 'offline';
 export const CONTROL_PLANE_FALLBACK_REFRESH_MS = 5_000;
 export const CONTROL_PLANE_EVENT_REFRESH_MS = 80;
 
-type GoalRunClient = Pick<
+type DesktopLeaseClient = Pick<
   ControlPlaneClient,
-  'captureDesktopContext' | 'startGoalRun'
+  'bindDesktopLease' | 'captureDesktopContext' | 'failDesktopLease' | 'run'
 >;
 
 async function releaseDesktopHandoffBestEffort(): Promise<void> {
@@ -35,12 +37,16 @@ async function releaseDesktopHandoffBestEffort(): Promise<void> {
   }
 }
 
-export async function startGoalWithDesktopHandoff(
-  client: GoalRunClient,
-  goal: string,
-): Promise<ArpExecutionSnapshot> {
-  const fullGoal = goal.trim();
-  if (!fullGoal) throw new Error('Goal run requires a non-empty goal.');
+export async function fulfillDesktopLease(
+  client: DesktopLeaseClient,
+  runId: string,
+  leaseId: string,
+): Promise<void> {
+  const canonicalRunId = runId.trim();
+  const canonicalLeaseId = leaseId.trim();
+  if (!canonicalRunId || !canonicalLeaseId) {
+    throw new Error('Desktop lease requires exact run and lease ids.');
+  }
   let executionContext: ClientExecutionContext;
   try {
     executionContext = await buildClientExecutionContext(
@@ -48,28 +54,103 @@ export async function startGoalWithDesktopHandoff(
       (result) => client.captureDesktopContext(result.control_surface_pid),
     );
   } catch (error) {
+    try {
+      await client.failDesktopLease(
+        canonicalRunId,
+        canonicalLeaseId,
+        error instanceof Error ? error.message : String(error),
+      );
+    } catch {
+      // The original handoff failure remains authoritative.
+    }
     await releaseDesktopHandoffBestEffort();
     throw error;
   }
-  let run: ArpExecutionSnapshot;
   try {
-    run = await client.startGoalRun(
-      fullGoal,
+    const bound = await window.electronAPI?.bindDesktopHandoff?.(
+      canonicalRunId,
+    );
+    if (bound === false) {
+      throw new Error('Electron rejected the desktop handoff binding.');
+    }
+  } catch (error) {
+    try {
+      await client.failDesktopLease(
+        canonicalRunId,
+        canonicalLeaseId,
+        error instanceof Error ? error.message : String(error),
+      );
+    } catch {
+      // No server bind was attempted, so local release remains safe.
+    }
+    await releaseDesktopHandoffBestEffort();
+    throw error;
+  }
+  try {
+    await client.bindDesktopLease(
+      canonicalRunId,
+      canonicalLeaseId,
       executionContext,
     );
   } catch (error) {
-    await releaseDesktopHandoffBestEffort();
-    throw error;
-  }
-  try {
-    const bound = await window.electronAPI?.bindDesktopHandoff?.(run.run_id);
-    if (bound === false) {
+    let exactRun: CurrentRunResponse | null = null;
+    try {
+      exactRun = await client.run(canonicalRunId);
+    } catch {
+      // An ambiguous bind must keep the surface yielded: the server may have
+      // delivered the lease even though its response was lost.
+      throw error;
+    }
+    const lease = exactRun.arp?.desktop_lease;
+    if (
+      lease
+      && String(lease.run_id || '') === canonicalRunId
+      && String(lease.lease_id || '') === canonicalLeaseId
+      && String(lease.status || '') === 'delivered'
+    ) {
+      return;
+    }
+    const leaseStatus = String(lease?.status || '');
+    const runStatus = String(
+      exactRun.arp?.status || exactRun.run?.status || '',
+    ).toLowerCase();
+    const terminal = [
+      'done',
+      'reply',
+      'failed',
+      'fail',
+      'error',
+      'canceled',
+      'cancelled',
+      'stopped',
+      'interrupted',
+      'blocked',
+    ].includes(runStatus);
+    let releaseSafe = terminal || leaseStatus === 'closed';
+    if (leaseStatus === 'waiting') {
+      try {
+        const failed = await client.failDesktopLease(
+          canonicalRunId,
+          canonicalLeaseId,
+          error instanceof Error ? error.message : String(error),
+        );
+        const failedLease = failed.lease;
+        releaseSafe = (
+          typeof failedLease === 'object'
+          && failedLease !== null
+          && String((failedLease as Record<string, unknown>).run_id || '') === canonicalRunId
+          && String((failedLease as Record<string, unknown>).lease_id || '') === canonicalLeaseId
+          && String((failedLease as Record<string, unknown>).status || '') === 'closed'
+        );
+      } catch {
+        // The original bind may have won the race and delivered the lease.
+      }
+    }
+    if (releaseSafe) {
       await releaseDesktopHandoffBestEffort();
     }
-  } catch {
-    await releaseDesktopHandoffBestEffort();
+    throw error;
   }
-  return run;
 }
 
 export function useControlPlane() {
@@ -79,6 +160,7 @@ export function useControlPlane() {
   const liveStartedRuns = useRef(new Set<string>());
   const overviewRef = useRef<PlatformOverview | null>(null);
   const runtimeRestarting = useRef(false);
+  const desktopLeaseHandled = useRef(new Set<string>());
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [baseUrl, setBaseUrl] = useState('');
   const [overview, setOverview] = useState<PlatformOverview | null>(null);
@@ -89,6 +171,33 @@ export function useControlPlane() {
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [error, setError] = useState('');
   const [runtimeIssue, setRuntimeIssue] = useState('控制器运行时身份尚未加载。');
+
+  const handleDesktopLease = useCallback(
+    async (runId: string, leaseId: string) => {
+      const key = `${runId}:${leaseId}`;
+      if (!runId || !leaseId || desktopLeaseHandled.current.has(key)) return;
+      if (desktopLeaseHandled.current.size >= 200) {
+        desktopLeaseHandled.current.clear();
+      }
+      desktopLeaseHandled.current.add(key);
+      const client = clientRef.current;
+      if (!client) {
+        desktopLeaseHandled.current.delete(key);
+        return;
+      }
+      try {
+        await fulfillDesktopLease(client, runId, leaseId);
+      } catch (leaseError) {
+        setError(
+          leaseError instanceof Error
+            ? leaseError.message
+            : String(leaseError),
+        );
+        setConnection('degraded');
+      }
+    },
+    [],
+  );
 
   const refresh = useCallback(async () => {
     const client = clientRef.current;
@@ -166,6 +275,12 @@ export function useControlPlane() {
         await refresh();
         if (disposed) return;
         disconnect = client.connectEvents((event) => {
+          if (event.type === 'desktop_lease_requested') {
+            void handleDesktopLease(
+              String(event.run_id || ''),
+              String(event.lease_id || ''),
+            );
+          }
           if (event.run_id && (event.type === 'agent_start' || event.type === 'arp_run_start')) {
             if (liveStartedRuns.current.size >= 200) liveStartedRuns.current.clear();
             liveStartedRuns.current.add(event.run_id);
@@ -176,6 +291,26 @@ export function useControlPlane() {
               String(event.body || ''),
               event.kind === 'error' || event.kind === 'success' ? event.kind : 'info',
               String(event.run_id || ''),
+            );
+          }
+          if (event.type === 'arp_run_done' && event.run_id) {
+            const status = String(event.status || '').toLowerCase();
+            const failed = [
+              'failed',
+              'fail',
+              'error',
+              'canceled',
+              'cancelled',
+              'stopped',
+              'interrupted',
+              'blocked',
+            ].includes(status);
+            void window.electronAPI?.notifyTaskbar?.(
+              failed ? '任务失败' : status === 'reply' ? 'Agent 已回复' : '任务完成',
+              String(event.user_result || event.error || event.result || '').slice(0, 220),
+              failed ? 'error' : 'success',
+              String(event.run_id),
+              true,
             );
           }
           if (event.type === 'ping') return;
@@ -219,7 +354,22 @@ export function useControlPlane() {
       if (interval) clearInterval(interval);
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
     };
-  }, [refresh, refreshLiveRun]);
+  }, [handleDesktopLease, refresh, refreshLiveRun]);
+
+  useEffect(() => {
+    const lease = arpSnapshot?.desktop_lease;
+    if (
+      !lease
+      || typeof lease !== 'object'
+      || String(lease.status || '') !== 'waiting'
+    ) {
+      return;
+    }
+    void handleDesktopLease(
+      String(lease.run_id || arpSnapshot?.run_id || ''),
+      String(lease.lease_id || ''),
+    );
+  }, [arpSnapshot, handleDesktopLease]);
 
   useEffect(() => {
     if (!currentRun) return;
@@ -259,14 +409,17 @@ export function useControlPlane() {
     return requireClient();
   };
 
-  const startGoal = useCallback(async (goal: string) => {
+  const startGoal = useCallback(async (
+    goal: string,
+    threadId = '',
+  ): Promise<GoalRunStart> => {
     const client = requireCompatibleClient();
-    const run = await startGoalWithDesktopHandoff(
-      client,
+    const started = await client.startGoalRun(
       goal,
+      threadId,
     );
     await refresh();
-    return run;
+    return started;
   }, [refresh]);
 
   const startAutomation = useCallback(async (

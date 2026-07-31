@@ -65,11 +65,17 @@ from .orchestrator.contracts import (
     validate_graph,
 )
 from .orchestrator.goal_admission import (
+    DesktopLeaseFailureRequest,
+    DesktopLeaseRequest,
     GoalAdmissionError,
     GoalAdmissionUnavailable,
     GoalRunRequest,
     admit_goal,
     bind_client_execution_context,
+)
+from .orchestrator.agent_threads import (
+    AGENT_THREADS,
+    AgentThreadError,
 )
 from .orchestrator.projection import RUN_PROJECTIONS
 from .orchestrator.runtime import ARP_RUNS, ArpExecution
@@ -1072,7 +1078,8 @@ def _terminalize_unstarted_vnext_execution(
             "trace_status": str(trace_status),
             "no_legacy_fallback": True,
         }
-        return True
+    execution._publish_run_done()
+    return True
 
 
 def _finalize_vnext_trace(
@@ -1118,6 +1125,9 @@ def _start_arp_execution(
     runtime_version: ArpRuntimeVersion = ArpRuntimeVersion.LEGACY,
     frozen_config: dict[str, Any] | None = None,
     goal_admission: dict[str, Any] | None = None,
+    thread_id: str = "",
+    turn_id: str = "",
+    thread_history: tuple[dict[str, str], ...] = (),
 ) -> ArpExecution:
     if (
         goal_admission is not None
@@ -1258,16 +1268,28 @@ def _start_arp_execution(
     if runtime_version is ArpRuntimeVersion.VNEXT:
         if frozen_config is None:
             raise RuntimeError("vNext live canary config was not frozen")
+        if not thread_id or not turn_id:
+            thread_id, turn_id, generated_history = (
+                AGENT_THREADS.begin_turn(graph.name)
+            )
+            thread_history = tuple(generated_history)
         from .orchestrator.vnext_live_canary import (
             prepare_live_vnext_execution,
         )
 
-        execution = prepare_live_vnext_execution(
-            graph,
-            inputs,
-            frozen_config,
-            run_manager=ARP_RUNS,
-        )
+        try:
+            execution = prepare_live_vnext_execution(
+                graph,
+                inputs,
+                frozen_config,
+                run_manager=ARP_RUNS,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                history=thread_history,
+            )
+        except Exception as exc:
+            AGENT_THREADS.fail_turn(turn_id, str(exc))
+            raise
     else:
         execution = ARP_RUNS.prepare(
             graph,
@@ -1277,6 +1299,16 @@ def _start_arp_execution(
     execution.runtime_state["runtime_version"] = runtime_version.value
     if goal_admission is not None:
         execution.runtime_state["goal_admission"] = dict(goal_admission)
+    if runtime_version is ArpRuntimeVersion.VNEXT:
+        try:
+            AGENT_THREADS.bind_run(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                run_id=execution.run_id,
+            )
+        except Exception as exc:
+            AGENT_THREADS.fail_turn(turn_id, str(exc))
+            raise
     job_id = f"arp-job-{execution.run_id}"
     job_ref["job_id"] = job_id
     with STATE.lock:
@@ -1311,7 +1343,7 @@ def _start_arp_execution(
                 trace_status="not_started",
             )
             snapshot = execution.to_dict()
-        ok = snapshot.get("status") == "done"
+        ok = snapshot.get("status") in {"done", "reply"}
         return {
             "ok": ok,
             "run_id": execution.run_id,
@@ -1374,6 +1406,8 @@ def _start_arp_execution(
             )
         with STATE.lock:
             STATE.run_jobs.pop(execution.run_id, None)
+        if runtime_version is ArpRuntimeVersion.VNEXT:
+            AGENT_THREADS.fail_turn(turn_id, str(exc))
         raise
     return execution
 
@@ -1388,6 +1422,7 @@ def start_goal_run(req: GoalRunRequest) -> dict[str, Any]:
             "WinPilot Python sources changed after this service started. "
             "Restart the runtime before starting another frontend task.",
         )
+    turn_id = ""
     try:
         frozen_config = CONFIG.snapshot()
         vnext_config = frozen_config.get("vnext")
@@ -1403,33 +1438,129 @@ def start_goal_run(req: GoalRunRequest) -> dict[str, Any]:
         )
 
         graph = build_exact_live_vnext_graph(admission.goal)
-        inputs = bind_client_execution_context(
-            req.execution_context,
-            task_id=graph.id,
+        thread_id, turn_id, history = AGENT_THREADS.begin_turn(
+            admission.goal,
+            thread_id=req.thread_id.strip(),
         )
         audit = admission.to_dict()
         execution = _start_arp_execution(
             graph,
-            inputs,
+            {},
             runtime_version=admission.runtime_version,
             frozen_config=frozen_config,
             goal_admission=audit,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            thread_history=tuple(history),
         )
     except GoalAdmissionUnavailable as exc:
         raise HTTPException(409, str(exc)) from exc
+    except AgentThreadError as exc:
+        if turn_id:
+            AGENT_THREADS.fail_turn(turn_id, str(exc))
+        raise HTTPException(409, str(exc)) from exc
     except (GoalAdmissionError, ValueError) as exc:
+        if turn_id:
+            AGENT_THREADS.fail_turn(turn_id, str(exc))
         logger.warning("Goal admission rejected before run start: %s", exc)
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
+        if turn_id:
+            AGENT_THREADS.fail_turn(turn_id, str(exc))
         raise HTTPException(409, str(exc)) from exc
     return {
         "ok": True,
         "run_id": execution.run_id,
+        "thread_id": thread_id,
+        "turn_id": turn_id,
         "runtime_version": admission.runtime_version.value,
         "admission": audit,
         "run": execution.to_dict(),
         "graph": graph.model_dump(mode="json"),
     }
+
+
+@app.get("/api/v2/threads/{thread_id}")
+def get_agent_thread(thread_id: str) -> dict[str, Any]:
+    try:
+        thread = AGENT_THREADS.snapshot(thread_id)
+    except AgentThreadError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"ok": True, "thread": thread}
+
+
+@app.post("/api/v2/goals/runs/{run_id}/desktop-lease")
+def bind_goal_desktop_lease(
+    run_id: str,
+    req: DesktopLeaseRequest,
+) -> dict[str, Any]:
+    execution = ARP_RUNS.get(run_id)
+    if execution is None:
+        raise HTTPException(404, "run not found")
+    if execution.status not in {
+        ArpRunStatus.QUEUED,
+        ArpRunStatus.RUNNING,
+        ArpRunStatus.PAUSED,
+    }:
+        raise HTTPException(409, "run is already terminal")
+    from .orchestrator.vnext_live_canary import (
+        DesktopLeaseError,
+        DesktopLeaseSlot,
+    )
+
+    lease = execution.runtime_state.get("_desktop_lease")
+    if not isinstance(lease, DesktopLeaseSlot):
+        raise HTTPException(409, "run has no desktop lease")
+    try:
+        inputs = bind_client_execution_context(
+            req.execution_context,
+            task_id=execution.graph.id,
+        )
+        target = lease.bind(
+            run_id=run_id,
+            lease_id=req.lease_id,
+            inputs=inputs,
+        )
+    except (DesktopLeaseError, GoalAdmissionError, ValueError) as exc:
+        execution.runtime_state["desktop_lease"] = lease.snapshot()
+        raise HTTPException(409, str(exc)) from exc
+    execution.inputs.update(inputs)
+    execution.runtime_state["desktop_lease"] = lease.snapshot()
+    execution.runtime_state["target_binding_id"] = target.binding_id
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "lease": lease.snapshot(),
+        "target": target.trace_identity(),
+    }
+
+
+@app.post("/api/v2/goals/runs/{run_id}/desktop-lease/fail")
+def fail_goal_desktop_lease(
+    run_id: str,
+    req: DesktopLeaseFailureRequest,
+) -> dict[str, Any]:
+    execution = ARP_RUNS.get(run_id)
+    if execution is None:
+        raise HTTPException(404, "run not found")
+    from .orchestrator.vnext_live_canary import (
+        DesktopLeaseError,
+        DesktopLeaseSlot,
+    )
+
+    lease = execution.runtime_state.get("_desktop_lease")
+    if not isinstance(lease, DesktopLeaseSlot):
+        raise HTTPException(409, "run has no desktop lease")
+    try:
+        lease.fail(
+            run_id=run_id,
+            lease_id=req.lease_id,
+            reason=req.reason,
+        )
+    except DesktopLeaseError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    execution.runtime_state["desktop_lease"] = lease.snapshot()
+    return {"ok": True, "run_id": run_id, "lease": lease.snapshot()}
 
 
 @app.post("/api/v2/arp/runs")

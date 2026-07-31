@@ -1,14 +1,16 @@
 # 模型 Provider、视觉路由、Thinking、缓存与成本
 
-本文只描述当前代码和官方文档能够证明的事实。模型能力口径核对日期为
-2026-07-14；如果上游模型能力发生变化，应同时更新
+本文只描述当前代码和官方文档能够证明的事实。模型能力与调用口径核对日期为
+2026-07-31；如果上游模型能力发生变化，应同时更新
 `python/winpilot_home/winpilot/model_adapter.py`、对应测试和本文，不能只改模型名称或提示词。
 
 ## 当前调用路径
 
 当前产品 GUI 主线不是 Legacy `AgentRunner`。它由
 `vnext/model_roles/visual_actor.py` 的单一 `LiveVisualActor` 通过
-`modeling/ModelCallRuntime` 调用 OpenAI-compatible Chat Completions。Legacy
+`modeling/ModelCallRuntime` 调用模型；默认仍是 OpenAI-compatible Chat
+Completions，只有配置显式给出 `api.protocol` 或 `api.api_style` 时才会改走 OpenAI
+Responses、Anthropic Messages 或 Gemini `generateContent`。Legacy
 `AgentRunner`、编程/仓库 profile 和较大工具历史仍为兼容路径，不能反向决定
 vNext 行为。
 
@@ -17,6 +19,8 @@ vNext 行为。
 - `ModelProfile` 归一化 provider、模型名和原生视觉能力。
 - `OpenAICompatibleAdapter` 保持
   `client.chat.completions.create(...)` 的调用形状。
+- `ProviderProtocolAdapter` 把同一 canonical message/tool/image 边界转换为 Responses、
+  Messages 或 `generateContent` wire；
 - `modeling/ModelCallRuntime` 负责 deadline、attempt 记录和 usage；
 - `request_extra_body()` 处理 MiMo / Reasonix 的 thinking 参数。
 - `normalize_usage()`、`accumulate_usage()` 归一化 token、缓存和成本。
@@ -27,15 +31,30 @@ vNext 行为。
 
 ## Provider 识别
 
-代码内置专门识别语义的 provider family 包括 `mimo`、`deepseek`、
-`reasonix`、`openai` 和 `openai_compatible`。`api.provider=auto` 会按
-`base_url` 和 `model` 依次推断 Reasonix、MiMo、DeepSeek、OpenAI，无法
+代码内置能力/usage 元数据语义的 provider family 包括 `mimo`、`deepseek`、
+`reasonix`、`anthropic`、`gemini`、`openai` 和 `openai_compatible`。
+`api.provider=auto` 会按 `base_url` 和 `model` 推断这些 family，无法
 识别时使用 `openai_compatible`。显式填写的其他自定义 provider 字符串会原样
-保留，仍使用 OpenAI-compatible 调用形状，但不会自动获得上述 family 的
-thinking、价格过滤或 usage 特判。
+保留，但不会自动获得上述 family 的 thinking、价格过滤或 usage 特判。
 
-这只是运行时需要的能力识别，不是完整 provider registry。模型名称相似、
-上下文更长或推理更强，都不能自动推出它支持图片。
+`api.provider` 只用于能力、usage 与价格等元数据，**不选择 wire**。模型名和
+`base_url` 同样不选择 wire：聚合器可以用 OpenAI-compatible 接口承载 Claude 或
+Gemini，自动改成原生协议会破坏兼容。原生 wire 只接受以下显式配置：
+
+- `api.protocol` / `api.api_style = openai_responses | responses`；
+- `api.protocol` / `api.api_style = anthropic | claude`；
+- `api.protocol` / `api.api_style = gemini | google`；
+- `chat | chat_completions | openai_chat | openai_compatible` 明确保留默认 Chat 路径。
+
+原生 adapter 当前是 provisional：仅支持非流式文本、Base64 data-URL 图片、function
+tools 与工具后续回合所需的原生 reasoning/signature replay sidecar；不支持音频、
+视频、文件或 provider built-in tools。canonical `strict:true` 会保留到 Anthropic
+tool schema，signed thinking / thought signature 也随对应 tool exchange 回放。相关
+5 个测试文件为 `214 passed`，但尚无三家真实 credential smoke 或可见 Electron
+provider E2E，不能据此声称“大部分模型 API 已端到端适配”。
+
+这只是当前 vNext 模型调用主线的薄协议层，不是完整 provider registry。模型名称
+相似、上下文更长或推理更强，都不能自动推出它支持图片。
 
 ## MiMo V2.5 的视觉路由
 
@@ -43,8 +62,10 @@ thinking、价格过滤或 usage 特判。
 | --- | --- | --- |
 | `mimo-v2.5` | 是 | 原生视觉主路径，直接接收真实 GUI JPEG |
 | `mimo-v2.5-pro` | 否 | text-only GUI 路径；使用 UIA/OCR/CV/非视觉摘要，必要时使用独立 VLM |
+| 名称符合当前 Claude 3/4/5 family 且 provider 为 Anthropic | 是 | 仅在显式 native wire 或兼容端点确实接受图片时使用 |
+| Gemini 1.5 或 2+ family 且 provider 为 Gemini | 是 | 仅在显式 native wire 或兼容端点确实接受图片时使用 |
 | 名称明确含 `omni`、`-vl`、`vision` 或 `gpt-4o` 的模型 | 是 | 原生视觉主路径 |
-| 其他未显式登记的模型 | 否 | text-only GUI 路径 |
+| 其他未显式登记的模型 | 默认否 | 可用显式 `api.supports_vision` 覆盖，随后仍需真实 E2E |
 
 这里的 Pro 路由是有意的 fail-closed 设计，不是按模型档次猜测。小米官方
 [模型页](https://mimo.mi.com/docs/en-US/quick-start/model)把
@@ -109,10 +130,17 @@ vNext 请求仍受 runner 总截止时间约束，late response 在工具分发�
 
 ## 缓存
 
-当前 vNext Visual Actor 不维护 Legacy 的 append-only 长历史；它只保留最近一笔
-原生 exchange，因此缓存收益服从这个有界消息形状。Legacy `AgentRunner` 仍有
-`stable_prefix` 和旧 `observe`/`read_text`/`list_windows` 折叠逻辑，但不得为提高
-cache 命中把它重新接回产品主线。任何 provider 都不承诺一定缓存。
+当前 vNext 有两层有界上下文：服务端 Thread 只交给模型最近成功且有用户结果的原生
+文本交换，最多 12 条 message / 16 KiB；进入视觉 mission 后，Actor 只额外保留最近
+一笔 provider 原生 tool exchange 与新鲜权威帧。它不维护无界 append-only 历史，也不
+为缓存重复旧截图。
+
+冻结 Legacy `agent/loop.py` 确有 cache-friendly stable prefix：32 KiB 前保持
+append-only history，并把 session continuity 放在前缀中保护 DeepSeek prefix cache。
+当前唯一活动 vNext 不走这个 owner；不得为了 cache 命中把它接回主线。已删除的
+`cache_strategy` 只是从未生效的标签。vNext 不发送 OpenAI `prompt_cache_key`、
+Anthropic `cache_control` 或 Gemini `cachedContent`，没有主动缓存 owner；任何 provider
+也不承诺一定缓存。
 
 `normalize_usage()` 当前识别：
 
@@ -125,7 +153,14 @@ cache 命中把它重新接回产品主线。任何 provider 都不承诺一定�
   `reasoning_tokens`。
 
 provider 不返回缓存字段时，WinPilot 不臆造命中；UI 中的零命中不等于缓存功能
-失效，也可能只是接口没有返回该统计。
+失效，也可能只是接口没有返回该统计。每次模型响应会发布 `agent_usage`，并累计到 run
+的 `model_usage`；这是成本/实验观测面，不会创建缓存。
+
+真实可见 Electron 长 Thread 报告（20 个聊天 Turn，另含末尾一个失败 connector
+probe）累计 `21626` prompt、`13248` cache hit、`8378` miss、`0` creation；新鲜 Thread
+的两个 connector 场景累计 `92964` prompt、`53376` hit、`39588` miss、`0` creation。
+这证明上游自动缓存字段确实被记录，不证明 vNext 主动创建缓存，也不能单独证明任务
+完成率或节省金额。
 
 ## 成本
 

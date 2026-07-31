@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Drive the real Electron client through Windows UI Automation.
+"""Drive the real Electron client with native mouse and keyboard input.
 
-This is deliberately not an API-equivalent harness: goals, max steps, the
-cold-start toggle, session reset, and the Run button are all operated through
-the visible Electron window. Backend trace files are only collected after the
-client submission so the result can be audited without stealing focus from the
-desktop agent while it works.
+Windows UI Automation is used only to locate and read visible controls. Goals,
+session reset, and submission are operated through native mouse and keyboard
+events in the foreground Electron window. Backend trace files are only
+collected after the client submission so the result can be audited without
+stealing focus from the desktop agent while it works.
 """
 
 from __future__ import annotations
@@ -37,9 +37,13 @@ TRACE_ROOT = WORKSPACE / "python" / "winpilot_home" / "traces"
 HARNESS_FOCUS_INPUT_TAG = 0x56584346
 
 CLIENT_TITLE = "灵动脚本"
-NAV_AGENT = "智能代理"
-NAV_ASSETS = "技能与学习"
-RUN_TASK = "运行任务"
+NAV_AGENT = "返回智能代理"
+OPEN_RESOURCES = "查看运行时状态"
+ASSETS_TAB = "技能与记忆"
+CLOSE_RESOURCES = "关闭资料"
+NEW_CONVERSATION = "新建对话"
+GOAL_INPUT = "消息输入"
+RUN_TASK = "发送消息"
 STOP_TASK = "停止"
 COLD_START = "冷启动（禁用 Skill/长期经验）"
 RUNTIME_SELECTOR = "运行时"
@@ -222,14 +226,54 @@ def _control_value(control: Any) -> str:
     pattern = control.GetPattern(auto.PatternId.ValuePattern)
     if pattern is None:
         raise RuntimeError(f"控件不支持 ValuePattern: {control.ControlTypeName}")
-    return str(pattern.Value or "")
+    value = str(pattern.Value or "")
+    try:
+        text_pattern = control.GetPattern(auto.PatternId.TextPattern)
+        text = str(text_pattern.DocumentRange.GetText(-1) or "").rstrip("\r\n")
+    except Exception:
+        return value
+    return text if len(text) > len(value) and text.startswith(value) else value
 
 
-def _set_control_value(control: Any, value: str) -> None:
-    pattern = control.GetPattern(auto.PatternId.ValuePattern)
-    if pattern is None:
-        raise RuntimeError(f"控件不支持 ValuePattern: {control.ControlTypeName}")
-    pattern.SetValue(value)
+def _document_contains_text(window: Any, expected: str) -> bool:
+    for control in _visible_descendants(window, "Document"):
+        try:
+            pattern = control.GetPattern(auto.PatternId.TextPattern)
+            text = str(pattern.DocumentRange.GetText(-1) or "")
+        except Exception:
+            continue
+        if expected in text:
+            return True
+    return False
+
+
+def _type_control_text(control: Any, value: str) -> dict[str, int | str]:
+    """Focus a visible editor and enter literal text through Windows input."""
+
+    control.Click()
+    auto.SendKeys("{Ctrl}a{Delete}", interval=0.01, waitTime=0.1)
+    successful_unicode_calls = 0
+    utf16_units = 0
+    for char in value:
+        encoded = char.encode("utf-16-le", errors="surrogatepass")
+        for offset in range(0, len(encoded), 2):
+            unit = chr(int.from_bytes(encoded[offset : offset + 2], "little"))
+            inserted = int(auto.SendUnicodeChar(unit, charMode=True))
+            if inserted <= 0:
+                raise RuntimeError(
+                    "原生键盘输入未完整写入消息框: "
+                    f"SendUnicodeChar returned {inserted} at unit {utf16_units}"
+                )
+            successful_unicode_calls += 1
+            utf16_units += 1
+    time.sleep(0.2)
+    return {
+        "control_discovery": "windows_uia",
+        "goal_entry": "windows_sendinput_unicode",
+        "requested_codepoints": len(value),
+        "submitted_utf16_units": utf16_units,
+        "successful_unicode_calls": successful_unicode_calls,
+    }
 
 
 def _toggle_state(control: Any) -> int:
@@ -323,7 +367,7 @@ def _active_run_matches_submission(
     task: str,
     previous_run_id: str,
 ) -> bool:
-    if not isinstance(runtime_status, dict) or runtime_status.get("running") is not True:
+    if not isinstance(runtime_status, dict):
         return False
     current = runtime_status.get("current_run")
     if not isinstance(current, dict):
@@ -331,11 +375,45 @@ def _active_run_matches_submission(
     current_run_id = str(current.get("run_id") or "")
     if not current_run_id or current_run_id == str(previous_run_id or ""):
         return False
-    return _runtime_goal_matches_submission(
-        current.get("goal"),
-        task,
-        str(current.get("runtime_version") or "legacy"),
+    return _runtime_has_active_run(runtime_status, current_run_id) and (
+        _runtime_goal_matches_submission(
+            current.get("goal"),
+            task,
+            str(current.get("runtime_version") or "legacy"),
+        )
     )
+
+
+def _runtime_has_active_run(
+    runtime_status: Any,
+    run_id: str = "",
+) -> bool:
+    """Treat matching current/job state as authoritative during projections."""
+
+    if not isinstance(runtime_status, dict):
+        return False
+    expected_run_id = str(run_id or "")
+    current = runtime_status.get("current_run")
+    if isinstance(current, dict):
+        current_run_id = str(current.get("run_id") or "")
+        current_status = str(current.get("status") or "").casefold()
+        if (
+            (not expected_run_id or current_run_id == expected_run_id)
+            and current_status
+            in {"queued", "waiting_resources", "running", "canceling"}
+        ):
+            return True
+    for job in runtime_status.get("runtime_jobs") or []:
+        if not isinstance(job, dict):
+            continue
+        job_run_id = str((job.get("metadata") or {}).get("run_id") or "")
+        if (
+            (not expected_run_id or job_run_id == expected_run_id)
+            and str(job.get("status") or "").casefold()
+            in {"queued", "waiting_resources", "running", "canceling"}
+        ):
+            return True
+    return runtime_status.get("running") is True
 
 
 def _safe_runtime_jobs(value: Any) -> list[dict[str, Any]]:
@@ -547,7 +625,7 @@ class ElectronClientDriver:
         goal = _first_visible_descendant(
             self.window,
             "Edit",
-            name_contains="描述希望代理",
+            name=GOAL_INPUT,
         )
         goal_value = _control_value(goal) if goal is not None else ""
         run_enabled = bool(
@@ -627,6 +705,15 @@ class ElectronClientDriver:
             )
         time.sleep(0.6)
 
+    def window_lifecycle_state(self) -> dict[str, Any]:
+        hwnd = self.identity.hwnd
+        return {
+            "visible": bool(win32gui.IsWindowVisible(hwnd)),
+            "minimized": bool(win32gui.IsIconic(hwnd)),
+            "foreground": win32gui.GetForegroundWindow() == hwnd,
+            "rect": list(win32gui.GetWindowRect(hwnd)),
+        }
+
     def ensure_renderer_ready(
         self,
         *,
@@ -646,7 +733,7 @@ class ElectronClientDriver:
                     _first_visible_descendant(
                         self.window,
                         "Edit",
-                        name_contains="描述希望代理",
+                        name=GOAL_INPUT,
                     )
                     is not None
                 ):
@@ -682,7 +769,7 @@ class ElectronClientDriver:
             self.capture_window("renderer-readiness-failed.png")
         except Exception:
             pass
-        raise RuntimeError("Electron 客户端渲染器重载后仍未显示智能代理页面")
+        raise RuntimeError("Electron 客户端渲染器重载后仍未显示消息输入页面")
 
     def buttons(self) -> list[Any]:
         return _visible_descendants(self.window, "Button")
@@ -698,19 +785,32 @@ class ElectronClientDriver:
                 continue
         return values
 
-    def button(self, title: str, *, prefix: bool = False) -> Any:
-        match = _first_visible_descendant(
-            self.window,
-            "Button",
-            name=title,
-            prefix=prefix,
-        )
-        if match is None:
-            raise RuntimeError(f"客户端中未找到按钮: {title}")
-        return match
+    def button(
+        self,
+        title: str,
+        *,
+        prefix: bool = False,
+        timeout: float = 0.0,
+    ) -> Any:
+        deadline = time.time() + max(0.0, timeout)
+        while True:
+            match = _first_visible_descendant(
+                self.window,
+                "Button",
+                name=title,
+                prefix=prefix,
+            )
+            if match is not None:
+                return match
+            if time.time() >= deadline:
+                raise RuntimeError(f"客户端中未找到按钮: {title}")
+            refreshed = auto.ControlFromHandle(self.identity.hwnd)
+            if refreshed is not None:
+                self.window = refreshed
+            time.sleep(0.2)
 
     def navigate(self, title: str) -> None:
-        self.button(title).Click()
+        self.button(title, timeout=5.0).Click()
         time.sleep(0.8)
 
     def capture_window(self, name: str) -> str:
@@ -729,8 +829,13 @@ class ElectronClientDriver:
 
     def clear_session_through_client(self) -> dict[str, Any]:
         self.restore_and_focus()
-        self.navigate(NAV_ASSETS)
-        session_button = self.button("会话 ", prefix=True)
+        try:
+            self.navigate(NAV_AGENT)
+        except RuntimeError:
+            pass
+        self.navigate(OPEN_RESOURCES)
+        self.navigate(ASSETS_TAB)
+        session_button = self.button("会话 ", prefix=True, timeout=5.0)
         before_name = session_button.Name.strip()
         before_match = re.search(r"(\d+)$", before_name)
         before = int(before_match.group(1)) if before_match else -1
@@ -762,7 +867,11 @@ class ElectronClientDriver:
         if after != 0:
             raise RuntimeError(f"冷启动前会话计数不是 0: {after_name}")
         proof = self.capture_window("session-reset.png")
-        self.navigate(NAV_AGENT)
+        self.navigate(CLOSE_RESOURCES)
+        try:
+            self.navigate(NEW_CONVERSATION)
+        except RuntimeError:
+            pass
         return {"before": before, "after": after, "cleared": cleared, "proof": proof}
 
     def configure_goal(
@@ -779,11 +888,11 @@ class ElectronClientDriver:
         goal = _first_visible_descendant(
             self.window,
             "Edit",
-            name_contains="描述希望代理",
+            name=GOAL_INPUT,
         )
         if goal is None:
-            raise RuntimeError("客户端目标输入框不可见")
-        _set_control_value(goal, task)
+            raise RuntimeError("客户端消息输入框不可见")
+        input_evidence = _type_control_text(goal, task)
 
         if str(runtime_version or "vnext").casefold() != "vnext":
             raise RuntimeError(
@@ -804,8 +913,22 @@ class ElectronClientDriver:
             "runtime_selector_label": "",
         }
 
+        # Chromium updates a controlled multiline editor asynchronously.  A
+        # long native SendInput sequence can finish a few ticks before UIA's
+        # Value/TextPattern projection catches up, even though the visible DOM
+        # already contains every character. Poll the read-only projection;
+        # never repair or resubmit the goal through a backend shortcut.
+        readback_deadline = time.time() + 2.0
         value = _control_value(goal)
-        if value != task:
+        while value != task and time.time() < readback_deadline:
+            time.sleep(0.05)
+            value = _control_value(goal)
+        if value == task:
+            input_evidence["goal_readback"] = "value_pattern"
+        elif _document_contains_text(self.window, task):
+            value = task
+            input_evidence["goal_readback"] = "document_text"
+        else:
             raise RuntimeError(f"客户端目标输入不一致: {value!r}")
         return {
             "task_input": value,
@@ -813,6 +936,7 @@ class ElectronClientDriver:
             "cold_start_toggle": 0,
             "max_steps_control_present": False,
             "max_steps": max_steps,
+            "input_evidence": input_evidence,
             **selection,
         }
 
@@ -846,7 +970,9 @@ class ElectronClientDriver:
             except Exception:
                 run_button_restored = False
             try:
-                runtime_stopped = not bool(self.runtime_status().get("running"))
+                runtime_stopped = not _runtime_has_active_run(
+                    self.runtime_status()
+                )
             except Exception:
                 runtime_stopped = False
             if run_button_restored and runtime_stopped:
@@ -941,7 +1067,10 @@ class ElectronClientDriver:
                     current_runtime_version,
                 ):
                     bound_run_id = current_run_id
-                elif current_goal.strip() and runtime_status.get("running"):
+                elif current_goal.strip() and _runtime_has_active_run(
+                    runtime_status,
+                    current_run_id,
+                ):
                     return {
                         "outcome": "submission_mismatch",
                         "status": "failed",
@@ -968,7 +1097,7 @@ class ElectronClientDriver:
             if (
                 bound_run_id
                 and current_run_id == bound_run_id
-                and runtime_status.get("running")
+                and _runtime_has_active_run(runtime_status, bound_run_id)
             ):
                 active_seen = True
             bound_job = next(
@@ -1022,7 +1151,10 @@ class ElectronClientDriver:
                     return {
                         "outcome": "independent_success",
                         "status": "running"
-                        if runtime_status.get("running")
+                        if _runtime_has_active_run(
+                            runtime_status,
+                            bound_run_id,
+                        )
                         else "terminal",
                         "run_id": bound_run_id,
                         "active_seen": active_seen,
@@ -1038,7 +1170,10 @@ class ElectronClientDriver:
                 bound_run_id
                 and runtime_status
                 and current_run_id == bound_run_id
-                and not runtime_status.get("running")
+                and not _runtime_has_active_run(
+                    runtime_status,
+                    bound_run_id,
+                )
             ):
                 runtime_terminal = str(
                     current_runtime.get("status")
@@ -1052,7 +1187,8 @@ class ElectronClientDriver:
                         "outcome": "terminal",
                         "status": (
                             "done"
-                            if runtime_terminal in {"done", "completed", "success"}
+                            if runtime_terminal
+                            in {"done", "completed", "success", "reply"}
                             else "canceled"
                             if runtime_terminal in {"canceled", "cancelled", "stopped"}
                             else "failed"
@@ -1097,7 +1233,7 @@ class ElectronClientDriver:
                 and bound_run_id
                 and active_seen
                 and current_run_id == bound_run_id
-                and runtime_status.get("running")
+                and _runtime_has_active_run(runtime_status, bound_run_id)
                 and now - started_at >= persistent_probe_seconds
             ):
                 return {
@@ -1113,7 +1249,15 @@ class ElectronClientDriver:
             if status:
                 last_status = status
             terminal = TERMINAL_STATUS.get(status)
-            if bound_run_id and terminal and (active_seen or RUN_TASK in button_names):
+            if (
+                bound_run_id
+                and terminal
+                and not _runtime_has_active_run(
+                    runtime_status,
+                    bound_run_id,
+                )
+                and (active_seen or RUN_TASK in button_names)
+            ):
                 return {
                     "outcome": "terminal",
                     "status": terminal,
@@ -1126,6 +1270,10 @@ class ElectronClientDriver:
             if (
                 bound_run_id
                 and active_seen
+                and not _runtime_has_active_run(
+                    runtime_status,
+                    bound_run_id,
+                )
                 and RUN_TASK in button_names
                 and STOP_TASK not in button_names
             ):
@@ -1718,6 +1866,11 @@ def run_case(
         "client": asdict(driver.identity),
         "client_renderer_reloaded": driver.renderer_reloaded,
         "entrypoint": "electron_client_windows_uia",
+        "submission_transport": {
+            "control_discovery": "windows_uia",
+            "goal_entry": "windows_sendinput_unicode",
+            "submit_action": "win32_native_mouse",
+        },
     }
     try:
         if expected_client_identity is not None:
@@ -1834,6 +1987,9 @@ def run_case(
                 previous_run_id,
             ):
                 result["nonterminal_cleanup"] = driver.stop_active_run()
+        result["client_terminal_before_harness_restore"] = (
+            driver.window_lifecycle_state()
+        )
         driver.restore_and_focus()
         result["screenshots"].update(
             {

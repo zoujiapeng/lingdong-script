@@ -1,11 +1,14 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from winpilot.model_adapter import (
     accumulate_usage,
     build_model_adapter,
     empty_usage_total,
     model_profile_from_config,
+    native_provider_protocol,
     normalize_usage,
     pricing_from_config,
 )
@@ -52,6 +55,63 @@ def test_profile_infers_provider_and_vision_capability():
     assert reasonix.provider == "reasonix"
 
 
+def test_native_provider_vision_capability_is_explicit_or_conservative():
+    claude = model_profile_from_config({"model": "claude-sonnet-4-20250514"})
+    assert claude.provider == "anthropic"
+    assert claude.supports_vision is True
+
+    gemini = model_profile_from_config({"model": "gemini-2.5-pro"})
+    assert gemini.provider == "gemini"
+    assert gemini.supports_vision is True
+
+    unknown = model_profile_from_config({
+        "provider": "anthropic",
+        "model": "private-text-model",
+    })
+    assert unknown.supports_vision is False
+
+    forced_off = model_profile_from_config({
+        "provider": "gemini",
+        "model": "gemini-2.5-pro",
+        "supports_vision": False,
+    })
+    assert forced_off.supports_vision is False
+
+    forced_on = model_profile_from_config({
+        "provider": "custom",
+        "model": "private-model",
+        "supports_vision": True,
+    })
+    assert forced_on.supports_vision is True
+
+
+def test_native_protocol_selection_is_explicit_and_aggregator_safe():
+    assert native_provider_protocol({
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": "anthropic/claude-sonnet-4",
+    }) is None
+    assert native_provider_protocol({
+        "provider": "auto",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "model": "gemini-2.5-pro",
+    }) is None
+    assert native_provider_protocol({"provider": "anthropic"}) is None
+    assert native_provider_protocol({
+        "provider": "anthropic",
+        "protocol": "anthropic",
+    }) == "anthropic"
+    assert native_provider_protocol({"api_style": "google"}) == "gemini"
+    assert native_provider_protocol({
+        "provider": "anthropic",
+        "protocol": "openai-compatible",
+    }) is None
+
+
+def test_native_protocol_rejects_unknown_explicit_protocol():
+    with pytest.raises(ValueError, match="unsupported model protocol"):
+        native_provider_protocol({"protocol": "mystery-wire"})
+
+
 def test_normalize_usage_accepts_deepseek_cache_fields():
     usage = normalize_usage(_usage(
         prompt_tokens=100,
@@ -84,6 +144,40 @@ def test_normalize_usage_accepts_chat_and_responses_cached_token_details():
     assert responses.prompt_tokens == 120
     assert responses.cache_hit_tokens == 100
     assert responses.cache_miss_tokens == 20
+
+
+def test_normalize_usage_accepts_openai_cache_write_token_details():
+    chat = normalize_usage({
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "prompt_tokens_details": {
+            "cached_tokens": 30,
+            "cache_write_tokens": 40,
+        },
+    })
+    assert chat.cache_hit_tokens == 30
+    assert chat.cache_creation_tokens == 40
+    assert chat.cache_miss_tokens == 30
+
+    responses = normalize_usage({
+        "input_tokens": 120,
+        "output_tokens": 6,
+        "input_tokens_details": {
+            "cached_tokens": 60,
+            "cache_write_tokens": 20,
+        },
+    })
+    assert responses.cache_hit_tokens == 60
+    assert responses.cache_creation_tokens == 20
+    assert responses.cache_miss_tokens == 40
+
+    direct = normalize_usage({
+        "prompt_tokens": 50,
+        "completion_tokens": 2,
+        "cache_write_tokens": 10,
+    })
+    assert direct.cache_creation_tokens == 10
+    assert direct.cache_miss_tokens == 40
 
 
 def test_normalize_usage_accepts_anthropic_style_cache_read_fields():

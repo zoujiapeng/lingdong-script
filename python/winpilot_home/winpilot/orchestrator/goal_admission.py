@@ -35,7 +35,7 @@ class GoalAdmissionUnavailable(GoalAdmissionError):
 
 
 class GoalExecutionRoute(str, Enum):
-    LIVE_GUI = "live_gui"
+    LIVE_AGENT = "live_agent"
 
 
 class GoalRunRequest(BaseModel):
@@ -44,7 +44,25 @@ class GoalRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     goal: str = Field(min_length=1)
+    thread_id: str = Field(default="", max_length=128)
+
+
+class DesktopLeaseRequest(BaseModel):
+    """One exact external target captured after the control surface yields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lease_id: str = Field(min_length=1, max_length=128)
     execution_context: dict[str, Any]
+
+
+class DesktopLeaseFailureRequest(BaseModel):
+    """Client-side failure to prepare one requested desktop lease."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lease_id: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=1024)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +103,7 @@ def admit_goal(
         )
     return GoalAdmissionDecision(
         goal=normalized_goal,
-        route=GoalExecutionRoute.LIVE_GUI,
+        route=GoalExecutionRoute.LIVE_AGENT,
         runtime_version=ArpRuntimeVersion.VNEXT,
         reason="single_semantic_agent",
     )
@@ -127,6 +145,8 @@ __all__ = [
     "GoalAdmissionUnavailable",
     "GoalExecutionRoute",
     "GoalRunRequest",
+    "DesktopLeaseFailureRequest",
+    "DesktopLeaseRequest",
     "admit_goal",
     "bind_client_execution_context",
 ]
