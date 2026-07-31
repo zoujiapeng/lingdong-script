@@ -1,8 +1,8 @@
 # AI / Codex / 开发者接手入口
 
 > 最后核对：2026-08-01。当前唯一产品分支是 `master`，本轮开始基线为
-> `a4bdaf7f794d0fb79cd34563815da9b1f80fcde7`。13.20–13.22 已进入主线，本轮 test-only
-> 结果见重置文档 13.23；不要用更早的提交说明覆盖 Thread/Turn、按需桌面租约、通用
+> `80ae593fb26335d5f1ff057a491ddf1a9830fc56`。13.20–13.23 已进入主线，本轮客户端与
+> 6-Turn 结果见重置文档 13.24；不要用更早的提交说明覆盖 Thread/Turn、按需桌面租约、通用
 > connector、history-depth 证据或 provisional native-provider 边界。
 
 本文件是换 Codex 窗口后的第一入口。它保存当前决策和继续工作的边界，不替代
@@ -320,6 +320,25 @@ Vite 后，fresh target 连续 `3/3` 完整通过：每次 connector raw→canon
 renderer `234 passed`、TypeScript typecheck 通过；renderer 与 typecheck 并行时的一次
 5 秒超时经串行原样重跑消失，属于测试调度干扰。
 
+13.24 首次得到两个有效的 6-Turn history pair。`92002`（F→H）与 `92003`（H→F）中，
+每臂的六个聊天 Turn 均为真实前端提交、非空成功回复、零 connector、零 lease、零观察、
+零 GUI；target 前实际 history 均精确为 12 条 `user/assistant` 交替消息。两个 pair 的
+fresh/history target 共 `4/4` 外部通过，因此当前没有 history-depth 负信号。`92001`
+和 `92004` 无效：两次 fresh 首轮都提交多个 desktop observation；一个普通寒暄和一个
+“陪我聊两句”样本不必要地申请 lease/观察桌面，均是模型模态选择，不准许用关键词
+router、提示教学或客户端意图分类修正。
+
+本轮只改现有 Electron 聊天 owner：中文 IME 组合输入 Enter 不再误发送；成功提交和
+“新建对话”清除旧 `arp-last-goal`，避免重启后把已发送任务伪装成草稿；失败卡与任务栏
+复用同一通用 outcome classifier，并显示原始失败结果；“再次编辑”只把原目标放回输入框，
+不自动重试或产生外部副作用。只有明确的 vnext/no-legacy 直接聊天正文不按 JSON 结果协议
+猜测，原有 legacy 安全停止分类保持不变；过渡状态也不再误画成失败。失败草稿可跨旧 run
+水合恢复，提交期间不能再切换 Thread 或覆盖草稿。可见失败截图证明当前源码显示精确模型
+合同错误、再次编辑与详情入口。生产切片为 `+70/-26`，没有 Runtime、系统提示、模型角色、
+工具面或窗口 lease 变化；
+history A/B 默认缩到 6 Turn，并要求精确 12 条实际 provider history。最终回归为 Python
+`3464 passed, 13 skipped, 1 warning`、renderer `243 passed`、TypeScript typecheck 通过。
+
 关键归因：
 
 - `ordered-clicks` 在加入最近一笔原生交换前会重复第一个目标；现在三次真实点击按
@@ -391,18 +410,20 @@ git status -sb
 git log -8 --oneline --decorate
 ```
 
-本轮开始时 `master` 与 `origin/master` 同为 `a4bdaf7`，除用户未跟踪的 `CON` 外干净；
-13.23 只改测试 runner、测试与文档。接手时必须重新核对状态，不要 reset、整体暂存或
+本轮开始时 `master` 与 `origin/master` 同为 `80ae593`，除用户未跟踪的 `CON` 外干净；
+13.24 改现有 Electron 聊天 owner、测试 runner、测试与文档。接手时必须重新核对状态，不要 reset、整体暂存或
 触碰 `CON`。然后阅读本文件和上述五份文档，不要立刻追加代码。
 
 优先级：
 
-1. 下一轮唯一实验仍不改生产代码：先完成 6 个全部零副作用的成功聊天 Turn，再执行
-   同一 preopened connector→全文替换 target；12 条 history 上限在 6 个完整 Turn 后已
-   填满，可隔离最大模型可见 history 压力与 20 次 provider/UIA 累积暴露。
-2. 跑四个随机 seed 并让 AB/BA 顺序对消；只有 fresh 与 6-Turn history 两臂均到达 target、
-   所有 controls 全真，才讨论 history owner。20-Turn 失败单独作为聊天可靠性缺口保留。
-3. 继续记录 raw model args、实际 canonical parse、物理 MCP/GUI receipt、严格文件终态、
+1. 下一轮唯一实验先不改生产代码：通过真实前端建立带随机 marker 的成功 Thread，正常
+   关闭并重启 Electron 及其托管服务，再检查旧消息是否可见、继续发送是否仍绑定原 Thread、
+   模型能否只凭恢复历史精确回答 marker。当前内存 Thread Store 与本地 stale thread id
+   预计会在这一边界分叉，但必须先取得可见证据，不能直接增加持久化 owner。
+2. 若正常重启首先在客户端/Thread persistence 层分叉，再设计一个私有、有限、可删除旧
+   owner 的最小持久化候选，并用聊天连续性与重启后的简单桌面任务两个家族验证；不得通过
+   自动创建新 Thread 假装上下文仍存在，也不得解除公共 trace 正文脱敏。
+3. 继续记录 raw model args、实际 canonical parse、物理 MCP/GUI receipt、严格外部终态、
    产品自主 terminal/恢复与 usage；不加提示教学、router、摘要模型、工具筛选器、自动
    重试或 Runtime 修正，不接回旧 `/api/chat`。
 4. native provider 只有拿到真实 credential 后才做相同 canonical 多轮工具序列与至少

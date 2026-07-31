@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentCockpit } from '../components/platform/PlatformWorkbench';
@@ -385,12 +385,82 @@ describe('primary agent surface', () => {
     await waitFor(() => {
       expect(screen.getByRole('textbox', { name: '消息输入' })).not.toBeDisabled();
     });
+    expect(localStorage.getItem('arp-last-goal')).toBeNull();
     expect(JSON.parse(localStorage.getItem('arp-agent-thread-run-ids') || '{}')).toEqual({
       thread_id: 'thread-goal-test',
       run_ids: ['run-goal-test'],
     });
     await user.type(screen.getByRole('textbox', { name: '消息输入' }), 'Run another task');
     expect(screen.getByRole('button', { name: '发送消息' })).not.toBeDisabled();
+  });
+
+  it('does not send while a Chinese IME is committing text with Enter', async () => {
+    const startGoal = vi.fn(async () => goalRunStart());
+    const user = userEvent.setup();
+    render(<AgentCockpit plane={cockpitPlane(startGoal) as never} />);
+
+    const composer = screen.getByRole('textbox', { name: '消息输入' });
+    await user.type(composer, '继续说明');
+    fireEvent.keyDown(composer, {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 229,
+      isComposing: true,
+    });
+
+    expect(startGoal).not.toHaveBeenCalled();
+    expect(composer).toHaveValue('继续说明');
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter', keyCode: 13 });
+    await waitFor(() => expect(startGoal).toHaveBeenCalledOnce());
+  });
+
+  it('keeps the draft and recovery value when starting a task fails', async () => {
+    const startGoal = vi.fn(async () => { throw new Error('Provider unavailable'); });
+    const user = userEvent.setup();
+    render(<AgentCockpit plane={cockpitPlane(startGoal) as never} />);
+
+    const composer = screen.getByRole('textbox', { name: '消息输入' });
+    await user.type(composer, 'Keep this exact request');
+    await user.click(screen.getByRole('button', { name: '发送消息' }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Provider unavailable'));
+    expect(composer).toHaveValue('Keep this exact request');
+    expect(localStorage.getItem('arp-last-goal')).toBe('Keep this exact request');
+  });
+
+  it('restores a failed submission draft without clearing it during run hydration', () => {
+    localStorage.setItem('arp-last-goal', 'Recover this failed submission');
+    localStorage.setItem('arp-agent-thread-run-ids', JSON.stringify({
+      thread_id: 'thread-previous',
+      run_ids: ['run-previous'],
+    }));
+
+    render(
+      <AgentCockpit
+        plane={cockpitPlane(
+          vi.fn(async () => goalRunStart()),
+          {
+            run_id: 'run-previous',
+            kind: 'agent',
+            status: 'reply',
+            phase: 'done',
+            goal: 'Previous successful request',
+            started_at: 1,
+            updated_at: 2,
+            finished_at: 2,
+            result: 'Previous answer',
+            timeline: [],
+            evidence: [],
+            metrics: {},
+          },
+        ) as never}
+      />,
+    );
+
+    expect(screen.getByRole('textbox', { name: '消息输入' })).toHaveValue(
+      'Recover this failed submission',
+    );
+    expect(localStorage.getItem('arp-last-goal')).toBe('Recover this failed submission');
   });
 
   it('keeps secondary agent information hidden until the user asks for it', async () => {
@@ -581,14 +651,146 @@ describe('primary agent surface', () => {
     );
 
     expect(screen.queryByRole('status', { name: '任务结果' })).not.toBeInTheDocument();
-    expect(screen.queryByText('The task could not be verified.')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('The task could not be verified.');
     const composer = screen.getByRole('textbox', { name: '消息输入' });
     expect(composer).toBeVisible();
+
+    const threadBeforeEdit = localStorage.getItem('arp-agent-thread-run-ids');
+    await user.click(screen.getByRole('button', { name: '再次编辑' }));
+    expect(composer).toHaveValue('Summarize the visible conversations');
+    expect(startGoal).not.toHaveBeenCalled();
+    expect(localStorage.getItem('arp-agent-thread-run-ids')).toBe(threadBeforeEdit);
+    await user.clear(composer);
 
     await user.type(composer, 'Retry with the visible window');
     await user.click(screen.getByRole('button', { name: '发送消息' }));
     expect(startGoal).toHaveBeenCalledWith('Retry with the visible window', '');
   });
+
+  it('shows an explicit failure result as a failure even when the status says reply', () => {
+    render(
+      <AgentCockpit
+        plane={cockpitPlane(
+          vi.fn(async () => goalRunStart()),
+          {
+            run_id: 'run-failed-reply',
+            kind: 'agent',
+            status: 'reply',
+            phase: 'done',
+            goal: 'Answer without using the desktop',
+            started_at: 1,
+            updated_at: 2,
+            finished_at: 2,
+            result: { ok: false, error: 'Provider connection failed.' },
+            timeline: [],
+            evidence: [],
+            metrics: {},
+          },
+        ) as never}
+      />,
+    );
+
+    expect(screen.queryByRole('status', { name: '任务结果' })).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Provider connection failed.');
+    expect(screen.getByRole('alert')).toHaveTextContent('任务未完成');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('已回复');
+    expect(screen.getByRole('button', { name: '再次编辑' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '打开资料' })).toHaveTextContent('任务未完成');
+    expect(document.querySelector('.ld-window-signal.stopped')).not.toBeNull();
+  });
+
+  it('keeps vnext JSON reply text as conversation content', () => {
+    const result = JSON.stringify({ ok: false, error: 'Example payload only' });
+    render(
+      <AgentCockpit
+        plane={cockpitPlane(
+          vi.fn(async () => goalRunStart()),
+          {
+            run_id: 'run-json-reply',
+            kind: 'arp',
+            runtime_version: 'vnext',
+            no_legacy_fallback: true,
+            status: 'reply',
+            phase: 'terminal',
+            goal: 'Show a JSON failure example',
+            started_at: 1,
+            updated_at: 2,
+            finished_at: 2,
+            result,
+            timeline: [],
+            evidence: [],
+            metrics: {},
+          },
+        ) as never}
+      />,
+    );
+
+    expect(screen.getByRole('status', { name: '任务结果' })).toHaveTextContent(result);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '打开资料' })).toHaveTextContent('Agent 已回复');
+  });
+
+  it('locks conversation mutation controls while a follow-up is submitting', async () => {
+    const startGoal = vi.fn(() => new Promise<GoalRunStart>(() => {}));
+    const user = userEvent.setup();
+    render(
+      <AgentCockpit
+        plane={cockpitPlane(
+          startGoal,
+          {
+            run_id: 'run-edit-race',
+            kind: 'arp',
+            status: 'failed',
+            phase: 'failed',
+            goal: 'Original failed request',
+            started_at: 1,
+            updated_at: 2,
+            finished_at: 2,
+            error: 'Provider unavailable',
+            timeline: [],
+            evidence: [],
+            metrics: {},
+          },
+        ) as never}
+      />,
+    );
+
+    await user.type(screen.getByRole('textbox', { name: '消息输入' }), 'Try a new request');
+    await user.click(screen.getByRole('button', { name: '发送消息' }));
+
+    expect(startGoal).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: '再次编辑' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '新建对话' })).toBeDisabled();
+  });
+
+  it.each(['waiting_external', 'canceling'])(
+    'keeps the %s transition active without rendering a failure card',
+    (status) => {
+      render(
+        <AgentCockpit
+          plane={cockpitPlane(
+            vi.fn(async () => goalRunStart()),
+            {
+              run_id: `run-${status}`,
+              kind: 'agent',
+              status,
+              phase: status,
+              goal: 'Wait for the current task transition',
+              started_at: 1,
+              updated_at: 2,
+              timeline: [],
+              evidence: [],
+              metrics: {},
+            },
+          ) as never}
+        />,
+      );
+
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Agent 当前状态')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '发送消息' })).toBeDisabled();
+    },
+  );
 
   it('renders consecutive goal runs as one compact long conversation', async () => {
     const user = userEvent.setup();
@@ -679,6 +881,7 @@ describe('primary agent surface', () => {
       thread_id: '',
       run_ids: [],
     });
+    expect(localStorage.getItem('arp-last-goal')).toBeNull();
   });
 
   it('keeps the composer visible for drafting while an Agent turn is active', async () => {

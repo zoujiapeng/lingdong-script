@@ -570,6 +570,11 @@ def test_history_ab_controls_use_observed_fingerprints_and_actual_history():
     }
 
     def arm(*, thread_id, client_pid, turn_count, history_count, text_only):
+        history_roles = [
+            role
+            for _ in range(history_count // 2)
+            for role in ("user", "assistant")
+        ]
         return {
             "thread_id": thread_id,
             "client_pid": client_pid,
@@ -595,6 +600,8 @@ def test_history_ab_controls_use_observed_fingerprints_and_actual_history():
                 "history_projection": {
                     "passed": True,
                     "history_message_count": history_count,
+                    "history_chars": 120 if history_count else 0,
+                    "history_roles": history_roles,
                 },
             },
         }
@@ -642,6 +649,19 @@ def test_history_ab_controls_use_observed_fingerprints_and_actual_history():
         history_turns=20,
     )
     assert changed_initial["same_observed_preopened_document"] is False
+
+    history["target"]["external"]["document_setup"]["initial_sha256"] = expected[
+        "initial_document_sha256"
+    ]
+    history["target"]["history_projection"]["history_message_count"] = 10
+    truncated_history = harness._history_ab_controls(
+        fresh,
+        history,
+        expected=expected,
+        history_turns=20,
+    )
+    assert truncated_history["history_actual_history_is_observed"] is False
+    history["target"]["history_projection"]["history_message_count"] = 12
 
     history["process_cleanup"]["passed"] = False
     changed_cleanup = harness._history_ab_controls(

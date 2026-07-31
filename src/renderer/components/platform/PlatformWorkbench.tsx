@@ -75,6 +75,8 @@ import {
   automationRuntimeGraph,
   type AutomationIR,
 } from '../../utils/automationIR';
+import { isTerminalTaskStatus } from '../../../shared/taskOutcome';
+import { taskOutcomeForRun } from '../../platform/taskOutcome';
 
 type PlatformView = 'agent' | 'studio' | 'runs' | 'assets' | 'system';
 type Plane = ReturnType<typeof useControlPlane>;
@@ -889,20 +891,23 @@ interface AgentCockpitProps {
 function visualRunTone(run: RunProjection | null): string {
   if (!run) return 'idle';
   if (run.phase === 'awaiting_human') return 'waiting';
-  const tone = statusTone(run.status);
-  if (tone === 'success') return 'done';
-  if (tone === 'danger') return 'stopped';
   if (run.status === 'paused') return 'paused';
-  return ACTIVE_STATUSES.has(run.status) ? 'running' : 'idle';
+  if (!isTerminalTaskStatus(run.status)) return 'running';
+  return taskOutcomeForRun(run) === 'success'
+    ? 'done'
+    : 'stopped';
 }
 
 function runActivityLabel(run: RunProjection | null): string {
   if (!run) return '等待任务';
   if (run.phase === 'awaiting_human') return '等待你的确认';
   if (run.status === 'paused') return '任务已暂停';
-  if (run.status === 'reply') return 'Agent 已回复';
-  if (statusTone(run.status) === 'success') return '任务已完成';
-  if (statusTone(run.status) === 'danger') return STATUS_LABELS[run.status] || '任务未完成';
+  if (isTerminalTaskStatus(run.status)) {
+    const outcome = taskOutcomeForRun(run);
+    if (outcome === 'error') return '任务未完成';
+    if (outcome === 'info') return '任务已停止';
+    return run.status === 'reply' ? 'Agent 已回复' : '任务已完成';
+  }
   const tool = TOOL_LABELS[run.current_tool || ''] || run.current_tool;
   return tool ? `正在${tool}` : PHASE_LABELS[run.phase] || 'Agent 正在处理';
 }
@@ -988,18 +993,24 @@ function AgentConversationTurn({
   isLatest,
   gateMessage,
   onOpenDetails,
+  onEditGoal,
+  editDisabled = false,
   onDecideGate,
 }: {
   run: RunProjection;
   isLatest: boolean;
   gateMessage: string;
   onOpenDetails?: () => void;
+  onEditGoal?: (goal: string) => void;
+  editDisabled?: boolean;
   onDecideGate: (approved: boolean) => void;
 }) {
   const tone = visualRunTone(run);
-  const active = ACTIVE_STATUSES.has(run.status);
-  const successful = statusTone(run.status) === 'success';
-  const unsuccessful = statusTone(run.status) === 'danger';
+  const terminal = isTerminalTaskStatus(run.status);
+  const active = !terminal;
+  const taskOutcome = taskOutcomeForRun(run);
+  const successful = terminal && taskOutcome === 'success';
+  const unsuccessful = terminal && taskOutcome !== 'success';
   const directReply = run.status === 'reply';
   const currentTool = TOOL_LABELS[run.current_tool || ''] || run.current_tool || '尚未选择工具';
   const resultText = displayValue(run.result).trim();
@@ -1058,10 +1069,15 @@ function AgentConversationTurn({
           <div className="ld-agent-response-icon"><XCircle size={16} /></div>
           <div className="ld-agent-response-body">
             <div className="ld-agent-response-meta">
-              <strong>{STATUS_LABELS[run.status] || '任务未完成'}</strong>
+              <strong>{taskOutcome === 'info' ? STATUS_LABELS[run.status] || '任务已停止' : '任务未完成'}</strong>
               <small>{formatTime(run.finished_at || run.updated_at)}</small>
             </div>
-            <CollapsibleAgentText text={run.error || '打开运行详情可查看失败位置、事件与证据。'} />
+            <CollapsibleAgentText text={displayValue(run.error || run.result).trim() || '打开运行详情可查看失败位置、事件与证据。'} />
+            {onEditGoal && run.goal && (
+              <button className="ld-agent-response-details" type="button" disabled={editDisabled} onClick={() => onEditGoal(run.goal)}>
+                再次编辑
+              </button>
+            )}
             {onOpenDetails && (
               <button className="ld-agent-response-details" type="button" onClick={onOpenDetails}>
                 查看详情
@@ -1113,8 +1129,8 @@ export function AgentCockpit({
   const run = conversationRuns[conversationRuns.length - 1]
     || (!threadState.persisted ? plane.currentRun : null);
   const arp = plane.arpSnapshot;
-  const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
-  const runtimeBusy = Boolean(plane.currentRun && ACTIVE_STATUSES.has(plane.currentRun.status));
+  const active = Boolean(run && !isTerminalTaskStatus(run.status));
+  const runtimeBusy = Boolean(plane.currentRun && !isTerminalTaskStatus(plane.currentRun.status));
   const manuallyPaused = Boolean(arp?.manual_paused);
   const runtimeIssue = plane.runtimeIssue;
   const modelProfile = plane.overview?.status.model_profile;
@@ -1221,10 +1237,6 @@ export function AgentCockpit({
     return () => { disposed = true; };
   }, [plane.baseUrl, threadRunKey]);
 
-  useEffect(() => {
-    if (run?.run_id) setGoal('');
-  }, [run?.run_id]);
-
   const conversationTailKey = conversationRuns
     .map((item) => `${item.run_id}:${item.status}:${item.updated_at}:${displayValue(item.result).length}`)
     .join('|');
@@ -1263,6 +1275,7 @@ export function AgentCockpit({
         threadState.threadId,
       );
       if (started?.run_id) {
+        localStorage.removeItem('arp-last-goal');
         setThreadState((previous) => {
           const existing = previous.runIds.length
             ? previous.runIds
@@ -1291,6 +1304,7 @@ export function AgentCockpit({
 
   const startNewConversation = () => {
     persistAgentThread('', []);
+    localStorage.removeItem('arp-last-goal');
     setThreadState({ persisted: true, threadId: '', runIds: [] });
     setRunDetails({});
     setGoal('');
@@ -1340,6 +1354,7 @@ export function AgentCockpit({
         onFocus={() => setComposerFocused(true)}
         onBlur={() => setComposerFocused(false)}
         onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault();
             void execute();
@@ -1463,11 +1478,11 @@ export function AgentCockpit({
             <span className={`ld-window-signal ${tone}`} />
             <span>
               <strong>{visibleConversationRuns[0]?.goal || '当前对话'}</strong>
-              <small>{conversationCount} 轮 · {STATUS_LABELS[run?.status || ''] || run?.status || '正在恢复'}</small>
+              <small>{conversationCount} 轮 · {runActivityLabel(run)}</small>
             </span>
           </button>
           <div className="ld-task-window-actions">
-            <button type="button" aria-label="新建对话" title={runtimeBusy ? '当前任务结束后可新建对话' : '新建对话'} disabled={runtimeBusy} onClick={startNewConversation}><Plus size={15} /></button>
+            <button type="button" aria-label="新建对话" title={runtimeBusy || submitting ? '当前提交结束后可新建对话' : '新建对话'} disabled={runtimeBusy || submitting} onClick={startNewConversation}><Plus size={15} /></button>
             <button type="button" aria-label="打开工作台" title="执行、画面、上下文与证据" onClick={onOpenWorkbench}><Activity size={15} /></button>
             <button type="button" aria-label="收起为迷你悬浮窗" title="收起为迷你悬浮窗" onClick={onCompact}><Minimize2 size={15} /></button>
           </div>
@@ -1491,6 +1506,15 @@ export function AgentCockpit({
                 isLatest={index === visibleConversationRuns.length - 1}
                 gateMessage={index === visibleConversationRuns.length - 1 ? gateMessage : ''}
                 onOpenDetails={onOpenResources}
+                editDisabled={submitting}
+                onEditGoal={(value) => {
+                  setGoal(value);
+                  setActionError('');
+                  requestAnimationFrame(() => {
+                    composerInputRef.current?.focus();
+                    composerInputRef.current?.setSelectionRange(value.length, value.length);
+                  });
+                }}
                 onDecideGate={(approved) => { void plane.decideGate(approved); }}
               />
             ))}

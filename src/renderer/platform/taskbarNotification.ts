@@ -1,9 +1,9 @@
 import type { RunProjection } from './contracts';
 import {
-  classifyTaskOutcome,
   isTerminalTaskStatus,
   taskResultText,
 } from '../../shared/taskOutcome';
+import { taskOutcomeForRun } from './taskOutcome';
 
 export type TaskbarNotificationKind = 'success' | 'error' | 'info';
 
@@ -43,11 +43,7 @@ export function taskbarNotificationForTransition(
     return null;
   }
 
-  const outcome = classifyTaskOutcome(
-    current.status,
-    currentRun.result,
-    currentRun.error,
-  );
+  const outcome = taskOutcomeForRun(currentRun);
   const success = outcome === 'success';
   const stopped = outcome === 'info';
   const title = success ? '任务完成' : stopped ? '任务已停止' : '任务失败';

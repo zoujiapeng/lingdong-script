@@ -100,6 +100,17 @@ describe('taskbarNotificationForTransition', () => {
     });
   });
 
+  it('keeps vnext direct JSON reply text successful', () => {
+    expect(taskbarNotificationForTransition(
+      { runId: 'run-1', status: 'running' },
+      run('reply', {
+        runtime_version: 'vnext',
+        no_legacy_fallback: true,
+        result: JSON.stringify({ ok: false, error: 'Example payload only' }),
+      }),
+    )?.kind).toBe('success');
+  });
+
   it('keeps a reply without explicit failure signals successful', () => {
     expect(taskbarNotificationForTransition(
       { runId: 'run-1', status: 'running' },

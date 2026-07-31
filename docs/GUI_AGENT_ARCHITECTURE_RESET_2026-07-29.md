@@ -1979,3 +1979,80 @@ Turn** 后执行同一 preopened target。当前上限是 12 条原生消息，6
 Turn 已填满模型可见 history 窗口；用四个 seed 做 AB/BA 对消，能把“最大可见 history
 压力”与 20 次连续 provider/UIA 暴露分开。20-Turn durability 失败继续作为真实聊天可靠性
 缺口单独保留，但不得通过 Runtime 自动重试、删题、提示或 router 清洗。
+
+### 13.24 六轮原生历史通过；客户端只修通用交互真实性
+
+本轮把 13.23 的唯一实验收敛到 6 个完整成功聊天 Turn。测试仍从可见 Electron 前端用
+Windows 键盘输入、鼠标发送；聊天自动 oracle 只要求 Server Thread 中存在非空成功回复，
+同时强制 connector raw/Gateway call、desktop lease、GUI observation、Runtime tool
+attempt 和 applied GUI action 全部为零。六个问题覆盖日常聊天、礼貌改写、翻译、日常
+解释、短规划和比较，不把答案或关键词交给生产模型。target 仍是相同的预打开随机文件、
+只读 connector 和全文替换保存，外部 oracle 未放宽。
+
+history control 不再接受“message count 大于零”。它现在要求实际 provider projection 为
+精确 12 条、角色严格按六组 `user, assistant` 交替、字符数位于 `1..16384`；这证明六个
+完整 Turn 已填满当前模型可见消息上限，而不是只证明 Thread UI 中看起来有六轮。一般
+20-Turn durability runner 保持不变，仅 history-depth A/B 的默认值从 20 收到 6，减少
+provider/UIA 累计干扰。
+
+四个 seed 得到两个有效 pair：
+
+| seed / 顺序 | 聊天路径 | fresh target | history target | 结论 |
+| --- | --- | --- | --- | --- |
+| `92001` / H→F | 首轮寒暄得到回复，但申请 lease 并观察桌面 | 首轮同时请求多个 desktop observation，合同拒绝 | 未到达 | 两个模型工具选择错误，pair 无效 |
+| `92002` / F→H | `6/6` 非空回复且全部零副作用 | 完整通过 | 12 条/1313 字符历史后完整通过 | 有效 pair；没有 history 负信号 |
+| `92003` / H→F | 新六类问题 `6/6` 非空回复且全部零副作用 | 完整通过 | 12 条/423 字符历史后完整通过 | 有效反序 pair；没有 history 负信号 |
+| `92004` / F→H | 六轮均回复，前五轮零副作用；第六轮“陪我聊两句”却申请 lease/观察桌面 | 首轮同时请求多个 desktop observation，合同拒绝 | 未到达 | 两个模型工具选择错误，pair 无效 |
+
+两个有效 pair 的四个 target 为 `4/4`：connector raw→canonical→fixture 各 `1/1`，磁盘
+全文精确等于随机值，GUI receipt 含 `type_text` 与保存按键，模型自主 terminal，窗口恢复、
+Notepad 清理和 Electron 进程清理全部通过。因此当前证据支持保留 12-message 原生 history
+owner，不支持摘要、扩大上限、删除历史或增加模型角色。四组共得到 19 个成功聊天回复，
+其中 17 个严格 text-only；两个错误升级为桌面的样本首分歧均是模型输出，不是客户端在
+发送时主动隐藏。客户端仍只在真实 `desktop_lease_requested` 后最小化，这条窗口合同不改。
+
+客户端审计同时发现三个确定性的通用体验缺口，均在现有 Electron owner 内最小修复：
+
+- 消息框 Enter 现在检查 IME composition/229，中文候选上屏不再误发送；
+- `arp-last-goal` 在成功取得 run id 和“新建对话”时清除；提交失败仍保留原输入，避免
+  已发送任务在重启后伪装成未发送草稿；
+- 聊天卡复用任务栏已经使用的 `classifyTaskOutcome`，所以 `reply/done` 携带显式失败
+  结构时不会显示成功；失败结果直接可见，并提供“再次编辑”将原目标放回输入框，但绝不
+  自动重发。可见 `92004` 失败终态截图显示精确合同错误、再次编辑和运行详情入口；相邻
+  按钮间距由一条通用 CSS 规则修正。明确带 `runtime_version=vnext` 与
+  `no_legacy_fallback=true` 的直接聊天字符串不再被解析为结果协议，用户要求展示
+  `{"ok": false}` 一类 JSON 时不会被误判失败；对象型失败 envelope 与独立 error 仍然
+  是失败。共享 classifier 一度改成忽略所有 `reply` 字符串，但审查证明 legacy 安全停止会
+  以字符串 envelope 到达任务栏；该负优化连同测试已完整回退。`waiting_external`、
+  `canceling` 和未知过渡状态在真正终态前继续显示为活动中。失败提交的草稿不再被旧 run
+  水合清空；提交进行中，“再次编辑”和“新建对话”都会锁定，避免请求返回后覆盖草稿或
+  把旧 Thread 接回新对话。
+
+生产代码切片为 `+70/-26`：`PlatformWorkbench.tsx +44/-20`、`floating.css +4/-0`、
+`taskOutcome.ts +20/-0`、`taskbarNotification.ts +2/-6`。测试/harness 为 `+254/-11`；
+系统提示、Runtime、Thread Store、
+connector、工具 schema、desktop lease 和模型调用次数均为 `+0/-0`。保留的实验是
+6-Turn 默认、精确 12-message
+control、IME guard、真实 outcome、显式再次编辑和成功提交清理。未准入或回退的是聊天
+关键词 router、意图分类器、提交即隐藏、自动重试、自动新建 Thread、history 摘要、提示
+教学、窗口 watchdog 以及任何模型纠错 Runtime。全局忽略 `reply` 字符串失败 envelope 的
+候选因会掩盖 legacy 安全停止而按负优化完整回退；其余保留项没有观察到生产负优化。
+
+失败分层：两次多 observation 和两次普通聊天申请桌面属于模型；本轮有效 pair 没有
+provider 连接错误；测试启动仍表现出较长冷启动/输出缓冲，但没有污染有效 arms。新架构
+仍是一个原始 goal、一个 `LiveVisualActor`、一条视觉执行线和小型工具面。模型继续承担
+聊天与工具模态选择，两个误用桌面样本说明压力真实存在；但两个双向有效 pair 证明最大
+12-message 原生历史没有使当前组合任务退化，不能把压力归咎于 history owner。
+
+Pi/Operit 计划不变：不引入第二 Runtime、RPC、Android owner 或长期双写；只有外部 E2E
+证明源码片段能整体替换并删除当前 owner、且跨至少两个任务族提高完成率时才准入。
+
+最终回归为 Python `3464 passed, 13 skipped, 1 warning`、renderer `243 passed`、
+TypeScript typecheck 通过；客户端 outcome/草稿聚焦回归为 `35 passed`，history harness
+聚焦回归为 `16 passed`。
+
+下一轮唯一最高价值实验转向 Codex 式会话连续性，仍先 test-only：通过真实前端建立带
+随机 marker 的成功 Thread，正常关闭并重启 Electron 及其托管服务，然后检查旧消息是否
+可见、下一条提交是否仍能绑定原 Thread、模型能否从恢复历史精确回答 marker。当前
+Thread Store 是进程内存且客户端保存 stale thread id，代码审计预期这里会分叉；必须先
+拿到可见重启证据，不能直接增加持久化 owner、自动创建新 Thread 或解除公共 trace 脱敏。
