@@ -981,6 +981,10 @@
   gap: 5px;
 }
 
+.ld-agent-response-details + .ld-agent-response-details {
+  margin-left: 12px;
+}
+
 .ld-agent-response-expand:hover,
 .ld-agent-response-details:hover {
   color: var(--ld-text);

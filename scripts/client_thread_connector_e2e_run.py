@@ -57,12 +57,12 @@ CONNECTOR_READ_TASK = (
     "请使用已连接的 {connector} 服务读取名为 verification 的值，然后只把读取到的值回复给我。"
 )
 CHAT_PROMPTS = (
-    "你好，我们开始一段连续对话。请用一句自然的话回应。",
-    "你认为清晨和傍晚各有什么优点？请简短回答。",
-    "用一句话解释为什么适当休息有助于专注。",
-    "如果周末只能安排一项轻松活动，你会建议什么？",
-    "请用一个简短比喻描述耐心。",
-    "怎样礼貌地提醒朋友别忘了带伞？",
+    "我今天有点累，陪我聊两句吧。",
+    "把“明天把资料发我”改得礼貌一些，只给改写后的句子。",
+    "把 Please keep the answer concise. 翻译成自然的中文。",
+    "用日常语言简短解释为什么冰水杯外面会出现水珠。",
+    "我有二十五分钟，想读书和收拾桌面，给我一个简单顺序。",
+    "比较清晨散步和傍晚散步，各说一个优点。",
     "用一句话概括阅读纸质书的感受。",
     "给第一次做饭的人一条最实用的建议。",
     "如果今天很忙，怎样安排五分钟的休息？",
@@ -1783,6 +1783,12 @@ def _history_ab_controls(
     history_setup = (
         (history_target.get("external") or {}).get("document_setup") or {}
     )
+    expected_history_messages = min(max(0, int(history_turns)) * 2, 12)
+    expected_history_roles = [
+        role
+        for _ in range(expected_history_messages // 2)
+        for role in ("user", "assistant")
+    ]
     return {
         "same_task_sha256": bool(
             fresh_target.get("task_sha256")
@@ -1862,7 +1868,10 @@ def _history_ab_controls(
         ),
         "history_actual_history_is_observed": bool(
             history_projection.get("passed") is True
-            and int(history_projection.get("history_message_count") or 0) > 0
+            and history_projection.get("history_message_count")
+            == expected_history_messages
+            and history_projection.get("history_roles") == expected_history_roles
+            and 0 < int(history_projection.get("history_chars") or 0) <= 16_384
         ),
         "history_prefill_is_text_only": (
             history.get("history_text_only_pass") is True
@@ -1904,7 +1913,7 @@ def _history_ab_comparison(
 def run_history_depth_ab_e2e(
     *,
     output_root: Path,
-    history_turns: int = 20,
+    history_turns: int = 6,
     timeout: int = 180,
     seed: int | None = None,
     arm_first: str = "random",
@@ -2089,7 +2098,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--skip-notepad", action="store_true")
     parser.add_argument("--history-depth-ab", action="store_true")
-    parser.add_argument("--ab-history-turns", type=int, default=20)
+    parser.add_argument("--ab-history-turns", type=int, default=6)
     parser.add_argument("--ab-seed", type=int)
     parser.add_argument(
         "--ab-first",
