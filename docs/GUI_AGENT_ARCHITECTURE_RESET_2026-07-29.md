@@ -1896,3 +1896,86 @@ adapter 仍因缺真实 credential E2E 而 provisional，本轮不继续扩张�
 用当前实际 history/零副作用探针跑至少四个随机 seed、AB/BA 对消顺序。只有 fresh 基线
 稳定通过且 history 臂在相同 raw→canonical→physical→file/terminal 层重复退化，才讨论
 history owner；否则继续把失败留在模型样本层。
+
+### 13.23 预打开文件基线通过；长对话 A/B 尚未形成有效配对
+
+本轮只改 E2E runner 与其测试，生产代码仍为 `+0/-0`，系统提示、Runtime、模型、
+Thread Store、connector 和工具面均未改变。history-depth target 不再把绝对路径交给模型，
+也不再经过 Windows Save As：runner 在自己的临时目录内为每一臂重新写入同一个、与
+答案不同的随机初值，
+用 `notepad.exe <path>` 打开已有文件；任务只表达“从 connector 读取 verification，用
+鼠标键盘全文替换当前记事本文档并保存”。提交前必须同时证明 fresh HWND、窗口标题含
+随机文件名、磁盘 SHA 仍等于初值；终态继续要求单次真实 connector 参数链、精确文件
+全文、保存后 mtime、完整 GUI receipt、自主 terminal 和前端恢复。
+
+测试清理也从任务结果中分离：owned Notepad 必须确认 HWND 消失；只有启动 PID 与窗口
+PID 相同且该 PID 只剩这一扇 owned 窗口时才允许强制终止，否则 fail closed 并停止该
+pair，不能杀共享的用户 Notepad。cleanup 失败只标记 test interference，不能覆盖已经
+观察到的用户外部终态。A/B comparison 同样改为 controls 未齐时只写
+`pair_incomplete_before_paired_target`；旧 `20260801-011434` 报告是在修正前生成，仍保留
+其中错误的 `history_arm_regressed_in_this_pair` 字段，不能把旧 artifact 重写成因果结论。
+两臂的 Runtime idle、托管 Electron 进程清理和无 runner failure 也属于 paired validity，
+不是模型能力结果。聚焦测试为 `16 passed`。
+
+最先两次 smoke 没有计入矩阵。`20260801-005351` 在用户目标前被 Windows 前台锁和 Vite
+重启阻断，属于测试基础设施；用外部桌面控制只激活测试 Electron 后，
+`20260801-010146` 的 fresh target 到达模型，但首次响应同时请求多个 desktop observation，
+被现有单观察合同正确拒绝；history 首轮又是 provider `Connection error`。随后将同一个
+workspace Vite 作为现有测试依赖在整个矩阵期间复用，`_url_ready` 与 listener identity
+均实测通过；没有为此新增生产或测试 owner，矩阵结束后已停止该进程。
+
+四个预注册 seed 按 fresh/history/history/fresh 对消顺序尝试；没有一个 pair 同时到达
+两边 target，因此本轮没有有效 history-depth 因果样本：
+
+| seed / 顺序 | fresh target | history 路径首个分歧 | 归因 |
+| --- | --- | --- | --- |
+| `91001` / F→H | 首臂 Vite 已打印 ready 但探活失败，target 未开始 | 11 个聊天 Turn 全部 reply 且零副作用；第 12 轮却申请 lease 并观察桌面，随后 `mission_verified` | fresh 为测试基础设施；history 为模型把普通聊天错误升级为 GUI |
+| `91002` / H→F | `arp-20260801-012106-f70e19` 完整通过 | 第 11 轮 `arp-20260801-011942-105d7a` 在零工具/零动作前 `Connection error` | 模型 provider/API 基础设施，pair 无效 |
+| `91003` / H→F | `arp-20260801-012620-d53674` 完整通过 | 第 1 轮 `arp-20260801-012451-4631e6` 在零工具/零动作前 `Connection error` | 模型 provider/API 基础设施，pair 无效 |
+| `91004` / F→H | `arp-20260801-012829-12e83a` 完整通过 | 前 5 轮通过，第 6 轮在前端提交路径发生 UIA `COMError: 事件无法调用任何订户`，没有 run id | 测试干扰，pair 无效 |
+
+三个有效 fresh target 为 `3/3`，耗时 `46.471 / 44.056 / 47.536` 秒。每次都是 raw model
+arguments→Gateway canonical parse→真实 fixture 调用各 `1/1`，已有文件精确等于随机
+connector 值，动作均为 `hotkey → type_text → hotkey`，模型自主 `done`，窗口恢复、
+Notepad 清理和进程清理全部通过。这个重复外部成功证明预打开文件是比 Save As 更低方差、
+同时仍保留用户鼠标键盘要求的测试基线；应保留在测试侧。它不证明 Notepad 类任务需要
+适配，也不准许把 `Ctrl+A/Ctrl+S` 写入 Runtime 或提示。
+
+冻结分支也完成了只读总审计，结论为 `0 cherry-pick / 0 merge / 0 Runtime 修改`：
+
+- `codex/vnext-agent-core` 的 branch-only 生产代码约 13,342 行，主要是 target discovery/
+  activation/launch、profiler、runtime selector、第二 verifier、shadow/bridge/action-history
+  等重复 owner；它没有当前 Thread/connector 路径，也没有 maximize primitive，不能解释
+  本轮失败；
+- `fix/pr10-python-ci` 只在已删除的旧 `windows_facts.py` 增加 drive-qualified 校验；当前
+  target identity owner 不存在同一缺口；
+- `test/pr15-legacy-electron-oracle` 是绑定旧 Legacy SHA 的测试分支，其 external oracle、
+  trace binding 和 unknown-no-replay 语义已由当前 harness/replay policy 覆盖；
+- 两条 recovery/C4 的 canary、input hook、composition/evidence 已被 master 后续强化；
+  真正残留的是已主动删除的 `LiveVisualObligationVerifier` 第二模型角色和前端 Runtime
+  selector，恢复会直接违反单 Actor、单产品入口。
+
+本轮保留：预打开文件 target、actual initial SHA/title precondition、独立 cleanup validity、
+controls-first comparison 和既有 raw/canonical/physical/file oracle。未准入或回退：任何
+冻结分支代码、Vite 新 owner、history 摘要/重试、聊天关键词路由、提示教学、Windows
+快捷键规则及 Runtime 修正。当前失败分层为一个模型聊天误用桌面、两个模型
+provider/API 连接错误、一个 UIA 提交错误和一次 Vite/前台测试干扰；fresh GUI task
+本身没有失败。
+
+最终源码回归为 Python `3464 passed, 13 skipped, 1 warning`、renderer
+`234 passed`，TypeScript typecheck 通过。renderer 曾在与 typecheck 并行时只有
+`store.test.ts` 超过 5 秒；串行原样重跑为 `234/234`，因此归为测试调度干扰，没有调高
+超时或修改产品代码。
+
+新架构 owner 未增加，仍是一个原始 goal、一个 `LiveVisualActor`、一条视觉执行线和小型
+通用工具面。模型仍承担聊天、connector、是否观察桌面、GUI 策略、自纠错和停止，压力
+很高；fresh `3/3` 说明这个组合任务在无历史时处于当前模型能力范围，但没有有效 paired
+history target，不能说压力来自 history depth。Pi/Operit 计划不变：不引入第二 Runtime、
+RPC 或 Android owner；只有源码能整体替换并删除当前 owner，且跨至少两个任务族提高
+外部完成率时才准入。
+
+下一轮唯一最高价值实验仍为 test-only：把 prefill 收到 **6 个全部零副作用的成功聊天
+Turn** 后执行同一 preopened target。当前上限是 12 条原生消息，6 个完整 user/assistant
+Turn 已填满模型可见 history 窗口；用四个 seed 做 AB/BA 对消，能把“最大可见 history
+压力”与 20 次连续 provider/UIA 暴露分开。20-Turn durability 失败继续作为真实聊天可靠性
+缺口单独保留，但不得通过 Runtime 自动重试、删题、提示或 router 清洗。

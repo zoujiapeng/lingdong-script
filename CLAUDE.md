@@ -1,9 +1,9 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-07-31。当前唯一产品分支是 `master`，HEAD 为
-> `fba5d7bb6dcb13c46e93dbc29bc3cef44e560622`。当前未提交工作树的最新事实见重置文档
-> 13.20–13.21；不要用更早的提交说明覆盖 Thread/Turn、按需桌面租约、通用 connector
-> 或 provisional native-provider 边界。
+> 最后核对：2026-08-01。当前唯一产品分支是 `master`，本轮开始基线为
+> `a4bdaf7f794d0fb79cd34563815da9b1f80fcde7`。13.20–13.22 已进入主线，本轮 test-only
+> 结果见重置文档 13.23；不要用更早的提交说明覆盖 Thread/Turn、按需桌面租约、通用
+> connector、history-depth 证据或 provisional native-provider 边界。
 
 本文件是换 Codex 窗口后的第一入口。它保存当前决策和继续工作的边界，不替代
 长期架构与测试规范。依次阅读：
@@ -32,6 +32,9 @@
 - 原 Draft PR #45/#46 已由这次直接提升取代，不是合并依据。
 - 其余具名分支全部只读冻结；只有当前 `master` 的真实 E2E 先证明能力缺口时，才可
   审查其单个候选提交。禁止继续向这些分支提交或把它们整体 merge 回来。
+- 2026-08-01 已完成所有具名冻结分支只读总审计；当前没有可准入项，结论为
+  `0 cherry-pick / 0 merge / 0 Runtime 修改`。旧分支剩余主要是重复 target pipeline、
+  profiler、第二 verifier 和前端 Runtime selector，不解释当前首分歧。
 - 后续正常开发直接提交到 `master`；不要再建立另一条长期产品分支。
 - 本地未跟踪 `CON` 属于用户，不能读取后擅自解释、暂存、删除、改名或覆盖。
 
@@ -300,6 +303,23 @@ observation、tool attempt 和 GUI action，因此旧 prefill 未实际污染桌
 发布前完整回归为 Python `3462 passed, 13 skipped, 1 warning`、renderer `234 passed`，
 TypeScript typecheck 通过。
 
+13.23 已把 history-depth target 改成 runner 临时目录内预先打开的已有随机文件，任务
+不再包含路径或经过 Save As。每臂重新写同一初值，并以 fresh HWND、标题文件名和
+提交前磁盘 SHA 证明目标；
+cleanup 作为独立测试有效性，不能覆盖用户外部终态或被误报成模型退化。稳定复用现有
+Vite 后，fresh target 连续 `3/3` 完整通过：每次 connector raw→canonical→fixture 为
+`1/1`，文件精确等于随机值，GUI 均为 `hotkey → type_text → hotkey`，自主 done、窗口
+恢复和清理均通过。
+
+四个 20-Turn ABBA 尝试没有形成一个完整 pair：history 路径分别在第 12 轮误用桌面
+（模型）、第 11/第 1 轮模型 provider/API `Connection error`（基础设施）、第 6 轮 UIA
+`COMError`（测试干扰）中止；另一次 fresh 被 Vite 探活干扰挡住。controls 未齐时报告
+现在只写 `pair_incomplete_before_paired_target`，不能归因 history。生产代码仍为 `+0/-0`，
+不加重试、摘要、router、提示或 Windows 快捷键规则。完整报告、旧 comparison 字段债务
+和冻结分支审计见 13.23。最终回归为 Python `3464 passed, 13 skipped, 1 warning`、
+renderer `234 passed`、TypeScript typecheck 通过；renderer 与 typecheck 并行时的一次
+5 秒超时经串行原样重跑消失，属于测试调度干扰。
+
 关键归因：
 
 - `ordered-clicks` 在加入最近一笔原生交换前会重复第一个目标；现在三次真实点击按
@@ -371,16 +391,17 @@ git status -sb
 git log -8 --oneline --decorate
 ```
 
-当前工作树包含 13.20–13.21 尚未提交的生产、测试和文档变更，以及用户未跟踪的
-`CON`。必须先核对并保留这些现有改动；不要 reset、覆盖、整体暂存或触碰 `CON`。
-然后阅读本文件和上述五份文档，不要立刻追加代码。
+本轮开始时 `master` 与 `origin/master` 同为 `a4bdaf7`，除用户未跟踪的 `CON` 外干净；
+13.23 只改测试 runner、测试与文档。接手时必须重新核对状态，不要 reset、整体暂存或
+触碰 `CON`。然后阅读本文件和上述五份文档，不要立刻追加代码。
 
 优先级：
 
-1. 下一轮唯一实验仍不改生产代码：预创建并打开一个随机文本文件，让 target 只做
-   connector read → 全量替换当前文档 → `Ctrl+S`，去掉 Save As 高方差步骤。
-2. 用当前实际 history 与零副作用探针跑至少四个随机 seed，并让 AB/BA 顺序对消；只有
-   fresh 基线稳定通过、history 臂在相同证据层重复退化，才讨论 history owner。
+1. 下一轮唯一实验仍不改生产代码：先完成 6 个全部零副作用的成功聊天 Turn，再执行
+   同一 preopened connector→全文替换 target；12 条 history 上限在 6 个完整 Turn 后已
+   填满，可隔离最大模型可见 history 压力与 20 次 provider/UIA 累积暴露。
+2. 跑四个随机 seed 并让 AB/BA 顺序对消；只有 fresh 与 6-Turn history 两臂均到达 target、
+   所有 controls 全真，才讨论 history owner。20-Turn 失败单独作为聊天可靠性缺口保留。
 3. 继续记录 raw model args、实际 canonical parse、物理 MCP/GUI receipt、严格文件终态、
    产品自主 terminal/恢复与 usage；不加提示教学、router、摘要模型、工具筛选器、自动
    重试或 Runtime 修正，不接回旧 `/api/chat`。

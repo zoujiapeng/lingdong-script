@@ -102,6 +102,13 @@ def connector_to_notepad_task(
     )
 
 
+def connector_to_current_notepad_task(fixture: FixtureEnvironment) -> str:
+    return (
+        f"从 {fixture.server_name} 读 verification，"
+        "用鼠标键盘将当前记事本文档全文替换为该值并保存。"
+    )
+
+
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -1072,17 +1079,55 @@ class OwnedNotepad:
     hwnd: int
     process_id: int
 
-    def close(self) -> None:
-        if win32gui.IsWindow(self.hwnd):
-            win32gui.PostMessage(self.hwnd, win32con.WM_CLOSE, 0, 0)
-            time.sleep(0.5)
-        _terminate_owned_process(self.process)
+    def close(self) -> dict[str, Any]:
+        try:
+            if win32gui.IsWindow(self.hwnd):
+                win32gui.PostMessage(self.hwnd, win32con.WM_CLOSE, 0, 0)
+            deadline = time.monotonic() + 5
+            while win32gui.IsWindow(self.hwnd) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            window_closed = not win32gui.IsWindow(self.hwnd)
+            remaining = _notepad_windows()
+            shared_window_count = sum(
+                process_id == self.process_id for process_id in remaining.values()
+            )
+            forced_process_termination = False
+            if (
+                not window_closed
+                and self.process.pid == self.process_id
+                and shared_window_count == 1
+            ):
+                _terminate_owned_process(self.process)
+                forced_process_termination = True
+                deadline = time.monotonic() + 3
+                while win32gui.IsWindow(self.hwnd) and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                window_closed = not win32gui.IsWindow(self.hwnd)
+            elif window_closed and (
+                self.process.pid != self.process_id or shared_window_count == 0
+            ):
+                _terminate_owned_process(self.process)
+            return {
+                "passed": window_closed,
+                "window_closed": window_closed,
+                "forced_process_termination": forced_process_termination,
+                "shared_process_window_count": shared_window_count,
+            }
+        except Exception as error:
+            return {
+                "passed": False,
+                "window_closed": False,
+                "error": f"{type(error).__name__}: {error}",
+            }
 
 
-def launch_notepad() -> OwnedNotepad:
+def launch_notepad(path: Path | None = None) -> OwnedNotepad:
     before = set(_notepad_windows())
+    command = ["notepad.exe"]
+    if path is not None:
+        command.append(str(path.resolve()))
     process = subprocess.Popen(
-        ["notepad.exe"],
+        command,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1092,6 +1137,13 @@ def launch_notepad() -> OwnedNotepad:
     while time.monotonic() < deadline:
         windows = _notepad_windows()
         fresh = [hwnd for hwnd in windows if hwnd not in before]
+        if path is not None:
+            expected_name = path.name.casefold()
+            fresh = [
+                hwnd
+                for hwnd in fresh
+                if expected_name in win32gui.GetWindowText(hwnd).casefold()
+            ]
         if fresh:
             hwnd = fresh[0]
             win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
@@ -1201,11 +1253,27 @@ def _run_connector_to_notepad_case(
     identity: client_harness.ClientIdentity,
     sequence: ThreadSequence,
     timeout: int,
+    preexisting_text: str | None = None,
 ) -> dict[str, Any]:
     """Run one complete connector-to-Notepad turn and wait for Agent terminal."""
 
-    output_file.unlink(missing_ok=True)
-    notepad = launch_notepad()
+    if preexisting_text is None:
+        output_file.unlink(missing_ok=True)
+        document_setup = {"mode": "blank_untitled"}
+        notepad = launch_notepad()
+    else:
+        if preexisting_text == fixture.token:
+            raise ValueError("preexisting Notepad text must differ from target")
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_text(preexisting_text, encoding="utf-8")
+        initial_raw = output_file.read_bytes()
+        document_setup = {
+            "mode": "preopened_existing_file",
+            "initial_bytes": len(initial_raw),
+            "initial_sha256": hashlib.sha256(initial_raw).hexdigest(),
+            "initial_differs_from_target": True,
+        }
+        notepad = launch_notepad(output_file)
     notepad_started_ns = time.time_ns()
     try:
 
@@ -1217,6 +1285,25 @@ def _run_connector_to_notepad_case(
                 raise RuntimeError("owned Notepad closed before submission")
             notepad_visible = bool(win32gui.IsWindowVisible(notepad.hwnd))
             electron_foreground = win32gui.GetForegroundWindow() == driver.identity.hwnd
+            if preexisting_text is not None:
+                current_raw = output_file.read_bytes()
+                current_sha256 = hashlib.sha256(current_raw).hexdigest()
+                title_matches = output_file.name.casefold() in win32gui.GetWindowText(
+                    notepad.hwnd
+                ).casefold()
+                precondition_passed = bool(
+                    current_sha256 == document_setup["initial_sha256"]
+                    and title_matches
+                )
+                document_setup.update(
+                    {
+                        "pre_submit_sha256": current_sha256,
+                        "title_matches_document": title_matches,
+                        "precondition_passed": precondition_passed,
+                    }
+                )
+                if not precondition_passed:
+                    raise RuntimeError("prepared Notepad document changed before submit")
             if not notepad_visible or not electron_foreground:
                 raise RuntimeError(
                     "Notepad was not visibly prepositioned behind Electron"
@@ -1248,12 +1335,13 @@ def _run_connector_to_notepad_case(
                 "applied_actions": actions,
                 "required": "type_text plus click/double_click/hotkey",
             }
+            evidence["document_setup"] = document_setup
             evidence["passed"] = bool(
                 evidence.get("passed") is True and input_path
             )
             return evidence
 
-        return _run_thread_case(
+        result = _run_thread_case(
             name,
             task,
             output_root=output_root,
@@ -1266,7 +1354,13 @@ def _run_connector_to_notepad_case(
             require_thread_result=True,
         )
     finally:
-        notepad.close()
+        cleanup = notepad.close()
+    verdict = result.get("task_verdict") or {}
+    external = verdict.get("external") or {}
+    external["notepad_cleanup"] = cleanup
+    verdict["external"] = external
+    result["task_verdict"] = verdict
+    return result
 
 
 def run_thread_connector_e2e(
@@ -1517,6 +1611,7 @@ def _run_history_depth_arm(
     fixture: FixtureEnvironment,
     task: str,
     output_file: Path,
+    initial_document: str,
     history_prompt_indexes: tuple[int, ...],
     output_root: Path,
     timeout: int,
@@ -1541,6 +1636,7 @@ def _run_history_depth_arm(
             FIXTURE_SCRIPT.read_bytes()
         ).hexdigest(),
         "output_path_sha256": _sha256_text(str(output_file.resolve())),
+        "initial_document_sha256": _sha256_text(initial_document),
     }
     try:
         managed = launch_managed_client(private_dir / "managed-client", fixture)
@@ -1589,6 +1685,7 @@ def _run_history_depth_arm(
             identity=managed.identity,
             sequence=sequence,
             timeout=timeout,
+            preexisting_text=initial_document,
         )
         target_case = _public_case(target_result)
         target_case["connector_chain"] = read_connector_probe_evidence(
@@ -1621,6 +1718,10 @@ def _run_history_depth_arm(
         "workspace_client_pid_absent": client_pid not in _workspace_electron_pids(),
     }
     outcome = _target_outcome(target_case)
+    notepad_cleanup = (
+        (((target_case or {}).get("external") or {}).get("notepad_cleanup")) or {}
+    )
+    test_cleanup_pass = bool(target_case and notepad_cleanup.get("passed") is True)
     arm = {
         "arm": arm_name,
         "cold_start": True,
@@ -1647,6 +1748,7 @@ def _run_history_depth_arm(
         ),
         "target": target_case,
         "target_outcome": outcome,
+        "test_cleanup_pass": test_cleanup_pass,
         "runtime_idle_after_target": idle,
         "process_cleanup": process_cleanup,
         "failure": failure,
@@ -1655,6 +1757,7 @@ def _run_history_depth_arm(
             and len(public_chats) == len(history_prompt_indexes)
             and all(case.get("passed") is True for case in public_chats)
             and outcome.get("full_pass") is True
+            and test_cleanup_pass
             and idle.get("passed") is True
             and process_cleanup.get("passed") is True
         ),
@@ -1676,6 +1779,10 @@ def _history_ab_controls(
     history_fingerprints = history.get("control_fingerprints") or {}
     fresh_projection = fresh_target.get("history_projection") or {}
     history_projection = history_target.get("history_projection") or {}
+    fresh_setup = ((fresh_target.get("external") or {}).get("document_setup") or {})
+    history_setup = (
+        (history_target.get("external") or {}).get("document_setup") or {}
+    )
     return {
         "same_task_sha256": bool(
             fresh_target.get("task_sha256")
@@ -1699,6 +1806,37 @@ def _history_ab_controls(
             fresh_fingerprints.get("output_path_sha256")
             == history_fingerprints.get("output_path_sha256")
             == expected["output_path_sha256"]
+        ),
+        "same_initial_document": bool(
+            fresh_fingerprints.get("initial_document_sha256")
+            == history_fingerprints.get("initial_document_sha256")
+            == expected["initial_document_sha256"]
+        ),
+        "same_observed_preopened_document": bool(
+            fresh_setup.get("mode") == "preopened_existing_file"
+            and history_setup.get("mode") == "preopened_existing_file"
+            and fresh_setup.get("initial_differs_from_target") is True
+            and history_setup.get("initial_differs_from_target") is True
+            and fresh_setup.get("precondition_passed") is True
+            and history_setup.get("precondition_passed") is True
+            and fresh_setup.get("title_matches_document") is True
+            and history_setup.get("title_matches_document") is True
+            and fresh_setup.get("initial_sha256")
+            == history_setup.get("initial_sha256")
+            == expected["initial_document_sha256"]
+        ),
+        "both_notepad_cleanups_passed": bool(
+            fresh.get("test_cleanup_pass") is True
+            and history.get("test_cleanup_pass") is True
+        ),
+        "both_arm_postconditions_passed": bool(
+            not fresh.get("failure")
+            and not history.get("failure")
+            and (fresh.get("runtime_idle_after_target") or {}).get("passed") is True
+            and (history.get("runtime_idle_after_target") or {}).get("passed")
+            is True
+            and (fresh.get("process_cleanup") or {}).get("passed") is True
+            and (history.get("process_cleanup") or {}).get("passed") is True
         ),
         "same_runtime_model_identity": bool(
             fresh.get("runtime_identity")
@@ -1732,6 +1870,37 @@ def _history_ab_controls(
     }
 
 
+def _history_ab_cleanup_interference(arms: list[dict[str, Any]]) -> bool:
+    for arm in arms:
+        target = arm.get("target")
+        if not target:
+            continue
+        cleanup = ((target.get("external") or {}).get("notepad_cleanup")) or {}
+        if cleanup.get("passed") is not True:
+            return True
+    return False
+
+
+def _history_ab_comparison(
+    *,
+    fresh_pass: bool,
+    history_pass: bool,
+    cleanup_interference: bool,
+    controls_pass: bool,
+) -> str:
+    if cleanup_interference:
+        return "pair_invalid_test_interference"
+    if not controls_pass:
+        return "pair_incomplete_before_paired_target"
+    if fresh_pass and history_pass:
+        return "both_passed_no_negative_history_signal_in_this_pair"
+    if fresh_pass and not history_pass:
+        return "history_arm_regressed_in_this_pair"
+    if not fresh_pass and history_pass:
+        return "fresh_arm_failed_history_arm_passed_order_or_sampling_signal"
+    return "both_failed_or_pair_incomplete"
+
+
 def run_history_depth_ab_e2e(
     *,
     output_root: Path,
@@ -1756,14 +1925,15 @@ def run_history_depth_ab_e2e(
     if arm_first == "random":
         order_digest = hashlib.sha256(f"{seed}:arm-order".encode()).digest()
         selected_arm_first = "fresh" if order_digest[0] % 2 == 0 else "history"
-    output_file = Path.home() / f"cne2e-ab-{secrets.token_hex(3)}.txt"
+    initial_document = f"cne2e-initial-{_sha256_text(f'{seed}:initial')[:16]}"
     arms: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(
         prefix="connector-history-ab-",
         dir=str(suite_dir),
     ) as temp_name:
+        output_file = Path(temp_name) / "current.txt"
         fixture = build_fixture_environment(Path(temp_name))
-        task = connector_to_notepad_task(fixture, output_file)
+        task = connector_to_current_notepad_task(fixture)
         fixture_config_sha256 = hashlib.sha256(
             fixture.config_path.read_bytes()
         ).hexdigest()
@@ -1782,17 +1952,25 @@ def run_history_depth_ab_e2e(
         try:
             for key in order:
                 arm_name, indexes = arm_specs[key]
-                arms.append(
-                    _run_history_depth_arm(
-                        arm_name=arm_name,
-                        fixture=fixture,
-                        task=task,
-                        output_file=output_file,
-                        history_prompt_indexes=indexes,
-                        output_root=private_dir,
-                        timeout=timeout,
-                    )
+                arm = _run_history_depth_arm(
+                    arm_name=arm_name,
+                    fixture=fixture,
+                    task=task,
+                    output_file=output_file,
+                    initial_document=initial_document,
+                    history_prompt_indexes=indexes,
+                    output_root=private_dir,
+                    timeout=timeout,
                 )
+                arms.append(arm)
+                cleanup = (
+                    (((arm.get("target") or {}).get("external") or {}).get(
+                        "notepad_cleanup"
+                    ))
+                    or {}
+                )
+                if arm.get("target") and cleanup.get("passed") is not True:
+                    break
         finally:
             if fixture.oracle_path.is_file():
                 shutil.copy2(
@@ -1825,6 +2003,7 @@ def run_history_depth_ab_e2e(
             "fixture_config_sha256": fixture_config_sha256,
             "fixture_source_sha256": fixture_source_sha256,
             "output_path_sha256": _sha256_text(str(output_file.resolve())),
+            "initial_document_sha256": _sha256_text(initial_document),
         }
         controls = _history_ab_controls(
             fresh,
@@ -1835,14 +2014,13 @@ def run_history_depth_ab_e2e(
         controls_pass = all(controls.values())
         fresh_pass = (fresh.get("target_outcome") or {}).get("full_pass") is True
         history_pass = (history.get("target_outcome") or {}).get("full_pass") is True
-        if fresh_pass and history_pass:
-            comparison = "both_passed_no_negative_history_signal_in_this_pair"
-        elif fresh_pass and not history_pass:
-            comparison = "history_arm_regressed_in_this_pair"
-        elif not fresh_pass and history_pass:
-            comparison = "fresh_arm_failed_history_arm_passed_order_or_sampling_signal"
-        else:
-            comparison = "both_failed_or_pair_incomplete"
+        cleanup_interference = _history_ab_cleanup_interference(arms)
+        comparison = _history_ab_comparison(
+            fresh_pass=fresh_pass,
+            history_pass=history_pass,
+            cleanup_interference=cleanup_interference,
+            controls_pass=controls_pass,
+        )
         report = {
             "kind": "visible_electron_frontend_history_depth_ab",
             "entrypoint": "electron_client_windows_uia",
@@ -1867,9 +2045,14 @@ def run_history_depth_ab_e2e(
             },
             "task_sha256": _sha256_text(task),
             "output_path_sha256": _sha256_text(str(output_file.resolve())),
+            "document_setup": {
+                "mode": "preopened_existing_file",
+                "initial_document_sha256": _sha256_text(initial_document),
+            },
             "controls": controls,
             "controls_pass": controls_pass,
             "arms": arms,
+            "notepad_cleanup_interference": cleanup_interference,
             "comparison": comparison,
             "connector_argument_chain": {
                 "raw_model_arguments_private_probe": True,
@@ -1878,7 +2061,7 @@ def run_history_depth_ab_e2e(
                 "runtime_telemetry_changed": False,
             },
             "limitations": [
-                "one randomized-order pair is a pilot, not a causal or statistical result",
+                "one pair is a pilot, not a causal or statistical result",
                 "provider cache, desktop warm-up, and repeated-task order effects require counterbalanced pairs",
                 "actual target history comes from the test-only provider-message projection",
                 "history content can prime behavior as well as increase depth",

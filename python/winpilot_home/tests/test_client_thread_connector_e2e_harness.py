@@ -49,6 +49,22 @@ def test_fixture_is_one_explicit_stdio_server_and_keeps_token_out_of_goal(tmp_pa
     )
 
 
+def test_preopened_notepad_task_keeps_target_and_file_path_out_of_goal(tmp_path):
+    harness = _load_harness()
+    fixture = harness.build_fixture_environment(
+        tmp_path,
+        token="cne2e_private_target",
+    )
+
+    task = harness.connector_to_current_notepad_task(fixture)
+
+    assert fixture.server_name in task
+    assert "当前记事本文档" in task
+    assert fixture.token not in task
+    assert str(tmp_path.resolve()) not in task
+    assert all(term not in task for term in ("Ctrl", "全选", "另存为"))
+
+
 def test_real_stdio_fixture_advertises_and_executes_one_read_only_tool(
     monkeypatch,
     tmp_path,
@@ -550,6 +566,7 @@ def test_history_ab_controls_use_observed_fingerprints_and_actual_history():
         "fixture_config_sha256": "b" * 64,
         "fixture_source_sha256": "c" * 64,
         "output_path_sha256": "d" * 64,
+        "initial_document_sha256": "e" * 64,
     }
 
     def arm(*, thread_id, client_pid, turn_count, history_count, text_only):
@@ -559,9 +576,22 @@ def test_history_ab_controls_use_observed_fingerprints_and_actual_history():
             "runtime_identity": {"model": "same"},
             "control_fingerprints": dict(expected),
             "history_text_only_pass": text_only,
+            "test_cleanup_pass": True,
+            "runtime_idle_after_target": {"passed": True},
+            "process_cleanup": {"passed": True},
+            "failure": "",
             "target": {
                 "task_sha256": expected["task_sha256"],
                 "turn_count": turn_count,
+                "external": {
+                    "document_setup": {
+                        "mode": "preopened_existing_file",
+                        "initial_sha256": expected["initial_document_sha256"],
+                        "initial_differs_from_target": True,
+                        "precondition_passed": True,
+                        "title_matches_document": True,
+                    }
+                },
                 "history_projection": {
                     "passed": True,
                     "history_message_count": history_count,
@@ -600,6 +630,56 @@ def test_history_ab_controls_use_observed_fingerprints_and_actual_history():
         history_turns=20,
     )
     assert changed["same_fixture_config"] is False
+
+    history["control_fingerprints"]["fixture_config_sha256"] = expected[
+        "fixture_config_sha256"
+    ]
+    history["target"]["external"]["document_setup"]["initial_sha256"] = "z" * 64
+    changed_initial = harness._history_ab_controls(
+        fresh,
+        history,
+        expected=expected,
+        history_turns=20,
+    )
+    assert changed_initial["same_observed_preopened_document"] is False
+
+    history["process_cleanup"]["passed"] = False
+    changed_cleanup = harness._history_ab_controls(
+        fresh,
+        history,
+        expected=expected,
+        history_turns=20,
+    )
+    assert changed_cleanup["both_arm_postconditions_passed"] is False
+
+
+def test_history_ab_cleanup_interference_has_priority_over_arm_outcomes():
+    harness = _load_harness()
+    fresh = {
+        "target": {"external": {"notepad_cleanup": {"passed": True}}}
+    }
+    history = {
+        "target": {"external": {"notepad_cleanup": {"passed": False}}}
+    }
+
+    interference = harness._history_ab_cleanup_interference([fresh, history])
+    comparison = harness._history_ab_comparison(
+        fresh_pass=True,
+        history_pass=False,
+        cleanup_interference=interference,
+        controls_pass=False,
+    )
+
+    assert interference is True
+    assert comparison == "pair_invalid_test_interference"
+
+    incomplete = harness._history_ab_comparison(
+        fresh_pass=True,
+        history_pass=False,
+        cleanup_interference=False,
+        controls_pass=False,
+    )
+    assert incomplete == "pair_incomplete_before_paired_target"
 
 
 def test_target_outcome_requires_external_gui_connector_terminal_and_usage():
