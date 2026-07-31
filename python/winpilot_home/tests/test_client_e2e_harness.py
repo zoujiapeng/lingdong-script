@@ -46,6 +46,52 @@ def test_harness_has_no_execution_policy_selector_argument():
     assert "EXECUTION_CONSTRAINT_SELECTOR" not in source
 
 
+def test_control_value_uses_complete_text_when_value_pattern_is_truncated():
+    harness = _load_harness()
+    full = "one long goal that continues beyond the value pattern"
+    prefix = full[:13]
+
+    class Range:
+        def GetText(self, length):
+            assert length == -1
+            return full + "\r\n"
+
+    class Control:
+        ControlTypeName = "EditControl"
+
+        def GetPattern(self, pattern_id):
+            if pattern_id == harness.auto.PatternId.ValuePattern:
+                return SimpleNamespace(Value=prefix)
+            if pattern_id == harness.auto.PatternId.TextPattern:
+                return SimpleNamespace(DocumentRange=Range())
+            return None
+
+    assert harness._control_value(Control()) == full
+
+
+def test_document_text_can_verify_a_long_goal_when_edit_value_is_truncated(
+    monkeypatch,
+):
+    harness = _load_harness()
+    goal = "one complete long goal"
+
+    class Range:
+        def GetText(self, length):
+            assert length == -1
+            return f"before {goal} after"
+
+    document = SimpleNamespace(
+        GetPattern=lambda pattern_id: SimpleNamespace(DocumentRange=Range())
+    )
+    monkeypatch.setattr(
+        harness,
+        "_visible_descendants",
+        lambda window, control_type: [document],
+    )
+
+    assert harness._document_contains_text(object(), goal) is True
+
+
 def test_visible_client_is_verified_foreground_before_goal_submission():
     source = (
         Path(__file__).resolve().parents[3]
@@ -113,7 +159,7 @@ def test_partial_name_lookup_short_circuits_the_goal_editor(
         assert includeTop is False
         for control in (
             Control("filter"),
-            Control("描述希望代理在这台电脑上完成的目标……"),
+            Control(harness.GOAL_INPUT),
             Control("late"),
         ):
             visited.append(control.Name)
@@ -124,14 +170,50 @@ def test_partial_name_lookup_short_circuits_the_goal_editor(
     match = harness._first_visible_descendant(
         object(),
         "Edit",
-        name_contains="描述希望代理",
+        name=harness.GOAL_INPUT,
     )
 
-    assert match.Name.startswith("描述希望代理")
+    assert match.Name == harness.GOAL_INPUT
     assert visited == [
         "filter",
-        "描述希望代理在这台电脑上完成的目标……",
+        harness.GOAL_INPUT,
     ]
+
+
+def test_goal_entry_uses_native_keyboard_input_without_value_pattern(monkeypatch):
+    harness = _load_harness()
+    calls = []
+
+    class Control:
+        def Click(self):
+            calls.append(("click",))
+
+    monkeypatch.setattr(
+        harness.auto,
+        "SendKeys",
+        lambda text, **kwargs: calls.append(("keys", text, kwargs)),
+    )
+    monkeypatch.setattr(
+        harness.auto,
+        "SendUnicodeChar",
+        lambda char, *, charMode: calls.append(("unicode", ord(char), charMode)) or 1,
+    )
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    evidence = harness._type_control_text(Control(), "A🙂")
+
+    assert calls[:2] == [
+        ("click",),
+        ("keys", "{Ctrl}a{Delete}", {"interval": 0.01, "waitTime": 0.1}),
+    ]
+    assert [item[1] for item in calls[2:]] == [ord("A"), 0xD83D, 0xDE42]
+    assert evidence == {
+        "control_discovery": "windows_uia",
+        "goal_entry": "windows_sendinput_unicode",
+        "requested_codepoints": 2,
+        "submitted_utf16_units": 3,
+        "successful_unicode_calls": 3,
+    }
 
 
 def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
@@ -160,7 +242,8 @@ def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
     driver.navigate = lambda title: navigated.append(title)
     driver.capture_window = lambda name: str(tmp_path / name)
 
-    def button(title, *, prefix=False):
+    def button(title, *, prefix=False, timeout=0.0):
+        del timeout
         lookups.append((title, prefix))
         if title == "会话 ":
             return session
@@ -175,7 +258,13 @@ def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
 
     assert result["before"] == 27
     assert result["after"] == 0
-    assert navigated == [harness.NAV_ASSETS, harness.NAV_AGENT]
+    assert navigated == [
+        harness.NAV_AGENT,
+        harness.OPEN_RESOURCES,
+        harness.ASSETS_TAB,
+        harness.CLOSE_RESOURCES,
+        harness.NEW_CONVERSATION,
+    ]
     assert lookups == [
         ("会话 ", True),
         ("清空会话记忆", False),
@@ -421,6 +510,114 @@ def test_wait_for_result_accepts_vnext_job_before_current_run_projection():
     assert result["status"] == "failed"
 
 
+def test_wait_for_result_does_not_treat_followup_send_as_running_task_terminal(
+    monkeypatch,
+):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    statuses = [
+        {
+            "running": False,
+            "current_run": {
+                "run_id": "arp-new",
+                "goal": "goal",
+                "status": "running",
+            },
+            "runtime_jobs": [
+                {
+                    "status": "running",
+                    "metadata": {"run_id": "arp-new"},
+                }
+            ],
+        },
+        {
+            "running": False,
+            "current_run": {
+                "run_id": "arp-new",
+                "goal": "goal",
+                "status": "done",
+            },
+        },
+    ]
+    calls = []
+
+    def runtime_status():
+        calls.append(True)
+        return statuses.pop(0) if len(statuses) > 1 else statuses[0]
+
+    driver.runtime_status = runtime_status
+    driver.buttons = lambda: [SimpleNamespace(Name=harness.RUN_TASK)]
+    driver.texts = lambda: []
+    driver._topbar_status = lambda _task: ""
+    clock = [0.0]
+
+    def now():
+        clock[0] += 0.1
+        return clock[0]
+
+    monkeypatch.setattr(harness.time, "time", now)
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    result = driver.wait_for_result(
+        "goal",
+        5,
+        previous_run_id="arp-old",
+        accepted_run_id="arp-new",
+    )
+
+    assert len(calls) == 2
+    assert result["outcome"] == "terminal"
+    assert result["status"] == "done"
+
+
+def test_wait_for_result_accepts_direct_reply_as_success(monkeypatch):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver.runtime_status = lambda: {
+        "running": False,
+        "current_run": {
+            "run_id": "arp-reply",
+            "goal": "say hello",
+            "status": "reply",
+        },
+    }
+    driver.buttons = lambda: []
+    driver.texts = lambda: []
+    driver._topbar_status = lambda _task: ""
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    result = driver.wait_for_result(
+        "say hello",
+        5,
+        accepted_run_id="arp-reply",
+    )
+
+    assert result["outcome"] == "terminal"
+    assert result["status"] == "done"
+    assert result["status_label"] == "reply"
+
+
+def test_window_lifecycle_state_is_captured_without_restoring(monkeypatch):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver.identity = SimpleNamespace(hwnd=711)
+    monkeypatch.setattr(harness.win32gui, "IsWindowVisible", lambda hwnd: hwnd == 711)
+    monkeypatch.setattr(harness.win32gui, "IsIconic", lambda hwnd: hwnd == 711)
+    monkeypatch.setattr(harness.win32gui, "GetForegroundWindow", lambda: 912)
+    monkeypatch.setattr(
+        harness.win32gui,
+        "GetWindowRect",
+        lambda hwnd: (10, 20, 810, 620) if hwnd == 711 else (),
+    )
+
+    assert driver.window_lifecycle_state() == {
+        "visible": True,
+        "minimized": True,
+        "foreground": False,
+        "rect": [10, 20, 810, 620],
+    }
+
+
 def test_optional_handoff_without_admitted_run_id_does_not_bind_literal_none():
     harness = _load_harness()
 
@@ -460,6 +657,24 @@ def test_cleanup_scope_matches_only_the_active_submitted_run():
         "target task",
         "arp-old",
     ) is False
+    assert harness._active_run_matches_submission(
+        {
+            "running": False,
+            "current_run": {
+                "run_id": "arp-new",
+                "goal": "target task",
+                "status": "running",
+            },
+            "runtime_jobs": [
+                {
+                    "status": "running",
+                    "metadata": {"run_id": "arp-new"},
+                }
+            ],
+        },
+        "target task",
+        "arp-old",
+    ) is True
     assert harness._active_run_matches_submission(
         {
             "running": True,

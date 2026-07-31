@@ -20,7 +20,7 @@ let _lifecycleGeneration = 0;
 const _stderrTail: string[] = [];
 
 const HOST = '127.0.0.1';
-const RUNTIME_CONTRACT_VERSION = 2;
+const RUNTIME_CONTRACT_VERSION = 3;
 // Chromium rejects a fixed list of historically sensitive ports before a
 // request reaches CORS or the server. The highest currently blocked port is
 // 10080, so renderer-facing managed services deliberately use a high port.

@@ -5,10 +5,30 @@ export type RuntimeVersion = 'legacy' | 'vnext';
 export interface GoalAdmissionAudit {
   format: 'goal-admission/1';
   goal: string;
-  route: 'live_gui';
+  route: 'live_agent';
   runtime_version: 'vnext';
   reason: 'single_semantic_agent';
   no_legacy_fallback: true;
+}
+
+export interface DesktopLeaseSnapshot {
+  format: 'desktop-lease/1';
+  run_id: string;
+  thread_id: string;
+  turn_id: string;
+  lease_id: string;
+  status: 'idle' | 'waiting' | 'validating' | 'delivered' | 'closed';
+  error: string;
+}
+
+export interface GoalRunStart {
+  ok: boolean;
+  run_id: string;
+  thread_id: string;
+  turn_id: string;
+  runtime_version: 'vnext';
+  admission: GoalAdmissionAudit;
+  run: ArpExecutionSnapshot;
 }
 
 export type ArpNodeKind =
@@ -191,6 +211,9 @@ export interface ArpExecutionSnapshot {
   runtime_budget?: VnextLiveCanaryBudget | Record<string, unknown>;
   no_legacy_fallback?: boolean;
   goal_admission?: GoalAdmissionAudit | Record<string, unknown>;
+  thread_id?: string;
+  turn_id?: string;
+  desktop_lease?: DesktopLeaseSnapshot | Record<string, unknown>;
   status: string;
   manual_paused?: boolean;
   current_node_id?: string | null;

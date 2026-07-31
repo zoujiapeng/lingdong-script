@@ -8,6 +8,7 @@ GUI controller.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +16,20 @@ from typing import Any
 
 _THINKING_DISABLED_BY_DEFAULT = {"mimo", "reasonix"}
 _VISION_MODEL_MARKERS = ("omni", "-vl", "vision", "gpt-4o")
+_NATIVE_PROTOCOL_ALIASES = {
+    "openai_responses": "openai_responses",
+    "responses": "openai_responses",
+    "anthropic": "anthropic",
+    "claude": "anthropic",
+    "gemini": "gemini",
+    "google": "gemini",
+}
+_CHAT_PROTOCOL_ALIASES = {
+    "chat",
+    "chat_completions",
+    "openai_chat",
+    "openai_compatible",
+}
 
 
 def _lower(value: Any) -> str:
@@ -85,19 +100,61 @@ def infer_provider(api: dict[str, Any] | Any) -> str:
         return "mimo"
     if "deepseek" in haystack:
         return "deepseek"
+    if "anthropic" in haystack or "claude" in model:
+        return "anthropic"
+    if "generativelanguage.googleapis.com" in base_url or "gemini" in model:
+        return "gemini"
     if "openai" in haystack:
         return "openai"
     return "openai_compatible"
 
 
-def model_supports_vision(model: str, provider: str = "") -> bool:
+def native_provider_protocol(api: dict[str, Any] | Any) -> str | None:
+    """Return an explicitly selected native wire protocol, if any.
+
+    Model names and base URLs are deliberately not used here: aggregators can
+    expose Claude or Gemini models through an OpenAI-compatible endpoint.  A
+    native protocol is selected only by ``api.protocol``/``api.api_style``;
+    ``api.provider`` remains metadata because aggregators may use a provider
+    family while still exposing an OpenAI-compatible wire contract.
+    """
+    api = _api_dict(api)
+    raw_protocol = api.get("protocol") or api.get("api_style")
+    if raw_protocol is not None:
+        key = _lower(raw_protocol).replace("-", "_")
+        if key in _CHAT_PROTOCOL_ALIASES:
+            return None
+        native = _NATIVE_PROTOCOL_ALIASES.get(key)
+        if native is None:
+            raise ValueError(f"unsupported model protocol {raw_protocol!r}")
+        return native
+
+    return None
+
+
+def model_supports_vision(
+    model: str,
+    provider: str = "",
+    explicit: bool | None = None,
+) -> bool:
     """Return true only for model names that explicitly advertise vision."""
+    if explicit is not None:
+        return explicit
     name = _lower(model)
+    family = _lower(provider)
     # MiMo v2.5's public OpenAI-compatible endpoint accepts image_url content
     # even though the model name does not contain an omni/vision marker. This
     # was verified against the live endpoint; ASR/TTS variants and v2.5-pro
     # are intentionally not inferred from that result.
     if name == "mimo-v2.5":
+        return True
+    if family in {"anthropic", "claude"} and re.match(
+        r"^claude-(?:(?:opus|sonnet|haiku)-)?[345](?:[.-]|$)", name
+    ):
+        return True
+    if family in {"gemini", "google"} and re.match(
+        r"^gemini-(?:1\.5|[2-9](?:\.\d+)?)(?:-|$)", name
+    ):
         return True
     return any(marker in name for marker in _VISION_MODEL_MARKERS)
 
@@ -108,7 +165,6 @@ class ModelProfile:
     base_url: str
     model: str
     supports_vision: bool
-    cache_strategy: str = "stable_prefix"
 
     @property
     def disables_thinking_by_default(self) -> bool:
@@ -119,11 +175,14 @@ def model_profile_from_config(api: dict[str, Any] | Any) -> ModelProfile:
     api = _api_dict(api)
     provider = infer_provider(api)
     model = str(api.get("model") or "")
+    explicit_vision = api.get("supports_vision")
+    if not isinstance(explicit_vision, bool):
+        explicit_vision = None
     return ModelProfile(
         provider=provider,
         base_url=str(api.get("base_url") or ""),
         model=model,
-        supports_vision=model_supports_vision(model, provider),
+        supports_vision=model_supports_vision(model, provider, explicit_vision),
     )
 
 
@@ -254,7 +313,12 @@ def normalize_usage(resp_or_usage: Any) -> NormalizedUsage:
         nested_input_cache,
         nested_prompt_cache,
     ) or 0
-    cache_creation = _first_int(_get(usage, "cache_creation_input_tokens", None)) or 0
+    cache_creation = _first_int(
+        _get(usage, "cache_creation_input_tokens", None),
+        _get(usage, "cache_write_tokens", None),
+        _nested(usage, "input_tokens_details", "cache_write_tokens"),
+        _nested(usage, "prompt_tokens_details", "cache_write_tokens"),
+    ) or 0
 
     if prompt_raw is not None:
         prompt = _to_int(prompt_raw)

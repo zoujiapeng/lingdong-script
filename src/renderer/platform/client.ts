@@ -6,6 +6,7 @@ import type {
   CurrentRunResponse,
   ClientExecutionContext,
   GraphValidation,
+  GoalRunStart,
   PlatformOverview,
   RunProjection,
   RuntimeEvent,
@@ -19,7 +20,7 @@ import type { AutomationIR } from '../utils/automationIR';
 const FALLBACK_URL = 'http://127.0.0.1:8765/';
 const ELECTRON_SERVER_READY_TIMEOUT_MS = 35_000;
 const ELECTRON_SERVER_POLL_MS = 200;
-export const EXPECTED_RUNTIME_CONTRACT_VERSION = 2;
+export const EXPECTED_RUNTIME_CONTRACT_VERSION = 3;
 
 export class TaskClarificationRequired extends Error {
   readonly questions: string[];
@@ -444,20 +445,43 @@ export class ControlPlaneClient {
 
   async startGoalRun(
     goal: string,
-    executionContext: ClientExecutionContext,
-  ): Promise<ArpExecutionSnapshot> {
-    const response = await this.request<{
-      ok: boolean;
-      run_id: string;
-      run: ArpExecutionSnapshot;
-    }>('api/v2/goals/runs', {
+    threadId = '',
+  ): Promise<GoalRunStart> {
+    return this.request<GoalRunStart>('api/v2/goals/runs', {
       method: 'POST',
       body: JSON.stringify({
         goal,
+        thread_id: threadId,
+      }),
+    });
+  }
+
+  bindDesktopLease(
+    runId: string,
+    leaseId: string,
+    executionContext: ClientExecutionContext,
+  ): Promise<Record<string, unknown>> {
+    return this.request(`api/v2/goals/runs/${encodeURIComponent(runId)}/desktop-lease`, {
+      method: 'POST',
+      body: JSON.stringify({
+        lease_id: leaseId,
         execution_context: executionContext,
       }),
     });
-    return response.run;
+  }
+
+  failDesktopLease(
+    runId: string,
+    leaseId: string,
+    reason: string,
+  ): Promise<Record<string, unknown>> {
+    return this.request(`api/v2/goals/runs/${encodeURIComponent(runId)}/desktop-lease/fail`, {
+      method: 'POST',
+      body: JSON.stringify({
+        lease_id: leaseId,
+        reason,
+      }),
+    });
   }
 
   async compileTask(task: string, maxSteps = 40, coldStart = false, requireGui = true): Promise<{ contract: TaskContract; graph: ArpGraph }> {

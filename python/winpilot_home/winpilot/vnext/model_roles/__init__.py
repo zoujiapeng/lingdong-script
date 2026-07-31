@@ -11,6 +11,7 @@ from .visual_actor import (
     VISUAL_ACTOR_MODEL_ROLE,
     VISUAL_ACTOR_SYSTEM_CONTRACT,
     LiveVisualActor,
+    VisualActorTurnAdmission,
 )
 __all__ = [
     "VISUAL_ACTOR_MODEL_ROLE",
@@ -21,4 +22,5 @@ __all__ = [
     "MAX_LIVE_MODEL_TOTAL_TIMEOUT_S",
     "LiveModelRoleError",
     "LiveVisualActor",
+    "VisualActorTurnAdmission",
 ]

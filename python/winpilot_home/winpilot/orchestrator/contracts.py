@@ -47,6 +47,7 @@ class ArpRunStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
     PAUSED = "paused"
+    REPLY = "reply"
     DONE = "done"
     FAILED = "failed"
     CANCELED = "canceled"

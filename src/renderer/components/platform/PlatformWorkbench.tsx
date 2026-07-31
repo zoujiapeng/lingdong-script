@@ -921,28 +921,43 @@ const AGENT_THREAD_LIMIT = 40;
 
 interface AgentThreadState {
   persisted: boolean;
+  threadId: string;
   runIds: string[];
 }
 
 function readAgentThreadState(): AgentThreadState {
   try {
     const raw = localStorage.getItem(AGENT_THREAD_STORAGE_KEY);
-    if (raw === null) return { persisted: false, runIds: [] };
+    if (raw === null) {
+      return { persisted: false, threadId: '', runIds: [] };
+    }
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return { persisted: true, runIds: [] };
-    const runIds = parsed
+    const values = Array.isArray(parsed) ? parsed : parsed?.run_ids;
+    if (!Array.isArray(values)) {
+      return { persisted: true, threadId: '', runIds: [] };
+    }
+    const runIds = values
       .map((value) => String(value || '').trim())
       .filter(Boolean)
       .slice(-AGENT_THREAD_LIMIT);
-    return { persisted: true, runIds: [...new Set(runIds)] };
+    return {
+      persisted: true,
+      threadId: Array.isArray(parsed)
+        ? ''
+        : String(parsed?.thread_id || '').trim(),
+      runIds: [...new Set(runIds)],
+    };
   } catch {
-    return { persisted: false, runIds: [] };
+    return { persisted: false, threadId: '', runIds: [] };
   }
 }
 
-function persistAgentThread(runIds: string[]) {
+function persistAgentThread(threadId: string, runIds: string[]) {
   try {
-    localStorage.setItem(AGENT_THREAD_STORAGE_KEY, JSON.stringify(runIds));
+    localStorage.setItem(AGENT_THREAD_STORAGE_KEY, JSON.stringify({
+      thread_id: threadId,
+      run_ids: runIds,
+    }));
   } catch {
     // A transient storage failure must not prevent a real Agent run.
   }
@@ -1159,9 +1174,17 @@ export function AgentCockpit({
     const current = plane.currentRun;
     if (threadState.persisted || !current?.run_id) return;
     const next = [current.run_id];
-    persistAgentThread(next);
-    setThreadState({ persisted: true, runIds: next });
-  }, [plane.currentRun?.run_id, threadState.persisted]);
+    persistAgentThread(threadState.threadId, next);
+    setThreadState({
+      persisted: true,
+      threadId: threadState.threadId,
+      runIds: next,
+    });
+  }, [
+    plane.currentRun?.run_id,
+    threadState.persisted,
+    threadState.threadId,
+  ]);
 
   useEffect(() => {
     if (!plane.baseUrl || !threadState.runIds.length) return;
@@ -1235,7 +1258,10 @@ export function AgentCockpit({
     followConversationTail.current = true;
     try {
       localStorage.setItem('arp-last-goal', goal.trim());
-      const started = await plane.startGoal(goal.trim());
+      const started = await plane.startGoal(
+        goal.trim(),
+        threadState.threadId,
+      );
       if (started?.run_id) {
         setThreadState((previous) => {
           const existing = previous.runIds.length
@@ -1245,8 +1271,12 @@ export function AgentCockpit({
             ...existing.filter((runId) => runId !== started.run_id),
             started.run_id,
           ].slice(-AGENT_THREAD_LIMIT);
-          persistAgentThread(next);
-          return { persisted: true, runIds: next };
+          persistAgentThread(started.thread_id, next);
+          return {
+            persisted: true,
+            threadId: started.thread_id,
+            runIds: next,
+          };
         });
       }
       setGoal('');
@@ -1260,8 +1290,8 @@ export function AgentCockpit({
   };
 
   const startNewConversation = () => {
-    persistAgentThread([]);
-    setThreadState({ persisted: true, runIds: [] });
+    persistAgentThread('', []);
+    setThreadState({ persisted: true, threadId: '', runIds: [] });
     setRunDetails({});
     setGoal('');
     setActionError('');

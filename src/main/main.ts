@@ -39,10 +39,15 @@ let _floatingWindowNormalBounds: Rectangle | null = null;
 type TaskbarNotificationKind = 'success' | 'error' | 'info';
 
 function releaseDesktopHandoff(window = mainWindow): void {
+  const shouldRestore = _desktopHandoffPending;
   _desktopHandoffPending = false;
   _desktopHandoffRunId = '';
   if (!window || window.isDestroyed()) return;
   window.setSkipTaskbar(false);
+  if (!shouldRestore) return;
+  if (window.isMinimized()) window.restore();
+  if (!window.isVisible()) window.show();
+  window.focus();
 }
 
 function notifyTaskbarAttention(

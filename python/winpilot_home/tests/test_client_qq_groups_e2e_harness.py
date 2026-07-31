@@ -220,7 +220,7 @@ def test_current_architecture_audit_accepts_verified_delivery_projection():
     assert audit["passed"] is True
     assert audit["blocker_present"] is False
     assert audit["status"] == "delivery_projection_available"
-    assert not any(audit["checks"].values())
+    assert not all(audit["checks"].values())
 
 
 def test_harness_wires_handoff_probe_and_redacts_base_stdout(

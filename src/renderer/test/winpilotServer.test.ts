@@ -18,7 +18,7 @@ import {
 function compatibleRuntime() {
   return {
     runtime: {
-      contract_version: 2,
+      contract_version: 3,
       source: { loaded_stamp: 'same', current_stamp: 'same', drifted: false },
       git: { loaded_commit: 'abc', current_commit: 'abc' },
     },
@@ -68,7 +68,7 @@ describe('WinPilot 托管服务兼容性提示', () => {
   });
 
   it('使用中文说明运行时身份不完整', () => {
-    expect(runtimeCompatibilityProblem({ runtime: { contract_version: 2 } }))
+    expect(runtimeCompatibilityProblem({ runtime: { contract_version: 3 } }))
       .toBe('托管的 Python 运行时身份不完整。');
   });
 

@@ -18,27 +18,42 @@
 PlatformWorkbench
   -> useControlPlane.startGoal
   -> POST /api/v2/goals/runs
-  -> server-owned Goal Admission
-  -> server-built exact vNext graph
-  -> vNext ArpExecution
-  -> MissionRuntime
-  -> CapabilityBroker
-  -> LiveVisualActor / GUI transaction
+  -> server-owned Thread / Turn + Goal Admission
+  -> LiveVisualActor.begin_turn
+       -> direct reply -> reply terminal
+       -> generic connector search/call -> same Actor continues
+       -> observe_desktop -> run-bound desktop lease
+          -> Electron yield + exact target bind
+          -> same LiveVisualActor -> MissionRuntime
+          -> CapabilityBroker -> GUI transaction
 ```
 
-`POST /api/v2/goals/runs` 是主 Agent 用户入口。请求只携带 `goal` 和客户端采集的 `execution_context`；不接受客户端选择的执行媒介、`graph`、`runtime_version` 或 `task_id`。服务端当前唯一选择 vNext，构造规范图并生成、绑定图身份；vNext 不可用时请求失败，不静默回退 Legacy。
+`POST /api/v2/goals/runs` 是主 Agent 用户入口。请求只携带 `goal` 和可选
+`thread_id`；不携带预绑定桌面、不接受客户端选择的执行媒介、`graph`、
+`runtime_version` 或 `task_id`。服务端当前唯一选择 vNext，构造规范图并生成、绑定
+图身份；vNext 不可用时请求失败，不静默回退 Legacy。只有同一 Actor 调用
+`observe_desktop` 后，前端才通过匹配 `run_id + lease_id` 的独立请求交付当时的桌面
+上下文。
 
-`/api/chat`、MCP、CLI、scheduler 和 integration runner 可以复用内部能力，但不能形成行为不同的第二套 GUI 产品入口。直接 POST API 也不能代替 Electron 客户端 E2E。`/api/v2/task-contracts/compile` 与可由客户端提交图和 runtime 的 `/api/v2/arp/runs` 暂留给 Studio、自动化编辑和兼容调用，不属于主 Agent 的意图或 runtime 选择链。
+显式 MCP 只作为同一 `LiveVisualActor` 的普通工具。`/api/chat`、CLI、scheduler、
+integration runner 或直接 MCP 调用可以复用内部能力，但不能形成行为不同的第二套 GUI
+产品入口，也不能代替 Electron 客户端 E2E。`/api/v2/task-contracts/compile` 与可由
+客户端提交图和 runtime 的 `/api/v2/arp/runs` 暂留给 Studio、自动化编辑和兼容调用，
+不属于主 Agent 的意图或 runtime 选择链。
 
 ### 2. 一个完整目标和一条执行主线
 
-Goal Admission 把用户原始目标直接绑定到一个 full-goal vNext mission。模型可在运行中
-调整、替换或放弃工作计划；最新画面与动作结果优先于旧计划的一致性。任务不能在
+Goal Admission 把用户原始目标直接绑定到一个 full-goal vNext turn。相同的
+`LiveVisualActor` 先在没有截图、没有系统提示的原生文本回合中直接回答、调用显式
+配置的两个通用 connector 工具，或调用 `observe_desktop`。只有后者才进入
+full-goal GUI mission；connector 结果也只回到同一个 Actor 继续决定。模型可在运行中
+调整、替换或放弃工作计划，最新画面与动作结果优先于旧计划的一致性。任务不能在
 看见界面前被 compiler 拆成一串应用专属微步骤，也不能因任务名称切换到另一套
 Agent、工具或提示词。Task Contract 只属于 Studio/兼容链。
 
-原生客户端当前使用一个小而固定的模型操作面：点击、双击、输入、快捷键、滚动、
-拖拽/折线路径/跨帧按住，以及 claim/blocked。复合目标由模型在“新帧 → 一个决定
+原生客户端当前使用一个小而固定的本地 GUI 操作面：点击、双击、输入、快捷键、滚动、
+拖拽/折线路径/跨帧按住，以及 claim/blocked；显式配置时，两个 generic connector
+工具与它同轮可见。复合目标由模型在“新帧 → 一个决定
 → 一笔动作 → 新证据”的循环中完成，不靠公开宏工具承载写死流程。运行时可以拒绝
 过期坐标、失去所有权的窗口或非法输入事务，但不能因为模型改变了语义判断而把它
 拉回旧策略。
@@ -90,15 +105,43 @@ pre-frame
 运行时一致性；测试中的真实业务成功仍由独立应用/browser oracle 判断。历史帧只能
 证明先前发生过什么，不能替代用户要求持续保持的当前状态。
 
+纯文本回答使用独立 `reply` 终态：它返回模型原始文本，不能构造 frame、target、
+`physical_attempt` 或 mission evidence。`reply` 表示这一轮成功完成，但不会证明
+任何外部应用状态；需要桌面操作的 `done` 仍必须由独立 oracle 验证用户结果。
+
 ## 控制平面
 
 ### 原始目标与执行媒介
 
 主 Agent 不再有前端“执行约束”选择器，也没有对应的请求字段、Goal Admission 状态或 Broker `InteractionMode`。用户口头强调“必须使用 GUI”时，这句话只存在于原始 `goal`，由同一个语义 Agent 理解；系统不再要求用户把同一意图重复编码到系统开关，也不增加关键词路由器或第二个 Task Profiler。
 
-当前 live vNext 工具目录仍只有 GUI/control 工具，因此当前产品事实上只能走 GUI。它尚未实现“GUI、命令行、provider 同时可见后由模型自主选择”，不能把删除选择器误报成混合执行已经完成。将来接入 shell 或 provider 时，必须把它们作为同一 Agent 的普通工具放入同一轮选择；`execution_medium` 只描述工具实际如何执行，不再承载用户策略。Runtime 只保留工具 schema、当前可信画面、窗口/指针所有权和不可逆外部动作边界等机械约束，不解释任务类型。
+当前 live vNext 在存在显式 MCP 配置时，把 `search_connector_tools` 和
+`call_connector_tool` 与首轮 `observe_desktop` 同时交给同一个 Actor；进入视觉线后，
+它们也与 GUI/control 工具同轮可见。因此当前已经能在直接聊天、只读 connector 和
+GUI 间自主组合，但尚无 shell，也不准入外部 mutation。后续能力仍必须作为同一
+Agent 的普通工具加入同一轮选择；`execution_medium` 只描述实际执行，不承载用户
+策略。Runtime 只保留 schema、可信画面、窗口/指针所有权与不可逆动作边界等机械
+约束，不解释任务类型。
 
-客户端 `execution_context` 只描述本次桌面交接。服务端在生成规范图之后绑定 `task_id`，因此客户端上下文不能借机注入图身份或选择 runtime。真实验收检查“Agent 实际用了什么”和外部结果，不检查前端策略状态。更完整的迁移边界、兼容面和退出门见 [vNext 迁移](vnext-migration.md)。
+桌面交接上下文只存在于一次性 lease bind。服务端在生成规范图之后绑定 `task_id`，
+因此客户端上下文不能借机注入图身份或选择 runtime。真实验收检查“Agent 实际用了
+什么”和外部结果，不检查前端策略状态。更完整的迁移边界、兼容面和退出门见
+[vNext 迁移](vnext-migration.md)。
+
+### Thread、Turn 与桌面租约
+
+前端为一次对话保存不透明 `thread_id`，服务端为每条消息创建一个 Turn，并且同一
+Thread 同时最多有一个活动 Turn。历史只保留最近成功且有用户可见结果的原生
+`user/assistant` 文本交换：最多 12 条消息、16 KiB；失败、取消、空结果和内部证据
+不进入下一轮。新建对话显式丢弃客户端 thread；这不是长期 memory，也没有 summarizer
+或第二个 conversation model。当前 Thread Store 只在服务进程内存中存在，运行时
+重启后旧 `thread_id` 会失效，这是尚未完成的持久化边界。
+
+`DesktopLeaseSlot` 是一次性的机械交接状态机。Actor 请求后状态进入
+`waiting`，Electron 让出前台并提交精确 `run_id + lease_id + target`，服务端验证后
+才进入 `delivered` 并允许首帧与物理动作。拒绝、超时或失败关闭 lease；matching
+terminal 由 Electron 自行恢复窗口，stale run、stale lease 或重复终态不能恢复其他
+运行。发送消息本身不再隐藏窗口。
 
 ### Task Contract（Studio/兼容）
 
@@ -128,7 +171,10 @@ StageRuntime 是旧 Task Contract/TASK_STAGE 链的阶段生命周期 owner：�
 
 | Owner | 唯一职责 | 明确禁止 |
 | --- | --- | --- |
+| `AgentThreadStore` | 保存有界成功 Turn 文本并绑定 run 终态 | 长期记忆、语义总结、执行选择 |
 | `LiveVisualActor` | 理解完整目标和当前 JPEG，选择一笔工具调用 | 物理输入、应用脚本、第二角色委派 |
+| `ConnectorGateway` | 有界发现显式 MCP，并把只读调用结果及 receipt 返回同一 Actor | 服务专属 adapter、任务路由、外部写入授权 |
+| `DesktopLeaseSlot` + Electron handoff | 精确配对桌面让出、target 交付和窗口恢复 | 按任务词预租约、替模型决定是否用 GUI |
 | `MissionRuntime` | 顺序驱动模型、动作、新帧与 obligation | 关键词规划、纠正模型答案 |
 | `FrameAuthority` / workspace | 发布当前 frame、epoch、hwnd、region、图像身份 | 理解画面或选择目标 |
 | `CapabilityBroker` | 投影 schema、当前可写性、窗口/指针所有权 | 根据任务类型预选路线 |
@@ -144,11 +190,12 @@ RunStateMachine 和 FailureRecoveryLayer 中可复用的基础能力，只能逐
 
 ### 原生视觉主路径
 
-当主模型明确支持图像时，普通 GUI 回合直接附加当前权威 JPEG、完整原始目标、
-有界 task state、上一动作事实，以及最多最近一笔 provider 原生
+当同一 Actor 申请桌面后，首个 GUI 回合保留初始有界文本消息及其原生
+`assistant observe_desktop → tool result`，再附加当前权威 JPEG、完整原始目标和
+有界 task state。后续 GUI 回合还保留最多最近一笔 provider 原生
 `user image → assistant tool call → tool result`。模型从画面理解语义并提出一笔
-typed transaction；动作后重新捕获权威帧，下一回合覆盖旧 exchange。这里没有无界
-聊天历史、第二 planner 或独立 Grounder/Verifier。
+typed transaction；动作后重新捕获权威帧，下一回合覆盖旧视觉 exchange。这里没有
+无界聊天历史、第二 planner 或独立 Grounder/Verifier。
 
 当前已复验基线固定 `api.thinking=false`、Visual Actor
 `temperature=0.0`、最大提交图片边 1120，并且每个决策最多一次 provider attempt。
@@ -170,6 +217,24 @@ typed transaction；动作后重新捕获权威帧，下一回合覆盖旧 excha
 - 不把缩放后的 JPEG 像素当物理桌面坐标；
 - 不在一个模型回合连续执行多笔未经新帧验证的空间动作；
 - 看不清目标、规则或结果时使用新权威帧重新判断或 `blocked`，不猜。
+
+### 模型调用协议
+
+默认调用仍是 OpenAI-compatible Chat Completions。配置只通过 `api.protocol` 或
+`api.api_style` 显式选择
+`openai_responses` / `responses`、`anthropic` / `claude` 或 `gemini` / `google`
+时，同一 `LiveVisualActor` 改走对应的 Responses、Messages 或 `generateContent` wire；
+`openai_compatible` / Chat aliases 保持原路径。`api.provider` 只保留元数据语义；wire
+选择不读取 provider、模型名或 `base_url`，
+避免把聚合器上的 Claude/Gemini 模型误送到原生接口。
+
+原生 adapter 只转换现有 canonical messages/tools，不增加 planner 或模型角色。当前
+范围是非流式文本、Base64 data-URL 图片、function schema、tool call/result，以及
+后续工具回合所需的 provider 原生 reasoning/signature sidecar；不支持音频、视频、
+文件或 provider built-in tools。审计发现的 provider 误切 wire 与 Anthropic 丢失
+canonical `strict:true` 已修复，相关 5 个测试文件 `214 passed`。三条原生线路目前仍
+只有确定性 transport/协议测试，属于 provisional adapter；尚无真实 provider
+credential 验收，不能据此声称 API 兼容已经端到端通过。
 
 ### 显式结构化辅助路径
 
@@ -223,9 +288,10 @@ typed transaction；动作后重新捕获权威帧，下一回合覆盖旧 excha
 - wait for stable/change；
 - mouse down / move / mouse up 的跨帧 held-pointer session。
 
-当前 live vNext 模型工具面只投影 click、double click、drag/path/held-pointer、
-scroll、type text、hotkey、claim 和 blocked。上述 hover、timed key、独立 wait 和
-裸 mouse-down/up 仍是兼容/底层能力，不得写成当前模型已经可自主选择。
+当前 live vNext 的本地 GUI/control 投影只有 click、double click、
+drag/path/held-pointer、scroll、type text、hotkey、claim 和 blocked；显式配置的两个
+connector 工具由 Gateway 并列提供，不扩张本地动作面。上述 hover、timed key、独立
+wait 和裸 mouse-down/up 仍是兼容/底层能力，不得写成当前模型已经可自主选择。
 
 Legacy `wait(until_change=true, persistent=true)` 只负责在绑定窗口或 ROI 上观察稳定
 变化；即使未来进入 vNext，变化含义和下一步仍必须由同一模型结合新帧决定。聊天、
@@ -266,9 +332,54 @@ Memory Pack 只能作为提示。当前权威帧、确定性文件/进程证据�
 
 ## MCP 边界
 
-MCP 是显式可选的 capability source。只有能力、授权、输入输出、当前上下文和可验证结果明确匹配时才使用；它不是 GUI 失败后的自动 fallback。没有 MCP 或 MCP 不适合时，原生视觉主线仍可独立运行。
+MCP 是显式可选的 capability source。只有 `.mcp.json`、配置路径或
+`WINPILOT_MCP_CONFIG` 明确登记的 remote HTTP / stdio server 才会出现；没有配置时
+两个 connector 工具不进入模型目录，原生视觉主线仍可独立运行。这里没有应用名
+adapter、关键词 router 或 GUI 失败后的自动 fallback。
 
-选择 MCP 的条件应是能力、授权、输入输出和验证契约匹配，而不是应用名硬编码。MCP 成功也需要进入同一 artifact/evidence/completion 体系。
+`search_connector_tools` 返回有界、标为不可信的 descriptor 和不透明 ref；
+`call_connector_tool` 只接受该 ref 与 JSON object 参数。当前 live Actor 始终不授予
+外部 mutation：只有 `readOnlyHint=true` 且 `destructiveHint` 不为 true 的工具可以
+执行。Gateway 在调用前重新发现并核对 descriptor/fingerprint，MCP client 又在同一
+物理连接的 `call_tool` 前核对一次 annotations 与完整 descriptor；整次发现/调用服从
+单一 deadline/cancel，且不会重试含糊的远端动作。结果有大小上限、hash 与 receipt，
+但仍是不可信数据，模型和外部 oracle 不能把远端 `ok` 当任务完成。
+
+仓库的 `.mcp.example.json` 指向 GitHub 官方 remote MCP，用
+`${env:GITHUB_PAT_TOKEN}` 注入 bearer token，并请求 server-side readonly 与有限
+toolsets。仓库不分发 credential，也没有 GitHub OAuth 登录流程；其他 connector 复用
+同一 generic MCP 合同，不新增服务专属实现。
+
+当前外部证据已经分开证明“transport 可用”和“用户任务完成”不是一回事。GitHub-like
+fixture 的精确 read 与 connector→Notepad 外部结果为 `2/2`；GitHub 官方 remote 也已
+完成真实 discover、`get_file_contents` 以及
+`get_commit(owner=zoujiapeng, repo=lingdong-script, sha=master, detail=none)` 物理调用，
+后者 receipt 为 `succeeded`，并返回独立 `gh api` 核对的
+`fba5d7bb6dcb13c46e93dbc29bc3cef44e560622`。首个中文 Electron run 的
+before-submit 已把目标损坏为大量 `?`，属于测试输入干扰，不能归因模型。随后 ASCII
+run `arp-20260731-220327-1ed4e4` 完整提交目标，官方 remote 有真实会话/POST；五次模型
+响应后，Actor 选择了未批准工具，Runtime 以 `state_rejected` fail closed，回复为空、
+零 GUI 动作。这个干净任务失败的首个分歧是模型工具选择/停止，不是 connector
+transport；Runtime 不应增加 GitHub 专属修正。
+
+显式 MCP 配置现在拥有最高优先级，120 秒目录缓存也按完整 server 配置 fingerprint
+隔离；相关聚焦测试 `21 passed`。这两项不再是未修 P1。
+
+## 缓存与用量
+
+仓库整体并非没有稳定前缀机制：冻结 Legacy `agent/loop.py` 在 32 KiB 前保持
+append-only history 保护 DeepSeek prefix cache，并把 session continuity 放在
+cache-friendly prefix。未生效的 `cache_strategy` 标签已删除；当前唯一活动 vNext 不走
+这个 Legacy owner，只通过仍然相同的请求开头自然形成 provider 可自动命中的前缀，
+不主动发送 OpenAI `prompt_cache_key`、Anthropic `cache_control` 或 Gemini
+`cachedContent`，也不会为了命中缓存恢复无界历史或重复旧截图。
+
+每次模型响应的 provider usage 会归一化为 prompt/completion、cache hit/miss/write
+和 reasoning token，发布 `agent_usage` 并累计到 run 的 `model_usage`。这是成本与 A/B
+观测面，不创建缓存；provider 不返回对应字段时保持为零，不能臆造命中或节省金额。
+可见 Electron 的 20-turn fixture 报告累计 `21626` prompt tokens，其中 provider 返回
+`13248` cache hits、`8378` misses、`0` creation；这证明 telemetry 与上游自动命中真实
+生效，不证明 vNext 拥有主动缓存 owner。
 
 ## Trace、Artifact 与 Replay
 
@@ -289,6 +400,13 @@ MCP 是显式可选的 capability source。只有能力、授权、输入输出�
 5. 原生配置已默认关闭 UIA/OCR，但 `fusion.observe` 等兼容入口仍保留旧 provider 顺序；必须继续防止非默认调用面把结构化信号升级成视觉语义或失败后的自动 fallback cascade。
 6. `/api/chat`、legacy IPC、FlowScript 和旧 feature 系统仍增加维护面。
 7. 当前整改版本尚未用真实 Electron 客户端完成 11 个任务和混合长任务的全量验收，不能继承历史 run 的通过结论或据此宣称通用成功率。
+8. connector transport 已有 fixture 与 GitHub 官方 remote 实证，但首个官方 GitHub
+   干净用户任务仍因模型选择未批准工具并停止失败；不得加入专属 formatter 或参数
+   修正。原生
+   Responses/Anthropic/Gemini 仍未经过真实 provider 调用，只能保持 provisional。
+9. connector 的 run trace 尚未持久化无正文 physical receipt；旧
+   `agent/mcp_tools.py` 仍是绕过 Gateway 的 Legacy 重复 owner。这些是待证据驱动删除的
+   基础设施债务，不解释当前 GitHub 模型工具选择失败。
 
 当前切片的删除顺序与退出门见 [vNext 迁移](vnext-migration.md)，更广泛的整改优先级见 [GUI Agent 架构审计](GUI_AGENT_ARCHITECTURE_AUDIT.md)。
 

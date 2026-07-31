@@ -66,6 +66,7 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.mission", "TargetBinding", None),
     ("winpilot.vnext.model_roles", "VISUAL_ACTOR_MODEL_ROLE", None),
     ("winpilot.vnext.model_roles", "LiveVisualActor", None),
+    ("winpilot.vnext.model_roles", "VisualActorTurnAdmission", None),
     ("winpilot.vnext.profiling", "ExecutionPolicy", None),
     ("winpilot.vnext.runtime", "CURRENT_FRAME_EVIDENCE_KIND", None),
     ("winpilot.vnext.runtime", "MissionRuntime", None),

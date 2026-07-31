@@ -236,6 +236,37 @@ def _tool_response(
     }
 
 
+def _connector_response(
+    name: str,
+    arguments: dict[str, str],
+    *,
+    call_id: str,
+) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(
+                                    arguments,
+                                    separators=(",", ":"),
+                                ),
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+
 def _actor_shape_response(
     *,
     role: Any = "assistant",
@@ -288,6 +319,50 @@ class _RecordingClient:
         if isinstance(response, BaseException):
             raise response
         return response
+
+
+class _RecordingConnectorGateway:
+    available = True
+
+    def __init__(self) -> None:
+        self.searches: list[dict[str, str]] = []
+        self.calls: list[dict[str, Any]] = []
+
+    def search(
+        self,
+        *,
+        query: str,
+        connector: str = "",
+        timeout_s: float,
+        stop_event: Any | None,
+    ) -> dict[str, Any]:
+        self.searches.append({"query": query, "connector": connector})
+        return {
+            "ok": True,
+            "tools": [
+                {
+                    "ref": "connector-ref",
+                    "connector": "github",
+                    "name": "get_issue",
+                }
+            ],
+        }
+
+    def call(
+        self,
+        *,
+        ref: str,
+        arguments_json: str,
+        timeout_s: float,
+        stop_event: Any | None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "ref": ref,
+                "arguments_json": arguments_json,
+            }
+        )
+        return {"ok": True, "content": "issue-value"}
 
 
 def _build_clients(
@@ -424,6 +499,351 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "data:image/jpeg;base64," in (
         actor_request["messages"][1]["content"][1]["image_url"]["url"]
     )
+
+
+def test_initial_actor_turn_replies_with_native_history_and_no_system_prompt() -> None:
+    reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "remembered-value",
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients(reply)
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    history = (
+        {"role": "user", "content": "Remember this value."},
+        {"role": "assistant", "content": "remembered-value"},
+    )
+
+    admission = actor.begin_turn(
+        "What was the value?",
+        history=history,
+    )
+
+    assert admission.kind == "reply"
+    assert admission.reply == "remembered-value"
+    request = clients[0].requests[0]
+    assert request["messages"] == [
+        *history,
+        {"role": "user", "content": "What was the value?"},
+    ]
+    assert all(message["role"] != "system" for message in request["messages"])
+    assert [tool["function"]["name"] for tool in request["tools"]] == [
+        "observe_desktop"
+    ]
+    assert request["tools"][0]["function"]["description"] == (
+        "Observe the desktop."
+    )
+    with pytest.raises(
+        LiveModelRoleError,
+        match="terminal direct reply",
+    ):
+        actor.propose(
+            _actor_turn(),
+            image_b64=_JPEG_B64,
+            image_media_type="image/jpeg",
+            submitted_size=(640, 480),
+        )
+
+
+def test_initial_observe_with_content_continues_on_the_same_actor() -> None:
+    observe = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "I will inspect the desktop.",
+                    "reasoning_content": "provider-native-reasoning",
+                    "tool_calls": [
+                        {
+                            "id": "observe-call",
+                            "type": "function",
+                            "function": {
+                                "name": "observe_desktop",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients(
+        [observe, _tool_response(call_id="visual-call")]
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    admission = actor.begin_turn(
+        "Complete the visible task",
+        history=(
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+        ),
+    )
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert admission.kind == "desktop"
+    assert admission.reply == ""
+    assert isinstance(decision, ActorTurnDecision)
+    assert len(clients[0].requests) == 2
+    visual_messages = clients[0].requests[1]["messages"]
+    assert visual_messages[0]["role"] == "system"
+    assert visual_messages[1:4] == [
+        {"role": "user", "content": "Earlier question"},
+        {"role": "assistant", "content": "Earlier answer"},
+        {"role": "user", "content": "Complete the visible task"},
+    ]
+    assert visual_messages[4]["content"] == "I will inspect the desktop."
+    assert visual_messages[4]["reasoning_content"] == (
+        "provider-native-reasoning"
+    )
+    assert visual_messages[5] == {
+        "role": "tool",
+        "tool_call_id": "observe-call",
+        "content": '{"desktop_observation":"available"}',
+    }
+    assert visual_messages[6]["content"][1]["type"] == "image_url"
+
+
+def test_initial_actor_lazily_calls_a_read_only_connector_then_replies() -> None:
+    reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "The issue contains issue-value.",
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients(
+        [
+            _connector_response(
+                "search_connector_tools",
+                {"query": "issue", "connector": "github"},
+                call_id="search-1",
+            ),
+            _connector_response(
+                "call_connector_tool",
+                {
+                    "ref": "connector-ref",
+                    "arguments_json": '{"number":7}',
+                },
+                call_id="call-1",
+            ),
+            reply,
+        ]
+    )
+    gateway = _RecordingConnectorGateway()
+    responses = []
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        connector_gateway=gateway,
+        on_response=responses.append,
+    )
+
+    admission = actor.begin_turn("Read issue 7 from GitHub")
+
+    assert admission.kind == "reply"
+    assert admission.reply == "The issue contains issue-value."
+    assert gateway.searches == [{"query": "issue", "connector": "github"}]
+    assert gateway.calls == [
+        {
+            "ref": "connector-ref",
+            "arguments_json": '{"number":7}',
+        }
+    ]
+    assert len(responses) == 3
+    assert actor.model_call_reservation == 5
+    assert len(clients[0].requests) == 3
+    assert [
+        tool["function"]["name"]
+        for tool in clients[0].requests[0]["tools"]
+    ] == [
+        "observe_desktop",
+        "search_connector_tools",
+        "call_connector_tool",
+    ]
+    assert [message["role"] for message in clients[0].requests[2]["messages"]] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool",
+    ]
+
+
+def test_visual_actor_can_use_a_connector_before_one_gui_action() -> None:
+    _, clients = _build_clients(
+        [
+            _connector_response(
+                "search_connector_tools",
+                {"query": "issue", "connector": "github"},
+                call_id="visual-search",
+            ),
+            _connector_response(
+                "call_connector_tool",
+                {
+                    "ref": "connector-ref",
+                    "arguments_json": '{"number":7}',
+                },
+                call_id="visual-call",
+            ),
+            _tool_response(
+                arguments={
+                    "text": "issue-value",
+                    "local_intent": "enter the connected value once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    gateway = _RecordingConnectorGateway()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        connector_gateway=gateway,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert decision.proposal["args"] == {"text": "issue-value"}
+    assert len(clients[0].requests) == 3
+    assert [message["role"] for message in clients[0].requests[2]["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool",
+    ]
+    assert gateway.calls[0]["ref"] == "connector-ref"
+
+
+def test_last_allowed_model_call_does_not_offer_nonterminal_connector_tools() -> None:
+    _, clients = _build_clients(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "budget-safe reply",
+                        "tool_calls": [],
+                    }
+                }
+            ]
+        }
+    )
+    gateway = _RecordingConnectorGateway()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        connector_gateway=gateway,
+    )
+
+    admission = actor.begin_turn(
+        "Answer without another tool round",
+        _model_call_limit=1,
+    )
+
+    assert admission.reply == "budget-safe reply"
+    assert len(clients[0].requests) == 1
+    assert [
+        tool["function"]["name"]
+        for tool in clients[0].requests[0]["tools"]
+    ] == ["observe_desktop"]
+    assert gateway.searches == []
+
+
+def test_initial_actor_turn_is_call_once_and_accepts_a_long_goal() -> None:
+    reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients(reply)
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    assert actor.begin_turn("x" * 1024).reply == "ok"
+    with pytest.raises(LiveModelRoleError, match="call-once"):
+        actor.begin_turn("another turn")
+
+
+def test_initial_actor_turn_drops_oldest_pairs_to_fit_long_history() -> None:
+    reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "recent-context",
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients(reply)
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    history = tuple(
+        {
+            "role": "user" if index % 2 == 0 else "assistant",
+            "content": f"{index:02d}-" + ("x" * 1_997),
+        }
+        for index in range(12)
+    )
+
+    assert actor.begin_turn("recall the latest context", history=history).reply == (
+        "recent-context"
+    )
+
+    messages = clients[0].requests[0]["messages"]
+    assert messages[:-1] == list(history[4:])
+    assert messages[-1] == {
+        "role": "user",
+        "content": "recall the latest context",
+    }
 
 
 def test_press_key_model_tool_maps_to_existing_hotkey_runtime_action() -> None:
