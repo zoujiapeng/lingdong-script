@@ -505,12 +505,12 @@ def build_exact_live_vnext_graph(goal: str) -> ArpGraph:
     """Project one full goal into the exact graph accepted by the live runtime."""
 
     if type(goal) is not str:
-        raise ValueError("vNext live canary goal must be a literal string")
+        raise ValueError("vNext live Agent goal must be a literal string")
     normalized_goal = goal.strip()
     if not normalized_goal:
-        raise ValueError("vNext live canary requires a non-empty full goal")
+        raise ValueError("vNext live Agent requires a non-empty full goal")
     graph = ArpGraph(
-        id=f"vnext-live-canary-{_fnv1a_utf16(normalized_goal)}",
+        id=f"vnext-live-agent-{_fnv1a_utf16(normalized_goal)}",
         name=normalized_goal,
         description="",
         nodes=[
@@ -589,16 +589,16 @@ def build_exact_live_vnext_graph(goal: str) -> ArpGraph:
 
 def _validate_exact_graph(graph: ArpGraph) -> str:
     if type(graph) is not ArpGraph:
-        raise ValueError("vNext live canary requires canonical ArpGraph")
+        raise ValueError("vNext live Agent requires canonical ArpGraph")
     if graph.format != "arp/1":
-        raise ValueError("vNext live canary requires arp/1")
+        raise ValueError("vNext live Agent requires arp/1")
     if graph.description != "" or graph.variables != {} or graph.metadata != {}:
         raise ValueError(
-            "vNext live canary graph description, variables, and metadata must be empty"
+            "vNext live Agent graph description, variables, and metadata must be empty"
         )
     if len(graph.nodes) != 3 or len(graph.edges) != 2:
         raise ValueError(
-            "vNext live canary requires exactly start, one AGENT_GOAL, and end"
+            "vNext live Agent requires exactly start, one AGENT_GOAL, and end"
         )
     expected_nodes = (
         ("start", ArpNodeKind.START, "start", {}, 0.0),
@@ -626,7 +626,7 @@ def _validate_exact_graph(graph: ArpGraph) -> str:
             or node.retry.delay_ms != 0
             or float(node.retry.backoff) != 1.0
         ):
-            raise ValueError(f"vNext live canary node {node_id!r} is not exact")
+            raise ValueError(f"vNext live Agent node {node_id!r} is not exact")
         if kind is ArpNodeKind.AGENT_GOAL:
             if set(node.config) != {"goal"}:
                 raise ValueError("AGENT_GOAL config must contain only goal")
@@ -637,7 +637,7 @@ def _validate_exact_graph(graph: ArpGraph) -> str:
                 raise ValueError("AGENT_GOAL goal must already be trimmed")
             goal = raw_goal
         elif node.config != config:
-            raise ValueError(f"vNext live canary node {node_id!r} config must be empty")
+            raise ValueError(f"vNext live Agent node {node_id!r} config must be empty")
     expected_edges = (
         ("start-to-full-goal", "start", "full-goal"),
         ("full-goal-to-end", "full-goal", "end"),
@@ -651,7 +651,7 @@ def _validate_exact_graph(graph: ArpGraph) -> str:
             or edge.branch != "next"
             or edge.label != ""
         ):
-            raise ValueError(f"vNext live canary edge {edge_id!r} is not exact")
+            raise ValueError(f"vNext live Agent edge {edge_id!r} is not exact")
     policy = graph.policy
     if (
         policy.max_node_visits != 1
@@ -660,27 +660,27 @@ def _validate_exact_graph(graph: ArpGraph) -> str:
         or policy.allow_shell is not False
         or policy.allow_desktop_mutation is not True
     ):
-        raise ValueError("vNext live canary graph policy is not exact")
-    expected_graph_id = f"vnext-live-canary-{_fnv1a_utf16(goal)}"
+        raise ValueError("vNext live Agent graph policy is not exact")
+    expected_graph_id = f"vnext-live-agent-{_fnv1a_utf16(goal)}"
     if graph.id != expected_graph_id or graph.name != goal:
-        raise ValueError("vNext live canary graph identity does not bind the full goal")
+        raise ValueError("vNext live Agent graph identity does not bind the full goal")
     return goal
 
 
 def _freeze_budget(config_snapshot: dict[str, Any]) -> _Budget:
     vnext = _plain_dict(config_snapshot.get("vnext"), "config.vnext")
-    if vnext.get("live_canary_enabled") is not True:
+    if vnext.get("live_agent_enabled") is not True:
         raise ValueError(
-            "vNext live canary is disabled; no legacy fallback was run"
+            "vNext live Agent is disabled; no legacy fallback was run"
         )
     values = {
         name: _positive_int(vnext.get(name), f"config.vnext.{name}")
         for name in ("max_turns", "max_runtime_s", "max_model_calls")
     }
     if values["max_turns"] > 100:
-        raise ValueError("config.vnext.max_turns exceeds the bounded canary")
+        raise ValueError("config.vnext.max_turns exceeds the bounded live Agent")
     if values["max_runtime_s"] > 3600:
-        raise ValueError("config.vnext.max_runtime_s exceeds the bounded canary")
+        raise ValueError("config.vnext.max_runtime_s exceeds the bounded live Agent")
     if values["max_model_calls"] > 2 * values["max_turns"]:
         raise ValueError(
             "config.vnext.max_model_calls exceeds Actor plus one "
@@ -700,12 +700,12 @@ def _freeze_model(
     native_protocol = native_provider_protocol(api)
     if not api_key or not model or (not base_url and native_protocol is None):
         raise ValueError(
-            "vNext live canary requires one configured vision model endpoint; "
+            "vNext live Agent requires one configured vision model endpoint; "
             "an explicit native provider may use its default base URL"
         )
     profile = model_profile_from_config(api)
     if not profile.supports_vision:
-        raise ValueError("configured vNext live canary model is not vision-capable")
+        raise ValueError("configured vNext live Agent model is not vision-capable")
     request_timeout = min(
         _positive_number(
             api.get("request_timeout_s"),
@@ -964,7 +964,7 @@ def _freeze_prebound_target(
         or context.get("task_id") != graph.id
     ):
         raise ValueError(
-            "vNext live canary requires the matching native Electron execution context"
+            "vNext live Agent requires the matching native Electron execution context"
         )
     _positive_int(
         context.get("submitted_at"),
@@ -2112,7 +2112,7 @@ def _publish_runtime_evidence_anchor(anchor: Mapping[str, Any]) -> None:
     )
 
 
-class _LiveCanarySession:
+class _LiveAgentSession:
     def __init__(
         self,
         *,
@@ -2325,7 +2325,7 @@ class _LiveCanarySession:
         ))
         if errors:
             raise ExceptionGroup(
-                "vNext live canary session cleanup failed",
+                "vNext live Agent session cleanup failed",
                 errors,
             )
 
@@ -2614,7 +2614,7 @@ def _seal_unstarted_runtime_evidence(
     return _seal_created_runtime_evidence(plane, journal)
 
 
-def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
+def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
     runtime_evidence, frame_artifacts, evidence_journal = (
         _create_runtime_evidence(build)
     )
@@ -2646,7 +2646,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
                     required_capabilities=("visual.interact",),
                 ),
             ),
-            source="vnext-live-canary",
+            source="vnext-live-agent",
             experience_policy="disabled",
         )
     except Exception as exc:
@@ -2766,7 +2766,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
         )
         if cleanup_errors:
             raise ExceptionGroup(
-                "vNext live canary owner composition and cleanup failed",
+                "vNext live Agent owner composition and cleanup failed",
                 [exc, *cleanup_errors],
             ) from exc
         raise
@@ -2793,7 +2793,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
             mutation_permits=permits,
             runtime_evidence_plane=runtime_evidence,
         )
-        return _LiveCanarySession(
+        return _LiveAgentSession(
             runtime=runtime,
             reducer=reducer,
             registry=registry,
@@ -2827,7 +2827,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveCanarySession:
         )
         if cleanup_errors:
             raise ExceptionGroup(
-                "vNext live canary composition and cleanup failed",
+                "vNext live Agent composition and cleanup failed",
                 [exc, *cleanup_errors],
             ) from exc
         raise
@@ -3382,7 +3382,7 @@ class _PreparedHandler:
                 return NodeResult(
                     ok=False,
                     branch="fail",
-                    error="vNext live canary handler is call-once",
+                    error="vNext live Agent handler is call-once",
                 )
             self._claimed = True
         if node.kind is not ArpNodeKind.AGENT_GOAL or node.id != "full-goal":
@@ -3439,7 +3439,7 @@ class _PreparedHandler:
                 deadline=lambda: deadline[0],
             )
             BUS.publish(
-                "vnext_canary_start",
+                "live_agent_start",
                 run_id=run_id,
                 mission_id=mission_id,
                 runtime_version=_RUNTIME_VERSION,
@@ -3477,7 +3477,7 @@ class _PreparedHandler:
                 ):
                     output["model_usage"] = model_usage
                 BUS.publish(
-                    "vnext_canary_done",
+                    "live_agent_done",
                     run_id=run_id,
                     mission_id=mission_id,
                     runtime_version=_RUNTIME_VERSION,
@@ -3528,7 +3528,7 @@ class _PreparedHandler:
                     pass
             detail = str(exc) or "vNext initial Actor turn failed"
             BUS.publish(
-                "vnext_canary_done",
+                "live_agent_done",
                 run_id=run_id,
                 mission_id=mission_id,
                 runtime_version=_RUNTIME_VERSION,
@@ -3702,7 +3702,7 @@ class _PreparedHandler:
                             target=target,
                         )
                     BUS.publish(
-                        "vnext_canary_turn",
+                        "live_agent_turn",
                         run_id=run_id,
                         mission_id=mission_id,
                         runtime_version=_RUNTIME_VERSION,
@@ -3765,7 +3765,7 @@ class _PreparedHandler:
                     detail = "vNext turn budget exhausted"
         except Exception:
             terminal_status = RuntimeStatus.STATE_REJECTED
-            detail = "vNext live canary failed closed"
+            detail = "vNext live Agent failed closed"
         finally:
             model_usage = actor_bundle.usage_total
             runtime_state["model_usage"] = model_usage
@@ -3869,7 +3869,7 @@ class _PreparedHandler:
             ):
                 output["model_usage"] = model_usage
             BUS.publish(
-                "vnext_canary_done",
+                "live_agent_done",
                 run_id=run_id,
                 mission_id=mission_id,
                 runtime_version=_RUNTIME_VERSION,
@@ -3958,7 +3958,7 @@ def prepare_live_vnext_execution(
         connector_factory=ConnectorGateway,
     )
     if type(config_snapshot) is not dict:
-        raise ValueError("vNext live canary config snapshot must be a dict")
+        raise ValueError("vNext live Agent config snapshot must be a dict")
     frozen_config = deepcopy(config_snapshot)
     goal = _validate_exact_graph(graph)
     budget = _freeze_budget(frozen_config)

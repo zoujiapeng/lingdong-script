@@ -104,7 +104,7 @@
     }
   },
   "vnext": {
-    "live_canary_enabled": true,
+    "live_agent_enabled": true,
     "max_turns": 30,
     "max_runtime_s": 300,
     "max_model_calls": 60

@@ -111,7 +111,7 @@ _RECOVERABLE_NOT_STARTED_ERROR_KINDS = frozenset(
 
 
 class MissionRuntimeConfigurationError(ValueError):
-    """The injected slice is outside the authorized minimal canary."""
+    """The injected slice is outside the authorized live-agent surface."""
 
 
 class MissionRuntime:
@@ -274,7 +274,7 @@ class MissionRuntime:
         names = frozenset(tool.name for tool in catalog.tools)
         if names != APPROVED_RUNTIME_TOOLS:
             raise MissionRuntimeConfigurationError(
-                "ToolCatalog must contain exactly the minimal canary surface"
+                "ToolCatalog must contain exactly the minimal live-agent surface"
             )
         for tool in catalog.tools:
             if tool.route is not ToolRoute.VISUAL_ACTOR:

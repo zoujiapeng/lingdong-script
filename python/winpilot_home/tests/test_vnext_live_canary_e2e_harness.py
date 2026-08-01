@@ -98,7 +98,7 @@ def _complete_campaign_config(
             "llm_trace": True,
         },
         "vnext": {
-            "live_canary_enabled": False,
+            "live_agent_enabled": False,
             **harness.FROZEN_RUNTIME_BUDGET,
         },
     }
@@ -292,7 +292,7 @@ def _model_config(harness) -> dict[str, Any]:
                 "escalation_model": "",
             },
             "vnext": {
-                "live_canary_enabled": True,
+                "live_agent_enabled": True,
                 **harness.FROZEN_RUNTIME_BUDGET,
             },
         }
@@ -866,7 +866,7 @@ def test_campaign_temporarily_freezes_retry_and_restores_exact_config(
     expected_frozen["api"]["max_retries"] = 0
     expected_frozen["vnext"].update(
         {
-            "live_canary_enabled": True,
+            "live_agent_enabled": True,
             **harness.FROZEN_RUNTIME_BUDGET,
         }
     )
@@ -2512,7 +2512,7 @@ def test_action_reconciliation_uses_mission_terminal_status_not_queue_done(
     harness = _canary_harness()
     run_id = "arp-terminal-binding"
     terminal = {
-        "type": "vnext_canary_done",
+        "type": "live_agent_done",
         "run_id": run_id,
         "status": "mission_verified",
         "ts": 2.0,
@@ -2525,7 +2525,7 @@ def test_action_reconciliation_uses_mission_terminal_status_not_queue_done(
     }
     events = [
             {
-                "type": "vnext_canary_start",
+                "type": "live_agent_start",
                 "run_id": run_id,
                 "ts": 1.0,
                 "target": {
@@ -3279,7 +3279,7 @@ def test_campaign_artifact_projections_do_not_copy_private_action_payloads():
     public_surfaces = {
         "ordinary_trace": safe_trace,
         "bus_websocket_event": {
-            "type": "vnext_canary_turn",
+            "type": "live_agent_turn",
             "run_id": private["report"]["run_id"],
             "decision_id": private["decision_ids"]["type_text"],
             "runtime_evidence_report_sha256": private["report_sha256"],
@@ -3498,7 +3498,7 @@ def test_trace_audit_binds_frozen_vnext_and_rejects_legacy_or_fallback(tmp_path)
             "task_contract": None,
         },
         {
-            "type": "vnext_canary_start",
+            "type": "live_agent_start",
             "run_id": run_id,
             "mission_id": mission_id,
             "runtime_budget": dict(harness.FROZEN_RUNTIME_BUDGET),
@@ -3553,21 +3553,21 @@ def test_trace_audit_binds_frozen_vnext_and_rejects_legacy_or_fallback(tmp_path)
             "receipt": {"outcome": "applied"},
         },
         {
-            "type": "vnext_canary_turn",
+            "type": "live_agent_turn",
             "run_id": run_id,
             "mission_id": mission_id,
             "no_legacy_fallback": True,
             "turn_index": 0,
         },
         {
-            "type": "vnext_canary_turn",
+            "type": "live_agent_turn",
             "run_id": run_id,
             "mission_id": mission_id,
             "no_legacy_fallback": True,
             "turn_index": 1,
         },
         {
-            "type": "vnext_canary_turn",
+            "type": "live_agent_turn",
             "run_id": run_id,
             "mission_id": mission_id,
             "no_legacy_fallback": True,
@@ -3587,7 +3587,7 @@ def test_trace_audit_binds_frozen_vnext_and_rejects_legacy_or_fallback(tmp_path)
             "verification_failure_count": 0,
         },
         {
-            "type": "vnext_canary_done",
+            "type": "live_agent_done",
             "run_id": run_id,
             "mission_id": mission_id,
             "runtime_version": "vnext",

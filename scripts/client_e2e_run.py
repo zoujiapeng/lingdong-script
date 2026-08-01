@@ -1565,7 +1565,7 @@ def _execution_evidence(trace_ids: list[str]) -> dict[str, Any]:
                 event_type = str(event.get("type") or "")
                 if event_type in {"arp_run_done", "arp_run_failed", "arp_run_canceled"}:
                     terminal_events.append(event_type)
-                if event_type == "vnext_canary_done":
+                if event_type == "live_agent_done":
                     terminal_events.append(event_type)
                     continue
                 if event_type == "vnext_raw_receipt":
@@ -1583,7 +1583,7 @@ def _execution_evidence(trace_ids: list[str]) -> dict[str, Any]:
                     ):
                         successful.append(tool)
                     continue
-                if event_type == "vnext_canary_turn":
+                if event_type == "live_agent_turn":
                     proposal_kind = str(event.get("proposal_kind") or "")
                     if proposal_kind in {
                         "claim_obligation_done",
@@ -1692,7 +1692,7 @@ def _gui_execution_trace_evidence(
                         if task_id:
                             bound_task_ids.add(task_id)
                 if (
-                    event_type == "vnext_canary_start"
+                    event_type == "live_agent_start"
                     and str(event.get("run_id") or "") == outer_run_id
                 ):
                     mission_id = str(event.get("mission_id") or "").strip()

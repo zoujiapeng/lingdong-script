@@ -2208,7 +2208,7 @@ def test_adapter_package_is_one_narrow_single_composition_owner() -> None:
         if "vnext.desktop_adapter" in source:
             product_importers.append(path.relative_to(home).as_posix())
     assert product_importers == [
-        "winpilot/orchestrator/vnext_live_canary.py"
+        "winpilot/orchestrator/live_agent.py"
     ]
 
 

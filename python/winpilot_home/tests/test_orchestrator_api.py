@@ -72,14 +72,14 @@ def _client_execution_context():
 
 
 def _waiting_desktop_lease(monkeypatch, *, run_id):
-    from winpilot.orchestrator import vnext_live_canary as canary
+    from winpilot.orchestrator import live_agent
     from winpilot.orchestrator.runtime import ArpExecution
     from winpilot.utils.screenshot import Region
 
-    graph = canary.build_exact_live_vnext_graph(
+    graph = live_agent.build_exact_live_vnext_graph(
         "Complete the visible task"
     )
-    facts = canary._TargetFacts(
+    facts = live_agent._TargetFacts(
         hwnd=800,
         root_hwnd=800,
         process_id=900,
@@ -89,18 +89,18 @@ def _waiting_desktop_lease(monkeypatch, *, run_id):
         region=(0, 0, 1200, 800),
         foreground_root_hwnd=800,
     )
-    dependencies = canary._CompositionDependencies(
+    dependencies = live_agent._CompositionDependencies(
         wall_clock=lambda: 1.002,
         target_reader=lambda hwnd: facts if hwnd == facts.hwnd else None,
         foreground_reader=lambda: facts.hwnd,
         hit_test_root=lambda _x, _y: facts.hwnd,
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "virtual_screen_region",
         lambda: Region(0, 0, 1920, 1080),
     )
-    lease = canary.DesktopLeaseSlot(
+    lease = live_agent.DesktopLeaseSlot(
         graph=graph,
         dependencies=dependencies,
         thread_id="thread-api-lease",
@@ -139,11 +139,86 @@ def test_product_and_example_config_default_to_vnext():
         (config.ROOT_DIR / "config.example.json").read_text(encoding="utf-8")
     )
 
-    assert config._DEFAULTS["vnext"]["live_canary_enabled"] is True
-    assert example["vnext"]["live_canary_enabled"] is True
+    assert config._DEFAULTS["vnext"]["live_agent_enabled"] is True
+    assert example["vnext"]["live_agent_enabled"] is True
+    assert "live_canary_enabled" not in config._DEFAULTS["vnext"]
+    assert "live_canary_enabled" not in example["vnext"]
 
 
-def test_platform_overview_exposes_fail_closed_vnext_canary_budget(
+def test_config_migrates_retired_live_agent_key_at_input_boundary(
+    tmp_path,
+    monkeypatch,
+):
+    from winpilot import config
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"vnext": {"live_canary_enabled": False}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "CONFIG_PATH", config_path)
+
+    holder = config.Config()
+    snapshot = holder.snapshot()
+
+    assert snapshot["vnext"]["live_agent_enabled"] is False
+    assert "live_canary_enabled" not in snapshot["vnext"]
+
+    holder.update({"vnext": {"live_canary_enabled": True}})
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["vnext"]["live_agent_enabled"] is True
+    assert "live_canary_enabled" not in persisted["vnext"]
+
+
+@pytest.mark.parametrize(
+    ("legacy_value", "canonical_value"),
+    [(False, True), (1, True)],
+)
+def test_config_rejects_conflicting_live_agent_keys_without_mutation(
+    tmp_path,
+    monkeypatch,
+    legacy_value,
+    canonical_value,
+):
+    from winpilot import config
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(config, "CONFIG_PATH", config_path)
+    holder = config.Config()
+    before = holder.snapshot()
+    persisted_before = config_path.read_bytes()
+
+    with pytest.raises(ValueError, match="conflicts"):
+        holder.update(
+            {
+                "vnext": {
+                    "live_canary_enabled": legacy_value,
+                    "live_agent_enabled": canonical_value,
+                }
+            }
+        )
+
+    assert holder.snapshot() == before
+    assert config_path.read_bytes() == persisted_before
+
+
+def test_config_api_reports_conflicting_live_agent_keys(client):
+    response = client.patch(
+        "/api/config",
+        json={
+            "vnext": {
+                "live_canary_enabled": False,
+                "live_agent_enabled": True,
+            }
+        },
+    )
+
+    assert response.status_code == 400
+    assert "conflicts" in response.json()["detail"]
+
+
+def test_platform_overview_exposes_fail_closed_vnext_live_agent_budget(
     client,
     monkeypatch,
 ):
@@ -154,7 +229,7 @@ def test_platform_overview_exposes_fail_closed_vnext_canary_budget(
     def frozen_get(*path, default=None):
         if path == ("vnext",):
             return {
-                "live_canary_enabled": False,
+                "live_agent_enabled": False,
                 "max_turns": 30,
                 "max_runtime_s": 300,
                 "max_model_calls": 60,
@@ -166,7 +241,7 @@ def test_platform_overview_exposes_fail_closed_vnext_canary_budget(
     status = client.get("/api/v2/platform").json()["status"]["vnext"]
 
     assert status == {
-        "live_canary_enabled": False,
+        "live_agent_enabled": False,
         "budget": {
             "max_turns": 30,
             "max_runtime_s": 300,
@@ -324,7 +399,7 @@ def test_public_trace_routes_preserve_safe_historical_trace_and_image(
                     "ts": 1.0,
                 },
                 {
-                    "type": "vnext_canary_done",
+                    "type": "live_agent_done",
                     "run_id": run_id,
                     "runtime_evidence": public_summary,
                     "ts": 2.0,
@@ -351,7 +426,7 @@ def test_public_trace_routes_preserve_safe_historical_trace_and_image(
 
     assert detail.status_code == 200
     assert detail.json()[-1] == {
-        "type": "vnext_canary_done",
+        "type": "live_agent_done",
         "run_id": run_id,
         "runtime_evidence": public_summary,
         "ts": 2.0,
@@ -398,7 +473,7 @@ def test_arp_run_request_rejects_unknown_top_level_fields(client):
     )
 
 
-def test_vnext_selection_fails_closed_when_canary_is_disabled(
+def test_vnext_selection_fails_closed_when_live_agent_is_disabled(
     client,
     monkeypatch,
 ):
@@ -409,7 +484,7 @@ def test_vnext_selection_fails_closed_when_canary_is_disabled(
         "snapshot",
         lambda: {
             "vnext": {
-                "live_canary_enabled": False,
+                "live_agent_enabled": False,
                 "max_turns": 30,
                 "max_runtime_s": 300,
                 "max_model_calls": 60,
@@ -442,7 +517,7 @@ def test_vnext_selection_fails_closed_when_canary_is_disabled(
 
     assert response.status_code == 409
     assert response.json()["detail"] == (
-        "vNext live canary is disabled; no legacy fallback was run"
+        "vNext live Agent is disabled; no legacy fallback was run"
     )
 
 
@@ -456,7 +531,7 @@ def test_vnext_selection_is_frozen_once_without_legacy_compilation(
     frozen = {
         "api": {"model": "test-vision-model"},
         "vnext": {
-            "live_canary_enabled": True,
+            "live_agent_enabled": True,
             "max_turns": 30,
             "max_runtime_s": 300,
             "max_model_calls": 60,
@@ -510,12 +585,12 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
 ):
     from winpilot import server
     from winpilot.orchestrator.contracts import ArpRuntimeVersion
-    from winpilot.orchestrator import vnext_live_canary
+    from winpilot.orchestrator import live_agent
 
     frozen = {
         "api": {"model": "test-vision-model"},
         "vnext": {
-            "live_canary_enabled": True,
+            "live_agent_enabled": True,
             "max_turns": 30,
             "max_runtime_s": 300,
             "max_model_calls": 60,
@@ -585,7 +660,7 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
     assert payload["turn_id"] == "turn-new"
     assert len(calls) == 1
     graph, inputs, kwargs = calls[0]
-    assert vnext_live_canary._validate_exact_graph(graph) == (
+    assert live_agent._validate_exact_graph(graph) == (
         "Complete the visible task"
     )
     assert graph.metadata == {}
@@ -645,7 +720,7 @@ def test_product_goal_admission_fails_closed_without_legacy_fallback(
     monkeypatch.setattr(
         server.CONFIG,
         "snapshot",
-        lambda: {"vnext": {"live_canary_enabled": False}},
+        lambda: {"vnext": {"live_agent_enabled": False}},
     )
     monkeypatch.setattr(
         server.TaskContractCompiler,
@@ -669,7 +744,7 @@ def test_product_goal_admission_fails_closed_without_legacy_fallback(
 
     assert response.status_code == 409
     assert response.json()["detail"] == (
-        "vNext live canary is disabled; no legacy fallback was run"
+        "vNext live Agent is disabled; no legacy fallback was run"
     )
 
 
@@ -819,9 +894,9 @@ def test_start_execution_freezes_goal_admission_before_job_submission(
 ):
     from winpilot import server
     from winpilot.orchestrator.contracts import ArpRuntimeVersion
-    from winpilot.orchestrator import vnext_live_canary
+    from winpilot.orchestrator import live_agent
 
-    graph = vnext_live_canary.build_exact_live_vnext_graph(
+    graph = live_agent.build_exact_live_vnext_graph(
         "Complete the visible task"
     )
     execution = SimpleNamespace(
@@ -838,7 +913,7 @@ def test_start_execution_freezes_goal_admission_before_job_submission(
         return execution
 
     monkeypatch.setattr(
-        vnext_live_canary,
+        live_agent,
         "prepare_live_vnext_execution",
         prepare,
     )
@@ -871,7 +946,7 @@ def test_start_execution_freezes_goal_admission_before_job_submission(
             graph,
             {},
             runtime_version=ArpRuntimeVersion.VNEXT,
-            frozen_config={"vnext": {"live_canary_enabled": True}},
+            frozen_config={"vnext": {"live_agent_enabled": True}},
             goal_admission=audit,
             thread_id="thread-audit",
             turn_id="turn-audit",
@@ -973,12 +1048,12 @@ def test_vnext_trace_start_failure_terminalizes_without_legacy_fallback(
         ArpRuntimeVersion,
     )
     from winpilot.orchestrator.runtime import ArpExecution
-    from winpilot.orchestrator import vnext_live_canary
+    from winpilot.orchestrator import live_agent
 
     execution = ArpExecution(ArpGraph.model_validate(_graph_payload()))
     submitted: dict[str, object] = {}
     monkeypatch.setattr(
-        vnext_live_canary,
+        live_agent,
         "prepare_live_vnext_execution",
         lambda *_args, **_kwargs: execution,
     )
@@ -1030,7 +1105,7 @@ def test_vnext_trace_finalization_is_frozen_into_job_run_and_done_event(
     stop_fails,
 ):
     from winpilot import server
-    from winpilot.orchestrator import vnext_live_canary
+    from winpilot.orchestrator import live_agent
     from winpilot.orchestrator.contracts import (
         ArpGraph,
         ArpRuntimeVersion,
@@ -1052,7 +1127,7 @@ def test_vnext_trace_finalization_is_frozen_into_job_run_and_done_event(
     jobs = RuntimeJobManager()
     monkeypatch.setattr(server, "RUNTIME_JOBS", jobs)
     monkeypatch.setattr(
-        vnext_live_canary,
+        live_agent,
         "prepare_live_vnext_execution",
         lambda *_args, **_kwargs: execution,
     )
@@ -1130,11 +1205,11 @@ def test_vnext_submit_failure_rolls_back_execution_and_job_binding(
         ArpRuntimeVersion,
     )
     from winpilot.orchestrator.runtime import ArpExecution
-    from winpilot.orchestrator import vnext_live_canary
+    from winpilot.orchestrator import live_agent
 
     execution = ArpExecution(ArpGraph.model_validate(_graph_payload()))
     monkeypatch.setattr(
-        vnext_live_canary,
+        live_agent,
         "prepare_live_vnext_execution",
         lambda *_args, **_kwargs: execution,
     )

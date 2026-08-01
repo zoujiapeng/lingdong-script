@@ -183,7 +183,7 @@ export interface RunProjection {
   run_id: string;
   kind: 'agent' | 'arp';
   runtime_version?: RuntimeVersion;
-  runtime_budget?: VnextLiveCanaryBudget | Record<string, unknown>;
+  runtime_budget?: VnextLiveAgentBudget | Record<string, unknown>;
   no_legacy_fallback?: boolean;
   goal_admission?: GoalAdmissionAudit | Record<string, unknown>;
   status: string;
@@ -208,7 +208,7 @@ export interface ArpExecutionSnapshot {
   graph_id: string;
   graph_name: string;
   runtime_version?: RuntimeVersion;
-  runtime_budget?: VnextLiveCanaryBudget | Record<string, unknown>;
+  runtime_budget?: VnextLiveAgentBudget | Record<string, unknown>;
   no_legacy_fallback?: boolean;
   goal_admission?: GoalAdmissionAudit | Record<string, unknown>;
   thread_id?: string;
@@ -739,15 +739,15 @@ export interface PerceptionDaemonStatus {
   [key: string]: unknown;
 }
 
-export interface VnextLiveCanaryBudget {
+export interface VnextLiveAgentBudget {
   max_turns: number;
   max_runtime_s: number;
   max_model_calls: number;
 }
 
 export interface VnextRuntimeStatus {
-  live_canary_enabled: boolean;
-  budget?: VnextLiveCanaryBudget;
+  live_agent_enabled: boolean;
+  budget?: VnextLiveAgentBudget;
 }
 
 export interface PlatformStatus {

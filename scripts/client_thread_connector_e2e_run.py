@@ -1237,7 +1237,7 @@ def stable_runtime_identity(
             "drifted": source.get("drifted"),
         },
         "vnext": {
-            "live_canary_enabled": vnext.get("live_canary_enabled"),
+            "live_agent_enabled": vnext.get("live_agent_enabled"),
             "budget": dict(vnext.get("budget") or {}),
         },
     }
@@ -1573,7 +1573,7 @@ def _target_outcome(case: dict[str, Any] | None) -> dict[str, Any]:
     self_terminal_pass = bool(
         case.get("outcome") == "terminal"
         and case.get("status") == "done"
-        and "vnext_canary_done" in (terminal.get("events") or [])
+        and "live_agent_done" in (terminal.get("events") or [])
         and not terminal.get("parse_errors")
     )
     evidence_complete = bool(

@@ -1,9 +1,11 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-08-01。当前唯一产品分支是 `master`，本轮开始基线为
-> `80ae593fb26335d5f1ff057a491ddf1a9830fc56`。13.20–13.23 已进入主线，本轮客户端与
-> 6-Turn 结果见重置文档 13.24；不要用更早的提交说明覆盖 Thread/Turn、按需桌面租约、通用
-> connector、history-depth 证据或 provisional native-provider 边界。
+> 最后核对：2026-08-01。当前唯一产品分支是 `master`；本轮开始时最近完成可见客户端
+> 证据和本地全量验证的固定产品基线为 `4f936728a6d7dcf76ac1c34033733a6cd3a95f74`。
+> 这不是本文件的永久 HEAD 标记；接手时必须现场运行 `git rev-parse HEAD` 与
+> `git rev-parse origin/master`。13.20–13.25 已进入主线；不要用更早的提交说明覆盖
+> Thread/Turn、按需桌面租约、通用 connector、history-depth 证据或 provisional
+> native-provider 边界。
 
 本文件是换 Codex 窗口后的第一入口。它保存当前决策和继续工作的边界，不替代
 长期架构与测试规范。依次阅读：
@@ -30,11 +32,16 @@
 - 2026-07-30 将原 `codex/lean-gui-agent-core` 的完整 HEAD 快进到 `master`；没有
   force push、历史改写、merge commit 或冻结分支整体合并。
 - 原 Draft PR #45/#46 已由这次直接提升取代，不是合并依据。
-- 其余具名分支全部只读冻结；只有当前 `master` 的真实 E2E 先证明能力缺口时，才可
-  审查其单个候选提交。禁止继续向这些分支提交或把它们整体 merge 回来。
 - 2026-08-01 已完成所有具名冻结分支只读总审计；当前没有可准入项，结论为
   `0 cherry-pick / 0 merge / 0 Runtime 修改`。旧分支剩余主要是重复 target pipeline、
   profiler、第二 verifier 和前端 Runtime selector，不解释当前首分歧。
+- 审计后远端开发分支只剩 `master`。PR10 历史由
+  `archive/pr10-vnext-agent-core-20260726` 保存，PR15 证据由
+  `evidence/pr15-legacy-electron-oracle-20260726` 保存；这些 tag 只作只读恢复输入，
+  不得继续开发或整体 merge。
+- `4f93672` 的最新 GitHub Actions run `30663041917` 因账户 billing/spending limit 在
+  Python 与 frontend job 均为零步骤时终止。当前没有可引用的 GitHub Actions 绿色结果；
+  本地回归是独立证据，不能冒充 Actions 已通过。
 - 后续正常开发直接提交到 `master`；不要再建立另一条长期产品分支。
 - 本地未跟踪 `CON` 属于用户，不能读取后擅自解释、暂存、删除、改名或覆盖。
 
@@ -392,14 +399,14 @@ QQ 空间点赞从 QQ 主窗口成功接管浏览窗口，30 次物理动作全�
 10. 不与真实 GUI E2E 并发跑重型全量测试；曾经因此让 `/api/status` 超时，属于测试
     调度干扰而非模型失败。
 
-## 剩余冻结分支审计门
+## 历史引用恢复与候选准入门
 
-1. 所有新工作只在 `master`；冻结分支不再演化。
-2. 先在当前 `master` 构造随机失败样本，再审查对应旧提交。
+1. 所有新工作只在 `master`；归档 tag 与历史提交不再演化。
+2. 先在当前 `master` 构造随机失败样本，再审查对应归档提交。
 3. 只提取最小能力，不 cherry-pick 旧 planner、prompt、state 或重复 owner。
 4. 至少两个任务族 E2E 有实质收益且代码规模合理才保留；无收益立即丢弃。
 5. 同一提交删除被替代实现，禁止长期双写。
-6. 不为“清理分支”整体 merge 冻结历史；审计完的分支直接删除。
+6. 不为“恢复历史”整体 merge 归档树；只提取通过准入门的最小候选。
 
 ## 新 Codex 窗口的第一组操作
 
@@ -410,8 +417,8 @@ git status -sb
 git log -8 --oneline --decorate
 ```
 
-本轮开始时 `master` 与 `origin/master` 同为 `80ae593`，除用户未跟踪的 `CON` 外干净；
-13.24 改现有 Electron 聊天 owner、测试 runner、测试与文档。接手时必须重新核对状态，不要 reset、整体暂存或
+本轮开始时 `master` 与 `origin/master` 同为 `4f93672`，除用户未跟踪的 `CON` 外干净；
+该 SHA 只是固定起点，不是本文件的实时 HEAD。接手时必须重新核对状态，不要 reset、整体暂存或
 触碰 `CON`。然后阅读本文件和上述五份文档，不要立刻追加代码。
 
 优先级：
@@ -428,7 +435,7 @@ git log -8 --oneline --decorate
    重试或 Runtime 修正，不接回旧 `/api/chat`。
 4. native provider 只有拿到真实 credential 后才做相同 canonical 多轮工具序列与至少
    两个任务族 Electron E2E；未通过的协议整条回退，不继续扩代码。
-5. 模型切换当前暂停；冻结分支只作只读审计，保持 `master` 为唯一产品主线。
+5. 模型切换当前暂停；归档 tag 只作只读恢复输入，保持 `master` 为唯一产品主线。
 
 常用验证：
 

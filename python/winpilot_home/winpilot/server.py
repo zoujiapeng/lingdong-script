@@ -740,8 +740,8 @@ def status() -> dict[str, Any]:
             "supports_vision": model_profile.supports_vision,
         },
         "vnext": {
-            "live_canary_enabled": (
-                vnext_config.get("live_canary_enabled") is True
+            "live_agent_enabled": (
+                vnext_config.get("live_agent_enabled") is True
             ),
             "budget": {
                 "max_turns": vnext_budget["max_turns"],
@@ -1267,13 +1267,13 @@ def _start_arp_execution(
 
     if runtime_version is ArpRuntimeVersion.VNEXT:
         if frozen_config is None:
-            raise RuntimeError("vNext live canary config was not frozen")
+            raise RuntimeError("vNext live Agent config was not frozen")
         if not thread_id or not turn_id:
             thread_id, turn_id, generated_history = (
                 AGENT_THREADS.begin_turn(graph.name)
             )
             thread_history = tuple(generated_history)
-        from .orchestrator.vnext_live_canary import (
+        from .orchestrator.live_agent import (
             prepare_live_vnext_execution,
         )
 
@@ -1430,10 +1430,10 @@ def start_goal_run(req: GoalRunRequest) -> dict[str, Any]:
             req.goal,
             live_gui_enabled=(
                 isinstance(vnext_config, dict)
-                and vnext_config.get("live_canary_enabled") is True
+                and vnext_config.get("live_agent_enabled") is True
             ),
         )
-        from .orchestrator.vnext_live_canary import (
+        from .orchestrator.live_agent import (
             build_exact_live_vnext_graph,
         )
 
@@ -1503,7 +1503,7 @@ def bind_goal_desktop_lease(
         ArpRunStatus.PAUSED,
     }:
         raise HTTPException(409, "run is already terminal")
-    from .orchestrator.vnext_live_canary import (
+    from .orchestrator.live_agent import (
         DesktopLeaseError,
         DesktopLeaseSlot,
     )
@@ -1543,7 +1543,7 @@ def fail_goal_desktop_lease(
     execution = ARP_RUNS.get(run_id)
     if execution is None:
         raise HTTPException(404, "run not found")
-    from .orchestrator.vnext_live_canary import (
+    from .orchestrator.live_agent import (
         DesktopLeaseError,
         DesktopLeaseSlot,
     )
@@ -1591,10 +1591,10 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
             vnext_config = frozen_config.get("vnext")
             if (
                 not isinstance(vnext_config, dict)
-                or vnext_config.get("live_canary_enabled") is not True
+                or vnext_config.get("live_agent_enabled") is not True
             ):
                 raise RuntimeError(
-                    "vNext live canary is disabled; no legacy fallback was run"
+                    "vNext live Agent is disabled; no legacy fallback was run"
                 )
         execution = _start_arp_execution(
             graph,
@@ -1928,7 +1928,10 @@ def patch_config(patch: dict[str, Any]) -> dict[str, Any]:
         if isinstance(sec, dict) and str(sec.get("api_key", "")).startswith("***"):
             sec.pop("api_key")
     _canonicalize_model_aliases(patch)
-    CONFIG.update(patch)
+    try:
+        CONFIG.update(patch)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     BUS.publish("config", changed=list(patch.keys()))
     return get_config()
 

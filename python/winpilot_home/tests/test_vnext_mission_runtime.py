@@ -1815,7 +1815,7 @@ def test_minimal_runtime_rejects_scope_expansion_at_construction() -> None:
 
     with pytest.raises(
         MissionRuntimeConfigurationError,
-        match="exactly the minimal canary surface",
+        match="exactly the minimal live-agent surface",
     ):
         _harness(_action(), catalog=_catalog(include_extra=True))
 

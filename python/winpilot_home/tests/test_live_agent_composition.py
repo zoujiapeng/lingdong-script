@@ -38,7 +38,7 @@ from winpilot.orchestrator.contracts import (
 )
 from winpilot.orchestrator.runtime import ArpRunManager
 from winpilot.orchestrator import goal_admission
-from winpilot.orchestrator import vnext_live_canary as canary
+from winpilot.orchestrator import live_agent
 from winpilot.agent.frame_authority import FrameAuthority
 from winpilot.utils.log import BUS
 from winpilot.utils.screenshot import Region
@@ -182,7 +182,7 @@ def _jpeg(width: int, height: int, level: int = 127) -> str:
 
 
 def _graph_dict() -> dict[str, Any]:
-    graph_id = f"vnext-live-canary-{canary._fnv1a_utf16(GOAL)}"
+    graph_id = f"vnext-live-agent-{live_agent._fnv1a_utf16(GOAL)}"
     retry = {
         "max_attempts": 1,
         "delay_ms": 0,
@@ -301,7 +301,7 @@ def _config() -> dict[str, Any]:
             "request_total_timeout_s": 120,
         },
         "vnext": {
-            "live_canary_enabled": True,
+            "live_agent_enabled": True,
             "max_turns": 30,
             "max_runtime_s": 300,
             "max_model_calls": 60,
@@ -352,10 +352,10 @@ def _prepare(
     config_snapshot: dict[str, Any],
     *,
     run_manager: Any,
-    _dependencies: canary._CompositionDependencies,
+    _dependencies: live_agent._CompositionDependencies,
     history: tuple[dict[str, str], ...] = (),
 ) -> Any:
-    return canary.prepare_live_vnext_execution(
+    return live_agent.prepare_live_vnext_execution(
         graph,
         inputs,
         config_snapshot,
@@ -420,12 +420,12 @@ def _facts(
     process_id: int = PID,
     foreground_root_hwnd: int | None = HWND,
     region: tuple[int, int, int, int] = REGION,
-) -> canary._TargetFacts:
-    return canary._TargetFacts(
+) -> live_agent._TargetFacts:
+    return live_agent._TargetFacts(
         hwnd=HWND,
         root_hwnd=HWND,
         process_id=process_id,
-        executable_identity=r"c:\apps\canary.exe",
+        executable_identity=r"c:\apps\live_agent.exe",
         title="Canary Target",
         class_name="CanaryWindow",
         region=region,
@@ -517,7 +517,7 @@ def _dependencies(
     reader: Any = None,
     client_factory: Any = None,
     evidence_root: Path | None = None,
-) -> canary._CompositionDependencies:
+) -> live_agent._CompositionDependencies:
     def build(build_spec: Any) -> _FakeSession | None:
         if session is None:
             return None
@@ -531,7 +531,7 @@ def _dependencies(
     def default_client_factory(**_kwargs: Any) -> Any:
         return _RawClient(_observe_desktop_response())
 
-    return canary._CompositionDependencies(
+    return live_agent._CompositionDependencies(
         wall_clock=lambda: NOW_MS / 1000.0,
         monotonic=lambda: 10.0,
         target_reader=reader or (lambda _hwnd: _facts()),
@@ -568,17 +568,17 @@ def test_live_target_reader_uses_visible_dwm_bounds_for_maximized_window(
         lambda _hwnd: (1, PID),
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "_process_executable_identity",
-        lambda _pid: r"c:\apps\canary.exe",
+        lambda _pid: r"c:\apps\live_agent.exe",
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "window_region",
         lambda _hwnd: Region(0, 0, 1920, 1040),
     )
 
-    facts = canary._read_win32_target(HWND)
+    facts = live_agent._read_win32_target(HWND)
 
     assert facts is not None
     assert facts.region == (0, 0, 1920, 1040)
@@ -603,22 +603,22 @@ def test_live_target_reader_clips_invisible_maximized_resize_border(
         lambda _hwnd: (1, PID),
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "_process_executable_identity",
-        lambda _pid: r"c:\apps\canary.exe",
+        lambda _pid: r"c:\apps\live_agent.exe",
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "window_region",
         lambda _hwnd: Region(-10, 0, 1940, 1040),
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "virtual_screen_region",
         lambda: Region(0, 0, 1920, 1040),
     )
 
-    facts = canary._read_win32_target(HWND)
+    facts = live_agent._read_win32_target(HWND)
 
     assert facts is not None
     assert facts.region == (0, 0, 1920, 1040)
@@ -659,7 +659,7 @@ def test_foreground_reader_selects_only_enabled_owned_modal(
         lambda _hwnd: (1, PID),
     )
 
-    assert canary._read_win32_foreground_root() == dialog
+    assert live_agent._read_win32_foreground_root() == dialog
 
 
 def test_hit_test_keeps_owned_top_level_surface_exact(
@@ -679,12 +679,12 @@ def test_hit_test_keeps_owned_top_level_surface_exact(
         lambda hwnd, flag: HWND if flag == 3 else hwnd,
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "_read_win32_foreground_root",
         lambda: popup,
     )
 
-    assert canary._hit_test_win32_root(300, 400) == popup
+    assert live_agent._hit_test_win32_root(300, 400) == popup
 
 
 @pytest.mark.parametrize(
@@ -708,12 +708,12 @@ def test_hit_test_maps_only_same_process_popup_to_foreground_surface(
         lambda hwnd: (1, popup_pid if hwnd == popup else PID),
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "_read_win32_foreground_root",
         lambda: HWND,
     )
 
-    assert canary._hit_test_win32_root(300, 400) == expected
+    assert live_agent._hit_test_win32_root(300, 400) == expected
 
 
 def test_hit_test_keeps_unowned_same_process_sibling_distinct(
@@ -733,13 +733,13 @@ def test_hit_test_keeps_unowned_same_process_sibling_distinct(
         lambda hwnd, _flag: hwnd,
     )
 
-    assert canary._hit_test_win32_root(300, 400) == sibling
+    assert live_agent._hit_test_win32_root(300, 400) == sibling
 
 
 def test_server_owned_graph_builder_emits_the_exact_live_contract() -> None:
-    graph = canary.build_exact_live_vnext_graph(f"  {GOAL}  ")
+    graph = live_agent.build_exact_live_vnext_graph(f"  {GOAL}  ")
 
-    assert canary._validate_exact_graph(graph) == GOAL
+    assert live_agent._validate_exact_graph(graph) == GOAL
     assert graph.name == GOAL
     assert graph.metadata == {}
     assert graph.variables == {}
@@ -826,7 +826,7 @@ def test_direct_reply_is_terminal_without_desktop_session_or_evidence(
     def forbidden_target(_hwnd: int) -> Any:
         raise AssertionError("direct reply must not inspect a desktop target")
 
-    dependencies = canary._CompositionDependencies(
+    dependencies = live_agent._CompositionDependencies(
         wall_clock=lambda: NOW_MS / 1000.0,
         monotonic=lambda: 10.0,
         target_reader=forbidden_target,
@@ -886,7 +886,7 @@ def test_direct_reply_is_terminal_without_desktop_session_or_evidence(
         event_type.startswith("desktop_lease_")
         for event_type in event_types
     )
-    assert "vnext_canary_turn" not in event_types
+    assert "live_agent_turn" not in event_types
     assert "runtime_evidence_sealed" not in event_types
     done = [event for event in events if event["type"] == "arp_run_done"]
     assert len(done) == 1
@@ -971,10 +971,10 @@ def test_native_provider_protocols_cross_deadline_boundary_and_report_usage(
         "base_url": "",
         "model": model_name,
     }
-    budget = canary._freeze_budget(config)
-    model = canary._freeze_model(config, budget)
+    budget = live_agent._freeze_budget(config)
+    model = live_agent._freeze_model(config, budget)
     transport = _NativeTransport(payload)
-    dependencies = canary._CompositionDependencies(
+    dependencies = live_agent._CompositionDependencies(
         monotonic=lambda: 10.0,
         client_factory=lambda **_kwargs: pytest.fail(
             "native protocols must not construct the OpenAI SDK client"
@@ -985,7 +985,7 @@ def test_native_provider_protocols_cross_deadline_boundary_and_report_usage(
     BUS.add_sink(events.append)
     bundle = None
     try:
-        bundle = canary._build_actor_resources(
+        bundle = live_agent._build_actor_resources(
             run_id=f"run-native-{provider}",
             mission_id=f"mission-native-{provider}",
             budget=budget,
@@ -1067,7 +1067,7 @@ def test_vnext_usage_and_cache_tokens_reach_runtime_and_terminal_event(
     usage = [event for event in events if event["type"] == "agent_usage"]
     assert len(usage) == 1
     assert usage[0]["total"] == expected
-    done = [event for event in events if event["type"] == "vnext_canary_done"]
+    done = [event for event in events if event["type"] == "live_agent_done"]
     assert len(done) == 1
     assert done[0]["model_usage"] == expected
 
@@ -1098,7 +1098,7 @@ def test_cancel_before_initial_actor_turn_closes_model_without_desktop_io(
             stop_event.set()
             return False
 
-    monkeypatch.setattr(canary, "RawDeviceExecutor", forbidden_raw)
+    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
     graph = _graph()
     execution = _prepare(
         graph,
@@ -1146,13 +1146,13 @@ def test_cancel_before_initial_actor_turn_closes_model_without_desktop_io(
         for event in events
         if event["type"]
         in {
-            "vnext_canary_start",
+            "live_agent_start",
             "runtime_evidence_sealed",
-            "vnext_canary_done",
+            "live_agent_done",
         }
     ] == [
-        "vnext_canary_start",
-        "vnext_canary_done",
+        "live_agent_start",
+        "live_agent_done",
     ]
 
 
@@ -1164,7 +1164,7 @@ def test_cancel_before_initial_actor_turn_closes_model_without_desktop_io(
         lambda raw: raw["nodes"][1].update({"timeout_s": 300}),
         lambda raw: raw["policy"].update({"max_node_visits": 2}),
         lambda raw: raw["metadata"].update({"task_contract": {}}),
-        lambda raw: raw.update({"id": "vnext-live-canary-wrong"}),
+        lambda raw: raw.update({"id": "vnext-live-agent-wrong"}),
     ),
 )
 def test_exact_graph_rejects_every_expansion(mutate: Any) -> None:
@@ -1229,7 +1229,7 @@ def test_desktop_lease_target_context_is_exact_and_fresh(
     change(inputs)
 
     with pytest.raises(ValueError, match=match):
-        canary._freeze_prebound_target(
+        live_agent._freeze_prebound_target(
             _graph(),
             inputs,
             dependencies=_dependencies(),
@@ -1257,7 +1257,7 @@ def test_current_target_identity_mismatch_fails_before_session(
             [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
         )
 
-    deps = canary._CompositionDependencies(
+    deps = live_agent._CompositionDependencies(
         wall_clock=lambda: NOW_MS / 1000.0,
         monotonic=lambda: 10.0,
         target_reader=lambda _hwnd: current,
@@ -1269,7 +1269,7 @@ def test_current_target_identity_mismatch_fails_before_session(
         ValueError,
         match=rf"current Electron target mismatch: {mismatch}",
     ):
-        canary._freeze_prebound_target(
+        live_agent._freeze_prebound_target(
             _graph(),
             _inputs(),
             dependencies=deps,
@@ -1288,12 +1288,12 @@ def test_prebound_target_normalizes_client_rect_to_visible_desktop(
         1040,
     ]
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "virtual_screen_region",
         lambda: Region(0, 0, 1920, 1040),
     )
 
-    target = canary._freeze_prebound_target(
+    target = live_agent._freeze_prebound_target(
         _graph(),
         inputs,
         dependencies=_dependencies(
@@ -1305,7 +1305,7 @@ def test_prebound_target_normalizes_client_rect_to_visible_desktop(
 
 
 def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> None:
-    catalog = canary._tool_catalog()
+    catalog = live_agent._tool_catalog()
     schemas = {
         tool.name: tool.schema
         for tool in catalog.tools
@@ -1379,7 +1379,7 @@ def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> No
     }
     assert {
         media[name]
-        for name in canary._APPROVED_ACTIONS
+        for name in live_agent._APPROVED_ACTIONS
     } == {ExecutionMedium.GUI}
     assert media["claim_obligation_done"] is ExecutionMedium.CONTROL
     assert media["blocked"] is ExecutionMedium.CONTROL
@@ -1463,7 +1463,7 @@ def test_exact_capture_rejects_clamping_and_decoded_dimension_mismatch(
     calls: list[tuple[int, int, Region]] = []
     returned = [_jpeg(1120, 280), _jpeg(1119, 280)]
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "virtual_screen_region",
         lambda: Region(0, 0, 3000, 1600),
     )
@@ -1478,20 +1478,20 @@ def test_exact_capture_rejects_clamping_and_decoded_dimension_mismatch(
         return returned.pop(0)
 
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "capture_window_jpeg_b64",
         capture,
     )
     visible = Region(100, 120, 2240, 560)
-    good = canary._capture_exact_target_jpeg(HWND, region=visible)
+    good = live_agent._capture_exact_target_jpeg(HWND, region=visible)
     assert good
-    assert canary._jpeg_dimensions(good) == (1120, 280)
+    assert live_agent._jpeg_dimensions(good) == (1120, 280)
     assert calls == [(HWND, 1120, visible)]
 
-    assert canary._capture_exact_target_jpeg(HWND, region=visible) == ""
+    assert live_agent._capture_exact_target_jpeg(HWND, region=visible) == ""
     assert calls[-1] == (HWND, 1120, visible)
     assert (
-        canary._capture_exact_target_jpeg(
+        live_agent._capture_exact_target_jpeg(
             HWND,
             region=Region(-1, 120, 640, 480),
         )
@@ -1544,9 +1544,9 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     assert session.closed is True
     assert len(snapshot["evidence"]) == 1
     assert snapshot["evidence"][0]["verified"] is True
-    starts = [item for item in events if item["type"] == "vnext_canary_start"]
-    done = [item for item in events if item["type"] == "vnext_canary_done"]
-    turns = [item for item in events if item["type"] == "vnext_canary_turn"]
+    starts = [item for item in events if item["type"] == "live_agent_start"]
+    done = [item for item in events if item["type"] == "live_agent_done"]
+    turns = [item for item in events if item["type"] == "live_agent_turn"]
     assert len(starts) == len(done) == 1
     assert len(turns) == 4
     assert turns[-2]["status"] == "verification_recorded"
@@ -1565,7 +1565,7 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
         "desktop_lease_bound"
     )
     assert event_types.index("desktop_lease_bound") < event_types.index(
-        "vnext_canary_turn"
+        "live_agent_turn"
     )
 
 
@@ -1603,7 +1603,7 @@ def test_handler_recovers_from_one_invalid_proposal_without_prompt_repair() -> N
     assert snapshot["result"]["turns_used"] == 2
     assert session.calls == 2
     turns = [
-        item for item in events if item["type"] == "vnext_canary_turn"
+        item for item in events if item["type"] == "live_agent_turn"
     ]
     assert turns[0]["status"] == "invalid_proposal"
     assert turns[0]["recovery"] == {
@@ -1647,7 +1647,7 @@ def test_handler_stops_after_two_consecutive_invalid_proposals() -> None:
     assert session.calls == 2
     assert session.closed is True
     turns = [
-        item for item in events if item["type"] == "vnext_canary_turn"
+        item for item in events if item["type"] == "live_agent_turn"
     ]
     assert [item["recovery"]["available"] for item in turns] == [
         True,
@@ -1711,7 +1711,7 @@ def test_handler_redecides_once_after_actor_transport_error() -> None:
     assert snapshot["result"]["turns_used"] == 2
     assert session.calls == 2
     turns = [
-        item for item in events if item["type"] == "vnext_canary_turn"
+        item for item in events if item["type"] == "live_agent_turn"
     ]
     assert turns[0]["status"] == "actor_error"
     assert turns[0]["recovery"] == {
@@ -1753,7 +1753,7 @@ def test_handler_preserves_second_consecutive_actor_error_as_terminal() -> None:
     assert snapshot["error"] == "vNext Runtime returned actor_error"
     assert session.calls == 2
     turns = [
-        item for item in events if item["type"] == "vnext_canary_turn"
+        item for item in events if item["type"] == "live_agent_turn"
     ]
     assert [item["recovery"]["available"] for item in turns] == [
         True,
@@ -1840,7 +1840,7 @@ def test_verified_result_survives_unavailable_diagnostic_summary(
         session.frame_epoch = build_spec.target.captured_at_ms
         return session
 
-    monkeypatch.setattr(canary, "_build_live_session", build)
+    monkeypatch.setattr(live_agent, "_build_live_session", build)
     manager = ArpRunManager()
     execution = _prepare(
         _graph(),
@@ -1859,7 +1859,7 @@ def test_verified_result_survives_unavailable_diagnostic_summary(
 
 
 def test_product_failure_detail_is_typed_status_only() -> None:
-    assert canary._public_runtime_detail(
+    assert live_agent._public_runtime_detail(
         RuntimeStatus.STATE_REJECTED
     ) == (
         "vNext Runtime returned state_rejected"
@@ -1868,13 +1868,13 @@ def test_product_failure_detail_is_typed_status_only() -> None:
 
 def test_public_turn_projection_omits_private_failure_feedback() -> None:
     sentinel = "PRIVATE-SCREEN-SENTINEL"
-    target = canary._freeze_prebound_target(
+    target = live_agent._freeze_prebound_target(
         _graph(),
         _inputs(),
         dependencies=_dependencies(),
     )
 
-    projected = canary._public_turn_snapshot(
+    projected = live_agent._public_turn_snapshot(
         {
             "mission_revision": 3,
             "mission_status": MissionStatus.RUNNING.value,
@@ -1896,7 +1896,7 @@ def test_public_turn_projection_omits_private_failure_feedback() -> None:
 
 
 def test_completion_projection_follows_current_workspace_target() -> None:
-    target = canary._freeze_prebound_target(
+    target = live_agent._freeze_prebound_target(
         _graph(),
         _inputs(),
         dependencies=_dependencies(),
@@ -1928,14 +1928,14 @@ def test_completion_projection_follows_current_workspace_target() -> None:
     }
 
     assert (
-        canary._completion_binding_error(
+        live_agent._completion_binding_error(
             source,
             mission_id="mission-current-target",
             run_id="run-current-target",
         )
         is None
     )
-    projected = canary._public_completion_snapshot(
+    projected = live_agent._public_completion_snapshot(
         source,
         mission_id="mission-current-target",
         run_id="run-current-target",
@@ -1983,7 +1983,7 @@ def test_model_transport_payload_is_absent_from_bus_and_node_result() -> None:
     done = [
         event
         for event in events
-        if event["type"] == "vnext_canary_done"
+        if event["type"] == "live_agent_done"
     ]
     assert len(done) == 1
     assert done[0]["detail"] == "vNext Runtime returned state_rejected"
@@ -2168,7 +2168,7 @@ def test_public_result_source_projects_only_safe_runtime_evidence(
         "journal_head_sha256": "a" * 64,
         "journal_event_count": 9,
         "report_sha256": "b" * 64,
-        "audit_locator": canary._runtime_evidence_audit_locator(
+        "audit_locator": live_agent._runtime_evidence_audit_locator(
             session.mission_id,
             session.run_id,
         ),
@@ -2180,7 +2180,7 @@ def test_public_result_source_projects_only_safe_runtime_evidence(
     done = [
         event
         for event in events
-        if event["type"] == "vnext_canary_done"
+        if event["type"] == "live_agent_done"
     ]
     assert len(done) == 1
     assert done[0]["runtime_evidence"] == summary
@@ -2224,7 +2224,7 @@ def test_raw_receipt_trace_projects_fixed_safe_summary(
     BUS.add_sink(events.append)
     try:
         recorder.start(run_id)
-        canary._RawReceiptTrace().record(
+        live_agent._RawReceiptTrace().record(
             RawActionReceipt(
                 action="scroll",
                 outcome=MutationOutcome.APPLIED,
@@ -2322,7 +2322,7 @@ def test_public_runtime_evidence_summary_requires_exact_explicit_scope(
         "report_status": "complete",
     }
 
-    summary = canary._public_runtime_evidence_summary(
+    summary = live_agent._public_runtime_evidence_summary(
         anchor,
         mission_id="mission-private",
         run_id="run-private",
@@ -2334,7 +2334,7 @@ def test_public_runtime_evidence_summary_requires_exact_explicit_scope(
         "journal_head_sha256": None,
         "journal_event_count": 0,
         "report_sha256": None,
-        "audit_locator": canary._runtime_evidence_audit_locator(
+        "audit_locator": live_agent._runtime_evidence_audit_locator(
             "mission-private",
             "run-private",
         ),
@@ -2384,7 +2384,7 @@ def test_invalid_completion_binding_is_non_success_before_done_event(
     assert result["evidence"] == []
     done = [
         event for event in events
-        if event["type"] == "vnext_canary_done"
+        if event["type"] == "live_agent_done"
     ]
     assert len(done) == 1
     assert done[0]["status"] == RuntimeStatus.STATE_REJECTED.value
@@ -2422,7 +2422,7 @@ def test_pause_invalidates_actor_frame_but_not_atomic_post_reconcile_frame() -> 
         binding_id="binding-pause",
         hwnd=HWND,
         process_id=PID,
-        executable_identity=r"c:\apps\canary.exe",
+        executable_identity=r"c:\apps\live_agent.exe",
         title_snapshot="Canary Target",
         established_by_evidence_ref=target_ref.id,
         epoch=7,
@@ -2473,12 +2473,12 @@ def test_pause_invalidates_actor_frame_but_not_atomic_post_reconcile_frame() -> 
         frame_ref(first, CURRENT_FRAME_EVIDENCE_KIND, "e-current-pause")
     )
     pause = type("_Pause", (), {"paused": True})()
-    state = canary._LiveRuntimeState(
+    state = live_agent._LiveRuntimeState(
         reducer=reducer,
         registry=registry,
         binding=binding,
         target_evidence=target_ref,
-        target_probe=canary._BoundTargetProbe(
+        target_probe=live_agent._BoundTargetProbe(
             _facts(),
             reader=lambda _hwnd: _facts(),
             hit_test_root=lambda _x, _y: HWND,
@@ -2530,7 +2530,7 @@ def test_goal_admission_audit_is_validated_without_runtime_policy() -> None:
         },
     }
 
-    assert canary._validate_goal_admission(context, goal=GOAL) is None
+    assert live_agent._validate_goal_admission(context, goal=GOAL) is None
 
 
 class _RawClient:
@@ -2715,22 +2715,22 @@ def _install_safe_backends(
         raise AssertionError("unexpected fake desktop primitive")
 
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "ADMITTED_PHYSICAL_CLICK_BACKEND",
         AdmittedPhysicalClickBackend(click),
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "ADMITTED_PHYSICAL_SCROLL_BACKEND",
         AdmittedPhysicalScrollBackend(unexpected),
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND",
         AdmittedPhysicalTypeTextBackend(unexpected),
     )
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "ADMITTED_PHYSICAL_HOTKEY_BACKEND",
         AdmittedPhysicalHotkeyBackend(unexpected),
     )
@@ -2753,7 +2753,7 @@ def _real_session_with_captures(
     capture_values = list(images)
 
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "virtual_screen_region",
         lambda: Region(0, 0, 1920, 1080),
     )
@@ -2764,14 +2764,14 @@ def _real_session_with_captures(
         max_side: int,
         region: Region,
     ) -> str:
-        assert max_side == canary._MAX_SUBMITTED_SIDE
+        assert max_side == live_agent._MAX_SUBMITTED_SIDE
         assert region == Region(*REGION)
         if not capture_values:
             raise AssertionError("unexpected extra capture")
         return capture_values.pop(0)
 
     monkeypatch.setattr(
-        canary,
+        live_agent,
         "capture_window_jpeg_b64",
         capture,
     )
@@ -2788,7 +2788,7 @@ def _real_session_with_captures(
         factory_calls.append(kwargs)
         return client
 
-    deps = canary._CompositionDependencies(
+    deps = live_agent._CompositionDependencies(
         wall_clock=lambda: NOW_MS / 1000.0,
         monotonic=lambda: clock[0],
         target_reader=(
@@ -2805,9 +2805,9 @@ def _real_session_with_captures(
         runtime_evidence_root=evidence_root,
     )
     graph = _graph()
-    budget = canary._freeze_budget(_config())
-    model = canary._freeze_model(_config(), budget)
-    actor_bundle = canary._build_actor_resources(
+    budget = live_agent._freeze_budget(_config())
+    model = live_agent._freeze_model(_config(), budget)
+    actor_bundle = live_agent._build_actor_resources(
         run_id="arp-test-live-frames",
         mission_id="vnext-mission-test-live-frames",
         budget=budget,
@@ -2815,12 +2815,12 @@ def _real_session_with_captures(
         dependencies=deps,
         deadline=lambda: deadline,
     )
-    build = canary._SessionBuild(
+    build = live_agent._SessionBuild(
         graph=graph,
         goal=GOAL,
         run_id="arp-test-live-frames",
         mission_id="vnext-mission-test-live-frames",
-        target=canary._freeze_prebound_target(
+        target=live_agent._freeze_prebound_target(
             graph,
             _inputs(),
             dependencies=deps,
@@ -2833,7 +2833,7 @@ def _real_session_with_captures(
         pause_controller=None,
     )
     return (
-        canary._build_live_session(build),
+        live_agent._build_live_session(build),
         raw_calls,
         factory_calls,
     )
@@ -2881,7 +2881,7 @@ def test_fresh_observation_is_auditable_without_pixel_data(
         if item["type"] == "vnext_model_call"
     ]
     assert [item["model_role"] for item in model_events] == [
-        canary.VISUAL_ACTOR_MODEL_ROLE,
+        live_agent.VISUAL_ACTOR_MODEL_ROLE,
     ]
     assert len(
         {item["request_fingerprint"] for item in model_events}
@@ -2952,20 +2952,20 @@ def test_completed_click_adopts_stable_cross_process_foreground_next_turn(
     next_hwnd = HWND + 50
     foreground = [HWND]
 
-    def reader(hwnd: int) -> canary._TargetFacts | None:
+    def reader(hwnd: int) -> live_agent._TargetFacts | None:
         if hwnd == HWND:
-            return canary._TargetFacts(
+            return live_agent._TargetFacts(
                 hwnd=HWND,
                 root_hwnd=HWND,
                 process_id=PID,
-                executable_identity=r"c:\apps\canary.exe",
+                executable_identity=r"c:\apps\live_agent.exe",
                 title="Canary Target",
                 class_name="CanaryWindow",
                 region=REGION,
                 foreground_root_hwnd=foreground[0],
             )
         if hwnd == next_hwnd:
-            return canary._TargetFacts(
+            return live_agent._TargetFacts(
                 hwnd=next_hwnd,
                 root_hwnd=next_hwnd,
                 process_id=PID + 1,
@@ -3324,19 +3324,19 @@ def test_real_composition_scroll_keeps_public_summary_private_and_evidence_exact
     from winpilot.action import executor as action_executor
 
     assert (
-        canary.ADMITTED_PHYSICAL_CLICK_BACKEND
+        live_agent.ADMITTED_PHYSICAL_CLICK_BACKEND
         is action_executor.ADMITTED_PHYSICAL_CLICK_BACKEND
     )
     assert (
-        canary.ADMITTED_PHYSICAL_SCROLL_BACKEND
+        live_agent.ADMITTED_PHYSICAL_SCROLL_BACKEND
         is action_executor.ADMITTED_PHYSICAL_SCROLL_BACKEND
     )
     assert (
-        canary.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND
+        live_agent.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND
         is action_executor.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND
     )
     assert (
-        canary.ADMITTED_PHYSICAL_HOTKEY_BACKEND
+        live_agent.ADMITTED_PHYSICAL_HOTKEY_BACKEND
         is action_executor.ADMITTED_PHYSICAL_HOTKEY_BACKEND
     )
 
@@ -3503,25 +3503,25 @@ def test_real_composition_scroll_keeps_public_summary_private_and_evidence_exact
 
 
 def _composition_build(
-    dependencies: canary._CompositionDependencies,
+    dependencies: live_agent._CompositionDependencies,
     *,
     run_id: str,
     mission_id: str,
-) -> canary._SessionBuild:
+) -> live_agent._SessionBuild:
     graph = _graph()
-    budget = canary._freeze_budget(_config())
-    return canary._SessionBuild(
+    budget = live_agent._freeze_budget(_config())
+    return live_agent._SessionBuild(
         graph=graph,
         goal=GOAL,
         run_id=run_id,
         mission_id=mission_id,
-        target=canary._freeze_prebound_target(
+        target=live_agent._freeze_prebound_target(
             graph,
             _inputs(),
             dependencies=dependencies,
         ),
         budget=budget,
-        model=canary._freeze_model(_config(), budget),
+        model=live_agent._freeze_model(_config(), budget),
         dependencies=dependencies,
         deadline=lambda: 310.0,
         actor_bundle=_StubActorBundle(),
@@ -3532,7 +3532,7 @@ def _composition_build(
 def _assert_single_incomplete_anchor(
     events: list[dict[str, Any]],
     root: Path,
-    build: canary._SessionBuild,
+    build: live_agent._SessionBuild,
 ) -> dict[str, Any]:
     sealed = [
         event
@@ -3580,7 +3580,7 @@ def test_evidence_setup_failure_precedes_models_and_raw_device(
         client_calls.append(kwargs)
         return _RawClient()
 
-    monkeypatch.setattr(canary, "RawDeviceExecutor", forbidden_raw)
+    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
     monkeypatch.setattr(
         EvidenceRegistry,
         "close",
@@ -3591,19 +3591,19 @@ def test_evidence_setup_failure_precedes_models_and_raw_device(
         evidence_root=tmp_path,
     )
     graph = _graph()
-    budget = canary._freeze_budget(_config())
-    build = canary._SessionBuild(
+    budget = live_agent._freeze_budget(_config())
+    build = live_agent._SessionBuild(
         graph=graph,
         goal=GOAL,
         run_id=run_id,
         mission_id="vnext-mission-evidence-setup-failure",
-        target=canary._freeze_prebound_target(
+        target=live_agent._freeze_prebound_target(
             graph,
             _inputs(),
             dependencies=deps,
         ),
         budget=budget,
-        model=canary._freeze_model(_config(), budget),
+        model=live_agent._freeze_model(_config(), budget),
         dependencies=deps,
         deadline=lambda: 310.0,
         actor_bundle=_StubActorBundle(),
@@ -3614,7 +3614,7 @@ def test_evidence_setup_failure_precedes_models_and_raw_device(
         RuntimeEvidenceJournalError,
         match="exclusively created",
     ):
-        canary._build_live_session(build)
+        live_agent._build_live_session(build)
 
     assert raw_constructions == []
     assert client_calls == []
@@ -3647,8 +3647,8 @@ def test_registry_setup_failure_seals_unique_incomplete_evidence_once(
         client_calls.append(kwargs)
         return _RawClient()
 
-    monkeypatch.setattr(canary, "EvidenceRegistry", failed_registry)
-    monkeypatch.setattr(canary, "RawDeviceExecutor", forbidden_raw)
+    monkeypatch.setattr(live_agent, "EvidenceRegistry", failed_registry)
+    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
     monkeypatch.setattr(
         RuntimeEvidenceJournal,
         "close",
@@ -3659,19 +3659,19 @@ def test_registry_setup_failure_seals_unique_incomplete_evidence_once(
         evidence_root=tmp_path,
     )
     graph = _graph()
-    budget = canary._freeze_budget(_config())
-    build = canary._SessionBuild(
+    budget = live_agent._freeze_budget(_config())
+    build = live_agent._SessionBuild(
         graph=graph,
         goal=GOAL,
         run_id=run_id,
         mission_id=mission_id,
-        target=canary._freeze_prebound_target(
+        target=live_agent._freeze_prebound_target(
             graph,
             _inputs(),
             dependencies=deps,
         ),
         budget=budget,
-        model=canary._freeze_model(_config(), budget),
+        model=live_agent._freeze_model(_config(), budget),
         dependencies=deps,
         deadline=lambda: 310.0,
         actor_bundle=_StubActorBundle(),
@@ -3684,7 +3684,7 @@ def test_registry_setup_failure_seals_unique_incomplete_evidence_once(
             RuntimeError,
             match="synthetic registry setup failure",
         ):
-            canary._build_live_session(build)
+            live_agent._build_live_session(build)
     finally:
         BUS.remove_sink(events.append)
 
@@ -3742,26 +3742,26 @@ def test_pre_controller_composition_failure_seals_evidence_and_closes_registry_o
         "close",
         tracked_registry_close,
     )
-    monkeypatch.setattr(canary, "MissionReducer", failed_reducer)
-    monkeypatch.setattr(canary, "RawDeviceExecutor", forbidden_raw)
+    monkeypatch.setattr(live_agent, "MissionReducer", failed_reducer)
+    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
     deps = _dependencies(
         client_factory=client_factory,
         evidence_root=tmp_path,
     )
     graph = _graph()
-    budget = canary._freeze_budget(_config())
-    build = canary._SessionBuild(
+    budget = live_agent._freeze_budget(_config())
+    build = live_agent._SessionBuild(
         graph=graph,
         goal=GOAL,
         run_id="arp-test-pre-evidence-failure",
         mission_id="vnext-mission-pre-evidence-failure",
-        target=canary._freeze_prebound_target(
+        target=live_agent._freeze_prebound_target(
             graph,
             _inputs(),
             dependencies=deps,
         ),
         budget=budget,
-        model=canary._freeze_model(_config(), budget),
+        model=live_agent._freeze_model(_config(), budget),
         dependencies=deps,
         deadline=lambda: 310.0,
         actor_bundle=_StubActorBundle(),
@@ -3775,7 +3775,7 @@ def test_pre_controller_composition_failure_seals_evidence_and_closes_registry_o
             RuntimeError,
             match="synthetic reducer setup failure",
         ):
-            canary._build_live_session(build)
+            live_agent._build_live_session(build)
     finally:
         BUS.remove_sink(events.append)
 
@@ -3824,7 +3824,7 @@ def test_run_bound_lease_rejects_target_changed_after_actor_request(
         clients.append(client)
         return client
 
-    dependencies = canary._CompositionDependencies(
+    dependencies = live_agent._CompositionDependencies(
         wall_clock=lambda: NOW_MS / 1000.0,
         monotonic=lambda: 10.0,
         target_reader=lambda _hwnd: current_target[0],
@@ -3845,7 +3845,7 @@ def test_run_bound_lease_rejects_target_changed_after_actor_request(
     lease = execution.runtime_state["_desktop_lease"]
     results: list[Any] = []
     events: list[dict[str, Any]] = []
-    monkeypatch.setattr(canary, "RawDeviceExecutor", forbidden_raw)
+    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
 
     def invoke_handler() -> None:
         results.append(
@@ -3868,7 +3868,7 @@ def test_run_bound_lease_rejects_target_changed_after_actor_request(
         else:
             pytest.fail("Actor did not request the desktop lease")
         with pytest.raises(
-            canary.DesktopLeaseError,
+            live_agent.DesktopLeaseError,
             match="process_id",
         ):
             lease.bind(
@@ -3925,7 +3925,7 @@ def test_expired_target_before_runtime_composition_seals_incomplete_evidence(
         client_calls.append(kwargs)
         raise AssertionError("model client must not be constructed")
 
-    dependencies = canary._CompositionDependencies(
+    dependencies = live_agent._CompositionDependencies(
         wall_clock=lambda: clock[0],
         monotonic=lambda: 10.0,
         target_reader=lambda _hwnd: _facts(),
@@ -3938,16 +3938,16 @@ def test_expired_target_before_runtime_composition_seals_incomplete_evidence(
         run_id="arp-test-expired-target-after-start",
         mission_id="vnext-mission-expired-target-after-start",
     )
-    clock[0] += (canary._TARGET_MAX_AGE_MS + 1) / 1000.0
+    clock[0] += (live_agent._TARGET_MAX_AGE_MS + 1) / 1000.0
     events: list[dict[str, Any]] = []
-    monkeypatch.setattr(canary, "RawDeviceExecutor", forbidden_raw)
+    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
     BUS.add_sink(events.append)
     try:
         with pytest.raises(
             RuntimeError,
             match="target expired before vNext execution",
         ):
-            canary._build_live_session(build)
+            live_agent._build_live_session(build)
     finally:
         BUS.remove_sink(events.append)
 
@@ -3989,7 +3989,7 @@ def test_controller_setup_failure_seals_and_closes_all_created_owners_once(
         original_permit_close(permits)
 
     _install_safe_backends(monkeypatch, raw_calls)
-    monkeypatch.setattr(canary, "AtomicDesktopAdapter", failed_controller)
+    monkeypatch.setattr(live_agent, "AtomicDesktopAdapter", failed_controller)
     monkeypatch.setattr(
         RuntimeEvidenceJournal,
         "close",
@@ -4021,7 +4021,7 @@ def test_controller_setup_failure_seals_and_closes_all_created_owners_once(
             RuntimeError,
             match="synthetic controller setup failure",
         ):
-            canary._build_live_session(build)
+            live_agent._build_live_session(build)
     finally:
         BUS.remove_sink(events.append)
 
@@ -4080,9 +4080,9 @@ def test_model_runtime_session_setup_failure_seals_and_closes_once(
 
     _install_safe_backends(monkeypatch, raw_calls)
     if failure_stage == "mission_runtime":
-        monkeypatch.setattr(canary, "MissionRuntime", failed_owner)
+        monkeypatch.setattr(live_agent, "MissionRuntime", failed_owner)
     elif failure_stage == "live_session":
-        monkeypatch.setattr(canary, "_LiveCanarySession", failed_owner)
+        monkeypatch.setattr(live_agent, "_LiveAgentSession", failed_owner)
     monkeypatch.setattr(
         RuntimeEvidenceJournal,
         "close",
@@ -4111,7 +4111,7 @@ def test_model_runtime_session_setup_failure_seals_and_closes_once(
     BUS.add_sink(events.append)
     try:
         with pytest.raises(RuntimeError, match=error_text):
-            canary._build_live_session(build)
+            live_agent._build_live_session(build)
     finally:
         BUS.remove_sink(events.append)
 
@@ -4146,14 +4146,14 @@ def test_real_composition_builds_zero_retry_actor_and_closes(
         evidence_root=tmp_path,
     )
     graph = _graph()
-    target = canary._freeze_prebound_target(
+    target = live_agent._freeze_prebound_target(
         graph,
         _inputs(),
         dependencies=deps,
     )
-    budget = canary._freeze_budget(_config())
-    model = canary._freeze_model(_config(), budget)
-    actor_bundle = canary._build_actor_resources(
+    budget = live_agent._freeze_budget(_config())
+    model = live_agent._freeze_model(_config(), budget)
+    actor_bundle = live_agent._build_actor_resources(
         run_id="arp-test-live-composition",
         mission_id="vnext-mission-test-live-composition",
         budget=budget,
@@ -4161,7 +4161,7 @@ def test_real_composition_builds_zero_retry_actor_and_closes(
         dependencies=deps,
         deadline=lambda: 310.0,
     )
-    build = canary._SessionBuild(
+    build = live_agent._SessionBuild(
         graph=graph,
         goal=GOAL,
         run_id="arp-test-live-composition",
@@ -4178,7 +4178,7 @@ def test_real_composition_builds_zero_retry_actor_and_closes(
     events: list[dict[str, Any]] = []
     BUS.add_sink(events.append)
     try:
-        session = canary._build_live_session(build)
+        session = live_agent._build_live_session(build)
 
         assert len(clients) == 1
         assert [item["max_retries"] for item in calls] == [0]
@@ -4263,7 +4263,7 @@ def test_session_rejects_mismatched_runtime_evidence_resources(
             ValueError,
             match="must share one run scope",
         ):
-            canary._LiveCanarySession(
+            live_agent._LiveAgentSession(
                 runtime=object(),
                 reducer=object(),
                 registry=object(),
@@ -4292,7 +4292,7 @@ def test_evidence_rebuild_failure_is_diagnostic_and_closes_resources(
     permits = MutationPermitAuthority(plane.mission_id, plane.run_id)
     registry = EvidenceRegistry(plane.mission_id, plane.run_id)
     actor_client = _RawClient()
-    session = canary._LiveCanarySession(
+    session = live_agent._LiveAgentSession(
         runtime=object(),
         reducer=object(),
         registry=registry,
@@ -4364,7 +4364,7 @@ def test_verified_session_keeps_success_on_incomplete_evidence_report(
     reducer = SimpleNamespace(
         projection=SimpleNamespace(status=MissionStatus.VERIFIED)
     )
-    session = canary._LiveCanarySession(
+    session = live_agent._LiveAgentSession(
         runtime=object(),
         reducer=reducer,
         registry=registry,
@@ -4414,7 +4414,7 @@ def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
     permits = CloseResource("permits", fail=True)
     registry = CloseResource("registry", fail=False)
     actor_client = _RawClient(close_error="actor close unavailable")
-    session = canary._LiveCanarySession(
+    session = live_agent._LiveAgentSession(
         runtime=object(),
         reducer=object(),
         registry=registry,
@@ -4437,7 +4437,7 @@ def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
 
 
 def test_composition_root_has_no_forbidden_product_imports_or_fallback() -> None:
-    source = Path(canary.__file__).read_text(encoding="utf-8")
+    source = Path(live_agent.__file__).read_text(encoding="utf-8")
 
     assert "default_handlers" not in source
     assert "CapabilityPlanner" not in source

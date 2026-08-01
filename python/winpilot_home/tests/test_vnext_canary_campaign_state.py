@@ -100,7 +100,7 @@ def _manifest_kwargs() -> dict[str, Any]:
                 "model": "visual-model",
             },
             "vnext": {
-                "live_canary_enabled": True,
+                "live_agent_enabled": True,
                 "max_turns": 8,
                 "max_runtime_s": 60,
                 "max_model_calls": 8,

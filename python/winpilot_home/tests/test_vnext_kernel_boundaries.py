@@ -19,9 +19,9 @@ RUNTIME_ROOT = VNEXT_ROOT / "runtime"
 MODEL_ROLES_ROOT = VNEXT_ROOT / "model_roles"
 EVIDENCE_PLANE_ROOT = VNEXT_ROOT / "evidence_plane"
 LIVE_COMPOSITION_ROOT = (
-    PACKAGE_ROOT / "orchestrator" / "vnext_live_canary.py"
+    PACKAGE_ROOT / "orchestrator" / "live_agent.py"
 )
-LIVE_COMPOSITION_MODULE = "winpilot.orchestrator.vnext_live_canary"
+LIVE_COMPOSITION_MODULE = "winpilot.orchestrator.live_agent"
 LIVE_COMPOSITION_VNEXT_MODULES = (
     "winpilot.vnext.capabilities",
     "winpilot.vnext.desktop_adapter",
@@ -563,7 +563,7 @@ def test_only_one_composition_root_can_reach_live_vnext_by_import() -> None:
         pytest.param(
             "load = __import__\n"
             "module = 'winpilot.orchestrator.' + "
-            "'vnext_live_canary'\n"
+            "'live_agent'\n"
             "load(module)",
             id="dynamic-composition-root",
         ),

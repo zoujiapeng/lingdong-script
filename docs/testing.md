@@ -1,6 +1,6 @@
 # GUI Agent 端到端测试规范
 
-Implementation note: current live vNext keeps one original goal, one
+Implementation note: the current primary `LiveVisualActor` path keeps one original goal, one
 `LiveVisualActor`, one visual execution line and eight generic GUI/control
 tools. Historical `observe.image_region` and persistent `wait` descriptions
 belong to Legacy or frozen experiments; they are not current client-E2E
@@ -27,7 +27,18 @@ invariants and client-entry contract.
 
 ## 当前基线
 
-2026-07-31 当前精确源码已复验一组真实消费软件。当前源码仍未完成 11 个真实
+本轮开始时最近完成本地发布回归的固定产品基线是 `4f93672`：Python
+`3464 passed, 13 skipped, 1 warning`、renderer `243 passed`，TypeScript typecheck
+通过。该提交的 GitHub Actions run `30663041917` 因 billing/spending limit 在两个 job
+均为零步骤时终止；它只能记为 infrastructure blocked，不能记为 Actions 已绿，也不能
+把本地结果冒充远端检查。
+
+2026-08-01 产品 owner/config 从历史 canary 名称迁移为 `live_agent` 后，当前精确源码
+本地全量复验为 Python `3468 passed, 13 skipped, 1 warning`、renderer `243 passed`，
+TypeScript typecheck 通过；可见 Electron 的 fresh/history 双臂、6 轮纯文本聊天与随后
+connector→Notepad 任务也全部通过。该记录仍是本地证据，不代表 GitHub Actions 绿色。
+
+2026-07-31 受控矩阵与原生探针记录已复验一组真实消费软件。当前源码仍未完成 11 个真实
 任务和混合长任务的全量验收；每个结果按它实际拥有的 oracle 单独记账：
 
 | 场景 | 当前证据 | 结论 |
@@ -389,6 +400,7 @@ npm run build:all
 - 模型 wire 改动需对应真实 provider smoke，缺少 credential 时必须明确记为未验证；
 - 改变真实应用逻辑时，对应真实任务 E2E 或明确记录未验证；
 - 失败恢复相关改动时，至少一个“新帧后重新判断且未隐式切辅助通道”的负向场景；
-- GitHub Actions 通过。
+- GitHub Actions 必须实际启动且通过；billing、配额或 runner 导致的零步骤终止只能
+  记为 infrastructure blocked，本地回归不能冒充 Actions 通过。
 
 单次成功不能换算成成功率。只有固定环境、固定协议、多 seed、多次重复和外部 ground truth 才能报告统计指标。

@@ -327,7 +327,7 @@ def test_runtime_status_retries_a_transient_managed_endpoint_timeout(
                     "metadata": {
                         "run_id": "arp-test",
                         "runtime_version": "vnext",
-                        "graph_id": "vnext-live-canary-test",
+                        "graph_id": "vnext-live-agent-test",
                         "private": "must-not-project",
                     },
                     "error": "",
@@ -382,7 +382,7 @@ def test_runtime_status_retries_a_transient_managed_endpoint_timeout(
             "metadata": {
                 "run_id": "arp-test",
                 "runtime_version": "vnext",
-                "graph_id": "vnext-live-canary-test",
+                "graph_id": "vnext-live-agent-test",
             },
             "error": "",
         }
@@ -1101,12 +1101,12 @@ def test_vnext_execution_evidence_projects_raw_receipts_and_terminal_event(
                     "input_completed": False,
                 },
                 {
-                    "type": "vnext_canary_turn",
+                    "type": "live_agent_turn",
                     "proposal_kind": "claim_obligation_done",
                     "status": "mission_verified",
                 },
                 {
-                    "type": "vnext_canary_done",
+                    "type": "live_agent_done",
                     "status": "mission_verified",
                 },
             )
@@ -1127,7 +1127,7 @@ def test_vnext_execution_evidence_projects_raw_receipts_and_terminal_event(
         "hotkey",
         "claim_obligation_done",
     ]
-    assert evidence["terminal_events"] == ["vnext_canary_done"]
+    assert evidence["terminal_events"] == ["live_agent_done"]
     assert evidence["parse_errors"] == []
 
 
@@ -1149,7 +1149,7 @@ def test_gui_execution_trace_accepts_only_vnext_os_input_receipts(
                     "no_legacy_fallback": True,
                 },
                 {
-                    "type": "vnext_canary_start",
+                    "type": "live_agent_start",
                     "run_id": "arp-gui",
                     "mission_id": "mission-gui",
                     "runtime_version": "vnext",
@@ -1222,7 +1222,7 @@ def test_gui_execution_trace_rejects_receipt_from_different_outer_run(
                     "no_legacy_fallback": True,
                 },
                 {
-                    "type": "vnext_canary_start",
+                    "type": "live_agent_start",
                     "run_id": "arp-gui",
                     "mission_id": "mission-gui",
                     "runtime_version": "vnext",
@@ -1277,7 +1277,7 @@ def test_gui_execution_trace_rejects_mismatched_mission_or_task_binding(
                     "no_legacy_fallback": True,
                 },
                 {
-                    "type": "vnext_canary_start",
+                    "type": "live_agent_start",
                     "run_id": "arp-gui",
                     "mission_id": "mission-gui",
                     "runtime_version": "vnext",
