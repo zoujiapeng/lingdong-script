@@ -2097,6 +2097,8 @@ oracle 只接受 `(N,1,4)`；1 个来自 composition 测试未冻结虚拟屏幕
 `1024×768` 把模拟窗口裁小。只在 test-only 层把 Hough 输出统一 reshape 为四列，并显式
 冻结该测试的虚拟屏幕；相关两文件回归 `95 passed`。没有修改 Paint/井字棋产品路径或
 Runtime，也没有为模型适配视觉几何。
+修复提交 `65fdce0` 的后继 Actions run `30688550071` 随后完整通过；frontend 与 Python
+job 都实际执行全部步骤并为 `success`。该绿色证据只绑定精确提交，不是永久 HEAD 声明。
 
 可见 Electron 最终有效报告为
 `output/playwright/live-agent-name-migration-e2e/20260801-142330-history-depth-ab/report.json`。
