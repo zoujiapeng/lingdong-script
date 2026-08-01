@@ -577,6 +577,11 @@ def test_live_target_reader_uses_visible_dwm_bounds_for_maximized_window(
         "window_region",
         lambda _hwnd: Region(0, 0, 1920, 1040),
     )
+    monkeypatch.setattr(
+        live_agent,
+        "virtual_screen_region",
+        lambda: Region(0, 0, 1920, 1080),
+    )
 
     facts = live_agent._read_win32_target(HWND)
 
