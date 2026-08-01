@@ -328,6 +328,47 @@ class DesktopToolMixin:
 
     def _t_screenshot(self, args: dict) -> ToolResult:
         quality = int(args.get("quality", 75))
+        if args.get("managed_artifact") is True:
+            try:
+                store, registry = self._managed_artifacts()
+                if store is None:
+                    return ToolResult(self._fmt({"ok": False, "error": "managed artifact store is unavailable"}))
+                scope = str(args.get("scope") or "screen").strip().casefold()
+                source_hwnd = int(args.get("hwnd") or 0)
+                if scope in {"window", "canvas"} and not source_hwnd:
+                    action_hwnd = getattr(self, "_action_hwnd", None)
+                    source_hwnd = int(action_hwnd() or 0) if callable(action_hwnd) else 0
+                artifact = store.capture_artifact(
+                    scope=scope,
+                    source_hwnd=source_hwnd,
+                    region=args.get("region") if isinstance(args.get("region"), dict) else None,
+                    source_window=str(args.get("source_window") or ""),
+                    purpose=str(args.get("purpose") or "user_output"),
+                    sendable=bool(args.get("sendable", True)),
+                    metadata={"flow_managed_artifact": True},
+                )
+                if registry is not None:
+                    registry.record(
+                        "artifact.current_run_valid",
+                        provider="artifact_store_capture",
+                        verified=True,
+                        artifact_id=artifact.artifact_id,
+                        metadata={"flow_managed_artifact": True, "sha256": artifact.sha256},
+                    )
+                return ToolResult(self._fmt({
+                    "ok": True,
+                    "artifact_id": artifact.artifact_id,
+                    "path": artifact.managed_path,
+                    "managed_path": artifact.managed_path,
+                    "sha256": artifact.sha256,
+                    "mime_type": artifact.mime_type,
+                    "width": artifact.width,
+                    "height": artifact.height,
+                    "size_bytes": artifact.size_bytes,
+                    "scope": artifact.source_scope,
+                }))
+            except Exception as exc:
+                return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
         save_path = str(args.get("path") or "").strip()
         if save_path:
             target = Path(save_path).expanduser()

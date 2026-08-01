@@ -2452,6 +2452,60 @@
   gap: 5px;
 }
 
+.flow-fragment-overlay { z-index: 180; place-items: center; padding: 16px; }
+.flow-fragment-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 68px));
+  overflow: auto;
+  border: 1px solid var(--ld-border, rgba(148, 163, 184, 0.28));
+  border-radius: 16px;
+  background: var(--ld-page-elevated);
+  color: var(--ld-text);
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
+}
+.flow-fragment-dialog > header,
+.flow-fragment-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+}
+.flow-fragment-dialog > header { position: sticky; top: 0; z-index: 1; border-bottom: 1px solid var(--ld-border, rgba(148, 163, 184, 0.2)); background: var(--ld-page-elevated); }
+.flow-fragment-dialog > header > div,
+.flow-fragment-dialog > header span { display: flex; align-items: center; gap: 9px; }
+.flow-fragment-dialog > header span { align-items: flex-start; flex-direction: column; gap: 2px; }
+.flow-fragment-dialog > header small,
+.flow-fragment-note,
+.flow-fragment-preview small { color: var(--ld-text-muted); font-size: 11px; }
+.flow-fragment-dialog > header button { border: 0; background: transparent; color: inherit; cursor: pointer; }
+.flow-fragment-prompt { display: flex; flex-direction: column; gap: 8px; padding: 18px 18px 8px; font-size: 12px; font-weight: 650; }
+.flow-fragment-prompt textarea {
+  min-height: 96px;
+  resize: vertical;
+  border: 1px solid var(--ld-border, #cbd5e1);
+  border-radius: 10px;
+  padding: 11px 12px;
+  background: var(--ld-surface-subtle);
+  color: inherit;
+  font: inherit;
+  line-height: 1.5;
+}
+.flow-fragment-note { margin: 0; padding: 0 18px 12px; line-height: 1.5; }
+.flow-fragment-dialog > .ld-inline-alert { margin: 0 18px 12px; }
+.flow-fragment-preview { margin: 0 18px 8px; padding: 12px; border: 1px solid var(--ld-border, #dbe3ef); border-radius: 10px; background: rgba(99, 102, 241, 0.05); }
+.flow-fragment-preview > div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.flow-fragment-preview ol { margin: 10px 0 0; padding-left: 24px; }
+.flow-fragment-preview li { padding: 4px 0 4px 2px; }
+.flow-fragment-preview li span { margin-right: 8px; }
+.flow-fragment-preview code {
+  display: block;
+  color: var(--ld-text-muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.flow-fragment-dialog > footer { position: sticky; bottom: 0; z-index: 1; justify-content: flex-end; border-top: 1px solid var(--ld-border, rgba(148, 163, 184, 0.2)); background: var(--ld-page-elevated); }
+
 .ld-command-orb {
   position: fixed;
   right: 16px;

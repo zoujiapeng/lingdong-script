@@ -65,6 +65,7 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.mission", "ObligationSpec", None),
     ("winpilot.vnext.mission", "TargetBinding", None),
     ("winpilot.vnext.model_roles", "VISUAL_ACTOR_MODEL_ROLE", None),
+    ("winpilot.vnext.model_roles", "FlowFragmentProposer", None),
     ("winpilot.vnext.model_roles", "LiveVisualActor", None),
     ("winpilot.vnext.model_roles", "VisualActorTurnAdmission", None),
     ("winpilot.vnext.profiling", "ExecutionPolicy", None),

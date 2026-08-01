@@ -52,6 +52,8 @@ describe('Automation IR adapters', () => {
       created: 123,
       conditions: { target_window: { title: 'Demo App' }, login_state: 'ready' },
       evidence: ['final text visible'],
+      export_manifest: { complete: false, partial: true, reasons: ['one omitted action'] },
+      source_runs: ['run-1', 'run-2'],
       vars: { a: '1' },
       steps: [{ tool: 'click', coords: [10, 20] }],
     }, 'air-roundtrip');
@@ -65,6 +67,8 @@ describe('Automation IR adapters', () => {
     expect(wps.target_window).toEqual({ title: 'Demo App' });
     expect(wps.conditions).toEqual({ target_window: { title: 'Demo App' }, login_state: 'ready' });
     expect(wps.evidence).toEqual(['final text visible']);
+    expect(wps.export_manifest).toEqual({ complete: false, partial: true, reasons: ['one omitted action'] });
+    expect(wps.source_runs).toEqual(['run-1', 'run-2']);
     expect(wps.vars).toEqual({ a: '1' });
     expect(wps.steps).toEqual([{ tool: 'click', coords: [10, 20] }]);
   });
@@ -344,6 +348,103 @@ describe('Automation IR adapters', () => {
     });
   });
 
+  it('requires every reachable path to focus a target before spatial action batches', () => {
+    const validate = (nodes: FlowScript['nodes'], edges: FlowScript['edges']) => validateAutomationLocally(
+      automationIrFromFlowScript({
+        meta: { id: 'target-path', name: 'target path', created_at: '', updated_at: '', version: '1.0.0' },
+        nodes,
+        edges,
+        variables: {},
+        settings: { default_delay: 0, error_handling: 'stop', max_retries: 0, retry_delay: 0, log_level: 'info' },
+      }),
+    );
+    const start = { id: 'start', type: 'start' as const, x: 0, y: 0, params: {} };
+    const end = { id: 'end', type: 'end' as const, x: 400, y: 0, params: {} };
+    const click = {
+      id: 'click', type: 'action_batch' as const, x: 200, y: 0,
+      params: { actions: [{ action: 'click', x: 10, y: 20 }] },
+    };
+    const edge = (id: string, from_node: string, to_node: string, from_port = 'output') => ({
+      id, from_node, from_port, to_node, to_port: 'input',
+    });
+
+    const direct = validate(
+      [start, click, end],
+      [edge('e1', 'start', 'click'), edge('e2', 'click', 'end')],
+    );
+    const sameBatch = validate(
+      [
+        start,
+        {
+          ...click,
+          params: { actions: [
+            { action: 'focus_window', title: 'Target' },
+            { action: 'click', x: 10, y: 20 },
+          ] },
+        },
+        end,
+      ],
+      [edge('e1', 'start', 'click'), edge('e2', 'click', 'end')],
+    );
+    const previousBatch = validate(
+      [
+        start,
+        {
+          id: 'focus', type: 'action_batch' as const, x: 100, y: 0,
+          params: { actions: [{ action: 'focus_window', hwnd: 101 }] },
+        },
+        click,
+        end,
+      ],
+      [edge('e1', 'start', 'focus'), edge('e2', 'focus', 'click'), edge('e3', 'click', 'end')],
+    );
+    const lateFocus = validate(
+      [
+        start,
+        {
+          ...click,
+          params: { actions: [
+            { action: 'click', x: 10, y: 20 },
+            { action: 'focus_window', title: 'Target' },
+          ] },
+        },
+        end,
+      ],
+      [edge('e1', 'start', 'click'), edge('e2', 'click', 'end')],
+    );
+    const branched = validate(
+      [
+        start,
+        {
+          id: 'branch', type: 'condition' as const, x: 100, y: 0,
+          params: { condition_type: 'variable_equals', variable_name: 'use_focus', variable_value: 'yes' },
+        },
+        {
+          id: 'focus', type: 'action_batch' as const, x: 200, y: -100,
+          params: { actions: [{ action: 'focus_window', title: 'Target' }] },
+        },
+        { ...click, x: 300 },
+        end,
+      ],
+      [
+        edge('e1', 'start', 'branch'),
+        edge('e2', 'branch', 'focus', 'yes'),
+        edge('e3', 'branch', 'click', 'no'),
+        edge('e4', 'focus', 'click'),
+        edge('e5', 'click', 'end'),
+      ],
+    );
+
+    expect(sameBatch.valid).toBe(true);
+    expect(previousBatch.valid).toBe(true);
+    for (const result of [direct, lateFocus, branched]) {
+      expect(result).toMatchObject({
+        valid: false,
+        errors: expect.arrayContaining([expect.stringContaining('每条可达路径')]),
+      });
+    }
+  });
+
   it('fails local validation for unsupported parameter branches and empty native configs', () => {
     const flow: FlowScript = {
       meta: { id: 'offline-invalid', name: 'offline-invalid', created_at: '', updated_at: '', version: '1.0.0' },
@@ -351,12 +452,24 @@ describe('Automation IR adapters', () => {
         { id: 'start', type: 'start', x: 0, y: 0, params: {} },
         { id: 'legacy', type: 'screenshot', x: 100, y: 0, params: { save_path: 'legacy.png' } },
         { id: 'empty', type: 'action_batch', x: 200, y: 0, params: { actions: [] } },
-        { id: 'end', type: 'end', x: 300, y: 0, params: {} },
+        { id: 'goal', type: 'agent_goal', x: 300, y: 0, params: { goal: '' } },
+        { id: 'text', type: 'click_text', x: 400, y: 0, params: { text: '' } },
+        { id: 'input', type: 'input_text', x: 500, y: 0, params: { text: '', click_before: false } },
+        { id: 'replay', type: 'replay_step', x: 600, y: 0, params: { step: {} } },
+        { id: 'launch', type: 'launch_program', x: 700, y: 0, params: { target: '' } },
+        { id: 'focus', type: 'focus_window', x: 800, y: 0, params: { title: '' } },
+        { id: 'end', type: 'end', x: 900, y: 0, params: {} },
       ],
       edges: [
         { id: 'e1', from_node: 'start', from_port: 'output', to_node: 'legacy', to_port: 'input' },
         { id: 'e2', from_node: 'legacy', from_port: 'output', to_node: 'empty', to_port: 'input' },
-        { id: 'e3', from_node: 'empty', from_port: 'output', to_node: 'end', to_port: 'input' },
+        { id: 'e3', from_node: 'empty', from_port: 'output', to_node: 'goal', to_port: 'input' },
+        { id: 'e4', from_node: 'goal', from_port: 'output', to_node: 'text', to_port: 'input' },
+        { id: 'e5', from_node: 'text', from_port: 'output', to_node: 'input', to_port: 'input' },
+        { id: 'e6', from_node: 'input', from_port: 'output', to_node: 'replay', to_port: 'input' },
+        { id: 'e7', from_node: 'replay', from_port: 'output', to_node: 'launch', to_port: 'input' },
+        { id: 'e8', from_node: 'launch', from_port: 'output', to_node: 'focus', to_port: 'input' },
+        { id: 'e9', from_node: 'focus', from_port: 'output', to_node: 'end', to_port: 'input' },
       ],
       variables: {},
       settings: { default_delay: 0, error_handling: 'stop', max_retries: 0, retry_delay: 0, log_level: 'info' },
@@ -367,6 +480,12 @@ describe('Automation IR adapters', () => {
       errors: expect.arrayContaining([
         expect.stringContaining('只能走旧执行器'),
         expect.stringContaining('至少一个动作'),
+        expect.stringContaining('必须填写目标'),
+        expect.stringContaining('click_element 缺少文本或视觉锚点'),
+        expect.stringContaining('type_text 的 text 不能为空'),
+        expect.stringContaining('WPS step 必须指定 tool'),
+        expect.stringContaining('launch 缺少 command'),
+        expect.stringContaining('focus_window 缺少窗口标题或 hwnd'),
       ]),
     });
   });

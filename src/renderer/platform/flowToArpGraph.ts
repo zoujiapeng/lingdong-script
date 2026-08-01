@@ -90,14 +90,16 @@ function clickAction(params: Record<string, any>): Record<string, unknown> {
   };
 }
 
+function coordinateClickActions(params: Record<string, any>): Array<Record<string, unknown>> {
+  if (params.method !== 'triple') return [clickAction(params)];
+  return [clickAction({ ...params, method: 'single' }), clickAction({ ...params, method: 'single' }), clickAction({ ...params, method: 'single' })];
+}
+
 function controllerActions(node: FlowNode): Array<Record<string, unknown>> | null {
   const params = node.params as Record<string, any>;
   switch (node.type) {
     case 'click': {
-      const clicks = params.method === 'triple'
-        ? [clickAction({ ...params, method: 'single' }), clickAction({ ...params, method: 'single' }), clickAction({ ...params, method: 'single' })]
-        : [clickAction(params)];
-      return withDelay(clicks, params);
+      return withDelay(coordinateClickActions(params), params);
     }
     case 'click_text':
       return withDelay([{
@@ -109,18 +111,30 @@ function controllerActions(node: FlowNode): Array<Record<string, unknown>> | nul
       }], params);
     case 'input_text': {
       const actions: Array<Record<string, unknown>> = [];
-      if (params.click_before !== false && params.x != null && params.y != null) {
+      const hasX = params.x != null;
+      const hasY = params.y != null;
+      if (hasX !== hasY || (params.click_before !== false && !(hasX && hasY))) return null;
+      if (params.click_before !== false) {
         actions.push({ action: 'click', x: params.x, y: params.y });
       }
       if (params.clear_before) actions.push({ action: 'hotkey', keys: ['ctrl', 'a'] });
       actions.push({ action: 'type_text', text: String(params.text ?? '') });
       return withDelay(actions, params);
     }
-    case 'keyboard':
-      return withDelay([{
+    case 'keyboard': {
+      const modifierNames = new Set(['ctrl', 'alt', 'shift', 'win']);
+      const rawKeys = list(params.keys).map((key) => key.toLowerCase());
+      const modifiers = [...new Set([
+        ...list(params.modifiers).map((key) => key.toLowerCase()),
+        ...rawKeys.filter((key) => modifierNames.has(key)),
+      ])];
+      const keys = rawKeys.filter((key) => !modifierNames.has(key));
+      if (!keys.length) return null;
+      return withDelay(keys.map((key) => ({
         action: 'hotkey',
-        keys: [...new Set([...list(params.modifiers), ...list(params.keys)])],
-      }], params);
+        keys: [...new Set([...modifiers, key])],
+      })), params);
+    }
     case 'swipe':
       return withDelay([{
         action: 'drag',
@@ -138,38 +152,51 @@ function controllerActions(node: FlowNode): Array<Record<string, unknown>> | nul
       return [{ action: 'launch', command: `${target}${args ? ` ${args}` : ''}` }];
     }
     case 'screenshot':
-      return params.save_path || params.output_path
+      return params.save_path || params.output_path || params.region
         ? null
-        : [{ action: 'screenshot', quality: Number(params.quality) || 85 }];
+        : [{
+          action: 'screenshot',
+          managed_artifact: true,
+          scope: 'screen',
+          purpose: 'user_output',
+          sendable: true,
+        }];
     case 'clipboard_set':
       return [{ action: 'clipboard_write', text: String(params.text ?? '') }];
-    case 'clipboard_get':
-      return params.into ? null : [{ action: 'clipboard_read' }];
     case 'wait':
       if (params.wait_type === 'window') {
+        const timeout = Number(params.timeout ?? 10);
+        if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 120) return null;
         return [{
           action: 'wait',
           condition: { window_appears: params.window_title },
-          timeout_s: Number(params.timeout) || 10,
+          timeout_s: timeout,
         }];
       }
       return null;
     case 'mouse_operation': {
       const operation = String(params.sub_operation || 'click');
       if (operation === 'click' && params.mode === 'text') {
-        return [{ action: 'click_element', label: params.text }];
+        return withDelay([{
+          action: 'click_element',
+          label: params.text,
+          button: params.method === 'right' || params.method === 'middle' ? params.method : 'left',
+          double: params.method === 'double',
+        }], params);
       }
-      if (operation === 'click' && params.mode === 'coordinate') return [clickAction(params)];
+      if (operation === 'click' && params.mode === 'coordinate') return withDelay(coordinateClickActions(params), params);
       if (operation === 'scroll') {
-        const amount = Math.abs(Number(params.scroll_amount) || 3) * (params.scroll_direction === 'up' ? 1 : -1);
-        return [{ action: 'scroll', x: params.x ?? params.move_x ?? 960, y: params.y ?? params.move_y ?? 540, amount }];
+        const direction = String(params.scroll_direction || 'down');
+        if (direction !== 'up' && direction !== 'down') return null;
+        const amount = Math.abs(Number(params.scroll_amount) || 3) * (direction === 'up' ? 1 : -1);
+        return withDelay([{ action: 'scroll', x: params.x ?? 960, y: params.y ?? 540, amount }], params);
       }
-      if (operation === 'move') return [{ action: 'move_mouse', x: params.move_x, y: params.move_y }];
+      if (operation === 'move') return withDelay([{ action: 'move_mouse', x: params.move_x, y: params.move_y }], params);
       if (operation === 'hover') {
-        return [
+        return withDelay([
           { action: 'move_mouse', x: params.hover_x, y: params.hover_y },
           { action: 'wait', duration_ms: Math.round((Number(params.hover_duration) || 0.5) * 1000) },
-        ];
+        ], params);
       }
       return null;
     }
@@ -200,7 +227,11 @@ function nodeToArp(node: FlowNode): ArpNode {
   let timeout_s: number | null = null;
   const actions = controllerActions(node);
 
-  if (NATIVE_KINDS.has(node.type as ArpNodeKind)) {
+  if (node.type === 'clipboard_get') {
+    const into = String(params.into || 'clipboard_text').trim() || 'clipboard_text';
+    kind = 'replay_step';
+    config = { step: { tool: 'ext.clipboard_get', into } };
+  } else if (NATIVE_KINDS.has(node.type as ArpNodeKind)) {
     kind = node.type as ArpNodeKind;
     config = withoutPolicyFields(params);
     if (kind === 'agent_goal' && params.success_criteria) {

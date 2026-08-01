@@ -27,6 +27,65 @@ def test_screenshot_saves_target_window_without_shell(monkeypatch, tmp_path):
     assert Image.open(image_path).size == (40, 24)
 
 
+def test_flow_managed_screenshot_uses_run_artifact_store(monkeypatch, tmp_path):
+    from winpilot.agent.tools import ToolSession
+    from winpilot.tasking import artifacts
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.evidence import EvidenceRegistry
+
+    frame = np.full((18, 32, 3), (7, 8, 9), dtype=np.uint8)
+    monkeypatch.setattr(artifacts, "capture", lambda _region: frame)
+    store = ArtifactStore("flow-shot", tmp_path / "artifacts")
+    registry = EvidenceRegistry("flow-shot")
+    session = ToolSession(task="capture flow screenshot")
+    session.run_id = "flow-shot"
+    session.managed_artifact_store = store
+    session.evidence_registry = registry
+    try:
+        result = session._t_screenshot({
+            "managed_artifact": True,
+            "scope": "screen",
+            "purpose": "user_output",
+            "sendable": True,
+            "quality": 71,
+        })
+    finally:
+        session.close()
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is True
+    assert payload["artifact_id"].startswith("art-")
+    assert payload["path"] == payload["managed_path"]
+    assert payload["width"] == 32
+    assert payload["height"] == 18
+    assert len(payload["sha256"]) == 64
+    assert store.snapshot()["artifacts"][0]["artifact_id"] == payload["artifact_id"]
+    assert registry.snapshot()["records"][0]["artifact_id"] == payload["artifact_id"]
+
+
+def test_model_screenshot_without_managed_mode_keeps_base64_path(monkeypatch):
+    from winpilot.agent import desktop_tools
+    from winpilot.agent.tools import ToolSession
+
+    monkeypatch.setattr(
+        desktop_tools.executor,
+        "screenshot_base64",
+        lambda quality: {"ok": True, "quality": quality, "base64": ""},
+    )
+    session = ToolSession(task="observe screen")
+    monkeypatch.setattr(
+        session,
+        "_managed_artifacts",
+        lambda: (_ for _ in ()).throw(AssertionError("default screenshot must not create an artifact")),
+    )
+    try:
+        result = session._t_screenshot({"quality": 63})
+    finally:
+        session.close()
+
+    assert json.loads(result.text) == {"ok": True, "quality": 63, "base64": ""}
+
+
 def test_paste_image_file_uses_clipboard_dib_and_focused_target(monkeypatch, tmp_path):
     from winpilot.action import executor
 

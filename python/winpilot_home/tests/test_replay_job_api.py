@@ -358,12 +358,6 @@ def test_replay_mode_api_exposes_apprentice_lifecycle(client, monkeypatch):
     fake = FakeApprentice()
     monkeypatch.setattr(server.apprentice_mod, "APPRENTICE", fake)
 
-    modes = client.get("/api/v2/replay/modes")
-    assert modes.status_code == 200
-    assert [item["id"] for item in modes.json()["modes"]] == [
-        "offline_graph", "skill", "apprentice",
-    ]
-
     started = client.post(
         "/api/v2/replay/apprentice/start",
         json={

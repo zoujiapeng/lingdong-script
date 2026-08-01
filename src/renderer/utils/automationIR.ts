@@ -118,19 +118,22 @@ export function automationIrFromWps(script: WpsScript, id = `air-${nanoid(12)}`)
   if (targetWindow !== undefined) conditions.target_window = targetWindow;
   const steps = clone(script.steps || []) as WpsStep[];
   const task = str(script.task);
+  const source: Record<string, unknown> = {
+    kind: 'wps',
+    format: script.format || 'wps/2',
+    source: script.source || '',
+    source_run: script.source_run || '',
+    task,
+  };
+  if (record(script.export_manifest)) source.export_manifest = clone(script.export_manifest);
+  if (Array.isArray(script.source_runs)) source.source_runs = clone(script.source_runs);
 
   return {
     format: 'automation-ir/1',
     id,
     name: str(script.name) || task || '自动化任务',
     created: created(anyScript.created),
-    source: {
-      kind: 'wps',
-      format: script.format || 'wps/2',
-      source: script.source || '',
-      source_run: script.source_run || '',
-      task,
-    },
+    source,
     conditions,
     evidence: Array.isArray(anyScript.evidence) ? { required: clone(anyScript.evidence) } : clone(anyScript.evidence || { required: [] }),
     steps: steps as Array<Record<string, unknown>>,
@@ -344,6 +347,72 @@ export function validateAutomationRuntime(ir: AutomationIR): string | undefined 
   return undefined;
 }
 
+const SPATIAL_TARGET_REQUIRED = new Set([
+  'click', 'double_click', 'click_element', 'scroll', 'move_mouse', 'drag',
+  'draw_strokes', 'ensure_input_mode', 'select_color', 'mouse_down', 'mouse_up',
+  'coordinate_click_test', 'paste_image_file',
+]);
+
+function parseLocalControllerAction(value: unknown): { name: string; inputs: Record<string, unknown> } | undefined {
+  const action = record(value);
+  if (!action) return undefined;
+  const explicitName = str(action.action || action.tool || action.name).toLowerCase().replace(/-/g, '_');
+  let name = explicitName;
+  let inputs: Record<string, unknown> = {
+    ...(record(action.params) || {}),
+    ...Object.fromEntries(Object.entries(action).filter(([key]) => !['action', 'tool', 'name', 'params'].includes(key))),
+  };
+  if (!name && Object.keys(action).length === 1) {
+    const [shorthand, rawInputs] = Object.entries(action)[0];
+    name = str(shorthand).toLowerCase().replace(/-/g, '_');
+    if (record(rawInputs)) inputs = record(rawInputs)!;
+    else if (name === 'hotkey') inputs = { keys: Array.isArray(rawInputs) ? rawInputs : [rawInputs] };
+    else if (name === 'type_text' || name === 'type_into_element') inputs = { text: String(rawInputs ?? '') };
+    else inputs = { value: rawInputs };
+  }
+  return name ? { name, inputs } : undefined;
+}
+
+function localControllerActionError(value: unknown): string | undefined {
+  if (!record(value)) return '必须是对象';
+  const parsed = parseLocalControllerAction(value);
+  if (!parsed) return '缺少 action/tool 名称';
+  const { name, inputs } = parsed;
+
+  const present = (key: string) => inputs[key] !== undefined && inputs[key] !== null;
+  const nonEmpty = (key: string) => str(inputs[key]).length > 0;
+  if (name === 'click' && !(
+    (present('x') && present('y'))
+    || ['element_id', 'label', 'text_query', 'anchor'].some(nonEmpty)
+    || (Array.isArray(inputs.fallback_text) && inputs.fallback_text.length > 0)
+  )) return 'click 缺少坐标或视觉锚点';
+  if (name === 'click_element' && !(
+    ['label', 'text_query', 'anchor'].some(nonEmpty)
+    || (Array.isArray(inputs.fallback_text) && inputs.fallback_text.length > 0)
+  )) return 'click_element 缺少文本或视觉锚点';
+  if (['type_text', 'type_into_element', 'clipboard_write'].includes(name) && !present('text')) {
+    return `${name} 缺少 text`;
+  }
+  if (['type_text', 'type_into_element'].includes(name) && !String(inputs.text ?? '').length) {
+    return `${name} 的 text 不能为空`;
+  }
+  if (name === 'hotkey' && !(Array.isArray(inputs.keys) ? inputs.keys.length : nonEmpty('value'))) {
+    return 'hotkey 缺少按键';
+  }
+  if (['scroll', 'move_mouse'].includes(name) && !(present('x') && present('y'))) {
+    return `${name} 缺少 x/y 坐标`;
+  }
+  if (name === 'scroll' && !present('amount')) return 'scroll 缺少 amount';
+  if (name === 'drag' && !['x1', 'y1', 'x2', 'y2'].every(present)) return 'drag 缺少起止坐标';
+  if (name === 'focus_window' && !(nonEmpty('title') || present('hwnd'))) return 'focus_window 缺少窗口标题或 hwnd';
+  if (name === 'launch' && !nonEmpty('command')) return 'launch 缺少 command';
+  if (name === 'wait' && !(
+    ['duration_s', 'seconds', 'time', 'duration_ms', 'ms', 'value'].some((key) => typeof inputs[key] === 'number')
+    || (record(inputs.condition) && Object.values(record(inputs.condition)!).some((item) => item !== undefined && item !== null && item !== ''))
+  )) return 'wait 缺少时长或条件';
+  return undefined;
+}
+
 /**
  * Fast, network-free structural validation for the editor. The Python control
  * plane remains authoritative before execution; this keeps basic graph editing
@@ -388,15 +457,24 @@ export function validateAutomationLocally(ir: AutomationIR): GraphValidation {
     if (node.disabled) continue;
     if (node.kind === 'legacy_flow') {
       errors.push(`节点 ${node.id} 的参数分支只能走旧执行器，不能由当前 ARP Runtime 执行。`);
+    } else if (node.kind === 'agent_goal' && !String(node.config.goal || node.config.task || '').trim()) {
+      errors.push(`代理任务节点 ${node.id} 必须填写目标。`);
     } else if (node.kind === 'action_batch') {
       const actions = node.config.actions;
       if (!Array.isArray(actions) || actions.length === 0) {
         errors.push(`动作批次节点 ${node.id} 必须包含至少一个动作。`);
+      } else {
+        actions.forEach((action, index) => {
+          const error = localControllerActionError(action);
+          if (error) errors.push(`动作批次节点 ${node.id} 的第 ${index + 1} 个动作无效：${error}。`);
+        });
       }
     } else if (node.kind === 'replay_step') {
       const step = node.config.step;
       if (!step || typeof step !== 'object' || Array.isArray(step)) {
         errors.push(`复现步骤节点 ${node.id} 必须包含 WPS step 对象。`);
+      } else if (!String((step as Record<string, unknown>).tool || '').trim()) {
+        errors.push(`复现步骤节点 ${node.id} 的 WPS step 必须指定 tool。`);
       }
     } else if (node.kind === 'skill_replay') {
       if (!['script', 'task', 'memory_id'].some((key) => String(node.config[key] || '').trim())) {
@@ -460,6 +538,35 @@ export function validateAutomationLocally(ir: AutomationIR): GraphValidation {
       }
     }
 
+    const pendingTargetStates: Array<[string, boolean]> = [[starts[0], false]];
+    const seenTargetStates = new Set<string>();
+    const targetErrors = new Set<string>();
+    while (pendingTargetStates.length) {
+      const [nodeId, targetEstablished] = pendingTargetStates.shift()!;
+      const stateKey = `${nodeId}\u0000${targetEstablished ? '1' : '0'}`;
+      if (seenTargetStates.has(stateKey)) continue;
+      seenTargetStates.add(stateKey);
+      const node = nodeMap.get(nodeId)!;
+      let establishedAfter = targetEstablished;
+      if (node.kind === 'action_batch' && !node.disabled && Array.isArray(node.config.actions)) {
+        for (const value of node.config.actions) {
+          const action = parseLocalControllerAction(value);
+          if (!action) continue;
+          if (action.name === 'focus_window' && (Boolean(action.inputs.hwnd) || str(action.inputs.title))) {
+            establishedAfter = true;
+          } else if (SPATIAL_TARGET_REQUIRED.has(action.name) && !establishedAfter) {
+            targetErrors.add(
+              `动作批次节点 ${node.id} 在空间动作 ${action.name} 前必须确保每条可达路径都已通过带 hwnd/title 的 focus_window 建立目标。`,
+            );
+          }
+        }
+      }
+      for (const edge of outgoing.get(nodeId) || []) {
+        pendingTargetStates.push([edge.target, establishedAfter]);
+      }
+    }
+    errors.push(...[...targetErrors].sort());
+
     if (graph.policy.require_evidence_on_done) {
       const evidenceKinds = new Set([
         'agent_goal', 'action_batch', 'replay_step', 'skill_replay',
@@ -506,6 +613,9 @@ export function automationIrToWps(ir: AutomationIR): WpsScript {
   if (Object.keys(conditions).length > 0) {
     script.conditions = conditions;
   }
+  const exportManifest = record(source.export_manifest);
+  if (exportManifest) script.export_manifest = clone(exportManifest);
+  if (Array.isArray(source.source_runs)) script.source_runs = clone(source.source_runs);
   const evidenceRecord = record(evidence);
   if (
     evidenceRecord

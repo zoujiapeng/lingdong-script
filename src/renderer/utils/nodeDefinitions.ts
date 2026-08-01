@@ -152,8 +152,6 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     defaultParams: {
       x: 960,
       y: 540,
-      offsetX: 0,
-      offsetY: 0,
       method: 'single',
       delay_after: 0.5,
     },
@@ -174,8 +172,6 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
       similarity: 90,
       timeout: 5,
       method: 'single',
-      offset_x: 0,
-      offset_y: 0,
       delay_after: 0.5,
       multi_scale: true,
       match_all: false,
@@ -197,11 +193,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     color: '#a855f7',
     defaultParams: {
       text: '',
-      similarity: 80,
       method: 'single',
-      offset_x: 0,
-      offset_y: 0,
-      timeout: 5,
       delay_after: 0.5,
     },
     ports: {
@@ -239,7 +231,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     color: '#10b981',
     defaultParams: {
       text: '',
-      click_before: true,
+      click_before: false,
       clear_before: true,
       delay_after: 0.3,
     },
@@ -345,7 +337,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     icon: 'Camera',
     category: 'image',
     color: '#64748b',
-    defaultParams: { quality: 85 },
+    defaultParams: {},
     ports: {
       inputs: [{ id: 'input', type: 'flow' }],
       outputs: [{ id: 'output', type: 'flow' }],
@@ -589,7 +581,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     icon: 'Rocket',
     category: 'system',
     color: '#22c55e',
-    defaultParams: { target: '', args: '', wait: false, force_new: false },
+    defaultParams: { target: '', args: '' },
     ports: { inputs: [{ id: 'input', type: 'flow' }], outputs: [{ id: 'output', type: 'flow' }] },
   },
   kill_process: {
@@ -619,7 +611,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     icon: 'Focus',
     category: 'system',
     color: '#8b5cf6',
-    defaultParams: { title: '', exact: false },
+    defaultParams: { title: '' },
     ports: { inputs: [{ id: 'input', type: 'flow' }], outputs: [{ id: 'output', type: 'flow' }] },
   },
   process_action: {
@@ -725,7 +717,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     icon: 'Clipboard',
     category: 'system',
     color: '#3b82f6',
-    defaultParams: {},
+    defaultParams: { into: 'clipboard_text' },
     ports: { inputs: [{ id: 'input', type: 'flow' }], outputs: [{ id: 'output', type: 'flow' }] },
   },
   window_control: {
@@ -781,7 +773,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   mouse_operation: {
     type: 'mouse_operation',
     label: '鼠标操作',
-    description: '鼠标综合操作：点击（坐标/图片识别/OCR文字）/滚轮/悬停/移动',
+    description: '鼠标综合操作：坐标或文字点击、滚轮、悬停、移动',
     icon: 'MousePointer2',
     category: 'basic',
     color: '#3b82f6',
@@ -791,13 +783,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
       mode: 'coordinate',
       x: 960, y: 540,
       method: 'single',
-      targets: [],
       text: '',
-      similarity: 90,
-      timeout: 5,
-      offset_x: 0, offset_y: 0,
-      multi_scale: false,
-      match_all: false,
       // 滚轮参数
       scroll_direction: 'down',
       scroll_amount: 3,

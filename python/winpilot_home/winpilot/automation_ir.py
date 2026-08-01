@@ -118,6 +118,12 @@ def automation_ir_from_wps(
         "source_run": script.get("source_run") or "",
         "task": task,
     }
+    export_manifest = script.get("export_manifest")
+    if isinstance(export_manifest, dict):
+        source["export_manifest"] = _clone(export_manifest)
+    source_runs = script.get("source_runs")
+    if isinstance(source_runs, list):
+        source["source_runs"] = _clone(source_runs)
 
     return {
         "format": AUTOMATION_IR_FORMAT,
@@ -165,6 +171,12 @@ def wps_from_automation_ir(ir: dict[str, Any]) -> dict[str, Any]:
         script["target_window"] = target_window
     if conditions:
         script["conditions"] = conditions
+    export_manifest = source.get("export_manifest")
+    if isinstance(export_manifest, dict):
+        script["export_manifest"] = _clone(export_manifest)
+    source_runs = source.get("source_runs")
+    if isinstance(source_runs, list):
+        script["source_runs"] = _clone(source_runs)
     evidence = ir.get("evidence")
     if isinstance(evidence, dict) and evidence.get("required"):
         script["evidence"] = _clone(evidence["required"])

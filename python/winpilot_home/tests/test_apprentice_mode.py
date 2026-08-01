@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 
 class FakeRecorder:
     def __init__(self, scripts_dir):
@@ -18,19 +20,23 @@ class FakeRecorder:
         self.recording = False
         path = self.scripts_dir / "lesson.wps.json"
         path.write_text(
-            json.dumps({
-                "format": "wps/2",
-                "name": self.name,
-                "source": "human",
-                "target_window": {"title": "Chat", "process": "chat.exe"},
-                "steps": [{"tool": "click", "text": "Send", "coords": [100, 200]}],
-            }),
+            json.dumps(
+                {
+                    "format": "wps/2",
+                    "name": self.name,
+                    "source": "human",
+                    "target_window": {"title": "Chat", "process": "chat.exe"},
+                    "steps": [{"tool": "click", "text": "Send", "coords": [100, 200]}],
+                }
+            ),
             encoding="utf-8",
         )
         return {"ok": True, "file": path.name, "steps": 1}
 
 
-def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(tmp_path, monkeypatch):
+def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(
+    tmp_path, monkeypatch
+):
     from winpilot.recorder import apprentice
 
     captured = []
@@ -39,7 +45,8 @@ def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(tmp_pat
     monkeypatch.setattr(
         apprentice.experience,
         "record",
-        lambda *args, **kwargs: captured.append((args, kwargs)) or {
+        lambda *args, **kwargs: captured.append((args, kwargs))
+        or {
             "id": "skill-candidate",
             "script": "lesson.automation.json",
             "provisional": True,
@@ -57,7 +64,9 @@ def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(tmp_pat
 
     result = manager.stop()
     saved = json.loads((tmp_path / "lesson.wps.json").read_text(encoding="utf-8"))
-    canonical = json.loads((tmp_path / "lesson.automation.json").read_text(encoding="utf-8"))
+    canonical = json.loads(
+        (tmp_path / "lesson.automation.json").read_text(encoding="utf-8")
+    )
 
     assert result["mode"] == "apprentice"
     assert result["memory"]["provisional"] is True
@@ -71,8 +80,12 @@ def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(tmp_pat
     assert canonical["safety"]["requires_preflight"] is True
     assert saved["task"] == "Send a message"
     assert saved["source"] == "apprentice"
-    assert saved["evidence"]["required"] == [{"predicate": "visible.text", "value": "sent"}]
-    assert captured[0][1]["verification"] == [{"predicate": "visible.text", "value": "sent"}]
+    assert saved["evidence"]["required"] == [
+        {"predicate": "visible.text", "value": "sent"}
+    ]
+    assert captured[0][1]["verification"] == [
+        {"predicate": "visible.text", "value": "sent"}
+    ]
     assert saved["source_session"] == started["session_id"]
     assert captured[0][0][:2] == ("Send a message", "QQ")
     assert captured[0][1]["verified"] is False
@@ -90,6 +103,89 @@ def test_apprentice_requires_named_task(tmp_path):
         assert "requires a task" in str(exc)
     else:
         raise AssertionError("blank apprentice task should fail")
+
+
+@pytest.mark.parametrize("name", ["CON", "../lesson", "lesson."])
+def test_apprentice_rejects_unsafe_explicit_macro_name(tmp_path, monkeypatch, name):
+    from winpilot.recorder import apprentice
+
+    fake = FakeRecorder(tmp_path)
+    monkeypatch.setattr(apprentice, "SCRIPTS_DIR", tmp_path)
+    manager = apprentice.ApprenticeManager(fake)
+
+    with pytest.raises(ValueError, match="Windows-safe"):
+        manager.start(
+            "Record a safe lesson",
+            name=name,
+            verification=[{"predicate": "visible.text", "value": "done"}],
+        )
+
+    assert fake.recording is False
+
+
+def test_apprentice_rejects_existing_macro_name_case_insensitively(
+    tmp_path, monkeypatch
+):
+    from winpilot.recorder import apprentice
+
+    (tmp_path / "Lesson.wps.json").write_text("keep", encoding="utf-8")
+    fake = FakeRecorder(tmp_path)
+    monkeypatch.setattr(apprentice, "SCRIPTS_DIR", tmp_path)
+    manager = apprentice.ApprenticeManager(fake)
+
+    with pytest.raises(ValueError, match="conflicts with existing script"):
+        manager.start(
+            "Record without replacing an old macro",
+            name="lesson",
+            verification=[{"predicate": "visible.text", "value": "done"}],
+        )
+
+    assert (tmp_path / "Lesson.wps.json").read_text(encoding="utf-8") == "keep"
+    assert fake.recording is False
+
+
+def test_apprentice_blank_macro_name_reuses_unique_session_id(tmp_path, monkeypatch):
+    from winpilot.recorder import apprentice
+
+    fake = FakeRecorder(tmp_path)
+    monkeypatch.setattr(apprentice, "SCRIPTS_DIR", tmp_path)
+    manager = apprentice.ApprenticeManager(fake)
+
+    started = manager.start(
+        r"Open C:\temp? then click",
+        verification=[{"predicate": "visible.text", "value": "done"}],
+    )
+
+    assert started["name"] == started["session_id"]
+
+
+def test_apprentice_keeps_existing_canonical_file_on_stop_race(tmp_path, monkeypatch):
+    from winpilot.recorder import apprentice
+
+    fake = FakeRecorder(tmp_path)
+    monkeypatch.setattr(apprentice, "SCRIPTS_DIR", tmp_path)
+    monkeypatch.setattr(
+        apprentice.experience,
+        "record",
+        lambda *args, **kwargs: pytest.fail("a conflicted recording is not promoted"),
+    )
+    manager = apprentice.ApprenticeManager(fake)
+    manager.start(
+        "Record without replacing canonical output",
+        name="lesson",
+        verification=[{"predicate": "visible.text", "value": "done"}],
+    )
+    canonical = tmp_path / "lesson.automation.json"
+    canonical.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError, match="recorded actions were kept.*already exists"
+    ):
+        manager.stop()
+
+    assert canonical.read_text(encoding="utf-8") == "keep"
+    assert (tmp_path / "lesson.wps.json").exists()
+    assert manager.status()["session_id"] is None
 
 
 def test_apprentice_clears_failed_recording_session(tmp_path):
@@ -138,10 +234,4 @@ def test_apprentice_keeps_session_when_recorder_stop_is_retryable(tmp_path):
 
     assert manager.status()["session_id"] == started["session_id"]
     assert manager.status()["recording"] is True
-
-
-def test_replay_mode_contract_lists_all_three_execution_paths():
-    from winpilot.recorder.apprentice import REPLAY_MODES
-
-    assert [mode["id"] for mode in REPLAY_MODES] == ["offline_graph", "skill", "apprentice"]
-    assert all(mode["llm_in_loop"] is False for mode in REPLAY_MODES)
+    # The same session remains available for the user's next stop attempt.

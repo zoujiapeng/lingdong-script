@@ -56,7 +56,6 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     // Parse options — support both English and Chinese keys
     const simMatch = rest.match(/(?:\b|(?<=\s))(?:similarity|相似度)[=:](\d+)/i);
     const timeoutMatch = rest.match(/(?:\b|(?<=\s))(?:timeout|超时)[=:](\d+(\.\d+)?)/i);
-    const offsetMatch = rest.match(/(?:\b|(?<=\s))(?:offset|偏移)\((-?\d+),(-?\d+)\)/i);
     const methodMatch = rest.match(/(?:\b|(?<=\s))(single|double|right|middle|单击|双击|右击|中键)(?:\b|(?=\s|$))/i);
 
     const params: any = {
@@ -64,8 +63,6 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
       targets,
       similarity: simMatch ? parseInt(simMatch[1]) : 90,
       timeout: timeoutMatch ? parseFloat(timeoutMatch[1]) : 5,
-      offset_x: offsetMatch ? parseInt(offsetMatch[1]) : 0,
-      offset_y: offsetMatch ? parseInt(offsetMatch[2]) : 0,
       delay_after: 0.5,
     };
     if (methodMatch) {
@@ -203,8 +200,6 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
         text: clickTextMatch[1],
         similarity: clickTextMatch[2] ? parseInt(clickTextMatch[2]) : 85,
         method: 'single',
-        offset_x: 0,
-        offset_y: 0,
         timeout: 5,
         delay_after: 0.5,
       },
@@ -915,9 +910,9 @@ const DEFAULT_SETTINGS = {
 function getDefaultParams(type: string): any {
   switch (type) {
     case 'click': return { x: 0, y: 0, method: 'single', delay_after: 0.5 };
-    case 'image_click': return { targets: [], similarity: 90, timeout: 5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.5, multi_scale: false, match_all: false };
-    case 'click_text': return { text: '', similarity: 80, method: 'single', offset_x: 0, offset_y: 0, timeout: 5, delay_after: 0.5 };
-    case 'mouse_operation': return { sub_operation: 'click', mode: 'coordinate', x: 0, y: 0, method: 'single', delay_after: 0.5, targets: [], text: '', similarity: 90, timeout: 5, offset_x: 0, offset_y: 0, multi_scale: false, match_all: false, scroll_direction: 'down', scroll_amount: 3, hover_x: 0, hover_y: 0, hover_duration: 0.5, move_x: 0, move_y: 0 };
+    case 'image_click': return { targets: [], similarity: 90, timeout: 5, method: 'single', delay_after: 0.5, multi_scale: false, match_all: false };
+    case 'click_text': return { text: '', similarity: 80, method: 'single', timeout: 5, delay_after: 0.5 };
+    case 'mouse_operation': return { sub_operation: 'click', mode: 'coordinate', x: 0, y: 0, method: 'single', delay_after: 0.5, targets: [], text: '', similarity: 90, timeout: 5, multi_scale: false, match_all: false, scroll_direction: 'down', scroll_amount: 3, hover_x: 0, hover_y: 0, hover_duration: 0.5, move_x: 0, move_y: 0 };
     case 'wait': return { wait_type: 'time', duration: 1 };
     case 'input_text': return { text: '', click_before: false, clear_before: true, delay_after: 0.3 };
     case 'keyboard': return { keys: [], modifiers: [], delay_after: 0.2 };

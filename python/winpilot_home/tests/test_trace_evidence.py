@@ -87,13 +87,75 @@ def test_jsonl_trace_event_redacts_inline_frame_in_worker(tmp_path, monkeypatch)
     assert "data:image" not in trace_text
     assert ";base64," not in trace_text
     assert encoded not in trace_text
-    event = json.loads(trace_text)
+    records = [json.loads(line) for line in trace_text.splitlines()]
+    event = records[0]
     assert event["image_url"] == {
         "frame_present": True,
         "frame_id": 11,
         "frame_byte_count": len(raw_frame),
         "frame_sha256": hashlib.sha256(raw_frame).hexdigest(),
     }
+    assert records[-1] == {
+        "type": "trace_integrity",
+        "ts": records[-1]["ts"],
+        "run_id": "inline-event",
+        "accepted_events": 1,
+        "dropped_events": 0,
+        "write_failures": 0,
+        "complete": True,
+    }
+
+
+def test_trace_stop_waits_for_an_accepted_callback_before_integrity(tmp_path, monkeypatch):
+    import json
+    import threading
+    import time
+
+    from winpilot.recorder import trace
+    from winpilot.utils.log import BUS
+
+    monkeypatch.setattr(trace, "TRACES_DIR", tmp_path)
+    recorder = trace.TraceRecorder()
+    entered = threading.Event()
+    release = threading.Event()
+    original = recorder._record_accepted_event
+
+    def delayed(event):
+        entered.set()
+        assert release.wait(2)
+        original(event)
+
+    monkeypatch.setattr(recorder, "_record_accepted_event", delayed)
+    try:
+        recorder.start("stop-race")
+        producer = threading.Thread(target=recorder._on_event, args=({
+            "type": "agent_debug",
+            "run_id": "stop-race",
+            "value": "last accepted event",
+        },))
+        producer.start()
+        assert entered.wait(1)
+        stopper = threading.Thread(target=recorder.stop)
+        stopper.start()
+        time.sleep(0.03)
+        assert stopper.is_alive()
+        release.set()
+        producer.join(2)
+        stopper.join(2)
+        assert not producer.is_alive()
+        assert not stopper.is_alive()
+    finally:
+        release.set()
+        BUS.remove_sink(recorder._on_event)
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "stop-race.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[0]["value"] == "last accepted event"
+    assert records[-1]["type"] == "trace_integrity"
+    assert records[-1]["accepted_events"] == 1
+    assert records[-1]["complete"] is True
 
 
 def test_trace_recorder_persists_exact_evidence_frame(tmp_path, monkeypatch):

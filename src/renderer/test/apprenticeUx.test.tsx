@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PlatformWorkbench } from '../components/platform/PlatformWorkbench';
@@ -75,31 +75,39 @@ afterEach(() => {
   controlPlane.current = null;
 });
 
-describe('apprentice recording UX', () => {
+describe('macro recording UX', () => {
   it('reconciles both ambiguous start and stop errors from the runtime status', async () => {
     const { client, plane } = createPlane();
     controlPlane.current = plane;
     const user = userEvent.setup();
     render(<PlatformWorkbench />);
 
-    await user.click(await screen.findByRole('tab', { name: '示教学习' }));
-    await user.type(screen.getByRole('textbox', { name: '要学习的工作流' }), 'Record the visible workflow');
+    await user.click(await screen.findByRole('tab', { name: '宏录制' }));
+    await user.type(screen.getByRole('textbox', { name: '宏名称' }), 'Visible workflow macro');
+    await user.type(screen.getByRole('textbox', { name: '宏录制任务' }), 'Record the visible workflow');
     await user.type(screen.getByRole('textbox', { name: '终态证据值' }), 'Expected visible result');
-    await user.click(screen.getByRole('button', { name: '开始学习' }));
+    await user.click(screen.getByRole('button', { name: '开始宏录制' }));
 
     expect(await screen.findByText('start response was lost')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('button', { name: '结束学习' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: '停止录制并生成流程' })).toBeEnabled());
     expect(client.apprenticeStart).toHaveBeenCalledOnce();
+    expect(client.apprenticeStart).toHaveBeenCalledWith(
+      'Record the visible workflow',
+      '',
+      [{ predicate: 'visible.text', value: 'Expected visible result' }],
+      'Visible workflow macro',
+    );
 
-    await user.click(screen.getByRole('button', { name: '结束学习' }));
+    await user.click(screen.getByRole('button', { name: '停止录制并生成流程' }));
 
     expect(await screen.findByText('stop response was lost')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('button', { name: '开始学习' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始宏录制' })).toBeEnabled());
     expect(client.apprenticeStop).toHaveBeenCalledOnce();
+    expect(screen.getByRole('textbox', { name: '宏名称' })).toHaveValue('');
     expect(client.apprenticeStatus).toHaveBeenCalledTimes(3);
   });
 
-  it('fits apprentice controls inside the drawer at the default 905px window width', () => {
+  it('fits macro controls inside the drawer at the default 905px window width', () => {
     const style = document.createElement('style');
     style.textContent = platformCss;
     document.head.append(style);
@@ -173,5 +181,53 @@ describe('runtime-job polling UX', () => {
     )).toBeInTheDocument();
     expect(document.querySelector('.arp-replay-job.failed')).toBeInTheDocument();
     expect(replayStatus).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe('flow launch snapshot UX', () => {
+  it('launches an unchanged graph after asynchronous runtime validation', async () => {
+    useStore.getState().newScript();
+    useStore.getState().setViewMode('studio');
+    let finishValidation!: (value: { valid: boolean; errors: string[]; warnings: string[] }) => void;
+    const pendingValidation = new Promise<{ valid: boolean; errors: string[]; warnings: string[] }>((resolve) => {
+      finishValidation = resolve;
+    });
+    const { plane } = createPlane();
+    plane.validateAutomation = vi.fn(() => pendingValidation);
+    plane.startAutomation = vi.fn(async () => undefined);
+    controlPlane.current = plane;
+    const user = userEvent.setup();
+    render(<PlatformWorkbench />);
+
+    await user.click(await screen.findByRole('button', { name: '运行工作流' }));
+    await waitFor(() => expect(plane.validateAutomation).toHaveBeenCalledOnce());
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await act(async () => finishValidation({ valid: true, errors: [], warnings: [] }));
+
+    await waitFor(() => expect(plane.startAutomation).toHaveBeenCalledOnce());
+  });
+
+  it('does not launch a graph changed while runtime validation is pending', async () => {
+    useStore.getState().newScript();
+    useStore.getState().setViewMode('studio');
+    let finishValidation!: (value: { valid: boolean; errors: string[]; warnings: string[] }) => void;
+    const pendingValidation = new Promise<{ valid: boolean; errors: string[]; warnings: string[] }>((resolve) => {
+      finishValidation = resolve;
+    });
+    const { plane } = createPlane();
+    plane.validateAutomation = vi.fn(() => pendingValidation);
+    plane.startAutomation = vi.fn(async () => undefined);
+    controlPlane.current = plane;
+    const user = userEvent.setup();
+    render(<PlatformWorkbench />);
+
+    await user.click(await screen.findByRole('button', { name: '运行工作流' }));
+    await waitFor(() => expect(plane.validateAutomation).toHaveBeenCalledOnce());
+    const node = useStore.getState().script.nodes[0];
+    act(() => useStore.getState().updateNode(node.id, { label: `${node.label}（已修改）` }));
+    await act(async () => finishValidation({ valid: true, errors: [], warnings: [] }));
+
+    expect(await screen.findByText('流程在验证期间已发生变化；旧结果已丢弃，请重新验证或运行当前版本。')).toBeInTheDocument();
+    expect(plane.startAutomation).not.toHaveBeenCalled();
   });
 });

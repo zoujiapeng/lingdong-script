@@ -17,6 +17,7 @@ import { createFlowExecutor } from './executor';
 import type { ExecutionController } from './executor';
 import { automationDocumentToFlowScript, automationIrFromFlowScript } from '../utils/automationIR';
 import { commitEditorDrafts } from '../utils/editorDrafts';
+import { materializeFlowFragment, type FlowFragmentProposal } from '../utils/flowFragmentProposal';
 import { edgeBranch } from '../platform/flowToArpGraph';
 import { DEFAULT_SETTINGS, DEFAULT_UI_STATE, PRESET_TEMPLATES, PRESET_TEMPLATE_META, STORAGE_KEY, MAX_HISTORY } from './defaults';
 import { loadCustomTemplates, saveCustomTemplates, loadAgentHistory, saveAgentHistory } from './persistence';
@@ -84,6 +85,7 @@ interface AppStore {
   updateNodeParams: (id: string, params: any) => void;
   deleteNodes: (ids: string[]) => void;
   duplicateNodes: (ids: string[]) => void;
+  applyFlowFragment: (proposal: FlowFragmentProposal) => { nodeIds: string[]; center: { x: number; y: number } };
   moveNode: (id: string, x: number, y: number) => void;
   moveNodes: (
     origins: Record<string, { x: number; y: number }>,
@@ -838,6 +840,28 @@ export const useStore = createWithEqualityFn<AppStore>()(
       pushHistory(get().script.nodes, get().script.edges);
     },
 
+    applyFlowFragment: (proposal) => {
+      const current = get();
+      pushHistory(current.script.nodes, current.script.edges);
+      const fragment = materializeFlowFragment(proposal, current.script.nodes, nanoid);
+      set((state) => {
+        state.script.nodes.push(...fragment.nodes);
+        state.script.edges.push(...fragment.edges);
+        state.ui.selection = { nodes: fragment.nodes.map((node) => node.id), edges: [] };
+        state.isDirty = true;
+      });
+      pushHistory(get().script.nodes, get().script.edges);
+      const first = fragment.nodes[0];
+      const last = fragment.nodes[fragment.nodes.length - 1];
+      return {
+        nodeIds: fragment.nodes.map((node) => node.id),
+        center: {
+          x: first.x + 110,
+          y: (first.y + last.y) / 2 + 40,
+        },
+      };
+    },
+
     checkpointHistory: () => {
       pushHistory(get().script.nodes, get().script.edges);
     },
@@ -1415,7 +1439,11 @@ export const useStore = createWithEqualityFn<AppStore>()(
 );
 
 export function confirmDocumentReplacement(): boolean {
-  if (commitEditorDrafts()) return false;
+  const draftError = commitEditorDrafts();
+  if (draftError) {
+    window.alert(`请先修正编辑器内容：${draftError}`);
+    return false;
+  }
   return !useStore.getState().isDirty
     || window.confirm('当前流程有未保存修改，继续将放弃这些修改。是否继续？');
 }

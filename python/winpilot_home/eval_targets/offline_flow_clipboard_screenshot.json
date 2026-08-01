@@ -1,0 +1,136 @@
+{
+  "meta": {
+    "id": "offline-flow-clipboard-screenshot-e2e",
+    "name": "Offline clipboard read and screenshot E2E",
+    "created_at": "2026-08-02T00:00:00.000Z",
+    "updated_at": "2026-08-02T00:00:00.000Z",
+    "version": "1.0.0"
+  },
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "x": 80,
+      "y": 80,
+      "params": {}
+    },
+    {
+      "id": "read",
+      "type": "clipboard_get",
+      "x": 80,
+      "y": 210,
+      "label": "Read external clipboard",
+      "params": {
+        "into": "clipboard_text"
+      }
+    },
+    {
+      "id": "matches",
+      "type": "condition",
+      "x": 80,
+      "y": 340,
+      "label": "Clipboard value matches",
+      "params": {
+        "condition_type": "variable_equals",
+        "variable_name": "clipboard_text",
+        "variable_value": "OFFLINE-NODE-E2E-SOURCE-20260802"
+      }
+    },
+    {
+      "id": "pass",
+      "type": "clipboard_set",
+      "x": 80,
+      "y": 470,
+      "label": "Publish pass oracle",
+      "params": {
+        "text": "OFFLINE-NODE-E2E-PASS-20260802"
+      }
+    },
+    {
+      "id": "shot",
+      "type": "screenshot",
+      "x": 80,
+      "y": 600,
+      "label": "Capture managed screenshot",
+      "params": {
+        "quality": 85
+      }
+    },
+    {
+      "id": "fail",
+      "type": "clipboard_set",
+      "x": 430,
+      "y": 470,
+      "label": "Publish fail oracle",
+      "params": {
+        "text": "OFFLINE-NODE-E2E-FAIL-20260802"
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "x": 80,
+      "y": 730,
+      "params": {}
+    }
+  ],
+  "edges": [
+    {
+      "id": "start-read",
+      "from_node": "start",
+      "from_port": "output",
+      "to_node": "read",
+      "to_port": "input"
+    },
+    {
+      "id": "read-matches",
+      "from_node": "read",
+      "from_port": "output",
+      "to_node": "matches",
+      "to_port": "input"
+    },
+    {
+      "id": "matches-pass",
+      "from_node": "matches",
+      "from_port": "yes",
+      "to_node": "pass",
+      "to_port": "input"
+    },
+    {
+      "id": "matches-fail",
+      "from_node": "matches",
+      "from_port": "no",
+      "to_node": "fail",
+      "to_port": "input"
+    },
+    {
+      "id": "pass-shot",
+      "from_node": "pass",
+      "from_port": "output",
+      "to_node": "shot",
+      "to_port": "input"
+    },
+    {
+      "id": "shot-end",
+      "from_node": "shot",
+      "from_port": "output",
+      "to_node": "end",
+      "to_port": "input"
+    },
+    {
+      "id": "fail-end",
+      "from_node": "fail",
+      "from_port": "output",
+      "to_node": "end",
+      "to_port": "input"
+    }
+  ],
+  "variables": {},
+  "settings": {
+    "default_delay": 0,
+    "error_handling": "stop",
+    "max_retries": 0,
+    "retry_delay": 0,
+    "log_level": "info"
+  }
+}

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import ntpath
 import threading
 import time
 from types import MappingProxyType
@@ -1875,6 +1876,8 @@ class AtomicDesktopAdapter:
         *,
         phase: str,
     ) -> Mapping[str, TraceScalar]:
+        binding = self._binding
+        process_name = ntpath.basename(binding.executable_identity)
         return MappingProxyType(
             {
                 "phase": phase,
@@ -1887,6 +1890,8 @@ class AtomicDesktopAdapter:
                 "frame_epoch": envelope.frame_epoch,
                 "target_hwnd": envelope.frame_hwnd,
                 "target_binding_id": envelope.target_binding_id,
+                "target_title": binding.title_snapshot,
+                "target_process": process_name,
             }
         )
 

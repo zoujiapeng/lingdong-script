@@ -15,6 +15,7 @@ import type {
   TaskContract,
   DesktopTargetContext,
 } from './contracts';
+import type { FlowFragmentProposal, FlowFragmentRequestContext } from '../utils/flowFragmentProposal';
 import type { AutomationIR } from '../utils/automationIR';
 
 const FALLBACK_URL = 'http://127.0.0.1:8765/';
@@ -355,6 +356,13 @@ export class ControlPlaneClient {
     return this.request(`api/export/${encodeURIComponent(runId)}`, { method: 'POST' });
   }
 
+  exportThreadAutomation(threadId: string, runIds: string[]): Promise<{ ok: boolean; ir: string }> {
+    return this.request(`api/export/thread/${encodeURIComponent(threadId)}/ir`, {
+      method: 'POST',
+      body: JSON.stringify({ run_ids: runIds }),
+    });
+  }
+
   humanStatus(): Promise<{ recording: boolean }> {
     return this.request('api/human/status');
   }
@@ -367,15 +375,12 @@ export class ControlPlaneClient {
     return this.request('api/human/stop', { method: 'POST' });
   }
 
-  replayModes(): Promise<{ ok: boolean; modes: Array<Record<string, unknown>> }> {
-    return this.request('api/v2/replay/modes');
-  }
-
   apprenticeStatus(): Promise<{
     mode: 'apprentice';
     recording: boolean;
     session_id?: string | null;
     task?: string;
+    name?: string;
     app?: string;
     started_at?: number | null;
   }> {
@@ -386,10 +391,11 @@ export class ControlPlaneClient {
     task: string,
     app = '',
     verification: Array<Record<string, unknown>> = [],
+    name = '',
   ): Promise<Record<string, any>> {
     return this.request('api/v2/replay/apprentice/start', {
       method: 'POST',
-      body: JSON.stringify({ task, app, verification }),
+      body: JSON.stringify({ task, app, verification, name }),
     });
   }
 
@@ -465,6 +471,40 @@ export class ControlPlaneClient {
         thread_id: threadId,
       }),
     });
+  }
+
+  async proposeFlowFragment(
+    goal: string,
+    context: FlowFragmentRequestContext,
+    signal?: AbortSignal,
+  ): Promise<FlowFragmentProposal> {
+    const started = await this.request<{ ok: boolean; proposal_job_id: string }>('api/v2/flow-fragments/proposals', {
+      method: 'POST',
+      body: JSON.stringify({
+        goal,
+        ...context,
+      }),
+    });
+    const jobId = started.proposal_job_id;
+    if (!jobId) throw new Error('流程片段生成任务未返回 job ID。');
+    while (true) {
+      if (signal?.aborted) {
+        await this.cancelRuntimeJob(jobId).catch(() => undefined);
+        throw new Error('已取消流程片段生成。');
+      }
+      const response = await this.request<{
+        ok: boolean;
+        job: { status: string; result?: FlowFragmentProposal; error?: string };
+      }>(`api/v2/jobs/${encodeURIComponent(jobId)}`);
+      const { job } = response;
+      if (job.status === 'done') {
+        if (!job.result) throw new Error('流程片段生成任务没有返回结果。');
+        return job.result;
+      }
+      if (job.status === 'failed') throw new Error(job.error || '流程片段生成失败。');
+      if (job.status === 'canceled') throw new Error('已取消流程片段生成。');
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
   }
 
   bindDesktopLease(

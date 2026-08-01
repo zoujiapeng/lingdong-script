@@ -52,6 +52,7 @@ describe('PropertyPanel history', () => {
     const actions = screen.getByText('操作列表').parentElement!.querySelector('textarea')!;
     fireEvent.change(actions, { target: { value: '{invalid-json' } });
     const confirm = vi.spyOn(window, 'confirm');
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
     let saveResult: { status: string; error?: string } | undefined;
 
     await act(async () => { saveResult = await useStore.getState().saveScript(); });
@@ -61,6 +62,7 @@ describe('PropertyPanel history', () => {
     act(() => { replacementAllowed = confirmDocumentReplacement(); });
     expect(replacementAllowed).toBe(false);
     expect(confirm).not.toHaveBeenCalled();
+    expect(alert).toHaveBeenCalledWith(expect.stringContaining('请先修正编辑器内容'));
     expect(actions.parentElement!.querySelector('.arp-field-error')).not.toBeNull();
   });
 
@@ -91,5 +93,23 @@ describe('PropertyPanel history', () => {
       step: { tool: 'ext.delay', seconds: 2 },
       target_window: { title: 'Notepad' },
     });
+  });
+
+  it('preserves structured evidence conditions instead of flattening them to text', () => {
+    useStore.getState().newScript();
+    const node = useStore.getState().script.nodes.find((item) => item.type === 'evidence_gate')!;
+    const original = JSON.parse(JSON.stringify((node.params as any).required));
+    useStore.getState().selectNodes([node.id]);
+    render(<PropertyPanel />);
+
+    const editor = screen.getByText('必需证据').parentElement!.querySelector('textarea')!;
+    expect(JSON.parse(editor.value)).toEqual(original);
+    const replacement = [{ predicate: 'artifact.exists', source: 'screenshot', equals: true, max_age_ms: 5000 }];
+    fireEvent.change(editor, { target: { value: JSON.stringify(replacement, null, 2) } });
+    fireEvent.blur(editor);
+
+    expect((useStore.getState().script.nodes.find((item) => item.id === node.id)!.params as any).required).toEqual(replacement);
+    act(() => useStore.getState().undo());
+    expect((useStore.getState().script.nodes.find((item) => item.id === node.id)!.params as any).required).toEqual(original);
   });
 });

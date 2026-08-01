@@ -3,6 +3,8 @@ import json
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from winpilot.recorder import human as human_mod
 from winpilot.recorder.human import HumanRecorder, StepBuilder, _normalize_key_char
 
@@ -138,6 +140,66 @@ def test_printable_text_flushes_when_the_target_window_changes():
 
 def _window(hwnd, pid, title, process):
     return {"hwnd": hwnd, "pid": pid, "title": title, "process": process}
+
+
+def _completed_click_recording(name):
+    recorder = HumanRecorder()
+    recorder._builder = StepBuilder()
+    recorder._name = name
+    target = {"title": "Editor", "process": "editor.exe"}
+    recorder._builder.mouse_press(10, 20, "left", None, target)
+    recorder._builder.mouse_release(10, 20, "left")
+    recorder._target_window = target
+    recorder._stop.set()
+    return recorder
+
+
+@pytest.mark.parametrize("name", ["CON", "../lesson", "lesson."])
+def test_recorder_rejects_unsafe_macro_name_before_hooks_start(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(human_mod, "SCRIPTS_DIR", tmp_path)
+    recorder = HumanRecorder()
+
+    with pytest.raises(ValueError, match="Windows-safe"):
+        recorder.start(name)
+
+    assert recorder.is_recording() is False
+
+
+def test_recorder_rejects_existing_macro_name_case_insensitively(tmp_path, monkeypatch):
+    existing = tmp_path / "Lesson.automation.json"
+    existing.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(human_mod, "SCRIPTS_DIR", tmp_path)
+    recorder = HumanRecorder()
+
+    with pytest.raises(ValueError, match="conflicts with existing script"):
+        recorder.start("lesson")
+
+    assert existing.read_text(encoding="utf-8") == "keep"
+    assert recorder.is_recording() is False
+
+
+def test_recorder_preserves_safe_macro_name_without_sanitizing(tmp_path, monkeypatch):
+    recorder = _completed_click_recording("lesson one.v1")
+    monkeypatch.setattr(human_mod, "SCRIPTS_DIR", tmp_path)
+
+    result = recorder.stop()
+    script = json.loads((tmp_path / result["file"]).read_text(encoding="utf-8"))
+
+    assert result["file"] == "lesson one.v1.wps.json"
+    assert script["name"] == "lesson one.v1"
+
+
+def test_recorder_keeps_existing_file_if_it_appears_before_stop(tmp_path, monkeypatch):
+    recorder = _completed_click_recording("lesson")
+    existing = tmp_path / "lesson.wps.json"
+    existing.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(human_mod, "SCRIPTS_DIR", tmp_path)
+
+    result = recorder.stop()
+
+    assert result["ok"] is False
+    assert "choose a different macro name" in result["error"]
+    assert existing.read_text(encoding="utf-8") == "keep"
 
 
 def test_recorder_snapshots_clipboard_when_paste_event_is_queued(monkeypatch):

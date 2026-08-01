@@ -394,11 +394,17 @@ class HumanRecorder:
         with self._lock:
             if self.is_recording():
                 return
+            from ..recorder import trace as trace_mod
+            checked_name = trace_mod.ensure_script_name_available(
+                name or time.strftime("演示_%Y%m%d-%H%M%S"),
+                directory=Path(SCRIPTS_DIR),
+                what="macro name",
+            )
             from pynput import keyboard as kb, mouse as ms
             self._builder = StepBuilder()
             self._queue = Queue()
             self._stop = threading.Event()
-            self._name = name or time.strftime("演示_%Y%m%d-%H%M%S")
+            self._name = checked_name
             self._control_window = self._foreground_window()
             self._target_window = None
             self._action_epoch_hwnd = None
@@ -519,10 +525,18 @@ class HumanRecorder:
             BUS.publish("human", state="stopped", ok=False, error=error, steps=len(steps))
             return {"ok": False, "error": error, "steps": len(steps)}
         SCRIPTS_DIR.mkdir(exist_ok=True)
-        safe = "".join(c for c in name if c.isalnum() or c in "-_") or "demo"
-        path = SCRIPTS_DIR / f"{safe}.wps.json"
+        path = SCRIPTS_DIR / f"{name}.wps.json"
         import json
-        path.write_text(json.dumps(script, ensure_ascii=False, indent=1), encoding="utf-8")
+        try:
+            with path.open("x", encoding="utf-8") as fh:
+                fh.write(json.dumps(script, ensure_ascii=False, indent=1))
+        except FileExistsError:
+            error = (
+                f'script "{path.name}" already exists; choose a different macro name '
+                "to keep the existing recording"
+            )
+            BUS.publish("human", state="stopped", ok=False, error=error, steps=len(steps))
+            return {"ok": False, "error": error, "steps": len(steps)}
         BUS.publish("human", state="stopped", file=path.name, steps=len(steps))
         return {"ok": True, "file": path.name, "steps": len(steps)}
 

@@ -14,6 +14,8 @@ export interface WpsScript {
   source?: string;
   source_ir?: string;
   source_run?: string;
+  source_runs?: unknown[];
+  export_manifest?: Record<string, unknown>;
   created?: number;
   target_window?: unknown;
   target?: unknown;

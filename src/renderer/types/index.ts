@@ -96,8 +96,6 @@ export interface EndNodeParams {
 export interface ClickNodeParams {
   x: number;
   y: number;
-  offsetX?: number;
-  offsetY?: number;
   method: ClickMethod;
   delay_after: number; // seconds
   description?: string;
@@ -113,8 +111,6 @@ export interface ImageClickNodeParams {
   similarity: number;       // 0-100
   timeout: number;          // seconds
   method: ClickMethod;
-  offset_x: number;
-  offset_y: number;
   delay_after: number;
   multi_scale: boolean;
   region?: { x: number; y: number; w: number; h: number };
@@ -201,11 +197,7 @@ export interface VariableSetNodeParams {
 
 export interface ClickTextNodeParams {
   text: string;
-  similarity: number;
   method: ClickMethod;
-  offset_x: number;
-  offset_y: number;
-  timeout: number;
   delay_after: number;
   description?: string;
 }
@@ -227,8 +219,6 @@ export interface ClickActionParams {
   text?: string;
   // common
   method: ClickMethod;
-  offset_x: number;
-  offset_y: number;
   timeout: number;
   delay_after: number;
   description?: string;
@@ -312,7 +302,6 @@ export interface VolumeMuteParams {
 export interface LaunchProgramParams {
   target: string;
   args: string;
-  wait: boolean;
 }
 
 export interface KillProcessParams {
@@ -328,7 +317,6 @@ export interface WaitProcessParams {
 
 export interface FocusWindowParams {
   title: string;
-  exact: boolean;
 }
 
 export interface WallpaperParams {

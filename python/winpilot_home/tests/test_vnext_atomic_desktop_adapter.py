@@ -1373,6 +1373,8 @@ def test_exact_type_text_is_absent_from_ordinary_trace(
                 "frame_epoch",
                 "target_hwnd",
                 "target_binding_id",
+                "target_title",
+                "target_process",
             }
             for _receipt, metadata in harness.trace.records
         )
@@ -1393,6 +1395,73 @@ def test_exact_type_text_is_absent_from_ordinary_trace(
         assert report.status.value == "complete"
         assert sentinel in journal_text
         assert sentinel in report_text
+    finally:
+        journal.close()
+
+
+def test_trace_export_reuses_durable_vnext_physical_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from winpilot.recorder import trace as trace_mod
+
+    trace_root = tmp_path / "traces"
+    evidence_parent = trace_root / "vnext_runtime_evidence"
+    evidence_parent.mkdir(parents=True)
+    evidence_directory = evidence_parent / RUN_ID
+    text = "repeat me exactly"
+    harness = _harness(
+        "type_text",
+        action_args={"text": text},
+        evidence_run_directory=evidence_directory,
+    )
+    journal = harness.evidence_journal
+    assert journal is not None
+    try:
+        result = harness.run()
+        assert result.transition is not None
+        _record_controller_transition(harness, result.transition)
+        journal_head = journal.head
+        journal_event_count = journal.event_count
+        journal.close()
+        records = [
+            {"type": "agent_start", "task": "durable export"},
+            {
+                "type": "vnext_raw_receipt",
+                "run_id": RUN_ID,
+                "mission_id": MISSION_ID,
+                "decision_id": harness.envelope.decision_id,
+                "input_completed": True,
+                "target_window": {"title": "App", "process": "app.exe"},
+            },
+            {
+                "type": "runtime_evidence_sealed",
+                "runtime_version": "vnext",
+                "mission_id": MISSION_ID,
+                "run_id": RUN_ID,
+                "journal_head_sha256": journal_head,
+                "journal_event_count": journal_event_count,
+                "report_status": "complete",
+                "missing_evidence_count": 0,
+                "verification_failure_count": 0,
+            },
+            {"type": "trace_integrity", "complete": True,
+             "dropped_events": 0, "write_failures": 0, "accepted_events": 3},
+        ]
+        (trace_root / f"{RUN_ID}.jsonl").write_text(
+            "".join(json.dumps(item) + "\n" for item in records),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(trace_mod, "TRACES_DIR", trace_root)
+
+        script = trace_mod.build_script(RUN_ID)
+
+        assert script["steps"] == [{
+            "tool": "type_text",
+            "text_input": text,
+            "target_window": {"title": "App", "process": "app.exe"},
+        }]
+        assert script["export_manifest"]["complete"] is True
     finally:
         journal.close()
 
