@@ -192,7 +192,7 @@ def test_trace_privacy_audit_fails_closed_on_claim_or_private_value(
     trace.write_text(
         json.dumps(
             {
-                "type": "vnext_canary_turn",
+                "type": "live_agent_turn",
                 "concise_claim": "摄影群在讨论私人事项",
             },
             ensure_ascii=False,

@@ -1890,7 +1890,7 @@ def test_broker_is_frozen_and_package_is_pure_default_unreachable() -> None:
     product_root = home / "winpilot"
     vnext_root = product_root / "vnext"
     live_composition_root = (
-        product_root / "orchestrator" / "vnext_live_canary.py"
+        product_root / "orchestrator" / "live_agent.py"
     )
 
     capability_importers = {

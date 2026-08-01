@@ -2056,3 +2056,70 @@ TypeScript typecheck 通过；客户端 outcome/草稿聚焦回归为 `35 passed
 可见、下一条提交是否仍能绑定原 Thread、模型能否从恢复历史精确回答 marker。当前
 Thread Store 是进程内存且客户端保存 stale thread id，代码审计预期这里会分叉；必须先
 拿到可见重启证据，不能直接增加持久化 owner、自动创建新 Thread 或解除公共 trace 脱敏。
+
+### 13.25 产品命名与仓库治理收口；同一客户端长对话加桌面任务复验通过
+
+本轮没有继续扩 Runtime、工具面或提示词，而是先清除会误导后续维护者的治理与命名债务。
+远端开发分支现只剩 `master`；`codex/vnext-agent-core`、`fix/pr10-python-ci` 与
+`test/pr15-legacy-electron-oracle` 已按各自精确 tip 删除。PR10/PR15 的可恢复历史仍由
+`archive/pr10-vnext-agent-core-20260726` 与
+`evidence/pr15-legacy-electron-oracle-20260726` 只读 tag 保存，fix 分支提交则可由前者的
+祖先链恢复。旧 Issue 已按当前事实重写或关闭：开放项只剩 #11、#39、#40、#43、#44，
+不再把 Legacy、旧 Verifier 或已完成 C 阶段阻塞描述为当前产品方向。`4f93672` 的最新
+Actions run `30663041917` 是账户 billing/spending limit 导致的零步骤终止，不是代码失败，
+更不是绿色检查。
+
+产品 composition owner 从 `orchestrator/vnext_live_canary.py` 改名为
+`orchestrator/live_agent.py`；配置与状态 canonical key 从 `live_canary_enabled` 改为
+`live_agent_enabled`，默认仍为 `true`。旧配置键只在 `config.py` 输入边界兼容：old-only
+在内存中迁移并在下次保存时只写 canonical key；双键值和精确类型都相同时接受并去掉旧键，
+冲突则在修改内存或磁盘前 fail closed，API 返回 400。Runtime、admission、status 与前端
+合同都只读取新键。真正的 canary campaign、runner 与报告 schema 仍保留 canary 名称；一次
+把这些实验资产也统改为 live-agent 的过宽候选已完整回退。没有新增关键词、应用 adapter、
+任务分类、坐标规则、重试规则或提示教学。
+13.10–13.24 中出现的旧 owner/event/key 名称是当时证据的追加式历史记录，也不机械改写。
+
+生产代码切片为 `+88/-55`，净增 33 行；其中 owner 文件改名及其事件/错误文本为
+`+35/-35`，新增量主要是 30 行通用配置边界。`config.example.json`、测试、runner 与文档
+不计入该数字；系统提示词为 `+0/-0`。保留的是 canonical 产品命名、旧键输入兼容和已有
+单 Actor 行为；回退的是过宽 canary 资产改名。没有为了 E2E 结果加入任何生产策略。
+
+本地验证结果：focused orchestrator/Actor/broker/adapter/client 合同 `420 passed`，真实
+canary campaign/harness `159 passed`，renderer `243 passed`，TypeScript typecheck 通过。
+第一次 Python 全量为 `3466 passed, 2 failed, 13 skipped`：一项是本轮漏改的错误文本期望，
+修正测试后清零；另一项是在重型全量负载下 stdio fixture 暂时宣告零工具，而同一聚焦测试
+此前和随后都通过，属于测试调度干扰。两项原样复跑 `2 passed`，最终完整重跑为
+`3468 passed, 13 skipped, 1 warning`。
+
+可见 Electron 最终有效报告为
+`output/playwright/live-agent-name-migration-e2e/20260801-142330-history-depth-ab/report.json`。
+测试从真实前端用 Windows 键盘输入与原生鼠标提交，顺序为 fresh→history：fresh 的
+connector→预打开 Notepad 任务通过；第二个冷启动客户端的 6 轮聊天 `6/6`，每轮均为非空
+回复、零 connector、零 desktop lease、零 GUI observation、零 Runtime tool attempt；随后
+第 7 轮在精确 12-message/699-character history 后再次完成同一组合任务。两臂均各有且只有
+一次 connector raw→canonical→physical 调用，磁盘文件精确等于随机值，GUI receipt 都是
+`hotkey → type_text → hotkey`，模型自主 terminal，窗口恢复、Notepad 与 Electron 清理均
+通过。
+
+同一组测试的前三次无效尝试没有混入成功率：`140029` 在任何 run 前被 Vite ready probe
+阻断，`140631` 在任何 run 前被 Windows `SetForegroundWindow` 拒绝，均为测试基础设施；
+`141407` 的首个普通聊天确实到达模型，但模型错误申请 desktop observation，属于模型模态
+选择，随后另一臂又被 Vite 探活阻断。复用一个已验证 workspace Vite 并只在两个冷启动
+Electron 出现时各聚焦一次后，`142330` 得到完整有效 pair；测试结束已按精确 PID 验证并
+停止该 Vite。没有用 Runtime 修正聊天误选桌面。
+
+新架构仍符合一个原始 goal、一个 `LiveVisualActor`、一条视觉执行线和小型通用工具面的
+核心思想；本轮只把“实验旁路”名称还原为产品 owner，没有增加模型角色。模型仍承担意图、
+聊天/connector/desktop 模态选择、视觉动作、自纠错与停止，职责和长任务压力都很高；有效
+6 轮样本证明最大可见 history 本身没有造成当前组合任务退化，但 `141407` 的误申请桌面
+继续证明模态选择压力真实存在。不能据此增加 router 或提示教学。
+
+Pi/Operit 引入计划不变：本轮 `+0/-0`。不搬运第二 Runtime、RPC、Android owner 或整套
+依赖；只有某段源码能整体替换并删除当前 owner，且在至少两个未知任务族的外部 oracle E2E
+中提高完成率时才准入。
+
+下一轮唯一最高价值实验仍是 test-only 的 Codex 式会话连续性：在真实前端建立带随机
+marker 的成功 Thread，正常关闭并重启 Electron 与托管服务，再验证旧消息可见、下一条
+提交仍绑定原 Thread、模型能从恢复历史精确回答 marker。先测出进程内 Thread Store 与
+stale thread id 的真实分歧，再决定是否需要替换 owner；不得预先增加持久化、自动新建
+Thread、router 或提示词。

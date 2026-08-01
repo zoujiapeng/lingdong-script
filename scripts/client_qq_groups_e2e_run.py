@@ -820,7 +820,7 @@ def audit_fact_delivery_projection() -> dict[str, Any]:
         / "winpilot_home"
         / "winpilot"
         / "orchestrator"
-        / "vnext_live_canary.py"
+        / "live_agent.py"
     )
     client_path = (
         WORKSPACE

@@ -55,7 +55,7 @@ def _append(event: dict[str, Any]) -> None:
 
 def _install() -> None:
     from winpilot.integrations import connector_gateway as gateway_module
-    from winpilot.orchestrator import vnext_live_canary as live_module
+    from winpilot.orchestrator import live_agent as live_module
     from winpilot.vnext.model_roles import visual_actor as actor_module
 
     original_build = live_module._build_actor_resources

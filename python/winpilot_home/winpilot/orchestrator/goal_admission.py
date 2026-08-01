@@ -99,7 +99,7 @@ def admit_goal(
         raise GoalAdmissionError("goal must not be empty")
     if live_gui_enabled is not True:
         raise GoalAdmissionUnavailable(
-            "vNext live canary is disabled; no legacy fallback was run"
+            "vNext live Agent is disabled; no legacy fallback was run"
         )
     return GoalAdmissionDecision(
         goal=normalized_goal,

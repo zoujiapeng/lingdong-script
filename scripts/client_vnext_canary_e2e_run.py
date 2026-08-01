@@ -121,7 +121,7 @@ SOURCE_IDENTITY_PATHS = (
     "scripts/vnext_canary_input_hook.py",
     "python/winpilot_home/eval_targets/vnext_canary_server.py",
     "python/winpilot_home/eval_targets/vnext_canary_target.html",
-    "python/winpilot_home/winpilot/orchestrator/vnext_live_canary.py",
+    "python/winpilot_home/winpilot/orchestrator/live_agent.py",
 )
 C2_ADAPTER_PATH = "python/winpilot_home/winpilot/vnext/desktop_adapter/atomic.py"
 C2_TEST_PATH = "python/winpilot_home/tests/test_vnext_atomic_desktop_adapter.py"
@@ -477,7 +477,7 @@ def _fixed_config() -> tuple[bytes, dict[str, Any], dict[str, Any]]:
     if not all(isinstance(item, dict) for item in (api, vlm, agent, vnext)):
         raise RuntimeError("campaign model/runtime config sections must be objects")
     api["max_retries"] = 0
-    vnext.update({"live_canary_enabled": True, **FROZEN_RUNTIME_BUDGET})
+    vnext.update({"live_agent_enabled": True, **FROZEN_RUNTIME_BUDGET})
     api_model = str(api.get("model") or "").strip()
     vlm_model = str(vlm.get("model") or "").strip()
     if not api_model or api_model != vlm_model:
@@ -1150,8 +1150,8 @@ def _authenticated_config(
         raise RuntimeError("paired canary requires agent.llm_trace=true")
     if api.get("max_retries") != 0:
         raise RuntimeError("paired canary requires api.max_retries=0")
-    if vnext.get("live_canary_enabled") is not True:
-        raise RuntimeError("vnext.live_canary_enabled must be explicitly true")
+    if vnext.get("live_agent_enabled") is not True:
+        raise RuntimeError("vnext.live_agent_enabled must be explicitly true")
     observed_budget = {
         name: vnext.get(name)
         for name in FROZEN_RUNTIME_BUDGET
@@ -1193,7 +1193,7 @@ def _enable_fixed_canary(
             method="PATCH",
             patch={
                 "vnext": {
-                    "live_canary_enabled": True,
+                    "live_agent_enabled": True,
                     **FROZEN_RUNTIME_BUDGET,
                 },
                 "api": {"max_retries": 0},
@@ -1232,8 +1232,8 @@ def _restore_canary_config(
         else {}
     )
     restored = {
-        "live_canary_enabled": (
-            original_vnext.get("live_canary_enabled") is True
+        "live_agent_enabled": (
+            original_vnext.get("live_agent_enabled") is True
         ),
         **{
             name: original_vnext.get(name, value)
@@ -1782,7 +1782,7 @@ def _trace_audit(
             safety_abort_reasons.add("runtime_legacy_fallback")
         frozen_events = [
             item for item in events
-            if item.get("type") == "vnext_canary_start"
+            if item.get("type") == "live_agent_start"
             and isinstance(item.get("runtime_budget"), dict)
         ]
         if len(frozen_events) != 1:
@@ -2005,7 +2005,7 @@ def _trace_audit(
                 errors.append(f"type/hotkey receipt sequence is not exact: {actions!r}")
 
         turn_events = [
-            item for item in events if item.get("type") == "vnext_canary_turn"
+            item for item in events if item.get("type") == "live_agent_turn"
         ]
         turn_indices = [item.get("turn_index") for item in turn_events]
         if turn_indices != list(range(len(turn_events))):
@@ -2018,7 +2018,7 @@ def _trace_audit(
         ):
             errors.append("vNext turn run/mission/fallback binding mismatch")
         done_events = [
-            item for item in events if item.get("type") == "vnext_canary_done"
+            item for item in events if item.get("type") == "live_agent_done"
         ]
         if len(done_events) != 1:
             errors.append(
@@ -2192,7 +2192,7 @@ def _trace_sources(
     turns = [
         event
         for event in indexed
-        if event.get("type") == "vnext_canary_turn"
+        if event.get("type") == "live_agent_turn"
         and event.get("proposal_kind") == "desktop_action"
     ]
     return indexed, starts, dones, receipts, turns, trace_file
@@ -2779,7 +2779,7 @@ def _reconcile_vnext_actions(
         (
             event
             for event in events
-            if event.get("type") == "vnext_canary_start"
+            if event.get("type") == "live_agent_start"
             and str(event.get("run_id") or "") == run_id
         ),
         {},
@@ -2817,7 +2817,7 @@ def _reconcile_vnext_actions(
     terminal_events = [
         event
         for event in events
-        if event.get("type") == "vnext_canary_done"
+        if event.get("type") == "live_agent_done"
         and str(event.get("run_id") or "") == run_id
     ]
     if len(terminal_events) != 1:

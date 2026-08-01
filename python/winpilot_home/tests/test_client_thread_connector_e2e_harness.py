@@ -709,7 +709,7 @@ def test_target_outcome_requires_external_gui_connector_terminal_and_usage():
         "outcome": "terminal",
         "status": "done",
         "terminal_evidence": {
-            "events": ["vnext_canary_done"],
+            "events": ["live_agent_done"],
             "parse_errors": [],
         },
         "usage": {"observed": True, "parse_errors": []},

@@ -35,6 +35,10 @@ PlatformWorkbench
 `observe_desktop` 后，前端才通过匹配 `run_id + lease_id` 的独立请求交付当时的桌面
 上下文。
 
+这一主路径的 canonical composition owner 是 `orchestrator/live_agent.py`；
+`vnext.live_agent_enabled=true` 是 fail-closed 的产品可用性配置，不是按任务选择的
+canary selector，也不允许客户端逐 run 切换。
+
 显式 MCP 只作为同一 `LiveVisualActor` 的普通工具。`/api/chat`、CLI、scheduler、
 integration runner 或直接 MCP 调用可以复用内部能力，但不能形成行为不同的第二套 GUI
 产品入口，也不能代替 Electron 客户端 E2E。`/api/v2/task-contracts/compile` 与可由
@@ -354,7 +358,7 @@ toolsets。仓库不分发 credential，也没有 GitHub OAuth 登录流程；�
 fixture 的精确 read 与 connector→Notepad 外部结果为 `2/2`；GitHub 官方 remote 也已
 完成真实 discover、`get_file_contents` 以及
 `get_commit(owner=zoujiapeng, repo=lingdong-script, sha=master, detail=none)` 物理调用，
-后者 receipt 为 `succeeded`，并返回独立 `gh api` 核对的
+后者 receipt 为 `succeeded`，并返回 2026-07-31 该次调用时独立 `gh api` 核对的
 `fba5d7bb6dcb13c46e93dbc29bc3cef44e560622`。首个中文 Electron run 的
 before-submit 已把目标损坏为大量 `?`，属于测试输入干扰，不能归因模型。随后 ASCII
 run `arp-20260731-220327-1ed4e4` 完整提交目标，官方 remote 有真实会话/POST；五次模型
