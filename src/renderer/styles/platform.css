@@ -449,12 +449,15 @@
 .arp-studio-title > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .arp-studio-title strong { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arp-studio-title span { color: var(--arp-text-muted); font-size: 8px; }
-.arp-toolbar-error { max-width: 260px; color: var(--arp-red); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.arp-toolbar-notice { color: var(--arp-green); font-size: 10px; white-space: nowrap; }
+.arp-studio-message-bar { min-height: 29px; flex: 0 0 auto; padding: 7px 12px; border-bottom: 1px solid; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.arp-studio-message-bar.danger { color: var(--arp-red); border-color: color-mix(in srgb, var(--arp-red) 35%, transparent); background: var(--arp-red-soft); }
+.arp-studio-message-bar.success { color: var(--arp-green); border-color: color-mix(in srgb, var(--arp-green) 35%, transparent); background: var(--arp-green-soft); }
+.arp-studio-message-bar.info { color: var(--arp-blue); border-color: color-mix(in srgb, var(--arp-blue) 35%, transparent); background: var(--arp-blue-soft); }
 .arp-validation-bar { min-height: 29px; flex: 0 0 auto; padding: 7px 12px; border-bottom: 1px solid; font-size: 9px; }
 .arp-validation-bar.warning { color: var(--arp-amber); border-color: color-mix(in srgb, var(--arp-amber) 35%, transparent); background: var(--arp-amber-soft); }
 .arp-validation-bar.danger { color: var(--arp-red); border-color: color-mix(in srgb, var(--arp-red) 35%, transparent); background: var(--arp-red-soft); }
 .arp-studio-shell { min-height: 0; flex: 1; display: flex; overflow: hidden; }
+.arp-studio-shell.is-locked { pointer-events: none; }
 .arp-mobile-panel-button, .arp-studio-scrim { display: none; }
 .arp-canvas-stage { min-width: 0; min-height: 0; flex: 1; display: flex; position: relative; }
 .arp-studio-shell .node-library { width: 224px; background: var(--arp-surface); border-color: var(--arp-line); }
@@ -638,33 +641,11 @@
   .arp-runs-layout { grid-template-columns: 1fr; height: auto; }
   .arp-run-list { max-height: 330px; border-right: 0; border-bottom: 1px solid var(--arp-line); }
   .arp-run-detail { min-height: 460px; }
-}
-
-@media (max-width: 700px) {
-  .arp-apprentice-control { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .arp-apprentice-control > input:first-child { grid-column: 1 / -1; }
-  .arp-apprentice-control > button { grid-column: 1 / -1; }
-  .arp-apprentice-control input, .arp-apprentice-control select, .arp-apprentice-control button { width: 100%; min-width: 0; }
-  .arp-asset-row { align-items: start; }
-  .arp-row-actions { flex-wrap: wrap; }
-  .arp-evidence-editor { grid-template-columns: 1fr; }
-  .arp-metrics-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .arp-metrics-row.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .arp-interaction-grid { grid-template-columns: 1fr; }
-  .arp-runtime-audit-summary { grid-template-columns: 1fr; }
-  .arp-runtime-stage { grid-template-columns: 1fr; }
-  .arp-runtime-stage-error { grid-column: 1; }
-  .arp-metrics-row .arp-metric { border-right: 1px solid var(--arp-line); border-bottom: 1px solid var(--arp-line); }
-  .arp-metrics-row:not(.compact) .arp-metric:nth-child(3n),
-  .arp-metrics-row.compact .arp-metric:nth-child(2n) { border-right: 0; }
-  .arp-metrics-row:not(.compact) .arp-metric:nth-child(n+10),
-  .arp-metrics-row.compact .arp-metric:nth-child(n+5) { border-bottom: 0; }
-  .arp-metrics-row:not(.compact) .arp-metric:last-child { border-right: 0; }
   .arp-studio-toolbar { padding: 0 7px; gap: 5px; }
   .arp-studio-title { min-width: 54px; flex: 1; overflow: hidden; }
   .arp-studio-title > svg, .arp-studio-title span { display: none; }
   .arp-studio-title strong { display: block; }
-  .arp-studio-toolbar > .arp-status, .arp-toolbar-error, .arp-toolbar-notice, .arp-action-spacer { display: none; }
+  .arp-studio-toolbar > .arp-status, .arp-action-spacer { display: none; }
   .arp-mobile-panel-button { display: inline-grid; }
   .arp-studio-command { width: 30px; min-height: 30px; padding: 0; flex: 0 0 30px; }
   .arp-studio-command > span { display: none; }
@@ -707,10 +688,28 @@
     border: 0;
     background: rgba(15, 23, 42, 0.28);
   }
-  .arp-studio-shell.mobile-library-open .arp-studio-scrim {
-    left: var(--arp-mobile-panel-width);
-  }
-  .arp-studio-shell.mobile-properties-open .arp-studio-scrim {
-    right: var(--arp-mobile-panel-width);
-  }
+  .arp-studio-shell.mobile-library-open .arp-studio-scrim { left: var(--arp-mobile-panel-width); }
+  .arp-studio-shell.mobile-properties-open .arp-studio-scrim { right: var(--arp-mobile-panel-width); }
+}
+
+@media (max-width: 700px) {
+  .arp-apprentice-control { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .arp-apprentice-control > input:first-child { grid-column: 1 / -1; }
+  .arp-apprentice-control > button { grid-column: 1 / -1; }
+  .arp-apprentice-control input, .arp-apprentice-control select, .arp-apprentice-control button { width: 100%; min-width: 0; }
+  .arp-asset-row { align-items: start; }
+  .arp-row-actions { flex-wrap: wrap; }
+  .arp-evidence-editor { grid-template-columns: 1fr; }
+  .arp-metrics-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .arp-metrics-row.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .arp-interaction-grid { grid-template-columns: 1fr; }
+  .arp-runtime-audit-summary { grid-template-columns: 1fr; }
+  .arp-runtime-stage { grid-template-columns: 1fr; }
+  .arp-runtime-stage-error { grid-column: 1; }
+  .arp-metrics-row .arp-metric { border-right: 1px solid var(--arp-line); border-bottom: 1px solid var(--arp-line); }
+  .arp-metrics-row:not(.compact) .arp-metric:nth-child(3n),
+  .arp-metrics-row.compact .arp-metric:nth-child(2n) { border-right: 0; }
+  .arp-metrics-row:not(.compact) .arp-metric:nth-child(n+10),
+  .arp-metrics-row.compact .arp-metric:nth-child(n+5) { border-bottom: 0; }
+  .arp-metrics-row:not(.compact) .arp-metric:last-child { border-right: 0; }
 }

@@ -8,6 +8,7 @@ from .common import (
     LiveModelRoleError,
 )
 from .visual_actor import (
+    FlowFragmentProposer,
     VISUAL_ACTOR_MODEL_ROLE,
     VISUAL_ACTOR_SYSTEM_CONTRACT,
     LiveVisualActor,
@@ -20,6 +21,7 @@ __all__ = [
     "MAX_LIVE_MODEL_NAME_CHARS",
     "MAX_LIVE_MODEL_OUTPUT_TOKENS",
     "MAX_LIVE_MODEL_TOTAL_TIMEOUT_S",
+    "FlowFragmentProposer",
     "LiveModelRoleError",
     "LiveVisualActor",
     "VisualActorTurnAdmission",

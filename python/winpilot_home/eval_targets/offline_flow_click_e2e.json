@@ -1,0 +1,94 @@
+{
+  "meta": {
+    "id": "offline-flow-click-e2e",
+    "name": "Offline click node E2E",
+    "created_at": "2026-08-02T00:00:00.000Z",
+    "updated_at": "2026-08-02T00:00:00.000Z",
+    "version": "1.0.0"
+  },
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "x": 80,
+      "y": 80,
+      "params": {}
+    },
+    {
+      "id": "focus-target",
+      "type": "focus_window",
+      "x": 80,
+      "y": 230,
+      "label": "Bind independent target",
+      "params": {
+        "title": "Offline Flow Node Target | click-20260802-01"
+      }
+    },
+    {
+      "id": "click-target",
+      "type": "click",
+      "x": 80,
+      "y": 380,
+      "label": "Click independent target",
+      "params": {
+        "x": 480,
+        "y": 168,
+        "method": "single",
+        "delay_after": 0
+      }
+    },
+    {
+      "id": "evidence-shot",
+      "type": "screenshot",
+      "x": 80,
+      "y": 530,
+      "label": "Capture completion evidence",
+      "params": {}
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "x": 80,
+      "y": 680,
+      "params": {}
+    }
+  ],
+  "edges": [
+    {
+      "id": "start-focus",
+      "from_node": "start",
+      "from_port": "output",
+      "to_node": "focus-target",
+      "to_port": "input"
+    },
+    {
+      "id": "focus-click",
+      "from_node": "focus-target",
+      "from_port": "output",
+      "to_node": "click-target",
+      "to_port": "input"
+    },
+    {
+      "id": "click-evidence",
+      "from_node": "click-target",
+      "from_port": "output",
+      "to_node": "evidence-shot",
+      "to_port": "input"
+    },
+    {
+      "id": "evidence-end",
+      "from_node": "evidence-shot",
+      "from_port": "output",
+      "to_node": "end",
+      "to_port": "input"
+    }
+  ],
+  "variables": {},
+  "settings": {
+    "default_delay": 0,
+    "error_handling": "stop",
+    "max_retries": 0,
+    "retry_delay": 0,
+    "log_level": "info"
+  }
+}

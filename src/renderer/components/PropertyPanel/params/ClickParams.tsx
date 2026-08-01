@@ -49,16 +49,6 @@ export function ClickParams({ params, onChange }: Props) {
           </div>
         </div>
       </div>
-      <div className="form-row">
-        <div className="form-group">
-          <label className="form-label">偏移 X</label>
-          <input className="form-input" type="number" value={params.offsetX || 0} onChange={(e) => onChange({ offsetX: +e.target.value })} />
-        </div>
-        <div className="form-group">
-          <label className="form-label">偏移 Y</label>
-          <input className="form-input" type="number" value={params.offsetY || 0} onChange={(e) => onChange({ offsetY: +e.target.value })} />
-        </div>
-      </div>
       <div className="form-group">
         <label className="form-label">点击方式</label>
         <select className="form-input form-select" value={params.method} onChange={(e) => onChange({ method: e.target.value as ClickMethod })}>

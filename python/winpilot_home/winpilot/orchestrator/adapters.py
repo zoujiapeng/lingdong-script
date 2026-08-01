@@ -23,6 +23,7 @@ _REPLAY_DESKTOP_TOOLS = {
     "click", "type_text", "hotkey", "launch", "focus_window", "scroll",
     "drag", "draw_strokes", "run_detached", "tray_click", "ext.clipboard_set",
 }
+_ACTION_BATCH_SESSION_KEY = "action_batch_session"
 
 
 def _publish_anchor_metrics(result: dict[str, Any], context: dict[str, Any], node: ArpNode) -> None:
@@ -123,41 +124,90 @@ def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
     if not isinstance(actions, list) or not actions:
         return NodeResult(ok=False, error="action_batch requires config.actions")
     task = str(node.config.get("subgoal") or node.name or "ARP GUI action batch")
-    session = ToolSession(stop_event=stop_event, task=task, runtime_profile=build_runtime_profile(task))
+    runtime_state = context.get("runtime_state")
+    if not isinstance(runtime_state, dict):
+        return NodeResult(ok=False, error="action_batch requires an ARP runtime session")
+    session = runtime_state.get(_ACTION_BATCH_SESSION_KEY)
+    if session is None:
+        session = ToolSession(
+            stop_event=stop_event,
+            task=task,
+            runtime_profile=build_runtime_profile(task),
+        )
+        runtime_state[_ACTION_BATCH_SESSION_KEY] = session
+    else:
+        # A node timeout wraps the run stop event with a node-local event. Keep
+        # the run-scoped session, but use the current node's cancellation view.
+        session.stop_event = stop_event
     session.run_id = context["run_id"]
-    try:
-        result = session.dispatch(
-            "run_action_batch",
-            {
-                "actions": actions,
-                "subgoal": task,
-                "stop_on_error": bool(node.config.get("stop_on_error", True)),
-                **({"sync": node.config["sync"]} if "sync" in node.config else {}),
-            },
-        )
-        data = _json_result(result.text)
-        ok = bool(data.get("ok")) and not data.get("failed_at")
-        verified = bool(data.get("verified")) or bool(
-            isinstance(data.get("controller_state"), dict)
-            and data["controller_state"].get("verified")
-        )
-        evidence = []
-        if verified:
-            evidence.append({
-                "predicate": "controller.batch",
-                "value": task,
-                "source": "fast_gui_controller",
-                "verified": True,
-            })
-        return NodeResult(
-            ok=ok,
-            branch="next" if ok else "fail",
-            output=data,
-            evidence=evidence,
-            error="" if ok else str(data.get("error") or result.text),
-        )
-    finally:
-        session.close()
+    managed_screenshot = any(
+        isinstance(action, dict)
+        and action.get("action") == "screenshot"
+        and action.get("managed_artifact") is True
+        for action in actions
+    )
+    if managed_screenshot:
+        if runtime_state.get("artifact_store") is not None:
+            session.managed_artifact_store = runtime_state["artifact_store"]
+        if runtime_state.get("evidence_registry") is not None:
+            session.evidence_registry = runtime_state["evidence_registry"]
+        try:
+            store, registry = session._managed_artifacts()
+        except Exception as exc:
+            return NodeResult(ok=False, error=f"managed screenshot store failed: {exc}")
+        runtime_state["artifact_store"] = store
+        runtime_state["evidence_registry"] = registry
+    result = session.dispatch(
+        "run_action_batch",
+        {
+            "actions": actions,
+            "subgoal": task,
+            "stop_on_error": bool(node.config.get("stop_on_error", True)),
+            **({"sync": node.config["sync"]} if "sync" in node.config else {}),
+        },
+    )
+    data = _json_result(result.text)
+    ok = bool(data.get("ok")) and not data.get("failed_at")
+    verified = bool(data.get("verified")) or bool(
+        isinstance(data.get("controller_state"), dict)
+        and data["controller_state"].get("verified")
+    )
+    evidence = []
+    if verified:
+        evidence.append({
+            "predicate": "controller.batch",
+            "value": task,
+            "source": "fast_gui_controller",
+            "verified": True,
+        })
+    if managed_screenshot:
+        for item in data.get("results", []):
+            artifact = item.get("data") if isinstance(item, dict) else None
+            if (
+                isinstance(artifact, dict)
+                and item.get("action") == "screenshot"
+                and item.get("ok") is True
+                and str(artifact.get("artifact_id") or "").strip()
+                and str(artifact.get("sha256") or "").strip()
+            ):
+                evidence.append({
+                    "predicate": "artifact.screenshot",
+                    "value": artifact["artifact_id"],
+                    "source": "managed_screenshot",
+                    "verified": True,
+                    "metadata": {
+                        key: artifact[key]
+                        for key in ("sha256", "width", "height", "size_bytes", "scope")
+                        if key in artifact
+                    },
+                })
+    return NodeResult(
+        ok=ok,
+        branch="next" if ok else "fail",
+        output=data,
+        evidence=evidence,
+        error="" if ok else str(data.get("error") or result.text),
+    )
 
 
 def _walk_replay_tools(step: dict[str, Any]) -> set[str]:

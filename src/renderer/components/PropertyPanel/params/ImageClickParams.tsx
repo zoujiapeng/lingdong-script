@@ -234,17 +234,6 @@ export function ImageClickParams({ params, onChange }: Props) {
         </select>
       </div>
 
-      <div className="form-row">
-        <div className="form-group">
-          <label className="form-label">偏移 X</label>
-          <input className="form-input" type="number" value={params.offset_x} onChange={(e) => onChange({ offset_x: +e.target.value })} />
-        </div>
-        <div className="form-group">
-          <label className="form-label">偏移 Y</label>
-          <input className="form-input" type="number" value={params.offset_y} onChange={(e) => onChange({ offset_y: +e.target.value })} />
-        </div>
-      </div>
-
       <div className="form-group">
         <label className="form-label">点击后延时 (秒)</label>
         <div className="slider-group">

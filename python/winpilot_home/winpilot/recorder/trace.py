@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import inspect
 import os
@@ -16,6 +17,7 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +85,8 @@ class TraceRecorder:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._callbacks_idle = threading.Condition(self._lock)
+        self._callbacks_in_flight = 0
         self._run_id: str | None = None
         self._file = None
         self._step = 0
@@ -92,6 +96,8 @@ class TraceRecorder:
         self._action_regions: dict[str, Region] = {}
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1024)
         self._dropped_events = 0
+        self._accepted_events = 0
+        self._write_failures = 0
         self._worker = threading.Thread(
             target=self._worker_loop,
             daemon=True,
@@ -114,6 +120,9 @@ class TraceRecorder:
             self._evidence_step = 0
             self._action_steps = {}
             self._action_regions = {}
+            self._dropped_events = 0
+            self._accepted_events = 0
+            self._write_failures = 0
             self._accepting = True
         BUS.publish("trace", state="recording", run_id=run_id)
 
@@ -128,11 +137,14 @@ class TraceRecorder:
             )
 
     def stop(self) -> None:
-        with self._lock:
+        with self._callbacks_idle:
             run_id = self._run_id
             self._accepting = False
+            self._callbacks_idle.wait_for(lambda: self._callbacks_in_flight == 0)
         self._queue.join()
         with self._lock:
+            if run_id and self._file is not None and self._run_id == run_id:
+                self._write_integrity_locked(run_id)
             self._close()
         if run_id:
             BUS.publish("trace", state="stopped", run_id=run_id)
@@ -148,9 +160,20 @@ class TraceRecorder:
         self._accepting = False
 
     def _on_event(self, event: dict[str, Any]) -> None:
-        with self._lock:
+        with self._callbacks_idle:
             if not self._accepting or self._file is None or event.get("type") == "trace":
                 return
+            self._callbacks_in_flight += 1
+        try:
+            self._record_accepted_event(event)
+        finally:
+            with self._callbacks_idle:
+                self._callbacks_in_flight -= 1
+                if self._callbacks_in_flight == 0:
+                    self._callbacks_idle.notify_all()
+
+    def _record_accepted_event(self, event: dict[str, Any]) -> None:
+        with self._lock:
             run_id = self._run_id
             step: int | None = None
             phase = "after"
@@ -251,7 +274,7 @@ class TraceRecorder:
                 with self._lock:
                     if self._accepting and self._run_id == run_id:
                         self._action_regions[action_key] = frame_region
-        self._enqueue({
+        queued = self._enqueue({
             "kind": "event",
             "run_id": run_id,
             "record": dict(event),
@@ -263,6 +286,10 @@ class TraceRecorder:
             "baseline_capture_source": baseline_capture_source,
             "post_capture_source": post_capture_source,
         })
+        if queued:
+            with self._lock:
+                if self._run_id == run_id:
+                    self._accepted_events += 1
 
     @staticmethod
     def _action_key(event: dict[str, Any]) -> str:
@@ -312,6 +339,10 @@ class TraceRecorder:
                 elif item.get("kind") == "evidence":
                     self._write_image(item.get("frame"), item.get("path"), quality=82)
             except Exception as exc:
+                if item.get("kind") == "event":
+                    with self._lock:
+                        if self._run_id == item.get("run_id"):
+                            self._write_failures += 1
                 logger.warning("trace worker failed: %s", exc)
             finally:
                 self._queue.task_done()
@@ -382,7 +413,28 @@ class TraceRecorder:
                 self._file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                 self._file.flush()
             except OSError as exc:
+                self._write_failures += 1
                 logger.warning("trace 写入失败: %s", exc)
+
+    def _write_integrity_locked(self, run_id: str) -> None:
+        """Append a final local completeness record after the queue drains."""
+
+        assert self._file is not None
+        record = {
+            "type": "trace_integrity",
+            "ts": time.time(),
+            "run_id": run_id,
+            "accepted_events": self._accepted_events,
+            "dropped_events": self._dropped_events,
+            "write_failures": self._write_failures,
+            "complete": self._dropped_events == 0 and self._write_failures == 0,
+        }
+        try:
+            self._file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._file.flush()
+        except OSError as exc:
+            self._write_failures += 1
+            logger.warning("trace 完整性记录写入失败: %s", exc)
 
     def _save_screenshot(
         self,
@@ -463,55 +515,141 @@ def list_traces() -> list[dict[str, Any]]:
     for path in sorted(TRACES_DIR.glob("*.jsonl"), reverse=True):
         info: dict[str, Any] = {"run_id": path.stem, "task": "", "status": "",
                                 "steps": 0, "size_kb": round(path.stat().st_size / 1024, 1)}
+        legacy_action_ids: set[str] = set()
+        legacy_anonymous = 0
+        vnext_action_ids: set[str] = set()
+        vnext_anonymous = 0
         try:
             with open(path, encoding="utf-8") as fh:
                 for line in fh:
                     event = json.loads(line)
                     if event.get("type") == "agent_start":
                         info["task"] = event.get("task", "")
-                    elif event.get("type") == "agent_tool":
-                        info["steps"] += 1
+                    elif event.get("type") in {"agent_tool", "agent_batch_action"}:
+                        replay = event.get("replay")
+                        meta = event.get("result_meta")
+                        wrapper_parent = bool(
+                            event.get("type") == "agent_tool"
+                            and isinstance(meta, dict)
+                            and meta.get("wrapped_by_fast_controller") is True
+                        )
+                        if (
+                            isinstance(replay, dict)
+                            and replay.get("tool") in KNOWN_TOOLS
+                            and event.get("tool") != "run_action_batch"
+                            and not wrapper_parent
+                        ):
+                            action_id = str(event.get("action_id") or "")
+                            if action_id:
+                                legacy_action_ids.add(action_id)
+                            else:
+                                legacy_anonymous += 1
+                    elif (
+                        event.get("type") == "vnext_raw_receipt"
+                        and event.get("input_completed") is True
+                    ):
+                        decision_id = str(event.get("decision_id") or "")
+                        if decision_id:
+                            vnext_action_ids.add(decision_id)
+                        else:
+                            vnext_anonymous += 1
                     elif event.get("type") == "agent_done":
                         info["status"] = event.get("status", "")
+                    elif event.get("type") == "arp_run_done":
+                        info["status"] = event.get("status", "")
+                        snapshot = event.get("runtime_snapshot")
+                        if isinstance(snapshot, dict):
+                            info["thread_id"] = str(snapshot.get("thread_id") or "")
+                            info["turn_id"] = str(snapshot.get("turn_id") or "")
+                    elif event.get("type") == "trace_integrity":
+                        info["complete"] = event.get("complete") is True
+                        info["dropped_events"] = int(event.get("dropped_events") or 0)
         except (json.JSONDecodeError, OSError):
             pass
+        info["steps"] = (
+            len(vnext_action_ids) + vnext_anonymous
+            if vnext_action_ids or vnext_anonymous
+            else len(legacy_action_ids) + legacy_anonymous
+        )
         out.append(info)
     return out
 
 
-def read_trace(run_id: str, limit: int = 2000) -> list[dict[str, Any]]:
+def _read_trace_records(
+    run_id: str,
+    limit: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     path = TRACES_DIR / f"{run_id}.jsonl"
     if not path.exists():
-        return []
-    events = []
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-            if len(events) >= limit:
-                break
+        return [], {
+            "total_lines": 0,
+            "returned_events": 0,
+            "malformed_lines": 0,
+            "truncated": False,
+        }
+    checked_limit = None if limit is None else max(0, int(limit))
+    events: list[dict[str, Any]] = []
+    total_lines = 0
+    malformed_lines = 0
+    valid_events = 0
+    try:
+        with path.open("rb") as fh:
+            for line in fh:
+                total_lines += 1
+                try:
+                    event = json.loads(line)
+                except (
+                    json.JSONDecodeError,
+                    UnicodeDecodeError,
+                    RecursionError,
+                ):
+                    malformed_lines += 1
+                    continue
+                if not isinstance(event, dict):
+                    malformed_lines += 1
+                    continue
+                valid_events += 1
+                if checked_limit is None or len(events) < checked_limit:
+                    events.append(event)
+    except OSError:
+        malformed_lines += 1
+    return events, {
+        "total_lines": total_lines,
+        "returned_events": len(events),
+        "malformed_lines": malformed_lines,
+        "truncated": checked_limit is not None and valid_events > len(events),
+    }
+
+
+def read_trace(
+    run_id: str,
+    limit: int | None = None,
+    *,
+    include_integrity: bool = False,
+) -> list[dict[str, Any]]:
+    """Read a trace; callers choose full export reads or bounded public reads."""
+
+    events, integrity = _read_trace_records(run_id, limit=limit)
+    if include_integrity or integrity["malformed_lines"] or integrity["truncated"]:
+        events.append({
+            "type": "trace_read_integrity",
+            "run_id": run_id,
+            "complete": not integrity["malformed_lines"] and not integrity["truncated"],
+            **integrity,
+        })
     return events
 
 
 # ------------------------------------------------------------------- export
 def _distill_steps(steps: list[dict]) -> list[dict]:
-    """Clean a raw replay-step list into a reusable procedure: clean volatile
-    text selectors and drop consecutive duplicate steps (re-tries/floundering).
-    Conservative — keeps every distinct action, only removes obvious noise."""
+    """Clean volatile metadata without deleting executed actions."""
     distilled: list[dict] = []
-    prev_key = None
     for raw in steps:
         step = dict(raw)
         step.pop("elapsed_ms", None)
         for field in ("text", "element_text"):
             if step.get(field):
                 step[field] = clean_selector_text(step[field])
-        key = _semantic_step_key(step)
-        if key == prev_key:  # identical consecutive step → drop the repeat
-            continue
-        prev_key = key
         distilled.append(step)
     return distilled
 
@@ -549,20 +687,129 @@ def _step_semantic_text(step: dict[str, Any]) -> str:
     return ""
 
 
-def _extract_replay_steps(events: list[dict[str, Any]]) -> list[dict]:
+def _event_target_window(event: dict[str, Any]) -> dict[str, Any] | None:
+    hint = _stable_target_window_hint(
+        _target_window_hint_from(event.get("target_window"), "event.target_window")
+    )
+    if hint:
+        return hint
+    hint = _target_window_from_args(event.get("args"))
+    if hint:
+        return hint
+    hint = _target_window_from_result_meta(event.get("result_meta"))
+    if hint:
+        return hint
+    snapshot = event.get("runtime_snapshot")
+    if isinstance(snapshot, dict):
+        context = snapshot.get("execution_context")
+        if isinstance(context, dict):
+            return _stable_target_window_hint(
+                _target_window_hint_from(
+                    context.get("target_window"),
+                    "runtime_snapshot.execution_context.target_window",
+                )
+            )
+    return None
+
+
+def _extract_replay_steps(
+    events: list[dict[str, Any]],
+) -> tuple[list[dict], list[str]]:
     steps: list[dict] = []
+    omissions: list[str] = []
+    pending_batch_keys: set[str] = set()
     for event in events:
+        event_type = str(event.get("type") or "")
+        event_tool = str(event.get("tool") or "")
+        if event_type not in {"agent_tool", "agent_batch_action"}:
+            continue
+        if event_type == "agent_tool" and event_tool in {
+            "run_action_batch", "execute_subgoal",
+        } and not (
+            isinstance(event.get("replay"), dict)
+            and event["replay"].get("tool") in KNOWN_TOOLS
+        ):
+            # These are transport/controller wrappers. Their physical children
+            # are recorded separately and must be the replay source of truth.
+            # A historical execute_subgoal may instead carry one already-
+            # flattened leaf replay; keep that explicit executable record.
+            pending_batch_keys.clear()
+            continue
         replay = event.get("replay")
         if not replay:
+            if _legacy_event_requires_replay(event):
+                identity = str(
+                    event.get("action_id")
+                    or event.get("batch_id")
+                    or "<anonymous>"
+                )
+                omissions.append(
+                    f"missing_replay_for_action:{event_tool}:{identity}"
+                )
             continue
         tool = replay.get("tool") if isinstance(replay, dict) else None
         if tool not in KNOWN_TOOLS:
+            if _legacy_event_requires_replay(event):
+                omissions.append(f"unsupported_replay_tool:{tool or '<missing>'}")
             continue
+        step = dict(replay)
+        hint = _event_target_window(event)
+        if hint and "target_window" not in step:
+            step["target_window"] = hint
         if event.get("type") == "agent_batch_action":
-            steps.append(replay)
-        elif event.get("type") == "agent_tool" and event.get("tool") != "run_action_batch":
-            steps.append(replay)
-    return steps
+            steps.append(step)
+            pending_batch_keys.add(_semantic_step_key(step))
+        elif event.get("type") == "agent_tool":
+            if event.get("tool") == "run_action_batch":
+                pending_batch_keys.clear()
+                continue
+            result_meta = event.get("result_meta")
+            wrapped = bool(
+                isinstance(result_meta, dict)
+                and result_meta.get("wrapped_by_fast_controller") is True
+            )
+            if wrapped and _semantic_step_key(step) in pending_batch_keys:
+                # The batch child and outer wrapper describe one physical
+                # action. This is identity-aware wrapper removal, not semantic
+                # deduplication of two independently executed equal actions.
+                pending_batch_keys.clear()
+                continue
+            steps.append(step)
+            pending_batch_keys.clear()
+    return steps, omissions
+
+
+_LEGACY_REPLAY_REQUIRED_ACTIONS = frozenset({
+    "open_app", "launch", "focus_window",
+    "click", "click_element", "double_click",
+    "type_text", "type_into_element", "hotkey",
+    "scroll", "drag", "draw_strokes", "tray_click",
+    "clipboard_paste", "paste_image_file",
+    "mouse_down", "mouse_up", "move_mouse", "hold_key", "select_color",
+    "coordinate_click_test", "run_detached", "write_file", "apply_patch",
+})
+
+
+def _legacy_event_requires_replay(event: dict[str, Any]) -> bool:
+    """Identify completed legacy leaf mutations, never reads or wrappers."""
+
+    if event.get("type") not in {"agent_tool", "agent_batch_action"}:
+        return False
+    tool = str(event.get("tool") or "")
+    if tool in {"run_action_batch", "execute_subgoal"}:
+        return False
+    if event.get("error"):
+        return False
+    meta = event.get("result_meta")
+    if isinstance(meta, dict) and (
+        meta.get("mutation_skipped") is True
+        or meta.get("action_executed") is False
+        or meta.get("native_action_executed") is False
+    ):
+        return False
+    return tool in _LEGACY_REPLAY_REQUIRED_ACTIONS or bool(
+        isinstance(meta, dict) and meta.get("mutation_applied") is True
+    )
 
 
 def _stable_target_window_hint(hint: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -632,26 +879,622 @@ def _target_window_from_args(args: Any) -> dict[str, Any] | None:
 
 def _extract_target_window(events: list[dict[str, Any]]) -> dict[str, Any] | None:
     for event in events:
-        hint = _target_window_from_args(event.get("args"))
-        if hint:
-            return hint
-        hint = _target_window_from_result_meta(event.get("result_meta"))
+        hint = _event_target_window(event)
         if hint:
             return hint
     return None
 
 
-def build_script(run_id: str, name: str | None = None) -> dict[str, Any]:
-    """Distill a trace into a replayable .wps.json document."""
-    events = read_trace(run_id)
+_JOURNAL_EVENT_FIELDS = (
+    "format",
+    "schema_version",
+    "sequence",
+    "previous_event_sha256",
+    "event_kind",
+    "mission_id",
+    "run_id",
+    "decision_id",
+    "action_id",
+    "payload",
+    "event_sha256",
+)
+_JOURNAL_EVENT_KINDS = frozenset({
+    "actor_decision",
+    "admission",
+    "physical_attempt",
+    "raw_receipt",
+    "controller_transition",
+    "frame_artifact",
+})
+_JOURNAL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
+_JOURNAL_SHA256 = re.compile(r"[0-9a-f]{64}")
+_JOURNAL_GENESIS = "0" * 64
+
+
+def _strict_journal_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate_json_key")
+        value[key] = item
+    return value
+
+
+def _reject_journal_constant(_value: str) -> None:
+    raise ValueError("non_finite_number")
+
+
+def _canonical_journal_bytes(value: Any) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (RecursionError, TypeError, UnicodeEncodeError, ValueError):
+        raise ValueError("non_canonical_json") from None
+
+
+def _read_vnext_journal(
+    run_id: str,
+) -> tuple[list[dict[str, Any]], str, str | None]:
+    """Authenticate the frozen journal wire format without importing vNext."""
+
+    path = TRACES_DIR / "vnext_runtime_evidence" / run_id / "evidence.jsonl"
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return [], _JOURNAL_GENESIS, "read_failed"
+    if not data:
+        return [], _JOURNAL_GENESIS, None
+    if not data.endswith(b"\n"):
+        return [], _JOURNAL_GENESIS, "missing_trailing_newline"
+    lines = data[:-1].split(b"\n")
+    if any(not line for line in lines):
+        return [], _JOURNAL_GENESIS, "empty_event_line"
+
+    records: list[dict[str, Any]] = []
+    previous = _JOURNAL_GENESIS
+    mission_id = ""
+    try:
+        for sequence, line in enumerate(lines):
+            try:
+                text = line.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                raise ValueError("invalid_utf8") from None
+            try:
+                event = json.loads(
+                    text,
+                    object_pairs_hook=_strict_journal_object,
+                    parse_constant=_reject_journal_constant,
+                )
+            except (ValueError, RecursionError) as exc:
+                code = str(exc)
+                if code not in {"duplicate_json_key", "non_finite_number"}:
+                    code = "malformed_json"
+                raise ValueError(code) from None
+            if type(event) is not dict:
+                raise ValueError("event_not_object")
+            if set(event) != set(_JOURNAL_EVENT_FIELDS):
+                raise ValueError("event_fields")
+            if _canonical_journal_bytes(event) != line:
+                raise ValueError("non_canonical_event_bytes")
+            if event.get("format") != "runtime-evidence-journal-event/1":
+                raise ValueError("event_format")
+            if type(event.get("schema_version")) is not int or event["schema_version"] != 1:
+                raise ValueError("schema_version")
+            if type(event.get("sequence")) is not int or event["sequence"] != sequence:
+                raise ValueError("event_sequence")
+            if event.get("previous_event_sha256") != previous:
+                raise ValueError("hash_chain")
+            if (
+                type(event.get("event_kind")) is not str
+                or event["event_kind"] not in _JOURNAL_EVENT_KINDS
+            ):
+                raise ValueError("event_kind")
+            current_mission = event.get("mission_id")
+            current_run = event.get("run_id")
+            if (
+                type(current_mission) is not str
+                or _JOURNAL_IDENTITY.fullmatch(current_mission) is None
+                or type(current_run) is not str
+                or _JOURNAL_IDENTITY.fullmatch(current_run) is None
+            ):
+                raise ValueError("event_scope")
+            if current_run != run_id:
+                raise ValueError("run_scope")
+            if mission_id and current_mission != mission_id:
+                raise ValueError("mission_scope")
+            mission_id = current_mission
+            for field in ("decision_id", "action_id"):
+                identity = event.get(field)
+                if identity is not None and (
+                    type(identity) is not str
+                    or _JOURNAL_IDENTITY.fullmatch(identity) is None
+                ):
+                    raise ValueError(f"{field}_identity")
+            if type(event.get("payload")) is not dict:
+                raise ValueError("payload_not_object")
+            digest = event.get("event_sha256")
+            if (
+                type(digest) is not str
+                or _JOURNAL_SHA256.fullmatch(digest) is None
+            ):
+                raise ValueError("event_digest")
+            material = {
+                field: event[field]
+                for field in _JOURNAL_EVENT_FIELDS[:-1]
+            }
+            if hashlib.sha256(_canonical_journal_bytes(material)).hexdigest() != digest:
+                raise ValueError("event_hash")
+            records.append(event)
+            previous = digest
+    except (ValueError, TypeError, RecursionError) as exc:
+        return [], _JOURNAL_GENESIS, str(exc)
+    return records, previous, None
+
+
+def _physical_attempt_to_wps(
+    attempt: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Project one authenticated physical attempt onto ordinary WPS actions."""
+
+    action = str(attempt.get("action") or "")
+    raw_arguments = attempt.get("physical_arguments")
+    if not isinstance(raw_arguments, Mapping):
+        return None
+    arguments = dict(raw_arguments)
+    if action in {"click", "double_click"}:
+        if arguments.get("kind") != "pointer_click":
+            return None
+        step: dict[str, Any] = {
+            "tool": "click",
+            "coords": [arguments.get("x"), arguments.get("y")],
+        }
+        if action == "double_click":
+            step["double"] = True
+        return step
+    if action == "scroll" and arguments.get("kind") == "wheel":
+        return {
+            "tool": "scroll",
+            "coords": [arguments.get("x"), arguments.get("y")],
+            "amount": arguments.get("signed_wheel_amount"),
+        }
+    if action == "drag" and arguments.get("kind") == "pointer_drag":
+        if (
+            arguments.get("started_held") is True
+            or arguments.get("keep_holding") is True
+        ):
+            return None
+        step = {
+            "tool": "drag",
+            "from": [arguments.get("x1"), arguments.get("y1")],
+            "to": [arguments.get("x2"), arguments.get("y2")],
+        }
+        if isinstance(arguments.get("points"), (list, tuple)):
+            step["points"] = [list(point) for point in arguments["points"]]
+        return step
+    if action == "type_text" and arguments.get("kind") == "type_text":
+        return {"tool": "type_text", "text_input": arguments.get("text")}
+    if action == "hotkey" and arguments.get("kind") == "hotkey":
+        modifiers = arguments.get("modifiers")
+        if not isinstance(modifiers, (list, tuple)):
+            return None
+        return {"tool": "hotkey", "keys": [*modifiers, arguments.get("key")]}
+    return None
+
+
+def _vnext_journal_steps(
+    run_id: str,
+    events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    trace_receipts: dict[str, list[dict[str, Any]]] = {}
+    reasons: list[str] = []
+    explicit_vnext = any(
+        event.get("runtime_version") == "vnext"
+        and event.get("type") in {
+            "arp_run_start",
+            "arp_run_done",
+            "runtime_evidence_sealed",
+            "vnext_model_call",
+        }
+        for event in events
+    )
+    has_evidence_seal = any(
+        event.get("type") == "runtime_evidence_sealed"
+        and event.get("runtime_version") == "vnext"
+        for event in events
+    )
+    for event in events:
+        if event.get("type") != "vnext_raw_receipt":
+            continue
+        decision_id = str(event.get("decision_id") or "").strip()
+        if not decision_id:
+            reasons.append("raw_receipt_decision_id_missing")
+            continue
+        receipt_run_id = event.get("run_id")
+        if receipt_run_id != run_id:
+            reasons.append(f"raw_receipt_run_scope_mismatch:{decision_id}")
+            continue
+        trace_receipts.setdefault(decision_id, []).append(event)
+
+    journal_path = (
+        TRACES_DIR / "vnext_runtime_evidence" / run_id / "evidence.jsonl"
+    )
+    if not trace_receipts and not reasons and not journal_path.is_file():
+        if not explicit_vnext:
+            return [], [], False
+        if has_evidence_seal:
+            return [], ["runtime_evidence_missing"], True
+        legacy_steps, legacy_reasons = _extract_replay_steps(events)
+        if legacy_steps or legacy_reasons:
+            reasons.append("vnext_trace_contains_legacy_replay")
+        return [], reasons, True
+
+    if not journal_path.is_file():
+        if has_evidence_seal or any(
+            receipt.get("input_completed") is not False
+            for receipt_events in trace_receipts.values()
+            for receipt in receipt_events
+        ):
+            reasons.append("runtime_evidence_missing")
+        return [], list(dict.fromkeys(reasons)), True
+
+    journal, journal_head, journal_error = _read_vnext_journal(run_id)
+    if journal_error:
+        reasons.append(f"runtime_evidence_invalid:{journal_error}")
+        return [], list(dict.fromkeys(reasons)), True
+
+    journal_mission_id = str(journal[0].get("mission_id") or "") if journal else ""
+    if journal_mission_id:
+        scoped_receipts: dict[str, list[dict[str, Any]]] = {}
+        for decision_id, receipt_events in trace_receipts.items():
+            for receipt in receipt_events:
+                receipt_mission_id = receipt.get("mission_id")
+                if receipt_mission_id != journal_mission_id:
+                    reasons.append(
+                        f"raw_receipt_mission_scope_mismatch:{decision_id}"
+                    )
+                    continue
+                scoped_receipts.setdefault(decision_id, []).append(receipt)
+        trace_receipts = scoped_receipts
+
+    seal = next((
+        event
+        for event in reversed(events)
+        if event.get("type") == "runtime_evidence_sealed"
+        and str(event.get("run_id") or "") == run_id
+    ), None)
+    if seal is None:
+        reasons.append("runtime_evidence_seal_missing")
+    elif seal.get("mission_id") != journal_mission_id:
+        reasons.append("runtime_evidence_seal_mission_scope_mismatch")
+    else:
+        if seal.get("journal_head_sha256") != journal_head:
+            reasons.append("runtime_evidence_seal_head_mismatch")
+        if (
+            type(seal.get("journal_event_count")) is not int
+            or seal["journal_event_count"] != len(journal)
+        ):
+            reasons.append("runtime_evidence_seal_count_mismatch")
+        if (
+            seal.get("report_status") != "complete"
+            or type(seal.get("missing_evidence_count")) is not int
+            or seal["missing_evidence_count"] != 0
+            or type(seal.get("verification_failure_count")) is not int
+            or seal["verification_failure_count"] != 0
+        ):
+            reasons.append("runtime_evidence_report_incomplete")
+
+    attempts: dict[str, list[dict[str, Any]]] = {}
+    journal_receipts: dict[str, list[dict[str, Any]]] = {}
+    for event in journal:
+        decision_id = str(event.get("decision_id") or "")
+        if event.get("event_kind") == "physical_attempt":
+            attempts.setdefault(decision_id, []).append(event)
+        elif event.get("event_kind") == "raw_receipt":
+            journal_receipts.setdefault(decision_id, []).append(event)
+
+    ordered_steps: list[tuple[int, int, dict[str, Any]]] = []
+    all_decisions = list(dict.fromkeys([
+        *trace_receipts,
+        *attempts,
+        *journal_receipts,
+    ]))
+    for order, decision_id in enumerate(all_decisions):
+        traced = trace_receipts.get(decision_id, [])
+        recorded_attempts = attempts.get(decision_id, [])
+        recorded_receipts = journal_receipts.get(decision_id, [])
+        if len(traced) > 1:
+            reasons.append(f"duplicate_trace_raw_receipt:{decision_id}:{len(traced)}")
+        if len(recorded_attempts) > 1:
+            reasons.append(f"duplicate_physical_attempt:{decision_id}:{len(recorded_attempts)}")
+        if len(recorded_receipts) > 1:
+            reasons.append(f"duplicate_journal_raw_receipt:{decision_id}:{len(recorded_receipts)}")
+        trace_receipt = traced[-1] if traced else None
+        attempt_event = recorded_attempts[-1] if recorded_attempts else None
+        journal_receipt_event = recorded_receipts[-1] if recorded_receipts else None
+        trace_receipt_missing = trace_receipt is None
+        if trace_receipt is None:
+            if attempt_event is not None and journal_receipt_event is not None:
+                reasons.append(f"trace_raw_receipt_missing:{decision_id}")
+                trace_receipt = {}
+            elif attempt_event is not None:
+                reasons.append(f"physical_attempt_without_trace_receipt:{decision_id}")
+                continue
+            elif journal_receipt_event is not None:
+                reasons.append(f"journal_receipt_without_trace_receipt:{decision_id}")
+                continue
+            else:
+                continue
+
+        trace_completed = trace_receipt.get("input_completed")
+        if trace_completed is not None and type(trace_completed) is not bool:
+            reasons.append(f"trace_raw_receipt_invalid:{decision_id}")
+            continue
+        if journal_receipt_event is None:
+            if trace_completed is not False or attempt_event is not None:
+                reasons.append(f"trace_receipt_without_journal_receipt:{decision_id}")
+        else:
+            receipt_payload = journal_receipt_event.get("payload")
+            journal_completed = (
+                receipt_payload.get("input_completed")
+                if isinstance(receipt_payload, dict)
+                else "invalid"
+            )
+            if journal_completed is not None and type(journal_completed) is not bool:
+                reasons.append(f"journal_raw_receipt_invalid:{decision_id}")
+                continue
+            if trace_receipt_missing:
+                trace_completed = journal_completed
+            elif journal_completed is not trace_completed:
+                reasons.append(f"raw_receipt_completion_mismatch:{decision_id}")
+                continue
+
+        if trace_completed is None:
+            reasons.append(f"physical_attempt_outcome_uncertain:{decision_id}")
+            continue
+        if trace_completed is False:
+            if attempt_event is not None:
+                reasons.append(f"physical_attempt_not_completed:{decision_id}")
+            continue
+        if attempt_event is None:
+            reasons.append(f"completed_receipt_without_physical_attempt:{decision_id}")
+            continue
+
+        attempt = attempt_event.get("payload")
+        if not isinstance(attempt, dict) or (
+            attempt.get("format") != "physical-attempt-record/1"
+            or (
+                journal_mission_id
+                and attempt.get("mission_id") != journal_mission_id
+            )
+            or attempt.get("run_id") != run_id
+            or attempt.get("decision_id") != decision_id
+            or attempt.get("action_id") != decision_id
+        ):
+            reasons.append(f"physical_attempt_invalid:{decision_id}")
+            continue
+        attempt_action = str(attempt.get("action") or "")
+        controller_action = str(trace_receipt.get("controller_action") or "")
+        if controller_action and controller_action != attempt_action:
+            reasons.append(f"controller_action_mismatch:{decision_id}")
+            continue
+        expected_raw_action = (
+            "click" if attempt_action == "double_click" else attempt_action
+        )
+        receipt_payload = (
+            journal_receipt_event.get("payload")
+            if journal_receipt_event is not None
+            else None
+        )
+        journal_action = str(
+            receipt_payload.get("action") or ""
+            if isinstance(receipt_payload, dict)
+            else ""
+        )
+        trace_raw_action = str(trace_receipt.get("raw_action") or "")
+        if (
+            journal_action
+            and journal_action != expected_raw_action
+        ) or (
+            trace_raw_action
+            and journal_action
+            and trace_raw_action != journal_action
+        ):
+            reasons.append(f"raw_receipt_action_mismatch:{decision_id}")
+            continue
+        replay = _physical_attempt_to_wps(attempt)
+        if replay is None:
+            reasons.append(
+                f"physical_action_not_replayable:"
+                f"{attempt.get('action') or '<missing>'}:{decision_id}"
+            )
+            continue
+        step = dict(replay)
+        trace_target = _event_target_window(trace_receipt) or {}
+        identity = attempt.get("target_identity")
+        executable = str(
+            identity.get("executable_identity") or ""
+            if isinstance(identity, dict)
+            else ""
+        ).strip()
+        process = executable.replace("\\", "/").rsplit("/", 1)[-1]
+        # The authenticated process identity remains the replay authority.
+        # Retain the trace title only when the trace names that same process;
+        # this keeps a useful same-process window hint without allowing a
+        # mismatched trace target to replace the sealed executable identity.
+        target = {"process": process} if process else {}
+        trace_process = str(trace_target.get("process") or "").strip()
+        trace_title = str(trace_target.get("title") or "").strip()
+        if (
+            process
+            and trace_process
+            and process.casefold() != trace_process.casefold()
+        ):
+            reasons.append(f"physical_action_target_mismatch:{decision_id}")
+        elif process and trace_process and trace_title:
+            target["title"] = trace_title
+        if target:
+            step["target_window"] = target
+        else:
+            reasons.append(f"physical_action_target_missing:{decision_id}")
+        timestamp = attempt.get("timestamp_ns")
+        ordered_steps.append((
+            timestamp if type(timestamp) is int else 0,
+            order,
+            step,
+        ))
+    ordered_steps.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in ordered_steps], list(dict.fromkeys(reasons)), True
+
+
+def _trace_export_manifest(
+    run_id: str,
+    events: list[dict[str, Any]],
+    read_integrity: dict[str, Any],
+    extra_reasons: list[str],
+) -> dict[str, Any]:
+    reasons = list(extra_reasons)
+    integrity_indexes = [
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "trace_integrity"
+    ]
+    if not integrity_indexes:
+        reasons.append("trace_integrity_missing")
+        dropped_events = None
+        write_failures = None
+    else:
+        dropped_events = 0
+        write_failures = 0
+        prior_integrity_index = -1
+        for integrity_index in integrity_indexes:
+            integrity = events[integrity_index]
+            segment_event_count = sum(
+                event.get("type") != "trace_integrity"
+                for event in events[prior_integrity_index + 1:integrity_index]
+            )
+            accepted_events = integrity.get("accepted_events")
+            if (
+                not isinstance(accepted_events, int)
+                or isinstance(accepted_events, bool)
+                or accepted_events < 0
+            ):
+                reasons.append(
+                    "trace_integrity_accepted_events_missing_or_invalid"
+                )
+            elif accepted_events != segment_event_count:
+                reasons.append(
+                    "trace_integrity_event_count_mismatch:"
+                    f"{accepted_events}:{segment_event_count}"
+                )
+            if integrity.get("complete") is not True:
+                reasons.append("trace_integrity_failed")
+            for field in ("dropped_events", "write_failures"):
+                value = integrity.get(field)
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                ):
+                    reasons.append(f"trace_integrity_{field}_missing_or_invalid")
+                    value = 0
+                if field == "dropped_events":
+                    dropped_events += value
+                else:
+                    write_failures += value
+            prior_integrity_index = integrity_index
+        if dropped_events:
+            reasons.append(f"trace_queue_dropped:{dropped_events}")
+        if write_failures:
+            reasons.append(f"trace_write_failures:{write_failures}")
+        trailing_event_count = sum(
+            event.get("type") != "trace_integrity"
+            for event in events[integrity_indexes[-1] + 1:]
+        )
+        if trailing_event_count:
+            reasons.append(f"trace_events_after_integrity:{trailing_event_count}")
+    malformed = int(read_integrity.get("malformed_lines") or 0)
+    if malformed:
+        reasons.append(f"trace_malformed_lines:{malformed}")
+    if read_integrity.get("truncated") is True:
+        reasons.append("trace_read_truncated")
+    reasons = list(dict.fromkeys(reasons))
+    return {
+        "format": "agent-replay-export/1",
+        "scope": "run",
+        "coverage": "ordinary_arp_actions",
+        "complete": not reasons,
+        "partial": bool(reasons),
+        "reasons": reasons,
+        "source_runs": [run_id],
+        "trace_event_count": len(events),
+        "dropped_events": dropped_events,
+        "write_failures": write_failures,
+    }
+
+
+def _trace_task(events: list[dict[str, Any]], run_id: str) -> str:
+    for event in events:
+        if event.get("type") == "agent_start" and event.get("task"):
+            return str(event["task"])
+    for event in events:
+        if event.get("type") != "arp_run_start":
+            continue
+        admission = event.get("goal_admission")
+        if isinstance(admission, Mapping) and admission.get("goal"):
+            return str(admission["goal"])
+    for event in reversed(events):
+        snapshot = event.get("runtime_snapshot")
+        if not isinstance(snapshot, dict):
+            continue
+        admission = snapshot.get("goal_admission")
+        if isinstance(admission, dict) and admission.get("goal"):
+            return str(admission["goal"])
+        if snapshot.get("graph_name"):
+            return str(snapshot["graph_name"])
+    return run_id
+
+
+def _build_run_segment(
+    run_id: str,
+    *,
+    records: tuple[list[dict[str, Any]], dict[str, Any]] | None = None,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
+    events, read_integrity = (
+        records if records is not None else _read_trace_records(run_id, limit=None)
+    )
     if not events:
         raise FileNotFoundError(f"trace 不存在: {run_id}")
-    task = next(
-        (e.get("task", "") for e in events if e.get("type") == "agent_start"), "")
-    steps = _extract_replay_steps(events)
+    legacy_steps, omissions = _extract_replay_steps(events)
+    vnext_steps, vnext_reasons, has_vnext_trace = _vnext_journal_steps(run_id, events)
+    steps = vnext_steps if has_vnext_trace else legacy_steps
+    reasons = [*omissions, *vnext_reasons]
+    default_target = (
+        next((
+            _stable_target_window_hint(step.get("target_window"))
+            for step in steps
+            if isinstance(step.get("target_window"), dict)
+            and _stable_target_window_hint(step.get("target_window"))
+        ), None)
+        if has_vnext_trace
+        else _extract_target_window(events)
+    )
+    if default_target and not has_vnext_trace:
+        for step in steps:
+            step.setdefault("target_window", default_target)
+    manifest = _trace_export_manifest(run_id, events, read_integrity, reasons)
+    return _trace_task(events, run_id), _distill_steps(steps), manifest, default_target
+
+
+def build_script(run_id: str, name: str | None = None) -> dict[str, Any]:
+    """Distill a trace into a replayable .wps.json document."""
+    task, steps, manifest, target_window = _build_run_segment(run_id)
     if not steps:
         raise ValueError("trace 中没有可重放的动作步骤")
-    steps = _distill_steps(steps)
     script = {
         "format": "wps/2",
         "name": name or task[:60] or run_id,
@@ -660,8 +1503,8 @@ def build_script(run_id: str, name: str | None = None) -> dict[str, Any]:
         "source_run": run_id,
         "created": int(time.time()),
         "steps": steps,
+        "export_manifest": manifest,
     }
-    target_window = _extract_target_window(events)
     if target_window:
         script["target_window"] = target_window
     err = validate_script(script)
@@ -670,14 +1513,308 @@ def build_script(run_id: str, name: str | None = None) -> dict[str, Any]:
     return script
 
 
+def _trace_thread_ids(
+    events: list[dict[str, Any]],
+) -> tuple[str, str, tuple[str, ...]]:
+    """Return one trace owner, or every conflicting owner without guessing."""
+
+    identities: list[str] = []
+    turns: dict[str, str] = {}
+    for event in events:
+        candidates: list[Mapping[str, Any]] = []
+        snapshot = event.get("runtime_snapshot")
+        if isinstance(snapshot, Mapping):
+            candidates.append(snapshot)
+        candidates.append(event)
+        for candidate in candidates:
+            thread_id = str(candidate.get("thread_id") or "").strip()
+            if not thread_id:
+                continue
+            if thread_id not in identities:
+                identities.append(thread_id)
+            turn_id = str(candidate.get("turn_id") or "").strip()
+            if turn_id:
+                turns[thread_id] = turn_id
+    if len(identities) > 1:
+        return "", "", tuple(identities)
+    if not identities:
+        return "", "", ()
+    thread_id = identities[0]
+    return thread_id, turns.get(thread_id, ""), ()
+
+
+def build_thread_script(
+    thread_id: str,
+    name: str | None = None,
+    *,
+    run_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Concatenate every replayable run in one Agent conversation."""
+
+    checked_thread = str(thread_id or "").strip()
+    if not checked_thread:
+        raise ValueError("thread_id is required")
+    segments: list[tuple[float, str, str, list[dict[str, Any]], dict[str, Any], dict[str, Any] | None]] = []
+    explicit_runs = run_ids is not None
+    requested_runs = list(dict.fromkeys(run_ids or []))
+    requested_set = set(requested_runs)
+    existing_runs = {
+        path.stem: path
+        for path in TRACES_DIR.glob("*.jsonl")
+    }
+    # The renderer intentionally keeps only bounded conversation state for
+    # display/model context. Trace files are the durable action ledger, so a
+    # thread export must discover older matching runs as well. Explicit run
+    # ids remain completeness assertions; they are not an exclusion list.
+    run_paths = list(existing_runs.items())
+    reasons: list[str] = []
+    if explicit_runs:
+        reasons.extend(
+            f"trace_missing:{run_id}"
+            for run_id in requested_runs
+            if run_id not in existing_runs
+        )
+    for requested_run_id, path in run_paths:
+        events, _read_integrity = _read_trace_records(path.stem, limit=None)
+        found_thread, _turn_id, mixed_threads = _trace_thread_ids(events)
+        if mixed_threads:
+            if (
+                (explicit_runs and requested_run_id in requested_set)
+                or checked_thread in mixed_threads
+            ):
+                reasons.append(
+                    "trace_thread_id_mixed:"
+                    f"{requested_run_id}:{'|'.join(mixed_threads)}"
+                )
+            continue
+        if not found_thread:
+            if explicit_runs and requested_run_id in requested_set:
+                reasons.append(f"trace_thread_id_missing:{requested_run_id}")
+            else:
+                unowned_manifest = _trace_export_manifest(
+                    requested_run_id,
+                    events,
+                    _read_integrity,
+                    [],
+                )
+                uncertain_reasons = [
+                    reason
+                    for reason in unowned_manifest["reasons"]
+                    if reason != "trace_integrity_missing"
+                ]
+                if uncertain_reasons:
+                    reasons.append(
+                        f"trace_thread_identity_unverifiable:{requested_run_id}"
+                    )
+            continue
+        if found_thread != checked_thread:
+            if explicit_runs and requested_run_id in requested_set:
+                reasons.append(
+                    "trace_thread_id_mismatch:"
+                    f"{requested_run_id}:{found_thread}"
+                )
+            continue
+        timestamp = next(
+            (
+                float(event.get("ts"))
+                for event in events
+                if isinstance(event.get("ts"), (int, float))
+            ),
+            path.stat().st_mtime,
+        )
+        task, steps, manifest, target = _build_run_segment(
+            path.stem,
+            records=(events, _read_integrity),
+        )
+        segments.append((timestamp, path.stem, task, steps, manifest, target))
+    if not segments:
+        raise FileNotFoundError(f"thread 没有可导出的 trace: {checked_thread}")
+    segments.sort(key=lambda item: (item[0], item[1]))
+    steps = [step for segment in segments for step in segment[3]]
+    if not steps:
+        raise ValueError("thread 中没有可重放的普通 ARP 动作")
+    reasons.extend(
+        f"{run_id}:{reason}"
+        for _ts, run_id, _task, _steps, manifest, _target in segments
+        for reason in manifest.get("reasons", [])
+    )
+    manifest = {
+        "format": "agent-replay-export/1",
+        "scope": "thread",
+        "coverage": "ordinary_arp_actions",
+        "thread_id": checked_thread,
+        "complete": not reasons,
+        "partial": bool(reasons),
+        "reasons": reasons,
+        "source_runs": [segment[1] for segment in segments],
+        "run_count": len(segments),
+    }
+    task = " / ".join(segment[2] for segment in segments if segment[2])
+    script: dict[str, Any] = {
+        "format": "wps/2",
+        "name": name or task[:60] or checked_thread,
+        "task": task,
+        "source": "agent-thread",
+        "source_run": checked_thread,
+        "source_runs": manifest["source_runs"],
+        "created": int(time.time()),
+        "steps": _distill_steps(steps),
+        "export_manifest": manifest,
+    }
+    first_target = next((segment[5] for segment in segments if segment[5]), None)
+    if first_target:
+        script["target_window"] = first_target
+    err = validate_script(script)
+    if err:
+        raise ValueError(f"exported thread .wps.json is not replayable: {err}")
+    return script
+
+
+_WINDOWS_RESERVED_LEAF_STEMS = {
+    "con", "prn", "aux", "nul", "clock$", "conin$", "conout$",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+    "com¹", "com²", "com³", "lpt¹", "lpt²", "lpt³",
+}
+
+
+def windows_safe_leaf(value: str, *, what: str = "export name") -> str:
+    """Validate one Windows filename component without rewriting user text."""
+
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= 160
+        or value in {".", ".."}
+        or value[-1] in {".", " "}
+        or any(
+            character in '/\\:\0*?"<>|'
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in value
+        )
+        or (
+            value.split(".", 1)[0].rstrip(" .").casefold()
+            in _WINDOWS_RESERVED_LEAF_STEMS
+        )
+    ):
+        raise ValueError(
+            f"{what} must be one Windows-safe filename component: no paths, "
+            "reserved device names, invalid characters, or trailing dots/spaces"
+        )
+    return value
+
+
+def ensure_script_name_available(
+    value: str,
+    *,
+    directory: Path,
+    what: str = "script name",
+) -> str:
+    """Reject a Windows-safe name that would replace an existing script."""
+
+    checked = windows_safe_leaf(value, what=what)
+    if not directory.is_dir():
+        return checked
+    existing = {entry.name.casefold(): entry.name for entry in directory.iterdir()}
+    conflict = next((
+        existing.get(f"{checked}{suffix}".casefold())
+        for suffix in (".wps.json", ".automation.json")
+        if f"{checked}{suffix}".casefold() in existing
+    ), None)
+    if conflict:
+        raise ValueError(
+            f'{what} "{checked}" conflicts with existing script "{conflict}"; '
+            "choose a different name to keep the existing recording"
+        )
+    return checked
+
+
+def _export_names(name: str | None, fallback: str) -> tuple[str | None, str]:
+    checked_name = windows_safe_leaf(name, what="export name") if name is not None else None
+    return checked_name, checked_name or windows_safe_leaf(fallback, what="export basename")
+
+
+def _unique_export_basename(value: str, *, directory: Path) -> str:
+    """Choose one basename free for both WPS and canonical IR siblings."""
+
+    checked = windows_safe_leaf(value, what="export basename")
+    existing = (
+        {entry.name.casefold() for entry in directory.iterdir()}
+        if directory.is_dir()
+        else set()
+    )
+    candidate = checked
+    sequence = 2
+    while any(
+        f"{candidate}{suffix}".casefold() in existing
+        for suffix in (".wps.json", ".automation.json")
+    ):
+        suffix = f"-{sequence}"
+        if len(checked) + len(suffix) > 160:
+            raise ValueError(
+                "export basename conflicts with an existing script and is too "
+                "long to add a unique suffix"
+            )
+        candidate = f"{checked}{suffix}"
+        sequence += 1
+    return candidate
+
+
+def _write_export_pair(
+    script: dict[str, Any],
+    *,
+    name: str | None,
+    basename: str,
+) -> Path:
+    """Exclusively create one WPS/IR pair without replacing either sibling."""
+
+    SCRIPTS_DIR.mkdir(exist_ok=True)
+    unique_basename = _unique_export_basename(basename, directory=SCRIPTS_DIR)
+    path = SCRIPTS_DIR / f"{unique_basename}.wps.json"
+    payload = json.dumps(script, ensure_ascii=False, indent=1)
+    with path.open("x", encoding="utf-8") as fh:
+        fh.write(payload)
+    try:
+        write_automation_ir(
+            script,
+            name=name,
+            basename=unique_basename,
+        )
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    return path
+
+
 def export_script(run_id: str, name: str | None = None) -> Path:
     """Write the legacy WPS adapter and a canonical Automation IR sibling."""
-    script = build_script(run_id, name=name)
-    SCRIPTS_DIR.mkdir(exist_ok=True)
-    path = SCRIPTS_DIR / f"{name or run_id}.wps.json"
-    path.write_text(json.dumps(script, ensure_ascii=False, indent=1), encoding="utf-8")
-    write_automation_ir(script, name=name, basename=name or run_id)
+    checked_name, basename = _export_names(name, run_id)
+    script = build_script(run_id, name=checked_name)
+    path = _write_export_pair(script, name=checked_name, basename=basename)
     BUS.publish("trace", state="exported", run_id=run_id, script=str(path))
+    return path
+
+
+def export_thread_script(
+    thread_id: str,
+    name: str | None = None,
+    *,
+    run_ids: list[str] | None = None,
+) -> Path:
+    """Write one editable WPS/Automation IR pair for a whole Agent thread."""
+
+    checked_name, basename = _export_names(name, f"thread-{thread_id}")
+    script = build_thread_script(thread_id, name=checked_name, run_ids=run_ids)
+    path = _write_export_pair(script, name=checked_name, basename=basename)
+    BUS.publish(
+        "trace",
+        state="thread_exported",
+        thread_id=thread_id,
+        script=str(path),
+    )
     return path
 
 
@@ -688,22 +1825,59 @@ def write_automation_ir(
     basename: str,
     directory: Path | None = None,
 ) -> Path:
-    ir = automation_ir_from_wps(script, name=name)
+    checked_name = windows_safe_leaf(name, what="export name") if name is not None else None
+    checked_basename = windows_safe_leaf(basename, what="export basename")
+    ir = automation_ir_from_wps(script, name=checked_name)
     err = validate_automation_ir(ir)
     if err:
         raise ValueError(f"exported Automation IR is invalid: {err}")
     root = directory or SCRIPTS_DIR
     root.mkdir(exist_ok=True)
-    path = root / f"{basename}.automation.json"
-    path.write_text(json.dumps(ir, ensure_ascii=False, indent=1), encoding="utf-8")
+    path = root / f"{checked_basename}.automation.json"
+    payload = json.dumps(ir, ensure_ascii=False, indent=1)
+    try:
+        with path.open("x", encoding="utf-8") as fh:
+            fh.write(payload)
+    except FileExistsError as exc:
+        raise FileExistsError(
+            f'script "{path.name}" already exists; choose a different macro name '
+            "to keep the existing recording"
+        ) from exc
     return path
 
 
 def export_automation_ir(run_id: str, name: str | None = None) -> Path:
     """Distill a trace into Automation IR v1 for skill/Flow/replay handoff."""
-    script = build_script(run_id, name=name)
-    path = write_automation_ir(script, name=name, basename=name or run_id)
+    checked_name, basename = _export_names(name, run_id)
+    script = build_script(run_id, name=checked_name)
+    SCRIPTS_DIR.mkdir(exist_ok=True)
+    basename = _unique_export_basename(basename, directory=SCRIPTS_DIR)
+    path = write_automation_ir(
+        script, name=checked_name, basename=basename,
+    )
     BUS.publish("trace", state="exported_ir", run_id=run_id, ir=str(path))
+    return path
+
+
+def export_thread_automation_ir(
+    thread_id: str,
+    name: str | None = None,
+    *,
+    run_ids: list[str] | None = None,
+) -> Path:
+    checked_name, basename = _export_names(name, f"thread-{thread_id}")
+    script = build_thread_script(thread_id, name=checked_name, run_ids=run_ids)
+    SCRIPTS_DIR.mkdir(exist_ok=True)
+    basename = _unique_export_basename(basename, directory=SCRIPTS_DIR)
+    path = write_automation_ir(
+        script, name=checked_name, basename=basename,
+    )
+    BUS.publish(
+        "trace",
+        state="thread_exported_ir",
+        thread_id=thread_id,
+        ir=str(path),
+    )
     return path
 
 
@@ -2656,7 +3830,10 @@ class Replayer:
             if not name:
                 return {"ok": False, "error": "ext.var_set 缺少 name"}
             if step.get("from") == "clipboard":
-                value = _clipboard_get()
+                read = _clipboard_get()
+                if not read.get("ok"):
+                    return read
+                value = str(read.get("text") or "")
             else:
                 value = str(step.get("value", ""))
             self.vars[name] = value
@@ -2667,7 +3844,10 @@ class Replayer:
 
         if tool == "ext.clipboard_get":
             into = str(step.get("into", "")).strip()
-            text = _clipboard_get()
+            read = _clipboard_get()
+            if not read.get("ok"):
+                return read
+            text = str(read.get("text") or "")
             if into:
                 self.vars[into] = text
             return {"ok": True, "text": text}
@@ -2719,21 +3899,54 @@ def replay(
 
 
 # ------------------------------------------------------------- clipboard
-def _clipboard_get() -> str:
-    """Read Unicode text from the Windows clipboard (empty on failure)."""
+def _clipboard_get(
+    *,
+    attempts: int = 3,
+    retry_delay_s: float = 0.02,
+) -> dict[str, Any]:
+    """Read Unicode text, distinguishing an empty clipboard from I/O failure."""
+
     try:
         import win32clipboard
-        win32clipboard.OpenClipboard()
-        try:
-            data = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-        except (TypeError, OSError):
-            data = ""
-        finally:
-            win32clipboard.CloseClipboard()
-        return data or ""
     except Exception as exc:
-        logger.warning("剪贴板读取失败: %s", exc)
-        return ""
+        logger.warning("剪贴板读取不可用: %s", exc)
+        return {"ok": False, "error": f"clipboard unavailable: {exc}"}
+
+    last_error: Exception | None = None
+    for attempt in range(max(1, int(attempts))):
+        opened = False
+        succeeded = False
+        text = ""
+        close_error: Exception | None = None
+        try:
+            win32clipboard.OpenClipboard()
+            opened = True
+            if win32clipboard.IsClipboardFormatAvailable(
+                win32clipboard.CF_UNICODETEXT
+            ):
+                data = win32clipboard.GetClipboardData(
+                    win32clipboard.CF_UNICODETEXT
+                )
+                if data is not None and not isinstance(data, str):
+                    raise TypeError("Unicode clipboard data is not text")
+                text = data or ""
+            succeeded = True
+        except Exception as exc:
+            last_error = exc
+        finally:
+            if opened:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception as exc:
+                    close_error = exc
+        if succeeded and close_error is None:
+            return {"ok": True, "text": text}
+        if close_error is not None:
+            last_error = close_error
+        if attempt + 1 < max(1, int(attempts)):
+            time.sleep(max(0.0, float(retry_delay_s)))
+    logger.warning("剪贴板读取失败: %s", last_error)
+    return {"ok": False, "error": f"clipboard read failed: {last_error}"}
 
 
 def _clipboard_set(text: str) -> dict[str, Any]:

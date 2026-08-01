@@ -7,6 +7,8 @@ interface Props {
 
 export function WaitParams({ params, onChange }: Props) {
   const supported = params.wait_type === 'time' || params.wait_type === 'window';
+  const windowTimeout = Number(params.timeout ?? 10);
+  const windowTimeoutValid = Number.isFinite(windowTimeout) && windowTimeout > 0 && windowTimeout <= 120;
   return (
     <div>
       <div className="form-group">
@@ -44,15 +46,30 @@ export function WaitParams({ params, onChange }: Props) {
       )}
 
       {params.wait_type === 'window' && (
-        <div className="form-group">
-          <label className="form-label">窗口标题</label>
-          <input
-            className="form-input"
-            value={params.window_title || ''}
-            onChange={(event) => onChange({ window_title: event.target.value })}
-            placeholder="例如：记事本"
-          />
-        </div>
+        <>
+          <div className="form-group">
+            <label className="form-label">窗口标题</label>
+            <input
+              className="form-input"
+              value={params.window_title || ''}
+              onChange={(event) => onChange({ window_title: event.target.value })}
+              placeholder="例如：记事本"
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">最长等待（秒）</label>
+            <input
+              className="form-input"
+               type="number"
+               min={0.1}
+               max={120}
+               step={0.1}
+               value={params.timeout ?? 10}
+               onChange={(event) => onChange({ timeout: Math.min(120, Math.max(0.1, Number(event.target.value) || 10)) })}
+             />
+             {!windowTimeoutValid && <div className="arp-field-error">窗口等待必须在 0 到 120 秒之间；请修正后再运行。</div>}
+           </div>
+        </>
       )}
 
       <div className="form-group">

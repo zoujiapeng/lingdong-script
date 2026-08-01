@@ -24,7 +24,35 @@
 
 “完全离线执行”在这里指不访问外部网络、不调用模型：确定性的 `replay_step` 和本地原生节点仍由机器上的 Python Runtime、Replayer 与 Desktop Action Queue 执行。Electron 单进程预览、计时器或日志不能冒充真实桌面执行；Runtime 不在或源码漂移时只能继续编辑，不能运行。
 
-当前智能代理与流程工作台仍缺少 artifact handoff：同一个 `LiveVisualActor` 只能收到原始 goal/Thread 历史，不能读取当前流程摘要或提交可预览、可撤销的流程修改。因此“让 AI 帮我生成/修改机械流程”尚未达到产品闭环。不得接回 `src/ai-interface`、旧 DSL 生成器或 Electron HTTP 直接写图路径；它们引入第二模型、长语法教学、关键词路由或无确认突变。后续实验只允许同一 Actor 读取用户显式附加的有界流程摘要，并提交带 revision/digest 的通用 patch 草稿，由 renderer 本地编译、展示 diff，用户确认后作为一次 undo checkpoint 应用；模型不能自动运行流程。
+Studio 提供显式的“一句话生成片段”辅助，但不进入 Agent 默认执行线。只有用户在编辑器中主动提交时，后端才创建一次短生命周期的 `FlowFragmentProposer`：它复用现有 provider/model/protocol/budget plumbing，但不是第二个 `LiveVisualActor`，主 Actor 也不承担图编排职责。请求只有一条 user JSON，不含 system/developer prompt，不读取桌面、Thread、连接器或完整文档，只收到用户原话、当前图的节点计数/类型摘要、基线 fingerprint 和小型本地可编译机械节点目录。它没有桌面、连接器或执行权限，不增加 Agent 默认提示词、默认工具面、Planner 或任务分类器。
+
+模型只能返回一个严格 schema 的无环片段草稿。Renderer 校验节点类型、参数、端口和基线 fingerprint，先展示摘要、节点、参数与连线；用户确认后才把片段放到当前图右侧空白区，并形成一次可撤销 checkpoint。它不会自动连接既有节点、覆盖文档、保存或运行。这个辅助调用需要模型和网络；新建、打开、编辑、拼接、撤销、保存以及确定性节点的本地执行仍保持完全离线。不得接回 `src/ai-interface`、旧 DSL 生成器或 Electron HTTP 直接写图路径。
+
+片段尚未拼接时没有可证明的上游窗口目标，所以片段预览只用一个通用 synthetic `focus_window` 检查候选节点自身的参数与结构；该节点不会写入用户流程。片段接入主图后，完整文档校验仍按每条可达路径要求真实 `focus_window`，不会因预览通过而放宽裸坐标动作的运行边界。
+
+2026-08-02 可见 Electron 探针从真实 Studio 提交“点击坐标 420,300，等待 1 秒，然后输入文本 hello”，单次调用返回 `click -> wait -> input_text` 三节点/两连线；确认后片段出现在右侧空白区，没有自动连接、保存或运行，随后 `Ctrl+Z` 把图恢复到原来的 16 节点/15 连线/14 动作。这证明 opt-in 生成、预览、应用和撤销链，不证明任意自然语言都能正确编排，也不改变离线节点的逐项 E2E 要求。
+
+同日还在 Electron 默认约 `900 x 580` 的真实窗口尺寸复测了普通用户路径。流程工作台在
+`800--960px` 范围内使用左右抽屉而不是把三列硬挤进约 400px 的画布；片段对话框按画布
+可视区域而不是整个窗口居中，`Esc` 只关闭该对话框，页眉与确认区在小窗口中保持可见。
+用户口语输入“等半秒，然后按一下回车”得到 `wait(0.5) -> keyboard(enter)`，应用后一次
+`Ctrl+Z` 删除整个片段，一次 `Ctrl+Y` 恢复。这是编辑器交互证据，不是节点执行 E2E。
+
+运行边界必须对用户可见：校验或启动期间会锁定会替换文档或历史的命令；运行已经开始后
+仍可编辑下一版本，但工作台明确提示当前 run 使用启动时快照。任何画布改动只影响下一次
+运行，不能让用户误以为正在运行的 graph 被热修改。异步 Runtime 校验返回后，前端用剔除
+`compiled_at` 等瞬时元数据的稳定文档 fingerprint 复核启动快照：未修改的流程可正常启动，
+校验期间被修改的流程会丢弃旧结果。
+
+属性面板只展示能准确投影到 canonical ARP 的参数。`evidence_gate` 的结构化条件以 JSON
+数组编辑并保留对象字段；鼠标文字点击、坐标点击、滚动和键盘序列只暴露已由编译契约
+覆盖的选项。键盘既兼容历史 `keys: ['ctrl', 'c']` 和弦，也支持明确
+`modifiers: ['ctrl'], keys: ['c', 'v']` 序列；窗口等待超时在 UI 和编译边界统一限制为
+`(0, 120]` 秒，无主键、超限和水平滚动都 fail closed。历史图片点击分支以及截图区域仍未
+贯通当前 canonical 执行线，
+因此保持迁移提示或 fail closed，不能用旧 UI 控件冒充可运行能力。当前 `screenshot` 节点
+只产生受管理的全屏工件；直接框选截图、跨显示器/DPI 坐标与裁剪后工件尺寸必须先通过
+独立 oracle E2E，才可作为正式区域/图片参数开放。
 
 ## 执行
 
@@ -52,6 +80,13 @@ Flow editor state -> automation-ir/1(runtime.arp_graph + fingerprint) -> validat
 
 - Automation IR 的 projection fingerprint 必须与当前 steps/variables/graph 一致，避免陈旧投影或被篡改的 graph 运行。
 - renderer 只接受 runtime contract v2，且要求 Python 进程启动时源码指纹、当前源码指纹和 Git revision 一致。源码更新后旧服务会被标记为 drifted，流程工作台禁止继续提交并要求重启。
+
+空间动作还有一条与应用无关的目标合同。Renderer 和 Python graph contract 都沿图路径追踪
+“是否已建立真实目标”：`focus_window` 可以在同一 `action_batch` 的空间动作之前建立目标，
+也可以在前一节点建立后供后续节点使用；如果空间动作早于目标建立，或分支合流的任一路径
+没有目标，校验必须 fail closed。同一 ARP run 的多个 `action_batch` 共享一个 `ToolSession`，
+所以已验证的目标绑定可以跨节点保留，并在 run 结束时统一释放。这是单条物理执行线的会话
+连续性，不是任务分类、窗口配方或第二套 controller。
 
 这两个 fingerprint 解决的是不同问题：前者保护 artifact 投影，后者保护正在运行的解释器；不能只通过其中一个就认为运行环境可信。
 
@@ -113,3 +148,6 @@ WinPilot 成功 trace 会生成规范 `.automation.json`，并保留 `.wps.json`
 - Flow/ARP graph 是用户编辑并保存的编排 artifact，不等同于 Agent 的内部工作计划。运行到 `agent_goal` 时，同一 `AgentRunner` 仍可根据新鲜画面调整自己的工作状态；这些变化不是公开流程工具调用，也不会静默改写已保存的 Flow 节点。
 - 客户端收到新的 `agent_plan` 快照后应整体更新显示，不能继续使用旧索引。计划项被标记完成只表示局部工作状态，不是 ARP `evidence_gate` 或最终任务成功证据。
 - `action_batch` 返回成功、画面发生变化、preview 走完、replay 结束或 graph 到达 `end` 都不能替代目标 evidence。需要可信完成时，图中必须保留与用户目标匹配的 evidence gate，或由 `agent_goal` 的新鲜画面/确定性 done gate 核验。
+- managed `screenshot` 在真实工件具有 `artifact_id` 和 SHA-256 时可以产生
+  `artifact.screenshot` 完成证据，让确定性 graph 到达可审计终态；它只证明截图工件被捕获，
+  不能单独证明同一图中的点击、输入或外部业务结果。那些语义仍需 Runtime 之外的 oracle。

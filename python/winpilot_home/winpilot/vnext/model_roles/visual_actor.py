@@ -117,6 +117,7 @@ _CONNECTOR_TOOL_CALL_LIMIT = 4
 _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
 _CONNECTOR_TOOLS = frozenset({_CONNECTOR_SEARCH_TOOL, _CONNECTOR_CALL_TOOL})
+_FLOW_FRAGMENT_TOOL = "propose_flow_fragment"
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,6 +369,212 @@ def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
 
 def _decode_arguments(raw: Any) -> dict[str, Any]:
     return strict_json_object(raw, "Actor tool arguments")
+
+
+def _flow_fragment_tool_definition(
+    allowed_node_types: Sequence[str],
+) -> dict[str, Any]:
+    node_types = list(dict.fromkeys(allowed_node_types))
+    if not node_types or any(type(item) is not str or not item for item in node_types):
+        raise LiveModelRoleError("flow fragment node catalog is invalid")
+    return {
+        "type": "function",
+        "function": {
+            "name": _FLOW_FRAGMENT_TOOL,
+            "description": (
+                "Propose one editable, non-running flow fragment using only "
+                "the supplied node catalog."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "maxLength": 1000},
+                    "nodes": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "local_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                                "type": {"type": "string", "enum": node_types},
+                                "label": {"type": "string", "maxLength": 120},
+                                "params_json": {"type": "string", "minLength": 2, "maxLength": 4096},
+                            },
+                            "required": ["local_id", "type", "label", "params_json"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "edges": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source": {"type": "string", "minLength": 1, "maxLength": 64},
+                                "target": {"type": "string", "minLength": 1, "maxLength": 64},
+                                "source_port": {"type": "string", "minLength": 1, "maxLength": 64},
+                            },
+                            "required": ["source", "target", "source_port"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["summary", "nodes", "edges"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+    }
+
+
+def _flow_fragment_from_response(
+    response: Any,
+    catalog_ports: Mapping[str, Sequence[str]],
+    catalog_params: Mapping[str, frozenset[str]],
+) -> dict[str, Any]:
+    message = response_message(response)
+    require_empty_content(message)
+    calls = member(message, "tool_calls")
+    if (
+        isinstance(calls, (str, bytes))
+        or not isinstance(calls, Sequence)
+        or len(calls) != 1
+    ):
+        raise LiveModelRoleError("flow fragment proposal requires exactly one tool call")
+    call = calls[0]
+    function = member(call, "function")
+    if member(call, "type") != "function" or function is None:
+        raise LiveModelRoleError("flow fragment proposal must be a function call")
+    if member(function, "name") != _FLOW_FRAGMENT_TOOL:
+        raise LiveModelRoleError("Actor returned an unapproved flow fragment tool")
+    arguments = _decode_arguments(member(function, "arguments"))
+    if set(arguments) != {"summary", "nodes", "edges"}:
+        raise LiveModelRoleError("flow fragment proposal fields mismatch")
+    summary = arguments["summary"]
+    raw_nodes = arguments["nodes"]
+    raw_edges = arguments["edges"]
+    if type(summary) is not str or len(summary) > 1000:
+        raise LiveModelRoleError("flow fragment summary is invalid")
+    if not isinstance(raw_nodes, list) or not 1 <= len(raw_nodes) <= 32:
+        raise LiveModelRoleError("flow fragment must contain 1 to 32 nodes")
+    if not isinstance(raw_edges, list) or len(raw_edges) > 64:
+        raise LiveModelRoleError("flow fragment contains too many edges")
+
+    nodes: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    node_types: dict[str, str] = {}
+    for index, raw in enumerate(raw_nodes):
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "local_id", "type", "label", "params_json"
+        }:
+            raise LiveModelRoleError(f"flow fragment node {index + 1} fields mismatch")
+        local_id = raw["local_id"]
+        node_type = raw["type"]
+        label = raw["label"]
+        params_json = raw["params_json"]
+        if type(local_id) is not str or not local_id.strip() or len(local_id) > 64:
+            raise LiveModelRoleError(f"flow fragment node {index + 1} id is invalid")
+        local_id = local_id.strip()
+        if local_id in ids:
+            raise LiveModelRoleError("flow fragment contains duplicate node ids")
+        if type(node_type) is not str or node_type not in catalog_ports:
+            raise LiveModelRoleError(f"flow fragment node {local_id!r} type is unavailable")
+        if type(label) is not str or len(label) > 120:
+            raise LiveModelRoleError(f"flow fragment node {local_id!r} label is invalid")
+        if type(params_json) is not str or not 2 <= len(params_json) <= 4096:
+            raise LiveModelRoleError(f"flow fragment node {local_id!r} params are invalid")
+        params = strict_json_object(
+            params_json,
+            f"flow fragment node {local_id!r} params_json",
+        )
+        unknown_params = set(params) - catalog_params[node_type]
+        if unknown_params:
+            raise LiveModelRoleError(
+                f"flow fragment node {local_id!r} uses unavailable params: "
+                + ", ".join(sorted(unknown_params))
+            )
+        ids.add(local_id)
+        node_types[local_id] = node_type
+        nodes.append({
+            "local_id": local_id,
+            "type": node_type,
+            "label": label.strip(),
+            "params": params,
+        })
+
+    edges: list[dict[str, str]] = []
+    seen_edges: set[tuple[str, str, str]] = set()
+    seen_branches: set[tuple[str, str]] = set()
+    for index, raw in enumerate(raw_edges):
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "source", "target", "source_port"
+        }:
+            raise LiveModelRoleError(f"flow fragment edge {index + 1} fields mismatch")
+        source, target, source_port = (
+            raw["source"], raw["target"], raw["source_port"]
+        )
+        if not all(type(item) is str and item.strip() for item in (source, target, source_port)):
+            raise LiveModelRoleError(f"flow fragment edge {index + 1} is invalid")
+        source, target, source_port = source.strip(), target.strip(), source_port.strip()
+        if source not in ids or target not in ids:
+            raise LiveModelRoleError("flow fragment edge references an unknown node")
+        if source == target:
+            raise LiveModelRoleError("flow fragment edge cannot target its source node")
+        if source_port not in catalog_ports[node_types[source]]:
+            raise LiveModelRoleError(
+                f"flow fragment node {source!r} has no {source_port!r} output"
+            )
+        key = (source, target, source_port)
+        if key in seen_edges:
+            raise LiveModelRoleError("flow fragment contains a duplicate edge")
+        branch = (source, source_port)
+        if branch in seen_branches:
+            raise LiveModelRoleError(
+                "flow fragment output branch can target only one node"
+            )
+        seen_edges.add(key)
+        seen_branches.add(branch)
+        edges.append({"source": source, "target": target, "source_port": source_port})
+
+    outgoing = {local_id: [] for local_id in ids}
+    indegree = {local_id: 0 for local_id in ids}
+    for edge in edges:
+        outgoing[edge["source"]].append(edge["target"])
+        indegree[edge["target"]] += 1
+    roots = [local_id for local_id, degree in indegree.items() if degree == 0]
+    ordered = 0
+    while roots:
+        current = roots.pop()
+        ordered += 1
+        for target in outgoing[current]:
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                roots.append(target)
+    if ordered != len(nodes):
+        raise LiveModelRoleError("flow fragment must not contain a directed cycle")
+    if len(nodes) > 1:
+        if not edges:
+            raise LiveModelRoleError(
+                "multi-node flow fragment requires internal edges"
+            )
+        neighbours = {local_id: set() for local_id in ids}
+        for edge in edges:
+            neighbours[edge["source"]].add(edge["target"])
+            neighbours[edge["target"]].add(edge["source"])
+        pending = [next(iter(ids))]
+        visited: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            pending.extend(neighbours[current] - visited)
+        if visited != ids:
+            raise LiveModelRoleError(
+                "flow fragment must not contain disconnected nodes"
+            )
+    return {"summary": summary.strip(), "nodes": nodes, "edges": edges}
 
 
 def _proposal_from_response(
@@ -670,6 +877,106 @@ def _initial_admission_from_response(
             tool_call_id=call_id,
         ),
     )
+
+
+class FlowFragmentProposer:
+    """One inert editor proposal with no desktop or conversation authority."""
+
+    def __init__(
+        self,
+        *,
+        client: Any,
+        model: str,
+        runtime: ModelCallRuntime,
+        total_timeout_s: float = 120.0,
+        max_output_tokens: int = 768,
+        on_attempt: Callable[[ModelAttempt], None] | None = None,
+        on_response: Callable[[Any], None] | None = None,
+    ) -> None:
+        if client is None:
+            raise LiveModelRoleError("client is required")
+        if type(runtime) is not ModelCallRuntime:
+            raise LiveModelRoleError("runtime must be ModelCallRuntime")
+        self._client = client
+        self._model = require_text(model, "model")
+        self._runtime = runtime
+        self._total_timeout_s = require_positive_timeout(total_timeout_s)
+        self._max_output_tokens = require_positive_int(
+            max_output_tokens, "max_output_tokens"
+        )
+        if on_attempt is not None and not callable(on_attempt):
+            raise LiveModelRoleError("on_attempt must be callable or null")
+        if on_response is not None and not callable(on_response):
+            raise LiveModelRoleError("on_response must be callable or null")
+        self._on_attempt = on_attempt
+        self._on_response = on_response
+        self._called = False
+        self._state_lock = threading.Lock()
+
+    def propose_flow_fragment(
+        self,
+        request: Mapping[str, Any],
+        *,
+        catalog_ports: Mapping[str, Sequence[str]],
+        catalog_params: Mapping[str, frozenset[str]],
+        stop_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(request, Mapping):
+            raise LiveModelRoleError("flow fragment request must be an object")
+        canonical_request = _canonical_json(request)
+        if len(canonical_request) > _THREAD_HISTORY_CHARS:
+            raise LiveModelRoleError("flow fragment request exceeds the bounded context")
+        ports = {
+            key: tuple(value)
+            for key, value in catalog_ports.items()
+            if type(key) is str and key
+        }
+        if len(ports) != len(catalog_ports) or any(
+            not value or any(type(port) is not str or not port for port in value)
+            for value in ports.values()
+        ):
+            raise LiveModelRoleError("flow fragment output-port catalog is invalid")
+        params = {
+            key: frozenset(value)
+            for key, value in catalog_params.items()
+            if type(key) is str and key and isinstance(value, frozenset)
+        }
+        if set(params) != set(ports) or any(
+            any(type(name) is not str or not name for name in names)
+            for names in params.values()
+        ):
+            raise LiveModelRoleError("flow fragment param catalog is invalid")
+        with self._state_lock:
+            if self._called:
+                raise LiveModelRoleError("flow fragment proposer is call-once")
+            self._called = True
+        outcome = invoke_chat_completion(
+            self._client,
+            decision_id=_initial_decision_id(canonical_request, ()),
+            model_role=VISUAL_ACTOR_MODEL_ROLE,
+            purpose="flow_fragment_proposal",
+            provider_request={
+                "model": self._model,
+                "messages": [{"role": "user", "content": canonical_request}],
+                "tools": [_flow_fragment_tool_definition(tuple(ports))],
+                "tool_choice": "auto",
+                "temperature": 0.0,
+                "max_completion_tokens": self._max_output_tokens,
+            },
+            policy=ModelRetryPolicy(
+                max_attempts=1,
+                total_timeout_s=self._total_timeout_s,
+            ),
+            stop_event=stop_event,
+            on_attempt=self._on_attempt,
+            runtime=self._runtime,
+        )
+        if self._on_response is not None:
+            try:
+                self._on_response(outcome.response)
+            except Exception:
+                pass
+        return _flow_fragment_from_response(outcome.response, ports, params)
 
 
 class LiveVisualActor:

@@ -21,6 +21,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 export function ArpNodeParams({ type, params, onChange }: Props) {
   const [actionsText, setActionsText] = useState(() => JSON.stringify(params.actions || [], null, 2));
   const [stepText, setStepText] = useState(() => JSON.stringify(params.step || {}, null, 2));
+  const [requiredText, setRequiredText] = useState(() => JSON.stringify(params.required || [], null, 2));
   const [targetText, setTargetText] = useState(() => (
     typeof params.target_window === 'string'
       ? params.target_window
@@ -36,7 +37,8 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
         ? params.target_window
         : JSON.stringify(params.target_window || '', null, 2));
     }
-  }, [type, params.actions, params.step, params.target_window]);
+    if (type === 'evidence_gate') setRequiredText(JSON.stringify(params.required || [], null, 2));
+  }, [type, params.actions, params.required, params.step, params.target_window]);
 
   const patch = (values: Record<string, unknown>) => onChange({ ...params, ...values });
   const commitDraft = useCallback((): string | undefined => {
@@ -68,6 +70,13 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
           onChange({ ...params, step, target_window: targetWindow });
         }
       }
+      if (type === 'evidence_gate') {
+        const required = JSON.parse(requiredText);
+        if (!Array.isArray(required)) throw new Error('required 必须是 JSON 数组。');
+        if (JSON.stringify(required) !== JSON.stringify(params.required || [])) {
+          onChange({ ...params, required });
+        }
+      }
       setJsonError('');
       return undefined;
     } catch (error) {
@@ -75,10 +84,10 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
       setJsonError(message);
       return message;
     }
-  }, [actionsText, onChange, params, stepText, targetText, type]);
+  }, [actionsText, onChange, params, requiredText, stepText, targetText, type]);
 
   useEffect(() => {
-    if (type !== 'action_batch' && type !== 'replay_step') return undefined;
+    if (type !== 'action_batch' && type !== 'replay_step' && type !== 'evidence_gate') return undefined;
     return registerEditorDraftCommitter(commitDraft);
   }, [commitDraft, type]);
 
@@ -153,12 +162,15 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
       )}
 
       {type === 'evidence_gate' && (
-        <Field label="必需证据" hint="每行填写一个证据标记；所有标记都必须出现在累计运行证据中。">
+        <Field label="必需证据" hint="JSON 数组；可保留 predicate、source、equals 和 max_age_ms 等结构化条件。">
           <textarea
-            className="form-input arp-textarea"
-            value={Array.isArray(params.required) ? params.required.join('\n') : ''}
-            onChange={(event) => patch({ required: event.target.value.split('\n').map((item) => item.trim()).filter(Boolean) })}
+            className="form-input arp-code-editor"
+            spellCheck={false}
+            value={requiredText}
+            onChange={(event) => setRequiredText(event.target.value)}
+            onBlur={commitDraft}
           />
+          {jsonError && <div className="arp-field-error">{jsonError}</div>}
         </Field>
       )}
 

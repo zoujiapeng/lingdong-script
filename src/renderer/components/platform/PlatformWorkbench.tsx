@@ -18,7 +18,6 @@ import {
   FilePlus2,
   FolderOpen,
   Gauge,
-  GraduationCap,
   GitBranch,
   History,
   Library,
@@ -54,6 +53,7 @@ import {
 import { FlowCanvas } from '../Canvas/FlowCanvas';
 import { NodeLibrary } from '../NodeLibrary/NodeLibrary';
 import { PropertyPanel } from '../PropertyPanel/PropertyPanel';
+import { FlowFragmentComposer } from '../FlowFragment/FlowFragmentComposer';
 import { confirmDocumentReplacement, useStore } from '../../store';
 import type { UIState } from '../../types';
 import { useControlPlane } from '../../platform/useControlPlane';
@@ -81,6 +81,7 @@ import {
   validateAutomationLocally,
   type AutomationIR,
 } from '../../utils/automationIR';
+import { flowDocumentFingerprint } from '../../utils/flowFragmentProposal';
 import { isTerminalTaskStatus } from '../../../shared/taskOutcome';
 import { taskOutcomeForRun } from '../../platform/taskOutcome';
 
@@ -891,6 +892,7 @@ interface AgentCockpitProps {
   onOpenResources?: () => void;
   onOpenSystem?: () => void;
   onOpenWorkbench?: () => void;
+  onLoadConversationFlow?: (automation: AutomationIR) => void;
   onOpenCommand?: () => void;
   onCompact?: () => void;
 }
@@ -1102,11 +1104,13 @@ export function AgentCockpit({
   onOpenResources,
   onOpenSystem,
   onOpenWorkbench,
+  onLoadConversationFlow,
   onOpenCommand,
   onCompact,
 }: AgentCockpitProps) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
   const [submitting, setSubmitting] = useState(false);
+  const [exportingFlow, setExportingFlow] = useState(false);
   const [controlling, setControlling] = useState(false);
   const [actionError, setActionError] = useState('');
   const [composerFocused, setComposerFocused] = useState(false);
@@ -1355,6 +1359,46 @@ export function AgentCockpit({
     }
   };
 
+  const exportConversationFlow = async () => {
+    if (exportingFlow || runtimeBusy || !threadState.threadId || !onLoadConversationFlow) return;
+    setExportingFlow(true);
+    setActionError('');
+    try {
+      const client = plane.getClient();
+      const exported = await client.exportThreadAutomation(threadState.threadId, threadState.runIds);
+      const automation = await client.script<AutomationIR>(exported.ir);
+      const manifest = automation.source?.export_manifest;
+      const manifestRecord = manifest && typeof manifest === 'object' && !Array.isArray(manifest)
+        ? manifest as Record<string, unknown>
+        : {};
+      const reasons = Array.isArray(manifestRecord.reasons)
+        ? manifestRecord.reasons.map(String).filter(Boolean)
+        : [];
+      const unsupported = reasons.filter((reason) => (
+        reason.includes('unsupported') || reason.includes('not_replayable')
+      ));
+      const partial = manifestRecord.partial === true
+        || manifestRecord.complete === false
+        || reasons.length > 0;
+      const lines = [
+        partial
+          ? '这是部分导出（partial），请先在流程工作台中检查和编辑。'
+          : '已提取本对话中可重放的动作。',
+        `${automation.steps.length} 个动作将加载到流程工作台，不会自动运行。`,
+      ];
+      if (unsupported.length) lines.push(`不支持或未纳入的动作：${unsupported.join('；')}`);
+      const remaining = reasons.filter((reason) => !unsupported.includes(reason));
+      if (remaining.length) lines.push(`另有 ${remaining.length} 项完整性提示，可在流程元数据中检查。`);
+      lines.push('是否继续加载？');
+      if (!window.confirm(lines.join('\n'))) return;
+      onLoadConversationFlow(automation);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExportingFlow(false);
+    }
+  };
+
   const renderComposerField = (compact = false) => (
     <>
       <textarea
@@ -1497,6 +1541,19 @@ export function AgentCockpit({
             </span>
           </button>
           <div className="ld-task-window-actions">
+            <button
+              type="button"
+              aria-label="将本对话动作转为流程"
+              title={!threadState.threadId
+                ? '当前对话还没有可导出的运行记录'
+                : runtimeBusy
+                  ? '对话结束后可转为流程'
+                  : '提取普通 ARP 可重放动作；确认后仅加载，不会运行'}
+              disabled={!threadState.threadId || runtimeBusy || exportingFlow || !onLoadConversationFlow}
+              onClick={() => void exportConversationFlow()}
+            >
+              {exportingFlow ? <Loader2 size={15} className="arp-spin" /> : <Workflow size={15} />}
+            </button>
             <button type="button" aria-label="新建对话" title={runtimeBusy || submitting ? '当前提交结束后可新建对话' : '新建对话'} disabled={runtimeBusy || submitting} onClick={startNewConversation}><Plus size={15} /></button>
             <button type="button" aria-label="打开工作台" title="执行、画面、上下文与证据" onClick={onOpenWorkbench}><Activity size={15} /></button>
             <button type="button" aria-label="收起为迷你悬浮窗" title="收起为迷你悬浮窗" onClick={onCompact}><Minimize2 size={15} /></button>
@@ -1615,6 +1672,16 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
     () => automationIrFromFlowScript(script, `air-${script.meta.id}`),
     [script],
   );
+  const validatedDocumentFingerprint = useMemo(
+    () => flowDocumentFingerprint(script),
+    [script],
+  );
+  const assertCurrentDocument = () => {
+    const currentScript = useStore.getState().script;
+    if (flowDocumentFingerprint(currentScript) !== validatedDocumentFingerprint) {
+      throw new Error('流程在验证期间已发生变化；旧结果已丢弃，请重新验证或运行当前版本。');
+    }
+  };
   const graph = useMemo<ArpGraph>(() => {
     return automationRuntimeGraph(automation);
   }, [automation]);
@@ -1672,6 +1739,7 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
         return offlineResult;
       }
       const result = await plane.validateAutomation(automation);
+      assertCurrentDocument();
       setValidationSource('runtime');
       setValidation(result);
       return result;
@@ -1690,6 +1758,7 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
       if (!local.valid) return;
       if (!runtimeReady) throw new Error(plane.runtimeIssue || '本机运行时尚未连接；当前流程仍可离线编辑和保存。');
       const result = await plane.validateAutomation(automation);
+      assertCurrentDocument();
       setValidationSource('runtime');
       setValidation(result);
       if (!result.valid) return;
@@ -1738,17 +1807,20 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
         {isDirty && <StatusPill status="queued" label="未保存" />}
         {!runtimeReady && <StatusPill status="paused" label="本地编辑" />}
         {validation && <StatusPill status={validation.valid ? 'success' : 'failed'} label={validation.valid ? (validationSource === 'local' ? '本地结构通过' : '运行时有效') : `${validation.errors.length} 个错误`} />}
-        {error && <span className="arp-toolbar-error">{error}</span>}
-        {notice && <span className="arp-toolbar-notice" role="status">{notice}</span>}
         <div className="arp-action-spacer" />
         <button className="arp-icon-button arp-mobile-panel-button" title="节点库" aria-label="显示/隐藏节点库" aria-pressed={mobilePanel === 'library'} onClick={() => setMobilePanel((current) => current === 'library' ? null : 'library')}><PanelLeft size={15} /></button>
         <button className="arp-icon-button arp-mobile-panel-button" title="节点属性" aria-label="显示/隐藏节点属性" aria-pressed={mobilePanel === 'properties'} onClick={() => setMobilePanel((current) => current === 'properties' ? null : 'properties')}><SlidersHorizontal size={15} /></button>
         <button className="arp-icon-button" title="适应工作流" aria-label="适应工作流" onClick={fitToScreen}><Network size={15} /></button>
-        <button className="arp-icon-button" title="新建工作流 (Ctrl+N)" aria-label="新建工作流" onClick={createNew}><FilePlus2 size={15} /></button>
-        <button className="arp-icon-button" title="打开工作流 (Ctrl+O)" aria-label="打开工作流" onClick={() => void open()} disabled={!onOpenAutomation}><FolderOpen size={15} /></button>
-        <button className="arp-icon-button" title="撤销 (Ctrl+Z)" aria-label="撤销" onClick={undo}><Undo2 size={15} /></button>
-        <button className="arp-icon-button" title="重做 (Ctrl+Y)" aria-label="重做" onClick={redo}><Redo2 size={15} /></button>
-        <button className="arp-button arp-studio-command" title="保存工作流" aria-label="保存工作流" onClick={() => void save()}><Save size={14} /><span>保存</span></button>
+        <button className="arp-icon-button" title="新建工作流 (Ctrl+N)" aria-label="新建工作流" onClick={createNew} disabled={busy}><FilePlus2 size={15} /></button>
+        <button className="arp-icon-button" title="打开工作流 (Ctrl+O)" aria-label="打开工作流" onClick={() => void open()} disabled={busy || !onOpenAutomation}><FolderOpen size={15} /></button>
+        <button className="arp-icon-button" title="撤销 (Ctrl+Z)" aria-label="撤销" onClick={undo} disabled={busy}><Undo2 size={15} /></button>
+        <button className="arp-icon-button" title="重做 (Ctrl+Y)" aria-label="重做" onClick={redo} disabled={busy}><Redo2 size={15} /></button>
+        <FlowFragmentComposer
+          propose={plane.proposeFlowFragment}
+          disabled={busy || activeRun || !runtimeReady}
+          disabledReason={activeRun ? '当前任务结束后才能生成流程片段' : (plane.runtimeIssue || '本机运行时尚未连接')}
+        />
+        <button className="arp-button arp-studio-command" title="保存工作流" aria-label="保存工作流" onClick={() => void save()} disabled={busy}><Save size={14} /><span>保存</span></button>
         <button className="arp-button arp-studio-command" title="验证工作流" aria-label="验证工作流" onClick={validate} disabled={busy}><ShieldCheck size={14} /><span>验证</span></button>
         {activeRun ? (
           <button className="arp-button arp-button-danger arp-studio-command" title="停止当前运行" aria-label="停止当前运行" onClick={() => void stop()} disabled={busy}>{busy ? <Loader2 size={14} className="arp-spin" /> : <CircleStop size={14} />}<span>停止</span></button>
@@ -1756,12 +1828,22 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
           <button className="arp-button arp-button-primary arp-studio-command" title={runtimeReady ? '运行工作流' : (plane.runtimeIssue || '本机运行时尚未连接')} aria-label="运行工作流" onClick={run} disabled={busy || !runtimeReady}>{busy ? <Loader2 size={14} className="arp-spin" /> : <Play size={14} fill="currentColor" />}<span>运行工作流</span></button>
         )}
       </header>
+      {(error || notice) && (
+        <div className={`arp-studio-message-bar ${error ? 'danger' : 'success'}`} role={error ? 'alert' : 'status'}>
+          {error || notice}
+        </div>
+      )}
+      {activeRun && (
+        <div className="arp-studio-message-bar info" role="status">
+          当前运行使用启动时快照；画布编辑只影响下一次运行。
+        </div>
+      )}
       {validation && (!validation.valid || validation.warnings.length > 0) && (
         <div className={`arp-validation-bar ${validation.valid ? 'warning' : 'danger'}`}>
           {(validation.errors.length ? validation.errors : validation.warnings).join(' · ')}
         </div>
       )}
-      <div className={`arp-studio-shell${mobilePanel ? ` mobile-${mobilePanel}-open` : ''}`}>
+      <div className={`arp-studio-shell${mobilePanel ? ` mobile-${mobilePanel}-open` : ''}${busy ? ' is-locked' : ''}`} aria-busy={busy}>
         <NodeLibrary capabilities={plane.capabilities} />
         <main className="arp-canvas-stage"><FlowCanvas /></main>
         <PropertyPanel />
@@ -1958,7 +2040,7 @@ export const replayOutcomeStatus = (job: ReplayJobView | null): string => {
   return job.ok === false ? 'failed' : job.status;
 };
 
-type ReplayMode = 'offline_graph' | 'skill' | 'apprentice';
+type ReplayMode = 'offline_graph' | 'skill' | 'macro';
 
 function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => void }) {
   const [traces, setTraces] = useState<TraceItem[]>([]);
@@ -1968,7 +2050,8 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   const [recording, setRecording] = useState(false);
   const [replayMode, setReplayMode] = useState<ReplayMode>('offline_graph');
   const [replayJob, setReplayJob] = useState<ReplayJobView | null>(null);
-  const [apprenticeTask, setApprenticeTask] = useState('');
+  const [recordingTask, setRecordingTask] = useState('');
+  const [recordingName, setRecordingName] = useState('');
   const [evidencePredicate, setEvidencePredicate] = useState('visible.text');
   const [evidenceValue, setEvidenceValue] = useState('');
   const [memoryView, setMemoryView] = useState<'long' | 'session'>('long');
@@ -2002,7 +2085,8 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
         client.traces(), client.scripts(), client.memories(), client.sessions(), client.apprenticeStatus(),
       ]);
       setTraces(nextTraces); setScripts(nextScripts); setMemories(nextMemories); setSessions(nextSessions); setRecording(Boolean(apprentice.recording));
-      if (apprentice.task) setApprenticeTask((current) => current || apprentice.task || '');
+      if (apprentice.task) setRecordingTask((current) => current || apprentice.task || '');
+      if (apprentice.name) setRecordingName((current) => current || apprentice.name || '');
       setError('');
     } catch (refreshError) { setError(refreshError instanceof Error ? refreshError.message : String(refreshError)); }
   }, [plane.baseUrl]);
@@ -2139,8 +2223,8 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   };
 
   const toggleRecording = async () => {
-    if (!recording && !apprenticeTask.trim()) {
-      setError('请输入要让学习器学习的工作流。');
+    if (!recording && !recordingTask.trim()) {
+      setError('请输入本次宏录制要完成的任务。');
       return;
     }
     if (!recording && !evidenceValue.trim()) {
@@ -2151,18 +2235,21 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
     try {
       if (recording) {
         const result = await plane.getClient().apprenticeStop();
+        setRecordingName('');
         await refresh();
         if (result.file) await openSkill(String(result.file));
         return;
       }
       await plane.getClient().apprenticeStart(
-        apprenticeTask.trim(),
+        recordingTask.trim(),
         '',
         [{ predicate: evidencePredicate, value: evidenceValue.trim() }],
+        recordingName.trim(),
       );
       await refresh();
     } catch (recordError) {
       try { await refresh(); } catch { /* Keep the original recording error visible. */ }
+      if (recording) setRecordingName('');
       setError(recordError instanceof Error ? recordError.message : String(recordError));
     }
     finally { setBusy(false); }
@@ -2232,17 +2319,18 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
 
   return (
     <div className="arp-page arp-assets-page">
-      <div className="arp-page-title"><div><span className="arp-kicker">复用</span><h2>技能与学习</h2></div></div>
+      <div className="arp-page-title"><div><span className="arp-kicker">离线自动化</span><h2>流程、技能与宏录制</h2></div></div>
       {error && <div className="arp-inline-error"><XCircle size={14} />{error}</div>}
       <div className="arp-replay-toolbar">
         <div className="arp-replay-modes" role="tablist" aria-label="重放模式">
           <button className={replayMode === 'offline_graph' ? 'active' : ''} onClick={() => setReplayMode('offline_graph')} role="tab" aria-selected={replayMode === 'offline_graph'} disabled={recording}><Workflow size={14} />离线流程</button>
           <button className={replayMode === 'skill' ? 'active' : ''} onClick={() => setReplayMode('skill')} role="tab" aria-selected={replayMode === 'skill'} disabled={recording}><RefreshCw size={14} />技能复用</button>
-          <button className={replayMode === 'apprentice' ? 'active' : ''} onClick={() => setReplayMode('apprentice')} role="tab" aria-selected={replayMode === 'apprentice'}><GraduationCap size={14} />示教学习</button>
+          <button className={replayMode === 'macro' ? 'active' : ''} onClick={() => setReplayMode('macro')} role="tab" aria-selected={replayMode === 'macro'}><Radio size={14} />宏录制</button>
         </div>
-        {replayMode === 'apprentice' && (
+        {replayMode === 'macro' && (
           <div className="arp-apprentice-control">
-            <input value={apprenticeTask} onChange={(event) => setApprenticeTask(event.target.value)} placeholder="输入要学习的工作流" disabled={recording || busy} aria-label="要学习的工作流" />
+            <input value={recordingName} onChange={(event) => setRecordingName(event.target.value)} placeholder="宏名称（可选）" disabled={recording || busy} aria-label="宏名称" />
+            <input value={recordingTask} onChange={(event) => setRecordingTask(event.target.value)} placeholder="描述本次录制要完成的任务" disabled={recording || busy} aria-label="宏录制任务" />
             <select value={evidencePredicate} onChange={(event) => setEvidencePredicate(event.target.value)} disabled={recording || busy} aria-label="终态证据类型">
               <option value="visible.text">可见文本</option>
               <option value="window.visible">可见窗口</option>
@@ -2250,7 +2338,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
               <option value="process.running">进程运行</option>
             </select>
             <input value={evidenceValue} onChange={(event) => setEvidenceValue(event.target.value)} placeholder="终态证据值" disabled={recording || busy} aria-label="终态证据值" />
-            <button className={`arp-button ${recording ? 'arp-button-danger' : 'arp-button-primary'}`} onClick={toggleRecording} disabled={busy || (!recording && (!apprenticeTask.trim() || !evidenceValue.trim()))}>{recording ? <CircleStop size={14} /> : <Radio size={14} />}{recording ? '结束学习' : '开始学习'}</button>
+            <button className={`arp-button ${recording ? 'arp-button-danger' : 'arp-button-primary'}`} onClick={toggleRecording} disabled={busy || (!recording && (!recordingTask.trim() || !evidenceValue.trim()))}>{recording ? <CircleStop size={14} /> : <Radio size={14} />}{recording ? '停止录制并生成流程' : '开始宏录制'}</button>
           </div>
         )}
       </div>
@@ -2963,6 +3051,12 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
     setWorkbenchView(null);
   }, [setViewMode]);
 
+  const loadConversationFlow = useCallback((automation: AutomationIR) => {
+    if (!confirmDocumentReplacement()) return;
+    useStore.getState().loadScript(automationIrToFlowScript(automation), { dirty: true });
+    openFlow();
+  }, [openFlow]);
+
   const closeFlow = useCallback(() => {
     setFlowOpen(false);
     setViewMode('agent');
@@ -3039,6 +3133,7 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
             onOpenResources={() => openResources('runs')}
             onOpenSystem={() => openResources('system')}
             onOpenWorkbench={() => openWorkbench(plane.currentRun ? 'activity' : 'flow')}
+            onLoadConversationFlow={loadConversationFlow}
             onOpenCommand={() => { setCommandOpen(true); setCommandQuery(''); }}
             onCompact={() => { if (plane.currentRun) setWindowMode('compact'); }}
           />

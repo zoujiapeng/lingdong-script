@@ -4463,3 +4463,73 @@ def test_goal_admission_has_no_legacy_tasking_or_agent_dependency() -> None:
     assert "AgentRunner" not in source
     assert "default_handlers" not in source
     assert "legacy_goal_graph_task" not in source
+
+
+def test_flow_fragment_resources_keep_local_budget_without_run_telemetry() -> None:
+    response = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-flow-fragment",
+                    "type": "function",
+                    "function": {
+                        "name": "propose_flow_fragment",
+                        "arguments": json.dumps({
+                            "summary": "click",
+                            "nodes": [{
+                                "local_id": "click",
+                                "type": "click",
+                                "label": "Click",
+                                "params_json": "{\"x\":10,\"y\":20}",
+                            }],
+                            "edges": [],
+                        }),
+                    },
+                }],
+            },
+        }],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+    }
+    raw_client = _RawClient(response)
+    config = _config()
+    budget = live_agent._freeze_budget(config)
+    model = live_agent._freeze_model(config, budget)
+    dependencies = live_agent._CompositionDependencies(
+        monotonic=lambda: 10.0,
+        client_factory=lambda **_kwargs: raw_client,
+    )
+    events: list[dict[str, Any]] = []
+    sink = events.append
+    BUS.add_sink(sink)
+    bundle = None
+    try:
+        bundle = live_agent._build_actor_resources(
+            run_id="flow-fragment-test",
+            mission_id="flow-fragment-proposal-test",
+            budget=budget,
+            model=model,
+            dependencies=dependencies,
+            deadline=lambda: 200.0,
+            publish_run_telemetry=False,
+            role_factory=live_agent.FlowFragmentProposer,
+        )
+        fragment = bundle.actor.propose_flow_fragment(
+            {"request": "click"},
+            catalog_ports={"click": ("output",)},
+            catalog_params={"click": frozenset({"x", "y"})},
+        )
+    finally:
+        if bundle is not None:
+            bundle.close()
+        BUS.remove_sink(sink)
+
+    assert fragment["nodes"][0]["params"] == {"x": 10, "y": 20}
+    assert bundle is not None
+    assert bundle.counter.count == 1
+    assert bundle.usage_total["prompt_tokens"] == 7
+    assert bundle.usage_total["completion_tokens"] == 3
+    assert not {
+        event.get("type") for event in events
+    } & {"vnext_model_call", "agent_usage"}

@@ -42,7 +42,7 @@ run `30688550071` 又实际执行并通过 frontend、Python 两个 job；这是
 
 本轮改动前的 `fd53fb887960ce77ebe4b1e7e104ee8c3af425e1` 由 Actions run
 `30698655302` 实际完成并通过 frontend、Python 两个 job。2026-08-02 当前工作树的发布门为：
-renderer `295 passed`、根目录 Python `2508 passed`、WinPilot `3509 passed, 13 skipped,
+renderer `316 passed`、根目录 Python `2508 passed`、WinPilot `3600 passed, 13 skipped,
 1 warning`，TypeScript typecheck、renderer/Electron build、CLI/AI build 均通过。新提交仍必须
 查询自己的 Actions，不能继承 `fd53fb8` 的绿色状态；这些回归合同也不替代下面的外部 oracle。
 
@@ -53,7 +53,69 @@ Studio 显示为 13 节点/12 连线。随后从 Studio 前端运行，ARP run
 确认 A=`afinal001`、B=`btwo001`。重置两个窗口后，又从“技能与记忆”前端完成
 memory verification `verify-7bf3d1b4ed57`，候选由 provisional 晋级为 `replay_verified`；
 再次重置后点击“复用”，RuntimeJob `replay-1c54a9f89d9e` 完成且同一外部 oracle 再次通过。
-这证明 human Apprentice 链，不证明 Agent 整场对话导出链，也不证明所有 Flow 参数分支可运行。
+这组证据只证明 human Apprentice 链；Agent 整场对话导出与离线节点证据分别按下面的独立
+探针记账，三者不能互相替代。
+
+2026-08-02 随后完成了一次真实两轮 Agent Thread 导出与离线 replay。用户从可见 Electron
+前端分别要求在 Notepad 输入 `ARP-THREAD-A-20260802-0329`，再追加
+`-B-20260802-0333`；两个来源 run 为 `arp-20260802-033126-e2c5f9` 与
+`arp-20260802-033440-85c0f4`。从对话顶栏导出得到 14 个普通 ARP 动作，确认后载入 Studio
+为 16 节点/15 连线；清空 Notepad 并从 Studio 运行后，
+`arp-20260802-033821-0bb256` 的 16 个节点完成且 `vnext_model_call=0`。独立剪贴板 oracle
+精确读到
+`ARP-THREAD-A-20260802-0329ARP-THREAD-A-20260802-0329-B-20260802-0333`，长度 68，
+SHA-256=`934b79c77eb2d6120be63b8a47141c902f343affd49a14e393cc7629d755230b`。
+重复 A 不是 Runtime 修正目标：第一轮未结束时测试操作重新激活了 Electron，叠加模型的参数/
+目标选择形成额外动作；raw canonical 与 `physical_attempt` 一致，replay 忠实复现。因此重放链
+grounded pass，但原始第二轮“只追加一次”的任务结果不算干净成功。
+
+重启当前源码后，普通用户再次从对话顶栏导出：前端显示 `partial`、14 个动作和
+“只加载、不会自动运行”，用户确认并放弃旧未保存草稿后，Studio 载入 16 节点。
+在默认约 `902 x 582` 窗口点击“运行工作流”，run
+`arp-20260802-065621-dd12f0` 的 16 个节点全部完成，`trace_integrity=complete`，
+`vnext_model_call=0`。导出节点的参数面板可见保留了经认证进程一致的
+`target_window.title + process`，Runtime preflight 也按这两个通用窗口标识定位。
+独立剪贴板 oracle 再次得到同一 68 字符串与同一 SHA-256。这是当前源码的
+可见重放证据，但仍不改写上述原始 Agent 第二轮受测结果。
+
+这不证明整场对话的所有普通 ARP 动作都可导出。跨 decision 的 held gesture 含
+`started_held` / `keep_holding`，当前被导出器拒绝并得到 0 步；缺少 durable run -> Thread
+owner index 也使完整归属只能靠约 14 秒的全量 trace 扫描核对。这两项属于基础设施缺口。
+轻量 owner scan 一度把本机耗时降到约 1.36 秒，但可能漏掉归属/完整性异常而 false-complete，
+实验已完整回退。当前选择较慢但可证明的全量扫描。
+
+同一可见 Studio 的一句话辅助探针提交“点击坐标 420,300，等待 1 秒，然后输入文本 hello”。
+隔离的 `FlowFragmentProposer` 用一次 opt-in、单条 user JSON、零 system/developer message
+返回 `click -> wait -> input_text` 三节点/两连线；确认后片段出现在当前图右侧空白处，未自动
+连接、保存或运行，`Ctrl+Z` 恢复原来的 16 节点/15 连线/14 动作。这证明生成/预览/应用/撤销
+合同，不是自然语言编排成功率，也不计入离线节点通过率。
+
+严格的离线节点独立矩阵当前为 `1/19`，只计 `click` DUT。2026-08-02 从可见 Electron Studio
+打开 `python/winpilot_home/eval_targets/offline_flow_click_e2e.json`，校验后运行
+`start -> focus_window -> click -> managed screenshot -> end`。run
+`arp-20260802-052309-82cf06` 的 5 个节点全部 `ok`、`trace_integrity=complete`，模型调用为 0；
+Runtime 外部 JSON oracle 显示 `click_count: 0 -> 1`，其余输入计数全部保持 0。截图工件
+SHA-256=`7a04783ba7c6d80ba81d0da86fd991b9e158a5315dc7608dd51b0c690e775e04`。
+业务 click 通过只依据外部 JSON；managed screenshot 只提供真实 artifact evidence，不是业务
+oracle，因此 `focus_window` 与 `screenshot` 都不计为独立通过。
+
+该探针保留了三项通用基础设施修复：同一 ARP run 的 action batch 共享一个 `ToolSession`，
+Renderer/Python 对每条控制流路径验证 spatial action 前已建立 target，managed screenshot 的
+artifact id/hash 显式进入 verified evidence。纯 `start -> click -> end` 仍会 fail closed；旧实现
+在 focus 与 click 分属两个节点时丢失 target 的失败已经修复。测试中一次 stale target baseline
+属于测试干扰，重置后排除。剩余 18 个节点只是尚无严格独立证据，不能记作已失败。
+
+另有一个组合 E 级批次：从可见 Electron 打开
+`python/winpilot_home/eval_targets/offline_flow_clipboard_screenshot.json` 并运行，YES 路径覆盖
+`start/end`、`clipboard_get`、`condition`、`clipboard_set` 和基础 `screenshot`。独立 OS
+剪贴板精确得到 `OFFLINE-NODE-E2E-PASS-20260802`；截图工件为 1920x1080、182009 bytes，
+manifest/hash 一致并可视为真实 Studio 桌面。NO 分支未运行，截图也没有验证 target nonce；
+因此只能记为这几个节点/分支的组合证据，不能称为所有离线节点逐项通过。
+
+下一轮唯一最高价值实验改为 canonical `screenshot.region` 的真实前端闭环：用户从属性面板
+直接框选，编译器显式映射 `x/y/w/h` 到 Runtime 的 `x/y/width/height`，外部 oracle 核对裁剪
+工件尺寸、SHA-256 与当轮随机标识，并覆盖 125% DPI 和第二显示器/负坐标边界。未通过前不
+开放历史图片模板节点。跨 decision held gesture 仍保留为已知重放缺口，但本轮不并行修改。
 
 同一候选的真实前端原生探针没有被内部 `done` 覆盖：Calculator `43×17` 的外部显示为
 `44` 而非 `731`；Paint 没有形成合格红色 X；QQ 群摘要在零 GUI 动作前被未批准工具拒绝；
@@ -407,6 +469,22 @@ npm run typecheck
 npm run build
 npm run build:all
 ```
+
+流程工作台的 renderer 聚焦回归还应覆盖真实默认窗口边界，而不只用宽浏览器视口：
+
+- `900 x 580` 下节点库和属性面板必须是可开关抽屉，主画布不被三列挤压；
+- 片段对话框的 `Esc` 不得关闭整个工作台，确认按钮在最小高度内仍可达；
+- 片段落点按 canvas viewport 计算，一次 undo/redo 必须整体回退/恢复；
+- 每个属性控件都要断言精确 canonical 参数；不支持的图片、方向、坐标组合和截图区域
+  必须 fail closed，不能静默降级成另一种动作；
+- active run 使用启动时快照；若允许继续编辑，UI 必须明确标为“下一次运行”。
+
+2026-08-02 的小窗口可见探针用真实 Electron 默认尺寸提交两条口语请求：一条生成
+`focus_window -> click -> wait -> input_text -> screenshot`，另一条生成
+`wait(0.5) -> keyboard(enter)`；完成参数修改、应用、整体 undo/redo，并验证抽屉、主题、
+对话框 Esc 与 sticky footer。直接相关的 6 个 renderer 聚焦文件共 48 项测试通过，
+完整 renderer 回归为 30 个文件、316 项通过。这个结果只证明
+编辑体验与编译边界，不替代下方逐节点真实执行矩阵；图片模板输入当前仍是未实现能力。
 
 ## 报告要求
 

@@ -89,6 +89,7 @@ from ..vnext.mission import (
     TargetBinding,
 )
 from ..vnext.model_roles import (
+    FlowFragmentProposer,
     VISUAL_ACTOR_MODEL_ROLE,
     LiveVisualActor,
     VisualActorTurnAdmission,
@@ -1974,7 +1975,7 @@ def _close_resources(
 
 
 class _BudgetedActor:
-    def __init__(self, role: LiveVisualActor, counter: _ModelCallCounter) -> None:
+    def __init__(self, role: Any, counter: _ModelCallCounter) -> None:
         self._role = role
         self._counter = counter
 
@@ -2001,6 +2002,17 @@ class _BudgetedActor:
         try:
             kwargs["_model_call_limit"] = admitted
             return self._role.begin_turn(*args, **kwargs)
+        finally:
+            self._counter.finish(VISUAL_ACTOR_MODEL_ROLE)
+
+    def propose_flow_fragment(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self._counter.begin(VISUAL_ACTOR_MODEL_ROLE, reserve=1)
+        try:
+            return self._role.propose_flow_fragment(*args, **kwargs)
         finally:
             self._counter.finish(VISUAL_ACTOR_MODEL_ROLE)
 
@@ -2049,6 +2061,14 @@ class _RawReceiptTrace:
         *,
         metadata: Mapping[str, Any],
     ) -> None:
+        target_window = {
+            key: value
+            for key, value in {
+                "title": str(metadata.get("target_title") or "").strip(),
+                "process": str(metadata.get("target_process") or "").strip(),
+            }.items()
+            if value
+        }
         BUS.publish(
             "vnext_raw_receipt",
             runtime_version=_RUNTIME_VERSION,
@@ -2069,6 +2089,7 @@ class _RawReceiptTrace:
             frame_epoch=int(metadata.get("frame_epoch") or 0),
             input_completed=receipt.input_completed,
             error_kind=receipt.error_kind,
+            **({"target_window": target_window} if target_window else {}),
             parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
         )
 
@@ -2337,12 +2358,15 @@ def _model_attempt_trace(
     model: _ModelConfig,
     model_role: str,
     counter: _ModelCallCounter,
+    publish_run_telemetry: bool = True,
 ) -> Callable[[ModelAttempt], None]:
     def record(attempt: ModelAttempt) -> None:
         counter.record_attempt(
             model_role,
             attempt.request_fingerprint,
         )
+        if not publish_run_telemetry:
+            return
         BUS.publish(
             "vnext_model_call",
             runtime_version=_RUNTIME_VERSION,
@@ -2370,6 +2394,8 @@ def _build_actor_resources(
     model: _ModelConfig,
     dependencies: _CompositionDependencies,
     deadline: Callable[[], float],
+    publish_run_telemetry: bool = True,
+    role_factory: Callable[..., Any] = LiveVisualActor,
 ) -> PreparedLiveActor:
     raw_client: Any | None = None
     try:
@@ -2433,6 +2459,8 @@ def _build_actor_resources(
             )
             if step_usage is None:
                 return
+            if not publish_run_telemetry:
+                return
             BUS.publish(
                 "agent_usage",
                 runtime_version=_RUNTIME_VERSION,
@@ -2444,34 +2472,32 @@ def _build_actor_resources(
                 total=deepcopy(usage_total),
             )
 
-        actor = _BudgetedActor(
-            LiveVisualActor(
-                client=actor_client,
-                model=model.model,
-                runtime=ModelCallRuntime(
-                    clock=dependencies.monotonic,
-                ),
-                total_timeout_s=_remaining_timeout(
-                    clock=dependencies.monotonic,
-                    deadline=deadline,
-                    configured_timeout_s=model.total_timeout_s,
-                ),
-                on_attempt=_model_attempt_trace(
-                    run_id=run_id,
-                    mission_id=mission_id,
-                    model=model,
-                    model_role=VISUAL_ACTOR_MODEL_ROLE,
-                    counter=counter,
-                ),
-                connector_gateway=(
-                    dependencies.connector_factory()
-                    if dependencies.connector_factory is not None
-                    else None
-                ),
-                on_response=record_usage,
+        role_kwargs: dict[str, Any] = {
+            "client": actor_client,
+            "model": model.model,
+            "runtime": ModelCallRuntime(clock=dependencies.monotonic),
+            "total_timeout_s": _remaining_timeout(
+                clock=dependencies.monotonic,
+                deadline=deadline,
+                configured_timeout_s=model.total_timeout_s,
             ),
-            counter,
-        )
+            "on_attempt": _model_attempt_trace(
+                run_id=run_id,
+                mission_id=mission_id,
+                model=model,
+                model_role=VISUAL_ACTOR_MODEL_ROLE,
+                counter=counter,
+                publish_run_telemetry=publish_run_telemetry,
+            ),
+            "on_response": record_usage,
+        }
+        if role_factory is LiveVisualActor:
+            role_kwargs["connector_gateway"] = (
+                dependencies.connector_factory()
+                if dependencies.connector_factory is not None
+                else None
+            )
+        actor = _BudgetedActor(role_factory(**role_kwargs), counter)
         return PreparedLiveActor(
             raw_client=raw_client,
             actor=actor,
@@ -4011,9 +4037,112 @@ def prepare_live_vnext_execution(
     return execution
 
 
+def propose_live_flow_fragment(
+    goal: str,
+    *,
+    base_fingerprint: str,
+    document: Mapping[str, Any],
+    catalog: list[dict[str, Any]],
+    config_snapshot: dict[str, Any],
+    stop_event: threading.Event | None = None,
+    _dependencies: _CompositionDependencies | None = None,
+) -> dict[str, Any]:
+    """Build one inert editor proposal with the configured model/provider path.
+
+    This auxiliary call has no desktop lease, connector tools, thread history,
+    saved-document authority, or execution authority.
+    """
+
+    if type(goal) is not str or not goal.strip() or len(goal.strip()) > 4000:
+        raise ValueError("flow fragment goal must be 1 to 4000 characters")
+    if (
+        type(base_fingerprint) is not str
+        or not base_fingerprint.startswith("sha256:")
+        or len(base_fingerprint) != 71
+        or any(char not in "0123456789abcdef" for char in base_fingerprint[7:])
+    ):
+        raise ValueError("flow fragment base_fingerprint is invalid")
+    if not isinstance(document, Mapping) or set(document) != {
+        "node_count", "edge_count", "node_types"
+    }:
+        raise ValueError("flow fragment document summary fields mismatch")
+    if not isinstance(catalog, list) or not 1 <= len(catalog) <= 32:
+        raise ValueError("flow fragment catalog must contain 1 to 32 nodes")
+    ports: dict[str, tuple[str, ...]] = {}
+    param_names: dict[str, frozenset[str]] = {}
+    sanitized_catalog: list[dict[str, Any]] = []
+    for index, item in enumerate(catalog):
+        if type(item) is not dict or set(item) != {
+            "type", "label", "params", "output_ports"
+        }:
+            raise ValueError(f"flow fragment catalog item {index + 1} fields mismatch")
+        node_type = item["type"]
+        output_ports = item["output_ports"]
+        if type(node_type) is not str or not node_type or node_type in ports:
+            raise ValueError("flow fragment catalog node type is invalid or duplicated")
+        if (
+            not isinstance(output_ports, list)
+            or not output_ports
+            or any(type(port) is not str or not port for port in output_ports)
+        ):
+            raise ValueError(f"flow fragment catalog {node_type!r} output ports are invalid")
+        if type(item["label"]) is not str:
+            raise ValueError(f"flow fragment catalog {node_type!r} text is invalid")
+        if type(item["params"]) is not dict or any(
+            type(key) is not str or not key for key in item["params"]
+        ):
+            raise ValueError(f"flow fragment catalog {node_type!r} params are invalid")
+        ports[node_type] = tuple(dict.fromkeys(output_ports))
+        param_names[node_type] = frozenset(item["params"])
+        sanitized_catalog.append(deepcopy(item))
+
+    budget = _freeze_budget(config_snapshot)
+    model = _freeze_model(config_snapshot, budget)
+    dependencies = _dependencies or _CompositionDependencies()
+    run_id = f"flow-fragment-{uuid.uuid4().hex[:24]}"
+    mission_id = f"flow-fragment-proposal-{uuid.uuid4().hex[:24]}"
+    deadline = dependencies.monotonic() + min(
+        float(budget.max_runtime_s),
+        model.total_timeout_s,
+    )
+    actor_bundle = _build_actor_resources(
+        run_id=run_id,
+        mission_id=mission_id,
+        budget=budget,
+        model=model,
+        dependencies=dependencies,
+        deadline=lambda: deadline,
+        publish_run_telemetry=False,
+        role_factory=FlowFragmentProposer,
+    )
+    try:
+        fragment = actor_bundle.actor.propose_flow_fragment(
+            {
+                "request": goal.strip(),
+                "document": deepcopy(dict(document)),
+                "catalog": sanitized_catalog,
+            },
+            catalog_ports=ports,
+            catalog_params=param_names,
+            stop_event=stop_event,
+        )
+        return {
+            "format": "flow-fragment-proposal/1",
+            "base_fingerprint": base_fingerprint,
+            "proposal_usage": {
+                "model_calls": actor_bundle.counter.count,
+                "tokens": actor_bundle.usage_total,
+            },
+            **fragment,
+        }
+    finally:
+        actor_bundle.close()
+
+
 __all__ = [
     "DesktopLeaseError",
     "DesktopLeaseSlot",
     "build_exact_live_vnext_graph",
     "prepare_live_vnext_execution",
+    "propose_live_flow_fragment",
 ]

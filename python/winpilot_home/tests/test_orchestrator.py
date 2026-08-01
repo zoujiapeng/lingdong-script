@@ -238,6 +238,79 @@ def test_graph_validation_uses_exact_wps_contract_for_replay_steps():
     assert any("click requires" in error for error in result.errors)
 
 
+def test_graph_validation_requires_focus_on_every_path_before_spatial_batches():
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, validate_graph
+
+    def batch(node_id, actions):
+        return ArpNode(
+            id=node_id,
+            kind=ArpNodeKind.ACTION_BATCH,
+            config={"actions": actions},
+        )
+
+    direct = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            batch("click", [{"action": "click", "x": 10, "y": 20}]),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="click"),
+            ArpEdge(id="e2", source="click", target="end"),
+        ],
+    )
+    same_batch = direct.model_copy(deep=True)
+    same_batch.nodes[1].config["actions"] = [
+        {"action": "focus_window", "title": "Target"},
+        {"action": "click", "x": 10, "y": 20},
+    ]
+    previous_batch = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            batch("focus", [{"action": "focus_window", "hwnd": 101}]),
+            batch("click", [{"action": "click", "x": 10, "y": 20}]),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="focus"),
+            ArpEdge(id="e2", source="focus", target="click"),
+            ArpEdge(id="e3", source="click", target="end"),
+        ],
+    )
+    late_focus = direct.model_copy(deep=True)
+    late_focus.nodes[1].config["actions"] = [
+        {"action": "click", "x": 10, "y": 20},
+        {"action": "focus_window", "title": "Target"},
+    ]
+    branched = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="branch",
+                kind=ArpNodeKind.CONDITION,
+                config={"source": "inputs.use_focus", "operator": "truthy"},
+            ),
+            batch("focus", [{"action": "focus_window", "title": "Target"}]),
+            batch("click", [{"action": "click", "x": 10, "y": 20}]),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="branch"),
+            ArpEdge(id="e2", source="branch", target="focus", branch="yes"),
+            ArpEdge(id="e3", source="branch", target="click", branch="no"),
+            ArpEdge(id="e4", source="focus", target="click"),
+            ArpEdge(id="e5", source="click", target="end"),
+        ],
+    )
+
+    assert validate_graph(same_batch).valid is True
+    assert validate_graph(previous_batch).valid is True
+    for graph in (direct, late_focus, branched):
+        result = validate_graph(graph)
+        assert result.valid is False
+        assert any("on every reachable path before spatial action 'click'" in error for error in result.errors)
+
+
 def test_replay_steps_share_one_session_and_mix_with_native_arp(monkeypatch):
     from winpilot.orchestrator import adapters
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy
@@ -321,6 +394,211 @@ def test_replay_steps_share_one_session_and_mix_with_native_arp(monkeypatch):
     assert replayer.calls[-1][3]["from_replay"] == "yes"
     assert replayer.calls[-1][3]["from_arp"] == "ready"
     assert [item["predicate"] for item in result["evidence"]] == ["replay.step", "replay.step"]
+
+
+def test_replay_clipboard_get_updates_arp_variables_for_conditions(monkeypatch):
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy
+    from winpilot.orchestrator.runtime import ArpExecution
+
+    monkeypatch.setattr(
+        adapters.trace_mod,
+        "_clipboard_get",
+        lambda: {"ok": True, "text": "clipboard-nonce"},
+    )
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="clipboard",
+                kind=ArpNodeKind.REPLAY_STEP,
+                config={"step": {"tool": "ext.clipboard_get", "into": "clip_text"}},
+            ),
+            ArpNode(
+                id="condition",
+                kind=ArpNodeKind.CONDITION,
+                config={"source": "variables.clip_text", "operator": "eq", "value": "clipboard-nonce"},
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="clipboard"),
+            ArpEdge(id="e2", source="clipboard", target="condition"),
+            ArpEdge(id="e3", source="condition", target="end", branch="yes"),
+            ArpEdge(id="e4", source="condition", target="end", branch="no"),
+        ],
+        policy=ArpPolicy(require_evidence_on_done=True),
+    )
+
+    result = ArpExecution(graph, adapters.default_handlers(), run_id="clipboard-replay").run()
+
+    assert result["status"] == "done"
+    assert result["variables"]["clip_text"] == "clipboard-nonce"
+    condition = next(item for item in result["history"] if item["node_id"] == "condition")
+    assert condition["branch"] == "yes"
+    assert condition["output"] == {"actual": "clipboard-nonce", "matched": True}
+
+
+def test_managed_screenshot_action_batch_surfaces_run_artifact(monkeypatch, tmp_path):
+    import numpy as np
+
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy
+    from winpilot.orchestrator.runtime import ArpExecution
+    from winpilot.tasking import artifacts
+
+    monkeypatch.setattr(artifacts, "TRACES_DIR", tmp_path)
+    monkeypatch.setattr(
+        artifacts,
+        "capture",
+        lambda _region: np.full((20, 36, 3), (11, 22, 33), dtype=np.uint8),
+    )
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="screenshot",
+                kind=ArpNodeKind.ACTION_BATCH,
+                config={"actions": [{
+                    "action": "screenshot",
+                    "managed_artifact": True,
+                    "scope": "screen",
+                    "purpose": "user_output",
+                    "sendable": True,
+                }]},
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="screenshot"),
+            ArpEdge(id="e2", source="screenshot", target="end"),
+        ],
+        policy=ArpPolicy(require_evidence_on_done=True),
+    )
+
+    result = ArpExecution(graph, adapters.default_handlers(), run_id="managed-flow-shot").run()
+
+    assert result["status"] == "done"
+    assert result["artifacts"]["count"] == 1
+    artifact = result["artifacts"]["artifacts"][0]
+    assert artifact["width"] == 36
+    assert artifact["height"] == 20
+    assert artifact["purpose"] == "user_output"
+    assert artifact["sendable"] is True
+    assert len(artifact["sha256"]) == 64
+    assert result["contract_evidence"]["records"][0]["artifact_id"] == artifact["artifact_id"]
+    assert result["evidence"][0]["predicate"] == "artifact.screenshot"
+    assert result["evidence"][0]["source"] == "managed_screenshot"
+    assert result["evidence"][0]["metadata"]["sha256"] == artifact["sha256"]
+
+
+def test_action_batches_share_target_session_until_run_cleanup(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
+    from winpilot.orchestrator.runtime import ArpExecution
+
+    sessions = []
+
+    class FakeToolSession:
+        def __init__(self, **_kwargs):
+            self.hwnd = None
+            self.closed = 0
+            self.calls = []
+            sessions.append(self)
+
+        def dispatch(self, name, args):
+            assert name == "run_action_batch"
+            assert self.closed == 0
+            action = args["actions"][0]
+            self.calls.append(action["action"])
+            if action["action"] == "focus_window":
+                self.hwnd = 4242
+            elif action["action"] == "click":
+                assert self.hwnd == 4242
+            return SimpleNamespace(text=json.dumps({"ok": True, "verified": True}))
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(adapters, "ToolSession", FakeToolSession)
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="focus",
+                kind=ArpNodeKind.ACTION_BATCH,
+                config={"actions": [{"action": "focus_window", "hwnd": 4242}]},
+            ),
+            ArpNode(
+                id="click",
+                kind=ArpNodeKind.ACTION_BATCH,
+                config={"actions": [{"action": "click", "x": 20, "y": 30}]},
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="focus"),
+            ArpEdge(id="e2", source="focus", target="click"),
+            ArpEdge(id="e3", source="click", target="end"),
+        ],
+    )
+    execution = ArpExecution(graph, adapters.default_handlers(), run_id="batch-session")
+
+    result = execution.run()
+
+    assert result["status"] == "done"
+    assert len(sessions) == 1
+    assert sessions[0].calls == ["focus_window", "click"]
+    assert sessions[0].closed == 1
+    assert "action_batch_session" not in execution.runtime_state
+
+
+def test_action_batch_session_cleanup_runs_after_dispatch_exception(monkeypatch):
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
+    from winpilot.orchestrator.runtime import ArpExecution
+
+    sessions = []
+
+    class FailingToolSession:
+        def __init__(self, **_kwargs):
+            self.closed = 0
+            sessions.append(self)
+
+        def dispatch(self, _name, _args):
+            raise RuntimeError("controller failed")
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(adapters, "ToolSession", FailingToolSession)
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="focus",
+                kind=ArpNodeKind.ACTION_BATCH,
+                config={"actions": [{"action": "focus_window", "hwnd": 4242}]},
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="focus"),
+            ArpEdge(id="e2", source="focus", target="end"),
+        ],
+    )
+    execution = ArpExecution(graph, adapters.default_handlers(), run_id="batch-cleanup")
+
+    result = execution.run()
+
+    assert result["status"] == "failed"
+    assert result["error"] == "controller failed"
+    assert len(sessions) == 1
+    assert sessions[0].closed == 1
+    assert "action_batch_session" not in execution.runtime_state
 
 
 def test_replay_step_enforces_postflight_evidence_before_success(tmp_path):

@@ -82,7 +82,6 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 | GET | `/api/automation-ir/{file}` | 读取并校验 `.automation.json` |
 | POST | `/api/human/start`、`/api/human/stop` | 开始或停止人类演示录制 |
 | GET | `/api/human/status` | 人类演示录制状态 |
-| GET | `/api/v2/replay/modes` | 查询 replay / apprentice 模式 |
 
 `POST /api/v2/task-contracts/compile` 接受 `task`、`max_steps` 与可选的 `cold_start`。`cold_start=true` 会在合同和图上写入 `experience_policy=disabled`，不生成 `skill_replay` 节点，并禁止该 run 读取或写入阶段 Skill、经验提示和会话记忆；它用于验证首次探索路径，不会改变任务语义或为某个测试对象增加分支。
 

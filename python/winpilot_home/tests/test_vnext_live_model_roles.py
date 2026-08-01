@@ -17,6 +17,7 @@ from winpilot.modeling import (
 )
 from winpilot.vnext.actor import InvalidActorProposal
 from winpilot.vnext.model_roles import (
+    FlowFragmentProposer,
     MAX_LIVE_MODEL_JSON_RESPONSE_CHARS,
     MAX_LIVE_MODEL_OUTPUT_TOKENS,
     MAX_LIVE_MODEL_TOTAL_TIMEOUT_S,
@@ -1343,4 +1344,199 @@ def test_role_json_outputs_have_a_hard_character_bound() -> None:
             image_b64=_JPEG_B64,
             image_media_type="image/jpeg",
             submitted_size=(640, 480),
+        )
+
+
+def test_actor_proposes_inert_flow_fragment_without_default_prompt_or_desktop_tools() -> None:
+    response = _tool_response(
+        "propose_flow_fragment",
+        json.dumps(
+            {
+                "summary": "click then wait",
+                "nodes": [
+                    {"local_id": "click", "type": "click", "label": "点击", "params_json": "{\"x\":420,\"y\":300}"},
+                    {"local_id": "wait", "type": "wait", "label": "等待", "params_json": "{\"wait_type\":\"time\",\"duration\":1}"},
+                ],
+                "edges": [{"source": "click", "target": "wait", "source_port": "output"}],
+            },
+            separators=(",", ":"),
+        ),
+    )
+    _, clients = _build_clients(response)
+    actor = FlowFragmentProposer(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    fragment = actor.propose_flow_fragment(
+        {"request": "click then wait", "document": {"node_count": 2}},
+        catalog_ports={"click": ("output",), "wait": ("output",)},
+        catalog_params={
+            "click": frozenset({"x", "y"}),
+            "wait": frozenset({"wait_type", "duration"}),
+        },
+    )
+
+    assert fragment["summary"] == "click then wait"
+    assert fragment["nodes"][0]["params"] == {"x": 420, "y": 300}
+    request = clients[0].requests[0]
+    assert request["messages"] == [{
+        "role": "user",
+        "content": '{"document":{"node_count":2},"request":"click then wait"}',
+    }]
+    assert request["tool_choice"] == "auto"
+    assert len(clients[0].requests) == 1
+    assert [tool["function"]["name"] for tool in request["tools"]] == [
+        "propose_flow_fragment"
+    ]
+    node_schema = request["tools"][0]["function"]["parameters"]["properties"]["nodes"]["items"]
+    assert node_schema["properties"]["params_json"]["type"] == "string"
+    assert "observe_desktop" not in json.dumps(request)
+
+
+def test_actor_rejects_flow_fragment_edge_outside_catalog_port() -> None:
+    response = _tool_response(
+        "propose_flow_fragment",
+        json.dumps(
+            {
+                "summary": "bad edge",
+                "nodes": [
+                    {"local_id": "click", "type": "click", "label": "", "params_json": "{}"},
+                    {"local_id": "wait", "type": "wait", "label": "", "params_json": "{}"},
+                ],
+                "edges": [{"source": "click", "target": "wait", "source_port": "fail"}],
+            },
+            separators=(",", ":"),
+        ),
+    )
+    _, clients = _build_clients(response)
+    actor = FlowFragmentProposer(client=clients[0], model="vision-model", runtime=ModelCallRuntime())
+
+    with pytest.raises(LiveModelRoleError, match="has no 'fail' output"):
+        actor.propose_flow_fragment(
+            {"request": "bad"},
+            catalog_ports={"click": ("output",), "wait": ("output",)},
+            catalog_params={"click": frozenset(), "wait": frozenset()},
+        )
+
+
+@pytest.mark.parametrize(
+    ("params_json", "match"),
+    [
+        ('{"x":NaN}', "non-JSON number"),
+        ('{"x":1,"x":2}', "duplicate field"),
+    ],
+)
+def test_actor_rejects_non_strict_flow_fragment_params_json(
+    params_json: str,
+    match: str,
+) -> None:
+    response = _tool_response(
+        "propose_flow_fragment",
+        json.dumps({
+            "summary": "bad params",
+            "nodes": [{
+                "local_id": "click",
+                "type": "click",
+                "label": "",
+                "params_json": params_json,
+            }],
+            "edges": [],
+        }),
+    )
+    _, clients = _build_clients(response)
+    actor = FlowFragmentProposer(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    with pytest.raises(LiveModelRoleError, match=match):
+        actor.propose_flow_fragment(
+            {"request": "bad"},
+            catalog_ports={"click": ("output",)},
+            catalog_params={"click": frozenset({"x"})},
+        )
+
+
+def test_actor_rejects_flow_fragment_directed_cycle() -> None:
+    response = _tool_response(
+        "propose_flow_fragment",
+        json.dumps(
+            {
+                "summary": "cycle",
+                "nodes": [
+                    {"local_id": "a", "type": "click", "label": "", "params_json": "{}"},
+                    {"local_id": "b", "type": "wait", "label": "", "params_json": "{}"},
+                ],
+                "edges": [
+                    {"source": "a", "target": "b", "source_port": "output"},
+                    {"source": "b", "target": "a", "source_port": "output"},
+                ],
+            },
+            separators=(",", ":"),
+        ),
+    )
+    _, clients = _build_clients(response)
+    actor = FlowFragmentProposer(client=clients[0], model="vision-model", runtime=ModelCallRuntime())
+
+    with pytest.raises(LiveModelRoleError, match="directed cycle"):
+        actor.propose_flow_fragment(
+            {"request": "cycle"},
+            catalog_ports={"click": ("output",), "wait": ("output",)},
+            catalog_params={"click": frozenset(), "wait": frozenset()},
+        )
+
+
+@pytest.mark.parametrize(
+    ("nodes", "edges", "match"),
+    [
+        (
+            [
+                {"local_id": "a", "type": "click", "label": "", "params_json": "{}"},
+                {"local_id": "b", "type": "wait", "label": "", "params_json": "{}"},
+                {"local_id": "c", "type": "wait", "label": "", "params_json": "{}"},
+            ],
+            [
+                {"source": "a", "target": "b", "source_port": "output"},
+                {"source": "a", "target": "c", "source_port": "output"},
+            ],
+            "only one node",
+        ),
+        (
+            [
+                {"local_id": "a", "type": "click", "label": "", "params_json": "{}"},
+                {"local_id": "b", "type": "wait", "label": "", "params_json": "{}"},
+            ],
+            [],
+            "requires internal edges",
+        ),
+        (
+            [{"local_id": "a", "type": "click", "label": "", "params_json": "{\"offset_x\":9}"}],
+            [],
+            "unavailable params",
+        ),
+    ],
+)
+def test_actor_rejects_fragment_semantics_the_renderer_would_reject(
+    nodes: list[dict[str, str]],
+    edges: list[dict[str, str]],
+    match: str,
+) -> None:
+    response = _tool_response(
+        "propose_flow_fragment",
+        json.dumps(
+            {"summary": "bad", "nodes": nodes, "edges": edges},
+            separators=(",", ":"),
+        ),
+    )
+    _, clients = _build_clients(response)
+    actor = FlowFragmentProposer(client=clients[0], model="vision-model", runtime=ModelCallRuntime())
+
+    with pytest.raises(LiveModelRoleError, match=match):
+        actor.propose_flow_fragment(
+            {"request": "bad"},
+            catalog_ports={"click": ("output",), "wait": ("output",)},
+            catalog_params={"click": frozenset(), "wait": frozenset()},
         )

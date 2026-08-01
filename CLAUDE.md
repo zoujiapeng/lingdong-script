@@ -95,13 +95,64 @@ memory -> 真实 replay 晋级 -> 0-token 复用。Studio 的新建、打开、�
 本地结构检查不需要网络或模型；确定性执行需要本机 Python Runtime、Replayer 与 Desktop
 Action Queue，但不需要联网。不得再造 JS 离线执行器或把浏览器模拟当成离线执行。
 
-这还不等于“Agent 一场对话所做的一切都能变成技能”。当前 Agent trace 只支持用户按
-单 run 手动提取局部草稿，vNext lifecycle/batch schema 与旧摘要/导出尚未完全对齐，长
-trace、丢事件、真实重复动作、逐步跨窗口目标和 connector/provider unsupported 都没有
-完整性契约；不完整导出必须拒绝或明确标为 partial。主 Agent 也还不能读取用户显式附加的
-当前 Flow 摘要或提交可预览、可撤销的流程 patch。旧 `src/ai-interface`、DSL 生成器和
-Electron HTTP 直接写图链包含第二模型、长提示教学、关键词路由或无确认突变，不得接回。
-权威边界与下一实验见 `docs/replay-recording.md`、`docs/flow-editor.md`。
+当前对话可以按 `thread_id` 聚合导出：导出器扫描该 Thread 的全部 durable trace，不受前端
+最近 40 条 run 投影限制；前端携带的有界 run 列表只用于完整性核对。导出器从 vNext
+`physical_attempt` / `raw_receipt` 和兼容 trace 中提取普通 ARP 动作，保留独立重复动作、
+每步目标进程、完整 trace 读取与逐 run 完整性账本；公开 trace 详情仍保持有界。用户先看到
+`complete/partial`、动作数和遗漏提示，确认后只把 Automation IR 加载进 Studio，不会自动
+运行。2026-08-02 可见 Electron 两轮 Thread 导出得到 14 个动作，载入 Studio 后离线 replay
+产生 0 次模型调用；独立剪贴板 oracle 精确得到
+`ARP-THREAD-A-20260802-0329ARP-THREAD-A-20260802-0329-B-20260802-0333`，SHA-256 为
+`934b79c77eb2d6120be63b8a47141c902f343affd49a14e393cc7629d755230b`。重复的 A 是模型参数/
+目标选择叠加测试过程中重新激活 Electron 的干扰；canonical 参数与 `physical_attempt` 一致，
+Runtime 没有背离，但原始第二轮口头任务不能据此称为干净完成。覆盖声明固定为
+`ordinary_arp_actions`。只读 connector 查询不是普通 ARP 动作，未来若加入有副作用的
+shell/provider 工具，必须先形成显式 unsupported trace，不能静默冒充“整场对话全部行为
+已重放”。
+重启当前源码后又从可见 Electron 完成了一次同路径发布验收：默认约
+`902 x 582` 窗口确认 partial 提示、加载 16 节点并点击运行，
+`arp-20260802-065621-dd12f0` 全部完成、`trace_integrity=complete`、模型调用为 0。
+属性面板与 Runtime preflight 都可见使用匹配的 `target_window.title + process`；
+独立剪贴板 oracle 再次读到 68 字符和上述同一 SHA-256。
+
+这还不能称为“整场对话的所有普通 ARP 动作都已可导出”。跨 decision 的连续 held gesture
+带有 `started_held` / `keep_holding`，当前会被导出器拒绝并得到 0 步；缺少 durable
+run -> Thread owner index 时，归属和完整性也只能靠全量 trace 扫描证明。这两项是基础设施
+缺口。一次轻量 owner scan 曾把本机扫描从约 14 秒降到 1.36 秒，但存在漏掉归属/完整性异常、
+把 partial 误报为 complete 的风险，已完整回退；当前保留 correctness-first 的约 14 秒全量
+扫描。不能为提速恢复第二 planner、摘要模型或放宽完整性门。
+
+Studio 另有显式“一句话生成片段”辅助：短生命周期的 `FlowFragmentProposer` 只复用现有
+provider/model/protocol/budget plumbing，不创建第二个 `LiveVisualActor`，也不把图编排职责
+塞进主 Actor。它只在用户主动提交时进行一次 opt-in 调用；provider 消息为一个 user JSON、
+零 system/developer message，不观察桌面、不读当前 Thread、不取得 connector 或执行权限。
+结果必须经过结构/fingerprint 校验和参数预览，用户确认后才作为一个 undo checkpoint 插入
+右侧空白区；不自动连入主图，也不自动运行。可见 Electron 已把“点击坐标 420,300，等待
+1 秒，然后输入文本 hello”生成 `click -> wait -> input_text` 三节点片段，应用后 `Ctrl+Z`
+恢复原来的 16 节点/15 连线/14 动作。它是在线编辑器辅助调用，不属于完全离线节点执行，
+也不改变产品任务链或默认提示词。旧 `src/ai-interface`、DSL 生成器和 Electron HTTP 直接
+写图链包含第二模型、长提示教学、关键词路由或无确认突变，不得接回。权威边界与逐节点证据
+见 `docs/replay-recording.md`、`docs/flow-editor.md`、`docs/offline-flow-node-e2e.md`。
+
+默认约 `900 x 580` 的 Electron 小窗口现已用可见用户路径复测：流程工作台使用左右抽屉，
+片段弹窗按画布居中且 `Esc` 不再关闭整个工作台，页脚操作在最小高度可达。口语“等半秒，
+然后按一下回车”生成 `wait(0.5) -> keyboard(enter)`，应用后可一次 undo/redo 整体回退和
+恢复。属性面板同时删去或封住不能精确编译的假参数，结构化 evidence 条件不再被改成
+`[object Object]`。这仍只是编辑器与编译证据；当前正式 `screenshot` 只支持受管理的全屏
+工件，图片模板和直接区域截图不能宣称打通，必须等待独立裁剪工件 oracle 的真实 E2E。
+
+严格的离线节点独立矩阵当前为 `1/19`，且只计 `click` DUT。2026-08-02 从可见 Electron
+Studio 运行 `start -> focus_window -> click -> managed screenshot -> end`，run
+`arp-20260802-052309-82cf06` 的 5 个节点全部 `ok`、`trace_integrity=complete`、模型调用为 0；
+Runtime 外部 JSON 显示 `click_count: 0 -> 1`，其余输入计数保持 0。截图工件 SHA-256 为
+`7a04783ba7c6d80ba81d0da86fd991b9e158a5315dc7608dd51b0c690e775e04`。业务 click oracle 是
+外部 JSON；截图只作为真实 artifact evidence，不能替代业务判定，也不把 `focus_window` 或
+`screenshot` 计为独立通过。通用修复只有三项：同一 ARP run 的 action batch 共享一个
+`ToolSession`；Renderer/Python 做 path-sensitive target validation；managed screenshot 把
+真实 artifact id/hash 显式送入 verified evidence。纯 click 无目标会 fail closed；旧实现跨节点
+丢 target 的基础设施失败已修复。早期 stale target baseline 是测试干扰，重置后排除。剩余
+18 个节点是尚无严格证据，不是已经失败。以上没有增加应用配方或模型职责：产品仍是一个原始
+goal、一个 `LiveVisualActor` 和一条视觉执行线；`FlowFragmentProposer` 仍只是隔离的编辑器辅助。
 
 ## 当前角色与唯一 owner
 
@@ -452,18 +503,19 @@ git log -8 --oneline --decorate
 精确 SHA 的 Actions，不要 reset、整体暂存或触碰用户未跟踪的 `CON`。然后阅读本文件和上述
 五份文档，不要因为看到“继续”就立刻追加代码。
 
-优先级：
+下一轮唯一最高价值实验：先不开放图片模板匹配，打通一个 canonical `screenshot.region` 的
+真实前端闭环。用户从属性面板直接框选屏幕区域，Renderer 明确映射 `x/y/w/h` 到 Runtime 的
+`x/y/width/height`，再由独立 oracle 核对裁剪工件的尺寸、SHA-256 和当轮随机标识；至少覆盖
+125% DPI 与第二显示器/负坐标边界。任何坐标、取消或显示器归属不确定都必须 fail closed。
+只有这条通用取样基础设施通过后，才考虑让图片参数复用同一控件；不能先显示历史
+`image_click` 或 `mouse_operation.image` 控件。跨 decision held gesture 仍是已知重放缺口，
+但不与这项实验并行修改。
 
-1. 下一轮唯一实验先不改生产代码：做多次、反序的 history/fresh 配对；每个历史臂先经真实
-   前端完成若干随机聊天，再在同一重启恢复 Thread 上分别执行一个随机只读 connector 任务和
-   一个简单桌面文件任务，记录实际 provider history、usage/cache 与独立 oracle。当前单次
-   history-depth A/B 未形成有效 pair，不能据此改变历史上限或工具选择面。
-2. 继续记录 raw model args、实际 canonical parse、物理 MCP/GUI receipt、严格外部终态、
-   产品自主 terminal/恢复与 usage；不加提示教学、router、摘要模型、工具筛选器、自动
-   重试或 Runtime 修正，不接回旧 `/api/chat`。
-3. native provider 只有拿到真实 credential 后才做相同 canonical 多轮工具序列与至少
-   两个任务族 Electron E2E；未通过的协议整条回退，不继续扩代码。
-4. 模型切换当前暂停；归档 tag 只作只读恢复输入，保持 `master` 为唯一产品主线。
+期间继续记录 raw model args、实际 canonical parse、物理 MCP/GUI receipt、严格外部终态、
+产品自主 terminal/恢复与 usage；不加提示教学、router、摘要模型、工具筛选器、自动重试或
+Runtime 修正，不接回旧 `/api/chat`。native provider 只有拿到真实 credential 后才做相同
+canonical 多轮工具序列与至少两个任务族 Electron E2E；未通过的协议整条回退。模型切换
+当前暂停；归档 tag 只作只读恢复输入，保持 `master` 为唯一产品主线。
 
 常用验证：
 

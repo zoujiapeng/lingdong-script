@@ -17,6 +17,7 @@ import type {
   RuntimeEvent,
 } from './contracts';
 import type { AutomationIR } from '../utils/automationIR';
+import type { FlowFragmentRequestContext } from '../utils/flowFragmentProposal';
 import { taskbarNotificationForTransition, type TaskbarRunState } from './taskbarNotification';
 
 export type ConnectionState = 'connecting' | 'online' | 'degraded' | 'offline';
@@ -431,6 +432,12 @@ export function useControlPlane() {
     return run;
   }, [refresh]);
 
+  const proposeFlowFragment = useCallback((
+    goal: string,
+    context: FlowFragmentRequestContext,
+    signal?: AbortSignal,
+  ) => requireCompatibleClient().proposeFlowFragment(goal, context, signal), []);
+
   const validateAutomation = useCallback(
     (automation: AutomationIR): Promise<GraphValidation> => (
       requireClient().validateAutomation(automation)
@@ -477,6 +484,7 @@ export function useControlPlane() {
     refresh,
     startGoal,
     startAutomation,
+    proposeFlowFragment,
     validateAutomation,
     cancelCurrent,
     pauseCurrent,

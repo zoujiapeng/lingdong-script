@@ -214,7 +214,6 @@ function pseudoGenImageClick(params: any): string {
   const parts: string[] = [];
   if (params.similarity && params.similarity !== 90) parts.push(`相似度=${params.similarity}`);
   if (params.timeout && params.timeout !== 5) parts.push(`超时=${params.timeout}`);
-  if (params.offset_x || params.offset_y) parts.push(`偏移(${params.offset_x ?? 0},${params.offset_y ?? 0})`);
   if (params.method && params.method !== 'single') {
     const m: Record<string, string> = { double: '双击', right: '右击', middle: '中键' };
     parts.push(m[params.method] || params.method);
@@ -239,7 +238,6 @@ function pseudoGenClickText(params: any): string {
   let line = `点击文本 "${params.text ?? ''}"`;
   const parts: string[] = [];
   if (params.similarity && params.similarity !== 80) parts.push(`相似度=${params.similarity}`);
-  if (params.offset_x || params.offset_y) parts.push(`偏移(${params.offset_x ?? 0},${params.offset_y ?? 0})`);
   if (params.method && params.method !== 'single') {
     const m: Record<string, string> = { double: '双击', right: '右击', middle: '中键' };
     parts.push(m[params.method] || params.method);
@@ -257,7 +255,6 @@ function pseudoGenClickAction(params: any): string {
     const parts: string[] = [];
     if (params.similarity && params.similarity !== 90) parts.push(`相似度=${params.similarity}`);
     if (params.timeout && params.timeout !== 5) parts.push(`超时=${params.timeout}`);
-    if (params.offset_x || params.offset_y) parts.push(`偏移(${params.offset_x ?? 0},${params.offset_y ?? 0})`);
     if (params.method && params.method !== 'single') {
       const m: Record<string, string> = { double: '双击', right: '右击', middle: '中键' };
       parts.push(m[params.method] || params.method);
@@ -269,7 +266,6 @@ function pseudoGenClickAction(params: any): string {
     let line = `点击文本 "${params.text ?? ''}"`;
     const parts: string[] = [];
     if (params.similarity && params.similarity !== 80) parts.push(`相似度=${params.similarity}`);
-    if (params.offset_x || params.offset_y) parts.push(`偏移(${params.offset_x ?? 0},${params.offset_y ?? 0})`);
     if (params.method && params.method !== 'single') {
       const m: Record<string, string> = { double: '双击', right: '右击', middle: '中键' };
       parts.push(m[params.method] || params.method);

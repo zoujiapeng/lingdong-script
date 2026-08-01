@@ -8,7 +8,7 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..fast.action_contract import validate_batch_actions
+from ..fast.action_contract import iter_atomic_actions, validate_batch_actions
 
 
 ARP_FORMAT = "arp/1"
@@ -24,6 +24,11 @@ CONDITION_OPERATORS = {
     "truthy", "falsy", "true", "false", "always_true", "always_false",
     "eq", "equals", "==", "ne", "not_equals", "!=",
     "contains", "gt", ">", "gte", ">=", "lt", "<", "lte", "<=",
+}
+_SPATIAL_TARGET_REQUIRED = {
+    "click", "double_click", "click_element", "scroll", "move_mouse", "drag",
+    "draw_strokes", "ensure_input_mode", "select_color", "mouse_down", "mouse_up",
+    "coordinate_click_test", "paste_image_file",
 }
 
 
@@ -245,6 +250,46 @@ def _validate_node_config(node: ArpNode) -> list[str]:
     return errors
 
 
+def _spatial_target_path_errors(
+    start: str,
+    node_map: dict[str, ArpNode],
+    outgoing: dict[str, list[ArpEdge]],
+) -> list[str]:
+    """Reject any reachable spatial batch path without a concrete focus binding."""
+
+    errors: set[str] = set()
+    pending: list[tuple[str, bool]] = [(start, False)]
+    seen: set[tuple[str, bool]] = set()
+    while pending:
+        node_id, target_established = pending.pop(0)
+        state = (node_id, target_established)
+        if state in seen:
+            continue
+        seen.add(state)
+        node = node_map[node_id]
+        established_after = target_established
+        if node.kind == ArpNodeKind.ACTION_BATCH and not node.disabled:
+            for action in iter_atomic_actions(
+                "run_action_batch",
+                {"actions": node.config.get("actions")},
+            ):
+                if action.name == "focus_window" and (
+                    action.inputs.get("hwnd")
+                    or str(action.inputs.get("title") or "").strip()
+                ):
+                    established_after = True
+                elif action.name in _SPATIAL_TARGET_REQUIRED and not established_after:
+                    errors.add(
+                        f"action batch node {node.id!r} requires a concrete focus_window "
+                        f"on every reachable path before spatial action {action.name!r}"
+                    )
+        pending.extend(
+            (edge.target, established_after)
+            for edge in outgoing.get(node_id, [])
+        )
+    return sorted(errors)
+
+
 def validate_graph(graph: ArpGraph) -> GraphValidation:
     errors: list[str] = []
     warnings: list[str] = []
@@ -318,6 +363,7 @@ def validate_graph(graph: ArpGraph) -> GraphValidation:
                     errors.append(
                         f"memory-backed skill node {node_id!r} requires a miss route for Agent fallback"
                     )
+        errors.extend(_spatial_target_path_errors(starts[0], node_map, outgoing))
         if graph.policy.require_evidence_on_done:
             evidence_kinds = {
                 ArpNodeKind.AGENT_GOAL,

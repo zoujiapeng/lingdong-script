@@ -116,36 +116,12 @@ export function ClickTextParams({ params, onChange }: Props) {
       )}
 
       <div className="form-group">
-        <label className="form-label">识别相似度 ({params.similarity}%)</label>
-        <div className="slider-group">
-          <input type="range" min="50" max="100" value={params.similarity} onChange={(e) => onChange({ similarity: +e.target.value })} />
-          <span className="slider-value">{params.similarity}%</span>
-        </div>
-      </div>
-      <div className="form-group">
         <label className="form-label">点击方式</label>
         <select className="form-input form-select" value={params.method} onChange={(e) => onChange({ method: e.target.value as ClickMethod })}>
           <option value="single">单击</option>
           <option value="double">双击</option>
           <option value="right">右键</option>
         </select>
-      </div>
-      <div className="form-row">
-        <div className="form-group">
-          <label className="form-label">偏移 X</label>
-          <input className="form-input" type="number" value={params.offset_x || 0} onChange={(e) => onChange({ offset_x: +e.target.value })} />
-        </div>
-        <div className="form-group">
-          <label className="form-label">偏移 Y</label>
-          <input className="form-input" type="number" value={params.offset_y || 0} onChange={(e) => onChange({ offset_y: +e.target.value })} />
-        </div>
-      </div>
-      <div className="form-group">
-        <label className="form-label">超时 (秒)</label>
-        <div className="slider-group">
-          <input type="range" min="1" max="30" step="0.5" value={params.timeout} onChange={(e) => onChange({ timeout: +e.target.value })} />
-          <span className="slider-value">{params.timeout}s</span>
-        </div>
       </div>
       <div className="form-group">
         <label className="form-label">点击后延时 (秒)</label>

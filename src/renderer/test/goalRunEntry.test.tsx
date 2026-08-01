@@ -521,6 +521,92 @@ describe('primary agent surface', () => {
     expect(localStorage.getItem('arp-last-goal')).toBe('Recover this failed submission');
   });
 
+  it('loads a partial conversation export only after an explicit non-running confirmation', async () => {
+    const completedRun = {
+      run_id: 'run-export-flow',
+      kind: 'agent',
+      status: 'done',
+      phase: 'done',
+      goal: 'Perform several desktop actions',
+      started_at: 1,
+      updated_at: 2,
+      finished_at: 2,
+      result: 'Finished.',
+      timeline: [],
+      evidence: [],
+      metrics: {},
+    };
+    const automation = {
+      format: 'automation-ir/1',
+      id: 'air-thread-export',
+      name: 'Conversation export',
+      created: 1,
+      source: {
+        kind: 'wps',
+        export_manifest: {
+          complete: false,
+          partial: true,
+          reasons: [
+            'physical_action_not_replayable:held_drag:decision-1',
+            'trace_queue_dropped:1',
+          ],
+        },
+      },
+      conditions: {},
+      evidence: { required: [] },
+      steps: [{ tool: 'click', coords: [10, 20] }],
+      variables: {},
+      safety: {},
+      fallback: {},
+      runtime: { kind: 'wps_replay' },
+    };
+    const exportThreadAutomation = vi.fn(async () => ({
+      ok: true,
+      ir: 'thread-export.automation.json',
+    }));
+    const script = vi.fn(async () => automation);
+    const plane = cockpitPlane(
+      vi.fn(async () => goalRunStart()),
+      completedRun,
+      [completedRun],
+    );
+    plane.getClient = vi.fn(() => ({ exportThreadAutomation, script })) as never;
+    localStorage.setItem('arp-agent-thread-run-ids', JSON.stringify({
+      thread_id: 'thread/export flow',
+      run_ids: [completedRun.run_id],
+    }));
+    const confirm = vi.spyOn(window, 'confirm')
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    const onLoadConversationFlow = vi.fn();
+    const user = userEvent.setup();
+
+    render(
+      <AgentCockpit
+        plane={plane as never}
+        onLoadConversationFlow={onLoadConversationFlow}
+      />,
+    );
+
+    const exportButton = screen.getByRole('button', { name: '将本对话动作转为流程' });
+    await user.click(exportButton);
+    await waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+    expect(confirm.mock.calls[0][0]).toContain('部分导出（partial）');
+    expect(confirm.mock.calls[0][0]).toContain('physical_action_not_replayable');
+    expect(confirm.mock.calls[0][0]).toContain('另有 1 项完整性提示');
+    expect(confirm.mock.calls[0][0]).not.toContain('trace_queue_dropped:1');
+    expect(confirm.mock.calls[0][0]).toContain('不会自动运行');
+    expect(onLoadConversationFlow).not.toHaveBeenCalled();
+
+    await user.click(exportButton);
+    await waitFor(() => expect(onLoadConversationFlow).toHaveBeenCalledWith(automation));
+    expect(exportThreadAutomation).toHaveBeenCalledWith(
+      'thread/export flow',
+      ['run-export-flow'],
+    );
+    expect(script).toHaveBeenCalledWith('thread-export.automation.json');
+  });
+
   it('keeps secondary agent information hidden until the user asks for it', async () => {
     const user = userEvent.setup();
     const openResources = vi.fn();

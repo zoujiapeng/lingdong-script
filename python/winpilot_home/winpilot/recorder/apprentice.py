@@ -14,31 +14,6 @@ from . import human as human_mod
 from . import trace as trace_mod
 
 
-REPLAY_MODES = (
-    {
-        "id": "offline_graph",
-        "name": "Offline graph",
-        "llm_in_loop": False,
-        "editable": True,
-        "source": "wps",
-    },
-    {
-        "id": "skill",
-        "name": "Skill replay",
-        "llm_in_loop": False,
-        "editable": False,
-        "source": "verified_memory",
-    },
-    {
-        "id": "apprentice",
-        "name": "Apprentice",
-        "llm_in_loop": False,
-        "editable": True,
-        "source": "human_demonstration",
-    },
-)
-
-
 class ApprenticeManager:
     """Turns one human lesson into an editable graph and skill candidate."""
 
@@ -65,12 +40,18 @@ class ApprenticeManager:
         with self._lock:
             if self.recorder.is_recording():
                 raise RuntimeError("a demonstration is already recording")
+            session_id = f"lesson-{uuid.uuid4().hex[:12]}"
+            macro_name = trace_mod.ensure_script_name_available(
+                str(name) if name is not None and name != "" else session_id,
+                directory=Path(SCRIPTS_DIR),
+                what="macro name",
+            )
             session = {
-                "session_id": f"lesson-{uuid.uuid4().hex[:12]}",
+                "session_id": session_id,
                 "mode": "apprentice",
                 "task": task,
                 "app": str(app or "").strip(),
-                "name": str(name or "").strip() or task[:80],
+                "name": macro_name,
                 "verification": requirements,
                 "started_at": time.time(),
             }
@@ -86,6 +67,7 @@ class ApprenticeManager:
                 "recording": bool(self.recorder.is_recording()),
                 "session_id": session.get("session_id"),
                 "task": session.get("task", ""),
+                "name": session.get("name", ""),
                 "app": session.get("app", ""),
                 "verification": session.get("verification", []),
                 "started_at": session.get("started_at"),
@@ -119,12 +101,18 @@ class ApprenticeManager:
             if error:
                 raise RuntimeError(f"recorded lesson is invalid: {error}")
             path.write_text(json.dumps(script, ensure_ascii=False, indent=1), encoding="utf-8")
-            canonical_path = trace_mod.write_automation_ir(
-                script,
-                name=session["name"],
-                basename=path.name.removesuffix(".wps.json"),
-                directory=path.parent,
-            )
+            try:
+                canonical_path = trace_mod.write_automation_ir(
+                    script,
+                    name=session["name"],
+                    basename=path.name.removesuffix(".wps.json"),
+                    directory=path.parent,
+                )
+            except FileExistsError as exc:
+                self._session = None
+                raise RuntimeError(
+                    f"recorded actions were kept in {path.name}, but {exc}"
+                ) from exc
 
             summaries = [json.dumps(step, ensure_ascii=False, sort_keys=True) for step in script.get("steps", [])]
             recipe = experience.record(

@@ -191,6 +191,640 @@ def _write_trace(path, events):
             fh.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            {"action": "click", "physical_arguments": {
+                "kind": "pointer_click", "x": 1, "y": 2,
+            }},
+            {"tool": "click", "coords": [1, 2]},
+        ),
+        (
+            {"action": "double_click", "physical_arguments": {
+                "kind": "pointer_click", "x": 3, "y": 4,
+            }},
+            {"tool": "click", "coords": [3, 4], "double": True},
+        ),
+        (
+            {"action": "scroll", "physical_arguments": {
+                "kind": "wheel", "x": 5, "y": 6, "signed_wheel_amount": -3,
+            }},
+            {"tool": "scroll", "coords": [5, 6], "amount": -3},
+        ),
+        (
+            {"action": "drag", "physical_arguments": {
+                "kind": "pointer_drag", "x1": 1, "y1": 2, "x2": 7, "y2": 8,
+                "points": [[3, 4], [5, 6]],
+            }},
+            {"tool": "drag", "from": [1, 2], "to": [7, 8],
+             "points": [[3, 4], [5, 6]]},
+        ),
+        (
+            {"action": "type_text", "physical_arguments": {
+                "kind": "type_text", "text": "hello",
+            }},
+            {"tool": "type_text", "text_input": "hello"},
+        ),
+        (
+            {"action": "hotkey", "physical_arguments": {
+                "kind": "hotkey", "modifiers": ["ctrl", "shift"], "key": "s",
+            }},
+            {"tool": "hotkey", "keys": ["ctrl", "shift", "s"]},
+        ),
+    ],
+)
+def test_vnext_physical_attempt_maps_to_plain_wps(payload, expected):
+    assert trace_mod._physical_attempt_to_wps(payload) == expected
+
+
+def test_vnext_plain_drag_ignores_false_hold_flags_but_rejects_live_hold():
+    attempt = {
+        "action": "drag",
+        "physical_arguments": {
+            "kind": "pointer_drag",
+            "x1": 1,
+            "y1": 2,
+            "x2": 7,
+            "y2": 8,
+            "started_held": False,
+            "keep_holding": False,
+        },
+    }
+
+    assert trace_mod._physical_attempt_to_wps(attempt) == {
+        "tool": "drag",
+        "from": [1, 2],
+        "to": [7, 8],
+    }
+    for field in ("started_held", "keep_holding"):
+        held = json.loads(json.dumps(attempt))
+        held["physical_arguments"][field] = True
+        assert trace_mod._physical_attempt_to_wps(held) is None
+
+
+def _write_vnext_journal(
+    root,
+    run_id,
+    decision_id,
+    *,
+    action="type_text",
+    raw_action=None,
+    physical_arguments=None,
+    input_completed=True,
+    include_attempt=True,
+    include_receipt=True,
+):
+    from winpilot.vnext.evidence_plane import RuntimeEvidenceJournal
+
+    evidence_parent = root / "vnext_runtime_evidence"
+    evidence_parent.mkdir(exist_ok=True)
+    journal = RuntimeEvidenceJournal.create(
+        evidence_parent / run_id,
+        "mission-replay-test",
+        run_id,
+    )
+    if include_attempt:
+        journal.append(
+            "physical_attempt",
+            {
+                "format": "physical-attempt-record/1",
+                "mission_id": "mission-replay-test",
+                "run_id": run_id,
+                "decision_id": decision_id,
+                "action_id": decision_id,
+                "action": action,
+                "physical_arguments": physical_arguments or {
+                    "kind": "type_text",
+                    "text": "journal text",
+                },
+                "target_identity": {
+                    "executable_identity": r"C:\Windows\System32\notepad.exe",
+                },
+                "timestamp_ns": 123,
+            },
+            decision_id=decision_id,
+            action_id=decision_id,
+        )
+    if include_receipt:
+        journal.append(
+            "raw_receipt",
+            {
+                "action": raw_action or action,
+                "input_completed": input_completed,
+            },
+            decision_id=decision_id,
+            action_id=decision_id,
+        )
+    result = {"head": journal.head, "count": journal.event_count}
+    journal.close()
+    return result
+
+
+def _vnext_seal(run_id, journal):
+    return {
+        "type": "runtime_evidence_sealed",
+        "runtime_version": "vnext",
+        "mission_id": "mission-replay-test",
+        "run_id": run_id,
+        "journal_head_sha256": journal["head"],
+        "journal_event_count": journal["count"],
+        "report_status": "complete",
+        "missing_evidence_count": 0,
+        "verification_failure_count": 0,
+    }
+
+
+def _complete_trace(events):
+    return [
+        *events,
+        {
+            "type": "trace_integrity",
+            "complete": True,
+            "dropped_events": 0,
+            "write_failures": 0,
+            "accepted_events": len(events),
+        },
+    ]
+
+
+def test_vnext_missing_required_journal_is_partial_without_legacy_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-missing-journal"
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([
+        {
+            "type": "vnext_raw_receipt",
+            "run_id": run_id,
+            "mission_id": "mission-replay-test",
+            "decision_id": "decision-one",
+            "input_completed": True,
+        },
+        {
+            "type": "agent_tool",
+            "tool": "hotkey",
+            "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]},
+        },
+    ]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert steps == []
+    assert manifest["partial"] is True
+    assert "runtime_evidence_missing" in manifest["reasons"]
+
+
+@pytest.mark.parametrize("input_completed", [None, False])
+def test_vnext_seal_without_journal_is_partial(
+    tmp_path,
+    monkeypatch,
+    input_completed,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-seal-without-journal"
+    events = [{
+        "type": "runtime_evidence_sealed",
+        "runtime_version": "vnext",
+        "mission_id": "mission-replay-test",
+        "run_id": run_id,
+        "journal_head_sha256": "1" * 64,
+        "journal_event_count": 1,
+        "report_status": "complete",
+        "missing_evidence_count": 0,
+        "verification_failure_count": 0,
+    }]
+    if input_completed is not None:
+        events.insert(0, {
+            "type": "vnext_raw_receipt",
+            "run_id": run_id,
+            "mission_id": "mission-replay-test",
+            "decision_id": "decision-no-journal",
+            "input_completed": input_completed,
+        })
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace(events))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert steps == []
+    assert "runtime_evidence_missing" in manifest["reasons"]
+    assert manifest["partial"] is True
+
+
+def test_vnext_reply_without_receipt_or_journal_is_complete_zero_action_segment(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-reply-only"
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([
+        {"type": "arp_run_start", "runtime_version": "vnext"},
+        {"type": "arp_run_done", "runtime_version": "vnext"},
+    ]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert steps == []
+    assert manifest["complete"] is True
+
+
+def test_vnext_reply_never_falls_back_to_legacy_replay(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-reply-with-legacy-contamination"
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([
+        {"type": "arp_run_start", "runtime_version": "vnext"},
+        {"type": "agent_tool", "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]}},
+        {"type": "arp_run_done", "runtime_version": "vnext"},
+    ]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert steps == []
+    assert manifest["reasons"] == ["vnext_trace_contains_legacy_replay"]
+
+
+@pytest.mark.parametrize(
+    ("input_completed", "include_attempt", "expected_reason", "step_count"),
+    [
+        (True, True, None, 1),
+        (True, False, "completed_receipt_without_physical_attempt:decision-one", 0),
+        (None, True, "physical_attempt_outcome_uncertain:decision-one", 0),
+        (False, False, None, 0),
+    ],
+)
+def test_vnext_journal_pairs_attempts_with_raw_receipts(
+    tmp_path,
+    monkeypatch,
+    input_completed,
+    include_attempt,
+    expected_reason,
+    step_count,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = f"vnext-pair-{str(input_completed).lower()}-{include_attempt}"
+    decision_id = "decision-one"
+    journal = _write_vnext_journal(
+        tmp_path,
+        run_id,
+        decision_id,
+        input_completed=input_completed,
+        include_attempt=include_attempt,
+    )
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([
+        {
+            "type": "vnext_raw_receipt",
+            "run_id": run_id,
+            "mission_id": "mission-replay-test",
+            "decision_id": decision_id,
+            "controller_action": "type_text",
+            "input_completed": input_completed,
+            "target_window": {"title": "Notepad", "process": "notepad.exe"},
+        },
+        _vnext_seal(run_id, journal),
+    ]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert len(steps) == step_count
+    if step_count:
+        assert steps[0]["target_window"] == {
+            "title": "Notepad",
+            "process": "notepad.exe",
+        }
+        assert _target == {"title": "Notepad", "process": "notepad.exe"}
+    if expected_reason is None:
+        assert manifest["reasons"] == []
+    else:
+        assert expected_reason in manifest["reasons"]
+
+
+def test_vnext_journal_preserves_double_click_raw_receipt_contract(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-double-click"
+    decision_id = "decision-double-click"
+    journal = _write_vnext_journal(
+        tmp_path,
+        run_id,
+        decision_id,
+        action="double_click",
+        raw_action="click",
+        physical_arguments={
+            "kind": "pointer_click",
+            "x": 41,
+            "y": 73,
+        },
+    )
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([
+        {
+            "type": "vnext_raw_receipt",
+            "run_id": run_id,
+            "mission_id": "mission-replay-test",
+            "decision_id": decision_id,
+            "controller_action": "double_click",
+            "raw_action": "click",
+            "input_completed": True,
+            "target_window": {"process": "notepad.exe"},
+        },
+        _vnext_seal(run_id, journal),
+    ]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert steps == [{
+        "tool": "click",
+        "coords": [41, 73],
+        "double": True,
+        "target_window": {"process": "notepad.exe"},
+    }]
+    assert manifest["complete"] is True
+
+
+def test_vnext_journal_uses_authenticated_process_target(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-target"
+    decision_id = "decision-target"
+    journal = _write_vnext_journal(tmp_path, run_id, decision_id)
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([
+        {
+            "type": "vnext_raw_receipt",
+            "run_id": run_id,
+            "mission_id": "mission-replay-test",
+            "decision_id": decision_id,
+            "controller_action": "type_text",
+            "raw_action": "type_text",
+            "input_completed": True,
+            "target_window": {
+                "title": "Document",
+                "process": "foreign.exe",
+            },
+        },
+        _vnext_seal(run_id, journal),
+    ]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert steps[0]["target_window"] == {"process": "notepad.exe"}
+    assert _target == {"process": "notepad.exe"}
+    assert trace_mod.build_script(run_id)["target_window"] == {
+        "process": "notepad.exe",
+    }
+    assert "physical_action_target_mismatch:decision-target" in manifest["reasons"]
+    assert manifest["partial"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "foreign", "expected_reason"),
+    [
+        ("run_id", "foreign-run", "raw_receipt_run_scope_mismatch"),
+        (
+            "mission_id",
+            "foreign-mission",
+            "raw_receipt_mission_scope_mismatch",
+        ),
+    ],
+)
+def test_vnext_journal_excludes_foreign_trace_receipt_scope(
+    tmp_path,
+    monkeypatch,
+    field,
+    foreign,
+    expected_reason,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-scope"
+    decision_id = "decision-scope"
+    journal = _write_vnext_journal(tmp_path, run_id, decision_id)
+    receipt = {
+        "type": "vnext_raw_receipt",
+        "run_id": run_id,
+        "mission_id": "mission-replay-test",
+        "decision_id": decision_id,
+        "controller_action": "type_text",
+        "raw_action": "type_text",
+        "input_completed": True,
+    }
+    receipt[field] = foreign
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([
+        receipt,
+        _vnext_seal(run_id, journal),
+    ]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert steps == [{
+        "tool": "type_text",
+        "text_input": "journal text",
+        "target_window": {"process": "notepad.exe"},
+    }]
+    assert _target == {"process": "notepad.exe"}
+    assert any(
+        reason.startswith(expected_reason)
+        for reason in manifest["reasons"]
+    )
+    assert manifest["partial"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "expected_reason"),
+    [
+        ("run_id", "raw_receipt_run_scope_mismatch"),
+        ("mission_id", "raw_receipt_mission_scope_mismatch"),
+    ],
+)
+def test_vnext_journal_excludes_trace_receipt_with_missing_scope(
+    tmp_path,
+    monkeypatch,
+    field,
+    expected_reason,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-missing-scope"
+    decision_id = "decision-missing-scope"
+    journal = _write_vnext_journal(tmp_path, run_id, decision_id)
+    receipt = {
+        "type": "vnext_raw_receipt",
+        "run_id": run_id,
+        "mission_id": "mission-replay-test",
+        "decision_id": decision_id,
+        "controller_action": "type_text",
+        "raw_action": "type_text",
+        "input_completed": True,
+    }
+    receipt.pop(field)
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([
+        receipt,
+        _vnext_seal(run_id, journal),
+    ]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert steps == [{
+        "tool": "type_text",
+        "text_input": "journal text",
+        "target_window": {"process": "notepad.exe"},
+    }]
+    assert any(
+        reason.startswith(expected_reason)
+        for reason in manifest["reasons"]
+    )
+    assert manifest["partial"] is True
+
+
+def test_vnext_journal_requires_exact_seal_scope(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-invalid-seal-scope"
+    decision_id = "decision-invalid-seal-scope"
+    journal = _write_vnext_journal(tmp_path, run_id, decision_id)
+    seal = _vnext_seal(run_id, journal)
+    seal.pop("mission_id")
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([{
+        "type": "vnext_raw_receipt",
+        "run_id": run_id,
+        "mission_id": "mission-replay-test",
+        "decision_id": decision_id,
+        "controller_action": "type_text",
+        "raw_action": "type_text",
+        "input_completed": True,
+    }, seal]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert len(steps) == 1
+    assert "runtime_evidence_seal_mission_scope_mismatch" in manifest["reasons"]
+    assert manifest["partial"] is True
+
+
+def test_vnext_journal_rejects_boolean_report_counts(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-boolean-report-counts"
+    decision_id = "decision-boolean-report-counts"
+    journal = _write_vnext_journal(tmp_path, run_id, decision_id)
+    seal = _vnext_seal(run_id, journal)
+    seal["missing_evidence_count"] = False
+    seal["verification_failure_count"] = False
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([{
+        "type": "vnext_raw_receipt",
+        "run_id": run_id,
+        "mission_id": "mission-replay-test",
+        "decision_id": decision_id,
+        "controller_action": "type_text",
+        "raw_action": "type_text",
+        "input_completed": True,
+    }, seal]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert len(steps) == 1
+    assert "runtime_evidence_report_incomplete" in manifest["reasons"]
+    assert manifest["partial"] is True
+
+
+def test_vnext_journal_without_trace_seal_is_partial(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-seal-missing"
+    decision_id = "decision-seal-missing"
+    _write_vnext_journal(tmp_path, run_id, decision_id)
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([{
+        "type": "vnext_raw_receipt",
+        "run_id": run_id,
+        "mission_id": "mission-replay-test",
+        "decision_id": decision_id,
+        "controller_action": "type_text",
+        "raw_action": "type_text",
+        "input_completed": True,
+    }]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert len(steps) == 1
+    assert "runtime_evidence_seal_missing" in manifest["reasons"]
+    assert manifest["partial"] is True
+
+
+def test_vnext_journal_exports_authenticated_attempt_when_trace_sink_missed_receipt(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-trace-sink-miss"
+    decision_id = "decision-trace-sink-miss"
+    journal = _write_vnext_journal(tmp_path, run_id, decision_id)
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([
+        {"type": "arp_run_start", "runtime_version": "vnext"},
+        _vnext_seal(run_id, journal),
+    ]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert steps == [{
+        "tool": "type_text",
+        "text_input": "journal text",
+        "target_window": {"process": "notepad.exe"},
+    }]
+    assert (
+        "trace_raw_receipt_missing:decision-trace-sink-miss"
+        in manifest["reasons"]
+    )
+    assert manifest["partial"] is True
+
+
+def test_vnext_authenticated_journal_corruption_is_partial(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-corrupt-journal"
+    decision_id = "decision-one"
+    journal = _write_vnext_journal(tmp_path, run_id, decision_id)
+    journal_path = (
+        tmp_path / "vnext_runtime_evidence" / run_id / "evidence.jsonl"
+    )
+    journal_path.write_bytes(journal_path.read_bytes().replace(b"journal text", b"changed text"))
+    _write_trace(tmp_path / f"{run_id}.jsonl", _complete_trace([
+        {
+            "type": "vnext_raw_receipt",
+            "run_id": run_id,
+            "mission_id": "mission-replay-test",
+            "decision_id": decision_id,
+            "controller_action": "type_text",
+            "input_completed": True,
+        },
+        _vnext_seal(run_id, journal),
+    ]))
+
+    _task, steps, manifest, _target = trace_mod._build_run_segment(run_id)
+
+    assert steps == []
+    assert "runtime_evidence_invalid:event_hash" in manifest["reasons"]
+
+
+def test_vnext_authenticated_journal_deep_json_is_partial(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    run_id = "vnext-deep-journal"
+    directory = tmp_path / "vnext_runtime_evidence" / run_id
+    directory.mkdir(parents=True)
+    (directory / "evidence.jsonl").write_bytes(b"{}\n")
+
+    def raise_recursion(*_args, **_kwargs):
+        raise RecursionError("synthetic excessive nesting")
+
+    monkeypatch.setattr(trace_mod.json, "loads", raise_recursion)
+
+    records, head, error = trace_mod._read_vnext_journal(run_id)
+
+    assert records == []
+    assert head == "0" * 64
+    assert error == "malformed_json"
+
+
 def test_export_script_includes_batch_child_replay(tmp_path, monkeypatch):
     monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
     monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", tmp_path / "scripts")
@@ -209,7 +843,7 @@ def test_export_script_includes_batch_child_replay(tmp_path, monkeypatch):
     assert trace_mod.validate_script(data) is None
 
 
-def test_export_script_dedupes_fast_wrapper_child_and_parent(tmp_path, monkeypatch):
+def test_export_script_drops_only_explicit_fast_wrapper_parent(tmp_path, monkeypatch):
     monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
     monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", tmp_path / "scripts")
     replay = {"tool": "draw_strokes", "strokes": [[[1, 2], [3, 4]]], "duration": 0.1}
@@ -217,13 +851,152 @@ def test_export_script_dedupes_fast_wrapper_child_and_parent(tmp_path, monkeypat
         {"type": "agent_start", "task": "draw"},
         {"type": "agent_batch_action", "tool": "draw_strokes",
          "replay": {**replay, "elapsed_ms": 9}},
-        {"type": "agent_tool", "tool": "draw_strokes", "replay": replay},
+        {"type": "agent_tool", "tool": "draw_strokes", "replay": replay,
+         "result_meta": {"wrapped_by_fast_controller": True}},
     ])
 
     path = trace_mod.export_script("r2")
     data = json.loads(path.read_text(encoding="utf-8"))
 
     assert data["steps"] == [replay]
+
+
+def test_export_script_keeps_independently_executed_identical_actions(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", tmp_path / "scripts")
+    replay = {"tool": "hotkey", "keys": ["ctrl", "s"]}
+    _write_trace(tmp_path / "repeated.jsonl", [
+        {"type": "agent_start", "task": "repeat"},
+        {"type": "agent_tool", "action_id": "first", "tool": "hotkey", "replay": replay},
+        {"type": "agent_tool", "action_id": "second", "tool": "hotkey", "replay": replay},
+        {"type": "trace_integrity", "complete": True, "dropped_events": 0,
+         "write_failures": 0, "accepted_events": 3},
+    ])
+
+    data = trace_mod.build_script("repeated")
+
+    assert data["steps"] == [replay, replay]
+    assert data["export_manifest"]["complete"] is True
+
+
+@pytest.mark.parametrize(
+    ("integrity", "trailing", "expected_reason"),
+    [
+        (
+            {"complete": True, "dropped_events": 0, "write_failures": 0},
+            [],
+            "trace_integrity_accepted_events_missing_or_invalid",
+        ),
+        (
+            {"complete": True, "dropped_events": 0, "write_failures": 0,
+             "accepted_events": 9},
+            [],
+            "trace_integrity_event_count_mismatch:9:2",
+        ),
+        (
+            {"complete": True, "dropped_events": 0, "write_failures": 0,
+             "accepted_events": 2},
+            [{"type": "note", "value": "unfinished append"}],
+            "trace_events_after_integrity:1",
+        ),
+    ],
+)
+def test_export_manifest_fails_closed_for_unsealed_trace_segment(
+    tmp_path,
+    monkeypatch,
+    integrity,
+    trailing,
+    expected_reason,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    _write_trace(tmp_path / "integrity.jsonl", [
+        {"type": "agent_start", "task": "integrity"},
+        {"type": "agent_tool", "action_id": "save", "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]}},
+        {"type": "trace_integrity", **integrity},
+        *trailing,
+    ])
+
+    manifest = trace_mod.build_script("integrity")["export_manifest"]
+
+    assert manifest["complete"] is False
+    assert manifest["partial"] is True
+    assert expected_reason in manifest["reasons"]
+
+
+def test_export_manifest_validates_every_append_segment(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    _write_trace(tmp_path / "appended.jsonl", [
+        {"type": "agent_start", "task": "first segment"},
+        {"type": "agent_tool", "action_id": "first", "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]}},
+        {"type": "trace_integrity", "complete": True, "dropped_events": 0,
+         "write_failures": 0, "accepted_events": 2},
+        {"type": "agent_tool", "action_id": "second", "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "n"]}},
+        {"type": "trace_integrity", "complete": True, "dropped_events": 0,
+         "write_failures": 0, "accepted_events": 1},
+    ])
+
+    data = trace_mod.build_script("appended")
+
+    assert data["steps"] == [
+        {"tool": "hotkey", "keys": ["ctrl", "s"]},
+        {"tool": "hotkey", "keys": ["ctrl", "n"]},
+    ]
+    assert data["export_manifest"]["complete"] is True
+
+
+def test_export_manifest_keeps_first_append_failure_visible(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    _write_trace(tmp_path / "appended-failure.jsonl", [
+        {"type": "agent_start", "task": "first segment"},
+        {"type": "agent_tool", "action_id": "first", "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]}},
+        {"type": "trace_integrity", "complete": False, "dropped_events": 1,
+         "write_failures": 0, "accepted_events": 2},
+        {"type": "agent_tool", "action_id": "second", "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "n"]}},
+        {"type": "trace_integrity", "complete": True, "dropped_events": 0,
+         "write_failures": 0, "accepted_events": 1},
+    ])
+
+    manifest = trace_mod.build_script("appended-failure")["export_manifest"]
+
+    assert manifest["complete"] is False
+    assert manifest["dropped_events"] == 1
+    assert "trace_integrity_failed" in manifest["reasons"]
+    assert "trace_queue_dropped:1" in manifest["reasons"]
+
+
+def test_legacy_export_reports_missing_leaf_replay_but_ignores_reads_and_wrappers(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    _write_trace(tmp_path / "legacy-omission.jsonl", [
+        {"type": "agent_start", "task": "legacy omission"},
+        {"type": "agent_tool", "action_id": "read", "tool": "read_text"},
+        {"type": "agent_batch_action", "action_id": "observe", "tool": "observe",
+         "replay": {"elapsed_ms": 1}},
+        {"type": "agent_tool", "action_id": "shell-read", "tool": "run_shell"},
+        {"type": "agent_tool", "action_id": "batch", "tool": "run_action_batch"},
+        {"type": "agent_tool", "action_id": "subgoal", "tool": "execute_subgoal",
+         "replay": {"tool": "execute_subgoal", "actions": []}},
+        {"type": "agent_tool", "action_id": "missing-click", "tool": "click"},
+        {"type": "agent_tool", "action_id": "saved", "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]}},
+        {"type": "trace_integrity", "complete": True, "dropped_events": 0,
+         "write_failures": 0, "accepted_events": 8},
+    ])
+
+    data = trace_mod.build_script("legacy-omission")
+
+    assert data["steps"] == [{"tool": "hotkey", "keys": ["ctrl", "s"]}]
+    assert data["export_manifest"]["reasons"] == [
+        "missing_replay_for_action:click:missing-click",
+    ]
+    assert data["export_manifest"]["partial"] is True
 
 
 def test_export_script_skips_non_executable_replay_records(tmp_path, monkeypatch):
@@ -309,6 +1082,481 @@ def test_export_script_uses_perception_target_window_without_persisting_hwnd(tmp
     }
     assert "hwnd" not in data["target_window"]
     assert trace_mod.validate_script(data) is None
+
+
+def test_read_trace_does_not_silently_truncate_long_conversation(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    events = [{"type": "note", "index": index} for index in range(2005)]
+    _write_trace(tmp_path / "long.jsonl", events)
+
+    loaded = trace_mod.read_trace("long")
+
+    assert len(loaded) == 2005
+    assert loaded[-1]["index"] == 2004
+
+
+def test_bounded_trace_read_always_reports_integrity(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    _write_trace(tmp_path / "bounded.jsonl", [
+        {"type": "note", "index": index} for index in range(5)
+    ])
+
+    loaded = trace_mod.read_trace("bounded", limit=2, include_integrity=True)
+
+    assert [event["index"] for event in loaded[:-1]] == [0, 1]
+    assert loaded[-1] == {
+        "type": "trace_read_integrity",
+        "run_id": "bounded",
+        "complete": False,
+        "total_lines": 5,
+        "returned_events": 2,
+        "malformed_lines": 0,
+        "truncated": True,
+    }
+
+
+def test_thread_export_concatenates_runs_and_preserves_equal_actions(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", tmp_path / "scripts")
+    thread_id = "thread-conversation"
+    first_target = {"title": "First Window", "process": "first.exe"}
+    second_target = {"title": "Second Window", "process": "second.exe"}
+
+    def run_events(ts, run_id, turn_id, target):
+        return [
+            {"type": "agent_tool", "ts": ts, "action_id": f"{run_id}-action",
+             "tool": "hotkey", "target_window": target,
+             "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]}},
+            {"type": "arp_run_done", "ts": ts + 1, "runtime_snapshot": {
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "goal_admission": {"goal": f"goal-{run_id}"},
+            }},
+            {"type": "trace_integrity", "complete": True, "dropped_events": 0,
+             "write_failures": 0, "accepted_events": 2},
+        ]
+
+    _write_trace(tmp_path / "run-later.jsonl", run_events(20, "run-later", "turn-2", second_target))
+    _write_trace(tmp_path / "run-first.jsonl", run_events(10, "run-first", "turn-1", first_target))
+    _write_trace(tmp_path / "run-older-than-ui-history.jsonl", run_events(
+        5,
+        "run-older-than-ui-history",
+        "turn-0",
+        first_target,
+    ))
+
+    _write_trace(tmp_path / "unrelated.jsonl", [{"broken": "not this thread"}])
+    data = trace_mod.build_thread_script(
+        thread_id,
+        run_ids=["run-later", "run-first"],
+    )
+
+    assert data["source_runs"] == [
+        "run-older-than-ui-history",
+        "run-first",
+        "run-later",
+    ]
+    assert [step["target_window"] for step in data["steps"]] == [
+        first_target,
+        first_target,
+        second_target,
+    ]
+    assert [step["keys"] for step in data["steps"]] == [
+        ["ctrl", "s"],
+        ["ctrl", "s"],
+        ["ctrl", "s"],
+    ]
+    assert data["export_manifest"]["complete"] is True
+
+
+def test_thread_export_rejects_one_trace_owned_by_multiple_threads(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    mixed = [
+        {"type": "agent_tool", "ts": 1, "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "a"]}},
+        {"type": "arp_run_done", "thread_id": "thread-a", "turn_id": "turn-a"},
+        {"type": "trace_integrity", "complete": True, "dropped_events": 0,
+         "write_failures": 0, "accepted_events": 2},
+        {"type": "agent_tool", "ts": 2, "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "b"]}},
+        {"type": "arp_run_done", "runtime_snapshot": {
+            "thread_id": "thread-b", "turn_id": "turn-b",
+        }},
+        {"type": "trace_integrity", "complete": True, "dropped_events": 0,
+         "write_failures": 0, "accepted_events": 2},
+    ]
+    valid = _complete_trace([
+        {"type": "agent_tool", "ts": 3, "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]}},
+        {"type": "arp_run_done", "runtime_snapshot": {
+            "thread_id": "thread-b", "turn_id": "turn-valid",
+        }},
+    ])
+    _write_trace(tmp_path / "mixed.jsonl", mixed)
+    _write_trace(tmp_path / "valid.jsonl", valid)
+
+    data = trace_mod.build_thread_script(
+        "thread-b",
+        run_ids=["mixed", "valid"],
+    )
+
+    assert data["source_runs"] == ["valid"]
+    assert data["steps"] == [{"tool": "hotkey", "keys": ["ctrl", "s"]}]
+    assert data["export_manifest"]["reasons"] == [
+        "trace_thread_id_mixed:mixed:thread-a|thread-b",
+    ]
+
+
+def test_trace_task_reads_vnext_arp_run_start_goal_admission():
+    assert trace_mod._trace_task([
+        {
+            "type": "arp_run_start",
+            "runtime_version": "vnext",
+            "goal_admission": {"goal": "真实 vNext 原始目标"},
+        },
+    ], "run-fallback") == "真实 vNext 原始目标"
+
+
+def test_explicit_thread_export_accounts_for_every_requested_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    thread_id = "thread-accounting"
+    complete = {
+        "type": "trace_integrity",
+        "complete": True,
+        "dropped_events": 0,
+        "write_failures": 0,
+        "accepted_events": 3,
+    }
+    _write_trace(tmp_path / "run-valid.jsonl", [
+        {
+            "type": "agent_start",
+            "ts": 10,
+            "task": "保存当前文档",
+        },
+        {
+            "type": "desktop_lease_requested",
+            "thread_id": thread_id,
+            "turn_id": "turn-valid",
+        },
+        {
+            "type": "agent_tool",
+            "action_id": "action-valid",
+            "tool": "hotkey",
+            "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]},
+        },
+        complete,
+    ])
+    _write_trace(tmp_path / "run-no-thread.jsonl", [
+        {
+            "type": "agent_tool",
+            "action_id": "action-no-thread",
+            "tool": "hotkey",
+            "replay": {"tool": "hotkey", "keys": ["ctrl", "n"]},
+        },
+        complete,
+    ])
+    _write_trace(tmp_path / "run-wrong-thread.jsonl", [
+        {
+            "type": "desktop_lease_requested",
+            "thread_id": "thread-other",
+            "turn_id": "turn-other",
+        },
+        {
+            "type": "agent_tool",
+            "action_id": "action-wrong-thread",
+            "tool": "hotkey",
+            "replay": {"tool": "hotkey", "keys": ["ctrl", "o"]},
+        },
+        complete,
+    ])
+
+    data = trace_mod.build_thread_script(
+        thread_id,
+        run_ids=[
+            "run-valid",
+            "run-missing",
+            "run-no-thread",
+            "run-wrong-thread",
+        ],
+    )
+
+    assert data["task"] == "保存当前文档"
+    assert data["source_runs"] == ["run-valid"]
+    assert data["steps"] == [{"tool": "hotkey", "keys": ["ctrl", "s"]}]
+    assert data["export_manifest"] == {
+        "format": "agent-replay-export/1",
+        "scope": "thread",
+        "coverage": "ordinary_arp_actions",
+        "thread_id": thread_id,
+        "complete": False,
+        "partial": True,
+        "reasons": [
+            "trace_missing:run-missing",
+            "trace_thread_id_missing:run-no-thread",
+            "trace_thread_id_mismatch:run-wrong-thread:thread-other",
+        ],
+        "source_runs": ["run-valid"],
+        "run_count": 1,
+    }
+
+
+def test_thread_export_marks_unreadable_owner_line_partial(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    healthy = [
+        {
+            "type": "desktop_lease_requested",
+            "thread_id": "thread-target",
+            "turn_id": "turn-healthy",
+        },
+        {
+            "type": "agent_tool",
+            "tool": "hotkey",
+            "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]},
+        },
+    ]
+    _write_trace(tmp_path / "healthy.jsonl", _complete_trace(healthy))
+    (tmp_path / "unreadable.jsonl").write_text(
+        '{"type":"desktop_lease_requested","thread_id":"thread-target"\n'
+        '{"type":"agent_tool","tool":"hotkey",'
+        '"replay":{"tool":"hotkey","keys":["ctrl","n"]}}\n'
+        '{"type":"trace_integrity","complete":true,"dropped_events":0,'
+        '"write_failures":0,"accepted_events":1}\n',
+        encoding="utf-8",
+    )
+
+    data = trace_mod.build_thread_script("thread-target")
+
+    assert data["steps"] == [{"tool": "hotkey", "keys": ["ctrl", "s"]}]
+    assert data["export_manifest"]["partial"] is True
+    assert (
+        "trace_thread_identity_unverifiable:unreadable"
+        in data["export_manifest"]["reasons"]
+    )
+
+
+def test_trace_read_preserves_valid_events_around_invalid_utf8(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    path = tmp_path / "invalid-utf8.jsonl"
+    path.write_bytes(
+        b'{"type":"agent_start","task":"ok"}\n'
+        b'{"type":"note","value":"\xe4\xb8"}\n'
+        b'{"type":"agent_tool","tool":"hotkey",'
+        b'"replay":{"tool":"hotkey","keys":["ctrl","s"]}}\n'
+    )
+
+    events, integrity = trace_mod._read_trace_records("invalid-utf8")
+
+    assert [event["type"] for event in events] == ["agent_start", "agent_tool"]
+    assert integrity["malformed_lines"] == 1
+
+
+@pytest.mark.parametrize("unsafe", [
+    r"..\escape",
+    "../escape",
+    "CON",
+    "con.txt",
+    "PRN",
+    "COM1",
+    "lpt9.log",
+    "CON .txt",
+    "COM¹.log",
+    "CONOUT$",
+    "trailing. ",
+])
+def test_all_trace_exports_reject_unsafe_windows_leaf_names(
+    tmp_path,
+    monkeypatch,
+    unsafe,
+):
+    traces = tmp_path / "traces"
+    scripts = tmp_path / "scripts"
+    traces.mkdir()
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", traces)
+    monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", scripts)
+    thread_id = "thread-safe"
+    _write_trace(traces / "run-safe.jsonl", [
+        {"type": "agent_tool", "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]}},
+        {"type": "arp_run_done", "runtime_snapshot": {"thread_id": thread_id}},
+        {"type": "trace_integrity", "complete": True,
+         "dropped_events": 0, "write_failures": 0, "accepted_events": 2},
+    ])
+
+    for export in (
+        lambda: trace_mod.export_script("run-safe", name=unsafe),
+        lambda: trace_mod.export_automation_ir("run-safe", name=unsafe),
+        lambda: trace_mod.export_thread_script(thread_id, name=unsafe),
+        lambda: trace_mod.export_thread_automation_ir(thread_id, name=unsafe),
+    ):
+        with pytest.raises(ValueError, match="Windows-safe"):
+            export()
+    minimal = {
+        "format": "wps/2",
+        "name": "safe",
+        "steps": [{"tool": "hotkey", "keys": ["ctrl", "s"]}],
+    }
+    with pytest.raises(ValueError, match="Windows-safe"):
+        trace_mod.write_automation_ir(
+            minimal, name=unsafe, basename="safe", directory=scripts,
+        )
+    with pytest.raises(ValueError, match="Windows-safe"):
+        trace_mod.write_automation_ir(
+            minimal, name=None, basename=unsafe, directory=scripts,
+        )
+    assert not scripts.exists()
+
+
+def test_thread_export_preserves_safe_chinese_name_with_space(tmp_path, monkeypatch):
+    traces = tmp_path / "traces"
+    scripts = tmp_path / "scripts"
+    traces.mkdir()
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", traces)
+    monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", scripts)
+    thread_id = "thread-safe-name"
+    _write_trace(traces / "run-safe-name.jsonl", [
+        {"type": "agent_tool", "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]}},
+        {"type": "arp_run_done", "runtime_snapshot": {"thread_id": thread_id}},
+        {"type": "trace_integrity", "complete": True,
+         "dropped_events": 0, "write_failures": 0, "accepted_events": 2},
+    ])
+
+    path = trace_mod.export_thread_script(thread_id, name="中文 流程")
+
+    assert path == scripts / "中文 流程.wps.json"
+    assert path.is_file()
+    assert (scripts / "中文 流程.automation.json").is_file()
+    assert json.loads(path.read_text(encoding="utf-8"))["name"] == "中文 流程"
+
+
+def test_trace_exports_never_replace_existing_wps_or_ir_siblings(tmp_path, monkeypatch):
+    traces = tmp_path / "traces"
+    scripts = tmp_path / "scripts"
+    traces.mkdir()
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", traces)
+    monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", scripts)
+    _write_trace(traces / "run-collision.jsonl", [
+        {"type": "agent_start", "task": "collision"},
+        {"type": "agent_tool", "action_id": "save", "tool": "hotkey",
+         "replay": {"tool": "hotkey", "keys": ["ctrl", "s"]}},
+        {"type": "trace_integrity", "complete": True, "dropped_events": 0,
+         "write_failures": 0, "accepted_events": 2},
+    ])
+
+    first = trace_mod.export_script("run-collision", name="same-name")
+    first_wps = first.read_bytes()
+    first_ir_path = scripts / "same-name.automation.json"
+    first_ir = first_ir_path.read_bytes()
+    second = trace_mod.export_script("run-collision", name="same-name")
+    ir_only = trace_mod.export_automation_ir("run-collision", name="same-name")
+
+    assert first == scripts / "same-name.wps.json"
+    assert second == scripts / "same-name-2.wps.json"
+    assert (scripts / "same-name-2.automation.json").is_file()
+    assert ir_only == scripts / "same-name-3.automation.json"
+    assert not (scripts / "same-name-3.wps.json").exists()
+    assert first.read_bytes() == first_wps
+    assert first_ir_path.read_bytes() == first_ir
+
+
+def test_clipboard_get_fails_closed_when_open_stays_busy(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    calls = {"open": 0}
+
+    def fail_open():
+        calls["open"] += 1
+        raise OSError("clipboard busy")
+
+    monkeypatch.setitem(sys.modules, "win32clipboard", SimpleNamespace(
+        CF_UNICODETEXT=13,
+        OpenClipboard=fail_open,
+    ))
+
+    result = trace_mod._clipboard_get(attempts=3, retry_delay_s=0)
+
+    assert result["ok"] is False
+    assert "clipboard busy" in result["error"]
+    assert calls["open"] == 3
+
+
+def test_clipboard_get_distinguishes_missing_text_format_from_failure(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    calls = {"close": 0}
+    monkeypatch.setitem(sys.modules, "win32clipboard", SimpleNamespace(
+        CF_UNICODETEXT=13,
+        OpenClipboard=lambda: None,
+        IsClipboardFormatAvailable=lambda _format: False,
+        GetClipboardData=lambda _format: (_ for _ in ()).throw(
+            AssertionError("GetClipboardData must not be called")
+        ),
+        CloseClipboard=lambda: calls.__setitem__("close", calls["close"] + 1),
+    ))
+
+    assert trace_mod._clipboard_get(attempts=1, retry_delay_s=0) == {
+        "ok": True,
+        "text": "",
+    }
+    assert calls["close"] == 1
+
+
+def test_clipboard_get_fails_closed_when_data_read_fails(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    calls = {"close": 0}
+    monkeypatch.setitem(sys.modules, "win32clipboard", SimpleNamespace(
+        CF_UNICODETEXT=13,
+        OpenClipboard=lambda: None,
+        IsClipboardFormatAvailable=lambda _format: True,
+        GetClipboardData=lambda _format: (_ for _ in ()).throw(
+            OSError("clipboard read failed")
+        ),
+        CloseClipboard=lambda: calls.__setitem__("close", calls["close"] + 1),
+    ))
+
+    result = trace_mod._clipboard_get(attempts=3, retry_delay_s=0)
+
+    assert result["ok"] is False
+    assert calls["close"] == 3
+
+
+def test_clipboard_get_retries_transient_busy_then_returns_text(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    calls = {"open": 0, "close": 0}
+
+    def open_clipboard():
+        calls["open"] += 1
+        if calls["open"] < 3:
+            raise OSError("clipboard busy")
+
+    monkeypatch.setitem(sys.modules, "win32clipboard", SimpleNamespace(
+        CF_UNICODETEXT=13,
+        OpenClipboard=open_clipboard,
+        IsClipboardFormatAvailable=lambda _format: True,
+        GetClipboardData=lambda _format: "clipboard nonce",
+        CloseClipboard=lambda: calls.__setitem__("close", calls["close"] + 1),
+    ))
+
+    assert trace_mod._clipboard_get(attempts=3, retry_delay_s=0) == {
+        "ok": True,
+        "text": "clipboard nonce",
+    }
+    assert calls == {"open": 3, "close": 1}
 
 
 # ------------------------------------------------------------- HTTP endpoints

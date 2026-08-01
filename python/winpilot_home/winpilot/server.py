@@ -28,7 +28,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .automation_ir import (
     arp_graph_from_automation_ir,
@@ -101,6 +101,15 @@ CHATGPT_MCP_ACTIVITY = {
 CHATGPT_MCP_ACTIVITY_LOCK = threading.Lock()
 _CHATGPT_MCP_ACTIVE_TTL_S = 45.0
 CONTROL_TOKEN = os.environ.get("WINPILOT_CONTROL_TOKEN", "").strip()
+
+
+class FlowFragmentProposalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    goal: str = Field(min_length=1, max_length=4000)
+    base_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    document: dict[str, Any]
+    catalog: list[dict[str, Any]] = Field(min_length=1, max_length=32)
 
 
 def _started_by_direct_uvicorn() -> bool:
@@ -228,25 +237,13 @@ def _public_trace_leaf(
 ) -> str:
     """Accept one bounded Windows-safe public trace path component."""
 
-    if (
-        type(value) is not str
-        or not 1 <= len(value) <= 160
-        or value in {".", ".."}
-        or value[-1] in {".", " "}
-        or any(
-            character in '/\\:\0*?"<>|'
-            or ord(character) < 32
-            or ord(character) == 127
-            for character in value
-        )
-        or (
-            image
-            and Path(value).suffix.casefold()
-            not in {".jpg", ".jpeg", ".png"}
-        )
-    ):
+    try:
+        checked = trace_mod.windows_safe_leaf(value, what=what)
+    except ValueError:
         raise HTTPException(404, f"{what} not found")
-    return value
+    if image and Path(checked).suffix.casefold() not in {".jpg", ".jpeg", ".png"}:
+        raise HTTPException(404, f"{what} not found")
+    return checked
 
 
 def _public_trace_run_id(run_id: str) -> str:
@@ -603,6 +600,10 @@ class ReplayRequest(BaseModel):
 
 class ExportRequest(BaseModel):
     name: str | None = None
+
+
+class ThreadExportRequest(ExportRequest):
+    run_ids: list[str] = Field(default_factory=list, max_length=40)
 
 
 class ScriptSaveRequest(BaseModel):
@@ -1449,6 +1450,43 @@ def _start_arp_execution(
     return execution
 
 
+@app.post("/api/v2/flow-fragments/proposals")
+def propose_flow_fragment(req: FlowFragmentProposalRequest) -> dict[str, Any]:
+    """Return an inert proposal; the renderer remains the only document owner."""
+
+    if runtime_source_drifted():
+        raise HTTPException(
+            409,
+            "WinPilot Python sources changed after this service started. "
+            "Restart the runtime before generating a flow fragment.",
+        )
+    frozen_config = CONFIG.snapshot()
+
+    def worker(stop_event: threading.Event) -> dict[str, Any]:
+        from .orchestrator.live_agent import propose_live_flow_fragment
+
+        return propose_live_flow_fragment(
+            req.goal,
+            base_fingerprint=req.base_fingerprint,
+            document=req.document,
+            catalog=req.catalog,
+            config_snapshot=frozen_config,
+            stop_event=stop_event,
+        )
+
+    job = RUNTIME_JOBS.submit(
+        "flow_fragment",
+        worker,
+        resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
+        metadata={"purpose": "flow_fragment_proposal"},
+    )
+    return {
+        "ok": True,
+        "proposal_job_id": job.id,
+        "job": job.snapshot(include_result=False),
+    }
+
+
 @app.post("/api/v2/goals/runs")
 def start_goal_run(req: GoalRunRequest) -> dict[str, Any]:
     """Admit one product goal without accepting a client-owned graph/runtime."""
@@ -1994,10 +2032,24 @@ def trace_summary(run_id: str) -> dict[str, Any]:
     return summary
 
 
+_PUBLIC_TRACE_DETAIL_LIMIT = 2_000
+
+
 @app.get("/api/trace/{run_id}")
-def trace_detail(run_id: str) -> list[dict[str, Any]]:
-    events = trace_mod.read_trace(_public_trace_run_id(run_id))
-    if not events:
+def trace_detail(
+    run_id: str,
+    limit: int = _PUBLIC_TRACE_DETAIL_LIMIT,
+) -> list[dict[str, Any]]:
+    events = trace_mod.read_trace(
+        _public_trace_run_id(run_id),
+        limit=max(1, min(int(limit), _PUBLIC_TRACE_DETAIL_LIMIT)),
+        include_integrity=True,
+    )
+    if not events or (
+        len(events) == 1
+        and events[0].get("type") == "trace_read_integrity"
+        and events[0].get("total_lines") == 0
+    ):
         raise HTTPException(404, "trace 不存在")
     return events
 
@@ -2021,6 +2073,19 @@ def trace_screenshot(run_id: str, name: str):
     if not path.is_file():
         raise HTTPException(404, "截图不存在")
     return FileResponse(path)
+
+
+@app.post("/api/export/thread/{thread_id}/ir")
+def export_thread_ir(thread_id: str, req: ThreadExportRequest | None = None) -> dict[str, Any]:
+    try:
+        path = trace_mod.export_thread_automation_ir(
+            _public_trace_run_id(thread_id),
+            name=(req.name if req else None),
+            run_ids=[_public_trace_run_id(item) for item in req.run_ids] if req else None,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "ir": path.name}
 
 
 @app.post("/api/export/{run_id}")
@@ -2151,11 +2216,6 @@ def human_stop() -> dict[str, Any]:
 @app.get("/api/human/status")
 def human_status() -> dict[str, Any]:
     return {"recording": human_mod.RECORDER.is_recording()}
-
-
-@app.get("/api/v2/replay/modes")
-def replay_modes() -> dict[str, Any]:
-    return {"ok": True, "modes": list(apprentice_mod.REPLAY_MODES)}
 
 
 @app.post("/api/v2/replay/apprentice/start")

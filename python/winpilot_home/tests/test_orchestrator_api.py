@@ -425,16 +425,62 @@ def test_public_trace_routes_preserve_safe_historical_trace_and_image(
     )
 
     assert detail.status_code == 200
-    assert detail.json()[-1] == {
+    assert detail.json()[-2] == {
         "type": "live_agent_done",
         "run_id": run_id,
         "runtime_evidence": public_summary,
         "ts": 2.0,
     }
+    assert detail.json()[-1] == {
+        "type": "trace_read_integrity",
+        "run_id": run_id,
+        "complete": True,
+        "total_lines": 2,
+        "returned_events": 2,
+        "malformed_lines": 0,
+        "truncated": False,
+    }
     assert summary.status_code == 200
     assert summary.json()["run_id"] == run_id
     assert screenshot.status_code == 200
     assert screenshot.content == b"safe-public-trace-image"
+
+
+def test_public_trace_detail_is_bounded_and_reports_read_integrity(
+    client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from winpilot import server
+
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    (traces / "long-trace.jsonl").write_text(
+        "".join(
+            json.dumps({"type": "note", "index": index}) + "\n"
+            for index in range(2_005)
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server.trace_mod, "TRACES_DIR", traces)
+
+    detail = client.get("/api/trace/long-trace?limit=3")
+
+    assert detail.status_code == 200
+    assert [event["index"] for event in detail.json()[:-1]] == [0, 1, 2]
+    assert detail.json()[-1] == {
+        "type": "trace_read_integrity",
+        "run_id": "long-trace",
+        "complete": False,
+        "total_lines": 2_005,
+        "returned_events": 3,
+        "malformed_lines": 0,
+        "truncated": True,
+    }
+    capped = client.get("/api/trace/long-trace?limit=999999")
+    assert len(capped.json()) == 2_001
+    assert capped.json()[-1]["returned_events"] == 2_000
+    assert capped.json()[-1]["truncated"] is True
 
 
 @pytest.mark.parametrize("runtime_version", ["future", "", 7, None])
@@ -1639,3 +1685,76 @@ def test_chatgpt_desktop_integration_exposes_real_mcp_handshake(monkeypatch):
     assert active["request_count"] >= 2
     assert active["security_mode"] == "loopback_only"
     assert active["proxy_bypass"] == "NO_PROXY=127.0.0.1,localhost"
+
+
+def test_flow_fragment_job_waits_for_interactive_resource_and_is_cancelable(
+    client,
+    monkeypatch,
+):
+    from winpilot import server
+    from winpilot.orchestrator import live_agent
+
+    blocker_entered = threading.Event()
+    release_blocker = threading.Event()
+    proposal_entered = threading.Event()
+
+    def hold_interactive_resource(_stop_event):
+        blocker_entered.set()
+        release_blocker.wait(2)
+        return {"ok": True}
+
+    def fake_proposal(*_args, stop_event, **_kwargs):
+        proposal_entered.set()
+        stop_event.wait(2)
+        return {"ok": False, "error": "canceled"}
+
+    monkeypatch.setattr(server, "runtime_source_drifted", lambda: False)
+    monkeypatch.setattr(live_agent, "propose_live_flow_fragment", fake_proposal)
+    blocker = server.RUNTIME_JOBS.submit(
+        "test_interactive_blocker",
+        hold_interactive_resource,
+        resources=(server._INTERACTIVE_RUNTIME_RESOURCE,),
+    )
+    proposal_job = None
+    try:
+        assert blocker_entered.wait(1)
+        response = client.post(
+            "/api/v2/flow-fragments/proposals",
+            json={
+                "goal": "click",
+                "base_fingerprint": f"sha256:{'0' * 64}",
+                "document": {
+                    "node_count": 2,
+                    "edge_count": 1,
+                    "node_types": ["start", "end"],
+                },
+                "catalog": [{
+                    "type": "click",
+                    "label": "Click",
+                    "params": {"x": 0, "y": 0},
+                    "output_ports": ["output"],
+                }],
+            },
+        )
+        assert response.status_code == 200
+        proposal_job = server.RUNTIME_JOBS.get(response.json()["proposal_job_id"])
+        assert proposal_job is not None
+        deadline = time.time() + 1
+        while proposal_job.status == "queued" and time.time() < deadline:
+            time.sleep(0.01)
+        assert proposal_job.resources == (server._INTERACTIVE_RUNTIME_RESOURCE,)
+        assert proposal_job.status == "waiting_resources"
+        assert not proposal_entered.is_set()
+
+        release_blocker.set()
+        assert proposal_entered.wait(1)
+        canceled = client.post(f"/api/v2/jobs/{proposal_job.id}/cancel")
+        assert canceled.status_code == 200
+        assert proposal_job.done.wait(1)
+        assert proposal_job.status == "canceled"
+    finally:
+        release_blocker.set()
+        if proposal_job is not None and not proposal_job.done.is_set():
+            server.RUNTIME_JOBS.cancel(proposal_job.id)
+            proposal_job.done.wait(1)
+        blocker.done.wait(1)
