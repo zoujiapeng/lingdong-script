@@ -242,7 +242,7 @@ def evaluate_board_frame(
     )
     positive: list[list[int]] = []
     negative: list[list[int]] = []
-    for raw in [] if raw_lines is None else raw_lines[:, 0, :]:
+    for raw in [] if raw_lines is None else np.asarray(raw_lines).reshape(-1, 4):
         x1, y1, x2, y2 = (int(value) for value in raw)
         dx, dy = x2 - x1, y2 - y1
         if abs(dx) < minimum_line * 0.55 or abs(dy) < minimum_line * 0.55:

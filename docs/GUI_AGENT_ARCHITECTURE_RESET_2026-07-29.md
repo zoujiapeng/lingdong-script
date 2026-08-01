@@ -2091,6 +2091,13 @@ canary campaign/harness `159 passed`，renderer `243 passed`，TypeScript typech
 此前和随后都通过，属于测试调度干扰。两项原样复跑 `2 passed`，最终完整重跑为
 `3468 passed, 13 skipped, 1 warning`。
 
+首次推送 `87f04fd` 后，Actions run `30688219189` 已实际执行：frontend 完整通过，Python
+出现 7 个测试基础设施失败。6 个来自 CI OpenCV 把 `HoughLinesP` 返回为 `(N,4)`，旧 Paint
+oracle 只接受 `(N,1,4)`；1 个来自 composition 测试未冻结虚拟屏幕，GitHub runner 的
+`1024×768` 把模拟窗口裁小。只在 test-only 层把 Hough 输出统一 reshape 为四列，并显式
+冻结该测试的虚拟屏幕；相关两文件回归 `95 passed`。没有修改 Paint/井字棋产品路径或
+Runtime，也没有为模型适配视觉几何。
+
 可见 Electron 最终有效报告为
 `output/playwright/live-agent-name-migration-e2e/20260801-142330-history-depth-ab/report.json`。
 测试从真实前端用 Windows 键盘输入与原生鼠标提交，顺序为 fresh→history：fresh 的
