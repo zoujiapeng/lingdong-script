@@ -8,12 +8,12 @@ requirements and must not be restored to teach the 11 samples. See
 [`visual-runtime-principles.md`](visual-runtime-principles.md) for the
 invariants and client-entry contract.
 
-最近一次受控矩阵验证（2026-07-31）使用可见 Electron 客户端、空 session、
+最近一次受控矩阵验证（2026-08-01）使用可见 Electron 客户端、空 session、
 操作系统鼠标键盘输入和独立浏览器 oracle。UIA 只定位控件和读回目标，不写入
-目标或代替点击。10 项中 5 项通过：`precise-click`、`ordered-clicks`、
-`drag-fit`、`slider`、`dynamic-hold`；`answer-all-questions` 只有 4/6，
+目标或代替点击。10 项中 6 项通过：`answer-all-questions` 取得 6/6，另有
+`precise-click`、`ordered-clicks`、`drag-fit`、`slider`、`dynamic-hold`；
 四个 corridor 变体均因模型提交的路径离开可见通道而失败。报告：
-`output/playwright/github-open-e2e-20260731/controlled-suite-r2/20260731-081832-suite/`。
+`output/playwright/client-visual-e2e/20260801-183951-suite/suite-report.json`。
 这只能叫受控 GUI 能力矩阵，不能冒充真实消费软件成功率。
 
 浏览器靶场不能单独代表桌面 E2E。当前已得到 Notepad 精确落盘的 grounded pass，
@@ -39,6 +39,21 @@ TypeScript typecheck 通过；可见 Electron 的 fresh/history 双臂、6 轮�
 connector→Notepad 任务也全部通过。test-only CI fixture 收口提交 `65fdce0` 的 Actions
 run `30688550071` 又实际执行并通过 frontend、Python 两个 job；这是该精确提交的远端
 绿色证据，未来 HEAD 必须重新查询。
+
+本轮改动前的 `3b48925` 由 Actions run `30688831098` 实际完成并通过 frontend、Python
+两个 job。本轮发布门前的候选工作树完整复验为 WinPilot
+`3478 passed, 13 skipped, 1 warning`、根测试 `2508 passed`、renderer `244 passed`，
+TypeScript typecheck、renderer/Electron build 和 CLI/AI build 均通过；新提交仍必须查询
+自己的 Actions，不能继承 `3b48925` 的绿色状态。
+
+同一候选的真实前端原生探针没有被内部 `done` 覆盖：Calculator `43×17` 的外部显示为
+`44` 而非 `731`；Paint 没有形成合格红色 X；QQ 群摘要在零 GUI 动作前被未批准工具拒绝；
+网易云错误选择 connector 元工具且参数不合法，目标歌曲/播放态/5% 音量均未成立。这四项
+首分歧都在模型原始参数或工具选择，不能据此修改 Runtime。正式报告分别位于
+`output/playwright/client-e2e/20260801-185226-calculator-random-43x17/report.json`、
+`output/playwright/client-paint-game-e2e/20260801-190517-paint-tic-tac-toe/paint-report.json`、
+`output/playwright/client-qq-groups-e2e/20260801-190819-qq-groups/qq-groups-report.json` 与
+`output/playwright/client-netease-music-e2e/20260801-191108-netease-music/netease-music-report.json`。
 
 2026-07-31 受控矩阵与原生探针记录已复验一组真实消费软件。当前源码仍未完成 11 个真实
 任务和混合长任务的全量验收；每个结果按它实际拥有的 oracle 单独记账：
@@ -106,6 +121,19 @@ RawDevice 证据和目标应用收到的可信操作系统事件；命令行辅�
 - 没有 desktop lease、外部 GUI observation、`physical_attempt` 或伪造的 mission
   completion evidence；
 - 前端显示模型原始 reply，而不是把 `claim_obligation_done` 包装成“已回复”。
+
+会话重启还必须使用正常标题栏关闭，并证明新 Electron、托管服务 PID/HWND 与旧进程不同，
+旧消息重新可见、下一条消息仍绑定同一 `thread_id`，且模型实际收到的恢复历史与有界
+checkpoint 精确一致。失败基线
+`output/playwright/client-thread-restart-e2e/20260801-153038-thread-restart/report.json`
+在服务重启后得到 404；最小 checkpoint 候选随后在聊天 marker 与 connector→Notepad
+两个不同任务族通过，报告为
+`output/playwright/client-thread-restart-e2e/20260801-194535-thread-restart/report.json`。
+这只证明最近成功 Turn 的短会话连续性，不证明长期 memory。
+
+未发送草稿是独立客户端状态：正常关闭/重启后应逐字恢复，但不能创建 run；成功发送和
+“新建对话”必须清除。可见 Electron 证据为
+`output/playwright/client-draft-restart-e2e/20260801-170711-draft-restart/report.json`。
 
 需要桌面操作的同一入口则必须记录 run-bound lease：只有同一个 Actor 调用通用
 `observe_desktop` 后才允许隐藏；capture 必须晚于 Electron yield ACK，首帧和任何

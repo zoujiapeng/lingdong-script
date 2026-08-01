@@ -112,12 +112,12 @@ miss、`0` creation；`agent_usage` / run `model_usage` 已真实记录这些上
 - 下一回合覆盖旧 exchange，避免无界聊天历史。
 
 Pi 只有在能整体替换并删除 Python 模型循环 owner、且跨任务 E2E 明显更好时才
-整体引入。当前下一切片不是继续包 Pi，也不是切换模型，而是：
+整体引入。当前不继续包 Pi，也不切换模型：
 
-1. `type_text` 跨 Notepad/Explorer 的冻结复验已得到 delivery `8/8`、外部任务
-   `7/8`，没有字符丢失复现，故不修改当前文本输入实现；
-2. 不改生产代码，只在至少两个任务族对 physical-key/focus/application-consumption
-   做一个测试型单变量 A/B；只有两族外部完整成功率都提高才替换并删除旧 owner；
+1. 只审查能删除现有 owner 的通用 provider/Actor lifecycle 源码片段，不搬运整套依赖、
+   Node↔Python RPC、Android runtime、第二 planner 或应用策略；
+2. 候选必须先在至少两个不同任务族用外部 oracle 提高完整成功率，并在同一提交删除被替代
+   owner，才允许进入主线；
 3. connector 已按同一 Actor 的通用工具落位；未来加入 shell 或外部 mutation 时也
    必须复用同一选择面，仍不增加 profiler、关键词 router、前端开关或第二 planner。
 
@@ -213,6 +213,10 @@ PR #45/#46 均由提升后的 `master` 取代。
 输入保存。每个独有能力先在当前 `master` 构造随机失败样本，只提取最小 owner，并在
 至少两个任务族上用外部 oracle 复验。没有实质收益、只补当前模型精度、扩大
 prompt/state 或不能删除旧 owner 的候选一律丢弃。不能为恢复历史整体 merge 归档树。
+2026-08-01 再次从本地 heads、`origin` heads、GitHub branches API、默认分支和 worktree
+五处复核：开发分支只剩 `master`，开放 PR 为零。两条本地 recovery 独有 tip 先保存为
+`archive/c4-canonical-from-d418-local-20260801` 与
+`archive/c4-fa2e9caf-local-20260801` 注释 tag，再删除所有剩余本地历史分支；tag 不是新分支。
 
 ## 迁移验证记录
 
@@ -279,7 +283,24 @@ stale/non-current run 和未启动 terminal 都有机械合同。服务端有界
 桌面 Turn 只在 Actor 请求后隐藏并在终态自行恢复。两次一次性 provider
 `Connection error` 经普通用户原样重发成功，失败 Turn 未污染历史。该迁移切片为
 生产 `+1372/-155`，比预估大，所以下一轮冻结生产改动，只用至少 20 Turn、两个原生
-任务族的随机交错矩阵验证长时收益。当前剩余迁移边界是 Thread 跨服务重启持久化、
-pause 与 waiting lease 的真实 E2E、长历史下 connector 选择压力、provisional native
+任务族的随机交错矩阵验证长时收益。Thread 跨服务重启的最小有界 checkpoint 已在 13.26
+用聊天连续性与 connector→Notepad 两族通过，不再是未实现边界。当前剩余迁移边界是
+pause 与 waiting lease 的真实 E2E、长历史下 connector/GUI 选择压力、provisional native
 model protocol 的真实凭据验收，以及未来把 shell/外部 mutation 与 GUI 同时交给同一
 模型；它们都不得通过预分类器实现。
+
+13.26 的当前源码受控矩阵为 `6/10`：随机试卷 `6/6`，precise/ordered click、drag、slider、
+dynamic hold 通过，四个 corridor 失败。模型原始折线、canonical 参数和 physical attempt
+逐点一致，可信浏览器 oracle 记录路径出界，因此不修改坐标 Runtime。Calculator `43×17`、
+Paint 井字棋、QQ 群摘要与网易云播放/音量也分别由应用外部状态判失败；首分歧仍是模型按键/
+几何、未批准工具或错误 connector schema。测试侧只保留每次导航前重新聚焦、真实应用 oracle
+不被单次截图异常抹掉，以及冷启动托管服务 readiness `30s→120s`；没有加入应用 adapter、
+提示教学、重复动作或答案修正。
+
+正常标题栏关闭后，全新的 Electron 与服务进程已恢复同一 Thread、旧消息、精确有界模型历史，
+并继续完成随机 marker 回忆和 connector→Notepad 外部文件任务；未发送草稿也在不创建 run 的
+前提下逐字恢复。前者报告为
+`output/playwright/client-thread-restart-e2e/20260801-194535-thread-restart/report.json`，后者为
+`output/playwright/client-draft-restart-e2e/20260801-170711-draft-restart/report.json`。checkpoint
+仍由既有 `AgentThreadStore` 唯一拥有，只保存最近成功的 12 条/16 KiB 文本交换和已完成投影，
+不新增模型角色、摘要或长期 memory。

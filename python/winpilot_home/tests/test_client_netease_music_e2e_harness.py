@@ -294,6 +294,27 @@ def test_current_run_fallback_must_match_the_submitted_goal():
     assert (run_id, job_id) == ("", "")
 
 
+def test_transient_capture_error_does_not_erase_the_last_player_verdict():
+    harness = _load_harness()
+    oracle = object.__new__(harness.NetEaseWindowOracle)
+    oracle._last_verdict = {
+        "source": harness.ORACLE_SOURCE,
+        "passed": False,
+        "status": "observing",
+        "volume_matches": True,
+    }
+    oracle._last_probe_error = "RuntimeError: target lost foreground"
+
+    verdict = oracle.final_verdict()
+
+    assert verdict["status"] == "observing"
+    assert verdict["volume_matches"] is True
+    assert verdict["last_probe_error"] == (
+        "RuntimeError: target lost foreground"
+    )
+    assert verdict["passed"] is False
+
+
 def test_harness_wires_visible_handoff_and_independent_probe(monkeypatch, tmp_path):
     harness = _load_harness()
     calls = {}

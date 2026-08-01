@@ -140,6 +140,15 @@ async def _lifespan(_app: FastAPI):
         TRACES_DIR,
         mark_incomplete_interrupted=True,
     )
+    try:
+        restored_threads = AGENT_THREADS.load_checkpoint()
+        if restored_threads:
+            logger.info(
+                "Restored %s bounded Agent Thread continuations",
+                restored_threads,
+            )
+    except AgentThreadError as exc:
+        logger.warning("Agent Thread continuation was not restored: %s", exc)
     _warm_perception_dimensions()
     _start_scheduler_thread()
     try:
@@ -623,14 +632,38 @@ class AutomationIrRunRequest(BaseModel):
 
 
 # ----------------------------------------------------------------- endpoints
+def _thread_result_projection(
+    projection: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if projection is None:
+        return None
+    completed = AGENT_THREADS.completed_run(str(projection.get("run_id") or ""))
+    if completed is None:
+        return projection
+    restored = dict(projection)
+    restored.update({
+        "goal": completed["goal"],
+        "status": completed["status"],
+        "result": completed["result"],
+        "error": "",
+        "phase": "terminal",
+        "manual_paused": False,
+        "current_node_id": None,
+        "current_tool": None,
+        "updated_at": completed["updated_at"],
+        "finished_at": completed["updated_at"],
+    })
+    return restored
+
+
 def _current_run_projection() -> dict[str, Any] | None:
     """Prefer the active parent ARP over an unbound child event projection."""
     execution = ARP_RUNS.current()
     if execution and execution.status.value in {"queued", "running", "paused"}:
         parent = RUN_PROJECTIONS.get(execution.run_id)
         if parent is not None:
-            return parent
-    return RUN_PROJECTIONS.current()
+            return _thread_result_projection(parent)
+    return _thread_result_projection(RUN_PROJECTIONS.current())
 
 
 @app.post("/api/chat")
@@ -788,7 +821,11 @@ def platform_capabilities() -> dict[str, Any]:
 
 @app.get("/api/v2/runs")
 def platform_runs(limit: int = 50) -> dict[str, Any]:
-    return {"ok": True, "runs": RUN_PROJECTIONS.list(max(1, min(limit, 200)))}
+    runs = RUN_PROJECTIONS.list(max(1, min(limit, 200)))
+    return {
+        "ok": True,
+        "runs": [_thread_result_projection(run) for run in runs],
+    }
 
 
 @app.get("/api/v2/jobs")
@@ -879,7 +916,7 @@ def platform_current_run() -> dict[str, Any]:
 
 @app.get("/api/v2/runs/{run_id}")
 def platform_run(run_id: str) -> dict[str, Any]:
-    projection = RUN_PROJECTIONS.get(run_id)
+    projection = _thread_result_projection(RUN_PROJECTIONS.get(run_id))
     arp = ARP_RUNS.get(run_id)
     if not projection and not arp:
         raise HTTPException(404, "run not found")

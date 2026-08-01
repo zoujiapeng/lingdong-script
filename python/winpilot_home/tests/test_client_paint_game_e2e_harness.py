@@ -314,6 +314,27 @@ def test_red_x_must_remain_stable_for_the_configured_frame_count():
     assert third["stable_frame_count"] == 3
 
 
+def test_transient_capture_error_does_not_erase_the_last_pixel_verdict():
+    harness = _load_paint_harness()
+    oracle = object.__new__(harness.PaintWindowOracle)
+    oracle._last_verdict = {
+        "source": harness.ORACLE_SOURCE,
+        "passed": False,
+        "status": "observing",
+        "red_pixels_inside_expected_cell": 17,
+    }
+    oracle._last_probe_error = "RuntimeError: target lost foreground"
+
+    verdict = oracle.final_verdict()
+
+    assert verdict["status"] == "observing"
+    assert verdict["red_pixels_inside_expected_cell"] == 17
+    assert verdict["last_probe_error"] == (
+        "RuntimeError: target lost foreground"
+    )
+    assert verdict["passed"] is False
+
+
 def test_client_wait_can_accept_independent_success_while_run_is_active():
     harness = _load_script(
         "client_e2e_run_paint_probe_test",

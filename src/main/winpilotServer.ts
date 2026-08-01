@@ -181,7 +181,7 @@ export function waitReady(
   port: number,
   options: RuntimeReadinessProbeOptions = {},
 ): Promise<void> {
-  const timeoutMs = options.timeoutMs ?? 30000;
+  const timeoutMs = options.timeoutMs ?? 120000;
   const requestTimeoutMs = options.requestTimeoutMs ?? 2000;
   const retryDelayMs = options.retryDelayMs ?? 400;
   const deadline = Date.now() + timeoutMs;

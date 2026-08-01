@@ -810,6 +810,7 @@ class ElectronClientDriver:
             time.sleep(0.2)
 
     def navigate(self, title: str) -> None:
+        self.restore_and_focus()
         self.button(title, timeout=5.0).Click()
         time.sleep(0.8)
 

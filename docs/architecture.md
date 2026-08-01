@@ -138,8 +138,10 @@ Agent 的普通工具加入同一轮选择；`execution_medium` 只描述实际�
 Thread 同时最多有一个活动 Turn。历史只保留最近成功且有用户可见结果的原生
 `user/assistant` 文本交换：最多 12 条消息、16 KiB；失败、取消、空结果和内部证据
 不进入下一轮。新建对话显式丢弃客户端 thread；这不是长期 memory，也没有 summarizer
-或第二个 conversation model。当前 Thread Store 只在服务进程内存中存在，运行时
-重启后旧 `thread_id` 会失效，这是尚未完成的持久化边界。
+或第二个 conversation model。`AgentThreadStore` 把最多 100 个 Thread 的同一有界成功
+投影原子写入进程私有 checkpoint；启动时严格校验并恢复原 `thread_id`、最近成功结果与
+原生消息。失败/取消/空结果、视觉帧、connector 正文、trace 正文和未完成 run 不写入，
+损坏或超限 checkpoint fail closed。它只延续短会话，不承担长期记忆或语义总结。
 
 `DesktopLeaseSlot` 是一次性的机械交接状态机。Actor 请求后状态进入
 `waiting`，Electron 让出前台并提交精确 `run_id + lease_id + target`，服务端验证后
@@ -175,7 +177,7 @@ StageRuntime 是旧 Task Contract/TASK_STAGE 链的阶段生命周期 owner：�
 
 | Owner | 唯一职责 | 明确禁止 |
 | --- | --- | --- |
-| `AgentThreadStore` | 保存有界成功 Turn 文本并绑定 run 终态 | 长期记忆、语义总结、执行选择 |
+| `AgentThreadStore` | 保存并恢复有界成功 Turn 文本与已完成 run 投影 | 长期记忆、语义总结、执行选择 |
 | `LiveVisualActor` | 理解完整目标和当前 JPEG，选择一笔工具调用 | 物理输入、应用脚本、第二角色委派 |
 | `ConnectorGateway` | 有界发现显式 MCP，并把只读调用结果及 receipt 返回同一 Actor | 服务专属 adapter、任务路由、外部写入授权 |
 | `DesktopLeaseSlot` + Electron handoff | 精确配对桌面让出、target 交付和窗口恢复 | 按任务词预租约、替模型决定是否用 GUI |

@@ -428,6 +428,26 @@ describe('primary agent surface', () => {
     expect(localStorage.getItem('arp-last-goal')).toBe('Keep this exact request');
   });
 
+  it('restores an unsent draft after the client remounts', async () => {
+    const user = userEvent.setup();
+    const first = render(<AgentCockpit plane={cockpitPlane() as never} />);
+
+    await user.type(
+      screen.getByRole('textbox'),
+      'Unsent exact draft',
+    );
+    await waitFor(() => {
+      expect(localStorage.getItem('arp-last-goal')).toBe('Unsent exact draft');
+    });
+
+    first.unmount();
+    render(<AgentCockpit plane={cockpitPlane() as never} />);
+
+    expect(screen.getByRole('textbox')).toHaveValue(
+      'Unsent exact draft',
+    );
+  });
+
   it('restores a failed submission draft without clearing it during run hydration', () => {
     localStorage.setItem('arp-last-goal', 'Recover this failed submission');
     localStorage.setItem('arp-agent-thread-run-ids', JSON.stringify({
