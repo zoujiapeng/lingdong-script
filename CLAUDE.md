@@ -1,8 +1,8 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-08-01。当前唯一产品分支是 `master`；本轮开始时最近完成可见客户端
-> 证据和本地全量验证的固定产品基线为 `4f936728a6d7dcf76ac1c34033733a6cd3a95f74`。
-> 这不是本文件的永久 HEAD 标记；接手时必须现场运行 `git rev-parse HEAD` 与
+> 最后核对：2026-08-01。当前唯一产品分支是 `master`；本轮治理、产品命名与 test-only
+> CI fixture 收口截至固定提交 `65fdce0c0f575b7bf5e2e273cab2722db09a9f95`，完整证据见
+> 13.25。这不是本文件的永久 HEAD 标记；接手时必须现场运行 `git rev-parse HEAD` 与
 > `git rev-parse origin/master`。13.20–13.25 已进入主线；不要用更早的提交说明覆盖
 > Thread/Turn、按需桌面租约、通用 connector、history-depth 证据或 provisional
 > native-provider 边界。
@@ -39,9 +39,11 @@
   `archive/pr10-vnext-agent-core-20260726` 保存，PR15 证据由
   `evidence/pr15-legacy-electron-oracle-20260726` 保存；这些 tag 只作只读恢复输入，
   不得继续开发或整体 merge。
-- `4f93672` 的最新 GitHub Actions run `30663041917` 因账户 billing/spending limit 在
-  Python 与 frontend job 均为零步骤时终止。当前没有可引用的 GitHub Actions 绿色结果；
-  本地回归是独立证据，不能冒充 Actions 已通过。
+- `4f93672` 的 run `30663041917` 曾因账户 billing/spending limit 在 Python 与 frontend
+  job 均为零步骤时终止；它只能作为历史 infrastructure-blocked 记录。
+- `65fdce0` 的 GitHub Actions run `30688550071` 随后实际执行全部步骤，frontend 与 Python
+  job 均为 `success`。绿色结论只绑定该精确提交；接手时仍须重新查询实时 HEAD，不能用它
+  覆盖未来提交。
 - 后续正常开发直接提交到 `master`；不要再建立另一条长期产品分支。
 - 本地未跟踪 `CON` 属于用户，不能读取后擅自解释、暂存、删除、改名或覆盖。
 

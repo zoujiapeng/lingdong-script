@@ -36,7 +36,9 @@ invariants and client-entry contract.
 2026-08-01 产品 owner/config 从历史 canary 名称迁移为 `live_agent` 后，当前精确源码
 本地全量复验为 Python `3468 passed, 13 skipped, 1 warning`、renderer `243 passed`，
 TypeScript typecheck 通过；可见 Electron 的 fresh/history 双臂、6 轮纯文本聊天与随后
-connector→Notepad 任务也全部通过。该记录仍是本地证据，不代表 GitHub Actions 绿色。
+connector→Notepad 任务也全部通过。test-only CI fixture 收口提交 `65fdce0` 的 Actions
+run `30688550071` 又实际执行并通过 frontend、Python 两个 job；这是该精确提交的远端
+绿色证据，未来 HEAD 必须重新查询。
 
 2026-07-31 受控矩阵与原生探针记录已复验一组真实消费软件。当前源码仍未完成 11 个真实
 任务和混合长任务的全量验收；每个结果按它实际拥有的 oracle 单独记账：
