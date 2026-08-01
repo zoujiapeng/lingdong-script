@@ -2132,3 +2132,102 @@ marker 的成功 Thread，正常关闭并重启 Electron 与托管服务，再�
 提交仍绑定原 Thread、模型能从恢复历史精确回答 marker。先测出进程内 Thread Store 与
 stale thread id 的真实分歧，再决定是否需要替换 owner；不得预先增加持久化、自动新建
 Thread、router 或提示词。
+
+### 13.26 有界会话重启与未发送草稿通过；全量探针继续按首分歧归因
+
+本轮先执行 13.25 冻结的正常重启实验。失败基线
+`output/playwright/client-thread-restart-e2e/20260801-153038-thread-restart/report.json`
+在正常标题栏关闭、重新启动 Electron 与托管服务后得到旧 `thread_id` 404；首分歧明确在
+服务端 Thread 连续性，不是模型、GUI 动作或应用状态。准入候选没有新增 memory owner，
+只让既有 `AgentThreadStore` 把最多 100 个 Thread 各自最近 6 个成功 Turn（12 条原生消息、
+总计最多 16 KiB）及已完成 run 投影原子写入被 Git 忽略的私有 checkpoint。失败、取消、
+空结果、活动 Turn、截图、connector 正文和 trace 正文均不写入；损坏、重复、超限或类型错误
+fail closed。写盘失败是 best-effort，不能阻断聊天。启动后仍由同一 owner 恢复原
+`thread_id`、成功结果和 provider history，不增加 summarizer、第二模型或执行选择。
+
+修复后的正式报告为
+`output/playwright/client-thread-restart-e2e/20260801-194535-thread-restart/report.json`：
+测试从可见前端用 Windows 键盘输入并以真实鼠标发送，正常关闭后观察到新的 Electron、
+服务 PID 与 HWND；旧消息重新可见，继续提交仍绑定同一 Thread，模型收到的两条历史消息
+内容/hash 精确，并正确回答随机 marker。随后同一恢复 Thread 自主选择只读 connector，
+再用 GUI 把随机字节精确写入 Notepad；connector receipt、物理键盘回执与外部文件 hash
+一致。聊天连续性与 connector→桌面文件是两个不同任务族，满足本轮最小 owner 准入门。
+紧邻它的 `20260801-194425-thread-restart` 在 Electron PID/HWND 均为 0、任何 run 尚未创建前
+被 Vite 探活阻断，严格记为测试干扰；同源码原样重跑后通过，未因此修改产品或放宽 oracle。
+
+客户端还修复一个同 owner 的确定性体验缺口：输入框内容变化时持续 best-effort 保存已有
+`arp-last-goal`，而不是只在执行时写入。未发送随机草稿在正常关闭/重启后逐字恢复且没有
+创建 run；成功发送和“新建对话”仍清除。可见 Electron 报告为
+`output/playwright/client-draft-restart-e2e/20260801-170711-draft-restart/report.json`。
+这不是长期 memory，也没有改变消息发送、窗口租约或模型 prompt。
+
+冷启动期间真实服务曾超过旧 30 秒 readiness，导致 Electron 把健康但仍在导入的托管服务
+判死。默认等待只在既有 Electron process owner 中从 30 秒放宽到 120 秒；同源码正常重启的
+两族 E2E 随后通过，因此保留。测试 runner 每次点击前重新聚焦被测前端，避免上一个桌面
+动作把焦点留在目标应用；Paint/网易云外部 oracle 只记录一次截图异常，不再用异常覆盖此前
+有效判定。后两项都只提高测试真实性，不改变生产 Agent。
+
+当前源码重新跑完整可见受控矩阵：
+`output/playwright/client-visual-e2e/20260801-183951-suite/suite-report.json`。结果为 `6/10`：
+随机试卷 `6/6`，precise click、ordered clicks、drag、slider 和 dynamic hold 通过；四个
+corridor 失败。四次失败的 raw model points、canonical points 与 physical attempt 逐点
+一致，可信浏览器 pointer path 的最小余量分别为 `-84/-92/-27/-94`，首分歧是模型视觉
+几何与停止，不修改坐标映射、path、提示或 Runtime。
+
+真实应用探针也全部保留失败：Calculator 随机 `43×17` 的应用显示为 `44` 而非 `731`，
+模型重复点击同一清除位置；Paint 只有 4 个红像素、没有任何合格对角线或中心红 X；QQ 群
+摘要在零 GUI 动作前因未批准工具结束；网易云在零 GUI 动作前选择 connector 元工具并提交
+错误 schema，歌曲播放和 5% 音量均未成立。对应正式报告位于
+`output/playwright/client-e2e/20260801-185226-calculator-random-43x17/report.json`、
+`output/playwright/client-paint-game-e2e/20260801-190517-paint-tic-tac-toe/paint-report.json`、
+`output/playwright/client-qq-groups-e2e/20260801-190819-qq-groups/qq-groups-report.json` 与
+`output/playwright/client-netease-music-e2e/20260801-191108-netease-music/netease-music-report.json`。
+这些都属于模型参数、模态/工具选择或停止失败；没有应用 adapter、router、答案修正、重复
+点击规则或软件 prompt 准入。
+
+一次 6-Turn history-depth A/B 没有形成有效 pair：history 目标错误申请桌面，fresh
+connector 目标也没有调用 connector。因此报告
+`output/playwright/client-thread-connector-e2e/20260801-180756-history-depth-ab/report.json`
+只证明观测链工作，不能证明 history 正负因果。usage 共 `8803` prompt tokens，其中
+`6336` cache hit、`2467` miss；上游自动前缀缓存真实生效，但项目仍没有 Reasonix 式手工
+cache key，也不为省钱恢复无界历史。第 6 轮 prompt 上升到 `4911`，说明模型上下文压力
+值得继续测，不能先删历史或增加摘要模型。
+
+仓库治理同时从五处复核并收口：本地 heads、`origin` heads、GitHub branches API 和默认
+分支都只剩 `master`，只有一个 worktree，开放 PR 为零。两条本地 recovery 独有 tip 先保存为
+`archive/c4-canonical-from-d418-local-20260801` 与
+`archive/c4-fa2e9caf-local-20260801` 注释 tag，再删除所有剩余本地历史分支；tag 只作只读
+恢复输入，不是开发分支。开放 Issue 保持 #11、#39、#40、#43、#44，不因单次样本关闭。
+
+生产代码切片为 `+275/-21`：`AgentThreadStore/server +265/-19`、Electron readiness
+`+1/-1`、未发送草稿 `+9/-1`。系统提示、模型角色、Runtime 工具面、视觉执行线、坐标/
+按键实现与 connector schema 均为 `+0/-0`。E2E runner 为 `+773/-16`，自动化测试为
+`+344/-0`。只读审查发现并在发布前修复三个 checkpoint 健壮性问题：删除空 Thread 的同步
+写盘、跳过无成功历史的 Thread、把非字符串 status 统一拒绝为 `AgentThreadError`；同时让
+恢复成功投影清除 paused/current node/current tool，避免矛盾终态。
+
+完整本地发布门为 WinPilot `3478 passed, 13 skipped, 1 warning`、根测试 `2508 passed`、
+renderer `244 passed`、TypeScript typecheck、renderer/Electron build 与 CLI/AI build
+全部通过；checkpoint 审查修复后的聚焦测试为 `9 passed`。GitHub 绿色状态必须绑定发布后的
+精确 SHA 单独查询，不能继承先前提交。
+
+本轮保留：有界私有 continuation checkpoint、精确 terminal 恢复投影、未发送草稿、120 秒
+冷启动 readiness、runner 每次导航前聚焦和不抹除有效 oracle 的瞬时错误记录。负优化并已
+回退：把“查看运行时状态”改成泛化的“打开资料”（审查证明语义更弱）、driver 启动后固定
+等待（造成 468 秒 renderer churn）、为多行草稿补 Shift+Enter 键盘规则，以及任何根据上述
+失败修改 Runtime 的候选。
+
+新架构仍是一个原始 goal、一个 `LiveVisualActor`、一条视觉执行线和小型通用工具面。
+checkpoint 位于已有 Thread owner，没有新 planner；模型继续承担意图、聊天/connector/GUI
+模态选择、视觉几何、自纠错与停止，职责很多、压力高，但这些正是不可用预分类器替代的
+语义职责。当前模型在 corridor、算术、QQ/网易云工具选择上的失败不应下沉到机械层。
+
+Pi/Operit 源码计划不变：不安装整套 Pi、不引入 Node↔Python RPC、Android runtime、第二
+模型或长期双写。只审查能够整体替换并删除现有 provider/Actor lifecycle owner 的通用片段；
+必须在至少两个不同任务族的外部 oracle E2E 中提高完整成功率后才准入。
+
+下一轮唯一最高价值实验仍为 test-only：做多次、反序的 history/fresh 配对。每个历史臂先
+从真实前端完成若干随机聊天，正常重启恢复同一 Thread，再分别执行一个随机只读 connector
+任务和一个简单桌面文件任务；严格记录实际 provider history、usage/cache、工具选择与外部
+oracle。只有形成有效重复 pair，才判断有界连续性是否在长对话下压低自主工具选择成功率；
+本轮不再增加生产代码。

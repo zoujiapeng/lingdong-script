@@ -851,6 +851,7 @@ class NetEaseWindowOracle:
             "passed": False,
             "status": "not_started",
         }
+        self._last_probe_error = ""
 
     def _validate_target(self) -> None:
         current = _window_identity(self.hwnd)
@@ -900,6 +901,7 @@ class NetEaseWindowOracle:
         verdict["status"] = "baseline_ready"
         verdict["passed"] = False
         self._last_verdict = verdict
+        self._last_probe_error = ""
         _write_json(self.output_dir / "oracle.json", verdict)
         return verdict
 
@@ -951,21 +953,24 @@ class NetEaseWindowOracle:
                 verdict = self._observe_once(run_id)
             return dict(verdict)
         except Exception as error:
+            self._last_probe_error = f"{type(error).__name__}: {error}"
             verdict = {
                 "source": ORACLE_SOURCE,
                 "passed": False,
                 "status": "capture_error",
                 "run_id": run_id,
-                "error": f"{type(error).__name__}: {error}",
+                "error": self._last_probe_error,
                 "target": self.identity,
             }
-            self._last_verdict = verdict
-            _write_json(self.output_dir / "oracle.json", verdict)
             return verdict
 
     def final_verdict(self) -> dict[str, Any]:
         verdict = dict(self._last_verdict)
         verdict.setdefault("source", ORACLE_SOURCE)
+        if self._last_probe_error:
+            verdict["last_probe_error"] = self._last_probe_error
+            if verdict.get("status") in {"not_started", "baseline_ready"}:
+                verdict["status"] = "capture_error"
         verdict["passed"] = verdict.get("passed") is True
         return verdict
 

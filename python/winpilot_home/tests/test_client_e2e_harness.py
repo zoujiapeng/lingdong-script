@@ -271,6 +271,21 @@ def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
     ]
 
 
+def test_navigation_reasserts_the_client_foreground_before_click(monkeypatch):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    events = []
+    driver.restore_and_focus = lambda: events.append("focus")
+    driver.button = lambda title, timeout=0.0: SimpleNamespace(
+        Click=lambda: events.append(("click", title, timeout)),
+    )
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    driver.navigate("destination")
+
+    assert events == ["focus", ("click", "destination", 5.0)]
+
+
 def test_trace_snapshot_tracks_outer_arp_jsonl_files_not_artifact_directories(
     monkeypatch,
     tmp_path,

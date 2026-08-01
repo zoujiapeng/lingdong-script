@@ -1159,6 +1159,15 @@ export function AgentCockpit({
   }, [modelMenuOpen]);
 
   useEffect(() => {
+    try {
+      if (goal) localStorage.setItem('arp-last-goal', goal);
+      else localStorage.removeItem('arp-last-goal');
+    } catch {
+      // A storage failure must not make the composer unusable.
+    }
+  }, [goal]);
+
+  useEffect(() => {
     const field = composerInputRef.current;
     if (!field) return;
     const maxHeight = showFollowupComposer ? 196 : 236;
@@ -1269,7 +1278,6 @@ export function AgentCockpit({
     setActionError('');
     followConversationTail.current = true;
     try {
-      localStorage.setItem('arp-last-goal', goal.trim());
       const started = await plane.startGoal(
         goal.trim(),
         threadState.threadId,

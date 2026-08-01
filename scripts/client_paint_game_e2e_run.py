@@ -568,6 +568,7 @@ class PaintWindowOracle:
             "passed": False,
             "status": "not_started",
         }
+        self._last_probe_error = ""
 
     def _validate_target(self) -> None:
         current = _window_identity(self.hwnd)
@@ -672,6 +673,7 @@ class PaintWindowOracle:
                 }
             )
             self._save_observation(image, mask, verdict)
+            self._last_probe_error = ""
             # Once a complete X appears, collect the remaining stability frames
             # while Paint is still visibly foreground. This also catches a
             # runtime that reaches terminal immediately after its drawing input.
@@ -697,22 +699,25 @@ class PaintWindowOracle:
                 self._save_observation(image, mask, verdict)
             return dict(verdict)
         except Exception as error:
+            self._last_probe_error = f"{type(error).__name__}: {error}"
             verdict = {
                 "source": ORACLE_SOURCE,
                 "passed": False,
                 "status": "capture_error",
                 "run_id": str(context.get("run_id") or ""),
-                "error": f"{type(error).__name__}: {error}",
+                "error": self._last_probe_error,
                 "target": self.identity,
                 **self._bbox_evidence(),
             }
-            self._last_verdict = verdict
-            _write_json(self.output_dir / "oracle.json", verdict)
             return verdict
 
     def final_verdict(self) -> dict[str, Any]:
         verdict = dict(self._last_verdict)
         verdict.setdefault("source", ORACLE_SOURCE)
+        if self._last_probe_error:
+            verdict["last_probe_error"] = self._last_probe_error
+            if verdict.get("status") in {"not_started", "baseline_ready"}:
+                verdict["status"] = "capture_error"
         verdict["passed"] = verdict.get("passed") is True
         return verdict
 

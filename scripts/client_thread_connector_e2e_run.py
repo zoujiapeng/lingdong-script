@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -50,6 +51,12 @@ ELECTRON_EXE = WORKSPACE / "node_modules" / "electron" / "dist" / "electron.exe"
 VITE_SCRIPT = WORKSPACE / "node_modules" / "vite" / "bin" / "vite.js"
 TSC_SCRIPT = WORKSPACE / "node_modules" / "typescript" / "bin" / "tsc"
 DEFAULT_OUTPUT = WORKSPACE / "output" / "playwright" / "client-thread-connector-e2e"
+DEFAULT_RESTART_OUTPUT = (
+    WORKSPACE / "output" / "playwright" / "client-thread-restart-e2e"
+)
+DEFAULT_DRAFT_RESTART_OUTPUT = (
+    WORKSPACE / "output" / "playwright" / "client-draft-restart-e2e"
+)
 FIXTURE_KEY = "verification"
 ORACLE_SOURCE = "append_only_connector_and_server_thread_oracle"
 
@@ -82,6 +89,27 @@ CHAT_PROMPTS = (
 
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _history_projection_sha256(messages: list[dict[str, str]]) -> str:
+    projection = [
+        {
+            "role": str(message.get("role") or ""),
+            "chars": len(str(message.get("content") or "")),
+            "content_sha256": _sha256_text(
+                str(message.get("content") or "")
+            ),
+        }
+        for message in messages
+    ]
+    return _sha256_text(
+        json.dumps(
+            projection,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def connector_read_task(server_name: str) -> str:
@@ -486,6 +514,57 @@ def _runtime_json(
     return value
 
 
+def _thread_lookup_evidence(
+    driver: client_harness.ElectronClientDriver,
+    thread_id: str,
+) -> dict[str, Any]:
+    """Read only the bounded Thread identity/order needed by this test."""
+
+    path = f"/api/v2/threads/{urllib.parse.quote(thread_id, safe='')}"
+    request = urllib.request.Request(
+        f"{driver._runtime_url}{path}",  # noqa: SLF001 - test-only audit channel
+        headers={
+            "Authorization": (
+                f"Bearer {driver._runtime_token}"  # noqa: SLF001
+            )
+        },
+    )
+    status = 0
+    detail = ""
+    payload: dict[str, Any] = {}
+    try:
+        with urllib.request.urlopen(request, timeout=10.0) as response:
+            status = int(response.status)
+            value = json.load(response)
+            payload = value if isinstance(value, dict) else {}
+    except urllib.error.HTTPError as error:
+        status = int(error.code)
+        try:
+            value = json.loads(error.read().decode("utf-8"))
+            detail = str(
+                value.get("detail") if isinstance(value, dict) else value
+            )
+        except Exception:
+            detail = str(error.reason or error)
+    except Exception as error:
+        detail = f"{type(error).__name__}: {error}"
+    thread = payload.get("thread")
+    thread = thread if isinstance(thread, dict) else {}
+    turns = [
+        item for item in thread.get("turns") or []
+        if isinstance(item, dict)
+    ]
+    return {
+        "source": "server_owned_thread_lookup",
+        "found": status == 200 and bool(thread),
+        "status": status,
+        "thread_id": str(thread.get("thread_id") or thread_id),
+        "turn_count": len(turns),
+        "run_ids": [str(item.get("run_id") or "") for item in turns],
+        "detail": detail,
+    }
+
+
 def thread_evidence(
     driver: client_harness.ElectronClientDriver,
     result: dict[str, Any],
@@ -639,6 +718,11 @@ def _run_thread_case(
         dict[str, Any] | None,
     ]
     | None = None,
+    after_submit: Callable[
+        [client_harness.ElectronClientDriver, dict[str, Any]],
+        dict[str, Any] | None,
+    ]
+    | None = None,
     require_thread_result: bool = True,
 ) -> dict[str, Any]:
     driver_box: dict[str, client_harness.ElectronClientDriver] = {}
@@ -678,6 +762,9 @@ def _run_thread_case(
 
     # The base harness prints its full local diagnostic report, which may
     # contain the random connector value. Keep it in the private artifact tree.
+    case_options: dict[str, Any] = {}
+    if after_submit is not None:
+        case_options["after_submit"] = after_submit
     with contextlib.redirect_stdout(io.StringIO()):
         result = client_harness.run_case(
             name,
@@ -689,6 +776,7 @@ def _run_thread_case(
             independent_completion_probe=completion_probe,
             required_context_run_id=sequence.last_run_id,
             expected_client_identity=identity,
+            **case_options,
         )
     verdict = (result.get("task_verdict") or {}).get("thread") or {}
     if result.get("passed") is True:
@@ -895,6 +983,44 @@ def _workspace_vite_listener() -> dict[str, Any]:
     }
 
 
+def _ready_managed_runtime(
+    electron_process: subprocess.Popen[Any],
+) -> psutil.Process | None:
+    """Return the current managed service only after its status API responds."""
+
+    try:
+        children = psutil.Process(electron_process.pid).children(recursive=True)
+    except psutil.Error:
+        return None
+    for child in reversed(children):
+        try:
+            command = child.cmdline()
+            if not any(Path(arg).name.casefold() == "serve.py" for arg in command):
+                continue
+            port = next(
+                (
+                    int(arg)
+                    for arg in command
+                    if str(arg).isdigit() and 1024 <= int(arg) <= 65535
+                ),
+                0,
+            )
+            token = str(child.environ().get("WINPILOT_CONTROL_TOKEN") or "")
+            if not port or not token:
+                continue
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/status",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=1.0) as response:
+                if 200 <= int(response.status) < 300:
+                    return child
+        except (psutil.Error, OSError, ValueError, urllib.error.URLError):
+            continue
+    return None
+
+
 @dataclass
 class ManagedClient:
     process: subprocess.Popen[Any]
@@ -1005,9 +1131,14 @@ def launch_managed_client(
         )
         deadline = time.monotonic() + 150
         driver = None
+        runtime_process = None
         last_error = ""
         while time.monotonic() < deadline and process.poll() is None:
             try:
+                runtime_process = _ready_managed_runtime(process)
+                if runtime_process is None:
+                    time.sleep(0.25)
+                    continue
                 candidate = client_harness.ElectronClientDriver(
                     directory / "electron-bootstrap"
                 )
@@ -1020,15 +1151,6 @@ def launch_managed_client(
                 time.sleep(0.25)
         if driver is None:
             raise RuntimeError(f"managed Electron did not become ready: {last_error}")
-        runtime_process = None
-        for child in psutil.Process(process.pid).children(recursive=True):
-            try:
-                command = child.cmdline()
-            except psutil.Error:
-                continue
-            if any(Path(arg).name.casefold() == "serve.py" for arg in command):
-                runtime_process = child
-                break
         inherited = (
             str(runtime_process.environ().get("WINPILOT_MCP_CONFIG") or "")
             if runtime_process is not None
@@ -1052,6 +1174,108 @@ def launch_managed_client(
         if vite_log is not None:
             vite_log.close()
         raise
+
+
+def _close_managed_client_through_ui(
+    managed: ManagedClient,
+    *,
+    timeout_s: float = 30.0,
+) -> dict[str, Any]:
+    """Close Electron through its visible titlebar and observe service exit."""
+
+    service_pids: list[int] = []
+    try:
+        for child in psutil.Process(managed.process.pid).children(recursive=True):
+            try:
+                command = child.cmdline()
+            except psutil.Error:
+                continue
+            if any(Path(arg).name.casefold() == "serve.py" for arg in command):
+                service_pids.append(int(child.pid))
+    except psutil.Error:
+        pass
+    before = managed.driver.window_lifecycle_state()
+    error = ""
+    clicked = False
+    try:
+        managed.driver.restore_and_focus()
+        managed.driver.button("关闭窗口", timeout=5.0).Click()
+        clicked = True
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    while clicked and time.monotonic() < deadline:
+        if managed.process.poll() is not None:
+            break
+        time.sleep(0.2)
+    root_exited = managed.process.poll() is not None
+    service_exited = all(not psutil.pid_exists(pid) for pid in service_pids)
+    workspace_client_absent = not _workspace_electron_pids()
+    vite_preserved = bool(
+        managed.vite_process is None
+        or managed.vite_process.poll() is None
+    )
+    passed = bool(
+        clicked
+        and root_exited
+        and service_exited
+        and workspace_client_absent
+        and vite_preserved
+    )
+    return {
+        "source": "visible_electron_titlebar_close_and_process_oracle",
+        "passed": passed,
+        "clicked": clicked,
+        "before": before,
+        "electron_root_exited": root_exited,
+        "managed_service_pids": service_pids,
+        "managed_service_exited": service_exited,
+        "workspace_client_absent": workspace_client_absent,
+        "vite_preserved_for_restart": vite_preserved,
+        "error": error or ("" if passed else "managed client did not exit cleanly"),
+    }
+
+
+def _visible_conversation_evidence(
+    driver: client_harness.ElectronClientDriver,
+    *,
+    goal: str,
+    response: str,
+    timeout_s: float = 20.0,
+) -> dict[str, Any]:
+    """Verify restored messages through visible/UIA text, without publishing them."""
+
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    values: list[str] = []
+    error = ""
+    goal_visible = False
+    response_visible = False
+    while time.monotonic() <= deadline:
+        try:
+            values = [str(item) for item in driver.texts()]
+            goal_visible = any(goal in item for item in values)
+            response_visible = any(item.strip() == response for item in values)
+            if goal_visible and response_visible:
+                break
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        time.sleep(0.25)
+    proof = ""
+    try:
+        proof = driver.capture_window("post-restart-hydrated.png")
+    except Exception as exc:
+        error = error or f"{type(exc).__name__}: {exc}"
+    return {
+        "source": "visible_renderer_conversation_text",
+        "passed": bool(goal_visible and response_visible and not error),
+        "goal_visible": goal_visible,
+        "response_visible": response_visible,
+        "visible_text_count": len(values),
+        "goal_sha256": _sha256_text(goal),
+        "response_sha256": _sha256_text(response),
+        "proof": proof,
+        "error": error,
+    }
 
 
 def _notepad_windows() -> dict[int, int]:
@@ -1507,6 +1731,506 @@ def run_thread_connector_e2e(
                 and all(item.get("passed") is True for item in public_cases)
                 and len(sequence.run_ids) == len(public_cases)
                 and (int(chat_turns) < 3 or context_probe_passed)
+            ),
+            "finished_at": datetime.now().astimezone().isoformat(),
+        }
+    report_path = suite_dir / "report.json"
+    _write_json(report_path, report)
+    report["report"] = str(report_path)
+    return report
+
+
+def run_thread_restart_e2e(
+    *,
+    output_root: Path,
+    timeout: int = 180,
+    include_notepad: bool = True,
+) -> dict[str, Any]:
+    """Exercise one visible frontend Thread across Electron/service restart."""
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suite_dir = output_root / f"{timestamp}-thread-restart"
+    private_dir = suite_dir / "private"
+    private_dir.mkdir(parents=True, exist_ok=True)
+    sequence = ThreadSequence()
+    marker = f"restart_{secrets.token_hex(6)}"
+    introduction = f"请记住这个随机会话标记：{marker}。只回复这个标记。"
+    recall = "我刚才让你记住的随机会话标记是什么？只回复标记。"
+    expected_history_sha256 = _history_projection_sha256(
+        [
+            {"role": "user", "content": introduction},
+            {"role": "assistant", "content": marker},
+        ]
+    )
+    first: ManagedClient | None = None
+    second: ManagedClient | None = None
+    first_case: dict[str, Any] = {}
+    recall_case: dict[str, Any] = {}
+    desktop_case: dict[str, Any] = {}
+    first_text_only: dict[str, Any] = {"passed": False}
+    recall_text_only: dict[str, Any] = {"passed": False}
+    history_projection: dict[str, Any] = {"passed": False}
+    initial_lookup: dict[str, Any] = {"found": False, "status": 0}
+    restart_lookup: dict[str, Any] = {"found": False, "status": 0}
+    final_lookup: dict[str, Any] = {"found": False, "status": 0}
+    visible_history: dict[str, Any] = {"passed": False}
+    close_evidence: dict[str, Any] = {"passed": False}
+    first_idle: dict[str, Any] = {"passed": False}
+    first_runtime: dict[str, Any] = {}
+    second_runtime: dict[str, Any] = {}
+    restart_admission: dict[str, Any] = {
+        "accepted": False,
+        "visible_thread_not_found": False,
+    }
+    first_pid = 0
+    second_pid = 0
+    first_hwnd = 0
+    second_hwnd = 0
+    failure = ""
+    with tempfile.TemporaryDirectory(
+        prefix="thread-restart-runtime-",
+        dir=str(suite_dir),
+    ) as temp_name:
+        fixture = build_fixture_environment(Path(temp_name))
+        try:
+            first = launch_managed_client(
+                private_dir / "managed-client-1",
+                fixture,
+            )
+            first_pid = int(first.identity.pid)
+            first_hwnd = int(first.identity.hwnd)
+            first.driver.wait_for_runtime_ready()
+            first_runtime = stable_runtime_identity(first.driver)
+            first_result = _run_thread_case(
+                "marker-introduction",
+                introduction,
+                output_root=private_dir / "client-1",
+                identity=first.identity,
+                sequence=sequence,
+                timeout=timeout,
+                expected_result=marker,
+            )
+            first_case = _public_case(first_result)
+            first_text_only = history_text_only_evidence(first_result, fixture)
+            first_case["text_only_evidence"] = first_text_only
+            if first_result.get("passed") is not True:
+                raise RuntimeError("initial visible marker turn failed")
+            if first_text_only.get("passed") is not True:
+                raise RuntimeError("initial marker turn was not text-only")
+            initial_lookup = _thread_lookup_evidence(
+                first.driver,
+                sequence.thread_id,
+            )
+            if (
+                initial_lookup.get("found") is not True
+                or initial_lookup.get("run_ids") != sequence.run_ids
+            ):
+                raise RuntimeError("initial server Thread snapshot is incomplete")
+            first_idle = _wait_for_runtime_idle(first.driver)
+            if first_idle.get("passed") is not True:
+                raise RuntimeError("initial runtime did not become idle")
+            close_evidence = _close_managed_client_through_ui(first)
+            if close_evidence.get("passed") is not True:
+                raise RuntimeError("visible Electron close did not stop its service")
+
+            second = launch_managed_client(
+                private_dir / "managed-client-2",
+                fixture,
+            )
+            second_pid = int(second.identity.pid)
+            second_hwnd = int(second.identity.hwnd)
+            second.driver.wait_for_runtime_ready()
+            second_runtime = stable_runtime_identity(second.driver)
+            visible_history = _visible_conversation_evidence(
+                second.driver,
+                goal=introduction,
+                response=marker,
+            )
+            restart_lookup = _thread_lookup_evidence(
+                second.driver,
+                sequence.thread_id,
+            )
+
+            def observe_restart_admission(
+                driver: client_harness.ElectronClientDriver,
+                result: dict[str, Any],
+            ) -> dict[str, Any]:
+                previous_run_id = sequence.last_run_id
+                deadline = time.monotonic() + 15.0
+                last_status: dict[str, Any] = {}
+                visible_error = False
+                while time.monotonic() <= deadline:
+                    try:
+                        last_status = driver.runtime_status()
+                    except Exception:
+                        last_status = {}
+                    current = last_status.get("current_run")
+                    current = current if isinstance(current, dict) else {}
+                    current_run_id = str(current.get("run_id") or "")
+                    if current_run_id and current_run_id != previous_run_id:
+                        evidence = {
+                            "source": "visible_submit_and_runtime_admission",
+                            "accepted": True,
+                            "run_id": current_run_id,
+                            "visible_thread_not_found": False,
+                        }
+                        result["restart_admission"] = evidence
+                        return evidence
+                    try:
+                        visible_error = any(
+                            "thread not found" in str(item).casefold()
+                            for item in driver.texts()
+                        )
+                    except Exception:
+                        visible_error = False
+                    if visible_error:
+                        proof = ""
+                        try:
+                            proof = driver.capture_window(
+                                "restart-admission-rejected.png"
+                            )
+                        except Exception:
+                            pass
+                        evidence = {
+                            "source": "visible_submit_and_runtime_admission",
+                            "accepted": False,
+                            "run_id": "",
+                            "visible_thread_not_found": True,
+                            "proof": proof,
+                        }
+                        result["restart_admission"] = evidence
+                        raise RuntimeError(
+                            "visible frontend rejected original Thread: "
+                            "thread not found"
+                        )
+                    time.sleep(0.2)
+                evidence = {
+                    "source": "visible_submit_and_runtime_admission",
+                    "accepted": False,
+                    "run_id": "",
+                    "visible_thread_not_found": visible_error,
+                    "error": "no admission or visible rejection within 15 seconds",
+                }
+                result["restart_admission"] = evidence
+                raise RuntimeError(evidence["error"])
+
+            recall_result = _run_thread_case(
+                "marker-recall-after-restart",
+                recall,
+                output_root=private_dir / "client-2",
+                identity=second.identity,
+                sequence=sequence,
+                timeout=timeout,
+                expected_result=marker,
+                after_submit=observe_restart_admission,
+            )
+            restart_admission = dict(
+                recall_result.get("restart_admission") or restart_admission
+            )
+            recall_case = _public_case(recall_result)
+            recall_case["restart_admission"] = restart_admission
+            if (recall_result.get("result") or {}).get("run_id"):
+                recall_text_only = history_text_only_evidence(
+                    recall_result,
+                    fixture,
+                )
+                history_projection = read_history_projection_evidence(
+                    fixture,
+                    run_id=str(
+                        (recall_result.get("result") or {}).get("run_id") or ""
+                    ),
+                    task_sha256=_sha256_text(recall),
+                )
+            recall_case["text_only_evidence"] = recall_text_only
+            recall_case["history_projection"] = history_projection
+            if include_notepad and recall_result.get("passed") is True:
+                output_file = Path.home() / f"restart-e2e-{secrets.token_hex(3)}.txt"
+                try:
+                    desktop_result = _run_connector_to_notepad_case(
+                        name="connector-to-notepad-after-restart",
+                        task=connector_to_notepad_task(fixture, output_file),
+                        output_file=output_file,
+                        fixture=fixture,
+                        output_root=private_dir / "client-2",
+                        identity=second.identity,
+                        sequence=sequence,
+                        timeout=timeout,
+                    )
+                    desktop_case = _public_case(desktop_result)
+                finally:
+                    output_file.unlink(missing_ok=True)
+            final_lookup = _thread_lookup_evidence(
+                second.driver,
+                sequence.thread_id,
+            )
+        except Exception as error:
+            failure = f"{type(error).__name__}: {error}"
+        finally:
+            if second is not None:
+                second.close()
+            if first is not None:
+                first.close()
+
+        process_cleanup = {
+            "passed": bool(
+                not _workspace_electron_pids()
+                and (not first_pid or not psutil.pid_exists(first_pid))
+                and (not second_pid or not psutil.pid_exists(second_pid))
+            ),
+            "workspace_electron_pids": _workspace_electron_pids(),
+            "first_pid_absent": not first_pid or not psutil.pid_exists(first_pid),
+            "second_pid_absent": not second_pid or not psutil.pid_exists(second_pid),
+        }
+        history_projection_matches = bool(
+            history_projection.get("passed") is True
+            and history_projection.get("history_message_count") == 2
+            and history_projection.get("history_roles") == ["user", "assistant"]
+            and history_projection.get("history_projection_sha256")
+            == expected_history_sha256
+        )
+        expected_run_count = 2 + int(include_notepad)
+        if close_evidence.get("passed") is not True:
+            failure_layer = "test_interference"
+        elif (
+            restart_lookup.get("status") == 404
+            and restart_admission.get("visible_thread_not_found") is True
+        ):
+            failure_layer = "infrastructure_thread_persistence"
+        elif visible_history.get("passed") is not True:
+            failure_layer = "infrastructure_run_projection"
+        elif restart_admission.get("accepted") is True and history_projection_matches:
+            if recall_case.get("exact_result_match") is not True:
+                failure_layer = "model"
+            elif include_notepad and desktop_case.get("passed") is not True:
+                failure_layer = "model_or_desktop_infrastructure"
+            else:
+                failure_layer = "none"
+        elif first_case.get("passed") is not True:
+            failure_layer = "model_or_provider_before_restart"
+        else:
+            failure_layer = "infrastructure_or_test_interference"
+        passed = bool(
+            not failure
+            and first_case.get("passed") is True
+            and first_text_only.get("passed") is True
+            and initial_lookup.get("found") is True
+            and close_evidence.get("passed") is True
+            and first_pid
+            and second_pid
+            and first_pid != second_pid
+            and first_hwnd != second_hwnd
+            and visible_history.get("passed") is True
+            and restart_lookup.get("found") is True
+            and restart_admission.get("accepted") is True
+            and recall_case.get("passed") is True
+            and recall_case.get("exact_result_match") is True
+            and recall_text_only.get("passed") is True
+            and history_projection_matches
+            and (
+                not include_notepad
+                or desktop_case.get("passed") is True
+            )
+            and final_lookup.get("found") is True
+            and final_lookup.get("run_ids") == sequence.run_ids
+            and len(sequence.run_ids) == expected_run_count
+            and process_cleanup.get("passed") is True
+        )
+        report = {
+            "kind": "visible_electron_thread_restart_e2e",
+            "entrypoint": "electron_client_windows_uia",
+            "submission_transport": "windows_sendinput_and_native_mouse",
+            "restart_transport": "visible_electron_titlebar_close",
+            "marker_sha256": _sha256_text(marker),
+            "thread_id": sequence.thread_id,
+            "accepted_run_count": len(sequence.run_ids),
+            "task_families": [
+                "text_chat_continuity",
+                *(["connector_to_desktop_file"] if include_notepad else []),
+            ],
+            "client_restart": {
+                "first_pid": first_pid,
+                "second_pid": second_pid,
+                "first_hwnd": first_hwnd,
+                "second_hwnd": second_hwnd,
+                "distinct_process": bool(first_pid and second_pid and first_pid != second_pid),
+                "distinct_window": bool(first_hwnd and second_hwnd and first_hwnd != second_hwnd),
+                "close": close_evidence,
+                "cleanup": process_cleanup,
+            },
+            "runtime_identity": {
+                "before_restart": first_runtime,
+                "after_restart": second_runtime,
+            },
+            "initial_runtime_idle": first_idle,
+            "initial_thread_lookup": initial_lookup,
+            "visible_history_after_restart": visible_history,
+            "thread_lookup_after_restart": restart_lookup,
+            "restart_admission": restart_admission,
+            "final_thread_lookup": final_lookup,
+            "expected_history_projection_sha256": expected_history_sha256,
+            "history_projection_matches": history_projection_matches,
+            "cases": [
+                item for item in (first_case, recall_case, desktop_case) if item
+            ],
+            "failure_layer": failure_layer,
+            "failure": failure,
+            "private_artifacts": {
+                "directory": "private",
+                "classification": "local_private_do_not_publish",
+            },
+            "passed": passed,
+            "finished_at": datetime.now().astimezone().isoformat(),
+        }
+    report_path = suite_dir / "report.json"
+    _write_json(report_path, report)
+    report["report"] = str(report_path)
+    return report
+
+
+def run_draft_restart_e2e(*, output_root: Path) -> dict[str, Any]:
+    """Keep one unsent OS-keyboard draft across a visible client restart."""
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suite_dir = output_root / f"{timestamp}-draft-restart"
+    private_dir = suite_dir / "private"
+    private_dir.mkdir(parents=True, exist_ok=True)
+    draft = f"Unsent exact draft {secrets.token_hex(12)}"
+    first: ManagedClient | None = None
+    second: ManagedClient | None = None
+    original_draft = ""
+    typed: dict[str, Any] = {"passed": False}
+    restored: dict[str, Any] = {"passed": False}
+    restoration: dict[str, Any] = {"passed": False}
+    first_close: dict[str, Any] = {"passed": False}
+    second_close: dict[str, Any] = {"passed": False}
+    first_pid = second_pid = first_hwnd = second_hwnd = 0
+    failure = ""
+
+    def current_run_id(driver: client_harness.ElectronClientDriver) -> str:
+        current = driver.runtime_status().get("current_run") or {}
+        return str(current.get("run_id") or "")
+
+    with tempfile.TemporaryDirectory(
+        prefix="draft-restart-runtime-",
+        dir=str(suite_dir),
+    ) as temp_name:
+        fixture = build_fixture_environment(Path(temp_name))
+        try:
+            first = launch_managed_client(private_dir / "managed-client-1", fixture)
+            first_pid = int(first.identity.pid)
+            first_hwnd = int(first.identity.hwnd)
+            first.driver.wait_for_runtime_ready()
+            original_draft = str(first.driver.submission_ui_state().get("goal_input") or "")
+            run_before = current_run_id(first.driver)
+            input_evidence = first.driver.configure_goal(draft)
+            time.sleep(0.5)
+            typed_state = first.driver.submission_ui_state(expected_goal=draft)
+            run_after_type = current_run_id(first.driver)
+            typed = {
+                "source": "visible_renderer_value_after_windows_sendinput",
+                "passed": bool(
+                    typed_state.get("goal_input") == draft
+                    and run_after_type == run_before
+                ),
+                "exact_value": typed_state.get("goal_input") == draft,
+                "run_unchanged": run_after_type == run_before,
+                "input_evidence": input_evidence.get("input_evidence"),
+                "proof": first.driver.capture_window("draft-before-close.png"),
+            }
+            first_close = _close_managed_client_through_ui(first)
+            if first_close.get("passed") is not True:
+                raise RuntimeError("visible Electron close did not stop its service")
+
+            second = launch_managed_client(private_dir / "managed-client-2", fixture)
+            second_pid = int(second.identity.pid)
+            second_hwnd = int(second.identity.hwnd)
+            second.driver.wait_for_runtime_ready()
+            restored_state = second.driver.submission_ui_state(expected_goal=draft)
+            run_after_restart = current_run_id(second.driver)
+            restored = {
+                "source": "visible_renderer_value_after_process_restart",
+                "passed": bool(
+                    restored_state.get("goal_input") == draft
+                    and run_after_restart == run_before
+                ),
+                "exact_value": restored_state.get("goal_input") == draft,
+                "run_unchanged": run_after_restart == run_before,
+                "proof": second.driver.capture_window("draft-after-restart.png"),
+            }
+            second.driver.configure_goal(original_draft)
+            time.sleep(0.5)
+            restoration_state = second.driver.submission_ui_state(
+                expected_goal=original_draft,
+            )
+            restoration = {
+                "source": "visible_keyboard_test_state_restoration",
+                "passed": restoration_state.get("goal_input") == original_draft,
+                "exact_value": restoration_state.get("goal_input") == original_draft,
+            }
+            second_close = _close_managed_client_through_ui(second)
+        except Exception as error:
+            failure = f"{type(error).__name__}: {error}"
+        finally:
+            if second is not None:
+                second.close()
+            if first is not None:
+                first.close()
+
+        cleanup = {
+            "passed": bool(
+                not _workspace_electron_pids()
+                and (not first_pid or not psutil.pid_exists(first_pid))
+                and (not second_pid or not psutil.pid_exists(second_pid))
+            ),
+            "workspace_electron_pids": _workspace_electron_pids(),
+        }
+        distinct_client = bool(
+            first_pid and second_pid and first_pid != second_pid
+            and first_hwnd and second_hwnd and first_hwnd != second_hwnd
+        )
+        if first_close.get("passed") is not True or second_close.get("passed") is not True:
+            failure_layer = "test_interference"
+        elif typed.get("passed") is not True:
+            failure_layer = "desktop_input_or_test_interference"
+        elif restored.get("passed") is not True:
+            failure_layer = "frontend_draft_persistence"
+        else:
+            failure_layer = "none"
+        report = {
+            "kind": "visible_electron_unsent_draft_restart_e2e",
+            "entrypoint": "electron_client_windows_uia",
+            "input_transport": "windows_sendinput_unicode",
+            "restart_transport": "visible_electron_titlebar_close",
+            "draft_chars": len(draft),
+            "draft_sha256": _sha256_text(draft),
+            "client_restart": {
+                "first_pid": first_pid,
+                "second_pid": second_pid,
+                "first_hwnd": first_hwnd,
+                "second_hwnd": second_hwnd,
+                "distinct_client": distinct_client,
+                "first_close": first_close,
+                "second_close": second_close,
+                "cleanup": cleanup,
+            },
+            "typed_without_submit": typed,
+            "restored_after_restart": restored,
+            "preexisting_draft_restored": restoration,
+            "failure_layer": failure_layer,
+            "failure": failure,
+            "private_artifacts": {
+                "directory": "private",
+                "classification": "local_private_do_not_publish",
+            },
+            "passed": bool(
+                not failure
+                and typed.get("passed") is True
+                and first_close.get("passed") is True
+                and distinct_client
+                and restored.get("passed") is True
+                and restoration.get("passed") is True
+                and second_close.get("passed") is True
+                and cleanup.get("passed") is True
             ),
             "finished_at": datetime.now().astimezone().isoformat(),
         }
@@ -2098,6 +2822,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--skip-notepad", action="store_true")
     parser.add_argument("--history-depth-ab", action="store_true")
+    parser.add_argument("--thread-restart", action="store_true")
+    parser.add_argument("--draft-restart", action="store_true")
     parser.add_argument("--ab-history-turns", type=int, default=6)
     parser.add_argument("--ab-seed", type=int)
     parser.add_argument(
@@ -2111,7 +2837,27 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.history_depth_ab:
+    if sum(bool(item) for item in (
+        args.thread_restart,
+        args.draft_restart,
+        args.history_depth_ab,
+    )) > 1:
+        raise SystemExit("restart and history-depth modes are exclusive")
+    if args.draft_restart:
+        output_root = args.output_root.resolve()
+        if output_root == DEFAULT_OUTPUT.resolve():
+            output_root = DEFAULT_DRAFT_RESTART_OUTPUT.resolve()
+        report = run_draft_restart_e2e(output_root=output_root)
+    elif args.thread_restart:
+        output_root = args.output_root.resolve()
+        if output_root == DEFAULT_OUTPUT.resolve():
+            output_root = DEFAULT_RESTART_OUTPUT.resolve()
+        report = run_thread_restart_e2e(
+            output_root=output_root,
+            timeout=max(30, args.timeout),
+            include_notepad=not args.skip_notepad,
+        )
+    elif args.history_depth_ab:
         report = run_history_depth_ab_e2e(
             output_root=args.output_root.resolve(),
             history_turns=max(0, args.ab_history_turns),

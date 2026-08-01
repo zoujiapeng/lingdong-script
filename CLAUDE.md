@@ -1,9 +1,8 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-08-01。当前唯一产品分支是 `master`；本轮治理、产品命名与 test-only
-> CI fixture 收口截至固定提交 `65fdce0c0f575b7bf5e2e273cab2722db09a9f95`，完整证据见
-> 13.25。这不是本文件的永久 HEAD 标记；接手时必须现场运行 `git rev-parse HEAD` 与
-> `git rev-parse origin/master`。13.20–13.25 已进入主线；不要用更早的提交说明覆盖
+> 最后核对：2026-08-01。当前唯一产品分支是 `master`。本文件不再把某个提交写成
+> “当前 HEAD”；接手时必须现场运行 `git rev-parse HEAD`、`git rev-parse origin/master`
+> 并查询该精确 SHA 的 Actions。13.20–13.26 已进入或正在进入主线；不要用更早的提交说明覆盖
 > Thread/Turn、按需桌面租约、通用 connector、history-depth 证据或 provisional
 > native-provider 边界。
 
@@ -35,15 +34,21 @@
 - 2026-08-01 已完成所有具名冻结分支只读总审计；当前没有可准入项，结论为
   `0 cherry-pick / 0 merge / 0 Runtime 修改`。旧分支剩余主要是重复 target pipeline、
   profiler、第二 verifier 和前端 Runtime selector，不解释当前首分歧。
-- 审计后远端开发分支只剩 `master`。PR10 历史由
+- 审计后，本地 head、`origin` 远端 head、GitHub branches API 和默认分支四处都只剩
+  `master`，且只有一个 worktree、零开放 PR。PR10 历史由
   `archive/pr10-vnext-agent-core-20260726` 保存，PR15 证据由
   `evidence/pr15-legacy-electron-oracle-20260726` 保存；这些 tag 只作只读恢复输入，
   不得继续开发或整体 merge。
+- 两条本地 recovery 独有 tip 已分别归档为
+  `archive/c4-canonical-from-d418-local-20260801` 与
+  `archive/c4-fa2e9caf-local-20260801`，随后删除所有剩余本地历史分支；tag 不是开发分支。
 - `4f93672` 的 run `30663041917` 曾因账户 billing/spending limit 在 Python 与 frontend
   job 均为零步骤时终止；它只能作为历史 infrastructure-blocked 记录。
 - `65fdce0` 的 GitHub Actions run `30688550071` 随后实际执行全部步骤，frontend 与 Python
   job 均为 `success`。绿色结论只绑定该精确提交；接手时仍须重新查询实时 HEAD，不能用它
   覆盖未来提交。
+- 本轮改动前的 `3b48925` 也由 Actions run `30688831098` 实际完成 frontend 与 Python
+  两项并均为 `success`；本轮新提交仍须等待自己的检查，不能继承该结论。
 - 后续正常开发直接提交到 `master`；不要再建立另一条长期产品分支。
 - 本地未跟踪 `CON` 属于用户，不能读取后擅自解释、暂存、删除、改名或覆盖。
 
@@ -129,8 +134,10 @@ adapter 或第二执行线。
 E2E 证明。
 
 Visual Actor 的视觉系统提示词保持 45 个英文单词；文本首轮不增加系统教学。Thread
-只保留最多 12 条、16 KiB 的成功用户/模型原生消息；失败 Turn 不进入历史，服务进程
-重启后不延续。视觉线只保留最近一笔 provider 原生
+只保留最多 12 条、16 KiB 的成功用户/模型原生消息；失败 Turn 不进入历史。现有
+`AgentThreadStore` 还把最多 100 个 Thread 的这个有界成功投影原子写入私有 checkpoint，
+服务重启后恢复同一 `thread_id`、可见成功结果与原生消息；它不保存 trace 正文、失败 Turn、
+视觉帧或长期摘要。视觉线只保留最近一笔 provider 原生
 `user image -> assistant tool call -> tool result`，下一回合加入新 JPEG 后覆盖旧交换；
 不保存无界聊天历史，不把长期 memory 当硬能力，也不在 prompt 中教学。
 Actor 上下文目前还保留最多 64 项安全动作摘要；删除 A/B 未获准，因此暂留，但它
@@ -209,21 +216,24 @@ adapter 尚无真实 provider credential 联机与跨任务族 Electron E2E，�
 
 ## 当前精确源码证据
 
-最新可见 Electron 受控矩阵是 `5/10`：
+最新可见 Electron 受控矩阵是 `6/10`：
 
 | 通过 | 失败 |
 | --- | --- |
-| precise-click | answer-all-questions（4/6） |
-| ordered-clicks | corridor-v0 |
-| drag-fit | corridor-v1 |
-| slider | game-drag-v2 |
-| dynamic-hold | corridor-v3 |
+| answer-all-questions（6/6） | corridor-v0 |
+| precise-click | corridor-v1 |
+| ordered-clicks | game-drag-v2 |
+| drag-fit | corridor-v3 |
+| slider | — |
+| dynamic-hold | — |
 
 通过条件包括用操作系统键盘向可见 Electron 输入原始目标、用鼠标点击发送、空
 session、准确 run/trace 绑定、RawDevice 物理回执和独立浏览器 oracle。UIA 只负责
 定位与读回。报告在被 Git 忽略的
-`output/playwright/github-open-e2e-20260731/controlled-suite-r2/20260731-081832-suite/`。
-同一源码的 WinPilot 全量回归为 `3377 passed, 13 skipped`。
+`output/playwright/client-visual-e2e/20260801-183951-suite/suite-report.json`。
+同一工作树的完整回归为 WinPilot `3478 passed, 13 skipped, 1 warning`、根测试
+`2508 passed`、renderer `244 passed`，typecheck、renderer/Electron build 与 CLI/AI build
+均通过；它们证明回归合同，不替代外部任务 oracle。
 
 新增的原生 Explorer 长任务也使用同一真实前端输入口径。生产对照
 `arp-20260731-072140-0f4b81` 和三字段去重臂
@@ -231,8 +241,9 @@ session、准确 run/trace 绑定、RawDevice 物理回执和独立浏览器 ora
 全部 applied；外部文件系统 oracle 均失败。去重臂完成了前两个正确重命名，但
 最终仍为 `center-7Q4M.txt.txt / north-7Q4M.txt / south-7Q4M.txt`，没有目录。
 因此生产候选已回退，当前精确源码仍是矩阵全量回归时的 Runtime。
-该 run 重启后显示“已中断”是独立持久化缺口：trace recorder 关闭后才发布外层
-`arp_run_done`，恢复投影看不到 run 终态；它不解释任务外部失败，本轮未修。
+该历史 run 重启后曾显示“已中断”，是当时独立的持久化缺口，不解释任务外部失败。
+13.26 已用有界私有 Thread checkpoint 修复并通过正常关闭/全新服务进程的两族复验；
+公共 trace 仍保持脱敏，不能用恢复投影冒充任务成功。
 
 随后完成的严格交叉配对共有 8 个有效 run：A 的 Explorer 两次均失败、Notepad
 两次精确落盘；B 的 Explorer 两次均失败，Notepad 一次精确落盘，另一次 Runtime
@@ -256,7 +267,8 @@ Electron 用操作系统键盘输入并以真实鼠标发送。
 `observe_desktop`。只有后者才发布 run-bound lease，Electron 此时才隐藏并交付
 精确 target，matching terminal 自行恢复。没有 router、第二角色、旧 `/api/chat`
 或应用 prompt。服务端 Thread/Turn 只保存最近 12 条、16 KiB 的成功用户可见原生
-交换；失败 Turn 不进入历史，当前仍是进程内存状态。
+交换；失败 Turn 不进入历史。13.20 当时仍是进程内存状态，13.26 已增加同一 owner 的
+有界私有 continuation checkpoint。
 
 当前源码的真实可见 Electron 验收在同一 Thread 连续完成 7 个 direct reply 和一个
 Notepad 桌面 Turn：能跨轮回答 `95-B`，桌面轮在租约后用
@@ -419,25 +431,22 @@ git status -sb
 git log -8 --oneline --decorate
 ```
 
-本轮开始时 `master` 与 `origin/master` 同为 `4f93672`，除用户未跟踪的 `CON` 外干净；
-该 SHA 只是固定起点，不是本文件的实时 HEAD。接手时必须重新核对状态，不要 reset、整体暂存或
-触碰 `CON`。然后阅读本文件和上述五份文档，不要立刻追加代码。
+接手时必须重新核对 `master`、`origin/master`、GitHub 默认分支、branches API、worktree 与
+精确 SHA 的 Actions，不要 reset、整体暂存或触碰用户未跟踪的 `CON`。然后阅读本文件和上述
+五份文档，不要因为看到“继续”就立刻追加代码。
 
 优先级：
 
-1. 下一轮唯一实验先不改生产代码：通过真实前端建立带随机 marker 的成功 Thread，正常
-   关闭并重启 Electron 及其托管服务，再检查旧消息是否可见、继续发送是否仍绑定原 Thread、
-   模型能否只凭恢复历史精确回答 marker。当前内存 Thread Store 与本地 stale thread id
-   预计会在这一边界分叉，但必须先取得可见证据，不能直接增加持久化 owner。
-2. 若正常重启首先在客户端/Thread persistence 层分叉，再设计一个私有、有限、可删除旧
-   owner 的最小持久化候选，并用聊天连续性与重启后的简单桌面任务两个家族验证；不得通过
-   自动创建新 Thread 假装上下文仍存在，也不得解除公共 trace 正文脱敏。
-3. 继续记录 raw model args、实际 canonical parse、物理 MCP/GUI receipt、严格外部终态、
+1. 下一轮唯一实验先不改生产代码：做多次、反序的 history/fresh 配对；每个历史臂先经真实
+   前端完成若干随机聊天，再在同一重启恢复 Thread 上分别执行一个随机只读 connector 任务和
+   一个简单桌面文件任务，记录实际 provider history、usage/cache 与独立 oracle。当前单次
+   history-depth A/B 未形成有效 pair，不能据此改变历史上限或工具选择面。
+2. 继续记录 raw model args、实际 canonical parse、物理 MCP/GUI receipt、严格外部终态、
    产品自主 terminal/恢复与 usage；不加提示教学、router、摘要模型、工具筛选器、自动
    重试或 Runtime 修正，不接回旧 `/api/chat`。
-4. native provider 只有拿到真实 credential 后才做相同 canonical 多轮工具序列与至少
+3. native provider 只有拿到真实 credential 后才做相同 canonical 多轮工具序列与至少
    两个任务族 Electron E2E；未通过的协议整条回退，不继续扩代码。
-5. 模型切换当前暂停；归档 tag 只作只读恢复输入，保持 `master` 为唯一产品主线。
+4. 模型切换当前暂停；归档 tag 只作只读恢复输入，保持 `master` 为唯一产品主线。
 
 常用验证：
 
