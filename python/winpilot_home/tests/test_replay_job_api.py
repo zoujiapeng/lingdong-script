@@ -412,7 +412,10 @@ def test_memory_verification_promotes_only_machine_checked_replay(client, tmp_pa
 
     experience = _fresh_api_memory(tmp_path, monkeypatch)
     path = tmp_path / "lesson.wps.json"
-    path.write_text('{"format":"wps/2","steps":[]}', encoding="utf-8")
+    path.write_text(
+        '{"format":"wps/2","steps":[{"tool":"ext.delay","seconds":0}]}',
+        encoding="utf-8",
+    )
     candidate = experience.record(
         "send message",
         "Chat",
@@ -456,7 +459,10 @@ def test_memory_verification_failure_never_promotes(client, tmp_path, monkeypatc
 
     experience = _fresh_api_memory(tmp_path, monkeypatch)
     path = tmp_path / "lesson-fail.wps.json"
-    path.write_text('{"format":"wps/2","steps":[]}', encoding="utf-8")
+    path.write_text(
+        '{"format":"wps/2","steps":[{"tool":"ext.delay","seconds":0}]}',
+        encoding="utf-8",
+    )
     candidate = experience.record(
         "send another message",
         "Chat",

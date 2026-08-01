@@ -28,6 +28,17 @@ export interface WpsScript {
 const X = 80;
 const Y_STEP = 112;
 
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function sourceDocument(script: WpsScript): FlowScript['source'] {
+  const raw = clone(script) as unknown as Record<string, unknown>;
+  delete raw.steps;
+  delete raw.vars;
+  return { kind: 'wps', raw };
+}
+
 function replayTarget(script: WpsScript): unknown {
   if (script.target_window != null && script.target_window !== '') return script.target_window;
   if (script.target != null && script.target !== '') return script.target;
@@ -57,6 +68,12 @@ export function wpsToFlowScript(script: WpsScript): FlowScript {
   const edges: FlowEdge[] = [];
   const targetWindow = replayTarget(script);
   const session = String(script.source_run || `offline-${nanoid(8)}`);
+  const steps = script.steps || [];
+  const preflightContract = {
+    ...(script.conditions !== undefined ? { conditions: clone(script.conditions) } : {}),
+    ...(script.safety !== undefined ? { safety: clone(script.safety) } : {}),
+  };
+  const hasPreflightContract = Object.keys(preflightContract).length > 0;
   let row = 0;
 
   const add = (type: FlowNode['type'], params: NodeParams, label?: string): FlowNode => {
@@ -83,14 +100,20 @@ export function wpsToFlowScript(script: WpsScript): FlowScript {
 
   const start = add('start', { label: '开始' } as NodeParams);
   let previous = start;
-  for (const step of script.steps || []) {
+  for (const [index, step] of steps.entries()) {
     const stepTarget = step.target_window ?? targetWindow;
     const node = add('replay_step', {
-      step,
+      step: clone(step),
       session,
       pace_ms: 0,
       allow_shell: false,
       ...(stepTarget !== undefined ? { target_window: stepTarget } : {}),
+      ...(index === 0 && hasPreflightContract
+        ? { preflight_contract: preflightContract }
+        : {}),
+      ...(index === steps.length - 1 && script.evidence !== undefined
+        ? { postflight_evidence: clone(script.evidence) }
+        : {}),
       _source_wps_replay: true,
     } as NodeParams, replayLabel(step));
     link(previous, node);
@@ -123,5 +146,6 @@ export function wpsToFlowScript(script: WpsScript): FlowScript {
       log_level: 'info',
       require_real_features: true,
     },
+    source: sourceDocument(script),
   };
 }

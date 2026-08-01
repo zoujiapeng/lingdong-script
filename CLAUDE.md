@@ -1,6 +1,6 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-08-01。当前唯一产品分支是 `master`。本文件不再把某个提交写成
+> 最后核对：2026-08-02。当前唯一产品分支是 `master`。本文件不再把某个提交写成
 > “当前 HEAD”；接手时必须现场运行 `git rev-parse HEAD`、`git rev-parse origin/master`
 > 并查询该精确 SHA 的 Actions。13.20–13.26 已进入或正在进入主线；不要用更早的提交说明覆盖
 > Thread/Turn、按需桌面租约、通用 connector、history-depth 证据或 provisional
@@ -47,8 +47,9 @@
 - `65fdce0` 的 GitHub Actions run `30688550071` 随后实际执行全部步骤，frontend 与 Python
   job 均为 `success`。绿色结论只绑定该精确提交；接手时仍须重新查询实时 HEAD，不能用它
   覆盖未来提交。
-- 本轮改动前的 `3b48925` 也由 Actions run `30688831098` 实际完成 frontend 与 Python
-  两项并均为 `success`；本轮新提交仍须等待自己的检查，不能继承该结论。
+- 本轮改动前的 `fd53fb887960ce77ebe4b1e7e104ee8c3af425e1` 由 Actions run
+  `30698655302` 实际完成 frontend 与 Python 两项并均为 `success`；本轮新提交仍须等待
+  自己的检查，不能继承该结论。
 - 后续正常开发直接提交到 `master`；不要再建立另一条长期产品分支。
 - 本地未跟踪 `CON` 属于用户，不能读取后擅自解释、暂存、删除、改名或覆盖。
 
@@ -85,6 +86,22 @@ MCP 直调不是产品 connector owner。
 “必须使用 GUI”时，只保留在原始 goal 中，由同一个模型理解。未来加入 shell 或
 provider 后，它们必须与 GUI 工具同时对该模型可见；不能恢复前端开关、Task
 Profiler、关键词预路由或另一个 planner。
+
+## Replay / 离线流程现状
+
+当前已用可见 Electron 和双窗口外部 oracle 完整通过：人类示教鼠标键盘 -> 每步
+`target_window` 的 WPS -> canonical Automation IR -> Studio 编辑/验证/运行 -> provisional
+memory -> 真实 replay 晋级 -> 0-token 复用。Studio 的新建、打开、保存、撤销、重做和
+本地结构检查不需要网络或模型；确定性执行需要本机 Python Runtime、Replayer 与 Desktop
+Action Queue，但不需要联网。不得再造 JS 离线执行器或把浏览器模拟当成离线执行。
+
+这还不等于“Agent 一场对话所做的一切都能变成技能”。当前 Agent trace 只支持用户按
+单 run 手动提取局部草稿，vNext lifecycle/batch schema 与旧摘要/导出尚未完全对齐，长
+trace、丢事件、真实重复动作、逐步跨窗口目标和 connector/provider unsupported 都没有
+完整性契约；不完整导出必须拒绝或明确标为 partial。主 Agent 也还不能读取用户显式附加的
+当前 Flow 摘要或提交可预览、可撤销的流程 patch。旧 `src/ai-interface`、DSL 生成器和
+Electron HTTP 直接写图链包含第二模型、长提示教学、关键词路由或无确认突变，不得接回。
+权威边界与下一实验见 `docs/replay-recording.md`、`docs/flow-editor.md`。
 
 ## 当前角色与唯一 owner
 

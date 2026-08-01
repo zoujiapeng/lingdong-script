@@ -109,27 +109,6 @@ export function FlowCanvas() {
     };
   }, [handleWheel]);
 
-  // Delete/Backspace key to delete selected nodes and edges
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Skip if user is typing in an input field
-      const target = e.target as HTMLElement;
-      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable) return;
-
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        const st = useStore.getState();
-        if (st.ui.selection.nodes.length > 0) {
-          st.deleteNodes(st.ui.selection.nodes);
-        }
-        if (st.ui.selection.edges.length > 0) {
-          st.deleteEdges(st.ui.selection.edges);
-        }
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (e.button === 1 || (e.button === 0 && e.altKey)) {

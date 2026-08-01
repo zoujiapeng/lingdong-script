@@ -1,10 +1,9 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
-import { Search, X, Check, Loader2 } from 'lucide-react';
+import { Search, X, Check } from 'lucide-react';
 import { NodeDefinition, NodeType } from '../../types';
 import { NODE_DEFINITIONS, NODE_CATEGORIES } from '../../utils/nodeDefinitions';
-import { useStore } from '../../store';
+import { confirmDocumentReplacement, useStore } from '../../store';
 import { unifiedSearch, UnifiedSearchResult } from '../../utils/unifiedSearch';
-import { llmEnhanceSearch, hasLLMApiKey } from '../../utils/llmSearcher';
 import { itemMarker } from '../../utils/itemMarker';
 import { getNodeIcon } from '../../utils/nodeIconMap';
 import { displaySearchReason, displaySearchToken } from '../../utils/displayLabels';
@@ -38,17 +37,29 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
   const [usFilter, setUsFilter] = useState<'all' | 'node' | 'template'>('all');
   const [usTestedFilter, setUsTestedFilter] = useState(false);
   const [usExpanded, setUsExpanded] = useState<string | null>(null);
-  const [usLoading, setUsLoading] = useState(false);
   const usTimer = useRef<ReturnType<typeof setTimeout>>();
   const usInputRef = useRef<HTMLInputElement>(null);
   const backendFlowTypes = useMemo(
     () => new Set(capabilities.flatMap((capability) => capability.flow_node_types || [])),
     [capabilities],
   );
-  const supportsNode = useCallback((type: string) => (
-    isRunnableFlowNodeType(type)
-    && backendFlowTypes.has(type)
-  ), [backendFlowTypes]);
+  const runtimeCatalogAvailable = capabilities.length > 0;
+  const modelBackedFlowTypes = useMemo(
+    () => new Set(capabilities
+      .filter((capability) => capability.requires_llm)
+      .flatMap((capability) => capability.flow_node_types || [])),
+    [capabilities],
+  );
+  const runtimeState = useCallback((type: string) => {
+    if (!runtimeCatalogAvailable) return 'unchecked' as const;
+    return backendFlowTypes.has(type) ? 'available' as const : 'unavailable' as const;
+  }, [backendFlowTypes, runtimeCatalogAvailable]);
+  const runtimeLabel = useCallback((type: string) => {
+    const state = runtimeState(type);
+    if (state === 'available') return modelBackedFlowTypes.has(type) ? '当前可执行 · 需要模型' : '当前可执行';
+    if (state === 'unavailable') return '当前运行时未开放';
+    return '运行时尚未核验';
+  }, [modelBackedFlowTypes, runtimeState]);
 
   // Rebuild index + focus input when entering search mode
   useEffect(() => {
@@ -73,29 +84,19 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
   }, [unifiedSearchQuery, showUnifiedSearch]);
 
   const doUsSearch = useCallback(async (q: string) => {
-    if (!q.trim()) { setUsResults([]); setUsLoading(false); return; }
+    if (!q.trim()) { setUsResults([]); return; }
     unifiedSearch.refreshTestedStatus();
     let results = unifiedSearch.search(q, { maxResults: 30 });
     results = results.filter(({ item }) => (
       item.type === 'template'
         ? Boolean(item.hasScript)
-        : item.type === 'node' && supportsNode(item.nodeType || item.id)
+        : item.type === 'node' && isRunnableFlowNodeType(item.nodeType || item.id)
     ));
     // Apply type filter
     if (usFilter !== 'all') results = results.filter(r => r.item.type === usFilter);
     if (usTestedFilter) results = results.filter(r => r.item.tested);
     setUsResults(results);
-    // LLM enhancement if offline scores are low
-    if (hasLLMApiKey() && results.length > 0 && results[0].score < 60) {
-      setUsLoading(true);
-      try {
-        const apiKey = (window as any).__llmApiKey || localStorage.getItem('lingdong-llm-api-key') || '';
-        const llmResult = await llmEnhanceSearch(q, results, apiKey);
-        if (llmResult.enhanced) setUsResults(llmResult.results);
-      } catch { /* keep offline results */ }
-      setUsLoading(false);
-    }
-  }, [supportsNode, usFilter, usTestedFilter]);
+  }, [usFilter, usTestedFilter]);
 
   // Re-filter when filter changes
   useEffect(() => {
@@ -119,11 +120,13 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
   };
 
   const handleUsUseTemplate = (id: string) => {
+    if (!confirmDocumentReplacement()) return;
     loadTemplate(id);
     handleUsClose();
   };
 
   const handleUsAddNode = (nodeType: string) => {
+    if (!isRunnableFlowNodeType(nodeType)) return;
     const canvasEl = document.querySelector('.flow-canvas-wrapper') as HTMLElement;
     if (!canvasEl) return;
     const rect = canvasEl.getBoundingClientRect();
@@ -135,10 +138,16 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
 
   // ── Normal library state ──
 
-  // Build the executable list from the frontend compiler/backend catalog intersection.
+  // Editing follows the local compiler boundary. Runtime catalog exposure is
+  // shown separately and is enforced again when the graph is validated/run.
   const allItems = useMemo(() => {
-    return Object.values(NODE_DEFINITIONS).filter((def) => supportsNode(def.type));
-  }, [supportsNode]);
+    return Object.values(NODE_DEFINITIONS).filter((def) => isRunnableFlowNodeType(def.type));
+  }, []);
+
+  const runtimeAvailableCount = useMemo(
+    () => allItems.filter((item) => runtimeState(item.type) === 'available').length,
+    [allItems, runtimeState],
+  );
 
   const availableCategories = useMemo(() => {
     const ids = new Set(allItems.map((def) => def.category));
@@ -208,7 +217,6 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
                   <X size={14} />
                 </button>
               )}
-              {usLoading && <Loader2 size={14} className="spinner" style={{ color: 'var(--text-muted)', flexShrink: 0 }} />}
             </div>
           </div>
 
@@ -247,7 +255,7 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
                 </div>
               </div>
             )}
-            {usQuery.trim() && usResults.length === 0 && !usLoading && (
+            {usQuery.trim() && usResults.length === 0 && (
               <div style={{ textAlign: 'center', padding: '32px 16px', color: 'var(--text-muted)', fontSize: 13 }}>
                 未找到匹配的指令或模板
               </div>
@@ -303,6 +311,11 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 2 }}>
                     {item.description || '暂无描述'}
                   </div>
+                  {isNode && (
+                    <div style={{ marginTop: 3, fontSize: 10, color: runtimeState((item as any).nodeType || item.id) === 'available' ? '#16a34a' : 'var(--text-muted)' }}>
+                      {runtimeLabel((item as any).nodeType || item.id)}
+                    </div>
+                  )}
                   {/* Expanded details */}
                   {isExpanded && (
                     <div style={{ marginTop: 6, padding: 8, background: 'var(--bg-secondary)', borderRadius: 6, fontSize: 11 }}>
@@ -350,7 +363,9 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
                 指令库
               </div>
               <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
-                {`${allItems.length} 个可执行节点`}
+                {runtimeCatalogAvailable
+                  ? `${allItems.length} 个可编辑节点 · ${runtimeAvailableCount} 个当前可执行`
+                  : `${allItems.length} 个可编辑节点 · 运行时尚未核验`}
               </div>
             </div>
             <div className="search-box">
@@ -399,8 +414,8 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
                   draggable
                   onDragStart={(e) => handleDragStart(e, item)}
                   onDoubleClick={() => handleDoubleClick(item)}
-                  title={`拖拽到画布 或 双击添加\n${item.description}`}
-                  style={{ opacity: tested ? 1 : 0.85 }}
+                  title={`拖拽到画布 或 双击添加\n${item.description}\n${runtimeLabel(item.type)}`}
+                  style={{ opacity: runtimeState(item.type) === 'unavailable' ? 0.62 : tested ? 1 : 0.85 }}
                 >
                   <div
                     className="node-item-icon"
@@ -411,6 +426,9 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
                   <div className="node-item-info">
                     <div className="node-item-name">{item.label}</div>
                     <div className="node-item-desc">{item.description.slice(0, 60)}</div>
+                    <div style={{ marginTop: 2, fontSize: 10, color: runtimeState(item.type) === 'available' ? '#16a34a' : 'var(--text-muted)' }}>
+                      {runtimeLabel(item.type)}
+                    </div>
                   </div>
                   <div title={tested ? '已测试 — 点击取消标记' : '未测试 — 点击标记为已测试'}
                     onClick={(e) => { e.stopPropagation(); itemMarker.toggleTested(item.type, 'node'); setTestedRefresh(k => k + 1); }}
@@ -445,11 +463,15 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
                       e.dataTransfer.effectAllowed = 'copy';
                     }}
                     onDoubleClick={() => handleDoubleClick(def)}
+                    title={runtimeLabel(def.type)}
                   >
                     <div className="node-item-icon" style={{ background: def.color, width: 24, height: 24 }}>
                       <NodeIcon name={def.icon} size={12} />
                     </div>
-                    <div className="node-item-name" style={{ fontSize: 12 }}>{def.label}</div>
+                    <div className="node-item-info">
+                      <div className="node-item-name" style={{ fontSize: 12 }}>{def.label}</div>
+                      <div className="node-item-desc">{runtimeLabel(def.type)}</div>
+                    </div>
                   </div>
                 );
               })}

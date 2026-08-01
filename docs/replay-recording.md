@@ -122,6 +122,23 @@ Task Contract 的阶段 Skill 不是整句历史任务的模糊 replay。它以 
 
 人类录制用于生成可重放动作，不代表可以直接训练模型；如果要用于学习，必须经过语义化、验证和失败样本分析。
 
+当前示教录制的确定性边界：
+
+- 录制开始时记住客户端控制窗口，控制窗口自身的点击和按键不会进入脚本；空录制或始终没有稳定目标窗口会失败，不会生成空技能。
+- 每个点击、文本、快捷键和拖拽步骤都保存自己的 `target_window`。焦点切换会切分文本缓冲；跨窗口拖拽会取消，而不是把两个窗口之间的路径伪装成一个动作。
+- Ctrl+V 在事件入队时快照 Unicode 剪贴板并保存为 `type_text`，避免以后回放读取到变化后的剪贴板。Ctrl+A..Z 的控制字符会还原为组合键名。
+- 人类演示的点击允许没有独立像素变化，因为它可能只建立焦点；这项标记只写入示教脚本，不改变自主 Agent 点击的验证规则。整个重放仍必须由最后的结构化 postflight 外部证据判定成功。
+- Replayer 在每个叶子动作前重新聚焦或解析该步目标。相同目标签名绑定的 HWND 仍存活且进程一致时允许文档标题变化；HWND 消失、进程不匹配或目标签名改变时必须重新解析并 fail closed。
+- WPS 导入流程图后，一个 Flow run 共享同一 Replayer session；首节点执行一次 preflight，末节点执行一次 postflight，中间 `replay_step` 逐叶验证。控制节点本身不伪造物理动作证据。
+
+### 与“整场对话沉淀为技能”愿景的差距
+
+Human Apprentice 已经闭环“人类鼠标键盘演示 -> WPS -> canonical Automation IR -> 可编辑 Flow -> provisional memory -> 真实 replay 验证晋级 -> 0-token 复用”。这不等于 Agent 整场对话已经闭环。
+
+Agent 运行记录目前仍由用户按单个 run 手动“提取草稿”，没有按 Thread/Turn 聚合一场对话，也不会自动进入 provisional memory。vNext 发出的 `arp_run_start`、`live_agent_*` 和 `agent_batch_action` 与旧摘要/导出所读取的 `agent_start`、`agent_done`、`agent_tool` 仍未完全对齐；长 trace 还存在 2000 事件读取上限、队列丢事件未写入 manifest、按内容去重真实重复动作、跨窗口只保留全局首目标，以及 connector/provider 等不支持动作被静默遗漏的风险。任何一个完整性标志不成立时，导出只能明确标为 partial 或拒绝，不能声称保存了“Agent 所做的一切”。
+
+因此当前项目对愿景的结论是“人类示教链已符合，Agent 对话链部分符合”。下一步必须先建立 lossless、按 action id 去投影重影、逐动作目标窗口、显式 unsupported/dropped 状态的 vNext draft 契约，再复用现有 Automation IR、Flow、Apprentice memory 和 replay verification；不能恢复旧 MemoryCompiler、第二 Planner 或新的模型角色。
+
 ## 导入流程图
 
 前端转换器：`src/renderer/utils/wpsToFlowScript.ts`。

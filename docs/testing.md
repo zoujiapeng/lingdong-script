@@ -40,11 +40,20 @@ connector→Notepad 任务也全部通过。test-only CI fixture 收口提交 `6
 run `30688550071` 又实际执行并通过 frontend、Python 两个 job；这是该精确提交的远端
 绿色证据，未来 HEAD 必须重新查询。
 
-本轮改动前的 `3b48925` 由 Actions run `30688831098` 实际完成并通过 frontend、Python
-两个 job。本轮发布门前的候选工作树完整复验为 WinPilot
-`3478 passed, 13 skipped, 1 warning`、根测试 `2508 passed`、renderer `244 passed`，
-TypeScript typecheck、renderer/Electron build 和 CLI/AI build 均通过；新提交仍必须查询
-自己的 Actions，不能继承 `3b48925` 的绿色状态。
+本轮改动前的 `fd53fb887960ce77ebe4b1e7e104ee8c3af425e1` 由 Actions run
+`30698655302` 实际完成并通过 frontend、Python 两个 job。2026-08-02 当前工作树的发布门为：
+renderer `295 passed`、根目录 Python `2508 passed`、WinPilot `3509 passed, 13 skipped,
+1 warning`，TypeScript typecheck、renderer/Electron build、CLI/AI build 均通过。新提交仍必须
+查询自己的 Actions，不能继承 `fd53fb8` 的绿色状态；这些回归合同也不替代下面的外部 oracle。
+
+2026-08-02 对示教/离线流程链做了可见 Electron 双窗口探针：用户从前端开始录制，依次在
+两个独立 Tk 窗口完成 11 个鼠标键盘叶子，停止后自动生成 canonical Automation IR 并在
+Studio 显示为 13 节点/12 连线。随后从 Studio 前端运行，ARP run
+`arp-20260802-000043-6439b0` 的 11/11 步证据通过，模型调用为 0；独立窗口标题 oracle
+确认 A=`afinal001`、B=`btwo001`。重置两个窗口后，又从“技能与记忆”前端完成
+memory verification `verify-7bf3d1b4ed57`，候选由 provisional 晋级为 `replay_verified`；
+再次重置后点击“复用”，RuntimeJob `replay-1c54a9f89d9e` 完成且同一外部 oracle 再次通过。
+这证明 human Apprentice 链，不证明 Agent 整场对话导出链，也不证明所有 Flow 参数分支可运行。
 
 同一候选的真实前端原生探针没有被内部 `done` 覆盖：Calculator `43×17` 的外部显示为
 `44` 而非 `731`；Paint 没有形成合格红色 X；QQ 群摘要在零 GUI 动作前被未批准工具拒绝；

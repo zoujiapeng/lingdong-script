@@ -131,8 +131,8 @@ def automation_ir_from_wps(
         "variables": _clone(script.get("vars") or script.get("variables") or {}),
         "safety": _default_safety(steps),
         "fallback": {
-            "on_preflight_fail": "live_agent_takeover",
-            "on_step_fail": "resume_live_from_failed_step",
+            "on_preflight_fail": "stop",
+            "on_step_fail": "stop",
         },
         "runtime": {"kind": "wps_replay"},
     }

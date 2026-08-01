@@ -26,7 +26,7 @@ def test_invalid_canonical_script_does_not_hide_valid_wps_fallback(tmp_path, mon
     monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", tmp_path)
     (tmp_path / "lesson.automation.json").write_text("{broken", encoding="utf-8")
     (tmp_path / "lesson.wps.json").write_text(
-        json.dumps({"format": "wps/2", "steps": []}),
+        json.dumps({"format": "wps/2", "steps": [{"tool": "ext.delay", "seconds": 0}]}),
         encoding="utf-8",
     )
 
@@ -99,7 +99,34 @@ def test_reject_if_without_cond():
 
 def test_allow_if_with_explicit_always_cond():
     assert trace_mod.validate_script(
-        {"format": "wps/2", "steps": [{"tool": "ctrl.if", "cond": {"always": True}, "then": []}]}) is None
+        {"format": "wps/2", "steps": [{
+            "tool": "ctrl.if",
+            "cond": {"always": True},
+            "then": [{"tool": "ext.delay", "seconds": 0}],
+        }]}) is None
+
+
+def test_reject_script_without_any_executable_leaf():
+    assert "executable leaf" in trace_mod.validate_script(
+        {"format": "wps/2", "steps": []})
+    assert "executable leaf" in trace_mod.validate_script({
+        "format": "wps/2",
+        "steps": [{
+            "tool": "ctrl.if",
+            "cond": {"always": True},
+            "then": [],
+            "else": [{"tool": "ctrl.loop", "count": 2, "body": []}],
+        }],
+    })
+    assert "executable leaf" in trace_mod.validate_script({
+        "format": "wps/2",
+        "steps": [{
+            "tool": "ctrl.loop",
+            "loop_type": "count",
+            "count": 0,
+            "body": [{"tool": "ext.delay", "seconds": 0}],
+        }],
+    })
 
 
 def test_reject_missing_required_leaf_fields():
@@ -144,6 +171,17 @@ def test_reject_empty_declared_target_window():
     err = trace_mod.validate_script(
         {"format": "wps/2", "target_window": {}, "steps": []})
     assert "target_window requires" in err
+
+
+def test_reject_empty_step_target_window_at_any_nesting_depth():
+    for steps in (
+        [{"tool": "click", "coords": [1, 2], "target_window": {}}],
+        [{"tool": "ctrl.if", "cond": {"always": True}, "then": [
+            {"tool": "hotkey", "keys": ["enter"], "target_window": ""},
+        ]}],
+    ):
+        err = trace_mod.validate_script({"format": "wps/2", "steps": steps})
+        assert ".target_window requires" in err
 
 
 # ------------------------------------------------------------- export_script

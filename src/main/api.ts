@@ -222,114 +222,34 @@ export function startApiServer(deps: ApiDeps): http.Server {
 
           // ─── DSL ───
           case '/api/run-dsl':
-            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            if (!payload.dsl) { send(400, { error: '缺少 dsl' }); return; }
-            (async () => {
-              const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
-              const dslProc = await spawnPythonOneShot([scriptPath], { cwd: getBaseDir(), stdio: ['pipe', 'pipe', 'pipe'] });
-              const out: Buffer[] = [];
-              const errOut: Buffer[] = [];
-              let sent = false;
-              const sendOnce = (code: number, data: any) => { if (!sent) { sent = true; send(code, data); } };
-              dslProc.stdout!.on('data', (c: Buffer) => out.push(c));
-              dslProc.stderr!.on('data', (c: Buffer) => errOut.push(c));
-              dslProc.on('close', () => {
-                const dslStdout = Buffer.concat(out).toString('utf8');
-                try {
-                  const flow = JSON.parse(dslStdout);
-                  deps.mainWindow!.webContents.send('api-command', { action: 'loadScript', payload: flow });
-                  sendOnce(200, { ok: true, flow });
-                } catch { sendOnce(500, { error: 'DSL 转换失败', raw: dslStdout }); }
-              });
-              dslProc.on('error', (e: Error) => sendOnce(500, { error: e.message }));
-              dslProc.stdin!.write(payload.dsl);
-              dslProc.stdin!.end();
-            })();
+            send(410, {
+              error: '旧 DSL 直接写图入口已停用；请在流程工作台打开 canonical Automation IR',
+            });
             break;
 
           case '/api/generate-dsl':
-            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            if (!payload.description) { send(400, { error: '缺少 description' }); return; }
-            (async () => {
-              const result = await callLLM({
-                apiKey: payload.apiKey || '',
-                messages: [
-                  { role: 'system', content: 'You are a desktop automation script generator. Output ONLY Lobster DSL lines, one per line. No markdown, no explanation.\n\nAvailable commands:\nCLICK x y — click coordinate\nTYPE text — type text\nWAIT N — wait N seconds\nLAUNCH program — launch program (use Chinese names like 记事本)\nHOTKEY keys — press hotkey, e.g. HOTKEY ctrl+c\nFOCUS title — focus window\nSCREENSHOT — capture screen\nSCROLL up/down — scroll\n\nExample: "5秒后打开记事本" →\nWAIT 5\nLAUNCH 记事本\n\nIMPORTANT: Follow the user timing exactly. If they say "X秒后" (after X seconds), add a WAIT N step before the next action. Do NOT wrap arguments in quotes. Output ONLY the DSL.' },
-                  { role: 'user', content: payload.description },
-                ],
-                apiBase: payload.apiBase,
-                model: payload.model,
-              });
-              const dsl = result.choices?.[0]?.message?.content?.trim();
-              if (dsl) {
-                send(200, { ok: true, dsl });
-              } else { send(500, { error: 'DSL 生成为空' }); }
-            })();
+            send(410, { error: '旧独立模型 DSL 生成入口已停用' });
             break;
 
-          case '/api/create-flow': {
-            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            (async () => {
-              let sent = false;
-              const sendOnce = (code: number, data: any) => { if (!sent) { sent = true; send(code, data); } };
-              let dslText = payload.dsl;
-              if (!dslText && payload.description) {
-                const llmResult = await callLLM({
-                  apiKey: payload.apiKey || '',
-                  messages: [
-                    { role: 'system', content: 'You are a desktop automation script generator. Output ONLY Lobster DSL lines, one per line. No markdown, no explanation.\n\nAvailable commands:\nCLICK x y — click coordinate\nTYPE text — type text\nWAIT N — wait N seconds\nLAUNCH program — launch program (use Chinese names like 记事本)\nHOTKEY keys — press hotkey, e.g. HOTKEY ctrl+c\nFOCUS title — focus window\nSCREENSHOT — capture screen\nSCROLL up/down — scroll\n\nExample: "5秒后打开记事本" →\nWAIT 5\nLAUNCH 记事本\n\nIMPORTANT: Follow the user timing exactly. If they say "X秒后" (after X seconds), add a WAIT N step before the next action. Do NOT wrap arguments in quotes. Output ONLY the DSL.' },
-                    { role: 'user', content: payload.description },
-                  ],
-                  apiBase: payload.apiBase,
-                  model: payload.model,
-                });
-                let raw = llmResult.choices?.[0]?.message?.content?.trim() || '';
-                // Strip markdown code block fences if present (```dsl ... ``` or just ``` ... ```)
-                raw = raw.replace(/^```(?:dsl)?\s*/i, '').replace(/```\s*$/i, '').trim();
-                dslText = raw;
-                if (!dslText) { sendOnce(500, { error: 'DSL 生成为空' }); return; }
-              }
-              if (dslText) {
-                const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
-                const proc = await spawnPythonOneShot([scriptPath], { cwd: getBaseDir(), stdio: ['pipe', 'pipe', 'pipe'] });
-                const out: Buffer[] = [];
-                proc.stdout!.on('data', (c: Buffer) => out.push(c));
-                proc.on('close', () => {
-                  const stdout = Buffer.concat(out).toString('utf8');
-                  try {
-                    const flow = JSON.parse(stdout);
-                    deps.mainWindow!.webContents.send('api-command', { action: 'loadScript', payload: flow });
-                    sendOnce(200, { ok: true, flow });
-                  } catch (e: any) { sendOnce(500, { error: 'JSON parse: ' + e.message, raw: stdout.slice(0, 500) }); }
-                });
-                proc.on('error', (e: Error) => sendOnce(500, { error: e.message }));
-                proc.stdin!.write(dslText);
-                proc.stdin!.end();
-              } else {
-                sendOnce(400, { error: '需要 dsl 或 description' });
-              }
-            })();
+          case '/api/create-flow':
+            send(410, {
+              error: '旧 DSL/独立模型写图入口已停用；流程文档只能由 renderer 显式打开或确认修改',
+            });
             break;
-          }
 
           // ─── Engine control ───
           case '/api/engine/start':
-            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            if (!payload.script) { send(400, { error: '缺少 script' }); return; }
-            deps.mainWindow.webContents.send('api-command', { action: 'start', payload: { script: payload.script } });
-            send(200, { ok: true });
+            send(410, {
+              error: '旧 Flow 执行入口已停用；请保存 Automation IR 并通过 /api/v2/automation-ir/runs 运行',
+            });
             break;
 
           case '/api/engine/pause':
-            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            deps.mainWindow.webContents.send('api-command', { action: 'pause', payload: {} });
-            send(200, { ok: true });
+            send(410, { error: '旧 Flow 执行入口已停用' });
             break;
 
           case '/api/engine/resume':
-            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            deps.mainWindow.webContents.send('api-command', { action: 'resume', payload: {} });
-            send(200, { ok: true });
+            send(410, { error: '旧 Flow 执行入口已停用' });
             break;
 
           // ─── Screenshot ───

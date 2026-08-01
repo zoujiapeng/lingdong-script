@@ -15,12 +15,18 @@ import { templateRegistry } from '../utils/templateRegistry';
 import { matchExact } from '../utils/templateMatcher';
 import { createFlowExecutor } from './executor';
 import type { ExecutionController } from './executor';
-import { generateText } from '../utils/textGenerator';
-import { automationIrFromFlowScript } from '../utils/automationIR';
+import { automationDocumentToFlowScript, automationIrFromFlowScript } from '../utils/automationIR';
+import { commitEditorDrafts } from '../utils/editorDrafts';
+import { edgeBranch } from '../platform/flowToArpGraph';
 import { DEFAULT_SETTINGS, DEFAULT_UI_STATE, PRESET_TEMPLATES, PRESET_TEMPLATE_META, STORAGE_KEY, MAX_HISTORY } from './defaults';
 import { loadCustomTemplates, saveCustomTemplates, loadAgentHistory, saveAgentHistory } from './persistence';
 export { loadTemplateShortcuts, saveTemplateShortcut, deleteTemplateShortcut, loadCustomTemplates, saveCustomTemplates } from './persistence';
 export type { CustomTemplate } from './persistence';
+
+export type ScriptSaveResult =
+  | { status: 'saved'; filePath?: string }
+  | { status: 'canceled' }
+  | { status: 'error'; error: string };
 
 function createTemplateScript(templateId: string): FlowScript | null {
   const tpl = PRESET_TEMPLATES.find((t) => t.id === templateId);
@@ -60,10 +66,10 @@ interface AppStore {
 
   // Actions - Script
   newScript: () => void;
-  loadScript: (script: FlowScript) => void;
+  loadScript: (script: FlowScript, options?: { dirty?: boolean }) => void;
   loadTemplate: (templateId: string) => void;
   loadTemplateByExactMatch: (query: string) => boolean;
-  saveScript: () => void;
+  saveScript: () => Promise<ScriptSaveResult>;
   setScriptName: (name: string) => void;
   saveAsTemplate: (name: string, description?: string) => void;
   registerScript: (script: FlowScript) => void;
@@ -79,7 +85,12 @@ interface AppStore {
   deleteNodes: (ids: string[]) => void;
   duplicateNodes: (ids: string[]) => void;
   moveNode: (id: string, x: number, y: number) => void;
-  moveNodes: (ids: string[], dx: number, dy: number) => void;
+  moveNodes: (
+    origins: Record<string, { x: number; y: number }>,
+    dx: number,
+    dy: number,
+    anchorId: string,
+  ) => void;
 
   // Actions - Edges
   addEdge: (edge: Omit<FlowEdge, 'id'>) => void;
@@ -104,6 +115,7 @@ interface AppStore {
   cutSelected: () => void;
 
   // Actions - History (undo/redo)
+  checkpointHistory: () => void;
   undo: () => void;
   redo: () => void;
 
@@ -276,15 +288,25 @@ function _buildParamPromptQueue(nodes: FlowNode[]): ParamPromptItem[] {
 }
 
 function pushHistory(nodes: FlowNode[], edges: FlowEdge[]) {
+  const snapshot = {
+    nodes: JSON.parse(JSON.stringify(nodes)) as FlowNode[],
+    edges: JSON.parse(JSON.stringify(edges)) as FlowEdge[],
+  };
+  const current = history[historyIndex];
+  if (current && JSON.stringify(current) === JSON.stringify(snapshot)) return;
   history = history.slice(0, historyIndex + 1);
-  history.push({ nodes: JSON.parse(JSON.stringify(nodes)), edges: JSON.parse(JSON.stringify(edges)) });
+  history.push(snapshot);
   if (history.length > MAX_HISTORY) history.shift();
   historyIndex = history.length - 1;
 }
 
+const initialScript = createTemplateScript('arp-quickstart');
+if (!initialScript) throw new Error('Default ARP template is unavailable.');
+pushHistory(initialScript.nodes, initialScript.edges);
+
 export const useStore = createWithEqualityFn<AppStore>()(
   immer((set, get) => ({
-    script: createTemplateScript('arp-quickstart')!,
+    script: initialScript,
     scripts: {},
     activeScriptId: '',
     recentScripts: [],
@@ -368,7 +390,8 @@ export const useStore = createWithEqualityFn<AppStore>()(
       return false;
     },
 
-    loadScript: (script) => {
+    loadScript: (document, options) => {
+      const script = automationDocumentToFlowScript(document);
       history = [];
       historyIndex = -1;
       pushHistory(script.nodes, script.edges);
@@ -383,52 +406,74 @@ export const useStore = createWithEqualityFn<AppStore>()(
         state.scriptTriggers = script.triggers || [];
         state.scripts[id] = script;
         state.activeScriptId = id;
-        state.isDirty = false;
+        state.isDirty = Boolean(options?.dirty);
         state.ui.selection = { nodes: [], edges: [] };
       });
       if (script.nodes.length > 0) get().fitToScreen();
     },
 
     saveScript: async () => {
-      set((state) => {
-        state.script.meta.updated_at = new Date().toISOString();
-        state.isDirty = false;
-      });
+      const draftError = commitEditorDrafts();
+      if (draftError) return { status: 'error', error: `请先修正编辑器内容：${draftError}` };
       const script = get().script;
-      const automation = automationIrFromFlowScript(script, `air-${script.meta.id}`);
-      const json = JSON.stringify(automation, null, 2);
-      const pseudoCode = (() => {
-        try {
-          return generateText(script, 'pseudocode');
-        } catch { return '# 伪代码生成失败'; }
-      })();
+      const updatedAt = new Date().toISOString();
+      const savedScript = {
+        ...script,
+        meta: { ...script.meta, updated_at: updatedAt },
+      };
+      let json: string;
+      try {
+        const automation = automationIrFromFlowScript(savedScript, `air-${script.meta.id}`);
+        json = JSON.stringify(automation, null, 2);
+      } catch (error) {
+        return { status: 'error', error: error instanceof Error ? error.message : String(error) };
+      }
 
       const api = (window as any).electronAPI;
       if (api?.saveFileDialog) {
-        const result = await api.saveFileDialog(`${script.meta.name}.automation.json`);
-        if (!result.canceled && result.filePath) {
-          try {
-            const basePath = result.filePath.replace(/\.automation\.json$|\.json$/, '');
-            await api.writeFile(result.filePath, json);
-            await api.writeFile(basePath + '.flow', pseudoCode);
-            return;
-          } catch (e) {
-            console.error('Save failed:', e);
+        try {
+          const result = await api.saveFileDialog(`${script.meta.name}.automation.json`);
+          if (!result || result.canceled || !result.filePath) {
+            return { status: 'canceled' };
           }
+          if (!api.writeFile) {
+            return { status: 'error', error: '当前客户端不支持写入文件。' };
+          }
+          const written = await api.writeFile(result.filePath, json);
+          if (!written?.success) {
+            return { status: 'error', error: String(written?.error || '写入自动化文件失败。') };
+          }
+          // The file contains the snapshot captured before the async dialog/write.
+          // Do not mark edits made while saving as persisted.
+          if (get().script === script) {
+            set((state) => {
+              state.script.meta.updated_at = updatedAt;
+              state.isDirty = false;
+            });
+          }
+          return { status: 'saved', filePath: result.filePath };
+        } catch (error) {
+          return { status: 'error', error: error instanceof Error ? error.message : String(error) };
         }
       }
-      // Browser fallback — trigger sequential downloads
-      const dl = (content: string, name: string, type: string) => {
-        const blob = new Blob([content], { type });
+
+      // Browser fallback exports the same canonical artifact as Electron.
+      try {
+        const blob = new Blob([json], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = name;
+        a.download = `${script.meta.name}.automation.json`;
         a.click();
         URL.revokeObjectURL(url);
-      };
-      dl(json, `${script.meta.name}.automation.json`, 'application/json');
-      dl(pseudoCode, `${script.meta.name}.flow`, 'text/plain');
+        set((state) => {
+          state.script.meta.updated_at = updatedAt;
+          state.isDirty = false;
+        });
+        return { status: 'saved' };
+      } catch (error) {
+        return { status: 'error', error: error instanceof Error ? error.message : String(error) };
+      }
     },
 
     setScriptName: (name) => {
@@ -505,6 +550,10 @@ export const useStore = createWithEqualityFn<AppStore>()(
     get canNavigateBack() { return get().subFlowNav.stack.length > 0; },
 
     addNode: (type, x, y, params, providedId?) => {
+      if (type === 'start' || type === 'end') {
+        const existing = get().script.nodes.find((node) => node.type === type);
+        if (existing) return existing.id;
+      }
       const def = NODE_DEFINITIONS[type];
       const id = providedId || nanoid();
       const { snap_to_grid, grid_size } = get().ui;
@@ -543,12 +592,27 @@ export const useStore = createWithEqualityFn<AppStore>()(
     },
 
     deleteNodes: (ids) => {
+      const current = get();
+      const requested = new Set(ids);
+      const removable = new Set(current.script.nodes
+        .filter((node) => requested.has(node.id) && node.type !== 'start' && node.type !== 'end')
+        .map((node) => node.id));
+      for (const type of ['start', 'end'] as const) {
+        const boundaryNodes = current.script.nodes.filter((node) => node.type === type);
+        const retained = boundaryNodes.find((node) => !requested.has(node.id)) || boundaryNodes[0];
+        for (const node of boundaryNodes) {
+          if (requested.has(node.id) && node.id !== retained?.id) removable.add(node.id);
+        }
+      }
+      if (removable.size === 0) return;
       set((state) => {
-        state.script.nodes = state.script.nodes.filter((n) => !ids.includes(n.id));
+        state.script.nodes = state.script.nodes.filter((n) => !removable.has(n.id));
         state.script.edges = state.script.edges.filter(
-          (e) => !ids.includes(e.from_node) && !ids.includes(e.to_node)
+          (e) => !removable.has(e.from_node) && !removable.has(e.to_node)
         );
-        state.ui.selection = { nodes: [], edges: [] };
+        const survivingEdges = new Set(state.script.edges.map((edge) => edge.id));
+        state.ui.selection.nodes = state.ui.selection.nodes.filter((id) => !removable.has(id));
+        state.ui.selection.edges = state.ui.selection.edges.filter((id) => survivingEdges.has(id));
         state.isDirty = true;
       });
       pushHistory(get().script.nodes, get().script.edges);
@@ -556,7 +620,10 @@ export const useStore = createWithEqualityFn<AppStore>()(
 
     duplicateNodes: (ids) => {
       const { nodes, edges } = get().script;
-      const selectedNodes = nodes.filter((n) => ids.includes(n.id));
+      const selectedNodes = nodes.filter(
+        (n) => ids.includes(n.id) && n.type !== 'start' && n.type !== 'end',
+      );
+      if (selectedNodes.length === 0) return;
       const idMap: Record<string, string> = {};
       const newNodes = selectedNodes.map((n) => {
         const newId = nanoid();
@@ -564,7 +631,7 @@ export const useStore = createWithEqualityFn<AppStore>()(
         return { ...JSON.parse(JSON.stringify(n)), id: newId, x: n.x + 40, y: n.y + 40, status: 'idle' as const };
       });
       const newEdges = edges
-        .filter((e) => ids.includes(e.from_node) && ids.includes(e.to_node))
+        .filter((e) => idMap[e.from_node] && idMap[e.to_node])
         .map((e) => ({ ...e, id: nanoid(), from_node: idMap[e.from_node], to_node: idMap[e.to_node] }));
       set((state) => {
         state.script.nodes.push(...newNodes);
@@ -580,33 +647,57 @@ export const useStore = createWithEqualityFn<AppStore>()(
       const snap = (v: number) => snap_to_grid ? Math.round(v / grid_size) * grid_size : v;
       set((state) => {
         const n = state.script.nodes.find((n) => n.id === id);
-        if (n) { n.x = snap(x); n.y = snap(y); }
+        if (!n) return;
+        const nextX = snap(x);
+        const nextY = snap(y);
+        if (n.x === nextX && n.y === nextY) return;
+        n.x = nextX;
+        n.y = nextY;
         state.isDirty = true;
       });
     },
 
-    moveNodes: (ids, dx, dy) => {
+    moveNodes: (origins, dx, dy, anchorId) => {
       const { snap_to_grid, grid_size } = get().ui;
       const snap = (v: number) => snap_to_grid ? Math.round(v / grid_size) * grid_size : v;
+      const anchor = origins[anchorId] || Object.values(origins)[0];
+      if (!anchor) return;
+      const appliedDx = snap(anchor.x + dx) - anchor.x;
+      const appliedDy = snap(anchor.y + dy) - anchor.y;
       set((state) => {
-        ids.forEach((id) => {
+        let changed = false;
+        Object.entries(origins).forEach(([id, origin]) => {
           const n = state.script.nodes.find((n) => n.id === id);
-          if (n) { n.x = snap(n.x + dx); n.y = snap(n.y + dy); }
+          if (!n) return;
+          const nextX = origin.x + appliedDx;
+          const nextY = origin.y + appliedDy;
+          if (n.x === nextX && n.y === nextY) return;
+          n.x = nextX;
+          n.y = nextY;
+          changed = true;
         });
-        state.isDirty = true;
+        if (changed) state.isDirty = true;
       });
     },
 
     addEdge: (edge) => {
       const { edges } = get().script;
-      // Prevent duplicate
-      const exists = edges.some(
-        (e) => e.from_node === edge.from_node && e.from_port === edge.from_port && e.to_node === edge.to_node
+      const normalizedEdge = {
+        ...edge,
+        from_port: String(edge.from_port || '').trim() || 'output',
+        to_port: String(edge.to_port || '').trim() || 'input',
+      };
+      const branch = edgeBranch(normalizedEdge.from_port, normalizedEdge.label);
+      // Runtime routing is single-valued for each source branch.
+      const sourceBranchExists = edges.some(
+        (existing) => (
+          existing.from_node === normalizedEdge.from_node
+          && edgeBranch(existing.from_port || 'output', existing.label) === branch
+        )
       );
-      if (exists) return;
-      // Allow multiple edges from the same output port (fan-out / parallel execution)
+      if (sourceBranchExists) return;
       set((state) => {
-        state.script.edges.push({ ...edge, id: nanoid() });
+        state.script.edges.push({ ...normalizedEdge, id: nanoid() });
         state.isDirty = true;
       });
       pushHistory(get().script.nodes, get().script.edges);
@@ -713,17 +804,30 @@ export const useStore = createWithEqualityFn<AppStore>()(
     paste: () => {
       const { clipboard } = get();
       if (!clipboard) return;
+      const boundaryTypes = new Set(
+        get().script.nodes
+          .filter((node) => node.type === 'start' || node.type === 'end')
+          .map((node) => node.type),
+      );
       const idMap: Record<string, string> = {};
-      const newNodes = clipboard.nodes.map((n) => {
+      const newNodes = clipboard.nodes.filter((node) => {
+        if (node.type !== 'start' && node.type !== 'end') return true;
+        if (boundaryTypes.has(node.type)) return false;
+        boundaryTypes.add(node.type);
+        return true;
+      }).map((n) => {
         const newId = nanoid();
         idMap[n.id] = newId;
         return { ...n, id: newId, x: n.x + 40, y: n.y + 40, status: 'idle' as const };
       });
-      const newEdges = clipboard.edges.map((e) => ({
+      if (newNodes.length === 0) return;
+      const newEdges = clipboard.edges.filter(
+        (edge) => idMap[edge.from_node] && idMap[edge.to_node],
+      ).map((e) => ({
         ...e,
         id: nanoid(),
-        from_node: idMap[e.from_node] || e.from_node,
-        to_node: idMap[e.to_node] || e.to_node,
+        from_node: idMap[e.from_node],
+        to_node: idMap[e.to_node],
       }));
       set((state) => {
         state.script.nodes.push(...newNodes);
@@ -731,6 +835,10 @@ export const useStore = createWithEqualityFn<AppStore>()(
         state.ui.selection = { nodes: newNodes.map((n) => n.id), edges: [] };
         state.isDirty = true;
       });
+      pushHistory(get().script.nodes, get().script.edges);
+    },
+
+    checkpointHistory: () => {
       pushHistory(get().script.nodes, get().script.edges);
     },
 
@@ -1306,6 +1414,12 @@ export const useStore = createWithEqualityFn<AppStore>()(
   }))
 );
 
+export function confirmDocumentReplacement(): boolean {
+  if (commitEditorDrafts()) return false;
+  return !useStore.getState().isDirty
+    || window.confirm('当前流程有未保存修改，继续将放弃这些修改。是否继续？');
+}
+
 // ── Template Registry Initialization ───────────────────────────
 
 // Register preset templates
@@ -1354,12 +1468,7 @@ try {
     if (parsed && parsed.nodes && parsed.meta) {
       // Delay restore to let the store initialize first
       setTimeout(() => {
-        useStore.setState((s) => {
-          s.script = parsed;
-          // Ensure settings exist to prevent crashes
-          if (!s.script.settings) s.script.settings = { ...DEFAULT_SETTINGS };
-          s.isDirty = false;
-        });
+        useStore.getState().loadScript(parsed, { dirty: true });
       }, 0);
     }
   }

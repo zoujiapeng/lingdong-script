@@ -98,6 +98,8 @@ class ApprenticeManager:
                 raise RuntimeError("no apprentice lesson is active")
             result = self.recorder.stop()
             if not result.get("ok"):
+                if not self.recorder.is_recording():
+                    self._session = None
                 raise RuntimeError(str(result.get("error") or "failed to stop demonstration"))
 
             path = (Path(SCRIPTS_DIR) / str(result.get("file") or "")).resolve()

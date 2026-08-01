@@ -5,6 +5,12 @@ const NATIVE_KINDS = new Set<ArpNodeKind>([
   'start', 'end', 'agent_goal', 'action_batch', 'replay_step', 'skill_replay', 'evidence_gate', 'human_gate',
 ]);
 
+/**
+ * Node types the renderer can compile without a legacy fallback.
+ *
+ * This is the local editing boundary, not proof that the connected runtime
+ * currently exposes the corresponding capability.
+ */
 export const RUNNABLE_FLOW_NODE_TYPES = new Set<NodeType>([
   'agent_goal',
   'action_batch',

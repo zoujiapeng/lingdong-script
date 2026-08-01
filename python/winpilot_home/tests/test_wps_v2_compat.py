@@ -24,7 +24,7 @@ class SpyReplayer(trace_mod.Replayer):
         self._leaf_ok = {}  # tool -> bool override
 
     def _run_step(self, idx, step):
-        self.leaf_calls.append({"idx": idx, "tool": step.get("tool"), "step": step})
+        self.leaf_calls.append({"idx": idx, "tool": step.get("tool"), "step": step, "hwnd": self.hwnd})
         return {"ok": self._leaf_ok.get(step.get("tool"), True)}
 
     def _check_condition(self, cond, timeout_s):
@@ -35,6 +35,21 @@ def _write(tmp_path, data):
     path = tmp_path / "s.wps.json"
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def _stub_window_inventory(monkeypatch, windows, processes):
+    monkeypatch.setattr(trace_mod.win32, "list_windows", lambda: [dict(win) for win in windows])
+    monkeypatch.setattr(
+        trace_mod.win32,
+        "_process_name",
+        lambda pid: processes.get(pid, ""),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        trace_mod.win32,
+        "title_contains",
+        lambda title, expected: expected.casefold() in title.casefold(),
+    )
 
 
 # ------------------------------------------------------- v1 compatibility
@@ -565,11 +580,48 @@ def test_click_without_expect_accepts_transient_pressed_state(monkeypatch):
     assert result["post_change_ratio"] == 0
 
 
+def test_demonstrated_click_can_delegate_outcome_to_final_evidence(monkeypatch):
+    replay = trace_mod.Replayer()
+    replay.hwnd = 123
+    monkeypatch.setattr(
+        replay,
+        "_capture_action_surface",
+        lambda: (_ for _ in ()).throw(AssertionError("no per-click pixel proof")),
+    )
+    monkeypatch.setattr(
+        trace_mod.verify,
+        "run_with_verify",
+        lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(
+        trace_mod.executor,
+        "click",
+        lambda *_args, **_kwargs: {"ok": True, "physical_attempt": True},
+    )
+
+    result = replay._run_step("1", {
+        "tool": "click",
+        "coords": [10, 20],
+        "allow_no_change": True,
+    })
+
+    assert result == {
+        "ok": True,
+        "physical_attempt": True,
+        "resolved": {"source": "recorded_coords", "point": [10, 20]},
+    }
+
+
 def test_replayer_preflight_binds_declared_target_window(tmp_path, monkeypatch):
+    focused = []
     monkeypatch.setattr(
         trace_mod.win32,
         "find_window",
         lambda title: {"hwnd": 456, "title": "Target App", "pid": 12} if title == "Target App" else None,
+    )
+    monkeypatch.setattr(
+        trace_mod.executor, "focus_window",
+        lambda hwnd: focused.append(hwnd) or {"ok": True, "hwnd": hwnd},
     )
     script = {
         "format": "wps/2",
@@ -584,7 +636,183 @@ def test_replayer_preflight_binds_declared_target_window(tmp_path, monkeypatch):
     assert out["preflight"]["required"] is True
     assert out["preflight"]["hwnd"] == 456
     assert r.hwnd == 456
+    assert focused == [456]
     assert [c["tool"] for c in r.leaf_calls] == ["click"]
+
+
+def test_replayer_rebinds_and_focuses_each_explicit_step_target(tmp_path, monkeypatch):
+    windows = {
+        "First": {"hwnd": 111, "title": "First", "pid": 1},
+        "Second": {"hwnd": 222, "title": "Second", "pid": 2},
+    }
+    focused = []
+    r = SpyReplayer()
+    monkeypatch.setattr(r, "_find_target_window", lambda hint: windows.get(hint.get("title")))
+    monkeypatch.setattr(
+        trace_mod.executor, "focus_window",
+        lambda hwnd: focused.append(hwnd) or {"ok": True, "hwnd": hwnd},
+    )
+    target = lambda title, process: {"title": title, "process": process}
+    script = {
+        "format": "wps/2",
+        "target_window": target("First", "first.exe"),
+        "steps": [
+            {"tool": "hotkey", "keys": ["enter"], "target_window": target("First", "first.exe")},
+            {"tool": "hotkey", "keys": ["tab"], "target_window": target("Second", "second.exe")},
+            {"tool": "hotkey", "keys": ["esc"], "target_window": target("First", "first.exe")},
+        ],
+    }
+
+    out = r.run(_write(tmp_path, script))
+
+    assert out["ok"] is True
+    assert [call["hwnd"] for call in r.leaf_calls] == [111, 222, 111]
+    assert focused == [111, 111, 222, 111]
+
+
+def test_replayer_keeps_same_live_process_bound_across_complete_title_drift(tmp_path, monkeypatch):
+    windows = [{"hwnd": 111, "title": "Document - Editor", "pid": 1}]
+    _stub_window_inventory(monkeypatch, windows, {1: "editor.exe"})
+    focused = []
+    monkeypatch.setattr(
+        trace_mod.executor,
+        "focus_window",
+        lambda hwnd: focused.append(hwnd) or {"ok": True, "hwnd": hwnd},
+    )
+    target = {"title": "Document - Editor", "process": "editor.exe"}
+    script = {
+        "format": "wps/2",
+        "target_window": target,
+        "steps": [
+            {"tool": "hotkey", "keys": ["enter"], "target_window": target},
+            {"tool": "hotkey", "keys": ["esc"], "target_window": target},
+        ],
+    }
+    r = SpyReplayer()
+    run_step = r._run_step
+
+    def mutate_title_after_first_action(idx, step):
+        result = run_step(idx, step)
+        if idx == "1":
+            windows[0]["title"] = "A completely different title"
+        return result
+
+    monkeypatch.setattr(r, "_run_step", mutate_title_after_first_action)
+
+    out = r.run(_write(tmp_path, script))
+
+    assert out["ok"] is True
+    assert [call["hwnd"] for call in r.leaf_calls] == [111, 111]
+    assert focused == [111, 111, 111]
+
+
+def test_replayer_rejects_title_drift_when_bound_hwnd_process_changes(monkeypatch):
+    windows = [{"hwnd": 111, "title": "Document - Editor", "pid": 1}]
+    processes = {1: "editor.exe"}
+    _stub_window_inventory(monkeypatch, windows, processes)
+    monkeypatch.setattr(trace_mod.executor, "focus_window", lambda hwnd: {"ok": True, "hwnd": hwnd})
+    target = {"title": "Document - Editor", "process": "editor.exe"}
+    r = SpyReplayer()
+
+    first = r.run_steps([{"tool": "hotkey", "keys": ["enter"]}], target_window=target)
+    windows[0]["title"] = "A completely different title"
+    processes[1] = "other.exe"
+    second = r.run_steps([{"tool": "hotkey", "keys": ["esc"]}], target_window=target)
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert "target window not found" in second["error"]
+    assert [call["tool"] for call in r.leaf_calls] == ["hotkey"]
+
+
+def test_replayer_does_not_accept_title_drift_without_process_identity(monkeypatch):
+    windows = [{"hwnd": 111, "title": "Document - Editor", "pid": 1}]
+    _stub_window_inventory(monkeypatch, windows, {})
+    monkeypatch.setattr(
+        trace_mod.win32,
+        "find_window",
+        lambda title: next(
+            (dict(win) for win in windows if title.casefold() in win["title"].casefold()),
+            None,
+        ),
+    )
+    monkeypatch.setattr(trace_mod.executor, "focus_window", lambda hwnd: {"ok": True, "hwnd": hwnd})
+    r = SpyReplayer()
+
+    first = r.run_steps([{"tool": "hotkey", "keys": ["enter"]}], target_window="Document - Editor")
+    windows[0]["title"] = "A completely different title"
+    second = r.run_steps([{"tool": "hotkey", "keys": ["esc"]}], target_window="Document - Editor")
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert [call["tool"] for call in r.leaf_calls] == ["hotkey"]
+
+
+def test_replayer_fully_resolves_changed_signature_instead_of_reusing_bound_hwnd(monkeypatch):
+    windows = [
+        {"hwnd": 111, "title": "First", "pid": 1},
+        {"hwnd": 222, "title": "Second", "pid": 2},
+    ]
+    _stub_window_inventory(monkeypatch, windows, {1: "editor.exe", 2: "editor.exe"})
+    monkeypatch.setattr(trace_mod.executor, "focus_window", lambda hwnd: {"ok": True, "hwnd": hwnd})
+    r = SpyReplayer()
+
+    first = r.run_steps(
+        [{"tool": "hotkey", "keys": ["enter"]}],
+        target_window={"title": "First", "process": "editor.exe"},
+    )
+    second = r.run_steps(
+        [{"tool": "hotkey", "keys": ["esc"]}],
+        target_window={"title": "Second", "process": "editor.exe"},
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert [call["hwnd"] for call in r.leaf_calls] == [111, 222]
+
+
+def test_replayer_fully_resolves_same_signature_when_bound_hwnd_disappears(monkeypatch):
+    windows = [{"hwnd": 111, "title": "Document - Editor", "pid": 1}]
+    _stub_window_inventory(monkeypatch, windows, {1: "editor.exe", 2: "editor.exe"})
+    monkeypatch.setattr(trace_mod.executor, "focus_window", lambda hwnd: {"ok": True, "hwnd": hwnd})
+    target = {"title": "Document - Editor", "process": "editor.exe"}
+    r = SpyReplayer()
+
+    first = r.run_steps([{"tool": "hotkey", "keys": ["enter"]}], target_window=target)
+    windows[:] = [{"hwnd": 222, "title": "Document - Editor", "pid": 2}]
+    second = r.run_steps([{"tool": "hotkey", "keys": ["esc"]}], target_window=target)
+    windows.clear()
+    third = r.run_steps([{"tool": "hotkey", "keys": ["tab"]}], target_window=target)
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert third["ok"] is False
+    assert [call["hwnd"] for call in r.leaf_calls] == [111, 222]
+
+
+def test_replayer_fails_closed_before_a_missing_step_target(tmp_path, monkeypatch):
+    r = SpyReplayer()
+    monkeypatch.setattr(
+        r, "_find_target_window",
+        lambda hint: {"hwnd": 111, "title": "First", "pid": 1}
+        if hint.get("title") == "First" else None,
+    )
+    monkeypatch.setattr(trace_mod.executor, "focus_window", lambda hwnd: {"ok": True, "hwnd": hwnd})
+    script = {
+        "format": "wps/2",
+        "target_window": "First",
+        "steps": [
+            {"tool": "hotkey", "keys": ["enter"], "target_window": "First"},
+            {"tool": "hotkey", "keys": ["tab"], "target_window": "Missing"},
+        ],
+    }
+
+    out = r.run(_write(tmp_path, script))
+
+    assert out["ok"] is False
+    assert [call["hwnd"] for call in r.leaf_calls] == [111]
+    assert out["results"][-1]["index"] == "2"
+    assert "target window not found" in out["results"][-1]["error"]
 
 
 def test_replayer_launch_binds_verified_window_for_semantic_followup(monkeypatch):
@@ -743,6 +971,7 @@ def test_in_memory_segments_share_window_variables_and_results(monkeypatch):
         "find_window",
         lambda title: {"hwnd": 456, "title": "Target App", "pid": 12},
     )
+    monkeypatch.setattr(trace_mod.executor, "focus_window", lambda hwnd: {"ok": True, "hwnd": hwnd})
     r = SpyReplayer()
 
     first = r.run_steps(
@@ -783,6 +1012,7 @@ def test_in_memory_segments_rebind_when_target_window_changes(monkeypatch):
         "Second App": {"hwnd": 222, "title": "Second App", "pid": 2},
     }
     monkeypatch.setattr(trace_mod.win32, "find_window", lambda title: windows.get(title))
+    monkeypatch.setattr(trace_mod.executor, "focus_window", lambda hwnd: {"ok": True, "hwnd": hwnd})
     r = SpyReplayer()
 
     first = r.run_steps(
@@ -799,6 +1029,46 @@ def test_in_memory_segments_rebind_when_target_window_changes(monkeypatch):
     assert first["preflight"]["hwnd"] == 111
     assert second["preflight"]["hwnd"] == 222
     assert r.hwnd == 222
+
+
+def test_in_memory_segments_revalidate_same_target_before_each_action(monkeypatch):
+    resolved = iter([
+        {"hwnd": 111, "title": "Target App", "pid": 1},
+        {"hwnd": 222, "title": "Target App", "pid": 2},
+    ])
+    focused = []
+    r = SpyReplayer()
+    monkeypatch.setattr(r, "_find_target_window", lambda hint: next(resolved))
+    monkeypatch.setattr(
+        trace_mod.executor, "focus_window",
+        lambda hwnd: focused.append(hwnd) or {"ok": True, "hwnd": hwnd},
+    )
+
+    first = r.run_steps(
+        [{"tool": "hotkey", "keys": ["enter"]}],
+        target_window={"title": "Target App", "process": "target.exe"},
+    )
+    second = r.run_steps(
+        [{"tool": "hotkey", "keys": ["esc"]}],
+        target_window={"title": "Target App", "process": "target.exe"},
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert [call["hwnd"] for call in r.leaf_calls[-2:]] == [111, 222]
+    assert focused == [111, 222]
+
+
+def test_replay_rejects_malformed_declared_postflight_evidence():
+    result = SpyReplayer().run_script({
+        "format": "wps/2",
+        "evidence": {"required": "must exist"},
+        "steps": [{"tool": "ext.delay", "seconds": 0}],
+    })
+
+    assert result["ok"] is False
+    assert result["postflight"]["required"] is True
+    assert "must be an array" in result["postflight"]["error"]
 
 
 def test_automation_ir_desktop_replay_requires_explicit_target_window(tmp_path):
@@ -821,7 +1091,7 @@ def test_replay_preflight_enforces_structured_conditions(tmp_path):
     script = {
         "format": "wps/2",
         "conditions": {"checks": [{"file_exists": str(marker)}]},
-        "steps": [],
+        "steps": [{"tool": "ext.delay", "seconds": 0}],
     }
 
     result = SpyReplayer().run(_write(tmp_path, script))
@@ -837,7 +1107,7 @@ def test_replay_postflight_enforces_typed_evidence(tmp_path):
     script = {
         "format": "wps/2",
         "evidence": {"required": [{"predicate": "file.exists", "value": str(marker)}]},
-        "steps": [],
+        "steps": [{"tool": "ext.delay", "seconds": 0}],
     }
 
     result = SpyReplayer().run(_write(tmp_path, script))

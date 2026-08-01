@@ -71,6 +71,29 @@ describe('wpsToFlowScript exact offline import', () => {
     expect((replayNodes(flow)[0].params as any).target_window).toBe('Calculator');
   });
 
+  it('runs canonical preflight once and postflight only after the final step', () => {
+    const conditions = { checks: [{ file_exists: 'C:\\ready.txt' }] };
+    const safety = { requires_preflight: true, mutates_desktop: false };
+    const evidence = {
+      required: [{ predicate: 'file.exists', value: 'C:\\result.txt' }],
+    };
+    const flow = wpsToFlowScript({
+      conditions,
+      safety,
+      evidence,
+      steps: [
+        { tool: 'ext.delay', seconds: 0 },
+        { tool: 'ext.var_set', name: 'ready', value: 'yes' },
+      ],
+    });
+    const replay = replayNodes(flow).map((node) => node.params as any);
+
+    expect(replay[0].preflight_contract).toEqual({ conditions, safety });
+    expect(replay[1]).not.toHaveProperty('preflight_contract');
+    expect(replay[0]).not.toHaveProperty('postflight_evidence');
+    expect(replay[1].postflight_evidence).toEqual(evidence);
+  });
+
   it('produces an offline-mode FlowScript envelope', () => {
     const source: WpsScript = {
       format: 'wps/2',
