@@ -1,7 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AgentCockpit } from '../components/platform/PlatformWorkbench';
+import {
+  AgentCockpit,
+  isActiveRunStatus,
+  replayJobFromRuntimeSnapshot,
+  replayOutcomeStatus,
+} from '../components/platform/PlatformWorkbench';
 import { ControlPlaneClient } from '../platform/client';
 import type {
   ArpExecutionSnapshot,
@@ -84,6 +89,39 @@ afterEach(() => {
   delete (window as any).electronAPI;
   localStorage.clear();
   vi.unstubAllGlobals();
+});
+
+describe('active run status contract', () => {
+  it.each(['queued', 'running', 'paused', 'waiting_external', 'canceling'])(
+    'keeps %s active until the shared terminal contract says otherwise',
+    (status) => expect(isActiveRunStatus(status)).toBe(true),
+  );
+
+  it.each(['done', 'failed', 'stopped', 'reply', ''])('treats %s as inactive', (status) => {
+    expect(isActiveRunStatus(status)).toBe(false);
+  });
+
+  it('shows a replay result with ok=false as failed even if a transport reports done', () => {
+    expect(replayOutcomeStatus({ replay_id: 'replay-1', kind: 'replay', status: 'done', ok: false })).toBe('failed');
+    expect(replayOutcomeStatus({ replay_id: 'replay-2', kind: 'replay', status: 'done', ok: true })).toBe('done');
+  });
+
+  it('rehydrates replay and memory verification through one runtime-job owner', () => {
+    const base = {
+      status: 'running', resources: ['interactive_desktop'], error: '',
+      created_at: 1, metadata: {},
+    };
+    expect(replayJobFromRuntimeSnapshot({
+      ...base, job_id: 'replay-1', kind: 'replay', metadata: { script: 'one.wps.json' },
+    })).toMatchObject({ replay_id: 'replay-1', kind: 'replay', script: 'one.wps.json' });
+    expect(replayJobFromRuntimeSnapshot({
+      ...base, job_id: 'verify-1', kind: 'memory_verification',
+      metadata: { script: 'one.wps.json', memory_id: 'memory-1' },
+    })).toMatchObject({ replay_id: 'verify-1', kind: 'memory_verification', memory_id: 'memory-1' });
+    expect(replayJobFromRuntimeSnapshot({
+      ...base, job_id: 'other-1', kind: 'schedule',
+    })).toBeNull();
+  });
 });
 
 describe('primary goal-run transport', () => {

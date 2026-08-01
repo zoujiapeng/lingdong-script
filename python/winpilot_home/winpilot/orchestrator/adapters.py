@@ -204,6 +204,30 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
     replayer.step_delay = pace_ms / 1000.0
     variables = context.get("variables") if isinstance(context.get("variables"), dict) else {}
     seeded_variables = {str(key): str(value) for key, value in variables.items()}
+    contract_preflight: dict[str, Any] | None = None
+    if "preflight_contract" in node.config:
+        contract = node.config.get("preflight_contract")
+        if not isinstance(contract, dict):
+            return NodeResult(ok=False, branch="fail", error="replay_step preflight_contract must be an object")
+        for field in ("conditions", "safety"):
+            if field in contract and not isinstance(contract.get(field), dict):
+                return NodeResult(ok=False, branch="fail", error=f"replay_step preflight {field} must be an object")
+        try:
+            contract_preflight = replayer.verify_preflight(
+                target_window=node.config.get("target_window"),
+                conditions=contract.get("conditions"),
+                safety=contract.get("safety"),
+            )
+        except Exception as exc:
+            contract_preflight = {"ok": False, "error": f"preflight contract failed: {exc}"}
+        if not contract_preflight.get("ok", False):
+            error = str(contract_preflight.get("error") or "replay preflight contract did not pass")
+            return NodeResult(
+                ok=False,
+                branch="fail",
+                output={"preflight": contract_preflight, "session": session_id, "tool": step.get("tool")},
+                error=error,
+            )
     try:
         result = replayer.run_steps(
             [step],
@@ -213,6 +237,25 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
         )
     except Exception as exc:
         return NodeResult(ok=False, branch="fail", error=f"replay step failed: {exc}")
+    if contract_preflight is not None:
+        result = {**result, "preflight": contract_preflight}
+    postflight: dict[str, Any] | None = None
+    if result.get("ok") and "postflight_evidence" in node.config:
+        try:
+            postflight = replayer.verify_postflight(
+                node.config.get("postflight_evidence")
+            )
+        except Exception as exc:
+            postflight = {"ok": False, "error": f"postflight evidence failed: {exc}"}
+        if not postflight.get("ok", False):
+            result = {
+                **result,
+                "ok": False,
+                "error": str(
+                    postflight.get("error")
+                    or "replay postflight evidence did not pass"
+                ),
+            }
     _publish_anchor_metrics(result, context, node)
 
     # Preserve native ARP value types unless the WPS segment actually changed
@@ -221,14 +264,20 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
         if key not in seeded_variables or value != seeded_variables[key]:
             variables[key] = value
     verified_steps = [item for item in result.get("results", []) if item.get("ok") is True]
-    ok = bool(result.get("ok")) and bool(verified_steps)
-    if result.get("ok") and not verified_steps:
+    control_noop = bool(
+        result.get("ok")
+        and not verified_steps
+        and step.get("tool") in trace_mod.CTRL_TOOLS
+    )
+    if result.get("ok") and not verified_steps and not control_noop:
         result = {**result, "ok": False, "error": "replay step produced no verified action"}
+    ok = bool(result.get("ok")) and bool(verified_steps or control_noop)
     output = {
         **result,
         "session": session_id,
         "tool": step.get("tool"),
         "verified_steps": len(verified_steps),
+        **({"postflight": postflight} if postflight is not None else {}),
     }
     return NodeResult(
         ok=ok,
@@ -242,8 +291,9 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
             "metadata": {
                 "session": session_id,
                 "verified_steps": len(verified_steps),
+                **({"postflight": postflight} if postflight is not None else {}),
             },
-        }] if ok else [],
+        }] if ok and verified_steps else [],
         error="" if ok else str(result.get("error") or "replay step failed"),
     )
 

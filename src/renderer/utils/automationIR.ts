@@ -1,7 +1,8 @@
 import { nanoid } from 'nanoid';
 import type { FlowScript, FlowNode, FlowEdge } from '../types';
 import { flowToArpGraph } from '../platform/flowToArpGraph';
-import type { ArpGraph } from '../platform/contracts';
+import type { ArpGraph, GraphValidation } from '../platform/contracts';
+import { NODE_DEFINITIONS } from './nodeDefinitions';
 import { wpsToFlowScript, type WpsScript, type WpsStep } from './wpsToFlowScript';
 
 export type AutomationRuntime =
@@ -53,6 +54,21 @@ function created(value: unknown): number {
 
 function str(value: unknown): string {
   return value == null ? '' : String(value).trim();
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function preservedWpsMetadata(script: FlowScript): Record<string, unknown> | undefined {
+  return script.source?.kind === 'wps' ? record(script.source.raw) : undefined;
+}
+
+function canonicalEvidence(value: unknown): Record<string, unknown> {
+  if (Array.isArray(value)) return { required: clone(value) };
+  return clone(record(value) || { required: [] });
 }
 
 function walkWpsSteps(steps: WpsStep[]): WpsStep[] {
@@ -121,8 +137,8 @@ export function automationIrFromWps(script: WpsScript, id = `air-${nanoid(12)}`)
     variables: clone(script.vars || {}),
     safety: defaultSafetyForWps(steps),
     fallback: {
-      on_preflight_fail: 'live_agent_takeover',
-      on_step_fail: 'resume_live_from_failed_step',
+      on_preflight_fail: 'stop',
+      on_step_fail: 'stop',
     },
     runtime: { kind: 'wps_replay' },
   };
@@ -223,6 +239,7 @@ function serializeFlowStep(node: FlowNode, edges: FlowEdge[]): Record<string, un
     x: node.x,
     y: node.y,
     label: node.label || '',
+    ...(node.disabled !== undefined ? { disabled: Boolean(node.disabled) } : {}),
     params: clone(node.params || {}),
     outgoing: edges
       .filter((edge) => edge.from_node === node.id)
@@ -231,6 +248,7 @@ function serializeFlowStep(node: FlowNode, edges: FlowEdge[]): Record<string, un
         from_port: edge.from_port,
         to_node: edge.to_node,
         to_port: edge.to_port,
+        label: edge.label || '',
       })),
   };
 }
@@ -239,6 +257,12 @@ export function automationIrFromFlowScript(script: FlowScript, id = `air-${nanoi
   const graph = flowToArpGraph(script);
   const steps = (script.nodes || []).map((node) => serializeFlowStep(node, script.edges || []));
   const variables = clone(script.variables || {});
+  const wps = preservedWpsMetadata(script);
+  const conditions = clone(record(wps?.conditions) || {});
+  const targetWindow = wps?.target_window ?? wps?.target;
+  if (targetWindow !== undefined && conditions.target_window === undefined) {
+    conditions.target_window = clone(targetWindow);
+  }
   graph.metadata = {
     ...graph.metadata,
     source: 'automation-ir',
@@ -255,21 +279,23 @@ export function automationIrFromFlowScript(script: FlowScript, id = `air-${nanoi
       flow_id: script.meta?.id || '',
       meta: clone(script.meta || {}),
       settings: clone(script.settings || {}),
+      triggers: clone(script.triggers || []),
+      ...(script.source ? { raw: clone(script.source) } : {}),
     },
-    conditions: {},
-    evidence: { required: [] },
+    conditions,
+    evidence: canonicalEvidence(wps?.evidence),
     steps,
     variables,
-    safety: {
+    safety: clone(record(wps?.safety) || {
       requires_preflight: true,
       mutates_desktop: true,
       desktop_action_queue_required: true,
       executor: 'flowscript',
-    },
-    fallback: {
-      on_preflight_fail: 'live_agent_takeover',
-      on_step_fail: 'open_flow_editor_at_failed_node',
-    },
+    }),
+    fallback: clone(record(wps?.fallback) || {
+      on_preflight_fail: 'stop',
+      on_step_fail: 'stop',
+    }),
     runtime: {
       kind: 'arp_graph',
       graph,
@@ -318,6 +344,143 @@ export function validateAutomationRuntime(ir: AutomationIR): string | undefined 
   return undefined;
 }
 
+/**
+ * Fast, network-free structural validation for the editor. The Python control
+ * plane remains authoritative before execution; this keeps basic graph editing
+ * useful while that local service is starting or unavailable.
+ */
+export function validateAutomationLocally(ir: AutomationIR): GraphValidation {
+  const runtimeError = validateAutomationRuntime(ir);
+  if (runtimeError) {
+    return { valid: false, errors: [runtimeError], warnings: [], entry_node: null, reachable_nodes: [] };
+  }
+  if (automationRuntimeKind(ir) === 'wps_replay') {
+    return {
+      valid: true,
+      errors: [],
+      warnings: ['本地格式检查已通过；执行前仍需本机运行时验证重放步骤。'],
+      entry_node: null,
+      reachable_nodes: [],
+    };
+  }
+
+  const graph = ir.runtime?.kind === 'arp_graph' ? ir.runtime.graph : undefined;
+  if (!graph) {
+    return { valid: false, errors: ['流程缺少 ARP 运行图。'], warnings: [], entry_node: null, reachable_nodes: [] };
+  }
+
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const nodeIds = graph.nodes.map((node) => node.id.trim());
+  const edgeIds = graph.edges.map((edge) => edge.id.trim());
+  if (nodeIds.some((id) => !id)) errors.push('每个节点都必须有非空 ID。');
+  if (new Set(nodeIds).size !== nodeIds.length) errors.push('节点 ID 必须唯一。');
+  if (edgeIds.some((id) => !id)) errors.push('每条连线都必须有非空 ID。');
+  if (new Set(edgeIds).size !== edgeIds.length) errors.push('连线 ID 必须唯一。');
+
+  const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
+  const starts = graph.nodes.filter((node) => node.kind === 'start').map((node) => node.id);
+  const ends = graph.nodes.filter((node) => node.kind === 'end').map((node) => node.id);
+  if (starts.length !== 1) errors.push('流程必须恰好有一个开始节点。');
+  if (ends.length === 0) errors.push('流程必须至少有一个结束节点。');
+
+  for (const node of graph.nodes) {
+    if (node.disabled) continue;
+    if (node.kind === 'legacy_flow') {
+      errors.push(`节点 ${node.id} 的参数分支只能走旧执行器，不能由当前 ARP Runtime 执行。`);
+    } else if (node.kind === 'action_batch') {
+      const actions = node.config.actions;
+      if (!Array.isArray(actions) || actions.length === 0) {
+        errors.push(`动作批次节点 ${node.id} 必须包含至少一个动作。`);
+      }
+    } else if (node.kind === 'replay_step') {
+      const step = node.config.step;
+      if (!step || typeof step !== 'object' || Array.isArray(step)) {
+        errors.push(`复现步骤节点 ${node.id} 必须包含 WPS step 对象。`);
+      }
+    } else if (node.kind === 'skill_replay') {
+      if (!['script', 'task', 'memory_id'].some((key) => String(node.config[key] || '').trim())) {
+        errors.push(`技能复用节点 ${node.id} 必须指定脚本、任务或 memory ID。`);
+      }
+    } else if (node.kind === 'evidence_gate') {
+      const required = node.config.required;
+      if (!Array.isArray(required) || required.length === 0) {
+        errors.push(`证据门节点 ${node.id} 必须包含至少一项具体证据。`);
+      }
+    } else if (node.kind === 'set_variable' && !String(node.config.name || '').trim()) {
+      errors.push(`设置变量节点 ${node.id} 必须指定变量名。`);
+    }
+  }
+
+  for (const edge of graph.edges) {
+    if (!nodeMap.has(edge.source)) errors.push(`连线 ${edge.id} 引用了不存在的起点 ${edge.source}。`);
+    if (!nodeMap.has(edge.target)) errors.push(`连线 ${edge.id} 引用了不存在的终点 ${edge.target}。`);
+  }
+  const routeCounts = new Map<string, number>();
+  for (const edge of graph.edges) {
+    const key = `${edge.source}\u0000${edge.branch}`;
+    routeCounts.set(key, (routeCounts.get(key) || 0) + 1);
+  }
+  for (const [key, count] of routeCounts) {
+    if (count <= 1) continue;
+    const [source, branch] = key.split('\u0000');
+    errors.push(`节点 ${source} 的 ${branch} 分支存在多条路由。`);
+  }
+
+  const reachable: string[] = [];
+  if (starts.length === 1 && errors.length === 0) {
+    const outgoing = new Map<string, typeof graph.edges>();
+    for (const node of graph.nodes) outgoing.set(node.id, []);
+    for (const edge of graph.edges) outgoing.get(edge.source)?.push(edge);
+    const pending = [starts[0]];
+    const seen = new Set<string>();
+    while (pending.length) {
+      const nodeId = pending.shift()!;
+      if (seen.has(nodeId)) continue;
+      seen.add(nodeId);
+      reachable.push(nodeId);
+      for (const edge of outgoing.get(nodeId) || []) pending.push(edge.target);
+    }
+    const unreachable = graph.nodes.map((node) => node.id).filter((id) => !seen.has(id));
+    if (unreachable.length) warnings.push(`不可达节点：${unreachable.join('、')}。`);
+    if (!ends.some((id) => seen.has(id))) errors.push('从开始节点无法到达任何结束节点。');
+
+    for (const nodeId of reachable) {
+      const node = nodeMap.get(nodeId)!;
+      const routes = outgoing.get(nodeId) || [];
+      if (node.kind !== 'end' && routes.length === 0) errors.push(`可达节点 ${nodeId} 没有后续路由。`);
+      if (node.kind === 'condition') {
+        const branches = new Set(routes.map((edge) => edge.branch));
+        const missing = ['yes', 'no'].filter((branch) => !branches.has(branch));
+        if (missing.length) errors.push(`条件节点 ${nodeId} 缺少 ${missing.join('/')} 分支。`);
+      }
+      if (node.kind === 'skill_replay' && !String(node.config.script || '').trim()) {
+        const branches = new Set(routes.map((edge) => edge.branch));
+        if (!branches.has('miss')) errors.push(`记忆技能节点 ${nodeId} 缺少 miss 回退路由。`);
+      }
+    }
+
+    if (graph.policy.require_evidence_on_done) {
+      const evidenceKinds = new Set([
+        'agent_goal', 'action_batch', 'replay_step', 'skill_replay',
+        'task_stage', 'evidence_gate', 'human_gate',
+      ]);
+      const hasEvidenceNode = graph.nodes.some((node) => (
+        seen.has(node.id) && !node.disabled && evidenceKinds.has(node.kind)
+      ));
+      if (!hasEvidenceNode) errors.push('流程要求完成证据，但没有可达的证据节点。');
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+    entry_node: starts.length === 1 ? starts[0] : null,
+    reachable_nodes: reachable,
+  };
+}
+
 export function automationIrToWps(ir: AutomationIR): WpsScript {
   if (ir.format !== 'automation-ir/1') throw new Error('不支持的 Automation IR 格式');
   const source = ir.source || {};
@@ -330,6 +493,7 @@ export function automationIrToWps(ir: AutomationIR): WpsScript {
     task: str(source.task),
     source: 'automation-ir',
     source_ir: str(ir.id),
+    source_run: str(source.source_run),
     created: created(ir.created),
     vars: clone(ir.variables || {}),
     steps: clone(ir.steps || []) as WpsStep[],
@@ -342,10 +506,17 @@ export function automationIrToWps(ir: AutomationIR): WpsScript {
   if (Object.keys(conditions).length > 0) {
     script.conditions = conditions;
   }
-  if (Array.isArray((evidence as Record<string, unknown> | undefined)?.required)) {
-    script.evidence = clone((evidence as Record<string, unknown>).required as unknown[]);
+  const evidenceRecord = record(evidence);
+  if (
+    evidenceRecord
+    && Object.keys(evidenceRecord).length === 1
+    && Array.isArray(evidenceRecord.required)
+  ) {
+    script.evidence = clone(evidenceRecord.required as unknown[]);
   } else if (Array.isArray(evidence)) {
     script.evidence = clone(evidence);
+  } else if (evidenceRecord && Object.keys(evidenceRecord).length > 0) {
+    script.evidence = clone(evidenceRecord);
   }
   return script;
 }
@@ -354,7 +525,22 @@ export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
   const error = validateAutomationIR(ir);
   if (error) throw new Error(error);
   const source = ir.source || {};
-  if (source.kind === 'wps') return wpsToFlowScript(automationIrToWps(ir));
+  if (source.kind === 'wps') {
+    const flow = wpsToFlowScript(automationIrToWps(ir));
+    flow.source = {
+      kind: 'wps',
+      raw: {
+        ...(flow.source?.raw || {}),
+        conditions: clone(ir.conditions),
+        evidence: clone(ir.evidence),
+        safety: clone(ir.safety),
+        fallback: clone(ir.fallback),
+      },
+    };
+    const replay = [...flow.nodes].reverse().find((node) => node.type === 'replay_step');
+    if (replay) replay.params = { ...replay.params, postflight_evidence: clone(ir.evidence) };
+    return assertEditableFlowScript(flow);
+  }
   if (source.kind !== 'flowscript') {
     throw new Error(`不支持的 Automation IR source.kind：${String(source.kind || '')}`);
   }
@@ -367,6 +553,7 @@ export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
       y: Number.isFinite(Number(step.y)) ? Number(step.y) : index * 112,
       params: clone(step.params || {}),
       ...(str(step.label) ? { label: str(step.label) } : {}),
+      ...(step.disabled !== undefined ? { disabled: Boolean(step.disabled) } : {}),
     };
   });
   const edges: FlowEdge[] = [];
@@ -380,14 +567,17 @@ export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
         from_port: str(outgoing.from_port) || 'output',
         to_node: str(outgoing.to_node),
         to_port: str(outgoing.to_port) || 'input',
+        ...(str(outgoing.label) ? { label: str(outgoing.label) } : {}),
       });
     }
   }
   const meta = clone((source.meta as FlowScript['meta']) || {}) as FlowScript['meta'];
   const now = new Date(created(ir.created) * 1000).toISOString();
   const settings = clone((source.settings as FlowScript['settings']) || {}) as FlowScript['settings'];
-  return {
+  const rawSource = record(source.raw);
+  return assertEditableFlowScript({
     meta: {
+      ...meta,
       id: str(meta.id) || str(source.flow_id) || nanoid(10),
       name: str(meta.name) || ir.name,
       description: str(meta.description),
@@ -401,6 +591,7 @@ export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
     edges,
     variables: clone(ir.variables || {}) as Record<string, string>,
     settings: {
+      ...settings,
       default_delay: Number(settings.default_delay ?? 0),
       error_handling: settings.error_handling || 'stop',
       max_retries: Number(settings.max_retries ?? 2),
@@ -410,7 +601,66 @@ export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
         ? { require_real_features: settings.require_real_features }
         : {}),
     },
-  };
+    ...(Array.isArray(source.triggers) ? { triggers: clone(source.triggers) as FlowScript['triggers'] } : {}),
+    ...(rawSource && str(rawSource.kind) && record(rawSource.raw)
+      ? { source: clone(rawSource) as unknown as FlowScript['source'] }
+      : {}),
+  });
+}
+
+function finiteCoordinate(value: unknown): number | undefined {
+  if (typeof value === 'string' && !value.trim()) return undefined;
+  if (typeof value !== 'number' && typeof value !== 'string') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function assertEditableFlowScript(value: unknown): FlowScript {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('流程文档必须是 JSON 对象。');
+  }
+  const script = clone(value) as FlowScript;
+  if (!script.meta || typeof script.meta !== 'object') throw new Error('流程文档缺少 meta。');
+  if (!Array.isArray(script.nodes) || !Array.isArray(script.edges)) {
+    throw new Error('流程文档必须包含 nodes 和 edges 数组。');
+  }
+  const ids = new Set<string>();
+  for (const [index, node] of script.nodes.entries()) {
+    if (!node || typeof node !== 'object') throw new Error(`nodes[${index + 1}] 必须是对象。`);
+    const id = str(node.id);
+    if (!id) throw new Error(`nodes[${index + 1}] 缺少 id。`);
+    if (ids.has(id)) throw new Error(`节点 ID 重复：${id}。`);
+    ids.add(id);
+    node.id = id;
+    if (!NODE_DEFINITIONS[node.type]) throw new Error(`不支持的节点类型：${String(node.type || '')}。`);
+    if (!node.params || typeof node.params !== 'object' || Array.isArray(node.params)) {
+      throw new Error(`节点 ${id} 的 params 必须是对象。`);
+    }
+    const x = finiteCoordinate(node.x);
+    const y = finiteCoordinate(node.y);
+    if (x === undefined || y === undefined) {
+      throw new Error(`节点 ${id} 缺少有效坐标。`);
+    }
+    node.x = x;
+    node.y = y;
+  }
+  const edgeIds = new Set<string>();
+  for (const [index, edge] of script.edges.entries()) {
+    if (!edge || typeof edge !== 'object') throw new Error(`edges[${index + 1}] 必须是对象。`);
+    const id = str(edge.id);
+    if (!id) throw new Error(`edges[${index + 1}] 缺少 id。`);
+    if (edgeIds.has(id)) throw new Error(`连线 ID 重复：${id}。`);
+    edgeIds.add(id);
+    edge.id = id;
+    edge.from_node = str(edge.from_node);
+    edge.to_node = str(edge.to_node);
+    edge.from_port = str(edge.from_port) || 'output';
+    edge.to_port = str(edge.to_port) || 'input';
+    if (!ids.has(edge.from_node) || !ids.has(edge.to_node)) {
+      throw new Error(`连线 ${id} 引用了不存在的节点。`);
+    }
+  }
+  return script;
 }
 
 export function automationDocumentToFlowScript(value: unknown): FlowScript {
@@ -422,10 +672,10 @@ export function automationDocumentToFlowScript(value: unknown): FlowScript {
     return automationIrToFlowScript(document as AutomationIR);
   }
   if (String(document.format || '').startsWith('wps/')) {
-    return wpsToFlowScript(document as WpsScript);
+    return assertEditableFlowScript(wpsToFlowScript(document as WpsScript));
   }
   if (document.meta && Array.isArray(document.nodes) && Array.isArray(document.edges)) {
-    return clone(document) as FlowScript;
+    return assertEditableFlowScript(document);
   }
   throw new Error(`不支持的自动化文档：${String(document.format || '未知格式')}`);
 }

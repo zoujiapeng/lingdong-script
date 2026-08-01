@@ -197,10 +197,15 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
   const isBreakpoint = useStore(s => s.execution.breakpoints.includes(node.id));
   const connectingActive = useStore(s => s.ui.connecting.active);
   const selectNodes = useStore(s => s.selectNodes);
-  const moveNode = useStore(s => s.moveNode);
+  const moveNodes = useStore(s => s.moveNodes);
   const toggleBreakpoint = useStore(s => s.toggleBreakpoint);
   const def = NODE_DEFINITIONS[node.type];
-  const dragStartRef = useRef<{ nx: number; ny: number; mx: number; my: number } | null>(null);
+  const dragStartRef = useRef<{
+    mx: number;
+    my: number;
+    scale: number;
+    positions: Record<string, { x: number; y: number }>;
+  } | null>(null);
   const hasDragged = useRef(false);
 
   // Stable refs for callbacks — avoids recreating handleMouseDown on every node/connectingActive change
@@ -225,39 +230,34 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
         selectNodes([n.id], e.shiftKey || e.ctrlKey || e.metaKey);
       }
 
-      dragStartRef.current = { nx: n.x, ny: n.y, mx: e.clientX, my: e.clientY };
+      const state = useStore.getState();
+      const selectedIds = state.ui.selection.nodes.includes(n.id)
+        ? state.ui.selection.nodes
+        : [n.id];
+      const positions = Object.fromEntries(state.script.nodes
+        .filter((candidate) => selectedIds.includes(candidate.id))
+        .map((candidate) => [candidate.id, { x: candidate.x, y: candidate.y }]));
+      dragStartRef.current = {
+        mx: e.clientX,
+        my: e.clientY,
+        scale: state.ui.canvas_transform.scale,
+        positions,
+      };
       hasDragged.current = false;
 
-      const { canvas_transform } = useStore.getState().ui;
-
       const onMove = (ev: MouseEvent) => {
-        if (!dragStartRef.current) return;
-        const dx = (ev.clientX - dragStartRef.current.mx) / canvas_transform.scale;
-        const dy = (ev.clientY - dragStartRef.current.my) / canvas_transform.scale;
+        const drag = dragStartRef.current;
+        if (!drag) return;
+        const dx = (ev.clientX - drag.mx) / drag.scale;
+        const dy = (ev.clientY - drag.my) / drag.scale;
         if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
           hasDragged.current = true;
-          const state = useStore.getState();
-          const selectedIds = state.ui.selection.nodes;
-          if (selectedIds.length > 1 && selectedIds.includes(n.id)) {
-            selectedIds.forEach((id) => {
-              const target = state.script.nodes.find((nd) => nd.id === id);
-              if (target) {
-                const snap = state.ui.snap_to_grid;
-                const gs = state.ui.grid_size;
-                const nx = dragStartRef.current!.nx + dx;
-                const ny = dragStartRef.current!.ny + dy;
-                state.moveNode(id, snap ? Math.round(nx / gs) * gs : nx, snap ? Math.round(ny / gs) * gs : ny);
-              }
-            });
-          } else {
-            const newX = dragStartRef.current.nx + dx;
-            const newY = dragStartRef.current.ny + dy;
-            moveNode(n.id, newX, newY);
-          }
+          moveNodes(drag.positions, dx, dy, n.id);
         }
       };
 
       const onUp = () => {
+        if (hasDragged.current) useStore.getState().checkpointHistory();
         dragStartRef.current = null;
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
@@ -266,7 +266,7 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [isSelected, selectNodes, moveNode]
+    [isSelected, selectNodes, moveNodes]
   );
 
   const handleClick = useCallback(

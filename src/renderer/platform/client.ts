@@ -131,7 +131,10 @@ async function readJson<T>(response: Response): Promise<T> {
   }
   if (!response.ok) {
     const detail = data?.detail ?? data?.error ?? data?.message ?? `${response.status} ${response.statusText}`;
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    throw Object.assign(
+      new Error(typeof detail === 'string' ? detail : JSON.stringify(detail)),
+      { status: response.status },
+    );
   }
   return data as T;
 }
@@ -338,6 +341,14 @@ export class ControlPlaneClient {
 
   replay(script: string): Promise<Record<string, unknown>> {
     return this.request('api/replay', { method: 'POST', body: JSON.stringify({ script }) });
+  }
+
+  replayStatus(replayId: string): Promise<Record<string, any>> {
+    return this.request(`api/replay/${encodeURIComponent(replayId)}`);
+  }
+
+  cancelRuntimeJob(jobId: string): Promise<Record<string, any>> {
+    return this.request(`api/v2/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
   }
 
   exportTrace(runId: string): Promise<{ ok: boolean; script: string }> {

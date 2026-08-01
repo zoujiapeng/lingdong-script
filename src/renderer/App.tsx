@@ -1,8 +1,9 @@
 import { useCallback, useEffect } from 'react';
 import { PlatformWorkbench } from './components/platform/PlatformWorkbench';
 import { AppErrorBoundary } from './components/common/AppErrorBoundary';
-import { useStore } from './store';
+import { confirmDocumentReplacement, useStore } from './store';
 import { automationDocumentToFlowScript } from './utils/automationIR';
+import { commitEditorDrafts } from './utils/editorDrafts';
 import './styles/globals.css';
 import './styles/platform.css';
 import './styles/floating.css';
@@ -36,15 +37,37 @@ export default function App() {
     if (selected.canceled || !selected.filePaths[0]) return;
     const loaded = await api.readFile(selected.filePaths[0]);
     if (loaded.error || !loaded.content) throw new Error(loaded.error || '自动化文件为空');
-    useStore.getState().loadScript(automationDocumentToFlowScript(JSON.parse(loaded.content)));
+    const script = automationDocumentToFlowScript(JSON.parse(loaded.content));
+    if (!confirmDocumentReplacement()) return;
+    useStore.getState().loadScript(script);
+  }, []);
+
+  const reportFileError = useCallback((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(message);
+    void window.electronAPI?.showNotification?.('流程文件操作失败', message);
+  }, []);
+
+  const saveAutomation = useCallback(async () => {
+    const result = await useStore.getState().saveScript();
+    if (result.status === 'error') reportFileError(new Error(result.error));
+  }, [reportFileError]);
+
+  const newAutomation = useCallback(() => {
+    if (!confirmDocumentReplacement()) return;
+    useStore.getState().newScript();
   }, []);
 
   const onKeyDown = useCallback((event: KeyboardEvent) => {
     const store = useStore.getState();
-    const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
+    const target = event.target as HTMLElement | null;
+    const typing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || Boolean(target?.isContentEditable);
+    if (event.ctrlKey || event.metaKey) {
+      if (event.key.toLowerCase() === 's') { event.preventDefault(); void saveAutomation().catch(reportFileError); }
+      if (event.key.toLowerCase() === 'o') { event.preventDefault(); void openAutomation().catch(reportFileError); }
+      if (event.key.toLowerCase() === 'n') { event.preventDefault(); newAutomation(); }
+    }
     if ((event.ctrlKey || event.metaKey) && !typing) {
-      if (event.key.toLowerCase() === 's') { event.preventDefault(); store.saveScript(); }
-      if (event.key.toLowerCase() === 'o') { event.preventDefault(); void openAutomation().catch(console.error); }
       if (event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? store.redo() : store.undo(); }
       if (event.key.toLowerCase() === 'y') { event.preventDefault(); store.redo(); }
       if (event.key.toLowerCase() === 'c') { event.preventDefault(); store.copySelected(); }
@@ -52,12 +75,11 @@ export default function App() {
     }
     if (!typing && (event.key === 'Delete' || event.key === 'Backspace')) {
       const selected = store.ui.selection;
-      const removable = selected.nodes.filter((id) => !['start', 'end'].includes(store.script.nodes.find((node) => node.id === id)?.type || ''));
-      if (removable.length) store.deleteNodes(removable);
+      if (selected.nodes.length) store.deleteNodes(selected.nodes);
       if (selected.edges.length) store.deleteEdges(selected.edges);
     }
     if (!typing && event.key === 'Escape') store.clearSelection();
-  }, [openAutomation]);
+  }, [newAutomation, openAutomation, reportFileError, saveAutomation]);
 
   useEffect(() => {
     window.addEventListener('keydown', onKeyDown);
@@ -65,10 +87,21 @@ export default function App() {
   }, [onKeyDown]);
 
   useEffect(() => window.electronAPI?.onMenuAction?.((action) => {
-    if (action === 'new') useStore.getState().newScript();
-    if (action === 'open') void openAutomation().catch(console.error);
-    if (action === 'save') void useStore.getState().saveScript();
-  }), [openAutomation]);
+    if (action === 'new') newAutomation();
+    if (action === 'open') void openAutomation().catch(reportFileError);
+    if (action === 'save') void saveAutomation().catch(reportFileError);
+  }), [newAutomation, openAutomation, reportFileError, saveAutomation]);
 
-  return <AppErrorBoundary><PlatformWorkbench /></AppErrorBoundary>;
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      const draftError = commitEditorDrafts();
+      if (!draftError && !useStore.getState().isDirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => window.removeEventListener('beforeunload', beforeUnload);
+  }, []);
+
+  return <AppErrorBoundary><PlatformWorkbench onOpenAutomation={openAutomation} /></AppErrorBoundary>;
 }

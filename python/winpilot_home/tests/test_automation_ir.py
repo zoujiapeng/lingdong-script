@@ -39,6 +39,10 @@ def test_automation_ir_from_wps_preserves_replay_metadata():
     assert ir["evidence"]["required"] == ["message visible"]
     assert ir["safety"]["mutates_desktop"] is True
     assert ir["safety"]["desktop_action_queue_required"] is True
+    assert ir["fallback"] == {
+        "on_preflight_fail": "stop",
+        "on_step_fail": "stop",
+    }
     assert ir["runtime"] == {"kind": "wps_replay"}
     assert automation_ir.validate_automation_runtime(ir) is None
 
@@ -63,6 +67,17 @@ def test_automation_ir_roundtrips_to_wps():
     assert out["vars"] == {"a": "1"}
     assert out["steps"] == [{"tool": "click", "coords": [1, 2]}]
     assert trace_mod.validate_script(out) is None
+
+
+def test_wps_automation_runtime_rejects_empty_execution_projection():
+    ir = automation_ir.automation_ir_from_wps({
+        "format": "wps/2",
+        "name": "empty",
+        "steps": [],
+    })
+
+    assert automation_ir.validate_automation_ir(ir) is None
+    assert "executable leaf" in automation_ir.validate_automation_runtime(ir)
 
 
 def test_non_wps_automation_ir_does_not_convert_to_wps():

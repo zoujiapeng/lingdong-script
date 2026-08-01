@@ -596,6 +596,11 @@ export interface ScriptMeta {
   dsl_file?: string;
 }
 
+export interface FlowSourceDocument {
+  kind: string;
+  raw: Record<string, unknown>;
+}
+
 export interface FlowScript {
   meta: ScriptMeta;
   nodes: FlowNode[];
@@ -603,6 +608,7 @@ export interface FlowScript {
   variables: Record<string, string>; // global variables
   settings: ScriptSettings;
   triggers?: TriggerDef[];  // 脚本级别的触发配置（定时/事件/启动）
+  source?: FlowSourceDocument; // canonical source metadata retained while editing
 }
 
 export interface ScriptSettings {

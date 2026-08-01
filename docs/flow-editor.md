@@ -16,7 +16,15 @@
 - `store/persistence.ts`：localStorage 持久化 helper。
 - `store/index.ts`：Zustand store；不再复制 defaults/templates/persistence。
 
-`NodeType` 联合类型包含现役节点和历史兼容类型，不等于生产运行能力。节点库、统一搜索和“最近使用”都只展示 `flowToArpGraph.ts` 的可编译集合与后端 capability catalog 的 `flow_node_types` 交集；后端未声明、前端不能编译或只能走 legacy adapter 的节点不会出现在任何新建入口中。catalog 尚未加载时交集为空，前端不会用硬编码最近列表绕过运行前可达性。
+`NodeType` 联合类型包含现役节点和历史兼容类型，不等于生产运行能力。节点库、统一搜索和“最近使用”只展示 `flowToArpGraph.ts` 的本地可编译集合；后端 capability catalog 的 `flow_node_types` 只负责标记当前 Runtime 是否已经声明对应执行能力。Runtime 离线或 catalog 尚未加载时，用户仍可离线编排全部本地可编译节点，但不能把“可编辑”冒充“当前可运行”；前端不能编译或只能走 legacy adapter 的节点不会出现在任何新建入口中。
+
+### 离线编辑边界
+
+流程工作台的新建、打开、撤销、重做、属性编辑、本地结构校验和保存都在 renderer 内完成，不需要网络、模型或 Python Runtime。保存只写一个 canonical `.automation.json`，未保存草稿通过本地持久化恢复；打开文件会先解析并校验，只有真正要替换脏文档时才请求确认。
+
+“完全离线执行”在这里指不访问外部网络、不调用模型：确定性的 `replay_step` 和本地原生节点仍由机器上的 Python Runtime、Replayer 与 Desktop Action Queue 执行。Electron 单进程预览、计时器或日志不能冒充真实桌面执行；Runtime 不在或源码漂移时只能继续编辑，不能运行。
+
+当前智能代理与流程工作台仍缺少 artifact handoff：同一个 `LiveVisualActor` 只能收到原始 goal/Thread 历史，不能读取当前流程摘要或提交可预览、可撤销的流程修改。因此“让 AI 帮我生成/修改机械流程”尚未达到产品闭环。不得接回 `src/ai-interface`、旧 DSL 生成器或 Electron HTTP 直接写图路径；它们引入第二模型、长语法教学、关键词路由或无确认突变。后续实验只允许同一 Actor 读取用户显式附加的有界流程摘要，并提交带 revision/digest 的通用 patch 草稿，由 renderer 本地编译、展示 diff，用户确认后作为一次 undo checkpoint 应用；模型不能自动运行流程。
 
 ## 执行
 

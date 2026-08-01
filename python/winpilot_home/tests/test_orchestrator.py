@@ -323,6 +323,193 @@ def test_replay_steps_share_one_session_and_mix_with_native_arp(monkeypatch):
     assert [item["predicate"] for item in result["evidence"]] == ["replay.step", "replay.step"]
 
 
+def test_replay_step_enforces_postflight_evidence_before_success(tmp_path):
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpNode, ArpNodeKind
+
+    present = tmp_path / "present.txt"
+    present.write_text("ready", encoding="utf-8")
+
+    def execute(value):
+        node = ArpNode(
+            id="replay",
+            kind=ArpNodeKind.REPLAY_STEP,
+            config={
+                "step": {"tool": "ext.delay", "seconds": 0},
+                "postflight_evidence": {
+                    "required": [{"predicate": "file.exists", "value": str(value)}],
+                },
+            },
+        )
+        return adapters._replay_step_handler(node, {
+            "run_id": "postflight-node",
+            "graph": {
+                "id": "postflight-test",
+                "policy": {"allow_shell": False, "allow_desktop_mutation": True},
+            },
+            "runtime_state": {},
+            "variables": {},
+        }, threading.Event())
+
+    succeeded = execute(present)
+    failed = execute(tmp_path / "missing.txt")
+
+    assert succeeded.ok is True
+    assert succeeded.output["postflight"]["ok"] is True
+    assert succeeded.evidence[0]["metadata"]["postflight"]["required"] is True
+    assert failed.ok is False
+    assert failed.branch == "fail"
+    assert failed.evidence == []
+    assert "evidence requirement failed" in failed.error
+
+    malformed = adapters._replay_step_handler(ArpNode(
+        id="malformed",
+        kind=ArpNodeKind.REPLAY_STEP,
+        config={
+            "step": {"tool": "ext.delay", "seconds": 0},
+            "postflight_evidence": {"required": "not-an-array"},
+        },
+    ), {
+        "run_id": "postflight-malformed",
+        "graph": {
+            "id": "postflight-test",
+            "policy": {"allow_shell": False, "allow_desktop_mutation": True},
+        },
+        "runtime_state": {},
+        "variables": {},
+    }, threading.Event())
+    assert malformed.ok is False
+    assert "must be an array" in malformed.error
+
+
+def test_replay_control_noop_preserves_wps_semantics_without_fabricating_evidence():
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpNode, ArpNodeKind
+
+    step = {
+        "tool": "ctrl.if",
+        "cond": {"always": True},
+        "then": [],
+        "else": [{"tool": "ext.delay", "seconds": 0}],
+    }
+    node = ArpNode(
+        id="optional",
+        kind=ArpNodeKind.REPLAY_STEP,
+        config={"step": step},
+    )
+
+    result = adapters._replay_step_handler(node, {
+        "run_id": "control-noop",
+        "graph": {
+            "id": "control-noop",
+            "policy": {"allow_shell": False, "allow_desktop_mutation": True},
+        },
+        "runtime_state": {},
+        "variables": {},
+    }, threading.Event())
+
+    assert result.ok is True
+    assert result.branch == "next"
+    assert result.output["verified_steps"] == 0
+    assert result.evidence == []
+
+
+def test_replay_postflight_controls_graph_completion(tmp_path):
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
+    from winpilot.orchestrator.runtime import ArpExecution
+
+    def execute(value, run_id):
+        graph = _graph(
+            [
+                ArpNode(id="start", kind=ArpNodeKind.START),
+                ArpNode(
+                    id="replay",
+                    kind=ArpNodeKind.REPLAY_STEP,
+                    config={
+                        "step": {"tool": "ext.delay", "seconds": 0},
+                        "postflight_evidence": {
+                            "required": [{
+                                "predicate": "file.exists",
+                                "value": str(value),
+                            }],
+                        },
+                    },
+                ),
+                ArpNode(id="end", kind=ArpNodeKind.END),
+            ],
+            [
+                ArpEdge(id="e1", source="start", target="replay"),
+                ArpEdge(id="e2", source="replay", target="end"),
+            ],
+        )
+        return ArpExecution(
+            graph,
+            adapters.default_handlers(),
+            run_id=run_id,
+        ).run()
+
+    present = tmp_path / "present.txt"
+    present.write_text("ready", encoding="utf-8")
+    succeeded = execute(present, "postflight-present")
+    failed = execute(tmp_path / "missing.txt", "postflight-missing")
+
+    assert succeeded["status"] == "done"
+    assert [item["node_id"] for item in succeeded["history"]] == ["start", "replay", "end"]
+    assert succeeded["history"][1]["output"]["postflight"]["ok"] is True
+    assert failed["status"] == "failed"
+    assert [item["node_id"] for item in failed["history"]] == ["start", "replay"]
+    assert failed["history"][-1]["ok"] is False
+
+
+def test_replay_preflight_controls_graph_completion(tmp_path):
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
+    from winpilot.orchestrator.runtime import ArpExecution
+
+    def execute(value, run_id):
+        graph = _graph(
+            [
+                ArpNode(id="start", kind=ArpNodeKind.START),
+                ArpNode(
+                    id="replay",
+                    kind=ArpNodeKind.REPLAY_STEP,
+                    config={
+                        "step": {"tool": "ext.delay", "seconds": 0},
+                        "preflight_contract": {
+                            "conditions": {
+                                "checks": [{"file_exists": str(value)}],
+                            },
+                        },
+                    },
+                ),
+                ArpNode(id="end", kind=ArpNodeKind.END),
+            ],
+            [
+                ArpEdge(id="e1", source="start", target="replay"),
+                ArpEdge(id="e2", source="replay", target="end"),
+            ],
+        )
+        return ArpExecution(
+            graph,
+            adapters.default_handlers(),
+            run_id=run_id,
+        ).run()
+
+    present = tmp_path / "ready.txt"
+    present.write_text("ready", encoding="utf-8")
+    succeeded = execute(present, "preflight-present")
+    failed = execute(tmp_path / "missing.txt", "preflight-missing")
+
+    assert succeeded["status"] == "done"
+    assert [item["node_id"] for item in succeeded["history"]] == ["start", "replay", "end"]
+    assert succeeded["history"][1]["output"]["preflight"]["checks"][0]["ok"] is True
+    assert failed["status"] == "failed"
+    assert [item["node_id"] for item in failed["history"]] == ["start", "replay"]
+    assert failed["history"][-1]["output"]["preflight"]["ok"] is False
+    assert "preflight condition failed" in failed["error"]
+
+
 def test_graph_validation_rejects_unsupported_controller_action_before_run():
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, validate_graph
 

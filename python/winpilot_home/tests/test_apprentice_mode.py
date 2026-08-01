@@ -22,6 +22,7 @@ class FakeRecorder:
                 "format": "wps/2",
                 "name": self.name,
                 "source": "human",
+                "target_window": {"title": "Chat", "process": "chat.exe"},
                 "steps": [{"tool": "click", "text": "Send", "coords": [100, 200]}],
             }),
             encoding="utf-8",
@@ -63,6 +64,11 @@ def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(tmp_pat
     assert result["file"] == "lesson.automation.json"
     assert result["legacy_file"] == "lesson.wps.json"
     assert canonical["format"] == "automation-ir/1"
+    assert canonical["conditions"]["target_window"] == {
+        "title": "Chat",
+        "process": "chat.exe",
+    }
+    assert canonical["safety"]["requires_preflight"] is True
     assert saved["task"] == "Send a message"
     assert saved["source"] == "apprentice"
     assert saved["evidence"]["required"] == [{"predicate": "visible.text", "value": "sent"}]
@@ -84,6 +90,54 @@ def test_apprentice_requires_named_task(tmp_path):
         assert "requires a task" in str(exc)
     else:
         raise AssertionError("blank apprentice task should fail")
+
+
+def test_apprentice_clears_failed_recording_session(tmp_path):
+    from winpilot.recorder import apprentice
+
+    class FailingRecorder(FakeRecorder):
+        def stop(self):
+            self.recording = False
+            return {"ok": False, "error": "recording crossed target windows"}
+
+    manager = apprentice.ApprenticeManager(FailingRecorder(tmp_path))
+    manager.start(
+        "Cross-window demonstration",
+        verification=[{"predicate": "visible.text", "value": "done"}],
+    )
+
+    try:
+        manager.stop()
+    except RuntimeError as exc:
+        assert "crossed target windows" in str(exc)
+    else:
+        raise AssertionError("unsafe demonstration must fail")
+    assert manager.status()["session_id"] is None
+    assert manager.status()["recording"] is False
+
+
+def test_apprentice_keeps_session_when_recorder_stop_is_retryable(tmp_path):
+    from winpilot.recorder import apprentice
+
+    class SlowRecorder(FakeRecorder):
+        def stop(self):
+            return {"ok": False, "error": "recorded input is still draining; try again"}
+
+    manager = apprentice.ApprenticeManager(SlowRecorder(tmp_path))
+    started = manager.start(
+        "Retry a slow recording",
+        verification=[{"predicate": "visible.text", "value": "done"}],
+    )
+
+    try:
+        manager.stop()
+    except RuntimeError as exc:
+        assert "still draining" in str(exc)
+    else:
+        raise AssertionError("draining recording must ask the user to retry")
+
+    assert manager.status()["session_id"] == started["session_id"]
+    assert manager.status()["recording"] is True
 
 
 def test_replay_mode_contract_lists_all_three_execution_paths():

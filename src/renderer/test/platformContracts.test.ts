@@ -352,6 +352,40 @@ describe('control plane client contracts', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('exposes the replay job lifecycle instead of treating start as completion', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      replay_id: 'replay-1', status: 'running', ok: null,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const client = new ControlPlaneClient('http://127.0.0.1:8765');
+      await client.replayStatus('replay-1');
+      await client.cancelRuntimeJob('replay-1');
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/replay/replay-1');
+      expect(String(fetchMock.mock.calls[1][0])).toContain('/api/v2/jobs/replay-1/cancel');
+      expect(fetchMock.mock.calls[1][1]?.method).toBe('POST');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('preserves HTTP status for deterministic runtime-job lookup failures', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      detail: 'runtime job not found',
+    }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const client = new ControlPlaneClient('http://127.0.0.1:8765');
+      const error = await client.replayStatus('missing').catch((caught) => caught);
+      expect(error).toMatchObject({ status: 404, message: 'runtime job not found' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('flow to ARP compiler', () => {

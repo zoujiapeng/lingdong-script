@@ -15,6 +15,8 @@ import {
   Database,
   Eye,
   FileCode2,
+  FilePlus2,
+  FolderOpen,
   Gauge,
   GraduationCap,
   GitBranch,
@@ -32,6 +34,7 @@ import {
   Play,
   Plus,
   Radio,
+  Redo2,
   RefreshCw,
   Save,
   Search,
@@ -41,6 +44,7 @@ import {
   Sparkles,
   Square,
   TerminalSquare,
+  Undo2,
   UserCheck,
   Workflow,
   X,
@@ -50,7 +54,7 @@ import {
 import { FlowCanvas } from '../Canvas/FlowCanvas';
 import { NodeLibrary } from '../NodeLibrary/NodeLibrary';
 import { PropertyPanel } from '../PropertyPanel/PropertyPanel';
-import { useStore } from '../../store';
+import { confirmDocumentReplacement, useStore } from '../../store';
 import type { UIState } from '../../types';
 import { useControlPlane } from '../../platform/useControlPlane';
 import type {
@@ -64,6 +68,7 @@ import type {
   InteractionRuntimeState,
   RunProjection,
   RuntimeEvent,
+  RuntimeJobSnapshot,
   StageRuntimeTrace,
   TaskContract,
 } from '../../platform/contracts';
@@ -73,6 +78,7 @@ import {
   automationIrToFlowScript,
   automationRuntimeKind,
   automationRuntimeGraph,
+  validateAutomationLocally,
   type AutomationIR,
 } from '../../utils/automationIR';
 import { isTerminalTaskStatus } from '../../../shared/taskOutcome';
@@ -81,7 +87,8 @@ import { taskOutcomeForRun } from '../../platform/taskOutcome';
 type PlatformView = 'agent' | 'studio' | 'runs' | 'assets' | 'system';
 type Plane = ReturnType<typeof useControlPlane>;
 
-const ACTIVE_STATUSES = new Set(['queued', 'running', 'paused']);
+export const isActiveRunStatus = (status: unknown) =>
+  Boolean(String(status ?? '').trim()) && !isTerminalTaskStatus(status);
 const UNSUCCESSFUL_STATUSES = new Set([
   'failed',
   'fail',
@@ -1129,8 +1136,8 @@ export function AgentCockpit({
   const run = conversationRuns[conversationRuns.length - 1]
     || (!threadState.persisted ? plane.currentRun : null);
   const arp = plane.arpSnapshot;
-  const active = Boolean(run && !isTerminalTaskStatus(run.status));
-  const runtimeBusy = Boolean(plane.currentRun && !isTerminalTaskStatus(plane.currentRun.status));
+  const active = Boolean(run && isActiveRunStatus(run.status));
+  const runtimeBusy = Boolean(plane.currentRun && isActiveRunStatus(plane.currentRun.status));
   const manuallyPaused = Boolean(arp?.manual_paused);
   const runtimeIssue = plane.runtimeIssue;
   const modelProfile = plane.overview?.status.model_profile;
@@ -1588,14 +1595,20 @@ export function AgentCockpit({
   );
 }
 
-function Studio({ plane }: { plane: Plane }) {
+function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: () => Promise<void> }) {
   const script = useStore((state) => state.script);
   const saveScript = useStore((state) => state.saveScript);
+  const newScript = useStore((state) => state.newScript);
+  const isDirty = useStore((state) => state.isDirty);
+  const undo = useStore((state) => state.undo);
+  const redo = useStore((state) => state.redo);
   const setUI = useStore((state) => state.setUI);
   const fitToScreen = useStore((state) => state.fitToScreen);
   const [validation, setValidation] = useState<GraphValidation | null>(null);
+  const [validationSource, setValidationSource] = useState<'local' | 'runtime'>('local');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [mobilePanel, setMobilePanel] = useState<'library' | 'properties' | null>(null);
   const processedNodeEvents = useRef(new Set<string>());
   const automation = useMemo(
@@ -1606,11 +1619,18 @@ function Studio({ plane }: { plane: Plane }) {
     return automationRuntimeGraph(automation);
   }, [automation]);
   const compilation = graph.metadata.compilation as { native_nodes?: number; legacy_nodes?: number; legacy_types?: string[] } | undefined;
+  const activeRun = Boolean(plane.currentRun && isActiveRunStatus(plane.currentRun.status));
+  const runtimeReady = plane.connection === 'online' && !plane.runtimeIssue;
 
   useEffect(() => {
     setUI({ panels_visible: true, show_node_library: true, show_property_panel: true });
     requestAnimationFrame(fitToScreen);
   }, []);
+
+  useEffect(() => {
+    setValidation(null);
+    setNotice('');
+  }, [automation]);
 
   useEffect(() => {
     const relevant = plane.events.slice(-20);
@@ -1639,7 +1659,20 @@ function Studio({ plane }: { plane: Plane }) {
   const validate = useCallback(async () => {
     setBusy(true); setError('');
     try {
+      const local = validateAutomationLocally(automation);
+      setValidationSource('local');
+      setValidation(local);
+      if (!local.valid) return local;
+      if (plane.connection !== 'online') {
+        const offlineResult = {
+          ...local,
+          warnings: [...local.warnings, '本地结构检查已通过；连接本机运行时后才能执行。'],
+        };
+        setValidation(offlineResult);
+        return offlineResult;
+      }
       const result = await plane.validateAutomation(automation);
+      setValidationSource('runtime');
       setValidation(result);
       return result;
     } catch (validateError) {
@@ -1651,7 +1684,13 @@ function Studio({ plane }: { plane: Plane }) {
   const run = async () => {
     setBusy(true); setError('');
     try {
+      const local = validateAutomationLocally(automation);
+      setValidationSource('local');
+      setValidation(local);
+      if (!local.valid) return;
+      if (!runtimeReady) throw new Error(plane.runtimeIssue || '本机运行时尚未连接；当前流程仍可离线编辑和保存。');
       const result = await plane.validateAutomation(automation);
+      setValidationSource('runtime');
       setValidation(result);
       if (!result.valid) return;
       await plane.startAutomation(automation);
@@ -1660,20 +1699,62 @@ function Studio({ plane }: { plane: Plane }) {
     } finally { setBusy(false); }
   };
 
+  const stop = async () => {
+    setBusy(true); setError('');
+    try { await plane.cancelCurrent(); }
+    catch (stopError) { setError(stopError instanceof Error ? stopError.message : String(stopError)); }
+    finally { setBusy(false); }
+  };
+
+  const save = async () => {
+    setError(''); setNotice('');
+    try {
+      const result = await saveScript();
+      if (result.status === 'error') throw new Error(result.error || '保存失败');
+      if (result.status === 'saved') setNotice('已保存');
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    }
+  };
+
+  const createNew = () => {
+    if (!confirmDocumentReplacement()) return;
+    newScript();
+    setError('');
+  };
+
+  const open = async () => {
+    if (!onOpenAutomation) return;
+    setError('');
+    try { await onOpenAutomation(); }
+    catch (openError) { setError(openError instanceof Error ? openError.message : String(openError)); }
+  };
+
   return (
     <div className="arp-studio-page">
       <header className="arp-studio-toolbar">
         <div className="arp-studio-title"><GitBranch size={16} /><div><strong>{script.meta.name}</strong><span>{graph.nodes.length} 个节点 / {graph.edges.length} 条连线 / {compilation?.native_nodes ?? graph.nodes.length} 个原生节点</span></div></div>
         {Boolean(compilation?.legacy_nodes) && <StatusPill status="failed" label={`${compilation?.legacy_nodes} 个节点不支持`} />}
-        {validation && <StatusPill status={validation.valid ? 'success' : 'failed'} label={validation.valid ? '有效' : `${validation.errors.length} 个错误`} />}
+        {isDirty && <StatusPill status="queued" label="未保存" />}
+        {!runtimeReady && <StatusPill status="paused" label="本地编辑" />}
+        {validation && <StatusPill status={validation.valid ? 'success' : 'failed'} label={validation.valid ? (validationSource === 'local' ? '本地结构通过' : '运行时有效') : `${validation.errors.length} 个错误`} />}
         {error && <span className="arp-toolbar-error">{error}</span>}
+        {notice && <span className="arp-toolbar-notice" role="status">{notice}</span>}
         <div className="arp-action-spacer" />
         <button className="arp-icon-button arp-mobile-panel-button" title="节点库" aria-label="显示/隐藏节点库" aria-pressed={mobilePanel === 'library'} onClick={() => setMobilePanel((current) => current === 'library' ? null : 'library')}><PanelLeft size={15} /></button>
         <button className="arp-icon-button arp-mobile-panel-button" title="节点属性" aria-label="显示/隐藏节点属性" aria-pressed={mobilePanel === 'properties'} onClick={() => setMobilePanel((current) => current === 'properties' ? null : 'properties')}><SlidersHorizontal size={15} /></button>
         <button className="arp-icon-button" title="适应工作流" aria-label="适应工作流" onClick={fitToScreen}><Network size={15} /></button>
-        <button className="arp-button arp-studio-command" title="保存工作流" aria-label="保存工作流" onClick={() => saveScript()}><Save size={14} /><span>保存</span></button>
+        <button className="arp-icon-button" title="新建工作流 (Ctrl+N)" aria-label="新建工作流" onClick={createNew}><FilePlus2 size={15} /></button>
+        <button className="arp-icon-button" title="打开工作流 (Ctrl+O)" aria-label="打开工作流" onClick={() => void open()} disabled={!onOpenAutomation}><FolderOpen size={15} /></button>
+        <button className="arp-icon-button" title="撤销 (Ctrl+Z)" aria-label="撤销" onClick={undo}><Undo2 size={15} /></button>
+        <button className="arp-icon-button" title="重做 (Ctrl+Y)" aria-label="重做" onClick={redo}><Redo2 size={15} /></button>
+        <button className="arp-button arp-studio-command" title="保存工作流" aria-label="保存工作流" onClick={() => void save()}><Save size={14} /><span>保存</span></button>
         <button className="arp-button arp-studio-command" title="验证工作流" aria-label="验证工作流" onClick={validate} disabled={busy}><ShieldCheck size={14} /><span>验证</span></button>
-        <button className="arp-button arp-button-primary arp-studio-command" title="运行工作流" aria-label="运行工作流" onClick={run} disabled={busy || Boolean(plane.currentRun && ACTIVE_STATUSES.has(plane.currentRun.status))}>{busy ? <Loader2 size={14} className="arp-spin" /> : <Play size={14} fill="currentColor" />}<span>运行工作流</span></button>
+        {activeRun ? (
+          <button className="arp-button arp-button-danger arp-studio-command" title="停止当前运行" aria-label="停止当前运行" onClick={() => void stop()} disabled={busy}>{busy ? <Loader2 size={14} className="arp-spin" /> : <CircleStop size={14} />}<span>停止</span></button>
+        ) : (
+          <button className="arp-button arp-button-primary arp-studio-command" title={runtimeReady ? '运行工作流' : (plane.runtimeIssue || '本机运行时尚未连接')} aria-label="运行工作流" onClick={run} disabled={busy || !runtimeReady}>{busy ? <Loader2 size={14} className="arp-spin" /> : <Play size={14} fill="currentColor" />}<span>运行工作流</span></button>
+        )}
       </header>
       {validation && (!validation.valid || validation.warnings.length > 0) && (
         <div className={`arp-validation-bar ${validation.valid ? 'warning' : 'danger'}`}>
@@ -1703,7 +1784,7 @@ export function RunsView({ plane }: { plane: Plane }) {
     return plane.runs.filter((run) => {
       const status = String(run.status || '').toLowerCase();
       const statusMatches = statusFilter === 'all'
-        || (statusFilter === 'active' && ACTIVE_STATUSES.has(status))
+        || (statusFilter === 'active' && isActiveRunStatus(status))
         || (statusFilter === 'success' && ['done', 'completed', 'success'].includes(status))
         || (statusFilter === 'failed' && UNSUCCESSFUL_STATUSES.has(status));
       const textMatches = !needle
@@ -1837,6 +1918,45 @@ interface MemoryItem {
   script_sha256?: string;
 }
 interface SessionItem { task: string; status: string; result: string; run_id: string }
+type ReplayJobKind = 'replay' | 'memory_verification';
+const ACTIVE_REPLAY_JOB_STATUSES = new Set(['queued', 'waiting_resources', 'running', 'canceling']);
+const MAX_REPLAY_POLL_ERRORS = 3;
+
+function replayPollErrorStatus(error: unknown): number | null {
+  if (!error || typeof error !== 'object' || !('status' in error)) return null;
+  const status = Number((error as { status?: unknown }).status);
+  return Number.isFinite(status) ? status : null;
+}
+
+export interface ReplayJobView {
+  replay_id: string;
+  kind: ReplayJobKind;
+  memory_id?: string;
+  script?: string;
+  status: string;
+  ok?: boolean | null;
+  error?: string;
+  result?: Record<string, any> | null;
+}
+
+export function replayJobFromRuntimeSnapshot(job: RuntimeJobSnapshot): ReplayJobView | null {
+  if (job.kind !== 'replay' && job.kind !== 'memory_verification') return null;
+  const memoryId = String(job.metadata.memory_id || '');
+  if (job.kind === 'memory_verification' && !memoryId) return null;
+  return {
+    replay_id: job.job_id,
+    kind: job.kind,
+    ...(memoryId ? { memory_id: memoryId } : {}),
+    script: String(job.metadata.script || ''),
+    status: job.status,
+    error: job.error,
+  };
+}
+
+export const replayOutcomeStatus = (job: ReplayJobView | null): string => {
+  if (!job) return '';
+  return job.ok === false ? 'failed' : job.status;
+};
 
 type ReplayMode = 'offline_graph' | 'skill' | 'apprentice';
 
@@ -1847,6 +1967,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [recording, setRecording] = useState(false);
   const [replayMode, setReplayMode] = useState<ReplayMode>('offline_graph');
+  const [replayJob, setReplayJob] = useState<ReplayJobView | null>(null);
   const [apprenticeTask, setApprenticeTask] = useState('');
   const [evidencePredicate, setEvidencePredicate] = useState('visible.text');
   const [evidenceValue, setEvidenceValue] = useState('');
@@ -1858,6 +1979,20 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const loadScript = useStore((state) => state.loadScript);
+  const replayActive = Boolean(replayJob && ACTIVE_REPLAY_JOB_STATUSES.has(replayJob.status));
+  const replayStatus = replayOutcomeStatus(replayJob);
+
+  const readReplayJob = useCallback(async (job: ReplayJobView): Promise<ReplayJobView> => {
+    const client = plane.getClient();
+    const current = job.kind === 'memory_verification'
+      ? await client.memoryVerificationStatus(job.memory_id!, job.replay_id)
+      : await client.replayStatus(job.replay_id);
+    return {
+      ...current,
+      kind: job.kind,
+      ...(job.memory_id ? { memory_id: job.memory_id } : {}),
+    } as ReplayJobView;
+  }, [plane.baseUrl]);
 
   const refresh = useCallback(async () => {
     if (!plane.baseUrl) return;
@@ -1874,6 +2009,70 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  useEffect(() => {
+    if (replayJob || busy || !plane.baseUrl) return;
+    const candidates = (plane.overview?.status.runtime_jobs || [])
+      .map(replayJobFromRuntimeSnapshot)
+      .filter((job): job is ReplayJobView => Boolean(job));
+    const recent = candidates.find((job) => ACTIVE_REPLAY_JOB_STATUSES.has(job.status)) || candidates[0];
+    if (!recent) return;
+    let disposed = false;
+    readReplayJob(recent)
+      .then((job) => { if (!disposed) setReplayJob(job as ReplayJobView); })
+      .catch(() => { /* the retained runtime summary may expire between polls */ });
+    return () => { disposed = true; };
+  }, [busy, plane.baseUrl, plane.overview, readReplayJob, replayJob]);
+
+  useEffect(() => {
+    const currentJob = replayJob;
+    const replayId = currentJob?.replay_id;
+    if (!currentJob || !replayId || !replayActive || !plane.baseUrl) return undefined;
+    let disposed = false;
+    let timer = 0;
+    let consecutiveErrors = 0;
+    const poll = async () => {
+      try {
+        const next = await readReplayJob(currentJob);
+        if (disposed) return;
+        consecutiveErrors = 0;
+        setReplayJob(next);
+        const outcomeError = next.ok === false || ['failed', 'stopped', 'canceled'].includes(next.status)
+          ? next.error || String(next.result?.error || '重放未完成。')
+          : '';
+        setError(outcomeError);
+        if (!['done', 'failed', 'stopped', 'canceled'].includes(next.status)) {
+          timer = window.setTimeout(poll, 500);
+        } else {
+          await refresh();
+          if (!disposed && outcomeError) setError(outcomeError);
+        }
+      } catch (pollError) {
+        if (!disposed) {
+          consecutiveErrors += 1;
+          const message = pollError instanceof Error ? pollError.message : String(pollError);
+          const missing = replayPollErrorStatus(pollError) === 404;
+          if (missing || consecutiveErrors >= MAX_REPLAY_POLL_ERRORS) {
+            const terminalError = missing
+              ? '运行任务状态已不存在，可以重新运行。'
+              : `连续 ${MAX_REPLAY_POLL_ERRORS} 次无法读取运行任务状态：${message}。可以重新运行。`;
+            setReplayJob({
+              ...currentJob,
+              status: 'failed',
+              ok: false,
+              error: terminalError,
+            });
+            setError(terminalError);
+            return;
+          }
+          setError(`暂时无法读取运行任务状态（${consecutiveErrors}/${MAX_REPLAY_POLL_ERRORS}）：${message}`);
+          timer = window.setTimeout(poll, 1000);
+        }
+      }
+    };
+    timer = window.setTimeout(poll, 300);
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [plane.baseUrl, readReplayJob, replayJob?.replay_id, replayActive, refresh]);
+
   const verifiedScripts = useMemo(
     () => scripts.filter((item) => item.valid && item.trust === 'verified'),
     [scripts],
@@ -1887,6 +2086,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
     setBusy(true);
     try {
       const asset = await plane.getClient().script<WpsScript | AutomationIR>(file);
+      if (!confirmDocumentReplacement()) return;
       loadScript(
         asset.format === 'automation-ir/1'
           ? automationIrToFlowScript(asset as AutomationIR)
@@ -1899,6 +2099,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
 
   const replay = async (file: string) => {
     setBusy(true); setError('');
+    setReplayJob(null);
     try {
       const client = plane.getClient();
       const asset = await client.script<WpsScript | AutomationIR>(file);
@@ -1909,12 +2110,25 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
         await plane.startAutomation(asset as AutomationIR);
       } else {
         if (plane.runtimeIssue) throw new Error(`${plane.runtimeIssue} 重放未启动。`);
-        await client.replay(file);
+        const started = await client.replay(file) as { replay_id?: string; job?: Omit<ReplayJobView, 'kind'> };
+        if (!started.replay_id || !started.job) throw new Error('本机运行时没有返回重放任务。');
+        setReplayJob({ ...started.job, kind: 'replay' });
       }
       await plane.refresh();
     }
     catch (replayError) { setError(replayError instanceof Error ? replayError.message : String(replayError)); }
     finally { setBusy(false); }
+  };
+
+  const cancelReplay = async () => {
+    if (!replayJob?.replay_id) return;
+    setBusy(true); setError('');
+    try {
+      await plane.getClient().cancelRuntimeJob(replayJob.replay_id);
+      setReplayJob(await readReplayJob(replayJob));
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : String(cancelError));
+    } finally { setBusy(false); }
   };
 
   const exportTrace = async (runId: string) => {
@@ -1947,7 +2161,10 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
         [{ predicate: evidencePredicate, value: evidenceValue.trim() }],
       );
       await refresh();
-    } catch (recordError) { setError(recordError instanceof Error ? recordError.message : String(recordError)); }
+    } catch (recordError) {
+      try { await refresh(); } catch { /* Keep the original recording error visible. */ }
+      setError(recordError instanceof Error ? recordError.message : String(recordError));
+    }
     finally { setBusy(false); }
   };
 
@@ -1957,19 +2174,12 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
       if (!item.verification?.length) throw new Error('请先为候选技能保存结构化终态证据。');
       const client = plane.getClient();
       const started = await client.startMemoryVerification(item.id);
-      const replayId = started.job.replay_id;
-      let completed: Record<string, any> | null = null;
-      for (let attempt = 0; attempt < 300; attempt += 1) {
-        const status = await client.memoryVerificationStatus(item.id, replayId);
-        if (['done', 'failed', 'stopped', 'canceled'].includes(String(status.status))) {
-          completed = status;
-          break;
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 1000));
-      }
-      if (!completed) throw new Error('验证回放仍在排队或运行，请稍后刷新状态。');
-      if (completed.ok !== true) throw new Error(String(completed.error || '结构化回放证据未通过。'));
-      await refresh();
+      setReplayJob({
+        ...started.job,
+        kind: 'memory_verification',
+        memory_id: item.id,
+      });
+      await plane.refresh();
     } catch (verifyError) { setError(verifyError instanceof Error ? verifyError.message : String(verifyError)); }
     finally { setBusy(false); }
   };
@@ -2044,6 +2254,12 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
           </div>
         )}
       </div>
+      {replayJob && (
+        <div className={`arp-replay-job ${replayStatus}`} role="status">
+          <span><strong>{STATUS_LABELS[replayStatus] || replayStatus}</strong><small>{replayJob.script || replayJob.replay_id}{Array.isArray(replayJob.result?.results) ? ` · ${replayJob.result.results.length} 步` : ''}</small></span>
+          {replayActive && <button className="arp-button arp-button-danger arp-button-small" onClick={() => void cancelReplay()} disabled={busy}><CircleStop size={13} />停止</button>}
+        </div>
+      )}
       <div className="arp-assets-grid">
         <section className="arp-panel">
           <div className="arp-panel-heading"><div><ShieldCheck size={15} /><strong>已验证技能</strong></div><span>{verifiedScripts.length}</span></div>
@@ -2054,7 +2270,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
                 <div><strong>{item.name || item.file}</strong><span>{item.steps} 步 · {item.task || '录制的工作流'} · {item.verification_state || 'verified'}</span></div>
                 <div className="arp-row-actions">
                   <button className="arp-icon-button" title="在流程工作台中打开" onClick={() => openSkill(item.file)} disabled={busy}><Braces size={15} /></button>
-                  {replayMode === 'skill' ? <button className="arp-button arp-button-small" onClick={() => replay(item.file)} disabled={busy}><Play size={13} />复用</button> : <button className="arp-button arp-button-small" onClick={() => openSkill(item.file)} disabled={busy}><Workflow size={13} />打开</button>}
+                  {replayMode === 'skill' ? <button className="arp-button arp-button-small" onClick={() => replay(item.file)} disabled={busy || replayActive}><Play size={13} />复用</button> : <button className="arp-button arp-button-small" onClick={() => openSkill(item.file)} disabled={busy}><Workflow size={13} />打开</button>}
                 </div>
               </div>
             ))}
@@ -2110,8 +2326,8 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
                   <div className="arp-row-actions">
                     {item.script && <button className="arp-icon-button" title="打开关联脚本" onClick={() => openSkill(item.script!)} disabled={busy}><Braces size={15} /></button>}
                     <button className="arp-icon-button" title="查看适用条件与证据" onClick={() => inspectMemory(item)} disabled={busy}><Eye size={15} /></button>
-                    {item.script && item.provisional && item.verification?.length ? <button className="arp-button arp-button-small" onClick={() => verifyMemory(item)} disabled={busy}><Check size={13} />回放验证</button> : null}
-                    {item.script && !item.provisional && item.script_sha256 ? <button className="arp-button arp-button-small" onClick={() => replay(item.script!)} disabled={busy}><Play size={13} />复用</button> : null}
+                    {item.script && item.provisional && item.verification?.length ? <button className="arp-button arp-button-small" onClick={() => verifyMemory(item)} disabled={busy || replayActive}><Check size={13} />回放验证</button> : null}
+                    {item.script && !item.provisional && item.script_sha256 ? <button className="arp-button arp-button-small" onClick={() => replay(item.script!)} disabled={busy || replayActive}><Play size={13} />复用</button> : null}
                     <button className="arp-icon-button" title="停用记忆" onClick={() => retireMemory(item)} disabled={busy}><Archive size={14} /></button>
                   </div>
                 </div>
@@ -2507,7 +2723,7 @@ function RuntimeWorkbench({
   const screenshotUrl = screenshot && plane.baseUrl && run
     ? plane.getClient().traceScreenshotUrl(run.run_id, String(screenshot.path))
     : '';
-  const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
+  const active = Boolean(run && isActiveRunStatus(run.status));
   const manuallyPaused = Boolean(arp?.manual_paused);
 
   const control = async (action: 'pause' | 'resume' | 'stop') => {
@@ -2695,7 +2911,7 @@ function CommandPalette({
   );
 }
 
-export function PlatformWorkbench() {
+export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () => Promise<void> }) {
   const plane = useControlPlane();
   const desktopWindowApi = window.electronAPI;
   const storeMode = useStore((state) => state.ui.viewMode);
@@ -2857,7 +3073,7 @@ export function PlatformWorkbench() {
               <div><span>流程工作台</span><strong>完整编辑、验证与运行</strong></div>
               <button type="button" onClick={closeFlow} aria-label="关闭流程工作台"><X size={17} /></button>
             </header>
-            <div className="ld-flow-window-body"><Studio plane={plane} /></div>
+            <div className="ld-flow-window-body"><Studio plane={plane} onOpenAutomation={onOpenAutomation} /></div>
           </section>
         </>
       )}

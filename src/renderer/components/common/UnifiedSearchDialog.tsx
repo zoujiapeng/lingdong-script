@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useStore } from '../../store';
 import { unifiedSearch, UnifiedSearchItem, UnifiedSearchResult } from '../../utils/unifiedSearch';
-import { llmEnhanceSearch, hasLLMApiKey } from '../../utils/llmSearcher';
 import { itemMarker } from '../../utils/itemMarker';
-import { Search, X, Check, Sparkles, Loader2, Tag, FileType } from 'lucide-react';
+import { Search, X, Check, Loader2, Tag, FileType } from 'lucide-react';
 import { displaySearchReason, displaySearchToken } from '../../utils/displayLabels';
 
 type FilterTab = 'all' | 'template' | 'tested';
@@ -47,8 +46,6 @@ export function UnifiedSearchDialog({
   const [results, setResults] = useState<UnifiedSearchResult[]>([]);
   const [filter, setFilter] = useState<FilterTab>('all');
   const [loading, setLoading] = useState(false);
-  const [llmLoading, setLlmLoading] = useState(false);
-  const [llmEnhanced, setLlmEnhanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [, forceRefresh] = useState(0);
   const [selectedItem, setSelectedItem] = useState<UnifiedSearchItem | null>(null);
@@ -76,7 +73,6 @@ export function UnifiedSearchDialog({
 
     setLoading(true);
     setError(null);
-    setLlmEnhanced(false);
 
     try {
       // Update tested status
@@ -84,27 +80,7 @@ export function UnifiedSearchDialog({
 
       const offline = unifiedSearch.search(q, { types: ['template'], maxResults: 20 })
         .filter((result) => result.item.hasScript);
-      let final = offline;
-      let enhanced = false;
-
-      // LLM enhancement if low confidence
-      if (offline.length === 0 || offline[0].score < 60) {
-        const apiKey = (window as any).__llmApiKey || localStorage.getItem('lingdong-llm-api-key') || '';
-        if (hasLLMApiKey() && apiKey) {
-          setLlmLoading(true);
-          const llmResult = await llmEnhanceSearch(q, offline, apiKey);
-          setLlmLoading(false);
-          if (llmResult.enhanced) {
-            final = llmResult.results.filter(
-              (result) => result.item.type === 'template' && result.item.hasScript,
-            );
-            enhanced = true;
-          }
-        }
-      }
-
-      setResults(final);
-      setLlmEnhanced(enhanced);
+      setResults(offline);
     } catch (e: any) {
       setError(e?.message || '搜索出错');
       setResults([]);
@@ -173,8 +149,6 @@ export function UnifiedSearchDialog({
               fontFamily: 'inherit',
             }}
           />
-          {llmLoading && <Loader2 size={16} style={{ color: 'var(--accent)', animation: 'spin 1s linear infinite' }} />}
-          {llmEnhanced && <span title="AI 增强搜索"><Sparkles size={16} style={{ color: 'var(--accent)' }} /></span>}
           <button onClick={onClose}
             style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4, display: 'flex' }}
             title="关闭 (Esc)"><X size={18} /></button>
@@ -251,21 +225,13 @@ export function UnifiedSearchDialog({
           {!loading && !error && query.trim() !== '' && filtered.length === 0 && (
             <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>
               <div style={{ fontSize: 14, marginBottom: 4 }}>未找到匹配的指令或模板</div>
-              <div style={{ fontSize: 12 }}>试试其他关键词，或使用 AI 搜索</div>
+              <div style={{ fontSize: 12 }}>试试其他关键词</div>
             </div>
           )}
 
           {/* Results list */}
           {!loading && !error && filtered.length > 0 && (
             <div>
-              {llmEnhanced && (
-                <div style={{
-                  padding: '6px 16px', fontSize: 11, color: 'var(--accent)',
-                  display: 'flex', alignItems: 'center', gap: 4,
-                }}>
-                  <Sparkles size={12} /> AI 增强搜索 — 离线分较低时由 AI 语义重排序
-                </div>
-              )}
               {filtered.map((r, i) => (
                 <div key={`${r.item.type}:${r.item.id}`}
                   style={{
@@ -387,7 +353,6 @@ export function UnifiedSearchDialog({
         }}>
           <span>
             {unifiedSearch.count} 条索引
-            {llmEnhanced && <span style={{ color: 'var(--accent)', marginLeft: 4 }}>· AI 增强已启用</span>}
           </span>
           <span>
             Esc 关闭 · 点击名称查看详情 · 标记「已测试」

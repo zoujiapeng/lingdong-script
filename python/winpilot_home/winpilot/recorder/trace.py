@@ -995,6 +995,10 @@ def _validate_steps(steps: Any, where: str) -> str | None:
         tool = step.get("tool")
         if tool not in KNOWN_TOOLS:
             return f"{loc} 未知步骤类型: {tool!r}"
+        if "target_window" in step and not _target_window_hint_from(
+            step.get("target_window"), f"{loc}.target_window",
+        ):
+            return f"{loc}.target_window requires title/window_title/name, hwnd, or process"
         if tool == "ctrl.if":
             cond = step.get("cond")
             if not isinstance(cond, dict):
@@ -1044,7 +1048,13 @@ def validate_script(data: Any) -> str | None:
         return "vars 必须是对象"
     if _target_window_spec_present(data) and not _target_window_hint(data):
         return "target_window requires title/window_title/name, hwnd, or process"
-    return _validate_steps(data.get("steps"), "steps")
+    steps = data.get("steps")
+    error = _validate_steps(steps, "steps")
+    if error:
+        return error
+    if replay_control.count_leaves(steps) <= 0:
+        return "steps must contain at least one executable leaf"
+    return None
 
 
 # ------------------------------------------------------------------- replay
@@ -1851,6 +1861,14 @@ class Replayer:
             parts.append(f"hwnd={hint['hwnd']}")
         return ", ".join(parts) or "empty target_window"
 
+    @staticmethod
+    def _target_hint_signature(hint: dict[str, Any]) -> str:
+        return json.dumps(
+            {key: hint[key] for key in ("title", "process", "hwnd") if key in hint},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
     def _window_process_name(self, win: dict) -> str:
         pid = win.get("pid")
         proc_fn = getattr(win32, "_process_name", None)
@@ -1861,68 +1879,117 @@ class Replayer:
         except Exception:
             return ""
 
+    def _window_matches_target_process(self, win: dict, hint: dict[str, Any]) -> bool:
+        process = str(hint.get("process") or "").strip().casefold()
+        if not process:
+            return False
+        actual = self._window_process_name(win).casefold()
+        if not actual:
+            return False
+        process_key = process.removesuffix(".exe")
+        actual_key = actual.removesuffix(".exe")
+        return process in actual or process_key in actual_key
+
     def _window_matches_target_hint(self, win: dict, hint: dict[str, Any]) -> bool:
         title = str(hint.get("title") or "").strip()
         if title and not win32.title_contains(str(win.get("title") or ""), title):
             return False
 
-        process = str(hint.get("process") or "").strip().casefold()
-        if process:
-            actual = self._window_process_name(win).casefold()
-            if not actual:
-                return False
-            process_key = process.removesuffix(".exe")
-            actual_key = actual.removesuffix(".exe")
-            if process not in actual and process_key not in actual_key:
-                return False
+        process = str(hint.get("process") or "").strip()
+        if process and not self._window_matches_target_process(win, hint):
+            return False
         return True
 
     def _find_target_window(self, hint: dict[str, Any]) -> dict | None:
         try:
-            hwnd = hint.get("hwnd")
-            if hwnd:
-                for win in win32.list_windows():
-                    if int(win.get("hwnd") or 0) == int(hwnd) and self._window_matches_target_hint(win, hint):
-                        return win
-                return None
-
+            signature = self._target_hint_signature(hint)
+            same_bound_target = bool(
+                self.hwnd is not None and self._target_signature == signature
+            )
             title = str(hint.get("title") or "").strip()
             process = str(hint.get("process") or "").strip()
+            hwnd = hint.get("hwnd")
+            if title and not process and not hwnd and not same_bound_target:
+                return win32.find_window(title)
+
+            windows = win32.list_windows()
+            if hwnd:
+                for win in windows:
+                    if int(win.get("hwnd") or 0) != int(hwnd):
+                        continue
+                    if self._window_matches_target_hint(win, hint):
+                        return win
+                    if (
+                        same_bound_target
+                        and int(self.hwnd or 0) == int(hwnd)
+                        and process
+                        and self._window_matches_target_process(win, hint)
+                    ):
+                        return win
+                    break
+                return None
+
+            if same_bound_target:
+                for win in windows:
+                    if int(win.get("hwnd") or 0) != int(self.hwnd or 0):
+                        continue
+                    if self._window_matches_target_hint(win, hint):
+                        return win
+                    # Document titles may change after an action; keep the live
+                    # bound HWND only when its recorded process still matches.
+                    if process and self._window_matches_target_process(win, hint):
+                        return win
+                    break
+
             if title and not process:
                 return win32.find_window(title)
 
-            for win in win32.list_windows():
+            for win in windows:
                 if self._window_matches_target_hint(win, hint):
                     return win
         except Exception as exc:
             logger.warning("replay target-window preflight failed: %s", exc)
         return None
 
-    def _preflight_target_window(self, script: dict[str, Any]) -> dict[str, Any]:
-        hint = _target_window_hint(script)
+    def _bind_target_window(self, hint: dict[str, Any] | None, *, focus: bool = False) -> dict[str, Any]:
         if not hint:
-            return {"ok": True, "required": False}
-
+            return {"ok": False, "required": True, "error": "invalid target_window"}
+        signature = self._target_hint_signature(hint)
+        previous_hwnd = self.hwnd
+        previous_signature = self._target_signature
         found = self._find_target_window(hint)
         if not found:
             error = f"target window not found: {self._target_hint_label(hint)}"
-            result = {"ok": False, "error": error, "hint": hint}
-            self._emit_step("preflight", "preflight.target_window", False, result)
             return {"ok": False, "required": True, "error": error, "hint": hint}
-
         self.hwnd = int(found["hwnd"])
-        self._target_signature = json.dumps(
-            {key: hint[key] for key in ("title", "process", "hwnd") if key in hint},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        self._target_signature = signature
+        if focus:
+            try:
+                focused = executor.focus_window(int(self.hwnd))
+            except Exception as exc:
+                focused = {"ok": False, "error": str(exc)}
+            if not isinstance(focused, dict) or focused.get("ok") is not True:
+                detail = focused if isinstance(focused, dict) else {}
+                error = str(detail.get("error") or "target window focus failed")
+                return {"ok": False, "required": True, "error": error, "hint": hint}
         return {
             "ok": True,
-            "required": True,
+            "required": bool(
+                previous_hwnd != self.hwnd or previous_signature != signature
+            ),
             "hwnd": self.hwnd,
             "title": found.get("title"),
             "hint": hint,
         }
+
+    def _preflight_target_window(self, script: dict[str, Any], *, focus: bool = False) -> dict[str, Any]:
+        hint = _target_window_hint(script)
+        if not hint:
+            return {"ok": True, "required": False}
+        result = self._bind_target_window(hint, focus=focus)
+        if not result.get("ok", False):
+            self._emit_step("preflight", "preflight.target_window", False, result)
+        return result
 
     @staticmethod
     def _condition_checks(script: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1965,8 +2032,10 @@ class Replayer:
                     checks.append(check)
         return checks, ignored
 
-    def _preflight(self, script: dict[str, Any]) -> dict[str, Any]:
-        target = self._preflight_target_window(script)
+    def _preflight(
+        self, script: dict[str, Any], *, focus_target: bool = False,
+    ) -> dict[str, Any]:
+        target = self._preflight_target_window(script, focus=focus_target)
         if not target.get("ok", False):
             return target
         safety = script.get("safety") if isinstance(script.get("safety"), dict) else {}
@@ -2033,10 +2102,15 @@ class Replayer:
         return evidence_expectation(requirement)
 
     def _postflight_evidence(self, script: dict[str, Any]) -> dict[str, Any]:
+        if "evidence" not in script:
+            return {"ok": True, "required": False, "checks": []}
         evidence = script.get("evidence")
         required = evidence.get("required", []) if isinstance(evidence, dict) else evidence
         if not isinstance(required, list):
-            return {"ok": True, "required": False, "checks": []}
+            error = "postflight evidence required must be an array"
+            result = {"ok": False, "required": True, "error": error, "checks": []}
+            self._emit_step("postflight", "postflight.evidence", False, result)
+            return result
         checks: list[dict[str, Any]] = []
         advisory: list[str] = []
         unsupported: list[Any] = []
@@ -2073,6 +2147,27 @@ class Replayer:
                     "advisory": advisory,
                 }
         return {"ok": True, "required": bool(checks), "checks": results, "advisory": advisory}
+
+    def verify_postflight(self, evidence: Any) -> dict[str, Any]:
+        """Run the canonical WPS postflight contract for an ARP replay segment."""
+        return self._postflight_evidence({"evidence": evidence})
+
+    def verify_preflight(
+        self,
+        *,
+        target_window: Any = None,
+        conditions: Any = None,
+        safety: Any = None,
+    ) -> dict[str, Any]:
+        """Run the canonical WPS preflight contract for an ARP replay segment."""
+        script: dict[str, Any] = {"format": "wps/2", "steps": []}
+        if target_window not in (None, "", {}):
+            script["target_window"] = target_window
+        if conditions is not None:
+            script["conditions"] = conditions
+        if safety is not None:
+            script["safety"] = safety
+        return self._preflight(script)
 
     def _run_step(self, idx: int, step: dict) -> dict[str, Any]:
         tool = step.get("tool", "")
@@ -2373,7 +2468,7 @@ class Replayer:
         self._reset_anchor_metrics()
         total = replay_control.count_leaves(steps)
         BUS.publish("replay", state="start", script=script_name, total=total)
-        preflight = self._preflight(script)
+        preflight = self._preflight(script, focus_target=True)
         if not preflight.get("ok", False):
             BUS.publish("replay", state="done", ok=False)
             self._flush_anchor_cache()
@@ -2432,13 +2527,8 @@ class Replayer:
         before = len(self._results)
         preflight: dict[str, Any] = {"ok": True, "required": False}
         target_hint = _target_window_hint(script)
-        target_signature = json.dumps(
-            {key: target_hint[key] for key in ("title", "process", "hwnd") if key in target_hint},
-            ensure_ascii=False,
-            sort_keys=True,
-        ) if target_hint else ""
-        if target_hint and (not self.hwnd or target_signature != self._target_signature):
-            preflight = self._preflight_target_window(script)
+        if target_hint:
+            preflight = self._preflight_target_window(script, focus=True)
             if not preflight.get("ok", False):
                 return {
                     "ok": False,
@@ -2492,6 +2582,13 @@ class Replayer:
             idx = f"{prefix}{i}"
             step = replay_control.interpolate_step(raw, self.vars)
             tool = step.get("tool", "")
+
+            if "target_window" in step:
+                hint = _target_window_hint_from(step.get("target_window"), f"{idx}.target_window")
+                binding = self._bind_target_window(hint, focus=True)
+                if not binding.get("ok", False):
+                    self._emit_step(idx, tool, False, binding)
+                    return False
 
             if tool == "ctrl.if":
                 if not replay_control.exec_if(self, step, idx):

@@ -34,7 +34,7 @@ function NodeIcon({ name, size = 16 }: { name: string; size?: number }) {
 }
 
 export function PropertyPanel() {
-  const { script, ui, updateNode, updateNodeParams } = useStore();
+  const { script, ui, updateNode, updateNodeParams, checkpointHistory } = useStore();
   const [activeTab, setActiveTab] = useState<'params' | 'advanced'>('params');
 
   const selectedNodeId = ui.selection.nodes[0];
@@ -64,7 +64,7 @@ export function PropertyPanel() {
   const def = NODE_DEFINITIONS[node.type];
 
   return (
-    <div className={panelClass}>
+    <div className={panelClass} onBlur={checkpointHistory}>
       {/* Header */}
       <div className="property-panel-header">
         <div className="property-panel-icon" style={{ background: def.color }}>

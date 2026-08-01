@@ -5,6 +5,12 @@ import {
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { getNodeDimensions } from '../../utils/constants';
+import { NODE_DEFINITIONS } from '../../utils/nodeDefinitions';
+import { isRunnableFlowNodeType } from '../../platform/flowToArpGraph';
+
+const CONTEXT_ADD_NODE_DEFINITIONS = Object.values(NODE_DEFINITIONS)
+  .filter((definition) => isRunnableFlowNodeType(definition.type))
+  .filter((definition) => definition.category === 'basic' || definition.category === 'control');
 
 // ============================================================
 // CANVAS CONTROLS
@@ -228,14 +234,14 @@ export function ContextMenu({ x, y, canvasX, canvasY, onClose }: ContextMenuProp
             <span className="context-menu-shortcut">Ctrl+A</span>
           </button>
           <div className="context-menu-divider" />
-          <div style={{ padding: '4px 8px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>添加节点</div>
-          {['click', 'image_click', 'wait', 'condition', 'loop'].map((type) => (
+          <div style={{ padding: '4px 8px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>添加可编辑节点</div>
+          {CONTEXT_ADD_NODE_DEFINITIONS.map((definition) => (
             <button
-              key={type}
+              key={definition.type}
               className="context-menu-item"
-              onClick={() => run(() => addNode(type as any, canvasX, canvasY))}
+              onClick={() => run(() => addNode(definition.type, canvasX, canvasY))}
             >
-              + {{ click: '点击', image_click: '图像点击', wait: '等待', condition: '条件判断', loop: '循环' }[type]}
+              + {definition.label}
             </button>
           ))}
           <div className="context-menu-divider" />
