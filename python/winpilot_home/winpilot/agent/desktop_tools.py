@@ -341,7 +341,7 @@ class DesktopToolMixin:
                 artifact = store.capture_artifact(
                     scope=scope,
                     source_hwnd=source_hwnd,
-                    region=args.get("region") if isinstance(args.get("region"), dict) else None,
+                    region=args.get("region"),
                     source_window=str(args.get("source_window") or ""),
                     purpose=str(args.get("purpose") or "user_output"),
                     sendable=bool(args.get("sendable", True)),
@@ -366,6 +366,7 @@ class DesktopToolMixin:
                     "height": artifact.height,
                     "size_bytes": artifact.size_bytes,
                     "scope": artifact.source_scope,
+                    "region": artifact.metadata.get("region"),
                 }))
             except Exception as exc:
                 return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
@@ -507,7 +508,7 @@ class DesktopToolMixin:
                 ),
             }))
         hwnd = int(args.get("source_hwnd") or getattr(self, "hwnd", 0) or 0)
-        region = args.get("region") if isinstance(args.get("region"), dict) else None
+        region = args.get("region")
         try:
             artifact = store.capture_artifact(
                 scope=scope,

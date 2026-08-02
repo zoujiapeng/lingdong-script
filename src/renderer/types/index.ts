@@ -280,8 +280,6 @@ export interface SystemCommandParams {
 
 export interface ScreenshotNodeParams {
   region?: { x: number; y: number; w: number; h: number };
-  save_path?: string;
-  format?: 'png' | 'jpg';
   description?: string;
 }
 

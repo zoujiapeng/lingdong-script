@@ -1,6 +1,6 @@
 ﻿import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu, Notification } from 'electron';
 import * as path from 'path';
-import { screen, type Rectangle } from 'electron';
+import { screen, type Display, type NativeImage, type Rectangle } from 'electron';
 import * as fs from 'fs';
 import * as os from 'os';
 import { randomBytes } from 'crypto';
@@ -35,6 +35,7 @@ const _taskbarNotifiedRuns = new Set<string>();
 let _desktopHandoffPending = false;
 let _desktopHandoffRunId = '';
 let _floatingWindowNormalBounds: Rectangle | null = null;
+let _screenRegionSelectionActive = false;
 
 type TaskbarNotificationKind = 'success' | 'error' | 'info';
 
@@ -898,120 +899,271 @@ ipcMain.handle('ai:generate',(_, params: { apiKey: string; messages: { role: str
   });
 });
 
-/** Capture full-screen screenshot with region selection overlay */
-async function _captureScreenshot(): Promise<any> {
-  if (!mainWindow) return { error: 'no window' };
-  mainWindow.minimize();
-  await new Promise((r) => setTimeout(r, 500));
+type ScreenRegionResult = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  dataURL?: string;
+  display_id: string;
+  scale_factor: number;
+  display_bounds_dip: Rectangle;
+  display_bounds_physical: Rectangle;
+  coordinate_space: 'screen_physical_px';
+};
+
+type RegionOverlay = {
+  window: BrowserWindow;
+  display: Display;
+  physicalBounds: Rectangle;
+  thumbnail: NativeImage;
+};
+
+function _selectionOverlayHtml(
+  imageDataURL: string,
+  doneChannel: string,
+  cancelChannel: string,
+  prompt: string,
+  scaleFactor: number,
+): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;cursor:crosshair;user-select:none;background:#111}
+#shot{position:fixed;inset:0;width:100%;height:100%;object-fit:fill;pointer-events:none}
+#selection{position:fixed;display:none;border:2px solid #60a5fa;box-shadow:0 0 0 9999px rgba(0,0,0,.48);pointer-events:none}
+#size{position:absolute;top:-29px;left:-2px;min-width:88px;padding:4px 7px;border-radius:5px;background:#2563eb;color:#fff;font:12px system-ui;white-space:nowrap}
+#bar{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:12px;padding:9px 16px;border-radius:9px;background:rgba(15,23,42,.88);color:#fff;font:13px system-ui;pointer-events:none}
+kbd{padding:2px 7px;border-radius:4px;background:rgba(255,255,255,.14);font:11px system-ui}
+</style></head><body><img id="shot" draggable="false"><div id="selection"><span id="size"></span></div>
+<div id="bar"><span>${String(prompt).replace(/[&<>"']/g, (value) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[value] || value))}</span><kbd>Enter</kbd>确认<kbd>Esc</kbd>取消</div>
+<script>
+const{ipcRenderer}=require('electron');
+const shot=document.getElementById('shot'),box=document.getElementById('selection'),size=document.getElementById('size');
+shot.src=${JSON.stringify(imageDataURL)};
+let start=null,current=null,dragging=false;
+const clamp=(value,max)=>Math.max(0,Math.min(max,Math.round(value)));
+const point=(event)=>({x:clamp(event.clientX,innerWidth),y:clamp(event.clientY,innerHeight)});
+function rect(){if(!start||!current)return null;return{x:Math.min(start.x,current.x),y:Math.min(start.y,current.y),w:Math.abs(current.x-start.x),h:Math.abs(current.y-start.y)}}
+function draw(){const r=rect();if(!r)return;box.style.display='block';box.style.left=r.x+'px';box.style.top=r.y+'px';box.style.width=r.w+'px';box.style.height=r.h+'px';size.textContent=Math.round(r.w*${scaleFactor})+' × '+Math.round(r.h*${scaleFactor})+' px'}
+function confirm(){const r=rect();if(!r||r.w<4||r.h<4)return;ipcRenderer.send(${JSON.stringify(doneChannel)},r)}
+onmousedown=event=>{if(event.button!==0)return;start=point(event);current=start;dragging=true;draw();event.preventDefault()};
+onmousemove=event=>{if(!dragging)return;current=point(event);draw()};
+onmouseup=event=>{if(!dragging)return;current=point(event);dragging=false;draw()};
+ondblclick=confirm;oncontextmenu=event=>event.preventDefault();
+onkeydown=event=>{if(event.key==='Enter')confirm();if(event.key==='Escape')ipcRenderer.send(${JSON.stringify(cancelChannel)})};
+<\/script></body></html>`;
+}
+
+function _strictLocalSelection(value: unknown, display: Display): { x: number; y: number; w: number; h: number } | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const values = ['x', 'y', 'w', 'h'].map((key) => raw[key]);
+  if (!values.every((item) => typeof item === 'number' && Number.isSafeInteger(item))) return null;
+  const [x, y, w, h] = values as number[];
+  if (x < 0 || y < 0 || w <= 0 || h <= 0) return null;
+  if (x + w > display.bounds.width || y + h > display.bounds.height) return null;
+  return { x, y, w, h };
+}
+
+function _rectInside(inner: Rectangle, outer: Rectangle): boolean {
+  return inner.width > 0 && inner.height > 0
+    && inner.x >= outer.x && inner.y >= outer.y
+    && inner.x + inner.width <= outer.x + outer.width
+    && inner.y + inner.height <= outer.y + outer.height;
+}
+
+async function _selectRegion(
+  prompt = '拖拽选择屏幕区域',
+  includePreview = true,
+): Promise<ScreenRegionResult | { error: string } | null> {
+  const controlWindow = mainWindow;
+  if (!controlWindow || controlWindow.isDestroyed()) return { error: 'no window' };
+  if (_desktopHandoffPending) return { error: 'desktop handoff is active' };
+  if (_screenRegionSelectionActive) return { error: 'screen region selection is already active' };
+
+  _screenRegionSelectionActive = true;
+  const controlWasVisible = controlWindow.isVisible();
+  const controlWasFocused = controlWindow.isFocused();
+  const overlays: RegionOverlay[] = [];
+  const token = randomBytes(12).toString('hex');
+  const doneChannel = `screen-region:${token}:done`;
+  const cancelChannel = `screen-region:${token}:cancel`;
 
   try {
-    const { screen } = require('electron');
-    const primaryDisplay = screen.getPrimaryDisplay();
-    const { width: sw, height: sh } = primaryDisplay.size;
+    if (controlWasVisible) controlWindow.hide();
+    await new Promise((resolve) => setTimeout(resolve, 220));
 
-    const sources = await desktopCapturer.getSources({
-      types: ['screen'],
-      thumbnailSize: { width: sw, height: sh },
-    });
-    if (sources.length === 0) { mainWindow.restore(); return { error: 'no sources' }; }
+    const displays = screen.getAllDisplays();
+    if (!displays.length) throw new Error('no displays available');
 
-    const fullDataURL = sources[0].thumbnail.toDataURL();
-
-    // Create selection overlay window (needs nodeIntegration for data URL page)
-    const selWin = new BrowserWindow({
-      width: sw, height: sh,
-      frame: false, resizable: false, show: false,
-      webPreferences: { contextIsolation: false, nodeIntegration: true },
-    });
-
-    const selHTML = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-html,body{width:100%;height:100%;overflow:hidden;cursor:crosshair;user-select:none}
-#canvas{display:block;width:100%;height:100%}
-#bar{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
-  background:rgba(0,0,0,0.75);color:#fff;padding:8px 18px;border-radius:8px;
-  font:14px system-ui;display:flex;align-items:center;gap:14px;pointer-events:none;z-index:10}
-#bar kbd{background:rgba(255,255,255,0.15);padding:2px 7px;border-radius:4px;font:11px system-ui}
-</style>
-</head>
-<body>
-<canvas id="c"></canvas>
-<div id="bar"><span>拖拽选择截图区域</span><kbd>Enter</kbd> 确认 <kbd>Esc</kbd> 取消</div>
-<script>
-const {ipcRenderer}=require("electron");
-const c=document.getElementById("c"),ctx=c.getContext("2d");
-const img=new Image();
-img.onload=()=>{c.width=img.width;c.height=img.height;ctx.drawImage(img,0,0);init()};
-img.src='${fullDataURL}';
-let sx,sy,ex,ey,drg=false;
-function init(){
-  c.onmousedown=e=>{sx=e.offsetX;sy=e.offsetY;drg=true};
-  c.onmousemove=e=>{if(!drg)return;ex=e.offsetX;ey=e.offsetY;draw()};
-  c.onmouseup=()=>{drg=false};
-  c.ondblclick=confirm;
-  onkeydown=e=>{if(e.key==="Enter")confirm();if(e.key==="Escape")ipcRenderer.send("ss:cancel")};
-}
-function draw(){
-  ctx.drawImage(img,0,0);
-  const x=Math.min(sx,ex),y=Math.min(sy,ey),w=Math.abs(ex-sx),h=Math.abs(ey-sy);
-  ctx.fillStyle="rgba(0,0,0,0.5)";ctx.fillRect(0,0,c.width,y);
-  ctx.fillRect(0,y,x,h);ctx.fillRect(x+w,y,c.width-x-w,h);ctx.fillRect(0,y+h,c.width,c.height-y-h);
-  ctx.strokeStyle="#3b82f6";ctx.lineWidth=3;ctx.setLineDash([6,4]);
-  ctx.strokeRect(x,y,w,h);ctx.setLineDash([]);
-  ctx.fillStyle="rgba(59,130,246,0.9)";ctx.fillRect(x,y-24,Math.min(w+10,100),20);
-  ctx.fillStyle="#fff";ctx.font="12px system-ui";ctx.textAlign="center";
-  ctx.fillText(w+"×"+h,x+Math.min(w,95)/2,y-8);
-}
-function confirm(){
-  if(sx===void 0||ex===void 0)return;
-  const x=Math.round(Math.min(sx,ex)),y=Math.round(Math.min(sy,ey)),w=Math.round(Math.abs(ex-sx)),h=Math.round(Math.abs(ey-sy));
-  if(w<5||h<5)return;
-  ipcRenderer.send("ss:done",{x,y,w,h});
-}
-<\/script>
-</body>
-</html>`;
-
-    selWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(selHTML));
-    selWin.once('ready-to-show', () => selWin.show());
-
-    // Wait for selection result, then crop
-    const result = await new Promise<string | null>((resolve) => {
-      const cleanup = () => {
-        ipcMain.removeAllListeners('ss:done');
-        ipcMain.removeAllListeners('ss:cancel');
-        ipcMain.removeAllListeners('ss:cropped');
-      };
-      const timeout = setTimeout(() => { cleanup(); selWin.close(); mainWindow!.restore(); resolve(null); }, 60000);
-      ipcMain.once('ss:done', (_: any, rect: { x: number; y: number; w: number; h: number }) => {
-        const { x, y, w, h } = rect;
-        const cropWin = new BrowserWindow({
-          show: false,
-          webPreferences: { contextIsolation: false, nodeIntegration: true },
-        });
-        const cropHTML = `<script>const{ipcRenderer}=require("electron");const i=new Image();i.onload=()=>{const c=document.createElement("canvas");c.width=${w};c.height=${h};c.getContext("2d").drawImage(i,${x},${y},${w},${h},0,0,${w},${h});ipcRenderer.send("ss:cropped",c.toDataURL("image/png"))};i.src='${fullDataURL}';<\/script>`;
-        cropWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(cropHTML));
-        ipcMain.once('ss:cropped', (_2: any, dataURL: string) => { cropWin.close(); clearTimeout(timeout); cleanup(); resolve(dataURL); });
-        cropWin.once('closed', () => { clearTimeout(timeout); cleanup(); resolve(null); });
+    for (const display of displays) {
+      const overlayWindow = new BrowserWindow({
+        ...display.bounds,
+        frame: false,
+        thickFrame: false,
+        resizable: false,
+        movable: false,
+        show: false,
+        alwaysOnTop: true,
+        skipTaskbar: true,
+        webPreferences: { contextIsolation: false, nodeIntegration: true },
       });
-      ipcMain.once('ss:cancel', () => { clearTimeout(timeout); cleanup(); resolve(null); });
-      selWin.once('closed', () => { clearTimeout(timeout); cleanup(); resolve(null); });
+      try {
+        const physicalBounds = screen.dipToScreenRect(overlayWindow, display.bounds);
+        if (physicalBounds.width <= 0 || physicalBounds.height <= 0) {
+          throw new Error(`display ${display.id} has invalid physical bounds`);
+        }
+        const sources = await desktopCapturer.getSources({
+          types: ['screen'],
+          thumbnailSize: { width: physicalBounds.width, height: physicalBounds.height },
+        });
+        const matches = sources.filter((source) => source.display_id === String(display.id));
+        if (matches.length !== 1) {
+          throw new Error(`display ${display.id} does not have exactly one capture source`);
+        }
+        let thumbnail = matches[0].thumbnail;
+        const thumbnailSize = thumbnail.getSize();
+        if (thumbnail.isEmpty()) throw new Error(`display ${display.id} capture is empty`);
+        if (thumbnailSize.width !== physicalBounds.width || thumbnailSize.height !== physicalBounds.height) {
+          if (thumbnailSize.width * physicalBounds.height !== thumbnailSize.height * physicalBounds.width) {
+            throw new Error(`display ${display.id} capture aspect ratio does not match physical bounds`);
+          }
+          thumbnail = thumbnail.resize({
+            width: physicalBounds.width,
+            height: physicalBounds.height,
+            quality: 'best',
+          });
+          const resized = thumbnail.getSize();
+          if (thumbnail.isEmpty() || resized.width !== physicalBounds.width || resized.height !== physicalBounds.height) {
+            throw new Error(`display ${display.id} capture could not be normalized to physical bounds`);
+          }
+        }
+        overlays.push({ window: overlayWindow, display, physicalBounds, thumbnail });
+      } catch (error) {
+        if (!overlayWindow.isDestroyed()) overlayWindow.destroy();
+        throw error;
+      }
+    }
+
+    await Promise.all(overlays.map((entry) => entry.window.loadURL(
+      'data:text/html;charset=utf-8,' + encodeURIComponent(_selectionOverlayHtml(
+        entry.thumbnail.toDataURL(), doneChannel, cancelChannel, prompt, entry.display.scaleFactor,
+      )),
+    )));
+    return await new Promise<ScreenRegionResult | { error: string } | null>((resolve) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const finish = (result: ScreenRegionResult | { error: string } | null) => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        ipcMain.removeListener(doneChannel, onDone);
+        ipcMain.removeListener(cancelChannel, onCancel);
+        for (const entry of overlays) {
+          if (!entry.window.isDestroyed()) entry.window.destroy();
+        }
+        resolve(result);
+      };
+      const onCancel = () => finish(null);
+      const onDone = (event: Electron.IpcMainEvent, value: unknown) => {
+        const entry = overlays.find((candidate) => candidate.window.webContents.id === event.sender.id);
+        if (!entry) return finish({ error: 'selection came from an unknown display overlay' });
+        const local = _strictLocalSelection(value, entry.display);
+        if (!local) return finish({ error: 'selection rectangle is invalid or crosses a display boundary' });
+        const currentDisplay = screen.getAllDisplays().find((display) => display.id === entry.display.id);
+        if (!currentDisplay
+          || currentDisplay.scaleFactor !== entry.display.scaleFactor
+          || currentDisplay.bounds.x !== entry.display.bounds.x
+          || currentDisplay.bounds.y !== entry.display.bounds.y
+          || currentDisplay.bounds.width !== entry.display.bounds.width
+          || currentDisplay.bounds.height !== entry.display.bounds.height) {
+          return finish({ error: 'selection display topology or scale changed' });
+        }
+        const currentPhysicalBounds = screen.dipToScreenRect(entry.window, currentDisplay.bounds);
+        if (currentPhysicalBounds.x !== entry.physicalBounds.x
+          || currentPhysicalBounds.y !== entry.physicalBounds.y
+          || currentPhysicalBounds.width !== entry.physicalBounds.width
+          || currentPhysicalBounds.height !== entry.physicalBounds.height) {
+          return finish({ error: 'selection physical display geometry changed' });
+        }
+        const currentBounds = entry.window.getContentBounds();
+        if (currentBounds.x !== entry.display.bounds.x || currentBounds.y !== entry.display.bounds.y
+          || currentBounds.width !== entry.display.bounds.width || currentBounds.height !== entry.display.bounds.height) {
+          return finish({ error: 'selection display geometry changed' });
+        }
+        const dipRect: Rectangle = {
+          x: entry.display.bounds.x + local.x,
+          y: entry.display.bounds.y + local.y,
+          width: local.w,
+          height: local.h,
+        };
+        const physical = screen.dipToScreenRect(entry.window, dipRect);
+        if (!_rectInside(physical, entry.physicalBounds)) {
+          return finish({ error: 'selection could not be owned by one physical display' });
+        }
+        const cropRect: Rectangle = {
+          x: physical.x - entry.physicalBounds.x,
+          y: physical.y - entry.physicalBounds.y,
+          width: physical.width,
+          height: physical.height,
+        };
+        let dataURL: string | undefined;
+        if (includePreview) {
+          const cropped = entry.thumbnail.crop(cropRect);
+          const croppedSize = cropped.getSize();
+          if (cropped.isEmpty() || croppedSize.width !== physical.width || croppedSize.height !== physical.height) {
+            return finish({ error: 'selected preview crop is empty or has the wrong size' });
+          }
+          dataURL = cropped.toDataURL();
+        }
+        finish({
+          x: physical.x,
+          y: physical.y,
+          w: physical.width,
+          h: physical.height,
+          ...(dataURL ? { dataURL } : {}),
+          display_id: String(entry.display.id),
+          scale_factor: entry.display.scaleFactor,
+          display_bounds_dip: { ...entry.display.bounds },
+          display_bounds_physical: { ...entry.physicalBounds },
+          coordinate_space: 'screen_physical_px',
+        });
+      };
+      ipcMain.on(doneChannel, onDone);
+      ipcMain.on(cancelChannel, onCancel);
+      for (const entry of overlays) entry.window.once('closed', onCancel);
+      timeout = setTimeout(
+        () => finish({ error: 'screen region selection timed out' }),
+        60000,
+      );
+      for (const entry of overlays) {
+        entry.window.setAlwaysOnTop(true, 'pop-up-menu');
+        entry.window.show();
+        entry.window.setContentBounds(entry.display.bounds);
+      }
+      const primary = overlays.find((entry) => entry.display.id === screen.getPrimaryDisplay().id) || overlays[0];
+      primary.window.focus();
     });
-
-    selWin.close();
-    mainWindow.restore();
-    mainWindow.focus();
-    if (result) return { dataURL: result };
-    return { error: 'cancelled' };
-
-  } catch (e: any) {
-    mainWindow.restore();
-    return { error: e.message };
+  } catch (error) {
+    for (const entry of overlays) {
+      if (!entry.window.isDestroyed()) entry.window.destroy();
+    }
+    return { error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    ipcMain.removeAllListeners(doneChannel);
+    ipcMain.removeAllListeners(cancelChannel);
+    if (!controlWindow.isDestroyed() && controlWasVisible) {
+      controlWindow.show();
+      if (controlWasFocused) controlWindow.focus();
+    }
+    _screenRegionSelectionActive = false;
   }
+}
+
+/** Compatibility image picker; canonical flow execution only consumes region coordinates. */
+async function _captureScreenshot(): Promise<any> {
+  const result = await _selectRegion('拖拽选择截图区域', true);
+  if (result && 'dataURL' in result && result.dataURL) return { dataURL: result.dataURL };
+  return result || { error: 'cancelled' };
 }
 
 /**
@@ -1033,121 +1185,14 @@ ipcMain.handle('screenshot:saveBase64Image', async (_, filename: string, dataURL
 
 ipcMain.handle('screenshot:capture', async () => _captureScreenshot());
 
-async function _selectRegion(): Promise<any> {
-  if (!mainWindow) return { error: 'no window' };
-  mainWindow.minimize();
-  await new Promise((r) => setTimeout(r, 500));
-
-  try {
-    const { screen } = require('electron');
-    const primaryDisplay = screen.getPrimaryDisplay();
-    const { width: sw, height: sh } = primaryDisplay.size;
-
-    const sources = await desktopCapturer.getSources({
-      types: ['screen'],
-      thumbnailSize: { width: sw, height: sh },
-    });
-    if (sources.length === 0) { mainWindow.restore(); return { error: 'no sources' }; }
-
-    const fullDataURL = sources[0].thumbnail.toDataURL();
-
-    const selWin = new BrowserWindow({
-      width: sw, height: sh,
-      frame: false, resizable: false, show: false,
-      webPreferences: { contextIsolation: false, nodeIntegration: true },
-    });
-
-    const selHTML = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-html,body{width:100%;height:100%;overflow:hidden;cursor:crosshair;user-select:none}
-#canvas{display:block;width:100%;height:100%}
-#bar{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
-  background:rgba(0,0,0,0.75);color:#fff;padding:8px 18px;border-radius:8px;
-  font:14px system-ui;display:flex;align-items:center;gap:14px;pointer-events:none;z-index:10}
-#bar kbd{background:rgba(255,255,255,0.15);padding:2px 7px;border-radius:4px;font:11px system-ui}
-</style>
-</head>
-<body>
-<canvas id="c"></canvas>
-<div id="bar"><span>拖拽选择监控区域</span><kbd>Enter</kbd> 确认 <kbd>Esc</kbd> 取消</div>
-<script>
-const{ipcRenderer}=require("electron");
-const c=document.getElementById("c"),ctx=c.getContext("2d");
-const img=new Image();
-img.onload=()=>{c.width=img.width;c.height=img.height;ctx.drawImage(img,0,0);init()};
-img.src='${fullDataURL}';
-let sx,sy,ex,ey,drg=false;
-function init(){
-  c.onmousedown=e=>{sx=e.offsetX;sy=e.offsetY;drg=true};
-  c.onmousemove=e=>{if(!drg)return;ex=e.offsetX;ey=e.offsetY;draw()};
-  c.onmouseup=()=>{drg=false};
-  c.ondblclick=confirm;
-  onkeydown=e=>{if(e.key==="Enter")confirm();if(e.key==="Escape")ipcRenderer.send("ss:cancel")};
-}
-function draw(){
-  ctx.drawImage(img,0,0);
-  const x=Math.min(sx,ex),y=Math.min(sy,ey),w=Math.abs(ex-sx),h=Math.abs(ey-sy);
-  ctx.fillStyle="rgba(0,0,0,0.5)";ctx.fillRect(0,0,c.width,y);
-  ctx.fillRect(0,y,x,h);ctx.fillRect(x+w,y,c.width-x-w,h);ctx.fillRect(0,y+h,c.width,c.height-y-h);
-  ctx.strokeStyle="#3b82f6";ctx.lineWidth=3;ctx.setLineDash([6,4]);
-  ctx.strokeRect(x,y,w,h);ctx.setLineDash([]);
-  ctx.fillStyle="rgba(59,130,246,0.9)";ctx.fillRect(x,y-24,Math.min(w+10,100),20);
-  ctx.fillStyle="#fff";ctx.font="12px system-ui";ctx.textAlign="center";
-  ctx.fillText(w+"×"+h,x+Math.min(w,95)/2,y-8);
-}
-function confirm(){
-  if(sx===void 0||ex===void 0)return;
-  const x=Math.round(Math.min(sx,ex)),y=Math.round(Math.min(sy,ey)),w=Math.round(Math.abs(ex-sx)),h=Math.round(Math.abs(ey-sy));
-  if(w<5||h<5)return;
-  ipcRenderer.send("ss:done",{x,y,w,h});
-}
-<\/script>
-</body>
-</html>`;
-
-    selWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(selHTML));
-    selWin.once('ready-to-show', () => selWin.show());
-
-    // Wait for selection result, then crop the region to return both coords + image
-    const result = await new Promise<{ x: number; y: number; w: number; h: number; dataURL: string } | null>((resolve) => {
-      const cleanup = () => { ipcMain.removeAllListeners('ss:done'); ipcMain.removeAllListeners('ss:cancel'); ipcMain.removeAllListeners('ss:cropped'); };
-      const timeout = setTimeout(() => { cleanup(); selWin.close(); mainWindow!.restore(); resolve(null); }, 60000);
-      ipcMain.once('ss:done', (_: any, rect: { x: number; y: number; w: number; h: number }) => {
-        const { x, y, w, h } = rect;
-        // Crop the selected region from the full screenshot (same technique as _captureScreenshot)
-        const cropWin = new BrowserWindow({
-          show: false,
-          webPreferences: { contextIsolation: false, nodeIntegration: true },
-        });
-        const cropHTML = `<script>const{ipcRenderer}=require("electron");const i=new Image();i.onload=()=>{const c=document.createElement("canvas");c.width=${w};c.height=${h};c.getContext("2d").drawImage(i,${x},${y},${w},${h},0,0,${w},${h});ipcRenderer.send("ss:cropped",c.toDataURL("image/png"))};i.src='${fullDataURL}';<\/script>`;
-        cropWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(cropHTML));
-        ipcMain.once('ss:cropped', (_2: any, dataURL: string) => {
-          cropWin.close(); clearTimeout(timeout); cleanup();
-          resolve({ x, y, w, h, dataURL });
-        });
-        cropWin.once('closed', () => { clearTimeout(timeout); cleanup(); resolve(null); });
-      });
-      ipcMain.once('ss:cancel', () => { clearTimeout(timeout); cleanup(); resolve(null); });
-      selWin.once('closed', () => { clearTimeout(timeout); cleanup(); resolve(null); });
-    });
-
-    selWin.close();
-    mainWindow.restore();
-    mainWindow.focus();
-    if (result) return { x: result.x, y: result.y, w: result.w, h: result.h, dataURL: result.dataURL };
-    return { error: 'cancelled' };
-
-  } catch (e: any) {
-    mainWindow.restore();
-    return { error: e.message };
-  }
-}
-
-ipcMain.handle('screenshot:selectRegion', async () => _selectRegion());
+ipcMain.handle('screenshot:selectRegion', async (_event, options?: unknown) => {
+  const includePreview = !(
+    options
+    && typeof options === 'object'
+    && (options as { includePreview?: unknown }).includePreview === false
+  );
+  return _selectRegion('拖拽选择屏幕区域', includePreview);
+});
 
 // --- Interaction Tools IPC ---
 async function _wheelSelect(params: { options: string[]; values?: string[]; title?: string; message?: string; default?: number }): Promise<any> {

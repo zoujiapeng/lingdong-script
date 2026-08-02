@@ -446,8 +446,11 @@ def test_managed_screenshot_action_batch_surfaces_run_artifact(monkeypatch, tmp_
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy
     from winpilot.orchestrator.runtime import ArpExecution
     from winpilot.tasking import artifacts
+    from winpilot.utils.screenshot import Region
 
     monkeypatch.setattr(artifacts, "TRACES_DIR", tmp_path)
+    requested = Region(120, 140, 36, 20)
+    monkeypatch.setattr(artifacts, "monitor_regions", lambda: (Region(0, 0, 1920, 1080),))
     monkeypatch.setattr(
         artifacts,
         "capture",
@@ -462,7 +465,8 @@ def test_managed_screenshot_action_batch_surfaces_run_artifact(monkeypatch, tmp_
                 config={"actions": [{
                     "action": "screenshot",
                     "managed_artifact": True,
-                    "scope": "screen",
+                    "scope": "region",
+                    "region": {"x": requested.left, "y": requested.top, "width": requested.width, "height": requested.height},
                     "purpose": "user_output",
                     "sendable": True,
                 }]},
@@ -485,11 +489,14 @@ def test_managed_screenshot_action_batch_surfaces_run_artifact(monkeypatch, tmp_
     assert artifact["height"] == 20
     assert artifact["purpose"] == "user_output"
     assert artifact["sendable"] is True
+    assert artifact["source_scope"] == "region"
+    assert artifact["metadata"]["region"] == {"left": 120, "top": 140, "width": 36, "height": 20}
     assert len(artifact["sha256"]) == 64
     assert result["contract_evidence"]["records"][0]["artifact_id"] == artifact["artifact_id"]
     assert result["evidence"][0]["predicate"] == "artifact.screenshot"
     assert result["evidence"][0]["source"] == "managed_screenshot"
     assert result["evidence"][0]["metadata"]["sha256"] == artifact["sha256"]
+    assert result["evidence"][0]["metadata"]["region"] == artifact["metadata"]["region"]
 
 
 def test_action_batches_share_target_session_until_run_cleanup(monkeypatch):

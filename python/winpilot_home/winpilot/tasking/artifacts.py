@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from ..config import TRACES_DIR
 from ..perception import win32
-from ..utils.screenshot import Region, capture, window_region
+from ..utils.screenshot import Region, capture, monitor_regions, window_region
 
 
 class Artifact(BaseModel):
@@ -197,16 +197,51 @@ class ArtifactStore:
         sendable: bool = True,
         metadata: dict[str, Any] | None = None,
     ) -> Artifact:
+        scope = str(scope or "").strip().casefold()
+        if scope not in {"window", "screen", "canvas", "region"}:
+            raise ValueError("artifact scope must be one of window, screen, canvas, or region")
         resolved_region: Region | None
-        if isinstance(region, dict):
-            resolved_region = Region(
-                int(region.get("left", region.get("x", 0))),
-                int(region.get("top", region.get("y", 0))),
-                int(region.get("width", 0)),
-                int(region.get("height", 0)),
-            ).clamp_to_screen()
-        elif isinstance(region, Region):
-            resolved_region = region.clamp_to_screen()
+        if region is not None:
+            if scope != "region":
+                raise ValueError("explicit artifact region requires scope='region'")
+            if isinstance(region, dict):
+                has_x = "x" in region
+                has_left = "left" in region
+                has_y = "y" in region
+                has_top = "top" in region
+                if has_x == has_left or has_y == has_top:
+                    raise ValueError("artifact region requires exactly one x/left and one y/top")
+                values = (
+                    region["x"] if has_x else region["left"],
+                    region["y"] if has_y else region["top"],
+                    region.get("width"),
+                    region.get("height"),
+                )
+                if not all(type(value) is int for value in values):
+                    raise ValueError("artifact region coordinates and dimensions must be integers")
+                resolved_region = Region(*values)
+            elif isinstance(region, Region):
+                values = (region.left, region.top, region.width, region.height)
+                if not all(type(value) is int for value in values):
+                    raise ValueError("artifact region coordinates and dimensions must be integers")
+                resolved_region = region
+            else:
+                raise ValueError("artifact region must be an object or Region")
+            if resolved_region.width <= 0 or resolved_region.height <= 0:
+                raise ValueError("artifact region width and height must be positive")
+            owners = [
+                monitor for monitor in monitor_regions()
+                if (
+                    resolved_region.left >= monitor.left
+                    and resolved_region.top >= monitor.top
+                    and resolved_region.right <= monitor.right
+                    and resolved_region.bottom <= monitor.bottom
+                )
+            ]
+            if len(owners) != 1:
+                raise ValueError("artifact region must be fully owned by exactly one connected display")
+        elif scope == "region":
+            raise ValueError("scope='region' requires an explicit artifact region")
         elif scope in {"window", "canvas"}:
             if not source_hwnd:
                 raise ValueError("window artifact capture requires source_hwnd")
@@ -216,6 +251,10 @@ class ArtifactStore:
         frame = capture(resolved_region)
         if getattr(frame, "size", 0) <= 0:
             raise ValueError("captured artifact frame is empty")
+        if resolved_region is not None:
+            frame_height, frame_width = frame.shape[:2]
+            if frame_width != resolved_region.width or frame_height != resolved_region.height:
+                raise ValueError("captured artifact frame dimensions do not match the resolved region")
         canvas_bbox: list[int] | None = None
         if scope == "canvas" and region is None:
             from ..perception.vision_cv import likely_canvas_bbox
