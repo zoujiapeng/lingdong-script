@@ -503,6 +503,15 @@ npm run build:all
 完整 renderer 回归为 30 个文件、316 项通过。这个结果只证明
 编辑体验与编译边界，不替代下方逐节点真实执行矩阵；图片模板输入当前仍是未实现能力。
 
+2026-08-02 删除 `LEGACY_FLOW` 执行 owner 后，必须从重启后的可见 Studio 重新跑，而不能复用
+删除前的节点结果。当前回归图为
+`start -> focus_window -> input_text -> screenshot -> end`：`input_text` 由 Runtime 外部 Tk JSON
+核对完整 Unicode 文本、码点长度和 UTF-8 SHA；`screenshot` 由独立 `mss` 在同一物理区域重抓，
+比较解码后 RGB 像素 hash。run `arp-20260802-183654-20ec43` 两项均通过且 trace 无丢事件，
+因此兼容删除保留。控制台乱码不能直接判产品失败，必须回到原始 JSON 字节/码点；同理，
+Runtime `done` 不能替代 Tk 或像素 oracle。删除后的完整回归为 renderer 30 个文件、317 项，
+WinPilot `3613 passed, 13 skipped`，TypeScript typecheck 通过。
+
 ## 报告要求
 
 每个 E2E 报告至少记录：

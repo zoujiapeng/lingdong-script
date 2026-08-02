@@ -183,7 +183,7 @@ def test_graph_validation_enforces_evidence_policy_shape():
     assert any("evidence-capable" in error for error in result.errors)
 
 
-def test_graph_validation_rejects_empty_evidence_gate_and_unknown_legacy_node():
+def test_graph_validation_rejects_empty_evidence_gate_and_retired_legacy_node():
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, validate_graph
 
     graph = _graph(
@@ -208,7 +208,39 @@ def test_graph_validation_rejects_empty_evidence_gate_and_unknown_legacy_node():
 
     assert result.valid is False
     assert any("concrete evidence token" in error for error in result.errors)
-    assert any("cannot execute legacy node type 'tool_call'" in error for error in result.errors)
+    assert any(
+        "uses retired legacy node type 'tool_call'" in error
+        and "migrate the saved flow to a canonical ARP capability" in error
+        for error in result.errors
+    )
+
+
+def test_supported_historical_legacy_node_is_readable_but_has_no_execution_owner():
+    from winpilot.orchestrator.adapters import default_handlers
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, validate_graph
+
+    legacy_node = ArpNode.model_validate({
+        "id": "legacy-input",
+        "kind": "legacy_flow",
+        "config": {"node_type": "input_text", "params": {"text": "kept for migration"}},
+    })
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            legacy_node,
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="legacy-input"),
+            ArpEdge(id="e2", source="legacy-input", target="end"),
+        ],
+    )
+
+    assert graph.nodes[1].config["params"]["text"] == "kept for migration"
+    result = validate_graph(graph)
+    assert result.valid is False
+    assert any("uses retired legacy node type 'input_text'" in error for error in result.errors)
+    assert ArpNodeKind.LEGACY_FLOW not in default_handlers()
 
 
 def test_graph_validation_uses_exact_wps_contract_for_replay_steps():

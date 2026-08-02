@@ -496,68 +496,6 @@ def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
     )
 
 
-def _legacy_actions(node_type: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-    actions: list[dict[str, Any]] = []
-    if node_type == "click":
-        method = str(params.get("method") or "single").casefold()
-        actions.append({
-            "action": "click",
-            "x": params.get("x"),
-            "y": params.get("y"),
-            "button": method if method in {"right", "middle"} else "left",
-            "double": method == "double",
-        })
-    elif node_type == "click_text":
-        actions.append({
-            "action": "click_element",
-            "label": params.get("text"),
-            "fallback_text": params.get("fallback_text") or [],
-        })
-    elif node_type == "input_text":
-        if params.get("click_before", True) and params.get("x") is not None and params.get("y") is not None:
-            actions.append({"action": "click", "x": params.get("x"), "y": params.get("y")})
-        if params.get("clear_before"):
-            actions.append({"action": "hotkey", "keys": ["ctrl", "a"]})
-        actions.append({"action": "type_text", "text": params.get("text", "")})
-    elif node_type == "keyboard":
-        keys = [str(key) for key in (params.get("modifiers") or [])]
-        keys.extend(str(key) for key in (params.get("keys") or []))
-        actions.append({"action": "hotkey", "keys": list(dict.fromkeys(keys))})
-    elif node_type == "focus_window":
-        actions.append({
-            "action": "focus_window",
-            "title": params.get("title") or params.get("window_title"),
-        })
-    elif node_type == "launch_program":
-        command = str(params.get("target") or params.get("path") or params.get("program") or "").strip()
-        arguments = str(params.get("args") or "").strip()
-        actions.append({"action": "launch", "command": f"{command} {arguments}".strip()})
-    delay_after = params.get("delay_after")
-    if isinstance(delay_after, (int, float)) and delay_after > 0:
-        actions.append({"action": "wait", "duration_ms": int(float(delay_after) * 1000)})
-    return actions
-
-
-def _legacy_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
-    node_type = str(node.config.get("node_type") or "").strip()
-    params = node.config.get("params") if isinstance(node.config.get("params"), dict) else {}
-    actions = _legacy_actions(node_type, params)
-    if not actions:
-        return NodeResult(
-            ok=False,
-            branch="fail",
-            error=(
-                f"legacy node {node_type!r} has no native ARP adapter; "
-                "run it through the Electron feature bridge or migrate it to an ARP capability"
-            ),
-        )
-    adapted = node.model_copy(update={
-        "kind": ArpNodeKind.ACTION_BATCH,
-        "config": {"actions": actions, "subgoal": node.name or node_type},
-    })
-    return _batch_handler(adapted, context, stop_event)
-
-
 def default_handlers(on_runner: RunnerCallback | None = None) -> dict[ArpNodeKind, NodeHandler]:
     from ..tasking.stage_runtime import task_stage_handler
 
@@ -572,7 +510,6 @@ def default_handlers(on_runner: RunnerCallback | None = None) -> dict[ArpNodeKin
         ArpNodeKind.REPLAY_STEP: _replay_step_handler,
         ArpNodeKind.SKILL_REPLAY: _skill_handler,
         ArpNodeKind.TASK_STAGE: run_task_stage,
-        ArpNodeKind.LEGACY_FLOW: _legacy_handler,
     }
 
 

@@ -38,7 +38,7 @@
 | `action_batch` | 是 | 本机桌面控制器 | 已有 | 已有 | 待测 | 一个 batch 后 JSON 中点击、文本和键盘事实完全匹配 |
 | `click` | 是 | 本机鼠标 | 已有 | 共用 controller | **独立 E2E 通过** | `click_count` 精确从 0 增加到 1，其他输入计数保持 0；截图只作完成证据 |
 | `click_text` | 是 | 本机观察/OCR + 鼠标 | 已有 | 共用 controller | 待测 | `click_count` 精确增加 1；目标文本每轮随机摆放 |
-| `input_text` | 是 | 本机键盘 | 已有 | 共用 controller | 待测 | `entry_text` 精确等于 nonce；多/少字符均失败 |
+| `input_text` | 是 | 本机键盘 | 已有 | 共用 controller | **独立 E2E 通过** | `entry_text` 精确等于 nonce；多/少字符均失败 |
 | `keyboard` | 是 | 本机键盘 | 已有 | 共用 controller | 待测 | JSON `key_events` 精确包含预期组合键/按键 |
 | `swipe` | 是 | 本机鼠标拖拽 | 已有 | 共用 controller | 待测 | `drag_start` / `drag_end` 位于两个预期区域且只发生一次 |
 | `mouse_operation.click` | 是 | 本机鼠标 | 已有 | 共用 controller | 待测 | 与 `click` 相同的精确计数 |
@@ -54,7 +54,7 @@
 | `skill_replay` | 是 | 本地 Memory + Replayer | 已有 | 已有 | Studio 节点 E2E 待测 | 现有证据来自相邻的 Memory 页面链路，不是 Studio 节点 E2E |
 | `agent_goal` | 否 | 模型 + 本机 Runtime | 已有 | 已有 | Studio 节点 E2E 待测；不计入离线矩阵 | 主 Agent 的相邻 E2E 不能替代 Studio `agent_goal` 节点 E2E |
 
-### 严格独立矩阵：2/19（`click`、`screenshot`）
+### 严格独立矩阵：3/19（`click`、`input_text`、`screenshot`）
 
 严格 case 的计数单位是“一个 DUT（device under test）节点”，不是“整张图只能有一个动作节点”。
 为了让真实桌面动作具备合法目标和让 Runtime 到达可审计终态，case 可以加入通用的目标建立节点
@@ -106,6 +106,23 @@ Windows work-area 下方，返回 `x=50,y=1030,width=350,height=35`，证明 ove
 `output/playwright/offline-screenshot-region-e2e/20260802-122544/report.json`。当前机器只有一块
 显示器；第二显示器、混合缩放和负坐标没有真实硬件条件，严格记为
 `infrastructure_unavailable/not_run`，合成测试不计 E 级证据。
+
+第三个独立 DUT 是 canonical `input_text`。删除 `LEGACY_FLOW` 执行兼容并重启当前源码后，
+用户从可见 Electron Studio 打开临时流程
+`start -> focus_window -> input_text -> screenshot -> end`，点击校验和运行。这里只有
+`input_text` 是新增计数的 DUT；`focus_window` 建立合法目标，`screenshot` 是已有能力的完成证据和
+回归 helper，不顺带增加其他矩阵项。run `arp-20260802-183654-20ec43` 的 5 个节点全部 `ok`，
+`trace_integrity` 为 `accepted=38, dropped=0, write_failures=0, complete=true`，模型调用为 0。
+
+流程文件、canonical `type_text` action、physical replay 与 Runtime 外部 Tk JSON oracle 均为
+`TXT-8A31C5-中文-🙂-END`：19 个 Unicode 码点，UTF-8 SHA-256 均为
+`ebcb3151c0be5d553a0606e9fab8f496ce8ba1d64f75a750ed2a750eb22a866c`。外部按钮
+`click_count` 保持 0，未发生提交、滚动或拖拽。PowerShell 的一次控制台显示把中文打印成乱码，
+但读取原始 JSON 后的码点与字节 hash 完全一致，因此归类为观察通道编码假象，不是产品失败。
+同一 run 的受管全屏截图为 1920x1080；其中静态 12 色标记区域
+`x=70,y=290,w=768,h=59` 与运行后独立 `mss` 重抓逐像素相同，RGB SHA-256 均为
+`e82463ec23dc36748988a2970377fa3448360e51ce65e2e0281a9b20b85e1321`。这只证明删除兼容后
+已有截图能力未退化，`screenshot` 仍只计既有的一项。
 
 ### 补充的组合 E 级批次（不计入 2/19）
 
@@ -169,8 +186,6 @@ python python/winpilot_home/eval_targets/offline_flow_node_target.py `
 6. 组合 owner：`action_batch`、`replay_step`、`skill_replay`；
 7. 联网对照：单独测试 `agent_goal`，不并入离线通过率。
 
-下一轮不增加节点类型也不预改生产代码，先把现有 canonical `input_text` 作为单一 DUT 做可见
-Electron 实验：用户在属性面板填写当轮随机 ASCII、中文、emoji 与换行组合，运行
-`start -> focus_window -> input_text -> end`，由 Runtime 外部 JSON/文件精确核对全文、长度和
-SHA。目标/焦点缺失必须 fail closed，空串行为必须明确且不能静默变成另一种动作。之后再沿
-上述顺序继续逐 DUT matrix；不并行开放历史图片模板，组合批次也不能替代独立 case。
+下一轮不增加节点类型也不预改生产代码，沿上述顺序把 canonical `keyboard` 作为单一 DUT 做
+可见 Electron 实验；由 Runtime 外部 JSON 精确核对按键、修饰键、重复次数和多余输入。之后再
+继续逐 DUT matrix；不并行开放历史图片模板，组合批次也不能替代独立 case。

@@ -174,6 +174,7 @@ def test_platform_overview_exposes_contracts_and_capabilities(client):
     assert data["contracts"]["arp"] == "arp/1"
     capability_ids = {item["id"] for item in data["capabilities"]}
     assert {"agent.goal", "controller.batch", "replay.step", "skill.replay", "evidence.gate", "task.stage", "control.variable"} <= capability_ids
+    assert "legacy.flow" not in capability_ids
     advertised_nodes = {
         node_type
         for item in data["capabilities"]

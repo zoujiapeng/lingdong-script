@@ -2362,3 +2362,58 @@ tools，因为它们尚未完成消费者迁移与双族 E2E。
 编辑与明确迁移错误。先用静态/编译矩阵证明当前 runnable 节点不生成它，再从可见 Studio 跑
 canonical `input_text` 与 `screenshot` 两个任务族，以 Unicode 长度/SHA 和图片尺寸/像素 hash
 独立验收；任一族退化就整批回退，不把旧 handler 改名保留，也不并行删除其他兼容面。
+
+### 13.29 MiMo 真实能力分层与 `LEGACY_FLOW` 执行 owner 删除
+
+本轮先冻结生产代码，重新跑当前 `master`、当前 MiMo `mimo-v2.5` 配置和真实可见 Electron。
+受控 10 项矩阵为 `6/10`：`answer-all-questions`、`precise-click`、`ordered-clicks`、`drag-fit`、
+`slider`、`dynamic-hold` 通过，四个 corridor 变体全部失败。有效失败 run 分别为
+`arp-20260802-175858-25acb3`、`arp-20260802-180651-5c1d79`、
+`arp-20260802-174829-0ec307`、`arp-20260802-174924-184d40`，外部浏览器 oracle 的最小通道
+余量为 `-164/-94/-44/-9`。四次都是模型原始折线、canonical image points 与
+`physical_attempt` 逐点一致；错误是模型一开始走错方向或切过内角，随后在目标未完成时声称
+完成。一次被外部窗口和错误 seed 污染的样本已排除并按原 seed 重跑，不能混入产品统计。
+
+原生软件提供了第二类失败证据。Notepad run `arp-20260802-181114-71609f` 通过：从外部基线
+`BASELINE-NATIVE-20260802` 经 `click -> hotkey -> type_text` 精确变为
+`NATIVE-E2E-8A31C5`，独立可见文本核对通过。Calculator 的同一 `43×17` 目标则两次失败：显式
+GUI 口令 run `arp-20260802-181440-5ee079` 用满 turn 后停在表达式 `4 +`、显示 0；自然口令 run
+`arp-20260802-181930-07a5fa` 停在 `43 ×`、显示 0。486x667 的窗口截图清晰，模型却把 `3`、
+乘号和 `7` 多次定位到相邻按键或边界，并在新帧已经显示无效结果后重复同一错误。两次 raw
+action、canonical 坐标和 SendInput 回执仍一致，首分歧都在模型参数层。
+
+因此当前结论不是“MiMo 完全不会 GUI”，而是它能完成简单点击、文本替换、短状态和部分拖拽，
+但在本产品需要的精细视觉定位、受约束几何、自纠错和停止判断上不够可靠。复杂架构主要保证
+输入所有权、一次坐标映射、trace 和 fail-closed；这些机械合同不会提升视觉语义能力。继续为
+Calculator 按键、corridor 转角或完成声明增加提示、规则、snap、offset、答案修正、第二模型或
+应用 adapter，只会把模型失败藏进机械层，本轮全部拒绝。`thinking=true`、截图最大边
+`1120 -> 1600`、移除 `temperature=0` 等既有 A/B 均更差；没有再次重复这些负实验。当前机器
+也没有第二个可用视觉 provider credential，不能把 401、文本模型或 mock adapter 冒充模型 A/B。
+
+随后执行上一节冻结候选。`ArpNodeKind.LEGACY_FLOW` 枚举仍保留，使历史流程 JSON 可以读取和
+编辑；但 graph validation 现在对每个该 kind 给出明确的“retired legacy node type / migrate
+the saved flow”错误。`legacy.flow` 不再出现在 capability catalog，`default_handlers()` 不再
+拥有该 kind，旧 `_legacy_handler` 和六种节点的隐式 action 翻译已物理删除。生产 diff 为
+`+4/-87`、净删除 83 行；测试为 `+35/-2`。没有改模型提示、角色、工具面、坐标、键盘、
+scheduler、宏或用户保存数据。
+
+删除后重启真实 Electron，Studio 仍显示 20 个可编辑且当前可执行节点，当前 20-node 编译矩阵
+不生成 `legacy_flow`。可见 Studio run `arp-20260802-183654-20ec43` 执行
+`start -> focus_window -> input_text -> screenshot -> end`，5 节点全部 `ok`、模型调用 0，trace
+完整性为 `38 accepted / 0 dropped / 0 write failures`。外部 Tk oracle、流程参数与物理输入均为
+`TXT-8A31C5-中文-🙂-END`：19 个码点，UTF-8 SHA-256 为
+`ebcb3151c0be5d553a0606e9fab8f496ce8ba1d64f75a750ed2a750eb22a866c`。受管截图中
+`x=70,y=290,w=768,h=59` 的 12 色静态区域与运行后独立 `mss` 重抓逐像素一致，RGB hash 均为
+`e82463ec23dc36748988a2970377fa3448360e51ce65e2e0281a9b20b85e1321`。两族均通过，所以保留
+删除；严格离线节点独立矩阵升至 `3/19`。
+
+最终本地发布门为 WinPilot `3613 passed, 13 skipped, 1 warning`、renderer 30 个文件
+`317 passed`、TypeScript typecheck 通过；聚焦 orchestrator/API 为 `101 passed`。唯一 warning
+仍是既有 `mss.mss` deprecation。`CON` 未触碰；GitHub 精确 SHA 状态必须在提交后另查。
+
+下一轮唯一高价值模型实验不是继续改 Runtime，而是在拿到一个真实支持图片与多轮 tool call 的
+候选 provider credential 后，用相同 goal、原始截图、tool schema、turn budget 和外部 oracle
+做盲 A/B：至少覆盖 Calculator、一个窄 corridor 和一个当前通过族。只有候选同时提高原生控件
+定位与受约束几何的完整成功率、且不回退 Notepad/短任务，才保留最小 provider adapter；否则
+整条回退。拿不到 credential 时只允许增加重复次数来估计 MiMo 方差，不以 prompt、router、
+规则、OCR snapping 或 Runtime 自动修正代替模型比较。

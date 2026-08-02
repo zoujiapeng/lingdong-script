@@ -12,14 +12,6 @@ from ..fast.action_contract import iter_atomic_actions, validate_batch_actions
 
 
 ARP_FORMAT = "arp/1"
-LEGACY_ACTION_NODE_TYPES = {
-    "click",
-    "click_text",
-    "input_text",
-    "keyboard",
-    "focus_window",
-    "launch_program",
-}
 CONDITION_OPERATORS = {
     "truthy", "falsy", "true", "false", "always_true", "always_false",
     "eq", "equals", "==", "ne", "not_equals", "!=",
@@ -242,11 +234,10 @@ def _validate_node_config(node: ArpNode) -> list[str]:
                     errors.append(f"{prefix} required[{index}] is invalid: {exc}")
     elif node.kind == ArpNodeKind.LEGACY_FLOW:
         node_type = str(config.get("node_type") or "").strip()
-        if node_type not in LEGACY_ACTION_NODE_TYPES:
-            errors.append(
-                f"{prefix} cannot execute legacy node type {node_type or '<empty>'!r}; "
-                "migrate it to a native ARP capability"
-            )
+        errors.append(
+            f"{prefix} uses retired legacy node type {node_type or '<empty>'!r}; "
+            "migrate the saved flow to a canonical ARP capability before running it"
+        )
     return errors
 
 

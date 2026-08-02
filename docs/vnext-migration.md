@@ -322,3 +322,19 @@ Paint 井字棋、QQ 群摘要与网易云播放/音量也分别由应用外部�
 
 下一批唯一候选是删除 `LEGACY_FLOW` 的执行 owner，同时保留旧文件读取与明确迁移错误；只有
 可见 Studio 的 canonical `input_text` 和 `screenshot` 两族外部 oracle 都通过才保留。
+
+该候选已于 2026-08-02 通过并保留。历史 `legacy_flow` JSON 仍能反序列化和编辑，但 validation
+一律给出显式迁移错误；capability catalog 与 handler map 均不再声明执行能力，旧隐式 action
+翻译被删除。生产代码 `+4/-87`，没有增加 prompt、角色、router 或工具。当前 20 个可运行目录
+节点的编译矩阵均为 canonical 非 `legacy_flow`。可见 Studio run
+`arp-20260802-183654-20ec43` 的 Unicode 输入与 Runtime 外部 oracle 同为 19 个码点、同一
+UTF-8 SHA；受管截图的静态色块区域与独立物理重抓逐像素同 hash。严格离线独立矩阵因此为
+`3/19`。完整回归为 WinPilot `3613 passed, 13 skipped`、renderer `317 passed` 与 TypeScript
+typecheck 通过。
+
+同轮真实模型基线再次证明迁移边界不能替模型做语义决策：MiMo 当前受控矩阵 `6/10`，四个
+corridor 的 raw/canonical/physical 折线一致但外部路径出界；Notepad 精确替换通过，而
+Calculator `43×17` 两次在清晰小窗口上误点并耗尽 turn。首分歧都在模型参数层，所以不修改
+坐标、键盘或完成 Runtime。下一模型候选只有在取得真实视觉 provider credential 后，才用同一
+协议对 Calculator、corridor 和一个通过族做盲 A/B；缺 credential 时不以 mock、文本模型、
+prompt 规则或应用 adapter 冒充迁移收益。
