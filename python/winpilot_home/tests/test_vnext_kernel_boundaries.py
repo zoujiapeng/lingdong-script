@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from vnext_import_boundary_ast import (
 
 
 PACKAGE_ROOT = Path(__file__).parents[1] / "winpilot"
+REPO_ROOT = Path(__file__).parents[3]
 VNEXT_ROOT = PACKAGE_ROOT / "vnext"
 RUNTIME_ROOT = VNEXT_ROOT / "runtime"
 MODEL_ROLES_ROOT = VNEXT_ROOT / "model_roles"
@@ -164,8 +166,8 @@ ATOMIC_DESKTOP_IMPORTS = (
     "winpilot.action.desktop_queue",
     "winpilot.action.raw_device",
     "winpilot.action.replay_policy",
-    "winpilot.agent.frame_authority",
     "winpilot.utils.screenshot",
+    "winpilot.visual_runtime.frame_authority",
     "winpilot.visual_runtime.frame_observer",
     "winpilot.visual_runtime.normalized_frame_coordinates",
     "winpilot.visual_runtime.submitted_image_coordinates",
@@ -388,6 +390,61 @@ def test_only_one_composition_root_can_reach_live_vnext_by_import() -> None:
         )
     ]
     assert dynamic_violations == []
+
+
+def test_live_composition_dependency_closure_cannot_reach_legacy_agent() -> None:
+    module_paths: dict[str, Path] = {}
+    for path in PACKAGE_ROOT.rglob("*.py"):
+        module = _module_name(path)
+        module_paths[module] = path
+        if path.name == "__init__.py":
+            module_paths[module.removesuffix(".__init__")] = path
+
+    pending = [LIVE_COMPOSITION_MODULE]
+    visited: set[str] = set()
+    violations: list[str] = []
+    while pending:
+        module = pending.pop()
+        if module in visited:
+            continue
+        visited.add(module)
+        path = module_paths[module]
+        analysis = _analyze_path(path)
+        if analysis.static_bindings("winpilot.agent"):
+            violations.append(f"{module}: static winpilot.agent import")
+        if analysis.dynamic_calls_reaching("winpilot.agent"):
+            violations.append(f"{module}: dynamic winpilot.agent import")
+        for imported in analysis.static_imports:
+            candidates = [imported.module]
+            if imported.name:
+                candidates.insert(0, f"{imported.module}.{imported.name}".strip("."))
+            for candidate in candidates:
+                parts = candidate.split(".")
+                for size in range(len(parts), 0, -1):
+                    reachable = ".".join(parts[:size])
+                    if reachable in module_paths and reachable not in visited:
+                        pending.append(reachable)
+
+    assert violations == []
+
+
+def test_retired_electron_agent_subprocess_cannot_return() -> None:
+    assert not (REPO_ROOT / "python" / "agent" / "__main__.py").exists()
+    sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((REPO_ROOT / "src" / "main").rglob("*.ts"))
+    )
+    forbidden_tokens = (
+        "AGENT_GOAL",
+        "/api/agent-start",
+        "agent:start",
+        "agent:stop",
+        "agent:guidance",
+        "agent:chat",
+        "agent:status",
+    )
+    assert [token for token in forbidden_tokens if token in sources] == []
+    assert re.search(r"['\"]-m['\"]\s*,\s*['\"]agent['\"]", sources) is None
 
 
 @pytest.mark.parametrize(

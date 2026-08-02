@@ -1591,68 +1591,6 @@ function _registerListeners() {
       useStore.getState().addLog({ level: msg.level || 'info', message: msg.message });
     }));
 
-    // Agent run tracking: dedup agent_done by run_id, time the run.
-    let _agentDoneRunId = '';
-    let _agentStartTime = 0;
-    let _agentRunId = '';
-    let _agentGoal = '';
-
-    _listenerCleanups.push(_api.onAgentMessage((msg: Record<string, unknown>) => {
-      const msgType = typeof msg?.type === 'string' ? msg.type : '';
-      if (!msgType) return;
-
-      // WinPilot native events. PlatformWorkbench reads the control-plane
-      // projection; this compatibility store keeps coarse status + history.
-      if (msgType === 'agent_start') {
-        _agentStartTime = Date.now();
-        _agentDoneRunId = '';
-        _agentRunId = typeof msg.run_id === 'string' ? msg.run_id : '';
-        _agentGoal = typeof msg.task === 'string' ? msg.task : '';
-        useStore.setState((s) => {
-          s.execution.plan = undefined;
-          s.execution.status = 'running';
-          s.execution.current_node_id = undefined;
-        });
-        return;
-      }
-
-      if (msgType === 'agent_done') {
-        const runId = typeof msg.run_id === 'string' ? msg.run_id : '';
-        // Dedup: a given run_id finishes once.
-        if (runId && _agentDoneRunId === runId) return;
-        if (runId) _agentDoneRunId = runId;
-
-        const status = (typeof msg.status === 'string' ? msg.status : 'error') as AgentRunRecord['status'];
-        const steps = typeof msg.steps === 'number' ? msg.steps : 0;
-        const result = typeof msg.result === 'string' ? msg.result : '';
-        const usage = (msg.usage && typeof msg.usage === 'object')
-          ? (msg.usage as AgentRunRecord['usage'])
-          : undefined;
-
-        useStore.setState((s) => {
-          s.execution.status = (status === 'done' || status === 'reply') ? 'completed' : 'error';
-          s.execution.current_node_id = undefined;
-        });
-
-        const elapsed = _agentStartTime > 0 ? Math.round((Date.now() - _agentStartTime) / 1000) : 0;
-        const record: AgentRunRecord = {
-          id: Math.random().toString(36).slice(2, 10),
-          goal: _agentGoal || '',
-          status,
-          run_id: runId || _agentRunId || undefined,
-          steps,
-          result,
-          usage,
-          started_at: new Date(_agentStartTime || Date.now()).toISOString(),
-          finished_at: new Date().toISOString(),
-          elapsed_seconds: elapsed,
-          summary: result,
-        };
-        useStore.getState().addAgentHistory(record);
-        return;
-      }
-    }));
-
     _listenerCleanups.push(_api.onApiCommand((action: string, payload: any) => {
       const store = useStore.getState();
       const pushState = () => {

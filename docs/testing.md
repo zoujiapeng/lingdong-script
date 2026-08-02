@@ -123,10 +123,16 @@ manifest/evidence 的 artifact id、文件 SHA 和 region 也全部一致，12 �
 manifest/hash 一致并可视为真实 Studio 桌面。NO 分支未运行，截图也没有验证 target nonce；
 因此只能记为这几个节点/分支的组合证据，不能称为所有离线节点逐项通过。
 
-下一轮唯一最高价值实验是不改生产代码，从可见 Studio 独立验收 canonical `input_text`：
-属性面板输入当轮随机的 ASCII、中文、emoji 与换行组合，Runtime 外部 JSON/文件 oracle 精确
-核对字符串、长度和 SHA；目标/焦点缺失必须 fail closed，空串行为必须明确且不能静默变成
-另一种动作。历史图片模板节点与跨 decision held gesture 都不在该轮并行修改。
+旧架构删除现在还必须通过三层 absence gate：
+
+- `live_agent` 全部内部 import 闭包不得触达 `winpilot.agent`；
+- 独立进程阻断整个旧 Agent 包时，托管 server 与 vNext goal admission 仍须成立；
+- 打包 Electron 中物理移走旧包后，真实前端必须仍能上线并提交到同一个 vNext admission。
+
+2026-08-02 前两层通过；第三层也到达 admission，但当前模型配置在调用前因缺少视觉端点
+fail closed，因此不能记为聊天或 GUI 完成。下一轮只尝试删除 `LEGACY_FLOW` 执行兼容，并用
+可见 Studio 的 canonical `input_text` 与 `screenshot` 两族外部 oracle 决定保留或整批回退；
+历史文件继续可读/可编辑，未知旧节点必须明确报迁移错误。
 
 同一候选的真实前端原生探针没有被内部 `done` 覆盖：Calculator `43×17` 的外部显示为
 `44` 而非 `731`；Paint 没有形成合格红色 X；QQ 群摘要在零 GUI 动作前被未批准工具拒绝；

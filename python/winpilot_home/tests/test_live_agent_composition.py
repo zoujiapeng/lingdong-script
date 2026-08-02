@@ -39,7 +39,7 @@ from winpilot.orchestrator.contracts import (
 from winpilot.orchestrator.runtime import ArpRunManager
 from winpilot.orchestrator import goal_admission
 from winpilot.orchestrator import live_agent
-from winpilot.agent.frame_authority import FrameAuthority
+from winpilot.visual_runtime.frame_authority import FrameAuthority
 from winpilot.utils.log import BUS
 from winpilot.utils.screenshot import Region
 from winpilot.visual_runtime.keyboard_contracts import HotkeyChord
@@ -4451,6 +4451,7 @@ def test_composition_root_has_no_forbidden_product_imports_or_fallback() -> None
     assert "winpilot.inspector" not in source
     assert "winpilot.profiler" not in source
     assert "winpilot.mcp" not in source
+    assert "from ..agent" not in source
     assert "fallback_to_legacy" not in source
     assert source.count("from ..vnext") >= 1
 

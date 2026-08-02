@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from winpilot.agent.frame_authority import FrameAuthority
+from winpilot.visual_runtime.frame_authority import FrameAuthority
 from winpilot.agent.loop import AgentRunner
 
 

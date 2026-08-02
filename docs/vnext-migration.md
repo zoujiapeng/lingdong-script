@@ -304,3 +304,21 @@ Paint 井字棋、QQ 群摘要与网易云播放/音量也分别由应用外部�
 `output/playwright/client-draft-restart-e2e/20260801-170711-draft-restart/report.json`。checkpoint
 仍由既有 `AgentThreadStore` 唯一拥有，只保存最近成功的 12 条/16 KiB 文本交换和已完成投影，
 不新增模型角色、摘要或长期 memory。
+
+2026-08-02 开始按消费者优先实际删除旧架构。`FrameAuthority` 已从 `agent` 移到共享
+`visual_runtime`，vNext composition 的完整内部 import 闭包由 AST 测试禁止回到
+`winpilot.agent`。server 的旧 Runner/router/session/adapters 改为旧路由调用时才加载；显式
+阻断整个旧 Agent 包的独立进程仍能加载 app 并完成一次 vNext goal admission。Electron 的
+`python -m agent`、环境变量自动启动、agent IPC/local API/event 链已删除，Renderer 中默认
+提交 legacy 的 `startGraph/compileTask` 消费者也已删除。按 rename detection 统计，生产 diff
+`+55/-678`、净删 623 行；`FrameAuthority` 文件迁移只改 1 行归属说明，没有增加提示、
+角色、router 或工具。
+
+打包 Electron 还做了物理缺席验收：测试包中的旧 Agent 目录改名后，真实前端仍显示运行时
+在线并能再次提交目标；旧包存在/不存在两臂都在模型调用前得到同一“未配置视觉端点”错误。
+因此新 Goal 启动/admission 的独立性已成立，但真实任务成功未验证，失败属于 provider 配置
+基础设施。`/api/chat`、scheduler、Legacy ARP/Studio、外部 ChatGPT MCP 旧 ToolSession、
+本地 7880 API/feature/F9 engine 仍是待删兼容面，不得把本切片写成旧架构整体删除完成。
+
+下一批唯一候选是删除 `LEGACY_FLOW` 的执行 owner，同时保留旧文件读取与明确迁移错误；只有
+可见 Studio 的 canonical `input_text` 和 `screenshot` 两族外部 oracle 都通过才保留。

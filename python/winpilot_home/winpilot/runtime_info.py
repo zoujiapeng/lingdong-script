@@ -57,7 +57,10 @@ def _git_dirty() -> bool | None:
 
 
 def _has_module(name: str) -> bool:
-    return importlib.util.find_spec(name) is not None
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
 
 
 def _source_stamp() -> str:

@@ -8,7 +8,6 @@ const fsp = fs.promises;
 import { spawn, ChildProcess } from 'child_process';
 import * as http from 'http';
 import * as https from 'https';
-import { StringDecoder } from 'string_decoder';
 import { SchedulerBridge, getSchedulerScriptPath, getPythonCommand } from './schedulerBridge';
 import { spawnPython, spawnPythonOneShot, runPythonCollect, startPythonEngine, stopPythonEngine } from './engine';
 import { getBaseDir, isDev } from './env';
@@ -16,15 +15,11 @@ import { startApiServer } from './api';
 import { resolveMacroPath } from './macroPaths';
 import { callFeature, stopFeatureProcess } from './featureCallBridge';
 import { startWinpilotServer, getWinpilotConnection, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer, restartWinpilotServer } from './winpilotServer';
-import { classifyTaskOutcome, taskResultText } from '../shared/taskOutcome';
 import {
   mainWindow, setMainWindow,
   pythonProcess,
   engineRunning,
   lastScript,
-  agentProcess, setAgentProcess,
-  setAgentRunning,
-  nextAgentToken, isAgentTokenCurrent,
 } from './state';
 
 // 缓存渲染器状态，通过 IPC 定期更新，避免 executeJavaScript 挂起
@@ -379,7 +374,6 @@ function createWindow() {
     }
     // Only non-secret model metadata is exposed to the renderer. API keys stay
     // in the main process / managed WinPilot configuration.
-    const envKey = process.env.ANTHROPIC_API_KEY || '';
     const envBase = process.env.LLM_API_BASE || 'https://api.deepseek.com/v1';
     const envModel = process.env.LLM_MODEL || 'deepseek-chat';
     const envMultimodal = process.env.LLM_MULTIMODAL === 'true';
@@ -390,18 +384,6 @@ function createWindow() {
         window.__LLM_MULTIMODAL__ = ${JSON.stringify(envMultimodal)};
       })();
     `);
-    // 自动启动 Agent（如果设置了 AGENT_GOAL 环境变量）
-    const autoGoal = process.env.AGENT_GOAL || '';
-    if (autoGoal) {
-      setTimeout(() => {
-        startAgentProcess(autoGoal, {
-          api_key: envKey,
-          api_base: envBase,
-          model: envModel,
-          multimodal: envMultimodal ? 'true' : 'false',
-        });
-      }, 2000);
-    }
     // 执行 startup 类型的调度
     runStartupSchedules();
   });
@@ -699,141 +681,6 @@ ipcMain.handle('engine:status', () => {
   return { success: true };
 });
 
-// ── Agent IPC ──────────────────────────────────────────────────
-
-function sendToAgent(message: any) {
-  if (agentProcess && agentProcess.stdin) {
-    agentProcess.stdin.write(Buffer.from(JSON.stringify(message) + '\n', 'utf8'));
-  }
-}
-
-/** Line buffer for agent stdout */
-let _agentLineBuffer = '';
-/** UTF-8 decoder for agent stdout (handles multi-byte chars split across chunks) */
-let _agentDecoder: StringDecoder;
-
-function startAgentProcess(goal: string, config?: Record<string, any>, supervise: boolean = true, steps?: any[]) {
-  // Stop existing agent if running — kill immediately, then wait before spawning new one
-  if (agentProcess && !agentProcess.killed) {
-    sendToAgent({ type: 'stop' });
-    agentProcess.kill();
-    setAgentProcess(null);
-    setAgentRunning(false);
-  }
-
-  const token = nextAgentToken();
-  const agentDir = path.join(getBaseDir(), 'python');
-
-  const proc = spawnPython(
-    ['-u', '-m', 'agent'],
-    { cwd: agentDir, stdio: ['pipe', 'pipe', 'pipe'] }
-  );
-  setAgentProcess(proc);
-  setAgentRunning(true);
-
-  // Reset buffers for new process
-  _agentLineBuffer = '';
-  _agentDecoder = new StringDecoder('utf8');
-
-  proc.stdout!.on('data', (data: Buffer) => {
-    _agentLineBuffer += _agentDecoder.write(data);
-    const lines = _agentLineBuffer.split('\n');
-    _agentLineBuffer = lines.pop() || ''; // keep incomplete trailing line
-    for (const line of lines) {
-      if (!line) continue;
-      try {
-        const msg = JSON.parse(line);
-        console.log('[agent]', msg.type, JSON.stringify(msg).slice(0, 200));
-        if (msg.type === 'agent_done') {
-          setAgentRunning(false);
-          const status = String(msg.status || '').toLowerCase();
-          const outcome = classifyTaskOutcome(status, msg.result, msg.error);
-          const success = outcome === 'success';
-          const stopped = outcome === 'info';
-          notifyTaskbarAttention(
-            success ? '任务完成' : stopped ? '任务已停止' : '任务失败',
-            String(
-              taskResultText(msg.error)
-              || taskResultText(msg.result)
-              || msg.task
-              || msg.run_id
-              || '',
-            ).slice(0, 220),
-            success ? 'success' : stopped ? 'info' : 'error',
-            String(msg.run_id || ''),
-            true,
-          );
-        } else if (msg.type === 'agent_error') {
-          notifyTaskbarAttention(
-            '任务失败',
-            String(msg.error || msg.message || msg.run_id || '').slice(0, 220),
-            'error',
-            String(msg.run_id || ''),
-            true,
-          );
-        }
-        mainWindow?.webContents.send('agent-message', msg);
-      } catch {
-        mainWindow?.webContents.send('agent-log', { level: 'info', message: line });
-      }
-    }
-  });
-
-  // Re-create decoder for stderr too (used in agent-start injection)
-  let _stderrDecoder = new StringDecoder('utf8');
-  proc.stderr!.on('data', (data: Buffer) => {
-    mainWindow?.webContents.send('agent-log', { level: 'error', message: _stderrDecoder.write(data) });
-  });
-
-  // Add a safety timeout: kill if agent runs longer than 30 minutes.
-  // WinPilot multi-step runs with OCR/VLM can take several minutes; the
-  // previous 300s cap would sever long-but-healthy runs mid-task.
-  const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
-  const agentTimeout = setTimeout(() => {
-    if (!isAgentTokenCurrent(token)) return;
-    console.warn('[agent] Safety timeout — killing agent after 30min');
-    mainWindow?.webContents.send('agent-log', { level: 'error', message: 'Agent 执行超时 (30 分钟)，已自动终止' });
-    proc.kill();
-    setAgentProcess(null);
-    setAgentRunning(false);
-  }, AGENT_TIMEOUT_MS);
-
-  proc.on('exit', (code) => {
-    clearTimeout(agentTimeout);
-    if (!isAgentTokenCurrent(token)) return;  // stale event from previous process
-    console.log('[agent] Process exited, code=' + code);
-    setAgentProcess(null);
-    setAgentRunning(false);
-  });
-
-  // Send start command (use a short delay to ensure Python process is listening)
-  setTimeout(() => {
-    sendToAgent({ type: 'start', goal, config: config || {}, supervise, steps });
-  }, 300);
-}
-
-ipcMain.handle('agent:start', (_, goal: string, config?: Record<string, any>, supervise?: boolean, steps?: any[]) => {
-  startAgentProcess(goal, config, supervise ?? true, steps);
-  return { success: true };
-});
-
-ipcMain.handle('agent:stop', () => {
-  sendToAgent({ type: 'stop' });
-  setAgentRunning(false);
-  setTimeout(() => {
-    if (agentProcess && !agentProcess.killed) {
-      agentProcess.kill();
-      setAgentProcess(null);
-    }
-  }, 3000);
-  return { success: true };
-});
-
-ipcMain.handle('agent:guidance', (_, text: string) => {
-  sendToAgent({ type: 'guidance', text });
-  return { success: true };
-});
-
 // WinPilot control-plane connection for the native renderer (null until ready).
 ipcMain.handle('winpilot:url', () => getWinpilotUrl());
 ipcMain.handle('winpilot:connection', () => getWinpilotConnection());
@@ -842,16 +689,6 @@ ipcMain.handle('winpilot:connection', () => getWinpilotConnection());
 // error). The Agent panel polls this so a failed startup can recover from UI.
 ipcMain.handle('winpilot:ensure', () => ensureWinpilotServer());
 ipcMain.handle('winpilot:restart', () => restartWinpilotServer());
-
-ipcMain.handle('agent:chat', (_, text: string) => {
-  sendToAgent({ type: 'chat', text });
-  return { success: true };
-});
-
-ipcMain.handle('agent:status', () => {
-  sendToAgent({ type: 'status' });
-  return { success: true };
-});
 
 ipcMain.handle('ai:generate',(_, params: { apiKey: string; messages: { role: string; content: string }[]; apiBase?: string; model?: string }) => {
   return new Promise((resolve) => {
@@ -1655,7 +1492,6 @@ if (!gotTheLock) {
         try { return JSON.parse(result.stdout.trim()); }
         catch { return { error: result.stderr?.trim() || 'DSL转换失败' }; }
       },
-      startAgent: startAgentProcess,
       controlToken: LOCAL_CONTROL_TOKEN,
       allowUnsafeEval: isDev && process.env.LINGDONG_ENABLE_UNSAFE_EVAL === '1',
     });

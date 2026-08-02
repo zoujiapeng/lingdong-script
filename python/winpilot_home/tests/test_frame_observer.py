@@ -2,7 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from winpilot.agent.frame_authority import FrameAuthority
+from winpilot.visual_runtime.frame_authority import FrameAuthority
 from winpilot.utils.image_capture import VisualCaptureScope
 from winpilot.utils.screenshot import Region
 

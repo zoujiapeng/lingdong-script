@@ -2,7 +2,7 @@
 
 > 最后核对：2026-08-02。当前唯一产品分支是 `master`。本文件不再把某个提交写成
 > “当前 HEAD”；接手时必须现场运行 `git rev-parse HEAD`、`git rev-parse origin/master`
-> 并查询该精确 SHA 的 Actions。13.20–13.26 已进入或正在进入主线；不要用更早的提交说明覆盖
+> 并查询该精确 SHA 的 Actions。13.20–13.28 已进入或正在进入主线；不要用更早的提交说明覆盖
 > Thread/Turn、按需桌面租约、通用 connector、history-depth 证据或 provisional
 > native-provider 边界。
 
@@ -78,9 +78,10 @@ Electron「智能代理」
   -> 模型继续、claim 或 blocked
 ```
 
-`/api/chat`、CLI、scheduler、FlowScript、`/task-contracts/compile`、客户端直接提交
+`/api/chat`、CLI、scheduler、FlowScript、`/task-contracts/compile`、服务端直接提交
 `/arp/runs` 和 Legacy AgentRunner 仍是开发、Studio 或兼容面，不得成为产品 vNext 的
-fallback，也不得冒充真实客户端 E2E。MCP 只通过当前 `ConnectorGateway` 进入同一
+fallback，也不得冒充真实客户端 E2E。Renderer 中默认提交 legacy graph/task contract 的
+客户端方法已经删除。MCP 只通过当前 `ConnectorGateway` 进入同一
 Actor：必须显式配置、延迟发现、只读注解通过、物理调用前重检 descriptor；冻结 Legacy
 MCP 直调不是产品 connector owner。
 
@@ -466,6 +467,38 @@ QQ 空间点赞从 QQ 主窗口成功接管浏览窗口，30 次物理动作全�
 灰色赞变为蓝色，但终态仍至少有两条当前可见说说未赞，属于模型覆盖、自纠错和
 停止失败，不是窗口或输入基础设施失败。
 
+## 2026-08-02 旧架构物理解耦第一批
+
+新产品执行线现在有两道不可回退合同：从 `winpilot.orchestrator.live_agent` 遍历当前全部
+内部静态依赖，任何直接、间接或可解析的动态 `winpilot.agent` 边都会使测试失败；另一个
+独立进程在 import hook 明确禁止整个 `winpilot.agent` 包时，仍必须启动托管 server 并完成
+一次模拟的 `/api/v2/goals/runs` vNext admission。`FrameAuthority` 已从旧 `agent` 包搬到
+`visual_runtime`；旧 Runner 可以反向复用这个机械 owner，新线不再向旧命名空间取依赖。
+
+第一批实际删除包括 Electron 的 `python -m agent` 子进程、`AGENT_GOAL` 自动入口、五个
+agent IPC、local `/api/agent-start`、preload/types/state/event listener，以及 Renderer 中无
+生产调用者且默认提交 legacy 的 `startGraph` / `compileTask`。服务启动对旧
+Runner/router/session/adapters 改为 legacy 调用时才加载；ChatGPT MCP 也只在外部桌面会话
+真正创建 `ToolSession` 时才加载旧包。按 Git rename detection 统计，生产 diff 为
+`+55/-678`、净删除 623 行；`FrameAuthority` 是文件迁移，只改了 1 行归属说明。系统提示、
+模型角色和工具面均为 `+0/-0`。
+
+可见 Electron 的物理缺席测试把打包测试目录中的整个 `winpilot/agent` 可恢复改名后重新
+启动。客户端仍显示运行时在线，从真实前端再次提交目标并到达 vNext 配置校验；结果与旧包
+存在时一致，均因当前 `deepseek-v4-flash` 没有配置可用视觉端点而在模型调用前失败。该结果
+证明产品启动/admission 不借用旧 Agent，但不是聊天或 GUI 任务通过。失败归因是 provider
+配置基础设施；本轮不换模型、不增加 text/GUI router，也不为它修改 Runtime。测试包随后已
+恢复，源工作树的旧包尚未整体删除。
+
+本地发布门为 WinPilot `3607 passed, 13 skipped, 1 warning`、根测试 `2508 passed`、
+renderer `317 passed`，TypeScript typecheck 与完整 build 通过；warning 是既有 `mss.mss`
+弃用提示。GitHub 状态仍必须绑定本轮提交后的精确 SHA 查询。
+
+仍不能宣称仓库已无旧架构：server 的 `/api/chat`、scheduler、Legacy ARP/Studio provider、
+外部 ChatGPT MCP 的旧 `ToolSession`，以及 Electron 的本地 7880 API、feature、F9 engine 与
+自动写入 `.claude.json` 仍存在。它们现在不能被新产品执行线依赖，但必须继续按消费者先行、
+旧数据可读、执行 fail closed 的顺序逐批删除，不能一次性砍掉离线流程和用户计划。
+
 ## 代码与架构准入规则
 
 1. 优先修已有基础设施、复用成熟实现或净删除；不要先加层。
@@ -507,14 +540,12 @@ git log -8 --oneline --decorate
 精确 SHA 的 Actions，不要 reset、整体暂存或触碰用户未跟踪的 `CON`。然后阅读本文件和上述
 五份文档，不要因为看到“继续”就立刻追加代码。
 
-下一轮唯一最高价值实验：不改生产代码，先从可见 Studio 独立验收 canonical `input_text`。
-用户在属性面板输入当轮随机的 ASCII、中文、emoji 与换行组合，运行
-`start -> focus_window -> input_text -> end`，由 Runtime 外部 JSON/文件 oracle 精确核对完整
-Unicode 字符串、长度与 SHA；目标/焦点缺失必须 fail closed，空串行为必须明确且不能静默
-变成另一种动作。只有首分歧落在产品基础设施时才修改对应 owner；不能为字符内容增加答案
-修正、软件 prompt 或键盘重试规则。
-图片参数虽然可以复用本轮唯一选区 owner，但历史 `image_click` / `mouse_operation.image` 仍不
-开放；跨 decision held gesture 也继续作为已知重放缺口，不与该实验并行修改。
+下一轮唯一最高价值实验：只审查并尝试删除 `ArpNodeKind.LEGACY_FLOW` 的执行兼容，不删除
+历史流程文件的读取/编辑。先证明当前 runnable 节点矩阵没有任何 canonical 节点生成
+`legacy_flow`，未知旧节点必须给出明确迁移错误；再从可见 Studio 分别跑 canonical
+`input_text` 与 `screenshot` 两个任务族，外部核对 Unicode 长度/SHA 和图片尺寸/像素 hash。
+两族不完整通过就整批回退，不能把旧 handler 改名继续挂着，也不并行删除 scheduler、宏、
+用户保存数据或为字符/图片内容加专属规则。
 
 期间继续记录 raw model args、实际 canonical parse、物理 MCP/GUI receipt、严格外部终态、
 产品自主 terminal/恢复与 usage；不加提示教学、router、摘要模型、工具筛选器、自动重试或
