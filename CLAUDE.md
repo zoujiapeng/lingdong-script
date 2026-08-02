@@ -499,6 +499,35 @@ renderer `317 passed`，TypeScript typecheck 与完整 build 通过；warning �
 自动写入 `.claude.json` 仍存在。它们现在不能被新产品执行线依赖，但必须继续按消费者先行、
 旧数据可读、执行 fail closed 的顺序逐批删除，不能一次性砍掉离线流程和用户计划。
 
+## 2026-08-02 MiMo 真实分层与 `LEGACY_FLOW` 执行删除
+
+当前 MiMo `mimo-v2.5` 的有效受控矩阵为 `6/10`：试卷、精确/有序点击、普通拖放、滑块和
+dynamic hold 通过，四个 corridor 变体全部失败。四次 raw model points、canonical points 与
+`physical_attempt` 逐点一致，外部 pointer oracle 的最小余量为 `-164/-94/-44/-9`；模型走错
+方向或切过内角后仍声称完成。原生 Notepad 精确替换为 `NATIVE-E2E-8A31C5` 通过；Calculator
+`43×17` 两次分别停在 `4 +` 和 `43 ×`、显示 0，模型在清晰 486x667 窗口上反复误认 `3`、
+乘号和 `7`。这些有效失败的首分歧都在模型参数层，不在 canonical、坐标映射、SendInput 或
+应用终态读取层。MiMo 不是完全不会 GUI，但当前精细定位、受约束几何、自纠错和停止可靠性
+不足以担当强通用桌面 Agent。不要为这些样本加按键配方、转角规则、snap、offset、答案修正、
+第二 verifier 或提示教学。
+
+上一轮冻结候选已通过并保留。`ArpNodeKind.LEGACY_FLOW` 枚举仍用于读取历史流程，但每个该 kind
+现在 validation fail closed 并给出明确迁移错误；`legacy.flow` 能力广告、默认 handler、旧
+`_legacy_handler` 与六种节点的隐式 action 翻译已删除。生产 `+4/-87`、净删 83 行，测试
+`+35/-2`；没有改系统提示、模型角色、工具面、坐标、键盘、scheduler、宏或用户数据。当前
+20 个可运行目录节点的编译矩阵不生成 `legacy_flow`。
+
+删除后重启真实 Electron，从可见 Studio 运行 canonical
+`start -> focus_window -> input_text -> screenshot -> end`。run
+`arp-20260802-183654-20ec43` 的 5 节点全部 `ok`、模型调用 0、trace
+`38 accepted / 0 dropped / 0 write failures`。流程、canonical/physical 输入与外部 Tk oracle
+均为 `TXT-8A31C5-中文-🙂-END`：19 个码点，UTF-8 SHA-256
+`ebcb3151c0be5d553a0606e9fab8f496ce8ba1d64f75a750ed2a750eb22a866c`。截图中的 12 色静态区域
+与独立 `mss` 重抓逐像素相同，RGB SHA-256
+`e82463ec23dc36748988a2970377fa3448360e51ce65e2e0281a9b20b85e1321`。严格离线节点独立矩阵
+升至 `3/19`。完整回归为 WinPilot `3613 passed, 13 skipped, 1 warning`、renderer
+`317 passed`、TypeScript typecheck 通过；warning 仍是既有 `mss.mss` deprecation。
+
 ## 代码与架构准入规则
 
 1. 优先修已有基础设施、复用成熟实现或净删除；不要先加层。
@@ -540,18 +569,16 @@ git log -8 --oneline --decorate
 精确 SHA 的 Actions，不要 reset、整体暂存或触碰用户未跟踪的 `CON`。然后阅读本文件和上述
 五份文档，不要因为看到“继续”就立刻追加代码。
 
-下一轮唯一最高价值实验：只审查并尝试删除 `ArpNodeKind.LEGACY_FLOW` 的执行兼容，不删除
-历史流程文件的读取/编辑。先证明当前 runnable 节点矩阵没有任何 canonical 节点生成
-`legacy_flow`，未知旧节点必须给出明确迁移错误；再从可见 Studio 分别跑 canonical
-`input_text` 与 `screenshot` 两个任务族，外部核对 Unicode 长度/SHA 和图片尺寸/像素 hash。
-两族不完整通过就整批回退，不能把旧 handler 改名继续挂着，也不并行删除 scheduler、宏、
-用户保存数据或为字符/图片内容加专属规则。
-
-期间继续记录 raw model args、实际 canonical parse、物理 MCP/GUI receipt、严格外部终态、
-产品自主 terminal/恢复与 usage；不加提示教学、router、摘要模型、工具筛选器、自动重试或
-Runtime 修正，不接回旧 `/api/chat`。native provider 只有拿到真实 credential 后才做相同
-canonical 多轮工具序列与至少两个任务族 Electron E2E；未通过的协议整条回退。模型切换
-当前暂停；归档 tag 只作只读恢复输入，保持 `master` 为唯一产品主线。
+下一轮唯一最高价值模型实验：不再修改 Runtime，先取得一个真实支持图片和多轮 tool call 的
+候选 provider credential，再用完全相同的 goal、截图、tool schema、turn budget 与外部 oracle
+做盲 A/B。最小矩阵必须同时覆盖 Calculator、一个窄 corridor 和一个当前通过族；继续记录 raw
+model args、canonical parse、物理 MCP/GUI receipt、严格外部终态、terminal/恢复与 usage。只有
+候选同时提高原生控件定位与受约束几何的完整成功率，且不回退 Notepad/短任务，才保留最小
+provider adapter；否则整条回退。当前没有第二个可用视觉 credential，`gpt-5.6-sol` smoke 在
+模型响应前为 HTTP 401，不能冒充 A/B。拿不到 credential 时只允许 test-only 增加 MiMo 重复
+次数估计方差，不加提示教学、router、摘要模型、工具筛选器、自动重试、OCR snapping、应用
+配方或 Runtime 修正，也不接回旧 `/api/chat`。归档 tag 只作只读恢复输入，保持 `master` 为
+唯一产品主线。
 
 常用验证：
 

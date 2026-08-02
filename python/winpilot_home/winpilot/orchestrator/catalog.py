@@ -144,15 +144,4 @@ def capability_catalog() -> list[CapabilitySpec]:
             input_schema={"message": "string", "approved": "boolean?"},
             flow_node_types=["human_gate"],
         ),
-        CapabilitySpec(
-            id="legacy.flow",
-            name="Legacy Flow adapter",
-            category="compatibility",
-            description="Run one explicitly supported legacy GUI node behind the controller contract.",
-            node_kind=ArpNodeKind.LEGACY_FLOW,
-            latency_class="mixed",
-            deterministic=False,
-            requires_llm=False,
-            input_schema={"node_type": "string", "params": "object"},
-        ),
     ]
