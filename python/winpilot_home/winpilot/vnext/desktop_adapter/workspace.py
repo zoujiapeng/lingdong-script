@@ -9,7 +9,7 @@ next two observations.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import threading
 import time
 
@@ -102,6 +102,7 @@ class _PendingTransition:
     action: str
     generation: int
     observations_left: int
+    rejected_identity: tuple[int, int, int, str] | None = None
 
 
 class DesktopWorkspace:
@@ -200,18 +201,52 @@ class DesktopWorkspace:
             foreground = self._read_foreground()
             if foreground not in (None, self._binding.hwnd):
                 candidate = self._read_stable(foreground)
-                if candidate is not None:
+                if (
+                    candidate is not None
+                    and candidate.stable_identity
+                    != pending.rejected_identity
+                ):
                     return candidate
             if sample_index + 1 < self._SUCCESSOR_SAMPLES:
                 self._wait(self._SUCCESSOR_SAMPLE_DELAY_S)
         return None
+
+    def _current_observation(self) -> WorkspaceObservation | None:
+        current = self._reader(self._binding.hwnd)
+        if (
+            type(current) is not WorkspaceSurface
+            or current.stable_identity != self._surface.stable_identity
+        ):
+            return None
+        return WorkspaceObservation(
+            surface=current,
+            generation=self._generation,
+        )
+
+    def _pending_for(
+        self,
+        observation: WorkspaceObservation,
+    ) -> _PendingTransition | None:
+        pending = self._pending
+        if (
+            not observation.replaces_binding
+            or observation.generation != self._generation
+            or pending is None
+            or pending.source_binding_id != self._binding.binding_id
+            or pending.generation != self._generation
+            or observation.causal_action_id != pending.action_id
+            or observation.surface.stable_identity
+            == pending.rejected_identity
+        ):
+            return None
+        return pending
 
     def observe(self) -> WorkspaceObservation:
         """Return the current surface or one stable causal successor."""
 
         with self._lock:
             pending = self._pending
-            if (
+            while (
                 pending is not None
                 and pending.source_binding_id == self._binding.binding_id
                 and pending.generation == self._generation
@@ -228,28 +263,64 @@ class DesktopWorkspace:
                 self._pending = (
                     None
                     if pending.observations_left <= 1
-                    else _PendingTransition(
-                        source_binding_id=pending.source_binding_id,
-                        action_id=pending.action_id,
-                        action=pending.action,
-                        generation=pending.generation,
+                    else replace(
+                        pending,
                         observations_left=pending.observations_left - 1,
                     )
                 )
 
-            current = self._reader(self._binding.hwnd)
-            if (
-                type(current) is not WorkspaceSurface
-                or current.stable_identity
-                != self._surface.stable_identity
-            ):
+                current = self._current_observation()
+                if current is not None:
+                    return current
+                pending = self._pending
+
+            current = self._current_observation()
+            if current is None:
                 raise RuntimeError("current workspace surface is unavailable")
             # An unrelated foreground window is intentionally not adopted.
             # The old surface remains observable, while the atomic adapter's
             # pre-input foreground guard prevents accidental input.
-            return WorkspaceObservation(
-                surface=current,
-                generation=self._generation,
+            return current
+
+    def validate(
+        self,
+        observation: WorkspaceObservation,
+    ) -> WorkspaceSurface | None:
+        """Revalidate one tentative successor without changing binding."""
+
+        if type(observation) is not WorkspaceObservation:
+            raise TypeError("observation must be WorkspaceObservation")
+        with self._lock:
+            if self._pending_for(observation) is None:
+                return None
+            current = self._read_stable(observation.surface.hwnd)
+            if (
+                current is None
+                or current.stable_identity
+                != observation.surface.stable_identity
+                or current.region != observation.surface.region
+                or current.class_name != observation.surface.class_name
+            ):
+                return None
+            return current
+
+    def discard(self, observation: WorkspaceObservation) -> None:
+        """Reject one tentative successor while preserving bounded hand-off."""
+
+        if type(observation) is not WorkspaceObservation:
+            raise TypeError("observation must be WorkspaceObservation")
+        with self._lock:
+            pending = self._pending_for(observation)
+            if pending is None:
+                raise RuntimeError("workspace discard is stale or uncaused")
+            self._pending = (
+                None
+                if pending.observations_left <= 1
+                else replace(
+                    pending,
+                    observations_left=pending.observations_left - 1,
+                    rejected_identity=observation.surface.stable_identity,
+                )
             )
 
     def adopt(
@@ -264,13 +335,7 @@ class DesktopWorkspace:
         if type(binding) is not TargetBinding:
             raise TypeError("binding must be canonical TargetBinding")
         with self._lock:
-            if (
-                not observation.replaces_binding
-                or observation.generation != self._generation
-                or self._pending is None
-                or observation.causal_action_id
-                != self._pending.action_id
-            ):
+            if self._pending_for(observation) is None:
                 raise RuntimeError("workspace adoption is stale or uncaused")
             self._require_binding_surface(binding, observation.surface)
             self._binding = TargetBinding.from_dict(binding.to_dict())
@@ -326,6 +391,7 @@ class DesktopWorkspace:
                 action=action,
                 generation=self._generation,
                 observations_left=self._SUCCESSOR_OBSERVATIONS,
+                rejected_identity=None,
             )
 
 

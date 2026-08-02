@@ -1552,12 +1552,12 @@ class _LiveRuntimeState:
             created_at=state.captured_at,
         )
 
-    def _adopt_workspace_observation(
+    def _prepare_workspace_adoption(
         self,
         observation: WorkspaceObservation,
-    ) -> None:
+    ) -> tuple[TargetBinding, EvidenceRef] | None:
         if not observation.replaces_binding:
-            return
+            return None
         previous = self._workspace.binding
         surface = observation.surface
         material = {
@@ -1600,80 +1600,86 @@ class _LiveRuntimeState:
             established_by_evidence_ref=evidence.id,
             epoch=previous.epoch + 1,
         )
-        self._registry.append(evidence)
-        self._reducer.apply(
-            self._reducer.event(
-                "target_bound",
-                payload={"target_binding": binding.to_dict()},
-                evidence_refs=(evidence.id,),
-            )
-        )
-        self._workspace.adopt(observation, binding)
-        BUS.publish(
-            "vnext_workspace_target_adopted",
-            runtime_version=_RUNTIME_VERSION,
-            no_legacy_fallback=True,
-            run_id=self._registry.run_id,
-            mission_id=self._registry.mission_id,
-            obligation_id=_OBLIGATION_ID,
-            previous_target_binding_id=previous.binding_id,
-            target_binding_id=binding.binding_id,
-            target_hwnd=binding.hwnd,
-            generation=observation.generation + 1,
-            causal_action=observation.causal_action,
-            parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
-        )
+        return binding, evidence
 
-    def _capture_current(
-        self,
-        *,
-        retry_target_transition: bool = True,
-    ) -> FrameState:
-        observation = self._workspace.observe()
-        self._adopt_workspace_observation(observation)
-        binding = self._workspace.binding
-        first = self._workspace.snapshot(binding.hwnd)
-        if first is None:
-            raise RuntimeError("workspace target identity is no longer current")
-        previous = self._authority.current
-        expected_previous = previous.frame_id if previous is not None else 0
-        captured = self._observer.capture(
-            epoch=binding.epoch,
-            hwnd=binding.hwnd,
-            phase="observe",
-            provided_region=Region(*first.region),
-            expected_previous_frame_id=expected_previous,
-        )
-        if (
-            captured is None
-            or captured.scope != "target_window"
-            or not _jpeg_is_valid(captured.image_b64)
-            or _jpeg_dimensions(captured.image_b64)
-            != captured.submitted_size
-        ):
-            raise RuntimeError("fresh target-window JPEG capture failed closed")
-        if self._workspace.snapshot(binding.hwnd) != first:
-            if retry_target_transition:
-                return self._capture_current(
-                    retry_target_transition=False,
+    def _capture_current(self) -> FrameState:
+        for attempt in range(2):
+            observation = self._workspace.observe()
+            prepared = self._prepare_workspace_adoption(observation)
+            replacement = prepared is not None
+            if prepared is None:
+                binding = self._workspace.binding
+                target_evidence = None
+                first = self._workspace.snapshot(binding.hwnd)
+            else:
+                binding, target_evidence = prepared
+                first = observation.surface.to_live_snapshot()
+            if first is None:
+                raise RuntimeError(
+                    "workspace target identity is no longer current"
                 )
-            raise RuntimeError("target changed during frame capture")
+            previous = self._authority.current
+            expected_previous = (
+                previous.frame_id if previous is not None else 0
+            )
+            captured = self._observer.capture(
+                epoch=binding.epoch,
+                hwnd=binding.hwnd,
+                phase="observe",
+                provided_region=Region(*first.region),
+                expected_previous_frame_id=expected_previous,
+            )
+            if (
+                captured is None
+                or captured.hwnd != binding.hwnd
+                or captured.epoch != binding.epoch
+                or (
+                    captured.region.left,
+                    captured.region.top,
+                    captured.region.width,
+                    captured.region.height,
+                )
+                != first.region
+                or captured.scope != "target_window"
+                or not _jpeg_is_valid(captured.image_b64)
+                or _jpeg_dimensions(captured.image_b64)
+                != captured.submitted_size
+            ):
+                if replacement:
+                    self._workspace.discard(observation)
+                    if attempt == 0:
+                        continue
+                raise RuntimeError(
+                    "fresh target-window JPEG capture failed closed"
+                )
+            validated = (
+                self._workspace.validate(observation)
+                if replacement
+                else self._workspace.snapshot(binding.hwnd)
+            )
+            current = (
+                None
+                if validated is None
+                else validated.to_live_snapshot()
+                if replacement
+                else validated
+            )
+            if current == first:
+                break
+            if replacement:
+                self._workspace.discard(observation)
+            if attempt > 0:
+                raise RuntimeError("target changed during frame capture")
         committed = self._observer.commit(captured)
-        if (
-            committed.hwnd != binding.hwnd
-            or committed.epoch != binding.epoch
-            or committed.region != first.region
-            or committed.scope != "target_window"
-        ):
-            raise RuntimeError("target changed while the frame was committed")
-        if self._workspace.snapshot(binding.hwnd) != first:
-            if retry_target_transition:
-                return self._capture_current(
-                    retry_target_transition=False,
-                )
-            raise RuntimeError("target changed while the frame was committed")
         frame_ref = self._frame_ref(committed)
-        self._registry.append(frame_ref)
+        previous_binding = None
+        if replacement:
+            previous_binding = self._workspace.binding
+            self._workspace.adopt(observation, binding)
+            assert target_evidence is not None
+            self._registry.append_many((target_evidence, frame_ref))
+        else:
+            self._registry.append(frame_ref)
         event = self._reducer.event(
             "target_bound",
             payload={"target_binding": binding.to_dict()},
@@ -1683,6 +1689,21 @@ class _LiveRuntimeState:
             ),
         )
         self._reducer.apply(event)
+        if previous_binding is not None:
+            BUS.publish(
+                "vnext_workspace_target_adopted",
+                runtime_version=_RUNTIME_VERSION,
+                no_legacy_fallback=True,
+                run_id=self._registry.run_id,
+                mission_id=self._registry.mission_id,
+                obligation_id=_OBLIGATION_ID,
+                previous_target_binding_id=previous_binding.binding_id,
+                target_binding_id=binding.binding_id,
+                target_hwnd=binding.hwnd,
+                generation=observation.generation + 1,
+                causal_action=observation.causal_action,
+                parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
+            )
         BUS.publish(
             "vnext_gui_observation",
             runtime_version=_RUNTIME_VERSION,
