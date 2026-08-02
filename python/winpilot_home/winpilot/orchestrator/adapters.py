@@ -197,7 +197,7 @@ def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
                     "verified": True,
                     "metadata": {
                         key: artifact[key]
-                        for key in ("sha256", "width", "height", "size_bytes", "scope")
+                        for key in ("sha256", "width", "height", "size_bytes", "scope", "region")
                         if key in artifact
                     },
                 })

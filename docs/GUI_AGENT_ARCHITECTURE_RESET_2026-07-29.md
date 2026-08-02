@@ -2231,3 +2231,80 @@ Pi/Operit 源码计划不变：不安装整套 Pi、不引入 Node↔Python RPC�
 任务和一个简单桌面文件任务；严格记录实际 provider history、usage/cache、工具选择与外部
 oracle。只有形成有效重复 pair，才判断有界连续性是否在长对话下压低自主工具选择成功率；
 本轮不再增加生产代码。
+
+### 13.27 canonical 区域截图通过真实前端、物理坐标与独立像素 oracle
+
+本轮只推进一个冻结候选：让当前目录内已有的 `screenshot` 节点支持用户从属性面板直接框选
+区域，并证明这一个区域从前端到物理工件没有发生坐标漂移。没有改 Agent prompt、模型工具面、
+任务路由、应用 adapter、坐标 offset、snap、答案修正、重试规则或 terminal；也没有开放历史
+图片模板节点。实现仍只有一个 Electron 选区 owner、一个 canonical screenshot action 和一个
+`ArtifactStore` 工件 owner。
+
+首个可见基线在 125% DPI 下能画出选区，却在确认时 fail closed 为
+`selection display geometry changed`。首分歧位于 Electron/Windows overlay 的内容边界：无框
+窗口仍带 invisible thick frame，并被 1536x816 work area 裁短，不是模型、Renderer 参数或
+截图 Runtime。尝试原生 fullscreen 后仍受工作区限制，因此完整回退；没有用比例、offset、
+clamp 或变形预览掩盖错误。最终保留的通用修复是 `frame:false, thickFrame:false`，窗口显示后
+用 `setContentBounds(display.bounds)` 覆盖整块显示器，并在确认时要求 content bounds 与选区
+开始时的 display bounds 精确相同。每块屏幕按唯一 `display_id` 绑定缩略图，local DIP rect 只
+通过 Electron 的 `dipToScreenRect` 转换一次为 `screen_physical_px`；拓扑、缩放、来源、宽高或
+边界不明确都 fail closed。
+
+Renderer 新增同一个 screenshot 属性面板的“全屏/框选区域”和整数 `x/y/w/h`，取消或错误不
+改原参数；运行时不会复用编辑预览。编译器只做字段改名 `w/h -> width/height` 并带上坐标空间。
+Python bridge 不再把 malformed region 擦掉后静默降级全屏；`ArtifactStore` 作为唯一裁剪、
+落盘、hash owner，拒绝未知 scope、bool/非整数、非正数、跨屏、越界和捕获尺寸漂移。已有图片
+参数仍显式请求预览以保持兼容，但没有因此把隐藏历史节点放回目录。
+
+正式可见报告为
+`output/playwright/offline-screenshot-region-e2e/20260802-122544/report.json`。用户从真实
+Electron 前端先点“框选区域”再按 `Esc`，主窗口恢复，原参数不变且没有新 run；随后
+再次框选并保存物理区域 `x=16,y=130,w=934,h=182`，前端校验通过后点击“运行工作流”。run
+`arp-20260802-130804-ecc3bd` 的节点全部 `ok`，`trace_integrity=complete`，模型调用为 0。
+action input/target/result、manifest 与 evidence 的 region 全部一致，artifact
+`art-fd7b5d391bc94af7` 为 934x182。
+
+正式 fixture 沿用了既有 click 流程并执行了一次 click helper；Runtime 外部 target JSON 证明
+它没有触发靶场按钮，所以没有污染 screenshot 的独立像素 oracle，也不计为本 case 的 DUT。
+后续可把 fixture 缩成 `start -> focus_window -> screenshot -> end`，但当前证据不能顺带把
+`focus_window` 或第二次 `click` 计入矩阵。
+
+Runtime 之外又用 `mss` 按同一物理区域重抓。两个 PNG 解码后的 RGB 像素逐点相同，像素
+SHA-256 均为 `57d2bf67fcb8f14488b882a32864b09136a069ae96857ac98bbcaa7908ade743`；
+工件文件 SHA-256
+`4cce99e19d25549d1666d6d9cf03047128c4fb3bc54b9e87321c530f9144ab0d` 也与 manifest/evidence
+精确一致。12 个由随机 marker 决定的颜色各有 3025 像素并按严格 x 顺序出现。另一次真实拖选
+进入 Windows work-area 下方，得到 `x=50,y=1030,width=350,height=35`，证明 overlay 不是只
+覆盖可用工作区。当前机器只有一块 1920x1080、125% 屏幕，第二显示器、混合缩放和负坐标
+严格记为 `infrastructure_unavailable/not_run`；合成覆盖不计 E 级通过。
+
+本轮保留：唯一 selector、真实 display source 绑定、一次 DIP→physical 转换、严格 fail-closed
+region contract、唯一 artifact owner，以及重复全套 renderer 时稳定复现超时后给一个重型
+test-only 宏 UX case 的 10 秒上限。负优化并已回退：原生 fullscreen overlay；也没有保留任何
+坐标补偿。一次 marker 选择重试因诊断超过 runner 的 60 秒 selector 超时，未创建 run/artifact，
+随后同源码立即通过，归类为测试干扰。最终有效闭环的首个产品失败属于 Windows/Electron
+窗口几何基础设施；修复后 26/26 oracle 通过。模型未参与，所以本轮没有模型失败样本。
+
+生产代码精确切片为 `+508/-248`（净增 260）：其中 `main.ts` 是 `+266/-221` 的重复 selector
+收敛；其余为截图属性面板、canonical 字段映射和严格 artifact region 合同。测试/靶场为
+`+289/-7`。完整本地发布门为 renderer `320 passed`、根测试 `2508 passed`、WinPilot
+`3604 passed, 13 skipped, 1 warning`，TypeScript typecheck、renderer/Electron build 与
+CLI/AI build 全部通过。WinPilot 唯一 warning 是既有 `mss.mss` deprecation。
+
+严格离线节点独立矩阵因此只从 `1/19` 提升为 `2/19`：`click` 与 `screenshot`。新架构仍是
+一个原始 goal、一个 `LiveVisualActor`、一条视觉执行线和小型通用工具面；这轮能力属于完全
+离线低代码/重放基础设施，没有增加模型角色或默认提示词。模型仍承担意图、聊天/connector/
+GUI 模态选择、视觉动作、自纠错和停止，职责与长任务压力仍高；本轮没有把任何压力转嫁给
+分类器或机械层。trace 中仍有历史字段 `runtime_version:"legacy"`，虽然实际走 canonical ARP
+兼容路径；这是命名债务，不影响本轮结果，也不在本轮顺手迁移。
+
+Pi/Operit 引入计划不变：本轮 `+0/-0`。不搬运第二 Runtime、RPC、Android owner 或整套 provider
+栈；只在某段源码可以整体替换并删除现 owner，且至少两个不同任务族的外部 oracle E2E 提高
+完整成功率时才准入。
+
+下一轮唯一最高价值实验是不改生产代码，从可见 Studio 独立验收 canonical `input_text`：在
+属性面板填写当轮随机 ASCII、中文、emoji 与换行组合，运行
+`start -> focus_window -> input_text -> end`，由 Runtime 外部 JSON/文件 oracle 精确核对文本、
+长度和 SHA；目标/焦点缺失必须 fail closed，空串行为必须明确且不能静默变成另一种动作。
+只有首分歧落在通用基础设施才修改对应 owner；不并行开放图片模板、不修改跨 decision held
+gesture，也不增加字符答案修正或键盘重试规则。

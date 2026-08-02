@@ -95,6 +95,19 @@ def virtual_screen_region() -> Region:
     return Region(left, top, width, height)
 
 
+def monitor_regions() -> tuple[Region, ...]:
+    """Return each connected monitor in authoritative physical pixels."""
+    regions = []
+    for monitor in _get_mss().monitors[1:]:
+        region = Region(
+            int(monitor["left"]), int(monitor["top"]),
+            int(monitor["width"]), int(monitor["height"]),
+        )
+        if region.width > 0 and region.height > 0:
+            regions.append(region)
+    return tuple(regions)
+
+
 def primary_screen_region() -> Region:
     user32 = ctypes.windll.user32
     return Region(0, 0, int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1)))

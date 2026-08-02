@@ -19,6 +19,7 @@ import { ColorCheckParams } from './params/ColorCheckParams';
 import { ProgressWaitParams } from './params/ProgressWaitParams';
 import { RegionWaitParams } from './params/RegionWaitParams';
 import { SceneConditionParams } from './params/SceneConditionParams';
+import { ScreenshotParams } from './params/ScreenshotParams';
 import { ToolCallParams } from './params/ToolCallParams';
 import { WebBrowserParams } from './params/WebBrowserParams';
 import { CameraCaptureParams } from './params/CameraCaptureParams';
@@ -100,7 +101,11 @@ export function PropertyPanel() {
       {/* Body */}
       <div className="property-body">
         {activeTab === 'params' ? (
-          <NodeParamEditor node={node} updateParams={(p) => updateNodeParams(node.id, p)} />
+          <NodeParamEditor
+            node={node}
+            updateParams={(p) => updateNodeParams(node.id, p)}
+            onCommit={checkpointHistory}
+          />
         ) : (
           <CommonNodeSettings node={node} updateNode={(u) => updateNode(node.id, u)} />
         )}
@@ -118,7 +123,15 @@ export function PropertyPanel() {
   );
 }
 
-function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams: (p: any) => void }) {
+function NodeParamEditor({
+  node,
+  updateParams,
+  onCommit,
+}: {
+  node: FlowNode;
+  updateParams: (p: any) => void;
+  onCommit: () => void;
+}) {
   switch (node.type) {
     case 'agent_goal':
     case 'action_batch':
@@ -145,9 +158,11 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
     case 'region_wait': return <RegionWaitParams params={node.params as any} onChange={updateParams} />;
     case 'scene_condition': return <SceneConditionParams params={node.params as any} onChange={updateParams} />;
     case 'screenshot': return (
-      <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-        运行时会采集当前屏幕，并由系统管理证据文件。
-      </div>
+      <ScreenshotParams
+        params={node.params as any}
+        onChange={updateParams}
+        onCommit={onCommit}
+      />
     );
     case 'web_browser': return <WebBrowserParams params={node.params as any} onChange={updateParams} />;
     case 'tool_call': return <ToolCallParams params={node.params as any} onChange={updateParams} />;

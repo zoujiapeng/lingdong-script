@@ -99,7 +99,7 @@ export function ImageClickParams({ params, onChange }: Props) {
       setCapturing(true);
       const api = (window as any).electronAPI;
       if (api?.selectRegion) {
-        const result = await api.selectRegion();
+        const result = await api.selectRegion({ includePreview: true });
         console.log('[框选] selectRegion 返回:', JSON.stringify(result));
         if (result && typeof result.x === 'number') {
           const regionPatch = { x: result.x, y: result.y, w: result.w, h: result.h };

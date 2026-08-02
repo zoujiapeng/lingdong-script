@@ -7,6 +7,7 @@ event so a harness can judge real OS input without trusting Runtime ``done``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,11 +18,11 @@ from typing import Any
 
 
 class OfflineFlowNodeTarget:
-    def __init__(self, state_file: Path, case_id: str) -> None:
+    def __init__(self, state_file: Path, case_id: str, marker: str = "", geometry: str = "900x650") -> None:
         self.state_file = state_file.resolve()
         self.root = tk.Tk()
         self.root.title(f"Offline Flow Node Target | {case_id}")
-        self.root.geometry("900x650")
+        self.root.geometry(geometry)
         self.root.minsize(720, 520)
         self.state: dict[str, Any] = {
             "format": "offline-flow-node-oracle/1",
@@ -48,7 +49,12 @@ class OfflineFlowNodeTarget:
             "hover_enter_count": 0,
             "hover_duration_ms": 0,
             "closed": False,
+            "screenshot_marker": marker,
+            "screenshot_marker_bbox_tk_logical": None,
+            "screenshot_marker_text_sha256": hashlib.sha256(marker.encode("utf-8")).hexdigest() if marker else "",
         }
+        self.marker = marker
+        self.marker_canvas: tk.Canvas | None = None
         self._drag_start: tuple[int, int] | None = None
         self._last_pointer_write = 0.0
         self._hover_started = 0.0
@@ -57,6 +63,8 @@ class OfflineFlowNodeTarget:
         self.root.bind_all("<KeyPress>", self._key, add=True)
         self.root.bind_all("<Motion>", self._pointer, add=True)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+        if self.marker_canvas is not None:
+            self.root.after(120, self._record_marker_geometry)
         self._write_state()
 
     def _build(self) -> None:
@@ -69,6 +77,23 @@ class OfflineFlowNodeTarget:
         ).pack(anchor="w")
         self.status = tk.StringVar(value="READY")
         ttk.Label(outer, textvariable=self.status).pack(anchor="w", pady=(2, 12))
+
+        if self.marker:
+            digest = hashlib.sha256(self.marker.encode("utf-8")).digest()
+            marker = tk.Canvas(outer, height=150, background="#0f172a", highlightthickness=0)
+            marker.pack(fill="x", pady=(0, 14))
+            for index, value in enumerate(digest[:12]):
+                color = f"#{value:02x}{digest[(index + 7) % len(digest)]:02x}{digest[(index + 13) % len(digest)]:02x}"
+                marker.create_rectangle(12 + index * 54, 14, 58 + index * 54, 60, fill=color, outline="#ffffff")
+            marker.create_text(
+                20,
+                102,
+                anchor="w",
+                text=self.marker,
+                fill="#ffffff",
+                font=("Consolas", 24, "bold"),
+            )
+            self.marker_canvas = marker
 
         body = ttk.Panedwindow(outer, orient="horizontal")
         body.pack(fill="both", expand=True)
@@ -119,6 +144,19 @@ class OfflineFlowNodeTarget:
         for widget in (self.scroll_canvas, content):
             widget.bind("<MouseWheel>", self._scroll, add=True)
         self.root.after(250, self.entry.focus_set)
+
+    def _record_marker_geometry(self) -> None:
+        if self.marker_canvas is None or not self.root.winfo_exists():
+            return
+        self.root.update_idletasks()
+        self.state["screenshot_marker_bbox_tk_logical"] = {
+            "left": int(self.marker_canvas.winfo_rootx()),
+            "top": int(self.marker_canvas.winfo_rooty()),
+            "width": int(self.marker_canvas.winfo_width()),
+            "height": int(self.marker_canvas.winfo_height()),
+        }
+        self._write_state()
+        self.root.after(250, self._record_marker_geometry)
 
     def _write_state(self) -> None:
         self.state["updated_at"] = time.time()
@@ -217,8 +255,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--state-file", type=Path, required=True)
     parser.add_argument("--case-id", default="manual")
+    parser.add_argument("--marker", default="")
+    parser.add_argument("--geometry", default="900x650")
     args = parser.parse_args()
-    OfflineFlowNodeTarget(args.state_file, str(args.case_id)).run()
+    OfflineFlowNodeTarget(
+        args.state_file,
+        str(args.case_id),
+        marker=str(args.marker),
+        geometry=str(args.geometry),
+    ).run()
     return 0
 
 

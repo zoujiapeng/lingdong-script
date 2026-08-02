@@ -595,6 +595,32 @@ describe('flow to ARP compiler', () => {
     expect(graph.metadata.compilation).toMatchObject({ legacy_nodes: 0 });
   });
 
+  it('maps a selected screenshot region to canonical physical-pixel arguments', () => {
+    const script = scriptFixture();
+    script.nodes.splice(1, 0, {
+      id: 'region-shot',
+      type: 'screenshot',
+      x: 0,
+      y: 0,
+      params: { region: { x: -1440, y: 120, w: 320, h: 180 } },
+    });
+
+    const graph = flowToArpGraph(script);
+
+    expect(graph.nodes.find((node) => node.id === 'region-shot')).toMatchObject({
+      kind: 'action_batch',
+      config: { actions: [{
+        action: 'screenshot',
+        managed_artifact: true,
+        scope: 'region',
+        coordinate_space: 'screen_physical_px',
+        region: { x: -1440, y: 120, width: 320, height: 180 },
+        purpose: 'user_output',
+        sendable: true,
+      }] },
+    });
+  });
+
   it('compiles every parameter branch exposed by the production property panels', () => {
     const cases: Array<{ type: NodeType; params: Record<string, unknown> }> = [
       { type: 'wait', params: { wait_type: 'time', duration: 1 } },
@@ -609,6 +635,7 @@ describe('flow to ARP compiler', () => {
       { type: 'mouse_operation', params: { sub_operation: 'move', move_x: 1, move_y: 2 } },
       { type: 'mouse_operation', params: { sub_operation: 'hover', hover_x: 1, hover_y: 2 } },
       { type: 'screenshot', params: {} },
+      { type: 'screenshot', params: { region: { x: -10, y: 2, w: 3, h: 4 } } },
     ];
 
     for (const [index, item] of cases.entries()) {
@@ -627,7 +654,11 @@ describe('flow to ARP compiler', () => {
       { type: 'mouse_operation', params: { sub_operation: 'scroll', scroll_direction: 'left', x: 1, y: 2 } },
       { type: 'input_text', params: { text: 'unsafe focus', click_before: true } },
       { type: 'screenshot', params: { save_path: 'legacy.png' } },
-      { type: 'screenshot', params: { region: { x: 1, y: 2, w: 3, h: 4 } } },
+      { type: 'screenshot', params: { format: 'png' } },
+      { type: 'screenshot', params: { region: { x: 1, y: 2, w: 0, h: 4 } } },
+      { type: 'screenshot', params: { region: { x: 1, y: 2, w: 3 } } },
+      { type: 'screenshot', params: { region: { x: 1.5, y: 2, w: 3, h: 4 } } },
+      { type: 'screenshot', params: { region: { x: '1', y: 2, w: 3, h: 4 } } },
     ];
 
     for (const [index, item] of cases.entries()) {

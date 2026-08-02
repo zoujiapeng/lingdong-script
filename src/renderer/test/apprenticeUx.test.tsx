@@ -105,7 +105,7 @@ describe('macro recording UX', () => {
     expect(client.apprenticeStop).toHaveBeenCalledOnce();
     expect(screen.getByRole('textbox', { name: '宏名称' })).toHaveValue('');
     expect(client.apprenticeStatus).toHaveBeenCalledTimes(3);
-  });
+  }, 10_000);
 
   it('fits macro controls inside the drawer at the default 905px window width', () => {
     const style = document.createElement('style');

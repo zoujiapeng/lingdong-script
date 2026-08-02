@@ -34,8 +34,10 @@
 - 2026-08-01 已完成所有具名冻结分支只读总审计；当前没有可准入项，结论为
   `0 cherry-pick / 0 merge / 0 Runtime 修改`。旧分支剩余主要是重复 target pipeline、
   profiler、第二 verifier 和前端 Runtime selector，不解释当前首分歧。
-- 审计后，本地 head、`origin` 远端 head、GitHub branches API 和默认分支四处都只剩
-  `master`，且只有一个 worktree、零开放 PR。PR10 历史由
+- 审计当时，本地 head、`origin` 远端 head、GitHub branches API 和默认分支四处都只剩
+  `master`，且只有一个 worktree、零开放 PR。2026-08-02 再次 fetch 后出现只改两份二进制
+  icon、从旧基线分叉的 `origin/agent/update-app-icon`；它不是产品主线，本轮只作只读审计输入，
+  未合并也未删除，必须另做可见图标验收后才能归档收口。PR10 历史由
   `archive/pr10-vnext-agent-core-20260726` 保存，PR15 证据由
   `evidence/pr15-legacy-electron-oracle-20260726` 保存；这些 tag 只作只读恢复输入，
   不得继续开发或整体 merge。
@@ -138,21 +140,23 @@ provider/model/protocol/budget plumbing，不创建第二个 `LiveVisualActor`�
 片段弹窗按画布居中且 `Esc` 不再关闭整个工作台，页脚操作在最小高度可达。口语“等半秒，
 然后按一下回车”生成 `wait(0.5) -> keyboard(enter)`，应用后可一次 undo/redo 整体回退和
 恢复。属性面板同时删去或封住不能精确编译的假参数，结构化 evidence 条件不再被改成
-`[object Object]`。这仍只是编辑器与编译证据；当前正式 `screenshot` 只支持受管理的全屏
-工件，图片模板和直接区域截图不能宣称打通，必须等待独立裁剪工件 oracle 的真实 E2E。
+`[object Object]`。正式 `screenshot` 现在同时支持受管理的全屏与物理屏幕区域工件；图片模板
+节点仍未因此开放，必须单独取得 canonical 编译、物理执行和外部业务 oracle。
 
-严格的离线节点独立矩阵当前为 `1/19`，且只计 `click` DUT。2026-08-02 从可见 Electron
-Studio 运行 `start -> focus_window -> click -> managed screenshot -> end`，run
-`arp-20260802-052309-82cf06` 的 5 个节点全部 `ok`、`trace_integrity=complete`、模型调用为 0；
-Runtime 外部 JSON 显示 `click_count: 0 -> 1`，其余输入计数保持 0。截图工件 SHA-256 为
-`7a04783ba7c6d80ba81d0da86fd991b9e158a5315dc7608dd51b0c690e775e04`。业务 click oracle 是
-外部 JSON；截图只作为真实 artifact evidence，不能替代业务判定，也不把 `focus_window` 或
-`screenshot` 计为独立通过。通用修复只有三项：同一 ARP run 的 action batch 共享一个
-`ToolSession`；Renderer/Python 做 path-sensitive target validation；managed screenshot 把
-真实 artifact id/hash 显式送入 verified evidence。纯 click 无目标会 fail closed；旧实现跨节点
-丢 target 的基础设施失败已修复。早期 stale target baseline 是测试干扰，重置后排除。剩余
-18 个节点是尚无严格证据，不是已经失败。以上没有增加应用配方或模型职责：产品仍是一个原始
-goal、一个 `LiveVisualActor` 和一条视觉执行线；`FlowFragmentProposer` 仍只是隔离的编辑器辅助。
+严格的离线节点独立矩阵当前为 `2/19`，只计 `click` 与 `screenshot` 两个 DUT。`click` 的
+既有 run `arp-20260802-052309-82cf06` 仍由 Runtime 外部 JSON 证明 `click_count: 0 -> 1`。
+2026-08-02 又从可见 Electron Studio 完成 `screenshot.region`：用户先用 `Esc` 取消一次框选，
+原参数未改变且没有新 run；随后在 125% DPI 屏幕直接框选，属性面板保存物理区域
+`x=16,y=130,w=934,h=182`，并从前端运行
+`start -> focus_window -> click -> screenshot -> end`。run
+`arp-20260802-130804-ecc3bd` 的节点全部 `ok`、`trace_integrity=complete`、模型调用为 0。
+独立 `mss` 按同一区域重抓后的 RGB 像素 SHA-256 与受管工件完全相同：
+`57d2bf67fcb8f14488b882a32864b09136a069ae96857ac98bbcaa7908ade743`；工件文件 SHA 也与
+manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-area 外区域，证明 overlay 没有
+被 Windows 工作区裁短。当前机器只有一块 1920x1080、125% 屏幕，第二显示器和负坐标只能
+记为 `infrastructure_unavailable/not_run`，不能用合成测试冒充 E 级证据。以上没有增加应用
+配方、提示教学或模型职责：产品仍是一个原始 goal、一个 `LiveVisualActor` 和一条视觉执行线；
+`FlowFragmentProposer` 仍只是隔离的编辑器辅助。
 
 ## 当前角色与唯一 owner
 
@@ -503,13 +507,14 @@ git log -8 --oneline --decorate
 精确 SHA 的 Actions，不要 reset、整体暂存或触碰用户未跟踪的 `CON`。然后阅读本文件和上述
 五份文档，不要因为看到“继续”就立刻追加代码。
 
-下一轮唯一最高价值实验：先不开放图片模板匹配，打通一个 canonical `screenshot.region` 的
-真实前端闭环。用户从属性面板直接框选屏幕区域，Renderer 明确映射 `x/y/w/h` 到 Runtime 的
-`x/y/width/height`，再由独立 oracle 核对裁剪工件的尺寸、SHA-256 和当轮随机标识；至少覆盖
-125% DPI 与第二显示器/负坐标边界。任何坐标、取消或显示器归属不确定都必须 fail closed。
-只有这条通用取样基础设施通过后，才考虑让图片参数复用同一控件；不能先显示历史
-`image_click` 或 `mouse_operation.image` 控件。跨 decision held gesture 仍是已知重放缺口，
-但不与这项实验并行修改。
+下一轮唯一最高价值实验：不改生产代码，先从可见 Studio 独立验收 canonical `input_text`。
+用户在属性面板输入当轮随机的 ASCII、中文、emoji 与换行组合，运行
+`start -> focus_window -> input_text -> end`，由 Runtime 外部 JSON/文件 oracle 精确核对完整
+Unicode 字符串、长度与 SHA；目标/焦点缺失必须 fail closed，空串行为必须明确且不能静默
+变成另一种动作。只有首分歧落在产品基础设施时才修改对应 owner；不能为字符内容增加答案
+修正、软件 prompt 或键盘重试规则。
+图片参数虽然可以复用本轮唯一选区 owner，但历史 `image_click` / `mouse_operation.image` 仍不
+开放；跨 decision held gesture 也继续作为已知重放缺口，不与该实验并行修改。
 
 期间继续记录 raw model args、实际 canonical parse、物理 MCP/GUI receipt、严格外部终态、
 产品自主 terminal/恢复与 usage；不加提示教学、router、摘要模型、工具筛选器、自动重试或

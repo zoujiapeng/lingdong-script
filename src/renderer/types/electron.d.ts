@@ -20,8 +20,19 @@ export interface ElectronAPI {
   onEngineLog: (callback: (msg: any) => void) => () => void;
 
   // Screenshot capture
-  captureScreenshot: () => Promise<string>;
-  selectRegion: () => Promise<{ x: number; y: number; w: number; h: number; dataURL: string } | null>;
+  captureScreenshot: () => Promise<{ dataURL?: string; error?: string } | null>;
+  selectRegion: (options?: { includePreview?: boolean }) => Promise<{
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    dataURL?: string;
+    display_id: string;
+    scale_factor: number;
+    display_bounds_dip: { x: number; y: number; width: number; height: number };
+    display_bounds_physical: { x: number; y: number; width: number; height: number };
+    coordinate_space: 'screen_physical_px';
+  } | { error: string } | null>;
   saveBase64Image: (filename: string, dataURL: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   ocrRecognizeRegion: (region: { x: number; y: number; w: number; h: number }) => Promise<string>;
 

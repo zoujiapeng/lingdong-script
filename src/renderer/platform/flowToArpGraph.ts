@@ -152,15 +152,32 @@ function controllerActions(node: FlowNode): Array<Record<string, unknown>> | nul
       return [{ action: 'launch', command: `${target}${args ? ` ${args}` : ''}` }];
     }
     case 'screenshot':
-      return params.save_path || params.output_path || params.region
-        ? null
-        : [{
+      if (params.save_path || params.output_path || params.format) return null;
+      if (params.region == null) {
+        return [{
           action: 'screenshot',
           managed_artifact: true,
           scope: 'screen',
           purpose: 'user_output',
           sendable: true,
         }];
+      }
+      if (typeof params.region !== 'object' || Array.isArray(params.region)) return null;
+      {
+        const { x, y, w, h } = params.region as Record<string, unknown>;
+        if (![x, y, w, h].every((value) => (
+          typeof value === 'number' && Number.isSafeInteger(value)
+        )) || Number(w) <= 0 || Number(h) <= 0) return null;
+        return [{
+          action: 'screenshot',
+          managed_artifact: true,
+          scope: 'region',
+          coordinate_space: 'screen_physical_px',
+          region: { x, y, width: w, height: h },
+          purpose: 'user_output',
+          sendable: true,
+        }];
+      }
     case 'clipboard_set':
       return [{ action: 'clipboard_write', text: String(params.text ?? '') }];
     case 'wait':

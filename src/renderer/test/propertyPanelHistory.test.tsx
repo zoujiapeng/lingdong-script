@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PropertyPanel } from '../components/PropertyPanel/PropertyPanel';
 import { confirmDocumentReplacement, useStore } from '../store';
@@ -9,6 +9,73 @@ afterEach(() => {
 });
 
 describe('PropertyPanel history', () => {
+  it('commits a physical screenshot selection as one undoable edit', async () => {
+    useStore.getState().newScript();
+    const nodeId = useStore.getState().addNode('screenshot', 100, 100);
+    useStore.getState().selectNodes([nodeId]);
+    (window as any).electronAPI = {
+      selectRegion: vi.fn(async () => ({
+        x: 120,
+        y: 80,
+        w: 400,
+        h: 225,
+        dataURL: 'data:image/png;base64,AA==',
+        display_id: '1',
+        scale_factor: 1.25,
+        display_bounds_dip: { x: 0, y: 0, width: 1536, height: 864 },
+        display_bounds_physical: { x: 0, y: 0, width: 1920, height: 1080 },
+        coordinate_space: 'screen_physical_px',
+      })),
+    };
+    render(<PropertyPanel />);
+
+    fireEvent.click(screen.getByText('框选区域'));
+    await waitFor(() => {
+      expect((useStore.getState().script.nodes.find((item) => item.id === nodeId)!.params as any).region)
+        .toEqual({ x: 120, y: 80, w: 400, h: 225 });
+    });
+    expect((window as any).electronAPI.selectRegion).toHaveBeenCalledWith({ includePreview: false });
+
+    act(() => useStore.getState().undo());
+    expect((useStore.getState().script.nodes.find((item) => item.id === nodeId)!.params as any).region)
+      .toBeUndefined();
+  });
+
+  it('keeps the previous screenshot region when selection is cancelled', async () => {
+    useStore.getState().newScript();
+    const original = { x: -300, y: 40, w: 200, h: 100 };
+    const nodeId = useStore.getState().addNode('screenshot', 100, 100, { region: original });
+    useStore.getState().selectNodes([nodeId]);
+    (window as any).electronAPI = { selectRegion: vi.fn(async () => null) };
+    render(<PropertyPanel />);
+
+    fireEvent.click(screen.getByText('框选区域'));
+    await waitFor(() => expect((window as any).electronAPI.selectRegion).toHaveBeenCalledOnce());
+
+    expect((useStore.getState().script.nodes.find((item) => item.id === nodeId)!.params as any).region)
+      .toEqual(original);
+  });
+
+  it('keeps preview capture enabled for image target selection', async () => {
+    useStore.getState().newScript();
+    const nodeId = useStore.getState().addNode('image_click', 100, 100);
+    useStore.getState().selectNodes([nodeId]);
+    (window as any).electronAPI = {
+      selectRegion: vi.fn(async () => ({
+        x: 10, y: 20, w: 30, h: 40,
+        dataURL: 'data:image/png;base64,AA==',
+      })),
+      saveBase64Image: vi.fn(async () => ({ success: true })),
+    };
+    render(<PropertyPanel />);
+
+    fireEvent.click(screen.getByTitle('框选搜索区域'));
+    await waitFor(() => {
+      expect((window as any).electronAPI.selectRegion)
+        .toHaveBeenCalledWith({ includePreview: true });
+    });
+  });
+
   it('checkpoints parameter, label, and disabled edits when their controls blur', () => {
     useStore.getState().newScript();
     const node = useStore.getState().script.nodes.find((item) => item.type === 'action_batch')!;
