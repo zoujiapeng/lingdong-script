@@ -1,4 +1,4 @@
-"""Single owner for the pixels that ground the next GUI action.
+"""Shared mechanical owner for the pixels that ground the next GUI action.
 
 ``FrameState`` is immutable.  Consumers may retain an older state for history,
 but only ``FrameAuthority.current`` is allowed to ground a new action.  The

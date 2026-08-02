@@ -63,7 +63,7 @@ from .failure_recovery import (
     FailureRecoveryLayer,
     attach_recovery_metadata,
 )
-from .frame_authority import FrameAuthority, FrameState
+from ..visual_runtime.frame_authority import FrameAuthority, FrameState
 from .gui_plan_helpers import (
     _schema_profile_for_task,
 )

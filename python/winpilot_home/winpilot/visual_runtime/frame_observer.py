@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import time
 from typing import Any
 
-from ..agent.frame_authority import FrameAuthority, FrameState
+from .frame_authority import FrameAuthority, FrameState
 from ..utils.image_capture import (
     VisualCaptureScope,
     capture_window_jpeg_b64,

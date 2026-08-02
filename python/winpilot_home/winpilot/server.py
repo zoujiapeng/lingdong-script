@@ -40,9 +40,6 @@ from .automation_ir import (
 )
 from . import scheduler as agent_scheduler
 from .action.desktop_queue import DESKTOP_ACTION_QUEUE
-from .agent.loop import AgentRunner
-from .agent.router import build_runner
-from .agent.session import SESSION
 from .config import CONFIG, ROOT_DIR, SCRIPTS_DIR, TRACES_DIR
 from .eval import summary as eval_summary
 from .model_adapter import model_profile_from_config
@@ -54,7 +51,6 @@ from .runtime_info import runtime_fingerprint, runtime_source_drifted
 from .runtime_jobs import RUNTIME_JOBS, RuntimeJob
 from .fast.perception_daemon import PERCEPTION_DAEMON
 from .utils.log import BUS, logger
-from .orchestrator.adapters import default_handlers, finalize_memory_feedback
 from .orchestrator.catalog import capability_catalog
 from .orchestrator.contracts import (
     ArpGraph,
@@ -101,6 +97,22 @@ CHATGPT_MCP_ACTIVITY = {
 CHATGPT_MCP_ACTIVITY_LOCK = threading.Lock()
 _CHATGPT_MCP_ACTIVE_TTL_S = 45.0
 CONTROL_TOKEN = os.environ.get("WINPILOT_CONTROL_TOKEN", "").strip()
+
+
+def _legacy_build_runner(*args: Any, **kwargs: Any) -> Any:
+    """Load the retired AgentRunner composition only for its legacy callers."""
+
+    from .agent.router import build_runner
+
+    return build_runner(*args, **kwargs)
+
+
+def _legacy_session() -> Any:
+    """Return the legacy session singleton without importing it at startup."""
+
+    from .agent.session import SESSION
+
+    return SESSION
 
 
 class FlowFragmentProposalRequest(BaseModel):
@@ -264,17 +276,17 @@ _INTERACTIVE_RUNTIME_RESOURCE = "interactive_runtime"
 class _RunState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.runner: AgentRunner | None = None
-        self.runners: dict[str, AgentRunner] = {}
+        self.runner: Any | None = None
+        self.runners: dict[str, Any] = {}
         self.run_jobs: dict[str, str] = {}
 
-    def register_runner(self, runner: AgentRunner, job_id: str = "") -> None:
+    def register_runner(self, runner: Any, job_id: str = "") -> None:
         with self.lock:
             self.runners[runner.run_id] = runner
             if job_id:
                 self.run_jobs[runner.run_id] = job_id
 
-    def bind_runner(self, runner: AgentRunner, job_id: str = "") -> None:
+    def bind_runner(self, runner: Any, job_id: str = "") -> None:
         self.register_runner(runner, job_id)
         with self.lock:
             self.runner = runner
@@ -349,12 +361,13 @@ def _public_memory_verification_job(job: RuntimeJob) -> dict[str, Any]:
     }
 
 def _run_agent_job(
-    runner: AgentRunner,
+    runner: Any,
     *,
     schedule_id: str = "",
     schedule_name: str = "",
     expected_session_generation: int | None = None,
 ) -> dict[str, Any]:
+    session = _legacy_session()
     STATE.bind_runner(runner)
     trace_mod.RECORDER.start(runner.run_id)
     if schedule_id:
@@ -369,7 +382,7 @@ def _run_agent_job(
     BUS.publish("chat", run_id=runner.run_id, role="user", content=runner.task)
     try:
         result = runner.run()
-        appended = SESSION.append(
+        appended = session.append(
             runner.task,
             runner.status,
             runner.result_text,
@@ -379,7 +392,7 @@ def _run_agent_job(
         BUS.publish(
             "session",
             action="append" if appended else "stale_append_ignored",
-            count=len(SESSION.all()),
+            count=len(session.all()),
             run_id=runner.run_id,
         )
         if schedule_id:
@@ -403,7 +416,7 @@ def _run_agent_job(
         logger.exception("agent runtime job crashed")
         runner.status = "error"
         runner.result_text = f"Agent runtime job crashed: {exc}"
-        appended = SESSION.append(
+        appended = session.append(
             runner.task,
             runner.status,
             runner.result_text,
@@ -417,7 +430,7 @@ def _run_agent_job(
         BUS.publish(
             "session",
             action="append" if appended else "stale_append_ignored",
-            count=len(SESSION.all()),
+            count=len(session.all()),
             run_id=runner.run_id,
         )
         return {
@@ -489,8 +502,8 @@ def _try_start_scheduled(entry: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         max_steps_override = None
     stop_event = threading.Event()
-    session_generation, session_context = SESSION.snapshot()
-    runner = build_runner(
+    session_generation, session_context = _legacy_session().snapshot()
+    runner = _legacy_build_runner(
         task,
         stop_event=stop_event,
         session_context=session_context,
@@ -682,9 +695,9 @@ def start_chat(req: ChatRequest) -> dict[str, Any]:
         if human_mod.RECORDER.is_recording():
             raise HTTPException(409, "已有任务在运行，请先停止")
         stop_event = threading.Event()
-        session_generation, session_context = SESSION.snapshot()
+        session_generation, session_context = _legacy_session().snapshot()
         max_steps = req.max_steps if req.max_steps and req.max_steps > 0 else None
-        runner = build_runner(
+        runner = _legacy_build_runner(
             task,
             stop_event=stop_event,
             session_context=session_context,
@@ -1031,7 +1044,7 @@ def validate_arp_graph(graph: ArpGraph) -> dict[str, Any]:
 @app.post("/api/v2/task-contracts/compile")
 def compile_task_contract(req: ContractCompileRequest) -> dict[str, Any]:
     try:
-        session_generation, session_context = SESSION.snapshot()
+        session_generation, session_context = _legacy_session().snapshot()
         contract, graph = TaskContractCompiler().compile_graph(
             req.task,
             max_steps=req.max_steps,
@@ -1176,7 +1189,7 @@ def _start_arp_execution(
         )
     expected_session_generation: int | None = None
     if runtime_version is ArpRuntimeVersion.LEGACY:
-        current_session_generation = SESSION.generation()
+        current_session_generation = _legacy_session().generation()
         raw_session_generation = graph.metadata.get("session_generation")
         expected_session_generation = (
             current_session_generation
@@ -1205,7 +1218,7 @@ def _start_arp_execution(
     trace_owner_lock = threading.Lock()
     trace_started = False
 
-    def on_runner(runner: AgentRunner) -> None:
+    def on_runner(runner: Any) -> None:
         STATE.bind_runner(runner, job_ref.get("job_id", ""))
 
     def on_start(started: ArpExecution) -> None:
@@ -1259,6 +1272,9 @@ def _start_arp_execution(
                 trace_status="stopped",
             )
             return
+        from .orchestrator.adapters import finalize_memory_feedback
+
+        session = _legacy_session()
         try:
             finalize_memory_feedback(finished)
         finally:
@@ -1281,7 +1297,7 @@ def _start_arp_execution(
                 )
                 if not str(result_text or "").strip():
                     result_text = str(snapshot.get("error") or "")
-                appended = SESSION.append(
+                appended = session.append(
                     str(contract_data.get("task") or finished.graph.name or ""),
                     str(snapshot.get("status") or ""),
                     str(result_text or ""),
@@ -1297,7 +1313,7 @@ def _start_arp_execution(
                 BUS.publish(
                     "session",
                     action="append" if appended else "stale_append_ignored",
-                    count=len(SESSION.all()),
+                    count=len(session.all()),
                     run_id=finished.run_id,
                 )
             finally:
@@ -1329,6 +1345,8 @@ def _start_arp_execution(
             AGENT_THREADS.fail_turn(turn_id, str(exc))
             raise
     else:
+        from .orchestrator.adapters import default_handlers
+
         execution = ARP_RUNS.prepare(
             graph,
             default_handlers(on_runner),
@@ -1654,7 +1672,7 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
             legacy_task = legacy_goal_graph_task(graph)
             if legacy_task is not None:
                 task, max_steps = legacy_task
-                session_generation, session_context = SESSION.snapshot()
+                session_generation, session_context = _legacy_session().snapshot()
                 _contract, graph = TaskContractCompiler().compile_graph(
                     task,
                     max_steps=max_steps,
@@ -2607,12 +2625,12 @@ def memory_clear() -> dict[str, Any]:
 
 @app.get("/api/session")
 def session_list() -> list[dict[str, Any]]:
-    return SESSION.all()
+    return _legacy_session().all()
 
 
 @app.delete("/api/session")
 def session_clear() -> dict[str, Any]:
-    generation = SESSION.clear()
+    generation = _legacy_session().clear()
     BUS.publish("session", action="clear", count=0, generation=generation)
     return {"ok": True, "generation": generation}
 

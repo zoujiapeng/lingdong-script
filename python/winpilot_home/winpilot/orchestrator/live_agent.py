@@ -36,7 +36,7 @@ from ..action.raw_device import (
     RawDeviceBackends,
     RawDeviceExecutor,
 )
-from ..agent.frame_authority import FrameAuthority, FrameState
+from ..visual_runtime.frame_authority import FrameAuthority, FrameState
 from ..integrations.connector_gateway import ConnectorGateway
 from ..model_adapter import (
     accumulate_usage,

@@ -31,7 +31,7 @@ from winpilot.action.raw_device import (
 )
 from winpilot.action.desktop_queue import DesktopActionCanceled
 from winpilot.action.replay_policy import MutationOutcome
-from winpilot.agent.frame_authority import FrameAuthority
+from winpilot.visual_runtime.frame_authority import FrameAuthority
 from winpilot.utils.screenshot import Region
 from winpilot.visual_runtime import (
     FrameObserver,

@@ -30,18 +30,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('engine-log', handler);
   },
 
-  // Agent control
-  agentStart: (goal: string, config?: Record<string, any>, supervise?: boolean, steps?: any[]) =>
-    ipcRenderer.invoke('agent:start', goal, config, supervise, steps),
-  agentStop: () =>
-    ipcRenderer.invoke('agent:stop'),
-  agentGuidance: (text: string) =>
-    ipcRenderer.invoke('agent:guidance', text),
-  agentChat: (text: string) =>
-    ipcRenderer.invoke('agent:chat', text),
-  agentStatus: () =>
-    ipcRenderer.invoke('agent:status'),
-
   // WinPilot authenticated control-plane connection
   getWinpilotUrl: () =>
     ipcRenderer.invoke('winpilot:url'),
@@ -74,18 +62,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('window:bind-desktop-handoff', runId),
   releaseDesktopHandoff: () =>
     ipcRenderer.invoke('window:release-desktop-handoff'),
-
-  // Agent messages (from main process)
-  onAgentMessage: (callback: (msg: any) => void) => {
-    const handler = (_: any, msg: any) => callback(msg);
-    ipcRenderer.on('agent-message', handler);
-    return () => ipcRenderer.removeListener('agent-message', handler);
-  },
-  onAgentLog: (callback: (msg: any) => void) => {
-    const handler = (_: any, msg: any) => callback(msg);
-    ipcRenderer.on('agent-log', handler);
-    return () => ipcRenderer.removeListener('agent-log', handler);
-  },
 
   // Screenshot capture
   captureScreenshot: () => ipcRenderer.invoke('screenshot:capture'),

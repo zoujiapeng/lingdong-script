@@ -20,8 +20,6 @@ from typing import Any
 import win32gui
 
 from ..action import executor
-from ..agent.runtime_profile import build_runtime_profile
-from ..agent.tools import ToolSession
 from ..config import CONFIG
 from ..fast.action_contract import BATCH_MUTATING_ACTIONS
 from ..orchestrator.contracts import ArpGraph, ArpNodeKind, validate_graph
@@ -237,6 +235,9 @@ class ChatGPTDesktopBridge:
         becomes visible through ``self._session``.  A failed preparation thus
         leaves the previous session and frame authority untouched.
         """
+        from ..agent.runtime_profile import build_runtime_profile
+        from ..agent.tools import ToolSession
+
         contract = None
         stage = None
         try:

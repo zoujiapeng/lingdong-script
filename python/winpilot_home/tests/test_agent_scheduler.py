@@ -88,7 +88,7 @@ def test_due_reminder_uses_notification_job_without_llm(monkeypatch):
     monkeypatch.setattr(server.agent_scheduler, "mark_finished", lambda *args: finished.append(args))
     monkeypatch.setattr(
         server,
-        "build_runner",
+        "_legacy_build_runner",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reminders must not start an LLM")),
     )
 
@@ -243,8 +243,8 @@ def test_scheduler_thread_executes_due_task_through_unified_runner(tmp_path, mon
     monkeypatch.setattr(server, "STATE", state)
     monkeypatch.setattr(server, "_SCHEDULER_STOP", scheduler_stop)
     monkeypatch.setattr(server, "_SCHEDULER_THREAD", None)
-    monkeypatch.setattr(server, "build_runner", build_runner)
-    monkeypatch.setattr(server, "SESSION", fake_session)
+    monkeypatch.setattr(server, "_legacy_build_runner", build_runner)
+    monkeypatch.setattr(server, "_legacy_session", lambda: fake_session)
     monkeypatch.setattr(server.trace_mod, "RECORDER", fake_recorder)
     monkeypatch.setattr(server.BUS, "publish", lambda *_args, **_kwargs: None)
 

@@ -36,8 +36,8 @@ from ...action.raw_device import (
     RawDeviceExecutor,
 )
 from ...action.replay_policy import MutationOutcome
-from ...agent.frame_authority import FrameAuthority, FrameState
 from ...utils.screenshot import Region
+from ...visual_runtime.frame_authority import FrameAuthority, FrameState
 from ...visual_runtime.frame_observer import FrameObserver
 from ...visual_runtime.normalized_frame_coordinates import (
     NormalizedFrameCoordinateMapper,

@@ -10,9 +10,7 @@ import type {
   PlatformOverview,
   RunProjection,
   RuntimeEvent,
-  RuntimeVersion,
   AgentSchedule,
-  TaskContract,
   DesktopTargetContext,
 } from './contracts';
 import type { FlowFragmentProposal, FlowFragmentRequestContext } from '../utils/flowFragmentProposal';
@@ -22,20 +20,6 @@ const FALLBACK_URL = 'http://127.0.0.1:8765/';
 const ELECTRON_SERVER_READY_TIMEOUT_MS = 35_000;
 const ELECTRON_SERVER_POLL_MS = 200;
 export const EXPECTED_RUNTIME_CONTRACT_VERSION = 3;
-
-export class TaskClarificationRequired extends Error {
-  readonly questions: string[];
-  readonly contract: TaskContract;
-  readonly graph: ArpGraph;
-
-  constructor(questions: string[], contract: TaskContract, graph: ArpGraph) {
-    super(`需要补充信息：${questions.join(' ') || '任务存在未解析的必要参数'}`);
-    this.name = 'TaskClarificationRequired';
-    this.questions = questions;
-    this.contract = contract;
-    this.graph = graph;
-  }
-}
 
 export function runtimeCompatibilityError(overview: PlatformOverview | null | undefined): string {
   if (!overview) return '控制器运行时身份尚未加载。';
@@ -445,21 +429,6 @@ export class ControlPlaneClient {
     });
   }
 
-  async startGraph(
-    graph: ArpGraph,
-    inputs: Record<string, unknown> = {},
-    runtimeVersion: RuntimeVersion = 'legacy',
-  ): Promise<ArpExecutionSnapshot> {
-    if (Object.prototype.hasOwnProperty.call(inputs, 'runtime_version')) {
-      throw new Error('runtime_version must be submitted as a top-level run field.');
-    }
-    const response = await this.request<{ ok: boolean; run_id: string; run: ArpExecutionSnapshot }>('api/v2/arp/runs', {
-      method: 'POST',
-      body: JSON.stringify({ graph, inputs, runtime_version: runtimeVersion }),
-    });
-    return response.run;
-  }
-
   async startGoalRun(
     goal: string,
     threadId = '',
@@ -533,27 +502,6 @@ export class ControlPlaneClient {
         reason,
       }),
     });
-  }
-
-  async compileTask(task: string, maxSteps = 40, coldStart = false, requireGui = true): Promise<{ contract: TaskContract; graph: ArpGraph }> {
-    const response = await this.request<{
-      ok: boolean;
-      needs_input?: boolean;
-      clarification_questions?: string[];
-      contract: TaskContract;
-      graph: ArpGraph;
-    }>('api/v2/task-contracts/compile', {
-      method: 'POST',
-      body: JSON.stringify({ task, max_steps: maxSteps, cold_start: coldStart, require_gui: requireGui }),
-    });
-    const questions = response.clarification_questions || response.contract.clarification_questions || [];
-    if (response.needs_input || questions.length > 0) {
-      throw new TaskClarificationRequired(questions, response.contract, response.graph);
-    }
-    if (!response.contract.satisfiable) {
-      throw new Error(`任务合同不可执行：${response.contract.missing_capabilities.join(', ') || '能力路径未知'}`);
-    }
-    return { contract: response.contract, graph: response.graph };
   }
 
   async startAutomation(

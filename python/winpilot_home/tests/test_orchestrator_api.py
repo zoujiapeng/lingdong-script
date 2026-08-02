@@ -1,10 +1,60 @@
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
 
 import pytest
+
+
+def test_server_import_does_not_load_legacy_agent_composition():
+    package_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(package_root), env.get("PYTHONPATH", ""))
+        if value
+    )
+    script = (
+        "import importlib.abc\n"
+        "import sys\n"
+        "class BlockLegacyAgent(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        if fullname == 'winpilot.agent' or fullname.startswith('winpilot.agent.'):\n"
+        "            raise ModuleNotFoundError(fullname)\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, BlockLegacyAgent())\n"
+        "from winpilot import server\n"
+        "from types import SimpleNamespace\n"
+        "assert any(route.path == '/api/v2/goals/runs' for route in server.app.routes)\n"
+        "server.runtime_source_drifted = lambda: False\n"
+        "server.CONFIG.snapshot = lambda: {'vnext': {'live_agent_enabled': True}}\n"
+        "server.AGENT_THREADS.begin_turn = lambda goal, thread_id='': ('thread', 'turn', [])\n"
+        "server._start_arp_execution = lambda graph, inputs, **kwargs: SimpleNamespace(\n"
+        "    run_id='run', graph=graph, to_dict=lambda: {'status': 'queued'}\n"
+        ")\n"
+        "started = server.start_goal_run(server.GoalRunRequest(goal='Say hello'))\n"
+        "assert started['runtime_version'] == 'vnext'\n"
+        "assert started['admission']['no_legacy_fallback'] is True\n"
+        "loaded = [name for name in sys.modules if name.startswith('winpilot.agent')]\n"
+        "assert 'winpilot.orchestrator.adapters' not in sys.modules\n"
+        "assert not loaded, loaded\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=package_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 @pytest.fixture

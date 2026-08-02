@@ -6,7 +6,6 @@ const mockCleanup = vi.fn();
 const mockElectronAPI = {
   onEngineMessage: vi.fn(() => mockCleanup),
   onEngineLog: vi.fn(() => mockCleanup),
-  onAgentMessage: vi.fn(() => mockCleanup),
   onApiCommand: vi.fn(() => mockCleanup),
   send: vi.fn(),
   on: vi.fn(() => mockCleanup),

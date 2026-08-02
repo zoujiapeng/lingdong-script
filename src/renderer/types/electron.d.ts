@@ -98,13 +98,6 @@ export interface ElectronAPI {
     releaseHandoff?: boolean,
   ) => Promise<boolean>;
 
-  // Agent control
-  agentStart: (goal: string, config?: Record<string, any>, supervise?: boolean, steps?: any[]) => Promise<any>;
-  agentStop: () => Promise<any>;
-  agentGuidance: (text: string) => Promise<any>;
-  agentChat: (text: string) => Promise<any>;
-  agentStatus: () => Promise<any>;
-
   // WinPilot authenticated control-plane connection
   getWinpilotUrl: () => Promise<string | null>;
   getWinpilotConnection: () => Promise<{ url: string; token: string } | null>;
@@ -123,10 +116,6 @@ export interface ElectronAPI {
   }>;
   bindDesktopHandoff: (runId: string) => Promise<boolean>;
   releaseDesktopHandoff: () => Promise<boolean>;
-
-  // Agent messages
-  onAgentMessage: (callback: (msg: any) => void) => () => void;
-  onAgentLog: (callback: (msg: any) => void) => () => void;
 
 }
 

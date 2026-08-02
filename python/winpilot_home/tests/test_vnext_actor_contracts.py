@@ -12,7 +12,7 @@ from types import MappingProxyType
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from winpilot.agent.frame_authority import FrameAuthority
+from winpilot.visual_runtime.frame_authority import FrameAuthority
 from winpilot.vnext.actor import (
     ACTOR_ENVELOPE_FORMAT,
     ACTOR_PROPOSAL_FORMAT,

@@ -10,7 +10,6 @@ import {
 import { ControlPlaneClient } from '../platform/client';
 import type {
   ArpExecutionSnapshot,
-  ArpGraph,
   ClientExecutionContext,
   DesktopTargetContext,
   GoalRunStart,
@@ -62,26 +61,6 @@ function goalRunStart(
       no_legacy_fallback: true,
     },
     run,
-  };
-}
-
-function compatibilityGraph(): ArpGraph {
-  return {
-    format: 'arp/1',
-    id: 'studio-graph',
-    name: 'Studio graph',
-    description: '',
-    nodes: [],
-    edges: [],
-    variables: {},
-    policy: {
-      max_node_visits: 1,
-      fail_fast: true,
-      require_evidence_on_done: false,
-      allow_shell: false,
-      allow_desktop_mutation: true,
-    },
-    metadata: {},
   };
 }
 
@@ -353,31 +332,6 @@ describe('primary goal-run transport', () => {
     expect(releaseDesktopHandoff).toHaveBeenCalledOnce();
   });
 
-  it('keeps compileTask and startGraph available as Studio compatibility APIs', async () => {
-    const graph = compatibilityGraph();
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      ok: true,
-      run_id: 'run-studio',
-      run: { ...snapshot(), graph_id: graph.id },
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }));
-    vi.stubGlobal('fetch', fetchMock);
-    const client = new ControlPlaneClient('http://127.0.0.1:8765');
-
-    await client.startGraph(graph, { source: 'studio' });
-
-    const body = JSON.parse(String(
-      (fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>)[0][1]?.body,
-    ));
-    expect(body).toEqual({
-      graph,
-      inputs: { source: 'studio' },
-      runtime_version: 'legacy',
-    });
-    expect(typeof client.compileTask).toBe('function');
-  });
 });
 
 describe('primary agent surface', () => {

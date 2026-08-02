@@ -18,7 +18,7 @@
 - `@feature`：`/api/features/list`、`/api/features/reload`、`/api/features/call`。
 - 模板/标记：`/api/save-template`、`/api/list-templates`、`/api/marks/save`、`/api/marks/load`。
 - AI/命令/UI：`/api/ai/generate`、`/api/command`、`/api/set-view-mode`、`/api/set-ui`、`/api/fit-screen`、`/api/get-state`、`/api/execute-js`。
-- 旧 Agent IPC：`/api/agent-start`。
+- 旧 `/api/agent-start` 已随 Electron autonomous Agent 删除；智能代理只使用托管服务的 `/api/v2/goals/runs`。
 - Electron 流程工具 MCP：`POST /mcp`。
 
 这个 `:7880/mcp` 属于流程图、`@feature` 和外部编辑控制面，不是 WinPilot 的 GUI Controller MCP。

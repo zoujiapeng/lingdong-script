@@ -25,7 +25,6 @@ export interface ApiDeps {
   wheelSelect: (params: any) => Promise<any>;
   ocrRecognizeRegion: (region: any) => Promise<any>;
   dslToFlow: (dslText: string) => Promise<any>;
-  startAgent: (goal: string, config: Record<string, string>, supervise: boolean) => void;
   controlToken: string;
   allowedOrigins?: string[];
   allowUnsafeEval?: boolean;
@@ -554,13 +553,6 @@ export function startApiServer(deps: ApiDeps): http.Server {
                 res.end();
               }
             })();
-            break;
-
-          // ─── AI Agent ───
-          case '/api/agent-start':
-            if (!payload.goal) { send(400, { error: '缺少 goal' }); return; }
-            deps.startAgent(payload.goal, payload.config || {}, payload.supervise !== false);
-            send(200, { ok: true });
             break;
 
           default:

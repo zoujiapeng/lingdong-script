@@ -397,14 +397,21 @@ cache-friendly prefix。未生效的 `cache_strategy` 标签已删除；当前�
 
 ## 当前实现债务
 
+2026-08-02 已完成第一批单向解耦：`live_agent` 的内部依赖闭包禁止到
+`winpilot.agent` 的直接、间接和可解析动态 import；托管 server 在 import hook 完全阻断旧
+Agent 包时仍能加载并完成一次 vNext goal admission。共享 `FrameAuthority` 已归属
+`visual_runtime`。Electron 旧 `python -m agent` 进程、IPC、local start API、死 event 链和
+Renderer 的默认 legacy `startGraph/compileTask` 消费者已删除。该合同只覆盖产品 Goal 主线，
+不等于整个仓库已经没有兼容面。
+
 全面审查确认以下问题仍在代码中，文档不能掩盖：
 
 1. `/api/v2/task-contracts/compile`、`/api/v2/arp/runs` 和 Legacy runtime 仍为 Studio/兼容调用存活；必须先清点并迁移消费者，再删除提供者。
-2. `agent/loop.py` 体积过大；`FrameAuthority`、`FastGuiController`、`RunStateMachine` 与 `FailureRecoveryLayer` 虽已建立边界，旧逻辑尚未全部迁出和去重。
+2. `agent/loop.py` 体积过大；`FrameAuthority` 已移出，`FastGuiController`、`RunStateMachine` 与 `FailureRecoveryLayer` 的旧逻辑尚未全部迁出和去重。
 3. `TaskContractCompiler`、`StageRuntime`、`InteractionStageEngine`、`SubgoalExecutor` 和 Controller 存在重复解释。
 4. 某些 communication/application adapter 仍含布局、别名或任务族特化。
 5. 原生配置已默认关闭 UIA/OCR，但 `fusion.observe` 等兼容入口仍保留旧 provider 顺序；必须继续防止非默认调用面把结构化信号升级成视觉语义或失败后的自动 fallback cascade。
-6. `/api/chat`、legacy IPC、FlowScript 和旧 feature 系统仍增加维护面。
+6. 自主 Agent IPC/CLI 已删除；`/api/chat`、scheduler、Legacy ARP、FlowScript、旧 feature/F9 engine 和本地 7880 API 仍增加维护面。
 7. 当前整改版本尚未用真实 Electron 客户端完成 11 个任务和混合长任务的全量验收，不能继承历史 run 的通过结论或据此宣称通用成功率。
 8. connector transport 已有 fixture 与 GitHub 官方 remote 实证，但首个官方 GitHub
    干净用户任务仍因模型选择未批准工具并停止失败；不得加入专属 formatter 或参数

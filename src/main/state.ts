@@ -20,19 +20,6 @@ export function setEngineRunning(v: boolean) { engineRunning = v; }
 export let lastScript: string | null = null;
 export function setLastScript(s: string | null) { lastScript = s; }
 
-/** Agent 进程 */
-export let agentProcess: ChildProcess | null = null;
-export function setAgentProcess(p: ChildProcess | null) { agentProcess = p; }
-
-/** Agent 运行状态 */
-export let agentRunning = false;
-export function setAgentRunning(v: boolean) { agentRunning = v; }
-
-/** Agent 进程令牌，防止陈旧事件污染新进程 */
-export let agentToken = 0;
-export function nextAgentToken(): number { return ++agentToken; }
-export function isAgentTokenCurrent(token: number): boolean { return token === agentToken; }
-
 /** 语音服务器进程 */
 export let voiceServerProcess: ChildProcess | null = null;
 export function setVoiceServerProcess(p: ChildProcess | null) { voiceServerProcess = p; }

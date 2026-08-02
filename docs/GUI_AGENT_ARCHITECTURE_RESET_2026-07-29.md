@@ -2308,3 +2308,57 @@ Pi/Operit 引入计划不变：本轮 `+0/-0`。不搬运第二 Runtime、RPC、
 长度和 SHA；目标/焦点缺失必须 fail closed，空串行为必须明确且不能静默变成另一种动作。
 只有首分歧落在通用基础设施才修改对应 owner；不并行开放图片模板、不修改跨 decision held
 gesture，也不增加字符答案修正或键盘重试规则。
+
+### 13.28 新 Goal 主线与旧 Agent 物理解耦；第一批旧入口净删除
+
+本轮目标不是继续给 vNext 加 owner，而是先保证它可以在旧 Agent 缺席时存在。依赖审计发现
+新线仍从 `winpilot.agent.frame_authority` 取一个纯机械 owner，Electron 还保留无人消费的
+`python -m agent` 子进程、五个 agent IPC、环境变量自动启动、local start API 和死事件链；
+Renderer 也保留两个没有生产调用者且默认提交 legacy 的 client 方法。它们构成了先删消费者、
+再删 provider 的第一批安全切片。
+
+`FrameAuthority` 现归属 `visual_runtime`。旧 `AgentRunner` 可以反向导入共享机械 owner，
+`live_agent` 与 atomic desktop adapter 不再经过旧命名空间。新 AST 合同从
+`winpilot.orchestrator.live_agent` 广度遍历全部内部静态 imports，并对每个可达模块检查
+`winpilot.agent` 的静态 binding 与可解析动态 import；当前审计闭包为 119 个模块、零旧边。
+另一个 subprocess import hook 完全禁止 `winpilot.agent*`，仍必须加载 server、注册
+`/api/v2/goals/runs` 并执行一次模拟 vNext admission。为满足这个物理合同，server 的旧
+Runner/router/session/adapters 只在旧路由调用时加载；ChatGPT MCP 也只在外部 bridge 真正
+创建旧 `ToolSession` 时局部加载。MCP 协议本身与 connector gateway 未被删除。
+
+实际删除包括 `python/agent/__main__.py`、Electron autonomous-agent process/timeout/token/state、
+`AGENT_GOAL`、agent start/stop/guidance/chat/status IPC、`/api/agent-start`、preload/type/event
+listener，以及 Renderer `startGraph`、`compileTask` 和只为它们存在的测试合同。按 Git
+rename detection 统计，生产代码为 `+55/-678`、净删除 623 行；`FrameAuthority` 文件迁移只
+改了 1 行归属说明。测试代码为 `+117/-128`。系统提示、模型角色、视觉工具面、坐标/键盘实现与 Pi/Operit 源码均为
+`+0/-0`。
+
+物理 E2E 使用当前源码完整 build 和 unpacked Electron。第一臂从真实窗口输入并发送聊天
+目标，产品在模型调用前明确失败：`deepseek-v4-flash` 没有配置可用 vision-mode endpoint。
+随后关闭测试进程，把打包测试目录中的整个 `winpilot/agent` 可恢复改名，再重新启动完整
+Electron。前端仍显示运行时在线、恢复未发送目标，并从真实输入框再次提交到同一个 vNext
+配置错误；之后恢复测试包目录。由于旧包物理不存在，这证明 Electron→managed server→Goal
+Admission 不再暗中依赖旧 Agent，但不能把两臂记为聊天或 GUI 任务通过。没有模型调用、没有
+桌面 lease、没有外部应用终态；失败属于 provider 配置基础设施，不是模型行为，也不是本轮
+删除回归。本轮遵守“暂不换模型”，没有增加 text/GUI 分类、自动 fallback 或 Runtime 修正。
+
+保留实验：共享 owner 反向依赖、composition closure ban、blocked-import server/admission、
+旧 Electron Agent 整链删除、死 Renderer consumer 删除和 ChatGPT MCP 的按需旧加载。生产
+负优化回退为 0；裸 `electron.exe` 只打开欢迎页，因此不作为 E2E，改用仓库打包客户端。
+没有顺手删除 `LEGACY_FLOW`、scheduler、宏、用户流程、旧 session 数据或外部 MCP desktop
+tools，因为它们尚未完成消费者迁移与双族 E2E。
+
+聚焦回归为 Python 370 项通过、ChatGPT MCP 23 项通过、renderer 87 项通过。完整本地发布门
+随后为 WinPilot `3607 passed, 13 skipped, 1 warning`、根测试 `2508 passed`、renderer
+`317 passed`，TypeScript typecheck 与完整 `npm run build` 通过。唯一 warning 是既有
+`mss.mss` deprecation。精确新提交的 GitHub Actions 尚未运行，不能继承旧 SHA 的绿色状态。
+
+新架构仍只有原始 goal、一个 `LiveVisualActor`、一条视觉执行线和小型通用工具面。模型继续
+承担聊天/connector/GUI 模态选择、视觉动作、自纠错和停止，职责与压力没有因本轮删除增加；
+当前 provider 缺少视觉端点使这些职责根本未进入模型。Pi/Operit 引入计划仍为零：只在源码能
+整体替换并删除现 owner，且两个不同任务族外部 oracle 提升完整成功率时准入。
+
+下一轮唯一最高价值实验是只删除 `ArpNodeKind.LEGACY_FLOW` 的执行兼容，保留历史文件的读取、
+编辑与明确迁移错误。先用静态/编译矩阵证明当前 runnable 节点不生成它，再从可见 Studio 跑
+canonical `input_text` 与 `screenshot` 两个任务族，以 Unicode 长度/SHA 和图片尺寸/像素 hash
+独立验收；任一族退化就整批回退，不把旧 handler 改名保留，也不并行删除其他兼容面。
