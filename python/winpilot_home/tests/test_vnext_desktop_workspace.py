@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from winpilot.vnext.desktop_adapter import (
     DesktopWorkspace,
     WorkspaceSurface,
@@ -11,8 +13,10 @@ from winpilot.vnext.mission import TargetBinding
 
 HWND_A = 101
 HWND_B = 202
+HWND_TRANSIENT = 303
 PID_A = 1001
 PID_B = 2002
+PID_TRANSIENT = 3003
 
 
 def _surface(
@@ -145,6 +149,122 @@ def test_completed_click_adopts_stable_foreground_on_next_observation() -> None:
     assert workspace.snapshot(HWND_B).hwnd == HWND_B
 
 
+def test_discarded_full_desktop_successor_is_never_adopted() -> None:
+    topology = _Topology()
+    topology.windows[HWND_TRANSIENT] = _surface(
+        HWND_TRANSIENT,
+        PID_TRANSIENT,
+        "C:/transient.exe",
+        foreground=HWND_TRANSIENT,
+        region=(0, 0, 1920, 1080),
+    )
+    workspace = _workspace(topology)
+    workspace.finish_action(
+        action_id="decision-1",
+        action="hotkey",
+        input_completed=True,
+    )
+    topology.foreground = HWND_TRANSIENT
+
+    transient = workspace.observe()
+
+    assert transient.replaces_binding
+    assert transient.surface.hwnd == HWND_TRANSIENT
+    assert workspace.validate(transient) is not None
+    workspace.discard(transient)
+    assert workspace.binding.hwnd == HWND_A
+    assert workspace.generation == 0
+    assert workspace.validate(transient) is None
+    stale_replacement = _binding(
+        HWND_TRANSIENT,
+        PID_TRANSIENT,
+        "C:/transient.exe",
+        binding_id="binding-transient",
+        evidence_id="evidence-transient",
+        epoch=11,
+    )
+    with pytest.raises(RuntimeError, match="stale or uncaused"):
+        workspace.adopt(transient, stale_replacement)
+
+    topology.foreground = HWND_B
+    successor = workspace.observe()
+    replacement = _binding(
+        HWND_B,
+        PID_B,
+        "C:/b.exe",
+        binding_id="binding-b",
+        evidence_id="evidence-b",
+        epoch=11,
+    )
+    workspace.adopt(successor, replacement)
+
+    assert successor.replaces_binding
+    assert successor.surface.hwnd == HWND_B
+    assert workspace.binding == replacement
+    assert workspace.generation == 1
+    assert workspace.snapshot(HWND_TRANSIENT) is None
+
+
+def test_two_discarded_successors_exhaust_bounded_handoff() -> None:
+    third_hwnd = 404
+    third_pid = 4004
+    topology = _Topology()
+    topology.windows[HWND_TRANSIENT] = _surface(
+        HWND_TRANSIENT,
+        PID_TRANSIENT,
+        "C:/transient.exe",
+        foreground=HWND_TRANSIENT,
+    )
+    topology.windows[third_hwnd] = _surface(
+        third_hwnd,
+        third_pid,
+        "C:/third.exe",
+        foreground=third_hwnd,
+    )
+    workspace = _workspace(topology)
+    workspace.finish_action(
+        action_id="decision-1",
+        action="hotkey",
+        input_completed=True,
+    )
+
+    topology.foreground = HWND_B
+    first = workspace.observe()
+    workspace.discard(first)
+    topology.foreground = HWND_TRANSIENT
+    second = workspace.observe()
+    workspace.discard(second)
+    topology.foreground = third_hwnd
+
+    observation = workspace.observe()
+
+    assert not observation.replaces_binding
+    assert observation.surface.hwnd == HWND_A
+    assert workspace.binding.hwnd == HWND_A
+    assert workspace.generation == 0
+
+
+def test_successor_that_loses_foreground_fails_validation() -> None:
+    topology = _Topology()
+    workspace = _workspace(topology)
+    workspace.finish_action(
+        action_id="decision-1",
+        action="click",
+        input_completed=True,
+    )
+    topology.foreground = HWND_B
+
+    successor = workspace.observe()
+    topology.foreground = HWND_A
+
+    assert successor.replaces_binding
+    assert successor.surface.hwnd == HWND_B
+    assert workspace.validate(successor) is None
+    assert workspace.binding.hwnd == HWND_A
+    assert workspace.generation == 0
+    assert workspace.snapshot(HWND_A).hwnd == HWND_A
+
+
 def test_not_started_input_never_creates_causal_transition() -> None:
     topology = _Topology()
     workspace = _workspace(topology)
@@ -209,6 +329,38 @@ def test_source_can_disappear_before_successor_is_observed() -> None:
     assert observation.replaces_binding
     assert observation.surface.hwnd == HWND_B
     assert observation.causal_action_id == "decision-1"
+
+
+def test_missing_source_keeps_bounded_handoff_for_delayed_successor() -> None:
+    topology = _Topology()
+    samples = iter((HWND_A,) * 5 + (HWND_B,))
+
+    def foreground_reader() -> int:
+        topology.foreground = next(samples)
+        return topology.foreground
+
+    workspace = DesktopWorkspace(
+        binding=_binding(),
+        surface=topology.read(HWND_A),
+        reader=topology.read,
+        foreground_reader=foreground_reader,
+        hit_test_root=topology.hit_test,
+        wait=lambda _seconds: None,
+    )
+    workspace.finish_action(
+        action_id="decision-1",
+        action="hotkey",
+        input_completed=True,
+    )
+    del topology.windows[HWND_A]
+
+    observation = workspace.observe()
+
+    assert observation.replaces_binding
+    assert observation.surface.hwnd == HWND_B
+    assert observation.causal_action_id == "decision-1"
+    assert workspace.binding.hwnd == HWND_A
+    assert workspace.generation == 0
 
 
 def test_delayed_foreground_successor_is_sampled_within_causal_window() -> None:

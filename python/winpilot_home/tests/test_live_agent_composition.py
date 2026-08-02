@@ -2753,9 +2753,14 @@ def _real_session_with_captures(
     hit_test_root: Any = None,
     target_reader: Any = None,
     on_click: Any = None,
+    capture_regions: list[Region] | None = None,
+    on_capture: Any = None,
 ) -> tuple[Any, list[str], list[dict[str, Any]]]:
     clock = clock or [10.0]
     capture_values = list(images)
+    expected_capture_regions = (
+        None if capture_regions is None else list(capture_regions)
+    )
 
     monkeypatch.setattr(
         live_agent,
@@ -2764,15 +2769,22 @@ def _real_session_with_captures(
     )
 
     def capture(
-        _hwnd: int,
+        hwnd: int,
         *,
         max_side: int,
         region: Region,
     ) -> str:
         assert max_side == live_agent._MAX_SUBMITTED_SIDE
-        assert region == Region(*REGION)
+        expected_region = (
+            Region(*REGION)
+            if expected_capture_regions is None
+            else expected_capture_regions.pop(0)
+        )
+        assert region == expected_region
         if not capture_values:
             raise AssertionError("unexpected extra capture")
+        if on_capture is not None:
+            on_capture(hwnd, region)
         return capture_values.pop(0)
 
     monkeypatch.setattr(
@@ -3027,6 +3039,185 @@ def test_completed_click_adopts_stable_cross_process_foreground_next_turn(
     assert len(adoption) == 1
     assert adoption[0]["target_hwnd"] == next_hwnd
     assert adoption[0]["causal_action"] == "click"
+
+
+def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    transient_hwnd = HWND + 25
+    next_hwnd = HWND + 50
+    desktop = Region(0, 0, 1920, 1080)
+    foreground = [HWND]
+    physical_clicks = [0]
+    session_holder: list[Any] = []
+    authoritative_before_transition: list[Any] = []
+    events: list[dict[str, Any]] = []
+    captures: list[tuple[int, Region]] = []
+
+    def facts(
+        hwnd: int,
+        *,
+        process_id: int,
+        executable_identity: str,
+        title: str,
+        class_name: str,
+        region: Region,
+    ) -> live_agent._TargetFacts:
+        return live_agent._TargetFacts(
+            hwnd=hwnd,
+            root_hwnd=hwnd,
+            process_id=process_id,
+            executable_identity=executable_identity,
+            title=title,
+            class_name=class_name,
+            region=(region.left, region.top, region.width, region.height),
+            foreground_root_hwnd=foreground[0],
+        )
+
+    def reader(hwnd: int) -> live_agent._TargetFacts | None:
+        if hwnd == HWND:
+            return facts(
+                HWND,
+                process_id=PID,
+                executable_identity=r"c:\apps\live_agent.exe",
+                title="Canary Target",
+                class_name="CanaryWindow",
+                region=Region(*REGION),
+            )
+        if hwnd == transient_hwnd:
+            return facts(
+                transient_hwnd,
+                process_id=PID + 1,
+                executable_identity=r"c:\system\desktop_surface.exe",
+                title="Transient Desktop Surface",
+                class_name="DesktopSurface",
+                region=desktop,
+            )
+        if hwnd == next_hwnd:
+            return facts(
+                next_hwnd,
+                process_id=PID + 2,
+                executable_identity=r"c:\apps\stable_successor.exe",
+                title="Stable Successor",
+                class_name="StableWindow",
+                region=Region(*REGION),
+            )
+        return None
+
+    def after_click() -> None:
+        physical_clicks[0] += 1
+        if physical_clicks[0] == 1:
+            foreground[0] = transient_hwnd
+
+    def after_capture(hwnd: int, region: Region) -> None:
+        captures.append((hwnd, region))
+        if region != desktop:
+            return
+        session = session_holder[0]
+        before = authoritative_before_transition[0]
+        projection_binding = session._reducer.projection.target_binding
+        assert projection_binding is not None
+        assert projection_binding.hwnd == HWND
+        assert session._runtime._state._workspace.binding.hwnd == HWND
+        assert session._authority.current == before
+        assert not [
+            item
+            for item in events
+            if item["type"] == "vnext_workspace_target_adopted"
+        ]
+        foreground[0] = next_hwnd
+
+    session, raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[
+            _jpeg(640, 480, level=80),
+            _jpeg(640, 480, level=100),
+            _jpeg(1120, 630, level=120),
+            _jpeg(640, 480, level=160),
+            _jpeg(640, 480, level=180),
+        ],
+        client=_RawClient(_click_responses() * 2),
+        evidence_root=tmp_path / "runtime-evidence",
+        target_reader=reader,
+        hit_test_root=lambda _x, _y: foreground[0],
+        on_click=after_click,
+        capture_regions=[
+            Region(*REGION),
+            Region(*REGION),
+            desktop,
+            Region(*REGION),
+            Region(*REGION),
+        ],
+        on_capture=after_capture,
+    )
+    session_holder.append(session)
+    session._runtime._state._observer._virtual_desktop = lambda: desktop
+    BUS.add_sink(events.append)
+    try:
+        first = session.run_one_turn(
+            turn_index=0,
+            stop_event=threading.Event(),
+        )
+        assert first.status is RuntimeStatus.ACTION_RECORDED
+        before = session._authority.current
+        assert before is not None
+        assert before.hwnd == HWND
+        authoritative_before_transition.append(before)
+
+        second = session.run_one_turn(
+            turn_index=1,
+            stop_event=threading.Event(),
+        )
+        assert second.status is RuntimeStatus.ACTION_RECORDED
+        replacement = session._reducer.projection.target_binding
+        assert replacement is not None
+        assert replacement.hwnd == next_hwnd
+        assert session._runtime._state._workspace.binding == replacement
+        assert session._controller is not None
+        assert session._controller.frozen_target_binding == replacement
+        current = session._authority.current
+        assert current is not None
+        assert current.hwnd == next_hwnd
+        assert current.epoch == replacement.epoch
+        assert current.frame_id == before.frame_id + 2
+    finally:
+        session.close()
+        BUS.remove_sink(events.append)
+
+    assert raw_calls == ["click", "click"]
+    assert captures[-3:] == [
+        (transient_hwnd, desktop),
+        (next_hwnd, Region(*REGION)),
+        (next_hwnd, Region(*REGION)),
+    ]
+    adoption = [
+        item
+        for item in events
+        if item["type"] == "vnext_workspace_target_adopted"
+    ]
+    assert len(adoption) == 1
+    assert adoption[0]["target_hwnd"] == next_hwnd
+    assert adoption[0]["causal_action"] == "click"
+    observations = [
+        item
+        for item in events
+        if item["type"] == "vnext_gui_observation"
+    ]
+    assert [item["target_hwnd"] for item in observations] == [
+        HWND,
+        next_hwnd,
+    ]
+    target_evidence = [
+        item
+        for item in session._registry.snapshot()
+        if item.kind == "target_binding"
+    ]
+    assert len(target_evidence) == 2
+    assert target_evidence[-1].id == adoption[0]["target_binding_id"].replace(
+        "vnext-workspace-",
+        "vnext-workspace-target-",
+    )
 
 
 def test_hit_test_race_is_durably_reobserved_before_one_real_input(
