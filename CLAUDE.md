@@ -46,6 +46,47 @@
 - 只保留模型自身无法守住的机械边界：物理输入单写入者、按键/指针释放清理、
   凭据不泄漏、不可逆外部动作的同意。
 
+## 2026-08-04 安全设计清理计划（重点方向）
+
+完整、更完善的安全系统由另一项目提供；本仓库任何自带的安全设计——选项、
+守卫、审批门、权限握手、证据链——都会干扰那个项目对 Agent 的判断。全部
+删除是本项目重点方向之一，按以下清单执行（删除时不保留"恒关闭"的死开关，
+选项与机制一起消失）：
+
+P0（会拦截 Agent 动作，优先删除）：
+
+- `ARP_RUNS.decide_gate` 运行审批门（`server.py` 路由 +
+  `orchestrator/runtime.py` 的 `decide_gate`、`approved/comment` 入参、
+  `integrations/chatgpt_mcp.py` 的 gate hook）。
+- `approve_mode` 审批选项（`config` + 前端控件）。
+- legacy `agent/scope_guard.py`（`ensure_scope`/`take_scope_recovery`，
+  含 `_native_point_scope_guard`）：随 legacy 包按消费者先行流程退役，
+  vNext 主链不可达，不作为单独修复对象。
+
+P1（默认关闭不拦截，从配置面删除选项，随后删除机制分支）：
+
+- `no_mouse_steal` / `multi_input_cooperation` /
+  `cooperative_cursor_tolerance_px`（`config` + `action/executor.py` 的
+  `_no_mouse_steal` / `multi_input_cooperation_enabled` /
+  `cooperative_input_guard` / `_cooperative_action_still_owned` 及
+  `raw_device.py` / `desktop_queue.py` 的 cooperative 分支）。
+- 对应测试 `test_multi_input_cooperation.py` 与相关用例随之删除。
+
+P2（只记录不拦截，删除候选）：
+
+- `MutationPermitAuthority` 每动作许可握手（`vnext/runtime/mutation_permits.py`
+  及 `call_once_with_permit`、adapter 的 permit 校验链）。
+- evidence 记录链（每动作 `actor_decision -> admission -> physical_attempt ->
+  raw_receipt -> controller_transition` 五类事件全记录 + 帧工件 + 哈希链）；
+  独立结果证据装置属另一项目，本仓库只保留机械层测试。
+- 文档中的安全/隐私描述与 `SECURITY.md` 同步清理。
+
+验收标准：上述关键词（`approve_mode`、`no_mouse_steal`、
+`multi_input_cooperation`、`decide_gate`、`scope_guard`、`permit`、
+`cooperative_`）在生产代码中搜索为零；全量测试通过后按
+`docs/visual-runtime-principles.md` 的机械边界清单复核，只保留物理输入
+单写入者、按键/指针释放清理、凭据不泄漏。
+
 ## 当前 Git / GitHub 状态
 
 - GitHub 默认分支、当前活动分支和唯一长期产品分支均为 `master`。
