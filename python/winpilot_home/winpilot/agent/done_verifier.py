@@ -751,7 +751,16 @@ class DoneVerifierMixin:
                         "target_window_validation_failed",
                         "target_window_geometry_unavailable",
                     }
-                    if decision.reason not in invalid_target_reasons:
+                    # Screen-first defaults make ``select_visual_capture_scope``
+                    # return the whole desktop unless a window crop was
+                    # explicitly opted in and verified.  The native visual
+                    # runtime judges full-desktop frames through its own path;
+                    # this legacy fallback attaches a fresh image only when a
+                    # verified window crop was actually selected.
+                    if (
+                        decision.scope == "target_window"
+                        and decision.reason not in invalid_target_reasons
+                    ):
                         self._fresh_done_image_b64 = capture_window_jpeg_b64(
                             hwnd, region=decision.region,
                         )

@@ -285,6 +285,7 @@ def _inputs(*, captured_at: int = NOW_MS - 500) -> dict[str, Any]:
                 "usable": True,
                 "failure_type": "",
                 "reason": "",
+                "binding_mode": "window",
             },
         }
     }
@@ -810,8 +811,6 @@ def test_prepare_rejects_any_initial_desktop_binding() -> None:
             run_manager=ArpRunManager(),
             _dependencies=_dependencies(),
         )
-
-
 def test_direct_reply_is_terminal_without_desktop_session_or_evidence(
     tmp_path: Path,
 ) -> None:
@@ -883,6 +882,7 @@ def test_direct_reply_is_terminal_without_desktop_session_or_evidence(
     assert clients[0].closed is True
     assert len(clients[0].requests) == 1
     assert clients[0].requests[0]["messages"] == [
+        {"role": "system", "content": live_agent.INITIAL_ACTOR_SYSTEM_CONTRACT},
         *history,
         {"role": "user", "content": GOAL},
     ]
@@ -1134,7 +1134,8 @@ def test_cancel_before_initial_actor_turn_closes_model_without_desktop_io(
 
     assert result.ok is False
     assert result.branch == "canceled"
-    assert result.output is None
+    assert result.output is not None
+    assert result.output["failure_stage"] == "canceled"
     assert "canceled before the initial Actor turn" in result.error
     assert raw_constructions == []
     assert len(client_calls) == len(clients) == 1
@@ -1207,13 +1208,13 @@ def test_exact_graph_rejects_every_expansion(mutate: Any) -> None:
         (
             lambda inputs: (
                 inputs["execution_context"].update(
-                    {"submitted_at": NOW_MS - 17_000}
+                    {"submitted_at": NOW_MS - 62_000}
                 ),
                 inputs["execution_context"]["desktop_handoff"].update(
-                    {"prepared_at": NOW_MS - 16_500}
+                    {"prepared_at": NOW_MS - 61_500}
                 ),
                 inputs["execution_context"]["target_window"].update(
-                    {"captured_at": NOW_MS - 16_000}
+                    {"captured_at": NOW_MS - 61_000}
                 ),
             ),
             "stale",
@@ -1307,6 +1308,72 @@ def test_prebound_target_normalizes_client_rect_to_visible_desktop(
     )
 
     assert target.region == (0, 0, 1920, 1040)
+
+
+def test_desktop_shell_binding_relaxes_foreground_and_keeps_identity() -> None:
+    inputs = _inputs()
+    target_window = inputs["execution_context"]["target_window"]
+    target_window["binding_mode"] = "desktop_shell"
+    target_window["foreground_verified"] = False
+    target_window["title"] = "Program Manager"
+    target_window["class_name"] = "Progman"
+    target_window["hwnd"] = 65878
+    target_window["process_id"] = 19076
+    target_window["rect"] = [0, 0, 1536, 864]
+    shell_facts = live_agent._TargetFacts(
+        hwnd=65878,
+        root_hwnd=65878,
+        process_id=19076,
+        executable_identity=r"c:\windows\explorer.exe",
+        title="Program Manager",
+        class_name="Progman",
+        region=(0, 0, 1536, 864),
+        foreground_root_hwnd=None,
+    )
+
+    target = live_agent._freeze_prebound_target(
+        _graph(),
+        inputs,
+        dependencies=_dependencies(
+            reader=lambda _hwnd: shell_facts,
+        ),
+    )
+
+    assert target.desktop_shell is True
+    assert target.binding_id.startswith("vnext-target-")
+    assert target.trace_identity()["binding_mode"] == "desktop_shell"
+    assert target.probe.snapshot(65878) is not None
+
+
+def test_desktop_shell_binding_rejects_when_shell_identity_changes() -> None:
+    inputs = _inputs()
+    target_window = inputs["execution_context"]["target_window"]
+    target_window["binding_mode"] = "desktop_shell"
+    target_window["foreground_verified"] = False
+    target_window["title"] = "Program Manager"
+    target_window["class_name"] = "Progman"
+    target_window["hwnd"] = 65878
+    target_window["process_id"] = 19076
+    target_window["rect"] = [0, 0, 1536, 864]
+    changed = live_agent._TargetFacts(
+        hwnd=65878,
+        root_hwnd=65878,
+        process_id=9999,
+        executable_identity=r"c:\windows\explorer.exe",
+        title="Program Manager",
+        class_name="Progman",
+        region=(0, 0, 1536, 864),
+        foreground_root_hwnd=None,
+    )
+
+    with pytest.raises(ValueError, match="process_id"):
+        live_agent._freeze_prebound_target(
+            _graph(),
+            inputs,
+            dependencies=_dependencies(
+                reader=lambda _hwnd: changed,
+            ),
+        )
 
 
 def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> None:
@@ -1421,19 +1488,12 @@ def test_mission_hotkey_summaries_match_the_physical_chord_contract() -> None:
     primary_keys = sorted(
         CANONICAL_HOTKEY_KEYS.difference(CANONICAL_HOTKEY_MODIFIERS)
     )
-    assert (
-        mission_contracts._HOTKEY_SUMMARY_MODIFIERS
-        == CANONICAL_HOTKEY_MODIFIERS
-    )
-    assert mission_contracts._HOTKEY_SUMMARY_PRIMARY_KEYS == frozenset(
-        primary_keys
-    )
+    # Every physical hotkey chord projects to the single bare summary
+    # "hotkey"; per-chord detail lives in the structured previous-action view,
+    # not in the completed-action history.
     for modifier in CANONICAL_HOTKEY_MODIFIERS:
         assert HotkeyChord((modifier,)).keys == (modifier,)
-        assert is_safe_action_summary(
-            "hotkey",
-            f"hotkey_{modifier}",
-        )
+        assert is_safe_action_summary("hotkey", "hotkey")
     for modifier_count in range(len(CANONICAL_HOTKEY_MODIFIERS) + 1):
         for modifiers in permutations(
             CANONICAL_HOTKEY_MODIFIERS,
@@ -1441,18 +1501,16 @@ def test_mission_hotkey_summaries_match_the_physical_chord_contract() -> None:
         ):
             for primary in primary_keys:
                 keys = (*modifiers, primary)
+                # The bare "hotkey" summary is accepted for every chord that
+                # is physically representable; per-chord detail is not part
+                # of the summary anymore.
                 try:
                     HotkeyChord(keys)
                 except ValueError:
-                    physical_valid = False
-                else:
-                    physical_valid = True
-                summary = "hotkey_" + "_".join(keys)
-                assert (
-                    is_safe_action_summary("hotkey", summary)
-                    is physical_valid
-                ), keys
+                    continue
+                assert is_safe_action_summary("hotkey", "hotkey"), keys
 
+    # Non-canonical summaries are still rejected by the privacy gate.
     for summary in (
         "hotkey_",
         "hotkey_ctrl_ctrl_a",
@@ -1791,7 +1849,9 @@ def test_handler_stops_on_blocked_without_retry_and_closes() -> None:
     assert snapshot["status"] == ArpRunStatus.FAILED.value
     assert session.calls == 1
     assert session.closed is True
-    assert snapshot["error"] == "vNext Runtime returned blocked"
+    # The real per-turn failure reason is preserved instead of being replaced
+    # by a generic status string.
+    assert snapshot["error"] == "the requested state could not be established"
     assert snapshot["evidence"] == []
 
 
@@ -1984,14 +2044,20 @@ def test_model_transport_payload_is_absent_from_bus_and_node_result() -> None:
         sort_keys=True,
     )
     assert sentinel not in public_wire
-    assert snapshot["error"] == "vNext Runtime returned state_rejected"
+    # The typed transport prefix survives, but the provider payload tail is
+    # stripped at the public boundary.
+    assert snapshot["error"] == (
+        "model transport failed after 1 attempt(s):"
+    )
     done = [
         event
         for event in events
         if event["type"] == "live_agent_done"
     ]
     assert len(done) == 1
-    assert done[0]["detail"] == "vNext Runtime returned state_rejected"
+    # The typed transport prefix survives the BUS boundary too; the sensitive
+    # provider payload tail does not.
+    assert done[0]["detail"] == "model transport failed after 1 attempt(s):"
 
 
 def test_public_result_source_projects_only_safe_runtime_evidence(
@@ -2705,8 +2771,9 @@ def _install_safe_backends(
         mechanism: Any,
         hwnd: int,
         final_guard: Any,
+        enforce_foreground: bool = True,
     ) -> RawBackendResult:
-        del button, count, mechanism, hwnd
+        del button, count, mechanism, hwnd, enforce_foreground
         assert final_guard(x, y).value == "admitted"
         if on_click is not None:
             on_click()
@@ -2755,11 +2822,19 @@ def _real_session_with_captures(
     on_click: Any = None,
     capture_regions: list[Region] | None = None,
     on_capture: Any = None,
+    screen_first: bool = False,
 ) -> tuple[Any, list[str], list[dict[str, Any]]]:
     clock = clock or [10.0]
     capture_values = list(images)
     expected_capture_regions = (
         None if capture_regions is None else list(capture_regions)
+    )
+    # Screen-first frames are the default; the window-crop path is the
+    # explicit opt-in these composition tests exercise by default.
+    monkeypatch.setitem(
+        live_agent.CONFIG._data["controller"],
+        "target_window_capture_enabled",
+        not screen_first,
     )
 
     monkeypatch.setattr(
@@ -2775,11 +2850,14 @@ def _real_session_with_captures(
         region: Region,
     ) -> str:
         assert max_side == live_agent._MAX_SUBMITTED_SIDE
-        expected_region = (
-            Region(*REGION)
-            if expected_capture_regions is None
-            else expected_capture_regions.pop(0)
-        )
+        if expected_capture_regions is None:
+            expected_region = (
+                Region(0, 0, 1920, 1080)
+                if screen_first
+                else Region(*REGION)
+            )
+        else:
+            expected_region = expected_capture_regions.pop(0)
         assert region == expected_region
         if not capture_values:
             raise AssertionError("unexpected extra capture")
@@ -3039,6 +3117,388 @@ def test_completed_click_adopts_stable_cross_process_foreground_next_turn(
     assert len(adoption) == 1
     assert adoption[0]["target_hwnd"] == next_hwnd
     assert adoption[0]["causal_action"] == "click"
+
+
+def test_screen_first_frame_shows_desktop_and_click_rebinds_visible_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Screen-first frames let the model click any window it can see.
+
+    The authoritative frame covers the whole virtual desktop, the pointer
+    guard admits a click whose hit root is a different top-level window, and
+    the causal successor hand-off re-binds the workspace to that window on the
+    next observation after the click raises it.
+    """
+    next_hwnd = HWND + 50
+    foreground = [HWND]
+
+    def reader(hwnd: int) -> live_agent._TargetFacts | None:
+        if hwnd == HWND:
+            return live_agent._TargetFacts(
+                hwnd=HWND,
+                root_hwnd=HWND,
+                process_id=PID,
+                executable_identity=r"c:\apps\live_agent.exe",
+                title="Canary Target",
+                class_name="CanaryWindow",
+                region=REGION,
+                foreground_root_hwnd=foreground[0],
+            )
+        if hwnd == next_hwnd:
+            return live_agent._TargetFacts(
+                hwnd=next_hwnd,
+                root_hwnd=next_hwnd,
+                process_id=PID + 1,
+                executable_identity=r"c:\apps\successor.exe",
+                title="Successor",
+                class_name="SuccessorWindow",
+                region=REGION,
+                foreground_root_hwnd=foreground[0],
+            )
+        return None
+
+    session, raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[
+            _jpeg(1120, 630, level=90),
+            _jpeg(1120, 630, level=110),
+            _jpeg(1120, 630, level=150),
+        ],
+        client=_RawClient(_click_responses()),
+        evidence_root=tmp_path / "runtime-evidence",
+        target_reader=reader,
+        hit_test_root=lambda _x, _y: next_hwnd,
+        on_click=lambda: foreground.__setitem__(0, next_hwnd),
+        screen_first=True,
+    )
+    events: list[dict[str, Any]] = []
+    BUS.add_sink(events.append)
+    try:
+        first = session.run_one_turn(
+            turn_index=0,
+            stop_event=threading.Event(),
+        )
+        assert first.status is RuntimeStatus.ACTION_RECORDED
+        assert session._reducer.projection.target_binding.hwnd == HWND
+
+        observation = next(
+            item
+            for item in events
+            if item["type"] == "vnext_gui_observation"
+        )
+        assert observation["frame_scope"] == "full_desktop"
+        assert observation["target_hwnd"] == HWND
+
+        observed = session._runtime._state.observe(
+            session._reducer.projection,
+            turn_index=1,
+        )
+        replacement = session._reducer.projection.target_binding
+        assert replacement is not None
+        assert replacement.hwnd == next_hwnd
+        assert observed.frame.hwnd == next_hwnd
+        assert observed.target.hwnd == next_hwnd
+    finally:
+        session.close()
+        BUS.remove_sink(events.append)
+
+    assert raw_calls == ["click"]
+    adoption = [
+        item
+        for item in events
+        if item["type"] == "vnext_workspace_target_adopted"
+    ]
+    assert len(adoption) == 1
+    assert adoption[0]["target_hwnd"] == next_hwnd
+    assert adoption[0]["causal_action"] == "click"
+
+
+def _launch_responses() -> list[dict[str, Any]]:
+    planned = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "launch_application",
+                                "arguments": json.dumps(
+                                    {
+                                        "app": "Notepad",
+                                        "arguments": "",
+                                        "task_state_update": {
+                                            "scratchpad": None,
+                                        },
+                                        "local_intent": (
+                                            "start the requested application"
+                                        ),
+                                    },
+                                    separators=(",", ":"),
+                                ),
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    return [planned]
+
+
+def test_real_composition_launches_a_generic_application_and_arms_successor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    launched: list[tuple[str, str]] = []
+
+    def launcher(app: str, arguments: str) -> dict[str, Any]:
+        launched.append((app, arguments))
+        return {"ok": True, "via": "fake", "target": app}
+
+    monkeypatch.setattr(
+        live_agent,
+        "_launch_application_primitive",
+        launcher,
+    )
+    session, raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[
+            _jpeg(640, 480, level=100),
+            _jpeg(640, 480, level=120),
+        ],
+        client=_RawClient(_launch_responses()),
+        evidence_root=tmp_path / "runtime-evidence",
+    )
+    events: list[dict[str, Any]] = []
+    BUS.add_sink(events.append)
+    try:
+        result = session.run_one_turn(
+            turn_index=0,
+            stop_event=threading.Event(),
+        )
+    finally:
+        session.close()
+        BUS.remove_sink(events.append)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert launched == [("Notepad", "")]
+    assert raw_calls == []
+    transition = session._reducer.projection.last_transition
+    assert transition is not None
+    assert transition.action == "launch_application"
+    assert transition.input_completed is True
+    receipts = [
+        item
+        for item in events
+        if item["type"] == "vnext_raw_receipt"
+        and item["raw_action"] == "launch_application"
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["input_completed"] is True
+    assert receipts[0]["target_window"]["process"] == "live_agent.exe"
+def test_real_composition_launch_failure_is_recoverable_before_any_input(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        live_agent,
+        "_launch_application_primitive",
+        lambda _app, _arguments: {
+            "ok": False,
+            "error": "no such application",
+        },
+    )
+    session, raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[
+            _jpeg(640, 480, level=100),
+        ],
+        client=_RawClient(_launch_responses()),
+        evidence_root=tmp_path / "runtime-evidence",
+    )
+    events: list[dict[str, Any]] = []
+    BUS.add_sink(events.append)
+    try:
+        result = session.run_one_turn(
+            turn_index=0,
+            stop_event=threading.Event(),
+        )
+    finally:
+        session.close()
+        BUS.remove_sink(events.append)
+
+    assert result.status is RuntimeStatus.STALE_DISCARDED
+    assert raw_calls == []
+    receipts = [
+        item
+        for item in events
+        if item["type"] == "vnext_raw_receipt"
+        and item["raw_action"] == "launch_application"
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["input_completed"] is False
+    assert receipts[0]["error_kind"] == "launch_application_failed"
+
+
+def test_desktop_shell_launch_adopts_the_launched_window_next_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    shell_hwnd = 65878
+    launched_hwnd = 70000
+    foreground = [shell_hwnd]
+
+    def shell_reader(hwnd: int) -> live_agent._TargetFacts | None:
+        if hwnd == shell_hwnd:
+            return live_agent._TargetFacts(
+                hwnd=shell_hwnd,
+                root_hwnd=shell_hwnd,
+                process_id=19076,
+                executable_identity=r"c:\windows\explorer.exe",
+                title="Program Manager",
+                class_name="Progman",
+                region=(0, 0, 1920, 1080),
+                foreground_root_hwnd=foreground[0],
+            )
+        if hwnd == launched_hwnd:
+            return live_agent._TargetFacts(
+                hwnd=launched_hwnd,
+                root_hwnd=launched_hwnd,
+                process_id=8812,
+                executable_identity=r"c:\apps\launched.exe",
+                title="Launched App",
+                class_name="LaunchedWindow",
+                region=(0, 0, 1920, 1080),
+                foreground_root_hwnd=foreground[0],
+            )
+        return None
+
+    launched: list[tuple[str, str]] = []
+
+    def launcher(app: str, arguments: str) -> dict[str, Any]:
+        launched.append((app, arguments))
+        foreground[0] = launched_hwnd
+        return {"ok": True, "via": "fake", "target": app}
+
+    monkeypatch.setattr(
+        live_agent,
+        "_launch_application_primitive",
+        launcher,
+    )
+    monkeypatch.setattr(
+        live_agent,
+        "virtual_screen_region",
+        lambda: Region(0, 0, 1920, 1080),
+    )
+
+    def capture(
+        hwnd: int,
+        *,
+        max_side: int,
+        region: Region,
+    ) -> str:
+        assert max_side == live_agent._MAX_SUBMITTED_SIDE
+        assert region == Region(0, 0, 1920, 1080)
+        return _jpeg(1120, 630, level=150)
+
+    monkeypatch.setattr(
+        live_agent,
+        "capture_window_jpeg_b64",
+        capture,
+    )
+    raw_calls: list[str] = []
+    _install_safe_backends(monkeypatch, raw_calls)
+    factory_calls: list[dict[str, Any]] = []
+    client = _RawClient(_launch_responses())
+
+    def factory(**kwargs: Any) -> _RawClient:
+        factory_calls.append(kwargs)
+        return client
+
+    deps = live_agent._CompositionDependencies(
+        wall_clock=lambda: NOW_MS / 1000.0,
+        monotonic=lambda: 10.0,
+        target_reader=shell_reader,
+        hit_test_root=lambda _x, _y: shell_hwnd,
+        client_factory=factory,
+        runtime_evidence_root=tmp_path / "runtime-evidence",
+    )
+    inputs = _inputs()
+    target_window = inputs["execution_context"]["target_window"]
+    target_window["binding_mode"] = "desktop_shell"
+    target_window["foreground_verified"] = False
+    target_window["title"] = "Program Manager"
+    target_window["class_name"] = "Progman"
+    target_window["hwnd"] = shell_hwnd
+    target_window["process_id"] = 19076
+    target_window["rect"] = [0, 0, 1920, 1080]
+    graph = _graph()
+    budget = live_agent._freeze_budget(_config())
+    model = live_agent._freeze_model(_config(), budget)
+    actor_bundle = live_agent._build_actor_resources(
+        run_id="arp-test-shell-launch",
+        mission_id="vnext-mission-test-shell-launch",
+        budget=budget,
+        model=model,
+        dependencies=deps,
+        deadline=lambda: 310.0,
+    )
+    build = live_agent._SessionBuild(
+        graph=graph,
+        goal=GOAL,
+        run_id="arp-test-shell-launch",
+        mission_id="vnext-mission-test-shell-launch",
+        target=live_agent._freeze_prebound_target(
+            graph,
+            inputs,
+            dependencies=deps,
+        ),
+        budget=budget,
+        model=model,
+        dependencies=deps,
+        deadline=lambda: 310.0,
+        actor_bundle=actor_bundle,
+        pause_controller=None,
+    )
+    events: list[dict[str, Any]] = []
+    BUS.add_sink(events.append)
+    session = None
+    try:
+        session = live_agent._build_live_session(build)
+        assert session._controller._desktop_shell is True
+        result = session.run_one_turn(
+            turn_index=0,
+            stop_event=threading.Event(),
+        )
+        assert result.status is RuntimeStatus.ACTION_RECORDED
+        assert launched == [("Notepad", "")]
+
+        observed = session._runtime._state.observe(
+            session._reducer.projection,
+            turn_index=1,
+        )
+        replacement = session._reducer.projection.target_binding
+        assert replacement is not None
+        assert replacement.hwnd == launched_hwnd
+        assert observed.frame.hwnd == launched_hwnd
+        assert observed.target.hwnd == launched_hwnd
+    finally:
+        if session is not None:
+            session.close()
+        BUS.remove_sink(events.append)
+
+    adoption = [
+        item
+        for item in events
+        if item["type"] == "vnext_workspace_target_adopted"
+    ]
+    assert len(adoption) == 1
+    assert adoption[0]["target_hwnd"] == launched_hwnd
+    assert adoption[0]["causal_action"] == "launch_application"
 
 
 def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
@@ -4086,7 +4546,8 @@ def test_run_bound_lease_rejects_target_changed_after_actor_request(
     result = results[0]
     assert result.ok is False
     assert result.branch == "fail"
-    assert result.output is None
+    assert result.output is not None
+    assert result.output["failure_stage"] == "target_binding"
     assert "target changed before desktop lease binding" in result.error
     assert raw_constructions == []
     assert len(client_calls) == len(clients) == 1
@@ -4406,6 +4867,7 @@ def test_real_composition_builds_zero_retry_actor_and_closes(
                 "scroll",
                 "type_text",
                 "hotkey",
+                "launch_application",
             "claim_obligation_done",
             "blocked",
         }
@@ -4725,3 +5187,168 @@ def test_flow_fragment_resources_keep_local_budget_without_run_telemetry() -> No
     assert not {
         event.get("type") for event in events
     } & {"vnext_model_call", "agent_usage"}
+
+
+def test_status_query_reply_uses_real_runtime_facts_without_desktop_lease(
+    tmp_path: Path,
+) -> None:
+    status_reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "memory is disabled",
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+    clients: list[_RawClient] = []
+
+    def client_factory(**_kwargs: Any) -> _RawClient:
+        client = _RawClient(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "status-1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "get_memory_status",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                status_reply,
+            ]
+        )
+        clients.append(client)
+        return client
+
+    def forbidden_session(build: Any) -> Any:
+        raise AssertionError("status query must not compose a desktop session")
+
+    dependencies = live_agent._CompositionDependencies(
+        wall_clock=lambda: NOW_MS / 1000.0,
+        monotonic=lambda: 10.0,
+        target_reader=lambda _hwnd: pytest.fail(
+            "status query must not inspect a desktop target"
+        ),
+        hit_test_root=lambda _x, _y: pytest.fail(
+            "status query must not hit-test the desktop"
+        ),
+        client_factory=client_factory,
+        session_builder=forbidden_session,
+        runtime_evidence_root=tmp_path,
+        config_snapshot=lambda: {
+            **_config(),
+            "agent": {"experience_memory": True},
+        },
+    )
+    manager = ArpRunManager()
+    execution = _prepare(
+        _graph(),
+        {},
+        _config(),
+        run_manager=manager,
+        _dependencies=dependencies,
+    )
+    snapshot = _run_prepared(manager, execution)
+
+    assert snapshot["status"] == ArpRunStatus.REPLY.value
+    assert execution.runtime_state["user_result"] == "memory is disabled"
+    assert (
+        execution.runtime_state["_desktop_lease"].snapshot()["status"]
+        == "idle"
+    )
+    assert len(clients) == 1
+    assert len(clients[0].requests) == 2
+    status_tool = json.loads(clients[0].requests[1]["messages"][3]["content"])
+    assert status_tool["format"] == "memory-status/1"
+    assert status_tool["long_term_experience_memory"] == "disabled"
+    assert status_tool["enabled"] is False
+    assert status_tool["experience_policy"] == "disabled"
+    assert status_tool["config_agent_experience_memory"] is True
+
+
+def test_failure_stage_classification_is_explicit() -> None:
+    from winpilot.orchestrator.live_agent import (
+        classify_live_agent_failure_stage,
+    )
+    from winpilot.vnext.runtime import RuntimeStatus
+
+    cases = (
+        (RuntimeStatus.INVALID_PROPOSAL, "bad", {}, "tool_format"),
+        (RuntimeStatus.ACTOR_ERROR, "provider timeout", {}, "model_routing"),
+        # blocked is the Actor's own semantic stop verdict, not a system
+        # physical-input failure.
+        (RuntimeStatus.BLOCKED, "outcome unknown", {}, "model_routing"),
+        # unrecognized state_rejected is a system precondition failure, not an
+        # automatic model verdict.
+        (
+            RuntimeStatus.STATE_REJECTED,
+            "controller rejected unknown precondition",
+            {},
+            "physical_input",
+        ),
+        (
+            RuntimeStatus.STATE_REJECTED,
+            "desktop lease timed out",
+            {},
+            "desktop_handoff",
+        ),
+        (
+            RuntimeStatus.STATE_REJECTED,
+            "current Electron target mismatch: process_id",
+            {},
+            "target_binding",
+        ),
+        (
+            RuntimeStatus.STATE_REJECTED,
+            "fresh target-window JPEG capture failed closed",
+            {},
+            "screenshot",
+        ),
+        (
+            RuntimeStatus.STATE_REJECTED,
+            "vNext verified completion result failed closed",
+            {},
+            "result_verification",
+        ),
+        (
+            RuntimeStatus.STATE_REJECTED,
+            "vNext model-call budget exhausted",
+            {},
+            "model_routing",
+        ),
+        (
+            RuntimeStatus.CANCELED,
+            "run canceled",
+            {},
+            "canceled",
+        ),
+        (
+            RuntimeStatus.MISSION_VERIFIED,
+            "",
+            {},
+            "",
+        ),
+    )
+    for status, detail, lease, expected in cases:
+        assert (
+            classify_live_agent_failure_stage(
+                status,
+                detail,
+                lease_state=lease,
+            )
+            == expected
+        ), (status, detail)

@@ -90,26 +90,6 @@ from .task_state import (
     ActorTurnDecision,
 )
 
-_RECOVERABLE_NOT_STARTED_ERROR_KINDS = frozenset(
-    {
-        "desktop_queue_canceled",
-        "frame_changed_after_queue",
-        "frame_unavailable",
-        "hit_test_changed",
-        "hit_test_changed_after_queue",
-        "permit_commit_identity_changed",
-        "permit_runtime_state_changed",
-        "permit_runtime_state_unavailable",
-        "permit_changed_after_queue",
-        "point_outside_target_after_queue",
-        "stale_authoritative_frame",
-        "target_changed_after_queue",
-        "target_identity_changed",
-        "target_unavailable",
-    }
-)
-
-
 class MissionRuntimeConfigurationError(ValueError):
     """The injected slice is outside the authorized live-agent surface."""
 
@@ -416,7 +396,8 @@ class MissionRuntime:
         if (
             snapshot.frame.hwnd != binding.hwnd
             or snapshot.frame.epoch != binding.epoch
-            or snapshot.frame.scope != "target_window"
+            or snapshot.frame.scope
+            not in {"target_window", "full_desktop"}
         ):
             return False
         registry = {ref.id: ref for ref in self._registry.snapshot()}
@@ -614,24 +595,16 @@ class MissionRuntime:
         self,
         proposal: DesktopActionProposal,
     ) -> str:
-        """Project useful action semantics without text, coordinates, or intent."""
+        """Project one uniform action-name summary.
 
-        action = proposal.action
-        args = dict(proposal.args)
-        if action == "scroll":
-            amount = args.get("amount")
-            if type(amount) is int:
-                if amount < 0:
-                    return "scroll_down"
-                if amount > 0:
-                    return "scroll_up"
-        if action == "hotkey":
-            keys = args.get("keys")
-            if isinstance(keys, (list, tuple)):
-                summary = "hotkey_" + "_".join(keys)
-                if is_safe_action_summary(action, summary):
-                    return summary
-        return action
+        Every action projects to its bare tool name; scroll direction, key
+        names and other per-action detail live in the structured
+        ``previous_action`` view and the fresh screenshot, not in the
+        completed-action history.  Per-action asymmetric enrichment was an
+        arbitrary rule that gave the model different information density
+        depending on which tool it happened to use.
+        """
+        return proposal.action
 
     def _complete_mission(
         self,
@@ -839,6 +812,37 @@ class MissionRuntime:
             tool_schema=tool_wire["schema"],
             broker_projection=canonical_projection.to_dict(),
         )
+
+    def _record_rejected_transition(
+        self,
+        envelope: ActorDecisionEnvelope,
+        transition: ControllerTransition,
+        *,
+        error_kind: str | None,
+    ) -> None:
+        """Record a proven-not-executed rejection into the mission event stream.
+
+        The rejected action is fed back to the same Actor on the next turn as
+        ``previous_action`` with its mechanical ``error_kind``, so the model
+        can change strategy instead of blindly repeating a click that never
+        started.  No physical replay is ever performed; the transition records
+        ``input_completed=False`` only.
+        """
+        try:
+            self._accept(
+                "transition_recorded",
+                payload={
+                    "obligation_id": envelope.obligation_id,
+                    "action_id": envelope.decision_id,
+                    "action": proposal_tool_name(envelope.proposal),
+                    "input_completed": False,
+                    "visible_effect": transition.visible_effect or "",
+                    "error_kind": error_kind or "",
+                },
+                base_revision=envelope.mission_revision,
+            )
+        except MissionError:
+            raise
 
     def _record_controller_transition(
         self,
@@ -1053,29 +1057,33 @@ class MissionRuntime:
                 return self._cancel(
                     detail="run was canceled before input executed"
                 )
+            # Every proven-not-executed rejection is fed back to the Actor
+            # with its mechanical error_kind (target/hit-test/permit/format).
+            # Whether the failure is worth another attempt is a semantic
+            # decision for the same model that sees the error and the next
+            # fresh frame; the runtime keeps only the mechanical budget
+            # (max_turns/max_model_calls) as the hard stop.  A static
+            # "recoverable" whitelist is no longer consulted.
             if action_binding is not None:
                 error_kind = action_binding.raw_action_receipt[
                     "error_kind"
                 ]
-                if (
-                    error_kind
-                    not in _RECOVERABLE_NOT_STARTED_ERROR_KINDS
-                ):
-                    return self._result(
-                        RuntimeStatus.STATE_REJECTED,
-                        route=route,
-                        proposal_kind=proposal_kind,
-                        decision_id=envelope.decision_id,
-                        detail=(
-                            "Controller rejected input with a "
-                            "non-recoverable precondition"
-                        ),
-                    )
+            else:
+                error_kind = None
+            try:
+                self._record_rejected_transition(
+                    envelope,
+                    transition,
+                    error_kind=error_kind,
+                )
+            except Exception as exc:
+                rejection_evidence_error = exc
             return self._result(
                 RuntimeStatus.STALE_DISCARDED,
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
+                event_ids=(),
                 detail=(
                     "Controller proved input did not execute; no replay occurred"
                     + (

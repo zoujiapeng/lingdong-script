@@ -308,7 +308,7 @@ class ActorDecisionEnvelope(BaseModel):
     frame_id: _POSITIVE_INT
     frame_epoch: _NONNEGATIVE_INT
     frame_hwnd: _POSITIVE_INT
-    frame_scope: Literal["target_window"]
+    frame_scope: Literal["target_window", "full_desktop"]
     frame_region: tuple[
         _SIGNED_INT,
         _SIGNED_INT,
@@ -651,7 +651,7 @@ def bind_actor_decision(
         if (
             not frame.authoritative
             or not frame.fresh
-            or frame.scope != "target_window"
+            or frame.scope not in {"target_window", "full_desktop"}
             or frame.frame_id is None
             or frame.hwnd != target.hwnd
             or frame.epoch != target.epoch

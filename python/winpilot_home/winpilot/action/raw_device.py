@@ -135,7 +135,14 @@ class RawActionReceipt:
     error_kind: str | None = None
 
     def __post_init__(self) -> None:
-        if self.action not in {"scroll", "click", "drag", "type_text", "hotkey"}:
+        if self.action not in {
+            "scroll",
+            "click",
+            "drag",
+            "type_text",
+            "hotkey",
+            "launch_application",
+        }:
             raise ValueError("unknown raw receipt action")
         if not isinstance(self.outcome, MutationOutcome):
             raise ValueError("raw receipt outcome must be MutationOutcome")
@@ -532,6 +539,7 @@ class RawDeviceExecutor:
         mechanism: ClickMechanism,
         *,
         final_guard: FinalPointerGuard | None = None,
+        enforce_foreground: bool = True,
     ) -> RawActionReceipt:
         context_error = self._context_error(context)
         if context_error is not None:
@@ -565,6 +573,7 @@ class RawDeviceExecutor:
                 )
             backend = self._backends.admitted_physical_click
             call_kwargs["final_guard"] = final_guard
+            call_kwargs["enforce_foreground"] = enforce_foreground
         return self._call(
             "click", backend, x, y, button=button, count=count,
             mechanism=mechanism, **call_kwargs,

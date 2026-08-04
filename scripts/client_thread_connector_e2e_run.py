@@ -59,6 +59,10 @@ DEFAULT_DRAFT_RESTART_OUTPUT = (
 )
 FIXTURE_KEY = "verification"
 ORACLE_SOURCE = "append_only_connector_and_server_thread_oracle"
+# Windows filesystem timestamps are quantized coarser than time.time_ns();
+# tolerate the observed ~8 ms skew so a file written right after the start
+# marker is not spuriously rejected as written before the task began.
+FILE_MTIME_TOLERANCE_NS = 100_000_000
 
 CONNECTOR_READ_TASK = (
     "请使用已连接的 {connector} 服务读取名为 verification 的值，然后只把读取到的值回复给我。"
@@ -1400,7 +1404,9 @@ def file_evidence(
         text, encoding = _read_text_file(path)
         raw = path.read_bytes()
         exact = text == fixture.token
-        modified_after_start = path.stat().st_mtime_ns >= after_time_ns
+        modified_after_start = (
+            path.stat().st_mtime_ns + FILE_MTIME_TOLERANCE_NS >= after_time_ns
+        )
         file_part = {
             "exists": True,
             "exact_value": exact,

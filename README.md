@@ -200,6 +200,7 @@ npm run e2e:client:mixed
 ## 文档
 
 - [AI / Codex 接手入口](CLAUDE.md)
+- [全项目精确讲解与逐文件索引](docs/project-guide/README.md)
 - [文档索引](docs/README.md)
 - [架构与运行原理](docs/architecture.md)
 - [视觉运行时原则](docs/visual-runtime-principles.md)

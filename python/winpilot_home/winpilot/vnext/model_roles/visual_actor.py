@@ -48,9 +48,19 @@ VISUAL_ACTOR_MODEL_ROLE = "vnext_visual_actor"
 VISUAL_ACTOR_SYSTEM_CONTRACT = """\
 Use original_goal, the current authoritative JPEG, task_state, previous action,
 and supplied tools to choose exactly one tool call. Return no prose. Use
-coordinates in the exact submitted-image pixels. If the goal is visibly
-complete, call claim_obligation_done. When pointer_held is true, continue or
-finish that drag."""
+coordinates in the exact submitted-image pixels. original_goal may mix chat and
+task: act on the actionable task and leave chat answers for the final claim.
+If the goal is visibly complete, call claim_obligation_done; when an action
+cannot advance the goal, call blocked instead of repeating it. When
+pointer_held is true, continue or finish that drag."""
+
+INITIAL_ACTOR_SYSTEM_CONTRACT = """\
+You are a Windows desktop agent on the user's real computer. Answer chat
+questions directly in the user's language. The observe_desktop tool grants
+access to the live screen; use it when you need to look at or operate the
+desktop. If a message mixes chat and a task, do the task and put the short
+answer into the final claim. Never invent results; verify by looking at the
+screen."""
 
 _TOOL_DESCRIPTIONS = {
     "click": "Click one point once in the current image.",
@@ -70,6 +80,10 @@ _TOOL_DESCRIPTIONS = {
     "hotkey": (
         "Press one key or one ordered key chord; this never enters literal "
         "text."
+    ),
+    "launch_application": (
+        "Start one installed application or file/URL association by display "
+        "name, alias, or path. This is a generic launch, not a click."
     ),
     "claim_obligation_done": (
         "Finish without further mutation when the current image shows the "
@@ -118,6 +132,21 @@ _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
 _CONNECTOR_TOOLS = frozenset({_CONNECTOR_SEARCH_TOOL, _CONNECTOR_CALL_TOOL})
 _FLOW_FRAGMENT_TOOL = "propose_flow_fragment"
+_STATUS_TOOL_CALL_LIMIT = 2
+_STATUS_AGENT_TOOL = "get_agent_status"
+_STATUS_MEMORY_TOOL = "get_memory_status"
+_STATUS_CAPABILITIES_TOOL = "get_capabilities"
+_STATUS_TOOLS = frozenset(
+    {
+        _STATUS_AGENT_TOOL,
+        _STATUS_MEMORY_TOOL,
+        _STATUS_CAPABILITIES_TOOL,
+    }
+)
+_SHELL_TOOL = "run_shell"
+_SHELL_TOOL_CALL_LIMIT = 4
+_SHELL_MAX_COMMAND_CHARS = 4096
+_SHELL_MAX_OUTPUT_CHARS = 6000
 
 
 @dataclass(frozen=True, slots=True)
@@ -684,6 +713,53 @@ def _history_exchange(
     return assistant, call_id, _RUNTIME_TOOL_NAMES.get(name, name)
 
 
+def _tool_format_repair(
+    response: Any,
+    format_error: str,
+) -> tuple[dict[str, Any], str] | None:
+    """Extract one failed tool call so the same model can repair it.
+
+    The structured format error is returned to the same model before any
+    physical input is executed.  A repaired proposal is parsed again and a
+    second failure is terminal: the runtime never replays after input.
+    """
+    message = response_message(response)
+    calls = member(message, "tool_calls")
+    if (
+        isinstance(calls, (str, bytes))
+        or not isinstance(calls, Sequence)
+        or len(calls) != 1
+    ):
+        return None
+    call = calls[0]
+    call_id = member(call, "id")
+    function = member(call, "function")
+    name = member(function, "name") if function is not None else None
+    arguments = member(function, "arguments") if function is not None else None
+    if (
+        type(call_id) is not str
+        or not call_id
+        or type(name) is not str
+        or type(arguments) is not str
+    ):
+        return None
+    assistant: dict[str, Any] = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arguments,
+                },
+            }
+        ],
+    }
+    return assistant, call_id
+
+
 def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
     if gateway is None or getattr(gateway, "available", False) is not True:
         return []
@@ -723,6 +799,173 @@ def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
             },
         },
     ]
+
+
+def _status_tool_definitions() -> list[dict[str, Any]]:
+    """Read-only Actor-owned status tools resolved without a desktop lease."""
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": _STATUS_AGENT_TOOL,
+                "description": (
+                    "Read this Agent's own runtime status without touching "
+                    "the desktop."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": _STATUS_MEMORY_TOOL,
+                "description": (
+                    "Read whether long-term experience memory is enabled for "
+                    "this Agent chain."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": _STATUS_CAPABILITIES_TOOL,
+                "description": (
+                    "Read the generic capabilities this Agent can choose "
+                    "right now."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        },
+    ]
+
+
+def _shell_tool_definitions() -> list[dict[str, Any]]:
+    """One generic shell tool for system query / activation, no desktop lease."""
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": _SHELL_TOOL,
+                "description": (
+                    "Execute one PowerShell or cmd command on this computer "
+                    "and return its output, exit code, and errors."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096,
+                            "description": (
+                                "Full command line; PowerShell by default. "
+                                "Use ; as the separator."
+                            ),
+                        },
+                        "shell": {
+                            "type": "string",
+                            "enum": ["powershell", "cmd"],
+                        },
+                        "timeout_s": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 120,
+                        },
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        },
+    ]
+
+
+def _status_exchange(
+    response: Any,
+) -> tuple[dict[str, Any], str, str, dict[str, Any]] | None:
+    """Detect one Actor-owned read-only status tool call."""
+    message = response_message(response)
+    calls = member(message, "tool_calls")
+    if (
+        isinstance(calls, (str, bytes))
+        or not isinstance(calls, Sequence)
+        or len(calls) != 1
+    ):
+        return None
+    call = calls[0]
+    function = member(call, "function")
+    name = member(function, "name") if function is not None else None
+    if name not in _STATUS_TOOLS:
+        return None
+    if member(call, "type") != "function":
+        raise LiveModelRoleError("Actor status tool call must be a function")
+    call_id = member(call, "id")
+    raw_arguments = member(function, "arguments")
+    if type(call_id) is not str or not call_id:
+        raise LiveModelRoleError("Actor status tool call requires an id")
+    arguments = _decode_arguments(raw_arguments)
+    if set(arguments) != set():
+        raise LiveModelRoleError(f"{name} does not accept arguments")
+    content = member(message, "content")
+    if content is not None and type(content) is not str:
+        raise LiveModelRoleError("Actor status content must be text or null")
+    assistant: dict[str, Any] = {
+        "role": "assistant",
+        "content": content or "",
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": raw_arguments,
+                },
+            }
+        ],
+    }
+    reasoning = member(message, "reasoning_content")
+    if type(reasoning) is str:
+        assistant["reasoning_content"] = reasoning
+    return assistant, call_id, name, arguments
+
+
+def _call_status(
+    provider: Any,
+    name: str,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve one Actor-owned status query from the injected Runtime facts."""
+
+    if provider is None or not callable(getattr(provider, "resolve", None)):
+        raise LiveModelRoleError("Actor status provider is unavailable")
+    result = provider.resolve(name)
+    if not isinstance(result, Mapping):
+        raise LiveModelRoleError(
+            "Actor status provider returned a non-object result"
+        )
+    return dict(result)
 
 
 def _connector_exchange(
@@ -813,6 +1056,92 @@ def _call_connector(
     return dict(result)
 
 
+def _shell_exchange(
+    response: Any,
+) -> tuple[dict[str, Any], str, str, dict[str, Any]] | None:
+    """Detect one Actor-owned ``run_shell`` tool call (connector pattern)."""
+    message = response_message(response)
+    calls = member(message, "tool_calls")
+    if (
+        isinstance(calls, (str, bytes))
+        or not isinstance(calls, Sequence)
+        or len(calls) != 1
+    ):
+        return None
+    call = calls[0]
+    function = member(call, "function")
+    name = member(function, "name") if function is not None else None
+    if name != _SHELL_TOOL:
+        return None
+    if member(call, "type") != "function":
+        raise LiveModelRoleError("Actor shell tool call must be a function")
+    call_id = member(call, "id")
+    raw_arguments = member(function, "arguments")
+    if type(call_id) is not str or not call_id:
+        raise LiveModelRoleError("Actor shell tool call requires an id")
+    arguments = _decode_arguments(raw_arguments)
+    command = arguments.get("command")
+    if type(command) is not str or not command.strip():
+        raise LiveModelRoleError("run_shell requires a non-empty command")
+    if len(command) > _SHELL_MAX_COMMAND_CHARS:
+        raise LiveModelRoleError("run_shell command exceeds the bounded budget")
+    shell_name = arguments.get("shell")
+    if shell_name not in (None, "powershell", "cmd"):
+        raise LiveModelRoleError("run_shell shell must be powershell or cmd")
+    timeout_s = arguments.get("timeout_s")
+    if timeout_s is not None and (
+        type(timeout_s) is not int or not 1 <= timeout_s <= 120
+    ):
+        raise LiveModelRoleError("run_shell timeout_s must be 1..120")
+    content = member(message, "content")
+    if content is not None and type(content) is not str:
+        raise LiveModelRoleError("Actor shell content must be text or null")
+    assistant: dict[str, Any] = {
+        "role": "assistant",
+        "content": content or "",
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": raw_arguments,
+                },
+            }
+        ],
+    }
+    reasoning = member(message, "reasoning_content")
+    if type(reasoning) is str:
+        assistant["reasoning_content"] = reasoning
+    return assistant, call_id, name, arguments
+
+
+def _call_shell(
+    runner: Any,
+    arguments: Mapping[str, Any],
+    *,
+    timeout_s: float,
+    stop_event: Any | None,
+) -> dict[str, Any]:
+    """Execute one bounded shell command through the injected runner."""
+    if runner is None or not callable(getattr(runner, "run", None)):
+        raise LiveModelRoleError("Actor shell runner is unavailable")
+    result = runner.run(
+        command=str(arguments.get("command") or ""),
+        shell=str(arguments.get("shell") or "powershell"),
+        timeout_s=float(arguments.get("timeout_s") or 30),
+        stop_event=stop_event,
+    )
+    if not isinstance(result, Mapping):
+        raise LiveModelRoleError("Actor shell runner returned a non-object result")
+    output = dict(result)
+    for key in ("stdout", "stderr", "error"):
+        value = output.get(key)
+        if isinstance(value, str) and len(value) > _SHELL_MAX_OUTPUT_CHARS:
+            output[key] = value[:_SHELL_MAX_OUTPUT_CHARS]
+    return output
+
+
 def _initial_admission_from_response(
     response: Any,
     messages: Sequence[Mapping[str, Any]],
@@ -892,11 +1221,18 @@ class FlowFragmentProposer:
         max_output_tokens: int = 768,
         on_attempt: Callable[[ModelAttempt], None] | None = None,
         on_response: Callable[[Any], None] | None = None,
+        max_attempts: int = 1,
     ) -> None:
         if client is None:
             raise LiveModelRoleError("client is required")
         if type(runtime) is not ModelCallRuntime:
             raise LiveModelRoleError("runtime must be ModelCallRuntime")
+        if (
+            type(max_attempts) is not int
+            or not 1 <= max_attempts <= 5
+        ):
+            raise LiveModelRoleError("max_attempts must be in [1, 5]")
+        self._max_attempts = max_attempts
         self._client = client
         self._model = require_text(model, "model")
         self._runtime = runtime
@@ -964,7 +1300,7 @@ class FlowFragmentProposer:
                 "max_completion_tokens": self._max_output_tokens,
             },
             policy=ModelRetryPolicy(
-                max_attempts=1,
+                max_attempts=self._max_attempts,
                 total_timeout_s=self._total_timeout_s,
             ),
             stop_event=stop_event,
@@ -993,6 +1329,9 @@ class LiveVisualActor:
         on_attempt: Callable[[ModelAttempt], None] | None = None,
         on_response: Callable[[Any], None] | None = None,
         connector_gateway: Any | None = None,
+        status_provider: Any | None = None,
+        shell_runner: Any | None = None,
+        max_attempts: int = 1,
     ) -> None:
         if client is None:
             raise LiveModelRoleError("client is required")
@@ -1016,6 +1355,22 @@ class LiveVisualActor:
             if getattr(connector_gateway, "available", False) is True
             else None
         )
+        self._status_provider = (
+            status_provider
+            if callable(getattr(status_provider, "resolve", None))
+            else None
+        )
+        self._shell_runner = (
+            shell_runner
+            if callable(getattr(shell_runner, "run", None))
+            else None
+        )
+        if (
+            type(max_attempts) is not int
+            or not 1 <= max_attempts <= 5
+        ):
+            raise LiveModelRoleError("max_attempts must be in [1, 5]")
+        self._max_attempts = max_attempts
         self._previous_exchange: _VisualExchange | None = None
         self._initial_exchange: _InitialExchange | None = None
         self._initial_turn_started = False
@@ -1024,11 +1379,20 @@ class LiveVisualActor:
 
     @property
     def model_call_reservation(self) -> int:
-        return (
-            _CONNECTOR_TOOL_CALL_LIMIT + 1
+        # One terminal proposal + one format repair + a shared local-tool
+        # budget (status/shell/connector) that the model spends freely.
+        local_budget = (
+            _STATUS_TOOL_CALL_LIMIT
+            if self._status_provider is not None
+            else 0
+        ) + (
+            _CONNECTOR_TOOL_CALL_LIMIT
             if self._connector_gateway is not None
-            else 1
+            else 0
+        ) + (
+            _SHELL_TOOL_CALL_LIMIT if self._shell_runner is not None else 0
         )
+        return 1 + 1 + local_budget
 
     def _record_response(self, response: Any) -> None:
         if self._on_response is None:
@@ -1046,7 +1410,12 @@ class LiveVisualActor:
             1 <= model_call_limit <= self.model_call_reservation
         ):
             raise LiveModelRoleError("Actor model-call allowance is invalid")
-        return min(_CONNECTOR_TOOL_CALL_LIMIT, model_call_limit - 1)
+        # One shared local-tool budget across status/shell/connector: the
+        # model decides how many system queries it needs (shell may need many
+        # turns to investigate), and the global model-call budget is the only
+        # hard cap.  A per-family limit would silently remove tools the model
+        # is still actively using.
+        return max(0, model_call_limit - 2)
 
     def begin_turn(
         self,
@@ -1067,6 +1436,10 @@ class LiveVisualActor:
             if self._initial_turn_started:
                 raise LiveModelRoleError("Actor initial turn is call-once")
             self._initial_turn_started = True
+        system_message = {
+            "role": "system",
+            "content": INITIAL_ACTOR_SYSTEM_CONTRACT,
+        }
         messages = _bounded_thread_messages(history, goal)
         terminal_tools = [
             {
@@ -1084,11 +1457,26 @@ class LiveVisualActor:
                 },
             },
         ]
+        status_tools = (
+            _status_tool_definitions()
+            if self._status_provider is not None
+            else []
+        )
+        shell_tools = (
+            _shell_tool_definitions()
+            if self._shell_runner is not None
+            else []
+        )
         connector_tools = _connector_tool_definitions(self._connector_gateway)
         provider_request = {
             "model": self._model,
-            "messages": messages,
-            "tools": [*terminal_tools, *connector_tools],
+            "messages": [system_message, *messages],
+            "tools": [
+                *terminal_tools,
+                *status_tools,
+                *shell_tools,
+                *connector_tools,
+            ],
             "tool_choice": "auto",
             "temperature": 0.0,
             "max_completion_tokens": self._max_output_tokens,
@@ -1096,7 +1484,9 @@ class LiveVisualActor:
         admission: VisualActorTurnAdmission | None = None
         exchange: _InitialExchange | None = None
         connector_limit = self._connector_call_limit(_model_call_limit)
-        for connector_calls in range(connector_limit + 1):
+        repair_attempted = False
+        repair_budget = _model_call_limit is None or _model_call_limit >= 2
+        for connector_calls in range(connector_limit + (2 if repair_budget else 1)):
             if connector_calls == connector_limit:
                 provider_request["tools"] = terminal_tools
             outcome = invoke_chat_completion(
@@ -1106,7 +1496,7 @@ class LiveVisualActor:
                 purpose="reply_observe_or_connector",
                 provider_request=provider_request,
                 policy=ModelRetryPolicy(
-                    max_attempts=1,
+                    max_attempts=self._max_attempts,
                     total_timeout_s=self._total_timeout_s,
                 ),
                 stop_event=stop_event,
@@ -1114,13 +1504,107 @@ class LiveVisualActor:
                 runtime=self._runtime,
             )
             self._record_response(outcome.response)
+            status = None
+            if self._status_provider is not None:
+                try:
+                    status = _status_exchange(outcome.response)
+                except LiveModelRoleError as exc:
+                    raise InvalidActorProposal(str(exc)) from exc
+            if (
+                status is not None
+                and connector_calls < connector_limit
+            ):
+                assistant, call_id, name, arguments = status
+                result = _call_status(
+                    self._status_provider,
+                    name,
+                    arguments,
+                )
+                messages.extend(
+                    (
+                        assistant,
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": _canonical_json(result),
+                        },
+                    )
+                )
+                provider_request["messages"] = [system_message, *messages]
+                continue
+            shell = None
+            if self._shell_runner is not None:
+                try:
+                    shell = _shell_exchange(outcome.response)
+                except LiveModelRoleError as exc:
+                    raise InvalidActorProposal(str(exc)) from exc
+            if (
+                shell is not None
+                and connector_calls < connector_limit
+            ):
+                assistant, call_id, name, arguments = shell
+                result = _call_shell(
+                    self._shell_runner,
+                    arguments,
+                    timeout_s=min(30.0, self._total_timeout_s),
+                    stop_event=stop_event,
+                )
+                messages.extend(
+                    (
+                        assistant,
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": _canonical_json(result),
+                        },
+                    )
+                )
+                provider_request["messages"] = [system_message, *messages]
+                continue
             connector = _connector_exchange(outcome.response)
             if connector is None or connector_calls >= connector_limit:
-                admission, exchange = _initial_admission_from_response(
-                    outcome.response,
-                    messages,
-                )
-                break
+                try:
+                    admission, exchange = _initial_admission_from_response(
+                        outcome.response,
+                        messages,
+                    )
+                    break
+                except LiveModelRoleError as exc:
+                    if (
+                        repair_attempted
+                        or not repair_budget
+                        or connector_calls >= connector_limit + 1
+                    ):
+                        raise
+                    repair_attempted = True
+                    repair = _tool_format_repair(
+                        outcome.response,
+                        str(exc),
+                    )
+                    if repair is None:
+                        raise
+                    assistant, call_id = repair
+                    messages.extend(
+                        (
+                            assistant,
+                            {
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": _canonical_json(
+                                    {
+                                        "tool_format_error": str(exc),
+                                        "action": (
+                                            "return exactly one valid tool call "
+                                            "with the required fields"
+                                        ),
+                                    }
+                                ),
+                            },
+                        )
+                    )
+                    provider_request["messages"] = [system_message, *messages]
+                    provider_request["tools"] = terminal_tools
+                    continue
             assistant, call_id, name, arguments = connector
             result = _call_connector(
                 self._connector_gateway,
@@ -1139,6 +1623,7 @@ class LiveVisualActor:
                     },
                 )
             )
+            provider_request["messages"] = [system_message, *messages]
         if admission is None:
             raise LiveModelRoleError("Actor initial turn did not terminate")
         self._initial_exchange = deepcopy(exchange)
@@ -1175,6 +1660,16 @@ class LiveVisualActor:
             image_b64, image_media_type, submitted_size
         )
         terminal_tools = _tool_definitions(turn)
+        status_tools = (
+            _status_tool_definitions()
+            if self._status_provider is not None
+            else []
+        )
+        shell_tools = (
+            _shell_tool_definitions()
+            if self._shell_runner is not None
+            else []
+        )
         connector_tools = _connector_tool_definitions(self._connector_gateway)
         context = turn.to_dict()
         context.pop("tools")
@@ -1214,7 +1709,6 @@ class LiveVisualActor:
         if (
             previous is not None
             and turn.previous_action is not None
-            and turn.previous_action.input_completed
             and turn.previous_action.action == previous.runtime_tool_name
         ):
             native_context.extend(deepcopy(previous.messages))
@@ -1244,7 +1738,12 @@ class LiveVisualActor:
                 *native_context,
                 *current_exchange,
             ],
-            "tools": [*terminal_tools, *connector_tools],
+            "tools": [
+                *terminal_tools,
+                *status_tools,
+                *shell_tools,
+                *connector_tools,
+            ],
             # MiMo's documented Chat Completions surface supports only
             # ``auto``. The role still accepts exactly one function call and
             # rejects prose, zero calls, and multiple calls without repair.
@@ -1254,8 +1753,12 @@ class LiveVisualActor:
         }
         outcome = None
         decision = None
+        repair_attempted = False
         connector_limit = self._connector_call_limit(_model_call_limit)
-        for connector_calls in range(connector_limit + 1):
+        repair_budget = (
+            _model_call_limit is None or _model_call_limit >= 2
+        )
+        for connector_calls in range(connector_limit + (2 if repair_budget else 1)):
             if connector_calls == connector_limit:
                 provider_request["tools"] = terminal_tools
             outcome = invoke_chat_completion(
@@ -1265,7 +1768,7 @@ class LiveVisualActor:
                 purpose="propose_action_or_connector",
                 provider_request=provider_request,
                 policy=ModelRetryPolicy(
-                    max_attempts=1,
+                    max_attempts=self._max_attempts,
                     total_timeout_s=self._total_timeout_s,
                 ),
                 stop_event=stop_event,
@@ -1273,6 +1776,61 @@ class LiveVisualActor:
                 runtime=self._runtime,
             )
             self._record_response(outcome.response)
+            status = None
+            if self._status_provider is not None:
+                try:
+                    status = _status_exchange(outcome.response)
+                except LiveModelRoleError as exc:
+                    raise InvalidActorProposal(str(exc)) from exc
+            if (
+                status is not None
+                and connector_calls < connector_limit
+            ):
+                assistant, call_id, name, arguments = status
+                result = _call_status(
+                    self._status_provider,
+                    name,
+                    arguments,
+                )
+                connector_messages = [
+                    assistant,
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": _canonical_json(result),
+                    },
+                ]
+                current_exchange.extend(connector_messages)
+                provider_request["messages"].extend(connector_messages)
+                continue
+            shell = None
+            if self._shell_runner is not None:
+                try:
+                    shell = _shell_exchange(outcome.response)
+                except LiveModelRoleError as exc:
+                    raise InvalidActorProposal(str(exc)) from exc
+            if (
+                shell is not None
+                and connector_calls < connector_limit
+            ):
+                assistant, call_id, name, arguments = shell
+                result = _call_shell(
+                    self._shell_runner,
+                    arguments,
+                    timeout_s=min(30.0, self._total_timeout_s),
+                    stop_event=stop_event,
+                )
+                connector_messages = [
+                    assistant,
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": _canonical_json(result),
+                    },
+                ]
+                current_exchange.extend(connector_messages)
+                provider_request["messages"].extend(connector_messages)
+                continue
             try:
                 connector = _connector_exchange(outcome.response)
             except LiveModelRoleError as exc:
@@ -1286,11 +1844,44 @@ class LiveVisualActor:
                             for tool in turn.tools
                         ),
                     )
-                except InvalidActorProposal:
-                    raise
+                    break
+                except InvalidActorProposal as exc:
+                    if (
+                        repair_attempted
+                        or not repair_budget
+                        or connector_calls >= connector_limit + 1
+                    ):
+                        raise
+                    repair_attempted = True
+                    repair = _tool_format_repair(
+                        outcome.response,
+                        str(exc),
+                    )
+                    if repair is None:
+                        raise
+                    assistant, call_id = repair
+                    repair_messages = [
+                        assistant,
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": _canonical_json(
+                                {
+                                    "tool_format_error": str(exc),
+                                    "action": (
+                                        "return exactly one valid tool call "
+                                        "with the required fields"
+                                    ),
+                                }
+                            ),
+                        },
+                    ]
+                    current_exchange.extend(repair_messages)
+                    provider_request["messages"].extend(repair_messages)
+                    provider_request["tools"] = terminal_tools
+                    continue
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
-                break
             assistant, call_id, name, arguments = connector
             result = _call_connector(
                 self._connector_gateway,
@@ -1328,6 +1919,7 @@ class LiveVisualActor:
 __all__ = [
     "VISUAL_ACTOR_MODEL_ROLE",
     "VISUAL_ACTOR_SYSTEM_CONTRACT",
+    "INITIAL_ACTOR_SYSTEM_CONTRACT",
     "LiveVisualActor",
     "VisualActorTurnAdmission",
 ]

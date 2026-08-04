@@ -87,16 +87,26 @@ def _jpeg(level: int) -> str:
     return base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
-def _map_submitted_test_point(image_x: object, image_y: object) -> tuple[int, int]:
-    frame_arguments, _ = SubmittedImageCoordinateMapper(
-        (REGION[2], REGION[3])
-    ).map_point_pair(
+def _map_submitted_test_point(
+    image_x: object,
+    image_y: object,
+    *,
+    region: tuple[int, int, int, int] | None = None,
+    submitted_size: tuple[int, int] | None = None,
+) -> tuple[int, int]:
+    physical_region = REGION if region is None else region
+    size = (
+        (physical_region[2], physical_region[3])
+        if submitted_size is None
+        else submitted_size
+    )
+    frame_arguments, _ = SubmittedImageCoordinateMapper(size).map_point_pair(
         {"image_x": image_x, "image_y": image_y},
         image_keys=("image_x", "image_y"),
         frame_keys=("frame_x", "frame_y"),
         context="atomic adapter test",
     )
-    return NormalizedFrameCoordinateMapper(REGION).map_point(
+    return NormalizedFrameCoordinateMapper(physical_region).map_point(
         frame_arguments["frame_x"],
         frame_arguments["frame_y"],
     )
@@ -174,11 +184,12 @@ class _RawHarness:
         mechanism,
         hwnd,
         final_guard,
+        enforce_foreground: bool = True,
     ) -> RawBackendResult:
         self.calls.append(
             (
                 "click",
-                (x, y, button, count, mechanism, hwnd),
+                (x, y, button, count, mechanism, hwnd, enforce_foreground),
             )
         )
         if count is ClickCount.DOUBLE and self.between_double_guards:
@@ -819,6 +830,210 @@ def test_exact_atomic_surface_completes_once_with_effect(
         assert values[4] is ClickMechanism.PHYSICAL
     elif action == "scroll":
         assert harness.raw.calls[0][1] == (*POINT, -240, HWND)
+
+
+def test_screen_first_click_is_admitted_on_any_visible_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Screen-first frames let the pointer operate any window the model sees.
+
+    The authoritative frame covers the whole virtual desktop, so the bound
+    window does not need to be the hit root at the click point and the
+    pre-input foreground activation is skipped: the model points at what it
+    sees and the OS raises the clicked window, which the causal successor
+    hand-off adopts on the next observation.
+    """
+    other_hwnd = HWND + 1
+    desktop = (0, 0, 1920, 1080)
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
+        lambda: Region(*desktop),
+    )
+    authority = FrameAuthority()
+    before_b64 = _jpeg(20)
+    after_b64 = _jpeg(220)
+    before = authority.commit(
+        epoch=EPOCH,
+        hwnd=HWND,
+        region=desktop,
+        scope="full_desktop",
+        reason="screen-first",
+        submitted_size=(1120, 630),
+        image_b64=before_b64,
+        captured_at=1.0,
+        expected_previous_frame_id=0,
+    )
+    observer = FrameObserver(
+        authority,
+        capture=lambda _hwnd, **_kwargs: after_b64,
+        virtual_desktop=lambda: Region(*desktop),
+        captured_at=lambda: 2.0,
+    )
+    binding = TargetBinding(
+        binding_id="target-binding",
+        hwnd=HWND,
+        process_id=PROCESS_ID,
+        executable_identity="C:/app.exe",
+        title_snapshot="App",
+        established_by_evidence_ref="evidence-target-bound",
+        epoch=EPOCH,
+    )
+    probe = _Probe(
+        LiveTargetSnapshot(
+            hwnd=HWND,
+            root_hwnd=HWND,
+            process_id=PROCESS_ID,
+            executable_identity=binding.executable_identity,
+            region=REGION,
+            foreground_root_hwnd=HWND,
+        ),
+        expected_hit_point=_map_submitted_test_point(
+            50.0,
+            40.0,
+            region=desktop,
+            submitted_size=(1120, 630),
+        ),
+        hit_root=other_hwnd,
+    )
+    permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
+    raw = _RawHarness(True)
+    trace = _Trace(False)
+    adapter = AtomicDesktopAdapter(
+        frame_authority=authority,
+        frame_observer=observer,
+        frozen_target_binding=binding,
+        target_probe=probe,
+        mutation_permits=permits,
+        raw_device=raw.executor(),
+        receipt_trace_sink=trace,
+        post_input_settle_delay_s=0.0,
+    )
+    envelope = _envelope(before, binding, "click")
+    commit_identity = RuntimeCommitIdentity(
+        RuntimeFrameIdentity(
+            frame_id=before.frame_id,
+            epoch=before.epoch,
+            hwnd=before.hwnd,
+            region=before.region,
+            scope=before.scope,
+            submitted_size=before.submitted_size,
+            image_sha256=before.image_sha256,
+        ),
+        RuntimeTargetIdentity.from_binding(binding),
+    )
+    attempt = call_once_with_permit(
+        authority=permits,
+        envelope=envelope,
+        turn_index=0,
+        commit_identity=commit_identity,
+        still_current=lambda: True,
+        execute=lambda pinned: adapter.execute(pinned),
+    ).transition
+    assert attempt is not None
+
+    assert attempt.outcome is ControllerOutcome.COMPLETED
+    assert attempt.input_completed is True
+    assert len(raw.calls) == 1
+    assert raw.calls[0][0] == "click"
+    assert raw.calls[0][1][:2] == _map_submitted_test_point(
+        50.0,
+        40.0,
+        region=desktop,
+        submitted_size=(1120, 630),
+    )
+    assert raw.calls[0][1][6] is False
+    assert authority.current is not None
+    assert authority.current.frame_id == 2
+    assert authority.current.scope == "full_desktop"
+    assert authority.current.region == desktop
+
+
+def test_screen_first_click_rejects_dead_hit_test_but_keeps_desktop_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A screen-first click still fails closed when no window sits at the point."""
+    other_hwnd = HWND + 1
+    desktop = (0, 0, 1920, 1080)
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
+        lambda: Region(*desktop),
+    )
+    authority = FrameAuthority()
+    before = authority.commit(
+        epoch=EPOCH,
+        hwnd=HWND,
+        region=desktop,
+        scope="full_desktop",
+        reason="screen-first",
+        submitted_size=(1120, 630),
+        image_b64=_jpeg(20),
+        captured_at=1.0,
+        expected_previous_frame_id=0,
+    )
+    observer = FrameObserver(
+        authority,
+        capture=lambda _hwnd, **_kwargs: _jpeg(220),
+        virtual_desktop=lambda: Region(*desktop),
+        captured_at=lambda: 2.0,
+    )
+    binding = TargetBinding(
+        binding_id="target-binding",
+        hwnd=HWND,
+        process_id=PROCESS_ID,
+        executable_identity="C:/app.exe",
+        title_snapshot="App",
+        established_by_evidence_ref="evidence-target-bound",
+        epoch=EPOCH,
+    )
+    probe = _Probe(
+        LiveTargetSnapshot(
+            hwnd=HWND,
+            root_hwnd=HWND,
+            process_id=PROCESS_ID,
+            executable_identity=binding.executable_identity,
+            region=REGION,
+            foreground_root_hwnd=HWND,
+        ),
+        expected_hit_point=(0, 0),
+        hit_root=None,
+    )
+    permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
+    raw = _RawHarness(True)
+    adapter = AtomicDesktopAdapter(
+        frame_authority=authority,
+        frame_observer=observer,
+        frozen_target_binding=binding,
+        target_probe=probe,
+        mutation_permits=permits,
+        raw_device=raw.executor(),
+        receipt_trace_sink=_Trace(False),
+        post_input_settle_delay_s=0.0,
+    )
+    envelope = _envelope(before, binding, "click")
+    commit_identity = RuntimeCommitIdentity(
+        RuntimeFrameIdentity(
+            frame_id=before.frame_id,
+            epoch=before.epoch,
+            hwnd=before.hwnd,
+            region=before.region,
+            scope=before.scope,
+            submitted_size=before.submitted_size,
+            image_sha256=before.image_sha256,
+        ),
+        RuntimeTargetIdentity.from_binding(binding),
+    )
+    attempt = call_once_with_permit(
+        authority=permits,
+        envelope=envelope,
+        turn_index=0,
+        commit_identity=commit_identity,
+        still_current=lambda: True,
+        execute=lambda pinned: adapter.execute(pinned),
+    ).transition
+    assert attempt is not None
+
+    assert attempt.outcome is ControllerOutcome.REJECTED
+    assert raw.calls == []
 
 
 def test_atomic_adapter_records_admission_and_single_raw_receipt() -> None:
@@ -2420,3 +2635,130 @@ def test_completed_click_keeps_old_action_atomic_then_offers_new_foreground() ->
     successor = workspace.observe()
     assert successor.replaces_binding
     assert successor.surface.hwnd == next_hwnd
+
+def _refresh_harness(harness):
+    requests: list[str] = []
+    snapshot_mode: list[str] = ["unavailable"]
+
+    class _WorkspacePort:
+        binding = harness.binding
+
+        def finish_action(self, **kwargs) -> None:
+            pass
+
+        def request_target_refresh(self) -> None:
+            requests.append("refresh")
+
+        def snapshot(self, hwnd: int) -> LiveTargetSnapshot | None:
+            if snapshot_mode[0] == "unavailable":
+                return None
+            return LiveTargetSnapshot(
+                hwnd=HWND,
+                root_hwnd=HWND,
+                process_id=PROCESS_ID,
+                executable_identity=harness.binding.executable_identity,
+                region=REGION,
+                foreground_root_hwnd=HWND,
+            )
+
+        def hit_test_root(self, x: int, y: int) -> int | None:
+            return HWND if snapshot_mode[0] == "valid" else None
+
+    workspace = _WorkspacePort()
+    from winpilot.vnext.desktop_adapter import atomic as atomic_module
+    monkeypatch = pytest.MonkeyPatch()
+
+    def queue_run(_action, callback, **kwargs):
+        return callback()
+
+    monkeypatch.setattr(atomic_module.DESKTOP_ACTION_QUEUE, "run", queue_run)
+    adapter = AtomicDesktopAdapter(
+        frame_authority=harness.authority,
+        frame_observer=harness.observer,
+        frozen_target_binding=harness.binding,
+        target_probe=workspace,
+        desktop_workspace=workspace,
+        mutation_permits=harness.permits,
+        raw_device=harness.raw.executor(),
+        receipt_trace_sink=harness.trace,
+        post_input_settle_delay_s=0.12,
+    )
+    harness.adapter = adapter
+
+    def run_one(index: int, *, still_current: bool = True):
+        envelope = _replace_envelope(
+            harness.envelope,
+            turn_index=index,
+        )
+        current = harness.authority.current
+        assert current is not None
+        frame_identity = RuntimeFrameIdentity(
+            frame_id=current.frame_id,
+            epoch=current.epoch,
+            hwnd=current.hwnd,
+            region=current.region,
+            scope=current.scope,
+            submitted_size=current.submitted_size,
+            image_sha256=current.image_sha256,
+        )
+        return call_once_with_permit(
+            authority=harness.permits,
+            envelope=envelope,
+            turn_index=index,
+            commit_identity=RuntimeCommitIdentity(
+                frame_identity,
+                RuntimeTargetIdentity.from_binding(harness.binding),
+            ),
+            still_current=lambda: still_current,
+            execute=lambda admitted: adapter.execute(
+                admitted,
+                stop_event=None,
+            ),
+        )
+
+    return requests, adapter, workspace, run_one, snapshot_mode, monkeypatch
+
+
+def test_repeated_geometry_rejections_request_target_refresh() -> None:
+    harness = _harness("click")
+    requests, adapter, _workspace, run_one, _mode, monkeypatch = (
+        _refresh_harness(harness)
+    )
+
+    for index in range(1, 4):
+        attempt = run_one(index)
+        assert attempt.transition is not None
+        assert attempt.transition.outcome is ControllerOutcome.REJECTED
+        assert attempt.transition.input_completed is False
+
+    assert len(requests) == 1
+    assert adapter.target_refresh_requested is True
+    assert adapter.consecutive_rejection_kinds[-1] == "target_unavailable"
+    monkeypatch.undo()
+
+
+def test_mixed_rejections_do_not_request_premature_refresh() -> None:
+    harness = _harness("click")
+    requests, adapter, _workspace, run_one, snapshot_mode, monkeypatch = (
+        _refresh_harness(harness)
+    )
+
+    # Two stale-geometry rejections, then a non-geometry permit rejection, then
+    # one more geometry rejection: the trailing window is no longer all
+    # geometry, so no refresh may be requested.
+    for index in range(1, 3):
+        run_one(index)
+    snapshot_mode[0] = "valid"
+    permit_rejected = run_one(3, still_current=False)
+    assert permit_rejected.transition is not None
+    assert permit_rejected.transition.outcome is ControllerOutcome.REJECTED
+    assert (
+        harness.trace.records[-1][0].error_kind
+        == "permit_runtime_state_changed"
+    )
+    snapshot_mode[0] = "unavailable"
+    run_one(4)
+
+    assert requests == []
+    assert adapter.target_refresh_requested is False
+    monkeypatch.undo()

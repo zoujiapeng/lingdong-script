@@ -863,6 +863,86 @@ def test_installed_app_resolution_uses_binary_aliases_and_typo_fuzzing(monkeypat
     assert fuzzy["match_kind"] == "fuzzy"
 
 
+def test_launch_application_prefers_exact_path_command_over_fuzzy_index(
+    monkeypatch,
+) -> None:
+    from winpilot.perception import apps
+
+    launched: list[list[str]] = []
+
+    def fake_popen(argv, **_kwargs):
+        launched.append(list(argv))
+        return None
+
+    monkeypatch.setattr(apps.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(apps, "_index", lambda: [
+        {
+            "name": "Notepad++",
+            "target": r"C:\Program Files\Notepad++\notepad++.exe",
+            "kind": "exe",
+            "aliases": ["notepad++", "notepad"],
+        },
+    ])
+    monkeypatch.setattr(apps, "resolve", lambda _query, max_results=1: [
+        {
+            "name": "Notepad++",
+            "target": r"C:\Program Files\Notepad++\notepad++.exe",
+            "kind": "exe",
+            "aliases": ["notepad++", "notepad"],
+        },
+    ])
+    # An exact PATH command must win over the fuzzy "notepad++" index hit.
+    monkeypatch.setattr(
+        apps.shutil,
+        "which",
+        lambda name: (
+            r"C:\WINDOWS\system32\notepad.EXE"
+            if name == "notepad"
+            else None
+        ),
+    )
+    # No visible notepad instance exists in this test environment.
+    monkeypatch.setattr(apps, "_activate_existing_instance", lambda _path: None)
+
+    result = apps.launch_application("notepad")
+
+    assert result["ok"] is True
+    assert result["via"] == "path"
+    assert result["target"].endswith("notepad.EXE")
+    assert launched == []
+
+
+def test_launch_application_uses_index_for_non_path_display_names(monkeypatch) -> None:
+    from winpilot.perception import apps
+
+    monkeypatch.setattr(apps, "_index", lambda: [
+        {
+            "name": "Nebula Player",
+            "target": r"C:\Start\Nebula Player.lnk",
+            "kind": "lnk",
+            "aliases": [],
+        },
+    ])
+    monkeypatch.setattr(apps.shutil, "which", lambda _name: None)
+    started: list[str] = []
+    monkeypatch.setattr(apps.os, "startfile", lambda target: started.append(target))
+
+    result = apps.launch_application("Nebula Player")
+
+    assert result["ok"] is True
+    assert result["via"] == "lnk"
+    assert result["target"] == r"C:\Start\Nebula Player.lnk"
+    assert started == [r"C:\Start\Nebula Player.lnk"]
+
+
+def test_launch_application_rejects_empty_name() -> None:
+    from winpilot.perception import apps
+
+    result = apps.launch_application("   ")
+    assert result["ok"] is False
+    assert "empty" in result["error"]
+
+
 def test_open_application_stage_rejects_controller_ok_without_verification(monkeypatch) -> None:
     from winpilot.agent.tool_result import ToolResult
     from winpilot.tasking.compiler import TaskContractCompiler

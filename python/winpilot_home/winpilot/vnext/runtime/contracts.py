@@ -48,7 +48,15 @@ MISSION_RUNTIME_RESULT_FORMAT = "mission-runtime-result/0"
 CURRENT_FRAME_EVIDENCE_KIND = "current_frame"
 POST_ACTION_FRAME_EVIDENCE_KIND = "post_action_frame"
 APPROVED_DESKTOP_ACTIONS = frozenset(
-    {"click", "double_click", "drag", "scroll", "type_text", "hotkey"}
+    {
+        "click",
+        "double_click",
+        "drag",
+        "scroll",
+        "type_text",
+        "hotkey",
+        "launch_application",
+    }
 )
 APPROVED_OUTCOME_TOOLS = frozenset(
     {"claim_obligation_done", "blocked"}
@@ -301,7 +309,7 @@ class RuntimeCommitIdentity:
         if (
             self.frame.hwnd != self.target.hwnd
             or self.frame.epoch != self.target.epoch
-            or self.frame.scope != "target_window"
+            or self.frame.scope not in {"target_window", "full_desktop"}
         ):
             raise RuntimeContractError(
                 "frame and target commit identities disagree"
@@ -512,6 +520,7 @@ class ActorPreviousActionView:
     local_visual_change: str | None = None
     frame_comparable: bool | None = None
     target_binding_valid: bool | None = None
+    error_kind: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.action) is not str or not _TOOL.fullmatch(self.action):
@@ -565,9 +574,15 @@ class ActorPreviousActionView:
                 raise RuntimeContractError(
                     f"previous action {name} must be boolean or null"
                 )
+        if self.error_kind is not None:
+            object.__setattr__(
+                self,
+                "error_kind",
+                _text(self.error_kind, "error_kind", allow_empty=True),
+            )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "action": self.action,
             "semantic_summary": self.semantic_summary,
             "local_intent": self.local_intent,
@@ -577,6 +592,9 @@ class ActorPreviousActionView:
             "frame_comparable": self.frame_comparable,
             "target_binding_valid": self.target_binding_valid,
         }
+        if self.error_kind is not None:
+            result["error_kind"] = self.error_kind
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -827,7 +845,7 @@ def project_actor_turn_input(
         or frame_state.frame_id != projection.frame_id
         or frame_state.hwnd != binding.hwnd
         or frame_state.epoch != binding.epoch
-        or frame_state.scope != "target_window"
+        or frame_state.scope not in {"target_window", "full_desktop"}
         or not frame_state.authoritative
         or not frame_state.fresh
     ):
@@ -884,6 +902,11 @@ def project_actor_turn_input(
             ),
             target_binding_valid=(
                 None if effect is None else effect.target_binding_valid
+            ),
+            error_kind=(
+                None
+                if not hasattr(transition, "error_kind")
+                else transition.error_kind
             ),
         )
     tools: list[ActorToolView] = []

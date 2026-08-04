@@ -46,40 +46,11 @@ _SAFE_ACTION_SUMMARY_BY_ACTION = {
     "click": frozenset({"click"}),
     "double_click": frozenset({"double_click"}),
     "drag": frozenset({"drag"}),
-    "scroll": frozenset({"scroll_down", "scroll_up"}),
+    "scroll": frozenset({"scroll"}),
     "type_text": frozenset({"type_text"}),
+    "launch_application": frozenset({"launch_application"}),
+    "hotkey": frozenset({"hotkey"}),
 }
-_HOTKEY_SUMMARY_MODIFIERS = ("ctrl", "alt", "shift", "win")
-_HOTKEY_SUMMARY_PRIMARY_KEYS = frozenset(
-    {
-        "enter",
-        "esc",
-        "tab",
-        "space",
-        "backspace",
-        "delete",
-        "insert",
-        "home",
-        "end",
-        "pageup",
-        "pagedown",
-        "up",
-        "down",
-        "left",
-        "right",
-        "capslock",
-        "numlock",
-        "printscreen",
-        "menu",
-        "plus",
-        "minus",
-        "comma",
-        "period",
-        "slash",
-        *(f"f{index}" for index in range(1, 13)),
-        *tuple("abcdefghijklmnopqrstuvwxyz0123456789"),
-    }
-)
 
 
 def thaw(value: Any) -> Any:
@@ -1486,6 +1457,7 @@ class TransitionSummary:
     obligation_id: str = ""
     action_id: str | None = None
     action_effect: ActionEffectSummary | None = None
+    error_kind: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1544,6 +1516,17 @@ class TransitionSummary:
                     InvalidMissionEvent,
                 ),
             )
+        if self.error_kind is not None:
+            object.__setattr__(
+                self,
+                "error_kind",
+                _contract_text(
+                    self.error_kind,
+                    "transition error_kind",
+                    InvalidMissionEvent,
+                    allow_empty=True,
+                ),
+            )
         if self.action_effect is not None:
             effect = (
                 self.action_effect
@@ -1578,6 +1561,8 @@ class TransitionSummary:
             result["action_id"] = self.action_id
         if self.action_effect is not None:
             result["action_effect"] = self.action_effect.to_dict()
+        if self.error_kind is not None:
+            result["error_kind"] = self.error_kind
         return result
 
 
@@ -1933,6 +1918,7 @@ _EVENT_PAYLOAD_FIELDS = {
                 "action_id",
                 "action_effect",
                 "action_summary",
+                "error_kind",
             }
         ),
     ),
@@ -2029,38 +2015,19 @@ _EVENT_STRING_ARRAY_FIELDS = frozenset(
 
 
 def is_safe_action_summary(action: str, summary: str) -> bool:
-    """Validate the canonical privacy-safe summary owned by Mission events."""
+    """Validate the canonical privacy-safe summary owned by Mission events.
+
+    Every action projects to its bare tool name; per-action detail (scroll
+    direction, key names) lives in the structured previous-action view and
+    the fresh screenshot, not in the completed-action history.
+    """
 
     if type(action) is not str or type(summary) is not str:
         return False
     fixed = _SAFE_ACTION_SUMMARY_BY_ACTION.get(action)
     if fixed is not None:
         return summary in fixed
-    if action != "hotkey" or not summary.startswith("hotkey_"):
-        return False
-    keys = tuple(summary.removeprefix("hotkey_").split("_"))
-    if not keys or any(not key for key in keys):
-        return False
-    primary = keys[-1]
-    modifiers = keys[:-1]
-    return (
-        (
-            primary in _HOTKEY_SUMMARY_PRIMARY_KEYS
-            or (
-                len(keys) == 1
-                and primary in _HOTKEY_SUMMARY_MODIFIERS
-            )
-        )
-        and len(modifiers) == len(set(modifiers))
-        and all(key in _HOTKEY_SUMMARY_MODIFIERS for key in modifiers)
-        and tuple(
-            sorted(
-                modifiers,
-                key=_HOTKEY_SUMMARY_MODIFIERS.index,
-            )
-        )
-        == modifiers
-    )
+    return False
 
 
 def _validate_event_payload(

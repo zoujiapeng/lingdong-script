@@ -34,8 +34,8 @@ _DEFAULTS: dict[str, Any] = {
         # Keep one provider request bounded.  The runner may retry a failed
         # request, but a single stalled decision must not hold the desktop
         # loop indefinitely.
-        "request_timeout_s": 75,
-        "request_total_timeout_s": 120,
+        "request_timeout_s": 90,
+        "request_total_timeout_s": 180,
         "max_retries": 2,
         "pricing": {
             "provider": "deepseek",
@@ -110,11 +110,11 @@ _DEFAULTS: dict[str, Any] = {
         # lightweight.  It is a runtime policy, not a task or app recipe.
         "native_visual_thinking": True,
         "native_visual_thinking_mode": "adaptive",
-        # Conservative auto mode.  A crop is used only for a validated,
-        # foreground, single-window target; every ambiguous/global scene falls
-        # back to the complete virtual desktop.  Disable to force full-screen
-        # frames while evaluating whether cropping helps a particular setup.
-        "target_window_capture_enabled": True,
+        # Screen-first frames.  The model sees the real virtual desktop by
+        # default so it can react to windows it never bound; a window crop is
+        # an explicit opt-in and is still used only for a validated,
+        # foreground, single-window target.
+        "target_window_capture_enabled": False,
         # Experimental human/agent input arbitration.  Window-message/UIA
         # actions are preferred; physical keyboard focus is never taken from
         # a different foreground window, and human cursor movement wins over
@@ -154,9 +154,12 @@ _DEFAULTS: dict[str, Any] = {
     },
     "vnext": {
         "live_agent_enabled": True,
-        "max_turns": 30,
-        "max_runtime_s": 300,
-        "max_model_calls": 60,
+        # Generous real-task budgets: slow visual providers and multi-step
+        # ordinary desktop tasks must not be cut off by a tight wall clock or
+        # turn cap.  Completion quality beats bounded-run accounting.
+        "max_turns": 60,
+        "max_runtime_s": 900,
+        "max_model_calls": 120,
     },
     "server": {"host": "127.0.0.1", "port": 8765},
 }

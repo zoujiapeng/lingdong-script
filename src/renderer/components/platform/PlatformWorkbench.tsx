@@ -20,6 +20,7 @@ import {
   Gauge,
   GitBranch,
   History,
+  Info,
   Library,
   Layers3,
   ListChecks,
@@ -875,7 +876,7 @@ function TaskContractRuntimeSection({
           <span>通道</span><code>{String(taskIntent.channel || '-')}</code>
           <span>接收方</span><code>{String(taskIntent.recipient || '-')}</code>
           <span>工件类型</span><code>{String(taskIntent.media_type || 'unknown')}</code>
-          <span>经验策略</span><code>{taskContract.experience_policy === 'disabled' || arp.experience_policy === 'disabled' ? '冷启动' : '允许阶段技能'}</code>
+          <span>经验策略</span><code>{taskContract.experience_policy === 'disabled' || arp.experience_policy === 'disabled' ? '长期经验记忆未启用（冷启动）' : '允许阶段技能'}</code>
         </div>
       ) : (
         <div className="arp-detail-note"><History size={14} />该运行早于合同快照持久化；阶段、能力、工件与证据直接由原始 trace 和受管理工件清单恢复，不重新推断或改写原任务意图。</div>
@@ -2402,6 +2403,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
               {memoryView === 'session' && <button className="arp-icon-button" title="清空会话记忆" onClick={clearSessions} disabled={busy}><X size={13} /></button>}
             </div>
           </div>
+          {memoryView === 'long' && <div className="arp-detail-note"><Info size={13} />这些长期记忆属于 Studio 回放与离线流程；当前 vNext 智能代理主链未启用长期经验记忆（experience_policy=disabled），不会读取或写入此项。</div>}
           <div className="arp-asset-list">
             {memoryView === 'long' && memories.map((item) => (
               <React.Fragment key={item.id}>
@@ -3112,13 +3114,13 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
         </button>
         {desktopWindowApi?.minimizeWindow && (
           <div className="ld-window-controls" aria-label="窗口控制">
-            <button type="button" onClick={() => void desktopWindowApi.minimizeWindow?.()} aria-label="最小化窗口" title="最小化">
+            <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void desktopWindowApi.minimizeWindow?.()} aria-label="最小化窗口" title="最小化">
               <Minus size={14} />
             </button>
-            <button type="button" onClick={() => void desktopWindowApi.toggleMaximizeWindow?.()} aria-label="最大化或还原窗口" title="最大化或还原">
+            <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void desktopWindowApi.toggleMaximizeWindow?.()} aria-label="最大化或还原窗口" title="最大化或还原">
               <Square size={11} />
             </button>
-            <button className="close" type="button" onClick={() => void desktopWindowApi.closeWindow?.()} aria-label="关闭窗口" title="关闭">
+            <button className="close" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => void desktopWindowApi.closeWindow?.()} aria-label="关闭窗口" title="关闭">
               <X size={14} />
             </button>
           </div>

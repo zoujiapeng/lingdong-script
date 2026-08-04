@@ -1782,7 +1782,7 @@
 
 /* Day / night toggle carried over from the newui floating template. */
 .ld-resource-body .ld-theme-showcase .ld-dnt-toggle {
-  --dnt-duration: 780ms;
+  --dnt-duration: 1300ms;
   --dnt-ease: cubic-bezier(0.16, 1, 0.3, 1);
   appearance: none;
   position: relative;
@@ -1851,7 +1851,7 @@
 .ld-dnt-sky {
   z-index: 0;
   opacity: 1;
-  transition: opacity 620ms ease;
+  transition: opacity 1000ms ease;
 }
 
 .ld-dnt-sky-day {
@@ -1919,13 +1919,13 @@
   z-index: 2;
   opacity: 0;
   transform: translate3d(0, -145px, 0);
-  transition: transform 650ms var(--dnt-ease), opacity 260ms ease;
+  transition: transform 1080ms var(--dnt-ease), opacity 420ms ease;
 }
 
 .ld-dnt-toggle[data-state="night"] .ld-dnt-stars {
   opacity: 1;
   transform: translate3d(0, 0, 0);
-  transition: transform 710ms var(--dnt-ease) 70ms, opacity 360ms ease 110ms;
+  transition: transform 1180ms var(--dnt-ease) 110ms, opacity 520ms ease 170ms;
 }
 
 .ld-dnt-star {
@@ -1974,7 +1974,7 @@
 .ld-dnt-cloud-layer {
   z-index: 2;
   transform: translate3d(0, 0, 0);
-  transition: transform 720ms var(--dnt-ease), opacity 260ms ease;
+  transition: transform 1200ms var(--dnt-ease), opacity 420ms ease;
 }
 
 .ld-dnt-toggle[data-state="night"] .ld-dnt-cloud-layer {
@@ -2060,26 +2060,26 @@
   opacity: 1;
   transform: scale(1);
   background: radial-gradient(circle at 35% 27%, #ffe36e 0%, #f8c82b 54%, #e4a91c 100%);
-  transition: opacity 290ms ease 170ms, transform 650ms var(--dnt-ease);
+  transition: opacity 420ms ease 260ms, transform 1050ms var(--dnt-ease);
 }
 
 .ld-dnt-moon {
   opacity: 0;
   transform: scale(0.82) rotate(-22deg);
   background: radial-gradient(circle at 35% 27%, #f4f6f9 0%, #d3d7df 57%, #aeb5c1 100%);
-  transition: opacity 260ms ease, transform 650ms var(--dnt-ease);
+  transition: opacity 420ms ease, transform 1050ms var(--dnt-ease);
 }
 
 .ld-dnt-toggle[data-state="night"] .ld-dnt-sun {
   opacity: 0;
   transform: scale(0.82) rotate(18deg);
-  transition: opacity 240ms ease, transform 650ms var(--dnt-ease);
+  transition: opacity 380ms ease, transform 1050ms var(--dnt-ease);
 }
 
 .ld-dnt-toggle[data-state="night"] .ld-dnt-moon {
   opacity: 1;
   transform: scale(1) rotate(0);
-  transition: opacity 300ms ease 170ms, transform 650ms var(--dnt-ease);
+  transition: opacity 480ms ease 260ms, transform 1050ms var(--dnt-ease);
 }
 
 .ld-dnt-crater {
@@ -2102,7 +2102,7 @@
     inset 0 -4px 5px rgba(255, 255, 255, 0.38),
     inset 2px 0 4px rgba(255, 255, 255, 0.2),
     inset -2px 0 4px rgba(0, 0, 0, 0.16);
-  transition: box-shadow 620ms ease;
+  transition: box-shadow 1000ms ease;
 }
 
 .ld-dnt-toggle[data-state="night"] .ld-dnt-rim {
@@ -2902,6 +2902,18 @@
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
+  }
+
+  /* The day/night theme switch is a compact, user-triggered showcase. It
+     keeps its own bounded transition so the crafted animation can still be
+     appreciated when the OS disables global client-area animation. */
+  .ld-floating-app .ld-dnt-toggle,
+  .ld-floating-app .ld-dnt-toggle *,
+  .ld-floating-app .ld-dnt-toggle *::before,
+  .ld-floating-app .ld-dnt-toggle *::after {
+    animation-duration: var(--dnt-duration, 1300ms) !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: var(--dnt-duration, 1300ms) !important;
   }
 }
 

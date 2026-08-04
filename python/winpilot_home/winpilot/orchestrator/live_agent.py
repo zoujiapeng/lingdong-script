@@ -20,7 +20,7 @@ import time
 from typing import Any, Protocol
 import uuid
 
-from ..config import TRACES_DIR
+from ..config import CONFIG, TRACES_DIR
 from ..action.executor import (
     ADMITTED_PHYSICAL_CLICK_BACKEND,
     ADMITTED_PHYSICAL_DRAG_BACKEND,
@@ -90,6 +90,7 @@ from ..vnext.mission import (
 )
 from ..vnext.model_roles import (
     FlowFragmentProposer,
+    INITIAL_ACTOR_SYSTEM_CONTRACT,
     VISUAL_ACTOR_MODEL_ROLE,
     LiveVisualActor,
     VisualActorTurnAdmission,
@@ -121,7 +122,7 @@ from .runtime import ArpExecution, NodeResult
 _RUNTIME_VERSION = "vnext"
 _OBLIGATION_ID = "full-goal"
 _RUNTIME_EVIDENCE_ROOT = TRACES_DIR / "vnext_runtime_evidence"
-_TARGET_MAX_AGE_MS = 15_000
+_TARGET_MAX_AGE_MS = 60_000
 _FUTURE_CLOCK_SKEW_MS = 2_000
 _MAX_SUBMITTED_SIDE = 1120
 _MAX_CONSECUTIVE_INVALID_PROPOSALS = 2
@@ -129,7 +130,15 @@ _MAX_CONSECUTIVE_ACTOR_ERRORS = 2
 _NON_WHITESPACE_PATTERN = r"\S"
 _BLOCKER_KIND_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 _APPROVED_ACTIONS = frozenset(
-    {"click", "double_click", "drag", "scroll", "type_text", "hotkey"}
+    {
+        "click",
+        "double_click",
+        "drag",
+        "scroll",
+        "type_text",
+        "hotkey",
+        "launch_application",
+    }
 )
 _GUI_GATES = (
     "target_bound",
@@ -243,6 +252,8 @@ class _CompositionDependencies:
     runtime_evidence_root: Path | None = None
     connector_factory: Callable[[], Any] | None = None
     provider_transport_factory: Callable[[], Any] | None = None
+    config_snapshot: Callable[[], dict[str, Any]] | None = None
+    shell_factory: Callable[[], Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +271,7 @@ class _FrozenTarget:
     reader: Callable[[int], "_TargetFacts | None"]
     foreground_reader: Callable[[], int | None]
     hit_test_root: Callable[[int, int], int | None]
+    desktop_shell: bool = False
 
     def trace_identity(self) -> dict[str, Any]:
         return {
@@ -272,6 +284,9 @@ class _FrozenTarget:
             "executable_identity_sha256": hashlib.sha256(
                 self.executable_identity.encode("utf-8")
             ).hexdigest(),
+            "binding_mode": (
+                "desktop_shell" if self.desktop_shell else "window"
+            ),
         }
 
 
@@ -757,6 +772,115 @@ def _process_executable_identity(process_id: int) -> str:
         kernel32.CloseHandle(handle)
 
 
+class _LiveAgentStatusProvider:
+    """Read-only Actor-owned status facts resolved without a desktop lease."""
+
+    _STATUS_FORMAT = "agent-status/1"
+    _MEMORY_FORMAT = "memory-status/1"
+    _CAPABILITIES_FORMAT = "capabilities/1"
+
+    def __init__(
+        self,
+        *,
+        runtime_version: str,
+        model: str,
+        budget: _Budget,
+        run_id: str,
+        mission_id: str,
+        thread_id: str,
+        turn_id: str,
+        live_agent_enabled: bool,
+        experience_policy: str,
+        connector_available: bool,
+        config_experience_memory: bool,
+        memory_store_present: bool,
+    ) -> None:
+        self._runtime_version = runtime_version
+        self._model = model
+        self._budget = budget
+        self._run_id = run_id
+        self._mission_id = mission_id
+        self._thread_id = thread_id
+        self._turn_id = turn_id
+        self._live_agent_enabled = live_agent_enabled
+        self._experience_policy = experience_policy
+        self._connector_available = connector_available
+        self._config_experience_memory = config_experience_memory
+        self._memory_store_present = memory_store_present
+
+    def resolve(self, name: str) -> dict[str, Any]:
+        if name == "get_agent_status":
+            return self._agent_status()
+        if name == "get_memory_status":
+            return self._memory_status()
+        if name == "get_capabilities":
+            return self._capabilities()
+        raise ValueError(f"unknown Actor status tool: {name!r}")
+
+    def _agent_status(self) -> dict[str, Any]:
+        return {
+            "format": self._STATUS_FORMAT,
+            "runtime_version": self._runtime_version,
+            "model": self._model,
+            "live_agent_enabled": self._live_agent_enabled,
+            "budget": self._budget.to_dict(),
+            "run_id": self._run_id,
+            "mission_id": self._mission_id,
+            "thread_id": self._thread_id,
+            "turn_id": self._turn_id,
+            "experience_policy": self._experience_policy,
+            "connector_available": self._connector_available,
+        }
+
+    def _memory_status(self) -> dict[str, Any]:
+        enabled = self._experience_policy == "allow"
+        return {
+            "format": self._MEMORY_FORMAT,
+            "long_term_experience_memory": (
+                "enabled" if enabled else "disabled"
+            ),
+            "enabled": enabled,
+            "experience_policy": self._experience_policy,
+            "reason": (
+                "long-term experience memory is active in this Agent chain"
+                if enabled
+                else (
+                    "vNext live Agent chain experience_policy=disabled; "
+                    "no memory retrieval or experience write is attached"
+                )
+            ),
+            "config_agent_experience_memory": self._config_experience_memory,
+            "store_present": self._memory_store_present,
+        }
+
+    def _capabilities(self) -> dict[str, Any]:
+        return {
+            "format": self._CAPABILITIES_FORMAT,
+            "direct_reply": True,
+            "status_queries": (
+                "get_agent_status",
+                "get_memory_status",
+                "get_capabilities",
+            ),
+            "connector": (
+                "search_connector_tools, call_connector_tool"
+                if self._connector_available
+                else "unavailable"
+            ),
+            "observe_desktop": True,
+            "desktop_actions": (
+                "click",
+                "double_click",
+                "drag",
+                "scroll",
+                "type_text",
+                "hotkey",
+                "launch_application",
+            ),
+            "outcome_tools": ("claim_obligation_done", "blocked"),
+        }
+
+
 def _read_win32_foreground_root() -> int | None:
     try:
         import win32gui
@@ -882,13 +1006,22 @@ class _BoundTargetProbe:
         *,
         reader: Callable[[int], _TargetFacts | None],
         hit_test_root: Callable[[int, int], int | None],
+        desktop_shell: bool = False,
     ) -> None:
         self._expected = expected
         self._reader = reader
         self._hit_test = hit_test_root
+        self._desktop_shell = desktop_shell
 
     def _matches(self, current: _TargetFacts | None) -> bool:
         expected = self._expected
+        foreground_ok = (
+            current is not None
+            and (
+                self._desktop_shell
+                or current.foreground_root_hwnd == expected.hwnd
+            )
+        )
         return bool(
             type(current) is _TargetFacts
             and current.hwnd == expected.hwnd
@@ -897,7 +1030,7 @@ class _BoundTargetProbe:
             and current.executable_identity == expected.executable_identity
             and current.class_name == expected.class_name
             and current.region == expected.region
-            and current.foreground_root_hwnd == expected.hwnd
+            and foreground_ok
         )
 
     def snapshot(self, hwnd: int) -> LiveTargetSnapshot | None:
@@ -1024,6 +1157,7 @@ def _freeze_prebound_target(
             "usable",
             "failure_type",
             "reason",
+            "binding_mode",
         },
         "execution_context.target_window",
     )
@@ -1039,9 +1173,13 @@ def _freeze_prebound_target(
     title = target.get("title")
     class_name = target.get("class_name")
     rect = target.get("rect")
+    binding_mode = target.get("binding_mode")
+    desktop_shell = binding_mode == "desktop_shell"
+    if not desktop_shell and binding_mode != "window":
+        raise ValueError("Electron target binding_mode is not exact")
     if (
         target.get("format") != "desktop-target/1"
-        or target.get("foreground_verified") is not True
+        or (not desktop_shell and target.get("foreground_verified") is not True)
         or target.get("usable") is not True
         or target.get("failure_type") != ""
         or target.get("reason") != ""
@@ -1110,7 +1248,7 @@ def _freeze_prebound_target(
             mismatches.append("class_name")
         if current.region != expected_region:
             mismatches.append("region")
-        if current.foreground_root_hwnd != hwnd:
+        if not desktop_shell and current.foreground_root_hwnd != hwnd:
             mismatches.append("foreground_root_hwnd")
     if mismatches:
         raise ValueError(
@@ -1125,6 +1263,7 @@ def _freeze_prebound_target(
         "class_name": class_name,
         "region": list(expected_region),
         "captured_at": captured_at,
+        "binding_mode": "desktop_shell" if desktop_shell else "window",
     }
     digest = hashlib.sha256(
         json.dumps(
@@ -1138,6 +1277,7 @@ def _freeze_prebound_target(
         current,
         reader=reader,
         hit_test_root=hit_test,
+        desktop_shell=desktop_shell,
     )
     if probe.snapshot(hwnd) is None:
         raise ValueError("pre-bound target changed during admission")
@@ -1155,6 +1295,7 @@ def _freeze_prebound_target(
         reader=reader,
         foreground_reader=foreground_reader,
         hit_test_root=hit_test,
+        desktop_shell=desktop_shell,
     )
 
 
@@ -1236,6 +1377,20 @@ def _tool_catalog() -> ToolCatalog:
             },
             ["keys"],
         ),
+        "launch_application": _object_schema(
+            {
+                "app": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                },
+                "arguments": {
+                    "type": "string",
+                    "maxLength": 4096,
+                },
+            },
+            ["app", "arguments"],
+        ),
         "claim_obligation_done": _object_schema(
             {
                 "concise_claim": {
@@ -1277,6 +1432,7 @@ def _tool_catalog() -> ToolCatalog:
         "scroll",
         "type_text",
         "hotkey",
+        "launch_application",
         "claim_obligation_done",
         "blocked",
     )
@@ -1319,6 +1475,19 @@ def _tool_catalog() -> ToolCatalog:
             )
         )
     return ToolCatalog(tuple(tools))
+
+
+def _launch_application_primitive(
+    app: str,
+    arguments: str,
+) -> dict[str, Any]:
+    """One generic Windows application launch without any app adapter."""
+    from ..perception.apps import launch_application
+
+    result = launch_application(app, arguments)
+    if isinstance(result, Mapping):
+        return dict(result)
+    return {"ok": False, "error": "launcher returned a non-object result"}
 
 
 def _jpeg_payload(image_b64: str) -> bytes | None:
@@ -1622,25 +1791,56 @@ class _LiveRuntimeState:
             expected_previous = (
                 previous.frame_id if previous is not None else 0
             )
+            desktop_shell = bool(
+                getattr(self._workspace, "desktop_shell", False)
+            )
+            crop_enabled = bool(
+                CONFIG.get(
+                    "controller",
+                    "target_window_capture_enabled",
+                    default=False,
+                )
+            )
+            # Screen-first frames.  The model sees the whole real virtual
+            # desktop by default so it can react to windows it never bound;
+            # a window crop is an explicit opt-in (``target_window_capture_
+            # enabled``) and the desktop shell keeps its labelled window
+            # scope for the full-desktop surface it binds.
+            if desktop_shell or crop_enabled:
+                capture_region = Region(*first.region)
+                expected_scope = "target_window"
+                scope_override = (
+                    "target_window" if desktop_shell else None
+                )
+            else:
+                capture_region = virtual_screen_region()
+                expected_scope = "full_desktop"
+                scope_override = "full_desktop"
             captured = self._observer.capture(
                 epoch=binding.epoch,
                 hwnd=binding.hwnd,
                 phase="observe",
-                provided_region=Region(*first.region),
+                provided_region=capture_region,
                 expected_previous_frame_id=expected_previous,
+                scope_override=scope_override,
             )
             if (
                 captured is None
                 or captured.hwnd != binding.hwnd
                 or captured.epoch != binding.epoch
+                or captured.scope != expected_scope
                 or (
                     captured.region.left,
                     captured.region.top,
                     captured.region.width,
                     captured.region.height,
                 )
-                != first.region
-                or captured.scope != "target_window"
+                != (
+                    capture_region.left,
+                    capture_region.top,
+                    capture_region.width,
+                    capture_region.height,
+                )
                 or not _jpeg_is_valid(captured.image_b64)
                 or _jpeg_dimensions(captured.image_b64)
                 != captured.submitted_size
@@ -1650,7 +1850,7 @@ class _LiveRuntimeState:
                     if attempt == 0:
                         continue
                 raise RuntimeError(
-                    "fresh target-window JPEG capture failed closed"
+                    "fresh screen-first JPEG capture failed closed"
                 )
             validated = (
                 self._workspace.validate(observation)
@@ -1769,8 +1969,11 @@ class _LiveRuntimeState:
         if (
             current_target is None
             or state.hwnd != current_target.hwnd
-            or state.region != current_target.region
-            or state.scope != "target_window"
+            or state.scope not in {"target_window", "full_desktop"}
+            or (
+                state.scope == "target_window"
+                and state.region != current_target.region
+            )
         ):
             raise RuntimeError("current target/frame identity no longer matches")
         frame = self._runtime_frame(state)
@@ -2417,6 +2620,7 @@ def _build_actor_resources(
     deadline: Callable[[], float],
     publish_run_telemetry: bool = True,
     role_factory: Callable[..., Any] = LiveVisualActor,
+    status_provider: _LiveAgentStatusProvider | None = None,
 ) -> PreparedLiveActor:
     raw_client: Any | None = None
     try:
@@ -2435,6 +2639,7 @@ def _build_actor_resources(
                 api_key=model.api_key,
                 timeout=request_timeout,
                 client_factory=dependencies.client_factory,
+                api_config=model.api,
             )
             model_adapter: Any = build_model_adapter(raw_client, model.api)
         else:
@@ -2511,6 +2716,7 @@ def _build_actor_resources(
                 publish_run_telemetry=publish_run_telemetry,
             ),
             "on_response": record_usage,
+            "max_attempts": _configured_max_attempts(model.api),
         }
         if role_factory is LiveVisualActor:
             role_kwargs["connector_gateway"] = (
@@ -2518,6 +2724,10 @@ def _build_actor_resources(
                 if dependencies.connector_factory is not None
                 else None
             )
+            if status_provider is not None:
+                role_kwargs["status_provider"] = status_provider
+            if dependencies.shell_factory is not None:
+                role_kwargs["shell_runner"] = dependencies.shell_factory()
         actor = _BudgetedActor(role_factory(**role_kwargs), counter)
         return PreparedLiveActor(
             raw_client=raw_client,
@@ -2736,6 +2946,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             ),
             foreground_reader=build.target.foreground_reader,
             hit_test_root=build.target.hit_test_root,
+            desktop_shell=build.target.desktop_shell,
         )
         authority = FrameAuthority()
         observer = FrameObserver(
@@ -2792,6 +3003,8 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             receipt_trace_sink=_RawReceiptTrace(),
             runtime_evidence_plane=runtime_evidence,
             frame_artifact_writer=frame_artifacts,
+            launcher=_launch_application_primitive,
+            desktop_shell=build.target.desktop_shell,
         )
         state.bind_pointer_state_reader(controller.pointer_state)
     except Exception as exc:
@@ -3005,6 +3218,74 @@ def _public_runtime_detail(status: RuntimeStatus) -> str:
     """Project only a stable typed status onto product-visible surfaces."""
 
     return f"vNext Runtime returned {status.value}"
+
+
+def classify_live_agent_failure_stage(
+    terminal_status: RuntimeStatus,
+    detail: str,
+    *,
+    lease_state: Mapping[str, Any],
+    stage_hint: str = "",
+) -> str:
+    """Classify one terminal vNext failure into a product-visible stage.
+
+    Stages: model_routing, desktop_handoff, target_binding, screenshot,
+    tool_format, physical_input, result_verification.  The classification is
+    mechanical; it never rewrites the underlying detail string.
+    """
+    if terminal_status is RuntimeStatus.MISSION_VERIFIED:
+        return ""
+    if terminal_status is RuntimeStatus.CANCELED:
+        return "canceled"
+    if stage_hint:
+        return stage_hint
+    status = terminal_status.value
+    if status in {"invalid_proposal"}:
+        return "tool_format"
+    if status in {"actor_error", "unavailable"}:
+        return "model_routing"
+    # ``blocked`` is the Actor's own semantic verdict ("I cannot advance"),
+    # not a physical-input failure.  Keep it out of the system-failure
+    # buckets; it is the model layer deciding to stop.
+    if status in {"blocked"}:
+        return "model_routing"
+    lease_status = str(lease_state.get("status") or "")
+    lease_error = str(lease_state.get("error") or "")
+    if status == "state_rejected":
+        lowered = f"{detail} {lease_error}".lower()
+        if "desktop lease" in lowered or "handoff" in lowered:
+            return "desktop_handoff"
+        if "target" in lowered and (
+            "mismatch" in lowered
+            or "missing" in lowered
+            or "stale" in lowered
+            or "expired" in lowered
+            or "descriptor" in lowered
+            or "binding" in lowered
+        ):
+            return "target_binding"
+        if "jpeg" in lowered or "capture" in lowered or "frame" in lowered:
+            return "screenshot"
+        if "verification" in lowered or "verify" in lowered or (
+            "completion result" in lowered
+        ):
+            return "result_verification"
+        if "budget" in lowered or "time budget" in lowered:
+            return "model_routing"
+        if "connector" in lowered:
+            return "model_routing"
+    if lease_status in {"closed"} and lease_error:
+        lowered = lease_error.lower()
+        if "target" in lowered or "binding" in lowered:
+            return "target_binding"
+        return "desktop_handoff"
+    # A state_rejected with no recognized keyword is a Runtime/controller
+    # precondition failure (physical input gate, permit, evidence), not an
+    # automatic model-routing verdict.  Surface it as physical_input so the
+    # system layer is not silently attributed to the model.
+    if status == "state_rejected":
+        return "physical_input"
+    return "model_routing"
 
 
 def _public_identity(value: Any) -> str:
@@ -3386,6 +3667,8 @@ class _PreparedHandler:
         dependencies: _CompositionDependencies,
         history: tuple[dict[str, str], ...],
         desktop_lease: DesktopLeaseSlot,
+        thread_id: str,
+        turn_id: str,
     ) -> None:
         self._graph = graph
         self._goal = goal
@@ -3394,6 +3677,8 @@ class _PreparedHandler:
         self._dependencies = dependencies
         self._history = tuple(deepcopy(history))
         self._desktop_lease = desktop_lease
+        self._thread_id = thread_id
+        self._turn_id = turn_id
         self._claimed = False
         self._lock = threading.Lock()
 
@@ -3417,6 +3702,46 @@ class _PreparedHandler:
             self._dependencies.monotonic() - started,
         )
         return bool(allowed and not stop_event.is_set())
+
+    def _status_provider(
+        self,
+        run_id: str,
+        mission_id: str,
+    ) -> _LiveAgentStatusProvider:
+        from ..memory import experience
+
+        config_snapshot = _plain_dict(
+            self._dependencies.config_snapshot(),
+            "config snapshot",
+        ) if self._dependencies.config_snapshot is not None else {}
+        live_agent_enabled = bool(
+            isinstance(config_snapshot.get("vnext"), dict)
+            and config_snapshot["vnext"].get("live_agent_enabled") is True
+        )
+        config_experience_memory = bool(
+            isinstance(config_snapshot.get("agent"), dict)
+            and config_snapshot["agent"].get("experience_memory") is True
+        )
+        try:
+            store_present = experience.memory_store_present()
+        except Exception:
+            store_present = False
+        return _LiveAgentStatusProvider(
+            runtime_version=_RUNTIME_VERSION,
+            model=self._model.model,
+            budget=self._budget,
+            run_id=run_id,
+            mission_id=mission_id,
+            thread_id=self._thread_id,
+            turn_id=self._turn_id,
+            live_agent_enabled=live_agent_enabled,
+            experience_policy="disabled",
+            connector_available=(
+                self._dependencies.connector_factory is not None
+            ),
+            config_experience_memory=config_experience_memory,
+            memory_store_present=store_present,
+        )
 
     def __call__(
         self,
@@ -3477,6 +3802,7 @@ class _PreparedHandler:
         )
         actor_bundle: PreparedLiveActor | None = None
         try:
+            status_provider = self._status_provider(run_id, mission_id)
             actor_bundle = _build_actor_resources(
                 run_id=run_id,
                 mission_id=mission_id,
@@ -3484,6 +3810,7 @@ class _PreparedHandler:
                 model=self._model,
                 dependencies=self._dependencies,
                 deadline=lambda: deadline[0],
+                status_provider=status_provider,
             )
             BUS.publish(
                 "live_agent_start",
@@ -3574,6 +3901,23 @@ class _PreparedHandler:
                 except Exception:
                     pass
             detail = str(exc) or "vNext initial Actor turn failed"
+            failure_stage = classify_live_agent_failure_stage(
+                (
+                    RuntimeStatus.CANCELED
+                    if stop_event.is_set()
+                    else RuntimeStatus.STATE_REJECTED
+                ),
+                detail,
+                lease_state=self._desktop_lease.snapshot(),
+                stage_hint=(
+                    "desktop_handoff"
+                    if isinstance(exc, DesktopLeaseError)
+                    and "target" not in detail.lower()
+                    else "target_binding"
+                    if isinstance(exc, DesktopLeaseError)
+                    else "model_routing"
+                ),
+            )
             BUS.publish(
                 "live_agent_done",
                 run_id=run_id,
@@ -3586,6 +3930,7 @@ class _PreparedHandler:
                     if stop_event.is_set()
                     else RuntimeStatus.STATE_REJECTED.value
                 ),
+                failure_stage=failure_stage,
                 turns_used=0,
                 model_calls=(
                     actor_bundle.counter.count
@@ -3598,6 +3943,24 @@ class _PreparedHandler:
             return NodeResult(
                 ok=False,
                 branch="canceled" if stop_event.is_set() else "fail",
+                output={
+                    "runtime_version": _RUNTIME_VERSION,
+                    "runtime_budget": budget_wire,
+                    "no_legacy_fallback": True,
+                    "status": (
+                        RuntimeStatus.CANCELED.value
+                        if stop_event.is_set()
+                        else RuntimeStatus.STATE_REJECTED.value
+                    ),
+                    "failure_stage": failure_stage,
+                    "turns_used": 0,
+                    "model_calls": (
+                        actor_bundle.counter.count
+                        if actor_bundle is not None
+                        else 0
+                    ),
+                    "model_usage": model_usage,
+                },
                 error=detail,
             )
         runtime_evidence_anchor: Mapping[str, Any] | None = None
@@ -3685,7 +4048,27 @@ class _PreparedHandler:
                     )
                     turns_used += 1
                     terminal_status = result.status
-                    detail = _public_runtime_detail(result.status)
+                    # Keep the real per-turn failure reason (error_kind,
+                    # rejection diagnostic, format error) instead of replacing
+                    # it with a generic status string: the model and the
+                    # product surface both need the actual cause.  Transport
+                    # failures may carry sensitive provider payload after the
+                    # attempt marker; that tail is stripped before exposure.
+                    raw_detail = str(result.detail or "")
+                    if "model transport failed" in raw_detail:
+                        # Transport failures may carry sensitive provider
+                        # payload (prompt or model response) inside the
+                        # detail; only the typed prefix survives the public
+                        # boundary.
+                        marker = "attempt(s):"
+                        if marker in raw_detail:
+                            detail = raw_detail.split(marker, 1)[0] + marker
+                        else:
+                            detail = raw_detail
+                    else:
+                        detail = raw_detail or _public_runtime_detail(
+                            result.status
+                        )
                     if result.status is RuntimeStatus.INVALID_PROPOSAL:
                         consecutive_invalid_proposals += 1
                     else:
@@ -3906,6 +4289,15 @@ class _PreparedHandler:
                 "runtime_budget": budget_wire,
                 "no_legacy_fallback": True,
                 "status": terminal_status.value,
+                "failure_stage": classify_live_agent_failure_stage(
+                    terminal_status,
+                    detail,
+                    lease_state=(
+                        self._desktop_lease.snapshot()
+                        if terminal_status is not RuntimeStatus.MISSION_VERIFIED
+                        else {}
+                    ),
+                ),
                 "turns_used": turns_used,
                 "model_calls": model_calls,
                 "accepted_event_ids": list(accepted_event_ids),
@@ -3923,6 +4315,7 @@ class _PreparedHandler:
                 runtime_budget=budget_wire,
                 no_legacy_fallback=True,
                 status=terminal_status.value,
+                failure_stage=output["failure_stage"],
                 turns_used=turns_used,
                 model_calls=model_calls,
                 model_usage=model_usage,
@@ -3988,6 +4381,40 @@ class _PreparedHandler:
         )
 
 
+def _configured_max_attempts(api: Mapping[str, Any]) -> int:
+    """Resolve the Actor transport attempt budget from config.api.
+
+    ``api.max_retries`` is the number of retries after the first attempt, so
+    the total attempt budget is retries + 1, clamped to the ModelRetryPolicy
+    ceiling of 5.  Defaults to 1 attempt (no retry) when unset.
+    """
+    raw = api.get("max_retries")
+    if raw is None:
+        return 1
+    try:
+        retries = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(5, retries + 1))
+
+
+def _shell_runner_factory() -> Any | None:
+    """Return the vNext shell runner when shell execution is enabled.
+
+    ``config.agent.shell_enabled`` gates the whole capability; when disabled
+    the tool is simply not offered to the Actor (same as connector/status).
+    The runner is the existing bounded shell primitive with its safety guard.
+    """
+    try:
+        from ..action import shell as shell_module
+
+        if shell_module.shell_enabled():
+            return shell_module
+    except Exception:
+        return None
+    return None
+
+
 def prepare_live_vnext_execution(
     graph: ArpGraph,
     inputs: dict[str, Any],
@@ -4003,6 +4430,8 @@ def prepare_live_vnext_execution(
 
     dependencies = _dependencies or _CompositionDependencies(
         connector_factory=ConnectorGateway,
+        config_snapshot=CONFIG.snapshot,
+        shell_factory=_shell_runner_factory,
     )
     if type(config_snapshot) is not dict:
         raise ValueError("vNext live Agent config snapshot must be a dict")
@@ -4035,6 +4464,8 @@ def prepare_live_vnext_execution(
         dependencies=dependencies,
         history=frozen_history,
         desktop_lease=desktop_lease,
+        thread_id=thread_id,
+        turn_id=turn_id,
     )
     execution = prepare(
         graph,

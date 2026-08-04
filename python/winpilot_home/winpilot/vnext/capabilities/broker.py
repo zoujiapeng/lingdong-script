@@ -25,6 +25,10 @@ from .state import (
     _broker_projection_id,
 )
 
+# Pointer gestures that move/click the physical cursor; excluded while a held
+# pointer lease is active because they would conflict with the held press.
+_POINTER_ACTIONS = frozenset({"click", "double_click", "drag"})
+
 @dataclass(frozen=True, slots=True)
 class CapabilityBroker:
     """Project one bounded tool surface from immutable accepted facts."""
@@ -62,7 +66,7 @@ class CapabilityBroker:
             and frame.frame_id is not None
             and frame.hwnd == target.hwnd
             and frame.epoch == target.epoch
-            and frame.scope == "target_window"
+            and frame.scope in {"target_window", "full_desktop"}
         )
 
     @staticmethod
@@ -161,11 +165,19 @@ class CapabilityBroker:
         pointer_held = cls._pointer_is_owned_held(state)
         if state.pointer.disposition is PointerDisposition.UNKNOWN:
             return False
-        if (
-            state.pointer.disposition is PointerDisposition.HELD
-            and (not pointer_held or tool.name != "drag")
-        ):
-            return False
+        if state.pointer.disposition is PointerDisposition.HELD:
+            # A physically held pointer lease is still owned: the model may
+            # continue/finish the drag, or choose a non-pointer action (hotkey,
+            # type_text, launch, claim, blocked) — those are mechanically safe
+            # while the button is held.  Pointer actions (click, double_click,
+            # a new drag) would conflict with the held press and stay excluded.
+            if pointer_held:
+                if tool.name in _POINTER_ACTIONS and tool.name != "drag":
+                    return False
+            else:
+                # Held but no longer owned (lease lost): nothing pointer-based
+                # is safe; the model must resolve the state first.
+                return False
         if tool.required_any_capabilities and not (
             set(tool.required_any_capabilities) & capabilities
         ):

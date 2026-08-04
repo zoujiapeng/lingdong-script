@@ -329,6 +329,7 @@ function launchTarget(target: string): void {
 function createWindow() {
   const startMinimized = process.argv.includes('--minimized');
   const customFloatingFrame = process.platform === 'win32';
+  const windowIconPath = path.join(getBaseDir(), 'assets', 'icon.png');
 
   setMainWindow(new BrowserWindow({
     width: 900,
@@ -337,6 +338,7 @@ function createWindow() {
     minHeight: 500,
     center: true,
     title: '灵动脚本',
+    ...(fs.existsSync(windowIconPath) ? { icon: windowIconPath } : {}),
     backgroundColor: customFloatingFrame ? '#00000000' : '#eef2f8',
     transparent: customFloatingFrame,
     frame: !customFloatingFrame,
@@ -557,10 +559,27 @@ ipcMain.handle('window:toggle-maximize', () => {
   return true;
 });
 
-ipcMain.handle('window:close', () => {
+ipcMain.handle('window:close', async () => {
   const window = mainWindow;
   if (!window || window.isDestroyed()) return false;
   window.close();
+  // A renderer beforeunload guard can cancel the close to protect an
+  // unsaved Flow draft. The title-bar close button is an explicit quit
+  // intent, so confirm with the user instead of silently doing nothing.
+  if (!window.isDestroyed()) {
+    const { response } = await dialog.showMessageBox(window, {
+      type: 'warning',
+      title: '灵动脚本',
+      message: '有尚未保存的更改，确定要退出吗？',
+      detail: '退出前请确认不需要保存当前工作。',
+      buttons: ['退出', '取消'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (response !== 0) return false;
+    window.destroy();
+  }
   return true;
 });
 

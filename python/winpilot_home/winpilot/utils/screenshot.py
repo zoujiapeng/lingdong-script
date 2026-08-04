@@ -138,8 +138,26 @@ def capture(region: Region | None = None) -> np.ndarray:
 
 
 def window_region(hwnd: int) -> Region:
-    """Window rectangle in physical pixels, DWM-accurate (no invisible borders)."""
+    """Window rectangle in physical pixels.
+
+    GetWindowRect is authoritative: it is the rectangle the OS uses for
+    hit-testing, so screenshots derived from it map 1:1 onto physical clicks.
+    DWM extended bounds are only a fallback when GetWindowRect is obviously
+    wrong (all-zero), because on some DPI/virtualized setups DWM reports a
+    whole-screen rectangle that does not match the actual window.
+    """
     rect = ctypes.wintypes.RECT()
+    if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        raise OSError(f"GetWindowRect 失败 hwnd={hwnd}")
+    region = Region(
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+    )
+    if region.width > 0 and region.height > 0:
+        return region
+    # Fall back to DWM extended bounds only when the real rectangle is empty.
     DWMWA_EXTENDED_FRAME_BOUNDS = 9
     res = ctypes.windll.dwmapi.DwmGetWindowAttribute(
         hwnd,
@@ -147,7 +165,6 @@ def window_region(hwnd: int) -> Region:
         ctypes.byref(rect),
         ctypes.sizeof(rect),
     )
-    if res != 0:  # fall back to GetWindowRect
-        if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-            raise OSError(f"GetWindowRect 失败 hwnd={hwnd}")
+    if res != 0:
+        raise OSError(f"GetWindowRect 与 DWM 均失败 hwnd={hwnd}")
     return Region(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
