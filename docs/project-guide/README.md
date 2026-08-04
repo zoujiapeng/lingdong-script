@@ -91,7 +91,7 @@ flowchart LR
 
 以下是 `CLAUDE.md` 最新章节与当前 HEAD 对齐的状态，不应被同文件更早的历史段落覆盖：
 
-- 当前配置下 MiMo `mimo-v2.5` 的有效受控视觉矩阵为 `6/10`；四个 corridor 变体失败；
+- 当前配置是 MiMo `mimo-v2.5`；屏幕优先帧（full_desktop）落地后的受控 smoke 为 `3/4`（drag-fit、slider、dynamic-hold 通过，corridor 属模型几何族），更早的 `6/10` 矩阵是 target-window 裁剪帧时代的旧基线；
 - corridor 的 raw model points、canonical points 和 `physical_attempt` 一致，首个分歧在模型参数层；
 - 原生 Notepad 精确替换通过；Calculator `43×17` 两次均未形成正确结果，首个分歧同样在模型识别/选择；
 - `LEGACY_FLOW` 执行路径删除后，Studio 的 `input_text` + `screenshot` 外部 oracle 通过；严格离线节点独立矩阵升至 `3/19`；

@@ -113,7 +113,7 @@ text-only 路径不会收到不可见的截图字节。它必须依赖 UIA、Win
 当前可复现 vNext 基线明确使用：
 
 - `api.thinking=false`；
-- Visual Actor `temperature=0.0`；
+- Visual Actor `temperature=0.3`；
 - 每个决策最多一次 provider attempt；
 - 最近一笔原生 tool exchange；若 provider 返回 `reasoning_content`，只随该交换
   原样回传一次。

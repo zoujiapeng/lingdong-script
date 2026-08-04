@@ -198,7 +198,8 @@ Oracle设置可以用命令行，但若原始 goal要求GUI，命令行只能搭
 
 | 场景 | 结果 | 首分歧/结论 |
 | --- | ---: | --- |
-| 受控视觉矩阵 | `6/10` | 试卷、精确/有序点击、普通拖放、滑块、dynamic hold通过；4个corridor失败 |
+| 受控视觉矩阵（旧基线） | `6/10` | 试卷、精确/有序点击、普通拖放、滑块、dynamic hold通过；4个corridor失败 |
+| 受控视觉 smoke（screen-first 后） | `3/4` | drag-fit、slider、dynamic-hold 通过；game-drag-v2 走廊失败属模型轨迹几何 |
 | Corridor | `0/4` | raw model path = canonical path = physical attempt；路径切角/出界，首分歧在模型参数 |
 | Native Notepad精确替换 | 通过 | 文字与外部终态精确一致，说明基本视觉+键盘链可用 |
 | Calculator `43×17` 两次 | 失败 | 模型误认数字/运算键并错误停止；不是映射或SendInput偏移 |
