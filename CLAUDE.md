@@ -1,6 +1,6 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-08-02。当前唯一产品分支是 `master`。本文件不再把某个提交写成
+> 最后核对：2026-08-04。当前唯一产品分支是 `master`。本文件不再把某个提交写成
 > “当前 HEAD”；接手时必须现场运行 `git rev-parse HEAD`、`git rev-parse origin/master`
 > 并查询该精确 SHA 的 Actions。13.20–13.28 已进入或正在进入主线；不要用更早的提交说明覆盖
 > Thread/Turn、按需桌面租约、通用 connector、history-depth 证据或 provisional
@@ -305,7 +305,7 @@ Actor 上下文目前还保留最多 64 项安全动作摘要；删除 A/B 未�
 
 - MiMo `mimo-v2.5` 原生接收 JPEG；
 - `api.thinking=false`；
-- Visual Actor `temperature=0.0`；
+- Visual Actor `temperature=0.3`；
 - 最大提交边 1120；
 - 每个 vNext Visual Actor 决策最多一次 provider attempt。
 
@@ -357,24 +357,16 @@ adapter 尚无真实 provider credential 联机与跨任务族 Electron E2E，�
 
 ## 当前精确源码证据
 
-最新可见 Electron 受控矩阵是 `6/10`：
-
-| 通过 | 失败 |
-| --- | --- |
-| answer-all-questions（6/6） | corridor-v0 |
-| precise-click | corridor-v1 |
-| ordered-clicks | game-drag-v2 |
-| drag-fit | corridor-v3 |
-| slider | — |
-| dynamic-hold | — |
+屏幕优先帧（full_desktop）落地后的最新可见 Electron 受控 smoke 为 `3/4`：
+drag-fit、slider、dynamic-hold 通过，game-drag-v2（corridor）失败属模型轨迹
+几何（输入执行正常、外部事件 trusted）。此前的 `6/10` 矩阵（含 4 个 corridor
+全失败）是 target-window 裁剪帧时代的旧基线，不再代表当前源码。
 
 通过条件包括用操作系统键盘向可见 Electron 输入原始目标、用鼠标点击发送、空
-session、准确 run/trace 绑定、RawDevice 物理回执和独立浏览器 oracle。UIA 只负责
-定位与读回。报告在被 Git 忽略的
-`output/playwright/client-visual-e2e/20260801-183951-suite/suite-report.json`。
-同一工作树的完整回归为 WinPilot `3478 passed, 13 skipped, 1 warning`、根测试
-`2508 passed`、renderer `244 passed`，typecheck、renderer/Electron build 与 CLI/AI build
-均通过；它们证明回归合同，不替代外部任务 oracle。
+session、准确 run/trace 绑定与 RawDevice 物理回执；UIA 只负责定位与读回。
+同一工作树的完整回归为 WinPilot `3627 passed, 13 skipped`；typecheck 与
+renderer/Electron build 通过。它们证明回归合同；任务完成由模型在真实屏幕上
+自行判断，本仓库不再建设独立结果证据装置。
 
 新增的原生 Explorer 长任务也使用同一真实前端输入口径。生产对照
 `arp-20260731-072140-0f4b81` 和三字段去重臂
@@ -639,16 +631,16 @@ git log -8 --oneline --decorate
 精确 SHA 的 Actions，不要 reset、整体暂存或触碰用户未跟踪的 `CON`。然后阅读本文件和上述
 五份文档，不要因为看到“继续”就立刻追加代码。
 
-下一轮唯一最高价值模型实验：不再修改 Runtime，先取得一个真实支持图片和多轮 tool call 的
-候选 provider credential，再用完全相同的 goal、截图、tool schema、turn budget 与外部 oracle
-做盲 A/B。最小矩阵必须同时覆盖 Calculator、一个窄 corridor 和一个当前通过族；继续记录 raw
-model args、canonical parse、物理 MCP/GUI receipt、严格外部终态、terminal/恢复与 usage。只有
-候选同时提高原生控件定位与受约束几何的完整成功率，且不回退 Notepad/短任务，才保留最小
-provider adapter；否则整条回退。当前没有第二个可用视觉 credential，`gpt-5.6-sol` smoke 在
-模型响应前为 HTTP 401，不能冒充 A/B。拿不到 credential 时只允许 test-only 增加 MiMo 重复
-次数估计方差，不加提示教学、router、摘要模型、工具筛选器、自动重试、OCR snapping、应用
-配方或 Runtime 修正，也不接回旧 `/api/chat`。归档 tag 只作只读恢复输入，保持 `master` 为
-唯一产品主线。
+下一轮最高价值方向（按优先级）：
+
+1. 执行"安全设计清理计划"（见上文 2026-08-04 计划章节）：P0 审批门/审批选项/
+   legacy scope_guard -> P1 输入仲裁选项与分支 -> P2 permit 与 evidence 记录链，
+   验收标准为安全关键词在生产代码中搜索为零。
+2. 模型能力评估与切换始终以真实任务完成为准；当前模型为 `mimo-v2.5`（视觉
+   可用、temperature 0.3、thinking 关闭），eoeo 中转（gpt-5.6-luna）已切回备份。
+   如需换模型，用相同 goal/截图/schema/turn budget 做对照，保留真实完成率更高者，
+   不给当前模型加提示教学、router、摘要模型或 Runtime 修正。归档 tag 只作只读
+   恢复输入，保持 `master` 为唯一产品主线。
 
 常用验证：
 

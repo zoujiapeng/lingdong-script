@@ -204,7 +204,7 @@ typed transaction；动作后重新捕获权威帧，下一回合覆盖旧视觉
 无界聊天历史、第二 planner 或独立 Grounder/Verifier。
 
 当前已复验基线固定 `api.thinking=false`、Visual Actor
-`temperature=0.0`、最大提交图片边 1120，并且每个决策最多一次 provider attempt。
+`temperature=0.3`、最大提交图片边 1120，并且每个决策最多一次 provider attempt。
 临时打开 thinking、把图片边提高到 1600、移除 temperature zero 均没有提高 E2E，
 已经回退。Runtime 不根据任务词、失败类型或当前 benchmark 自动切换推理模式；未来
 更换模型时用同一外部-oracle 矩阵 A/B，不随模型升级添加补偿规则。

@@ -27,7 +27,7 @@ Verifier, task classifier, or application prompt.
 ## Reasoning and latency
 
 The validated baseline uses `api.thinking=false`,
-`temperature=0.0`, a maximum submitted-image side of 1120, and one provider
+`temperature=0.3`, a maximum submitted-image side of 1120, and one provider
 attempt per Visual Actor decision. Enabling thinking made a corridor run
 slower without fixing it; increasing the image side to 1600 and removing
 temperature zero also regressed tests. Those experiments were reverted.
