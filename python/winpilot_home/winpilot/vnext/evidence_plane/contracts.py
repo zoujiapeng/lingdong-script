@@ -32,7 +32,15 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _ACTION = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _DESKTOP_ACTIONS = frozenset(
-    {"click", "double_click", "drag", "scroll", "type_text", "hotkey"}
+    {
+        "click",
+        "double_click",
+        "drag",
+        "scroll",
+        "type_text",
+        "hotkey",
+        "launch_application",
+    }
 )
 _RUNTIME_ACTOR_TOOLS = _DESKTOP_ACTIONS | {
     "claim_obligation_done",
@@ -330,8 +338,13 @@ def _validate_frame_identity(value: Any, name: str) -> Mapping[str, Any]:
         raise RuntimeEvidenceContractError(
             f"{name}.submitted_size must be two positive integers"
         )
-    if _identity(item["scope"], f"{name}.scope") != "target_window":
-        raise RuntimeEvidenceContractError(f"{name}.scope must be target_window")
+    if _identity(item["scope"], f"{name}.scope") not in {
+        "target_window",
+        "full_desktop",
+    }:
+        raise RuntimeEvidenceContractError(
+            f"{name}.scope must be target_window or full_desktop"
+        )
     _sha256(item["image_sha256"], f"{name}.image_sha256")
     if item["media_type"] != "image/jpeg":
         raise RuntimeEvidenceContractError(f"{name}.media_type must be image/jpeg")
@@ -378,6 +391,7 @@ def _validate_submitted_arguments(
         "scroll": ("image_x", "image_y", "amount"),
         "type_text": ("text",),
         "hotkey": ("keys",),
+        "launch_application": ("app", "arguments"),
     }[action]
     if action == "drag" and type(value) is dict:
         if "image_points" in value:
@@ -517,7 +531,7 @@ def _validate_actor_envelope(
         envelope["allowed_evidence_scope"],
         "actor_envelope.allowed_evidence_scope",
     )
-    if envelope["frame_scope"] != "target_window":
+    if envelope["frame_scope"] not in {"target_window", "full_desktop"}:
         raise RuntimeEvidenceContractError(
             "actor_envelope changed the bounded live-frame contract"
         )
@@ -1230,6 +1244,7 @@ def _validate_physical_arguments(
         ),
         "type_text": ("kind", "text"),
         "hotkey": ("kind", "modifiers", "key"),
+        "launch_application": ("kind", "app", "arguments"),
     }[action]
     if action == "drag" and type(value) is dict:
         if "points" in value:
@@ -1244,6 +1259,7 @@ def _validate_physical_arguments(
         "scroll": "wheel",
         "type_text": "type_text",
         "hotkey": "hotkey",
+        "launch_application": "launch_application",
     }[action]
     if item["kind"] != expected_kind:
         raise RuntimeEvidenceContractError(
@@ -1328,6 +1344,19 @@ def _validate_physical_arguments(
         if type(text) is not str or not 1 <= len(text) <= 4096:
             raise RuntimeEvidenceContractError(
                 "physical type_text payload is not canonical"
+            )
+    elif action == "launch_application":
+        app = item["app"]
+        arguments = item["arguments"]
+        if (
+            type(app) is not str
+            or not app
+            or len(app) > 512
+            or type(arguments) is not str
+            or len(arguments) > 4096
+        ):
+            raise RuntimeEvidenceContractError(
+                "physical launch_application payload is not canonical"
             )
     else:
         modifiers = item["modifiers"]
@@ -1455,8 +1484,16 @@ class PhysicalAttemptRecord:
             "scroll": "raw_device.admitted_physical_scroll/0",
             "type_text": "raw_device.admitted_physical_type_text/0",
             "hotkey": "raw_device.admitted_physical_hotkey/0",
+            "launch_application": "desktop_launcher.generic/0",
         }[action]
-        if route != expected_route or self.mechanism != "physical_sendinput":
+        if route != expected_route or (
+            self.mechanism
+            != (
+                "physical_sendinput"
+                if action != "launch_application"
+                else "desktop_launcher"
+            )
+        ):
             raise RuntimeEvidenceContractError(
                 "physical attempt route/mechanism is not canonical"
             )

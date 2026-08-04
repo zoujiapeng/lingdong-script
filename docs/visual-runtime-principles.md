@@ -34,8 +34,8 @@ temperature zero also regressed tests. Those experiments were reverted.
 
 The primary vNext runtime must not automatically toggle provider reasoning
 from task keywords or action outcomes. A future model profile may use its own
-documented settings, but it must be compared on the same external-oracle
-matrix. If a stronger model fixes arithmetic or geometry directly, no runtime
+documented settings, but it must be compared on the same real-task matrix. If
+a stronger model fixes arithmetic or geometry directly, no runtime
 rule should accompany the model upgrade.
 
 Every provider call still has a total deadline. A response that does not
@@ -44,8 +44,9 @@ and an already executed GUI action is never replayed by a model retry.
 
 ## Visual observation
 
-Each normal turn receives the current authoritative target-window JPEG or,
-when the task/window scope requires it, the complete virtual desktop. The
+Each normal turn receives the complete virtual desktop by default
+(screen-first frames). A window crop is an explicit opt-in used only when a
+verified foreground target makes it material; it is never the default. The
 submitted image declares its exact pixel dimensions. Model coordinates use
 those pixels and are mapped exactly once into the authoritative physical
 region.
@@ -54,7 +55,7 @@ The current minimal live tool catalog does not expose the Legacy
 `observe(image_region=...)` crop tool. Legacy observe/UIA/OCR/CV code remains
 as compatibility debt, not as an automatic fallback for vNext failures.
 Adding a model-selected crop or another observation primitive requires
-cross-task E2E evidence that the current observation is structurally
+cross-task completion evidence that the current observation is structurally
 insufficient; it must not be introduced to repair one benchmark.
 
 UIA, OCR, CV, and MCP are secondary facts. They may be used only when their
@@ -76,10 +77,10 @@ primitive and must not be documented as one.
 
 ## Evaluation and change admission
 
-E2E evaluation submits the original natural-language task through the visible
-Electron client. Hard-skill tests use an empty session and independent
-application or browser evidence. The sample tasks are probes, not production
-rules.
+The model verifies task completion on the real screen it sees; no separate
+verification pass, evidence chain, or outcome oracle is built or required for
+completion in this repository (independent-outcome oracle rigs belong to
+another project). Unit and integration tests guard the mechanical layer only.
 
 Diagnose every failure in this order:
 
@@ -92,5 +93,5 @@ model arguments
 
 Change only the first layer that diverges. Matching submitted and physical
 coordinates rule out a coordinate-transport bug; matching submitted and
-physical text rules out a keyboard-transport bug. A unit test, tool `ok`,
-pixel delta, runtime `done`, or model claim is not a client E2E pass.
+physical text rules out a keyboard-transport bug. A unit test or tool `ok`
+is not a user-task pass.

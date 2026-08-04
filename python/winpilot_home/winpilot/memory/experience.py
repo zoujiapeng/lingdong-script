@@ -179,6 +179,14 @@ def enabled() -> bool:
     return bool(CONFIG.get("agent", "experience_memory", default=True))
 
 
+def memory_store_present() -> bool:
+    """Return whether a durable memory store exists without opening it."""
+    try:
+        return _effective_db_path().is_file()
+    except Exception:
+        return False
+
+
 def _script_path(script: str) -> Path | None:
     name = str(script or "").strip()
     if not name:

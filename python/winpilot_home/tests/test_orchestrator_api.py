@@ -117,6 +117,7 @@ def _client_execution_context():
             "usable": True,
             "failure_type": "",
             "reason": "",
+            "binding_mode": "window",
         },
     }
 

@@ -404,7 +404,6 @@ def test_contracts_are_strict_versioned_json_and_canonical_on_wire() -> None:
     [
         ("type_text", "secret_token"),
         ("click", "double_click"),
-        ("scroll", "scroll"),
         ("scroll", "scroll_sideways"),
         ("hotkey", "hotkey_secret_token"),
         ("hotkey", "hotkey_a_ctrl"),

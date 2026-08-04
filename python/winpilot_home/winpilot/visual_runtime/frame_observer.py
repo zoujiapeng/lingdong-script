@@ -74,8 +74,13 @@ class FrameObserver:
         cached_capture: Mapping[str, Any] | None = None,
         related_window: Callable[[int | None, int | None], bool] | None = None,
         expected_previous_frame_id: int | None = None,
+        scope_override: str | None = None,
     ) -> FrameCapture | None:
-        """Capture an exact pixel/geometry pair without publishing it."""
+        """Capture an exact pixel/geometry pair without publishing it.
+
+        ``scope_override`` lets a desktop-shell binding label its full-desktop
+        frame as the bound target surface instead of ``full_desktop``.
+        """
 
         if expected_previous_frame_id is None:
             previous = self._authority.current
@@ -85,15 +90,23 @@ class FrameObserver:
         if provided_region is not None:
             region = provided_region
             scope = (
-                "full_desktop"
-                if region == self._virtual_desktop()
-                else "target_window"
+                str(scope_override)
+                if scope_override is not None
+                else (
+                    "full_desktop"
+                    if region == self._virtual_desktop()
+                    else "target_window"
+                )
             )
             reason = "preflight_exact_capture_region"
         elif self._cache_matches(cached_capture, provided_image_b64, hwnd):
             assert cached_capture is not None
             region = cached_capture["region"]
-            scope = str(cached_capture.get("scope") or "target_window")
+            scope = str(
+                scope_override
+                or cached_capture.get("scope")
+                or "target_window"
+            )
             reason = str(
                 cached_capture.get("scope_reason") or "observe_exact_capture_region"
             )
@@ -104,7 +117,7 @@ class FrameObserver:
                 related_window=related_window,
             )
             region = decision.region
-            scope = str(decision.scope)
+            scope = str(scope_override or decision.scope)
             reason = str(decision.reason)
 
         if region.width < 16 or region.height < 16:

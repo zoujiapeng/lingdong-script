@@ -175,6 +175,50 @@ def test_foreground_capture_classifies_unavailable_window_inventory():
     assert target["failure_type"] == "target_binding_missing"
 
 
+def test_foreground_capture_falls_back_to_windows_shell_desktop():
+    shell = {
+        "format": "desktop-target/1",
+        "hwnd": 65878,
+        "title": "Program Manager",
+        "process_id": 19076,
+        "class_name": "Progman",
+        "rect": [0, 0, 1536, 864],
+        "foreground_verified": False,
+        "usable": True,
+        "failure_type": "",
+        "reason": "windows_shell_desktop_fallback",
+        "binding_mode": "desktop_shell",
+    }
+
+    target = capture_foreground_window_context(
+        4412,
+        foreground_resolver=lambda: 0,
+        process_id_resolver=lambda _hwnd: 0,
+        windows_provider=lambda: [],
+        desktop_shell_resolver=lambda: dict(shell),
+    )
+
+    assert target["usable"] is True
+    assert target["failure_type"] == ""
+    assert target["binding_mode"] == "desktop_shell"
+    assert target["hwnd"] == 65878
+    assert target["class_name"] == "Progman"
+
+
+def test_foreground_capture_keeps_missing_when_shell_unavailable():
+    target = capture_foreground_window_context(
+        4412,
+        foreground_resolver=lambda: 0,
+        process_id_resolver=lambda _hwnd: 0,
+        windows_provider=lambda: [],
+        desktop_shell_resolver=lambda: {},
+    )
+
+    assert target["usable"] is False
+    assert target["failure_type"] == "target_binding_missing"
+    assert target["binding_mode"] == "window"
+
+
 def test_handoff_target_must_be_live_and_recent():
     inputs = _inputs(yielded=True)
     inputs["execution_context"]["target_window"] = {
@@ -200,7 +244,7 @@ def test_handoff_target_must_be_live_and_recent():
     stale_hwnd, stale = validated_handoff_target(
         context,
         window_exists_resolver=lambda _hwnd: True,
-        now_ms=25_001,
+        now_ms=65_001,
     )
     assert stale_hwnd == 0
     assert stale is not None

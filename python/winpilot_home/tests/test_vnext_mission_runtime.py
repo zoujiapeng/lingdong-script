@@ -202,6 +202,22 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
         "scroll": _scroll_schema(),
         "type_text": _text_schema(),
         "hotkey": _hotkey_schema(),
+        "launch_application": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "app": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                },
+                "arguments": {
+                    "type": "string",
+                    "maxLength": 4096,
+                },
+            },
+            "required": ["app", "arguments"],
+        },
     }
     tools = [
         _tool(
@@ -218,6 +234,7 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
                 "scroll",
                 "type_text",
                 "hotkey",
+                "launch_application",
             ),
             start=1,
         )
@@ -951,9 +968,17 @@ def test_cross_frame_held_drag_preserves_then_releases_one_lease() -> None:
     assert harness.actor.turns[0].pointer_held is False
     assert harness.actor.turns[1].pointer_held is True
     assert harness.actor.turns[2].pointer_held is True
-    assert tuple(
+    # While the held pointer lease is owned, the model may continue the drag
+    # or finish with a non-pointer action (claim/blocked); pointer gestures
+    # that would conflict with the held press stay excluded.
+    held_tool_names = tuple(
         tool.name for tool in harness.actor.turns[1].tools
-    ) == ("drag",)
+    )
+    assert "drag" in held_tool_names
+    assert "claim_obligation_done" in held_tool_names
+    assert "blocked" in held_tool_names
+    assert "click" not in held_tool_names
+    assert "double_click" not in held_tool_names
     assert [
         envelope.pointer_disposition
         for envelope in harness.controller.envelopes
@@ -1313,7 +1338,7 @@ def test_previous_action_intent_does_not_depend_on_private_evidence() -> None:
     assert previous.local_intent == "perform one click"
 
 
-def test_rejected_action_does_not_replace_last_completed_intent() -> None:
+def test_rejected_action_replaces_previous_with_proven_not_executed() -> None:
     harness = _harness(
         _action("click"),
         _action("scroll"),
@@ -1329,8 +1354,9 @@ def test_rejected_action_does_not_replace_last_completed_intent() -> None:
     assert blocked.status is RuntimeStatus.BLOCKED
     previous = harness.actor.turns[2].previous_action
     assert previous is not None
-    assert previous.action == "click"
-    assert previous.local_intent == "perform one click"
+    assert previous.action == "scroll"
+    assert previous.input_completed is False
+    assert previous.error_kind == ""
 
 
 def test_actor_receives_only_completed_action_order() -> None:
@@ -1379,22 +1405,22 @@ def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
 
     assert verified.status is RuntimeStatus.MISSION_VERIFIED
     expected = (
-        "scroll_down",
-        "scroll_up",
-        "hotkey_ctrl_a",
+        "scroll",
+        "scroll",
+        "hotkey",
         "type_text",
     )
     assert (
         harness.actor.turns[1].previous_action.semantic_summary
-        == "scroll_down"
+        == "scroll"
     )
     assert (
         harness.actor.turns[2].previous_action.semantic_summary
-        == "scroll_up"
+        == "scroll"
     )
     assert (
         harness.actor.turns[3].previous_action.semantic_summary
-        == "hotkey_ctrl_a"
+        == "hotkey"
     )
     assert harness.actor.turns[4].completed_action_summaries == expected
     transition_summaries = tuple(
@@ -1620,7 +1646,14 @@ def test_rejected_controller_proves_no_input_and_is_not_replayed() -> None:
     assert first.status is RuntimeStatus.STALE_DISCARDED
     assert second.status is RuntimeStatus.BLOCKED
     assert harness.controller.calls == 1
-    assert len(harness.reducer.events) == 2
+    # The rejected action is recorded as a proven-not-executed transition so
+    # the same Actor receives it as previous_action on the next turn instead
+    # of silently retrying the same dead target.
+    assert [event.kind for event in harness.reducer.events] == [
+        "target_bound",
+        "transition_recorded",
+        "obligation_blocked",
+    ]
 
 
 def test_post_action_state_failure_is_blocked_after_one_input_attempt() -> None:

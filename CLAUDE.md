@@ -10,10 +10,11 @@
 长期架构与测试规范。依次阅读：
 
 1. `README.md`
-2. `docs/architecture.md`
-3. `docs/testing.md`
-4. `docs/vnext-migration.md`
-5. `docs/GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md`
+2. `docs/project-guide/README.md`（全项目架构、流程、合同和零遗漏逐文件索引）
+3. `docs/architecture.md`
+4. `docs/testing.md`
+5. `docs/vnext-migration.md`
+6. `docs/GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md`
 
 ## 最终目标
 
@@ -24,6 +25,26 @@
 
 衡量标准是完整用户任务的真实端到端完成率，不是代码量、工具 `ok`、模型总结、
 像素变化、单元测试数量或某个内部状态进入 `done`。
+
+## 2026-08-04 模型优先（Model-first）最高原则
+
+模型就是系统本身：它理解目标、看真实屏幕、选目标和坐标、验证自己的结果、
+决定何时完成、用自然语言汇报。运行时只负责给它真实桌面并执行它选的物理动作。
+任何"听起来很完善"的层——安全契约、隐私门、证据链、验证通道、能力检查、
+权限握手——如果唯一作用是拒绝或延迟模型已经正确做出的决定，就删除。
+
+- **绝大部分靠模型，不靠硬编码规则。** 模型弱就换模型或接受结果；给当前模型
+  加配方、分类器、提示教学、坐标偏移、吸附、第二验证器或多角色只会把错误
+  固化到更强模型身上。
+- **本仓库不建设、不要求独立结果证据（external oracle）机制。** 那套 E2E
+  oracle 属另一项目；本仓库以真实任务完成和单元/集成测试守住机械层即可，
+  不再为"可证明"堆证据链。
+- **任务完成由模型在它看到的真实屏幕上自行判断。** 不再叠加独立完成验证器；
+  模型 claim 的可靠性就是产品可靠性的一部分。
+- **物理输入去往模型在屏幕上指的位置，不管那是哪个窗口。** 不得强制绑定窗口
+  到前台，不得因"另一个窗口才应该拥有点击"而拒绝点击。
+- 只保留模型自身无法守住的机械边界：物理输入单写入者、按键/指针释放清理、
+  凭据不泄漏、不可逆外部动作的同意。
 
 ## 当前 Git / GitHub 状态
 
@@ -182,11 +203,14 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 
 ## 动作面与上下文
 
-当前 Turn 首轮保持零系统提示，只有三个短通用入口：
+2026-08-03 整改后，初始文本轮带一个 68 词的通用角色说明
+`INITIAL_ACTOR_SYSTEM_CONTRACT`（回答聊天、混合目标先做任务、不编造结果），不包含
+应用配方、关键词 router 或坐标教学；模型仍自由选择直接回复、connector 或桌面。入口：
 
 - `observe_desktop`
 - `search_connector_tools`
 - `call_connector_tool`（只执行发现过的 read-only 工具）
+- `get_agent_status` / `get_memory_status` / `get_capabilities`（Actor 自持只读状态工具，不申请租约）
 
 申请桌面后，同一 Actor 进入视觉线；视觉动作面保持：
 
@@ -196,17 +220,20 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 - `scroll`
 - `type_text`
 - `hotkey`（模型侧名称 `press_key`）
+- `launch_application`（按显示名/别名/PATH 裸命令/路径通用启动，成功后经 workspace
+  因果后继机制重绑定到新窗口）
 - `claim_obligation_done`
 - `blocked`
 
-显式只读 connector 的两个通用入口在视觉回合仍可见；它们没有变成 GUI 动作、应用
-adapter 或第二执行线。
+显式只读 connector 的两个通用入口和三个状态工具在视觉回合仍可见；它们没有变成 GUI
+动作、应用 adapter 或第二执行线。
 
 不要为启动软件、答题、绘画、保存、发 QQ、播放音乐、调音量、棋局或某个网站新增
 宏工具。已有工具结构上不能表达的新通用能力，必须先由至少两个不同任务族的真实
 E2E 证明。
 
-Visual Actor 的视觉系统提示词保持 45 个英文单词；文本首轮不增加系统教学。Thread
+视觉系统提示词保持 77 个英文单词（含聊天/任务混合目标与 `blocked` 停止判断）；
+初始文本轮只带上述短角色合同（68 词），不增加应用或界面教学。Thread
 只保留最多 12 条、16 KiB 的成功用户/模型原生消息；失败 Turn 不进入历史。现有
 `AgentThreadStore` 还把最多 100 个 Thread 的这个有界成功投影原子写入私有 checkpoint，
 服务重启后恢复同一 `thread_id`、可见成功结果与原生消息；它不保存 trace 正文、失败 Turn、
@@ -336,9 +363,10 @@ Electron 用操作系统键盘输入并以真实鼠标发送。
 消费边界的测试型 A/B；不得添加重复按键规则。
 
 13.20 已把 13.19 的失败候选落成当前产品合同。主入口现在只提交 `goal` 与可选
-`thread_id`；同一个 `LiveVisualActor` 在零系统提示首轮直接 `reply` 或调用唯一
-`observe_desktop`。只有后者才发布 run-bound lease，Electron 此时才隐藏并交付
-精确 target，matching terminal 自行恢复。没有 router、第二角色、旧 `/api/chat`
+`thread_id`；同一个 `LiveVisualActor` 在短角色合同首轮直接 `reply` 或调用唯一
+`observe_desktop`（2026-08-03 前为零系统提示，见"动作面与上下文"）。只有后者才发布
+run-bound lease，Electron 此时才隐藏并交付精确 target，matching terminal 自行恢复。
+没有 router、第二角色、旧 `/api/chat`
 或应用 prompt。服务端 Thread/Turn 只保存最近 12 条、16 KiB 的成功用户可见原生
 交换；失败 Turn 不进入历史。13.20 当时仍是进程内存状态，13.26 已增加同一 owner 的
 有界私有 continuation checkpoint。
@@ -537,13 +565,14 @@ dynamic hold 通过，四个 corridor 变体全部失败。四次 raw model poin
 4. 不为有限软件集合做适配；适配再多应用也不能覆盖无限任务。
 5. 隐私、安全和证明层只保留真实机械边界：当前帧/窗口身份、物理输入所有权、凭据
    不泄漏、不可逆外部动作边界。不要让重复 policy/ledger/guard 改写用户目标或阻断
-   合法动作。
-6. 新能力必须说明唯一 owner、通用输入/输出、失败语义、被删除的旧 owner，以及至少
-   两个不同任务族的外部-oracle E2E。
+   合法动作；只记录不保护真实边界的证据/审计链属于删除候选。
+6. 新能力必须说明唯一 owner、通用输入/输出、失败语义和被删除的旧 owner，并在至少
+   两个不同任务族上有真实端到端完成；不依赖独立 oracle 装置（属另一项目）。
 7. 失败先比较：模型原始参数 → canonical 参数 → physical_attempt → OS/应用终态。
    证据在哪一层第一次分叉，就只修那一层。
 8. 不把旧结果当本轮结果；每次改运行时代码后重载 Electron 并重跑当前源码。
-9. 不把全量 pytest、直接 API、模型 claim 或 runtime done 当用户任务完成。
+9. 不把全量 pytest 或内部 `done` 当用户任务完成；任务是否完成由模型在它看到的
+   真实屏幕上自行判断，不叠加独立完成验证器。
 10. 不与真实 GUI E2E 并发跑重型全量测试；曾经因此让 `/api/status` 超时，属于测试
     调度干扰而非模型失败。
 
@@ -592,3 +621,225 @@ python scripts/client_e2e_run.py --suite mixed
 真实客户端 E2E 前先运行 `npm run dev`。不要直接运行
 `uvicorn winpilot.server:app`；支持的入口是 Electron 托管或
 `python/winpilot_home/serve.py`。
+
+## 2026-08-03 主架构三缺口整改（未提交工作树）
+
+本轮按“状态查询工具 → 无目标窗口启动能力 → 工具格式修复 → 记忆语义 → 错误阶段 →
+初始轮角色合同”的顺序整改主链，没有新增模型角色、关键词 router 或第二 Planner。
+
+1. **同一个 LiveVisualActor 增加只读状态工具**：`get_agent_status`、
+   `get_memory_status`、`get_capabilities` 在初始文本轮和视觉轮都可见，由
+   `_LiveAgentStatusProvider` 直接读 Runtime/配置事实，不申请桌面租约。记忆状态
+   如实报告 vNext 主链 `experience_policy=disabled`（不读取/写入长期经验记忆），
+   同时给出配置里的 `agent.experience_memory` 与 store 存在性，不再让模型猜。
+2. **无目标窗口启动能力**：`/api/v2/desktop-context` 在没有可用前台应用窗口时
+   回退到 Windows Shell 桌面（Progman）作为 `binding_mode="desktop_shell"` 目标；
+   `_freeze_prebound_target`、`_BoundTargetProbe`、`DesktopWorkspace`、
+   `AtomicDesktopAdapter` 增加 `desktop_shell` 标志放宽前台校验；新增通用
+   `launch_application(app, arguments)` 工具，经 `perception.apps` 既有
+   resolve+launch_target/startfile 执行（无记事本/计算器适配器），失败按
+   `launch_application_failed` 归类为可恢复 NOT_STARTED，成功后由既有 workspace
+   因果后继机制重绑定到新窗口。
+3. **一次工具格式修复**：视觉轮模型工具调用不符合 schema 时，把结构化
+   `tool_format_error` 回喂同一模型修复一次；第二次失败即终止。修复发生在任何
+   物理输入之前；物理动作后仍绝不自动重放（call-once + permit 不变）。
+4. **记忆语义统一**：`get_memory_status` 与运行面板/记忆页明确显示
+   “长期经验记忆未启用（冷启动）”；Studio 长期记忆页加注 vNext 主链不读写。
+5. **错误阶段分类**：`live_agent_done` 与运行输出新增 `failure_stage`：
+   `model_routing` / `desktop_handoff` / `target_binding` / `screenshot` /
+   `tool_format` / `physical_input` / `result_verification` / `canceled`。
+6. **初始轮短角色合同**：初始文本轮新增 68 词的 `INITIAL_ACTOR_SYSTEM_CONTRACT`
+   （回答聊天、混合目标先做任务并把短答案放进最终 claim、不编造结果），视觉提示词
+   相应从 45 词扩展到 77 词（增加“混合聊天/任务目标”与“无法推进时调用 blocked”）。
+   这是通用角色说明，不包含应用配方、关键词路由或坐标教学；此前零系统提示，历史
+   记录中的“零系统提示/不增加系统教学”描述仅适用于更早版本，以本节为准。
+
+回归：WinPilot `3628 passed, 13 skipped, 1 warning`、根测试 `2508 passed`、
+renderer `318 passed`、TypeScript typecheck 与完整 build 通过。新增/更新的关键测试：
+状态工具不申请租约、最后调用不提供状态工具、一次格式修复、通用启动成功/失败、
+desktop_shell 绑定与启动后窗口采用、错误阶段分类、初始轮角色合同与视觉提示词长度。
+
+## 2026-08-03 真实可见 Electron E2E（当前源码，未提交工作树）
+
+已在 `npm run dev` 的可见 Electron 上用操作系统键盘/真实鼠标提交并完成两个基础任务：
+
+1. **查询记忆状态** `arp-20260803-133836-78a096`（thread
+   `thread-e87eb42afc3b4e67b6fe48a596952c2f`）：2 次模型调用后 `reply` 终态，
+   trace 零 `desktop_lease_requested`、零 `vnext_gui_observation`、零
+   `vnext_raw_receipt`、零 connector。Thread 保存的回复如实描述
+   “长期经验记忆未启用；存储组件存在但未激活；experience_policy=disabled”。
+   状态查询不申请桌面租约。
+2. **打开记事本** `arp-20260803-134115-fe73db`（无任何记事本窗口的干净桌面）：
+   一次 `launch_application` applied 后出现
+   `vnext_workspace_target_adopted { causal_action=launch_application,
+   target_hwnd=854236 }`——workspace 因果重绑定到新窗口；模型下一次观察即
+   `claim_obligation_done`，`mission_verified`，2 turns / 3 模型调用。
+   独立 Win32 oracle 看到 1 个 `notepad.exe`（pid 14112）与可见 Notepad 窗口。
+   `gui_execution_trace.passed=true`（applied=[launch_application]，forbidden=[]）。
+
+E2E 暴露并修复的问题：
+- `perception.apps.launch_application` 现在优先用 `shutil.which` 解析 PATH 裸命令
+  （如 `notepad`→`C:\WINDOWS\system32\notepad.EXE`），避免模糊索引把 `notepad`
+  解析成已安装的 Notepad++（别名含 notepad）；这是通用 PATH 兜底，不是应用适配。
+- `scripts/client_e2e_run.py` 的 `gui_actions` 集合加入 `launch_application`，
+  harness 不再把该动作误报为 `non_gui_action`。
+- E2E 前必须重启 Electron（kill-electron.ps1 后 `npm run dev`）：Python 源码漂移
+  保护会让修改后仍运行旧源码的托管服务拒绝新任务并使 Run 按钮 disabled；重启后
+  `loaded_stamp==current_stamp`，Run 按钮恢复。
+
+受控视觉矩阵 smoke（drag-fit/slider/dynamic-hold/game-drag-v2）在重启后的当前源码
+上为 `3/4`（game-drag-v2 corridor 失败是既有模型几何族，不属本轮基础设施）。
+
+2026-08-03 晚再次全量复核当前源码：
+
+- 重启 Electron 后受控视觉全矩阵为 `6/10`，与既有基线逐 case 一致：通过
+  answer-all-questions / precise-click / ordered-clicks / drag-fit / slider /
+  dynamic-hold，失败 corridor-v0/v1/v3 与 game-drag-v2（模型几何族，非本轮
+  基础设施）。报告在
+  `output/playwright/client-visual-e2e/20260803-210144-suite/suite-report.json`。
+- original 长任务 `11/11` 未通过，全部 `failure_stage` 落在模型层
+  （`model_routing` / `tool_format` / `state_rejected` / `blocked` / turn
+  budget 耗尽），如 QQ 空间点赞在初始轮即 `invalid_proposal`、画板画花时模型给
+  `observe_desktop` 传参、聊天样本 `reply` 终态无外部 oracle 可验证；
+  `client_e2e_run.py` 的 original/mixed 目录本身不作为正式验收统计（见
+  `docs/GUI_AGENT_ARCHITECTURE_RESET_2026-07-29.md` 13.16 节），本次结果只作
+  失败分层记录，不改 Runtime、不加提示。
+- mixed 套件两次尝试均被 `SetForegroundWindow` 无法置前台的运行环境干扰中止
+  （runner 在首个 case 提交前失败），不属于模型或 Runtime 失败；已完成的
+  mix-media-analysis / mix-drawing-handoff 均为模型层失败。
+- 全量回归 WinPilot `3628 passed, 13 skipped, 1 warning`、根测试 `2508 passed`、
+  renderer `318 passed`、typecheck 与完整 build 通过。
+- 修复 `scripts/client_thread_connector_e2e_run.py` 既有 harness flaky：Windows
+  文件系统 mtime 相对 `time.time_ns()` 存在约 8 ms 量化偏差，`file_evidence` 的
+  `modified_after_start` 严格 `>=` 比较在全量负载下偶发误判，新增 100 ms 容差
+  `FILE_MTIME_TOLERANCE_NS`；单测复跑 `16 passed`，全量下原失败用例通过。这是
+  测试基础设施修复，未改变 Runtime、提示词或动作面。
+
+本段结论只绑定上述精确 run SHA 与 trace 文件，不能覆盖未来提交。
+
+## 2026-08-03 深夜：反馈黑洞与目标漂移三修复（未提交工作树）
+
+依据 original 长任务 trace 分层（模型参数 → canonical → physical → 外部状态）
+定位到三个真实软件任务失败的**基础设施**根因，按"只修第一层分歧"实现三个修复：
+
+1. **被拒动作反馈黑洞**：此前 `not_started`（如 `hit_test_changed`、
+   `target_identity_changed`）只写入审计证据，**不进 mission 事件流**——模型下一轮
+   收到"干净"新帧，完全不知道自己上次点击没执行、为什么被拒，于是对同一过期目标
+   无限重复（Krita 56 次、抖音 10 次连续 `not_started` 直到 budget 耗尽）。
+   修复：`mission_runtime` 的 STALE_DISCARDED 分支新增 `_record_rejected_transition`，
+   把 proven-not-executed 的拒绝作为 `transition_recorded`（`input_completed=False` +
+   `error_kind`）写入投影；`TransitionSummary` / `ActorPreviousActionView` 增加
+   `error_kind` 字段（canonical payload 同步放行）；`visual_actor.propose()` 不再
+   要求 `input_completed=True`，只要 action 匹配就把 `previous_action`（含
+   `error_kind`）回喂同一模型。仍然绝无物理重放。
+2. **初始轮零修复机会**：初始轮模型给 `observe_desktop` 传参等
+   `LiveModelRoleError` 此前直接 `state_rejected` 终止（0 turns）。修复：
+   `begin_turn` 与视觉轮一致，首次 admission 失败回喂结构化
+   `tool_format_error` 一次（`_tool_format_repair` 复用），第二次失败才终止。
+3. **过期目标无限重试**：被拒动作不 arm workspace pending successor，binding
+   永不更新，后续点击永远撞同一失效目标。修复：`AtomicDesktopAdapter` 跟踪滑动
+   窗口内最近 3 次可恢复拒绝，若全部属于目标几何族（hit_test/target/region/
+   point 类），调用新增的 `workspace.request_target_refresh()` 重新探测当前前台
+   窗口；`DesktopWorkspace` 新增该 uncaused successor 机制（复用既有两采样
+   adopt，仍不直接改写输入）。非几何拒绝（如 permit）会打断该序列，避免误刷新。
+
+配套测试：被拒动作进入事件流并含 error_kind、rejected previous_action 替换旧的
+completed intent、初始轮一次修复/二次终止、workspace refresh 成功/无前台变化不
+adopt/覆盖旧 pending、adapter 连续几何拒绝触发 refresh、混合拒绝不提前触发。
+
+全量回归：WinPilot `3635 passed, 13 skipped, 1 warning`（+7）、根测试
+`2508 passed`、renderer `318 passed`、typecheck 与完整 build 通过。
+
+可见 Electron E2E（重启后当前源码）：
+
+- 受控视觉全矩阵 `6/10` 与基线逐 case 一致，无回退
+  （`output/playwright/client-visual-e2e/20260803-225924-suite/`）。
+- 画板画花 `original-2` run `arp-20260803-231058-b2dff9`：60 次回执中
+  `launch_application applied ×1`、`click applied ×58`、仅 1 次
+  `hotkey not_started:target_identity_changed`、1 次 launch 后窗口采用——
+  对照修复前 Krita 案例 `click not_started ×56`。模型 60 轮全部真实点击画板但
+  未识别完成（停止判断，模型层），基础设施不再吞动作。
+- 网易云 `original-5` run `arp-20260803-231730-12a6b8`：`launch_application
+  applied ×24`、`hotkey applied ×1`、`click not_started:hit_test_changed ×35`；
+  模型收到 error_kind 后仍重复点击（策略未变，模型层）。
+
+结论：三修复消除了"点击被拒且模型不知情、目标漂移后无限重试"两条系统性问题，
+真实软件任务的剩余失败归因转为模型层（目标选择、停止判断）。本段结论只绑定上述
+精确 run SHA 与 trace 文件，不能覆盖未来提交。
+
+## 2026-08-04：run_shell 接入 vNext + 死板规则清理（未提交工作树）
+
+**产品方向确认**：完整整体 Agent（B 形态）——GUI 工具与 shell 工具同时可见，模型
+按语义自主选择；评测纯度由任务语义保证（受控矩阵本身 GUI-only），不用工具投影
+裁剪。
+
+**run_shell 接入**（connector 同款路径，文本轮+视觉轮可见，不申请桌面 lease）：
+- 工具 `run_shell(command, shell, timeout_s)`，复用既有 `action/shell.py`
+  （safety.guard 守卫、超时、UTF-8），`config.agent.shell_enabled` 控制是否提供
+  （已改为 true）
+- 注入链：`_shell_runner_factory` → `_CompositionDependencies.shell_factory` →
+  `LiveVisualActor(shell_runner=...)`；`_shell_exchange`/`_call_shell`/`_shell_tool_definitions`
+- 每工具族调用上限改为**共享本地工具预算**（status+shell+connector 合用一个
+  budget，全局 `model_call_limit` 是唯一硬顶）
+
+**死板规则清理**（原应用语义却用硬编码的位置）：
+1. **H1 窗口交接动作名门控**（workspace.py）：删除 `_WINDOW_CHANGING_ACTIONS`
+   动作名列表——所有完成输入都武装后继探测，是否真切前台由两采样观察语义决定
+2. **H4 失败原因被吞+分类器错归**（live_agent.py）：保留真实 `result.detail`
+   （transport 错误截断到类型前缀防敏感泄漏）；`blocked` 不再归
+   `physical_input`（是模型语义停止判定→model_routing）；无关键词的
+   state_rejected 归 `physical_input`（系统前置失败）而非默认 model_routing
+3. **M3 run_shell 描述**：删除 "Prefer this over clicking..." 偏好规则（提示教学），
+   改中性事实描述
+4. **M4 初始提示关键词路由**：删除 "Call observe_desktop for any request to
+   open, search, click..." 动词枚举，改为中性"需要看/操作桌面时使用"
+5. **H3 可恢复错误白名单**（mission_runtime.py）：删除
+   `_RECOVERABLE_NOT_STARTED_ERROR_KINDS`——所有 proven-not-executed 拒绝都带
+   error_kind 反馈模型，是否继续由模型语义决定，系统只留机械预算
+6. **M7 动作历史不对称投影**：`_safe_action_summary`/`is_safe_action_summary`
+   统一为裸动作名（scroll_down/scroll_up/hotkey_chord 特判删除，细节在
+   previous_action 结构化视图与截图），清理 `_HOTKEY_SUMMARY_*` 死代码
+
+全量回归：WinPilot `3637 passed, 13 skipped, 1 warning`、根测试 `2508 passed`、
+renderer `318 passed`、typecheck 与完整 build 通过。
+
+结论只绑定当前工作树；未提交，`CON` 未触碰。
+
+**M2/M6 补充**（同一轮）：
+- M2 连续 INVALID_PROPOSAL/ACTOR_ERROR 硬停：判定为预算护栏（配合
+  max_turns/max_model_calls 有界），核心错误吞没已在 H4 解决（真实 detail 保留、
+  transport 截断防泄漏），不再改 session 注入接口
+- M6 指针 held 时只允许 drag：改为**排除指针动作**（click/double_click/drag 冲突）
+  但允许非指针动作（hotkey/type_text/launch/claim/blocked）——held 且 owned 时
+  模型可以继续拖或语义结束；held 但租约丢失（非 owned）时仍全排除（机械安全）
+
+
+## 2026-08-04 屏幕优先帧与守卫层解除（已提交 master）
+
+按 Model-first 原则整改视觉执行线，目标：模型看到真实屏幕、点击落在它指的位置，
+解除层层守卫对合法动作的拦截。三次真实运行的分层审计表明：网易云任务失败的
+首分歧不在模型参数，而在执行线——裁剪帧让模型看不到已启动的应用（10:06 run），
+raw_device 的强制前台检查用绑定窗口（终端）判定点击合法性，导致 49/59 次点击
+被拒、模型只能无限重试（14:52 run）；解除后同一任务一次完成。
+
+本轮改动：
+
+1. **屏幕优先帧（默认）**：`controller.target_window_capture_enabled` 默认改为
+   `false`；`live_agent._capture_current` 默认按完整虚拟桌面捕获
+   （`frame_scope=full_desktop`），窗口裁剪仅显式开启或 desktop_shell 时使用。
+2. **点击任意可见窗口**：`atomic.py` 在 full_desktop 帧下放行点击（hit test 落在
+   哪个窗口就点哪个），跳过对绑定窗口的前台强制；点击后 OS 自然激活目标窗口，
+   下一轮 workspace 因果后继自动重绑定。
+3. **解除 raw_device 强制前台检查**：`enforce_foreground` 参数全链透传
+   （`RawDeviceExecutor.click -> execute_admitted_physical_click -> _raw_click`），
+   vNext 在 full_desktop 帧下传 `False`；legacy 路径默认不变。
+4. **scope 校验统一放宽**：envelope / Broker / MissionRuntime / 证据平面里所有
+   硬编码 `frame_scope == "target_window"` 改为接受
+   `{target_window, full_desktop}`。
+5. **legacy done_verifier**：仅当验证过的窗口裁剪被选中时才附加原生图，全屏帧
+   走 vNext 原生路径，避免全屏帧误触发 LLM 完成判断。
+
+回归：Python `3627 passed, 13 skipped`（新增 screen-first 点击/重绑定用例）。
+可见 Electron E2E smoke：slider、dynamic-hold 外部判定通过，game-drag-v2 走廊
+失败属模型轨迹几何（输入执行正常）。本仓库不再为任务完成建设独立结果证据装置
+（该装置属另一项目）；任务完成由模型在真实屏幕上自行判断。

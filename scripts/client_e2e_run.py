@@ -1651,6 +1651,7 @@ def _gui_execution_trace_evidence(
     outer_run_id = str(outer_run_id or "").strip()
     gui_actions = {
         "click", "double_click", "drag", "scroll", "type_text", "hotkey",
+        "launch_application",
     }
     inspected: list[str] = []
     applied_actions: list[str] = []

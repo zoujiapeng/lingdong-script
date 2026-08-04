@@ -577,6 +577,7 @@ def _execute_click_input_unqueued(
     hwnd: int | None = None,
     *,
     final_guard: FinalPointerGuard | None = None,
+    enforce_foreground: bool = True,
 ) -> RawBackendResult:
     """Execute one strict click after the caller has serialized admission."""
     if not (
@@ -594,10 +595,10 @@ def _execute_click_input_unqueued(
         mechanism is ClickMechanism.PREPOSITIONED_PHYSICAL, False,
     )
     if final_guard is None:
-        return _raw_click(*raw_args, enforce_foreground=True)
+        return _raw_click(*raw_args, enforce_foreground=enforce_foreground)
     return _raw_click(
         *raw_args,
-        enforce_foreground=True,
+        enforce_foreground=enforce_foreground,
         final_guard=final_guard,
     )
 
@@ -611,12 +612,14 @@ def execute_admitted_physical_click(
     hwnd: int | None = None,
     *,
     final_guard: FinalPointerGuard,
+    enforce_foreground: bool = True,
 ) -> RawBackendResult:
     """Run an already-queued physical click with a true pre-down guard."""
     if not callable(final_guard) or mechanism is ClickMechanism.BACKGROUND_MESSAGE:
         return _click_progress(False, 0, "invalid admitted physical click")
     return _execute_click_input_unqueued(
         x, y, button, count, mechanism, hwnd=hwnd, final_guard=final_guard,
+        enforce_foreground=enforce_foreground,
     )
 
 

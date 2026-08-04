@@ -272,6 +272,9 @@ def _parse_transition(
     raw_effect = payload.get("action_effect")
     if raw_effect is not None and not isinstance(raw_effect, Mapping):
         raise InvalidMissionEvent("transition action_effect must be an object")
+    error_kind = payload.get("error_kind")
+    if error_kind is not None and type(error_kind) is not str:
+        raise InvalidMissionEvent("transition error_kind must be a string or null")
     return TransitionSummary(
         action=_payload_text(payload, "action", "unknown"),
         input_completed=input_completed,
@@ -289,6 +292,7 @@ def _parse_transition(
             if raw_effect is not None
             else None
         ),
+        error_kind=error_kind,
     )
 
 

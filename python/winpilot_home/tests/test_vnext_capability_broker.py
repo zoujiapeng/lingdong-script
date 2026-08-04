@@ -1178,7 +1178,12 @@ def test_owned_held_pointer_projects_only_drag_with_the_same_lease() -> None:
         ),
     )
     assert projection.execution_route is ExecutionRoute.VISUAL_ACTOR
-    assert projection.tool_names == ("drag",)
+    # Owned held pointer: the model may continue the drag or finish with a
+    # non-pointer action; pointer gestures that conflict with the held press
+    # (click/double_click) stay excluded.
+    assert "drag" in projection.tool_names
+    assert "click" not in projection.tool_names
+    assert "double_click" not in projection.tool_names
     assert projection.pointer_lease_id == "pointer-lease-1"
 
 

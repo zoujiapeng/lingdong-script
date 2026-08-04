@@ -97,4 +97,34 @@ describe('client-owned execution context', () => {
       'control_surface_still_focused',
     );
   });
+
+  it('accepts a desktop-shell binding when no application window exists', async () => {
+    const prepareDesktopHandoff = vi.fn(async () => ({
+      yielded: true,
+      control_surface_pid: 7712,
+      prepared_at: 800,
+    }));
+    const captureTarget = vi.fn(async () => ({
+      format: 'desktop-target/1' as const,
+      hwnd: 65878,
+      title: 'Program Manager',
+      process_id: 19076,
+      class_name: 'Progman',
+      rect: [0, 0, 1536, 864],
+      captured_at: 850,
+      foreground_verified: false,
+      usable: true,
+      failure_type: '',
+      reason: 'windows_shell_desktop_fallback',
+      binding_mode: 'desktop_shell' as const,
+    }));
+    (window as any).electronAPI = { prepareDesktopHandoff };
+
+    const context = await buildClientExecutionContext(900, captureTarget);
+
+    expect(context.target_window?.usable).toBe(true);
+    expect(context.target_window?.binding_mode).toBe('desktop_shell');
+    expect(context.target_window?.hwnd).toBe(65878);
+    expect(context.desktop_handoff.yielded).toBe(true);
+  });
 });

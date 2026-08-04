@@ -496,9 +496,12 @@ def _frame_identity(value: Any) -> dict[str, Any]:
         raise FrameArtifactValidationError(
             "frame_identity.submitted_size must be two positive integers"
         )
-    if type(value["scope"]) is not str or value["scope"] != "target_window":
+    if (
+        type(value["scope"]) is not str
+        or value["scope"] not in {"target_window", "full_desktop"}
+    ):
         raise FrameArtifactValidationError(
-            "frame_identity.scope must be target_window"
+            "frame_identity.scope must be target_window or full_desktop"
         )
     image_sha256 = _sha256(
         value["image_sha256"],
@@ -516,7 +519,7 @@ def _frame_identity(value: Any) -> dict[str, Any]:
         "epoch": epoch,
         "hwnd": hwnd,
         "region": list(region),
-        "scope": "target_window",
+        "scope": value["scope"],
         "submitted_size": list(submitted_size),
         "image_sha256": image_sha256,
         "media_type": "image/jpeg",

@@ -280,18 +280,30 @@ def test_not_started_input_never_creates_causal_transition() -> None:
     assert workspace.binding.hwnd == HWND_A
 
 
-def test_non_window_changing_action_never_adopts_new_foreground() -> None:
+def test_any_completed_action_adopts_only_a_real_foreground_change() -> None:
     topology = _Topology()
     workspace = _workspace(topology)
-    topology.foreground = HWND_B
 
+    # scroll that does NOT change the foreground must not adopt anything.
     workspace.finish_action(
         action_id="decision-1",
         action="scroll",
         input_completed=True,
     )
-
     assert not workspace.observe().replaces_binding
+
+    # the same scroll, when the foreground genuinely changed, adopts the
+    # successor: window hand-off is semantic (driven by the observation), not
+    # gated by an action-name list.
+    topology.foreground = HWND_B
+    workspace.finish_action(
+        action_id="decision-2",
+        action="scroll",
+        input_completed=True,
+    )
+    observation = workspace.observe()
+    assert observation.replaces_binding
+    assert observation.surface.hwnd == HWND_B
 
 
 def test_disappearing_pending_candidate_is_discarded() -> None:
@@ -422,3 +434,59 @@ def test_current_window_geometry_can_change_between_actions() -> None:
 
     assert observation.surface.region == (20, 30, 1024, 700)
     assert workspace.snapshot(HWND_A).region == (20, 30, 1024, 700)
+
+
+def test_refresh_request_arms_successor_without_any_input() -> None:
+    topology = _Topology()
+    workspace = _workspace(topology)
+    topology.foreground = HWND_B
+
+    workspace.request_target_refresh()
+
+    observation = workspace.observe()
+    assert observation.replaces_binding
+    assert observation.surface.hwnd == HWND_B
+    assert observation.causal_action_id == "refresh-target"
+    assert observation.causal_action == "refresh_target"
+
+    replacement = _binding(
+        HWND_B,
+        PID_B,
+        "C:/b.exe",
+        binding_id="binding-b",
+        evidence_id="evidence-b",
+        epoch=11,
+    )
+    workspace.adopt(observation, replacement)
+    assert workspace.binding == replacement
+    assert workspace.generation == 1
+
+
+def test_refresh_request_without_foreground_change_keeps_target() -> None:
+    topology = _Topology()
+    workspace = _workspace(topology)
+
+    workspace.request_target_refresh()
+
+    observation = workspace.observe()
+    assert not observation.replaces_binding
+    assert observation.surface.hwnd == HWND_A
+    assert workspace.binding.hwnd == HWND_A
+
+
+def test_refresh_overrides_only_the_latest_pending_transition() -> None:
+    topology = _Topology()
+    workspace = _workspace(topology)
+    workspace.finish_action(
+        action_id="decision-1",
+        action="click",
+        input_completed=True,
+    )
+
+    workspace.request_target_refresh()
+    topology.foreground = HWND_B
+
+    observation = workspace.observe()
+
+    assert observation.replaces_binding
+    assert observation.causal_action_id == "refresh-target"

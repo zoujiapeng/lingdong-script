@@ -66,6 +66,7 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.mission", "MissionStatus", None),
     ("winpilot.vnext.mission", "ObligationSpec", None),
     ("winpilot.vnext.mission", "TargetBinding", None),
+    ("winpilot.vnext.model_roles", "INITIAL_ACTOR_SYSTEM_CONTRACT", None),
     ("winpilot.vnext.model_roles", "VISUAL_ACTOR_MODEL_ROLE", None),
     ("winpilot.vnext.model_roles", "FlowFragmentProposer", None),
     ("winpilot.vnext.model_roles", "LiveVisualActor", None),
@@ -846,6 +847,7 @@ def test_minimal_runtime_tool_surface_cannot_expand_silently() -> None:
         "scroll",
         "type_text",
         "hotkey",
+        "launch_application",
     }
     assert APPROVED_OUTCOME_TOOLS == {
         "claim_obligation_done",

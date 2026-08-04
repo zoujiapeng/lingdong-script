@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -33,6 +34,12 @@ _START_MENU_DIRS = [
     Path(os.environ.get("PROGRAMDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
 ]
 _SKIP_WORDS = ("卸载", "uninstall", "帮助", "help", "网站", "website", "readme")
+
+
+_LOOKS_LIKE_PATH_OR_ASSOCIATION = re.compile(
+    r"[\\/:]|\.(exe|lnk|bat|cmd|url|txt|pdf|docx?|xlsx?|pptx?)$",
+    re.IGNORECASE,
+)
 
 
 def _unique_text(values) -> list[str]:
@@ -477,3 +484,182 @@ def launch_target(entry: dict) -> dict:
         }
     except OSError as exc:
         return {"ok": False, "error": str(exc), "target": target}
+
+
+def _activate_existing_instance(exe_path: str) -> int | None:
+    """Find a visible top-level window owned by ``exe_path`` and activate it.
+
+    Generic process-to-window activation: enumerate top-level windows, match
+    their owning process executable against the resolved path, pick the first
+    visible non-minimized window, and bring it to the foreground.  Returns the
+    activated hwnd, or None when no matching visible window exists.  This is
+    window activation, not an application adapter: it works for any
+    application that already runs.
+    """
+    import ctypes
+
+    import win32con
+    import win32gui
+    import win32process
+
+    try:
+        norm = os.path.normcase(os.path.normpath(exe_path))
+    except Exception:
+        return None
+    found: list[int] = []
+    try:
+        win32gui.EnumWindows(
+            lambda hwnd, _unused: (
+                found.append(hwnd)
+                if win32gui.IsWindowVisible(hwnd)
+                and not win32gui.IsIconic(hwnd)
+                and win32gui.GetWindowText(hwnd)
+                and (
+                    os.path.normcase(
+                        os.path.normpath(
+                            _process_exe(win32process.GetWindowThreadProcessId(hwnd)[1])
+                        )
+                    )
+                    == norm
+                )
+                else None
+            )
+            or True,
+            None,
+        )
+    except Exception:
+        return None
+    if not found:
+        return None
+    hwnd = found[0]
+    try:
+        win32gui.SetForegroundWindow(hwnd)
+        win32gui.BringWindowToTop(hwnd)
+    except Exception:
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+    return int(hwnd)
+
+
+def _process_exe(pid: int) -> str:
+    try:
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid)
+        )
+        if not handle:
+            return ""
+        try:
+            size = ctypes.c_ulong(32768)
+            buf = ctypes.create_unicode_buffer(size.value)
+            if not ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                handle, 0, buf, ctypes.byref(size)
+            ):
+                return ""
+            return buf.value or ""
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        return ""
+
+
+def launch_application(
+    app: str,
+    arguments: str = "",
+    *,
+    resolver: Callable[[str], list[dict]] | None = None,
+) -> dict:
+    """Launch one generic application without any per-app adapter.
+
+    ``app`` may be a display name, executable alias, ``.lnk``/``.exe`` path,
+    or a file/URL association.  The existing installed-app index resolves
+    display names and aliases; an exact PATH executable (for example
+    ``notepad`` or ``calc``) is resolved through ``shutil.which`` before the
+    fuzzy index, because Windows system tools are not Start Menu entries;
+    paths and associations fall back to ``os.startfile``.  Returns
+    ``{ok, via, target, arguments}`` or ``{ok: False, error}``.
+    """
+    from collections.abc import Callable
+
+    name = str(app or "").strip()
+    if not name:
+        return {"ok": False, "error": "application name must not be empty"}
+    arguments_list = [str(arguments or "").strip()]
+    arguments_list = [item for item in arguments_list if item]
+    # An exact bare command name (for example ``notepad`` or ``calc``) is
+    # resolved through PATH before the fuzzy installed-app index: Windows
+    # system tools are not Start Menu entries, and a fuzzy match such as
+    # "Notepad++" must not shadow the exact command the user named.
+    path = (
+        shutil.which(name)
+        if not _LOOKS_LIKE_PATH_OR_ASSOCIATION.search(name)
+        else None
+    )
+    # If the application is already running with a visible top-level window,
+    # activate that window instead of starting a second instance.  A GUI
+    # agent needs "bring the app to the front" semantics for "it is already
+    # open", which a bare start cannot provide.
+    if path:
+        activated = _activate_existing_instance(path)
+        if activated:
+            return {
+                "ok": True,
+                "via": "existing",
+                "target": path,
+                "arguments": arguments_list,
+                "name": name,
+                "aliases": [],
+                "activated_hwnd": activated,
+            }
+    if path:
+        try:
+            if arguments_list:
+                subprocess.Popen(
+                    [path, *arguments_list],
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            else:
+                os.startfile(path)  # noqa: S606
+            return {
+                "ok": True,
+                "via": "path",
+                "target": path,
+                "arguments": arguments_list,
+                "name": name,
+                "aliases": [],
+            }
+        except OSError as exc:
+            return {"ok": False, "error": str(exc), "target": name}
+    resolved = None
+    if resolver is not None:
+        try:
+            resolved = resolver(name)
+        except Exception as exc:
+            return {"ok": False, "error": f"application resolution failed: {exc}"}
+    else:
+        try:
+            resolved = resolve(name, max_results=1)
+        except Exception as exc:
+            return {"ok": False, "error": f"application resolution failed: {exc}"}
+    if isinstance(resolved, list) and resolved:
+        entry = dict(resolved[0])
+        if arguments_list:
+            entry["arguments"] = arguments_list
+        return launch_target(entry)
+    try:
+        os.startfile(name)  # noqa: S606
+        return {
+            "ok": True,
+            "via": "startfile",
+            "target": name,
+            "arguments": arguments_list,
+            "name": name,
+            "aliases": [],
+        }
+    except OSError as exc:
+        return {"ok": False, "error": str(exc), "target": name}

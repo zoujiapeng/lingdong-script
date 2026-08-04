@@ -60,7 +60,58 @@ def normalize_execution_context(inputs: Any) -> dict[str, Any]:
             "usable": target.get("usable") is True,
             "failure_type": str(target.get("failure_type") or ""),
             "reason": str(target.get("reason") or ""),
+            "binding_mode": str(target.get("binding_mode") or "window"),
         },
+    }
+
+
+def windows_shell_desktop_context(
+    *,
+    region_provider: Callable[[], list[int]] | None = None,
+    hwnd_resolver: Callable[[], int] | None = None,
+    process_id_resolver: Callable[[int], int] | None = None,
+) -> dict[str, Any]:
+    """Return the Windows Shell desktop (``Progman``) as a bindable target."""
+    if hwnd_resolver is None:
+        hwnd_resolver = lambda: int(
+            ctypes.windll.user32.FindWindowW("Progman", None) or 0
+        )
+    if process_id_resolver is None:
+        process_id_resolver = window_process_id
+    if region_provider is None:
+        from ..utils.screenshot import virtual_screen_region
+
+        region_provider = lambda: [
+            virtual_screen_region().left,
+            virtual_screen_region().top,
+            virtual_screen_region().width,
+            virtual_screen_region().height,
+        ]
+    try:
+        hwnd = int(hwnd_resolver() or 0)
+    except Exception:
+        return {}
+    if not hwnd:
+        return {}
+    try:
+        process_id = int(process_id_resolver(hwnd) or 0)
+    except Exception:
+        process_id = 0
+    rect = _normalized_rect(region_provider() or [])
+    if len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
+        return {}
+    return {
+        "format": "desktop-target/1",
+        "hwnd": hwnd,
+        "title": "Program Manager",
+        "process_id": process_id,
+        "class_name": "Progman",
+        "rect": rect,
+        "foreground_verified": False,
+        "usable": True,
+        "failure_type": "",
+        "reason": "windows_shell_desktop_fallback",
+        "binding_mode": "desktop_shell",
     }
 
 
@@ -84,8 +135,15 @@ def capture_foreground_window_context(
     process_id_resolver: Callable[[int], int] = window_process_id,
     windows_provider: Callable[[], list[dict[str, Any]]] | None = None,
     time_provider: Callable[[], float] = time.time,
+    desktop_shell_resolver: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Capture the foreground target immediately after a control-surface yield."""
+    """Capture the foreground target immediately after a control-surface yield.
+
+    When no usable application window exists, the Windows Shell desktop
+    (``Progman``) is bound instead so a generic launch stage can start an
+    application.  That is a real visible target window, not a virtual desktop
+    shortcut.
+    """
     if foreground_resolver is None:
         foreground_resolver = lambda: int(
             ctypes.windll.user32.GetForegroundWindow() or 0
@@ -114,9 +172,23 @@ def capture_foreground_window_context(
     ), {})
     failure_type = ""
     reason = ""
+    shell: dict[str, Any] = {}
+    binding_mode = "window"
     if not hwnd or not window:
-        failure_type = "target_binding_missing"
-        reason = "no usable foreground application was visible after handoff"
+        if desktop_shell_resolver is not None:
+            try:
+                shell = desktop_shell_resolver()
+            except Exception:
+                shell = {}
+        if not isinstance(shell, dict) or int(shell.get("hwnd") or 0) <= 0:
+            failure_type = "target_binding_missing"
+            reason = "no usable foreground application was visible after handoff"
+            shell = {}
+        else:
+            hwnd = int(shell.get("hwnd") or 0)
+            process_id = int(shell.get("process_id") or 0)
+            window = shell
+            binding_mode = "desktop_shell"
     elif exclude_process_id and process_id == int(exclude_process_id):
         failure_type = "control_surface_handoff_failed"
         reason = "native control surface still owns foreground"
@@ -128,10 +200,13 @@ def capture_foreground_window_context(
         "class_name": str(window.get("class_name") or ""),
         "rect": _normalized_rect(window.get("rect")),
         "captured_at": captured_at,
-        "foreground_verified": bool(hwnd and window),
+        "foreground_verified": bool(
+            hwnd and window and binding_mode == "window"
+        ),
         "usable": not failure_type,
         "failure_type": failure_type,
         "reason": reason,
+        "binding_mode": binding_mode,
     }
 
 
@@ -140,7 +215,7 @@ def validated_handoff_target(
     *,
     window_exists_resolver: Callable[[int], bool] | None = None,
     now_ms: int | None = None,
-    max_age_ms: int = 15_000,
+    max_age_ms: int = 60_000,
 ) -> tuple[int, dict[str, Any] | None]:
     """Return a live compiler-independent HWND or a precise binding failure."""
     if str(execution_context.get("entrypoint") or "") != "native_agent_cockpit":

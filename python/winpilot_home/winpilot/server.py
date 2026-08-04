@@ -855,11 +855,22 @@ def platform_jobs(limit: int = 50) -> dict[str, Any]:
 
 @app.get("/api/v2/desktop-context")
 def desktop_context(exclude_process_id: int = 0) -> dict[str, Any]:
-    """Bind the external foreground window after the native client yields."""
+    """Bind the external foreground window after the native client yields.
+
+    When no usable application window exists, the Windows Shell desktop is
+    bound as a generic launch surface instead of failing with
+    ``target_binding_missing``.
+    """
+    from .tasking.execution_context import (
+        capture_foreground_window_context,
+        windows_shell_desktop_context,
+    )
+
     return {
         "ok": True,
         "target": capture_foreground_window_context(
             max(0, int(exclude_process_id or 0)),
+            desktop_shell_resolver=windows_shell_desktop_context,
         ),
     }
 

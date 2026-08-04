@@ -649,6 +649,7 @@ export interface DesktopTargetContext {
   usable: boolean;
   failure_type: string;
   reason: string;
+  binding_mode?: 'window' | 'desktop_shell';
 }
 
 export interface ClientExecutionContext {

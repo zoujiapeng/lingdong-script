@@ -40,7 +40,6 @@ export async function buildClientExecutionContext(
       );
     }
   }
-
   return {
     format: 'execution-context/1',
     entrypoint: bridge ? 'native_agent_cockpit' : 'web_workbench',

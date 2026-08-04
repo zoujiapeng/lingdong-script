@@ -108,9 +108,6 @@ class _PendingTransition:
 class DesktopWorkspace:
     """Own the current window and causal foreground hand-offs."""
 
-    _WINDOW_CHANGING_ACTIONS = frozenset(
-        {"click", "double_click", "hotkey"}
-    )
     _SUCCESSOR_SAMPLES = 5
     _SUCCESSOR_SAMPLE_DELAY_S = 0.05
     _SUCCESSOR_OBSERVATIONS = 2
@@ -124,6 +121,7 @@ class DesktopWorkspace:
         foreground_reader: Callable[[], int | None],
         hit_test_root: Callable[[int, int], int | None],
         wait: Callable[[float], None] = time.sleep,
+        desktop_shell: bool = False,
     ) -> None:
         if type(binding) is not TargetBinding:
             raise TypeError("binding must be canonical TargetBinding")
@@ -145,9 +143,15 @@ class DesktopWorkspace:
         self._foreground_reader = foreground_reader
         self._hit_test = hit_test_root
         self._wait = wait
+        self._desktop_shell = desktop_shell
         self._pending: _PendingTransition | None = None
         self._generation = 0
         self._lock = threading.RLock()
+
+    @property
+    def desktop_shell(self) -> bool:
+        with self._lock:
+            return self._desktop_shell
 
     @staticmethod
     def _require_binding_surface(
@@ -179,7 +183,10 @@ class DesktopWorkspace:
             or type(second) is not WorkspaceSurface
             or first.stable_identity != second.stable_identity
             or first.region != second.region
-            or second.foreground_root_hwnd != second.hwnd
+            or (
+                not self._desktop_shell
+                and second.foreground_root_hwnd != second.hwnd
+            )
         ):
             return None
         return second
@@ -372,11 +379,17 @@ class DesktopWorkspace:
         action: str,
         input_completed: bool | None,
     ) -> None:
-        """Record, but never immediately adopt, a causal successor."""
+        """Record, but never immediately adopt, a causal successor.
 
+        Every completed input arms successor discovery; whether the action
+        actually changed the foreground is decided by the observation itself
+        (stable two-sample foreground probe), not by a hard-coded action-name
+        list.  The model may launch, hotkey, click or drag into another window
+        — all of them can change the foreground and all deserve the same
+        semantic hand-off.
+        """
         if (
             input_completed is not True
-            or action not in self._WINDOW_CHANGING_ACTIONS
             or type(action_id) is not str
             or not action_id
         ):
@@ -389,6 +402,24 @@ class DesktopWorkspace:
                 source_binding_id=self._binding.binding_id,
                 action_id=action_id,
                 action=action,
+                generation=self._generation,
+                observations_left=self._SUCCESSOR_OBSERVATIONS,
+                rejected_identity=None,
+            )
+
+    def request_target_refresh(self) -> None:
+        """Arm one uncaused successor probe for a stale target binding.
+
+        Called by the atomic adapter after repeated recoverable geometry
+        rejections (target moved or replaced).  The next observation resolves
+        the current foreground window as the successor; adoption still requires
+        the same stable two-sample hand-off and never rewrites input.
+        """
+        with self._lock:
+            self._pending = _PendingTransition(
+                source_binding_id=self._binding.binding_id,
+                action_id="refresh-target",
+                action="refresh_target",
                 generation=self._generation,
                 observations_left=self._SUCCESSOR_OBSERVATIONS,
                 rejected_identity=None,

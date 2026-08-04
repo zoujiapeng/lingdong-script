@@ -15,9 +15,10 @@ from winpilot.modeling import (
     RetryKind,
     create_openai_client,
 )
-from winpilot.vnext.actor import InvalidActorProposal
+from winpilot.vnext.actor import InvalidActorProposal, actor_proposal_to_json
 from winpilot.vnext.model_roles import (
     FlowFragmentProposer,
+    INITIAL_ACTOR_SYSTEM_CONTRACT,
     MAX_LIVE_MODEL_JSON_RESPONSE_CHARS,
     MAX_LIVE_MODEL_OUTPUT_TOKENS,
     MAX_LIVE_MODEL_TOTAL_TIMEOUT_S,
@@ -429,10 +430,12 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         == VISUAL_ACTOR_SYSTEM_CONTRACT
     )
     actor_contract = " ".join(VISUAL_ACTOR_SYSTEM_CONTRACT.split())
-    assert len(actor_contract.split()) < 60
+    assert len(actor_contract.split()) < 100
     assert "current authoritative JPEG" in actor_contract
     assert "exact submitted-image pixels" in actor_contract
     assert "goal is visibly complete, call claim_obligation_done" in actor_contract
+    assert "may mix chat and task" in actor_contract
+    assert "call blocked instead of repeating it" in actor_contract
     assert "When pointer_held is true" in actor_contract
     assert actor_request["tool_choice"] == "auto"
     assert "parallel_tool_calls" not in actor_request
@@ -502,7 +505,7 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     )
 
 
-def test_initial_actor_turn_replies_with_native_history_and_no_system_prompt() -> None:
+def test_initial_actor_turn_replies_with_native_history_and_short_system_contract() -> None:
     reply = {
         "choices": [
             {
@@ -534,10 +537,18 @@ def test_initial_actor_turn_replies_with_native_history_and_no_system_prompt() -
     assert admission.reply == "remembered-value"
     request = clients[0].requests[0]
     assert request["messages"] == [
+        {"role": "system", "content": INITIAL_ACTOR_SYSTEM_CONTRACT},
         *history,
         {"role": "user", "content": "What was the value?"},
     ]
-    assert all(message["role"] != "system" for message in request["messages"])
+    assert request["messages"][0]["role"] == "system"
+    initial_contract = " ".join(INITIAL_ACTOR_SYSTEM_CONTRACT.split())
+    assert len(initial_contract.split()) < 120
+    assert "live screen" in initial_contract
+    assert "mixes chat and a task" in initial_contract
+    # The initial contract must not teach keyword routing: no verb list is
+    # mapped to observe_desktop.
+    assert "Call observe_desktop for any request" not in initial_contract
     assert [tool["function"]["name"] for tool in request["tools"]] == [
         "observe_desktop"
     ]
@@ -676,7 +687,7 @@ def test_initial_actor_lazily_calls_a_read_only_connector_then_replies() -> None
         }
     ]
     assert len(responses) == 3
-    assert actor.model_call_reservation == 5
+    assert actor.model_call_reservation == 6
     assert len(clients[0].requests) == 3
     assert [
         tool["function"]["name"]
@@ -687,6 +698,7 @@ def test_initial_actor_lazily_calls_a_read_only_connector_then_replies() -> None
         "call_connector_tool",
     ]
     assert [message["role"] for message in clients[0].requests[2]["messages"]] == [
+        "system",
         "user",
         "assistant",
         "tool",
@@ -840,7 +852,11 @@ def test_initial_actor_turn_drops_oldest_pairs_to_fit_long_history() -> None:
     )
 
     messages = clients[0].requests[0]["messages"]
-    assert messages[:-1] == list(history[4:])
+    assert messages[0] == {
+        "role": "system",
+        "content": INITIAL_ACTOR_SYSTEM_CONTRACT,
+    }
+    assert messages[1:-1] == list(history[4:])
     assert messages[-1] == {
         "role": "user",
         "content": "recall the latest context",
@@ -884,7 +900,7 @@ def test_press_key_model_tool_maps_to_existing_hotkey_runtime_action() -> None:
     (
         ActorPreviousActionView(
             action="scroll",
-            semantic_summary="scroll_down",
+            semantic_summary="scroll",
             input_completed=True,
             visible_effect="",
             local_visual_change="changed",
@@ -1540,3 +1556,400 @@ def test_actor_rejects_fragment_semantics_the_renderer_would_reject(
             catalog_ports={"click": ("output",), "wait": ("output",)},
             catalog_params={"click": frozenset(), "wait": frozenset()},
         )
+
+
+class _RecordingStatusProvider:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def resolve(self, name: str) -> dict[str, Any]:
+        self.calls.append(name)
+        if name == "get_agent_status":
+            return {"format": "agent-status/1", "model": "vision-model"}
+        if name == "get_memory_status":
+            return {
+                "format": "memory-status/1",
+                "long_term_experience_memory": "disabled",
+                "experience_policy": "disabled",
+            }
+        if name == "get_capabilities":
+            return {
+                "format": "capabilities/1",
+                "direct_reply": True,
+                "observe_desktop": True,
+            }
+        raise ValueError(name)
+
+
+def _status_response(
+    name: str,
+    *,
+    call_id: str,
+) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+
+def test_initial_actor_resolves_own_status_without_a_desktop_lease() -> None:
+    reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "memory is disabled",
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients(
+        [
+            _status_response("get_memory_status", call_id="status-1"),
+            reply,
+        ]
+    )
+    provider = _RecordingStatusProvider()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        status_provider=provider,
+    )
+
+    admission = actor.begin_turn("Is long-term memory enabled?")
+
+    assert admission.kind == "reply"
+    assert admission.reply == "memory is disabled"
+    assert provider.calls == ["get_memory_status"]
+    assert len(clients[0].requests) == 2
+    assert [
+        tool["function"]["name"]
+        for tool in clients[0].requests[0]["tools"]
+    ] == [
+        "observe_desktop",
+        "get_agent_status",
+        "get_memory_status",
+        "get_capabilities",
+    ]
+    assert [message["role"] for message in clients[0].requests[1]["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+    ]
+    tool_result = json.loads(clients[0].requests[1]["messages"][3]["content"])
+    assert tool_result["experience_policy"] == "disabled"
+
+
+def test_status_tools_are_never_offered_on_the_last_allowed_model_call() -> None:
+    reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "budget-safe reply",
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients(reply)
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        status_provider=_RecordingStatusProvider(),
+    )
+
+    admission = actor.begin_turn(
+        "Answer without another tool round",
+        _model_call_limit=2,
+    )
+
+    assert admission.reply == "budget-safe reply"
+    assert len(clients[0].requests) == 1
+    assert [
+        tool["function"]["name"]
+        for tool in clients[0].requests[0]["tools"]
+    ] == ["observe_desktop"]
+    assert actor.model_call_reservation == 4
+
+
+def test_visual_actor_repairs_one_invalid_tool_call_before_physical_input() -> None:
+    repaired = _tool_response(
+        "type_text",
+        {
+            "text": "hello",
+            "local_intent": "enter the requested greeting once",
+        },
+        call_id="repaired-call",
+    )
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                "type_text",
+                # Missing local_intent; strict schema requires every property.
+                {"text": "hello", "task_state_update": {"scratchpad": None}},
+                call_id="broken-call",
+            ),
+            repaired,
+        ]
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert isinstance(decision, ActorTurnDecision)
+    assert decision.proposal["args"]["text"] == "hello"
+    assert len(clients[0].requests) == 2
+    repair_messages = clients[0].requests[1]["messages"]
+    assert repair_messages[-2]["tool_calls"][0]["id"] == "broken-call-0"
+    tool_result = json.loads(repair_messages[-1]["content"])
+    assert "tool_format_error" in tool_result
+    assert "local_intent" in tool_result["tool_format_error"]
+
+def test_initial_observe_with_arguments_is_repaired_once_then_terminates() -> None:
+    bad_observe = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "observe-with-args",
+                            "type": "function",
+                            "function": {
+                                "name": "observe_desktop",
+                                "arguments": '{"app":"notepad"}',
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    good_observe = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "observe-fixed",
+                            "type": "function",
+                            "function": {
+                                "name": "observe_desktop",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients([bad_observe, good_observe])
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    admission = actor.begin_turn("Open notepad and wait")
+
+    assert admission.kind == "desktop"
+    assert len(clients[0].requests) == 2
+    repair_messages = clients[0].requests[1]["messages"]
+    assert repair_messages[-2]["tool_calls"][0]["id"] == "observe-with-args"
+    tool_result = json.loads(repair_messages[-1]["content"])
+    assert tool_result["tool_format_error"] == (
+        "observe_desktop does not accept arguments"
+    )
+
+
+def test_initial_observe_second_format_failure_is_terminal() -> None:
+    bad_observe = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "observe-with-args",
+                            "type": "function",
+                            "function": {
+                                "name": "observe_desktop",
+                                "arguments": '{"app":"notepad"}',
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients([bad_observe, bad_observe])
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    with pytest.raises(
+        LiveModelRoleError,
+        match="observe_desktop does not accept arguments",
+    ):
+        actor.begin_turn("Open notepad and wait")
+
+class _RecordingShellRunner:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.result: dict[str, Any] = {
+            "ok": True,
+            "exit_code": 0,
+            "stdout": "notepad running",
+            "stderr": "",
+        }
+
+    def run(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        return dict(self.result)
+
+
+def test_initial_turn_can_run_shell_before_observe() -> None:
+    shell_response = _tool_response(
+        name="run_shell",
+        arguments={"command": "Get-Process notepad"},
+        call_id="shell-call",
+    )
+    observe = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "observe-call",
+                            "type": "function",
+                            "function": {
+                                "name": "observe_desktop",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients([shell_response, observe])
+    runner = _RecordingShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    admission = actor.begin_turn("Check if notepad is running")
+
+    assert admission.kind == "desktop"
+    assert len(runner.calls) == 1
+    assert runner.calls[0]["command"] == "Get-Process notepad"
+    assert runner.calls[0]["shell"] == "powershell"
+    assert len(clients[0].requests) == 2
+    shell_result_messages = [
+        m
+        for m in clients[0].requests[1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    assert len(shell_result_messages) == 1
+    tool_result = json.loads(shell_result_messages[0]["content"])
+    assert tool_result["stdout"] == "notepad running"
+
+
+def test_visual_turn_can_run_shell_before_gui_action() -> None:
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="run_shell",
+                arguments={"command": "tasklist", "shell": "cmd"},
+                call_id="visual-shell",
+            ),
+            _tool_response(
+                arguments={
+                    "text": "hello",
+                    "local_intent": "enter the requested text once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    runner = _RecordingShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert len(runner.calls) == 1
+    assert runner.calls[0]["command"] == "tasklist"
+    assert runner.calls[0]["shell"] == "cmd"
+    assert len(clients[0].requests) == 2
+
+
+def test_shell_tool_is_absent_without_runner() -> None:
+    _, clients = _build_clients(_tool_response())
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    names = [
+        tool["function"]["name"]
+        for tool in clients[0].requests[0]["tools"]
+    ]
+    assert "run_shell" not in names
