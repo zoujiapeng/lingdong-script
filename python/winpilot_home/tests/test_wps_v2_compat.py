@@ -290,8 +290,10 @@ def test_replay_preserves_recorded_visual_servo_before_physical_click(monkeypatc
             or (100, 120)
         ),
     )
+    from winpilot.fast import visual_servo as visual_servo_mod
+
     monkeypatch.setattr(
-        trace_mod,
+        visual_servo_mod,
         "track_visual_target",
         lambda initial, labels, **kwargs: (
             trace_mod.UIElement(
@@ -301,8 +303,7 @@ def test_replay_preserves_recorded_visual_servo_before_physical_click(monkeypatc
                 text="Moving target",
                 cx=180,
                 cy=140,
-                left=150,
-                top=125,
+                left=150,                top=125,
                 width=60,
                 height=30,
                 confidence=0.95,

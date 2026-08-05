@@ -26,7 +26,6 @@ import cv2
 from ..action import executor, verify
 from ..automation_ir import automation_ir_from_wps, validate_automation_ir, wps_from_automation_ir
 from ..config import CONFIG, SCRIPTS_DIR, TRACES_DIR
-from ..fast.visual_servo import ServoConfig, track_visual_target
 from ..memory import replay_anchors
 from ..perception import fusion, groundtruth, ocr, uia, vision_cv, win32
 from ..perception.model import UIElement
@@ -2660,6 +2659,10 @@ class Replayer:
         step: dict[str, Any],
         point: tuple[int, int],
     ) -> tuple[tuple[int, int] | None, dict[str, Any]]:
+        # Lazy import: the visual-servo tracker belongs to the legacy fast
+        # package and must not load at service startup.
+        from ..fast.visual_servo import ServoConfig, track_visual_target
+
         resolved = dict(self._last_relocation)
         recorded = step.get("resolved_element")
         if not isinstance(recorded, dict):

@@ -49,7 +49,6 @@ from .recorder import apprentice as apprentice_mod
 from .recorder import trace as trace_mod
 from .runtime_info import runtime_fingerprint, runtime_source_drifted
 from .runtime_jobs import RUNTIME_JOBS, RuntimeJob
-from .fast.perception_daemon import PERCEPTION_DAEMON
 from .utils.log import BUS, logger
 from .orchestrator.catalog import capability_catalog
 from .orchestrator.contracts import (
@@ -184,7 +183,6 @@ async def _lifespan(_app: FastAPI):
                 yield
     finally:
         _stop_scheduler_thread()
-        PERCEPTION_DAEMON.shutdown()
 
 
 app = FastAPI(title="WinPilot", docs_url=None, redoc_url=None, lifespan=_lifespan)
@@ -782,7 +780,6 @@ def status() -> dict[str, Any]:
         # completed job's full ARP/result payload here; selected run/job detail
         # has dedicated endpoints.
         "runtime_jobs": RUNTIME_JOBS.list(20, include_result=False),
-        "perception_daemon": PERCEPTION_DAEMON.status(),
         "current_run": _current_run_projection(),
     }
 

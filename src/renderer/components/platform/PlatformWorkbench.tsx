@@ -2545,7 +2545,6 @@ function SystemView({ plane }: { plane: Plane }) {
   const runtimeJobs = platformStatus?.runtime_jobs || [];
   const activeRuntimeJobs = runtimeJobs.filter((job) => ['queued', 'waiting_resources', 'running', 'canceling'].includes(job.status));
   const desktopQueue = platformStatus?.desktop_action_queue;
-  const perceptionDaemon = platformStatus?.perception_daemon;
 
   useEffect(() => {
     if (!plane.baseUrl) return;
@@ -2667,7 +2666,6 @@ function SystemView({ plane }: { plane: Plane }) {
             <div><span>Runtime jobs</span><strong>{activeRuntimeJobs.length}/{runtimeJobs.length}</strong><small>活动 / 最近摘要</small></div>
             <div><span>桌面动作队列</span><strong>{desktopQueue?.completed ?? 0}/{desktopQueue?.submitted ?? 0}</strong><small>{desktopQueue?.failed ?? 0} 失败 · {desktopQueue?.resource_waiters ?? 0} 等待资源</small></div>
             <div><span>异步桌面动作</span><strong>{desktopQueue?.async_status?.running ?? 0}</strong><small>{(desktopQueue?.async_status?.queued ?? 0) + (desktopQueue?.async_status?.waiting_resources ?? 0)} 排队</small></div>
-            <div><span>感知缓存</span><strong>{perceptionDaemon?.entries ?? 0}</strong><small>{perceptionDaemon?.active_leases ?? 0} 活动租约 · {perceptionDaemon?.targets.length ?? 0} 目标</small></div>
           </div>
           <div className="arp-runtime-job-list">
             {runtimeJobs.slice(0, 8).map((job) => {

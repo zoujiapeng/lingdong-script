@@ -8,8 +8,6 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..fast.action_contract import iter_atomic_actions, validate_batch_actions
-
 
 ARP_FORMAT = "arp/1"
 CONDITION_OPERATORS = {
@@ -161,6 +159,8 @@ def _validate_node_config(node: ArpNode) -> list[str]:
         if not goal:
             errors.append(f"{prefix} requires config.goal")
     elif node.kind == ArpNodeKind.ACTION_BATCH:
+        from ..fast.action_contract import validate_batch_actions
+
         errors.extend(f"{prefix}: {error}" for error in validate_batch_actions(config.get("actions")))
     elif node.kind == ArpNodeKind.REPLAY_STEP:
         step = config.get("step")
@@ -260,6 +260,8 @@ def _spatial_target_path_errors(
         node = node_map[node_id]
         established_after = target_established
         if node.kind == ArpNodeKind.ACTION_BATCH and not node.disabled:
+            from ..fast.action_contract import iter_atomic_actions
+
             for action in iter_atomic_actions(
                 "run_action_batch",
                 {"actions": node.config.get("actions")},
