@@ -1120,47 +1120,17 @@ default）在运行时也必须允许省略并填默认值，否则模型按 sch
 
 ## 2026-08-06 opencode 视觉辅助（vision-assistant MCP，永久启用）
 
-**这是本机 opencode（以及任何接入 deepseek 的 AI 工具）的永久视觉能力**：
-opencode 接入的 deepseek 本身不支持图片，但通过本机已注册的 MCP 服务器
-`vision-assistant` 可以"看懂"图片。所有调试窗口（本仓库的 AI/Codex/opencode
-窗口）都应该直接使用它，不要再绕道别的方式看截图。
+opencode 接入的 deepseek 不支持图片，但本机已注册 MCP 服务器 `vision-assistant`，
+模型可直接调用工具看图：
 
-### 用法（在 opencode / 本仓库任何 agent 窗口里）
+- `describe_image(path, question?)`——描述一张图片文件
+- `describe_screen(question?)`——截图并描述当前屏幕
 
-工具是 MCP 全局注册的，模型可直接调用：
+配置在 `~/.config/opencode/vision-mcp/vision_mcp.py`（opencode.jsonc 已注册）。
+凭据优先读 `python/winpilot_home/config.json` 的 `api` 段，环境变量仅后备。
+验证：`opencode run "用 vision-assistant 的 describe_image 查看 <路径> 并描述"`。
 
-- `describe_image(path, question?)`——读取一张图片文件（png/jpg/webp/bmp/gif），
-  交给 MiMo 视觉模型（mimo-v2.5）返回详细文字描述。用于看懂某张截图/图。
-- `describe_screen(question?)`——捕获当前整个屏幕（自动缩放压缩到 1280px
-  JPEG 防超时）并返回描述。用于了解当前桌面状态。
-
-模型侧不需要任何额外配置：工具名带 `vision-assistant_` 前缀（如
-`vision-assistant_describe_image`），opencode 会在工具列表里自动暴露。
-
-### 配置文件位置（永久安装）
-
-- 服务器代码：`C:\Users\zou\.config\opencode\vision-mcp\vision_mcp.py`
-- 注册配置：`C:\Users\zou\.config\opencode\opencode.jsonc`（mcp.vision-assistant）
-
-依赖：`mcp`、`anyio`、`mss`、`Pillow`（mss/Pillow 仅 describe_screen 需要）。
-凭据来源：**优先读 `python/winpilot_home/config.json` 的 `api` 段**（本机权威
-MiMo key）；仅当 config.json 不存在时才回退环境变量 `MIMO_API_KEY` /
-`MIMO_BASE_URL` / `MIMO_VISION_MODEL`。
-
-### 踩过的坑（修好后再也不回退）
-
-1. **401 根因**：opencode 进程会继承 shell 残留的 `MIMO_API_KEY`（指向失效的
-   中转 javen.bbroot.com），导致视觉请求 401。修复：**config.json 权威优先**，
-   环境变量仅后备。不要为了调试临时 `$env:MIMO_*`，会污染所有子进程。
-2. **describe_screen 超时**：原始全屏 PNG 可达数 MB，超过 opencode MCP 调用
-   超时（报 `MCP error -32001`）。修复：截图后缩放到最长边 1280px + JPEG
-   quality 82 再上传。
-3. **并发连接冲突**：opencode TUI 与 `opencode run` 同时连同一 stdio MCP
-   server 时，工具可能短暂不可用（报 unavailable）。单连接时稳定；遇冲突
-   重试或只用其中一个窗口。
-4. **验证方式**：`opencode run "用 vision-assistant 的 describe_image 查看
-   <绝对路径> 并描述"`（需 `$env:OPENCODE_MODEL="deepseek/deepseek-chat"`，
-   或直接用默认模型）。改 server 后无需重启 TUI，新 `opencode run` 会重新
-   拉起 server。
+注意：不要为调试临时 `$env:MIMO_*`（会污染子进程导致 401）；TUI 与
+`opencode run` 并发连同一 server 时工具可能短暂不可用，重试即可。
 
 `CON` 未触碰。
