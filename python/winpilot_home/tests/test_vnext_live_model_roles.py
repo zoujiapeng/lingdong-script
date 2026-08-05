@@ -2318,3 +2318,23 @@ def test_read_window_text_ignores_extra_arguments() -> None:
     assert decision.proposal["kind"] == "desktop_action"
     assert decision.proposal["action"] == "click"
     assert len(clients[0].requests) == 2
+
+
+def test_owned_utility_tool_tolerates_unknown_fields() -> None:
+    """Utility tools ignore surplus keys instead of rejecting the call."""
+    from winpilot.vnext.model_roles.visual_actor import _owned_tool_exchange
+
+    response = _tool_response(
+        name="list_windows",
+        arguments={
+            "unexpected": 1,
+            "task_state_update": {"scratchpad": "w"},
+        },
+    )
+    exchange = _owned_tool_exchange(
+        response,
+        "list_windows",
+        expected_arguments={},
+    )
+    assert exchange is not None
+    assert exchange[3] == {}

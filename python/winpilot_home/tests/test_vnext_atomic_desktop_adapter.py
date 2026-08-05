@@ -434,6 +434,7 @@ def _proposal(action: str) -> dict[str, Any]:
         },
         "type_text": {"text": "hello"},
         "hotkey": {"keys": ["ctrl", "l"]},
+        "launch_application": {"app": "notepad", "arguments": ""},
     }[action]
     return {
         "format": ACTOR_PROPOSAL_FORMAT,
@@ -2022,3 +2023,46 @@ def test_hotkey_folds_aliases_and_orders_chord_modifiers() -> None:
     assert kind == "hotkey"
     chord, _hwnd = payload
     assert tuple(chord.keys) == ("shift", "win", "s")
+
+
+def test_extra_action_arguments_are_tolerated_not_rejected() -> None:
+    """Surplus keys must not burn an Actor turn on a format-repair round."""
+    harness = _harness(
+        "click",
+        action_args={
+            "image_x": 50.0,
+            "image_y": 40.0,
+            "region": {"left": 1, "top": 2, "width": 3, "height": 4},
+            "note": "模型多余字段",
+        },
+    )
+    attempt = harness.run()
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+
+
+def test_launch_tolerates_extra_arguments() -> None:
+    harness = _harness("launch_application")
+    prepared = harness.adapter._prepare_action(
+        harness.envelope,
+        harness.envelope.proposal.model_copy(update={
+            "args": {
+                "app": "notepad",
+                "arguments": "",
+                "window": "extra",
+            }
+        }),
+    )
+    assert prepared.action == "launch_application"
+
+
+def test_hotkey_tolerates_extra_arguments() -> None:
+    harness = _harness(
+        "hotkey",
+        action_args={"keys": ["ctrl", "s"], "delay_ms": 5},
+    )
+    attempt = harness.run()
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
