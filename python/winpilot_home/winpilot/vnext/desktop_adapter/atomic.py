@@ -44,6 +44,10 @@ from ...action.replay_policy import MutationOutcome
 from ...utils.screenshot import Region, virtual_screen_region
 from ...visual_runtime.frame_authority import FrameAuthority, FrameState
 from ...visual_runtime.frame_observer import FrameObserver
+from ...visual_runtime.keyboard_contracts import (
+    canonical_hotkey_args,
+    normalize_hotkey_args,
+)
 from ...visual_runtime.normalized_frame_coordinates import (
     NormalizedFrameCoordinateMapper,
 )
@@ -1545,8 +1549,8 @@ class AtomicDesktopAdapter:
             )
         if action == "hotkey":
             self._require_keys(args, {"keys"})
-            keys = args["keys"]
-            if not isinstance(keys, (list, tuple)):
+            keys = canonical_hotkey_args(normalize_hotkey_args(args["keys"]))
+            if not keys:
                 raise ValueError("hotkey keys must be an array")
             return _PreparedAction(
                 action=action,

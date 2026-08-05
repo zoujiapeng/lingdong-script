@@ -158,6 +158,7 @@ ATOMIC_DESKTOP_IMPORTS = (
     "winpilot.utils.screenshot",
     "winpilot.visual_runtime.frame_authority",
     "winpilot.visual_runtime.frame_observer",
+    "winpilot.visual_runtime.keyboard_contracts",
     "winpilot.visual_runtime.normalized_frame_coordinates",
     "winpilot.visual_runtime.submitted_image_coordinates",
 )

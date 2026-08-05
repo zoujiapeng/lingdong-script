@@ -1996,3 +1996,29 @@ def test_launch_visible_effect_surfaces_existing_instance_note() -> None:
         receipt_existing_no_note, "launch_application"
     )
     assert "already-running" in effect_fallback
+
+def test_hotkey_accepts_string_chord_via_canonical_normalization() -> None:
+    harness = _harness("hotkey", action_args={"keys": "ctrl+l"})
+    attempt = harness.run()
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    (kind, payload) = harness.raw.calls[-1]
+    assert kind == "hotkey"
+    chord, _hwnd = payload
+    assert tuple(chord.keys) == ("ctrl", "l")
+
+
+def test_hotkey_folds_aliases_and_orders_chord_modifiers() -> None:
+    harness = _harness(
+        "hotkey",
+        action_args={"keys": ["shift", "command", "s"]},
+    )
+    attempt = harness.run()
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    (kind, payload) = harness.raw.calls[-1]
+    assert kind == "hotkey"
+    chord, _hwnd = payload
+    assert tuple(chord.keys) == ("shift", "win", "s")
