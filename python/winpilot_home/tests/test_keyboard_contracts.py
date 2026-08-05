@@ -42,6 +42,19 @@ def test_canonical_folds_aliases() -> None:
     ]
 
 
+def test_canonical_folds_left_right_modifier_variants() -> None:
+    assert canonical_hotkey_args(["ctrl_l", "s"]) == ["ctrl", "s"]
+    assert canonical_hotkey_args(["control_r", "a"]) == ["ctrl", "a"]
+    assert canonical_hotkey_args(["shift_l", "tab"]) == ["shift", "tab"]
+    assert canonical_hotkey_args(["alt_r", "f4"]) == ["alt", "f4"]
+    assert canonical_hotkey_args(["win_r", "l"]) == ["win", "l"]
+
+
+def test_canonicalized_left_right_chord_passes_hotkey_contract() -> None:
+    chord = HotkeyChord(tuple(canonical_hotkey_args(normalize_hotkey_args(["shift_r", "ctrl_l", "x"]))))
+    assert chord.keys == ("ctrl", "shift", "x")
+
+
 def test_canonical_orders_modifiers_first_in_canonical_order() -> None:
     assert canonical_hotkey_args(["s", "shift", "ctrl"]) == ["ctrl", "shift", "s"]
 

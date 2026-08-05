@@ -21,11 +21,23 @@ CANONICAL_HOTKEY_KEYS = frozenset({
 _MODIFIER_ALIASES = {
     "control": "ctrl",
     "ctl": "ctrl",
+    "control_l": "ctrl",
+    "control_r": "ctrl",
+    "ctrl_l": "ctrl",
+    "ctrl_r": "ctrl",
     "option": "alt",
+    "option_l": "alt",
+    "option_r": "alt",
+    "alt_l": "alt",
+    "alt_r": "alt",
     "command": "win",
     "cmd": "win",
     "super": "win",
     "windows": "win",
+    "win_l": "win",
+    "win_r": "win",
+    "shift_l": "shift",
+    "shift_r": "shift",
 }
 
 

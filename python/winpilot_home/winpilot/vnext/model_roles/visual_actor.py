@@ -1175,8 +1175,8 @@ def _window_text_exchange(
     if type(call_id) is not str or not call_id:
         raise LiveModelRoleError("Actor window-text tool call requires an id")
     arguments = _decode_arguments(raw_arguments)
-    if set(arguments) != set():
-        raise LiveModelRoleError("read_window_text does not accept arguments")
+    if type(arguments) is not dict:
+        raise LiveModelRoleError("Actor window-text arguments must be a JSON object")
     content = member(message, "content")
     if content is not None and type(content) is not str:
         raise LiveModelRoleError("Actor window-text content must be text or null")
@@ -1606,8 +1606,6 @@ def _execute_initial_call(
     if name == _WINDOW_TEXT_TOOL:
         if window_text_reader is None or not callable(window_text_reader):
             raise LiveModelRoleError("Actor window-text reader is unavailable")
-        if set(arguments) != set():
-            raise LiveModelRoleError("read_window_text does not accept arguments")
         result = window_text_reader(turn)
         if not isinstance(result, Mapping):
             raise LiveModelRoleError(
