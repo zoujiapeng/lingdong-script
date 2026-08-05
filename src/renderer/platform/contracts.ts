@@ -735,13 +735,6 @@ export interface DesktopActionQueueStatus {
   [key: string]: unknown;
 }
 
-export interface PerceptionDaemonStatus {
-  entries: number;
-  active_leases: number;
-  targets: Array<Record<string, unknown>>;
-  [key: string]: unknown;
-}
-
 export interface VnextLiveAgentBudget {
   max_turns: number;
   max_runtime_s: number;
@@ -772,7 +765,6 @@ export interface PlatformStatus {
   model_profile?: RuntimeModelProfile;
   desktop_action_queue?: DesktopActionQueueStatus;
   runtime_jobs?: RuntimeJobSnapshot[];
-  perception_daemon?: PerceptionDaemonStatus;
   vnext?: VnextRuntimeStatus;
   current_run?: RunProjection | null;
   [key: string]: unknown;

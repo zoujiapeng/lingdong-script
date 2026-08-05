@@ -21,7 +21,6 @@ import win32gui
 
 from ..action import executor
 from ..config import CONFIG
-from ..fast.action_contract import BATCH_MUTATING_ACTIONS
 from ..orchestrator.contracts import ArpGraph, ArpNodeKind, validate_graph
 from ..recorder import trace as trace_mod
 from ..tasking import TaskContractCompiler
@@ -38,9 +37,20 @@ JsonDict = dict[str, Any]
 # policy tied to the Controller's canonical mutation set; explicit waits are
 # included because they intentionally cross a visual-state boundary even
 # though they do not inject input themselves.
-_FRAME_INVALIDATING_PREFIX_ACTIONS = frozenset(BATCH_MUTATING_ACTIONS) | {
-    "wait", "wait_change", "wait_for_visual_change", "wait_stable",
-}
+# Lazy: BATCH_MUTATING_ACTIONS lives in the legacy fast package; resolving it
+# at import time would drag the fast/agent chain into service startup.
+_frame_invalidating_prefix_actions: frozenset[str] | None = None
+
+
+def _frame_invalidating_actions() -> frozenset[str]:
+    global _frame_invalidating_prefix_actions
+    if _frame_invalidating_prefix_actions is None:
+        from ..fast.action_contract import BATCH_MUTATING_ACTIONS
+
+        _frame_invalidating_prefix_actions = frozenset(BATCH_MUTATING_ACTIONS) | {
+            "wait", "wait_change", "wait_for_visual_change", "wait_stable",
+        }
+    return _frame_invalidating_prefix_actions
 
 
 def _region_payload(region: screenshot.Region | None) -> JsonDict | None:
@@ -871,7 +881,7 @@ class ChatGPTDesktopBridge:
                 name = str(action.get("action") or action.get("tool") or "").strip()
                 if not name and len(action) == 1:
                     name = str(next(iter(action))).strip()
-                if name in _FRAME_INVALIDATING_PREFIX_ACTIONS:
+                if name in _frame_invalidating_actions():
                     invalidating_prefixes.append({"index": index, "action": name})
         if invalidating_prefixes:
             return {
@@ -1001,7 +1011,7 @@ class ChatGPTDesktopBridge:
             if self._raw_frame_gesture_action(original):
                 action["source_frame_coordinates"] = provenance
             mapped_actions.append(action)
-            if name in BATCH_MUTATING_ACTIONS:
+            if name in _frame_invalidating_actions():
                 local_mutation_seen = True
         args["actions"] = mapped_actions
         args["source_frame_binding"] = frame

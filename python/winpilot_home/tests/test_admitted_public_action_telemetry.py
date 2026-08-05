@@ -561,7 +561,6 @@ def test_websocket_forwards_the_real_admitted_public_summary_unchanged(
     monkeypatch.setattr(server, "_warm_perception_dimensions", lambda: None)
     monkeypatch.setattr(server, "_start_scheduler_thread", lambda: None)
     monkeypatch.setattr(server, "_stop_scheduler_thread", lambda: None)
-    monkeypatch.setattr(server.PERCEPTION_DAEMON, "shutdown", lambda: None)
     monkeypatch.setattr(server, "CHATGPT_MCP_APP", None)
     monkeypatch.setattr(server, "CHATGPT_MCP_LIFESPAN_USED", False)
     original_subscribe = BUS.subscribe
