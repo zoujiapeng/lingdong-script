@@ -786,7 +786,8 @@ _LEGACY_REPLAY_REQUIRED_ACTIONS = frozenset({
     "click", "click_element", "double_click",
     "type_text", "type_into_element", "hotkey",
     "scroll", "drag", "draw_strokes", "tray_click",
-    "clipboard_paste", "paste_image_file",
+
+
     "mouse_down", "mouse_up", "move_mouse", "hold_key", "select_color",
     "coordinate_click_test", "run_detached", "write_file", "apply_patch",
 })

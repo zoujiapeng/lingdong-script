@@ -37,7 +37,6 @@ from .file_tools import FileToolMixin
 from .fast_tools import FastToolMixin
 from .interaction_tools import (
     InteractionToolMixin,
-    normalize_key_sequence,
 )
 from .memory_tools import MemoryToolMixin
 from .mcp_tools import McpToolMixin
@@ -53,7 +52,7 @@ from .working_set_tools import WorkingSetToolMixin
 _MUTATING_TOOLS = {
     "open_app", "launch", "click", "double_click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
     "focus_window", "wait", "tray_click", "run_shell", "run_detached",
-    "write_file", "apply_patch", "clipboard_write", "clipboard_paste", "paste_image_file", "mouse_down",
+    "write_file", "apply_patch", "clipboard_write", "clipboard_paste", "mouse_down",
     "mouse_up", "move_mouse", "hold_key", "run_action_batch", "execute_subgoal",
     "coordinate_click_test",
     "call_mcp_tool",
@@ -68,7 +67,6 @@ _ACTION_SCREEN_DELTA_TOOLS = {
     "focus_window",
     "tray_click",
     "clipboard_paste",
-    "paste_image_file",
     "mouse_down",
     "mouse_up",
     "move_mouse",
@@ -242,7 +240,6 @@ class ToolSession(
             return ToolResult(f"未知工具: {name}")
         if name == "hotkey":
             args = dict(args)
-            args["keys"] = normalize_key_sequence(args.get("keys"))
         guard_result = None
         scope_recovery = None
         if name not in _CONTROLLER_COMPOSITE_TOOLS:

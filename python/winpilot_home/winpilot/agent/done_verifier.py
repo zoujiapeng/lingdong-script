@@ -55,8 +55,10 @@ _NATIVE_JUDGE_NONVISUAL_TOOLS = frozenset({
     # Provider boundaries can prove facts which may not be legible in the
     # current foreground frame.  They remain evidence only: the judge, not a
     # task-string router, decides whether a receipt is relevant or sufficient.
-    "capture_artifact",
-    "paste_image_file",
+
+
+
+
     "open_conversation",
     "send_text",
     "send_artifact",
@@ -1426,7 +1428,7 @@ class DoneVerifierMixin:
         paste_indices = [
             index
             for index, (name, _args, output) in enumerate(history)
-            if name in {"paste_image_file", "send_artifact"} and self._communication_mutation_succeeded(output)
+            if name in {"send_artifact"} and self._communication_mutation_succeeded(output)
         ]
         send_indices = [
             index
@@ -1532,7 +1534,7 @@ class DoneVerifierMixin:
         paste_index = next(
             (
                 index for index in range(len(history) - 1, -1, -1)
-                if history[index][0] in {"paste_image_file", "send_artifact"}
+                if history[index][0] in {"send_artifact"}
                 and self._communication_mutation_succeeded(history[index][2])
             ),
             None,

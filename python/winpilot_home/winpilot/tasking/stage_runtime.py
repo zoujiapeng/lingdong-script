@@ -345,7 +345,8 @@ class StageRuntime:
             "screenshot": "artifact",
             "send_text": "communication",
             "send_artifact": "communication",
-            "paste_image_file": "communication",
+
+
             "web_search": "research",
             "run_shell": "workspace",
             "write_file": "workspace",

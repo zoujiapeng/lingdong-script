@@ -1957,66 +1957,6 @@ def test_hotkey_printable_sequence_is_typed_as_text(monkeypatch):
     assert "coerced_from_hotkey" in result.text
 
 
-def test_hotkey_json_string_keys_are_pressed_not_typed(monkeypatch):
-    import winpilot.agent.tools as tools_mod
-    from winpilot.agent.tools import ToolSession
-
-    calls = []
-
-    fake_executor = SimpleNamespace(
-        type_text=lambda text, hwnd=None: calls.append(("type_text", text, hwnd)) or {"ok": True, "typed": len(text)},
-        press_keys=lambda keys: calls.append(("press_keys", keys)) or {"ok": True, "keys": keys},
-        focus_window=lambda hwnd: {"ok": True},
-    )
-    fake_verify = SimpleNamespace(
-        run_with_verify=lambda _name, action, **_kwargs: action(),
-    )
-    monkeypatch.setattr(tools_mod, "executor", fake_executor)
-    monkeypatch.setattr(tools_mod, "verify", fake_verify)
-
-    session = ToolSession(task="save the file")
-    result = session._t_hotkey({"keys": '["ctrl", "s"]}'})
-
-    assert calls == [("press_keys", ["ctrl", "s"])]
-    assert '"keys": ["ctrl", "s"]' in result.text
-    assert "coerced_from_hotkey" not in result.text
-
-
-def test_copy_hotkey_is_verified_by_clipboard_generation(monkeypatch):
-    import json
-
-    import winpilot.agent.interaction_tools as interaction_tools
-    import winpilot.agent.tools as tools_mod
-    from winpilot.agent.tools import ToolSession
-
-    sequences = iter([41, 42])
-    fake_executor = SimpleNamespace(
-        press_keys=lambda keys: {"ok": True, "keys": keys},
-        focus_window=lambda hwnd: {"ok": True},
-        clipboard_read=lambda: "https://example.test/actual-address",
-    )
-    fake_verify = SimpleNamespace(
-        run_with_verify=lambda _name, action, **_kwargs: action(),
-    )
-    monkeypatch.setattr(tools_mod, "executor", fake_executor)
-    monkeypatch.setattr(tools_mod, "verify", fake_verify)
-    monkeypatch.setattr(
-        interaction_tools,
-        "_clipboard_sequence_number",
-        lambda: next(sequences),
-    )
-
-    result = ToolSession(task="copy the selected browser address")._t_hotkey(
-        {"keys": ["c", "ctrl"]}
-    )
-    payload = json.loads(result.text)
-
-    assert payload["keys"] == ["ctrl", "c"]
-    assert payload["clipboard_sequence_changed"] is True
-    assert payload["clipboard_text_length"] > 0
-    assert payload["verified"] is True
-
-
 def test_assistant_history_truncates_verbose_content():
     from winpilot.agent.loop import _sanitize_assistant
 

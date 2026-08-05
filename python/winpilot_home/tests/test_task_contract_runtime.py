@@ -914,7 +914,7 @@ def test_native_vision_desktop_goal_exposes_artifact_and_gui_primitives():
     }
     assert {
         "capture_artifact", "send_artifact", "verify_delivery",
-        "paste_image_file", "read_text", "click", "type_text", "scroll",
+        "read_text", "click", "type_text", "scroll",
         "drag", "draw_strokes", "mouse_down", "move_mouse", "mouse_up",
     } <= names
 

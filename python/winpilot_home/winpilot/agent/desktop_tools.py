@@ -13,7 +13,7 @@ from ..config import CONFIG
 from ..perception import vision_cv
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, desktop_geometry, screen_size, window_region
-from .interaction_tools import _call_with_optional_hwnd, normalize_key_sequence
+from .interaction_tools import _call_with_optional_hwnd
 from .tool_result import ToolResult
 
 
@@ -453,45 +453,6 @@ class DesktopToolMixin:
         self._fold_base64(result)
         return ToolResult(self._fmt(result))
 
-    def _t_paste_image_file(self, args: dict) -> ToolResult:
-        path = str(args.get("path") or "").strip()
-        if not path:
-            return ToolResult("paste_image_file requires an absolute image path")
-        store, registry = self._managed_artifacts()
-        artifact = None
-        if store is not None:
-            for item in store.artifacts():
-                if str(Path(item.get("managed_path") or "").resolve()) == str(Path(path).expanduser().resolve()):
-                    artifact = store.get(str(item.get("artifact_id") or ""), require_sendable=True)
-                    break
-            if artifact is None:
-                artifact = store.import_file(
-                    path,
-                    purpose="selected_input",
-                    sendable=True,
-                    metadata={"compatibility_tool": "paste_image_file"},
-                )
-            path = artifact.managed_path
-        target = args.get("hwnd") or getattr(self, "hwnd", None)
-        if not target:
-            action_hwnd = getattr(self, "_action_hwnd", None)
-            target = action_hwnd() if callable(action_hwnd) else None
-        result = executor.paste_image_file(path, hwnd=int(target) if target else None)
-        if artifact is not None:
-            result["artifact_id"] = artifact.artifact_id
-            result["sha256"] = artifact.sha256
-            result["delivery"] = False
-            result["preview_only"] = True
-            if registry is not None and result.get("ok") is True:
-                registry.record(
-                    "artifact.composer_preview",
-                    provider="compatibility_paste_image_file",
-                    verified=True,
-                    artifact_id=artifact.artifact_id,
-                    metadata={"delivery": False, "sha256": artifact.sha256},
-                )
-        return ToolResult(self._fmt(result))
-
     def _t_capture_artifact(self, args: dict) -> ToolResult:
         store, registry = self._managed_artifacts()
         if store is None:
@@ -909,7 +870,7 @@ class DesktopToolMixin:
             return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
 
     def _t_hold_key(self, args: dict) -> ToolResult:
-        keys = normalize_key_sequence(args.get("keys") or [])
+        keys = args.get("keys") or []
         target = getattr(self, "_action_hwnd", lambda: None)()
         result = executor.hold_keys(
             keys,

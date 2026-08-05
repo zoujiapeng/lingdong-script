@@ -165,9 +165,32 @@ def _image_file_to_dib(path: Path) -> tuple[bytes, int, int]:
     return buffer.getvalue()[14:], int(width), int(height)
 
 
+def set_clipboard_dib(dib: bytes) -> None:
+    """Replace the clipboard with one CF_DIB payload (shared with executor)."""
+    import win32clipboard
+    import win32con
+
+    opened = False
+    last_error: Exception | None = None
+    for _attempt in range(4):
+        try:
+            win32clipboard.OpenClipboard()
+            opened = True
+            break
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.04)
+    if not opened:
+        raise RuntimeError(f"clipboard is busy: {last_error}")
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32con.CF_DIB, dib)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
 def paste_image_backend(*, path: str) -> dict[str, Any]:
     """Put one image file onto the clipboard and press Ctrl+V."""
-    import win32clipboard
     import win32con
 
     image_path = Path(str(path or "")).expanduser()
@@ -186,23 +209,7 @@ def paste_image_backend(*, path: str) -> dict[str, Any]:
             "error": "paste_image requires a PNG, JPEG, BMP, or WebP file",
         }
     dib, width, height = _image_file_to_dib(image_path)
-    opened = False
-    last_error: Exception | None = None
-    for _attempt in range(4):
-        try:
-            win32clipboard.OpenClipboard()
-            opened = True
-            break
-        except Exception as exc:
-            last_error = exc
-            time.sleep(0.04)
-    if not opened:
-        raise RuntimeError(f"clipboard is busy: {last_error}")
-    try:
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardData(win32con.CF_DIB, dib)
-    finally:
-        win32clipboard.CloseClipboard()
+    set_clipboard_dib(dib)
 
     # Ctrl+V through SendInput to the foreground window.  This is the vNext
     # input path: raw physical keyboard events, no legacy executor.

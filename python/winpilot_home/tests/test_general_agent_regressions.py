@@ -189,7 +189,7 @@ def test_same_board_different_user_intent_does_not_switch_runtime_mode() -> None
         "click", "double_click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
         "mouse_down", "move_mouse", "mouse_up",
         "wait", "done", "blocked", "fail",
-        "capture_artifact", "paste_image_file",
+        "capture_artifact",
         "discover_mcp_tools", "call_mcp_tool",
     }
     assert tool_sets[0] == expected_model_tools

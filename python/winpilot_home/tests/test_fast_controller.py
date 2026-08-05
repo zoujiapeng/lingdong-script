@@ -4806,16 +4806,6 @@ def test_clipboard_words_do_not_replace_explicit_click_with_find_replace_strateg
     assert actions[0]["label"] == "File"
     assert not any(action.get("keys") in (["ctrl", "h"], ["ctrl", "v"]) for action in actions)
     assert "clipboard_replace_token" not in request.constraints
-def test_standalone_hotkey_canonicalizes_reversed_modifier_order():
-    from winpilot.agent.interaction_tools import canonical_hotkey_order
-
-    assert canonical_hotkey_order(["l", "ctrl"]) == ["ctrl", "l"]
-    assert canonical_hotkey_order(["c", "control"]) == ["ctrl", "c"]
-    assert canonical_hotkey_order(["down", "home"]) == ["down", "home"]
-
-
-
-
 def test_input_locator_rejects_focused_top_level_window_as_text_field():
     from winpilot.fast.input_locator import locate_input
     from winpilot.perception.fusion import Snapshot
