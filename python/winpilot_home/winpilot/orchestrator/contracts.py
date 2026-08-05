@@ -18,7 +18,7 @@ CONDITION_OPERATORS = {
 _SPATIAL_TARGET_REQUIRED = {
     "click", "double_click", "click_element", "scroll", "move_mouse", "drag",
     "draw_strokes", "ensure_input_mode", "select_color", "mouse_down", "mouse_up",
-    "coordinate_click_test", "paste_image_file",
+    "coordinate_click_test",
 }
 
 

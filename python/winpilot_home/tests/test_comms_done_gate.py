@@ -164,58 +164,6 @@ def test_comms_done_gate_no_payload_rejects_read_text_without_send_action():
     assert "causal evidence" in runner._last_done_reject_reason
 
 
-def test_image_send_done_gate_accepts_current_attachment_delivery_evidence():
-    runner = _make_runner("用计算器计算88和76的商，然后打开QQ给我的手机发一张计算器结果的截图")
-    runner._tool_history = [
-        ("screenshot", {"path": r"C:\\Users\\zou\\Desktop\\calculator_result.png"}, '{"ok": true}'),
-        ("paste_image_file", {"path": r"C:\\Users\\zou\\Desktop\\calculator_result.png"}, '{"ok": true, "via": "clipboard_dib"}'),
-        ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
-        ("observe", {"query": "已发送"}, '我的手机\n28.58KB已发送'),
-    ]
-
-    verdict = runner._deterministic_image_send_verdict()
-
-    assert verdict is not None
-    assert verdict[0] is True
-    assert "图片附件" in verdict[1]
-
-
-@pytest.mark.parametrize(
-    ("task", "recipient"),
-    [
-        ("把截图用QQ发给项目讨论群", "项目讨论群"),
-        ("通过QQ把图片发送给设计评审", "设计评审"),
-    ],
-)
-def test_legacy_image_send_gate_reuses_structured_recipient_intent(task, recipient):
-    """The compatibility gate must not depend on a built-in recipient alias."""
-    runner = _make_runner(task)
-    runner._tool_history = [
-        ("paste_image_file", {"path": r"C:\\tmp\\result.png"}, '{"ok": true}'),
-        ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
-        ("observe", {"query": "delivery"}, f"{recipient}\n28.58KB已发送"),
-    ]
-
-    verdict = runner._deterministic_image_send_verdict()
-
-    assert verdict is not None
-    assert verdict[0] is True
-
-
-def test_image_send_done_gate_rejects_paste_without_send_action():
-    runner = _make_runner("Open QQ and send an image to my phone")
-    runner._tool_history = [
-        ("paste_image_file", {"path": r"C:\\tmp\\result.png"}, '{"ok": true}'),
-        ("read_text", {}, "my phone\n28.58KB sent"),
-    ]
-
-    verdict = runner._deterministic_image_send_verdict()
-
-    assert verdict is not None
-    assert verdict[0] is False
-    assert "no successful Send/Enter" in verdict[1]
-
-
 @pytest.mark.parametrize(
     "keys",
     [

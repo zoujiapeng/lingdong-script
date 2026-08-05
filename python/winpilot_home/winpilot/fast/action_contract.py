@@ -75,7 +75,6 @@ VISUAL_TRANSACTION_ACTIONS = BATCH_MUTATING_ACTIONS | {
     "run_action_batch",
     "execute_subgoal",
     "open_app",
-    "paste_image_file",
     "mouse_down",
     "mouse_up",
     "hold_key",

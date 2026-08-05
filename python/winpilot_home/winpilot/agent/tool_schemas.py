@@ -454,7 +454,6 @@ _LEAN_GUI_TOOLS = {
     "wait",
     "screenshot",
     "capture_artifact",
-    "paste_image_file",
     "open_conversation",
     "send_text",
     "send_artifact",
@@ -530,7 +529,6 @@ _LEAN_TOOL_DESCRIPTIONS = {
     ),
     "wait": "Wait for duration_s, or poll a declared condition.",
     "screenshot": "Capture screen with compact nonvisual summary.",
-    "paste_image_file": "Paste a PNG/JPEG into the focused app as an image.",
     "open_conversation": (
         "Bind an exact recipient and composer; omit app to discover a locally grounded registered route."
     ),
@@ -1713,15 +1711,6 @@ def tool_schemas(
                 "height": _prop("integer", "Optional region height."),
                 "overwrite": _prop("boolean", "Allow replacing an existing destination file."),
             },
-        ),
-        _tool(
-            "paste_image_file",
-            "Place a local PNG/JPEG on the clipboard and paste it as an image into the focused chat/editor. Prefer this over hunting for an attachment icon, then verify the pasted preview or sent image bubble.",
-            {
-                "path": _prop("string", "Absolute path to a PNG, JPEG, BMP, or WebP image."),
-                "hwnd": _prop("integer", "Optional target window handle."),
-            },
-            ["path"],
         ),
         _tool(
             "capture_artifact",

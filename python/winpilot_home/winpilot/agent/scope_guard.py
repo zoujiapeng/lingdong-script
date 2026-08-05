@@ -33,8 +33,6 @@ GUI_SCOPE_MUTATIONS = {
     "draw_strokes",
     "ensure_input_mode",
     "select_color",
-    "clipboard_paste",
-    "paste_image_file",
     "mouse_down",
     "mouse_up",
     "move_mouse",
@@ -52,7 +50,7 @@ _SCOPE_RECOVERY_TOOLS = {"open_app", "launch", "focus_window", "tray_click", "sc
 _SPATIAL_TARGET_REQUIRED = {
     "click", "double_click", "click_element", "scroll", "move_mouse", "drag",
     "draw_strokes", "ensure_input_mode", "select_color",
-    "mouse_down", "mouse_up", "coordinate_click_test", "paste_image_file",
+    "mouse_down", "mouse_up", "coordinate_click_test",
 }
 
 

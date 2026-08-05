@@ -108,12 +108,12 @@ _ACTION_TOOLS = set(_RUN_ACTION_TOOLS)
 _VISUAL_MUTATION_TOOLS = {
     "open_app", "launch", "focus_window", "click", "double_click", "type_text", "hotkey",
     "scroll", "drag", "draw_strokes", "tray_click", "clipboard_paste",
-    "paste_image_file", "mouse_down", "mouse_up", "move_mouse", "hold_key",
+    "mouse_down", "mouse_up", "move_mouse", "hold_key",
     "run_action_batch", "execute_subgoal", "coordinate_click_test", "wait",
 }
 _LOW_LEVEL_VISUAL_TOOLS = {
     "click", "double_click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
-    "tray_click", "clipboard_paste", "paste_image_file", "mouse_down",
+    "tray_click", "clipboard_paste", "mouse_down",
     "mouse_up", "move_mouse", "hold_key", "coordinate_click_test",
     "run_action_batch", "execute_subgoal",
 }
