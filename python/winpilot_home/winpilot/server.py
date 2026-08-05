@@ -623,10 +623,6 @@ class ScriptSaveRequest(BaseModel):
     script: dict[str, Any]
 
 
-class HumanStartRequest(BaseModel):
-    name: str | None = None
-
-
 class ApprenticeStartRequest(BaseModel):
     task: str
     name: str = ""
@@ -732,21 +728,6 @@ def stop_run() -> dict[str, Any]:
     return {"ok": True, "canceled_jobs": canceled_jobs}
 
 
-@app.post("/api/interject")
-def interject(req: ChatRequest) -> dict[str, Any]:
-    """Inject a hint into the running agent (steer it mid-task)."""
-    text = req.task.strip()
-    if not text:
-        raise HTTPException(400, "内容不能为空")
-    runner = STATE.runner
-    job = STATE.job_for_run(runner.run_id) if runner else None
-    agent_alive = bool(job and job.status == "running") or ARP_RUNS.busy()
-    if not runner or not agent_alive:
-        raise HTTPException(409, "当前没有运行中的任务")
-    runner.interject(text)
-    return {"ok": True}
-
-
 @app.get("/api/status")
 def status() -> dict[str, Any]:
     runner = STATE.runner
@@ -822,14 +803,6 @@ def platform_overview() -> dict[str, Any]:
             "event_stream": "/ws/events",
             "mcp": "/mcp",
         },
-    }
-
-
-@app.get("/api/v2/capabilities")
-def platform_capabilities() -> dict[str, Any]:
-    return {
-        "ok": True,
-        "capabilities": [item.model_dump(mode="json") for item in capability_catalog()],
     }
 
 
@@ -1963,26 +1936,6 @@ def cancel_agent_schedule(schedule_id: str) -> dict[str, Any]:
     return {"ok": True, "id": schedule_id}
 
 
-@app.post("/api/elevate")
-def elevate() -> dict[str, Any]:
-    """Relaunch WinPilot elevated (one UAC prompt), then exit this instance."""
-    if _is_admin():
-        return {"ok": True, "already_admin": True}
-    run_py = str(ROOT_DIR / "run.py")
-    try:
-        # ShellExecuteW "runas" triggers the UAC consent dialog.
-        rc = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, f'"{run_py}"', str(ROOT_DIR), 1)
-        if rc <= 32:
-            return {"ok": False, "error": f"提权失败（用户可能取消了 UAC），代码 {rc}"}
-    except Exception as exc:
-        raise HTTPException(500, f"提权失败: {exc}") from exc
-    BUS.publish("config", changed=["elevate"], note="正在以管理员身份重启…")
-    # Give the new elevated process time to bind the port, then exit ours.
-    threading.Timer(1.5, lambda: __import__("os")._exit(0)).start()
-    return {"ok": True, "restarting": True}
-
-
 @app.get("/api/config")
 def get_config() -> dict[str, Any]:
     snapshot = CONFIG.snapshot()
@@ -2020,18 +1973,6 @@ def patch_config(patch: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
     BUS.publish("config", changed=list(patch.keys()))
     return get_config()
-
-
-@app.get("/api/traces")
-def traces() -> list[dict[str, Any]]:
-    return trace_mod.list_traces()
-
-
-@app.get("/api/evals")
-def evals(limit: int = 20) -> dict[str, Any]:
-    limit = max(1, min(int(limit or 20), 100))
-    reports = eval_summary.list_eval_reports(limit=limit)
-    return eval_summary.aggregate_reports(reports)
 
 
 @app.get("/api/trace/{run_id}/summary")
@@ -2123,11 +2064,6 @@ def export_ir(run_id: str, req: ExportRequest | None = None) -> dict[str, Any]:
     return {"ok": True, "ir": path.name}
 
 
-@app.get("/api/scripts")
-def scripts() -> list[dict[str, Any]]:
-    return trace_mod.list_scripts()
-
-
 def _script_path(file: str) -> Path:
     if not (file.endswith(".wps.json") or file.endswith(".automation.json")):
         raise HTTPException(400, "file must end in .automation.json or .wps.json")
@@ -2200,33 +2136,6 @@ def put_script(file: str, req: ScriptSaveRequest) -> dict[str, Any]:
     path.write_text(
         json.dumps(req.script, ensure_ascii=False, indent=1), encoding="utf-8")
     return {"ok": True, "file": path.name}
-
-
-@app.post("/api/human/start")
-def human_start(req: HumanStartRequest | None = None) -> dict[str, Any]:
-    """Begin a human-demonstration recording (captures clicks/keys with
-    perception selectors into a .wps.json)."""
-    with STATE.lock:
-        if STATE.busy():
-            raise HTTPException(409, "已有任务/重放/录制在运行")
-        try:
-            human_mod.RECORDER.start((req.name if req else None) or "")
-        except Exception as exc:  # pynput unavailable etc.
-            raise HTTPException(500, f"无法启动录制: {exc}") from exc
-    return {"ok": True}
-
-
-@app.post("/api/human/stop")
-def human_stop() -> dict[str, Any]:
-    result = human_mod.RECORDER.stop()
-    if not result.get("ok"):
-        raise HTTPException(400, result.get("error", "停止失败"))
-    return result
-
-
-@app.get("/api/human/status")
-def human_status() -> dict[str, Any]:
-    return {"recording": human_mod.RECORDER.is_recording()}
 
 
 @app.post("/api/v2/replay/apprentice/start")

@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import base64
 import time
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from ..config import TEMPLATES_IMG_DIR
 from ..utils.log import logger
 from ..utils.screenshot import Region, capture, virtual_screen_region
 from .model import UIElement
+from .surface_binding import InteractionRegion
 
 _ICON_MIN, _ICON_MAX = 12, 64          # icon side length range (px)
 _ICON_AR_TOL = 0.45                    # |1 - w/h| tolerance for square-ish shapes
@@ -661,3 +663,144 @@ def credible_light_work_surface(image: np.ndarray) -> dict:
         "candidate_count": len(candidates),
         "source": "current_target_pixels",
     }
+
+
+_CONTINUOUS_INPUT_EDGE_INSET_FRAME_UNITS = 24
+
+
+def credible_work_surface_frame_bounds(
+    image_b64: str,
+    *,
+    client_frame_bounds: tuple[int, int, int, int] | list[int] | None = None,
+) -> dict[str, object] | None:
+    """Locate one light work surface in the exact model-visible JPEG.
+
+    Bounds are inclusive 0..1000 coordinates relative to the authoritative
+    frame. This constrains ``frame_strokes`` without adding or silently
+    reinterpreting another coordinate system.
+
+    Moved here from ``utils.image_capture``: it is a legacy perception
+    heuristic with no vNext consumer, so it must not live in the mechanical
+    capture core.
+    """
+    if not image_b64:
+        return {
+            "ok": False,
+            "reason": "authoritative frame pixels were unavailable",
+            "failure_kind": "unavailable",
+        }
+    try:
+        raw = np.frombuffer(base64.b64decode(image_b64), dtype=np.uint8)
+        image = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            return {
+                "ok": False,
+                "reason": "authoritative frame pixels could not be decoded",
+                "failure_kind": "unavailable",
+            }
+        detection = credible_light_work_surface(image)
+        if not isinstance(detection, dict) or detection.get("ok") is not True:
+            reason = (
+                str(detection.get("reason") or "no credible light work surface was found")
+                if isinstance(detection, dict)
+                else "work-surface detector returned no decision"
+            )
+            ambiguous = bool(
+                "nested" in reason.casefold()
+                or "modal" in reason.casefold()
+                or "multiple" in reason.casefold()
+                or "ambiguous" in reason.casefold()
+            )
+            return {
+                "ok": False,
+                "reason": reason,
+                "failure_kind": "ambiguous" if ambiguous else "not_detected",
+                "ambiguous": ambiguous,
+                "candidate_count": (
+                    detection.get("candidate_count")
+                    if isinstance(detection, dict)
+                    else None
+                ),
+                "source": "authoritative_frame_pixels",
+            }
+        bbox = detection.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return {
+                "ok": False,
+                "reason": "detector returned invalid work-surface geometry",
+                "failure_kind": "invalid",
+                "source": "authoritative_frame_pixels",
+            }
+        x1, y1, x2, y2 = [int(value) for value in bbox]
+        height, width = image.shape[:2]
+        if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+            return {
+                "ok": False,
+                "reason": "detector returned out-of-frame work-surface geometry",
+                "failure_kind": "invalid",
+                "source": "authoritative_frame_pixels",
+            }
+        x_span = max(1, width - 1)
+        y_span = max(1, height - 1)
+        detected_bounds = [
+            int(round(x1 * 1000.0 / x_span)),
+            int(round(y1 * 1000.0 / y_span)),
+            int(round((x2 - 1) * 1000.0 / x_span)),
+            int(round((y2 - 1) * 1000.0 / y_span)),
+        ]
+        detected_region = InteractionRegion(
+            tuple(detected_bounds),
+            coordinate_space="frame_0_1000",
+            label="detected_interaction_surface",
+            source=str(detection.get("source") or "authoritative_frame_pixels"),
+            confidence=max(0.0, min(1.0, float(detection.get("light_ratio") or 0.0))),
+        )
+        if client_frame_bounds is not None:
+            try:
+                client_region = InteractionRegion(
+                    tuple(int(value) for value in client_frame_bounds),
+                    coordinate_space="frame_0_1000",
+                    label="window_client_authority",
+                    source="win32_client_rect",
+                )
+                clipped = detected_region.intersection(client_region)
+            except (TypeError, ValueError):
+                clipped = None
+            if clipped is None:
+                return {
+                    "ok": False,
+                    "reason": "detected work surface was outside the window client region",
+                    "failure_kind": "invalid",
+                    "source": "authoritative_frame_pixels",
+                }
+            detected_region = clipped
+            detected_bounds = list(clipped.bounds)
+        left, top, right, bottom = detected_region.bounds
+        inset = _CONTINUOUS_INPUT_EDGE_INSET_FRAME_UNITS
+        if right - left > inset * 2 + 40 and bottom - top > inset * 2 + 40:
+            safe_region = detected_region.inset(inset)
+        else:
+            safe_region = detected_region
+            inset = 0
+        safe_bounds = list(safe_region.bounds)
+        return {
+            "ok": True,
+            # Mutating continuous input uses the inset rectangle. Detectors
+            # often include the final antialiased row beside scrollbars or
+            # resize handles; starting a drag there scrolls/resizes the view
+            # and makes an existing result appear to vanish.
+            "work_surface_frame_bounds": safe_bounds,
+            "detected_work_surface_frame_bounds": detected_bounds,
+            "continuous_input_edge_inset": inset,
+            "source": "authoritative_frame_pixels",
+            "light_ratio": detection.get("light_ratio"),
+            "candidate_count": detection.get("candidate_count"),
+            "interaction_region": safe_region.to_dict(),
+            "detected_interaction_region": detected_region.to_dict(),
+        }
+    except Exception:
+        return {
+            "ok": False,
+            "reason": "work-surface detection failed on the authoritative frame",
+            "failure_kind": "unavailable",
+        }

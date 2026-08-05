@@ -17,7 +17,7 @@ from ..agent.runtime_profile import RuntimeProfile
 from ..agent.tools import ToolSession
 from ..fast.watcher import ScreenWatcher
 from ..orchestrator.runtime import NodeResult
-from ..perception import win32
+from ..perception import vision_cv, win32
 from ..perception.surface_binding import InteractionRegion, SurfaceBinding
 from ..utils import image_capture
 from ..utils.log import BUS
@@ -624,7 +624,7 @@ def _external_watch_bounds(
     )
     target = state.get("target_binding") or {}
     try:
-        detected = image_capture.credible_work_surface_frame_bounds(
+        detected = vision_cv.credible_work_surface_frame_bounds(
             base64.b64encode(Path(baseline.managed_path).read_bytes()).decode(),
             client_frame_bounds=target.get("client_frame_bounds"),
         )
@@ -1154,7 +1154,7 @@ class InteractionStageEngine:
         ).casefold()
         detected_surface = None
         if primary_modality == "draw":
-            detected_surface = image_capture.credible_work_surface_frame_bounds(
+            detected_surface = vision_cv.credible_work_surface_frame_bounds(
                 base64.b64encode(Path(artifact.managed_path).read_bytes()).decode(),
                 client_frame_bounds=client_bounds,
             )

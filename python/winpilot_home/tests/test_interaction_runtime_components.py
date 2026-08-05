@@ -352,60 +352,6 @@ def test_frozen_persistent_contract_keeps_wait_nonterminal():
     assert validation.valid, validation.errors
 
 
-@pytest.mark.parametrize(
-    ("record_terminal", "expected_status"),
-    [(True, "done"), (False, "failed")],
-)
-def test_persistent_first_turn_end_requires_exact_terminal_evidence(
-    record_terminal,
-    expected_status,
-):
-    from winpilot.orchestrator.contracts import ArpNodeKind
-    from winpilot.orchestrator.runtime import ArpExecution, NodeResult
-    from winpilot.tasking.contracts import StageType, TaskStage
-    from winpilot.tasking.evidence import EvidenceRegistry
-
-    contract, graph = _legacy_interaction_graph(persistent=True)
-    wait_stage = _legacy_stage(contract, "WaitForExternalChange")
-
-    def stage_handler(node, context, _stop_event):
-        registry = context["runtime_state"].get("evidence_registry")
-        if not isinstance(registry, EvidenceRegistry):
-            registry = EvidenceRegistry(context["run_id"])
-            context["runtime_state"]["evidence_registry"] = registry
-        stage = TaskStage.model_validate(node.config["stage"])
-        for obligation in stage.obligations:
-            if obligation.id == "interaction.task_completed" and not record_terminal:
-                continue
-            registry.record(
-                obligation.evidence_predicate,
-                provider=obligation.evidence_providers[0].id,
-                verified=True,
-                stage_id=stage.id,
-            )
-        return NodeResult(
-            branch="complete" if stage.type == StageType.VERIFY_LOCAL_EFFECT else "next",
-        )
-
-    result = ArpExecution(
-        graph,
-        {ArpNodeKind.TASK_STAGE: stage_handler},
-        run_id=f"persistent-terminal-{record_terminal}",
-    ).run()
-
-    assert result["status"] == expected_status
-    visited = {item["node_id"] for item in result["history"]}
-    assert wait_stage.id not in visited
-    if record_terminal:
-        assert result["completion_contract"]["ok"] is True
-    else:
-        assert result["completion_contract"]["ok"] is False
-        assert {
-            item["obligation_id"]
-            for item in result["completion_contract"]["missing"]
-        } == {"interaction.task_completed"}
-
-
 def test_interaction_complete_branch_reaches_later_typed_stages():
     from winpilot.orchestrator.contracts import validate_graph
 
@@ -3686,7 +3632,7 @@ def test_external_watch_uses_pixel_surface_bound_by_last_verified_action(
         "source": "authoritative_frame_pixels",
     }
     monkeypatch.setattr(
-        runtime_module.image_capture,
+        runtime_module.vision_cv,
         "credible_work_surface_frame_bounds",
         lambda *_args, **_kwargs: dict(detected),
     )

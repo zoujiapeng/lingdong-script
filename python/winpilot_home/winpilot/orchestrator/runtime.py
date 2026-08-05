@@ -395,11 +395,10 @@ class ArpExecution:
                     item_limit=1200,
                     item_budget=180,
                 ),
-                "completion_contract": _json_preview(
-                    self.runtime_state.get("completion_contract"),
-                    limit=1800,
-                    _budget=[240],
-                ),
+                # Task-contract completion verification was retired: the
+                # completion verdict now comes from the model on the real
+                # screen.  The field stays for API/trace compatibility.
+                "completion_contract": None,
                 "stage_trace": [
                     _json_preview(item, limit=1800, _budget=[160])
                     for item in stage_trace
@@ -569,108 +568,10 @@ class ArpExecution:
             ),
         )
 
-    def _task_contract_completion(self, node: ArpNode) -> NodeResult | None:
-        """Evaluate a typed task contract at the only terminal boundary.
-
-        Legacy and user-authored ARP graphs without ``task_contract`` metadata
-        retain the generic evidence policy.  Once a graph declares a task
-        contract, however, reaching END is not completion until every exact
-        predicate/stage/provider obligation has been verified.
-        """
-        if "task_contract" not in self.graph.metadata:
-            return None
-
-        from pydantic import ValidationError
-
-        from ..tasking.artifacts import ArtifactStore
-        from ..tasking.completion import CompletionContractVerifier
-        from ..tasking.contracts import TaskContract
-        from ..tasking.evidence import EvidenceRegistry
-
-        raw_contract = self.graph.metadata.get("task_contract")
-        if not isinstance(raw_contract, dict) or not raw_contract:
-            verdict = {
-                "ok": False,
-                "run_id": self.run_id,
-                "contract_id": "",
-                "obligations": [],
-                "final_conditions": [],
-                "missing": [],
-                "contract_errors": ["task_contract metadata is missing or invalid"],
-                "artifact_refs": {},
-                "primary_artifact_id": "",
-                "reason": "invalid task completion contract: task_contract metadata is missing or invalid",
-            }
-            self.runtime_state["completion_contract"] = verdict
-            return NodeResult(ok=False, branch="fail", output=verdict, error=verdict["reason"])
-        try:
-            contract = TaskContract.model_validate(raw_contract)
-        except (ValidationError, TypeError, ValueError) as exc:
-            verdict = {
-                "ok": False,
-                "run_id": self.run_id,
-                "contract_id": str(raw_contract.get("task_id") or ""),
-                "obligations": [],
-                "final_conditions": [],
-                "missing": [],
-                "contract_errors": [f"task_contract validation failed: {exc}"],
-                "artifact_refs": {},
-                "primary_artifact_id": "",
-                "reason": "invalid task completion contract: task_contract validation failed",
-            }
-            self.runtime_state["completion_contract"] = verdict
-            return NodeResult(ok=False, branch="fail", output=verdict, error=verdict["reason"])
-
-        runtime_errors: list[str] = []
-        registry = self.runtime_state.get("evidence_registry")
-        if not isinstance(registry, EvidenceRegistry):
-            registry = EvidenceRegistry(self.run_id)
-            self.runtime_state["evidence_registry"] = registry
-            if contract.obligations:
-                runtime_errors.append("run-scoped evidence registry was not initialized")
-        elif registry.run_id != self.run_id:
-            runtime_errors.append("evidence registry belongs to a different run")
-            registry = EvidenceRegistry(self.run_id)
-            self.runtime_state["evidence_registry"] = registry
-
-        store = self.runtime_state.get("artifact_store")
-        if not isinstance(store, ArtifactStore) or store.run_id != self.run_id:
-            store = None
-            if any(obligation.artifact_ref for obligation in contract.obligations):
-                runtime_errors.append("run-scoped artifact store is unavailable")
-
-        verdict = CompletionContractVerifier(contract, registry, store).verify()
-        if runtime_errors:
-            verdict["ok"] = False
-            verdict["contract_errors"] = [
-                *runtime_errors,
-                *list(verdict.get("contract_errors") or []),
-            ]
-            verdict["reason"] = "task completion runtime is incomplete: " + "; ".join(runtime_errors)
-        self.runtime_state["completion_contract"] = verdict
-        record = registry.record(
-            "contract.complete",
-            provider="completion_contract_verifier",
-            verified=bool(verdict.get("ok")),
-            stage_id=node.id,
-            value=bool(verdict.get("ok")),
-            metadata=verdict,
-        )
-        return NodeResult(
-            ok=bool(verdict.get("ok")),
-            branch="next" if verdict.get("ok") else "fail",
-            output=verdict,
-            evidence=[record],
-            error="" if verdict.get("ok") else str(verdict.get("reason") or "task contract incomplete"),
-        )
-
     def _execute_builtin(self, node: ArpNode, last: NodeResult | None) -> NodeResult | None:
         if node.kind == ArpNodeKind.START:
             return NodeResult(ok=True)
         if node.kind == ArpNodeKind.END:
-            contract_result = self._task_contract_completion(node)
-            if contract_result is not None:
-                return contract_result
             if last is not None and last.ok and last.branch == "reply":
                 return NodeResult(
                     ok=True,

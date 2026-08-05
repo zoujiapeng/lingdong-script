@@ -372,6 +372,7 @@ def test_runtime_snapshot_keeps_every_evidence_and_artifact_item_typed():
     assert len(snapshot["artifacts"]["artifacts"]) == len(artifacts)
     assert all(isinstance(item, dict) for item in snapshot["artifacts"]["artifacts"])
     assert snapshot["artifacts"]["artifacts"][-1]["artifact_id"] == "artifact-5"
+    assert snapshot["completion_contract"] is None
 
 
 def test_cold_start_contract_disables_stage_skills_and_experience():
@@ -1283,77 +1284,6 @@ def test_completion_rejects_contract_with_stage_obligations_removed_from_final_c
     assert verdict["ok"] is False
     assert "no completion obligations" in verdict["reason"]
     assert "do not match" in verdict["reason"]
-
-
-def test_arp_end_rejects_arbitrary_verified_evidence_for_task_contract():
-    from winpilot.orchestrator.contracts import ArpNodeKind
-    from winpilot.orchestrator.runtime import ArpExecution, NodeResult
-    from winpilot.tasking.compiler import TaskContractCompiler
-    from winpilot.tasking.evidence import EvidenceRegistry
-
-    contract, graph = TaskContractCompiler().compile_graph(
-        "Open Calculator",
-        cold_start=True,
-    )
-    obligation = contract.obligations[0]
-
-    def stage_handler(_node, context, _stop_event):
-        registry = EvidenceRegistry(context["run_id"])
-        context["runtime_state"]["evidence_registry"] = registry
-        record = registry.record(
-            "unrelated.verified_claim",
-            provider=obligation.evidence_providers[0].id,
-            verified=True,
-            stage_id=obligation.stage_id,
-        )
-        return NodeResult(evidence=[record])
-
-    execution = ArpExecution(
-        graph,
-        {ArpNodeKind.TASK_STAGE: stage_handler},
-        run_id="arp-contract-fail-closed",
-    )
-    result = execution.run()
-
-    assert result["status"] == "failed"
-    assert "missing task-contract evidence" in result["error"]
-    assert result["completion_contract"]["ok"] is False
-    assert result["completion_contract"]["missing"][0]["predicate"] == "application.open"
-
-
-def test_arp_end_marks_done_only_after_exact_contract_completion():
-    from winpilot.orchestrator.contracts import ArpNodeKind
-    from winpilot.orchestrator.runtime import ArpExecution, NodeResult
-    from winpilot.tasking.compiler import TaskContractCompiler
-    from winpilot.tasking.evidence import EvidenceRegistry
-
-    contract, graph = TaskContractCompiler().compile_graph(
-        "Open Calculator",
-        cold_start=True,
-    )
-    obligation = contract.obligations[0]
-
-    def stage_handler(_node, context, _stop_event):
-        registry = EvidenceRegistry(context["run_id"])
-        context["runtime_state"]["evidence_registry"] = registry
-        record = registry.record(
-            obligation.evidence_predicate,
-            provider=obligation.evidence_providers[0].id,
-            verified=True,
-            stage_id=obligation.stage_id,
-        )
-        return NodeResult(evidence=[record])
-
-    result = ArpExecution(
-        graph,
-        {ArpNodeKind.TASK_STAGE: stage_handler},
-        run_id="arp-contract-complete",
-    ).run()
-
-    assert result["status"] == "done"
-    assert result["completion_contract"]["ok"] is True
-    assert result["outputs"]["end"]["final_conditions"][0]["satisfied"] is True
-    assert result["contract_evidence"]["records"][-1]["predicate"] == "contract.complete"
 
 
 def test_capture_scope_distinguishes_canvas_from_explicit_window():
