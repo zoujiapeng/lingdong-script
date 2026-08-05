@@ -26,7 +26,6 @@ import {
   ListChecks,
   Loader2,
   Maximize2,
-  MessageSquare,
   Minimize2,
   Minus,
   Network,
@@ -1055,11 +1054,18 @@ function AgentConversationTurn({
       )}
 
       {active && run.narration && (
-        <article className="ld-agent-thought" aria-label="Agent 思考与进度">
-          <div className="ld-agent-thought-icon"><MessageSquare size={13} /></div>
-          <CollapsibleAgentText text={run.narration} />
+        <article className="ld-agent-response" aria-label="Agent 进度汇报" role="status">
+          <div className="ld-agent-response-icon"><Bot size={16} /></div>
+          <div className="ld-agent-response-body">
+            <div className="ld-agent-response-meta">
+              <strong>Agent 正在处理</strong>
+              <small>{formatTime(run.updated_at)}</small>
+            </div>
+            <CollapsibleAgentText text={run.narration} />
+          </div>
         </article>
       )}
+
 
 
       {isLatest && run.phase === 'awaiting_human' && (
