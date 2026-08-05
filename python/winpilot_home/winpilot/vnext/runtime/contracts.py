@@ -557,7 +557,7 @@ class ActorPreviousActionView:
             object.__setattr__(
                 self,
                 "local_intent",
-                _text(self.local_intent, "local_intent"),
+                _text(self.local_intent, "local_intent", allow_empty=True),
             )
         if self.local_visual_change not in (
             None,

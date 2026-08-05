@@ -1661,8 +1661,6 @@ def test_handler_recovers_from_one_invalid_proposal_without_prompt_repair() -> N
     assert turns[0]["status"] == "invalid_proposal"
     assert turns[0]["recovery"] == {
         "kind": "bounded_invalid_proposal_redecision",
-        "consecutive_attempt": 1,
-        "max_consecutive_attempts": 2,
         "available": True,
     }
     assert turns[1]["recovery"] is None
@@ -1672,7 +1670,7 @@ def test_handler_recovers_from_one_invalid_proposal_without_prompt_repair() -> N
     )
 
 
-def test_handler_stops_after_two_consecutive_invalid_proposals() -> None:
+def test_handler_keeps_redeciding_after_invalid_proposals_until_budget() -> None:
     session = _FakeSession(
         [
             MissionRuntimeResult(RuntimeStatus.INVALID_PROPOSAL),
@@ -1695,18 +1693,18 @@ def test_handler_stops_after_two_consecutive_invalid_proposals() -> None:
     finally:
         BUS.remove_sink(events.append)
 
-    assert snapshot["status"] == ArpRunStatus.FAILED.value
-    assert snapshot["error"] == "vNext Runtime returned invalid_proposal"
-    assert session.calls == 2
-    assert session.closed is True
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"]["status"] == "mission_verified"
+    assert snapshot["result"]["turns_used"] == 3
+    assert session.calls == 3
     turns = [
         item for item in events if item["type"] == "live_agent_turn"
     ]
-    assert [item["recovery"]["available"] for item in turns] == [
+    assert [item["recovery"]["available"] for item in turns[:2]] == [
         True,
-        False,
+        True,
     ]
-    assert turns[-1]["recovery"]["consecutive_attempt"] == 2
+    assert turns[-1]["recovery"] is None
 
 
 def test_successful_turn_resets_invalid_proposal_recovery_streak() -> None:
@@ -1769,8 +1767,6 @@ def test_handler_redecides_once_after_actor_transport_error() -> None:
     assert turns[0]["status"] == "actor_error"
     assert turns[0]["recovery"] == {
         "kind": "bounded_actor_error_redecision",
-        "consecutive_attempt": 1,
-        "max_consecutive_attempts": 2,
         "available": True,
     }
     assert private_detail not in json.dumps(
@@ -1779,7 +1775,7 @@ def test_handler_redecides_once_after_actor_transport_error() -> None:
     )
 
 
-def test_handler_preserves_second_consecutive_actor_error_as_terminal() -> None:
+def test_handler_keeps_redeciding_after_actor_errors_until_budget() -> None:
     session = _FakeSession(
         [
             MissionRuntimeResult(RuntimeStatus.ACTOR_ERROR),
@@ -1802,17 +1798,18 @@ def test_handler_preserves_second_consecutive_actor_error_as_terminal() -> None:
     finally:
         BUS.remove_sink(events.append)
 
-    assert snapshot["status"] == ArpRunStatus.FAILED.value
-    assert snapshot["error"] == "vNext Runtime returned actor_error"
-    assert session.calls == 2
+    assert snapshot["status"] == ArpRunStatus.DONE.value
+    assert snapshot["result"]["status"] == "mission_verified"
+    assert snapshot["result"]["turns_used"] == 3
+    assert session.calls == 3
     turns = [
         item for item in events if item["type"] == "live_agent_turn"
     ]
-    assert [item["recovery"]["available"] for item in turns] == [
+    assert [item["recovery"]["available"] for item in turns[:2]] == [
         True,
-        False,
+        True,
     ]
-    assert turns[-1]["recovery"]["consecutive_attempt"] == 2
+    assert turns[-1]["recovery"] is None
 
 
 def test_handler_stops_on_blocked_without_retry_and_closes() -> None:
@@ -3556,10 +3553,10 @@ def test_post_capture_failure_defers_to_fresh_observation_without_replay(
         "type_text",
         "press_key",
     }:
-        assert (
-            tools[name]["properties"]["local_intent"]["pattern"]
-            == r"\S"
-        )
+        local_intent = tools[name]["properties"]["local_intent"]
+        assert local_intent["type"] == "string"
+        assert local_intent["default"] == ""
+        assert "pattern" not in local_intent
 
 
 def test_each_model_call_is_clamped_to_one_second_remaining_deadline(

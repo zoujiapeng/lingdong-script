@@ -153,7 +153,7 @@ Electron「智能代理」
   -> 原始 goal + 最多 12 条、16 KiB 的成功 Turn 原生历史
   -> 同一模型直接 reply，或搜索/调用显式只读 connector，或申请 observe_desktop
   -> 只有 observe_desktop 才建立 run-bound lease，Electron 随后让出前台并冻结 target
-  -> 同一 Actor 继续读取权威 JPEG + 有界 task state + 最近一笔原生 tool exchange
+  -> 同一 Actor 继续读取权威 JPEG + 有界 task state + 最近三笔原生 tool exchange
   -> 模型选择一笔通用 GUI 工具调用
   -> CapabilityBroker 只投影机械可用工具
   -> AtomicDesktopAdapter 唯一一次坐标映射
@@ -288,20 +288,28 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 - `claim_obligation_done`
 - `blocked`
 
-显式只读 connector 的两个通用入口和三个状态工具在视觉回合仍可见；它们没有变成 GUI
-动作、应用 adapter 或第二执行线。
+显式只读 connector 的两个通用入口、三个状态工具、`run_shell` 与视觉线内的
+`read_window_text` 在文本/视觉回合仍可见；它们没有变成 GUI 动作、应用 adapter 或
+第二执行线。本地工具（status/shell/connector/window_text）合用一个共享本地工具预算，
+没有每工具族上限；全局 `max_model_calls` 是唯一硬顶。
 
 不要为启动软件、答题、绘画、保存、发 QQ、播放音乐、调音量、棋局或某个网站新增
 宏工具。已有工具结构上不能表达的新通用能力，必须先由至少两个不同任务族的真实
 E2E 证明。
+
+工具协议保持宽松：`task_state_update` 与 `local_intent` 都是可选字段（分别带默认
+`{"scratchpad": null}` 与 `""`），模型省略时运行时各自保留当前 scratchpad / 置空
+intent，不触发格式修复；`_DeadlineModelAdapter` 不再向 local_intent 注入
+非空白 pattern 强制。连续 INVALID_PROPOSAL/ACTOR_ERROR 不再硬停：只有
+`max_turns`/`max_model_calls` 预算作为机械停止，模型可以在预算内持续自我纠正。
 
 视觉系统提示词保持 77 个英文单词（含聊天/任务混合目标与 `blocked` 停止判断）；
 初始文本轮只带上述短角色合同（68 词），不增加应用或界面教学。Thread
 只保留最多 12 条、16 KiB 的成功用户/模型原生消息；失败 Turn 不进入历史。现有
 `AgentThreadStore` 还把最多 100 个 Thread 的这个有界成功投影原子写入私有 checkpoint，
 服务重启后恢复同一 `thread_id`、可见成功结果与原生消息；它不保存 trace 正文、失败 Turn、
-视觉帧或长期摘要。视觉线只保留最近一笔 provider 原生
-`user image -> assistant tool call -> tool result`，下一回合加入新 JPEG 后覆盖旧交换；
+视觉帧或长期摘要。视觉线只保留最近三笔 provider 原生
+`user image -> assistant tool call -> tool result`，下一回合加入新 JPEG 后丢弃最旧交换；
 不保存无界聊天历史，不把长期 memory 当硬能力，也不在 prompt 中教学。
 Actor 上下文目前还保留最多 64 项安全动作摘要；删除 A/B 未获准，因此暂留，但它
 仍是模型上下文压力债务，不应继续扩张。
@@ -898,3 +906,261 @@ raw_device 的强制前台检查用绑定窗口（终端）判定点击合法性
 可见 Electron E2E smoke：slider、dynamic-hold 外部判定通过，game-drag-v2 走廊
 失败属模型轨迹几何（输入执行正常）。本仓库不再为任务完成建设独立结果证据装置
 （该装置属另一项目）；任务完成由模型在真实屏幕上自行判断。
+
+## 2026-08-05 能力导向协议放宽与原生历史加深（未提交工作树）
+
+按"提升 Agent 完成任务能力"方向对主链做四类整改，没有新增模型角色、工具、
+提示教学或第二执行线：
+
+1. **模型输出负担下降**：`task_state_update`（默认 `{"scratchpad": null}`）与
+   `local_intent`（默认 `""`）从所有工具 schema 的 required 改为可选；模型省略时
+   `ActorTaskStateUpdate.from_dict(None)` 保留当前 scratchpad，proposal 的
+   `local_intent` 允许空串（`_text` 放宽为 allow_empty）。`_DeadlineModelAdapter`
+   删除整段 local_intent pattern 注入/minLength 强制（中间层门禁）。
+2. **放开通用工具**：`read_window_text` 移除每工具族 2 次上限，与
+   status/shell/connector 一样只受共享本地工具预算约束；全局
+   `max_model_calls` 是唯一硬顶。
+3. **删除无意义中间层**：`_MAX_CONSECUTIVE_INVALID_PROPOSALS` /
+   `_MAX_CONSECUTIVE_ACTOR_ERRORS` 硬停删除——连续 INVALID_PROPOSAL/ACTOR_ERROR
+   不再终止 run，只有 turn/model-call 预算机械停止；BUS recovery 事件简化为
+   kind+available（harness 与前端均向后兼容）。
+4. **原生工具历史加深**：视觉线原生交换历史从最近 1 笔增至最近 3 笔
+   （`_VISUAL_HISTORY_DEPTH = 3`），每笔含当时的 user image → assistant tool call
+   → tool result（result 在下一回合按 previous_action 回填），提升长任务里
+   "我上几步做过什么/屏幕当时什么样"的连续性；Thread 文本历史仍为 12 条/16 KiB。
+
+回归：WinPilot `3420 passed, 13 skipped, 1 warning`（mss deprecation）、根测试
+`2508 passed`、renderer `318 passed`、TypeScript typecheck 通过；测试数量与
+stash 前基线一致（3433 collected），未删测试。
+
+真实可见 Electron E2E（重启后当前源码）：
+
+- 受控视觉矩阵 `6/10` 与基线逐 case 一致（corridor 家族仍属模型几何族）。
+- 随机真实任务套件 `2/4` 外部通过：chat-then-task（同一 Thread 先聊天后
+  Notepad 精确落盘 token）与 impossible-open-missing-file（优雅拒绝，未伪造）
+  均真实文件 oracle 通过；calculator 为 harness 环境找不到"计算器"窗口的
+  准备期错误，notepad-edit-save 失败是模型 IME 状态下 `-`/数字键入与 Save As
+  对话框策略（模型层，输入回执全部 applied）。
+- 六项高难度真实软件套件：全部物理回执 applied、零机械 error_kind、零护栏事件；
+  quiz-page 60 回合耗尽（模型自纠错耗散）、tic-tac-toe 红 X 画错格（模型视觉
+  几何）、krita/qq/context 三项为 harness 准备期/COM 错误，无机械层回退。
+
+结论：本轮把工具协议里的强制性输出字段与连续失败硬停清掉、统一为共享预算，
+并把视觉原生历史加深到 3 笔；失败分层仍然全部落在模型层（几何、停止、输入法
+策略），机械层零拒绝、零回退。`CON` 未触碰。
+
+## 2026-08-05 深挖：IME 吞字符是真实机械 bug（已修复，未提交工作树）
+
+上一条结论把 notepad 失败归为"模型 IME 策略"，继续逐步骤复现后推翻了该分层：
+**type_text 的 VK 路径在中文 IME 激活时确实吞字符**，是机械 bug，不是模型问题。
+
+复现实验（本机键盘布局 `0x0804`，微软拼音激活）用项目真实
+`_execute_physical_type_text` 输入 `RD-60516943-E`：
+
+- **VK 路径**（修复前 strict 默认，`_should_strict_type_via_vk` 对纯 ASCII 为 True）：
+  编辑区显示 `RD-6943-E`——数字 `0 5 1` 被 IME 候选键吞掉，并弹出输入法候选栏。
+  与模型 narration 反复出现的 "RD 6943 E"、"RD- B" 逐字符吻合。
+- **UNICODE 路径**（`KEYEVENTF_UNICODE`）：完整 `RD-60516943-E`，无候选栏。
+- **VK 路径 + 目标线程切英文布局（`WM_INPUTLANGCHANGEREQUEST` → `0x0409`）**：
+  完整 `RD-60516943-E`，恢复布局后回到 `0x0804`。
+
+修复（`action/executor.py`）：新增 `_english_layout_switch` /
+`_restore_layout_switch`——strict type_text 走 VK 路径时，若目标窗口线程布局
+非英文（`(layout & 0xFFFF) != 0x0409`），发送前用 `PostMessage
+WM_INPUTLANGCHANGEREQUEST` 切到 US English，`finally` 恢复原布局。UNICODE 路径
+与 legacy 路径不变。新增 2 个单测（切换/恢复、英文布局跳过）。
+
+修复后真实 E2E（重启 Electron，随机 notepad-edit-save 三个批次）：
+
+- **notepad-edit-save 5/8 外部通过**（修复前 0/2）：seed 99、8018、555、16393、
+  4242 均精确落盘 token；模型不再与 IME 搏斗（成功样本 5~19 个动作，最短 5 个
+  模型调用），失败样本全部是"文本轮 run_shell 启动第二个 notepad"窗口错位。
+- chat-then-task 2/3 有效通过（seed 8696、47175，后者 6 个物理动作精确落盘
+  `CT-83363939-X`；另一 case 被 harness GBK 控制台编码 bug 作废，已修：
+  `sys.stdout.reconfigure(utf-8)`）。
+- 全量回归不变：WinPilot `3422 passed, 13 skipped`、根测试 2508、renderer 318、
+  typecheck 通过。
+
+shell 结果增强：`run_shell` 每次返回附 `foreground_window` 事实（hwnd/标题/
+类名/进程），让模型在文本轮也知道 shell 命令（如 Start-Process 或 SendKeys）
+作用/影响的是哪个前台窗口，不再盲操作。
+
+残留问题（不再归因模型）：**模型在初始文本轮（无租约、无截图）用 run_shell
+启动 GUI 应用（`Start-Process notepad.exe`）+ SendKeys 注入键盘**，会绕过
+RawDevice 单写入者、抢占地平线，使租约 target 绑定到模型自己启动的窗口而非
+用户预置窗口（trace：harness 预置 note-*.txt notepad 与 lease 绑定的空白
+notepad 是不同 hwnd）。这违反 AGENTS.md 的"物理输入单写入者"机械边界；后续
+方向是把文本轮 shell 的 GUI 启动/注入与租约 target 捕获解耦（候选：
+shell 结果携带前台窗口信息、文本轮禁止 SendKeys 式注入、或 observe 后
+full_desktop 帧让模型自行选择目标窗口后再绑定）。`CON` 未触碰。
+
+## 2026-08-06 截图/窗口/粘贴三通用工具迁入 vNext（未提交工作树）
+
+两个真实失败案例（网易云→QQ 发截图；Krita 画猫）的 trace 分层确认根因在
+**工具面缺口**，不是模型：
+
+1. **网易云→QQ 发截图**（`arp-20260806-000819-e4884d`）：模型用系统
+   PrintScreen 截图 → 触发 Snipping Tool 框选覆盖层（PrintScreen 被系统配置为
+   打开截图工具而非直接复制）→ 截图没进剪贴板 → QQ 粘贴失败 → 重新 launch QQ
+   开了未登录新实例 → 卡登录。失败链里模型每一步都是合理的，但**没有任何工具
+   能可靠地"截图保存/图片进剪贴板/发现已打开的窗口"**。
+2. **Krita 画猫**（`arp-20260806-001927-2e3465`）：模型文本轮 shell 启动 Krita
+   + AppActivate，observe 后 3 次点击窗口漂移 3 次（16517420→3279940→5704414），
+   目标丢失后 blocked 自称"只能 point/click/drag，不能生成艺术内容"——这是对
+   "当前画面不是画布"的合理化解释，不是能力不足。
+
+迁移（不包装 legacy，vNext 原生）：
+
+- `winpilot/vnext/desktop_ops.py`：纯逻辑层——参数校验、调用注入的物理后端、
+  有界结果格式化。零 win32/物理依赖，属于 vNext 内核（边界测试 pin 为
+  `LIVE_COMPOSITION_VNEXT_MODULES` / `_BINDINGS` 新增 `desktop_ops` 三项）。
+- `winpilot/action/clipboard_ops.py`：物理后端（action 层是产品线允许跨越
+  win32 的桌面边界）——`capture_screen_backend`（共享 utils.screenshot 截图存
+  PNG/JPEG）、`list_windows_backend`（自包含 EnumWindows，**不引用 legacy
+  perception.win32**，避免新增 legacy-verification reach）、`paste_image_backend`
+  （PIL→CF_DIB→win32clipboard→SendInput Ctrl+V，不经 legacy executor 队列）。
+- `visual_actor.py` 工具面新增 `capture_screen(path, window)` /
+  `list_windows()` / `paste_image_file(path)` 三个通用工具（视觉轮可见，
+  与 shell/connector 同享本地工具预算，`_owned_tool_exchange` 通用检测，
+  允许可选 task_state_update 附加字段）。
+
+边界保持：live_agent 只通过 pin 的 `desktop_ops` 绑定接线；`action.clipboard_ops`
+不引用 legacy verification 栈（`test_product_line_legacy_verification_reach`
+仍为零新增 edge）；`desktop_adapter` 包仍恰好 3 个文件（capture_ops 移出为
+独立 `vnext/desktop_ops.py`）。
+
+回归：WinPilot `3426 passed, 13 skipped`（+4 新工具测试）、根测试 2508、
+renderer 318、typecheck 通过。真实 Electron：截图保存 PNG（1920x1080）、
+窗口枚举、CF_DIB 进剪贴板均实测成功；notepad-edit-save 仍 1/2 通过（模型
+3-6 动作精确落盘，无 IME 搏斗）。`CON` 未触碰。
+
+## 2026-08-06 托盘/隐藏窗口的已运行实例复用修复（未提交工作树）
+
+重跑"网易云→QQ 发截图"（`arp-20260806-013053-239c5e`）：模型完成网易云后
+说 "QQ is not currently open. Let me launch QQ"，launch_application 后出现
+QQ 登录界面。用户指出关键事实：**QQ 一直开着，只是隐藏在系统托盘**。
+
+分层确认根因（不是模型问题）：
+
+- `perception/apps.py` 的 `_activate_existing_instance` /
+  `_activate_existing_by_process_name` / `_activate_existing_by_title` 只匹配
+  `IsWindowVisible(hwnd)` 的窗口（且 `not IsIconic`）。应用收进系统托盘时主
+  窗口 `IsWindowVisible=False`，三个激活函数全部返回 None → launch 走
+  `os.startfile` 启动**第二个未登录实例** → 模型面对登录界面卡住。
+- 模型判断"QQ 没开"的依据是**全屏帧里没有 QQ 窗口**——被托盘隐藏时确实
+  看不到，这是视觉盲区，不是模型推理错误。
+
+修复（`perception/apps.py`）：
+
+- 三个激活函数改为**可见窗口优先、隐藏/托盘窗口回退**：先用 `EnumWindows`
+  收集同进程的可见非最小化窗口；没有时收集同进程的隐藏窗口，对第一个
+  `ShowWindow(SW_RESTORE)` 后激活。新增 `_collect_existing_window` /
+  `_collect_existing_by_process` / `_collect_existing_by_title` 三个分桶
+  帮助函数。这样"已在托盘运行"的 QQ 会被恢复并激活，不再启动新实例。
+- `atomic.py` 的 `_run_launch` 在 `via: existing` 时把
+  `activated_hwnd` / `existing` / `note`（"already running: activated the
+  existing window; no new instance was started"）写进回执 facts；新增
+  `_launch_visible_effect` 把这些信息投影到模型的
+  `previous_action.visible_effect`——模型读到"激活了已运行窗口，未开新
+  实例"，不再误判"QQ 没开"。
+
+验证：
+
+- 真实环境：QQ 窗口 `ShowWindow(SW_HIDE)` 后（`IsWindowVisible=False`），
+  `launch_application("QQ")` 返回 `via: existing, activated_hwnd=33557054`，
+  窗口被 SW_RESTORE 恢复显示，**未启动新实例**（修复前会 `via: path` 启动
+  第二个）。
+- 单测 +2（`test_activate_existing_restores_tray_hidden_window_fallback`、
+  `test_launch_visible_effect_surfaces_existing_instance_note`）。
+- 全量回归：WinPilot `3428 passed, 13 skipped`、根测试 2508、renderer 318、
+  typecheck 通过。
+
+回答用户的问题："在启动工具里检测进程是否在跑并返回提醒"——方向正确，
+且 `launch_application` 本来就有 `_activate_existing_*` 复用机制；真正的
+缺口是**托盘/隐藏窗口被排除在复用之外**（只找可见窗口），以及**"复用了
+已运行实例"的事实没有反馈给模型**。两者都已修。`list_windows` / `run_shell`
+仍然可用，但此场景不再依赖模型主动查进程——launch 工具本身就会正确复用
+并告知模型。`CON` 未触碰。
+
+## 2026-08-06 可选工具参数校验 bug 导致 41 回合无效提案（已修复，未提交工作树）
+
+重跑"网易云→QQ 发截图"（`arp-20260806-021133-5b5c82`）：模型完成网易云后
+成功 launch_application 复用已登录 QQ（ADOPTED hwnd=394574，托盘修复生效），
+turn13 误判"截图已粘贴"，turn18 决定用 `capture_screen` 重新截图，但此后
+**连续 41 个回合全部 invalid_proposal**，最终 `failure_stage=tool_format`、
+detail="capture_screen requires exactly ['path', 'window'] fields"。
+
+根因（机械 bug，不是模型）：`_owned_tool_exchange` 的参数校验用
+`set(arguments) != set(expected_arguments)` 要求**恰好相等**。但
+`capture_screen` 的 schema 里 `window` 是可选字段（`"default": False`），
+模型按 schema 合法地只传 `{"path": ...}` 省略 `window`，被运行时拒绝。
+工具 schema 说可选、运行时强制必填，二者矛盾；模型 41 次尝试都被同一规则
+打回直到 budget 耗尽（上一轮删除了连续 invalid 硬停，所以会一直重试）。
+
+修复（`visual_actor.py`）：
+
+- `_owned_tool_exchange` 改为：未知字段报错、**可选字段缺省时填入 JSON
+  default**（新增 `_OPTIONAL_TOOL_DEFAULTS = {capture_screen: {window: False}}`），
+  类型仍校验。工具 schema 与运行时校验从此一致。
+- 回归测试 +1：`test_capture_screen_accepts_omitted_optional_window_field`
+  （省略 window 的 capture_screen 调用被接受且 default 填 False）。
+
+验证：
+
+- 真实 client 提交"打开画图随便点几下，用 capture_screen 截图保存到指定
+  路径并确认存在"：模型 8 次 model call，截图 PNG 在 2:28:26 由 capture
+  runner 创建（107KB），视觉 API 确认截图内容为真实屏幕（画图窗口 + 画布
+  上 3 个点击痕迹 + 背景终端）——capture_screen 完整链路端到端可用。
+- 全量回归：WinPilot `3429 passed, 13 skipped`、根测试 2508、renderer 318、
+  typecheck 通过。
+
+教训：新增工具的 schema 必须与运行时参数校验逐字段对齐；可选字段（带
+default）在运行时也必须允许省略并填默认值，否则模型按 schema 合法调用却
+被拒，会静默烧掉整个预算。`CON` 未触碰。
+
+## 2026-08-06 opencode 视觉辅助（vision-assistant MCP，永久启用）
+
+**这是本机 opencode（以及任何接入 deepseek 的 AI 工具）的永久视觉能力**：
+opencode 接入的 deepseek 本身不支持图片，但通过本机已注册的 MCP 服务器
+`vision-assistant` 可以"看懂"图片。所有调试窗口（本仓库的 AI/Codex/opencode
+窗口）都应该直接使用它，不要再绕道别的方式看截图。
+
+### 用法（在 opencode / 本仓库任何 agent 窗口里）
+
+工具是 MCP 全局注册的，模型可直接调用：
+
+- `describe_image(path, question?)`——读取一张图片文件（png/jpg/webp/bmp/gif），
+  交给 MiMo 视觉模型（mimo-v2.5）返回详细文字描述。用于看懂某张截图/图。
+- `describe_screen(question?)`——捕获当前整个屏幕（自动缩放压缩到 1280px
+  JPEG 防超时）并返回描述。用于了解当前桌面状态。
+
+模型侧不需要任何额外配置：工具名带 `vision-assistant_` 前缀（如
+`vision-assistant_describe_image`），opencode 会在工具列表里自动暴露。
+
+### 配置文件位置（永久安装）
+
+- 服务器代码：`C:\Users\zou\.config\opencode\vision-mcp\vision_mcp.py`
+- 注册配置：`C:\Users\zou\.config\opencode\opencode.jsonc`（mcp.vision-assistant）
+
+依赖：`mcp`、`anyio`、`mss`、`Pillow`（mss/Pillow 仅 describe_screen 需要）。
+凭据来源：**优先读 `python/winpilot_home/config.json` 的 `api` 段**（本机权威
+MiMo key）；仅当 config.json 不存在时才回退环境变量 `MIMO_API_KEY` /
+`MIMO_BASE_URL` / `MIMO_VISION_MODEL`。
+
+### 踩过的坑（修好后再也不回退）
+
+1. **401 根因**：opencode 进程会继承 shell 残留的 `MIMO_API_KEY`（指向失效的
+   中转 javen.bbroot.com），导致视觉请求 401。修复：**config.json 权威优先**，
+   环境变量仅后备。不要为了调试临时 `$env:MIMO_*`，会污染所有子进程。
+2. **describe_screen 超时**：原始全屏 PNG 可达数 MB，超过 opencode MCP 调用
+   超时（报 `MCP error -32001`）。修复：截图后缩放到最长边 1280px + JPEG
+   quality 82 再上传。
+3. **并发连接冲突**：opencode TUI 与 `opencode run` 同时连同一 stdio MCP
+   server 时，工具可能短暂不可用（报 unavailable）。单连接时稳定；遇冲突
+   重试或只用其中一个窗口。
+4. **验证方式**：`opencode run "用 vision-assistant 的 describe_image 查看
+   <绝对路径> 并描述"`（需 `$env:OPENCODE_MODEL="deepseek/deepseek-chat"`，
+   或直接用默认模型）。改 server 后无需重启 TUI，新 `opencode run` 会重新
+   拉起 server。
+
+`CON` 未触碰。

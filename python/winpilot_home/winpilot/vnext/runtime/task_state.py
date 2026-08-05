@@ -32,6 +32,8 @@ class ActorTaskStateUpdate:
 
     @classmethod
     def from_dict(cls, value: Any) -> "ActorTaskStateUpdate":
+        if value is None:
+            return cls(None)
         if type(value) is not dict or set(value) != {"scratchpad"}:
             raise ActorTaskStateError(
                 "task_state_update must contain exactly scratchpad"
