@@ -1,4 +1,4 @@
-﻿﻿<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -114,13 +114,6 @@
       <span class="hint">记得本会话此前任务，"再来一次/刚才那个"等指代据此理解。重启服务=新会话。</span>
     </div>
 
-    <h3>权限</h3>
-    <div class="form-grid">
-      <span class="hint" id="admin-line">当前权限: —</span>
-      <button class="mini" id="btn-elevate">以管理员重启（弹一次 UAC）</button>
-      <span class="hint">提权后可操控管理员窗口、写系统目录，Everything(es.exe) 也能连上。</span>
-    </div>
-
     <h3>模型</h3>
     <div class="form-grid">
       <label>Provider
@@ -163,13 +156,6 @@
       <label class="row"><input type="checkbox" id="cfg-ocr-gpu"> GPU 加速 (DirectML)</label>
       <span class="hint" id="ocr-provider-line">当前 provider: —</span>
     </div>
-
-    <h3>Trace / 脚本</h3>
-    <h4>最近评测</h4>
-    <div id="eval-list" class="trace-list"></div>
-    <div id="trace-list" class="trace-list"></div>
-    <h4>可重放脚本</h4>
-    <div id="script-list" class="trace-list"></div>
   </div>
 </aside>
 

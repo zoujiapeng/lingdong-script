@@ -16,7 +16,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from ..utils import image_capture
+from ..perception import vision_cv
 
 
 _ROLE_COLOUR_TERMS: dict[str, tuple[str, ...]] = {
@@ -169,7 +169,7 @@ def inventory_frame_appearance(
     detected: dict[str, Any] | None = None
     if surface_bounds is None:
         try:
-            detected = image_capture.credible_work_surface_frame_bounds(
+            detected = vision_cv.credible_work_surface_frame_bounds(
                 base64.b64encode(path.read_bytes()).decode(),
                 client_frame_bounds=client_frame_bounds,
             )

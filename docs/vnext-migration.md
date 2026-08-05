@@ -201,6 +201,67 @@ Legacy 产品/兼容消费者
 - 旧 wire format 如仍需读取，仅存在于隔离的只读迁移器；
 - 单元、常规回归和真实客户端 E2E 均在删除后的当前版本重新通过。
 
+## 机械核心所有权（2026-08-05 起）
+
+vNext 产品线直接运行在一小撮**共享机械模块**上（物理输入、帧捕获、窗口读回、
+应用启动）。它们位于 `winpilot.vnext` 之外，但归 vNext 所有：
+
+| 包 | 模块 |
+| --- | --- |
+| `action/` | `desktop_queue` `executor` `raw_device` `replay_policy` `safety` `shell` |
+| `utils/` | `dpi` `image_capture` `log` `screenshot` |
+| `visual_runtime/` | `frame_authority` `frame_observer` `keyboard_contracts` `normalized_frame_coordinates` `submitted_image_coordinates` |
+| `perception/` | `apps` `model` `uia`（含 `app_aliases` `search`） |
+
+所有权合同由 `tests/test_vnext_mechanical_core_contract.py` 钉住：
+
+- 全部 19 个模块必须可从产品组合根（`live_agent.py`）静态到达——删除 legacy
+  包不得带走机械层；
+- 机械模块不得 import legacy/规划层（agent/tasking/fast/recorder/memory/
+  integrations/modeling/eval/orchestrator/server/vnext/provider SDK）；
+- 机械模块与产品线对 legacy 验证栈（`action/verify`、`utils/trace_payload`、
+  `perception.{fusion,ocr,reducer,surface_binding,vision_cv,vlm,win32,world,
+  incremental}`）的 25 条已知引用被**钉死为只减不增**清单（见测试内
+  `PINNED_LEGACY_VERIFICATION_REACH` / `PINNED_CORE_PERCEPTION_LEAKS`）。
+
+### Phase A：零消费者路由删除（已执行）
+
+删除 9 条路由：`/api/human/start|stop|status`、`/api/v2/capabilities`、
+`/api/interject`、`/api/elevate`、`/api/traces`、`/api/evals`、`/api/scripts`；
+连带删除 `recorder/trace.list_traces` 与 webui 诊断页对应前端块。保留
+`/api/stop`（webui 停止按钮与 `gui_eval_run.py` chat 模式仍在消费）。
+全量回归 `3419 passed, 13 skipped`。
+
+### Phase D 清单：产品线内的 legacy 验证栈引用（已归零）
+
+2026-08-05 分两步把 25 条边砍到 0：
+
+1. **WPS 校验提取**：`validate_script` 及全部校验辅助从 `recorder/trace.py`
+   提取到纯模块 `recorder/wps_validate.py`（只依赖 stdlib + `replay_control`），
+   `orchestrator/contracts.py` 改从该模块惰性导入——`recorder.trace`、`fast.
+   perception_daemon`、`fast.element_cache`、`perception.{fusion,ocr,
+   incremental}`、`action.verify`、`utils.trace_payload` 整体退出产品线闭包。
+2. **机械核心净化**：`credible_work_surface_frame_bounds`（legacy 亮面检测
+   启发式，唯一消费者是 tasking legacy）从 `utils/image_capture.py` 移回
+   `perception/vision_cv.py`；`image_capture` 对 `surface_binding`/`vision_cv`
+   的引用归零，机械核心对感知栈的渗透清单清空。
+3. **完成契约验证退役**：删除 `ArpRuntime._task_contract_completion`
+   （runtime.py 惰性导入 tasking artifacts/completion/contracts/evidence 的
+   旧完成契约验证器 = CLAUDE.md 明令不建的"第二验证器"）及其 END 调用点；
+   `completion_contract` 快照字段保留为恒 `None`（API/trace 兼容），
+   `artifacts`/`contract_evidence` 的 duck-typing 投影保留（managed
+   screenshot 工件是真实能力，且不依赖 tasking import）。
+
+**现状**：产品线闭包对 legacy 验证栈（`action.verify`、`utils.trace_payload`、
+`perception.{fusion,ocr,reducer,surface_binding,vision_cv,vlm,win32,world,
+incremental}`）**零引用**；机械核心对感知栈**零引用**。合同测试
+`test_vnext_mechanical_core_contract.py` 的两个 pin 均已清空为强约束。
+
+产品线闭包内剩余的 legacy 包模块只剩 Studio 兼容面（`fast.action_contract`
+动作校验、`tasking.contracts` TASK_STAGE 节点校验、`recorder.wps_validate`+
+`replay_control` 纯校验），随官方退役链第 4/5 步（TASK_STAGE/StageRuntime
+适配器与 Studio）整体退役。
+
 ## 主分支提升与冻结分支边界
 
 2026-07-30，GitHub 已有默认分支 `master` 是

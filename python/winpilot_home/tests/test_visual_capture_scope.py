@@ -7,7 +7,7 @@ def test_credible_work_surface_bounds_use_authoritative_frame_coordinates():
     import cv2
     import numpy as np
 
-    from winpilot.utils.image_capture import credible_work_surface_frame_bounds
+    from winpilot.perception.vision_cv import credible_work_surface_frame_bounds
 
     image = np.zeros((720, 1008, 3), dtype=np.uint8)
     image[258:671, 126:992] = 255
@@ -32,7 +32,7 @@ def test_work_surface_is_clipped_to_window_client_authority():
     import cv2
     import numpy as np
 
-    from winpilot.utils.image_capture import credible_work_surface_frame_bounds
+    from winpilot.perception.vision_cv import credible_work_surface_frame_bounds
 
     image = np.zeros((500, 800, 3), dtype=np.uint8)
     image[50:480, 20:780] = 255
@@ -67,7 +67,7 @@ def test_credible_work_surface_bounds_preserve_ambiguous_failure(monkeypatch):
     import numpy as np
 
     from winpilot.perception import vision_cv
-    from winpilot.utils.image_capture import credible_work_surface_frame_bounds
+    from winpilot.perception.vision_cv import credible_work_surface_frame_bounds
 
     image = np.zeros((120, 160, 3), dtype=np.uint8)
     ok, encoded = cv2.imencode(".png", image)

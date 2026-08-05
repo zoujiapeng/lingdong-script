@@ -168,8 +168,9 @@ def _validate_node_config(node: ArpNode) -> list[str]:
             errors.append(f"{prefix} requires config.step object")
         else:
             # Keep WPS validation in one place so graph execution and file replay
-            # accept exactly the same deterministic step language.
-            from ..recorder.trace import validate_script
+            # accept exactly the same deterministic step language.  The pure
+            # validator must not pull recorder.trace into the product closure.
+            from ..recorder.wps_validate import validate_script
 
             script = {"format": "wps/2", "steps": [step]}
             if config.get("target_window") not in (None, "", {}):

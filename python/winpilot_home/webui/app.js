@@ -342,8 +342,6 @@ function renderEvent(ev) {
       if (ev.result && ev.status !== "reply") addChat("assistant", ev.result, { statusClass: cls });
       addLog("agent", ev.status === "done" ? "agent" : "error",
         `结束 status=${ev.status} 动作步数=${ev.steps}`, ev.ts);
-      refreshTraces();
-      refreshEvals();
       refreshSession();
       return;
     }
@@ -370,7 +368,6 @@ function renderEvent(ev) {
     }
     case "trace":
       addLog("trace", "agent", `${ev.state} ${ev.script || ev.run_id || ""}`, ev.ts);
-      if (ev.state === "exported") refreshScripts();
       return;
     case "config":
       return;
@@ -459,9 +456,6 @@ async function refreshStatus() {
       const ab = $("badge-admin");
       ab.textContent = "权限: " + (st.is_admin ? "管理员" : "普通");
       ab.classList.toggle("gpu", st.is_admin);
-      $("admin-line").textContent = "当前权限: " + (st.is_admin ? "管理员" : "普通用户");
-      $("btn-elevate").disabled = st.is_admin;
-      if (st.is_admin) $("btn-elevate").textContent = "已是管理员";
     }
     if (typeof st.shell_enabled === "boolean") $("cfg-shell").checked = st.shell_enabled;
     if (st.usage) {
@@ -577,14 +571,6 @@ function bindSettings() {
       refreshMemory();
     } catch (err) { addLog("memory", "error", `新增失败: ${err.message}`); }
   };
-  $("btn-elevate").onclick = async () => {
-    if (!confirm("将弹出 UAC 并以管理员身份重启 WinPilot。当前任务会中断，确定？")) return;
-    try {
-      const r = await api("/api/elevate", { method: "POST" });
-      if (r.already_admin) { addLog("权限", "agent", "已是管理员"); return; }
-      addChat("system", "正在以管理员身份重启… 若 UAC 通过，请稍候刷新页面。");
-    } catch (err) { addChat("system", `提权失败: ${err.message}`); }
-  };
 }
 
 /* ========================= traces & scripts ========================= */
@@ -647,85 +633,6 @@ async function refreshMemory() {
   } catch (_e) { /* noop */ }
 }
 
-async function refreshTraces() {
-  try {
-    const traces = await api("/api/traces");
-    const wrap = $("trace-list");
-    wrap.textContent = "";
-    traces.slice(0, 12).forEach((t) => {
-      const row = el("div", "trace-row");
-      row.appendChild(el("span", "t-name", `${t.run_id} ${t.task ? "· " + t.task : ""}`));
-      row.appendChild(el("span", "t-status", `${t.status || "?"} ${t.steps}步`));
-      const btn = el("button", "mini", "导出脚本");
-      btn.onclick = async () => {
-        try {
-          const r = await api(`/api/export/${t.run_id}`, { method: "POST" });
-          addLog("trace", "agent", `已导出: ${r.script}`);
-          refreshScripts();
-        } catch (err) { addLog("trace", "error", `导出失败: ${err.message}`); }
-      };
-      row.appendChild(btn);
-      wrap.appendChild(row);
-    });
-  } catch (_e) { /* noop */ }
-}
-async function refreshEvals() {
-  try {
-    const data = await api("/api/evals?limit=8");
-    const wrap = $("eval-list");
-    if (!wrap) return;
-    wrap.textContent = "";
-    const head = el("div", "trace-row");
-    head.appendChild(el("span", "t-name",
-      `共 ${data.total || 0} 条 · done ${data.passed_or_done || 0} · ${data.total_duration_s || 0}s · ¥${Number(data.total_cost_cny || 0).toFixed(4)}`));
-    wrap.appendChild(head);
-    const fast = data.fast_gui || {};
-    if ((fast.batch_calls || 0) || (fast.run_state_events || 0) || (fast.screen_watch_calls || 0)) {
-      const row = el("div", "trace-row");
-      row.appendChild(el("span", "t-name",
-        `fast GUI: batch ${fast.batch_calls || 0}, actions ${fast.batch_actions || 0}, saved ${fast.round_trips_saved || 0}, waits ${fast.screen_waits || 0}, states ${fast.run_state_events || 0}`));
-      wrap.appendChild(row);
-    }
-    const slow = data.slow_tools || [];
-    if (slow.length) {
-      const row = el("div", "trace-row");
-      const s = slow[0];
-      row.appendChild(el("span", "t-name",
-        `最慢 ${s.tool || "?"} ${s.elapsed_ms || 0}ms · ${s.run_id || ""}`));
-      wrap.appendChild(row);
-    }
-    (data.reports || []).slice(0, 6).forEach((r) => {
-      const row = el("div", "trace-row");
-      row.appendChild(el("span", "t-name", `${r.case_id || r.run_id} · ${r.task || ""}`));
-      row.appendChild(el("span", "t-status", `${r.status || "?"} ${r.duration_s || 0}s`));
-      wrap.appendChild(row);
-    });
-  } catch (_e) { /* noop */ }
-}
-async function refreshScripts() {
-  try {
-    const scriptsArr = await api("/api/scripts");
-    const wrap = $("script-list");
-    wrap.textContent = "";
-    scriptsArr.forEach((s) => {
-      const row = el("div", "trace-row");
-      row.appendChild(el("span", "t-name", `${s.file} (${s.steps}步)`));
-      const btn = el("button", "mini", "重放");
-      btn.onclick = async () => {
-        try {
-          await api("/api/replay", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ script: s.file }),
-          });
-        } catch (err) { addLog("重放", "error", err.message); }
-      };
-      row.appendChild(btn);
-      wrap.appendChild(row);
-    });
-  } catch (_e) { /* noop */ }
-}
-
 /* =============================== main =============================== */
 async function main() {
   config = await api("/api/config");
@@ -738,9 +645,6 @@ async function main() {
   if (planHead) planHead.onclick = () => $("plan-panel").classList.toggle("collapsed");
   connectWs();
   refreshStatus();
-  refreshTraces();
-  refreshEvals();
-  refreshScripts();
   refreshMemory();
   refreshSession();
   setInterval(refreshStatus, 4000);
@@ -763,16 +667,7 @@ async function main() {
         await requestStop();
         return;
       }
-      // steer the in-flight task
-      addChat("user", "💬 " + text);
-      try {
-        await api("/api/interject", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ task: text }),
-        });
-        addLog("插话", "agent", "已发送提示，agent 将在下一步看到");
-      } catch (err) { addChat("system", `插话失败: ${err.message}`); }
+      addChat("system", "任务运行中，请先停止或等待完成。");
       return;
     }
     addChat("user", text);
