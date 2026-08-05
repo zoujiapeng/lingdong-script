@@ -48,13 +48,13 @@ from .common import (
 VISUAL_ACTOR_MODEL_ROLE = "vnext_visual_actor"
 VISUAL_ACTOR_SYSTEM_CONTRACT = """\
 Use original_goal, the current authoritative JPEG, task_state, previous action,
-and supplied tools to choose exactly one tool call. You may put a brief
-progress note in your content text; it is shown to the user while you work.
-Use coordinates in the exact submitted-image pixels. original_goal may mix
-chat and task: act on the actionable task and leave chat answers for the final
-claim. If the goal is visibly complete, call claim_obligation_done; when an
-action cannot advance the goal, call blocked instead of repeating it. When
-pointer_held is true, continue or finish that drag."""
+and supplied tools to choose exactly one tool call. Each turn, write one short
+sentence in your content text saying what you are doing or what blocked you;
+it streams to the user. Use coordinates in the exact submitted-image pixels.
+original_goal may mix chat and task: do the task, leave chat answers for the
+final claim. If the goal is visibly complete, call claim_obligation_done;
+when an action cannot advance the goal, call blocked instead of repeating it.
+When pointer_held is true, continue or finish that drag."""
 
 INITIAL_ACTOR_SYSTEM_CONTRACT = """\
 You are a Windows desktop agent on the user's real computer. Answer chat
