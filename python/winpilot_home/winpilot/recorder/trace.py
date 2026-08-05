@@ -507,6 +507,77 @@ class TraceRecorder:
 RECORDER = TraceRecorder()
 
 
+def list_traces() -> list[dict[str, Any]]:
+    """Trace runs on disk, newest first, with task + status summary.
+
+    Consumed by the Electron Platform workbench trace browser
+    (``/api/traces``); part of the Studio/compat surface.
+    """
+    TRACES_DIR.mkdir(exist_ok=True)
+    out: list[dict[str, Any]] = []
+    for path in sorted(TRACES_DIR.glob("*.jsonl"), reverse=True):
+        info: dict[str, Any] = {"run_id": path.stem, "task": "", "status": "",
+                                "steps": 0, "size_kb": round(path.stat().st_size / 1024, 1)}
+        legacy_action_ids: set[str] = set()
+        legacy_anonymous = 0
+        vnext_action_ids: set[str] = set()
+        vnext_anonymous = 0
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    event = json.loads(line)
+                    if event.get("type") == "agent_start":
+                        info["task"] = event.get("task", "")
+                    elif event.get("type") in {"agent_tool", "agent_batch_action"}:
+                        replay = event.get("replay")
+                        meta = event.get("result_meta")
+                        wrapper_parent = bool(
+                            event.get("type") == "agent_tool"
+                            and isinstance(meta, dict)
+                            and meta.get("wrapped_by_fast_controller") is True
+                        )
+                        if (
+                            isinstance(replay, dict)
+                            and replay.get("tool") in KNOWN_TOOLS
+                            and event.get("tool") != "run_action_batch"
+                            and not wrapper_parent
+                        ):
+                            action_id = str(event.get("action_id") or "")
+                            if action_id:
+                                legacy_action_ids.add(action_id)
+                            else:
+                                legacy_anonymous += 1
+                    elif (
+                        event.get("type") == "vnext_raw_receipt"
+                        and event.get("input_completed") is True
+                    ):
+                        decision_id = str(event.get("decision_id") or "")
+                        if decision_id:
+                            vnext_action_ids.add(decision_id)
+                        else:
+                            vnext_anonymous += 1
+                    elif event.get("type") == "agent_done":
+                        info["status"] = event.get("status", "")
+                    elif event.get("type") == "arp_run_done":
+                        info["status"] = event.get("status", "")
+                        snapshot = event.get("runtime_snapshot")
+                        if isinstance(snapshot, dict):
+                            info["thread_id"] = str(snapshot.get("thread_id") or "")
+                            info["turn_id"] = str(snapshot.get("turn_id") or "")
+                    elif event.get("type") == "trace_integrity":
+                        info["complete"] = event.get("complete") is True
+                        info["dropped_events"] = int(event.get("dropped_events") or 0)
+        except (json.JSONDecodeError, OSError):
+            pass
+        info["steps"] = (
+            len(vnext_action_ids) + vnext_anonymous
+            if vnext_action_ids or vnext_anonymous
+            else len(legacy_action_ids) + legacy_anonymous
+        )
+        out.append(info)
+    return out
+
+
 def _read_trace_records(
     run_id: str,
     limit: int | None = None,
