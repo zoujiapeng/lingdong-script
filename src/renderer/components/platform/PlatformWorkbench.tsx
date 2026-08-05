@@ -26,6 +26,7 @@ import {
   ListChecks,
   Loader2,
   Maximize2,
+  MessageSquare,
   Minimize2,
   Minus,
   Network,
@@ -83,7 +84,11 @@ import {
   type AutomationIR,
 } from '../../utils/automationIR';
 import { flowDocumentFingerprint } from '../../utils/flowFragmentProposal';
-import { isTerminalTaskStatus } from '../../../shared/taskOutcome';
+import {
+  isTerminalTaskStatus,
+  readableFailureStage,
+  readableRunError,
+} from '../../../shared/taskOutcome';
 import { taskOutcomeForRun } from '../../platform/taskOutcome';
 
 type PlatformView = 'agent' | 'studio' | 'runs' | 'assets' | 'system';
@@ -1001,19 +1006,15 @@ function CollapsibleAgentText({ text }: { text: string }) {
 function AgentConversationTurn({
   run,
   isLatest,
-  gateMessage,
   onOpenDetails,
   onEditGoal,
   editDisabled = false,
-  onDecideGate,
 }: {
   run: RunProjection;
   isLatest: boolean;
-  gateMessage: string;
   onOpenDetails?: () => void;
   onEditGoal?: (goal: string) => void;
   editDisabled?: boolean;
-  onDecideGate: (approved: boolean) => void;
 }) {
   const tone = visualRunTone(run);
   const terminal = isTerminalTaskStatus(run.status);
@@ -1024,6 +1025,14 @@ function AgentConversationTurn({
   const directReply = run.status === 'reply';
   const currentTool = TOOL_LABELS[run.current_tool || ''] || run.current_tool || '尚未选择工具';
   const resultText = displayValue(run.result).trim();
+  const rawFailureText = displayValue(run.error || run.result).trim();
+  // The model's own words are the honest explanation when it could not
+  // finish; the rigid system error only supplements when there is none.
+  const failureText = resultText
+    ? resultText
+    : rawFailureText
+      ? readableRunError(rawFailureText, run.failure_stage)
+      : '打开运行详情可查看失败位置、事件与证据。';
 
   return (
     <section className="ld-conversation-turn" aria-label="对话轮次" data-run-id={run.run_id}>
@@ -1045,14 +1054,18 @@ function AgentConversationTurn({
         </article>
       )}
 
+      {active && run.narration && (
+        <article className="ld-agent-thought" aria-label="Agent 思考与进度">
+          <div className="ld-agent-thought-icon"><MessageSquare size={13} /></div>
+          <CollapsibleAgentText text={run.narration} />
+        </article>
+      )}
+
+
       {isLatest && run.phase === 'awaiting_human' && (
         <section className="ld-gate-card" aria-label="需要人工确认">
           <div className="ld-gate-icon"><UserCheck size={18} /></div>
-          <div><span>需要确认</span><strong>{gateMessage}</strong><p>Agent 已停在当前边界，选择后才会继续。</p></div>
-          <div className="ld-gate-actions">
-            <button type="button" onClick={() => onDecideGate(false)}>拒绝</button>
-            <button type="button" className="primary" onClick={() => onDecideGate(true)}>批准并继续</button>
-          </div>
+          <div><span>需要确认</span><strong>等待人工确认</strong><p>Agent 已停在当前边界。</p></div>
         </section>
       )}
 
@@ -1082,7 +1095,12 @@ function AgentConversationTurn({
               <strong>{taskOutcome === 'info' ? STATUS_LABELS[run.status] || '任务已停止' : '任务未完成'}</strong>
               <small>{formatTime(run.finished_at || run.updated_at)}</small>
             </div>
-            <CollapsibleAgentText text={displayValue(run.error || run.result).trim() || '打开运行详情可查看失败位置、事件与证据。'} />
+            <CollapsibleAgentText text={failureText} />
+            {run.failure_stage && (
+              <small className="ld-agent-response-failure-stage">
+                失败阶段：{readableFailureStage(run.failure_stage)}
+              </small>
+            )}
             {onEditGoal && run.goal && (
               <button className="ld-agent-response-details" type="button" disabled={editDisabled} onClick={() => onEditGoal(run.goal)}>
                 再次编辑
@@ -1156,9 +1174,6 @@ export function AgentCockpit({
       : plane.connection === 'offline'
         ? '运行时离线'
         : '正在连接运行时';
-  const gateMessage = run?.phase === 'awaiting_human'
-    ? String([...plane.events].reverse().find((event) => event.type === 'arp_human_gate')?.message || run.current_node_id || '请确认是否继续当前操作')
-    : '';
 
   useEffect(() => {
     if (!modelMenuOpen) return;
@@ -1577,7 +1592,6 @@ export function AgentCockpit({
                 key={item.run_id}
                 run={item}
                 isLatest={index === visibleConversationRuns.length - 1}
-                gateMessage={index === visibleConversationRuns.length - 1 ? gateMessage : ''}
                 onOpenDetails={onOpenResources}
                 editDisabled={submitting}
                 onEditGoal={(value) => {
@@ -1588,7 +1602,6 @@ export function AgentCockpit({
                     composerInputRef.current?.setSelectionRange(value.length, value.length);
                   });
                 }}
-                onDecideGate={(approved) => { void plane.decideGate(approved); }}
               />
             ))}
 
@@ -2601,7 +2614,6 @@ function SystemView({ plane }: { plane: Plane }) {
               <label><span>视觉模型</span><input value={config.vlm?.model || ''} onChange={(event) => patch('vlm', 'model', event.target.value)} /></label>
               <label><span>视觉模型地址</span><input value={config.vlm?.base_url || ''} onChange={(event) => patch('vlm', 'base_url', event.target.value)} /></label>
               <Toggle checked={Boolean(config.vlm?.enabled)} onChange={(value) => patch('vlm', 'enabled', value)} label="启用强化视觉回退" />
-              <Toggle checked={Boolean(config.agent?.verify_done)} onChange={(value) => patch('agent', 'verify_done', value)} label="启用证据完成门" />
             </div>
           ) : <EmptyState icon={Loader2} title="正在加载配置" />}
         </section>
@@ -2614,7 +2626,6 @@ function SystemView({ plane }: { plane: Plane }) {
             <Toggle checked={Boolean(config.fusion?.screen_watch_autostart)} onChange={(value) => patch('fusion', 'screen_watch_autostart', value)} label="自动启动屏幕监视" />
             <Toggle checked={Boolean(config.controller?.native_visual_thinking)} onChange={(value) => patch('controller', 'native_visual_thinking', value)} label="原生视觉推理（更慢）" />
             <Toggle checked={config.controller?.target_window_capture_enabled !== false} onChange={(value) => patch('controller', 'target_window_capture_enabled', value)} label="自动裁剪目标窗口画面" />
-            <Toggle checked={Boolean(config.controller?.multi_input_cooperation)} onChange={(value) => patch('controller', 'multi_input_cooperation', value)} label="实验性多鼠标键盘协同" />
             <Toggle checked={Boolean(config.fusion?.ocr_skip_when_uia_rich)} onChange={(value) => patch('fusion', 'ocr_skip_when_uia_rich', value)} label="UIA 信息丰富时跳过 OCR" />
             <Toggle checked={Boolean(config.fusion?.vlm_skip_when_uia_rich)} onChange={(value) => patch('fusion', 'vlm_skip_when_uia_rich', value)} label="UIA 信息丰富时跳过视觉模型" />
           </div>}

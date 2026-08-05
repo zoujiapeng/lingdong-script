@@ -251,8 +251,6 @@ class ArpExecution:
         self.pause_controller = PauseController()
         self._manual_paused = False
         self._lock = threading.RLock()
-        self._gate_condition = threading.Condition(self._lock)
-        self._gate_decisions: dict[str, dict[str, Any]] = {}
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
@@ -361,6 +359,10 @@ class ArpExecution:
                 "evidence": [_json_preview(item) for item in self.evidence[-30:]],
                 "history": list(self.history[-200:]),
                 "result": _json_preview(self.result),
+                "user_result": (
+                    str(self.runtime_state.get("user_result") or "")[:16_384]
+                    or None
+                ),
                 "error": self.error,
                 "created_at": self.created_at,
                 "started_at": self.started_at,
@@ -446,11 +448,10 @@ class ArpExecution:
         self.stop_event.set()
         self._manual_paused = False
         self.pause_controller.resume()
-        with self._gate_condition:
+        with self._lock:
             if self.status == ArpRunStatus.QUEUED:
                 self.status = ArpRunStatus.CANCELED
                 self.finished_at = time.time()
-            self._gate_condition.notify_all()
 
     def pause(self) -> bool:
         with self._lock:
@@ -477,18 +478,6 @@ class ArpExecution:
 
     def _wait_if_paused(self) -> bool:
         return self.pause_controller.wait_if_paused(self.stop_event)
-
-    def decide_gate(self, node_id: str, approved: bool, comment: str = "") -> bool:
-        with self._gate_condition:
-            if self.current_node_id != node_id or self.status != ArpRunStatus.PAUSED:
-                return False
-            self._gate_decisions[node_id] = {
-                "approved": bool(approved),
-                "comment": str(comment or ""),
-                "decided_at": time.time(),
-            }
-            self._gate_condition.notify_all()
-            return True
 
     def _context(self, last: NodeResult | None = None) -> dict[str, Any]:
         return {
@@ -547,65 +536,6 @@ class ArpExecution:
         else:
             matched = bool(actual)
         return NodeResult(ok=True, branch="yes" if matched else "no", output={"actual": actual, "matched": matched})
-
-    def _human_gate(self, node: ArpNode) -> NodeResult:
-        if node.config.get("approved") is True:
-            return NodeResult(
-                ok=True,
-                branch="approved",
-                output={"approved": True, "mode": "preapproved"},
-                evidence=[{
-                    "predicate": "human.approved",
-                    "source": "human_gate",
-                    "node_id": node.id,
-                    "value": True,
-                    "verified": True,
-                    "metadata": {"mode": "preapproved"},
-                }],
-            )
-        timeout_s = float(node.timeout_s or node.config.get("timeout_s") or 3600)
-        with self._gate_condition:
-            self.status = ArpRunStatus.PAUSED
-            BUS.publish(
-                "arp_human_gate",
-                run_id=self.run_id,
-                node_id=node.id,
-                message=str(node.config.get("message") or node.name or "Approval required"),
-                status="waiting",
-            )
-            deadline = time.monotonic() + timeout_s
-            while node.id not in self._gate_decisions and not self.stop_event.is_set():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self.status = ArpRunStatus.RUNNING
-                    return NodeResult(ok=False, branch="timeout", error="human approval timed out")
-                self._gate_condition.wait(timeout=min(remaining, 0.5))
-            self.status = ArpRunStatus.RUNNING
-            if self.stop_event.is_set():
-                return NodeResult(ok=False, branch="canceled", error="run canceled")
-            decision = self._gate_decisions.pop(node.id)
-        approved = bool(decision.get("approved"))
-        BUS.publish(
-            "arp_human_gate",
-            run_id=self.run_id,
-            node_id=node.id,
-            status="approved" if approved else "rejected",
-            comment=decision.get("comment", ""),
-        )
-        return NodeResult(
-            ok=approved,
-            branch="approved" if approved else "rejected",
-            output=decision,
-            evidence=[{
-                "predicate": "human.approved",
-                "source": "human_gate",
-                "node_id": node.id,
-                "value": True,
-                "verified": True,
-                "text": str(decision.get("comment", "")),
-            }] if approved else [],
-            error="" if approved else "human rejected the gate",
-        )
 
     def _evidence_gate(self, node: ArpNode) -> NodeResult:
         required = [
@@ -766,8 +696,6 @@ class ArpExecution:
             return NodeResult(ok=True, output={key: value})
         if node.kind == ArpNodeKind.EVIDENCE_GATE:
             return self._evidence_gate(node)
-        if node.kind == ArpNodeKind.HUMAN_GATE:
-            return self._human_gate(node)
         return None
 
     def _execute_node(self, node: ArpNode, last: NodeResult | None) -> NodeResult:
@@ -850,8 +778,7 @@ class ArpExecution:
     def _publish_run_done(self) -> None:
         user_result = self.runtime_state.get("user_result")
         if (
-            self.status not in {ArpRunStatus.DONE, ArpRunStatus.REPLY}
-            or type(user_result) is not str
+            type(user_result) is not str
             or not user_result.strip()
             or len(user_result) > 16_384
         ):
@@ -867,6 +794,9 @@ class ArpExecution:
             error=self.error,
             evidence_count=len(self.evidence),
             runtime_snapshot=self.audit_snapshot(),
+            failure_stage=str(
+                self.runtime_state.get("failure_stage") or ""
+            ),
             **(
                 {"user_result": user_result}
                 if user_result is not None
@@ -986,6 +916,9 @@ class ArpExecution:
                             passed=True,
                         )
                 raw_output = result.output if isinstance(result.output, dict) else {}
+                failure_stage = raw_output.get("failure_stage")
+                if type(failure_stage) is str and failure_stage.strip():
+                    self.runtime_state["failure_stage"] = failure_stage.strip()
                 raw_interaction_state = (
                     raw_output.get("interaction_state")
                     if isinstance(raw_output.get("interaction_state"), dict)
@@ -1220,10 +1153,6 @@ class ArpRunManager:
     def resume(self, run_id: str) -> bool:
         execution = self.get(run_id)
         return execution.resume() if execution else False
-
-    def decide_gate(self, run_id: str, node_id: str, approved: bool, comment: str = "") -> bool:
-        execution = self.get(run_id)
-        return execution.decide_gate(node_id, approved, comment) if execution else False
 
 
 ARP_RUNS = ArpRunManager()

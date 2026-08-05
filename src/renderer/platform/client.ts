@@ -534,13 +534,6 @@ export class ControlPlaneClient {
     return this.request(`api/v2/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST' });
   }
 
-  gate(runId: string, nodeId: string, approved: boolean, comment = ''): Promise<{ ok: boolean }> {
-    return this.request(`api/v2/arp/runs/${encodeURIComponent(runId)}/gate`, {
-      method: 'POST',
-      body: JSON.stringify({ node_id: nodeId, approved, comment }),
-    });
-  }
-
   connectEvents(onEvent: (event: RuntimeEvent) => void, onState?: (connected: boolean) => void): () => void {
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;

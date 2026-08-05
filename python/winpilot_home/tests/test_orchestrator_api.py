@@ -78,16 +78,15 @@ def _graph_payload():
         "format": "arp/1",
         "id": "api-graph",
         "name": "API graph",
+        "policy": {"fail_fast": True, "require_evidence_on_done": False},
         "nodes": [
             {"id": "start", "kind": "start"},
             {"id": "set", "kind": "set_variable", "config": {"name": "ready", "value": True}},
-            {"id": "gate", "kind": "human_gate", "config": {"approved": True}},
             {"id": "end", "kind": "end"},
         ],
         "edges": [
             {"id": "e1", "source": "start", "target": "set"},
-            {"id": "e2", "source": "set", "target": "gate"},
-            {"id": "e3", "source": "gate", "target": "end", "branch": "approved"},
+            {"id": "e2", "source": "set", "target": "end"},
         ],
     }
 
@@ -181,7 +180,8 @@ def test_platform_overview_exposes_contracts_and_capabilities(client):
         for item in data["capabilities"]
         for node_type in item.get("flow_node_types", [])
     }
-    assert {"agent_goal", "action_batch", "skill_replay", "variable_set", "human_gate"} <= advertised_nodes
+    assert {"agent_goal", "action_batch", "skill_replay", "variable_set"} <= advertised_nodes
+    assert "human_gate" not in advertised_nodes
 
 
 def test_product_and_example_config_default_to_vnext():

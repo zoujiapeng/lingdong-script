@@ -41,6 +41,23 @@ _LOOKS_LIKE_PATH_OR_ASSOCIATION = re.compile(
     re.IGNORECASE,
 )
 
+# Browsers host arbitrary tab titles; a tab labelled like an application is a
+# web page, never an installed application window.  Title-based activation
+# must never hijack the agent into a browser tab for a native app name.
+_BROWSER_PROCESS_NAMES = frozenset({
+    "chrome.exe",
+    "msedge.exe",
+    "firefox.exe",
+    "iexplore.exe",
+    "brave.exe",
+    "opera.exe",
+    "vivaldi.exe",
+    "chromium.exe",
+    "seamonkey.exe",
+    "waterfox.exe",
+    "tor.exe",
+})
+
 
 def _unique_text(values) -> list[str]:
     """Return non-empty strings once, preserving the strongest-first order."""
@@ -531,17 +548,175 @@ def _activate_existing_instance(exe_path: str) -> int | None:
         return None
     if not found:
         return None
-    hwnd = found[0]
+    return _activate_window(found[0])
+
+
+def _activate_window(hwnd: int) -> int | None:
+    """Bring one window to the foreground, working around the Windows
+    foreground lock.
+
+    A background process cannot normally ``SetForegroundWindow``: Windows
+    restricts foreground changes to the process that owns the foreground or
+    most recently received input.  ``AttachThreadInput`` temporarily joins
+    the target window's input queue so the activation request is treated as
+    if it came from that thread, which is the standard, mechanical way to
+    raise a real application window from an automation process.  Falls back
+    to the plain API when attachment is unavailable.
+    """
+    import ctypes
+
+    import win32con
+    import win32gui
+    import win32process
+
+    hwnd = int(hwnd)
     try:
-        win32gui.SetForegroundWindow(hwnd)
-        win32gui.BringWindowToTop(hwnd)
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    except Exception:
+        pass
+    try:
+        foreground = win32gui.GetForegroundWindow()
+        target_thread = win32process.GetWindowThreadProcessId(hwnd)[0]
+        attached = False
+        if foreground and foreground != hwnd:
+            try:
+                current_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+                foreground_thread = win32process.GetWindowThreadProcessId(
+                    foreground
+                )[0]
+                if ctypes.windll.user32.AttachThreadInput(
+                    current_thread, foreground_thread, True
+                ):
+                    ctypes.windll.user32.AttachThreadInput(
+                        current_thread, target_thread, True
+                    )
+                    attached = True
+            except Exception:
+                attached = False
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+            win32gui.BringWindowToTop(hwnd)
+        except Exception:
+            pass
+        if attached:
+            try:
+                ctypes.windll.user32.AttachThreadInput(
+                    current_thread, target_thread, False
+                )
+                ctypes.windll.user32.AttachThreadInput(
+                    current_thread, foreground_thread, False
+                )
+            except Exception:
+                pass
     except Exception:
         try:
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             win32gui.SetForegroundWindow(hwnd)
         except Exception:
             pass
     return int(hwnd)
+
+
+def _activate_existing_by_title(display_name: str) -> int | None:
+    """Activate a visible window whose title contains the display name.
+
+    Generic title-based activation for display names whose executable cannot
+    be matched (Store/UWP apps, shortcuts without a resolvable target).  The
+    match is a plain substring test, so "QQ" activates the open QQ window
+    instead of starting a second instance.  Browser windows are excluded:
+    a tab title such as "网易云音乐 - Google Chrome" is a web page, not an
+    installed application window, and activating it would hijack the model
+    into the browser instead of the real app.
+    """
+    import ctypes
+
+    import win32con
+    import win32gui
+    import win32process
+
+    needle = str(display_name or "").strip()
+    if not needle:
+        return None
+    found: list[int] = []
+    try:
+        win32gui.EnumWindows(
+            lambda hwnd, _unused: (
+                found.append(hwnd)
+                if win32gui.IsWindowVisible(hwnd)
+                and not win32gui.IsIconic(hwnd)
+                and needle in win32gui.GetWindowText(hwnd)
+                and _window_process_name(hwnd) not in _BROWSER_PROCESS_NAMES
+                else None
+            )
+            or True,
+            None,
+        )
+    except Exception:
+        return None
+    if not found:
+        return None
+    return _activate_window(found[0])
+
+
+def _window_process_name(hwnd: int) -> str:
+    """Return the owning process's executable file name (lowercased), or ''."""
+    try:
+        import win32process
+
+        pid = win32process.GetWindowThreadProcessId(int(hwnd))[1]
+        return os.path.basename(_process_exe(pid)).casefold()
+    except Exception:
+        return ""
+
+
+def _activate_existing_by_process_name(process_name: str) -> int | None:
+    """Activate a visible window owned by a running process file name.
+
+    Process-name activation is stronger than title matching: it finds the
+    real application window even when its title is a document/song/chat name
+    ("江南 - 林俊杰") that never contains the display name ("网易云音乐").
+    """
+    import ctypes
+
+    import win32con
+    import win32gui
+
+    needle = str(process_name or "").strip().casefold()
+    if not needle:
+        return None
+    if os.path.basename(needle) != needle:
+        needle = os.path.basename(needle)
+    found: list[int] = []
+    try:
+        win32gui.EnumWindows(
+            lambda hwnd, _unused: (
+                found.append(hwnd)
+                if win32gui.IsWindowVisible(hwnd)
+                and not win32gui.IsIconic(hwnd)
+                and win32gui.GetWindowText(hwnd)
+                and _window_process_name(hwnd) == needle
+                else None
+            )
+            or True,
+            None,
+        )
+    except Exception:
+        return None
+    if not found:
+        return None
+    return _activate_window(found[0])
+
+
+def _shortcut_target(lnk_path: str) -> str:
+    """Resolve a .lnk shortcut to its target executable path, or ''."""
+    try:
+        import win32com.client  # noqa: PLC0415
+
+        shell = win32com.client.Dispatch("WScript.Shell")
+        shortcut = shell.CreateShortcut(str(lnk_path))
+        return str(shortcut.TargetPath or "")
+    except Exception:
+        return ""
 
 
 def _process_exe(pid: int) -> str:
@@ -566,6 +741,33 @@ def _process_exe(pid: int) -> str:
             ctypes.windll.kernel32.CloseHandle(handle)
     except Exception:
         return ""
+
+
+def _activate_resolved_entry(entry: dict) -> int | None:
+    """Best-effort activation of an already-running resolved application."""
+    kind = str(entry.get("kind") or "")
+    target = str(entry.get("target") or "")
+    name = str(entry.get("name") or "")
+    candidates: list[str] = []
+    if kind == "exe":
+        candidates.append(target)
+    elif kind == "lnk":
+        candidates.append(_shortcut_target(target))
+    for candidate in candidates:
+        if candidate:
+            activated = _activate_existing_instance(candidate)
+            if activated:
+                return activated
+    # Store/UWP apps resolve to an AppID whose on-disk exe lives behind a
+    # WindowsApps VFS path that the running process may not report.  Match
+    # the process file name instead, so a running "cloudmusic" window is
+    # activated even though its title is a song name, not the display name.
+    process_name = str(entry.get("process_name") or "")
+    if process_name:
+        activated = _activate_existing_by_process_name(process_name)
+        if activated:
+            return activated
+    return _activate_existing_by_title(name or target)
 
 
 def launch_application(
@@ -648,6 +850,21 @@ def launch_application(
             return {"ok": False, "error": f"application resolution failed: {exc}"}
     if isinstance(resolved, list) and resolved:
         entry = dict(resolved[0])
+        # Prefer activating an already-running instance over starting a new
+        # one: a GUI agent needs "the app is already open, bring it to the
+        # front" semantics for every display-name launch, not just bare PATH
+        # commands.
+        activated = _activate_resolved_entry(entry)
+        if activated:
+            return {
+                "ok": True,
+                "via": "existing",
+                "target": str(entry.get("target") or ""),
+                "arguments": arguments_list,
+                "name": name,
+                "aliases": list(entry.get("aliases") or []),
+                "activated_hwnd": activated,
+            }
         if arguments_list:
             entry["arguments"] = arguments_list
         return launch_target(entry)

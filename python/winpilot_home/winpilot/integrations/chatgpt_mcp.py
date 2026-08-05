@@ -84,7 +84,6 @@ class ChatGPTBridgeHooks:
     start_graph: Callable[[ArpGraph, JsonDict], JsonDict]
     get_run: Callable[[str], JsonDict]
     cancel_run: Callable[[str], JsonDict]
-    decide_gate: Callable[[str, str, bool, str], JsonDict]
     busy: Callable[[], bool]
     enabled: Callable[[], bool]
     mutation_allowed: Callable[[], bool]
@@ -1627,15 +1626,6 @@ def build_chatgpt_mcp(hooks: ChatGPTBridgeHooks):
     )
     def cancel_gui_run(run_id: str) -> JsonDict:
         return hooks.cancel_run(run_id)
-
-    @mcp.tool(
-        name="decide_human_gate",
-        title="Decide human gate",
-        description="Approve or reject the exact human-gate node where an ARP run is paused.",
-        annotations=mutate,
-    )
-    def decide_human_gate(run_id: str, node_id: str, approved: bool, comment: str = "") -> JsonDict:
-        return hooks.decide_gate(run_id, node_id, approved, comment)
 
     @mcp.tool(
         name="list_gui_skills",

@@ -154,6 +154,24 @@ def require_empty_content(message: Any) -> None:
         )
 
 
+def narration_content(message: Any) -> str:
+    """Extract the Actor's brief progress note alongside its tool call.
+
+    The model may narrate what it is doing in the content text while it
+    works; the runtime keeps the latest note and surfaces it to the user
+    instead of a rigid system string when the run cannot finish.
+    """
+    content = member(message, "content")
+    if content is None:
+        return ""
+    if type(content) is not str:
+        raise LiveModelRoleError("Actor content must be text or null")
+    return content.strip()[:_NARRATION_MAX_CHARS]
+
+
+_NARRATION_MAX_CHARS = 4000
+
+
 __all__ = [
     "MAX_LIVE_MODEL_JSON_RESPONSE_CHARS",
     "MAX_LIVE_MODEL_NAME_CHARS",
@@ -161,6 +179,7 @@ __all__ = [
     "MAX_LIVE_MODEL_TOTAL_TIMEOUT_S",
     "LiveModelRoleError",
     "member",
+    "narration_content",
     "require_empty_content",
     "require_jpeg",
     "require_positive_int",

@@ -73,13 +73,6 @@ from ..vnext.desktop_adapter import (
     WorkspaceSurface,
 )
 from ..vnext.evidence import EvidenceRegistry
-from ..vnext.evidence_plane import (
-    FrameArtifactWriter,
-    RuntimeEvidenceJournal,
-    RuntimeEvidencePlane,
-    canonical_sha256,
-    runtime_evidence_report_sha256,
-)
 from ..vnext.mission import (
     EvidenceRef,
     MissionDefinition,
@@ -101,7 +94,6 @@ from ..vnext.runtime import (
     POST_ACTION_FRAME_EVIDENCE_KIND,
     MissionRuntime,
     MissionRuntimeResult,
-    MutationPermitAuthority,
     RuntimeFrame,
     RuntimeFrameIdentity,
     RuntimeSnapshot,
@@ -121,7 +113,6 @@ from .runtime import ArpExecution, NodeResult
 
 _RUNTIME_VERSION = "vnext"
 _OBLIGATION_ID = "full-goal"
-_RUNTIME_EVIDENCE_ROOT = TRACES_DIR / "vnext_runtime_evidence"
 _TARGET_MAX_AGE_MS = 60_000
 _FUTURE_CLOCK_SKEW_MS = 2_000
 _MAX_SUBMITTED_SIDE = 1120
@@ -159,9 +150,6 @@ _CONTINUE_STATUSES = frozenset(
     }
 )
 _PRIVATE_RUNTIME_EVIDENCE = "private_runtime_evidence"
-_RUNTIME_EVIDENCE_REPORT_STATUSES = frozenset(
-    {"complete", "incomplete", "verification_failed"}
-)
 _PUBLIC_ACTION_EFFECT_FIELDS = frozenset(
     {
         "format",
@@ -249,7 +237,6 @@ class _CompositionDependencies:
     hit_test_root: Callable[[int, int], int | None] | None = None
     client_factory: Callable[..., Any] | None = None
     session_builder: Callable[["_SessionBuild"], _SessionPort] | None = None
-    runtime_evidence_root: Path | None = None
     connector_factory: Callable[[], Any] | None = None
     provider_transport_factory: Callable[[], Any] | None = None
     config_snapshot: Callable[[], dict[str, Any]] | None = None
@@ -881,6 +868,58 @@ class _LiveAgentStatusProvider:
         }
 
 
+def _window_text_reader_factory() -> Any:
+    """Read-only UIA text of the exact bound target window (frame hwnd).
+
+    The reader is called inside the Visual Actor's own turn with the
+    projected frame, so the text it returns always describes the same window
+    the current screenshot shows — no UIA-vs-pixels mismatch is possible.
+    """
+    _WINDOW_TEXT_FORMAT = "window-text/1"
+    _WINDOW_TEXT_MAX_CHARS = 6000
+
+    def read(turn: Any) -> dict[str, Any]:
+        frame = getattr(turn, "frame", None)
+        hwnd = getattr(frame, "window_hwnd", None) if frame is not None else None
+        if not hwnd:
+            return {
+                "format": _WINDOW_TEXT_FORMAT,
+                "window_hwnd": None,
+                "element_count": 0,
+                "text": "",
+                "error": (
+                    "no bound target window in the current frame; "
+                    "observe the desktop first"
+                ),
+            }
+        try:
+            from ..perception.uia import collect as uia_collect
+
+            elements = uia_collect(int(hwnd))
+        except Exception as exc:
+            return {
+                "format": _WINDOW_TEXT_FORMAT,
+                "window_hwnd": int(hwnd),
+                "element_count": 0,
+                "text": "",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        lines: list[str] = []
+        for element in elements:
+            text = str(getattr(element, "text", "") or "").strip()
+            if text and text not in lines:
+                lines.append(text)
+        joined = "\n".join(lines)
+        return {
+            "format": _WINDOW_TEXT_FORMAT,
+            "window_hwnd": int(hwnd),
+            "element_count": len(lines),
+            "text": joined[:_WINDOW_TEXT_MAX_CHARS],
+        }
+
+    return read
+
+
 def _read_win32_foreground_root() -> int | None:
     try:
         import win32gui
@@ -1334,8 +1373,9 @@ def _tool_catalog() -> ToolCatalog:
                         "maxItems": 2,
                     },
                     "maxItems": 32,
+                    "default": [],
                 },
-                "keep_holding": {"type": "boolean"},
+                "keep_holding": {"type": "boolean", "default": False},
             },
             ["image_x1", "image_y1", "image_x2", "image_y2"],
         ),
@@ -1794,6 +1834,13 @@ class _LiveRuntimeState:
             desktop_shell = bool(
                 getattr(self._workspace, "desktop_shell", False)
             )
+            # A successor is always a real foreground window (the workspace
+            # probes exclude the old binding hwnd), so the desktop-shell
+            # crop label must not leak into the adopted window's first
+            # frame.  The workspace flag retires on ``adopt``; this keeps
+            # the capture that *finds* the successor screen-first too.
+            if replacement:
+                desktop_shell = False
             crop_enabled = bool(
                 CONFIG.get(
                     "controller",
@@ -2318,45 +2365,6 @@ class _RawReceiptTrace:
         )
 
 
-def _rebuild_runtime_evidence_anchor(
-    plane: RuntimeEvidencePlane,
-    journal: RuntimeEvidenceJournal,
-    *,
-    close_journal: Callable[[], None],
-) -> tuple[Any, dict[str, Any]]:
-    expected_head = journal.head
-    run_directory = journal.run_directory
-    close_journal()
-    report = RuntimeEvidencePlane.rebuild_report(
-        run_directory,
-        plane.mission_id,
-        plane.run_id,
-        expected_journal_head_sha256=expected_head,
-    )
-    anchor = {
-        "mission_id": plane.mission_id,
-        "run_id": plane.run_id,
-        "journal_head_sha256": report.journal_head_sha256,
-        "journal_event_count": report.journal_event_count,
-        "report_sha256": runtime_evidence_report_sha256(report),
-        "report_status": report.status.value,
-        "missing_evidence_count": len(report.missing_evidence),
-        "verification_failure_count": len(
-            report.verification_failures
-        ),
-    }
-    return report, anchor
-
-
-def _publish_runtime_evidence_anchor(anchor: Mapping[str, Any]) -> None:
-    BUS.publish(
-        "runtime_evidence_sealed",
-        runtime_version=_RUNTIME_VERSION,
-        no_legacy_fallback=True,
-        **dict(anchor),
-    )
-
-
 class _LiveAgentSession:
     def __init__(
         self,
@@ -2364,64 +2372,35 @@ class _LiveAgentSession:
         runtime: MissionRuntime,
         reducer: MissionReducer,
         registry: EvidenceRegistry,
-        permits: MutationPermitAuthority,
         authority: FrameAuthority,
         binding: TargetBinding,
         counter: _ModelCallCounter,
         client: Any,
         controller: AtomicDesktopAdapter | None = None,
-        runtime_evidence: RuntimeEvidencePlane | None = None,
-        frame_artifacts: FrameArtifactWriter | None = None,
-        evidence_journal: RuntimeEvidenceJournal | None = None,
     ) -> None:
-        evidence_resources = (
-            runtime_evidence,
-            frame_artifacts,
-            evidence_journal,
-        )
-        if any(item is not None for item in evidence_resources) and not all(
-            item is not None for item in evidence_resources
-        ):
-            raise ValueError(
-                "runtime evidence plane, artifact writer, and journal "
-                "must be injected together"
-            )
-        if runtime_evidence is not None:
-            if frame_artifacts is None or evidence_journal is None:
-                raise ValueError(
-                    "runtime evidence resources must be injected together"
-                )
-            if (
-                runtime_evidence.journal is not evidence_journal
-                or runtime_evidence.mission_id
-                != evidence_journal.mission_id
-                or runtime_evidence.run_id != evidence_journal.run_id
-                or frame_artifacts.run_directory
-                != evidence_journal.run_directory
-            ):
-                raise ValueError(
-                    "runtime evidence resources must share one run scope"
-                )
         self._runtime = runtime
         self._reducer = reducer
         self._registry = registry
-        self._permits = permits
         self._authority = authority
         self._binding = binding
         self._counter = counter
         self._client = client
         self._controller = controller
-        self._runtime_evidence = runtime_evidence
-        self._frame_artifacts = frame_artifacts
-        self._evidence_journal = evidence_journal
-        self._evidence_journal_close_attempted = False
-        self._runtime_evidence_anchor: dict[str, Any] | None = None
         self._closed = False
         self._lock = threading.Lock()
 
     @property
     def model_calls(self) -> int:
         return self._counter.count
+
+    @property
+    def latest_narration(self) -> str:
+        """The Actor's most recent progress note in its own words."""
+
+        try:
+            return str(self._runtime.latest_narration or "")
+        except Exception:
+            return ""
 
     def run_one_turn(
         self,
@@ -2517,32 +2496,6 @@ class _LiveAgentSession:
             ),
         }
 
-    @property
-    def runtime_evidence_anchor(self) -> Mapping[str, Any] | None:
-        if self._runtime_evidence_anchor is None:
-            return None
-        return deepcopy(self._runtime_evidence_anchor)
-
-    def _close_evidence_journal_once(self) -> None:
-        journal = self._evidence_journal
-        if journal is None or self._evidence_journal_close_attempted:
-            return
-        self._evidence_journal_close_attempted = True
-        journal.close()
-
-    def _seal_runtime_evidence(self) -> None:
-        plane = self._runtime_evidence
-        journal = self._evidence_journal
-        if plane is None or journal is None:
-            return
-        _report, anchor = _rebuild_runtime_evidence_anchor(
-            plane,
-            journal,
-            close_journal=self._close_evidence_journal_once,
-        )
-        self._runtime_evidence_anchor = anchor
-        _publish_runtime_evidence_anchor(anchor)
-
     def close(self) -> None:
         with self._lock:
             if self._closed:
@@ -2554,16 +2507,8 @@ class _LiveAgentSession:
                 self._controller.close()
             except Exception as exc:
                 errors.append(exc)
-        try:
-            self._seal_runtime_evidence()
-        except Exception:
-            try:
-                self._close_evidence_journal_once()
-            except Exception:
-                pass
         errors.extend(_close_resources(
             (
-                ("mutation permit authority", self._permits),
                 ("evidence registry", self._registry),
                 ("Visual Actor client", self._client),
             )
@@ -2728,6 +2673,7 @@ def _build_actor_resources(
                 role_kwargs["status_provider"] = status_provider
             if dependencies.shell_factory is not None:
                 role_kwargs["shell_runner"] = dependencies.shell_factory()
+            role_kwargs["window_text_reader"] = _window_text_reader_factory()
         actor = _BudgetedActor(role_factory(**role_kwargs), counter)
         return PreparedLiveActor(
             raw_client=raw_client,
@@ -2786,95 +2732,7 @@ def _target_evidence(
     return evidence, binding
 
 
-def _create_runtime_evidence(
-    build: _SessionBuild,
-) -> tuple[
-    RuntimeEvidencePlane,
-    FrameArtifactWriter,
-    RuntimeEvidenceJournal,
-]:
-    root = (
-        _RUNTIME_EVIDENCE_ROOT
-        if build.dependencies.runtime_evidence_root is None
-        else build.dependencies.runtime_evidence_root
-    )
-    if not isinstance(root, Path):
-        raise TypeError("runtime_evidence_root must be a pathlib.Path")
-    root = root.resolve(strict=False)
-    root.mkdir(parents=True, exist_ok=True)
-    journal = RuntimeEvidenceJournal.create(
-        root / build.run_id,
-        build.mission_id,
-        build.run_id,
-    )
-    try:
-        artifacts = FrameArtifactWriter.create(journal.run_directory)
-        plane = RuntimeEvidencePlane(
-            build.mission_id,
-            build.run_id,
-            journal=journal,
-        )
-    except Exception as exc:
-        cleanup_errors = _close_resources(
-            (("runtime evidence journal", journal),)
-        )
-        if cleanup_errors:
-            raise ExceptionGroup(
-                "vNext evidence resource setup and cleanup failed",
-                [exc, *cleanup_errors],
-            ) from exc
-        raise
-    return plane, artifacts, journal
-
-
-def _seal_created_runtime_evidence(
-    plane: RuntimeEvidencePlane,
-    journal: RuntimeEvidenceJournal,
-) -> dict[str, Any]:
-    close_attempted = False
-
-    def close_once() -> None:
-        nonlocal close_attempted
-        if close_attempted:
-            return
-        close_attempted = True
-        journal.close()
-
-    try:
-        _report, anchor = _rebuild_runtime_evidence_anchor(
-            plane,
-            journal,
-            close_journal=close_once,
-        )
-        _publish_runtime_evidence_anchor(anchor)
-        return anchor
-    except Exception as exc:
-        try:
-            close_once()
-        except Exception:
-            raise ExceptionGroup(
-                "vNext runtime evidence seal and cleanup failed",
-                [
-                    exc,
-                    RuntimeError(
-                        "runtime evidence journal close failed"
-                    ),
-                ],
-            ) from exc
-        raise
-
-
-def _seal_unstarted_runtime_evidence(
-    build: _SessionBuild,
-) -> dict[str, Any]:
-    plane, _frame_artifacts, journal = _create_runtime_evidence(build)
-    return _seal_created_runtime_evidence(plane, journal)
-
-
 def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
-    runtime_evidence, frame_artifacts, evidence_journal = (
-        _create_runtime_evidence(build)
-    )
     try:
         age_ms = (
             int(build.dependencies.wall_clock() * 1000)
@@ -2907,16 +2765,6 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             experience_policy="disabled",
         )
     except Exception as exc:
-        try:
-            _seal_created_runtime_evidence(
-                runtime_evidence,
-                evidence_journal,
-            )
-        except Exception as cleanup_exc:
-            raise ExceptionGroup(
-                "vNext evidence admission and cleanup failed",
-                [exc, cleanup_exc],
-            ) from exc
         raise
     registry: EvidenceRegistry | None = None
     try:
@@ -2964,25 +2812,16 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
         )
     except Exception as exc:
         cleanup_errors: list[Exception] = []
-        try:
-            _seal_created_runtime_evidence(
-                runtime_evidence,
-                evidence_journal,
-            )
-        except Exception as cleanup_exc:
-            cleanup_errors.append(cleanup_exc)
         cleanup_errors.extend(
             _close_resources((("evidence registry", registry),))
         )
         if cleanup_errors:
             raise ExceptionGroup(
-                "vNext evidence composition and cleanup failed",
+                "vNext composition and cleanup failed",
                 [exc, *cleanup_errors],
             ) from exc
         raise
-    permits: MutationPermitAuthority | None = None
     try:
-        permits = MutationPermitAuthority(build.mission_id, build.run_id)
         raw = RawDeviceExecutor(
             RawDeviceBackends(
                 admitted_physical_click=ADMITTED_PHYSICAL_CLICK_BACKEND,
@@ -2998,28 +2837,17 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             frozen_target_binding=binding,
             target_probe=workspace,
             desktop_workspace=workspace,
-            mutation_permits=permits,
             raw_device=raw,
             receipt_trace_sink=_RawReceiptTrace(),
-            runtime_evidence_plane=runtime_evidence,
-            frame_artifact_writer=frame_artifacts,
             launcher=_launch_application_primitive,
             desktop_shell=build.target.desktop_shell,
         )
         state.bind_pointer_state_reader(controller.pointer_state)
     except Exception as exc:
         cleanup_errors = []
-        try:
-            _seal_created_runtime_evidence(
-                runtime_evidence,
-                evidence_journal,
-            )
-        except Exception as cleanup_exc:
-            cleanup_errors.append(cleanup_exc)
         cleanup_errors.extend(
             _close_resources(
                 (
-                    ("mutation permit authority", permits),
                     ("evidence registry", registry),
                 )
             )
@@ -3050,36 +2878,22 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             state=state,
             controller=controller,
             evidence_registry=registry,
-            mutation_permits=permits,
-            runtime_evidence_plane=runtime_evidence,
         )
         return _LiveAgentSession(
             runtime=runtime,
             reducer=reducer,
             registry=registry,
-            permits=permits,
             authority=authority,
             binding=binding,
             counter=counter,
             client=actor_bundle,
             controller=controller,
-            runtime_evidence=runtime_evidence,
-            frame_artifacts=frame_artifacts,
-            evidence_journal=evidence_journal,
         )
     except Exception as exc:
         cleanup_errors = []
-        try:
-            _seal_created_runtime_evidence(
-                runtime_evidence,
-                evidence_journal,
-            )
-        except Exception as cleanup_exc:
-            cleanup_errors.append(cleanup_exc)
         cleanup_errors.extend(
             _close_resources(
                 (
-                    ("mutation permit authority", permits),
                     ("evidence registry", registry),
                     ("model resources", build.actor_bundle),
                 )
@@ -3582,44 +3396,16 @@ def _public_runtime_evidence_summary(
     mission_id: str,
     run_id: str,
 ) -> dict[str, Any]:
-    fallback = _unavailable_runtime_evidence_summary(
+    """Per-action durable evidence recording was removed (Model-first).
+
+    The run output keeps an explicit unavailable marker so downstream
+    consumers never mistake the absence of a journal for a complete one.
+    """
+    del value
+    return _unavailable_runtime_evidence_summary(
         mission_id,
         run_id,
     )
-    if not isinstance(value, Mapping):
-        return fallback
-    source = value.get("runtime_evidence")
-    if not isinstance(source, Mapping):
-        source = value
-    status = source.get("status", source.get("report_status"))
-    head = _public_sha256(source.get("journal_head_sha256"))
-    report_sha = _public_sha256(source.get("report_sha256"))
-    event_count = source.get("journal_event_count")
-    scope_matches = (
-        value.get("mission_id") == mission_id
-        and value.get("run_id") == run_id
-    )
-    if (
-        not scope_matches
-        or status not in _RUNTIME_EVIDENCE_REPORT_STATUSES
-        or type(event_count) is not int
-        or event_count < 0
-        or head is None
-        or report_sha is None
-    ):
-        return fallback
-    return {
-        "available": True,
-        "status": status,
-        "journal_head_sha256": head,
-        "journal_event_count": event_count,
-        "report_sha256": report_sha,
-        "audit_locator": _runtime_evidence_audit_locator(
-            mission_id,
-            run_id,
-        ),
-        "parameter_visibility": _PRIVATE_RUNTIME_EVIDENCE,
-    }
 
 
 def _validate_goal_admission(
@@ -3963,7 +3749,6 @@ class _PreparedHandler:
                 },
                 error=detail,
             )
-        runtime_evidence_anchor: Mapping[str, Any] | None = None
         runtime_evidence_summary = (
             _unavailable_runtime_evidence_summary(
                 mission_id,
@@ -3996,19 +3781,6 @@ class _PreparedHandler:
                 stop_event,
                 deadline,
             ):
-                if self._dependencies.session_builder is None:
-                    runtime_evidence_anchor = (
-                        _seal_unstarted_runtime_evidence(
-                            session_build
-                        )
-                    )
-                    runtime_evidence_summary = (
-                        _public_runtime_evidence_summary(
-                            runtime_evidence_anchor,
-                            mission_id=mission_id,
-                            run_id=run_id,
-                        )
-                    )
                 terminal_status = RuntimeStatus.CANCELED
                 detail = "run canceled before vNext session composition"
             else:
@@ -4142,6 +3914,9 @@ class _PreparedHandler:
                         runtime_status=result.status.value,
                         proposal_kind=result.proposal_kind,
                         decision_id=result.decision_id,
+                        narration=str(
+                            getattr(session, "latest_narration", "") or ""
+                        )[:4096],
                         accepted_event_ids=list(
                             result.accepted_event_ids
                         ),
@@ -4238,26 +4013,6 @@ class _PreparedHandler:
                             if detail
                             else cleanup_detail
                         )
-                try:
-                    runtime_evidence_anchor = getattr(
-                        session,
-                        "runtime_evidence_anchor",
-                        None,
-                    )
-                    runtime_evidence_summary = (
-                        _public_runtime_evidence_summary(
-                            runtime_evidence_anchor,
-                            mission_id=mission_id,
-                            run_id=run_id,
-                        )
-                    )
-                except Exception:
-                    runtime_evidence_summary = (
-                        _unavailable_runtime_evidence_summary(
-                            mission_id,
-                            run_id,
-                        )
-                    )
             try:
                 actor_bundle.close()
             except Exception:
@@ -4283,6 +4038,20 @@ class _PreparedHandler:
                     detail = (
                         "vNext verified completion result failed closed"
                     )
+            else:
+                # The task did not finish: the user must see the Actor's own
+                # words (what it did, what it found, what blocked it), not a
+                # rigid system string.  The latest narration is the model's
+                # real dialogue; the system detail stays in the trace.
+                narration = (
+                    str(getattr(session, "latest_narration", "") or "")
+                    if session is not None
+                    else ""
+                ).strip()
+                if narration:
+                    runtime_state["user_result"] = narration[:16_384]
+                    if not detail:
+                        detail = narration[:500]
             output = {
                 **snapshot,
                 "runtime_version": _RUNTIME_VERSION,

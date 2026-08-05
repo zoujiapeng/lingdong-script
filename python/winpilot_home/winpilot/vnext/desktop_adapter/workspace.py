@@ -349,6 +349,13 @@ class DesktopWorkspace:
             self._surface = observation.surface
             self._pending = None
             self._generation += 1
+            # A successor is always a real foreground window (causal successor
+            # and refresh probes both exclude the old binding hwnd).  The
+            # desktop-shell flag only describes the initial no-foreground
+            # Progman binding; once a real window is adopted it must retire,
+            # so later frames return to the screen-first full_desktop scope
+            # instead of keeping the labelled window crop.
+            self._desktop_shell = False
 
     def snapshot(self, hwnd: int) -> LiveTargetSnapshot | None:
         """Implement the atomic adapter's read-only target probe."""

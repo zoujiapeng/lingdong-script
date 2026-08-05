@@ -103,6 +103,57 @@ def _workspace(topology: _Topology) -> DesktopWorkspace:
     )
 
 
+def _shell_workspace(topology: _Topology) -> DesktopWorkspace:
+    return DesktopWorkspace(
+        binding=_binding(),
+        surface=topology.read(HWND_A),
+        reader=topology.read,
+        foreground_reader=lambda: topology.foreground,
+        hit_test_root=topology.hit_test,
+        wait=lambda _seconds: None,
+        desktop_shell=True,
+    )
+
+
+def test_desktop_shell_flag_retires_when_a_real_window_is_adopted() -> None:
+    topology = _Topology()
+    workspace = _shell_workspace(topology)
+    assert workspace.desktop_shell is True
+
+    topology.foreground = HWND_B
+    workspace.finish_action(
+        action_id="decision-1",
+        action="launch_application",
+        input_completed=True,
+    )
+    observation = workspace.observe()
+    assert observation.replaces_binding
+
+    replacement = _binding(
+        HWND_B,
+        PID_B,
+        "C:/b.exe",
+        binding_id="binding-b",
+        evidence_id="evidence-b",
+        epoch=11,
+    )
+    workspace.adopt(observation, replacement)
+
+    assert workspace.binding == replacement
+    assert workspace.desktop_shell is False
+
+
+def test_desktop_shell_flag_survives_refresh_without_adoption() -> None:
+    topology = _Topology()
+    workspace = _shell_workspace(topology)
+
+    workspace.request_target_refresh()
+
+    observation = workspace.observe()
+    assert not observation.replaces_binding
+    assert workspace.desktop_shell is True
+
+
 def test_unrelated_foreground_is_observed_but_never_adopted() -> None:
     topology = _Topology()
     workspace = _workspace(topology)

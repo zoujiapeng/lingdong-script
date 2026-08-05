@@ -1037,10 +1037,9 @@ def test_consecutive_calls_keep_only_the_latest_native_tool_exchange() -> None:
                     }
                 ]
             },
-            "only one tool call",
+            "exactly one tool call",
         ),
         (_tool_response(count=2), "exactly one tool call"),
-        (_tool_response(content="explanation"), "only one tool call"),
         (_tool_response(name="observe"), "unapproved tool"),
         (_tool_response(arguments="{bad json"), "not valid JSON"),
         (
@@ -1099,6 +1098,35 @@ def test_actor_fails_closed_on_noncanonical_model_output(
             image_media_type="image/jpeg",
             submitted_size=(640, 480),
         )
+
+
+def test_actor_preserves_narration_alongside_one_tool_call() -> None:
+    """The Actor may narrate progress in content while still acting."""
+    _, clients = _build_clients(
+        _tool_response(
+            name="click",
+            arguments={
+                "image_x": 400,
+                "image_y": 300,
+                "local_intent": "click the canvas once",
+            },
+            content="我找到了画板，现在在画布上落笔。",
+        )
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    assert decision.narration == "我找到了画板，现在在画布上落笔。"
+    assert decision.proposal["kind"] == "desktop_action"
+    assert decision.proposal["action"] == "click"
 
 
 def test_actor_permissions_are_the_exact_broker_projected_subset() -> None:
@@ -1180,8 +1208,10 @@ def test_actor_preserves_an_ordered_optional_runtime_drag_path() -> None:
     actor_schema = clients[0].requests[0]["tools"][0]["function"][
         "parameters"
     ]
-    assert "image_points" in actor_schema["required"]
-    assert "keep_holding" in actor_schema["required"]
+    assert "image_points" not in actor_schema["required"]
+    assert "keep_holding" not in actor_schema["required"]
+    assert actor_schema["properties"]["image_points"]["default"] == []
+    assert actor_schema["properties"]["keep_holding"]["default"] is False
     assert actor_schema["properties"]["image_points"]["maxItems"] == 32
     assert len(clients[0].requests) == 1
 

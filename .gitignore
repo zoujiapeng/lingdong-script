@@ -88,6 +88,9 @@ UserszouDesktop*/
 python/voice/models/
 python/voice/whisper_models/
 
+# Windows reserved device name — opencode snapshots git add everything; CON makes git fail
+CON
+
 # WinPilot runtime files (config.json may contain API keys — never commit)
 python/winpilot_home/config.json
 python/winpilot_home/traces/

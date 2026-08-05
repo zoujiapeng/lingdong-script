@@ -760,6 +760,7 @@ def run_paint_game_case(
     max_steps: int = 30,
     stable_frames: int = 3,
     sample_interval_s: float = 0.18,
+    capture: Callable[..., Image.Image] = ImageGrab.grab,
 ) -> dict[str, Any]:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     case_dir = output_root / f"{timestamp}-paint-tic-tac-toe"
@@ -772,6 +773,7 @@ def run_paint_game_case(
         oracle_dir,
         stable_frames=stable_frames,
         sample_interval_s=sample_interval_s,
+        capture=capture,
     )
     initial_focus = _focus_window(paint_hwnd)
     baseline = oracle.capture_baseline()

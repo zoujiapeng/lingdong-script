@@ -74,12 +74,15 @@ class ActorTurnDecision:
 
     proposal: Mapping[str, Any]
     task_state_update: ActorTaskStateUpdate
+    narration: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.proposal, Mapping):
             raise ActorTaskStateError("Actor proposal must be a mapping")
         if type(self.task_state_update) is not ActorTaskStateUpdate:
             raise ActorTaskStateError("Actor decision requires a typed update")
+        if type(self.narration) is not str:
+            raise ActorTaskStateError("Actor narration must be text")
         object.__setattr__(self, "proposal", MappingProxyType(dict(self.proposal)))
 
 

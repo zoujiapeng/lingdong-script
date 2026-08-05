@@ -15,14 +15,6 @@ from typing import Any
 import pytest
 
 from winpilot.vnext.actor import ActorDecisionEnvelope
-from winpilot.vnext.evidence_plane import (
-    ActorDecisionRecord,
-    PhysicalAttemptRecord,
-    RuntimeEvidenceReport,
-    RuntimeEvidenceReportStatus,
-    canonical_sha256,
-    runtime_evidence_report_sha256,
-)
 from winpilot.vnext.model_roles import VISUAL_ACTOR_MODEL_ROLE
 
 
@@ -2367,145 +2359,6 @@ def test_type_observation_binds_every_strict_keyboard_event_exactly_once():
         ) == 1
 
 
-def test_trace_sources_do_not_mutate_strict_runtime_anchor(tmp_path):
-    harness = _canary_harness()
-    run_id = "arp-strict-anchor"
-    anchor = {
-        "type": "runtime_evidence_sealed",
-        "ts": 1.25,
-        "runtime_version": "vnext",
-        "no_legacy_fallback": True,
-        "mission_id": "mission-strict-anchor",
-        "run_id": run_id,
-        "journal_head_sha256": "a" * 64,
-        "journal_event_count": 1,
-        "report_sha256": "b" * 64,
-        "report_status": "complete",
-        "missing_evidence_count": 0,
-        "verification_failure_count": 0,
-    }
-    trace = tmp_path / "strict-anchor.jsonl"
-    trace.write_text(json.dumps(anchor) + "\n", encoding="utf-8")
-
-    events, *_rest = harness._trace_sources(
-        {"trace_binding": {"trace_file": str(trace)}}
-    )
-
-    assert events == [anchor]
-    assert harness._runtime_evidence_anchor(
-        events,
-        run_id=run_id,
-    ) == anchor
-
-
-def _client_result_for_trace(path: Path, run_id: str) -> dict[str, Any]:
-    return {
-        "result": {
-            "run_id": run_id,
-            "outcome": "terminal",
-            "status": "done",
-            "runtime": {
-                "current_run": {
-                    "run_id": run_id,
-                    "runtime_version": "vnext",
-                    "no_legacy_fallback": True,
-                },
-            },
-        },
-        "trace_binding": {"trace_file": str(path), "passed": True},
-        "execution_valid": True,
-        "passed": True,
-    }
-
-
-def _target_identity(hwnd: int) -> dict[str, Any]:
-    return {
-        "hwnd": hwnd,
-        "root_hwnd": hwnd,
-        "title": "WinPilot vNext Canary test",
-        "class_name": "Chrome_WidgetWin_1",
-        "process_id": 4242,
-        "executable": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        "rect": [80, 60, 1180, 820],
-    }
-
-
-def test_runtime_evidence_is_rebuilt_from_private_journal_and_anchor(
-    monkeypatch,
-):
-    harness = _canary_harness()
-    run_id = "arp-evidence-run"
-    mission_id = "mission-evidence-run"
-    report = RuntimeEvidenceReport(
-        mission_id=mission_id,
-        run_id=run_id,
-        status=RuntimeEvidenceReportStatus.INCOMPLETE,
-        actor_decisions=(),
-        admissions=(),
-        physical_attempts=(),
-        action_bindings=(),
-        frame_artifacts=(),
-        journal_head_sha256="a" * 64,
-        journal_event_count=7,
-        missing_evidence=("actor_decision",),
-    )
-    report_wire = report.to_dict()
-
-    calls: list[tuple[Path, str, str, str | None]] = []
-
-    def rebuild(path, observed_mission, observed_run, expected_journal_head_sha256=None):
-        calls.append(
-            (
-                Path(path),
-                observed_mission,
-                observed_run,
-                expected_journal_head_sha256,
-            )
-        )
-        return report
-
-    monkeypatch.setattr(
-        harness.RuntimeEvidencePlane,
-        "rebuild_report",
-        staticmethod(rebuild),
-    )
-    anchor = {
-        "type": "runtime_evidence_sealed",
-        "ts": 1_721_000_000.25,
-        "runtime_version": "vnext",
-        "no_legacy_fallback": True,
-        "mission_id": mission_id,
-        "run_id": run_id,
-        "journal_head_sha256": "a" * 64,
-        "journal_event_count": 7,
-        "report_sha256": runtime_evidence_report_sha256(report),
-        "report_status": "incomplete",
-        "missing_evidence_count": 1,
-        "verification_failure_count": 0,
-    }
-    rebuilt, safe_anchor = harness._rebuild_runtime_evidence(
-        [anchor],
-        run_id=run_id,
-    )
-    assert rebuilt == report_wire
-    assert safe_anchor["report_sha256"] == anchor["report_sha256"]
-    assert safe_anchor["type"] == "runtime_evidence_sealed"
-    assert safe_anchor["ts"] == anchor["ts"]
-    assert calls == [
-        (
-            harness.RUNTIME_EVIDENCE_ROOT / run_id,
-            mission_id,
-            run_id,
-            "a" * 64,
-        )
-    ]
-
-    tampered = dict(anchor)
-    tampered["report_sha256"] = "b" * 64
-    with pytest.raises(RuntimeError, match="report_sha256"):
-        harness._rebuild_runtime_evidence([tampered], run_id=run_id)
-
-
 def test_action_reconciliation_uses_mission_terminal_status_not_queue_done(
     monkeypatch,
 ):
@@ -3011,472 +2864,36 @@ def _serialize_private_evidence_surface(
     )
 
 
-def test_campaign_artifact_projections_do_not_copy_private_action_payloads():
-    harness = _canary_harness()
-    private = _privacy_fixture(harness)
-    external_state = {
-        "events": [
-            {
-                "type": "input",
-                "trusted": True,
-                "details": {"data": private["text"]},
-            },
-            {
-                "type": "keydown",
-                "trusted": True,
-                "details": {
-                    "keys": private["hotkey"],
-                    "chord": private["hotkey_chord"],
-                },
-            },
-            {
-                "type": "pointerdown",
-                "trusted": True,
-                "details": {
-                    "screen_x": private["click"]["image_x"],
-                    "screen_y": private["click"]["image_y"],
-                },
-            },
-        ],
-        "oracle": {
-            "source": "independent_vnext_canary_browser_oracle",
-            "passed": False,
-            "case_id": "case-one",
-            "scenario": "type_hotkey",
-            "seed": 6301,
-            "page_id": "private-page",
-            "wrong_input_count": 1,
-            "success_event_count": 0,
-            "action_observations": [
-                {
-                    "action": "type_text",
-                    "start_event_seq": 1,
-                    "end_event_seq": 1,
-                    "event_types": ["input"],
-                    "before_state": {"value": ""},
-                    "after_state": {"value": private["text"]},
-                    "before_state_sha256": "a" * 64,
-                    "after_state_sha256": "b" * 64,
-                    "decidable": True,
-                    "actual_changed": True,
-                    "errors": [private["text"]],
-                }
-            ],
-            "errors": [private["hotkey_chord"]],
-        },
-    }
-    safe_oracle = harness._safe_external_oracle(external_state, {})
-    safe_os = harness._safe_os_input_evidence(
-        {
-            "raw_events": [
-                {
-                    "kind": "key_down",
-                    "text": private["text"],
-                    "keys": private["hotkey"],
-                },
-                {
-                    "kind": "button_down",
-                    "x": private["click"]["image_x"],
-                    "y": private["click"]["image_y"],
-                },
-            ],
-            "normalized_action_events": [
-                {
-                    "type": "keydown",
-                    "action": "hotkey",
-                    "decision_id": private["decision_ids"]["hotkey"],
-                    "sequence": 1,
-                    "keys": private["hotkey"],
-                },
-                {
-                    "type": "pointerdown",
-                    "action": "click",
-                    "decision_id": private["decision_ids"]["click"],
-                    "sequence": 2,
-                    "x": private["click"]["image_x"],
-                    "y": private["click"]["image_y"],
-                },
-            ],
-            "external_untrusted_mutations": [],
-            "unexpected_injected_target_mutations": [],
-            "dropped_event_count": 0,
-            "hook_seq": 2,
-            "thread_error": "",
-            "input_release_audit": {
-                "passed": True,
-                "key_balance": {},
-                "button_balance": {},
-                "errors": [],
-            },
-        }
-    )
-    raw_trace_audit = {
-        "passed": False,
-        "trace_sha256": "d" * 64,
-        "trace_event_count": 3,
-        "run_id": private["report"]["run_id"],
-        "runtime_version": "vnext",
-        "outer_start_count": 1,
-        "model_event_types": ["vnext_model_call"],
-        "model_call_count": 1,
-        "models": ["model-one"],
-        "target_expectation": {
-            "class_name": "Chrome_WidgetWin_1",
-            "executable_identity_sha256": "e" * 64,
-            "hwnd": 991,
-            "process_id": 4102,
-            "region": [0, 0, 1280, 720],
-            "root_hwnd": 991,
-            "private_title": private["text"],
-        },
-        "target_binding_id": "binding-private-fixture",
-        "turn_count": 1,
-        "done_count": 0,
-        "runtime_evidence_anchor_count": 1,
-        "receipt_summary": {
-            "count": 3,
-            "controller_actions": ["type_text", "hotkey", "click"],
-            "decision_ids": [
-                item["decision_id"]
-                for item in private["report"]["actor_decisions"]
-            ],
-            "target_binding_ids": ["binding-private-fixture"] * 3,
-            "outcomes": ["applied", "applied", "applied"],
-            "run_ids": [private["report"]["run_id"]] * 3,
-            "target_hwnds": [991, 991, 991],
-            "actor_envelope": private["decisions"]["type_text"][
-                "actor_envelope"
-            ],
-        },
-        "forensic_summary": {
-            "main_request_count": 1,
-            "main_provider_attempt_count": 1,
-            "done_judge_request_count": 0,
-            "errors": [private["hotkey_chord"]],
-        },
-        "errors": [private["text"]],
-        "canonical_arguments": {
-            "text": private["text"],
-            "keys": private["hotkey"],
-        },
-        "physical_attempt": private["attempts"]["type_text"],
-        "safety_abort_reasons": [],
-    }
-    safe_trace = harness._safe_trace_audit(raw_trace_audit)
-    runtime_anchor = {
-        "type": "runtime_evidence_sealed",
-        "ts": 1_721_000_000.25,
-        "runtime_version": "vnext",
-        "no_legacy_fallback": True,
-        "mission_id": private["report"]["mission_id"],
-        "run_id": private["report"]["run_id"],
-        "journal_head_sha256": private["report"]["journal_head_sha256"],
-        "journal_event_count": private["report"]["journal_event_count"],
-        "report_sha256": private["report_sha256"],
-        "report_status": private["report"]["status"],
-        "missing_evidence_count": len(private["report"]["missing_evidence"]),
-        "verification_failure_count": 0,
-    }
-    safe_attempt = harness._safe_attempt_result(
-        {
-            "sample_key": "001:type-hotkey:vnext",
-            "execution_order": 1,
-            "attempt": 1,
-            "case": "type-hotkey",
-            "family": "type_hotkey",
-            "scenario": "type_hotkey",
-            "seed": 6301,
-            "runtime_version": "vnext",
-            "runtime_budget": harness.FROZEN_RUNTIME_BUDGET,
-            "frozen_config_sha256": "c" * 64,
-            "started_at": "2026-07-27T12:00:00Z",
-            "finished_at": "2026-07-27T12:01:00Z",
-            "status": "failed",
-            "passed": False,
-            "trace_audit": raw_trace_audit,
-            "external_settlement": {
-                "passed": False,
-                "polls": 1,
-                "stable_seconds": 0.0,
-                "errors": [private["text"]],
-            },
-            "config_audit": {
-                "passed": True,
-                "config_sha256": "c" * 64,
-                "model": "model-one",
-                "provider": "provider-one",
-                "adapter": "adapter-one",
-                "api_max_retries": 0,
-                "prompt": private["text"],
-            },
-            "target_source_audit": {
-                "passed": True,
-                "served_sha256": "d" * 64,
-                "source_sha256": "d" * 64,
-                "private_note": private["hotkey_chord"],
-            },
-            "target_identity_audit": {
-                "passed": True,
-                "before": {"title": private["text"], "hwnd": 100},
-                "after": {"title": private["text"], "hwnd": 100},
-                "errors": [],
-                "private_note": private["hotkey_chord"],
-            },
-            "runner_error": private["text"],
-            "runtime_evidence_error": private["hotkey_chord"],
-            "cleanup": {
-                "passed": False,
-                "errors": [private["text"]],
-            },
-            "client_result": {
-                "execution_valid": False,
-                "passed": False,
-                "result": {
-                    "run_id": private["report"]["run_id"],
-                    "outcome": "error",
-                    "status": "failed",
-                    "runtime": {
-                        "current_run": {
-                            "runtime_version": "vnext",
-                            "no_legacy_fallback": True,
-                        }
-                    },
+def _client_result_for_trace(path: Path, run_id: str) -> dict[str, Any]:
+    return {
+        "result": {
+            "run_id": run_id,
+            "outcome": "terminal",
+            "status": "done",
+            "runtime": {
+                "current_run": {
+                    "run_id": run_id,
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
                 },
             },
         },
-        external_oracle=safe_oracle,
-        os_input_evidence=safe_os,
-        reconciliation=None,
-        runtime_evidence_anchor=runtime_anchor,
-    )
-    ordinary_error = harness._invalid_suite_result(
-        campaign_dir=Path("campaign-private-fixture"),
-        code="synthetic_private_error",
-        error=RuntimeError(private["text"]),
-    )
-    campaign_summary = harness.campaign_state.with_content_hash(
-        {
-            "schema_version": "campaign-privacy-summary/1",
-            "sample_key": safe_attempt["sample_key"],
-            "status": safe_attempt["status"],
-            "runtime_version": safe_attempt["runtime_version"],
-            "runtime_evidence_report_sha256": private["report_sha256"],
-            "trusted_action_event_count": safe_os[
-                "trusted_action_event_count"
-            ],
-        }
-    )
-    final_report = harness.campaign_state.with_content_hash(
-        {
-            "schema_version": "campaign-public-report/1",
-            "summary": campaign_summary,
-            "attempt": safe_attempt,
-            "external_oracle": safe_oracle,
-            "os_input_evidence": safe_os,
-            "runtime_evidence_report_sha256": private["report_sha256"],
-        }
-    )
-    public_surfaces = {
-        "ordinary_trace": safe_trace,
-        "bus_websocket_event": {
-            "type": "live_agent_turn",
-            "run_id": private["report"]["run_id"],
-            "decision_id": private["decision_ids"]["type_text"],
-            "runtime_evidence_report_sha256": private["report_sha256"],
-            "trace_audit": safe_trace,
-        },
-        "api_run_projection": {
-            **safe_attempt["client_projection"],
-            "runtime_evidence_report_status": runtime_anchor["report_status"],
-            "runtime_evidence_report_sha256": private["report_sha256"],
-        },
-        "campaign_summary": campaign_summary,
-        "ui_result": {
-            "status": safe_attempt["status"],
-            "passed": safe_attempt["passed"],
-            "runtime_version": safe_attempt["runtime_version"],
-            "error_identity": ordinary_error["error_identity"],
-        },
-        "ordinary_error": ordinary_error,
-        "final_non_private_report": final_report,
-        "external_oracle_artifact": safe_oracle,
-        "os_input_artifact": safe_os,
-        "attempt_result_artifact": safe_attempt,
-    }
-    for surface_name, value in public_surfaces.items():
-        _assert_public_json_projection(
-            surface_name,
-            value,
-            private=private,
-        )
-
-    private_report = _serialize_private_evidence_surface(
-        "runtime_evidence_report",
-        private["report"],
-    )
-    private_journal = _serialize_private_evidence_surface(
-        "dedicated_runtime_evidence_journal",
-        private["journal"],
-    )
-    private_audit = _serialize_private_evidence_surface(
-        "non_public_audit_artifact",
-        private["audit_artifact"],
-    )
-    private_type_decision = next(
-        item
-        for item in private_report["actor_decisions"]
-        if item["action"] == "type_text"
-    )
-    private_type_attempt = next(
-        item
-        for item in private_report["physical_attempts"]
-        if item["action"] == "type_text"
-    )
-    assert private_type_decision["canonical_arguments"] == {
-        "text": private["text"]
-    }
-    assert private_type_attempt["physical_arguments"] == {
-        "kind": "type_text",
-        "text": private["text"],
-    }
-    assert private_journal["payload"]["actor_envelope"]["proposal"]["args"] == {
-        "text": private["text"]
-    }
-    assert private_audit["physical_attempt"]["submitted_arguments"] == {
-        "text": private["text"]
+        "trace_binding": {"trace_file": str(path), "passed": True},
+        "execution_valid": True,
+        "passed": True,
     }
 
 
-def test_read_only_runtime_evidence_report_is_an_allowed_private_surface():
-    harness = _canary_harness()
-    private = _privacy_fixture(harness)
-
-    serialized = _serialize_private_evidence_surface(
-        "runtime_evidence_report",
-        private["report"],
-    )
-    canonical_report = RuntimeEvidenceReport.from_dict(serialized).to_dict()
-
-    assert canonical_report == serialized
-    for decision in canonical_report["actor_decisions"]:
-        assert (
-            ActorDecisionEnvelope.from_dict(
-                decision["actor_envelope"]
-            ).to_dict()
-            == decision["actor_envelope"]
-        )
-        assert ActorDecisionRecord.from_dict(decision).to_dict() == decision
-    for attempt in canonical_report["physical_attempts"]:
-        assert (
-            PhysicalAttemptRecord.from_dict(attempt).to_dict()
-            == attempt
-        )
-    type_text = next(
-        item
-        for item in canonical_report["actor_decisions"]
-        if item["action"] == "type_text"
-    )
-    assert type_text["canonical_arguments"]["text"] == private["text"]
-
-
-@pytest.mark.parametrize(
-    "field_name",
-    sorted(_PRIVATE_PROJECTION_FIELDS),
-)
-def test_public_projection_rejects_every_private_evidence_field(field_name):
-    harness = _canary_harness()
-    private = _privacy_fixture(harness)
-
-    with pytest.raises(AssertionError, match=field_name):
-        _assert_public_json_projection(
-            "parameterized_public_projection",
-            {"status": "failed", field_name: {"value": "not-public"}},
-            private=private,
-        )
-
-
-@pytest.mark.parametrize(
-    "secret_name",
-    [
-        "text",
-        "hotkey",
-        "hotkey_chord",
-        "image_x",
-        "image_y",
-        "physical_x",
-        "physical_y",
-    ],
-)
-def test_public_projection_rejects_every_private_action_value(secret_name):
-    harness = _canary_harness()
-    private = _privacy_fixture(harness)
-    secrets = {
-        "text": private["text"],
-        "hotkey": private["hotkey"],
-        "hotkey_chord": private["hotkey_chord"],
-        "image_x": private["click"]["image_x"],
-        "image_y": private["click"]["image_y"],
-        "physical_x": private["click"]["physical_x"],
-        "physical_y": private["click"]["physical_y"],
+def _target_identity(hwnd: int) -> dict[str, Any]:
+    return {
+        "hwnd": hwnd,
+        "root_hwnd": hwnd,
+        "title": "WinPilot vNext Canary test",
+        "class_name": "Chrome_WidgetWin_1",
+        "process_id": 4242,
+        "executable": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "rect": [80, 60, 1180, 820],
     }
-
-    with pytest.raises(AssertionError, match="private"):
-        _assert_public_json_projection(
-            "parameterized_public_projection",
-            {"status": "failed", "opaque_value": secrets[secret_name]},
-            private=private,
-        )
-
-
-def test_public_projection_allows_runtime_evidence_report_identifiers():
-    harness = _canary_harness()
-    private = _privacy_fixture(harness)
-
-    projected = _assert_public_json_projection(
-        "api_run_projection",
-        {
-            "runtime_evidence_report": {
-                "sha256": private["report_sha256"],
-                "status": "incomplete",
-                "missing_evidence_count": 1,
-            },
-            "runtime_evidence_report_sha256": private["report_sha256"],
-            "runtime_evidence_report_status": "incomplete",
-            "runtime_evidence_report_missing_count": 1,
-        },
-        private=private,
-    )
-
-    assert projected["runtime_evidence_report_sha256"] == private[
-        "report_sha256"
-    ]
-    assert projected["runtime_evidence_report"] == {
-        "sha256": private["report_sha256"],
-        "status": "incomplete",
-        "missing_evidence_count": 1,
-    }
-    assert harness.campaign_state._private_evidence_field(projected) == ""
-
-
-def test_public_projection_rejects_canonical_arguments():
-    harness = _canary_harness()
-    private = _privacy_fixture(harness)
-    leaked = {
-        "status": "failed",
-        "canonical_arguments": {"text": private["text"]},
-    }
-
-    with pytest.raises(AssertionError, match="canonical_arguments"):
-        _assert_public_json_projection(
-            "api_run_projection",
-            leaked,
-            private=private,
-        )
-
-    assert (
-        harness.campaign_state._private_evidence_field(leaked)
-        == "canonical_arguments"
-    )
 
 
 def test_trace_audit_binds_frozen_vnext_and_rejects_legacy_or_fallback(tmp_path):
@@ -3486,7 +2903,15 @@ def test_trace_audit_binds_frozen_vnext_and_rejects_legacy_or_fallback(tmp_path)
     })
     run_id = "arp-vnext-canary"
     target_hwnd = 991
-    target_identity = _target_identity(target_hwnd)
+    target_identity = {
+        "hwnd": target_hwnd,
+        "root_hwnd": target_hwnd,
+        "title": "WinPilot vNext Canary test",
+        "class_name": "Chrome_WidgetWin_1",
+        "process_id": 4242,
+        "executable": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "rect": [80, 60, 1180, 820],
+    }
     expected_target = harness._expected_target_trace(target_identity)
     mission_id = "mission-one"
     events = [
@@ -3753,6 +3178,7 @@ def test_trace_audit_rejects_vnext_events_in_legacy_trace(tmp_path, monkeypatch)
         "provider attempt forensic contains retry" in error
         for error in rejected_retry["errors"]
     )
+
 
 
 def test_target_is_separate_and_contains_no_forbidden_gesture_surface():

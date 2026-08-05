@@ -51,13 +51,6 @@ from winpilot.vnext.capabilities import (
     ToolArgumentValidator,
 )
 from winpilot.vnext.evidence import EvidenceRegistry
-from winpilot.vnext.evidence_plane import (
-    FrameArtifactWriter,
-    RuntimeEvidenceJournal,
-    RuntimeEvidenceJournalError,
-    RuntimeEvidencePlane,
-    canonical_sha256,
-)
 from winpilot.vnext.mission import (
     EvidenceRef,
     MissionDefinition,
@@ -70,7 +63,6 @@ from winpilot.vnext.mission import (
 from winpilot.vnext.mission import contracts as mission_contracts
 from winpilot.vnext.runtime import (
     MissionRuntimeResult,
-    MutationPermitAuthority,
     RuntimeStatus,
 )
 from winpilot.vnext.runtime import (
@@ -517,7 +509,6 @@ def _dependencies(
     session: _FakeSession | None = None,
     reader: Any = None,
     client_factory: Any = None,
-    evidence_root: Path | None = None,
 ) -> live_agent._CompositionDependencies:
     def build(build_spec: Any) -> _FakeSession | None:
         if session is None:
@@ -541,7 +532,6 @@ def _dependencies(
         session_builder=(
             build if session is not None else None
         ),
-        runtime_evidence_root=evidence_root,
     )
 
 
@@ -839,7 +829,6 @@ def test_direct_reply_is_terminal_without_desktop_session_or_evidence(
         ),
         client_factory=client_factory,
         session_builder=forbidden_session,
-        runtime_evidence_root=tmp_path,
     )
     history = (
         {"role": "user", "content": "Remember the token amber."},
@@ -1043,7 +1032,6 @@ def test_vnext_usage_and_cache_tokens_reach_runtime_and_terminal_event(
         run_manager=manager,
         _dependencies=_dependencies(
             client_factory=lambda **_kwargs: client,
-            evidence_root=tmp_path,
         ),
     )
     events: list[dict[str, Any]] = []
@@ -1112,7 +1100,6 @@ def test_cancel_before_initial_actor_turn_closes_model_without_desktop_io(
         run_manager=ArpRunManager(),
         _dependencies=_dependencies(
             client_factory=client_factory,
-            evidence_root=tmp_path,
         ),
     )
     run_id = "arp-test-pre-composition-cancel"
@@ -1402,7 +1389,10 @@ def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> No
     assert drag["properties"]["image_points"]["maxItems"] == 32
     assert drag["properties"]["image_points"]["items"]["minItems"] == 2
     assert drag["properties"]["image_points"]["items"]["maxItems"] == 2
-    assert drag["properties"]["keep_holding"] == {"type": "boolean"}
+    assert tuple(drag["properties"]["image_points"]["default"]) == ()
+    assert drag["properties"]["keep_holding"] == {
+        "type": "boolean", "default": False,
+    }
     validator = ToolArgumentValidator(catalog)
     straight = {
         "image_x1": 10,
@@ -2060,225 +2050,6 @@ def test_model_transport_payload_is_absent_from_bus_and_node_result() -> None:
     assert done[0]["detail"] == "model transport failed after 1 attempt(s):"
 
 
-def test_public_result_source_projects_only_safe_runtime_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from winpilot.orchestrator.projection import RunProjectionStore
-    from winpilot.recorder import trace
-
-    user_result = (
-        "Photography group: planning a weekend photo walk.\n"
-        "Running group: confirming Saturday's meeting time."
-    )
-
-    class PrivateSnapshotSession(_FakeSession):
-        def _private_report(self) -> dict[str, Any]:
-            actor_envelope = {
-                "decision_id": "decision-private",
-                "mission_id": self.mission_id,
-                "run_id": self.run_id,
-                "proposal": {
-                    "kind": "desktop_action",
-                    "action": "type_text",
-                    "args": {"text": PRIVATE_TEXT},
-                },
-            }
-            physical_attempt = {
-                "decision_id": "decision-private",
-                "action_id": "decision-private",
-                "action": "scroll",
-                "submitted_arguments": {
-                    "image_x": PRIVATE_X,
-                    "image_y": PRIVATE_Y,
-                    "amount": PRIVATE_AMOUNT,
-                },
-                "physical_arguments": {
-                    "kind": "scroll",
-                    "x": PRIVATE_X,
-                    "y": PRIVATE_Y,
-                    "amount": PRIVATE_AMOUNT,
-                },
-            }
-            return {
-                "format": "runtime-evidence-report/1",
-                "mission_id": self.mission_id,
-                "run_id": self.run_id,
-                "status": "complete",
-                "actor_decisions": [
-                    {
-                        "decision_id": "decision-private",
-                        "canonical_arguments": {
-                            "text": PRIVATE_TEXT,
-                            "keys": PRIVATE_CHORD.split("+"),
-                        },
-                        "actor_envelope": actor_envelope,
-                    }
-                ],
-                "admissions": [],
-                "physical_attempts": [physical_attempt],
-                "action_bindings": [],
-                "frame_artifacts": [],
-                "journal_head_sha256": "a" * 64,
-                "journal_event_count": 9,
-                "missing_evidence": [],
-                "verification_failures": [],
-            }
-
-        def turn_snapshot(self) -> dict[str, Any]:
-            return {
-                "mission_revision": 7,
-                "mission_status": "verified",
-                "target_binding_id": self.target_binding_id,
-                "target_hwnd": HWND,
-                "frame_id": 9,
-                "frame_epoch": self.frame_epoch,
-                "frame_evidence_refs": ["e-visual"],
-                "action_effect": None,
-                "runtime_evidence_report": self._private_report(),
-                "canonical_arguments": {"text": PRIVATE_TEXT},
-                "physical_arguments": {
-                    "x": PRIVATE_X,
-                    "y": PRIVATE_Y,
-                    "amount": PRIVATE_AMOUNT,
-                },
-                "hotkey_chord": PRIVATE_CHORD,
-            }
-
-        def completion_snapshot(self) -> dict[str, Any]:
-            snapshot = super().completion_snapshot()
-            snapshot.update(
-                {
-                    "result": user_result,
-                    "runtime_evidence_report": self._private_report(),
-                    "actor_envelope": self._private_report()[
-                        "actor_decisions"
-                    ][0]["actor_envelope"],
-                    "canonical_arguments": {"text": PRIVATE_TEXT},
-                    "physical_arguments": {
-                        "x": PRIVATE_X,
-                        "y": PRIVATE_Y,
-                        "amount": PRIVATE_AMOUNT,
-                        "hotkey_chord": PRIVATE_CHORD,
-                    },
-                    "physical_attempt": self._private_report()[
-                        "physical_attempts"
-                    ][0],
-                }
-            )
-            return snapshot
-
-        @property
-        def runtime_evidence_anchor(self) -> dict[str, Any] | None:
-            if not self.closed:
-                return None
-            return {
-                "mission_id": self.mission_id,
-                "run_id": self.run_id,
-                "journal_head_sha256": "a" * 64,
-                "journal_event_count": 9,
-                "report_sha256": "b" * 64,
-                "report_status": "complete",
-                "missing_evidence_count": 0,
-                "verification_failure_count": 0,
-            }
-
-    session = PrivateSnapshotSession(
-        [
-            MissionRuntimeResult(
-                RuntimeStatus.MISSION_VERIFIED,
-                accepted_event_ids=("event-verified",),
-            )
-        ]
-    )
-    manager = ArpRunManager()
-    execution = _prepare(
-        _graph(),
-        {},
-        _config(),
-        run_manager=manager,
-        _dependencies=_dependencies(session=session),
-    )
-    trace_root = tmp_path / "public-traces"
-    monkeypatch.setattr(trace, "TRACES_DIR", trace_root)
-    recorder = trace.TraceRecorder()
-    projection = RunProjectionStore()
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        recorder.start(execution.run_id)
-        snapshot = _run_prepared(manager, execution)
-        recorder.stop()
-    finally:
-        recorder.stop()
-        BUS.remove_sink(events.append)
-        BUS.remove_sink(projection.on_event)
-        BUS.remove_sink(recorder._on_event)
-
-    records = [
-        json.loads(line)
-        for line in (
-            trace_root / f"{execution.run_id}.jsonl"
-        ).read_text(encoding="utf-8").splitlines()
-    ]
-    public_projection = projection.get(execution.run_id)
-    public_surfaces = {
-        "execution": snapshot,
-        "bus": events,
-        "trace": records,
-        "run_projection": public_projection,
-    }
-    for surface in public_surfaces.values():
-        _assert_private_runtime_evidence_absent(surface)
-
-    summary = snapshot["result"]["runtime_evidence"]
-    assert set(summary) == _PUBLIC_RUNTIME_EVIDENCE_FIELDS
-    assert summary == {
-        "available": True,
-        "status": "complete",
-        "journal_head_sha256": "a" * 64,
-        "journal_event_count": 9,
-        "report_sha256": "b" * 64,
-        "audit_locator": live_agent._runtime_evidence_audit_locator(
-            session.mission_id,
-            session.run_id,
-        ),
-        "parameter_visibility": "private_runtime_evidence",
-    }
-    assert "/" not in summary["audit_locator"]
-    assert "\\" not in summary["audit_locator"]
-    assert "evidence.jsonl" not in summary["audit_locator"]
-    done = [
-        event
-        for event in events
-        if event["type"] == "live_agent_done"
-    ]
-    assert len(done) == 1
-    assert done[0]["runtime_evidence"] == summary
-    arp_done = [
-        event
-        for event in events
-        if event["type"] == "arp_run_done"
-    ]
-    assert len(arp_done) == 1
-    assert arp_done[0]["user_result"] == user_result
-    assert public_projection["result"] == user_result
-    assert "result" not in snapshot["result"]
-    trace_wire = json.dumps(records, ensure_ascii=False)
-    assert user_result not in trace_wire
-    persisted_done = [
-        record
-        for record in records
-        if record["type"] == "arp_run_done"
-    ]
-    assert len(persisted_done) == 1
-    assert persisted_done[0]["user_result"] == {
-        "private_text_redacted": True,
-        "text_char_count": len(user_result),
-        "text_sha256": hashlib.sha256(
-            user_result.encode("utf-8")
-        ).hexdigest(),
-    }
 
 
 def test_raw_receipt_trace_projects_fixed_safe_summary(
@@ -2385,6 +2156,7 @@ def test_raw_receipt_trace_projects_fixed_safe_summary(
 def test_public_runtime_evidence_summary_requires_exact_explicit_scope(
     scope: dict[str, Any],
 ) -> None:
+    """Per-action durable evidence was removed; the summary stays unavailable."""
     anchor = {
         **scope,
         "journal_head_sha256": "a" * 64,
@@ -2813,7 +2585,6 @@ def _real_session_with_captures(
     *,
     images: list[str],
     client: _RawClient,
-    evidence_root: Path,
     clock: list[float] | None = None,
     deadline: float = 310.0,
     install_safe_backends: bool = True,
@@ -2897,7 +2668,6 @@ def _real_session_with_captures(
             else hit_test_root
         ),
         client_factory=factory,
-        runtime_evidence_root=evidence_root,
     )
     graph = _graph()
     budget = live_agent._freeze_budget(_config())
@@ -2947,7 +2717,6 @@ def test_fresh_observation_is_auditable_without_pixel_data(
             _jpeg(640, 480, level=180),
         ],
         client=_RawClient(_click_responses()),
-        evidence_root=tmp_path / "runtime-evidence",
     )
     trace_root = tmp_path / "public-traces"
     monkeypatch.setattr(trace, "TRACES_DIR", trace_root)
@@ -3080,7 +2849,6 @@ def test_completed_click_adopts_stable_cross_process_foreground_next_turn(
             _jpeg(640, 480, level=180),
         ],
         client=_RawClient(_click_responses()),
-        evidence_root=tmp_path / "runtime-evidence",
         target_reader=reader,
         on_click=lambda: foreground.__setitem__(0, next_hwnd),
     )
@@ -3166,7 +2934,6 @@ def test_screen_first_frame_shows_desktop_and_click_rebinds_visible_window(
             _jpeg(1120, 630, level=150),
         ],
         client=_RawClient(_click_responses()),
-        evidence_root=tmp_path / "runtime-evidence",
         target_reader=reader,
         hit_test_root=lambda _x, _y: next_hwnd,
         on_click=lambda: foreground.__setitem__(0, next_hwnd),
@@ -3271,7 +3038,6 @@ def test_real_composition_launches_a_generic_application_and_arms_successor(
             _jpeg(640, 480, level=120),
         ],
         client=_RawClient(_launch_responses()),
-        evidence_root=tmp_path / "runtime-evidence",
     )
     events: list[dict[str, Any]] = []
     BUS.add_sink(events.append)
@@ -3318,7 +3084,6 @@ def test_real_composition_launch_failure_is_recoverable_before_any_input(
             _jpeg(640, 480, level=100),
         ],
         client=_RawClient(_launch_responses()),
-        evidence_root=tmp_path / "runtime-evidence",
     )
     events: list[dict[str, Any]] = []
     BUS.add_sink(events.append)
@@ -3425,7 +3190,6 @@ def test_desktop_shell_launch_adopts_the_launched_window_next_observation(
         target_reader=shell_reader,
         hit_test_root=lambda _x, _y: shell_hwnd,
         client_factory=factory,
-        runtime_evidence_root=tmp_path / "runtime-evidence",
     )
     inputs = _inputs()
     target_window = inputs["execution_context"]["target_window"]
@@ -3486,6 +3250,15 @@ def test_desktop_shell_launch_adopts_the_launched_window_next_observation(
         assert replacement.hwnd == launched_hwnd
         assert observed.frame.hwnd == launched_hwnd
         assert observed.target.hwnd == launched_hwnd
+        # The desktop-shell flag must retire once a real window is adopted,
+        # so later frames return to the screen-first full-desktop scope
+        # instead of keeping the labelled window crop.
+        assert session._controller._is_desktop_shell is False
+        assert (
+            session._runtime._state._workspace.desktop_shell
+            is False
+        )
+        assert observed.frame.scope == "full_desktop"
     finally:
         if session is not None:
             session.close()
@@ -3598,7 +3371,6 @@ def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
             _jpeg(640, 480, level=180),
         ],
         client=_RawClient(_click_responses() * 2),
-        evidence_root=tmp_path / "runtime-evidence",
         target_reader=reader,
         hit_test_root=lambda _x, _y: foreground[0],
         on_click=after_click,
@@ -3680,75 +3452,6 @@ def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
     )
 
 
-def test_hit_test_race_is_durably_reobserved_before_one_real_input(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    hit_tests = 0
-
-    def hit_test_root(_x: int, _y: int) -> int:
-        nonlocal hit_tests
-        hit_tests += 1
-        return HWND + 1 if hit_tests == 1 else HWND
-
-    evidence_root = tmp_path / "runtime-evidence"
-    session, raw_calls, _factory_calls = _real_session_with_captures(
-        monkeypatch,
-        images=[
-            _jpeg(640, 480, level=100),
-            _jpeg(640, 480, level=120),
-            _jpeg(640, 480, level=180),
-        ],
-        client=_RawClient(_click_responses() * 2),
-        evidence_root=evidence_root,
-        hit_test_root=hit_test_root,
-    )
-    try:
-        first = session.run_one_turn(
-            turn_index=0,
-            stop_event=threading.Event(),
-        )
-        second = session.run_one_turn(
-            turn_index=1,
-            stop_event=threading.Event(),
-        )
-        bindings = session._runtime_evidence.action_bindings
-
-        assert first.status is RuntimeStatus.STALE_DISCARDED
-        assert second.status is RuntimeStatus.ACTION_RECORDED
-        assert raw_calls == ["click"]
-        assert len(bindings) == 2
-        rejected = next(
-            binding
-            for binding in bindings
-            if binding.raw_action_receipt["outcome"] == "not_started"
-        )
-        applied = next(
-            binding
-            for binding in bindings
-            if binding.raw_action_receipt["outcome"] == "applied"
-        )
-        assert rejected.physical_attempt_count == 0
-        assert (
-            rejected.raw_action_receipt["error_kind"]
-            == "hit_test_changed"
-        )
-        assert applied.physical_attempt_count == 1
-    finally:
-        session.close()
-
-    report = RuntimeEvidencePlane.rebuild_report(
-        evidence_root / "arp-test-live-frames",
-        "vnext-mission-test-live-frames",
-        "arp-test-live-frames",
-    )
-    assert len(report.action_bindings) == 2
-    assert not any(
-        item.endswith("_action_binding")
-        for item in report.missing_evidence
-    )
-
-
 def test_initial_capture_dimension_mismatch_stops_before_model_or_raw(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3758,7 +3461,6 @@ def test_initial_capture_dimension_mismatch_stops_before_model_or_raw(
         monkeypatch,
         images=[_jpeg(639, 480)],
         client=actor_client,
-        evidence_root=tmp_path,
     )
     try:
         result = session.run_one_turn(
@@ -3785,7 +3487,6 @@ def test_observation_retries_one_target_transition_during_capture(
             _jpeg(640, 480, level=120),
         ],
         client=_RawClient(_click_responses()),
-        evidence_root=tmp_path,
     )
     workspace = session._runtime._state._workspace
     original_snapshot = workspace.snapshot
@@ -3827,7 +3528,6 @@ def test_post_capture_failure_defers_to_fresh_observation_without_replay(
             _jpeg(639, 480),
         ],
         client=actor_client,
-        evidence_root=tmp_path,
     )
     try:
         first = session.run_one_turn(
@@ -3878,7 +3578,6 @@ def test_each_model_call_is_clamped_to_one_second_remaining_deadline(
         monkeypatch,
         images=[_jpeg(640, 480)],
         client=actor_client,
-        evidence_root=tmp_path,
         clock=clock,
         deadline=11.0,
     )
@@ -3899,566 +3598,14 @@ def test_each_model_call_is_clamped_to_one_second_remaining_deadline(
     assert clock[0] == pytest.approx(11.1)
 
 
-def test_completed_action_seals_one_authenticated_evidence_anchor(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    actor_client = _RawClient(_click_responses())
-    session, raw_calls, _factory_calls = _real_session_with_captures(
-        monkeypatch,
-        images=[
-            _jpeg(640, 480, level=120),
-            _jpeg(640, 480, level=180),
-        ],
-        client=actor_client,
-        evidence_root=tmp_path,
-    )
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        result = session.run_one_turn(
-            turn_index=0,
-            stop_event=threading.Event(),
-        )
-        session.close()
-    finally:
-        BUS.remove_sink(events.append)
-
-    assert result.status is RuntimeStatus.ACTION_RECORDED
-    assert raw_calls == ["click"]
-    sealed = [
-        event
-        for event in events
-        if event["type"] == "runtime_evidence_sealed"
-    ]
-    assert len(sealed) == 1
-    anchor = session.runtime_evidence_anchor
-    assert anchor is not None
-    assert anchor["journal_event_count"] == 7
-    assert anchor["report_status"] == "complete"
-    assert anchor["missing_evidence_count"] == 0
-    assert anchor["verification_failure_count"] == 0
-    assert set(sealed[0]) == {
-        "type",
-        "ts",
-        "runtime_version",
-        "no_legacy_fallback",
-        "mission_id",
-        "run_id",
-        "journal_head_sha256",
-        "journal_event_count",
-        "report_sha256",
-        "report_status",
-        "missing_evidence_count",
-        "verification_failure_count",
-    }
-    report = RuntimeEvidencePlane.rebuild_report(
-        tmp_path / "arp-test-live-frames",
-        "vnext-mission-test-live-frames",
-        "arp-test-live-frames",
-        expected_journal_head_sha256=anchor[
-            "journal_head_sha256"
-        ],
-    )
-    assert canonical_sha256(report.to_dict()) == anchor["report_sha256"]
-    assert len(report.actor_decisions) == 1
-    assert len(report.admissions) == 1
-    assert len(report.physical_attempts) == 1
-    assert len(report.action_bindings) == 1
-    assert len(report.frame_artifacts) == 2
-    assert (
-        report.action_bindings[0].decision_id
-        == report.physical_attempts[0].decision_id
-        == report.actor_decisions[0].decision_id
-    )
 
 
-def test_real_composition_scroll_keeps_public_summary_private_and_evidence_exact(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from winpilot.action import executor as action_executor
-
-    assert (
-        live_agent.ADMITTED_PHYSICAL_CLICK_BACKEND
-        is action_executor.ADMITTED_PHYSICAL_CLICK_BACKEND
-    )
-    assert (
-        live_agent.ADMITTED_PHYSICAL_SCROLL_BACKEND
-        is action_executor.ADMITTED_PHYSICAL_SCROLL_BACKEND
-    )
-    assert (
-        live_agent.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND
-        is action_executor.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND
-    )
-    assert (
-        live_agent.ADMITTED_PHYSICAL_HOTKEY_BACKEND
-        is action_executor.ADMITTED_PHYSICAL_HOTKEY_BACKEND
-    )
-
-    cursor = [(901, 407)]
-    moved: list[tuple[int, int]] = []
-    sent: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(action_executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(
-        action_executor,
-        "multi_input_cooperation_enabled",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        action_executor,
-        "_cursor_pos",
-        lambda: cursor[0],
-    )
-
-    def move_mouse(x: int, y: int) -> None:
-        cursor[0] = (x, y)
-        moved.append((x, y))
-
-    monkeypatch.setattr(action_executor, "_raw_move_mouse", move_mouse)
-    monkeypatch.setattr(
-        action_executor,
-        "_restore_cursor_after_agent_input",
-        lambda _saved, _expected, _hwnd: True,
-    )
-    monkeypatch.setattr(
-        action_executor,
-        "_mouse_input",
-        lambda flags, **kwargs: (
-            "mouse",
-            flags,
-            tuple(sorted(kwargs.items())),
-        ),
-    )
-    monkeypatch.setattr(
-        action_executor,
-        "_send_inputs",
-        lambda inputs: sent.append(tuple(inputs)),
-    )
-    monkeypatch.setattr(action_executor.time, "sleep", lambda _seconds: None)
-    for legacy_name in (
-        "execute_scroll_input",
-        "scroll",
-        "type_text",
-        "press_keys",
-    ):
-        monkeypatch.setattr(
-            action_executor,
-            legacy_name,
-            lambda *_args, _name=legacy_name, **_kwargs: (_ for _ in ()).throw(
-                AssertionError(f"legacy fallback called: {_name}")
-            ),
-        )
-
-    actor_client = _RawClient(_scroll_responses())
-    session, fake_raw_calls, _factory_calls = _real_session_with_captures(
-        monkeypatch,
-        images=[
-            _jpeg(640, 480, level=120),
-            _jpeg(640, 480, level=180),
-        ],
-        client=actor_client,
-        evidence_root=tmp_path,
-        install_safe_backends=False,
-    )
-    raw_device = session._runtime._controller._raw
-    backends = raw_device._backends
-    assert backends.scroll is None
-    assert backends.click is None
-    assert (
-        backends.admitted_physical_click
-        is action_executor.ADMITTED_PHYSICAL_CLICK_BACKEND
-    )
-    assert (
-        backends.admitted_physical_scroll
-        is action_executor.ADMITTED_PHYSICAL_SCROLL_BACKEND
-    )
-    assert (
-        backends.admitted_physical_type_text
-        is action_executor.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND
-    )
-    assert (
-        backends.admitted_physical_hotkey
-        is action_executor.ADMITTED_PHYSICAL_HOTKEY_BACKEND
-    )
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        result = session.run_one_turn(
-            turn_index=0,
-            stop_event=threading.Event(),
-        )
-        session.close()
-    finally:
-        BUS.remove_sink(events.append)
-
-    assert result.status is RuntimeStatus.ACTION_RECORDED
-    assert fake_raw_calls == []
-    assert moved == [(137, 229)]
-    assert len(sent) == 1
-    public_actions = [
-        event
-        for event in events
-        if event.get("type") == "action"
-    ]
-    assert len(public_actions) == 1
-    assert set(public_actions[0]) == {
-        "type",
-        "ts",
-        "action",
-        "input_completed",
-        "via",
-        "parameter_visibility",
-    }
-    assert public_actions[0] == {
-        "type": "action",
-        "ts": public_actions[0]["ts"],
-        "action": "scroll",
-        "input_completed": True,
-        "via": "physical_sendinput",
-        "parameter_visibility": "private_runtime_evidence",
-    }
-    assert not ({"x", "y", "amount"} & set(public_actions[0]))
-
-    anchor = session.runtime_evidence_anchor
-    assert anchor is not None
-    report = RuntimeEvidencePlane.rebuild_report(
-        tmp_path / "arp-test-live-frames",
-        "vnext-mission-test-live-frames",
-        "arp-test-live-frames",
-        expected_journal_head_sha256=anchor["journal_head_sha256"],
-    )
-    assert len(report.physical_attempts) == 1
-    attempt = report.physical_attempts[0].to_dict()
-    assert attempt["action"] == "scroll"
-    assert attempt["submitted_arguments"] == {
-        "image_x": 37,
-        "image_y": 29,
-        "amount": -713,
-    }
-    assert attempt["physical_arguments"] == {
-        "kind": "wheel",
-        "x": 137,
-        "y": 229,
-        "signed_wheel_amount": -713,
-        "event_wheel_delta": -85_560,
-    }
-    assert len(report.actor_decisions) == 1
-    assert len(report.admissions) == 1
-    assert len(report.action_bindings) == 1
-    assert len(report.frame_artifacts) == 2
-    binding = report.action_bindings[0]
-    assert binding.raw_action_receipt["input_completed"] is True
-    assert binding.physical_attempt_count == 1
-    assert (
-        binding.decision_id
-        == report.physical_attempts[0].decision_id
-        == report.admissions[0].decision_id
-        == report.actor_decisions[0].decision_id
-    )
 
 
-def _composition_build(
-    dependencies: live_agent._CompositionDependencies,
-    *,
-    run_id: str,
-    mission_id: str,
-) -> live_agent._SessionBuild:
-    graph = _graph()
-    budget = live_agent._freeze_budget(_config())
-    return live_agent._SessionBuild(
-        graph=graph,
-        goal=GOAL,
-        run_id=run_id,
-        mission_id=mission_id,
-        target=live_agent._freeze_prebound_target(
-            graph,
-            _inputs(),
-            dependencies=dependencies,
-        ),
-        budget=budget,
-        model=live_agent._freeze_model(_config(), budget),
-        dependencies=dependencies,
-        deadline=lambda: 310.0,
-        actor_bundle=_StubActorBundle(),
-        pause_controller=None,
-    )
 
 
-def _assert_single_incomplete_anchor(
-    events: list[dict[str, Any]],
-    root: Path,
-    build: live_agent._SessionBuild,
-) -> dict[str, Any]:
-    sealed = [
-        event
-        for event in events
-        if event["type"] == "runtime_evidence_sealed"
-    ]
-    assert len(sealed) == 1
-    anchor = sealed[0]
-    assert anchor["run_id"] == build.run_id
-    assert anchor["mission_id"] == build.mission_id
-    assert anchor["journal_event_count"] == 0
-    assert anchor["report_status"] == "incomplete"
-    report = RuntimeEvidencePlane.rebuild_report(
-        root / build.run_id,
-        build.mission_id,
-        build.run_id,
-        expected_journal_head_sha256=anchor[
-            "journal_head_sha256"
-        ],
-    )
-    assert canonical_sha256(report.to_dict()) == anchor["report_sha256"]
-    return anchor
 
 
-def test_evidence_setup_failure_precedes_models_and_raw_device(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    run_id = "arp-test-evidence-setup-failure"
-    (tmp_path / run_id).mkdir()
-    raw_constructions: list[bool] = []
-    client_calls: list[dict[str, Any]] = []
-    closed_registries: list[EvidenceRegistry] = []
-    original_registry_close = EvidenceRegistry.close
-
-    def tracked_registry_close(registry: EvidenceRegistry) -> None:
-        closed_registries.append(registry)
-        original_registry_close(registry)
-
-    def forbidden_raw(*_args: Any, **_kwargs: Any) -> Any:
-        raw_constructions.append(True)
-        raise AssertionError("RawDevice must not be constructed")
-
-    def client_factory(**kwargs: Any) -> _RawClient:
-        client_calls.append(kwargs)
-        return _RawClient()
-
-    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
-    monkeypatch.setattr(
-        EvidenceRegistry,
-        "close",
-        tracked_registry_close,
-    )
-    deps = _dependencies(
-        client_factory=client_factory,
-        evidence_root=tmp_path,
-    )
-    graph = _graph()
-    budget = live_agent._freeze_budget(_config())
-    build = live_agent._SessionBuild(
-        graph=graph,
-        goal=GOAL,
-        run_id=run_id,
-        mission_id="vnext-mission-evidence-setup-failure",
-        target=live_agent._freeze_prebound_target(
-            graph,
-            _inputs(),
-            dependencies=deps,
-        ),
-        budget=budget,
-        model=live_agent._freeze_model(_config(), budget),
-        dependencies=deps,
-        deadline=lambda: 310.0,
-        actor_bundle=_StubActorBundle(),
-        pause_controller=None,
-    )
-
-    with pytest.raises(
-        RuntimeEvidenceJournalError,
-        match="exclusively created",
-    ):
-        live_agent._build_live_session(build)
-
-    assert raw_constructions == []
-    assert client_calls == []
-    assert closed_registries == []
-
-
-def test_registry_setup_failure_seals_unique_incomplete_evidence_once(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    run_id = "arp-test-registry-setup-failure"
-    mission_id = "vnext-mission-registry-setup-failure"
-    raw_constructions: list[bool] = []
-    client_calls: list[dict[str, Any]] = []
-    journal_closes: list[RuntimeEvidenceJournal] = []
-    original_journal_close = RuntimeEvidenceJournal.close
-
-    def failed_registry(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("synthetic registry setup failure")
-
-    def tracked_journal_close(journal: RuntimeEvidenceJournal) -> None:
-        journal_closes.append(journal)
-        original_journal_close(journal)
-
-    def forbidden_raw(*_args: Any, **_kwargs: Any) -> Any:
-        raw_constructions.append(True)
-        raise AssertionError("RawDevice must not be constructed")
-
-    def client_factory(**kwargs: Any) -> _RawClient:
-        client_calls.append(kwargs)
-        return _RawClient()
-
-    monkeypatch.setattr(live_agent, "EvidenceRegistry", failed_registry)
-    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
-    monkeypatch.setattr(
-        RuntimeEvidenceJournal,
-        "close",
-        tracked_journal_close,
-    )
-    deps = _dependencies(
-        client_factory=client_factory,
-        evidence_root=tmp_path,
-    )
-    graph = _graph()
-    budget = live_agent._freeze_budget(_config())
-    build = live_agent._SessionBuild(
-        graph=graph,
-        goal=GOAL,
-        run_id=run_id,
-        mission_id=mission_id,
-        target=live_agent._freeze_prebound_target(
-            graph,
-            _inputs(),
-            dependencies=deps,
-        ),
-        budget=budget,
-        model=live_agent._freeze_model(_config(), budget),
-        dependencies=deps,
-        deadline=lambda: 310.0,
-        actor_bundle=_StubActorBundle(),
-        pause_controller=None,
-    )
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        with pytest.raises(
-            RuntimeError,
-            match="synthetic registry setup failure",
-        ):
-            live_agent._build_live_session(build)
-    finally:
-        BUS.remove_sink(events.append)
-
-    assert len(journal_closes) == 1
-    assert raw_constructions == []
-    assert client_calls == []
-    sealed = [
-        event
-        for event in events
-        if event["type"] == "runtime_evidence_sealed"
-    ]
-    assert len(sealed) == 1
-    anchor = sealed[0]
-    assert anchor["run_id"] == run_id
-    assert anchor["mission_id"] == mission_id
-    assert anchor["journal_event_count"] == 0
-    assert anchor["report_status"] == "incomplete"
-    report = RuntimeEvidencePlane.rebuild_report(
-        tmp_path / run_id,
-        mission_id,
-        run_id,
-        expected_journal_head_sha256=anchor[
-            "journal_head_sha256"
-        ],
-    )
-    assert canonical_sha256(report.to_dict()) == anchor["report_sha256"]
-
-
-def test_pre_controller_composition_failure_seals_evidence_and_closes_registry_once(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    closed_registries: list[EvidenceRegistry] = []
-    raw_constructions: list[bool] = []
-    client_calls: list[dict[str, Any]] = []
-    original_registry_close = EvidenceRegistry.close
-
-    def tracked_registry_close(registry: EvidenceRegistry) -> None:
-        closed_registries.append(registry)
-        original_registry_close(registry)
-
-    def failed_reducer(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("synthetic reducer setup failure")
-
-    def forbidden_raw(*_args: Any, **_kwargs: Any) -> Any:
-        raw_constructions.append(True)
-        raise AssertionError("RawDevice must not be constructed")
-
-    def client_factory(**kwargs: Any) -> _RawClient:
-        client_calls.append(kwargs)
-        return _RawClient()
-
-    monkeypatch.setattr(
-        EvidenceRegistry,
-        "close",
-        tracked_registry_close,
-    )
-    monkeypatch.setattr(live_agent, "MissionReducer", failed_reducer)
-    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
-    deps = _dependencies(
-        client_factory=client_factory,
-        evidence_root=tmp_path,
-    )
-    graph = _graph()
-    budget = live_agent._freeze_budget(_config())
-    build = live_agent._SessionBuild(
-        graph=graph,
-        goal=GOAL,
-        run_id="arp-test-pre-evidence-failure",
-        mission_id="vnext-mission-pre-evidence-failure",
-        target=live_agent._freeze_prebound_target(
-            graph,
-            _inputs(),
-            dependencies=deps,
-        ),
-        budget=budget,
-        model=live_agent._freeze_model(_config(), budget),
-        dependencies=deps,
-        deadline=lambda: 310.0,
-        actor_bundle=_StubActorBundle(),
-        pause_controller=None,
-    )
-
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        with pytest.raises(
-            RuntimeError,
-            match="synthetic reducer setup failure",
-        ):
-            live_agent._build_live_session(build)
-    finally:
-        BUS.remove_sink(events.append)
-
-    assert len(closed_registries) == 1
-    assert closed_registries[0].closed is True
-    assert raw_constructions == []
-    assert client_calls == []
-    sealed = [
-        event
-        for event in events
-        if event["type"] == "runtime_evidence_sealed"
-    ]
-    assert len(sealed) == 1
-    anchor = sealed[0]
-    assert anchor["run_id"] == build.run_id
-    assert anchor["mission_id"] == build.mission_id
-    assert anchor["journal_event_count"] == 0
-    assert anchor["report_status"] == "incomplete"
-    report = RuntimeEvidencePlane.rebuild_report(
-        tmp_path / build.run_id,
-        build.mission_id,
-        build.run_id,
-        expected_journal_head_sha256=anchor[
-            "journal_head_sha256"
-        ],
-    )
-    assert canonical_sha256(report.to_dict()) == anchor["report_sha256"]
 
 
 def test_run_bound_lease_rejects_target_changed_after_actor_request(
@@ -4486,7 +3633,6 @@ def test_run_bound_lease_rejects_target_changed_after_actor_request(
         target_reader=lambda _hwnd: current_target[0],
         hit_test_root=lambda _x, _y: HWND,
         client_factory=client_factory,
-        runtime_evidence_root=tmp_path,
     )
     graph = _graph()
     execution = _prepare(
@@ -4566,495 +3712,8 @@ def test_run_bound_lease_rejects_target_changed_after_actor_request(
     assert "runtime_evidence_sealed" not in event_types
 
 
-def test_expired_target_before_runtime_composition_seals_incomplete_evidence(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    clock = [NOW_MS / 1000.0]
-    raw_constructions: list[bool] = []
-    client_calls: list[dict[str, Any]] = []
-
-    def forbidden_raw(*_args: Any, **_kwargs: Any) -> Any:
-        raw_constructions.append(True)
-        raise AssertionError("RawDevice must not be constructed")
-
-    def forbidden_client(**kwargs: Any) -> Any:
-        client_calls.append(kwargs)
-        raise AssertionError("model client must not be constructed")
-
-    dependencies = live_agent._CompositionDependencies(
-        wall_clock=lambda: clock[0],
-        monotonic=lambda: 10.0,
-        target_reader=lambda _hwnd: _facts(),
-        hit_test_root=lambda _x, _y: HWND,
-        client_factory=forbidden_client,
-        runtime_evidence_root=tmp_path,
-    )
-    build = _composition_build(
-        dependencies,
-        run_id="arp-test-expired-target-after-start",
-        mission_id="vnext-mission-expired-target-after-start",
-    )
-    clock[0] += (live_agent._TARGET_MAX_AGE_MS + 1) / 1000.0
-    events: list[dict[str, Any]] = []
-    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
-    BUS.add_sink(events.append)
-    try:
-        with pytest.raises(
-            RuntimeError,
-            match="target expired before vNext execution",
-        ):
-            live_agent._build_live_session(build)
-    finally:
-        BUS.remove_sink(events.append)
-
-    assert raw_constructions == []
-    assert client_calls == []
-    _assert_single_incomplete_anchor(events, tmp_path, build)
 
 
-def test_controller_setup_failure_seals_and_closes_all_created_owners_once(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    raw_calls: list[str] = []
-    client_calls: list[dict[str, Any]] = []
-    journal_closes: list[RuntimeEvidenceJournal] = []
-    registry_closes: list[EvidenceRegistry] = []
-    permit_closes: list[MutationPermitAuthority] = []
-    original_journal_close = RuntimeEvidenceJournal.close
-    original_registry_close = EvidenceRegistry.close
-    original_permit_close = MutationPermitAuthority.close
-
-    def failed_controller(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("synthetic controller setup failure")
-
-    def forbidden_client(**kwargs: Any) -> _RawClient:
-        client_calls.append(kwargs)
-        return _RawClient()
-
-    def tracked_journal_close(journal: RuntimeEvidenceJournal) -> None:
-        journal_closes.append(journal)
-        original_journal_close(journal)
-
-    def tracked_registry_close(registry: EvidenceRegistry) -> None:
-        registry_closes.append(registry)
-        original_registry_close(registry)
-
-    def tracked_permit_close(permits: MutationPermitAuthority) -> None:
-        permit_closes.append(permits)
-        original_permit_close(permits)
-
-    _install_safe_backends(monkeypatch, raw_calls)
-    monkeypatch.setattr(live_agent, "AtomicDesktopAdapter", failed_controller)
-    monkeypatch.setattr(
-        RuntimeEvidenceJournal,
-        "close",
-        tracked_journal_close,
-    )
-    monkeypatch.setattr(
-        EvidenceRegistry,
-        "close",
-        tracked_registry_close,
-    )
-    monkeypatch.setattr(
-        MutationPermitAuthority,
-        "close",
-        tracked_permit_close,
-    )
-    dependencies = _dependencies(
-        client_factory=forbidden_client,
-        evidence_root=tmp_path,
-    )
-    build = _composition_build(
-        dependencies,
-        run_id="arp-test-controller-setup-failure",
-        mission_id="vnext-mission-controller-setup-failure",
-    )
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        with pytest.raises(
-            RuntimeError,
-            match="synthetic controller setup failure",
-        ):
-            live_agent._build_live_session(build)
-    finally:
-        BUS.remove_sink(events.append)
-
-    assert raw_calls == []
-    assert client_calls == []
-    assert len(journal_closes) == 1
-    assert len(registry_closes) == 1
-    assert registry_closes[0].closed is True
-    assert len(permit_closes) == 1
-    assert permit_closes[0].closed is True
-    _assert_single_incomplete_anchor(events, tmp_path, build)
-
-
-@pytest.mark.parametrize(
-    "failure_stage,expected_clients",
-    (
-        ("mission_runtime", 0),
-        ("live_session", 0),
-    ),
-)
-def test_model_runtime_session_setup_failure_seals_and_closes_once(
-    failure_stage: str,
-    expected_clients: int,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    raw_calls: list[str] = []
-    clients: list[_RawClient] = []
-    journal_closes: list[RuntimeEvidenceJournal] = []
-    registry_closes: list[EvidenceRegistry] = []
-    permit_closes: list[MutationPermitAuthority] = []
-    original_journal_close = RuntimeEvidenceJournal.close
-    original_registry_close = EvidenceRegistry.close
-    original_permit_close = MutationPermitAuthority.close
-    error_text = f"synthetic {failure_stage} setup failure"
-
-    def factory(**_kwargs: Any) -> _RawClient:
-        client = _RawClient()
-        clients.append(client)
-        return client
-
-    def failed_owner(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError(error_text)
-
-    def tracked_journal_close(journal: RuntimeEvidenceJournal) -> None:
-        journal_closes.append(journal)
-        original_journal_close(journal)
-
-    def tracked_registry_close(registry: EvidenceRegistry) -> None:
-        registry_closes.append(registry)
-        original_registry_close(registry)
-
-    def tracked_permit_close(permits: MutationPermitAuthority) -> None:
-        permit_closes.append(permits)
-        original_permit_close(permits)
-
-    _install_safe_backends(monkeypatch, raw_calls)
-    if failure_stage == "mission_runtime":
-        monkeypatch.setattr(live_agent, "MissionRuntime", failed_owner)
-    elif failure_stage == "live_session":
-        monkeypatch.setattr(live_agent, "_LiveAgentSession", failed_owner)
-    monkeypatch.setattr(
-        RuntimeEvidenceJournal,
-        "close",
-        tracked_journal_close,
-    )
-    monkeypatch.setattr(
-        EvidenceRegistry,
-        "close",
-        tracked_registry_close,
-    )
-    monkeypatch.setattr(
-        MutationPermitAuthority,
-        "close",
-        tracked_permit_close,
-    )
-    dependencies = _dependencies(
-        client_factory=factory,
-        evidence_root=tmp_path,
-    )
-    build = _composition_build(
-        dependencies,
-        run_id=f"arp-test-{failure_stage}-failure",
-        mission_id=f"vnext-mission-{failure_stage}-failure",
-    )
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        with pytest.raises(RuntimeError, match=error_text):
-            live_agent._build_live_session(build)
-    finally:
-        BUS.remove_sink(events.append)
-
-    assert raw_calls == []
-    assert len(clients) == expected_clients
-    assert all(client.closed for client in clients)
-    assert all(client.close_calls == 1 for client in clients)
-    assert build.actor_bundle.closed is True
-    assert build.actor_bundle.close_calls == 1
-    assert len(journal_closes) == 1
-    assert len(registry_closes) == 1
-    assert registry_closes[0].closed is True
-    assert len(permit_closes) == 1
-    assert permit_closes[0].closed is True
-    _assert_single_incomplete_anchor(events, tmp_path, build)
-
-
-def test_real_composition_builds_zero_retry_actor_and_closes(
-    tmp_path: Path,
-) -> None:
-    calls: list[dict[str, Any]] = []
-    clients: list[_RawClient] = []
-
-    def factory(**kwargs: Any) -> _RawClient:
-        calls.append(kwargs)
-        client = _RawClient()
-        clients.append(client)
-        return client
-
-    deps = _dependencies(
-        client_factory=factory,
-        evidence_root=tmp_path,
-    )
-    graph = _graph()
-    target = live_agent._freeze_prebound_target(
-        graph,
-        _inputs(),
-        dependencies=deps,
-    )
-    budget = live_agent._freeze_budget(_config())
-    model = live_agent._freeze_model(_config(), budget)
-    actor_bundle = live_agent._build_actor_resources(
-        run_id="arp-test-live-composition",
-        mission_id="vnext-mission-test-live-composition",
-        budget=budget,
-        model=model,
-        dependencies=deps,
-        deadline=lambda: 310.0,
-    )
-    build = live_agent._SessionBuild(
-        graph=graph,
-        goal=GOAL,
-        run_id="arp-test-live-composition",
-        mission_id="vnext-mission-test-live-composition",
-        target=target,
-        budget=budget,
-        model=model,
-        dependencies=deps,
-        deadline=lambda: 310.0,
-        actor_bundle=actor_bundle,
-        pause_controller=None,
-    )
-
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        session = live_agent._build_live_session(build)
-
-        assert len(clients) == 1
-        assert [item["max_retries"] for item in calls] == [0]
-        runtime = session._runtime
-        assert runtime._controller.mutation_permits is runtime.mutation_permits
-        assert runtime._runtime_evidence is session._runtime_evidence
-        assert (
-            runtime._controller.runtime_evidence_plane
-            is session._runtime_evidence
-        )
-        assert (
-            runtime._controller._frame_artifacts
-            is session._frame_artifacts
-        )
-        assert (
-            session._runtime_evidence.journal
-            is session._evidence_journal
-        )
-        assert (
-            session._frame_artifacts.run_directory
-            == session._evidence_journal.run_directory
-        )
-        assert {
-            tool.name for tool in runtime._catalog.tools
-            } == {
-                "click",
-                "double_click",
-                "drag",
-                "scroll",
-                "type_text",
-                "hotkey",
-                "launch_application",
-            "claim_obligation_done",
-            "blocked",
-        }
-
-        session.close()
-        session.close()
-    finally:
-        BUS.remove_sink(events.append)
-    assert all(client.closed for client in clients)
-    assert runtime.mutation_permits.closed is True
-    assert session._registry.closed is True
-    sealed = [
-        event
-        for event in events
-        if event["type"] == "runtime_evidence_sealed"
-    ]
-    assert len(sealed) == 1
-    anchor = session.runtime_evidence_anchor
-    assert anchor is not None
-    assert {
-        key: value
-        for key, value in sealed[0].items()
-        if key != "ts"
-    } == {
-        "type": "runtime_evidence_sealed",
-        "runtime_version": "vnext",
-        "no_legacy_fallback": True,
-        **anchor,
-    }
-    assert sealed[0]["run_id"] == build.run_id
-    assert sealed[0]["mission_id"] == build.mission_id
-    assert sealed[0]["journal_event_count"] == 0
-    assert sealed[0]["report_status"] == "incomplete"
-
-
-def test_session_rejects_mismatched_runtime_evidence_resources(
-    tmp_path: Path,
-) -> None:
-    plane, _writer, journal = _runtime_evidence_resources(
-        tmp_path,
-        suffix="scope-a",
-    )
-    _other_plane, other_writer, other_journal = (
-        _runtime_evidence_resources(
-            tmp_path,
-            suffix="scope-b",
-        )
-    )
-    try:
-        with pytest.raises(
-            ValueError,
-            match="must share one run scope",
-        ):
-            live_agent._LiveAgentSession(
-                runtime=object(),
-                reducer=object(),
-                registry=object(),
-                permits=object(),
-                authority=FrameAuthority(),
-                binding=object(),
-                counter=object(),
-                client=object(),
-                runtime_evidence=plane,
-                frame_artifacts=other_writer,
-                evidence_journal=journal,
-            )
-    finally:
-        journal.close()
-        other_journal.close()
-
-
-def test_evidence_rebuild_failure_is_diagnostic_and_closes_resources(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    plane, writer, journal = _runtime_evidence_resources(
-        tmp_path,
-        suffix="seal-failure",
-    )
-    permits = MutationPermitAuthority(plane.mission_id, plane.run_id)
-    registry = EvidenceRegistry(plane.mission_id, plane.run_id)
-    actor_client = _RawClient()
-    session = live_agent._LiveAgentSession(
-        runtime=object(),
-        reducer=object(),
-        registry=registry,
-        permits=permits,
-        authority=FrameAuthority(),
-        binding=object(),
-        counter=object(),
-        client=actor_client,
-        runtime_evidence=plane,
-        frame_artifacts=writer,
-        evidence_journal=journal,
-    )
-    sentinel = "PRIVATE_MODEL_RESPONSE_OR_TYPED_TEXT"
-    close_calls: list[RuntimeEvidenceJournal] = []
-    original_close = RuntimeEvidenceJournal.close
-
-    def tracked_close(current: RuntimeEvidenceJournal) -> None:
-        if current is journal:
-            close_calls.append(current)
-        original_close(current)
-
-    def failed_rebuild(
-        _cls: type[RuntimeEvidencePlane],
-        *_args: Any,
-        **_kwargs: Any,
-    ) -> Any:
-        raise RuntimeError(sentinel)
-
-    monkeypatch.setattr(
-        RuntimeEvidenceJournal,
-        "close",
-        tracked_close,
-    )
-    monkeypatch.setattr(
-        RuntimeEvidencePlane,
-        "rebuild_report",
-        classmethod(failed_rebuild),
-    )
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        session.close()
-        session.close()
-    finally:
-        BUS.remove_sink(events.append)
-
-    assert close_calls == [journal]
-    assert permits.closed is True
-    assert registry.closed is True
-    assert actor_client.closed is True
-    assert session.runtime_evidence_anchor is None
-    assert not any(
-        event["type"] == "runtime_evidence_sealed"
-        for event in events
-    )
-    assert sentinel not in json.dumps(events, sort_keys=True)
-
-
-def test_verified_session_keeps_success_on_incomplete_evidence_report(
-    tmp_path: Path,
-) -> None:
-    plane, writer, journal = _runtime_evidence_resources(
-        tmp_path,
-        suffix="verified-incomplete",
-    )
-    permits = MutationPermitAuthority(plane.mission_id, plane.run_id)
-    registry = EvidenceRegistry(plane.mission_id, plane.run_id)
-    actor_client = _RawClient()
-    reducer = SimpleNamespace(
-        projection=SimpleNamespace(status=MissionStatus.VERIFIED)
-    )
-    session = live_agent._LiveAgentSession(
-        runtime=object(),
-        reducer=reducer,
-        registry=registry,
-        permits=permits,
-        authority=FrameAuthority(),
-        binding=object(),
-        counter=object(),
-        client=actor_client,
-        runtime_evidence=plane,
-        frame_artifacts=writer,
-        evidence_journal=journal,
-    )
-    events: list[dict[str, Any]] = []
-    BUS.add_sink(events.append)
-    try:
-        session.close()
-        session.close()
-    finally:
-        BUS.remove_sink(events.append)
-
-    sealed = [
-        event
-        for event in events
-        if event["type"] == "runtime_evidence_sealed"
-    ]
-    assert len(sealed) == 1
-    assert sealed[0]["report_status"] == "incomplete"
-    assert sealed[0]["missing_evidence_count"] > 0
-    assert session.runtime_evidence_anchor is not None
-    assert permits.closed is True
-    assert registry.closed is True
-    assert actor_client.closed is True
 
 
 def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
@@ -5069,14 +3728,12 @@ def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
             if self.fail:
                 raise RuntimeError(f"{self.name} unavailable")
 
-    permits = CloseResource("permits", fail=True)
-    registry = CloseResource("registry", fail=False)
+    registry = CloseResource("registry", fail=True)
     actor_client = _RawClient(close_error="actor close unavailable")
     session = live_agent._LiveAgentSession(
         runtime=object(),
         reducer=object(),
         registry=registry,
-        permits=permits,
         authority=FrameAuthority(),
         binding=object(),
         counter=object(),
@@ -5086,11 +3743,11 @@ def test_session_cleanup_closes_every_resource_and_aggregates_errors() -> None:
     with pytest.raises(ExceptionGroup) as caught:
         session.close()
 
-    assert permits.calls == registry.calls == 1
+    assert registry.calls == 1
     assert actor_client.closed is True
     messages = [str(error) for error in caught.value.exceptions]
     assert len(messages) == 2
-    assert any("mutation permit authority" in message for message in messages)
+    assert any("evidence registry" in message for message in messages)
     assert any("Visual Actor client" in message for message in messages)
 
 
@@ -5248,7 +3905,6 @@ def test_status_query_reply_uses_real_runtime_facts_without_desktop_lease(
         ),
         client_factory=client_factory,
         session_builder=forbidden_session,
-        runtime_evidence_root=tmp_path,
         config_snapshot=lambda: {
             **_config(),
             "agent": {"experience_memory": True},

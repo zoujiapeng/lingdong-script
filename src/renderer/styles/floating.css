@@ -913,6 +913,14 @@
   box-shadow: var(--ld-shadow-sm), var(--ld-shadow-inset);
 }
 
+.ld-agent-response-failure-stage {
+  display: block;
+  margin-top: 7px;
+  color: var(--ld-danger);
+  font-size: 10px;
+  opacity: 0.85;
+}
+
 .ld-agent-response-meta {
   display: flex;
   align-items: center;

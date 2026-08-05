@@ -608,11 +608,16 @@ class RawDeviceExecutor:
             and not canonical_points
             and (x1, y1) == (x2, y2)
         )
+        closed_path = bool(
+            canonical_points
+            and (x1, y1) == (x2, y2)
+        )
         if (
             any(type(value) is not int for value in (x1, y1, x2, y2))
             or (
                 (x1, y1) == (x2, y2)
                 and not stationary_finish
+                and not closed_path
             )
             or canonical_points is None
             or not callable(final_guard)

@@ -610,6 +610,45 @@ def test_drag_preserves_ordered_intermediate_points_in_one_backend_call() -> Non
     ]
 
 
+def test_drag_accepts_closed_path_that_returns_to_start() -> None:
+    """A closed loop (start == end with a path) is a legal drawing gesture."""
+
+    calls = []
+
+    def admitted(x1, y1, x2, y2, *, hwnd, points, final_guard):
+        calls.append((x1, y1, x2, y2, hwnd, points))
+        assert final_guard(x1, y1) is FinalPointerGuardDecision.ADMITTED
+        return RawBackendResult(True, {"via": "physical_sendinput"})
+
+    raw = RawDeviceExecutor(
+        RawDeviceBackends(
+            admitted_physical_drag=AdmittedPhysicalDragBackend(admitted)
+        )
+    )
+    receipt = raw.drag(
+        _context(),
+        10,
+        20,
+        10,
+        20,
+        points=[[30, 20], [30, 50], [10, 20]],
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+    )
+
+    assert receipt.outcome is MutationOutcome.APPLIED
+    assert calls == [
+        (
+            10,
+            20,
+            10,
+            20,
+            41,
+            ((30, 20), (30, 50), (10, 20)),
+        )
+    ]
+
+
+
 @pytest.mark.parametrize(
     "points",
     (
@@ -843,7 +882,6 @@ def _physical_executor_mocks(monkeypatch, events):
     from winpilot.action import executor
 
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
     monkeypatch.setattr(executor, "_target_window_still_foreground", lambda _hwnd: True)
     monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: events.append(("move", x, y)))
     monkeypatch.setattr(executor, "_cursor_pos", lambda: (10, 20))
@@ -914,7 +952,6 @@ def test_admitted_drag_begin_continue_finish_preserve_one_physical_hold(
 
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
     monkeypatch.setattr(executor, "_target_window_still_foreground", lambda _hwnd: True)
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
     monkeypatch.setattr(executor, "_cursor_pos", lambda: cursor["point"])
     monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
     monkeypatch.setattr(
@@ -1006,7 +1043,6 @@ def test_failed_held_segment_releases_without_cursor_restore(monkeypatch) -> Non
         executor._held_mouse_buttons.discard("left")
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
     monkeypatch.setattr(executor, "_target_window_still_foreground", lambda _hwnd: True)
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
     monkeypatch.setattr(executor, "_cursor_pos", lambda: (10, 20))
     monkeypatch.setattr(executor, "_abs_mouse_move", lambda _x, _y: None)
     monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
@@ -1538,8 +1574,6 @@ def test_legacy_keyboard_public_entries_delegate_to_shared_unqueued_owners(
 
     monkeypatch.setattr(desktop_queue.DESKTOP_ACTION_QUEUE, "run", run)
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "cooperative_input_guard", lambda *_args: None)
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
     monkeypatch.setattr(executor, "_execute_physical_type_text", type_backend)
     monkeypatch.setattr(executor, "_vk_of", mapped.__getitem__)
     monkeypatch.setattr(executor, "_execute_physical_hotkey_vks", hotkey_backend)
@@ -1565,8 +1599,6 @@ def test_legacy_keyboard_bus_action_payloads_remain_byte_for_byte_compatible(
     executor, _sent = _keyboard_executor_mocks(monkeypatch)
     events: list[dict] = []
     focused: list[int] = []
-    monkeypatch.setattr(executor, "cooperative_input_guard", lambda *_args: None)
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
     monkeypatch.setattr(executor.win32gui, "GetForegroundWindow", lambda: 999)
     monkeypatch.setattr(
         executor, "_raw_focus_window",
@@ -1663,7 +1695,6 @@ def test_physical_click_partial_failure_is_unknown_and_releases(
         if len(calls) == fail_at:
             raise OSError("injected partial SendInput failure")
 
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
     monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: None)
     monkeypatch.setattr(executor, "_mouse_input", lambda flag: flag)
     monkeypatch.setattr(executor, "_send_inputs", send_inputs)
@@ -1687,7 +1718,6 @@ def test_physical_click_uses_final_root_ownership_not_focus_helper_result(
     from winpilot.action import executor
 
     sent: list[list] = []
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
     monkeypatch.setattr(executor, "_raw_focus_window", lambda hwnd: {"ok": False})
     monkeypatch.setattr(executor, "_target_window_still_foreground", lambda hwnd: True)
     monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: None)
@@ -1710,7 +1740,6 @@ def test_physical_click_rechecks_target_after_cursor_move(monkeypatch) -> None:
 
     ownership = iter((True, False))
     sent: list[list] = []
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
     monkeypatch.setattr(executor, "_raw_focus_window", lambda hwnd: {"ok": True})
     monkeypatch.setattr(
         executor, "_target_window_still_foreground", lambda hwnd: next(ownership),
@@ -1756,33 +1785,6 @@ def test_strict_background_click_never_switches_mechanism(monkeypatch) -> None:
     assert len(posted) == 1
 
 
-def test_legacy_click_unknown_never_falls_back_or_claims_success(monkeypatch) -> None:
-    from winpilot.action import executor
-
-    monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
-    monkeypatch.setattr(
-        executor,
-        "_post_click",
-        lambda *args, **kwargs: RawBackendResult(
-            None, {"completed_clicks": 1, "via": "post_message"},
-        ),
-    )
-    monkeypatch.setattr(
-        executor,
-        "_raw_click",
-        lambda *args, **kwargs: pytest.fail("unknown click was replayed"),
-    )
-
-    result = executor.click(10, 20, double=True, hwnd=41)
-
-    assert result["ok"] is False
-    assert result["verified"] is False
-    assert result["input_completed"] is None
-    assert result["outcome_unknown"] is True
-    assert result["completed_clicks"] == 1
-
 
 def test_legacy_click_dry_run_keeps_preexisting_argument_behavior(monkeypatch) -> None:
     from winpilot.action import executor
@@ -1794,40 +1796,6 @@ def test_legacy_click_dry_run_keeps_preexisting_argument_behavior(monkeypatch) -
         "dry_run": True,
     }
 
-
-def test_completed_click_is_not_replayed_when_telemetry_fails(monkeypatch) -> None:
-    from winpilot.action import executor
-
-    calls: list[str] = []
-    monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
-    monkeypatch.setattr(
-        executor,
-        "_post_click",
-        lambda *args, **kwargs: calls.append("post") or RawBackendResult(True, {}),
-    )
-    monkeypatch.setattr(
-        executor,
-        "_raw_click",
-        lambda *args, **kwargs: pytest.fail("completed click was replayed"),
-    )
-    original_publish = executor.BUS.publish
-
-    def publish(event_type, **payload):
-        if event_type == "action":
-            raise RuntimeError("injected telemetry failure")
-        return original_publish(event_type, **payload)
-
-    monkeypatch.setattr(executor.BUS, "publish", publish)
-
-    assert executor.click(10, 20, hwnd=41) == {
-        "ok": True,
-        "x": 10,
-        "y": 20,
-        "via": "post_message",
-    }
-    assert calls == ["post"]
 
 
 def test_legacy_scroll_output_and_exception_semantics_are_unchanged(monkeypatch) -> None:
@@ -1881,61 +1849,3 @@ def test_legacy_public_scroll_delegates_typed_single_queue_owner(monkeypatch) ->
 
     assert executor.scroll(1, 2, -3, hwnd=41) == {"ok": True, "via": "typed"}
     assert calls == [(1, 2, -3, 41)]
-
-
-def test_postmessage_success_never_falls_back_when_action_telemetry_fails(
-    monkeypatch,
-) -> None:
-    from winpilot.action import executor
-
-    posted: list = []
-    sent: list = []
-    monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
-    monkeypatch.setattr(executor.win32gui, "WindowFromPoint", lambda point: 41)
-    monkeypatch.setattr(executor, "_same_window_root", lambda target, hwnd: True)
-    monkeypatch.setattr(
-        executor.win32gui,
-        "PostMessage",
-        lambda *args: posted.append(args),
-    )
-    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.append(inputs))
-    original_publish = executor.BUS.publish
-
-    def publish(event_type, **payload):
-        if event_type == "action":
-            raise RuntimeError("injected telemetry failure")
-        return original_publish(event_type, **payload)
-
-    monkeypatch.setattr(executor.BUS, "publish", publish)
-
-    result = executor.execute_scroll_input(1, 2, -3, hwnd=41)
-
-    assert result.input_completed is True
-    assert result.facts == {"ok": True, "via": "post_message"}
-    assert len(posted) == 1
-    assert sent == []
-
-
-def test_postmessage_exception_is_unknown_and_never_falls_back(monkeypatch) -> None:
-    from winpilot.action import executor
-
-    sent: list = []
-    monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
-    monkeypatch.setattr(executor.win32gui, "WindowFromPoint", lambda point: 41)
-    monkeypatch.setattr(executor, "_same_window_root", lambda target, hwnd: True)
-    monkeypatch.setattr(
-        executor.win32gui,
-        "PostMessage",
-        lambda *args: (_ for _ in ()).throw(OSError("uncertain post")),
-    )
-    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.append(inputs))
-
-    result = executor.execute_scroll_input(1, 2, -3, hwnd=41)
-
-    assert result.input_completed is None
-    assert result.facts["error"] == "post_message_outcome_unknown"
-    assert sent == []

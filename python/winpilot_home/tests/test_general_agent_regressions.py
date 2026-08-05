@@ -943,6 +943,120 @@ def test_launch_application_rejects_empty_name() -> None:
     assert "empty" in result["error"]
 
 
+def test_activate_resolved_entry_uses_process_name_for_appid_entries(
+    monkeypatch,
+) -> None:
+    """UWP app entries resolve to AppIDs, not exe paths.
+
+    A running app whose window title is a document/song name ("江南 - 林俊杰")
+    must still be activated via its process file name; the display-name title
+    fallback would miss it entirely.
+    """
+    from winpilot.perception import apps
+
+    entry = {
+        "kind": "appid",
+        "name": "网易云音乐",
+        "target": "1F8B0F94.122165AE053F_j2p0p5q0044a6!CLOUDMUSIC",
+        "process_name": "cloudmusic.exe",
+    }
+    monkeypatch.setattr(apps, "_activate_existing_instance", lambda _path: None)
+    monkeypatch.setattr(
+        apps,
+        "_activate_existing_by_process_name",
+        lambda name: 2426606 if name == "cloudmusic.exe" else None,
+    )
+    monkeypatch.setattr(apps, "_activate_existing_by_title", lambda _name: None)
+
+    assert apps._activate_resolved_entry(entry) == 2426606
+
+
+def test_activate_existing_by_title_never_activates_a_browser_window(
+    monkeypatch,
+) -> None:
+    """A browser tab titled like an app is a web page, not the app window."""
+    from winpilot.perception import apps
+
+    windows = [
+        (1001, "网易云音乐 - Google Chrome", "chrome.exe"),
+        (1002, "网易云音乐", "cloudmusic.exe"),
+    ]
+    state = {"activated": None}
+
+    def fake_enum_windows(callback, _unused):
+        for hwnd, title, process in windows:
+            callback(hwnd, None)
+        return True
+
+    fake_win32gui = SimpleNamespace(
+        EnumWindows=fake_enum_windows,
+        IsWindowVisible=lambda h: True,
+        IsIconic=lambda h: False,
+        GetWindowText=lambda h: next(
+            title for hwnd2, title, _p in windows if hwnd2 == h
+        ),
+        SetForegroundWindow=lambda h: state.update(activated=h) or True,
+        BringWindowToTop=lambda h: True,
+    )
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setattr(
+        apps,
+        "_window_process_name",
+        lambda h: next(
+            process for hwnd2, _t, process in windows if hwnd2 == h
+        ),
+    )
+
+    activated = apps._activate_existing_by_title("网易云音乐")
+
+    assert activated == 1002
+    assert state["activated"] == 1002
+
+
+def test_activate_existing_by_process_name_finds_window_by_process(
+    monkeypatch,
+) -> None:
+    """Process-name activation finds a song-titled app window."""
+    from winpilot.perception import apps
+
+    windows = [
+        (3001, "江南 - 林俊杰", "cloudmusic.exe"),
+        (3002, "网易云音乐 - Google Chrome", "chrome.exe"),
+    ]
+
+    def fake_enum_windows(callback, _unused):
+        for hwnd, _title, _process in windows:
+            callback(hwnd, None)
+        return True
+
+    fake_win32gui = SimpleNamespace(
+        EnumWindows=fake_enum_windows,
+        IsWindowVisible=lambda h: True,
+        IsIconic=lambda h: False,
+        GetWindowText=lambda h: next(
+            title for hwnd2, title, _p in windows if hwnd2 == h
+        ),
+        SetForegroundWindow=lambda h: True,
+        BringWindowToTop=lambda h: True,
+    )
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setattr(
+        apps,
+        "_window_process_name",
+        lambda h: next(
+            process for hwnd2, _t, process in windows if hwnd2 == h
+        ),
+    )
+
+    activated = apps._activate_existing_by_process_name("cloudmusic.exe")
+
+    assert activated == 3001
+
+
 def test_open_application_stage_rejects_controller_ok_without_verification(monkeypatch) -> None:
     from winpilot.agent.tool_result import ToolResult
     from winpilot.tasking.compiler import TaskContractCompiler

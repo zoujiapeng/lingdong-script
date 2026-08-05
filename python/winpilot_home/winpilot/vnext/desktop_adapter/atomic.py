@@ -55,18 +55,10 @@ from ..capabilities import (
     PointerDisposition,
     PointerLeaseState,
 )
-from ..evidence_plane import (
-    FrameArtifactReference,
-    FrameArtifactRole,
-    FrameArtifactWriter,
-    RuntimeEvidencePlane,
-)
 from ..mission import EvidenceRef, TargetBinding
 from ..runtime import (
     ControllerOutcome,
     ControllerTransition,
-    MutationPermitAuthority,
-    RuntimeCommitIdentity,
     RuntimeFrame,
     RuntimeFrameIdentity,
     RuntimeTargetIdentity,
@@ -236,11 +228,8 @@ class AtomicDesktopAdapter:
         frozen_target_binding: TargetBinding,
         target_probe: DesktopTargetProbe,
         desktop_workspace: DesktopWorkspacePort | None = None,
-        mutation_permits: MutationPermitAuthority,
         raw_device: RawDeviceExecutor,
         receipt_trace_sink: RawReceiptTraceSink | None = None,
-        runtime_evidence_plane: RuntimeEvidencePlane | None = None,
-        frame_artifact_writer: FrameArtifactWriter | None = None,
         launcher: Callable[[str, str], Mapping[str, Any]] | None = None,
         post_input_settle_delay_s: float = 0.12,
         wait: Callable[[float], Any] = time.sleep,
@@ -288,10 +277,6 @@ class AtomicDesktopAdapter:
                 raise TypeError(
                     "desktop_workspace must own the initial target binding"
                 )
-        if type(mutation_permits) is not MutationPermitAuthority:
-            raise TypeError(
-                "mutation_permits must be MutationPermitAuthority"
-            )
         if type(raw_device) is not RawDeviceExecutor:
             raise TypeError("raw_device must be RawDeviceExecutor")
         if set(raw_device.admitted_action_names) != {
@@ -312,41 +297,6 @@ class AtomicDesktopAdapter:
             getattr(receipt_trace_sink, "record", None)
         ):
             raise TypeError("receipt_trace_sink must provide record()")
-        if (
-            runtime_evidence_plane is not None
-            and type(runtime_evidence_plane) is not RuntimeEvidencePlane
-        ):
-            raise TypeError(
-                "runtime_evidence_plane must be RuntimeEvidencePlane or null"
-            )
-        if (
-            frame_artifact_writer is not None
-            and type(frame_artifact_writer) is not FrameArtifactWriter
-        ):
-            raise TypeError(
-                "frame_artifact_writer must be FrameArtifactWriter or null"
-            )
-        durable = bool(
-            runtime_evidence_plane is not None
-            and runtime_evidence_plane.durable
-        )
-        if durable != (frame_artifact_writer is not None):
-            raise TypeError(
-                "durable Runtime evidence requires one FrameArtifactWriter"
-            )
-        if durable:
-            assert runtime_evidence_plane is not None
-            assert frame_artifact_writer is not None
-            journal = runtime_evidence_plane.journal
-            assert journal is not None
-            if (
-                frame_artifact_writer.run_directory
-                != journal.run_directory
-                or not frame_artifact_writer.writable
-            ):
-                raise TypeError(
-                    "journal and artifact writer must share one writable run"
-                )
         if (
             isinstance(post_input_settle_delay_s, bool)
             or not isinstance(post_input_settle_delay_s, (int, float))
@@ -376,34 +326,16 @@ class AtomicDesktopAdapter:
             raise ValueError(
                 "held_pointer_timeout_s must be in the range 1..300"
             )
-        if (
-            mutation_permits.mission_id == ""
-            or mutation_permits.run_id == ""
-        ):
-            raise ValueError("mutation permit scope must be non-empty")
-        if runtime_evidence_plane is not None and (
-            runtime_evidence_plane.mission_id
-            != mutation_permits.mission_id
-            or runtime_evidence_plane.run_id
-            != mutation_permits.run_id
-        ):
-            raise ValueError(
-                "Runtime evidence plane and mutation permit scope differ"
-            )
 
         self._authority = frame_authority
         self._observer = frame_observer
         self._fixed_binding = frozen_target_binding
         self._workspace = desktop_workspace
         self._probe = probe
-        self._permits = mutation_permits
         self._raw = raw_device
         self._launcher = launcher
         self._desktop_shell = desktop_shell
         self._trace = receipt_trace_sink
-        self._runtime_evidence = runtime_evidence_plane
-        self._frame_artifacts = frame_artifact_writer
-        self._durable_evidence_enabled = durable
         self._post_input_settle_delay_s = settle_delay
         self._wait = wait
         self._clock = clock
@@ -426,14 +358,20 @@ class AtomicDesktopAdapter:
         return self._target_refresh_requested
 
     @property
-    def consecutive_rejection_kinds(self) -> tuple[str, ...]:
-        return self._rejection_history
+    def _is_desktop_shell(self) -> bool:
+        # The desktop-shell flag only describes the initial no-foreground
+        # Progman binding.  Once the workspace adopts a real window the flag
+        # retires, so the adapter must follow the live workspace instead of
+        # keeping a frozen copy that would keep cropping frames.
+        if self._workspace is not None:
+            return bool(
+                getattr(self._workspace, "desktop_shell", self._desktop_shell)
+            )
+        return self._desktop_shell
 
     @property
-    def mutation_permits(self) -> MutationPermitAuthority:
-        """Expose identity only so composition can prove one shared authority."""
-
-        return self._permits
+    def consecutive_rejection_kinds(self) -> tuple[str, ...]:
+        return self._rejection_history
 
     @property
     def _binding(self) -> TargetBinding:
@@ -447,10 +385,6 @@ class AtomicDesktopAdapter:
     @property
     def frozen_target_binding(self) -> TargetBinding:
         return self._binding
-
-    @property
-    def runtime_evidence_plane(self) -> RuntimeEvidencePlane | None:
-        return self._runtime_evidence
 
     def pointer_state(self) -> PointerLeaseState:
         with self._pointer_lock:
@@ -574,7 +508,8 @@ class AtomicDesktopAdapter:
                 envelope,
                 phase="binding",
             )
-            return self._rejected(envelope, action)
+            self._record_rejection(receipt.error_kind or "target_binding_mismatch")
+            return self._rejected(envelope, action, error_kind=receipt.error_kind)
 
         try:
             matched, pinned = self._authority.run_if_current(
@@ -605,33 +540,27 @@ class AtomicDesktopAdapter:
                 envelope,
                 phase="frame_pin",
             )
-            return self._rejected(envelope, action)
+            return self._rejected(envelope, action, error_kind=receipt.error_kind)
 
         receipt = pinned.receipt
         self._record_trace_receipt(receipt, envelope, phase="raw_device")
         if not pinned.raw_device_called:
-            evidence_recorded = self._record_evidence_receipt(
-                receipt,
-                envelope,
-            )
             if receipt.input_completed is False:
-                return self._rejected(envelope, action)
+                return self._rejected(
+                    envelope,
+                    action,
+                    error_kind=receipt.error_kind,
+                )
             return self._unknown_transition(
                 envelope,
                 action,
-                input_completed=(
-                    receipt.input_completed
-                    if evidence_recorded
-                    else None
-                ),
+                input_completed=receipt.input_completed,
             )
         if receipt.input_completed is False:
-            if self._record_evidence_receipt(receipt, envelope):
-                return self._rejected(envelope, action)
-            return self._unknown_transition(
+            return self._rejected(
                 envelope,
                 action,
-                input_completed=False,
+                error_kind=receipt.error_kind,
             )
         settle_failed = False
         if (
@@ -656,7 +585,6 @@ class AtomicDesktopAdapter:
                 # to rewrite the completed receipt or replay the action.
                 pass
         if pinned.before_frame is None:
-            self._record_evidence_receipt(receipt, envelope)
             return self._unknown_transition(
                 envelope,
                 action,
@@ -672,21 +600,12 @@ class AtomicDesktopAdapter:
                 pinned.before_frame,
             )
         except Exception:
-            self._record_evidence_receipt(receipt, envelope)
             return self._unknown_transition(
                 envelope,
                 action,
                 input_completed=receipt.input_completed,
             )
 
-        if not self._record_evidence_receipt(receipt, envelope):
-            return self._unknown_transition(
-                envelope,
-                action,
-                input_completed=receipt.input_completed,
-                post_frame=post_frame,
-                post_evidence=post_evidence,
-            )
         if settle_failed:
             return self._unknown_transition(
                 envelope,
@@ -786,7 +705,7 @@ class AtomicDesktopAdapter:
                 else None
             ),
             require_foreground=(
-                not self._desktop_shell
+                not self._is_desktop_shell
                 and before_frame.scope == "target_window"
             ),
         ):
@@ -815,60 +734,6 @@ class AtomicDesktopAdapter:
                 self._not_started(prepared.action, "stop_requested"),
             )
 
-        commit_identity = RuntimeCommitIdentity(
-            before_frame.identity,
-            RuntimeTargetIdentity.from_binding(self._binding),
-        )
-        admission = self._permits.begin_admission(
-            envelope,
-            current_commit_identity=commit_identity,
-        )
-        if not admission.allowed:
-            return _PinnedExecution(
-                before_frame,
-                self._not_started(
-                    prepared.action,
-                    self._record_rejection(
-                        f"permit_{admission.reason.value}"
-                    ),
-                ),
-            )
-        evidence_plane = self._runtime_evidence
-        if evidence_plane is not None:
-            try:
-                if admission.permit_id is None:
-                    raise ValueError(
-                        "allowed admission is missing permit identity"
-                    )
-                self._persist_frame_artifact(
-                    envelope,
-                    before_frame,
-                    role=FrameArtifactRole.BEFORE,
-                    capture_timestamp_ns=self._seconds_to_ns(
-                        state.captured_at
-                    ),
-                )
-                evidence_plane.record_admission(
-                    decision_id=envelope.decision_id,
-                    mission_id=envelope.mission_id,
-                    run_id=envelope.run_id,
-                    frame_identity=commit_identity.frame.to_dict(),
-                    target_identity=commit_identity.target.to_dict(),
-                    mutation_permit_id=admission.permit_id,
-                    controller_route="vnext_atomic_desktop_adapter",
-                    actor_envelope_sha256=hashlib.sha256(
-                        envelope.to_json().encode("utf-8")
-                    ).hexdigest(),
-                )
-            except Exception:
-                return _PinnedExecution(
-                    before_frame,
-                    self._not_started(
-                        prepared.action,
-                        "evidence_admission_rejected",
-                    ),
-                )
-
         raw_started = False
 
         def invoke_raw() -> RawActionReceipt:
@@ -884,35 +749,6 @@ class AtomicDesktopAdapter:
                     prepared.action,
                     revalidation_error,
                 )
-            if evidence_plane is not None:
-                try:
-                    evidence_plane.reserve_physical_attempt(
-                        decision_id=envelope.decision_id,
-                        mission_id=envelope.mission_id,
-                        run_id=envelope.run_id,
-                        actor_envelope_sha256=hashlib.sha256(
-                            envelope.to_json().encode("utf-8")
-                        ).hexdigest(),
-                        submitted_arguments=dict(
-                            envelope.proposal.args
-                        ),
-                        physical_arguments=(
-                            self._physical_attempt_arguments(prepared)
-                        ),
-                        raw_device_route=self._raw_device_route(
-                            prepared.action
-                        ),
-                        mechanism=(
-                            "physical_sendinput"
-                            if prepared.action != "launch_application"
-                            else "desktop_launcher"
-                        ),
-                    )
-                except Exception:
-                    return self._not_started(
-                        prepared.action,
-                        "evidence_attempt_rejected",
-                    )
             raw_started = True
             return self._run_raw(
                 envelope,
@@ -984,7 +820,7 @@ class AtomicDesktopAdapter:
                 else None
             ),
             require_foreground=(
-                not self._desktop_shell
+                not self._is_desktop_shell
                 and before_frame.scope == "target_window"
             ),
         ):
@@ -1001,15 +837,6 @@ class AtomicDesktopAdapter:
                 return self._frame_geometry_rejection(
                     "hit_test_changed_after_queue"
                 )
-        commit_identity = RuntimeCommitIdentity(
-            before_frame.identity,
-            RuntimeTargetIdentity.from_binding(self._binding),
-        )
-        if not self._permits.revalidate_active_admission(
-            envelope,
-            current_commit_identity=commit_identity,
-        ):
-            return self._record_rejection("permit_changed_after_queue")
         return None
 
     def _frame_geometry_rejection(self, error_kind: str) -> str:
@@ -1076,10 +903,6 @@ class AtomicDesktopAdapter:
             target_hwnd=self._binding.hwnd,
             current_hwnd=initial_target.hwnd,
         )
-        active_identity = RuntimeCommitIdentity(
-            before_frame.identity,
-            RuntimeTargetIdentity.from_binding(self._binding),
-        )
 
         if prepared.point is not None:
             expected_point = prepared.point
@@ -1107,11 +930,6 @@ class AtomicDesktopAdapter:
                     )
                     if decision is not FinalPointerGuardDecision.ADMITTED:
                         return decision
-                if not self._permits.revalidate_active_admission(
-                    envelope,
-                    current_commit_identity=active_identity,
-                ):
-                    return FinalPointerGuardDecision.TARGET_UNAVAILABLE
                 return FinalPointerGuardDecision.ADMITTED
 
             if prepared.action in {"click", "double_click"}:
@@ -1183,11 +1001,6 @@ class AtomicDesktopAdapter:
             )
             if decision is not FinalKeyboardGuardDecision.ADMITTED:
                 return decision
-            if not self._permits.revalidate_active_admission(
-                envelope,
-                current_commit_identity=active_identity,
-            ):
-                return FinalKeyboardGuardDecision.TARGET_UNAVAILABLE
             return FinalKeyboardGuardDecision.ADMITTED
 
         if prepared.action == "type_text":
@@ -1217,7 +1030,7 @@ class AtomicDesktopAdapter:
         same activation the legacy executor performs; it is mechanical input
         preparation, never a semantic shortcut.
         """
-        if self._desktop_shell:
+        if self._is_desktop_shell:
             return
         binding = self._binding
         hwnd = int(binding.hwnd)
@@ -1461,7 +1274,7 @@ class AtomicDesktopAdapter:
             provided_region=region,
             expected_previous_frame_id=before.frame_id,
             scope_override=(
-                "target_window" if self._desktop_shell else None
+                "target_window" if self._is_desktop_shell else None
             ),
         )
         if captured is None or captured.scope != expected_scope:
@@ -1522,14 +1335,6 @@ class AtomicDesktopAdapter:
         frame = self._runtime_frame(
             committed,
             evidence_refs=(evidence.id,),
-        )
-        self._persist_frame_artifact(
-            envelope,
-            frame,
-            role=FrameArtifactRole.AFTER,
-            capture_timestamp_ns=self._seconds_to_ns(
-                committed.captured_at
-            ),
         )
         return frame, evidence
 
@@ -1664,7 +1469,16 @@ class AtomicDesktopAdapter:
                 and not points
             )
             if start == end and not stationary_release:
-                raise ValueError("drag endpoints must map to distinct pixels")
+                # A held continuation that stays in place is a no-op hold;
+                # keep it as a distinct-endpoint press so the physical
+                # layer never sees a stationary drag.
+                if started_held:
+                    end = start
+                # A closed path (start == end with intermediate points) is a
+                # legitimate curve-drawing gesture: the model outlines a shape
+                # and returns to its start.  Keep it a drag with its full path;
+                # never silently rewrite the action into a click, because the
+                # decision was already recorded as drag.
             return _PreparedAction(
                 action=action,
                 point=start,
@@ -1865,9 +1679,7 @@ class AtomicDesktopAdapter:
         binding = self._binding
         pointer = self.pointer_state()
         return bool(
-            envelope.mission_id == self._permits.mission_id
-            and envelope.run_id == self._permits.run_id
-            and envelope.target_binding_id == binding.binding_id
+            envelope.target_binding_id == binding.binding_id
             and envelope.frame_hwnd == binding.hwnd
             and envelope.frame_epoch == binding.epoch
             and envelope.frame_scope in {"target_window", "full_desktop"}
@@ -2135,12 +1947,15 @@ class AtomicDesktopAdapter:
     def _rejected(
         envelope: ActorDecisionEnvelope,
         action: str,
+        *,
+        error_kind: str | None = None,
     ) -> ControllerTransition:
         return ControllerTransition(
             outcome=ControllerOutcome.REJECTED,
             action_id=envelope.decision_id,
             action=action,
             input_completed=False,
+            error_kind=error_kind,
         )
 
     @staticmethod
@@ -2167,63 +1982,6 @@ class AtomicDesktopAdapter:
                 None if post_frame is None else post_frame.frame_id
             ),
         )
-
-    def _persist_frame_artifact(
-        self,
-        envelope: ActorDecisionEnvelope,
-        frame: RuntimeFrame,
-        *,
-        role: FrameArtifactRole,
-        capture_timestamp_ns: int,
-    ) -> None:
-        writer = self._frame_artifacts
-        evidence_plane = self._runtime_evidence
-        if writer is None:
-            return
-        if evidence_plane is None or not evidence_plane.durable:
-            raise RuntimeError(
-                "frame artifacts require a durable Runtime evidence plane"
-            )
-        identity = frame.identity.to_dict()
-        result = writer.write_frame(
-            mission_id=envelope.mission_id,
-            run_id=envelope.run_id,
-            decision_id=envelope.decision_id,
-            action_id=envelope.decision_id,
-            role=role.value,
-            frame_identity=identity,
-            image_b64=frame.image_b64,
-            capture_timestamp_ns=capture_timestamp_ns,
-        )
-        evidence_plane.record_frame_artifact(
-            FrameArtifactReference(
-                mission_id=envelope.mission_id,
-                run_id=envelope.run_id,
-                decision_id=envelope.decision_id,
-                action_id=envelope.decision_id,
-                frame_id=result.frame_id,
-                frame_identity=identity,
-                artifact_uri=result.artifact_uri,
-                raw_jpeg_sha256=result.sha256,
-                runtime_frame_image_sha256=frame.image_sha256,
-                capture_timestamp_ns=result.capture_timestamp_ns,
-                role=result.role,
-            )
-        )
-
-    @staticmethod
-    def _seconds_to_ns(value: float) -> int:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError("capture timestamp must be a finite number")
-        seconds = float(value)
-        if not math.isfinite(seconds) or seconds < 0.0:
-            raise ValueError(
-                "capture timestamp must be finite and non-negative"
-            )
-        nanoseconds = int(seconds * 1_000_000_000)
-        if nanoseconds > (2**63 - 1):
-            raise ValueError("capture timestamp exceeds signed-64 range")
-        return nanoseconds
 
     def _receipt_metadata(
         self,
@@ -2268,28 +2026,6 @@ class AtomicDesktopAdapter:
         except Exception:
             pass
 
-    def _record_evidence_receipt(
-        self,
-        receipt: RawActionReceipt,
-        envelope: ActorDecisionEnvelope,
-    ) -> bool:
-        evidence_plane = self._runtime_evidence
-        if evidence_plane is None:
-            return True
-        try:
-            evidence_plane.record_raw_receipt(
-                decision_id=envelope.decision_id,
-                mission_id=envelope.mission_id,
-                run_id=envelope.run_id,
-                actor_envelope_sha256=hashlib.sha256(
-                    envelope.to_json().encode("utf-8")
-                ).hexdigest(),
-                receipt=receipt.to_dict(),
-            )
-        except Exception:
-            return False
-        return True
-
     def _record_receipt(
         self,
         receipt: RawActionReceipt,
@@ -2302,7 +2038,7 @@ class AtomicDesktopAdapter:
             envelope,
             phase=phase,
         )
-        return self._record_evidence_receipt(receipt, envelope)
+        return True
 
 
 __all__ = [

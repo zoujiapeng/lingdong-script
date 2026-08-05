@@ -463,12 +463,42 @@ export function useControlPlane() {
     await refresh();
   }, [currentRun, refresh]);
 
-  const decideGate = useCallback(async (approved: boolean, comment = '') => {
-    const nodeId = String(arpSnapshot?.current_node_id || currentRun?.current_node_id || '');
-    if (!currentRun || !nodeId) throw new Error('当前没有等待处理的人工确认。');
-    await requireClient().gate(currentRun.run_id, nodeId, approved, comment);
-    await refresh();
-  }, [arpSnapshot, currentRun, refresh]);
+  // Global F7/F8 hotkeys arrive from the main process via the preload
+  // bridge.  The run state is read from a ref so the handler never goes
+  // stale between renders.
+  const controlRef = useRef<{
+    currentRun: RunProjection | null;
+    paused: () => void;
+    stop: () => void;
+  } | null>(null);
+  controlRef.current = {
+    currentRun,
+    paused: () => {
+      if (currentRun) {
+        void pauseCurrent();
+      }
+    },
+    stop: () => {
+      if (currentRun) {
+        void cancelCurrent();
+      }
+    },
+  };
+
+  useEffect(() => {
+    const onAgentControl = window.electronAPI?.onAgentControl;
+    if (!onAgentControl) return undefined;
+    const unsubscribe = onAgentControl((action) => {
+      const control = controlRef.current;
+      if (!control?.currentRun) return;
+      if (action === 'toggle_pause') {
+        void control.paused();
+      } else if (action === 'stop') {
+        void control.stop();
+      }
+    });
+    return unsubscribe;
+  }, []);
 
   return {
     connection,
@@ -489,7 +519,6 @@ export function useControlPlane() {
     cancelCurrent,
     pauseCurrent,
     resumeCurrent,
-    decideGate,
     getClient: requireClient,
   };
 }

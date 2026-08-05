@@ -974,25 +974,39 @@ def test_arp_execution_routes_explicit_failure_before_fail_fast():
     def handler(node, context, stop_event):
         return NodeResult(ok=False, branch="fail", error="cached skill diverged")
 
+    def recover_handler(node, context, stop_event):
+        return NodeResult(
+            ok=True,
+            evidence=[{
+                "predicate": "task.complete",
+                "source": "test",
+                "value": True,
+                "verified": True,
+            }],
+        )
+
     graph = _graph(
         [
             ArpNode(id="start", kind=ArpNodeKind.START),
             ArpNode(id="skill", kind=ArpNodeKind.SKILL_REPLAY, config={"script": "known.wps.json"}),
-            ArpNode(id="recover", kind=ArpNodeKind.HUMAN_GATE, config={"approved": True}),
+            ArpNode(id="recover", kind=ArpNodeKind.AGENT_GOAL, config={"goal": "recover"}),
             ArpNode(id="end", kind=ArpNodeKind.END),
         ],
         [
             ArpEdge(id="e1", source="start", target="skill"),
             ArpEdge(id="e2", source="skill", target="end", branch="next"),
             ArpEdge(id="e3", source="skill", target="recover", branch="fail"),
-            ArpEdge(id="e4", source="recover", target="end", branch="approved"),
+            ArpEdge(id="e4", source="recover", target="end", branch="next"),
         ],
         policy=ArpPolicy(fail_fast=True, require_evidence_on_done=True),
     )
 
     result = ArpExecution(
         graph,
-        {ArpNodeKind.SKILL_REPLAY: handler},
+        {
+            ArpNodeKind.SKILL_REPLAY: handler,
+            ArpNodeKind.AGENT_GOAL: recover_handler,
+        },
         run_id="arp-recover-failure",
     ).run()
 
@@ -1135,34 +1149,37 @@ def test_arp_memory_feedback_uses_final_run_outcome(monkeypatch):
     assert feedback == [(('memory-1',), False)]
 
 
-def test_arp_human_gate_can_resume_from_manager():
+def test_arp_pause_resume_from_manager():
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
     from winpilot.orchestrator.runtime import ArpRunManager
 
     graph = _graph(
         [
             ArpNode(id="start", kind=ArpNodeKind.START),
-            ArpNode(id="gate", kind=ArpNodeKind.HUMAN_GATE, timeout_s=2),
+            ArpNode(id="pause", kind=ArpNodeKind.DELAY, config={"duration_ms": 30000}),
             ArpNode(id="end", kind=ArpNodeKind.END),
         ],
         [
-            ArpEdge(id="e1", source="start", target="gate"),
-            ArpEdge(id="e2", source="gate", target="end", branch="approved"),
+            ArpEdge(id="e1", source="start", target="pause"),
+            ArpEdge(id="e2", source="pause", target="end"),
         ],
     )
     manager = ArpRunManager()
     execution = manager.start(graph)
     deadline = time.time() + 2
+    while execution.status.value not in {"running", "paused"} and time.time() < deadline:
+        time.sleep(0.01)
+    assert manager.pause(execution.run_id) is True
+    deadline = time.time() + 2
     while execution.status.value != "paused" and time.time() < deadline:
         time.sleep(0.01)
-
     assert execution.status.value == "paused"
-    assert manager.decide_gate(execution.run_id, "gate", True, "approved in test") is True
+    assert manager.resume(execution.run_id) is True
+    manager.cancel(execution.run_id)
     deadline = time.time() + 2
-    while execution.status.value not in {"done", "failed"} and time.time() < deadline:
+    while execution.status.value not in {"canceled", "failed"} and time.time() < deadline:
         time.sleep(0.01)
-
-    assert execution.status.value == "done"
+    assert execution.status.value == "canceled"
 
 
 def test_run_projection_unifies_agent_metrics_and_done_evidence():
@@ -1281,6 +1298,75 @@ def test_run_projection_freezes_vnext_identity_and_records_mismatch():
         "observed": "legacy",
         "event_type": "arp_run_done",
     }
+
+
+def test_run_projection_tracks_live_actor_narration():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    run_id = "projection-narration"
+    base = {
+        "type": "arp_run_start",
+        "ts": 1.0,
+        "run_id": run_id,
+        "runtime_version": "vnext",
+        "no_legacy_fallback": True,
+        "goal_admission": {
+            "format": "goal-admission/1",
+            "goal": "Narration run",
+            "route": "live_agent",
+            "runtime_version": "vnext",
+            "reason": "single_semantic_agent",
+            "no_legacy_fallback": True,
+        },
+        "graph_id": "graph",
+        "graph_name": "Narration run",
+    }
+    store.on_event(base)
+
+    run = store.get(run_id)
+    assert run["narration"] == ""
+
+    store.on_event({
+        "type": "live_agent_turn",
+        "ts": 2.0,
+        "run_id": run_id,
+        "runtime_version": "vnext",
+        "no_legacy_fallback": True,
+        "turn_index": 0,
+        "status": "action_recorded",
+        "narration": "正在查看桌面，准备打开网易云音乐",
+        "runtime_snapshot": {"runtime_version": "vnext"},
+    })
+    assert store.get(run_id)["narration"] == "正在查看桌面，准备打开网易云音乐"
+
+    # A later turn replaces the previous narration with the current one.
+    store.on_event({
+        "type": "live_agent_turn",
+        "ts": 3.0,
+        "run_id": run_id,
+        "runtime_version": "vnext",
+        "no_legacy_fallback": True,
+        "turn_index": 1,
+        "status": "action_recorded",
+        "narration": "正在输入搜索关键词",
+        "runtime_snapshot": {"runtime_version": "vnext"},
+    })
+    assert store.get(run_id)["narration"] == "正在输入搜索关键词"
+
+    # Blank narration never overwrites the last real progress note.
+    store.on_event({
+        "type": "live_agent_turn",
+        "ts": 4.0,
+        "run_id": run_id,
+        "runtime_version": "vnext",
+        "no_legacy_fallback": True,
+        "turn_index": 2,
+        "status": "action_recorded",
+        "narration": "",
+        "runtime_snapshot": {"runtime_version": "vnext"},
+    })
+    assert store.get(run_id)["narration"] == "正在输入搜索关键词"
 
 
 def test_run_projection_preserves_manual_pause_across_child_events():

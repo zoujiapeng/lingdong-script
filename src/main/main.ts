@@ -1560,6 +1560,16 @@ if (!gotTheLock) {
       }
     });
 
+    // 全局 F7 热键 — 暂停/继续 vNext Agent 任务（前端控制面处理）
+    globalShortcut.register('F7', () => {
+      mainWindow?.webContents.send('agent-control', { action: 'toggle_pause' });
+    });
+
+    // 全局 F8 热键 — 停止 vNext Agent 任务
+    globalShortcut.register('F8', () => {
+      mainWindow?.webContents.send('agent-control', { action: 'stop' });
+    });
+
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });

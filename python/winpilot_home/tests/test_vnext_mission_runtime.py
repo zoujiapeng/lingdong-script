@@ -24,10 +24,6 @@ from winpilot.vnext.capabilities import (
     ToolSpec,
 )
 from winpilot.vnext.evidence import EvidenceRegistry
-from winpilot.vnext.evidence_plane import (
-    RuntimeEvidencePlane,
-    RuntimeEvidenceReportStatus,
-)
 from winpilot.vnext.mission import (
     EvidencePolicy,
     EvidenceRef,
@@ -49,9 +45,6 @@ from winpilot.vnext.runtime import (
     ControllerTransition,
     MissionRuntime,
     MissionRuntimeConfigurationError,
-    MutationPermitAuthority,
-    MutationPermitError,
-    MutationPermitReason,
     RuntimeFrame,
     RuntimeFrameIdentity,
     RuntimeSnapshot,
@@ -465,28 +458,17 @@ class FakeController:
     def __init__(
         self,
         *,
-        authority: MutationPermitAuthority,
         state: FakeState,
         make_post_frame: Callable[
             [ActorDecisionEnvelope],
             tuple[RuntimeFrame, EvidenceRef],
         ],
-        runtime_evidence_plane: RuntimeEvidencePlane | None = None,
     ) -> None:
-        self.authority = authority
         self.state = state
         self.make_post_frame = make_post_frame
-        self.runtime_evidence_plane = runtime_evidence_plane
         self.mode = "completed"
         self.calls = 0
         self.envelopes: list[ActorDecisionEnvelope] = []
-        self.admissions = []
-        self.duplicate_admission = None
-        self.try_duplicate = False
-        self.change_commit_before_admission = False
-        self.lie_completed_when_denied = False
-        self.finish_before_return = False
-        self.on_after_admission: Callable[[], None] | None = None
         self.stop_before_admission: threading.Event | None = None
         self.stop_after_action: threading.Event | None = None
         self.pointer_after_override: PointerLeaseState | None = None
@@ -503,122 +485,9 @@ class FakeController:
         action = envelope.proposal.action
         if self.stop_before_admission is not None:
             self.stop_before_admission.set()
-        changed_frame: RuntimeFrame | None = None
-        changed_evidence: EvidenceRef | None = None
-        if self.change_commit_before_admission:
-            changed_frame, changed_evidence = self.make_post_frame(envelope)
-            self.state.install_frame(changed_frame)
-        admission = self.authority.begin_admission(
-            envelope,
-            current_commit_identity=self.state.snapshot.commit_identity,
-        )
-        self.admissions.append(admission)
-        evidence_plane = self.runtime_evidence_plane
-        if evidence_plane is not None and admission.allowed:
-            assert admission.permit_id is not None
-            commit = self.state.snapshot.commit_identity
-            envelope_sha256 = hashlib.sha256(
-                envelope.to_json().encode("utf-8")
-            ).hexdigest()
-            evidence_plane.record_admission(
-                decision_id=envelope.decision_id,
-                mission_id=envelope.mission_id,
-                run_id=envelope.run_id,
-                frame_identity=commit.frame.to_dict(),
-                target_identity=commit.target.to_dict(),
-                mutation_permit_id=admission.permit_id,
-                controller_route="vnext_atomic_desktop_adapter",
-                actor_envelope_sha256=envelope_sha256,
-            )
-            args = envelope.proposal.model_dump(mode="json")["args"]
-            action = envelope.proposal.action
-            if action in {"click", "double_click"}:
-                physical = {
-                    "kind": "pointer_click",
-                    "x": int(args["image_x"]),
-                    "y": int(args["image_y"]),
-                    "button": "left",
-                    "click_count": (
-                        2 if action == "double_click" else 1
-                    ),
-                }
-            elif action == "scroll":
-                physical = {
-                    "kind": "wheel",
-                    "x": int(args["image_x"]),
-                    "y": int(args["image_y"]),
-                    "signed_wheel_amount": args["amount"],
-                    "event_wheel_delta": args["amount"] * 120,
-                }
-            elif action == "type_text":
-                physical = {
-                    "kind": "type_text",
-                    "text": args["text"],
-                }
-            else:
-                physical = {
-                    "kind": "hotkey",
-                    "modifiers": list(args["keys"][:-1]),
-                    "key": args["keys"][-1],
-                }
-            route = {
-                "click": "raw_device.admitted_physical_click/0",
-                "double_click": "raw_device.admitted_physical_click/0",
-                "scroll": "raw_device.admitted_physical_scroll/0",
-                "type_text": "raw_device.admitted_physical_type_text/0",
-                "hotkey": "raw_device.admitted_physical_hotkey/0",
-            }[action]
-            evidence_plane.reserve_physical_attempt(
-                decision_id=envelope.decision_id,
-                mission_id=envelope.mission_id,
-                run_id=envelope.run_id,
-                actor_envelope_sha256=envelope_sha256,
-                submitted_arguments=args,
-                physical_arguments=physical,
-                raw_device_route=route,
-                mechanism="physical_sendinput",
-            )
-            evidence_plane.record_raw_receipt(
-                decision_id=envelope.decision_id,
-                mission_id=envelope.mission_id,
-                run_id=envelope.run_id,
-                actor_envelope_sha256=envelope_sha256,
-                receipt={
-                    "action": (
-                        "click" if action == "double_click" else action
-                    ),
-                    "outcome": "applied",
-                    "input_completed": True,
-                    "backend_result": {
-                        "input_completed": True,
-                        "facts": {},
-                    },
-                    "error_kind": None,
-                },
-            )
-        if self.on_after_admission is not None:
-            self.on_after_admission()
-        if self.try_duplicate:
-            self.duplicate_admission = self.authority.begin_admission(
-                envelope,
-                current_commit_identity=self.state.snapshot.commit_identity,
-            )
         if self.mode == "raise":
             raise RuntimeError("synthetic controller failure")
-        action = envelope.proposal.action
-        if not admission.allowed and self.lie_completed_when_denied:
-            assert changed_frame is not None
-            assert changed_evidence is not None
-            return ControllerTransition(
-                outcome=ControllerOutcome.COMPLETED,
-                action_id=envelope.decision_id,
-                action=action,
-                input_completed=True,
-                visible_effect="malicious completed claim",
-                post_frame_evidence=(changed_evidence,),
-                post_frame_id=changed_frame.frame_id,
-            )
-        if not admission.allowed or self.mode == "rejected":
+        if self.mode == "rejected":
             return ControllerTransition(
                 outcome=ControllerOutcome.REJECTED,
                 action_id=envelope.decision_id,
@@ -655,8 +524,6 @@ class FakeController:
         if self.pointer_after_override is not None:
             pointer_after = self.pointer_after_override
         self.state.install_frame(frame, pointer=pointer_after)
-        if self.finish_before_return:
-            assert self.authority.finish_admission(envelope.decision_id)
         if self.stop_after_action is not None:
             self.stop_after_action.set()
         return ControllerTransition(
@@ -677,10 +544,8 @@ class Harness:
     actor: FakeActor
     state: FakeState
     controller: FakeController
-    permits: MutationPermitAuthority
     runtime: MissionRuntime
     catalog: ToolCatalog
-    runtime_evidence: RuntimeEvidencePlane | None = None
 
     def make_frame(
         self,
@@ -752,8 +617,6 @@ def _harness(
     catalog: ToolCatalog | None = None,
     bind_target: bool = True,
     profile_provider: bool = False,
-    with_runtime_evidence: bool = False,
-    controller_evidence_mode: str = "same",
 ) -> Harness:
     definition = definition or _definition()
     registry = EvidenceRegistry(definition.mission_id, definition.run_id)
@@ -839,19 +702,6 @@ def _harness(
         target=RuntimeTargetIdentity.from_binding(binding),
     )
     state = FakeState(snapshot)
-    permits = MutationPermitAuthority(
-        definition.mission_id,
-        definition.run_id,
-    )
-    runtime_evidence = (
-        RuntimeEvidencePlane(
-            definition.mission_id,
-            definition.run_id,
-            clock_ns=lambda: 123_456_789,
-        )
-        if with_runtime_evidence
-        else None
-    )
     holder: dict[str, Harness] = {}
 
     def make_post_frame(
@@ -864,20 +714,9 @@ def _harness(
         )
 
     controller = FakeController(
-        authority=permits,
         state=state,
         make_post_frame=make_post_frame,
-        runtime_evidence_plane=(
-            RuntimeEvidencePlane(
-                definition.mission_id,
-                definition.run_id,
-            )
-            if controller_evidence_mode == "different"
-            else runtime_evidence
-        ),
     )
-    if controller_evidence_mode == "absent":
-        del controller.runtime_evidence_plane
     profile = ExecutionPolicy(
         provider_availability=(
             ("obligation_verifier",) if profile_provider else ()
@@ -897,8 +736,6 @@ def _harness(
         state=state,
         controller=controller,
         evidence_registry=registry,
-        mutation_permits=permits,
-        runtime_evidence_plane=runtime_evidence,
     )
     harness = Harness(
         reducer=reducer,
@@ -906,10 +743,8 @@ def _harness(
         actor=actor,
         state=state,
         controller=controller,
-        permits=permits,
         runtime=runtime,
         catalog=catalog,
-        runtime_evidence=runtime_evidence,
     )
     holder["harness"] = harness
     return harness
@@ -926,11 +761,6 @@ def test_minimal_runtime_executes_each_approved_action_once(action: str) -> None
 
     assert result.status is RuntimeStatus.ACTION_RECORDED
     assert harness.controller.calls == 1
-    assert len(harness.controller.admissions) == 1
-    assert harness.controller.admissions[0].allowed is True
-    assert harness.permits.pending_count == 0
-    assert harness.permits.active_count == 0
-    assert harness.permits.consumed_count == 1
     assert [event.kind for event in harness.reducer.events] == [
         "target_bound",
         "transition_recorded",
@@ -1019,7 +849,6 @@ def test_actor_can_verify_already_satisfied_goal_without_mutation() -> None:
     )
     assert harness.actor.calls == 1
     assert harness.controller.calls == 0
-    assert harness.permits.consumed_count == 0
     assert harness.actor.turns[0].frame.authoritative is True
     assert harness.actor.turns[0].frame.fresh is True
     assert [event.kind for event in harness.reducer.events] == [
@@ -1108,7 +937,6 @@ def test_ephemeral_task_state_crosses_turns_but_not_durable_evidence() -> None:
             _action("scroll"),
             scratchpad=f"All visible groups including {sentinel} summarized.",
         ),
-        with_runtime_evidence=True,
     )
 
     first = harness.runtime.run_one_turn(turn_index=0)
@@ -1121,18 +949,49 @@ def test_ephemeral_task_state_crosses_turns_but_not_durable_evidence() -> None:
     assert state.scratchpad == (
         f"All visible groups including {sentinel} summarized."
     )
-    plane = harness.runtime_evidence
-    assert plane is not None
     durable_wire = {
         "events": [event.to_dict() for event in harness.reducer.events],
         "projection": harness.reducer.projection.to_dict(),
-        "evidence": plane.build_report().to_dict(),
+        "evidence": [
+            reference.to_dict() for reference in harness.registry.snapshot()
+        ],
     }
     assert sentinel not in json.dumps(durable_wire, ensure_ascii=False)
     assert "task_state_update" not in json.dumps(
         durable_wire,
         ensure_ascii=False,
     )
+
+
+def test_runtime_keeps_the_actor_latest_narration() -> None:
+    """The Actor's own words survive as the run's honest progress note."""
+    harness = _harness(
+        _task_decision(
+            _action("click"),
+            scratchpad=None,
+        ).__class__(
+            proposal=_action("click"),
+            task_state_update=ActorTaskStateUpdate.from_dict(
+                {"scratchpad": None}
+            ),
+            narration="画板已打开，正在画猫的轮廓。",
+        ),
+        _task_decision(
+            _action("drag"),
+            scratchpad=None,
+        ).__class__(
+            proposal=_action("drag"),
+            task_state_update=ActorTaskStateUpdate.from_dict(
+                {"scratchpad": None}
+            ),
+            narration="轮廓画好了，现在补上耳朵和胡须。",
+        ),
+    )
+
+    harness.runtime.run_one_turn(turn_index=0)
+    assert harness.runtime.latest_narration == "画板已打开，正在画猫的轮廓。"
+    harness.runtime.run_one_turn(turn_index=1)
+    assert harness.runtime.latest_narration == "轮廓画好了，现在补上耳朵和胡须。"
 
 
 def test_stale_or_invalid_actor_decision_does_not_commit_task_state() -> None:
@@ -1170,140 +1029,10 @@ def test_pre_action_current_state_failure_is_discarded_before_input() -> None:
     assert harness.controller.calls == 0
 
 
-def test_runtime_records_reasoning_free_actor_decision_before_action() -> None:
-    harness = _harness(
-        _action("click"),
-        with_runtime_evidence=True,
-    )
-    plane = harness.runtime_evidence
-    assert plane is not None
-
-    result = harness.runtime.run_one_turn(turn_index=0)
-
-    assert result.status is RuntimeStatus.ACTION_RECORDED
-    assert harness.controller.calls == 1
-    assert len(plane.decision_records) == 1
-    record = plane.decision_records[0]
-    assert record.decision_id == result.decision_id
-    assert record.action == "click"
-    assert set(record.to_dict()) == {
-        "format",
-        "decision_id",
-        "mission_id",
-        "run_id",
-        "mission_revision",
-        "obligation_id",
-        "turn_index",
-        "proposal_kind",
-        "action",
-        "canonical_arguments",
-        "canonical_arguments_sha256",
-        "actor_envelope",
-        "actor_envelope_sha256",
-        "tool_schema",
-        "tool_schema_sha256",
-        "broker_projection",
-        "broker_projection_sha256",
-    }
-    envelope_wire = harness.controller.envelopes[0].to_dict()
-    record_wire = record.to_dict()
-    assert record_wire["actor_envelope"] == envelope_wire
-    assert (
-        record_wire["canonical_arguments"]
-        == envelope_wire["proposal"]["args"]
-    )
-    report = plane.build_report()
-    assert report.status is RuntimeEvidenceReportStatus.INCOMPLETE
-    assert "durable_journal" in report.missing_evidence
-    assert (
-        f"{record.decision_id}_before_frame_artifact"
-        in report.missing_evidence
-    )
-
-
-def test_transition_evidence_failure_after_input_blocks_without_replay(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    harness = _harness(
-        _action("click"),
-        with_runtime_evidence=True,
-    )
-    plane = harness.runtime_evidence
-    assert plane is not None
-
-    def fail_transition(**_kwargs: Any) -> None:
-        raise RuntimeError("synthetic durable transition failure")
-
-    monkeypatch.setattr(
-        plane,
-        "record_controller_transition",
-        fail_transition,
-    )
-
-    first = harness.runtime.run_one_turn(turn_index=0)
-    second = harness.runtime.run_one_turn(turn_index=1)
-
-    assert first.status is RuntimeStatus.BLOCKED
-    assert "could not be reconciled" in first.detail
-    assert harness.controller.calls == 1
-    assert harness.permits.consumed_count == 1
-    assert all(
-        event.kind != "transition_recorded"
-        for event in harness.reducer.events
-    )
-    assert second.status is not RuntimeStatus.ACTION_RECORDED
-    assert harness.controller.calls == 1
-
-
-def test_rejection_evidence_failure_before_input_recovers_with_fresh_observation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    harness = _harness(
-        _action("click"),
-        with_runtime_evidence=True,
-    )
-    harness.controller.mode = "rejected"
-    plane = harness.runtime_evidence
-    assert plane is not None
-
-    def fail_transition(**_kwargs: Any) -> None:
-        raise RuntimeError("synthetic durable rejection failure")
-
-    monkeypatch.setattr(
-        plane,
-        "record_controller_transition",
-        fail_transition,
-    )
-
-    result = harness.runtime.run_one_turn(turn_index=0)
-
-    assert result.status is RuntimeStatus.STALE_DISCARDED
-    assert "input did not execute" in result.detail
-    assert "diagnostic evidence was unavailable" in result.detail
-    assert harness.controller.calls == 1
-    assert harness.permits.consumed_count == 1
-
-
-@pytest.mark.parametrize("mode", ("different", "absent"))
-def test_runtime_requires_one_shared_evidence_plane_owner(
-    mode: str,
-) -> None:
-    with pytest.raises(
-        TypeError,
-        match="must share one evidence plane",
-    ):
-        _harness(
-            _action("click"),
-            with_runtime_evidence=True,
-            controller_evidence_mode=mode,
-        )
-
-
 def test_previous_action_view_keeps_one_bounded_completed_intent() -> None:
     harness = _harness(
         _action("click"),
         _blocked(),
-        with_runtime_evidence=True,
     )
     assert harness.runtime.run_one_turn(turn_index=0).status is RuntimeStatus.ACTION_RECORDED
 
@@ -1444,7 +1173,6 @@ def test_repeated_actions_are_executed_without_task_level_suppression() -> None:
         _action("hotkey"),
         _action("type_text"),
         _action("type_text"),
-        with_runtime_evidence=True,
     )
 
     statuses = tuple(
@@ -1457,9 +1185,6 @@ def test_repeated_actions_are_executed_without_task_level_suppression() -> None:
         for status in statuses
     )
     assert harness.controller.calls == 6
-    assert harness.permits.consumed_count == 6
-    assert harness.runtime_evidence is not None
-    assert len(harness.runtime_evidence.physical_attempt_records) == 6
 
 
 def test_actor_result_is_discarded_when_mission_revision_changes() -> None:
@@ -1475,7 +1200,6 @@ def test_actor_result_is_discarded_when_mission_revision_changes() -> None:
 
     assert result.status is RuntimeStatus.STALE_DISCARDED
     assert harness.controller.calls == 0
-    assert harness.permits.consumed_count == 0
 
 
 def test_untrusted_pre_frame_is_rejected_before_actor_or_controller() -> None:
@@ -1497,39 +1221,8 @@ def test_untrusted_pre_frame_is_rejected_before_actor_or_controller() -> None:
     assert harness.controller.calls == 0
 
 
-def test_duplicate_controller_admission_is_denied_without_second_input() -> None:
-    harness = _harness(_action())
-    harness.controller.try_duplicate = True
-
-    result = harness.runtime.run_one_turn(turn_index=0)
-
-    assert result.status is RuntimeStatus.ACTION_RECORDED
-    assert harness.controller.calls == 1
-    assert harness.controller.duplicate_admission is not None
-    assert harness.controller.duplicate_admission.allowed is False
-    assert (
-        harness.controller.duplicate_admission.reason
-        is MutationPermitReason.ALREADY_CONSUMED
-    )
 
 
-def test_permit_issue_rejects_turn_index_not_bound_by_actor_envelope() -> None:
-    harness = _harness(_action())
-    harness.controller.mode = "rejected"
-    assert (
-        harness.runtime.run_one_turn(turn_index=0).status
-        is RuntimeStatus.STALE_DISCARDED
-    )
-    envelope = harness.controller.envelopes[0]
-    authority = MutationPermitAuthority(MISSION_ID, RUN_ID)
-
-    with pytest.raises(MutationPermitError, match="disagree"):
-        authority.issue(
-            envelope,
-            turn_index=envelope.turn_index + 1,
-            commit_identity=harness.state.snapshot.commit_identity,
-            still_current=lambda: True,
-        )
 
 
 @pytest.mark.parametrize("mode", ("unknown", "raise"))
@@ -1578,62 +1271,6 @@ def test_applied_input_without_post_frame_continues_with_fresh_observation() -> 
     assert previous.action == "click"
     assert previous.input_completed is True
     assert previous.local_intent == "perform one click"
-
-
-def test_unknown_outcome_closes_mutation_after_concurrent_revision() -> None:
-    harness = _harness(_action(), _action())
-    harness.controller.mode = "unknown"
-    binding = harness.reducer.projection.target_binding
-    assert binding is not None
-    harness.controller.on_after_admission = lambda: harness.reducer.apply(
-        harness.reducer.event(
-            "target_bound",
-            payload={"target_binding": binding.to_dict()},
-            evidence_refs=("e-target",),
-        )
-    )
-
-    first = harness.runtime.run_one_turn(turn_index=0)
-    second = harness.runtime.run_one_turn(turn_index=1)
-
-    assert first.status is RuntimeStatus.BLOCKED
-    assert second.status is RuntimeStatus.BLOCKED
-    assert harness.controller.calls == 1
-    assert harness.permits.closed is True
-    assert [event.kind for event in harness.reducer.events] == [
-        "target_bound",
-        "target_bound",
-        "obligation_blocked",
-    ]
-
-
-@pytest.mark.parametrize(
-    "configure",
-    (
-        lambda controller: (
-            setattr(controller, "change_commit_before_admission", True),
-            setattr(controller, "lie_completed_when_denied", True),
-        ),
-        lambda controller: setattr(
-            controller,
-            "finish_before_return",
-            True,
-        ),
-    ),
-)
-def test_completed_claim_without_closed_active_permit_fails_closed(
-    configure: Callable[[FakeController], Any],
-) -> None:
-    harness = _harness(_action())
-    configure(harness.controller)
-
-    result = harness.runtime.run_one_turn(turn_index=0)
-
-    assert result.status is RuntimeStatus.BLOCKED
-    assert harness.controller.calls == 1
-    assert harness.reducer.events[-1].kind == "obligation_blocked"
-    assert harness.permits.pending_count == 0
-    assert harness.permits.active_count == 0
 
 
 def test_rejected_controller_proves_no_input_and_is_not_replayed() -> None:
@@ -1748,7 +1385,6 @@ def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
 
     admission = _harness(
         _action(),
-        with_runtime_evidence=True,
     )
     admission_stop = threading.Event()
     admission.controller.stop_before_admission = admission_stop
@@ -1759,16 +1395,12 @@ def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:
 
     assert admission_result.status is RuntimeStatus.CANCELED
     assert admission.controller.calls == 1
-    assert admission.controller.admissions[0].allowed is False
     assert admission.reducer.events[-1].kind == "mission_canceled"
-    assert all(
-        event.kind != "transition_recorded"
-        for event in admission.reducer.events
-    )
-    admission_plane = admission.runtime_evidence
-    assert admission_plane is not None
-    assert admission_plane.physical_attempt_records == ()
-    assert admission_plane.action_bindings == ()
+    assert [event.kind for event in admission.reducer.events] == [
+        "target_bound",
+        "transition_recorded",
+        "mission_canceled",
+    ]
 
     after = _harness(_action())
     after_stop = threading.Event()
