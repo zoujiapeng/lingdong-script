@@ -2273,3 +2273,48 @@ def test_capture_screen_accepts_omitted_optional_window_field() -> None:
     assert decision.proposal["action"] == "type_text"
     assert runner.calls == [{"path": r"C:\tmp\shot.png", "window": False}]
     assert len(clients[0].requests) == 2
+
+
+def test_read_window_text_ignores_extra_arguments() -> None:
+    """A no-arg read tool must not reject the model for passing extra keys."""
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="read_window_text",
+                arguments={
+                    "unexpected_field": 1,
+                    "task_state_update": {"scratchpad": "checking the window"},
+                },
+            ),
+            _tool_response(
+                name="click",
+                arguments={
+                    "image_x": 400,
+                    "image_y": 300,
+                },
+            ),
+        ]
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        window_text_reader=lambda _turn: {
+            "format": "window-text/1",
+            "window_hwnd": 1,
+            "element_count": 0,
+            "text": "",
+        },
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal is not None
+    assert decision.proposal["kind"] == "desktop_action"
+    assert decision.proposal["action"] == "click"
+    assert len(clients[0].requests) == 2
