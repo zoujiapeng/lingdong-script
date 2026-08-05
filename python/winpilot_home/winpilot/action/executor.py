@@ -52,6 +52,7 @@ from .raw_device import (
 )
 
 user32 = ctypes.windll.user32
+imm32 = ctypes.windll.imm32
 
 # ToolSession installs this callback only around a visible action. Sampling
 # after mouse-down makes short-lived pressed states part of action evidence.
@@ -234,40 +235,97 @@ _WM_INPUTLANGCHANGEREQUEST = 0x0050
 _ENGLISH_US_LAYOUT = 0x04090409
 
 
-def _english_layout_switch(hwnd: int | None) -> tuple[int | None, int | None] | None:
-    """Return (loaded_layout, original_layout) when hwnd runs a non-English layout.
+def _english_layout_switch(
+    hwnd: int | None,
+) -> tuple[tuple[int | None, bool] | None, bool]:
+    """Prepare a VK-safe keyboard state for the foreground window thread.
 
-    SendInput VK transitions are interpreted through the foreground window
-    thread's keyboard layout.  Under an active Chinese/Japanese/Korean IME the
-    digit and punctuation scan codes are consumed as IME candidate keys, so
-    exact ASCII text like ``RD-60516943-E`` silently loses characters
-    (``0 5 1`` -> gone) while KEYEVENTF_UNICODE keeps working.  The fix used
-    by the strict type_text path is to switch the target window thread to the
-    US English layout for the duration of the VK input and restore the
-    original layout afterwards.  Returns None when no switch is needed or the
-    target is unavailable.
+    Returns ``(restore, safe)``.  ``safe`` is False only when the target is
+    unavailable and the caller must fall back to the UNICODE path.  When
+    ``restore`` is not None it carries ``(original_layout, ime_was_open)`` to
+    restore afterwards.
+
+    SendInput VK transitions are interpreted by the FOREGROUND window thread
+    (not the bound target), so layout and IME state are sampled and fixed on
+    the foreground window.  Two independent blind spots corrupt exact ASCII
+    input on Chinese/Japanese/Korean systems:
+
+    - the layout is 0x0804 (Chinese): digit/punctuation scan codes are
+      consumed as IME candidate keys (``0 5 1`` -> gone);
+    - the layout is 0x0409 but a Chinese IME is open: the IME composition
+      buffer still intercepts VK input and can reorder plain ASCII
+      (``gui`` -> ``giu``) because ``GetKeyboardLayout`` cannot see IME
+      activation.
+
+    The fix switches the foreground thread to the US English layout when
+    needed (waiting for the switch to actually apply), closes the IME for the
+    duration of the VK input, then restores both.
     """
     if not hwnd:
-        return None
-    tid = user32.GetWindowThreadProcessId(hwnd, None)
+        return None, False
+    foreground = int(user32.GetForegroundWindow() or 0)
+    if not foreground:
+        return None, False
+    tid = user32.GetWindowThreadProcessId(foreground, None)
     if not tid:
-        return None
+        return None, False
     original = user32.GetKeyboardLayout(tid)
-    if original == _ENGLISH_US_LAYOUT or (original & 0xFFFF) == 0x0409:
-        return None
     english = user32.LoadKeyboardLayoutW("00000409", 0x00000100)  # KLF_ACTIVATE
     if not english:
-        return None
-    user32.PostMessageW(hwnd, _WM_INPUTLANGCHANGEREQUEST, 0, english)
-    # The switch is async; give the target thread a moment to apply it.
-    time.sleep(0.03)
-    return english, original
+        return None, False
+
+    ime_context = imm32.ImmGetContext(foreground)
+    ime_open = False
+    if ime_context:
+        ime_open = bool(imm32.ImmGetOpenStatus(ime_context))
+
+    layout_is_english = (
+        original == _ENGLISH_US_LAYOUT or (original & 0xFFFF) == 0x0409
+    )
+    if layout_is_english and not ime_open:
+        if ime_context:
+            imm32.ImmReleaseContext(foreground, ime_context)
+        return None, True
+
+    changed = False
+    if not layout_is_english:
+        user32.PostMessageW(foreground, _WM_INPUTLANGCHANGEREQUEST, 0, english)
+        # The switch is async; wait until the foreground thread actually
+        # applies it so the first typed character is not interpreted through
+        # the old layout.
+        deadline = time.monotonic() + 0.15
+        while time.monotonic() < deadline:
+            if int(user32.GetKeyboardLayout(tid) or 0) == int(english):
+                break
+            time.sleep(0.01)
+        changed = True
+    if ime_open and ime_context:
+        imm32.ImmSetOpenStatus(ime_context, False)
+        changed = True
+    if ime_context:
+        imm32.ImmReleaseContext(foreground, ime_context)
+    if not changed:
+        return None, True
+    return (original, ime_open), True
 
 
-def _restore_layout_switch(hwnd: int | None, original: int | None) -> None:
-    if not hwnd or not original:
+def _restore_layout_switch(
+    hwnd: int | None,
+    restore: tuple[int | None, bool] | None,
+) -> None:
+    if not hwnd or not restore:
         return
-    user32.PostMessageW(hwnd, _WM_INPUTLANGCHANGEREQUEST, 0, original)
+    foreground = int(user32.GetForegroundWindow() or 0)
+    if not foreground:
+        return
+    original, ime_was_open = restore
+    if original:
+        user32.PostMessageW(foreground, _WM_INPUTLANGCHANGEREQUEST, 0, original)
+    if ime_was_open:
+        context = imm32.ImmGetContext(foreground)
+        if context:
+            imm32.ImmSetOpenStatus(context, True)
+            imm32.ImmReleaseContext(foreground, context)
     time.sleep(0.02)
 
 
@@ -1844,12 +1902,15 @@ def _execute_physical_type_text(
 
     requested = len(text)
     completed = 0
+    layout_switch: tuple[int | None, bool] | None = None
     via_vk = _should_strict_type_via_vk(text)
-    layout_switch = (
-        _english_layout_switch(hwnd)
-        if via_vk and not legacy_semantics
-        else None
-    )
+    if via_vk and not legacy_semantics:
+        layout_switch, keyboard_safe = _english_layout_switch(hwnd)
+        if not keyboard_safe:
+            # The target thread is unavailable, so VK transitions cannot be
+            # made safe against the active IME; use the UNICODE path, which
+            # bypasses IME composition entirely.
+            via_vk = False
     try:
         for char in text:
             decision = _keyboard_guard_decision(final_guard)
@@ -1889,8 +1950,8 @@ def _execute_physical_type_text(
                 )
             time.sleep(max(float(interval_s), 0.03) if via_vk else float(interval_s))
     finally:
-        if layout_switch is not None:
-            _restore_layout_switch(hwnd, layout_switch[1])
+        if layout_switch is not None and layout_switch[0] is not None:
+            _restore_layout_switch(hwnd, layout_switch[0])
 
     result = _keyboard_result(
         True,

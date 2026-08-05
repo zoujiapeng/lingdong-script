@@ -1322,6 +1322,16 @@ def _keyboard_executor_mocks(monkeypatch):
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
+        executor.user32,
+        "GetForegroundWindow",
+        lambda: 41,
+    )
+    monkeypatch.setattr(
+        executor.user32,
+        "GetKeyboardLayout",
+        lambda _tid: 0x04090409,
+    )
+    monkeypatch.setattr(
         executor,
         "_key_input",
         lambda **kwargs: ("key", tuple(sorted(kwargs.items()))),
@@ -1432,16 +1442,18 @@ def test_ascii_text_switches_english_layout_away_from_ime(
         calls.append((hwnd, msg, lparam))
         return 1
 
+    monkeypatch.setattr(ex.user32, "GetForegroundWindow", lambda: 41)
     monkeypatch.setattr(ex.user32, "GetWindowThreadProcessId", fake_thread_layout)
     monkeypatch.setattr(ex.user32, "GetKeyboardLayout", fake_layout)
     monkeypatch.setattr(ex.user32, "LoadKeyboardLayoutW", fake_load)
     monkeypatch.setattr(ex.user32, "PostMessageW", fake_post)
 
-    switch = ex._english_layout_switch(41)
-    assert switch == (english, chinese)
+    switch, safe = ex._english_layout_switch(41)
+    assert safe is True
+    assert switch == (chinese, False)
     assert calls == [(41, ex._WM_INPUTLANGCHANGEREQUEST, english)]
 
-    ex._restore_layout_switch(41, chinese)
+    ex._restore_layout_switch(41, (chinese, False))
     assert calls[-1] == (41, ex._WM_INPUTLANGCHANGEREQUEST, chinese)
 
 
@@ -1458,11 +1470,65 @@ def test_ascii_text_skips_layout_switch_on_english_layout(
     def fake_layout(tid: int) -> int:
         return english
 
+    monkeypatch.setattr(ex.user32, "GetForegroundWindow", lambda: 41)
     monkeypatch.setattr(ex.user32, "GetWindowThreadProcessId", fake_thread_layout)
     monkeypatch.setattr(ex.user32, "GetKeyboardLayout", fake_layout)
 
-    assert ex._english_layout_switch(41) is None
-    assert ex._english_layout_switch(0) is None
+    # English layout with no open IME: nothing to do, VK is safe.
+    assert ex._english_layout_switch(41) == (None, True)
+    # Unavailable target: VK cannot be made safe, caller falls back to UNICODE.
+    assert ex._english_layout_switch(0) == (None, False)
+
+
+def test_english_layout_with_open_ime_still_closes_ime_for_vk(
+    monkeypatch,
+) -> None:
+    """GetKeyboardLayout cannot see IME activation: an open Chinese IME
+    corrupts plain ASCII VK input even on a 0x0409 layout."""
+    import winpilot.action.executor as ex
+
+    english = 0x04090409
+    context = object()
+    calls: list[tuple[int, int, int]] = []
+    ime_calls: list[str] = []
+
+    def fake_thread_layout(hwnd: int, _pid: int | None) -> int:
+        return english
+
+    def fake_layout(tid: int) -> int:
+        return english
+
+    def fake_get_context(hwnd: int):
+        ime_calls.append(("get", hwnd))
+        return context
+
+    def fake_open_status(ctx) -> int:
+        ime_calls.append(("status",))
+        return 1
+
+    def fake_set_open_status(ctx, opened: int) -> int:
+        ime_calls.append(("set", opened))
+        return 1
+
+    def fake_release(hwnd: int, ctx) -> int:
+        ime_calls.append(("release", hwnd))
+        return 1
+
+    monkeypatch.setattr(ex.user32, "GetForegroundWindow", lambda: 41)
+    monkeypatch.setattr(ex.user32, "GetWindowThreadProcessId", fake_thread_layout)
+    monkeypatch.setattr(ex.user32, "GetKeyboardLayout", fake_layout)
+    monkeypatch.setattr(ex.imm32, "ImmGetContext", fake_get_context)
+    monkeypatch.setattr(ex.imm32, "ImmGetOpenStatus", fake_open_status)
+    monkeypatch.setattr(ex.imm32, "ImmSetOpenStatus", fake_set_open_status)
+    monkeypatch.setattr(ex.imm32, "ImmReleaseContext", fake_release)
+
+    switch, safe = ex._english_layout_switch(41)
+    assert safe is True
+    assert switch == (english, True)
+    assert ("set", 0) in ime_calls  # IME closed for the VK input duration
+
+    ex._restore_layout_switch(41, (english, True))
+    assert ("set", 1) in ime_calls  # IME reopened afterwards
 
 
 @pytest.mark.parametrize("backend_name,argument", [
