@@ -207,7 +207,56 @@ def run(command: str, shell: str = "powershell",
         "exit_code": proc.returncode,
         "stdout": stdout,
         "stderr": stderr,
+        "foreground_window": _foreground_window_fact(),
     }
+
+
+def _foreground_window_fact() -> dict[str, Any]:
+    """Return the current foreground window as a bounded fact.
+
+    Shell commands that start GUI apps (``Start-Process notepad.exe``) or
+    inject keys (``SendKeys``) act on whatever window owns the foreground,
+    which the model cannot see during the initial text turn.  Reporting the
+    affected window keeps the model from mistaking a window it never looked
+    at for the task target.
+    """
+    try:
+        import ctypes
+
+        hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        if not hwnd:
+            return {"hwnd": 0, "available": False}
+        title = ""
+        class_name = ""
+        try:
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            buffer = ctypes.create_unicode_buffer(max(length, 0) + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buffer, len(buffer))
+            title = buffer.value[:200]
+        except Exception:
+            pass
+        try:
+            class_buffer = ctypes.create_unicode_buffer(64)
+            ctypes.windll.user32.GetClassNameW(hwnd, class_buffer, 64)
+            class_name = class_buffer.value
+        except Exception:
+            pass
+        process_id = ctypes.c_ulong(0)
+        try:
+            ctypes.windll.user32.GetWindowThreadProcessId(
+                hwnd, ctypes.byref(process_id)
+            )
+        except Exception:
+            pass
+        return {
+            "hwnd": int(hwnd),
+            "title": title,
+            "class_name": class_name,
+            "process_id": int(process_id.value or 0),
+            "available": True,
+        }
+    except Exception:
+        return {"hwnd": 0, "available": False}
 
 
 def _sweep_old(directory, max_age_s: int = 7 * 24 * 3600, keep: int = 200) -> None:

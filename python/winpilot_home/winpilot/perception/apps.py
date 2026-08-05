@@ -504,14 +504,18 @@ def launch_target(entry: dict) -> dict:
 
 
 def _activate_existing_instance(exe_path: str) -> int | None:
-    """Find a visible top-level window owned by ``exe_path`` and activate it.
+    """Find a top-level window owned by ``exe_path`` and activate it.
 
     Generic process-to-window activation: enumerate top-level windows, match
     their owning process executable against the resolved path, pick the first
-    visible non-minimized window, and bring it to the foreground.  Returns the
-    activated hwnd, or None when no matching visible window exists.  This is
-    window activation, not an application adapter: it works for any
-    application that already runs.
+    usable window, and bring it to the foreground.  Visible non-minimized
+    windows are preferred; when none exists (the app is closed to the system
+    tray / notification area, or minimized), a hidden or minimized window of
+    the same process is restored and activated instead, so "the app is
+    already open" never silently starts a second instance.  Returns the
+    activated hwnd, or None when no matching window exists.  This is window
+    activation, not an application adapter: it works for any application
+    that already runs.
     """
     import ctypes
 
@@ -523,32 +527,67 @@ def _activate_existing_instance(exe_path: str) -> int | None:
         norm = os.path.normcase(os.path.normpath(exe_path))
     except Exception:
         return None
-    found: list[int] = []
+    found_visible: list[int] = []
+    found_hidden: list[int] = []
     try:
         win32gui.EnumWindows(
             lambda hwnd, _unused: (
-                found.append(hwnd)
-                if win32gui.IsWindowVisible(hwnd)
-                and not win32gui.IsIconic(hwnd)
-                and win32gui.GetWindowText(hwnd)
-                and (
-                    os.path.normcase(
-                        os.path.normpath(
-                            _process_exe(win32process.GetWindowThreadProcessId(hwnd)[1])
-                        )
-                    )
-                    == norm
+                _collect_existing_window(
+                    hwnd,
+                    norm=norm,
+                    visible=found_visible,
+                    hidden=found_hidden,
                 )
-                else None
             )
             or True,
             None,
         )
     except Exception:
         return None
-    if not found:
+    hwnd = found_visible[0] if found_visible else None
+    if hwnd is None and found_hidden:
+        # Restore a tray-hidden/minimized window before activating it.
+        hwnd = found_hidden[0]
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        except Exception:
+            pass
+    if hwnd is None:
         return None
-    return _activate_window(found[0])
+    return _activate_window(hwnd)
+
+
+def _collect_existing_window(
+    hwnd: int,
+    *,
+    norm: str,
+    visible: list[int],
+    hidden: list[int],
+) -> bool:
+    """Bucket one top-level window by visibility for a resolved exe path."""
+    import win32gui
+    import win32process
+
+    try:
+        is_visible = bool(
+            win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd)
+        )
+    except Exception:
+        return True
+    try:
+        owner_pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+        owner_exe = os.path.normcase(
+            os.path.normpath(_process_exe(owner_pid))
+        )
+    except Exception:
+        return True
+    if owner_exe != norm:
+        return True
+    if is_visible:
+        visible.append(hwnd)
+    else:
+        hidden.append(hwnd)
+    return True
 
 
 def _activate_window(hwnd: int) -> int | None:
@@ -618,15 +657,17 @@ def _activate_window(hwnd: int) -> int | None:
 
 
 def _activate_existing_by_title(display_name: str) -> int | None:
-    """Activate a visible window whose title contains the display name.
+    """Activate a window whose title contains the display name.
 
     Generic title-based activation for display names whose executable cannot
     be matched (Store/UWP apps, shortcuts without a resolvable target).  The
     match is a plain substring test, so "QQ" activates the open QQ window
-    instead of starting a second instance.  Browser windows are excluded:
-    a tab title such as "网易云音乐 - Google Chrome" is a web page, not an
-    installed application window, and activating it would hijack the model
-    into the browser instead of the real app.
+    instead of starting a second instance.  Visible windows are preferred; a
+    tray-hidden/minimized window is restored and activated as a fallback.
+    Browser windows are excluded: a tab title such as "网易云音乐 - Google
+    Chrome" is a web page, not an installed application window, and
+    activating it would hijack the model into the browser instead of the
+    real app.
     """
     import ctypes
 
@@ -637,25 +678,63 @@ def _activate_existing_by_title(display_name: str) -> int | None:
     needle = str(display_name or "").strip()
     if not needle:
         return None
-    found: list[int] = []
+    found_visible: list[int] = []
+    found_hidden: list[int] = []
     try:
         win32gui.EnumWindows(
             lambda hwnd, _unused: (
-                found.append(hwnd)
-                if win32gui.IsWindowVisible(hwnd)
-                and not win32gui.IsIconic(hwnd)
-                and needle in win32gui.GetWindowText(hwnd)
-                and _window_process_name(hwnd) not in _BROWSER_PROCESS_NAMES
-                else None
+                _collect_existing_by_title(
+                    hwnd,
+                    needle=needle,
+                    visible=found_visible,
+                    hidden=found_hidden,
+                )
             )
             or True,
             None,
         )
     except Exception:
         return None
-    if not found:
+    hwnd = found_visible[0] if found_visible else None
+    if hwnd is None and found_hidden:
+        hwnd = found_hidden[0]
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        except Exception:
+            pass
+    if hwnd is None:
         return None
-    return _activate_window(found[0])
+    return _activate_window(hwnd)
+
+
+def _collect_existing_by_title(
+    hwnd: int,
+    *,
+    needle: str,
+    visible: list[int],
+    hidden: list[int],
+) -> bool:
+    """Bucket one top-level window by visibility for a title match."""
+    import win32gui
+
+    try:
+        is_visible = bool(
+            win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd)
+        )
+    except Exception:
+        return True
+    try:
+        if needle not in win32gui.GetWindowText(hwnd):
+            return True
+        if _window_process_name(hwnd) in _BROWSER_PROCESS_NAMES:
+            return True
+    except Exception:
+        return True
+    if is_visible:
+        visible.append(hwnd)
+    else:
+        hidden.append(hwnd)
+    return True
 
 
 def _window_process_name(hwnd: int) -> str:
@@ -670,11 +749,13 @@ def _window_process_name(hwnd: int) -> str:
 
 
 def _activate_existing_by_process_name(process_name: str) -> int | None:
-    """Activate a visible window owned by a running process file name.
+    """Activate a window owned by a running process file name.
 
     Process-name activation is stronger than title matching: it finds the
     real application window even when its title is a document/song/chat name
     ("江南 - 林俊杰") that never contains the display name ("网易云音乐").
+    Visible windows are preferred; a tray-hidden/minimized window of the
+    same process is restored and activated as a fallback.
     """
     import ctypes
 
@@ -686,25 +767,62 @@ def _activate_existing_by_process_name(process_name: str) -> int | None:
         return None
     if os.path.basename(needle) != needle:
         needle = os.path.basename(needle)
-    found: list[int] = []
+    found_visible: list[int] = []
+    found_hidden: list[int] = []
     try:
         win32gui.EnumWindows(
             lambda hwnd, _unused: (
-                found.append(hwnd)
-                if win32gui.IsWindowVisible(hwnd)
-                and not win32gui.IsIconic(hwnd)
-                and win32gui.GetWindowText(hwnd)
-                and _window_process_name(hwnd) == needle
-                else None
+                _collect_existing_by_process(
+                    hwnd,
+                    needle=needle,
+                    visible=found_visible,
+                    hidden=found_hidden,
+                )
             )
             or True,
             None,
         )
     except Exception:
         return None
-    if not found:
+    hwnd = found_visible[0] if found_visible else None
+    if hwnd is None and found_hidden:
+        hwnd = found_hidden[0]
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        except Exception:
+            pass
+    if hwnd is None:
         return None
-    return _activate_window(found[0])
+    return _activate_window(hwnd)
+
+
+def _collect_existing_by_process(
+    hwnd: int,
+    *,
+    needle: str,
+    visible: list[int],
+    hidden: list[int],
+) -> bool:
+    """Bucket one top-level window by visibility for a process-name match."""
+    import win32gui
+
+    try:
+        is_visible = bool(
+            win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd)
+        )
+    except Exception:
+        return True
+    try:
+        owner_name = _window_process_name(hwnd)
+    except Exception:
+        return True
+    if owner_name != needle:
+        return True
+    if is_visible:
+        visible.append(hwnd)
+    else:
+        hidden.append(hwnd)
+    return True
 
 
 def _shortcut_target(lnk_path: str) -> str:

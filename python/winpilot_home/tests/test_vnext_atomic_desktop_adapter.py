@@ -1938,3 +1938,61 @@ def test_mixed_rejections_do_not_request_premature_refresh() -> None:
     assert requests == []
     assert adapter.target_refresh_requested is False
     monkeypatch.undo()
+
+def test_launch_visible_effect_surfaces_existing_instance_note() -> None:
+    """A launch that reused a running instance must tell the model so."""
+    from winpilot.vnext.desktop_adapter.atomic import AtomicDesktopAdapter
+
+    adapter = AtomicDesktopAdapter.__new__(AtomicDesktopAdapter)
+
+    # via=existing -> note projected
+    receipt_existing = RawActionReceipt(
+        action="launch_application",
+        outcome=MutationOutcome.APPLIED,
+        backend_result=RawBackendResult(
+            True,
+            {
+                "via": "existing",
+                "target": "C:\\QQ\\QQ.exe",
+                "activated_hwnd": 33557054,
+                "existing": True,
+                "note": "already running: activated the existing window; no new instance was started",
+            },
+        ),
+    )
+    effect = adapter._launch_visible_effect(receipt_existing, "launch_application")
+    assert "already running" in effect
+    assert "no new instance" in effect
+
+    # via=path (fresh start) -> empty effect
+    receipt_fresh = RawActionReceipt(
+        action="launch_application",
+        outcome=MutationOutcome.APPLIED,
+        backend_result=RawBackendResult(
+            True,
+            {"via": "path", "target": "C:\\QQ\\QQ.exe"},
+        ),
+    )
+    assert adapter._launch_visible_effect(receipt_fresh, "launch_application") == ""
+
+    # non-launch action -> empty effect
+    receipt_click = RawActionReceipt(
+        action="click",
+        outcome=MutationOutcome.APPLIED,
+        backend_result=RawBackendResult(True, {}),
+    )
+    assert adapter._launch_visible_effect(receipt_click, "click") == ""
+
+    # fallback when note missing but via=existing
+    receipt_existing_no_note = RawActionReceipt(
+        action="launch_application",
+        outcome=MutationOutcome.APPLIED,
+        backend_result=RawBackendResult(
+            True,
+            {"via": "existing", "target": "C:\\QQ\\QQ.exe"},
+        ),
+    )
+    effect_fallback = adapter._launch_visible_effect(
+        receipt_existing_no_note, "launch_application"
+    )
+    assert "already-running" in effect_fallback

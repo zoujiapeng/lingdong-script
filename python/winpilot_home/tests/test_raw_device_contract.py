@@ -1406,6 +1406,65 @@ def test_admitted_ascii_text_uses_distinct_vk_transitions(
     assert executor._should_strict_type_via_vk("中文") is False
 
 
+def test_ascii_text_switches_english_layout_away_from_ime(
+    monkeypatch,
+) -> None:
+    """VK transitions under a Chinese/Japanese/Korean IME swallow digit keys;
+    the strict text path must switch the target thread to a Latin layout and
+    restore it afterwards."""
+    import winpilot.action.executor as ex
+
+    english = 0x04090409
+    chinese = 0x08040804
+    calls: list[tuple[int, int, int]] = []
+
+    def fake_thread_layout(hwnd: int, _pid: int | None) -> int:
+        return chinese
+
+    def fake_layout(tid: int) -> int:
+        return chinese
+
+    def fake_load(layout: str, flags: int) -> int:
+        assert layout == "00000409"
+        return english
+
+    def fake_post(hwnd: int, msg: int, wparam: int, lparam: int) -> int:
+        calls.append((hwnd, msg, lparam))
+        return 1
+
+    monkeypatch.setattr(ex.user32, "GetWindowThreadProcessId", fake_thread_layout)
+    monkeypatch.setattr(ex.user32, "GetKeyboardLayout", fake_layout)
+    monkeypatch.setattr(ex.user32, "LoadKeyboardLayoutW", fake_load)
+    monkeypatch.setattr(ex.user32, "PostMessageW", fake_post)
+
+    switch = ex._english_layout_switch(41)
+    assert switch == (english, chinese)
+    assert calls == [(41, ex._WM_INPUTLANGCHANGEREQUEST, english)]
+
+    ex._restore_layout_switch(41, chinese)
+    assert calls[-1] == (41, ex._WM_INPUTLANGCHANGEREQUEST, chinese)
+
+
+def test_ascii_text_skips_layout_switch_on_english_layout(
+    monkeypatch,
+) -> None:
+    import winpilot.action.executor as ex
+
+    english = 0x04090409
+
+    def fake_thread_layout(hwnd: int, _pid: int | None) -> int:
+        return english
+
+    def fake_layout(tid: int) -> int:
+        return english
+
+    monkeypatch.setattr(ex.user32, "GetWindowThreadProcessId", fake_thread_layout)
+    monkeypatch.setattr(ex.user32, "GetKeyboardLayout", fake_layout)
+
+    assert ex._english_layout_switch(41) is None
+    assert ex._english_layout_switch(0) is None
+
+
 @pytest.mark.parametrize("backend_name,argument", [
     ("ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND", "secret"),
     ("ADMITTED_PHYSICAL_HOTKEY_BACKEND", HotkeyChord(("ctrl", "s"))),

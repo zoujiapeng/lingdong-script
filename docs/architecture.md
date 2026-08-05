@@ -198,10 +198,10 @@ RunStateMachine 和 FailureRecoveryLayer 中可复用的基础能力，只能逐
 
 当同一 Actor 申请桌面后，首个 GUI 回合保留初始有界文本消息及其原生
 `assistant observe_desktop → tool result`，再附加当前权威 JPEG、完整原始目标和
-有界 task state。后续 GUI 回合还保留最多最近一笔 provider 原生
+有界 task state。后续 GUI 回合还保留最多最近三笔 provider 原生
 `user image → assistant tool call → tool result`。模型从画面理解语义并提出一笔
-typed transaction；动作后重新捕获权威帧，下一回合覆盖旧视觉 exchange。这里没有
-无界聊天历史、第二 planner 或独立 Grounder/Verifier。
+typed transaction；动作后重新捕获权威帧，下一回合追加新视觉 exchange 并丢弃最旧。
+这里没有无界聊天历史、第二 planner 或独立 Grounder/Verifier。
 
 当前已复验基线固定 `api.thinking=false`、Visual Actor
 `temperature=0.3`、最大提交图片边 1120，并且每个决策最多一次 provider attempt。

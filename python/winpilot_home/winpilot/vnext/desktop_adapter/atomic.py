@@ -84,6 +84,7 @@ _POST_FRAME_KIND = "post_action_frame"
 _JPEG_MEDIA_TYPE = "image/jpeg"
 _MAX_SCROLL_AMOUNT = 1200
 _MAX_DRAG_INTERMEDIATE_POINTS = 32
+_MAX_LAUNCH_EFFECT_CHARS = 200
 # One spatial turn can make an Actor call followed by a Grounder call.  Keep
 # the emergency lease longer than their combined production timeout; normal
 # release is the next drag segment or session.close(), not this fallback.
@@ -657,7 +658,7 @@ class AtomicDesktopAdapter:
             action_id=envelope.decision_id,
             action=action,
             input_completed=True,
-            visible_effect="",
+            visible_effect=self._launch_visible_effect(receipt, action),
             post_frame_evidence=(post_evidence,),
             post_frame_id=post_frame.frame_id,
             action_effect=effect_result.summary,
@@ -1121,15 +1122,56 @@ class AtomicDesktopAdapter:
                 prepared.action,
                 "launch_application_failed",
             )
+        via = str(result.get("via") or "generic")
         facts = {
-            "via": str(result.get("via") or "generic"),
+            "via": via,
             "target": str(result.get("target") or "")[:512],
         }
+        activated_hwnd = result.get("activated_hwnd")
+        if activated_hwnd:
+            try:
+                facts["activated_hwnd"] = int(activated_hwnd)
+            except (TypeError, ValueError):
+                pass
+        if via == "existing":
+            # Tell the model it reused a running instance instead of starting
+            # a second one: a GUI agent judges "is the app open" by what it
+            # sees, and a covered/minimized window can look "not open".
+            facts["existing"] = True
+            facts["note"] = (
+                "already running: activated the existing window; "
+                "no new instance was started"
+            )
         return RawActionReceipt(
             action=prepared.action,
             outcome=MutationOutcome.APPLIED,
             backend_result=RawBackendResult(True, facts),
         )
+
+    @staticmethod
+    def _launch_visible_effect(
+        receipt: RawActionReceipt,
+        action: str,
+    ) -> str:
+        """Surface the launch outcome fact to the model's previous-action view.
+
+        A GUI agent decides "is the app open" from what it sees; a
+        tray-hidden or covered window can look closed.  When launch reused a
+        running instance, the note is projected into ``visible_effect`` so
+        the model reads "activated existing window, no new instance" instead
+        of concluding it must start a fresh (possibly login-requiring)
+        instance.
+        """
+        if action != "launch_application" or receipt.backend_result is None:
+            return ""
+        facts = dict(receipt.backend_result.facts) or {}
+        note = facts.get("note")
+        if isinstance(note, str) and note:
+            return note[:_MAX_LAUNCH_EFFECT_CHARS]
+        via = str(facts.get("via") or "")
+        if via == "existing":
+            return "activated an already-running instance; no new one started"
+        return ""
 
     def _update_pointer_after_drag(
         self,

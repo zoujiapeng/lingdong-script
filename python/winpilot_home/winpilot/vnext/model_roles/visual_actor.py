@@ -132,6 +132,7 @@ _STRICT_SCHEMA_KEYS = frozenset(
 _LOCALLY_ENFORCED_SCHEMA_KEYS = frozenset({"not", "uniqueItems"})
 _THREAD_HISTORY_MESSAGES = 12
 _THREAD_HISTORY_CHARS = 16_384
+_VISUAL_HISTORY_DEPTH = 3
 _CONNECTOR_TOOL_CALL_LIMIT = 4
 _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
@@ -153,8 +154,21 @@ _SHELL_TOOL_CALL_LIMIT = 4
 _SHELL_MAX_COMMAND_CHARS = 4096
 _SHELL_MAX_OUTPUT_CHARS = 6000
 _WINDOW_TEXT_TOOL = "read_window_text"
-_WINDOW_TEXT_TOOL_CALL_LIMIT = 2
+_WINDOW_TEXT_RESERVATION = 2
 _WINDOW_TEXT_MAX_CHARS = 6000
+_CAPTURE_SCREEN_TOOL = "capture_screen"
+_CAPTURE_SCREEN_RESERVATION = 2
+_LIST_WINDOWS_TOOL = "list_windows"
+_LIST_WINDOWS_RESERVATION = 1
+_PASTE_IMAGE_TOOL = "paste_image_file"
+_PASTE_IMAGE_RESERVATION = 2
+_CAPTURE_OUTPUT_MAX_CHARS = 6000
+# Optional tool-schema fields and their JSON defaults.  The model may omit
+# them; the runtime fills the default so the tool schema and the validator
+# never disagree.
+_OPTIONAL_TOOL_DEFAULTS = {
+    _CAPTURE_SCREEN_TOOL: {"window": False},
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,11 +177,12 @@ class _InitialExchange:
     tool_call_id: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _VisualExchange:
     messages: tuple[dict[str, Any], ...]
     tool_call_id: str
     runtime_tool_name: str
+    result_content: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,8 +402,10 @@ def _actor_parameters(tool: ActorToolView) -> dict[str, Any]:
         raise LiveModelRoleError(
             f"Actor tool {tool.name!r} shadows task_state_update"
         )
-    properties["task_state_update"] = TASK_STATE_UPDATE_SCHEMA
-    required = [*required, "task_state_update"]
+    properties["task_state_update"] = {
+        **TASK_STATE_UPDATE_SCHEMA,
+        "default": {"scratchpad": None},
+    }
     if tool.requires_local_intent:
         if "local_intent" in properties or "local_intent" in required:
             raise LiveModelRoleError(
@@ -396,10 +413,9 @@ def _actor_parameters(tool: ActorToolView) -> dict[str, Any]:
             )
         properties["local_intent"] = {
             "type": "string",
-            "minLength": 1,
+            "default": "",
             "maxLength": 16384,
         }
-        required = [*required, "local_intent"]
     parameters["properties"] = properties
     parameters["required"] = required
     parameters["additionalProperties"] = False
@@ -671,7 +687,7 @@ def _proposal_from_response(
             arguments.pop("task_state_update", None)
         )
     except ActorTaskStateError as exc:
-        raise LiveModelRoleError(str(exc)) from exc
+        raise InvalidActorProposal(str(exc)) from exc
     if runtime_name in APPROVED_DESKTOP_ACTIONS:
         local_intent = arguments.pop("local_intent", None)
         raw_proposal = {
@@ -679,7 +695,7 @@ def _proposal_from_response(
             "kind": "desktop_action",
             "action": runtime_name,
             "args": arguments,
-            "local_intent": local_intent,
+            "local_intent": local_intent or "",
         }
     elif runtime_name == "claim_obligation_done":
         raw_proposal = {
@@ -963,6 +979,112 @@ def _window_text_tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
+def _capture_screen_tool_definitions() -> list[dict[str, Any]]:
+    """One generic screen/window capture tool that saves a PNG/JPEG file.
+
+    The model needs real image files for tasks like "send a screenshot to my
+    phone".  The system PrintScreen / Snipping Tool flow is a modal overlay
+    the model cannot operate reliably, so the runtime exposes its own capture
+    primitive instead of forcing the model to script one.
+    """
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": _CAPTURE_SCREEN_TOOL,
+                "description": (
+                    "Capture the whole screen or one visible window and save "
+                    "it as a PNG/JPEG file; returns the saved path and size. "
+                    "Use it when a task needs a screenshot saved to disk "
+                    "(send via QQ/chat, attach, or inspect a region)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                            "description": (
+                                "Absolute output path ending in .png or .jpg"
+                            ),
+                        },
+                        "window": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Capture only the current target window "
+                                "instead of the whole screen"
+                            ),
+                        },
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        },
+    ]
+
+
+def _list_windows_tool_definitions() -> list[dict[str, Any]]:
+    """One generic read-only window inventory tool."""
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": _LIST_WINDOWS_TOOL,
+                "description": (
+                    "List the currently visible desktop windows (title, "
+                    "class, process) so you can tell whether an application "
+                    "is already open before launching a new instance."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        },
+    ]
+
+
+def _paste_image_tool_definitions() -> list[dict[str, Any]]:
+    """One generic image-paste tool: file -> clipboard -> Ctrl+V."""
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": _PASTE_IMAGE_TOOL,
+                "description": (
+                    "Put an existing PNG/JPEG image file onto the clipboard "
+                    "and press Ctrl+V in the current target window, which "
+                    "inserts the image into chat/message inputs that accept "
+                    "paste.  Use it after capture_screen to send a screenshot."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                        },
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        },
+    ]
+
+
 def _status_exchange(
     response: Any,
 ) -> tuple[dict[str, Any], str, str, dict[str, Any]] | None:
@@ -1095,6 +1217,150 @@ def _call_window_text(
         raise LiveModelRoleError(
             "Actor window-text reader returned a non-object result"
         )
+    return dict(result)
+
+
+def _owned_tool_exchange(
+    response: Any,
+    name: str,
+    *,
+    expected_arguments: Mapping[str, Any],
+) -> tuple[dict[str, Any], str, str, dict[str, Any]] | None:
+    """Detect one Actor-owned read-only/utility tool call (generic pattern).
+
+    ``expected_arguments`` maps each field name to the required type
+    (``str`` or ``bool``).  Fields declared optional in the tool schema (with
+    a JSON ``default``) may be omitted by the model; the default is filled in
+    before the type check so the tool schema and the runtime validator agree.
+    The model may also attach the optional ``task_state_update`` scratchpad
+    field to any call; it is popped before validation so utility tools do not
+    need their own scratchpad schema.
+    """
+    message = response_message(response)
+    calls = member(message, "tool_calls")
+    if (
+        isinstance(calls, (str, bytes))
+        or not isinstance(calls, Sequence)
+        or len(calls) != 1
+    ):
+        return None
+    call = calls[0]
+    function = member(call, "function")
+    call_name = member(function, "name") if function is not None else None
+    if call_name != name:
+        return None
+    if member(call, "type") != "function":
+        raise LiveModelRoleError(f"Actor {name} tool call must be a function")
+    call_id = member(call, "id")
+    raw_arguments = member(function, "arguments")
+    if type(call_id) is not str or not call_id:
+        raise LiveModelRoleError(f"Actor {name} tool call requires an id")
+    arguments = _decode_arguments(raw_arguments)
+    arguments.pop("task_state_update", None)
+    unknown = set(arguments) - set(expected_arguments)
+    if unknown:
+        raise LiveModelRoleError(
+            f"{name} has unsupported fields: {sorted(unknown)!r}"
+        )
+    for field, expected_type in expected_arguments.items():
+        if field not in arguments:
+            # Optional schema field with a default: fill the default so the
+            # model is never punished for omitting an optional argument.
+            default = _OPTIONAL_TOOL_DEFAULTS.get(name, {}).get(field)
+            if default is not None:
+                arguments[field] = default
+                continue
+            raise LiveModelRoleError(
+                f"{name} is missing required field {field!r}"
+            )
+        if type(arguments[field]) is not expected_type:
+            raise LiveModelRoleError(
+                f"{name}.{field} must be {expected_type.__name__}"
+            )
+    content = member(message, "content")
+    if content is not None and type(content) is not str:
+        raise LiveModelRoleError(f"Actor {name} content must be text or null")
+    assistant: dict[str, Any] = {
+        "role": "assistant",
+        "content": content or "",
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": raw_arguments,
+                },
+            }
+        ],
+    }
+    reasoning = member(message, "reasoning_content")
+    if type(reasoning) is str:
+        assistant["reasoning_content"] = reasoning
+    return assistant, call_id, name, arguments
+
+
+def _call_capture_screen(
+    capture_runner: Any,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Save a screen/window capture through the injected runner."""
+    if capture_runner is None or not callable(capture_runner):
+        raise LiveModelRoleError("Actor capture runner is unavailable")
+    result = capture_runner(
+        path=str(arguments.get("path") or ""),
+        window=bool(arguments.get("window")),
+    )
+    if not isinstance(result, Mapping):
+        raise LiveModelRoleError("Actor capture runner returned a non-object result")
+    output = dict(result)
+    for key in ("error", "detail"):
+        value = output.get(key)
+        if isinstance(value, str) and len(value) > _CAPTURE_OUTPUT_MAX_CHARS:
+            output[key] = value[:_CAPTURE_OUTPUT_MAX_CHARS]
+    return output
+
+
+def _call_list_windows(
+    windows_reader: Any,
+) -> dict[str, Any]:
+    """Return the visible window inventory through the injected reader."""
+    if windows_reader is None or not callable(windows_reader):
+        raise LiveModelRoleError("Actor window inventory is unavailable")
+    try:
+        result = windows_reader()
+    except Exception as exc:
+        raise LiveModelRoleError(
+            f"Actor window inventory failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    if isinstance(result, Mapping):
+        return dict(result)
+    if not isinstance(result, list):
+        raise LiveModelRoleError(
+            "Actor window inventory returned a non-list result"
+        )
+    bounded: list[dict[str, Any]] = []
+    for item in result[-24:]:
+        if not isinstance(item, Mapping):
+            continue
+        bounded.append({
+            key: item.get(key)
+            for key in ("hwnd", "title", "class_name", "pid")
+            if key in item
+        })
+    return {"ok": True, "windows": bounded, "count": len(bounded)}
+
+
+def _call_paste_image(
+    paste_runner: Any,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Paste an image file into the current target through the injected runner."""
+    if paste_runner is None or not callable(paste_runner):
+        raise LiveModelRoleError("Actor image-paste runner is unavailable")
+    result = paste_runner(path=str(arguments.get("path") or ""))
+    if not isinstance(result, Mapping):
+        raise LiveModelRoleError("Actor image-paste runner returned a non-object result")
     return dict(result)
 
 
@@ -1547,6 +1813,9 @@ class LiveVisualActor:
         status_provider: Any | None = None,
         shell_runner: Any | None = None,
         window_text_reader: Any | None = None,
+        capture_runner: Any | None = None,
+        windows_reader: Any | None = None,
+        paste_runner: Any | None = None,
         max_attempts: int = 1,
     ) -> None:
         if client is None:
@@ -1584,13 +1853,22 @@ class LiveVisualActor:
         self._window_text_reader = (
             window_text_reader if callable(window_text_reader) else None
         )
+        self._capture_runner = (
+            capture_runner if callable(capture_runner) else None
+        )
+        self._windows_reader = (
+            windows_reader if callable(windows_reader) else None
+        )
+        self._paste_runner = (
+            paste_runner if callable(paste_runner) else None
+        )
         if (
             type(max_attempts) is not int
             or not 1 <= max_attempts <= 5
         ):
             raise LiveModelRoleError("max_attempts must be in [1, 5]")
         self._max_attempts = max_attempts
-        self._previous_exchange: _VisualExchange | None = None
+        self._visual_history: list[_VisualExchange] = []
         self._initial_exchange: _InitialExchange | None = None
         self._initial_turn_started = False
         self._initial_turn_terminal = False
@@ -1611,8 +1889,20 @@ class LiveVisualActor:
         ) + (
             _SHELL_TOOL_CALL_LIMIT if self._shell_runner is not None else 0
         ) + (
-            _WINDOW_TEXT_TOOL_CALL_LIMIT
+            _WINDOW_TEXT_RESERVATION
             if self._window_text_reader is not None
+            else 0
+        ) + (
+            _CAPTURE_SCREEN_RESERVATION
+            if self._capture_runner is not None
+            else 0
+        ) + (
+            _LIST_WINDOWS_RESERVATION
+            if self._windows_reader is not None
+            else 0
+        ) + (
+            _PASTE_IMAGE_RESERVATION
+            if self._paste_runner is not None
             else 0
         )
         return 1 + 1 + local_budget
@@ -1969,6 +2259,21 @@ class LiveVisualActor:
             if self._window_text_reader is not None
             else []
         )
+        capture_tools = (
+            _capture_screen_tool_definitions()
+            if self._capture_runner is not None
+            else []
+        )
+        windows_tools = (
+            _list_windows_tool_definitions()
+            if self._windows_reader is not None
+            else []
+        )
+        paste_tools = (
+            _paste_image_tool_definitions()
+            if self._paste_runner is not None
+            else []
+        )
         connector_tools = _connector_tool_definitions(self._connector_gateway)
         context = turn.to_dict()
         context.pop("tools")
@@ -2004,28 +2309,26 @@ class LiveVisualActor:
                     ),
                 }
             )
-        previous = self._previous_exchange
+        previous = self._visual_history[-1] if self._visual_history else None
         if (
             previous is not None
             and turn.previous_action is not None
             and turn.previous_action.action == previous.runtime_tool_name
         ):
-            native_context.extend(deepcopy(previous.messages))
+            previous.result_content = {
+                "previous_action": turn.previous_action.to_dict()
+            }
+        else:
+            self._visual_history = []
+        for exchange in self._visual_history:
+            native_context.extend(deepcopy(exchange.messages))
             native_context.append(
                 {
                     "role": "tool",
-                    "tool_call_id": previous.tool_call_id,
-                    "content": _canonical_json(
-                        {
-                            "previous_action": (
-                                turn.previous_action.to_dict()
-                            )
-                        }
-                    ),
+                    "tool_call_id": exchange.tool_call_id,
+                    "content": _canonical_json(exchange.result_content),
                 }
             )
-        else:
-            self._previous_exchange = None
         current_exchange = [user_message]
         provider_request = {
             "model": self._model,
@@ -2042,6 +2345,9 @@ class LiveVisualActor:
                 *status_tools,
                 *shell_tools,
                 *window_text_tools,
+                *capture_tools,
+                *windows_tools,
+                *paste_tools,
                 *connector_tools,
             ],
             # MiMo's documented Chat Completions surface supports only
@@ -2058,7 +2364,6 @@ class LiveVisualActor:
         repair_budget = (
             _model_call_limit is None or _model_call_limit >= 2
         )
-        window_text_calls = 0
         for connector_calls in range(connector_limit + (2 if repair_budget else 1)):
             if connector_calls == connector_limit:
                 provider_request["tools"] = terminal_tools
@@ -2141,13 +2446,92 @@ class LiveVisualActor:
             if (
                 window_text is not None
                 and connector_calls < connector_limit
-                and window_text_calls < _WINDOW_TEXT_TOOL_CALL_LIMIT
             ):
-                window_text_calls += 1
                 assistant, call_id, name, arguments = window_text
                 result = _call_window_text(
                     self._window_text_reader,
                     turn,
+                )
+                connector_messages = [
+                    assistant,
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": _canonical_json(result),
+                    },
+                ]
+                current_exchange.extend(connector_messages)
+                provider_request["messages"].extend(connector_messages)
+                continue
+            capture = None
+            if self._capture_runner is not None:
+                try:
+                    capture = _owned_tool_exchange(
+                        outcome.response,
+                        _CAPTURE_SCREEN_TOOL,
+                        expected_arguments={
+                            "path": str,
+                            "window": bool,
+                        },
+                    )
+                except LiveModelRoleError as exc:
+                    raise InvalidActorProposal(str(exc)) from exc
+            if capture is not None and connector_calls < connector_limit:
+                assistant, call_id, name, arguments = capture
+                result = _call_capture_screen(
+                    self._capture_runner,
+                    arguments,
+                )
+                connector_messages = [
+                    assistant,
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": _canonical_json(result),
+                    },
+                ]
+                current_exchange.extend(connector_messages)
+                provider_request["messages"].extend(connector_messages)
+                continue
+            windows = None
+            if self._windows_reader is not None:
+                try:
+                    windows = _owned_tool_exchange(
+                        outcome.response,
+                        _LIST_WINDOWS_TOOL,
+                        expected_arguments={},
+                    )
+                except LiveModelRoleError as exc:
+                    raise InvalidActorProposal(str(exc)) from exc
+            if windows is not None and connector_calls < connector_limit:
+                assistant, call_id, name, arguments = windows
+                result = _call_list_windows(self._windows_reader)
+                connector_messages = [
+                    assistant,
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": _canonical_json(result),
+                    },
+                ]
+                current_exchange.extend(connector_messages)
+                provider_request["messages"].extend(connector_messages)
+                continue
+            paste = None
+            if self._paste_runner is not None:
+                try:
+                    paste = _owned_tool_exchange(
+                        outcome.response,
+                        _PASTE_IMAGE_TOOL,
+                        expected_arguments={"path": str},
+                    )
+                except LiveModelRoleError as exc:
+                    raise InvalidActorProposal(str(exc)) from exc
+            if paste is not None and connector_calls < connector_limit:
+                assistant, call_id, name, arguments = paste
+                result = _call_paste_image(
+                    self._paste_runner,
+                    arguments,
                 )
                 connector_messages = [
                     assistant,
@@ -2232,15 +2616,19 @@ class LiveVisualActor:
         if outcome is None or decision is None:
             raise LiveModelRoleError("Actor visual turn did not terminate")
         exchange = _history_exchange(outcome.response)
-        self._previous_exchange = (
-            None
-            if exchange is None
-            else _VisualExchange(
-                messages=tuple(deepcopy([*current_exchange, exchange[0]])),
-                tool_call_id=exchange[1],
-                runtime_tool_name=exchange[2],
+        if exchange is None:
+            self._visual_history = []
+        else:
+            self._visual_history.append(
+                _VisualExchange(
+                    messages=tuple(
+                        deepcopy([*current_exchange, exchange[0]])
+                    ),
+                    tool_call_id=exchange[1],
+                    runtime_tool_name=exchange[2],
+                )
             )
-        )
+            del self._visual_history[:-_VISUAL_HISTORY_DEPTH]
         self._initial_exchange = None
         return decision
 

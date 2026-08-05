@@ -1057,6 +1057,58 @@ def test_activate_existing_by_process_name_finds_window_by_process(
     assert activated == 3001
 
 
+def test_activate_existing_restores_tray_hidden_window_fallback(
+    monkeypatch,
+) -> None:
+    """A tray-hidden/minimized window is still the same running instance.
+
+    When an app's only window is hidden in the notification area (QQ's
+    classic "close to tray" behavior), launch must restore and activate it
+    instead of silently starting a second, possibly unauthenticated,
+    instance.
+    """
+    from winpilot.perception import apps
+
+    windows = [
+        (4001, "QQ", "QQ.exe"),
+    ]
+    state = {"activated": None, "shown": None}
+
+    def fake_enum_windows(callback, _unused):
+        for hwnd, _title, _process in windows:
+            callback(hwnd, None)
+        return True
+
+    fake_win32gui = SimpleNamespace(
+        EnumWindows=fake_enum_windows,
+        # The QQ window is hidden in the tray: not visible, not iconic.
+        IsWindowVisible=lambda h: False,
+        IsIconic=lambda h: False,
+        GetWindowText=lambda h: next(
+            title for hwnd2, title, _p in windows if hwnd2 == h
+        ),
+        ShowWindow=lambda h, cmd: state.update(shown=cmd) or True,
+        SetForegroundWindow=lambda h: state.update(activated=h) or True,
+        BringWindowToTop=lambda h: True,
+    )
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setattr(
+        apps,
+        "_window_process_name",
+        lambda h: next(
+            process for hwnd2, _t, process in windows if hwnd2 == h
+        ).casefold(),
+    )
+
+    activated = apps._activate_existing_by_process_name("QQ.exe")
+
+    assert activated == 4001
+    assert state["shown"] is not None  # SW_RESTORE was called
+    assert state["activated"] == 4001
+
+
 def test_open_application_stage_rejects_controller_ok_without_verification(monkeypatch) -> None:
     from winpilot.agent.tool_result import ToolResult
     from winpilot.tasking.compiler import TaskContractCompiler

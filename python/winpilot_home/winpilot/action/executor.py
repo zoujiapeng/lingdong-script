@@ -230,6 +230,47 @@ def _should_strict_type_via_vk(text: str) -> bool:
     )
 
 
+_WM_INPUTLANGCHANGEREQUEST = 0x0050
+_ENGLISH_US_LAYOUT = 0x04090409
+
+
+def _english_layout_switch(hwnd: int | None) -> tuple[int | None, int | None] | None:
+    """Return (loaded_layout, original_layout) when hwnd runs a non-English layout.
+
+    SendInput VK transitions are interpreted through the foreground window
+    thread's keyboard layout.  Under an active Chinese/Japanese/Korean IME the
+    digit and punctuation scan codes are consumed as IME candidate keys, so
+    exact ASCII text like ``RD-60516943-E`` silently loses characters
+    (``0 5 1`` -> gone) while KEYEVENTF_UNICODE keeps working.  The fix used
+    by the strict type_text path is to switch the target window thread to the
+    US English layout for the duration of the VK input and restore the
+    original layout afterwards.  Returns None when no switch is needed or the
+    target is unavailable.
+    """
+    if not hwnd:
+        return None
+    tid = user32.GetWindowThreadProcessId(hwnd, None)
+    if not tid:
+        return None
+    original = user32.GetKeyboardLayout(tid)
+    if original == _ENGLISH_US_LAYOUT or (original & 0xFFFF) == 0x0409:
+        return None
+    english = user32.LoadKeyboardLayoutW("00000409", 0x00000100)  # KLF_ACTIVATE
+    if not english:
+        return None
+    user32.PostMessageW(hwnd, _WM_INPUTLANGCHANGEREQUEST, 0, english)
+    # The switch is async; give the target thread a moment to apply it.
+    time.sleep(0.03)
+    return english, original
+
+
+def _restore_layout_switch(hwnd: int | None, original: int | None) -> None:
+    if not hwnd or not original:
+        return
+    user32.PostMessageW(hwnd, _WM_INPUTLANGCHANGEREQUEST, 0, original)
+    time.sleep(0.02)
+
+
 def _dry_run() -> bool:
     return bool(CONFIG.get("agent", "dry_run", default=False))
 
@@ -1804,43 +1845,52 @@ def _execute_physical_type_text(
     requested = len(text)
     completed = 0
     via_vk = _should_strict_type_via_vk(text)
-    for char in text:
-        decision = _keyboard_guard_decision(final_guard)
-        if decision is not FinalKeyboardGuardDecision.ADMITTED:
-            return _keyboard_result(
-                False if completed == 0 else None,
-                requested_codepoints=requested,
-                completed_codepoints=completed,
-                error="final keyboard guard rejected before text input",
-                guard_decision=decision,
+    layout_switch = (
+        _english_layout_switch(hwnd)
+        if via_vk and not legacy_semantics
+        else None
+    )
+    try:
+        for char in text:
+            decision = _keyboard_guard_decision(final_guard)
+            if decision is not FinalKeyboardGuardDecision.ADMITTED:
+                return _keyboard_result(
+                    False if completed == 0 else None,
+                    requested_codepoints=requested,
+                    completed_codepoints=completed,
+                    error="final keyboard guard rejected before text input",
+                    guard_decision=decision,
+                )
+            sent, cleanup_attempted, cleanup_completed = _send_text_codepoint(
+                char, via_vk=via_vk,
             )
-        sent, cleanup_attempted, cleanup_completed = _send_text_codepoint(
-            char, via_vk=via_vk,
-        )
-        if sent is not True:
-            return _keyboard_result(
-                None if sent is None or completed else False,
-                requested_codepoints=requested,
-                completed_codepoints=completed,
-                release_cleanup_attempted=cleanup_attempted,
-                release_cleanup_completed=cleanup_completed,
-                error=(
-                    "text input outcome unknown"
-                    if sent is None
-                    else "text input unavailable"
-                ),
-            )
-        completed += 1
-        decision = _keyboard_guard_decision(final_guard)
-        if decision is not FinalKeyboardGuardDecision.ADMITTED:
-            return _keyboard_result(
-                None,
-                requested_codepoints=requested,
-                completed_codepoints=completed,
-                error="final keyboard guard changed after text input",
-                guard_decision=decision,
-            )
-        time.sleep(max(float(interval_s), 0.03) if via_vk else float(interval_s))
+            if sent is not True:
+                return _keyboard_result(
+                    None if sent is None or completed else False,
+                    requested_codepoints=requested,
+                    completed_codepoints=completed,
+                    release_cleanup_attempted=cleanup_attempted,
+                    release_cleanup_completed=cleanup_completed,
+                    error=(
+                        "text input outcome unknown"
+                        if sent is None
+                        else "text input unavailable"
+                    ),
+                )
+            completed += 1
+            decision = _keyboard_guard_decision(final_guard)
+            if decision is not FinalKeyboardGuardDecision.ADMITTED:
+                return _keyboard_result(
+                    None,
+                    requested_codepoints=requested,
+                    completed_codepoints=completed,
+                    error="final keyboard guard changed after text input",
+                    guard_decision=decision,
+                )
+            time.sleep(max(float(interval_s), 0.03) if via_vk else float(interval_s))
+    finally:
+        if layout_switch is not None:
+            _restore_layout_switch(hwnd, layout_switch[1])
 
     result = _keyboard_result(
         True,

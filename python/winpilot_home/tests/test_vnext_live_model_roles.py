@@ -476,7 +476,10 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     ]
     for schema in strict_schemas:
         assert "task_state_update" in schema["properties"]
-        assert "task_state_update" in schema["required"]
+        assert "task_state_update" not in schema["required"]
+        assert schema["properties"]["task_state_update"]["default"] == {
+            "scratchpad": None
+        }
     for schema in strict_schemas:
         assert {
             "allOf",
@@ -957,11 +960,13 @@ def test_actor_turn_contract_rejects_arbitrary_action_summaries(
         )
 
 
-def test_consecutive_calls_keep_only_the_latest_native_tool_exchange() -> None:
+def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None:
     _, clients = _build_clients([
         _tool_response(call_id="first"),
         _tool_response(call_id="second"),
         _tool_response(call_id="third"),
+        _tool_response(call_id="fourth"),
+        _tool_response(call_id="fifth"),
     ])
     actor = LiveVisualActor(
         client=clients[0],
@@ -1017,9 +1022,38 @@ def test_consecutive_calls_keep_only_the_latest_native_tool_exchange() -> None:
         second_messages
     )
     third_messages = clients[0].requests[2]["messages"]
-    assert len(third_messages) == 5
-    assert third_messages[2]["tool_calls"][0]["id"] == "second-0"
-    assert "first-0" not in json.dumps(third_messages)
+    assert len(third_messages) == 8
+    assert third_messages[2]["tool_calls"][0]["id"] == "first-0"
+    assert third_messages[3]["tool_call_id"] == "first-0"
+    assert third_messages[5]["tool_calls"][0]["id"] == "second-0"
+    assert third_messages[6]["tool_call_id"] == "second-0"
+    assert json.loads(third_messages[6]["content"]) == {
+        "previous_action": completed.previous_action.to_dict(),
+    }
+
+    actor.propose(
+        completed,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    fourth_messages = clients[0].requests[3]["messages"]
+    assert len(fourth_messages) == 11
+    assert fourth_messages[5]["tool_calls"][0]["id"] == "second-0"
+    assert fourth_messages[8]["tool_calls"][0]["id"] == "third-0"
+    assert "first-0" in json.dumps(fourth_messages)
+
+    actor.propose(
+        completed,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    fifth_messages = clients[0].requests[4]["messages"]
+    assert len(fifth_messages) == 11
+    assert "first-0" not in json.dumps(fifth_messages)
+    assert fifth_messages[5]["tool_calls"][0]["id"] == "third-0"
+    assert fifth_messages[8]["tool_calls"][0]["id"] == "fourth-0"
 
 
 @pytest.mark.parametrize(
@@ -1736,8 +1770,14 @@ def test_visual_actor_repairs_one_invalid_tool_call_before_physical_input() -> N
         [
             _tool_response(
                 "type_text",
-                # Missing local_intent; strict schema requires every property.
-                {"text": "hello", "task_state_update": {"scratchpad": None}},
+                # Malformed task_state_update; strict schema now allows an
+                # omitted local_intent, so the repair must be provoked by
+                # the state contract instead.
+                {
+                    "text": "hello",
+                    "local_intent": "enter the requested greeting once",
+                    "task_state_update": {"scratchpad": 12345},
+                },
                 call_id="broken-call",
             ),
             repaired,
@@ -1763,7 +1803,7 @@ def test_visual_actor_repairs_one_invalid_tool_call_before_physical_input() -> N
     assert repair_messages[-2]["tool_calls"][0]["id"] == "broken-call-0"
     tool_result = json.loads(repair_messages[-1]["content"])
     assert "tool_format_error" in tool_result
-    assert "local_intent" in tool_result["tool_format_error"]
+    assert "scratchpad" in tool_result["tool_format_error"]
 
 def test_initial_observe_with_arguments_is_repaired_once_then_terminates() -> None:
     bad_observe = {
@@ -1983,3 +2023,253 @@ def test_shell_tool_is_absent_without_runner() -> None:
         for tool in clients[0].requests[0]["tools"]
     ]
     assert "run_shell" not in names
+
+
+class _RecordingCaptureRunner:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, *, path: str, window: bool) -> dict[str, Any]:
+        self.calls.append({"path": path, "window": window})
+        return {
+            "format": "capture-screen/1",
+            "ok": True,
+            "path": path,
+            "width": 1920,
+            "height": 1080,
+            "size_bytes": 1234,
+            "scope": "window" if window else "screen",
+        }
+
+
+class _RecordingWindowsReader:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> dict[str, Any]:
+        self.calls += 1
+        return {
+            "format": "windows-list/1",
+            "ok": True,
+            "windows": [
+                {"hwnd": 100, "title": "QQ", "class_name": "QQMainWnd", "pid": 1},
+                {"hwnd": 200, "title": "网易云音乐", "class_name": "OrpheusBrowserHost", "pid": 2},
+            ],
+            "count": 2,
+        }
+
+
+class _RecordingPasteRunner:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __call__(self, *, path: str) -> dict[str, Any]:
+        self.calls.append(path)
+        return {
+            "format": "paste-image/1",
+            "ok": True,
+            "path": path,
+            "width": 1920,
+            "height": 1080,
+            "via": "clipboard_dib",
+        }
+
+
+def test_visual_turn_can_capture_screen_before_gui_action() -> None:
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="capture_screen",
+                arguments={
+                    "path": r"C:\tmp\shot.png",
+                    "window": True,
+                },
+                call_id="capture-call",
+            ),
+            _tool_response(
+                arguments={
+                    "text": "hello",
+                    "local_intent": "enter the requested text once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    runner = _RecordingCaptureRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        capture_runner=runner,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert runner.calls == [{"path": r"C:\tmp\shot.png", "window": True}]
+    assert len(clients[0].requests) == 2
+    capture_result_messages = [
+        m
+        for m in clients[0].requests[1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    assert len(capture_result_messages) == 1
+    tool_result = json.loads(capture_result_messages[0]["content"])
+    assert tool_result["ok"] is True
+    assert tool_result["path"] == r"C:\tmp\shot.png"
+
+
+def test_visual_turn_can_list_windows_before_gui_action() -> None:
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="list_windows",
+                arguments={},
+                call_id="windows-call",
+            ),
+            _tool_response(
+                arguments={
+                    "text": "hello",
+                    "local_intent": "enter the requested text once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    reader = _RecordingWindowsReader()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        windows_reader=reader,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert reader.calls == 1
+    assert len(clients[0].requests) == 2
+    result_messages = [
+        m
+        for m in clients[0].requests[1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    tool_result = json.loads(result_messages[0]["content"])
+    assert tool_result["count"] == 2
+    assert tool_result["windows"][0]["title"] == "QQ"
+
+
+def test_visual_turn_can_paste_image_before_gui_action() -> None:
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="paste_image_file",
+                arguments={"path": r"C:\tmp\shot.png"},
+                call_id="paste-call",
+            ),
+            _tool_response(
+                arguments={
+                    "text": "hello",
+                    "local_intent": "enter the requested text once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    runner = _RecordingPasteRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        paste_runner=runner,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert runner.calls == [r"C:\tmp\shot.png"]
+    assert len(clients[0].requests) == 2
+    result_messages = [
+        m
+        for m in clients[0].requests[1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    tool_result = json.loads(result_messages[0]["content"])
+    assert tool_result["ok"] is True
+
+
+def test_capture_window_tools_are_absent_without_runners() -> None:
+    _, clients = _build_clients(_tool_response())
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    names = [
+        tool["function"]["name"]
+        for tool in clients[0].requests[0]["tools"]
+    ]
+    assert "capture_screen" not in names
+    assert "list_windows" not in names
+    assert "paste_image_file" not in names
+
+
+def test_capture_screen_accepts_omitted_optional_window_field() -> None:
+    """The tool schema declares ``window`` optional with default false; the
+    runtime validator must not reject a call that omits it (a regression that
+    burned 41 turns in a real QQ screenshot run)."""
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="capture_screen",
+                arguments={"path": r"C:\tmp\shot.png"},
+                call_id="capture-call",
+            ),
+            _tool_response(
+                arguments={
+                    "text": "hello",
+                    "local_intent": "enter the requested text once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    runner = _RecordingCaptureRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        capture_runner=runner,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert runner.calls == [{"path": r"C:\tmp\shot.png", "window": False}]
+    assert len(clients[0].requests) == 2

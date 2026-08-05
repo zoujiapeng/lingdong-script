@@ -116,8 +116,6 @@ _OBLIGATION_ID = "full-goal"
 _TARGET_MAX_AGE_MS = 60_000
 _FUTURE_CLOCK_SKEW_MS = 2_000
 _MAX_SUBMITTED_SIDE = 1120
-_MAX_CONSECUTIVE_INVALID_PROPOSALS = 2
-_MAX_CONSECUTIVE_ACTOR_ERRORS = 2
 _NON_WHITESPACE_PATTERN = r"\S"
 _BLOCKER_KIND_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 _APPROVED_ACTIONS = frozenset(
@@ -918,6 +916,43 @@ def _window_text_reader_factory() -> Any:
         }
 
     return read
+
+
+def _capture_runner_factory() -> Any:
+    """vNext capture runner: pure-logic wrapper over the action backend."""
+
+    from ..action.clipboard_ops import capture_screen_backend
+    from ..vnext.desktop_ops import capture_screen
+
+    def runner(*, path: str, window: bool) -> dict[str, Any]:
+        return capture_screen(
+            capture_screen_backend,
+            path=path,
+            window=window,
+        )
+
+    return runner
+
+
+def _windows_reader_factory() -> Any:
+    """vNext window inventory runner: pure-logic wrapper over the backend."""
+
+    from ..action.clipboard_ops import list_windows_backend
+    from ..vnext.desktop_ops import list_windows
+
+    return lambda: list_windows(list_windows_backend)
+
+
+def _paste_runner_factory() -> Any:
+    """vNext image-paste runner: pure-logic wrapper over the backend."""
+
+    from ..action.clipboard_ops import paste_image_backend
+    from ..vnext.desktop_ops import paste_image
+
+    def runner(*, path: str) -> dict[str, Any]:
+        return paste_image(paste_image_backend, path=path)
+
+    return runner
 
 
 def _read_win32_foreground_root() -> int | None:
@@ -2179,43 +2214,6 @@ class _DeadlineModelAdapter:
                 self._model.total_timeout_s,
             ),
         )
-        tools = request.get("tools")
-        if tools is not None:
-            if type(tools) is not list:
-                raise RuntimeError("Visual Actor tools must be an array")
-            for tool in tools:
-                if type(tool) is not dict:
-                    raise RuntimeError("Visual Actor tool must be an object")
-                function = tool.get("function")
-                if type(function) is not dict:
-                    raise RuntimeError(
-                        "Visual Actor tool function must be an object"
-                    )
-                parameters = function.get("parameters")
-                properties = (
-                    parameters.get("properties")
-                    if type(parameters) is dict
-                    else None
-                )
-                if (
-                    type(properties) is not dict
-                    or "local_intent" not in properties
-                ):
-                    continue
-                local_intent = (
-                    properties.get("local_intent")
-                    if type(properties) is dict
-                    else None
-                )
-                if (
-                    type(local_intent) is not dict
-                    or local_intent.get("type") != "string"
-                    or local_intent.get("minLength") != 1
-                ):
-                    raise RuntimeError(
-                        "Visual Actor local_intent schema is unavailable"
-                    )
-                local_intent["pattern"] = _NON_WHITESPACE_PATTERN
         prepared = self._adapter.prepare_chat_completion(**request)
         if type(prepared) is not dict:
             raise RuntimeError("model adapter returned a non-object request")
@@ -2674,6 +2672,9 @@ def _build_actor_resources(
             if dependencies.shell_factory is not None:
                 role_kwargs["shell_runner"] = dependencies.shell_factory()
             role_kwargs["window_text_reader"] = _window_text_reader_factory()
+            role_kwargs["capture_runner"] = _capture_runner_factory()
+            role_kwargs["windows_reader"] = _windows_reader_factory()
+            role_kwargs["paste_runner"] = _paste_runner_factory()
         actor = _BudgetedActor(role_factory(**role_kwargs), counter)
         return PreparedLiveActor(
             raw_client=raw_client,
@@ -3757,8 +3758,6 @@ class _PreparedHandler:
         )
         session: _SessionPort | None = None
         turns_used = 0
-        consecutive_invalid_proposals = 0
-        consecutive_actor_errors = 0
         terminal_status = RuntimeStatus.STATE_REJECTED
         detail = ""
         accepted_event_ids: tuple[str, ...] = ()
@@ -3841,14 +3840,6 @@ class _PreparedHandler:
                         detail = raw_detail or _public_runtime_detail(
                             result.status
                         )
-                    if result.status is RuntimeStatus.INVALID_PROPOSAL:
-                        consecutive_invalid_proposals += 1
-                    else:
-                        consecutive_invalid_proposals = 0
-                    if result.status is RuntimeStatus.ACTOR_ERROR:
-                        consecutive_actor_errors += 1
-                    else:
-                        consecutive_actor_errors = 0
                     redecision_budget_available = bool(
                         turn_index + 1 < self._budget.max_turns
                         and session.model_calls
@@ -3857,14 +3848,10 @@ class _PreparedHandler:
                     )
                     invalid_proposal_recovery_available = (
                         result.status is RuntimeStatus.INVALID_PROPOSAL
-                        and consecutive_invalid_proposals
-                        < _MAX_CONSECUTIVE_INVALID_PROPOSALS
                         and redecision_budget_available
                     )
                     actor_error_recovery_available = (
                         result.status is RuntimeStatus.ACTOR_ERROR
-                        and consecutive_actor_errors
-                        < _MAX_CONSECUTIVE_ACTOR_ERRORS
                         and redecision_budget_available
                     )
                     if (
@@ -3927,18 +3914,6 @@ class _PreparedHandler:
                                     if result.status
                                     is RuntimeStatus.INVALID_PROPOSAL
                                     else "bounded_actor_error_redecision"
-                                ),
-                                "consecutive_attempt": (
-                                    consecutive_invalid_proposals
-                                    if result.status
-                                    is RuntimeStatus.INVALID_PROPOSAL
-                                    else consecutive_actor_errors
-                                ),
-                                "max_consecutive_attempts": (
-                                    _MAX_CONSECUTIVE_INVALID_PROPOSALS
-                                    if result.status
-                                    is RuntimeStatus.INVALID_PROPOSAL
-                                    else _MAX_CONSECUTIVE_ACTOR_ERRORS
                                 ),
                                 "available": (
                                     invalid_proposal_recovery_available

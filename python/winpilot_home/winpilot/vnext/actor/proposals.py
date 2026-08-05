@@ -221,7 +221,13 @@ class DesktopActionProposal(_ActorModel):
     @field_validator("local_intent")
     @classmethod
     def _intent(cls, value: Any) -> str:
-        return _text(value, "local_intent")
+        if type(value) is not str:
+            raise ValueError("local_intent must be a string")
+        if len(value) > _MAX_TEXT_LENGTH:
+            raise ValueError("local_intent exceeds the text length limit")
+        if value and not value.strip():
+            raise ValueError("local_intent must not be blank")
+        return value
 
 
 class ObserveProposal(_ActorModel):
