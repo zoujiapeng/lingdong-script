@@ -6,7 +6,6 @@ second completion/evidence ledger.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import threading
 from typing import Any, Iterable, Mapping
@@ -33,10 +32,6 @@ from ..capabilities import (
     ToolRoute,
 )
 from ..evidence import EvidenceRegistry
-from ..evidence_plane import (
-    ActionExecutionBinding,
-    RuntimeEvidencePlane,
-)
 from ..mission import (
     EvidenceRef,
     MissionError,
@@ -70,11 +65,6 @@ from .contracts import (
     RuntimeTargetIdentity,
     project_actor_turn_input,
 )
-from .mutation_attempt import call_once_with_permit
-from .mutation_permits import (
-    MutationPermitAuthority,
-    MutationPermitError,
-)
 from .ports import (
     ActorPort,
     ControllerPort,
@@ -94,6 +84,9 @@ class MissionRuntimeConfigurationError(ValueError):
     """The injected slice is outside the authorized live-agent surface."""
 
 
+_MAX_NARRATION_CHARS = 4000
+
+
 class MissionRuntime:
     """Coordinate exactly one bounded Actor decision per call."""
 
@@ -108,8 +101,6 @@ class MissionRuntime:
         state: RuntimeStatePort,
         controller: ControllerPort,
         evidence_registry: EvidenceRegistry,
-        mutation_permits: MutationPermitAuthority | None = None,
-        runtime_evidence_plane: RuntimeEvidencePlane | None = None,
     ) -> None:
         if type(reducer) is not MissionReducer:
             raise TypeError("reducer must be MissionReducer")
@@ -129,13 +120,6 @@ class MissionRuntime:
             raise TypeError(
                 "Runtime and MissionReducer must share one EvidenceRegistry"
             )
-        if (
-            runtime_evidence_plane is not None
-            and type(runtime_evidence_plane) is not RuntimeEvidencePlane
-        ):
-            raise TypeError(
-                "runtime_evidence_plane must be RuntimeEvidencePlane or null"
-            )
         for value, method, name in (
             (actor, "propose", "actor"),
             (state, "observe", "state"),
@@ -150,37 +134,6 @@ class MissionRuntime:
             catalog=catalog,
             registry=evidence_registry,
         )
-        permits = mutation_permits or MutationPermitAuthority(
-            reducer.definition.mission_id,
-            reducer.definition.run_id,
-        )
-        if type(permits) is not MutationPermitAuthority:
-            raise TypeError(
-                "mutation_permits must be MutationPermitAuthority"
-            )
-        if (
-            permits.mission_id != reducer.definition.mission_id
-            or permits.run_id != reducer.definition.run_id
-        ):
-            raise TypeError(
-                "mutation permit scope must match mission/run"
-            )
-        if runtime_evidence_plane is not None and (
-            runtime_evidence_plane.mission_id
-            != reducer.definition.mission_id
-            or runtime_evidence_plane.run_id
-            != reducer.definition.run_id
-        ):
-            raise TypeError(
-                "Runtime evidence plane scope must match mission/run"
-            )
-        if (
-            getattr(controller, "runtime_evidence_plane", None)
-            is not runtime_evidence_plane
-        ):
-            raise TypeError(
-                "Runtime and Controller must share one evidence plane"
-            )
         self._reducer = reducer
         self._profile = profile
         self._broker = broker
@@ -190,9 +143,8 @@ class MissionRuntime:
         self._state = state
         self._controller = controller
         self._registry = evidence_registry
-        self._mutation_permits = permits
-        self._runtime_evidence = runtime_evidence_plane
         self._verified_completion_result: str | None = None
+        self._latest_narration: str = ""
         self._previous_action_local_intent: str | None = None
         self._task_state = ActorTaskState.initial()
         self._turn_lock = threading.Lock()
@@ -282,16 +234,18 @@ class MissionRuntime:
         return self._reducer
 
     @property
-    def mutation_permits(self) -> MutationPermitAuthority:
-        return self._mutation_permits
-
-    @property
     def verified_completion_result(self) -> str | None:
         """Return Actor-authored result text only after mission verification."""
 
         if self._reducer.projection.status is not MissionStatus.VERIFIED:
             return None
         return self._verified_completion_result
+
+    @property
+    def latest_narration(self) -> str:
+        """Return the Actor's most recent progress note in its own words."""
+
+        return self._latest_narration
 
     @property
     def task_state(self) -> ActorTaskState:
@@ -498,7 +452,6 @@ class MissionRuntime:
         decision_id: str,
         detail: str,
     ) -> MissionRuntimeResult:
-        self._mutation_permits.close()
         event_ids: tuple[str, ...] = ()
         block_error: MissionError | None = None
         for _ in range(3):
@@ -780,39 +733,6 @@ class MissionRuntime:
             self._verified_completion_result = proposal.concise_claim
         return completion
 
-    @staticmethod
-    def _actor_envelope_sha256(
-        envelope: ActorDecisionEnvelope,
-    ) -> str:
-        return hashlib.sha256(
-            envelope.to_json().encode("utf-8")
-        ).hexdigest()
-
-    def _record_actor_decision(
-        self,
-        proposal: DesktopActionProposal,
-        envelope: ActorDecisionEnvelope,
-        broker_projection: BrokerProjection,
-    ) -> None:
-        plane = self._runtime_evidence
-        if plane is None:
-            return
-        canonical_envelope = ActorDecisionEnvelope.from_dict(
-            envelope.to_dict()
-        )
-        canonical_projection = BrokerProjection.from_dict(
-            broker_projection.to_dict()
-        )
-        canonical_proposal = canonical_envelope.proposal
-        if type(canonical_proposal) is not DesktopActionProposal:
-            raise TypeError("evidence requires the bound desktop proposal")
-        tool_wire = self._catalog.get(canonical_proposal.action).to_dict()
-        plane.record_actor_decision(
-            actor_envelope=canonical_envelope.to_dict(),
-            tool_schema=tool_wire["schema"],
-            broker_projection=canonical_projection.to_dict(),
-        )
-
     def _record_rejected_transition(
         self,
         envelope: ActorDecisionEnvelope,
@@ -844,29 +764,6 @@ class MissionRuntime:
         except MissionError:
             raise
 
-    def _record_controller_transition(
-        self,
-        envelope: ActorDecisionEnvelope,
-        transition: ControllerTransition,
-        *,
-        post_frame_identity: Mapping[str, Any] | None = None,
-    ) -> ActionExecutionBinding | None:
-        plane = self._runtime_evidence
-        if plane is None:
-            return None
-        return plane.record_controller_transition(
-            decision_id=envelope.decision_id,
-            mission_id=envelope.mission_id,
-            run_id=envelope.run_id,
-            actor_envelope_sha256=self._actor_envelope_sha256(envelope),
-            transition=transition.to_dict(),
-            post_frame_identity=(
-                None
-                if post_frame_identity is None
-                else dict(post_frame_identity)
-            ),
-        )
-
     def _run_action(
         self,
         proposal: DesktopActionProposal,
@@ -880,52 +777,36 @@ class MissionRuntime:
     ) -> MissionRuntimeResult:
         proposal_kind = proposal.kind
         obligation_id = envelope.obligation_id
+        if not self._mutation_still_current(
+            envelope,
+            initial,
+            broker_projection,
+            turn_index=turn_index,
+            stop_event=stop_event,
+        ):
+            return self._result(
+                RuntimeStatus.STALE_DISCARDED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail="Runtime authority changed while waiting for input",
+            )
         try:
-            attempt = call_once_with_permit(
-                authority=self._mutation_permits,
-                envelope=envelope,
-                turn_index=turn_index,
-                commit_identity=initial.commit_identity,
-                still_current=lambda: self._mutation_still_current(
-                    envelope,
-                    initial,
-                    broker_projection,
-                    turn_index=turn_index,
-                    stop_event=stop_event,
-                ),
-                execute=lambda admitted: self._controller.execute(
-                    admitted,
-                    stop_event=stop_event,
-                ),
+            transition = self._controller.execute(
+                envelope,
+                stop_event=stop_event,
             )
-        except MutationPermitError as exc:
-            return self._result(
-                RuntimeStatus.STATE_REJECTED,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=envelope.decision_id,
-                detail=str(exc),
-            )
-        if attempt.execute_call_count != 1:
-            return self._result(
-                RuntimeStatus.STATE_REJECTED,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=envelope.decision_id,
-                detail="Controller attempt was not call-once",
-            )
-        if attempt.controller_error is not None:
+        except Exception as exc:
             return self._block_unknown(
                 obligation_id=obligation_id,
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
                 detail=(
-                    "Controller raised after mutation admission: "
-                    f"{attempt.controller_error}"
+                    "Controller raised during execution: "
+                    f"{type(exc).__name__}: {exc}"
                 ),
             )
-        transition = attempt.transition
         if type(transition) is not ControllerTransition:
             return self._block_unknown(
                 obligation_id=obligation_id,
@@ -946,52 +827,6 @@ class MissionRuntime:
         ):
             return self._cancel(
                 detail="run was canceled before input executed"
-            )
-        if identity_matches and transition.outcome in {
-            ControllerOutcome.REJECTED,
-            ControllerOutcome.UNKNOWN,
-        }:
-            rejection_evidence_error: Exception | None = None
-            try:
-                action_binding = self._record_controller_transition(
-                    envelope,
-                    transition,
-                )
-            except Exception as exc:
-                if transition.input_completed is False:
-                    # No input reached the OS, so a diagnostic journal failure
-                    # must not turn a harmless stale proposal into a terminal
-                    # mission failure.  The next turn can safely observe a
-                    # fresh frame and decide again.  Executed or unknown input
-                    # still takes the fail-closed path below.
-                    action_binding = None
-                    rejection_evidence_error = exc
-                else:
-                    return self._block_unknown(
-                        obligation_id=obligation_id,
-                        route=route,
-                        proposal_kind=proposal_kind,
-                        decision_id=envelope.decision_id,
-                        detail=(
-                            "Controller outcome evidence failed closed after "
-                            f"admission: {exc}"
-                        ),
-                    )
-        if (
-            transition.outcome is not ControllerOutcome.REJECTED
-            and (
-                attempt.pending_permit_revoked
-                or not attempt.active_admission_closed
-            )
-        ):
-            return self._block_unknown(
-                obligation_id=obligation_id,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=envelope.decision_id,
-                detail=(
-                    "Controller reported mutation without consuming Runtime permit"
-                ),
             )
         if not identity_matches:
             return self._block_unknown(
@@ -1058,23 +893,18 @@ class MissionRuntime:
                     detail="run was canceled before input executed"
                 )
             # Every proven-not-executed rejection is fed back to the Actor
-            # with its mechanical error_kind (target/hit-test/permit/format).
+            # with its mechanical error_kind (target/hit-test/format).
             # Whether the failure is worth another attempt is a semantic
             # decision for the same model that sees the error and the next
             # fresh frame; the runtime keeps only the mechanical budget
             # (max_turns/max_model_calls) as the hard stop.  A static
             # "recoverable" whitelist is no longer consulted.
-            if action_binding is not None:
-                error_kind = action_binding.raw_action_receipt[
-                    "error_kind"
-                ]
-            else:
-                error_kind = None
+            rejection_evidence_error: Exception | None = None
             try:
                 self._record_rejected_transition(
                     envelope,
                     transition,
-                    error_kind=error_kind,
+                    error_kind=transition.error_kind,
                 )
             except Exception as exc:
                 rejection_evidence_error = exc
@@ -1121,11 +951,6 @@ class MissionRuntime:
                 keep_holding=proposal.model_dump(mode="json")[
                     "args"
                 ].get("keep_holding", False),
-            )
-            self._record_controller_transition(
-                envelope,
-                transition,
-                post_frame_identity=after.frame.identity.to_dict(),
             )
             event_ids = self._accept(
                 "transition_recorded",
@@ -1221,14 +1046,6 @@ class MissionRuntime:
             return self._result(
                 RuntimeStatus.BLOCKED,
                 detail=f"mission is not actionable: {projection.status.value}",
-            )
-        if self._mutation_permits.closed:
-            return self._result(
-                RuntimeStatus.BLOCKED,
-                detail=(
-                    "desktop mutation authority is closed after an "
-                    "unreconciled outcome"
-                ),
             )
         if self._stopped(stop_event):
             return self._cancel()
@@ -1410,21 +1227,11 @@ class MissionRuntime:
                 detail=str(exc),
             )
         self._task_state = pending_task_state
+        if type(actor_decision) is ActorTurnDecision:
+            narration = actor_decision.narration.strip()
+            if narration:
+                self._latest_narration = narration[:_MAX_NARRATION_CHARS]
         if type(proposal) is DesktopActionProposal:
-            try:
-                self._record_actor_decision(
-                    proposal,
-                    envelope,
-                    broker_projection,
-                )
-            except Exception as exc:
-                return self._result(
-                    RuntimeStatus.STATE_REJECTED,
-                    route=route,
-                    proposal_kind=proposal_kind,
-                    decision_id=envelope.decision_id,
-                    detail=f"Evidence decision failed closed: {exc}",
-                )
             return self._run_action(
                 proposal,
                 envelope,
@@ -1468,6 +1275,7 @@ class MissionRuntime:
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
                 event_ids=event_ids,
+                detail=(reason or proposal.blocker_kind)[:4000],
             )
         return self._result(
             RuntimeStatus.INVALID_PROPOSAL,

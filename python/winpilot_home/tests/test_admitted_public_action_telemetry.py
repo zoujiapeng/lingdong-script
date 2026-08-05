@@ -159,11 +159,6 @@ def strict_backend_environment(monkeypatch):
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
     monkeypatch.setattr(
         executor,
-        "multi_input_cooperation_enabled",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        executor,
         "_target_window_still_foreground",
         lambda _hwnd: True,
     )

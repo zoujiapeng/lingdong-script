@@ -1800,13 +1800,6 @@ def cancel_arp_run(run_id: str) -> dict[str, Any]:
     return {"ok": True, "run": ARP_RUNS.get(run_id).to_dict()}
 
 
-@app.post("/api/v2/arp/runs/{run_id}/gate")
-def decide_arp_gate(run_id: str, req: ArpGateDecisionRequest) -> dict[str, Any]:
-    if not ARP_RUNS.decide_gate(run_id, req.node_id, req.approved, req.comment):
-        raise HTTPException(409, "run is not waiting at this human gate")
-    return {"ok": True}
-
-
 def _chatgpt_bridge_status() -> dict[str, Any]:
     runtime_status = status()
     enabled = bool(CONFIG.get("integrations", "chatgpt_desktop", "enabled", default=True))
@@ -1902,17 +1895,6 @@ def _chatgpt_bridge_cancel_run(run_id: str) -> dict[str, Any]:
         RUNTIME_JOBS.cancel(job.id)
     execution = ARP_RUNS.get(run_id)
     return {"ok": True, "run": execution.to_dict() if execution else None}
-
-
-def _chatgpt_bridge_decide_gate(
-    run_id: str,
-    node_id: str,
-    approved: bool,
-    comment: str,
-) -> dict[str, Any]:
-    if not ARP_RUNS.decide_gate(run_id, node_id, approved, comment):
-        return {"ok": False, "error": "run is not waiting at this human gate"}
-    return {"ok": True}
 
 
 @app.get("/api/v2/integrations/chatgpt")
@@ -2696,7 +2678,6 @@ def _install_chatgpt_mcp() -> None:
             start_graph=_chatgpt_bridge_start_graph,
             get_run=_chatgpt_bridge_get_run,
             cancel_run=_chatgpt_bridge_cancel_run,
-            decide_gate=_chatgpt_bridge_decide_gate,
             busy=STATE.busy,
             enabled=lambda: bool(
                 CONFIG.get("integrations", "chatgpt_desktop", "enabled", default=True)

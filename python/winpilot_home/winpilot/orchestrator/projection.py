@@ -94,6 +94,7 @@ class RunProjectionStore:
             "result": None,
             "error": "",
             "usage": None,
+            "narration": "",
             "timeline": [],
             "evidence": [],
             # Audit data is kept separately from the lightweight run list.
@@ -169,8 +170,6 @@ class RunProjectionStore:
             return "verifying"
         if event_type == "arp_evidence":
             return "verifying"
-        if event_type == "arp_human_gate" and event.get("status") == "waiting":
-            return "awaiting_human"
         if event_type == "arp_run_paused":
             return "paused"
         if event_type == "arp_run_resumed":
@@ -294,6 +293,13 @@ class RunProjectionStore:
                     run["satisfiability"] = copy.deepcopy(satisfiability)
                 if event.get("experience_policy"):
                     run["experience_policy"] = str(event.get("experience_policy"))
+            # Live Actor narration: the model's own running commentary on the
+            # real screen.  Each turn replaces the previous narration so the
+            # frontend can show current progress, not a history summary.
+            if event_type == "live_agent_turn":
+                narration = event.get("narration")
+                if type(narration) is str and narration.strip():
+                    run["narration"] = narration[:4096]
             runtime_snapshot = event.get("runtime_snapshot")
             if isinstance(runtime_snapshot, dict):
                 run["arp_snapshot"] = copy.deepcopy(runtime_snapshot)
@@ -727,6 +733,7 @@ class RunProjectionStore:
                     else _compact(event.get("result"))
                 )
                 run["error"] = str(event.get("error") or "")
+                run["failure_stage"] = str(event.get("failure_stage") or "")
                 run["current_node_id"] = None
                 run["current_tool"] = None
                 run["finished_at"] = run["updated_at"]

@@ -132,16 +132,4 @@ def capability_catalog() -> list[CapabilitySpec]:
             input_schema={"required": "array"},
             flow_node_types=["evidence_gate"],
         ),
-        CapabilitySpec(
-            id="human.approval",
-            name="Human approval",
-            category="safety",
-            description="Pause before sensitive or externally visible actions.",
-            node_kind=ArpNodeKind.HUMAN_GATE,
-            latency_class="human",
-            deterministic=True,
-            requires_llm=False,
-            input_schema={"message": "string", "approved": "boolean?"},
-            flow_node_types=["human_gate"],
-        ),
     ]

@@ -19,7 +19,6 @@ REPO_ROOT = Path(__file__).parents[3]
 VNEXT_ROOT = PACKAGE_ROOT / "vnext"
 RUNTIME_ROOT = VNEXT_ROOT / "runtime"
 MODEL_ROLES_ROOT = VNEXT_ROOT / "model_roles"
-EVIDENCE_PLANE_ROOT = VNEXT_ROOT / "evidence_plane"
 LIVE_COMPOSITION_ROOT = (
     PACKAGE_ROOT / "orchestrator" / "live_agent.py"
 )
@@ -28,7 +27,6 @@ LIVE_COMPOSITION_VNEXT_MODULES = (
     "winpilot.vnext.capabilities",
     "winpilot.vnext.desktop_adapter",
     "winpilot.vnext.evidence",
-    "winpilot.vnext.evidence_plane",
     "winpilot.vnext.mission",
     "winpilot.vnext.model_roles",
     "winpilot.vnext.profiling",
@@ -51,15 +49,6 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.desktop_adapter", "WorkspaceObservation", None),
     ("winpilot.vnext.desktop_adapter", "WorkspaceSurface", None),
     ("winpilot.vnext.evidence", "EvidenceRegistry", None),
-    ("winpilot.vnext.evidence_plane", "FrameArtifactWriter", None),
-    ("winpilot.vnext.evidence_plane", "RuntimeEvidenceJournal", None),
-    ("winpilot.vnext.evidence_plane", "RuntimeEvidencePlane", None),
-    ("winpilot.vnext.evidence_plane", "canonical_sha256", None),
-    (
-        "winpilot.vnext.evidence_plane",
-        "runtime_evidence_report_sha256",
-        None,
-    ),
     ("winpilot.vnext.mission", "EvidenceRef", None),
     ("winpilot.vnext.mission", "MissionDefinition", None),
     ("winpilot.vnext.mission", "MissionReducer", None),
@@ -75,7 +64,6 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.runtime", "CURRENT_FRAME_EVIDENCE_KIND", None),
     ("winpilot.vnext.runtime", "MissionRuntime", None),
     ("winpilot.vnext.runtime", "MissionRuntimeResult", None),
-    ("winpilot.vnext.runtime", "MutationPermitAuthority", None),
     ("winpilot.vnext.runtime", "POST_ACTION_FRAME_EVIDENCE_KIND", None),
     ("winpilot.vnext.runtime", "RuntimeFrame", None),
     ("winpilot.vnext.runtime", "RuntimeFrameIdentity", None),
@@ -87,7 +75,6 @@ KERNEL_ROOTS = (
     VNEXT_ROOT / "__init__.py",
     VNEXT_ROOT / "mission",
     VNEXT_ROOT / "evidence",
-    EVIDENCE_PLANE_ROOT,
 )
 
 FORBIDDEN_IMPORT_PREFIXES = (
@@ -122,8 +109,6 @@ RUNTIME_FILES = (
     "__init__.py",
     "contracts.py",
     "mission_runtime.py",
-    "mutation_attempt.py",
-    "mutation_permits.py",
     "ports.py",
     "post_action_reconcile.py",
     "task_state.py",
@@ -178,14 +163,6 @@ MODEL_ROLE_FILES = (
     "__init__.py",
     "common.py",
     "visual_actor.py",
-)
-
-EVIDENCE_PLANE_FILES = (
-    "__init__.py",
-    "artifacts.py",
-    "contracts.py",
-    "journal.py",
-    "plane.py",
 )
 
 MODEL_ROLE_ALLOWED_PRODUCT_PREFIXES = (
@@ -323,28 +300,6 @@ def test_vnext_root_has_no_eager_or_lazy_imports() -> None:
         and node.name == "__getattr__"
         for node in tree.body
     )
-
-
-def test_runtime_evidence_plane_is_exact_pure_and_default_unreachable() -> None:
-    assert tuple(
-        sorted(path.name for path in EVIDENCE_PLANE_ROOT.glob("*.py"))
-    ) == EVIDENCE_PLANE_FILES
-    importers = {
-        path.relative_to(VNEXT_ROOT).as_posix()
-        for path in _source_files(VNEXT_ROOT)
-        if EVIDENCE_PLANE_ROOT not in path.parents
-        and any(
-            _matches_prefix(
-                imported,
-                "winpilot.vnext.evidence_plane",
-            )
-            for imported in _imports(path)
-        )
-    }
-    assert importers == {
-        "desktop_adapter/atomic.py",
-        "runtime/mission_runtime.py",
-    }
 
 
 def test_only_one_composition_root_can_reach_live_vnext_by_import() -> None:

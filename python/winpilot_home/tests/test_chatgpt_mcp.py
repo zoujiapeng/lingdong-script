@@ -44,9 +44,6 @@ def _hooks(**overrides):
         "start_graph": lambda graph, inputs: {"ok": True, "graph_id": graph.id, "inputs": inputs},
         "get_run": lambda run_id: {"ok": True, "run_id": run_id},
         "cancel_run": lambda run_id: {"ok": True, "run_id": run_id},
-        "decide_gate": lambda run_id, node_id, approved, comment: {
-            "ok": True, "run_id": run_id, "node_id": node_id, "approved": approved,
-        },
         "busy": lambda: False,
         "enabled": lambda: True,
         "mutation_allowed": lambda: True,

@@ -47,11 +47,6 @@ if str(PYTHON_HOME) not in sys.path:
 import client_e2e_run as client_harness  # noqa: E402
 import vnext_canary_campaign as campaign_state  # noqa: E402
 import vnext_canary_input_hook as input_hook  # noqa: E402
-from winpilot.vnext.evidence_plane import (  # noqa: E402
-    RuntimeEvidencePlane,
-    canonical_sha256,
-    runtime_evidence_report_sha256,
-)
 
 
 TARGET_SERVER = (
@@ -95,9 +90,6 @@ PACKAGE_LOCK = WORKSPACE / "package-lock.json"
 DIST_MAIN = WORKSPACE / "dist" / "main"
 DIST_RENDERER = WORKSPACE / "dist" / "renderer"
 TARGET_HTML = TARGET_SERVER.with_name("vnext_canary_target.html")
-RUNTIME_EVIDENCE_ROOT = (
-    client_harness.TRACE_ROOT / "vnext_runtime_evidence"
-)
 ORACLE_VERSION = "independent-vnext-canary-browser-os-join/2"
 BROWSER_EVENT_POST_ACTION_GRACE_S = 0.25
 _BROWSER_ACTION_EVENT_TYPES = {
@@ -1504,114 +1496,29 @@ def _load_trace_events(client_result: dict[str, Any]) -> tuple[list[dict[str, An
     return events, str(path)
 
 
-def _runtime_evidence_anchor(
-    events: list[dict[str, Any]],
-    *,
-    run_id: str,
-) -> dict[str, Any]:
-    matches = [
-        item
-        for item in events
-        if item.get("type") == "runtime_evidence_sealed"
-        and str(item.get("run_id") or "") == run_id
-    ]
-    if len(matches) != 1:
-        raise RuntimeError(
-            "vNext run does not expose exactly one runtime evidence anchor"
-        )
-    raw = matches[0]
-    required = {
-        "type",
-        "ts",
-        "runtime_version",
-        "no_legacy_fallback",
-        "mission_id",
-        "run_id",
-        "journal_head_sha256",
-        "journal_event_count",
-        "report_sha256",
-        "report_status",
-        "missing_evidence_count",
-        "verification_failure_count",
-    }
-    if set(raw) != required:
-        raise RuntimeError("runtime evidence anchor fields are not exact")
-    mission_id = str(raw.get("mission_id") or "")
-    if (
-        not mission_id
-        or type(raw.get("ts")) not in {int, float}
-        or type(raw.get("ts")) is bool
-        or not math.isfinite(float(raw["ts"]))
-        or raw.get("runtime_version") != "vnext"
-        or raw.get("no_legacy_fallback") is not True
-    ):
-        raise RuntimeError("runtime evidence anchor scope is invalid")
-    head = raw.get("journal_head_sha256")
-    if head is not None and (
-        type(head) is not str or re.fullmatch(r"[0-9a-f]{64}", head) is None
-    ):
-        raise RuntimeError("runtime evidence journal head is invalid")
-    report_sha = raw.get("report_sha256")
-    if (
-        type(report_sha) is not str
-        or re.fullmatch(r"[0-9a-f]{64}", report_sha) is None
-    ):
-        raise RuntimeError("runtime evidence report hash is invalid")
-    for field in (
-        "journal_event_count",
-        "missing_evidence_count",
-        "verification_failure_count",
-    ):
-        value = raw.get(field)
-        if type(value) is not int or type(value) is bool or value < 0:
-            raise RuntimeError(f"runtime evidence {field} is invalid")
-    return {
-        "type": "runtime_evidence_sealed",
-        "ts": raw["ts"],
-        "mission_id": mission_id,
-        "run_id": run_id,
-        "journal_head_sha256": head,
-        "journal_event_count": int(raw["journal_event_count"]),
-        "report_sha256": report_sha,
-        "report_status": str(raw.get("report_status") or ""),
-        "missing_evidence_count": int(raw["missing_evidence_count"]),
-        "verification_failure_count": int(
-            raw["verification_failure_count"]
-        ),
-        "runtime_version": "vnext",
-        "no_legacy_fallback": True,
-    }
-
-
 def _rebuild_runtime_evidence(
     events: list[dict[str, Any]],
     *,
     run_id: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    anchor = _runtime_evidence_anchor(events, run_id=run_id)
-    report = RuntimeEvidencePlane.rebuild_report(
-        RUNTIME_EVIDENCE_ROOT / run_id,
-        anchor["mission_id"],
-        run_id,
-        expected_journal_head_sha256=anchor["journal_head_sha256"],
-    )
-    wire = report.to_dict()
-    checks = {
-        "mission_id": report.mission_id,
-        "run_id": report.run_id,
-        "journal_head_sha256": report.journal_head_sha256,
-        "journal_event_count": report.journal_event_count,
-        "report_sha256": runtime_evidence_report_sha256(report),
-        "report_status": report.status.value,
-        "missing_evidence_count": len(report.missing_evidence),
-        "verification_failure_count": len(report.verification_failures),
+    """Return the sealed anchor without a durable journal.
+
+    The per-action durable evidence journal was removed (Model-first); the
+    run trace remains the only record, so the canary reconciliation keeps
+    an explicit unavailable marker instead of a rebuilt report.
+    """
+    del events
+    anchor = {
+        "mission_id": "",
+        "run_id": run_id,
+        "journal_head_sha256": None,
+        "journal_event_count": 0,
+        "report_sha256": None,
+        "report_status": "incomplete",
+        "missing_evidence_count": 0,
+        "verification_failure_count": 0,
     }
-    for field, observed in checks.items():
-        if anchor[field] != observed:
-            raise RuntimeError(
-                f"runtime evidence anchor mismatch: {field}"
-            )
-    return wire, anchor
+    return dict(anchor), anchor
 
 
 def _event_model(event: dict[str, Any]) -> str:

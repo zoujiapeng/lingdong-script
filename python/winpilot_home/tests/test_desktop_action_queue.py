@@ -292,7 +292,6 @@ def test_public_click_uses_one_outer_queue_event(monkeypatch):
     calls = []
     events = []
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: False)
     monkeypatch.setattr(
         executor,
         "_raw_click",
@@ -372,7 +371,6 @@ def test_window_scoped_decorator_binds_positional_hwnd(monkeypatch):
 def test_prepositioned_click_keeps_physical_servo_path(monkeypatch):
     calls = []
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
     monkeypatch.setattr(
         executor,
         "_post_click",
@@ -402,7 +400,6 @@ def test_prepositioned_click_keeps_physical_servo_path(monkeypatch):
 def test_force_physical_click_bypasses_background_window_message(monkeypatch):
     calls = []
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
     monkeypatch.setattr(
         executor,
         "_post_click",
@@ -472,7 +469,6 @@ def test_raw_prepositioned_click_does_not_refocus_or_repeat_slow_move(monkeypatc
 
 def test_legacy_raw_click_refocuses_without_adding_a_foreground_gate(monkeypatch):
     calls = []
-    monkeypatch.setattr(executor, "multi_input_cooperation_enabled", lambda: False)
     monkeypatch.setattr(
         executor,
         "_raw_focus_window",
@@ -583,7 +579,6 @@ def test_public_scroll_uses_one_outer_queue_event(monkeypatch):
     calls = []
     events = []
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: False)
     monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: calls.append(("move", x, y)))
     monkeypatch.setattr(executor, "_send_inputs", lambda inputs: calls.append(("send", len(inputs))))
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
@@ -607,7 +602,6 @@ def test_public_drag_uses_one_outer_queue_event(monkeypatch):
     calls = []
     events = []
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: False)
     monkeypatch.setattr(executor, "_raw_focus_window", lambda hwnd: calls.append(("focus", hwnd)))
     monkeypatch.setattr(
         executor,
@@ -640,7 +634,6 @@ def test_public_draw_strokes_uses_one_outer_queue_event(monkeypatch):
     calls = []
     events = []
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
-    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: False)
     monkeypatch.setattr(executor, "_raw_focus_window", lambda hwnd: calls.append(("focus", hwnd)))
     monkeypatch.setattr(
         executor,
@@ -677,11 +670,6 @@ def test_long_pointer_path_releases_button_when_target_window_is_lost(monkeypatc
         executor,
         "_target_window_still_foreground",
         lambda _hwnd: next(target_checks, False),
-    )
-    monkeypatch.setattr(
-        executor,
-        "_cooperative_action_still_owned",
-        lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(executor, "_abs_mouse_move", lambda *_args: None)
     monkeypatch.setattr(executor, "_emit_move", lambda *_args: None)

@@ -36,7 +36,6 @@ class ArpNodeKind(str, Enum):
     DELAY = "delay"
     SET_VARIABLE = "set_variable"
     EVIDENCE_GATE = "evidence_gate"
-    HUMAN_GATE = "human_gate"
     LEGACY_FLOW = "legacy_flow"
 
 
@@ -363,7 +362,6 @@ def validate_graph(graph: ArpGraph) -> GraphValidation:
                 ArpNodeKind.SKILL_REPLAY,
                 ArpNodeKind.TASK_STAGE,
                 ArpNodeKind.EVIDENCE_GATE,
-                ArpNodeKind.HUMAN_GATE,
             }
             if not any(
                 node.id in seen and not node.disabled and node.kind in evidence_kinds

@@ -3,6 +3,31 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import pytest
+
+from winpilot.config import CONFIG
+
+
+@pytest.fixture(autouse=True)
+def _pin_daemon_config(monkeypatch: pytest.MonkeyPatch):
+    """Pin the daemon's own toggle so tests never depend on the machine config.
+
+    The default product config keeps ambient auto-perception off (vision and
+    shell first); these unit tests exercise the daemon schedule path itself.
+    """
+    monkeypatch.setattr(
+        CONFIG,
+        "_data",
+        {**CONFIG._data, "fusion": {
+            **dict(CONFIG._data.get("fusion") or {}),
+            "incremental_perception_enabled": True,
+            "incremental_perception_max_crops": 4,
+            "incremental_perception_min_ratio": 0.00015,
+            "incremental_perception_max_ratio": 0.35,
+            "incremental_perception_debounce_ms": 0,
+        }},
+    )
+    yield
 
 
 def test_perception_daemon_reuses_watcher_and_cache_per_hwnd(monkeypatch):

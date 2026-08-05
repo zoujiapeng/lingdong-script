@@ -122,3 +122,42 @@ export function taskResultText(value: unknown): string {
   }
   return value === null || value === undefined ? '' : String(value);
 }
+
+const FAILURE_STAGE_LABELS: Record<string, string> = {
+  model_routing: '模型决策',
+  desktop_handoff: '桌面交接',
+  target_binding: '目标窗口绑定',
+  screenshot: '画面截图',
+  tool_format: '工具调用格式',
+  physical_input: '物理输入',
+  result_verification: '结果验证',
+  canceled: '已取消',
+};
+
+export function readableFailureStage(stage: unknown): string {
+  const key = String(stage || '').trim().toLowerCase();
+  return FAILURE_STAGE_LABELS[key] || key || '未知';
+}
+
+const READABLE_ERRORS: Array<[RegExp, string]> = [
+  [/vNext turn budget exhausted/, '执行回合数用尽：模型在限制内未能完成任务'],
+  [/vNext model-call budget exhausted/, '模型调用次数用尽'],
+  [/vNext runtime time budget exhausted/, '执行时间超时'],
+  [/vNext Runtime returned blocked/, '模型报告无法继续'],
+  [/vNext Runtime returned invalid_proposal/, '模型提交了无效的工具调用'],
+  [/Evidence decision failed closed/, '动作校验未通过，未执行'],
+  [/permit[a-z_]* (?:rejected|changed|not)/, '内部执行许可未通过'],
+  [/run canceled/, '运行已取消'],
+];
+
+export function readableRunError(error: unknown, stage?: unknown): string {
+  const raw = String(error || '').trim();
+  if (!raw) return '';
+  for (const [pattern, label] of READABLE_ERRORS) {
+    if (pattern.test(raw)) {
+      const stageLabel = readableFailureStage(stage);
+      return stageLabel ? `${label}（失败阶段：${stageLabel}）` : label;
+    }
+  }
+  return raw;
+}

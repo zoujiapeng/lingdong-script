@@ -93,6 +93,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('menu-action', handler);
   },
 
+  // Global Agent control hotkeys (F7 pause/resume, F8 stop) from main process
+  onAgentControl: (callback: (action: string) => void) => {
+    const handler = (_: any, payload: any) =>
+      callback(String(payload?.action || ''));
+    ipcRenderer.on('agent-control', handler);
+    return () => ipcRenderer.removeListener('agent-control', handler);
+  },
+
   // API commands (from local HTTP bridge)
   onApiCommand: (callback: (action: string, payload: any) => void) => {
     const handler = (_: any, msg: any) => callback(msg.action, msg.payload);

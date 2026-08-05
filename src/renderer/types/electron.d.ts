@@ -62,6 +62,9 @@ export interface ElectronAPI {
   // Menu actions
   onMenuAction: (callback: (action: string) => void) => () => void;
 
+  // Global Agent control hotkeys (F7 pause/resume, F8 stop)
+  onAgentControl: (callback: (action: string) => void) => () => void;
+
   // API commands
   onApiCommand: (callback: (action: string, payload: any) => void) => () => void;
 

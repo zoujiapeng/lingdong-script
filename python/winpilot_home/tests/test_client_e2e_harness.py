@@ -241,6 +241,7 @@ def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
     driver.restore_and_focus = lambda: None
     driver.navigate = lambda title: navigated.append(title)
     driver.capture_window = lambda name: str(tmp_path / name)
+    driver.identity = SimpleNamespace(hwnd=4242)
 
     def button(title, *, prefix=False, timeout=0.0):
         del timeout
@@ -253,6 +254,22 @@ def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
 
     driver.button = button
     monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    invoked = []
+
+    def fake_scroll_invoke(hwnd, *, regex_name):
+        invoked.append((hwnd, regex_name))
+        # Mirror the harness path: find the named button and invoke it.
+        if regex_name == harness.re.compile(r"^会话 \d+$").pattern or (
+            regex_name == r"^会话 \d+$"
+        ):
+            return None
+        if regex_name == "清空会话记忆":
+            ClearButton().Click()
+            return None
+        raise RuntimeError(f"unexpected scroll invoke: {regex_name!r}")
+
+    monkeypatch.setattr(harness, "_uia_scroll_invoke", fake_scroll_invoke)
 
     result = driver.clear_session_through_client()
 
@@ -267,7 +284,10 @@ def test_session_reset_reuses_the_count_control_instead_of_rewalking_cards(
     ]
     assert lookups == [
         ("会话 ", True),
-        ("清空会话记忆", False),
+    ]
+    assert invoked == [
+        (4242, r"^会话 \d+$"),
+        (4242, "清空会话记忆"),
     ]
 
 

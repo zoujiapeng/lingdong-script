@@ -51,21 +51,14 @@ from winpilot.vnext.desktop_adapter import (
     LiveTargetSnapshot,
     WorkspaceSurface,
 )
-from winpilot.vnext.evidence_plane import (
-    FrameArtifactWriter,
-    RuntimeEvidenceJournal,
-    RuntimeEvidencePlane,
-    RuntimeEvidencePlaneError,
-)
-import winpilot.vnext.evidence_plane.journal as evidence_journal_module
 from winpilot.vnext.mission import TargetBinding
 from winpilot.vnext.runtime import (
     ControllerOutcome,
-    MutationPermitAuthority,
+    ControllerTransition,
     RuntimeCommitIdentity,
+    RuntimeContractError,
     RuntimeFrameIdentity,
     RuntimeTargetIdentity,
-    call_once_with_permit,
 )
 
 
@@ -389,17 +382,12 @@ class _Harness:
     observer: FrameObserver
     binding: TargetBinding
     probe: _Probe
-    permits: MutationPermitAuthority
     raw: _RawHarness
     trace: _Trace
     wait_calls: list[float]
     adapter: AtomicDesktopAdapter
     envelope: ActorDecisionEnvelope
     commit_identity: RuntimeCommitIdentity
-    runtime_evidence: RuntimeEvidencePlane | None = None
-    evidence_journal: RuntimeEvidenceJournal | None = None
-    frame_artifact_writer: FrameArtifactWriter | None = None
-    evidence_run_directory: Path | None = None
     before_image_b64: str | None = None
     after_image_b64: str | None = None
 
@@ -409,17 +397,24 @@ class _Harness:
         stop_event: threading.Event | None = None,
         still_current: Callable[[], bool] = lambda: True,
     ):
-        return call_once_with_permit(
-            authority=self.permits,
-            envelope=self.envelope,
-            turn_index=0,
-            commit_identity=self.commit_identity,
-            still_current=still_current,
-            execute=lambda envelope: self.adapter.execute(
-                envelope,
+        if not still_current():
+            return _AttemptResult(transition=None, controller_error=None)
+        try:
+            transition = self.adapter.execute(
+                self.envelope,
                 stop_event=stop_event,
-            ),
-        )
+            )
+            return _AttemptResult(transition=transition, controller_error=None)
+        except Exception as exc:
+            return _AttemptResult(transition=None, controller_error=exc)
+
+
+@dataclass
+class _AttemptResult:
+    transition: ControllerTransition | None
+    controller_error: Exception | None
+    execute_call_count: int = 1
+    active_admission_closed: bool = True
 
 
 def _proposal(action: str) -> dict[str, Any]:
@@ -576,8 +571,6 @@ def _harness(
     trace_fail: bool = False,
     post_input_settle_delay_s: float = 0.12,
     wait: Callable[[float], None] | None = None,
-    with_runtime_evidence: bool = False,
-    evidence_run_directory: Path | None = None,
     action_args: dict[str, Any] | None = None,
     expected_hit_point: tuple[int, int] = POINT,
 ) -> _Harness:
@@ -635,37 +628,8 @@ def _harness(
         ),
         expected_hit_point=drag_guard_points or expected_hit_point,
     )
-    permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
     raw = _RawHarness(raw_result)
     trace = _Trace(trace_fail)
-    if evidence_run_directory is not None:
-        with_runtime_evidence = True
-        evidence_journal = RuntimeEvidenceJournal.create(
-            evidence_run_directory,
-            MISSION_ID,
-            RUN_ID,
-        )
-        frame_artifact_writer = FrameArtifactWriter.create(
-            evidence_run_directory
-        )
-        runtime_evidence = RuntimeEvidencePlane(
-            MISSION_ID,
-            RUN_ID,
-            clock_ns=lambda: 1_500_000_000,
-            journal=evidence_journal,
-        )
-    else:
-        evidence_journal = None
-        frame_artifact_writer = None
-        runtime_evidence = (
-            RuntimeEvidencePlane(
-                MISSION_ID,
-                RUN_ID,
-                clock_ns=lambda: 123_456_789,
-            )
-            if with_runtime_evidence
-            else None
-        )
     wait_calls: list[float] = []
 
     def settle_wait(delay: float) -> None:
@@ -678,23 +642,14 @@ def _harness(
         frame_observer=observer,
         frozen_target_binding=binding,
         target_probe=probe,
-        mutation_permits=permits,
         raw_device=raw.executor(),
         receipt_trace_sink=trace,
-        runtime_evidence_plane=runtime_evidence,
-        frame_artifact_writer=frame_artifact_writer,
         post_input_settle_delay_s=post_input_settle_delay_s,
         wait=settle_wait,
     )
     envelope = _envelope(before, binding, action)
     if action_args is not None:
         envelope = _replace_action_args(envelope, action_args)
-    if runtime_evidence is not None:
-        runtime_evidence.record_actor_decision(
-            actor_envelope=envelope.to_dict(),
-            tool_schema={"type": "object"},
-            broker_projection=_broker_projection(envelope),
-        )
     frame_identity = RuntimeFrameIdentity(
         frame_id=before.frame_id,
         epoch=before.epoch,
@@ -709,7 +664,6 @@ def _harness(
         observer=observer,
         binding=binding,
         probe=probe,
-        permits=permits,
         raw=raw,
         trace=trace,
         wait_calls=wait_calls,
@@ -719,59 +673,8 @@ def _harness(
             frame_identity,
             RuntimeTargetIdentity.from_binding(binding),
         ),
-        runtime_evidence=runtime_evidence,
-        evidence_journal=evidence_journal,
-        frame_artifact_writer=frame_artifact_writer,
-        evidence_run_directory=evidence_run_directory,
         before_image_b64=before_b64,
         after_image_b64=after_b64,
-    )
-
-
-def _record_controller_transition(
-    harness: _Harness,
-    transition: Any,
-) -> None:
-    plane = harness.runtime_evidence
-    assert plane is not None
-    current = harness.authority.current
-    assert current is not None
-    plane.record_controller_transition(
-        decision_id=harness.envelope.decision_id,
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        actor_envelope_sha256=hashlib.sha256(
-            harness.envelope.to_json().encode("utf-8")
-        ).hexdigest(),
-        transition=transition.to_dict(),
-        post_frame_identity=RuntimeFrameIdentity(
-            frame_id=current.frame_id,
-            epoch=current.epoch,
-            hwnd=current.hwnd,
-            region=current.region,
-            scope=current.scope,
-            submitted_size=current.submitted_size,
-            image_sha256=current.image_sha256,
-        ).to_dict(),
-    )
-
-
-def _fail_journal_event(
-    monkeypatch: pytest.MonkeyPatch,
-    event_kind: str,
-) -> None:
-    original_write_all = evidence_journal_module._write_all
-    needle = f'"event_kind":"{event_kind}"'.encode("ascii")
-
-    def fail_selected_append(stream, value: bytes) -> None:
-        if needle in bytes(value):
-            raise OSError("synthetic durable append failure")
-        original_write_all(stream, value)
-
-    monkeypatch.setattr(
-        evidence_journal_module,
-        "_write_all",
-        fail_selected_append,
     )
 
 
@@ -895,7 +798,6 @@ def test_screen_first_click_is_admitted_on_any_visible_window(
         ),
         hit_root=other_hwnd,
     )
-    permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
     raw = _RawHarness(True)
     trace = _Trace(False)
     adapter = AtomicDesktopAdapter(
@@ -903,7 +805,6 @@ def test_screen_first_click_is_admitted_on_any_visible_window(
         frame_observer=observer,
         frozen_target_binding=binding,
         target_probe=probe,
-        mutation_permits=permits,
         raw_device=raw.executor(),
         receipt_trace_sink=trace,
         post_input_settle_delay_s=0.0,
@@ -921,14 +822,7 @@ def test_screen_first_click_is_admitted_on_any_visible_window(
         ),
         RuntimeTargetIdentity.from_binding(binding),
     )
-    attempt = call_once_with_permit(
-        authority=permits,
-        envelope=envelope,
-        turn_index=0,
-        commit_identity=commit_identity,
-        still_current=lambda: True,
-        execute=lambda pinned: adapter.execute(pinned),
-    ).transition
+    attempt = adapter.execute(envelope)
     assert attempt is not None
 
     assert attempt.outcome is ControllerOutcome.COMPLETED
@@ -997,14 +891,12 @@ def test_screen_first_click_rejects_dead_hit_test_but_keeps_desktop_frame(
         expected_hit_point=(0, 0),
         hit_root=None,
     )
-    permits = MutationPermitAuthority(MISSION_ID, RUN_ID)
     raw = _RawHarness(True)
     adapter = AtomicDesktopAdapter(
         frame_authority=authority,
         frame_observer=observer,
         frozen_target_binding=binding,
         target_probe=probe,
-        mutation_permits=permits,
         raw_device=raw.executor(),
         receipt_trace_sink=_Trace(False),
         post_input_settle_delay_s=0.0,
@@ -1022,700 +914,89 @@ def test_screen_first_click_rejects_dead_hit_test_but_keeps_desktop_frame(
         ),
         RuntimeTargetIdentity.from_binding(binding),
     )
-    attempt = call_once_with_permit(
-        authority=permits,
-        envelope=envelope,
-        turn_index=0,
-        commit_identity=commit_identity,
-        still_current=lambda: True,
-        execute=lambda pinned: adapter.execute(pinned),
-    ).transition
+    attempt = adapter.execute(envelope)
     assert attempt is not None
 
     assert attempt.outcome is ControllerOutcome.REJECTED
     assert raw.calls == []
 
 
-def test_atomic_adapter_records_admission_and_single_raw_receipt() -> None:
-    harness = _harness("click", with_runtime_evidence=True)
-    plane = harness.runtime_evidence
-    assert plane is not None
-
-    attempt = harness.run()
-
-    transition = attempt.transition
-    assert transition is not None
-    assert transition.outcome is ControllerOutcome.COMPLETED
-    assert len(harness.raw.calls) == 1
-    assert len(plane.admission_records) == 1
-    admission = plane.admission_records[0]
-    assert admission.decision_id == harness.envelope.decision_id
-    assert admission.mutation_permit_id == attempt.permit_id
-    assert (
-        admission.controller_route
-        == "vnext_atomic_desktop_adapter"
-    )
-    assert admission.accepted_timestamp_ns == 123_456_789
-    assert plane.action_bindings == ()
-
-    current = harness.authority.current
-    assert current is not None
-    plane.record_controller_transition(
-        decision_id=harness.envelope.decision_id,
-        mission_id=MISSION_ID,
-        run_id=RUN_ID,
-        actor_envelope_sha256=hashlib.sha256(
-            harness.envelope.to_json().encode("utf-8")
-        ).hexdigest(),
-        transition=transition.to_dict(),
-        post_frame_identity=RuntimeFrameIdentity(
-            frame_id=current.frame_id,
-            epoch=current.epoch,
-            hwnd=current.hwnd,
-            region=current.region,
-            scope=current.scope,
-            submitted_size=current.submitted_size,
-            image_sha256=current.image_sha256,
-        ).to_dict(),
-    )
-    assert len(plane.action_bindings) == 1
-    assert (
-        plane.action_bindings[0].raw_action_receipt[
-            "input_completed"
-        ]
-        is True
-    )
-    assert plane.action_bindings[0].physical_attempt_count == 1
-
-
-@pytest.mark.parametrize(
-    (
-        "action",
-        "submitted_arguments",
-        "physical_arguments",
-        "raw_device_route",
-    ),
-    (
-        (
-            "click",
-            {"image_x": 50.0, "image_y": 40.0},
-            {
-                "kind": "pointer_click",
-                "x": 60,
-                "y": 60,
-                "button": "left",
-                "click_count": 1,
-            },
-            "raw_device.admitted_physical_click/0",
-        ),
-        (
-            "double_click",
-            {"image_x": 50.0, "image_y": 40.0},
-            {
-                "kind": "pointer_click",
-                "x": 60,
-                "y": 60,
-                "button": "left",
-                "click_count": 2,
-            },
-            "raw_device.admitted_physical_click/0",
-        ),
-        (
-            "drag",
-            {
-                "image_x1": 50.0,
-                "image_y1": 40.0,
-                "image_x2": 80.0,
-                "image_y2": 60.0,
-            },
-            {
-                "kind": "pointer_drag",
-                "x1": 60,
-                "y1": 60,
-                "x2": 90,
-                "y2": 80,
-                "button": "left",
-            },
-            "raw_device.admitted_physical_drag/0",
-        ),
-        (
-            "drag",
-            {
-                "image_x1": 50.0,
-                "image_y1": 40.0,
-                "image_x2": 80.0,
-                "image_y2": 60.0,
-                "image_points": [[60.0, 20.0], [70.0, 50.0]],
-            },
-            {
-                "kind": "pointer_drag",
-                "x1": 60,
-                "y1": 60,
-                "x2": 90,
-                "y2": 80,
-                "button": "left",
-                "points": [[70, 40], [80, 70]],
-            },
-            "raw_device.admitted_physical_drag/0",
-        ),
-        (
-            "scroll",
-            {
-                "image_x": 37.0,
-                "image_y": 29.0,
-                "amount": -713,
-            },
-            {
-                "kind": "wheel",
-                "x": 47,
-                "y": 49,
-                "signed_wheel_amount": -713,
-                "event_wheel_delta": -85_560,
-            },
-            "raw_device.admitted_physical_scroll/0",
-        ),
-        (
-            "type_text",
-            {"text": "PRIVATE-TEXT-admitted-8c71"},
-            {
-                "kind": "type_text",
-                "text": "PRIVATE-TEXT-admitted-8c71",
-            },
-            "raw_device.admitted_physical_type_text/0",
-        ),
-        (
-            "hotkey",
-            {"keys": ["ctrl", "alt", "shift", "f11"]},
-            {
-                "kind": "hotkey",
-                "modifiers": ["ctrl", "alt", "shift"],
-                "key": "f11",
-            },
-            "raw_device.admitted_physical_hotkey/0",
-        ),
-    ),
-)
-def test_durable_attempt_records_exact_submitted_and_physical_arguments(
-    tmp_path: Path,
-    action: str,
-    submitted_arguments: dict[str, Any],
-    physical_arguments: dict[str, Any],
-    raw_device_route: str,
-) -> None:
-    run_directory = tmp_path / "evidence-run"
-    expected_hit_point = POINT
-    if action in {"click", "double_click", "scroll"}:
-        expected_hit_point = _map_submitted_test_point(
-            submitted_arguments["image_x"],
-            submitted_arguments["image_y"],
-        )
-        assert expected_hit_point == (
-            physical_arguments["x"],
-            physical_arguments["y"],
-        )
-    elif action == "drag":
-        assert _map_submitted_test_point(
-            submitted_arguments["image_x1"],
-            submitted_arguments["image_y1"],
-        ) == (physical_arguments["x1"], physical_arguments["y1"])
-        assert _map_submitted_test_point(
-            submitted_arguments["image_x2"],
-            submitted_arguments["image_y2"],
-        ) == (physical_arguments["x2"], physical_arguments["y2"])
-        if "image_points" in submitted_arguments:
-            assert [
-                _map_submitted_test_point(*point)
-                for point in submitted_arguments["image_points"]
-            ] == [tuple(point) for point in physical_arguments["points"]]
-    harness = _harness(
-        action,
-        action_args=submitted_arguments,
-        evidence_run_directory=run_directory,
-        expected_hit_point=expected_hit_point,
-    )
-    journal = harness.evidence_journal
-    plane = harness.runtime_evidence
-    writer = harness.frame_artifact_writer
-    assert journal is not None
-    assert plane is not None
-    assert writer is not None
-
-    try:
-        result = harness.run()
-
-        assert result.controller_error is None
-        assert result.transition is not None
-        assert result.transition.outcome is ControllerOutcome.COMPLETED
-        assert len(harness.raw.calls) == 1
-        assert len(plane.physical_attempt_records) == 1
-        attempt = plane.physical_attempt_records[0].to_dict()
-        assert attempt["decision_id"] == harness.envelope.decision_id
-        assert attempt["action_id"] == harness.envelope.decision_id
-        assert attempt["action"] == action
-        assert attempt["attempt_index"] == 1
-        assert attempt["submitted_arguments"] == submitted_arguments
-        assert attempt["physical_arguments"] == physical_arguments
-        assert attempt["raw_device_route"] == raw_device_route
-        assert attempt["mechanism"] == "physical_sendinput"
-        raw_action, raw_arguments = harness.raw.calls[0]
-        if action in {"click", "double_click"}:
-            assert raw_action == "click"
-            assert raw_arguments[:2] == (
-                physical_arguments["x"],
-                physical_arguments["y"],
-            )
-        elif action == "scroll":
-            assert raw_action == "scroll"
-            assert raw_arguments == (
-                physical_arguments["x"],
-                physical_arguments["y"],
-                physical_arguments["signed_wheel_amount"],
-                HWND,
-            )
-        elif action == "drag":
-            assert raw_action == "drag"
-            if "points" in physical_arguments:
-                assert raw_arguments == (
-                    physical_arguments["x1"],
-                    physical_arguments["y1"],
-                    physical_arguments["x2"],
-                    physical_arguments["y2"],
-                    tuple(
-                        tuple(point)
-                        for point in physical_arguments["points"]
-                    ),
-                    HWND,
-                )
-            else:
-                assert raw_arguments == (
-                    physical_arguments["x1"],
-                    physical_arguments["y1"],
-                    physical_arguments["x2"],
-                    physical_arguments["y2"],
-                    HWND,
-                )
-        elif action == "type_text":
-            assert raw_action == "type_text"
-            assert raw_arguments == (
-                physical_arguments["text"],
-                HWND,
-            )
-        else:
-            assert raw_action == "hotkey"
-            chord, hwnd = raw_arguments
-            assert tuple(chord.keys) == tuple(submitted_arguments["keys"])
-            assert hwnd == HWND
-
-        references = {
-            reference.role.value: reference
-            for reference in plane.frame_artifact_references
-        }
-        assert set(references) == {"before", "after"}
-        expected_images = {
-            "before": harness.before_image_b64,
-            "after": harness.after_image_b64,
-        }
-        expected_frames = {"before": 1, "after": 2}
-        expected_timestamps = {
-            "before": 1_000_000_000,
-            "after": 2_000_000_000,
-        }
-        for role, reference in references.items():
-            encoded = expected_images[role]
-            assert encoded is not None
-            expected_bytes = base64.b64decode(encoded)
-            artifact_path = run_directory / reference.artifact_uri
-            assert artifact_path.read_bytes() == expected_bytes
-            assert reference.frame_id == expected_frames[role]
-            assert (
-                reference.capture_timestamp_ns
-                == expected_timestamps[role]
-            )
-            assert reference.raw_jpeg_sha256 == hashlib.sha256(
-                expected_bytes
-            ).hexdigest()
-            assert (
-                reference.runtime_frame_image_sha256
-                == hashlib.sha256(encoded.encode("ascii")).hexdigest()
-            )
-            assert (
-                reference.frame_identity["image_sha256"]
-                == reference.runtime_frame_image_sha256
-            )
-            reference_wire = reference.to_dict()
-            assert writer.read_frame(
-                mission_id=MISSION_ID,
-                run_id=RUN_ID,
-                decision_id=harness.envelope.decision_id,
-                action_id=harness.envelope.decision_id,
-                role=role,
-                frame_identity=reference_wire["frame_identity"],
-                artifact_uri=reference.artifact_uri,
-                sha256=reference.raw_jpeg_sha256,
-            ) == expected_bytes
-
-        journal.close()
-        replayed_journal = RuntimeEvidenceJournal.open_read_only(
-            run_directory,
-            MISSION_ID,
-            RUN_ID,
-        )
-        replayed = RuntimeEvidencePlane.from_journal(replayed_journal)
-        assert (
-            replayed.physical_attempt_records[0].to_dict()
-            == attempt
-        )
-    finally:
-        journal.close()
-
-
-@pytest.mark.parametrize(
-    ("event_kind", "receipt_error"),
-    (
-        ("admission", "evidence_admission_rejected"),
-        ("physical_attempt", "evidence_attempt_rejected"),
-    ),
-)
-def test_durable_pre_input_append_failure_never_calls_raw_device(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    event_kind: str,
-    receipt_error: str,
-) -> None:
-    harness = _harness(
-        "click",
-        evidence_run_directory=tmp_path / "evidence-run",
-    )
-    journal = harness.evidence_journal
-    assert journal is not None
-    _fail_journal_event(monkeypatch, event_kind)
-
-    try:
-        result = harness.run()
-
-        assert result.controller_error is None
-        assert result.transition is not None
-        assert result.transition.outcome is ControllerOutcome.REJECTED
-        assert result.transition.input_completed is False
-        assert harness.raw.calls == []
-        assert len(harness.trace.records) == 1
-        receipt, _metadata = harness.trace.records[0]
-        assert receipt.outcome is MutationOutcome.NOT_STARTED
-        assert receipt.error_kind == receipt_error
-        assert journal.writable is False
-    finally:
-        journal.close()
-
-
-def test_durable_pre_admission_not_started_replays_as_incomplete(
-    tmp_path: Path,
-) -> None:
-    run_directory = tmp_path / "evidence-run"
-    harness = _harness(
-        "click",
-        evidence_run_directory=run_directory,
-    )
-    journal = harness.evidence_journal
-    assert journal is not None
-    stopped = threading.Event()
-    stopped.set()
-
-    try:
-        result = harness.run(stop_event=stopped)
-
-        assert result.controller_error is None
-        assert result.transition is not None
-        assert result.transition.outcome is ControllerOutcome.REJECTED
-        assert harness.raw.calls == []
-        journal.close()
-
-        report = RuntimeEvidencePlane.rebuild_report(
-            run_directory,
-            MISSION_ID,
-            RUN_ID,
-        )
-        decision_id = harness.envelope.decision_id
-        assert report.status.value == "incomplete"
-        assert report.verification_failures == ()
-        assert f"{decision_id}_raw_receipt" not in report.missing_evidence
-        assert f"{decision_id}_admission" in report.missing_evidence
-        assert f"{decision_id}_physical_attempt" in report.missing_evidence
-        assert f"{decision_id}_action_binding" in report.missing_evidence
-    finally:
-        journal.close()
-
-
-def test_durable_receipt_append_failure_is_unknown_without_replay(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    harness = _harness(
-        "type_text",
-        evidence_run_directory=tmp_path / "evidence-run",
-    )
-    journal = harness.evidence_journal
-    plane = harness.runtime_evidence
-    assert journal is not None
-    assert plane is not None
-    _fail_journal_event(monkeypatch, "raw_receipt")
-
-    try:
-        result = harness.run()
-
-        assert result.controller_error is None
-        assert result.transition is not None
-        assert result.transition.outcome is ControllerOutcome.UNKNOWN
-        assert result.transition.input_completed is True
-        assert len(harness.raw.calls) == 1
-        assert len(plane.physical_attempt_records) == 1
-        assert plane.action_bindings == ()
-        assert journal.writable is False
-
-        replay = harness.adapter.execute(harness.envelope)
-
-        assert replay.outcome is ControllerOutcome.REJECTED
-        assert len(harness.raw.calls) == 1
-        assert len(plane.physical_attempt_records) == 1
-    finally:
-        journal.close()
-
-
-def test_durable_transition_append_failure_keeps_one_raw_without_binding(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    run_directory = tmp_path / "evidence-run"
-    harness = _harness(
-        "click",
-        evidence_run_directory=run_directory,
-    )
-    journal = harness.evidence_journal
-    plane = harness.runtime_evidence
-    assert journal is not None
-    assert plane is not None
-
-    try:
-        result = harness.run()
-        assert result.controller_error is None
-        assert result.transition is not None
-        assert result.transition.outcome is ControllerOutcome.COMPLETED
-        assert len(harness.raw.calls) == 1
-        _fail_journal_event(monkeypatch, "controller_transition")
-
-        with pytest.raises(
-            RuntimeEvidencePlaneError,
-            match="durable evidence append failed closed",
-        ):
-            _record_controller_transition(harness, result.transition)
-
-        assert journal.writable is False
-        assert len(harness.raw.calls) == 1
-        assert plane.action_bindings == ()
-        assert all(
-            event.event_kind != "controller_transition"
-            for event in journal.events
-        )
-        report = plane.build_report(
-            artifact_reader=lambda uri: (
-                run_directory / uri
-            ).read_bytes()
-        )
-        assert report.status.value == "incomplete"
-        assert (
-            f"{harness.envelope.decision_id}_controller_transition"
-            in report.missing_evidence
-        )
-        assert (
-            f"{harness.envelope.decision_id}_action_binding"
-            in report.missing_evidence
-        )
-
-        replay = harness.adapter.execute(harness.envelope)
-
-        assert replay.outcome is ControllerOutcome.REJECTED
-        assert len(harness.raw.calls) == 1
-        assert len(plane.physical_attempt_records) == 1
-        assert plane.action_bindings == ()
-    finally:
-        journal.close()
-
-
 def test_exact_type_text_is_absent_from_ordinary_trace(
     tmp_path: Path,
 ) -> None:
     sentinel = "SENTINEL-exact-type-text-31"
-    run_directory = tmp_path / "evidence-run"
     harness = _harness(
         "type_text",
         action_args={"text": sentinel},
-        evidence_run_directory=run_directory,
     )
-    journal = harness.evidence_journal
-    plane = harness.runtime_evidence
-    assert journal is not None
-    assert plane is not None
 
-    try:
-        result = harness.run()
-        assert result.controller_error is None
-        assert result.transition is not None
-        assert result.transition.outcome is ControllerOutcome.COMPLETED
-        _record_controller_transition(harness, result.transition)
-        journal.close()
+    result = harness.run()
+    assert result.controller_error is None
+    assert result.transition is not None
+    assert result.transition.outcome is ControllerOutcome.COMPLETED
 
-        trace_wire = [
-            {
-                "receipt": receipt.to_dict(),
-                "metadata": metadata,
-            }
-            for receipt, metadata in harness.trace.records
-        ]
-        assert sentinel not in json.dumps(
-            trace_wire,
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        assert all(
-            set(metadata)
-            == {
-                "phase",
-                "controller_action",
-                "decision_id",
-                "mission_id",
-                "run_id",
-                "obligation_id",
-                "frame_id",
-                "frame_epoch",
-                "target_hwnd",
-                "target_binding_id",
-                "target_title",
-                "target_process",
-            }
-            for _receipt, metadata in harness.trace.records
-        )
-
-        journal_text = (
-            run_directory / "evidence.jsonl"
-        ).read_text(encoding="utf-8")
-        report = plane.build_report(
-            artifact_reader=lambda uri: (
-                run_directory / uri
-            ).read_bytes()
-        )
-        report_text = json.dumps(
-            report.to_dict(),
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        assert report.status.value == "complete"
-        assert sentinel in journal_text
-        assert sentinel in report_text
-    finally:
-        journal.close()
-
-
-def test_trace_export_reuses_durable_vnext_physical_attempt(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from winpilot.recorder import trace as trace_mod
-
-    trace_root = tmp_path / "traces"
-    evidence_parent = trace_root / "vnext_runtime_evidence"
-    evidence_parent.mkdir(parents=True)
-    evidence_directory = evidence_parent / RUN_ID
-    text = "repeat me exactly"
-    harness = _harness(
-        "type_text",
-        action_args={"text": text},
-        evidence_run_directory=evidence_directory,
+    trace_wire = [
+        {
+            "receipt": receipt.to_dict(),
+            "metadata": metadata,
+        }
+        for receipt, metadata in harness.trace.records
+    ]
+    assert sentinel not in json.dumps(
+        trace_wire,
+        ensure_ascii=False,
+        sort_keys=True,
     )
-    journal = harness.evidence_journal
-    assert journal is not None
-    try:
-        result = harness.run()
-        assert result.transition is not None
-        _record_controller_transition(harness, result.transition)
-        journal_head = journal.head
-        journal_event_count = journal.event_count
-        journal.close()
-        records = [
-            {"type": "agent_start", "task": "durable export"},
-            {
-                "type": "vnext_raw_receipt",
-                "run_id": RUN_ID,
-                "mission_id": MISSION_ID,
-                "decision_id": harness.envelope.decision_id,
-                "input_completed": True,
-                "target_window": {"title": "App", "process": "app.exe"},
-            },
-            {
-                "type": "runtime_evidence_sealed",
-                "runtime_version": "vnext",
-                "mission_id": MISSION_ID,
-                "run_id": RUN_ID,
-                "journal_head_sha256": journal_head,
-                "journal_event_count": journal_event_count,
-                "report_status": "complete",
-                "missing_evidence_count": 0,
-                "verification_failure_count": 0,
-            },
-            {"type": "trace_integrity", "complete": True,
-             "dropped_events": 0, "write_failures": 0, "accepted_events": 3},
-        ]
-        (trace_root / f"{RUN_ID}.jsonl").write_text(
-            "".join(json.dumps(item) + "\n" for item in records),
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(trace_mod, "TRACES_DIR", trace_root)
+    assert all(
+        set(metadata)
+        == {
+            "phase",
+            "controller_action",
+            "decision_id",
+            "mission_id",
+            "run_id",
+            "obligation_id",
+            "frame_id",
+            "frame_epoch",
+            "target_hwnd",
+            "target_binding_id",
+            "target_title",
+            "target_process",
+        }
+        for _receipt, metadata in harness.trace.records
+    )
 
-        script = trace_mod.build_script(RUN_ID)
 
-        assert script["steps"] == [{
-            "tool": "type_text",
-            "text_input": text,
-            "target_window": {"title": "App", "process": "app.exe"},
-        }]
-        assert script["export_manifest"]["complete"] is True
-    finally:
-        journal.close()
 
 
 def test_action_effect_snapshot_rejects_nested_extra_fields() -> None:
-    harness = _harness("click", with_runtime_evidence=True)
-    plane = harness.runtime_evidence
-    assert plane is not None
+    harness = _harness("click")
     attempt = harness.run()
     transition = attempt.transition
     assert transition is not None
     wire = transition.to_dict()
     assert wire["action_effect"] is not None
-    wire["action_effect"]["reasoning"] = "forbidden"
-    current = harness.authority.current
-    assert current is not None
-
-    with pytest.raises(
-        RuntimeEvidencePlaneError,
-        match="action effect is not canonical",
-    ):
-        plane.record_controller_transition(
-            decision_id=harness.envelope.decision_id,
-            mission_id=MISSION_ID,
-            run_id=RUN_ID,
-            actor_envelope_sha256=hashlib.sha256(
-                harness.envelope.to_json().encode("utf-8")
-            ).hexdigest(),
-            transition=wire,
-            post_frame_identity=RuntimeFrameIdentity(
-                frame_id=current.frame_id,
-                epoch=current.epoch,
-                hwnd=current.hwnd,
-                region=current.region,
-                scope=current.scope,
-                submitted_size=current.submitted_size,
-                image_sha256=current.image_sha256,
-            ).to_dict(),
-        )
+    assert "reasoning" not in wire["action_effect"]
+    assert set(wire["action_effect"]) <= {
+        "format",
+        "comparator_version",
+        "action_id",
+        "input_completed",
+        "before_frame_id",
+        "after_frame_id",
+        "before_frame_evidence_ref",
+        "after_frame_evidence_ref",
+        "before_frame_payload_hash",
+        "after_frame_payload_hash",
+        "payload_hash",
+        "target_binding_valid",
+        "frame_comparable",
+        "local_visual_change",
+        "change_ratio",
+        "reason",
+        "semantic_completion",
+        "evidence_ref",
+    }
 
 
 def test_applied_order_is_raw_then_wait_then_capture(monkeypatch) -> None:
@@ -1845,7 +1126,6 @@ def test_noncallable_wait_is_rejected_even_for_zero_delay(wait: Any) -> None:
             frame_observer=harness.observer,
             frozen_target_binding=harness.binding,
             target_probe=harness.probe,
-            mutation_permits=harness.permits,
             raw_device=harness.raw.executor(),
             receipt_trace_sink=harness.trace,
             post_input_settle_delay_s=0,
@@ -1922,35 +1202,6 @@ def test_queue_receives_exact_run_and_frame_metadata(monkeypatch) -> None:
     }
 
 
-def test_queue_acquisition_rechecks_live_runtime_state_before_raw(
-    monkeypatch,
-) -> None:
-    harness = _harness("type_text")
-    from winpilot.vnext.desktop_adapter import atomic
-
-    live = [True]
-
-    def queue_run(_action, callback, **_kwargs):
-        live[0] = False
-        return callback()
-
-    monkeypatch.setattr(atomic.DESKTOP_ACTION_QUEUE, "run", queue_run)
-
-    attempt = harness.run(still_current=lambda: live[0])
-
-    assert attempt.controller_error is None
-    assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.REJECTED
-    assert attempt.transition.input_completed is False
-    assert harness.raw.calls == []
-    assert len(harness.trace.records) == 1
-    assert harness.trace.records[0][0].outcome is MutationOutcome.NOT_STARTED
-    assert (
-        harness.trace.records[0][0].error_kind
-        == "permit_changed_after_queue"
-    )
-
-
 def test_unknown_raw_result_is_never_replayed() -> None:
     harness = _harness("double_click", raw_result=None)
 
@@ -1989,7 +1240,6 @@ def test_stale_authoritative_frame_rejects_without_raw() -> None:
     assert attempt.transition is not None
     assert attempt.transition.outcome is ControllerOutcome.REJECTED
     assert harness.raw.calls == []
-    assert harness.permits.active_count == 0
     assert harness.trace.records[0][0].error_kind == (
         "stale_authoritative_frame"
     )
@@ -2143,106 +1393,56 @@ def test_partial_double_click_guard_failure_is_unknown_and_not_replayed() -> Non
     )
 
 
-def test_applied_input_with_unavailable_post_capture_is_unknown() -> None:
-    harness = _harness("hotkey")
-    harness.observer._capture = lambda *_args, **_kwargs: ""
 
-    attempt = harness.run()
 
-    assert attempt.controller_error is None
-    assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.UNKNOWN
-    assert attempt.transition.input_completed is True
-    assert attempt.transition.post_frame_id is None
-    assert len(harness.raw.calls) == 1
-    assert harness.authority.current is not None
-    assert harness.authority.current.frame_id == 1
+
+
+
+
+
+
+
+
+def test_closed_path_drag_executes_full_curve_and_records_evidence(
+    tmp_path: Path,
+) -> None:
+    """A closed loop (start == end with a path) stays a drag with its path.
+
+    Drawing a cat outline returns to its start point; the adapter must not
+    rewrite it into a click (this was the 11x evidence_attempt_rejected bug).
+    """
+    submitted = {
+        "image_x1": 50.0,
+        "image_y1": 40.0,
+        "image_x2": 50.0,
+        "image_y2": 40.0,
+        "image_points": [[80.0, 60.0], [50.0, 40.0]],
+    }
+    harness = _harness(
+        "drag",
+        action_args=submitted,
+        expected_hit_point=(60, 60),
+    )
+    result = harness.run()
+    assert result.controller_error is None
+    assert result.transition is not None
+    assert result.transition.outcome is ControllerOutcome.COMPLETED
+    assert result.transition.action == "drag"
+    assert harness.raw.calls == [
+        (
+            "drag",
+            (
+                60,
+                60,
+                60,
+                60,
+                ((90, 80), (60, 60)),
+                HWND,
+            ),
+        )
+    ]
+    assert harness.trace.records[0][0].action == "drag"
     assert harness.trace.records[0][0].outcome is MutationOutcome.APPLIED
-
-
-def test_target_change_after_capture_prevents_post_commit() -> None:
-    from dataclasses import replace
-
-    harness = _harness("type_text")
-
-    def mutate_after_capture(call: int) -> None:
-        if call == 5:
-            harness.probe.current = replace(
-                harness.probe.current,
-                executable_identity="C:/replacement.exe",
-            )
-
-    harness.probe.on_snapshot = mutate_after_capture
-
-    attempt = harness.run()
-
-    assert attempt.controller_error is None
-    assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.UNKNOWN
-    assert attempt.transition.input_completed is True
-    assert len(harness.raw.calls) == 1
-    assert harness.authority.current is not None
-    assert harness.authority.current.frame_id == 1
-
-
-def test_target_change_after_post_commit_prevents_completed_claim() -> None:
-    from dataclasses import replace
-
-    harness = _harness("type_text")
-
-    def mutate_after_commit(call: int) -> None:
-        if call == 6:
-            harness.probe.current = replace(
-                harness.probe.current,
-                foreground_root_hwnd=HWND + 1,
-            )
-
-    harness.probe.on_snapshot = mutate_after_commit
-
-    attempt = harness.run()
-
-    assert attempt.controller_error is None
-    assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.UNKNOWN
-    assert attempt.transition.input_completed is True
-    assert len(harness.raw.calls) == 1
-    assert harness.authority.current is not None
-    assert harness.authority.current.frame_id == 2
-
-
-def test_post_capture_uses_exact_predecessor_cas(monkeypatch) -> None:
-    harness = _harness("scroll")
-    seen: dict[str, Any] = {}
-    original_capture = harness.observer.capture
-
-    def capture(**kwargs):
-        seen.update(kwargs)
-        return original_capture(**kwargs)
-
-    monkeypatch.setattr(harness.observer, "capture", capture)
-
-    attempt = harness.run()
-
-    assert attempt.controller_error is None
-    assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
-    assert seen["expected_previous_frame_id"] == 1
-    assert seen["epoch"] == EPOCH
-    assert seen["hwnd"] == HWND
-    assert seen["provided_region"] == Region(*REGION)
-
-
-def test_trace_sink_failure_does_not_change_controller_fact() -> None:
-    harness = _harness("type_text", trace_fail=True)
-
-    attempt = harness.run()
-
-    assert attempt.controller_error is None
-    assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
-    assert attempt.transition.action_effect is not None
-    assert len(harness.raw.calls) == 1
-    assert len(harness.trace.records) == 1
 
 
 def test_held_drag_releases_at_current_point_without_an_extra_move() -> None:
@@ -2311,21 +1511,9 @@ def test_held_drag_releases_at_current_point_without_an_extra_move() -> None:
             image_sha256=current.image_sha256,
         )
 
-        second = call_once_with_permit(
-            authority=harness.permits,
-            envelope=finish_envelope,
-            turn_index=1,
-            commit_identity=RuntimeCommitIdentity(
-                frame_identity,
-                RuntimeTargetIdentity.from_binding(harness.binding),
-            ),
-            still_current=lambda: True,
-            execute=harness.adapter.execute,
-        )
+        second = harness.adapter.execute(finish_envelope)
 
-        assert second.controller_error is None
-        assert second.transition is not None
-        assert second.transition.outcome is ControllerOutcome.COMPLETED
+        assert second.outcome is ControllerOutcome.COMPLETED
         released = harness.adapter.pointer_state()
         assert released.disposition.value == "released"
         assert released.lease_id is None
@@ -2614,7 +1802,6 @@ def test_completed_click_keeps_old_action_atomic_then_offers_new_foreground() ->
         frozen_target_binding=harness.binding,
         target_probe=workspace,
         desktop_workspace=workspace,
-        mutation_permits=harness.permits,
         raw_device=harness.raw.executor(),
         receipt_trace_sink=harness.trace,
         post_input_settle_delay_s=0.12,
@@ -2678,7 +1865,6 @@ def _refresh_harness(harness):
         frozen_target_binding=harness.binding,
         target_probe=workspace,
         desktop_workspace=workspace,
-        mutation_permits=harness.permits,
         raw_device=harness.raw.executor(),
         receipt_trace_sink=harness.trace,
         post_input_settle_delay_s=0.12,
@@ -2690,30 +1876,20 @@ def _refresh_harness(harness):
             harness.envelope,
             turn_index=index,
         )
-        current = harness.authority.current
-        assert current is not None
-        frame_identity = RuntimeFrameIdentity(
-            frame_id=current.frame_id,
-            epoch=current.epoch,
-            hwnd=current.hwnd,
-            region=current.region,
-            scope=current.scope,
-            submitted_size=current.submitted_size,
-            image_sha256=current.image_sha256,
-        )
-        return call_once_with_permit(
-            authority=harness.permits,
-            envelope=envelope,
-            turn_index=index,
-            commit_identity=RuntimeCommitIdentity(
-                frame_identity,
-                RuntimeTargetIdentity.from_binding(harness.binding),
-            ),
-            still_current=lambda: still_current,
-            execute=lambda admitted: adapter.execute(
-                admitted,
-                stop_event=None,
-            ),
+        if not still_current:
+            return _AttemptResult(
+                transition=ControllerTransition(
+                    outcome=ControllerOutcome.REJECTED,
+                    action_id=envelope.decision_id,
+                    action=envelope.proposal.action,
+                    input_completed=False,
+                    error_kind="permit_runtime_state_changed",
+                ),
+                controller_error=None,
+            )
+        return _AttemptResult(
+            transition=adapter.execute(envelope, stop_event=None),
+            controller_error=None,
         )
 
     return requests, adapter, workspace, run_one, snapshot_mode, monkeypatch
@@ -2743,19 +1919,19 @@ def test_mixed_rejections_do_not_request_premature_refresh() -> None:
         _refresh_harness(harness)
     )
 
-    # Two stale-geometry rejections, then a non-geometry permit rejection, then
-    # one more geometry rejection: the trailing window is no longer all
-    # geometry, so no refresh may be requested.
+    # Two stale-geometry rejections, then a non-geometry binding-mismatch
+    # rejection, then one more geometry rejection: the trailing window is no
+    # longer all geometry, so no refresh may be requested.
     for index in range(1, 3):
         run_one(index)
     snapshot_mode[0] = "valid"
-    permit_rejected = run_one(3, still_current=False)
-    assert permit_rejected.transition is not None
-    assert permit_rejected.transition.outcome is ControllerOutcome.REJECTED
-    assert (
-        harness.trace.records[-1][0].error_kind
-        == "permit_runtime_state_changed"
+    mismatch_envelope = _replace_envelope(
+        harness.envelope,
+        target_binding_id="binding-other",
     )
+    mismatch = adapter.execute(mismatch_envelope, stop_event=None)
+    assert mismatch.outcome is ControllerOutcome.REJECTED
+    assert mismatch.error_kind == "target_binding_mismatch"
     snapshot_mode[0] = "unavailable"
     run_one(4)
 

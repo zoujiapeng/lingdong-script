@@ -671,6 +671,7 @@ class ActorFrameView:
     authoritative: bool
     fresh: bool
     coordinate_space: str = "submitted_image_pixels"
+    window_hwnd: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("image_available", "authoritative", "fresh"):
@@ -680,8 +681,12 @@ class ActorFrameView:
             raise RuntimeContractError(
                 "Actor frame uses submitted-image pixels only"
             )
+        if self.window_hwnd is not None and type(self.window_hwnd) is not int:
+            raise RuntimeContractError("window_hwnd must be an int or None")
 
     def to_dict(self) -> dict[str, Any]:
+        # window_hwnd stays an internal reader handle and is intentionally not
+        # part of the identity-free model-facing view.
         return {
             "image_available": self.image_available,
             "authoritative": self.authoritative,
@@ -903,11 +908,7 @@ def project_actor_turn_input(
             target_binding_valid=(
                 None if effect is None else effect.target_binding_valid
             ),
-            error_kind=(
-                None
-                if not hasattr(transition, "error_kind")
-                else transition.error_kind
-            ),
+            error_kind=transition.error_kind,
         )
     tools: list[ActorToolView] = []
     for name in projection.tool_names:
@@ -944,6 +945,7 @@ def project_actor_turn_input(
             image_available=frame_state.frame_id is not None,
             authoritative=frame_state.authoritative,
             fresh=frame_state.fresh,
+            window_hwnd=frame_state.hwnd,
         ),
         tools=tuple(tools),
         task_state=task_state,
@@ -972,6 +974,7 @@ class ControllerTransition:
     post_frame_id: int | None = None
     action_effect: ActionEffectSummary | None = None
     action_effect_evidence: EvidenceRef | None = None
+    error_kind: str | None = None
     format: str = CONTROLLER_TRANSITION_FORMAT
 
     def __post_init__(self) -> None:
@@ -1003,6 +1006,12 @@ class ControllerTransition:
         ):
             raise RuntimeContractError(
                 "input_completed must be boolean or null"
+            )
+        if self.error_kind is not None:
+            object.__setattr__(
+                self,
+                "error_kind",
+                _text(self.error_kind, "error_kind", allow_empty=True),
             )
         object.__setattr__(
             self,
@@ -1130,6 +1139,7 @@ class ControllerTransition:
                 if self.action_effect_evidence is None
                 else self.action_effect_evidence.to_dict()
             ),
+            "error_kind": self.error_kind,
         }
 
 

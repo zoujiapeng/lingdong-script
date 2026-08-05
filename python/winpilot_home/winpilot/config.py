@@ -96,9 +96,7 @@ _DEFAULTS: dict[str, Any] = {
         "session_memory": True,
         "verify_done": True,
         "done_max_rejects": 2,
-        "approve_mode": "off",
         "escalation_model": "",
-        "no_mouse_steal": False,
         "llm_trace": True,
         "reflect_interval": 8,
     },
@@ -115,12 +113,6 @@ _DEFAULTS: dict[str, Any] = {
         # an explicit opt-in and is still used only for a validated,
         # foreground, single-window target.
         "target_window_capture_enabled": False,
-        # Experimental human/agent input arbitration.  Window-message/UIA
-        # actions are preferred; physical keyboard focus is never taken from
-        # a different foreground window, and human cursor movement wins over
-        # automatic cursor restoration.
-        "multi_input_cooperation": False,
-        "cooperative_cursor_tolerance_px": 12,
         # A model turn may commit one visual transaction.  The resulting real
         # frame is returned before another transaction is accepted.
         "visual_closed_loop": True,

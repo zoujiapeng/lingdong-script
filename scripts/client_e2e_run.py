@@ -250,7 +250,10 @@ def _document_contains_text(window: Any, expected: str) -> bool:
 def _type_control_text(control: Any, value: str) -> dict[str, int | str]:
     """Focus a visible editor and enter literal text through Windows input."""
 
-    control.Click()
+    try:
+        control.set_focus()
+    except Exception:
+        control.Click()
     auto.SendKeys("{Ctrl}a{Delete}", interval=0.01, waitTime=0.1)
     successful_unicode_calls = 0
     utf16_units = 0
@@ -811,7 +814,15 @@ class ElectronClientDriver:
 
     def navigate(self, title: str) -> None:
         self.restore_and_focus()
-        self.button(title, timeout=5.0).Click()
+        button = self.button(title, timeout=5.0)
+        try:
+            pattern = button.GetInvokePattern()
+            if pattern is not None:
+                pattern.Invoke()
+            else:
+                button.Click()
+        except Exception:
+            button.Click()
         time.sleep(0.8)
 
     def capture_window(self, name: str) -> str:
@@ -840,16 +851,16 @@ class ElectronClientDriver:
         before_name = session_button.Name.strip()
         before_match = re.search(r"(\d+)$", before_name)
         before = int(before_match.group(1)) if before_match else -1
-        session_button.Click()
+        _uia_scroll_invoke(self.identity.hwnd, regex_name=r"^会话 \d+$")
         time.sleep(0.5)
         try:
-            self.button("清空会话记忆").Click()
+            _uia_scroll_invoke(self.identity.hwnd, regex_name="清空会话记忆")
         except RuntimeError:
             # Chromium can omit title-only icon buttons from UIA names; reload
             # the tab once before treating it as a client defect.
-            session_button.Click()
+            _uia_scroll_invoke(self.identity.hwnd, regex_name=r"^会话 \d+$")
             time.sleep(0.3)
-            self.button("清空会话记忆").Click()
+            _uia_scroll_invoke(self.identity.hwnd, regex_name="清空会话记忆")
         cleared = True
         deadline = time.time() + 15
         while time.time() < deadline:
@@ -1314,6 +1325,39 @@ class ElectronClientDriver:
             "runtime": runtime_status,
             "independent_verdict": last_independent_probe,
         }
+
+
+def _uia_scroll_invoke(
+    window_hwnd: int,
+    *,
+    regex_name: str,
+) -> None:
+    """Scroll a possibly off-viewport Chromium button into view and invoke it.
+
+    Long asset pages push the memory/session controls below the visible viewport,
+    where a plain physical click misses.  The uiautomation library resolves the
+    control by regex, scrolls it into view, and invokes the UIA pattern.
+    """
+    try:
+        import uiautomation as auto
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(f"uiautomation unavailable: {exc}") from exc
+    root = auto.ControlFromHandle(int(window_hwnd)) if window_hwnd else None
+    if root is None:
+        raise RuntimeError("uia root control is unavailable")
+    target = root.ButtonControl(RegexName=regex_name)
+    if not target.Exists(maxSearchSeconds=3):
+        raise RuntimeError(f"uia button not found: {regex_name!r}")
+    try:
+        target.ScrollIntoView()
+    except Exception:
+        pass
+    time.sleep(0.2)
+    pattern = target.GetInvokePattern()
+    if pattern is not None:
+        pattern.Invoke()
+    else:
+        target.Click()
 
 
 def _trace_names() -> set[str]:

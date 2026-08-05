@@ -197,7 +197,9 @@ export interface RunProjection {
   finished_at?: number | null;
   result?: unknown;
   error?: string;
+  failure_stage?: string;
   usage?: Record<string, unknown> | null;
+  narration?: string;
   timeline: RunTimelineEvent[];
   evidence: Array<Record<string, unknown>>;
   metrics: RunMetrics;
