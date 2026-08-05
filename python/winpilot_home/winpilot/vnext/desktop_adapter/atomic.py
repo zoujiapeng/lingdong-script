@@ -1425,12 +1425,9 @@ class AtomicDesktopAdapter:
                 "image_y2",
             }
             optional_keys = {"image_points", "keep_holding"}
-            if (
-                not endpoint_keys <= set(args)
-                or not set(args) <= endpoint_keys | optional_keys
-            ):
+            if not endpoint_keys <= set(args):
                 raise ValueError(
-                    "atomic action arguments do not match exact schema"
+                    "atomic action arguments are missing required fields"
                 )
             hold_control_present = "keep_holding" in args
             keep_holding = args.get("keep_holding", False)
@@ -1557,12 +1554,9 @@ class AtomicDesktopAdapter:
                 chord=HotkeyChord(tuple(keys)),
             )
         if action == "launch_application":
-            if not {"app"} <= set(args) or not set(args) <= {
-                "app",
-                "arguments",
-            }:
+            if "app" not in args:
                 raise ValueError(
-                    "atomic launch arguments do not match exact schema"
+                    "atomic launch arguments are missing required fields"
                 )
             app = args["app"]
             launch_arguments = args.get("arguments", "")
@@ -1667,8 +1661,12 @@ class AtomicDesktopAdapter:
         args: Mapping[str, Any],
         expected: set[str],
     ) -> None:
-        if set(args) != expected:
-            raise ValueError("atomic action arguments do not match exact schema")
+        # Required-subset check: the Actor schema already forbids extras at
+        # the model boundary, so the mechanical layer tolerates surplus keys
+        # instead of burning an Actor turn on a format-repair round.  Missing
+        # required fields still fail closed.
+        if not expected <= set(args):
+            raise ValueError("atomic action arguments are missing required fields")
 
     @staticmethod
     def _require_image_point(

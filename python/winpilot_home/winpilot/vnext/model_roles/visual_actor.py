@@ -1257,11 +1257,8 @@ def _owned_tool_exchange(
         raise LiveModelRoleError(f"Actor {name} tool call requires an id")
     arguments = _decode_arguments(raw_arguments)
     arguments.pop("task_state_update", None)
-    unknown = set(arguments) - set(expected_arguments)
-    if unknown:
-        raise LiveModelRoleError(
-            f"{name} has unsupported fields: {sorted(unknown)!r}"
-        )
+    for field in set(arguments) - set(expected_arguments):
+        arguments.pop(field, None)
     for field, expected_type in expected_arguments.items():
         if field not in arguments:
             # Optional schema field with a default: fill the default so the
