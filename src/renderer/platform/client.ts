@@ -1,7 +1,6 @@
 import type {
   ArpExecutionSnapshot,
   ArpGraph,
-  CapabilitySpec,
   ChatGPTDesktopIntegration,
   CurrentRunResponse,
   ClientExecutionContext,
@@ -176,11 +175,6 @@ export class ControlPlaneClient {
     return this.request('api/v2/platform');
   }
 
-  async capabilities(): Promise<CapabilitySpec[]> {
-    const response = await this.request<{ ok: boolean; capabilities: CapabilitySpec[] }>('api/v2/capabilities');
-    return response.capabilities;
-  }
-
   currentRun(): Promise<CurrentRunResponse> {
     return this.request('api/v2/runs/current');
   }
@@ -345,18 +339,6 @@ export class ControlPlaneClient {
       method: 'POST',
       body: JSON.stringify({ run_ids: runIds }),
     });
-  }
-
-  humanStatus(): Promise<{ recording: boolean }> {
-    return this.request('api/human/status');
-  }
-
-  humanStart(): Promise<Record<string, unknown>> {
-    return this.request('api/human/start', { method: 'POST', body: '{}' });
-  }
-
-  humanStop(): Promise<Record<string, unknown>> {
-    return this.request('api/human/stop', { method: 'POST' });
   }
 
   apprenticeStatus(): Promise<{

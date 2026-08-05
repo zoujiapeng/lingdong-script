@@ -1975,6 +1975,12 @@ def patch_config(patch: dict[str, Any]) -> dict[str, Any]:
     return get_config()
 
 
+@app.get("/api/traces")
+def traces() -> list[dict[str, Any]]:
+    """Trace run browser for the Electron Platform workbench (Studio surface)."""
+    return trace_mod.list_traces()
+
+
 @app.get("/api/trace/{run_id}/summary")
 def trace_summary(run_id: str) -> dict[str, Any]:
     checked_run_id = _public_trace_run_id(run_id)
@@ -2118,6 +2124,12 @@ def get_automation_ir(file: str) -> dict[str, Any]:
     if err:
         raise HTTPException(400, f"Automation IR validation failed: {err}")
     return ir
+
+
+@app.get("/api/scripts")
+def scripts() -> list[dict[str, Any]]:
+    """Script library for the Electron Platform workbench (Studio surface)."""
+    return trace_mod.list_scripts()
 
 
 @app.put("/api/script/{file}")
