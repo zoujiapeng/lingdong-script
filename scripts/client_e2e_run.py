@@ -1995,7 +1995,14 @@ def run_case(
             preparation = before_submit(driver, result)
             if preparation is not None:
                 result["before_submit_handoff"] = preparation
-        driver.button(RUN_TASK).Click()
+        # Submit with Enter while the goal editor is focused: a synthetic
+        # mouse Click on the send button does not reliably trigger the
+        # Chromium handler under some window states, while Enter matches the
+        # real user path (renderer submits on Enter).  Fall back to Click.
+        try:
+            auto.SendKeys("{Enter}", interval=0.01, waitTime=0.1)
+        except Exception:
+            driver.button(RUN_TASK).Click()
         submitted_at = time.time()
         result["submitted_at"] = datetime.now().astimezone().isoformat()
         print(
