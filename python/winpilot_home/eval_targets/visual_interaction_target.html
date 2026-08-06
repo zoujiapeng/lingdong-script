@@ -68,6 +68,9 @@
     .calib-point { position: absolute; background: #5b3fd4; border: 2px solid #2a1f66;
       box-shadow: 0 0 0 1px #fff; }
     .calib-point.hit { background: #169b62; border-color: #0a4d31; }
+    .feedback-line { position: absolute; left: 0; right: 0; bottom: -34px; text-align: center;
+      font-weight: 800; color: #233654; background: #eef2f8; border: 2px solid #9eabbc;
+      padding: 5px 0; border-radius: 8px; }
     .board canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
     .legend { position: absolute; padding: 10px 13px; border-radius: 10px; background: #fff;
       border: 2px solid #9eabbc; line-height: 1.6; font-weight: 800; }
@@ -392,6 +395,49 @@
         points:points.map(p=>({index:p.index,intended_x:p.center.x,intended_y:p.center.y}))};
     }
 
+    function setupCalibrationFeedback() {
+      heading.textContent='Calibration With Feedback';
+      instruction.textContent='Click the exact center of every purple square. The status line below reports how far your last click missed; use it to correct.';
+      const W=arena.clientWidth,H=arena.clientHeight,cols=3,rows=1,size=36,tolerance=8;
+      const feedback=document.createElement('div');feedback.className='feedback-line';
+      feedback.textContent='上次点击偏差: —';arena.append(feedback);
+      const points=[];
+      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
+        const x=Math.round((col+0.5)*W/cols-size/2), y=Math.round((row+0.5)*H/rows-size/2);
+        const el=document.createElement('div');el.className='calib-point';place(el,x,y,size,size);
+        const point={index:points.length,center:{x:x+size/2,y:y+size/2},hit:false};
+        points.push(point);
+        el.addEventListener('pointerdown',event=>{if(!event.isTrusted)return;moveCount=0;
+          const cx=Math.round(event.clientX),cy=Math.round(event.clientY);
+          let best=null;
+          for(const p of points){if(p.hit)continue;
+            const dx=cx-p.center.x,dy=cy-p.center.y;
+            if(Math.abs(dx)<=tolerance&&Math.abs(dy)<=tolerance){
+              if(!best||Math.hypot(dx,dy)<Math.hypot(best.dx,best.dy))best={...p,dx,dy,actual_x:cx,actual_y:cy};
+            }
+          }
+          if(best){best.hit=true;el.classList.add('hit');
+            feedback.textContent=`命中 点${best.index+1} 偏差 ${best.dx>=0?'右':'左'}${Math.abs(best.dx)}px ${best.dy>=0?'下':'上'}${Math.abs(best.dy)}px`;
+            report('calibration_hit',event,{index:best.index,intended_x:best.center.x,intended_y:best.center.y,actual_x:best.actual_x,actual_y:best.actual_y,dx:best.dx,dy:best.dy});
+            if(points.every(p=>p.hit))markSuccess('CALIBRATION_SUCCEEDED',event,{succeeded:true,
+              points:points.map(p=>({index:p.index,intended_x:p.center.x,intended_y:p.center.y}))});
+          }else{
+            let nearest=null;
+            for(const p of points){if(p.hit)continue;
+              const dx=cx-p.center.x,dy=cy-p.center.y;
+              if(!nearest||Math.hypot(dx,dy)<Math.hypot(nearest.dx,nearest.dy))nearest={...p,dx,dy};
+            }
+            const dx=nearest?nearest.dx:0,dy=nearest?nearest.dy:0;
+            feedback.textContent=`上次点击偏差: ${dx>=0?'右':''}${Math.abs(dx)}px ${dy>=0?'下':''}${Math.abs(dy)}px${dx<0?'左 '+(-dx)+'px':''}${dy<0?'上 '+(-dy)+'px':''}`;
+            report('calibration_miss',event,{actual_x:cx,actual_y:cy,nearest_index:nearest?nearest.index:-1,dx,dy});
+          }
+        });
+        arena.append(el);
+      }
+      readyDetails={point_count:points.length,tolerance_px:tolerance,
+        points:points.map(p=>({index:p.index,intended_x:p.center.x,intended_y:p.center.y}))};
+    }
+
     async function setupQuizAll() {
       heading.textContent='综合知识小测';
       instruction.textContent='请回答全部题目，然后点击“提交全部答案”。页面可以滚动。';
@@ -443,7 +489,7 @@
       };
     }
 
-    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn,quiz_all:setupQuizAll,calibration_grid:setupCalibrationGrid};
+    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn,quiz_all:setupQuizAll,calibration_grid:setupCalibrationGrid,calibration_feedback:setupCalibrationFeedback};
     Promise.resolve((setups[scenario]||setupDragFit)()).then(()=>
       requestAnimationFrame(()=>requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
         viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails})))
