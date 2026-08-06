@@ -195,6 +195,11 @@ def strict_backend_environment(monkeypatch):
         lambda _text: False,
     )
     monkeypatch.setattr(
+        executor.user32,
+        "GetForegroundWindow",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
         executor,
         "_vk_of",
         {"ctrl": 0x11, "shift": 0x10, "f11": 0x7A}.__getitem__,
