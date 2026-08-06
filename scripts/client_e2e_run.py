@@ -251,7 +251,13 @@ def _type_control_text(control: Any, value: str) -> dict[str, int | str]:
     """Focus a visible editor and enter literal text through Windows input."""
 
     try:
-        control.set_focus()
+        # ``SetFocus`` is the real uiautomation method; the lowercase alias
+        # does not exist, and the mouse-Click fallback silently fails to give
+        # the editor keyboard focus on some window states.
+        if hasattr(control, "SetFocus"):
+            control.SetFocus()
+        else:
+            control.set_focus()
     except Exception:
         control.Click()
     auto.SendKeys("{Ctrl}a{Delete}", interval=0.01, waitTime=0.1)

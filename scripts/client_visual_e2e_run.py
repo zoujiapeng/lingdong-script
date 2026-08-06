@@ -94,6 +94,15 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "runtime_version": "vnext",
         "ground_truth": "trusted_browser_pointer_events",
     },
+    "calibration-feedback": {
+        "scenario": "calibration_feedback",
+        "task": SPOKEN_GUI_VISUAL_TEST_TASK,
+        "seed": 20260807,
+        "max_steps": 24,
+        "timeout": 420,
+        "runtime_version": "vnext",
+        "ground_truth": "trusted_browser_pointer_events",
+    },
     "drag-fit": {
         "scenario": "drag_fit",
         "task": VISUAL_TEST_TASK,
@@ -319,21 +328,41 @@ def _calibration_summary(state: dict[str, Any]) -> dict[str, Any]:
         for event in events
         if event.get("type") == "calibration_hit"
     ]
-    if not hits:
+    misses = [
+        (int(event.get("details", {}).get("dx") or 0),
+         int(event.get("details", {}).get("dy") or 0))
+        for event in events
+        if event.get("type") == "calibration_miss"
+    ]
+    if not hits and not misses:
         return {}
-    dx_values = [dx for dx, _dy, _index in hits]
-    dy_values = [dy for _dx, dy, _index in hits]
-    return {
-        "hit_count": len(hits),
-        "mean_dx": round(sum(dx_values) / len(dx_values), 2),
-        "mean_dy": round(sum(dy_values) / len(dy_values), 2),
-        "max_abs_dx": max(abs(value) for value in dx_values),
-        "max_abs_dy": max(abs(value) for value in dy_values),
-        "points": [
-            {"index": index, "dx": dx, "dy": dy}
-            for dx, dy, index in sorted(hits, key=lambda item: item[2])
-        ],
-    }
+    summary: dict[str, Any] = {"hit_count": len(hits), "miss_count": len(misses)}
+    if hits:
+        dx_values = [dx for dx, _dy, _index in hits]
+        dy_values = [dy for _dx, dy, _index in hits]
+        summary.update({
+            "mean_dx": round(sum(dx_values) / len(dx_values), 2),
+            "mean_dy": round(sum(dy_values) / len(dy_values), 2),
+            "max_abs_dx": max(abs(value) for value in dx_values),
+            "max_abs_dy": max(abs(value) for value in dy_values),
+            "points": [
+                {"index": index, "dx": dx, "dy": dy}
+                for dx, dy, index in sorted(hits, key=lambda item: item[2])
+            ],
+        })
+    if misses:
+        # Correction ability: does the distance to the intended point shrink
+        # after each visible miss report?  A shrinking |dx|+|dy| sequence
+        # means the model reads the on-screen offset feedback and adjusts.
+        miss_distances = [abs(dx) + abs(dy) for dx, dy in misses]
+        summary["miss_distances"] = miss_distances
+        summary["converging"] = (
+            len(miss_distances) >= 2
+            and miss_distances[-1] < miss_distances[0]
+            and min(miss_distances) == miss_distances[-1]
+        )
+        summary["last_miss_distance"] = miss_distances[-1] if miss_distances else None
+    return summary
 
 
 def external_verdict(
