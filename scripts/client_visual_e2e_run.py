@@ -85,6 +85,15 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "timeout": 420,
         "runtime_version": "vnext",
     },
+    "calibration-grid": {
+        "scenario": "calibration_grid",
+        "task": SPOKEN_GUI_VISUAL_TEST_TASK,
+        "seed": 20260806,
+        "max_steps": 24,
+        "timeout": 420,
+        "runtime_version": "vnext",
+        "ground_truth": "trusted_browser_pointer_events",
+    },
     "drag-fit": {
         "scenario": "drag_fit",
         "task": VISUAL_TEST_TASK,
@@ -290,6 +299,41 @@ def _terminate_tree(process: subprocess.Popen[Any] | None) -> None:
             item.kill()
         except psutil.Error:
             pass
+
+
+def _calibration_summary(state: dict[str, Any]) -> dict[str, Any]:
+    """Aggregate calibration_hit offsets (dx/dy per point) for the report.
+
+    The calibration grid records the intended point center and the actual
+    click position for every hit, so a systematic visual-location bias shows
+    up as a non-zero mean offset, while a coordinate-mapping bug shows up as
+    a consistent offset pattern across the grid.
+    """
+    events = state.get("events") if isinstance(state, dict) else None
+    if not isinstance(events, list):
+        return {}
+    hits = [
+        (int(event.get("details", {}).get("dx") or 0),
+         int(event.get("details", {}).get("dy") or 0),
+         int(event.get("details", {}).get("index") or 0))
+        for event in events
+        if event.get("type") == "calibration_hit"
+    ]
+    if not hits:
+        return {}
+    dx_values = [dx for dx, _dy, _index in hits]
+    dy_values = [dy for _dx, dy, _index in hits]
+    return {
+        "hit_count": len(hits),
+        "mean_dx": round(sum(dx_values) / len(dx_values), 2),
+        "mean_dy": round(sum(dy_values) / len(dy_values), 2),
+        "max_abs_dx": max(abs(value) for value in dx_values),
+        "max_abs_dy": max(abs(value) for value in dy_values),
+        "points": [
+            {"index": index, "dx": dx, "dy": dy}
+            for dx, dy, index in sorted(hits, key=lambda item: item[2])
+        ],
+    }
 
 
 def external_verdict(
@@ -704,6 +748,7 @@ def run_visual_case(
         result["external_state"] = state
         verdict = dict(oracle_result.get("verdict") or {})
         result["external_verdict"] = verdict
+        result["calibration_summary"] = _calibration_summary(state)
         result["passed"] = client_result.get("passed") is True
     except Exception as error:
         result["runner_error"] = f"{type(error).__name__}: {error}"
