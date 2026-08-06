@@ -59,6 +59,7 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
         "corridor_drag",
         "dynamic_hold",
         "quiz_all",
+        "calibration_grid",
     }
     assert all(
         harness.VISUAL_CASES[name]["runtime_version"] == "vnext"
