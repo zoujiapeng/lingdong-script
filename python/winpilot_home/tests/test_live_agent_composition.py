@@ -1297,7 +1297,9 @@ def test_prebound_target_normalizes_client_rect_to_visible_desktop(
     assert target.region == (0, 0, 1920, 1040)
 
 
-def test_desktop_shell_binding_relaxes_foreground_and_keeps_identity() -> None:
+def test_desktop_shell_binding_relaxes_foreground_and_keeps_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     inputs = _inputs()
     target_window = inputs["execution_context"]["target_window"]
     target_window["binding_mode"] = "desktop_shell"
@@ -1307,6 +1309,11 @@ def test_desktop_shell_binding_relaxes_foreground_and_keeps_identity() -> None:
     target_window["hwnd"] = 65878
     target_window["process_id"] = 19076
     target_window["rect"] = [0, 0, 1536, 864]
+    monkeypatch.setattr(
+        live_agent,
+        "virtual_screen_region",
+        lambda: Region(0, 0, 1536, 864),
+    )
     shell_facts = live_agent._TargetFacts(
         hwnd=65878,
         root_hwnd=65878,
@@ -1332,7 +1339,9 @@ def test_desktop_shell_binding_relaxes_foreground_and_keeps_identity() -> None:
     assert target.probe.snapshot(65878) is not None
 
 
-def test_desktop_shell_binding_rejects_when_shell_identity_changes() -> None:
+def test_desktop_shell_binding_rejects_when_shell_identity_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     inputs = _inputs()
     target_window = inputs["execution_context"]["target_window"]
     target_window["binding_mode"] = "desktop_shell"
@@ -1342,6 +1351,11 @@ def test_desktop_shell_binding_rejects_when_shell_identity_changes() -> None:
     target_window["hwnd"] = 65878
     target_window["process_id"] = 19076
     target_window["rect"] = [0, 0, 1536, 864]
+    monkeypatch.setattr(
+        live_agent,
+        "virtual_screen_region",
+        lambda: Region(0, 0, 1536, 864),
+    )
     changed = live_agent._TargetFacts(
         hwnd=65878,
         root_hwnd=65878,
