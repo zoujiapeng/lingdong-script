@@ -2870,6 +2870,27 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             definition.goal_revision,
             available_capabilities=("visual.interact",),
         )
+        # One mechanical fuel gauge per turn: remaining turns, model calls
+        # and wall time as facts only.  The Actor decides how to pace long
+        # multi-part goals; the runtime never spends on its behalf.
+        frozen_budget = build.budget
+        budget_clock = build.dependencies.monotonic
+        budget_deadline = build.deadline
+
+        def budget_facts(turn_index: int) -> dict[str, int]:
+            del turn_index
+            remaining_s = int(
+                float(budget_deadline()) - float(budget_clock())
+            )
+            elapsed_s = max(0, frozen_budget.max_runtime_s - remaining_s)
+            return {
+                "max_turns": frozen_budget.max_turns,
+                "max_model_calls": frozen_budget.max_model_calls,
+                "max_runtime_s": frozen_budget.max_runtime_s,
+                "model_calls_used": counter.count,
+                "elapsed_s": elapsed_s,
+            }
+
         runtime = MissionRuntime(
             reducer=reducer,
             profile=profile,
@@ -2879,6 +2900,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             state=state,
             controller=controller,
             evidence_registry=registry,
+            budget_facts_provider=budget_facts,
         )
         return _LiveAgentSession(
             runtime=runtime,

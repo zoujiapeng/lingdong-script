@@ -38,6 +38,7 @@ from winpilot.vnext.runtime import (
     APPROVED_RUNTIME_TOOLS,
     CURRENT_FRAME_EVIDENCE_KIND,
     POST_ACTION_FRAME_EVIDENCE_KIND,
+    ActorBudgetView,
     ActorTurnInput,
     ActorTaskStateUpdate,
     ActorTurnDecision,
@@ -45,6 +46,7 @@ from winpilot.vnext.runtime import (
     ControllerTransition,
     MissionRuntime,
     MissionRuntimeConfigurationError,
+    RuntimeContractError,
     RuntimeFrame,
     RuntimeFrameIdentity,
     RuntimeSnapshot,
@@ -619,6 +621,7 @@ def _harness(
     catalog: ToolCatalog | None = None,
     bind_target: bool = True,
     profile_provider: bool = False,
+    budget_provider: Callable[[int], Mapping[str, Any]] | None = None,
 ) -> Harness:
     definition = definition or _definition()
     registry = EvidenceRegistry(definition.mission_id, definition.run_id)
@@ -738,6 +741,7 @@ def _harness(
         state=state,
         controller=controller,
         evidence_registry=registry,
+        budget_facts_provider=budget_provider,
     )
     harness = Harness(
         reducer=reducer,
@@ -963,6 +967,61 @@ def test_ephemeral_task_state_crosses_turns_but_not_durable_evidence() -> None:
         durable_wire,
         ensure_ascii=False,
     )
+
+
+def test_actor_turn_carries_the_fuel_gauge_facts() -> None:
+    """One mechanical budget gauge: spent vs max turns, calls, and seconds."""
+    harness = _harness(
+        _task_decision(_action("click")),
+        budget_provider=lambda turn_index: {
+            "max_turns": 60,
+            "max_model_calls": 120,
+            "max_runtime_s": 1800,
+            "model_calls_used": 7 + turn_index,
+            "elapsed_s": 42,
+        },
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=3)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    budget = harness.actor.turns[0].budget
+    assert budget is not None
+    assert budget.turns_used == 3
+    assert budget.max_turns == 60
+    assert budget.model_calls_used == 10
+    assert budget.max_model_calls == 120
+    assert budget.elapsed_s == 42
+    assert budget.max_runtime_s == 1800
+
+
+def test_budget_gauge_never_fails_a_turn() -> None:
+    """A broken or missing gauge degrades to null, never to a mission error."""
+    def broken(turn_index: int) -> dict[str, int]:
+        del turn_index
+        raise RuntimeError("gauge down")
+
+    harness = _harness(
+        _task_decision(_action("click")),
+        budget_provider=broken,
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.actor.turns[0].budget is None
+
+
+def test_actor_turn_rejects_an_invalid_budget_view() -> None:
+    with pytest.raises(RuntimeContractError):
+        ActorBudgetView(
+            turns_used=61,
+            max_turns=60,
+            model_calls_used=0,
+            max_model_calls=120,
+            elapsed_s=0,
+            max_runtime_s=1800,
+        )
 
 
 def test_runtime_keeps_the_actor_latest_narration() -> None:
