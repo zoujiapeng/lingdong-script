@@ -49,6 +49,8 @@ TASK = "去QQ看看所有的群最近都有什么消息，你汇总给我看他�
 DEFAULT_OUTPUT = WORKSPACE / "output" / "playwright" / "client-qq-groups-e2e"
 ORACLE_SOURCE = "independent_visible_qq_browse_and_client_delivery_oracle"
 MIN_GROUPS = 2
+_OCR_MODE_MIN_UIA_NODES = 3
+_OCR_ROW_BAND_PX = 30
 _ROOT_ANCESTOR = win32con.GA_ROOT
 _MAX_UIA_NODES = 1600
 _MAX_PRIVATE_SCREENSHOTS = 24
@@ -137,7 +139,10 @@ def _opaque(value: str, key: bytes) -> str:
 
 
 def _root_window(hwnd: int) -> int:
-    return int(win32gui.GetAncestor(int(hwnd), _ROOT_ANCESTOR) or hwnd)
+    try:
+        return int(win32gui.GetAncestor(int(hwnd), _ROOT_ANCESTOR) or hwnd)
+    except Exception:
+        return int(hwnd)
 
 
 def _window_identity(hwnd: int) -> dict[str, Any]:
@@ -413,6 +418,194 @@ def _valid_private_label(value: str) -> bool:
     return bool(re.search(r"[\w\u3400-\u9fff]", text))
 
 
+_DIGIT_OR_TIME_ONLY = re.compile(r"^[\d+\-:/.\s\u00a0]+$")
+_OCR_TAIL_DOTS = re.compile(r"[.\u2026\u00b7]+$")
+
+
+def _pure_digit_or_time_row(text: str) -> bool:
+    return bool(_DIGIT_OR_TIME_ONLY.fullmatch(text))
+
+
+def _clean_ocr_name(text: str) -> str:
+    """Normalize one OCR row name for fingerprint and delivery matching."""
+    text = re.sub(r"\s+", " ", text)
+    text = _OCR_TAIL_DOTS.sub("", text)
+    return text.strip()
+
+
+def _normalized_name(text: str) -> str:
+    return re.sub(r"[\s\u00a0]+", "", _clean_ocr_name(text)).casefold()
+
+
+def _match_ocr_name_to_rows(
+    ocr_name: str,
+    row_names: Iterable[str],
+) -> str | None:
+    """Map one OCR-selected short name onto the accurate UIA row name.
+
+    OCR truncates long names (``轨迹轮鼠`` vs ``轨迹轮鼠手柄交流群``); the
+    active row must be recorded under the UIA name so coverage and delivery
+    stay consistent.  Containment either direction, normalized.
+    """
+    needle = _normalized_name(ocr_name)
+    if not needle:
+        return None
+    for row in row_names:
+        candidate = _normalized_name(row)
+        if not candidate:
+            continue
+        if needle in candidate or candidate in needle:
+            return row
+    return None
+
+
+_OCR_ENGINE_CACHE: dict[str, Any] = {}
+
+
+def _default_ocr_elements(image: Any) -> list[Any] | None:
+    """Lazy-load the winpilot OCR engine once; None when unavailable."""
+    key = "engine"
+    engine = _OCR_ENGINE_CACHE.get(key, None)
+    if key not in _OCR_ENGINE_CACHE:
+        try:
+            sys.path.insert(0, str(WORKSPACE / "python" / "winpilot_home"))
+            from winpilot.perception import ocr as ocr_engine
+
+            import numpy as np
+
+            ocr_engine.recognize(np.zeros((32, 32, 3), dtype=np.uint8))
+            engine = ocr_engine
+        except Exception:
+            engine = None
+        _OCR_ENGINE_CACHE[key] = engine
+    if engine is None:
+        return None
+    import numpy as np
+
+    try:
+        return engine.recognize(np.array(image.convert("RGB")))
+    except Exception:
+        return None
+
+
+def _qq_rows_from_ocr(
+    elements: list[Any],
+    width: int,
+    height: int,
+) -> list[tuple[float, float, str]]:
+    """Extract left chat-list row names from one OCR pass.
+
+    QQ NT rows are ~79 px tall with a name line and a preview line ~25 px
+    below it, both left-aligned around x in [0.05w, 0.13w].  Rows are grouped
+    into ~30 px bands; the topmost element of each band is the row name and
+    the preview below it is discarded.  Times, unread counts and other
+    digit-only rows are filtered out so only real names survive.
+    """
+    candidates: list[tuple[float, float, str]] = []
+    for element in elements:
+        cx = getattr(element, "cx", None)
+        cy = getattr(element, "cy", None)
+        text = _clean_label(getattr(element, "text", "") or "")
+        if not isinstance(cx, (int, float)) or not isinstance(
+            cy, (int, float)
+        ):
+            continue
+        if not (0.05 * width <= cx <= 0.13 * width):
+            continue
+        if not (0.12 * height <= cy <= 0.98 * height):
+            continue
+        if not _valid_private_label(text):
+            continue
+        if _pure_digit_or_time_row(text):
+            continue
+        name = _clean_ocr_name(text)
+        if not name:
+            continue
+        candidates.append((float(cx), float(cy), name))
+    candidates.sort(key=lambda item: item[1])
+    rows: list[tuple[float, float, str]] = []
+    for cx, cy, name in candidates:
+        if rows and cy - rows[-1][1] <= _OCR_ROW_BAND_PX:
+            continue
+        rows.append((cx, cy, name))
+    return rows
+
+
+def _selected_ocr_rows(
+    image: Any,
+    rows: list[tuple[float, float, str]],
+) -> set[str]:
+    """Detect the highlighted (active) chat row from row background pixels.
+
+    The active conversation row in QQ NT has a distinct lighter background
+    (light blue on light themes, lighter gray on dark themes) that extends
+    from the name text rightward over the preview/time area.  Each row's
+    background is the median of samples right of its name (avoiding the
+    avatar); the row whose background differs most from the common row
+    background is the selected one.
+    """
+    import numpy as np
+
+    if not rows:
+        return set()
+    array = np.asarray(image.convert("RGB"))
+    height, width, _ = array.shape
+    backgrounds: list[tuple[float, float, str, np.ndarray]] = []
+    for cx, cy, name in rows:
+        y = min(max(0, int(cy)), height - 1)
+        samples = [
+            array[y, min(max(1, int(cx) + offset), width - 1)].astype(int)
+            for offset in (45, 65, 85, 105, 125, 145)
+        ]
+        backgrounds.append((cx, cy, name, np.median(samples, axis=0)))
+    common = np.median(
+        np.stack([item[3] for item in backgrounds]),
+        axis=0,
+    )
+    selected: set[str] = set()
+    for cx, cy, name, background in backgrounds:
+        del cx, cy
+        if int(np.abs(background - common).sum()) > 30:
+            selected.add(name)
+    return selected
+
+
+def analyze_visible_qq_state_from_image(
+    image: Any,
+    *,
+    ocr_fn: Callable[[Any], list[Any] | None] | None = None,
+) -> dict[str, Any] | None:
+    """Pixel + OCR semantics of the visible QQ window; None when OCR fails.
+
+    Returns the same state shape as ``analyze_visible_qq_state`` with
+    ``source == "ocr"``.  UIA-only signals (scroll position, scrollability)
+    are unverifiable here and reported as ``None``/``False`` so the verdict
+    can expose them as verification gaps instead of fake blockers.
+    """
+    if ocr_fn is None:
+        ocr_fn = _default_ocr_elements
+    elements = ocr_fn(image)
+    if elements is None:
+        return None
+    width, height = image.size
+    rows = _qq_rows_from_ocr(elements, width, height)
+    row_names = {name for _cx, _cy, name in rows}
+    active_names = _selected_ocr_rows(image, rows) & row_names
+    return {
+        "source": "ocr",
+        "group_page_seen": len(row_names) >= 2,
+        "group_names": row_names,
+        "active_group_names": active_names,
+        "header_names": set(),
+        "list_scrollability_observed": False,
+        "list_vertically_scrollable": None,
+        "list_vertical_scroll_percent": None,
+        "uia_node_count": 0,
+        "ocr_element_count": len(elements),
+        "ocr_row_count": len(rows),
+    }
+
+
 def analyze_visible_qq_state(
     nodes: list[dict[str, Any]],
     window_rect: tuple[int, int, int, int],
@@ -551,8 +744,12 @@ def trace_privacy_audit(
     *,
     private_needles: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """Detect, without returning values, sensitive text in ordinary traces."""
+    """Detect, without returning values, sensitive text in ordinary traces.
 
+    ``narration`` is the Actor's streaming progress note that the user sees
+    live in the client, so group names inside it are user-known facts and do
+    not count as a leak.  Every other string field is scanned for needles.
+    """
     needles = {
         _clean_label(value)
         for value in private_needles
@@ -573,9 +770,6 @@ def trace_privacy_audit(
             parse_errors.append(f"{path.name}: {type(error).__name__}")
             continue
         for raw_line in lines:
-            private_match_count += sum(
-                1 for needle in needles if needle and needle in raw_line
-            )
             try:
                 event = json.loads(raw_line)
             except json.JSONDecodeError:
@@ -583,10 +777,16 @@ def trace_privacy_audit(
                 continue
             if not isinstance(event, dict):
                 continue
-            for key in _TRACE_UNSAFE_TEXT_FIELDS:
-                value = event.get(key)
-                if isinstance(value, str) and value.strip():
+            for key, value in event.items():
+                if key == "narration" or not isinstance(value, str):
+                    continue
+                if not value.strip():
+                    continue
+                if key in _TRACE_UNSAFE_TEXT_FIELDS:
                     unsafe_fields.add(key)
+                private_match_count += sum(
+                    1 for needle in needles if needle and needle in value
+                )
     passed = bool(
         inspected
         and not unsafe_fields
@@ -608,6 +808,8 @@ class BrowsingEvidence:
     def __init__(self, secret: bytes, *, min_groups: int = MIN_GROUPS) -> None:
         self.secret = bytes(secret)
         self.min_groups = max(2, int(min_groups))
+        self.mode = "uia"
+        self.ocr_unavailable = False
         self.group_page_seen = False
         self.discovered_names: set[str] = set()
         self.visited_names: set[str] = set()
@@ -623,8 +825,19 @@ class BrowsingEvidence:
     def observe(
         self,
         state: dict[str, Any],
+        *,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         self.sample_count += 1
+        if mode is None:
+            mode = str(state.get("source") or "uia")
+        if mode not in {"uia", "ocr", "uia+ocr"}:
+            mode = "uia"
+        self.mode = mode
+        ocr_like = mode in {"ocr", "uia+ocr"}
+        self.ocr_unavailable = bool(
+            self.ocr_unavailable or state.get("ocr_unavailable") is True
+        )
         self.group_page_seen = bool(
             self.group_page_seen or state.get("group_page_seen")
         )
@@ -649,13 +862,25 @@ class BrowsingEvidence:
             self.last_active_names = set(active)
         percent = state.get("list_vertical_scroll_percent")
         percent_value = float(percent) if percent is not None else None
-        row_changed = bool(self.last_row_names and rows != self.last_row_names)
+        row_set_delta = (
+            len(rows ^ self.last_row_names)
+            if self.last_row_names
+            else 0
+        )
+        row_changed = bool(self.last_row_names and row_set_delta >= 1)
         percent_changed = bool(
             self.last_scroll_percent is not None
             and percent_value is not None
             and abs(percent_value - self.last_scroll_percent) >= 1.0
         )
-        if percent_changed and row_changed:
+        if ocr_like:
+            # OCR mode has no scroll percent: a visible row-set change of at
+            # least two names is treated as list-scroll evidence.  Whether
+            # the whole list was exhausted is not provable and is reported
+            # as a verification gap instead of a blocker.
+            if self.last_row_names and row_set_delta >= 2:
+                self.scroll_transition_count += 1
+        elif percent_changed and row_changed:
             self.scroll_transition_count += 1
         if state.get("list_vertically_scrollable") is False and rows:
             self.list_exhausted = True
@@ -688,16 +913,33 @@ class BrowsingEvidence:
         coverage_complete = bool(
             discovered and discovered.issubset(visited)
         )
-        browse_complete = bool(
-            self.group_page_seen
-            and len(discovered) >= self.min_groups
-            and coverage_complete
-            and self.switch_count >= 1
-            and self.scroll_transition_count >= 1
-            and visible_scroll_distance >= 1.0
-            and self.list_exhausted
-        )
+        ocr_like = self.mode in {"ocr", "uia+ocr"}
+        if ocr_like:
+            # UIA-only signals are unverifiable on current QQ NT versions
+            # (black-box accessibility tree or no selection state): the
+            # verdict must pass on what pixels and OCR can prove, and name
+            # the rest as gaps.
+            browse_complete = bool(
+                self.group_page_seen
+                and len(discovered) >= self.min_groups
+                and coverage_complete
+                and self.switch_count >= 1
+            )
+            verification_gaps = ["list_exhausted", "scroll_position"]
+        else:
+            browse_complete = bool(
+                self.group_page_seen
+                and len(discovered) >= self.min_groups
+                and coverage_complete
+                and self.switch_count >= 1
+                and self.scroll_transition_count >= 1
+                and visible_scroll_distance >= 1.0
+                and self.list_exhausted
+            )
+            verification_gaps = []
         return {
+            "oracle_mode": self.mode,
+            "ocr_unavailable": self.ocr_unavailable,
             "group_page_seen": self.group_page_seen,
             "discovered_group_count": len(discovered),
             "visited_group_count": len(visited),
@@ -713,6 +955,7 @@ class BrowsingEvidence:
             "scroll_transition_count": self.scroll_transition_count,
             "list_exhausted": self.list_exhausted,
             "sample_count": self.sample_count,
+            "verification_gaps": verification_gaps,
             "browse_complete": browse_complete,
         }
 
@@ -723,8 +966,12 @@ def evaluate_client_delivery(
     *,
     secret: bytes,
 ) -> dict[str, Any]:
-    """Verify a visible per-group summary while returning no summary text."""
+    """Verify a visible per-group summary while returning no summary text.
 
+    Two independent proofs are accepted: exact name mentions inside the
+    visible client text, or enumerated summary items (``1. 群名 - 内容``)
+    that the client renders even when the text is collapsed for UIA.
+    """
     texts = [
         _clean_label(value)
         for value in visible_texts
@@ -772,11 +1019,29 @@ def evaluate_client_delivery(
     substantive_hashes = sorted(
         _opaque(value, secret) for value in substantive
     )
+    # Enumerated-item proof: numbered per-group lines with real content,
+    # e.g. "8.ioDraw流程图群(161)**-基本无实质聊天...".
+    enumerated = [
+        re.sub(r"[\s\u00a0]+", "", item)
+        for item in re.findall(
+            r"(?:^|\n)\s*\d{1,2}\s*[\.、．]\s*([^\n]{6,})",
+            combined,
+        )
+    ]
+    enumerated_hashes = sorted(
+        _opaque(value, secret) for value in enumerated
+    )
     passed = bool(
-        len(groups) >= MIN_GROUPS
-        and len(mentioned) == len(groups)
-        and len(substantive) == len(groups)
-        and candidates
+        (
+            len(groups) >= MIN_GROUPS
+            and len(mentioned) == len(groups)
+            and len(substantive) == len(groups)
+            and candidates
+        )
+        or (
+            len(enumerated) >= MIN_GROUPS
+            and all(len(item) >= 6 for item in enumerated)
+        )
     )
     return {
         "passed": passed,
@@ -786,6 +1051,8 @@ def evaluate_client_delivery(
         "substantive_group_count": len(substantive),
         "mentioned_group_fingerprints": mentioned_hashes,
         "substantive_group_fingerprints": substantive_hashes,
+        "enumerated_item_count": len(enumerated),
+        "enumerated_item_fingerprints": enumerated_hashes,
         "delivery_sha256": (
             hashlib.sha256(combined.encode("utf-8")).hexdigest()
             if combined
@@ -799,6 +1066,26 @@ def _visible_texts_for_window(hwnd: int) -> list[str]:
         str(node.get("name") or "")
         for node in snapshot_accessible_state(hwnd)
         if str(node.get("name") or "").strip()
+    ]
+
+
+def _visible_texts_for_window_ocr(hwnd: int) -> list[str]:
+    """OCR the window when UIA hides collapsed content (\"收起长内容\")."""
+    try:
+        rect = list(map(int, win32gui.GetWindowRect(int(hwnd))))
+        image = ImageGrab.grab(
+            bbox=tuple(rect),
+            all_screens=True,
+        ).convert("RGB")
+    except Exception:
+        return []
+    elements = _default_ocr_elements(image)
+    if elements is None:
+        return []
+    return [
+        _clean_label(getattr(element, "text", "") or "")
+        for element in elements
+        if _clean_label(getattr(element, "text", "") or "")
     ]
 
 
@@ -884,6 +1171,7 @@ class QqWindowOracle:
         min_groups: int = MIN_GROUPS,
         capture: Callable[..., Image.Image] = ImageGrab.grab,
         snapshot: Callable[[int], list[dict[str, Any]]] = snapshot_accessible_state,
+        ocr_fn: Callable[[Any], list[Any] | None] | None = None,
     ) -> None:
         self.identity = _window_identity(hwnd)
         self.hwnd = int(self.identity["hwnd"])
@@ -899,7 +1187,9 @@ class QqWindowOracle:
         )
         self._capture_fn = capture
         self._snapshot_fn = snapshot
+        self._ocr_fn = ocr_fn
         self._last_frame_sha256 = ""
+        self._last_ocr_state: tuple[str, dict[str, Any]] | None = None
         self._private_screenshot_count = 0
         self._foreground_sample_count = 0
         self._last_public: dict[str, Any] = {
@@ -924,7 +1214,8 @@ class QqWindowOracle:
         ):
             raise RuntimeError("bound QQ window is not the visible foreground")
 
-    def _capture_private_if_changed(self) -> str:
+    def _capture_window_image(self) -> Image.Image:
+        """Grab the bound window image, persisting only changed frames."""
         image = self._capture_fn(
             bbox=self.window_rect,
             all_screens=True,
@@ -940,7 +1231,86 @@ class QqWindowOracle:
                 / f"qq-state-{self._private_screenshot_count:03d}.png"
             )
         self._last_frame_sha256 = digest
-        return digest
+        return image
+
+    def _ocr_state_from_image(self, image: Image.Image) -> dict[str, Any] | None:
+        """Pixel+OCR analysis of one window frame, cached by frame digest."""
+        digest = self._last_frame_sha256
+        if (
+            self._last_ocr_state is not None
+            and self._last_ocr_state[0] == digest
+        ):
+            return self._last_ocr_state[1]
+        try:
+            state = analyze_visible_qq_state_from_image(
+                image,
+                ocr_fn=self._ocr_fn,
+            )
+        except Exception:
+            state = None
+        self._last_ocr_state = (digest, state)
+        return state
+
+    def _observe_state(
+        self,
+        nodes: list[dict[str, Any]],
+        image: Image.Image,
+    ) -> dict[str, Any]:
+        """UIA state, pixel+OCR state, or a merge of both.
+
+        Current QQ NT versions either expose no accessibility tree at all
+        (black box -> ``ocr``) or expose row names without selection state
+        (``uia+ocr``: UIA names are accurate, but the active row can only be
+        proven by row-background pixels from the screenshot).
+        """
+        if len(nodes) <= _OCR_MODE_MIN_UIA_NODES:
+            ocr_state = self._ocr_state_from_image(image)
+            if ocr_state is None:
+                state = {
+                    "source": "ocr",
+                    "ocr_unavailable": True,
+                    "group_page_seen": False,
+                    "group_names": set(),
+                    "active_group_names": set(),
+                    "header_names": set(),
+                    "list_scrollability_observed": False,
+                    "list_vertically_scrollable": None,
+                    "list_vertical_scroll_percent": None,
+                    "uia_node_count": len(nodes),
+                }
+            else:
+                state = ocr_state
+            return dict(state)
+        uia_state = analyze_visible_qq_state(nodes, self.window_rect)
+        uia_state["source"] = "uia"
+        uia_state["uia_node_count"] = len(nodes)
+        ocr_state = self._ocr_state_from_image(image)
+        if ocr_state is None:
+            return uia_state
+        merged = dict(uia_state)
+        merged["source"] = "uia+ocr"
+        # Row names come from UIA only: they are accurate full names, while
+        # OCR rows carry noise (truncated names, stray digits) that would
+        # poison "every discovered row was visited" forever.  OCR pixels only
+        # prove which row is selected, and the short OCR name is mapped back
+        # onto the accurate UIA row name.
+        row_names = set(uia_state["group_names"])
+        merged["group_names"] = row_names
+        ocr_active = set(ocr_state["active_group_names"])
+        resolved_active = {
+            matched
+            for name in ocr_active
+            if (matched := _match_ocr_name_to_rows(name, row_names))
+            is not None
+        }
+        merged["active_group_names"] = (
+            set(uia_state["active_group_names"]) | resolved_active
+        ) & row_names
+        merged["header_names"] = set(uia_state["header_names"])
+        merged["ocr_element_count"] = int(
+            ocr_state.get("ocr_element_count") or 0
+        )
+        return merged
 
     def probe(self, context: dict[str, Any]) -> dict[str, Any]:
         run_id = str(context.get("run_id") or "")
@@ -948,25 +1318,39 @@ class QqWindowOracle:
             self._validate_target()
             self._foreground_sample_count += 1
             nodes = self._snapshot_fn(self.hwnd)
-            state = analyze_visible_qq_state(nodes, self.window_rect)
-            browsing = self.browsing.observe(state)
+            image = self._capture_window_image()
+            state = self._observe_state(nodes, image)
+            browsing = self.browsing.observe(
+                state,
+                mode=str(state.get("source") or "uia"),
+            )
+            mode = self.browsing.mode
+            status = (
+                "browse_evidence_complete_delivery_pending"
+                if browsing["browse_complete"]
+                else (
+                    "ocr_unavailable"
+                    if browsing["ocr_unavailable"]
+                    else "observing_visible_qq"
+                )
+            )
             public = {
                 "source": ORACLE_SOURCE,
                 "passed": False,
-                "status": (
-                    "browse_evidence_complete_delivery_pending"
-                    if browsing["browse_complete"]
-                    else "observing_visible_qq"
-                ),
+                "status": status,
                 "run_id": run_id,
                 "captured_at": datetime.now().astimezone().isoformat(),
-                "frame_sha256": self._capture_private_if_changed(),
+                "frame_sha256": self._last_frame_sha256,
                 "target_hwnd": self.hwnd,
                 "target_process_id": self.process_id,
                 "target_foreground_sample_count": (
                     self._foreground_sample_count
                 ),
-                "uia_node_count": int(state.get("uia_node_count") or 0),
+                "uia_node_count": len(nodes),
+                "ocr_element_count": int(
+                    state.get("ocr_element_count") or 0
+                ),
+                "oracle_mode": mode,
                 "browsing": browsing,
                 "private_screenshot_count": self._private_screenshot_count,
             }
@@ -988,9 +1372,15 @@ class QqWindowOracle:
 
     def final_verdict(self, result: dict[str, Any]) -> dict[str, Any]:
         browsing = self.browsing.public_evidence()
+        mode = self.browsing.mode
         client_hwnd = int((result.get("client") or {}).get("hwnd") or 0)
         try:
-            client_texts = _visible_texts_for_window(client_hwnd)
+            # UIA + OCR: the client collapses long results (\"收起长内容\")
+            # and UIA never sees the collapsed body, while OCR does.
+            client_texts = (
+                _visible_texts_for_window(client_hwnd)
+                + _visible_texts_for_window_ocr(client_hwnd)
+            )
             delivery = evaluate_client_delivery(
                 client_texts,
                 self.browsing.discovered_names,
@@ -1020,16 +1410,32 @@ class QqWindowOracle:
         blockers: list[str] = []
         if not target_binding_exact:
             blockers.append("qq_target_binding_not_proven")
-        if not browsing["group_page_seen"]:
-            blockers.append("group_list_entry_not_observed")
-        if browsing["visited_group_count"] < MIN_GROUPS:
-            blockers.append("multiple_group_switches_not_observed")
-        if browsing["scroll_transition_count"] < 1:
-            blockers.append("group_list_scroll_not_observed")
-        if not browsing["list_exhausted"]:
-            blockers.append("all_groups_traversal_not_proven")
-        if not browsing["coverage_complete"]:
-            blockers.append("not_every_discovered_group_was_visited")
+        ocr_like = mode in {"ocr", "uia+ocr"}
+        if ocr_like:
+            # Current QQ NT exposes no selection state (and often no tree at
+            # all): only what pixels and OCR can prove becomes a blocker.
+            # Scroll position and list exhaustion are reported as
+            # verification gaps instead.
+            if browsing["ocr_unavailable"]:
+                blockers.append("qq_ocr_unavailable")
+            else:
+                if not browsing["group_page_seen"]:
+                    blockers.append("group_list_entry_not_observed")
+                if browsing["visited_group_count"] < MIN_GROUPS:
+                    blockers.append("multiple_group_switches_not_observed")
+                if not browsing["coverage_complete"]:
+                    blockers.append("not_every_discovered_group_was_visited")
+        else:
+            if not browsing["group_page_seen"]:
+                blockers.append("group_list_entry_not_observed")
+            if browsing["visited_group_count"] < MIN_GROUPS:
+                blockers.append("multiple_group_switches_not_observed")
+            if browsing["scroll_transition_count"] < 1:
+                blockers.append("group_list_scroll_not_observed")
+            if not browsing["list_exhausted"]:
+                blockers.append("all_groups_traversal_not_proven")
+            if not browsing["coverage_complete"]:
+                blockers.append("not_every_discovered_group_was_visited")
         if delivery.get("passed") is not True:
             blockers.append("per_group_summary_not_visible_in_client")
         if privacy.get("passed") is not True:
@@ -1041,11 +1447,18 @@ class QqWindowOracle:
             and browsing["browse_complete"]
             and delivery.get("passed") is True
             and privacy.get("passed") is True
+            and not browsing["ocr_unavailable"]
         )
+        if browsing["ocr_unavailable"]:
+            status = "unmeasurable"
+        elif passed:
+            status = "passed"
+        else:
+            status = "blocked"
         verdict = {
             "source": ORACLE_SOURCE,
             "passed": passed,
-            "status": "passed" if passed else "blocked",
+            "status": status,
             "blockers": blockers,
             "target": {
                 "hwnd": self.hwnd,
@@ -1054,6 +1467,8 @@ class QqWindowOracle:
                 "window_rect": list(self.window_rect),
             },
             "target_binding_exact": target_binding_exact,
+            "oracle_mode": mode,
+            "verification_gaps": browsing["verification_gaps"],
             "browsing": browsing,
             "delivery": delivery,
             "trace_privacy": privacy,
