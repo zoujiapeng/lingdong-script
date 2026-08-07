@@ -57,6 +57,7 @@ from .contracts import (
     CURRENT_FRAME_EVIDENCE_KIND,
     MAX_COMPLETED_ACTION_HISTORY,
     POST_ACTION_FRAME_EVIDENCE_KIND,
+    ActorBudgetView,
     ControllerOutcome,
     ControllerTransition,
     MissionRuntimeResult,
@@ -101,6 +102,7 @@ class MissionRuntime:
         state: RuntimeStatePort,
         controller: ControllerPort,
         evidence_registry: EvidenceRegistry,
+        budget_facts_provider: Callable[[int], Mapping[str, Any]] | None = None,
     ) -> None:
         if type(reducer) is not MissionReducer:
             raise TypeError("reducer must be MissionReducer")
@@ -148,6 +150,11 @@ class MissionRuntime:
         self._previous_action_local_intent: str | None = None
         self._task_state = ActorTaskState.initial()
         self._turn_lock = threading.Lock()
+        if budget_facts_provider is not None and not callable(
+            budget_facts_provider
+        ):
+            raise TypeError("budget_facts_provider must be callable or null")
+        self._budget_facts_provider = budget_facts_provider
 
     @staticmethod
     def _validate_minimal_scope(
@@ -520,6 +527,34 @@ class MissionRuntime:
             evidence_policy=definition.evidence_policy,
             evidence_refs=refs,
         )
+
+    def _project_budget(
+        self,
+        turn_index: int,
+    ) -> ActorBudgetView | None:
+        """Read the mechanical fuel-gauge facts for one Actor turn.
+
+        The gauge is advisory: any provider or contract failure degrades the
+        gauge to ``None`` instead of failing the mission.  Spending policy is
+        always the Actor's own semantic decision.
+        """
+        provider = self._budget_facts_provider
+        if provider is None:
+            return None
+        try:
+            raw = provider(turn_index)
+            if not isinstance(raw, Mapping):
+                return None
+            return ActorBudgetView(
+                turns_used=turn_index,
+                max_turns=raw.get("max_turns"),
+                model_calls_used=raw.get("model_calls_used"),
+                max_model_calls=raw.get("max_model_calls"),
+                elapsed_s=raw.get("elapsed_s"),
+                max_runtime_s=raw.get("max_runtime_s"),
+            )
+        except Exception:
+            return None
 
     def _completed_action_history(
         self,
@@ -1075,6 +1110,7 @@ class MissionRuntime:
                 detail="Broker route is not Visual Actor",
             )
         try:
+            budget = self._project_budget(turn_index)
             turn = project_actor_turn_input(
                 self._reducer.card,
                 initial.broker_state.frame,
@@ -1089,6 +1125,7 @@ class MissionRuntime:
                         projection.active_obligation_id or ""
                     )
                 ),
+                budget=budget,
             )
         except Exception as exc:
             return self._result(

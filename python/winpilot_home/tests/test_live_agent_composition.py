@@ -3252,6 +3252,18 @@ def test_desktop_shell_launch_adopts_the_launched_window_next_observation(
         assert result.status is RuntimeStatus.ACTION_RECORDED
         assert launched == [("Notepad", "")]
 
+        # The mechanical fuel gauge is wired end-to-end: the visual turn's
+        # user context carries consumed/max turns, calls, and wall seconds.
+        visual_request = client.requests[0]
+        turn_text = visual_request["messages"][-1]["content"][0]["text"]
+        turn_payload = json.loads(turn_text)
+        assert turn_payload["budget"]["max_turns"] == budget.max_turns
+        assert turn_payload["budget"]["max_model_calls"] == budget.max_model_calls
+        assert turn_payload["budget"]["max_runtime_s"] == budget.max_runtime_s
+        assert turn_payload["budget"]["turns_used"] == 0
+        assert turn_payload["budget"]["model_calls_used"] == 0
+        assert turn_payload["budget"]["elapsed_s"] >= 0
+
         observed = session._runtime._state.observe(
             session._reducer.projection,
             turn_index=1,

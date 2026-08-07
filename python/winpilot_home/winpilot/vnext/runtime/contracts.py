@@ -598,6 +598,61 @@ class ActorPreviousActionView:
 
 
 @dataclass(frozen=True, slots=True)
+class ActorBudgetView:
+    """One mechanical fuel-gauge fact, never a spending policy.
+
+    The Runtime reports how much of the frozen run budget is already spent
+    (turns, model calls, wall time) and how much remains.  Whether to slow
+    down, skim, skip or stop is the Actor's own semantic decision; the gauge
+    only makes the facts visible every turn.
+    """
+
+    turns_used: int
+    max_turns: int
+    model_calls_used: int
+    max_model_calls: int
+    elapsed_s: int
+    max_runtime_s: int
+
+    def __post_init__(self) -> None:
+        for name, minimum in (
+            ("turns_used", 0),
+            ("max_turns", 1),
+            ("model_calls_used", 0),
+            ("max_model_calls", 1),
+            ("elapsed_s", 0),
+            ("max_runtime_s", 1),
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < minimum:
+                raise RuntimeContractError(
+                    f"budget {name} must be an integer >= {minimum}"
+                )
+        if self.turns_used > self.max_turns:
+            raise RuntimeContractError(
+                "budget turns_used exceeds max_turns"
+            )
+        if self.model_calls_used > self.max_model_calls:
+            raise RuntimeContractError(
+                "budget model_calls_used exceeds max_model_calls"
+            )
+        if self.elapsed_s > self.max_runtime_s:
+            raise RuntimeContractError(
+                "budget elapsed_s exceeds max_runtime_s"
+            )
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "turns_used": self.turns_used,
+            "max_turns": self.max_turns,
+            "model_calls_used": self.model_calls_used,
+            "max_model_calls": self.max_model_calls,
+            "elapsed_s": self.elapsed_s,
+            "max_runtime_s": self.max_runtime_s,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ActorMissionView:
     original_goal: str
     active_obligation: ActorObligationView
@@ -730,6 +785,7 @@ class ActorTurnInput:
     frame: ActorFrameView
     tools: tuple[ActorToolView, ...]
     task_state: ActorTaskState | None = None
+    budget: ActorBudgetView | None = None
     completed_action_summaries: tuple[str, ...] = ()
     previous_action: ActorPreviousActionView | None = None
     pointer_held: bool = False
@@ -748,6 +804,10 @@ class ActorTurnInput:
             object.__setattr__(self, "task_state", ActorTaskState.initial())
         elif type(self.task_state) is not ActorTaskState:
             raise RuntimeContractError("Actor turn requires ActorTaskState")
+        if self.budget is not None and type(self.budget) is not ActorBudgetView:
+            raise RuntimeContractError(
+                "Actor turn requires ActorBudgetView or null"
+            )
         tools = tuple(self.tools)
         if not tools or any(type(tool) is not ActorToolView for tool in tools):
             raise RuntimeContractError(
@@ -793,6 +853,9 @@ class ActorTurnInput:
             "mission": self.mission.to_dict(),
             "frame": self.frame.to_dict(),
             "task_state": self.task_state.to_dict(),
+            "budget": (
+                None if self.budget is None else self.budget.to_dict()
+            ),
             "tools": [tool.to_dict() for tool in self.tools],
             "completed_action_summaries": list(
                 self.completed_action_summaries
@@ -818,6 +881,7 @@ def project_actor_turn_input(
     task_state: ActorTaskState | None = None,
     previous_action_local_intent: str | None = None,
     completed_action_summaries: Iterable[str] = (),
+    budget: ActorBudgetView | None = None,
 ) -> ActorTurnInput:
     """Project one identity-free bounded view from canonical Runtime facts."""
 
@@ -825,6 +889,10 @@ def project_actor_turn_input(
     if type(card) is not MissionCard or card.active_obligation is None:
         raise RuntimeContractError(
             "Visual Actor requires one active MissionCard obligation"
+        )
+    if budget is not None and type(budget) is not ActorBudgetView:
+        raise RuntimeContractError(
+            "Actor projection requires ActorBudgetView or null"
         )
     if type(frame_state) is not AuthoritativeFrameState:
         raise RuntimeContractError(
@@ -949,6 +1017,7 @@ def project_actor_turn_input(
         ),
         tools=tuple(tools),
         task_state=task_state,
+        budget=budget,
         completed_action_summaries=completed_summaries,
         previous_action=previous,
         pointer_held=projection.pointer_lease_id is not None,
@@ -1243,6 +1312,7 @@ __all__ = [
     "ActorFrameView",
     "ActorToolView",
     "ActorTurnInput",
+    "ActorBudgetView",
     "ActorTaskState",
     "ActorTaskStateError",
     "ActorTaskStateUpdate",
