@@ -517,10 +517,13 @@ def _click_progress(
     *,
     cleanup: bool | None = None,
     via: str = "",
+    error_kind: str | None = None,
 ) -> RawBackendResult:
     facts: dict[str, Any] = {"completed_clicks": int(completed_clicks)}
     if error:
         facts.update({"ok": False, "blocked": True, "error": error})
+    if error_kind:
+        facts["error_kind"] = error_kind
     if cleanup is not None:
         facts.update(release_cleanup_attempted=True,
                      release_cleanup_completed=cleanup)
@@ -659,6 +662,7 @@ def _raw_click(
         if enforce_foreground and not _target_window_still_foreground(hwnd):
             return _click_progress(
                 False, 0, "click target is not the current foreground window",
+                error_kind="target_window_lost",
             )
     if prepositioned:
         current_x, current_y = _cursor_pos()
@@ -687,6 +691,11 @@ def _raw_click(
                 False if completed_clicks == 0 else None,
                 completed_clicks,
                 "click target lost foreground ownership before mouse-down",
+                error_kind=(
+                    "target_window_lost"
+                    if completed_clicks == 0
+                    else None
+                ),
             )
         if final_guard is not None:
             try:
@@ -890,6 +899,7 @@ def _physical_drag_result(
     held_before: bool | None = None,
     held_after: bool | None = None,
     moves_completed: int | None = None,
+    error_kind: str | None = None,
 ) -> RawBackendResult:
     facts: dict[str, Any] = {
         "ok": input_completed is True,
@@ -901,6 +911,8 @@ def _physical_drag_result(
     }
     if error:
         facts.update({"blocked": True, "error": error})
+    if error_kind:
+        facts["error_kind"] = error_kind
     if guard_decision is not None:
         facts["guard_decision"] = guard_decision.value
     if cursor_restored is not None:
@@ -978,6 +990,7 @@ def _held_drag_failure(
     guard_decision: FinalPointerGuardDecision | None,
     held_before: bool,
     moves_completed: int,
+    error_kind: str | None = None,
 ) -> RawBackendResult:
     attempted, released, held_after = _best_effort_release_left(force=True)
     return _physical_drag_result(
@@ -990,6 +1003,7 @@ def _held_drag_failure(
         held_before=held_before,
         held_after=held_after,
         moves_completed=moves_completed,
+        error_kind=error_kind,
     )
 
 
@@ -1023,6 +1037,7 @@ def _execute_held_drag_segment(
                 guard_decision=guard_decision,
                 held_before=False,
                 moves_completed=0,
+                error_kind="target_window_lost",
             )
         try:
             _abs_mouse_move(*start)
@@ -1053,6 +1068,7 @@ def _execute_held_drag_segment(
             guard_decision=guard_decision,
             held_before=held_before,
             moves_completed=0,
+            error_kind="target_window_lost",
         )
 
     guard_decision = _held_drag_guard_decision(start, final_guard)
@@ -1298,11 +1314,14 @@ def execute_admitted_physical_drag(
             progress=progress,
         )
         if not completed:
-            error = (
-                f"final pointer guard rejected: {guard_decision.value}"
-                if not progress["button_pressed"]
-                else "drag outcome unknown after physical input began"
-            )
+            if not progress["button_pressed"]:
+                error = (
+                    f"final pointer guard rejected: {guard_decision.value}"
+                    if guard_decision is not FinalPointerGuardDecision.ADMITTED
+                    else "drag could not start"
+                )
+            else:
+                error = "drag outcome unknown after physical input began"
     except Exception:
         error = (
             "drag outcome unknown after physical input began"
@@ -1319,6 +1338,9 @@ def execute_admitted_physical_drag(
         if progress["button_pressed"]
         else False
     )
+    error_kind: str | None = None
+    if input_completed is False and not _target_window_still_foreground(hwnd):
+        error_kind = "target_window_lost"
     result = _physical_drag_result(
         input_completed,
         error=error,
@@ -1328,6 +1350,7 @@ def execute_admitted_physical_drag(
         release_cleanup_completed=bool(
             progress["release_cleanup_completed"]
         ),
+        error_kind=error_kind,
     )
     if input_completed is True:
         _publish_admitted_action_summary(

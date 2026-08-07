@@ -76,7 +76,22 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
         "完成当前界面上的测试。",
         "必须使用GUI和真实鼠标完成当前界面上的测试。",
         "必须使用GUI和真实鼠标键盘，帮我在当前开启的页面里答完所有题。",
+        "必须使用GUI和真实鼠标完成当前界面上的测试。这个测试测量的是你用鼠标"
+        "点击紫色方块中心的精度，每次真实点击的位置都会被记录并在任务结束后"
+        "验证，所以请直接用鼠标点击当前页面上每个紫色方块的中心，直到全部"
+        "方块都变成绿色。",
+        "必须使用GUI和真实鼠标完成当前界面上的测试。这个测试测量的是你用鼠标"
+        "点击紫色方块中心的精度，每次真实点击的位置都会被记录并在任务结束后"
+        "验证；页面状态行会提示上次点击的偏差，请根据提示直接用鼠标修正点击，"
+        "直到全部方块都变成绿色。",
     }
+    for name in ("calibration-grid", "calibration-feedback"):
+        task = harness.VISUAL_CASES[name]["task"]
+        assert "真实鼠标" in task, f"{name} must demand real mouse input"
+        assert "紫色方块" in task, f"{name} must name the visible page target"
+        assert "绿色" in task, f"{name} must state the visible completion state"
+        assert "精度" in task, f"{name} must say it measures click precision"
+        assert "验证" in task, f"{name} must say clicks are verified"
     quiz_case = harness.VISUAL_CASES["answer-all-questions"]
     assert quiz_case["runtime_version"] == "vnext"
     assert quiz_case["ground_truth"] == (
@@ -472,6 +487,53 @@ def test_dynamic_target_persists_pointerup_before_success():
     )
 
 
+def test_calibration_hits_mutate_the_shared_point_object():
+    # A spread copy (best={...p}) would set hit on the copy only, so
+    # points.every(p=>p.hit) could never become true and the page could
+    # never report CALIBRATION_SUCCEEDED no matter how precise the clicks.
+    target = (
+        Path(__file__).resolve().parents[1]
+        / "eval_targets"
+        / "visual_interaction_target.html"
+    ).read_text(encoding="utf-8")
+    for setup_name in ("setupCalibrationGrid", "setupCalibrationFeedback"):
+        setup = target[target.index(f"function {setup_name}()") :]
+        next_setup = target.index(
+            "function setup", target.index(f"function {setup_name}()") + 1
+        )
+        setup = setup[:next_setup]
+        assert "best=p;" in setup, f"{setup_name} must reference the point"
+        hit_branch = setup[setup.index("if(best){") :]
+        assert "best.hit=true;" in hit_branch
+        assert "points.every(p=>p.hit)" in hit_branch
+        assert "markSuccess('CALIBRATION_SUCCEEDED'" in hit_branch
+
+
+def test_calibration_clicks_are_judged_in_arena_coordinates():
+    # event.clientX/Y are viewport coordinates while the calibration points
+    # are arena-relative.  Judging dx = clientX - center.x without removing
+    # the arena offset scores a click that lands exactly on square 0 as a hit
+    # on square 6 and marks every real center-click on row 0 as a miss; the
+    # square that visually turns green then never matches the recorded index.
+    target = (
+        Path(__file__).resolve().parents[1]
+        / "eval_targets"
+        / "visual_interaction_target.html"
+    ).read_text(encoding="utf-8")
+    for setup_name in ("setupCalibrationGrid", "setupCalibrationFeedback"):
+        setup = target[target.index(f"function {setup_name}()") :]
+        next_setup = target.index(
+            "function setup", target.index(f"function {setup_name}()") + 1
+        )
+        setup = setup[:next_setup]
+        pointer_branch = setup[setup.index("addEventListener('pointerdown'") :]
+        assert "getBoundingClientRect" in pointer_branch, (
+            f"{setup_name} must convert viewport to arena coordinates"
+        )
+        assert "event.clientX-arenaRect.left" in pointer_branch
+        assert "event.clientY-arenaRect.top" in pointer_branch
+
+
 def test_external_verdict_rejects_agent_claim_without_trusted_pointer_event():
     harness = _load_harness()
     state = _state(
@@ -487,3 +549,79 @@ def test_external_verdict_rejects_agent_claim_without_trusted_pointer_event():
 
     assert verdict["passed"] is False
     assert "success event is not trusted and successful" in verdict["errors"]
+
+
+def _calibration_state(scenario: str, point_count: int, *, misses: int = 0) -> dict:
+    state = _state(
+        scenario,
+        {"succeeded": True},
+        moves=0,
+    )
+    state["events"][:0] = [
+        {
+            "type": "page_ready",
+            "details": {
+                "point_count": point_count,
+                "tolerance_px": 8 if scenario == "calibration_feedback" else 20,
+            },
+        }
+    ]
+    for index in range(point_count):
+        state["events"].insert(
+            index + 1,
+            {
+                "type": "calibration_hit",
+                "trusted": True,
+                "scenario": scenario,
+                "details": {"index": index},
+            },
+        )
+    for index in range(misses):
+        state["events"].append(
+            {
+                "type": "calibration_miss",
+                "trusted": True,
+                "scenario": scenario,
+                "details": {"nearest_index": 0},
+            }
+        )
+    return state
+
+
+def test_external_verdict_accepts_complete_calibration_grid():
+    harness = _load_harness()
+
+    state = _calibration_state("calibration_grid", 12)
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="calibration_grid", seed=17,
+    )
+    assert verdict["passed"] is True
+
+    state["events"] = [
+        item for item in state["events"]
+        if not (item.get("type") == "calibration_hit" and (item.get("details") or {}).get("index") == 7)
+    ]
+    failed = harness.external_verdict(
+        state, case_id="case-1", scenario="calibration_grid", seed=17,
+    )
+    assert failed["passed"] is False
+    assert "calibration did not hit every declared point" in failed["errors"][0]
+
+
+def test_external_verdict_accepts_complete_calibration_feedback_and_rejects_misses():
+    harness = _load_harness()
+
+    state = _calibration_state("calibration_feedback", 3)
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="calibration_feedback", seed=17,
+    )
+    assert verdict["passed"] is True
+
+    failed = harness.external_verdict(
+        _calibration_state("calibration_feedback", 3, misses=1),
+        case_id="case-1", scenario="calibration_feedback", seed=17,
+    )
+    assert failed["passed"] is False
+    assert "calibration feedback contained a trusted miss" in failed["errors"]

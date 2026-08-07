@@ -681,6 +681,17 @@ python scripts/client_e2e_run.py --suite original
 python scripts/client_e2e_run.py --suite mixed
 ```
 
+手动测试后导出排查日志（每次 run 的原始 trace 已自动落在
+`python/winpilot_home/traces/arp-*.jsonl`，导出脚本负责转成可读报告）：
+
+```powershell
+python scripts/export_run_log.py                # 最新一次 run → output/run-logs/<run_id>.md
+python scripts/export_run_log.py <run_id>       # 指定 run（含叙述/回执/错误/耗时/用量）
+python scripts/export_run_log.py --last 5       # 最近 5 次
+python scripts/export_run_log.py --latest-e2e   # 最近一次视觉 E2E 套件打包：
+                                                #   INDEX.md 汇总 + 每 case 的 run 日志 + 截图
+```
+
 真实客户端 E2E 前先运行 `npm run dev`。不要直接运行
 `uvicorn winpilot.server:app`；支持的入口是 Electron 托管或
 `python/winpilot_home/serve.py`。
@@ -1132,5 +1143,110 @@ opencode 接入的 deepseek 不支持图片，但本机已注册 MCP 服务器 `
 
 注意：不要为调试临时 `$env:MIMO_*`（会污染子进程导致 401）；TUI 与
 `opencode run` 并发连同一 server 时工具可能短暂不可用，重试即可。
+
+## 2026-08-07 成功率整改：校准判定缺口、被拒反馈黑洞、协议放宽、历史加深（未提交工作树）
+
+本轮以"提升 agent 完成任务成功率"为唯一目标，对同一批视觉 E2E 任务做了
+前后对照（同一可见 Electron、同一 harness 口径），并逐任务拆 trace 归因。
+四类改动全部属于"放宽工具协议 / 删除无意义中间层 / 减轻输出负担 / 放开通用
+工具 / 增加原生历史"允许范围，没有新增模型角色、提示教学或第二执行线：
+
+1. **校准场景无法被判定（测试基建缺口）**：`client_visual_e2e_run.py` 的
+   `external_verdict` 没有 `calibration_grid` / `calibration_feedback` 分支，
+   任何校准 run 都会被判 `unsupported scenario` 必败，模型表现完全无法测量。
+   修复：按页面 `page_ready.point_count` 和 trusted `calibration_hit` 事件全集
+   判定成功（feedback 场景额外要求零 trusted miss），`complete()` 等待逻辑同步
+   补校准分支。+3 harness 测试。
+2. **物理前台守卫被拒后模型不知道原因（机械反馈黑洞）**：corridor 失败 trace
+   里 `physical_input_guard` 以 `target_window_lost` 拒绝 drag，但 raw receipt
+   是 NOT_APPLIED + `error_kind=null`，模型只看到"没执行"而不知道窗口失焦，
+   于是继续盲目点击。修复：executor 的 click/drag/held-drag 前台守卫失败路径
+   在 backend facts 里带 `error_kind="target_window_lost"`；`AtomicDesktopAdapter`
+   新增 `_receipt_error_kind`（receipt.error_kind 优先，缺省读 backend facts），
+   被拒 transition 携带真实机械原因进入 `previous_action.error_kind` 回喂模型。
+   RawActionReceipt 契约不变（certain 回执仍不带 error_kind）。+4 测试。
+3. **status/connector 工具协议放宽**：`_status_exchange` / `_execute_initial_call`
+   的 status 分支要求参数精确为空、`_connector_exchange` 要求精确字段集；模型
+   合法附加可选 `task_state_update` 等字段会被拒绝并烧格式修复回合。改为与
+   `_owned_tool_exchange` 一致：未知字段弹出、缺必填仍 fail closed。+2 测试。
+4. **视觉原生历史 3 → 4 笔**：`_VISUAL_HISTORY_DEPTH = 4`，长任务里"我上几步
+   看过什么屏幕/做过什么"的连续性更稳；每笔含当时 user image → tool call →
+   result。Thread 文本历史仍 12 条/16 KiB。
+
+前后对照（同一批任务，改动前 `20260807-032255/032626/032803`，改动后
+`20260807-042237/043117/043254` 及各单 case）：
+
+- smoke：`3/4 → 4/4`。game-drag-v2（corridor）从必败变为通过：模型这次用
+  分段 held drag + DevTools 只读检查，外部 trusted 事件 `path_valid=true`、
+  `min_clearance=16`。corridor-v0 也通过（5 turn，模型读到 LEFT_CORRIDOR /
+  GOAL_MISSED 状态文本后自我纠错）；corridor-v1/v3 及重复的 game-drag-v2
+  仍失败（模型几何族波动，输入回执全部 applied，零机械拒绝）。
+- goal-admission `2/2`、exam `1/1`：与基线逐 case 一致，无回退。
+- calibration-grid：改动前因判定缺口必败且模型 3/12；改动后可判定，本轮
+  3/12 失败。归因全部在模型层：命中点存在一致的右+12px/下+10px 视觉定位
+  偏差（±20 容差内可命中），对个别方格估计偏差 30–65px 反复重试同一坐标，
+  随后转向 F12/DevTools/JS 探测烧掉预算（50–60 次模型调用），最终 workspace
+  表面丢失或超时。机械层零拒绝、零回退。
+- calibration-feedback：±8px 容差对当前模型的 ~12px 系统性定位偏差过严；
+  模型读到"上次点击偏差"文本但无法收敛到 8px，随后连续 invalid_proposal。
+  模型层，记录不修。
+
+失败分层结论：本轮所有有效失败的首次分歧都在模型层（视觉定位偏差、停止/
+纠错判断、DevTools 探测策略）；机械层唯一修复是让"被拒动作的原因"真实到达
+模型（target_window_lost 反馈），这是 2026-08-03 反馈黑洞修复的同一族补漏。
+
+回归：WinPilot `3448 passed, 13 skipped, 1 warning`、根测试 `2508 passed`、
+renderer `318 passed`、TypeScript typecheck 通过。`CON` 未触碰。
+
+给模型失败/困难策略的建议（只记录，不实现为规则）：
+- 长手势（corridor）用分段 held drag（keep_holding）比单次长折线更稳：本轮
+  通过的 corridor 均采用分段拖动 + 每段看新帧的策略。
+- 模型在任务受阻时改用 DevTools/JS/剪贴板探测是"换别的办法"的合理行为，
+  不能写死规则限制；测试语义要在任务文本里说清被测对象（如"测量点击精度、
+  点击位置会被记录验证、用真实鼠标点击"），让绕道自然偏离测试目的而非被
+  禁止。
+
+## 2026-08-07 第二轮：校准页面坐标 bug 是"点击命中不生效"的真根因（未提交工作树）
+
+用户两轮判断（"测试题不完善"、"网页有问题，点中了都没变绿"）指向同一处，
+逐项核实后确认两个都是真的，其中页面 bug 是校准场景永远失败的根因：
+
+1. **校准页坐标混算 bug（根因，已修复）**：`visual_interaction_target.html`
+   的 `setupCalibrationGrid` / `setupCalibrationFeedback` 用
+   `event.clientX/Y`（浏览器**视口**坐标）直接减 `point.center`（**arena 相对**
+   坐标）判定命中，arena 在视口里偏移了 (486,132)。后果：
+   - 点击真正落在 index 0 方块（视口 605,197）→ 页面算 dx=605-594=11 →
+     **误判为 index 6 命中**（视觉绿的 index 0，数据记 index 6）；
+   - 点击真正落在第 1 行方块（视口 1080/1317,197）→ dx=486/723 > 20 →
+     **点中了却判 miss**，模型看到"还是紫色"开始重试；
+   - calibration_summary 的 mean_dx≈+12/+13 是坐标混算假象，不是模型视觉
+     偏差。
+   修复：pointerdown 里先 `arena.getBoundingClientRect()`，用
+   `clientX-arenaRect.left / clientY-arenaRect.top` 统一到 arena 坐标再判定。
+   +1 静态测试钉住坐标换算。
+2. **测试题不完善（已改措辞）**：校准任务只说"点击紫色方块中心"，没说这是
+   **点击精度测量、点击位置会被记录验证**，模型看到"可以读 DevTools 坐标"
+   就绕道，测试目的漂移。改后任务明确"测量你用鼠标点击紫色方块中心的精度，
+   每次真实点击的位置都会被记录并在任务结束后验证，请直接用鼠标点击"。
+   不禁止任何工具/办法（模型换别的办法仍算成功），只把被测对象说清楚。
+   harness 测试同步断言新措辞包含"精度""验证""真实鼠标""紫色方块""绿色"。
+
+修复后同一 Electron 重跑（每 case 真实提交、trusted 事件判定）：
+
+- calibration-grid：**3/12、4/12、2/12 失败 → 12/12 通过**（mean_dx=-1.75、
+  mean_dy=11，全在 ±20 容差内）。此前所有失败都归因错误——页面把每次
+  命中判错方块/把真命中判 miss。
+- calibration-feedback：**失败 → 3/3 通过**（±8 容差内，实际偏差 ≤5px；
+  之前"146px 偏差"是同一坐标 bug 的假象）。
+- smoke `4/4`（drag-fit/slider/dynamic-hold/game-drag-v2）、goal-admission
+  `2/2`、exam `1/1`：与上轮一致，无回退。
+- corridor-v0 再次通过；corridor-v1/v3 仍失败（模型几何族，输入回执全部
+  applied、零机械拒绝，与校准无关）。
+- 回归：WinPilot `3450 passed, 13 skipped, 1 warning`、根测试 `2508`、
+  renderer `318`、typecheck 通过。
+
+经验：受控测试页的坐标系必须与被测输入一致（视口 vs 内容区偏移），否则
+"模型点不准"的假象会掩盖真 bug；E2E 判定缺口（校准场景此前无法判定）和
+页面判定 bug 都要在归因模型前先排除。`CON` 未触碰。
 
 `CON` 未触碰。

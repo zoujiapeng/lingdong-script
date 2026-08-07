@@ -132,7 +132,7 @@ _STRICT_SCHEMA_KEYS = frozenset(
 _LOCALLY_ENFORCED_SCHEMA_KEYS = frozenset({"not", "uniqueItems"})
 _THREAD_HISTORY_MESSAGES = 12
 _THREAD_HISTORY_CHARS = 16_384
-_VISUAL_HISTORY_DEPTH = 3
+_VISUAL_HISTORY_DEPTH = 4
 _CONNECTOR_TOOL_CALL_LIMIT = 4
 _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
@@ -1109,8 +1109,10 @@ def _status_exchange(
     if type(call_id) is not str or not call_id:
         raise LiveModelRoleError("Actor status tool call requires an id")
     arguments = _decode_arguments(raw_arguments)
-    if set(arguments) != set():
-        raise LiveModelRoleError(f"{name} does not accept arguments")
+    # Status tools declare no parameters; surplus fields (for example the
+    # optional task_state_update scratchpad) are tolerated like owned tools.
+    for field in tuple(arguments):
+        arguments.pop(field, None)
     content = member(message, "content")
     if content is not None and type(content) is not str:
         raise LiveModelRoleError("Actor status content must be text or null")
@@ -1389,11 +1391,13 @@ def _connector_exchange(
         if name == _CONNECTOR_SEARCH_TOOL
         else {"ref", "arguments_json"}
     )
-    if set(arguments) != expected or not all(
+    for field in set(arguments) - expected:
+        arguments.pop(field, None)
+    if not expected.issubset(arguments) or not all(
         type(arguments[key]) is str for key in expected
     ):
         raise LiveModelRoleError(
-            f"{name} requires exactly {sorted(expected)!r} text fields"
+            f"{name} requires {sorted(expected)!r} text fields"
         )
     content = member(message, "content")
     if content is not None and type(content) is not str:
@@ -1576,8 +1580,9 @@ def _execute_initial_call(
             getattr(status_provider, "resolve", None)
         ):
             raise LiveModelRoleError("Actor status provider is unavailable")
-        if set(arguments) != set():
-            raise LiveModelRoleError(f"{name} does not accept arguments")
+        # Status tools declare no parameters; surplus fields are tolerated.
+        for field in tuple(arguments):
+            arguments.pop(field, None)
         return dict(status_provider.resolve(name))
     if name == _SHELL_TOOL:
         if shell_runner is None or not callable(

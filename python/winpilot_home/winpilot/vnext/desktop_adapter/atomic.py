@@ -554,7 +554,7 @@ class AtomicDesktopAdapter:
                 return self._rejected(
                     envelope,
                     action,
-                    error_kind=receipt.error_kind,
+                    error_kind=self._receipt_error_kind(receipt),
                 )
             return self._unknown_transition(
                 envelope,
@@ -565,7 +565,7 @@ class AtomicDesktopAdapter:
             return self._rejected(
                 envelope,
                 action,
-                error_kind=receipt.error_kind,
+                error_kind=self._receipt_error_kind(receipt),
             )
         settle_failed = False
         if (
@@ -1986,6 +1986,29 @@ class AtomicDesktopAdapter:
             outcome=MutationOutcome.OUTCOME_UNKNOWN,
             error_kind=error_kind,
         )
+
+    @staticmethod
+    def _receipt_error_kind(receipt: RawActionReceipt) -> str | None:
+        """Return the machine rejection kind of a not-executed receipt.
+
+        The raw receipt itself may carry the kind (not-started/unknown), or the
+        physical backend may have attached it to the result facts.  Reading
+        facts here keeps the RawActionReceipt contract (certain outcomes carry
+        no error_kind) while still feeding the real mechanical reason to the
+        Actor's ``previous_action.error_kind``.
+        """
+        if receipt.error_kind:
+            return receipt.error_kind
+        backend_result = receipt.backend_result
+        if backend_result is None:
+            return None
+        facts = backend_result.facts
+        if not isinstance(facts, Mapping):
+            return None
+        kind = facts.get("error_kind")
+        if type(kind) is str and kind and len(kind) <= 64:
+            return kind
+        return None
 
     @staticmethod
     def _rejected(
