@@ -1221,6 +1221,66 @@ def test_unknown_raw_result_is_never_replayed() -> None:
     )
 
 
+def test_guard_rejection_backend_fact_error_kind_reaches_transition() -> None:
+    from winpilot.vnext.desktop_adapter import atomic
+
+    class _Envelope:
+        decision_id = "decision-guard-test"
+
+    receipt = RawActionReceipt(
+        action="click",
+        outcome=MutationOutcome.NOT_APPLIED,
+        backend_result=RawBackendResult(False, {
+            "error_kind": "target_window_lost",
+            "error": "target window lost foreground",
+        }),
+    )
+    transition = atomic.AtomicDesktopAdapter._rejected(
+        _Envelope(),
+        "click",
+        error_kind=atomic.AtomicDesktopAdapter._receipt_error_kind(receipt),
+    )
+
+    assert transition.outcome is ControllerOutcome.REJECTED
+    assert transition.input_completed is False
+    assert transition.error_kind == "target_window_lost"
+
+
+def test_receipt_error_kind_prefers_explicit_and_ignores_empty_facts() -> None:
+    from winpilot.vnext.desktop_adapter import atomic
+
+    explicit = RawActionReceipt(
+        action="click",
+        outcome=MutationOutcome.NOT_STARTED,
+        error_kind="hit_test_changed",
+    )
+    assert (
+        atomic.AtomicDesktopAdapter._receipt_error_kind(explicit)
+        == "hit_test_changed"
+    )
+
+    fact_based = RawActionReceipt(
+        action="drag",
+        outcome=MutationOutcome.NOT_APPLIED,
+        backend_result=RawBackendResult(False, {
+            "error_kind": "target_window_lost",
+        }),
+    )
+    assert (
+        atomic.AtomicDesktopAdapter._receipt_error_kind(fact_based)
+        == "target_window_lost"
+    )
+
+    empty = RawActionReceipt(
+        action="drag",
+        outcome=MutationOutcome.NOT_APPLIED,
+        backend_result=RawBackendResult(False, {
+            "error": "no machine kind",
+        }),
+    )
+    assert atomic.AtomicDesktopAdapter._receipt_error_kind(empty) is None
+
+
 def test_stale_authoritative_frame_rejects_without_raw() -> None:
     harness = _harness("hotkey")
     harness.authority.commit(

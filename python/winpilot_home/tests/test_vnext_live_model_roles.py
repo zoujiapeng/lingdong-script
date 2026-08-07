@@ -967,6 +967,7 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         _tool_response(call_id="third"),
         _tool_response(call_id="fourth"),
         _tool_response(call_id="fifth"),
+        _tool_response(call_id="sixth"),
     ])
     actor = LiveVisualActor(
         client=clients[0],
@@ -1050,10 +1051,26 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         submitted_size=(640, 480),
     )
     fifth_messages = clients[0].requests[4]["messages"]
-    assert len(fifth_messages) == 11
-    assert "first-0" not in json.dumps(fifth_messages)
-    assert fifth_messages[5]["tool_calls"][0]["id"] == "third-0"
-    assert fifth_messages[8]["tool_calls"][0]["id"] == "fourth-0"
+    assert len(fifth_messages) == 14
+    assert "first-0" in json.dumps(fifth_messages)
+    assert fifth_messages[2]["tool_calls"][0]["id"] == "first-0"
+    assert fifth_messages[5]["tool_calls"][0]["id"] == "second-0"
+    assert fifth_messages[8]["tool_calls"][0]["id"] == "third-0"
+    assert fifth_messages[11]["tool_calls"][0]["id"] == "fourth-0"
+
+    actor.propose(
+        completed,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    sixth_messages = clients[0].requests[5]["messages"]
+    assert len(sixth_messages) == 14
+    assert "first-0" not in json.dumps(sixth_messages)
+    assert sixth_messages[2]["tool_calls"][0]["id"] == "second-0"
+    assert sixth_messages[5]["tool_calls"][0]["id"] == "third-0"
+    assert sixth_messages[8]["tool_calls"][0]["id"] == "fourth-0"
+    assert sixth_messages[11]["tool_calls"][0]["id"] == "fifth-0"
 
 
 @pytest.mark.parametrize(
@@ -1670,6 +1687,96 @@ def _status_response(
             }
         ]
     }
+
+
+def test_status_tool_tolerates_surplus_fields_like_owned_tools() -> None:
+    reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "status read",
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+    status = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "status-surplus-1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_memory_status",
+                                "arguments": (
+                                    '{"task_state_update": '
+                                    '{"scratchpad": "keep me"}}'
+                                ),
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients([status, reply])
+    provider = _RecordingStatusProvider()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        status_provider=provider,
+    )
+
+    admission = actor.begin_turn("check memory")
+
+    assert admission.kind == "reply"
+    assert provider.calls == ["get_memory_status"]
+
+
+def test_connector_tool_tolerates_surplus_fields_like_owned_tools() -> None:
+    reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "fetched",
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients(
+        [
+            _connector_response(
+                "search_connector_tools",
+                {
+                    "query": "issue",
+                    "connector": "github",
+                    "task_state_update": {"scratchpad": "keep"},
+                },
+                call_id="search-surplus-1",
+            ),
+            reply,
+        ]
+    )
+    gateway = _RecordingConnectorGateway()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        connector_gateway=gateway,
+    )
+
+    admission = actor.begin_turn("search github issues")
+
+    assert admission.kind == "reply"
+    assert gateway.searches == [{"query": "issue", "connector": "github"}]
 
 
 def test_initial_actor_resolves_own_status_without_a_desktop_lease() -> None:

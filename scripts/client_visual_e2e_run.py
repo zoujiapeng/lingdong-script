@@ -58,6 +58,25 @@ SPOKEN_GUI_VISUAL_TEST_TASK = "必须使用GUI和真实鼠标完成当前界面�
 ANSWER_ALL_QUESTIONS_TASK = (
     "必须使用GUI和真实鼠标键盘，帮我在当前开启的页面里答完所有题。"
 )
+# The calibration grid measures physical pointer placement: the task states
+# the visible page's own instruction and requires the real mouse for the
+# measured action.  The measured property is the accuracy of the physical
+# click itself (the page records every trusted pointer location and verifies
+# it after the run), so the goal names the visible targets and the physical
+# input.  It does not forbid helper tools; the requirement is only that the
+# clicks that hit the squares are real mouse input.
+CALIBRATION_GRID_TASK = (
+    "必须使用GUI和真实鼠标完成当前界面上的测试。这个测试测量的是你用鼠标"
+    "点击紫色方块中心的精度，每次真实点击的位置都会被记录并在任务结束后"
+    "验证，所以请直接用鼠标点击当前页面上每个紫色方块的中心，直到全部"
+    "方块都变成绿色。"
+)
+CALIBRATION_FEEDBACK_TASK = (
+    "必须使用GUI和真实鼠标完成当前界面上的测试。这个测试测量的是你用鼠标"
+    "点击紫色方块中心的精度，每次真实点击的位置都会被记录并在任务结束后"
+    "验证；页面状态行会提示上次点击的偏差，请根据提示直接用鼠标修正点击，"
+    "直到全部方块都变成绿色。"
+)
 
 VISUAL_CASES: dict[str, dict[str, Any]] = {
     "answer-all-questions": {
@@ -87,7 +106,7 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
     },
     "calibration-grid": {
         "scenario": "calibration_grid",
-        "task": SPOKEN_GUI_VISUAL_TEST_TASK,
+        "task": CALIBRATION_GRID_TASK,
         "seed": 20260806,
         "max_steps": 24,
         "timeout": 420,
@@ -96,7 +115,7 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
     },
     "calibration-feedback": {
         "scenario": "calibration_feedback",
-        "task": SPOKEN_GUI_VISUAL_TEST_TASK,
+        "task": CALIBRATION_FEEDBACK_TASK,
         "seed": 20260807,
         "max_steps": 24,
         "timeout": 420,
@@ -585,6 +604,50 @@ def external_verdict(
             errors.append("quiz page did not require visible scrolling")
         if ready_details.get("question_ids") != question_ids:
             errors.append("submitted quiz does not match the visible question set")
+    elif scenario in {"calibration_grid", "calibration_feedback"}:
+        # Every calibration point must be hit with one trusted pointerdown;
+        # the page reports one calibration_hit per accepted square center.
+        ready = next(
+            (
+                item for item in reversed(state.get("events") or [])
+                if item.get("type") == "page_ready"
+            ),
+            {},
+        )
+        point_count = int((ready.get("details") or {}).get("point_count") or 0)
+        if point_count < 1:
+            errors.append("calibration page did not declare its points")
+        hits = [
+            item for item in state.get("events") or []
+            if item.get("type") == "calibration_hit"
+            and item.get("trusted") is True
+            and item.get("scenario") == scenario
+        ]
+        hit_indices = {
+            int((item.get("details") or {}).get("index", -1))
+            for item in hits
+        }
+        if event.get("type") != "scenario_success":
+            errors.append("calibration success did not come from the grid page")
+        if len(hits) != point_count or hit_indices != set(range(point_count)):
+            errors.append(
+                "calibration did not hit every declared point "
+                f"({len(hits)}/{point_count})"
+            )
+        if details.get("succeeded") is not True:
+            errors.append("calibration success details are not successful")
+        if scenario == "calibration_feedback":
+            tolerance = int((ready.get("details") or {}).get("tolerance_px") or 0)
+            if tolerance < 1:
+                errors.append("calibration feedback tolerance is invalid")
+            miss_events = [
+                item for item in state.get("events") or []
+                if item.get("type") == "calibration_miss"
+                and item.get("trusted") is True
+                and item.get("scenario") == scenario
+            ]
+            if miss_events:
+                errors.append("calibration feedback contained a trusted miss")
     else:
         errors.append(f"unsupported scenario: {scenario}")
 
@@ -726,6 +789,31 @@ def run_visual_case(
                         and item.get("trusted") is True
                         for item in events
                     )
+                if scenario in {"calibration_grid", "calibration_feedback"}:
+                    if any(
+                        item.get("type") == "scenario_failure"
+                        and item.get("trusted") is True
+                        for item in events
+                    ):
+                        return True
+                    ready = next(
+                        (
+                            item for item in reversed(events)
+                            if item.get("type") == "page_ready"
+                        ),
+                        {},
+                    )
+                    point_count = int(
+                        (ready.get("details") or {}).get("point_count") or 0
+                    )
+                    hit_count = len([
+                        item for item in events
+                        if (
+                            item.get("type") == "calibration_hit"
+                            and item.get("trusted") is True
+                        )
+                    ])
+                    return point_count > 0 and hit_count >= point_count
                 if any(
                     item.get("type") == "scenario_failure"
                     and item.get("trusted") is True

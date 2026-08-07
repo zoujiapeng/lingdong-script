@@ -468,6 +468,7 @@ class FakeController:
         self.make_post_frame = make_post_frame
         self.mode = "completed"
         self.calls = 0
+        self.rejection_error_kind: str | None = None
         self.envelopes: list[ActorDecisionEnvelope] = []
         self.stop_before_admission: threading.Event | None = None
         self.stop_after_action: threading.Event | None = None
@@ -493,6 +494,7 @@ class FakeController:
                 action_id=envelope.decision_id,
                 action=action,
                 input_completed=False,
+                error_kind=self.rejection_error_kind,
             )
         if self.mode == "unknown":
             return ControllerTransition(
@@ -1086,6 +1088,27 @@ def test_rejected_action_replaces_previous_with_proven_not_executed() -> None:
     assert previous.action == "scroll"
     assert previous.input_completed is False
     assert previous.error_kind == ""
+
+
+def test_rejected_transition_error_kind_reaches_actor_previous_action() -> None:
+    harness = _harness(
+        _action("click"),
+        _action("drag"),
+        _blocked(),
+    )
+    assert harness.runtime.run_one_turn(turn_index=0).status is RuntimeStatus.ACTION_RECORDED
+    harness.controller.mode = "rejected"
+    harness.controller.rejection_error_kind = "target_window_lost"
+    rejected = harness.runtime.run_one_turn(turn_index=1)
+    blocked = harness.runtime.run_one_turn(turn_index=2)
+
+    assert rejected.status is RuntimeStatus.STALE_DISCARDED
+    assert blocked.status is RuntimeStatus.BLOCKED
+    previous = harness.actor.turns[2].previous_action
+    assert previous is not None
+    assert previous.action == "drag"
+    assert previous.input_completed is False
+    assert previous.error_kind == "target_window_lost"
 
 
 def test_actor_receives_only_completed_action_order() -> None:
