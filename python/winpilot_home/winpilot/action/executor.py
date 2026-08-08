@@ -1974,7 +1974,7 @@ def _execute_physical_type_text(
             time.sleep(max(float(interval_s), 0.03) if via_vk else float(interval_s))
     finally:
         if layout_switch is not None and layout_switch[0] is not None:
-            _restore_layout_switch(hwnd, layout_switch[0])
+            _restore_layout_switch(hwnd, layout_switch)
 
     result = _keyboard_result(
         True,
