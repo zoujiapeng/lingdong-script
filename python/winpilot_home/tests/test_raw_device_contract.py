@@ -1531,6 +1531,47 @@ def test_english_layout_with_open_ime_still_closes_ime_for_vk(
     assert ("set", 1) in ime_calls  # IME reopened afterwards
 
 
+def test_physical_type_text_restores_layout_switch_tuple_after_input(
+    monkeypatch,
+) -> None:
+    """The finally path must hand the whole (original, ime) tuple to the
+    restore helper, not its first element (regression: passing the int
+    raised TypeError -> backend_exception on every typed character)."""
+    import winpilot.action.executor as ex
+
+    restore_calls: list[tuple[int | None, tuple[int, bool] | None]] = []
+    sent_chars: list[str] = []
+
+    def fake_send(char: str, *, via_vk: bool) -> tuple[bool | None, bool, bool]:
+        sent_chars.append(char)
+        return True, True, True
+
+    monkeypatch.setattr(ex, "_should_strict_type_via_vk", lambda text: True)
+    monkeypatch.setattr(
+        ex,
+        "_english_layout_switch",
+        lambda hwnd: ((0x0804, True), True),
+    )
+    monkeypatch.setattr(
+        ex,
+        "_restore_layout_switch",
+        lambda hwnd, restore: restore_calls.append((hwnd, restore)),
+    )
+    monkeypatch.setattr(ex, "_send_text_codepoint", fake_send)
+    monkeypatch.setattr(ex.time, "sleep", lambda _seconds: None)
+
+    result = ex._execute_physical_type_text(
+        "ab",
+        hwnd=41,
+        final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+        interval_s=0.008,
+    )
+
+    assert result.input_completed is True
+    assert sent_chars == ["a", "b"]
+    assert restore_calls == [(41, (0x0804, True))]
+
+
 @pytest.mark.parametrize("backend_name,argument", [
     ("ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND", "secret"),
     ("ADMITTED_PHYSICAL_HOTKEY_BACKEND", HotkeyChord(("ctrl", "s"))),
