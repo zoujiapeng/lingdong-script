@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from itertools import permutations
 import json
@@ -436,15 +436,18 @@ class _FakeSession:
     run_id: str = ""
     target_binding_id: str = ""
     frame_epoch: int = 0
+    rejection_feedbacks: list[str | None] = field(default_factory=list)
 
     def run_one_turn(
         self,
         *,
         turn_index: int,
         stop_event: Any,
+        rejection_feedback: str | None = None,
     ) -> MissionRuntimeResult:
         assert turn_index == self.calls
         assert not stop_event.is_set()
+        self.rejection_feedbacks.append(rejection_feedback)
         result = self.results[self.calls]
         self.calls += 1
         self.model_calls += 1
@@ -1719,6 +1722,38 @@ def test_handler_keeps_redeciding_after_invalid_proposals_until_budget() -> None
         True,
     ]
     assert turns[-1]["recovery"] is None
+
+
+def test_invalid_proposal_rejection_detail_is_fed_to_the_next_turn() -> None:
+    session = _FakeSession(
+        [
+            MissionRuntimeResult(
+                RuntimeStatus.INVALID_PROPOSAL,
+                detail=(
+                    "tool arguments rejected: tool=hotkey code=schema_mismatch "
+                    "keyword=enum path=('keys', 0)"
+                ),
+            ),
+            MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
+        ]
+    )
+    manager = ArpRunManager()
+    execution = _prepare(
+        _graph(),
+        {},
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(session=session),
+    )
+
+    snapshot = _run_prepared(manager, execution)
+
+    assert snapshot["result"]["status"] == "mission_verified"
+    assert session.calls == 2
+    assert session.rejection_feedbacks == [
+        None,
+        "tool arguments rejected: tool=hotkey code=schema_mismatch keyword=enum path=('keys', 0)",
+    ]
 
 
 def test_successful_turn_resets_invalid_proposal_recovery_streak() -> None:

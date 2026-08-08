@@ -203,6 +203,12 @@ def _canonical_json(value: Mapping[str, Any]) -> str:
     )
 
 
+def _tool_function_name(tool: Mapping[str, Any]) -> str:
+    function = tool.get("function") if isinstance(tool, Mapping) else None
+    name = function.get("name") if isinstance(function, Mapping) else None
+    return name if type(name) is str else ""
+
+
 def _decision_id(turn: ActorTurnInput, image_b64: str) -> str:
     digest = hashlib.sha256()
     digest.update(turn.to_json().encode("utf-8"))
@@ -1998,6 +2004,7 @@ class LiveVisualActor:
         exchange: _InitialExchange | None = None
         connector_limit = self._connector_call_limit(_model_call_limit)
         repair_attempted = False
+        shell_calls = 0
         repair_budget = _model_call_limit is None or _model_call_limit >= 2
         for connector_calls in range(connector_limit + (2 if repair_budget else 1)):
             if connector_calls == connector_limit:
@@ -2102,6 +2109,41 @@ class LiveVisualActor:
                 if call_name == "observe_desktop":
                     terminal = call
                     continue
+                if (
+                    call_name == _SHELL_TOOL
+                    and shell_calls >= _SHELL_TOOL_CALL_LIMIT
+                ):
+                    # Per-turn shell budget on the initial text round too:
+                    # do not execute another shell command this turn.
+                    call_id = member(call, "id")
+                    if type(call_id) is not str or not call_id:
+                        raise InvalidActorProposal(
+                            "Actor initial tool call requires an id"
+                        )
+                    executed_any = True
+                    pending_tool_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": _canonical_json(
+                                {
+                                    "tool_budget_exhausted": "run_shell",
+                                    "message": (
+                                        "run_shell is limited to "
+                                        f"{_SHELL_TOOL_CALL_LIMIT} calls "
+                                        "per initial turn; reply or observe "
+                                        "the desktop now"
+                                    ),
+                                }
+                            ),
+                        }
+                    )
+                    provider_request["tools"] = [
+                        tool
+                        for tool in provider_request["tools"]
+                        if _tool_function_name(tool) != _SHELL_TOOL
+                    ]
+                    continue
                 try:
                     result = _execute_initial_call(
                         call,
@@ -2116,6 +2158,8 @@ class LiveVisualActor:
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
                 executed_any = True
+                if call_name == _SHELL_TOOL:
+                    shell_calls += 1
                 call_id = member(call, "id")
                 if type(call_id) is not str or not call_id:
                     raise InvalidActorProposal(
@@ -2223,6 +2267,7 @@ class LiveVisualActor:
         submitted_size: tuple[int, int],
         stop_event: threading.Event | None = None,
         _model_call_limit: int | None = None,
+        rejection_feedback: str | None = None,
     ) -> ActorTurnDecision:
         if self._initial_turn_terminal:
             raise LiveModelRoleError(
@@ -2329,6 +2374,18 @@ class LiveVisualActor:
                     "content": _canonical_json(exchange.result_content),
                 }
             )
+        if rejection_feedback:
+            native_context.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous tool call was rejected by the "
+                        "runtime: "
+                        f"{rejection_feedback}. Return exactly one valid "
+                        "tool call."
+                    ),
+                }
+            )
         current_exchange = [user_message]
         provider_request = {
             "model": self._model,
@@ -2360,6 +2417,7 @@ class LiveVisualActor:
         outcome = None
         decision = None
         repair_attempted = False
+        shell_calls = 0
         connector_limit = self._connector_call_limit(_model_call_limit)
         repair_budget = (
             _model_call_limit is None or _model_call_limit >= 2
@@ -2415,11 +2473,43 @@ class LiveVisualActor:
                     shell = _shell_exchange(outcome.response)
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
-            if (
-                shell is not None
-                and connector_calls < connector_limit
-            ):
+            if shell is not None:
                 assistant, call_id, name, arguments = shell
+                if shell_calls >= _SHELL_TOOL_CALL_LIMIT:
+                    # Per-turn shell budget: do not execute another shell
+                    # command this turn.  Return the reason to the model and
+                    # drop run_shell from the visible tools for the rest of
+                    # the turn so the visual line keeps advancing.
+                    shell_budget_messages = [
+                        assistant,
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": _canonical_json(
+                                {
+                                    "tool_budget_exhausted": "run_shell",
+                                    "message": (
+                                        "run_shell is limited to "
+                                        f"{_SHELL_TOOL_CALL_LIMIT} calls "
+                                        "per visual turn; choose a GUI "
+                                        "tool now"
+                                    ),
+                                }
+                            ),
+                        },
+                    ]
+                    current_exchange.extend(shell_budget_messages)
+                    provider_request["messages"].extend(shell_budget_messages)
+                    provider_request["tools"] = [
+                        tool
+                        for tool in provider_request["tools"]
+                        if _tool_function_name(tool) != _SHELL_TOOL
+                    ]
+                    continue
+                if connector_calls >= connector_limit:
+                    provider_request["tools"] = terminal_tools
+                    continue
+                shell_calls += 1
                 result = _call_shell(
                     self._shell_runner,
                     arguments,
