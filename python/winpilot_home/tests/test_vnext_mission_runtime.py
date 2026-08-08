@@ -365,6 +365,7 @@ class FakeActor:
     ) -> None:
         self.proposals = list(proposals)
         self.turns: list[ActorTurnInput] = []
+        self.rejection_feedbacks: list[str | None] = []
         self.calls = 0
         self.on_propose: Callable[[], None] | None = None
         self.raise_error: Exception | None = None
@@ -377,6 +378,7 @@ class FakeActor:
         image_media_type: str,
         submitted_size: tuple[int, int],
         stop_event: threading.Event | None = None,
+        rejection_feedback: str | None = None,
     ) -> ActorTurnDecision | Mapping[str, Any]:
         assert image_b64
         assert image_media_type == "image/jpeg"
@@ -384,6 +386,7 @@ class FakeActor:
         assert stop_event is None or isinstance(stop_event, threading.Event)
         self.calls += 1
         self.turns.append(turn)
+        self.rejection_feedbacks.append(rejection_feedback)
         if self.on_propose is not None:
             self.on_propose()
         if self.raise_error is not None:
@@ -1088,6 +1091,20 @@ def test_pre_action_current_state_failure_is_discarded_before_input() -> None:
 
     assert result.status is RuntimeStatus.STALE_DISCARDED
     assert harness.controller.calls == 0
+
+
+def test_run_one_turn_forwards_rejection_feedback_to_the_actor() -> None:
+    harness = _harness(_blocked())
+
+    result = harness.runtime.run_one_turn(
+        turn_index=0,
+        rejection_feedback="tool arguments rejected: tool=hotkey",
+    )
+
+    assert result.status is RuntimeStatus.BLOCKED
+    assert harness.actor.rejection_feedbacks == [
+        "tool arguments rejected: tool=hotkey"
+    ]
 
 
 def test_previous_action_view_keeps_one_bounded_completed_intent() -> None:

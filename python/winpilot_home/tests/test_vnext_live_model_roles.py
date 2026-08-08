@@ -2132,6 +2132,176 @@ def test_shell_tool_is_absent_without_runner() -> None:
     assert "run_shell" not in names
 
 
+def test_visual_turn_shell_calls_are_capped_at_per_turn_limit() -> None:
+    _, clients = _build_clients(
+        [
+            *[
+                _tool_response(
+                    name="run_shell",
+                    arguments={"command": f"tasklist {index}"},
+                    call_id=f"visual-shell-{index}",
+                )
+                for index in range(5)
+            ],
+            _tool_response(
+                arguments={
+                    "text": "hello",
+                    "local_intent": "enter the requested text once",
+                },
+                call_id="gui-call",
+            ),
+        ]
+    )
+    runner = _RecordingShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert len(runner.calls) == 4
+    assert [call["command"] for call in runner.calls] == [
+        "tasklist 0",
+        "tasklist 1",
+        "tasklist 2",
+        "tasklist 3",
+    ]
+    budget_messages = [
+        json.loads(m["content"])
+        for m in clients[0].requests[5]["messages"]
+        if m.get("role") == "tool"
+        and "tool_budget_exhausted" in str(m.get("content", ""))
+    ]
+    assert budget_messages
+    assert budget_messages[0]["tool_budget_exhausted"] == "run_shell"
+    # run_shell is dropped from the visible tools after the per-turn cap.
+    names = [
+        tool["function"]["name"]
+        for tool in clients[0].requests[5]["tools"]
+    ]
+    assert "run_shell" not in names
+    assert "type_text" in names
+
+
+def test_initial_turn_shell_calls_are_capped_at_per_turn_limit() -> None:
+    _, clients = _build_clients(
+        [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": f"initial-shell-{index}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "run_shell",
+                                        "arguments": json.dumps(
+                                            {
+                                                "command": f"tasklist {index}",
+                                            },
+                                            separators=(",", ":"),
+                                        ),
+                                    },
+                                }
+                                for index in range(5)
+                            ],
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "observe-call",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "observe_desktop",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        ]
+    )
+    runner = _RecordingShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    admission = actor.begin_turn("Check running processes")
+
+    assert admission.kind == "desktop"
+    assert len(runner.calls) == 4
+    initial_feedback = [
+        json.loads(m["content"])
+        for m in clients[0].requests[1]["messages"]
+        if m.get("role") == "tool"
+        and "tool_budget_exhausted" in str(m.get("content", ""))
+    ]
+    assert initial_feedback
+    assert initial_feedback[0]["tool_budget_exhausted"] == "run_shell"
+    names = [
+        tool["function"]["name"]
+        for tool in clients[0].requests[1]["tools"]
+    ]
+    assert "run_shell" not in names
+
+
+def test_propose_injects_rejection_feedback_into_native_context() -> None:
+    _, clients = _build_clients(_tool_response())
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+        rejection_feedback=(
+            "tool arguments rejected: tool=hotkey code=schema_mismatch "
+            "keyword=enum path=('keys', 0)"
+        ),
+    )
+
+    messages = clients[0].requests[0]["messages"]
+    assert any(
+        m.get("role") == "user"
+        and "tool arguments rejected" in str(m.get("content", ""))
+        for m in messages
+    )
+    assert any(
+        m.get("role") == "user"
+        and "Return exactly one valid tool call" in str(m.get("content", ""))
+        for m in messages
+    )
+
+
 class _RecordingCaptureRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []

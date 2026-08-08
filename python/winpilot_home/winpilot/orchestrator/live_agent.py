@@ -116,6 +116,7 @@ _OBLIGATION_ID = "full-goal"
 _TARGET_MAX_AGE_MS = 60_000
 _FUTURE_CLOCK_SKEW_MS = 2_000
 _MAX_SUBMITTED_SIDE = 1120
+_MAX_REJECTION_FEEDBACK_CHARS = 512
 _NON_WHITESPACE_PATTERN = r"\S"
 _BLOCKER_KIND_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 _APPROVED_ACTIONS = frozenset(
@@ -217,6 +218,7 @@ class _SessionPort(Protocol):
         *,
         turn_index: int,
         stop_event: Any,
+        rejection_feedback: str | None = None,
     ) -> MissionRuntimeResult: ...
 
     def completion_snapshot(self) -> Mapping[str, Any]: ...
@@ -2405,10 +2407,12 @@ class _LiveAgentSession:
         *,
         turn_index: int,
         stop_event: Any,
+        rejection_feedback: str | None = None,
     ) -> MissionRuntimeResult:
         return self._runtime.run_one_turn(
             turn_index=turn_index,
             stop_event=stop_event,
+            rejection_feedback=rejection_feedback,
         )
 
     def completion_snapshot(self) -> Mapping[str, Any]:
@@ -3810,6 +3814,7 @@ class _PreparedHandler:
                     or _build_live_session
                 )
                 session = builder(session_build)
+                rejection_feedback = ""
                 for turn_index in range(self._budget.max_turns):
                     if not self._wait_if_paused(
                         pause_controller,
@@ -3838,7 +3843,9 @@ class _PreparedHandler:
                     result = session.run_one_turn(
                         turn_index=turn_index,
                         stop_event=bounded_stop,
+                        rejection_feedback=rejection_feedback or None,
                     )
+                    rejection_feedback = ""
                     turns_used += 1
                     terminal_status = result.status
                     # Keep the real per-turn failure reason (error_kind,
@@ -3955,10 +3962,13 @@ class _PreparedHandler:
                     )
                     if terminal_status is RuntimeStatus.MISSION_VERIFIED:
                         break
-                    if (
-                        invalid_proposal_recovery_available
-                        or actor_error_recovery_available
-                    ):
+                    if invalid_proposal_recovery_available:
+                        # Feed the real rejection reason back to the same
+                        # model on the next turn so it can correct the exact
+                        # failing tool call instead of repeating it blind.
+                        rejection_feedback = raw_detail[:_MAX_REJECTION_FEEDBACK_CHARS]
+                        continue
+                    if actor_error_recovery_available:
                         continue
                     if terminal_status not in _CONTINUE_STATUSES:
                         break

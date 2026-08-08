@@ -1039,6 +1039,7 @@ class MissionRuntime:
         *,
         turn_index: int,
         stop_event: threading.Event | None = None,
+        rejection_feedback: str | None = None,
     ) -> MissionRuntimeResult:
         if type(turn_index) is not int or turn_index < 0:
             raise ValueError(
@@ -1053,6 +1054,7 @@ class MissionRuntime:
             return self._run_locked(
                 turn_index=turn_index,
                 stop_event=stop_event,
+                rejection_feedback=rejection_feedback,
             )
         finally:
             self._turn_lock.release()
@@ -1062,6 +1064,7 @@ class MissionRuntime:
         *,
         turn_index: int,
         stop_event: threading.Event | None,
+        rejection_feedback: str | None = None,
     ) -> MissionRuntimeResult:
         projection = self._reducer.projection
         if projection.status is MissionStatus.VERIFIED:
@@ -1140,6 +1143,7 @@ class MissionRuntime:
                 image_media_type=initial.frame.media_type,
                 submitted_size=initial.frame.submitted_size,
                 stop_event=stop_event,
+                rejection_feedback=rejection_feedback,
             )
         except InvalidActorProposal as exc:
             if self._stopped(stop_event):
