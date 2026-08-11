@@ -114,6 +114,7 @@ export interface CapabilitySpec {
 export interface RunTimelineEvent {
   type: string;
   ts?: number;
+  kind?: string | null;
   phase?: string;
   node_id?: string | null;
   tool?: string | null;
@@ -200,6 +201,8 @@ export interface RunProjection {
   failure_stage?: string;
   usage?: Record<string, unknown> | null;
   narration?: string;
+  task_state?: string;
+  task_state_revision?: number;
   timeline: RunTimelineEvent[];
   evidence: Array<Record<string, unknown>>;
   metrics: RunMetrics;

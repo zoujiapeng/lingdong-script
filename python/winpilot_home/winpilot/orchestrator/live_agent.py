@@ -2677,6 +2677,41 @@ def _build_actor_resources(
                 total=deepcopy(usage_total),
             )
 
+        def publish_actor_activity(activity: Mapping[str, Any]) -> None:
+            if not publish_run_telemetry:
+                return
+            kind = str(activity.get("kind") or "activity")
+            ok = activity.get("ok")
+            BUS.publish(
+                "live_agent_activity",
+                runtime_version=_RUNTIME_VERSION,
+                no_legacy_fallback=True,
+                run_id=run_id,
+                mission_id=mission_id,
+                model_role=VISUAL_ACTOR_MODEL_ROLE,
+                kind=kind,
+                phase=(
+                    "acting"
+                    if kind in {"tool_start", "tool_result"}
+                    else "deciding"
+                ),
+                tool=str(activity.get("tool") or ""),
+                content=str(activity.get("message") or "")[:4096],
+                command=str(activity.get("command") or "")[:16_384],
+                task_state=str(activity.get("task_state") or "")[:8192],
+                status=(
+                    "failed"
+                    if ok is False
+                    else "done"
+                    if kind == "tool_result"
+                    else "running"
+                    if kind == "tool_start"
+                    else "updated"
+                    if kind == "task_state"
+                    else ""
+                ),
+            )
+
         role_kwargs: dict[str, Any] = {
             "client": actor_client,
             "model": model.model,
@@ -2698,6 +2733,7 @@ def _build_actor_resources(
             "max_attempts": _configured_max_attempts(model.api),
         }
         if role_factory is LiveVisualActor:
+            role_kwargs["on_activity"] = publish_actor_activity
             role_kwargs["connector_gateway"] = (
                 dependencies.connector_factory()
                 if dependencies.connector_factory is not None

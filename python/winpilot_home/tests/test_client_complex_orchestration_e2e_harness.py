@@ -103,3 +103,37 @@ def test_orchestration_evidence_reports_real_parallelism_and_recovery(tmp_path):
     assert evidence["pytest_exit_codes"] == [0]
     assert evidence["timeline"][1]["output_preview"] == "revision changed"
     assert evidence["parse_errors"] == []
+
+
+def test_live_ui_probe_requires_interleaved_activity_and_task_board():
+    harness = _load_harness()
+
+    class Driver:
+        def texts(self):
+            return ["模型思路", "动态任务板", "开始执行", "执行结果"]
+
+        def capture_window(self, name):
+            return name
+
+    verdict = harness.observe_live_ui(Driver(), {})
+
+    assert verdict["passed"] is True
+    assert all(verdict["observed"].values())
+    assert verdict["screenshot"] == "live-activity.png"
+
+
+def test_live_ui_probe_accepts_task_board_as_the_models_progress_signal():
+    harness = _load_harness()
+
+    class Driver:
+        def texts(self):
+            return ["动态任务板", "开始执行", "执行结果"]
+
+        def capture_window(self, name):
+            return name
+
+    verdict = harness.observe_live_ui(Driver(), {})
+
+    assert verdict["passed"] is True
+    assert verdict["observed"]["model_narration"] is False
+    assert verdict["observed"]["task_board"] is True

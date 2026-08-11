@@ -132,11 +132,21 @@ const EVENT_LABELS: Record<string, string> = {
   interaction_action_executed: '本轮动作已执行', interaction_local_effect_verified: '局部效果已验证',
   interaction_wait_external_change: '等待外部变化', interaction_external_change: '检测到外部变化',
   surface_binding: '交互区域绑定',
+  live_agent_activity: 'Agent 实时活动',
 };
 const TOOL_LABELS: Record<string, string> = {
   click: '点击', draw_strokes: '连续绘制', type_text: '输入文字', hotkey: '快捷键', scroll: '滚动',
   drag: '拖拽', open_app: '打开应用', focus_window: '聚焦窗口', observe: '观察', done: '完成',
   capture_artifact: '创建工件', send_artifact: '发送工件', verify_delivery: '验证送达', open_conversation: '打开会话',
+  run_shell: '运行命令', observe_desktop: '观察桌面', read_window_text: '读取窗口文字',
+  capture_screen: '截取屏幕', list_windows: '读取窗口列表', paste_image: '粘贴图片',
+  claim_obligation_done: '完成任务', blocked: '说明阻塞',
+};
+const LIVE_ACTIVITY_LABELS: Record<string, string> = {
+  message: '模型思路',
+  task_state: '任务板更新',
+  tool_start: '开始执行',
+  tool_result: '执行结果',
 };
 
 function viewFromStore(mode: UIState['viewMode']): PlatformView {
@@ -1023,6 +1033,10 @@ function AgentConversationTurn({
   const unsuccessful = terminal && taskOutcome !== 'success';
   const directReply = run.status === 'reply';
   const currentTool = TOOL_LABELS[run.current_tool || ''] || run.current_tool || '尚未选择工具';
+  const liveEntries = (run.timeline || [])
+    .filter((entry) => entry.type === 'live_agent_activity')
+    .slice(-12);
+  const taskState = String(run.task_state || '').trim();
   const resultText = displayValue(run.result).trim();
   const rawFailureText = displayValue(run.error || run.result).trim();
   // The model's own words are the honest explanation when it could not
@@ -1053,7 +1067,57 @@ function AgentConversationTurn({
         </article>
       )}
 
-      {active && run.narration && (
+      {active && (liveEntries.length > 0 || taskState) && (
+        <article className="ld-live-work" aria-label="Agent 实时活动" role="status">
+          <header className="ld-live-work-header">
+            <div><Radio size={14} /><strong>实时活动</strong></div>
+            <small>{formatTime(run.updated_at)}</small>
+          </header>
+          {liveEntries.length > 0 && (
+            <div className="ld-live-activity-list" aria-live="polite">
+              {liveEntries.map((entry, index) => {
+                const kind = String(entry.kind || 'activity');
+                const failed = entry.status === 'failed';
+                const Icon = kind === 'message'
+                  ? Bot
+                  : kind === 'task_state'
+                    ? ListChecks
+                    : kind === 'tool_result'
+                      ? failed ? XCircle : CheckCircle2
+                      : TerminalSquare;
+                const summary = displayValue(entry.summary).trim();
+                return (
+                  <div className={`ld-live-activity ${kind} ${failed ? 'failed' : ''}`} key={`${entry.ts || 0}-${kind}-${index}`}>
+                    <Icon size={13} />
+                    <div>
+                      <span>
+                        {LIVE_ACTIVITY_LABELS[kind] || '活动'}
+                        {entry.tool && <code>{TOOL_LABELS[entry.tool] || entry.tool}</code>}
+                      </span>
+                      {summary && (kind === 'tool_start'
+                        ? <pre>{summary}</pre>
+                        : <p>{summary}</p>)}
+                    </div>
+                    <time>{formatTime(entry.ts)}</time>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {taskState && (
+            <section className="ld-task-board" aria-label="动态任务板">
+              <div>
+                <ListChecks size={14} />
+                <strong>动态任务板</strong>
+                <small>模型已更新 {run.task_state_revision || 1} 次</small>
+              </div>
+              <pre>{taskState}</pre>
+            </section>
+          )}
+        </article>
+      )}
+
+      {active && liveEntries.length === 0 && !taskState && run.narration && (
         <article className="ld-agent-response" aria-label="Agent 进度汇报" role="status">
           <div className="ld-agent-response-icon"><Bot size={16} /></div>
           <div className="ld-agent-response-body">

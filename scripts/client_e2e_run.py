@@ -1263,7 +1263,13 @@ class ElectronClientDriver:
                     "visible_text": texts,
                     "runtime": runtime_status,
                 }
-            status = self._topbar_status(task)
+            try:
+                status = self._topbar_status(task)
+            except Exception:
+                # Chromium UIA can disappear for one poll while the renderer
+                # repaints. Runtime status above remains the authoritative
+                # non-invasive signal, so retry instead of aborting the run.
+                status = ""
             if status:
                 last_status = status
             terminal = TERMINAL_STATUS.get(status)

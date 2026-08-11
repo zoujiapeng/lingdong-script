@@ -1684,11 +1684,22 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     messages = [
         item for item in events if item["type"] == "live_agent_message"
     ]
+    activities = [
+        item for item in events if item["type"] == "live_agent_activity"
+    ]
     assert len(starts) == len(done) == 1
     assert [item["narration"] for item in messages] == [
         "好的，我先查看当前桌面，再继续完成任务。"
     ]
     assert messages[0]["phase"] == "starting"
+    assert [item["kind"] for item in activities[:2]] == [
+        "message",
+        "tool_start",
+    ]
+    assert activities[0]["content"] == (
+        "好的，我先查看当前桌面，再继续完成任务。"
+    )
+    assert activities[1]["tool"] == "observe_desktop"
     assert len(turns) == 4
     assert turns[-2]["status"] == "verification_recorded"
     assert starts[0]["runtime_budget"] == {
@@ -1700,6 +1711,9 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     assert done[0]["status"] == "mission_verified"
     event_types = [item["type"] for item in events]
     assert event_types.index("vnext_model_call") < event_types.index(
+        "live_agent_activity"
+    )
+    assert event_types.index("live_agent_activity") < event_types.index(
         "live_agent_message"
     )
     assert event_types.index("live_agent_message") < event_types.index(
