@@ -54,3 +54,49 @@ def test_nonzero_result_is_actionable_and_preserves_full_output_path(
     assert result["next_step"] == (
         "use the output to correct the command or choose another tool"
     )
+
+
+def test_result_above_actor_budget_is_recoverable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        shell,
+        "_save_full_output",
+        lambda _text: r"C:\Temp\full-shell.log",
+    )
+
+    result = shell._shape_result(
+        stdout="x" * 7000,
+        stderr="",
+        ok=True,
+        exit_code=0,
+    )
+
+    assert len(result["output"].encode("utf-8")) <= 6000
+    assert result["output_meta"]["truncated"] is True
+    assert result["output_meta"]["truncated_by"] == "bytes"
+    assert result["full_output_path"] == r"C:\Temp\full-shell.log"
+
+
+def test_empty_command_publishes_the_rejection(monkeypatch) -> None:
+    events = []
+    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
+    monkeypatch.setattr(
+        shell.BUS,
+        "publish",
+        lambda event_type, **payload: events.append(
+            {"type": event_type, **payload}
+        ),
+    )
+
+    result = shell.run(" ")
+
+    assert result == {"ok": False, "error": "empty command"}
+    assert events == [
+        {
+            "type": "action",
+            "action": "shell_blocked",
+            "command": "",
+            "reason": "empty command",
+            "operation_id": events[0]["operation_id"],
+        }
+    ]
+    assert len(events[0]["operation_id"]) == 32

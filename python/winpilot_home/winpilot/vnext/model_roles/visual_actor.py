@@ -3,9 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
-import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -53,24 +52,51 @@ Use original_goal, current JPEG, task_state, previous action, and supplied
 tools. Choose exactly one tool. Briefly tell the user what you are doing or
 what blocked you. Coordinates are exact submitted-image pixels. Chat and act
 naturally. Choose and revise any approach in task_state; runtime does not
-classify or route. If visibly complete, finish done. If no action can advance,
-finish blocked. When pointer_held is true, continue or finish that drag. Use
-budget facts to pace long goals."""
+classify or route. If visibly complete, call claim_obligation_done. If no
+action can advance, call blocked. When pointer_held is true, continue or finish
+that drag. Use budget facts to pace long goals."""
 
 INITIAL_ACTOR_SYSTEM_CONTRACT = """\
 You are a Windows desktop agent on the user's real computer. Answer chat
 questions directly in the user's language. The observe_desktop tool grants
 access to the live screen; use it when you need to look at or operate the
 desktop. You may chat, act, or interleave both freely: narrate what you are
-doing, why, and anything you find or cannot do, in your own words, at any
-time. Keep any useful phase or plan in task_state_update and revise it as you
-learn. For mixed requests, respond naturally while you work and summarize at
-the end. Never invent results; verify by looking at the screen."""
+doing briefly when useful. Tool calls in one response run concurrently; put
+dependent steps in later responses after reading their results. Keep any
+useful phase or plan in task_state_update and revise it as you learn. For
+mixed requests, respond naturally while you work and summarize at the end.
+Never invent results; verify by looking at the screen."""
 
-_POINTER_TOOL = "pointer"
-_KEYBOARD_TOOL = "keyboard"
-_FINISH_TOOL = "finish"
-_POINTER_ACTIONS = frozenset({"click", "double_click", "drag", "scroll"})
+_TOOL_DESCRIPTIONS = {
+    "click": "Click one point once in the current image.",
+    "double_click": "Double-click one point once in the current image.",
+    "drag": (
+        "Drag once from one image point to another, optionally following "
+        "ordered intermediate image_points; use [] for a straight path. "
+        "keep_holding preserves the same press for a later visual turn."
+    ),
+    "scroll": (
+        "Scroll at one point; amount < 0 scrolls down and amount > 0 scrolls up."
+    ),
+    "type_text": (
+        "Enter the requested literal characters into the focused editable "
+        "control; selected text is replaced."
+    ),
+    "hotkey": (
+        "Press one key or one ordered key chord; this never enters literal text."
+    ),
+    "launch_application": (
+        "Start one installed application or file/URL association by display "
+        "name, alias, or path. This is a generic launch, not a click."
+    ),
+    "claim_obligation_done": (
+        "Finish without further mutation when the current image shows the "
+        "requested result."
+    ),
+    "blocked": (
+        "Report a visible blocker only when no supplied action can advance the goal."
+    ),
+}
 
 _MODEL_TOOL_NAMES = {
     "hotkey": "press_key",
@@ -170,6 +196,37 @@ def _canonical_json(value: Mapping[str, Any]) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def _repeated_tool_result(
+    result: Mapping[str, Any],
+    *,
+    same_as_tool_call_id: str,
+    repeat_count: int,
+) -> dict[str, Any]:
+    """Reference an earlier identical result without hiding a new execution."""
+    compact: dict[str, Any] = {
+        "result_unchanged": True,
+        "same_as_tool_call_id": same_as_tool_call_id,
+        "repeat_count": repeat_count,
+        "message": (
+            "The tool ran again and returned exactly the same result as the "
+            "referenced earlier tool call."
+        ),
+    }
+    for field in (
+        "ok",
+        "exit_code",
+        "timeout",
+        "stopped",
+        "error_kind",
+        "next_step",
+    ):
+        if field in result:
+            compact[field] = result[field]
+    if result.get("error") and "ok" not in compact:
+        compact["ok"] = False
+    return compact
 
 
 def _finish_reason(response: Any) -> str:
@@ -479,35 +536,6 @@ def _actor_parameters(tool: ActorToolView) -> dict[str, Any]:
     )
 
 
-def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "anyOf": [dict(schema), {"type": "null"}],
-        "default": None,
-    }
-
-
-def _grouped_tool(
-    name: str,
-    description: str,
-    schema: dict[str, Any],
-    *,
-    requires_local_intent: bool,
-) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": _actor_parameters_from_schema(
-                name,
-                schema,
-                requires_local_intent=requires_local_intent,
-            ),
-            "strict": True,
-        },
-    }
-
-
 def _with_task_state(
     definitions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -536,156 +564,18 @@ def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
         raise LiveModelRoleError(
             "Visual Actor tools are outside the minimal Runtime surface"
         )
-    available = set(names)
-    by_name = {tool.name: tool for tool in turn.tools}
-    # Validate the broker-projected source schemas before regrouping them.
-    # Grouping shrinks the model surface; it must not hide a malformed Runtime
-    # schema or silently widen the actions the broker supplied.
-    for tool in turn.tools:
-        _actor_parameters(tool)
-    definitions: list[dict[str, Any]] = []
-    pointer_actions = [
-        name for name in ("click", "double_click", "drag", "scroll")
-        if name in available
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": _MODEL_TOOL_NAMES.get(tool.name, tool.name),
+                "description": _TOOL_DESCRIPTIONS[tool.name],
+                "parameters": _actor_parameters(tool),
+                "strict": True,
+            },
+        }
+        for tool in turn.tools
     ]
-    if pointer_actions:
-        definitions.append(
-            _grouped_tool(
-                _POINTER_TOOL,
-                "Mouse: click, double-click, scroll, or drag on the image.",
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "action": {"type": "string", "enum": pointer_actions},
-                        "x": _nullable({"type": "number", "minimum": 0}),
-                        "y": _nullable({"type": "number", "minimum": 0}),
-                        "x2": _nullable({"type": "number", "minimum": 0}),
-                        "y2": _nullable({"type": "number", "minimum": 0}),
-                        "amount": _nullable({
-                            "type": "integer",
-                            "minimum": -1200,
-                            "maximum": 1200,
-                            "not": {"const": 0},
-                        }),
-                        "path": {
-                            "type": "array",
-                            "items": {
-                                "type": "array",
-                                "items": {"type": "number", "minimum": 0},
-                                "minItems": 2,
-                                "maxItems": 2,
-                            },
-                            "maxItems": 32,
-                            "default": [],
-                        },
-                        "hold": {"type": "boolean", "default": False},
-                    },
-                    "required": ["action"],
-                },
-                requires_local_intent=True,
-            )
-        )
-    keyboard_actions = [
-        action for action, runtime_name in (
-            ("type", "type_text"),
-            ("press", "hotkey"),
-        )
-        if runtime_name in available
-    ]
-    if keyboard_actions:
-        definitions.append(
-            _grouped_tool(
-                _KEYBOARD_TOOL,
-                "Keyboard: type text or press a key/chord.",
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "action": {"type": "string", "enum": keyboard_actions},
-                        "text": _nullable(
-                            by_name["type_text"].to_dict()["schema"]
-                            ["properties"]["text"]
-                            if "type_text" in by_name
-                            else {"type": "string", "minLength": 1}
-                        ),
-                        # One compact chord is more reliable across providers
-                        # than an array (for example, "ctrl+a"). The canonical
-                        # boundary still accepts legacy arrays.
-                        "keys": _nullable({
-                            "type": "string",
-                            "minLength": 1,
-                        }),
-                    },
-                    "required": ["action"],
-                },
-                requires_local_intent=True,
-            )
-        )
-    launch = next(
-        (tool for tool in turn.tools if tool.name == "launch_application"),
-        None,
-    )
-    if launch is not None:
-        definitions.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": launch.name,
-                    "description": "Open an application, file, or URL.",
-                    "parameters": _actor_parameters(launch),
-                    "strict": True,
-                },
-            }
-        )
-    finish_states = [
-        state for state, runtime_name in (
-            ("done", "claim_obligation_done"),
-            ("blocked", "blocked"),
-        )
-        if runtime_name in available
-    ]
-    if finish_states:
-        definitions.append(
-            _grouped_tool(
-                _FINISH_TOOL,
-                "End as done or blocked.",
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "status": {"type": "string", "enum": finish_states},
-                        "message": (
-                            by_name["claim_obligation_done"].to_dict()
-                            ["schema"]["properties"]["concise_claim"]
-                            if "claim_obligation_done" in by_name
-                            else {"type": "string", "minLength": 1}
-                        ),
-                        "kind": _nullable(
-                            by_name["blocked"].to_dict()["schema"]
-                            ["properties"]["blocker_kind"]
-                            if "blocked" in by_name
-                            else {"type": "string", "minLength": 1}
-                        ),
-                        "facts": {
-                            **(
-                                by_name["blocked"].to_dict()["schema"]
-                                ["properties"]["observed_facts"]
-                                if "blocked" in by_name
-                                else {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                }
-                            ),
-                            "default": [],
-                        },
-                    },
-                    "required": ["status", "message"],
-                },
-                requires_local_intent=False,
-            )
-        )
-    return definitions
 
 
 def _decode_arguments(raw: Any) -> dict[str, Any]:
@@ -898,155 +788,8 @@ def _flow_fragment_from_response(
     return {"summary": summary.strip(), "nodes": nodes, "edges": edges}
 
 
-_INTEGER_TEXT = re.compile(r"[+-]?\d+")
-_NUMBER_TEXT = re.compile(
-    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
-)
-
-
-def _number_value(value: Any, name: str) -> int | float:
-    """Canonicalize provider-emitted JSON numbers, including numeric text."""
-
-    if type(value) in {int, float}:
-        number = value
-    elif type(value) is str and _NUMBER_TEXT.fullmatch(value.strip()):
-        text = value.strip()
-        number = int(text) if _INTEGER_TEXT.fullmatch(text) else float(text)
-    else:
-        raise InvalidActorProposal(f"{name} must be a number")
-    if type(number) is float and not math.isfinite(number):
-        raise InvalidActorProposal(f"{name} must be a finite number")
-    return number
-
-
-def _required_number(arguments: Mapping[str, Any], name: str) -> int | float:
-    return _number_value(arguments.get(name), name)
-
-
-def _required_integer(arguments: Mapping[str, Any], name: str) -> int:
-    number = _number_value(arguments.get(name), name)
-    if type(number) is float and number.is_integer():
-        return int(number)
-    if type(number) is not int:
-        raise InvalidActorProposal(f"{name} must be an integer")
-    return number
-
-
-def _translate_terminal_call(
-    name: str,
-    arguments: dict[str, Any],
-) -> tuple[str, dict[str, Any]]:
-    """Translate the small model tool surface to existing runtime actions."""
-
-    if name == _POINTER_TOOL:
-        action = arguments.get("action")
-        if action not in _POINTER_ACTIONS:
-            raise InvalidActorProposal("pointer.action is invalid")
-        x = _required_number(arguments, "x")
-        y = _required_number(arguments, "y")
-        if action in {"click", "double_click"}:
-            return action, {"image_x": x, "image_y": y}
-        if action == "scroll":
-            amount = _required_integer(arguments, "amount")
-            if amount == 0:
-                raise InvalidActorProposal(
-                    "pointer.amount must be a non-zero integer for scroll"
-                )
-            return action, {
-                "image_x": x,
-                "image_y": y,
-                "amount": amount,
-            }
-        x2 = _required_number(arguments, "x2")
-        y2 = _required_number(arguments, "y2")
-        path = arguments.get("path") or []
-        hold = arguments.get("hold", False)
-        if type(path) is not list or type(hold) is not bool:
-            raise InvalidActorProposal(
-                "pointer.path and pointer.hold are invalid"
-            )
-        normalized_path: list[list[int | float]] = []
-        for index, point in enumerate(path):
-            if type(point) is not list or len(point) != 2:
-                raise InvalidActorProposal(
-                    f"pointer.path[{index}] must contain x and y"
-                )
-            normalized_path.append([
-                _number_value(point[0], f"pointer.path[{index}][0]"),
-                _number_value(point[1], f"pointer.path[{index}][1]"),
-            ])
-        return action, {
-            "image_x1": x,
-            "image_y1": y,
-            "image_x2": x2,
-            "image_y2": y2,
-            "image_points": normalized_path,
-            "keep_holding": hold,
-        }
-    if name == _KEYBOARD_TOOL:
-        action = arguments.get("action")
-        if action == "type":
-            text = arguments.get("text")
-            if type(text) is not str or not text:
-                raise InvalidActorProposal(
-                    "keyboard.text is required when action is type"
-                )
-            return "type_text", {"text": text}
-        if action == "press":
-            keys = arguments.get("keys")
-            if type(keys) is str:
-                keys = [
-                    item.strip()
-                    for item in keys.replace(",", "+").split("+")
-                    if item.strip()
-                ]
-            if (
-                type(keys) is not list
-                or not keys
-                or any(type(key) is not str or not key.strip() for key in keys)
-            ):
-                raise InvalidActorProposal(
-                    "keyboard.keys is required when action is press"
-                )
-            return "hotkey", {"keys": [key.strip() for key in keys]}
-        raise InvalidActorProposal("keyboard.action is invalid")
-    if name == _FINISH_TOOL:
-        status = arguments.get("status")
-        message = arguments.get("message")
-        if type(message) is not str or not message.strip():
-            raise InvalidActorProposal("finish.message is required")
-        message = message.strip()
-        if status == "done":
-            return "claim_obligation_done", {"concise_claim": message}
-        if status == "blocked":
-            kind = arguments.get("kind") or "blocked"
-            facts = arguments.get("facts") or [message]
-            return "blocked", {
-                "blocker_kind": kind,
-                "observed_facts": facts,
-            }
-        raise InvalidActorProposal("finish.status is invalid")
-    return _RUNTIME_TOOL_NAMES.get(name, name), arguments
-
-
 def _runtime_name_from_model_call(name: str, raw_arguments: Any) -> str:
-    try:
-        arguments = _decode_arguments(raw_arguments)
-    except LiveModelRoleError:
-        return _RUNTIME_TOOL_NAMES.get(name, name)
-    if name == _POINTER_TOOL:
-        action = arguments.get("action")
-        return action if action in _POINTER_ACTIONS else name
-    if name == _KEYBOARD_TOOL:
-        return {
-            "type": "type_text",
-            "press": "hotkey",
-        }.get(arguments.get("action"), name)
-    if name == _FINISH_TOOL:
-        return {
-            "done": "claim_obligation_done",
-            "blocked": "blocked",
-        }.get(arguments.get("status"), name)
+    del raw_arguments
     return _RUNTIME_TOOL_NAMES.get(name, name)
 
 
@@ -1084,7 +827,7 @@ def _proposal_from_response(
     except ActorTaskStateError as exc:
         raise InvalidActorProposal(str(exc)) from exc
     local_intent = arguments.pop("local_intent", None)
-    runtime_name, arguments = _translate_terminal_call(name, arguments)
+    runtime_name = _RUNTIME_TOOL_NAMES.get(name, name)
     if runtime_name not in available_runtime_names:
         raise LiveModelRoleError("Visual Actor returned an unavailable action")
     if runtime_name in APPROVED_DESKTOP_ACTIONS:
@@ -1940,10 +1683,37 @@ def _call_shell(
             TypeError("shell runner returned a non-object result"),
         )
     output = dict(result)
-    for key in ("stdout", "stderr", "output", "error"):
+    stdout = output.pop("stdout", "")
+    stderr = output.pop("stderr", "")
+    if not isinstance(output.get("output"), str) or not output.get("output"):
+        parts = [
+            value
+            for value in (stdout, stderr)
+            if isinstance(value, str) and value
+        ]
+        output["output"] = "\n".join(parts) or "(no output)"
+    # stdout/stderr duplicate the combined output from the native runner.
+    # Keep one bounded stream so long tool loops spend context on new facts.
+    for key in ("output", "error"):
         value = output.get(key)
         if isinstance(value, str) and len(value) > _SHELL_MAX_OUTPUT_CHARS:
             output[key] = value[-_SHELL_MAX_OUTPUT_CHARS:]
+            if key == "output":
+                meta = dict(output.get("output_meta") or {})
+                truncated_by = str(meta.get("truncated_by") or "")
+                meta.update(
+                    {
+                        "truncated": True,
+                        "truncated_by": "+".join(
+                            part
+                            for part in (truncated_by, "actor_chars")
+                            if part
+                        ),
+                        "total_chars": len(value),
+                        "shown_chars": len(output[key]),
+                    }
+                )
+                output["output_meta"] = meta
     return _actionable_tool_result(_SHELL_TOOL, output)
 
 
@@ -1960,6 +1730,31 @@ def _initial_calls_from_response(
     return list(calls)
 
 
+def _initial_call_envelope(
+    call: Mapping[str, Any],
+) -> tuple[str, str, dict[str, Any]]:
+    """Validate transcript fields before any call in the batch can execute."""
+    if member(call, "type") != "function":
+        raise LiveModelRoleError("Actor initial tool call must be a function")
+    call_id = member(call, "id")
+    if type(call_id) is not str or not call_id:
+        raise LiveModelRoleError("Actor initial tool call requires an id")
+    function = member(call, "function")
+    name = member(function, "name") if function is not None else None
+    if type(name) is not str or name not in {
+        "observe_desktop",
+        _SHELL_TOOL,
+        _WINDOW_TEXT_TOOL,
+        *_STATUS_TOOLS,
+        *_CONNECTOR_TOOLS,
+    }:
+        raise LiveModelRoleError(
+            f"Actor initial turn returned an unapproved tool: {name!r}"
+        )
+    arguments = _decode_arguments(member(function, "arguments"))
+    return call_id, name, arguments
+
+
 def _execute_initial_call(
     call: Mapping[str, Any],
     *,
@@ -1972,22 +1767,15 @@ def _execute_initial_call(
     stop_event: Any | None,
 ) -> dict[str, Any]:
     """Execute one non-terminal initial tool call and return its result."""
-    if member(call, "type") != "function":
-        raise LiveModelRoleError("Actor initial tool call must be a function")
-    function = member(call, "function")
-    name = member(function, "name") if function is not None else None
-    arguments = (
-        _decode_arguments(member(function, "arguments"))
-        if function is not None
-        else None
-    )
-    if arguments is None:
-        raise LiveModelRoleError("Actor initial tool call requires arguments")
+    _call_id, name, arguments = _initial_call_envelope(call)
     if name in _STATUS_TOOLS:
         if status_provider is None or not callable(
             getattr(status_provider, "resolve", None)
         ):
-            raise LiveModelRoleError("Actor status provider is unavailable")
+            return _actionable_tool_result(
+                str(name),
+                {"ok": False, "error": "status provider is unavailable"},
+            )
         # Status tools declare no parameters; surplus fields are tolerated.
         for field in tuple(arguments):
             arguments.pop(field, None)
@@ -2002,39 +1790,26 @@ def _execute_initial_call(
             )
         return _actionable_tool_result(str(name), result)
     if name == _SHELL_TOOL:
-        if shell_runner is None or not callable(
-            getattr(shell_runner, "run", None)
-        ):
-            raise LiveModelRoleError("Actor shell runner is unavailable")
-        try:
-            result = shell_runner.run(
-                command=str(arguments.get("command") or ""),
-                shell=str(arguments.get("shell") or "powershell"),
-                timeout_s=float(arguments.get("timeout_s") or 30),
-                stop_event=stop_event,
-            )
-        except Exception as exc:
-            return _actionable_tool_error(_SHELL_TOOL, exc)
-        if not isinstance(result, Mapping):
-            raise LiveModelRoleError(
-                "Actor shell runner returned a non-object result"
-            )
-        output = dict(result)
-        for key in ("stdout", "stderr", "error"):
-            value = output.get(key)
-            if isinstance(value, str) and len(value) > _SHELL_MAX_OUTPUT_CHARS:
-                output[key] = value[:_SHELL_MAX_OUTPUT_CHARS]
-        return _actionable_tool_result(_SHELL_TOOL, output)
+        return _call_shell(
+            shell_runner,
+            arguments,
+            timeout_s=timeout_s,
+            stop_event=stop_event,
+        )
     if name == _WINDOW_TEXT_TOOL:
         if window_text_reader is None or not callable(window_text_reader):
-            raise LiveModelRoleError("Actor window-text reader is unavailable")
+            return _actionable_tool_result(
+                _WINDOW_TEXT_TOOL,
+                {"ok": False, "error": "window-text reader is unavailable"},
+            )
         try:
             result = window_text_reader(turn)
         except Exception as exc:
             return _actionable_tool_error(_WINDOW_TEXT_TOOL, exc)
         if not isinstance(result, Mapping):
-            raise LiveModelRoleError(
-                "Actor window-text reader returned a non-object result"
+            return _actionable_tool_error(
+                _WINDOW_TEXT_TOOL,
+                TypeError("window-text reader returned a non-object result"),
             )
         return _actionable_tool_result(_WINDOW_TEXT_TOOL, result)
     if name is not None and name in _CONNECTOR_TOOLS:
@@ -2496,6 +2271,9 @@ class LiveVisualActor:
         admission: VisualActorTurnAdmission | None = None
         exchange: _InitialExchange | None = None
         connector_limit = self._connector_call_limit(_model_call_limit)
+        seen_tool_results: dict[
+            tuple[str, str], tuple[str, str, int]
+        ] = {}
         repair_attempted = False
         repair_budget = _model_call_limit is None or _model_call_limit >= 2
         for connector_calls in range(connector_limit + (2 if repair_budget else 1)):
@@ -2568,9 +2346,86 @@ class LiveVisualActor:
                     provider_request["messages"] = [system_message, *messages]
                     provider_request["tools"] = terminal_tools
                     continue
+            preflight_error = ""
+            try:
+                envelopes = [_initial_call_envelope(call) for call in calls]
+                call_ids = [
+                    call_id for call_id, _name, _arguments in envelopes
+                ]
+                if len(set(call_ids)) != len(call_ids):
+                    raise LiveModelRoleError(
+                        "Actor initial tool-call ids must be unique"
+                    )
+                observe_envelopes = [
+                    envelope
+                    for envelope in envelopes
+                    if envelope[1] == "observe_desktop"
+                ]
+                if len(observe_envelopes) > 1:
+                    raise LiveModelRoleError(
+                        "Actor initial turn must request at most one "
+                        "desktop observation"
+                    )
+                if observe_envelopes and observe_envelopes[0][2]:
+                    raise LiveModelRoleError(
+                        "observe_desktop does not accept arguments"
+                    )
+            except LiveModelRoleError as exc:
+                preflight_error = str(exc)
+            if preflight_error:
+                if (
+                    repair_attempted
+                    or not repair_budget
+                    or connector_calls >= connector_limit + 1
+                ):
+                    raise LiveModelRoleError(preflight_error)
+                repair_attempted = True
+                repair = _tool_format_repair(
+                    outcome.response,
+                    preflight_error,
+                )
+                feedback = {
+                    "tool_format_error": preflight_error,
+                    "tools_executed": 0,
+                    "action": (
+                        "return a valid tool batch; independent calls may "
+                        "remain together"
+                    ),
+                }
+                if repair is not None:
+                    repaired_assistant, repaired_call_id = repair
+                    messages.extend(
+                        (
+                            repaired_assistant,
+                            {
+                                "role": "tool",
+                                "tool_call_id": repaired_call_id,
+                                "content": _canonical_json(feedback),
+                            },
+                        )
+                    )
+                else:
+                    # A malformed multi-call batch cannot be echoed as a
+                    # provider tool exchange. No call ran, so ask the same
+                    # model to reissue the batch without removing its tools.
+                    messages.extend(
+                        (
+                            {
+                                "role": "assistant",
+                                "content": narration_content(
+                                    response_message(outcome.response)
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": _canonical_json(feedback),
+                            },
+                        )
+                    )
+                provider_request["messages"] = [system_message, *messages]
+                continue
             terminal = None
             executed_any = False
-            terminal_format_error: str | None = None
             message = response_message(outcome.response)
             content = member(message, "content")
             reasoning = member(message, "reasoning_content")
@@ -2595,6 +2450,7 @@ class LiveVisualActor:
             if type(reasoning) is str:
                 assistant["reasoning_content"] = reasoning
             pending_tool_messages: list[Mapping[str, Any]] = []
+            executable_calls: list[Any] = []
             for call in calls:
                 call_function = member(call, "function")
                 call_name = (
@@ -2606,19 +2462,41 @@ class LiveVisualActor:
                     terminal = call
                     continue
                 self._record_tool_start(call)
-                try:
-                    result = _execute_initial_call(
-                        call,
-                        status_provider=self._status_provider,
-                        shell_runner=self._shell_runner,
-                        connector_gateway=self._connector_gateway,
-                        window_text_reader=self._window_text_reader,
-                        turn=None,
-                        timeout_s=min(30.0, self._total_timeout_s),
-                        stop_event=stop_event,
-                    )
-                except LiveModelRoleError as exc:
-                    raise InvalidActorProposal(str(exc)) from exc
+                executable_calls.append(call)
+
+            def execute(call: Mapping[str, Any]) -> dict[str, Any]:
+                return _execute_initial_call(
+                    call,
+                    status_provider=self._status_provider,
+                    shell_runner=self._shell_runner,
+                    connector_gateway=self._connector_gateway,
+                    window_text_reader=self._window_text_reader,
+                    turn=None,
+                    timeout_s=min(30.0, self._total_timeout_s),
+                    stop_event=stop_event,
+                )
+
+            try:
+                if len(executable_calls) > 1:
+                    # Tool calls in one model response are one model-selected
+                    # parallel batch. Dependencies remain separate responses;
+                    # preserve call order only for the provider transcript.
+                    with ThreadPoolExecutor(
+                        thread_name_prefix="visual-actor-tool",
+                    ) as executor:
+                        results = list(executor.map(execute, executable_calls))
+                else:
+                    results = [execute(call) for call in executable_calls]
+            except LiveModelRoleError as exc:
+                raise InvalidActorProposal(str(exc)) from exc
+
+            for call, result in zip(executable_calls, results, strict=True):
+                call_function = member(call, "function")
+                call_name = (
+                    member(call_function, "name")
+                    if call_function is not None
+                    else None
+                )
                 self._record_tool_result(str(call_name or "tool"), result)
                 executed_any = True
                 call_id = member(call, "id")
@@ -2626,72 +2504,48 @@ class LiveVisualActor:
                     raise InvalidActorProposal(
                         "Actor initial tool call requires an id"
                     )
+                provider_result: Mapping[str, Any] = result
+                try:
+                    _call_id, canonical_name, canonical_arguments = (
+                        _initial_call_envelope(call)
+                    )
+                    result_key = (
+                        canonical_name,
+                        _canonical_json(canonical_arguments),
+                    )
+                    canonical_result = _canonical_json(result)
+                except (LiveModelRoleError, TypeError, ValueError):
+                    result_key = None
+                    canonical_result = ""
+                if result_key is not None:
+                    previous = seen_tool_results.get(result_key)
+                    if previous is not None and previous[0] == canonical_result:
+                        repeat_count = previous[2] + 1
+                        seen_tool_results[result_key] = (
+                            canonical_result,
+                            previous[1],
+                            repeat_count,
+                        )
+                        provider_result = _repeated_tool_result(
+                            result,
+                            same_as_tool_call_id=previous[1],
+                            repeat_count=repeat_count,
+                        )
+                    else:
+                        seen_tool_results[result_key] = (
+                            canonical_result,
+                            call_id,
+                            0,
+                        )
                 pending_tool_messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": _canonical_json(result),
+                        "content": _canonical_json(provider_result),
                     }
                 )
             if terminal is not None:
                 terminal_id = member(terminal, "id")
-                if type(terminal_id) is not str or not terminal_id:
-                    terminal_format_error = (
-                        "Actor initial tool call requires an id"
-                    )
-                else:
-                    terminal_arguments = member(
-                        member(terminal, "function"),
-                        "arguments",
-                    )
-                    try:
-                        if _decode_arguments(terminal_arguments):
-                            terminal_format_error = (
-                                "observe_desktop does not accept arguments"
-                            )
-                    except LiveModelRoleError as exc:
-                        terminal_format_error = str(exc)
-                if terminal_format_error is not None:
-                    if (
-                        repair_attempted
-                        or not repair_budget
-                        or connector_calls >= connector_limit + 1
-                    ):
-                        raise LiveModelRoleError(terminal_format_error)
-                    repair_attempted = True
-                    repair = _tool_format_repair(
-                        outcome.response,
-                        terminal_format_error,
-                    )
-                    if repair is None:
-                        raise InvalidActorProposal(terminal_format_error)
-                    repaired_assistant, repaired_call_id = repair
-                    messages.extend(
-                        (
-                            repaired_assistant,
-                            {
-                                "role": "tool",
-                                "tool_call_id": repaired_call_id,
-                                "content": _canonical_json(
-                                    {
-                                        "tool_format_error": (
-                                            terminal_format_error
-                                        ),
-                                        "action": (
-                                            "return exactly one valid tool call "
-                                            "with the required fields"
-                                        ),
-                                    }
-                                ),
-                            },
-                        )
-                    )
-                    provider_request["messages"] = [
-                        system_message,
-                        *messages,
-                    ]
-                    provider_request["tools"] = terminal_tools
-                    continue
                 # Keep the full assistant tool-call list and every executed
                 # result in the exchange so the provider transcript stays
                 # consistent; observe_desktop is the terminal admission.  The

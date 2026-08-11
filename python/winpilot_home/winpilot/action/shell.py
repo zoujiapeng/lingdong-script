@@ -113,9 +113,11 @@ def _shape_result(
     combined = stdout
     if stderr:
         combined = f"{combined}\n{stderr}" if combined else stderr
-    output, output_meta = _truncate_tail(combined)
-    stdout_tail, _ = _truncate_tail(stdout)
-    stderr_tail, _ = _truncate_tail(stderr)
+    output, output_meta = _truncate_tail(
+        combined, max_bytes=_MAX_OUTPUT_CHARS
+    )
+    stdout_tail, _ = _truncate_tail(stdout, max_bytes=_MAX_OUTPUT_CHARS)
+    stderr_tail, _ = _truncate_tail(stderr, max_bytes=_MAX_OUTPUT_CHARS)
     full_output_path = (
         _save_full_output(combined) if output_meta["truncated"] else None
     )
@@ -244,14 +246,24 @@ def run(command: str, shell: str = "powershell",
         timeout_s: float = _DEFAULT_TIMEOUT_S, cwd: str | None = None,
         stop_event=None) -> dict:
     """Run a command, capture output, and kill the whole process tree on timeout."""
+    operation_id = uuid.uuid4().hex
     if not shell_enabled():
+        BUS.publish(
+            "action", action="shell_blocked", command=command[:200],
+            reason="shell is disabled", operation_id=operation_id,
+        )
         return {"ok": False, "error": "shell is disabled"}
     if not command or not command.strip():
+        BUS.publish(
+            "action", action="shell_blocked", command="",
+            reason="empty command", operation_id=operation_id,
+        )
         return {"ok": False, "error": "empty command"}
     blocked = safety.guard(command)
     if blocked is not None:
         BUS.publish("action", action="shell_blocked", command=command[:200],
-                    reason=blocked.get("error") or blocked.get("note"))
+                    reason=blocked.get("error") or blocked.get("note"),
+                    operation_id=operation_id)
         return blocked
 
     if shell == "cmd":
@@ -263,7 +275,10 @@ def run(command: str, shell: str = "powershell",
                 _PS_UTF8_PREFIX + command]
         prefer = ("utf-8", "gbk")
 
-    BUS.publish("action", action="shell", shell=shell, command=command[:400])
+    BUS.publish(
+        "action", action="shell", shell=shell, command=command[:400],
+        operation_id=operation_id,
+    )
     proc: subprocess.Popen | None = None
     try:
         proc = subprocess.Popen(
@@ -284,8 +299,11 @@ def run(command: str, shell: str = "powershell",
                         stdout_b, stderr_b = proc.communicate(timeout=2)
                     except Exception:
                         stdout_b, stderr_b = b"", b""
-                    BUS.publish("action", action="shell_result", exit_code=None,
-                                ok=False, output_preview="stopped")
+                    BUS.publish(
+                        "action", action="shell_result", exit_code=None,
+                        ok=False, output_preview="stopped",
+                        operation_id=operation_id,
+                    )
                     return _shape_result(
                         stdout=_decode(stdout_b or b"", prefer),
                         stderr=_decode(stderr_b or b"", prefer),
@@ -310,8 +328,11 @@ def run(command: str, shell: str = "powershell",
             except Exception:
                 stdout_b, stderr_b = b"", b""
         logger.warning("shell command timed out (%ss): %s", timeout_s, command[:120])
-        BUS.publish("action", action="shell_result", exit_code=None,
-                    ok=False, output_preview=f"timeout after {timeout_s}s")
+        BUS.publish(
+            "action", action="shell_result", exit_code=None,
+            ok=False, output_preview=f"timeout after {timeout_s}s",
+            operation_id=operation_id,
+        )
         return _shape_result(
             stdout=_decode(stdout_b or b"", prefer),
             stderr=_decode(stderr_b or b"", prefer),
@@ -322,6 +343,11 @@ def run(command: str, shell: str = "powershell",
         )
     except Exception as exc:
         logger.warning("shell execution failed: %s", exc)
+        BUS.publish(
+            "action", action="shell_result", exit_code=None,
+            ok=False, output_preview=str(exc)[:300],
+            operation_id=operation_id,
+        )
         return _shape_result(
             stdout="",
             stderr="",
@@ -333,8 +359,11 @@ def run(command: str, shell: str = "powershell",
     stdout = _decode(stdout_b or b"", prefer)
     stderr = _decode(stderr_b or b"", prefer)
     ok = proc.returncode == 0
-    BUS.publish("action", action="shell_result", exit_code=proc.returncode,
-                ok=ok, output_preview=(stdout or stderr)[:300])
+    BUS.publish(
+        "action", action="shell_result", exit_code=proc.returncode,
+        ok=ok, output_preview=(stdout or stderr)[:300],
+        operation_id=operation_id,
+    )
     return _shape_result(
         stdout=stdout,
         stderr=stderr,

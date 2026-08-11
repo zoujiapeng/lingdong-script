@@ -3695,8 +3695,24 @@ def test_post_capture_failure_defers_to_fresh_observation_without_replay(
         tool["function"]["name"]: tool["function"]["parameters"]
         for tool in actor_client.requests[0]["tools"]
     }
-    assert {"pointer", "keyboard", "finish"} <= set(tools)
-    for name in {"pointer", "keyboard"}:
+    assert {
+        "click",
+        "double_click",
+        "drag",
+        "scroll",
+        "type_text",
+        "press_key",
+        "claim_obligation_done",
+        "blocked",
+    } <= set(tools)
+    for name in {
+        "click",
+        "double_click",
+        "drag",
+        "scroll",
+        "type_text",
+        "press_key",
+    }:
         local_intent = tools[name]["properties"]["local_intent"]
         assert local_intent["type"] == "string"
         assert local_intent["default"] == ""
