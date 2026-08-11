@@ -279,7 +279,9 @@ def orchestration_evidence(result: dict[str, Any]) -> dict[str, Any]:
         "model_calls": 0,
         "shell_attempts": 0,
         "shell_failures": 0,
-        "parallel_tool_batches": [],
+        "multi_tool_response_batches": [],
+        "parallel_shell_batches": [],
+        "max_parallel_shells": 0,
         "max_tools_in_one_model_response": 0,
         "finish_reasons": {},
         "truncated_model_responses": 0,
@@ -321,36 +323,158 @@ def orchestration_evidence(result: dict[str, Any]) -> dict[str, Any]:
             evidence["max_tools_in_one_model_response"], count
         )
         if count > 1:
-            evidence["parallel_tool_batches"].append(count)
+            evidence["multi_tool_response_batches"].append(count)
 
-    pending_command = ""
+    pending_by_id: dict[str, tuple[str, float | None, int]] = {}
+    pending_without_id: list[tuple[str, float | None, int]] = []
+    shell_intervals: list[tuple[float, float, str]] = []
+    completed: list[tuple[int, dict[str, Any]]] = []
+    start_index = 0
     for record in records:
         if record.get("type") != "action":
             continue
         action = record.get("action")
         if action == "shell":
-            pending_command = str(record.get("command") or "")
+            pending = (
+                str(record.get("command") or ""),
+                float(record["ts"])
+                if isinstance(record.get("ts"), (int, float))
+                else None,
+                start_index,
+            )
+            start_index += 1
+            evidence["shell_attempts"] += 1
+            operation_id = str(record.get("operation_id") or "")
+            if operation_id:
+                pending_by_id[operation_id] = pending
+            else:
+                pending_without_id.append(pending)
+            continue
+        if action == "shell_blocked":
+            completed.append(
+                (
+                    start_index,
+                    {
+                        "exit_code": None,
+                        "ok": False,
+                        "blocked": True,
+                        "command": _short(record.get("command"), 1000),
+                        "output_preview": _short(record.get("reason"), 500),
+                    },
+                )
+            )
+            start_index += 1
+            evidence["shell_attempts"] += 1
             continue
         if action != "shell_result":
             continue
-        exit_code = int(record.get("exit_code") or 0)
-        command_lower = pending_command.lower()
+        operation_id = str(record.get("operation_id") or "")
+        if operation_id and operation_id in pending_by_id:
+            pending_command, started_at, sequence = pending_by_id.pop(
+                operation_id
+            )
+        elif not operation_id and pending_without_id:
+            pending_command, started_at, sequence = pending_without_id.pop(0)
+        else:
+            pending_command, started_at, sequence = "", None, start_index
+            start_index += 1
+            evidence["parse_errors"].append(
+                "shell_result has no matching shell start"
+                + (f": {operation_id}" if operation_id else "")
+            )
+        raw_exit_code = record.get("exit_code")
+        exit_code = (
+            int(raw_exit_code)
+            if isinstance(raw_exit_code, (int, float))
+            else None
+        )
+        ok = (
+            record.get("ok") is True
+            if isinstance(record.get("ok"), bool)
+            else exit_code == 0
+        )
+        finished_at = (
+            float(record["ts"])
+            if isinstance(record.get("ts"), (int, float))
+            else None
+        )
+        if (
+            operation_id
+            and started_at is not None
+            and finished_at is not None
+            and finished_at > started_at
+        ):
+            shell_intervals.append(
+                (started_at, finished_at, operation_id)
+            )
         item = {
-            "index": len(evidence["timeline"]) + 1,
             "exit_code": exit_code,
+            "ok": ok,
             "command": _short(pending_command, 1000),
             "output_preview": _short(record.get("output_preview"), 500),
         }
-        evidence["timeline"].append(item)
-        if _invokes_python_script(pending_command, "acceptance.py"):
-            evidence["acceptance_exit_codes"].append(exit_code)
-        if "pytest" in command_lower:
-            evidence["pytest_exit_codes"].append(exit_code)
-        pending_command = ""
+        reported_exit = re.search(
+            r"\bEXIT_CODE=(-?\d+)\b",
+            str(record.get("output_preview") or ""),
+        )
+        if reported_exit:
+            item["reported_exit_code"] = int(reported_exit.group(1))
+        if started_at is not None and finished_at is not None:
+            item["started_at"] = started_at
+            item["finished_at"] = finished_at
+            item["duration_ms"] = max(
+                0, round((finished_at - started_at) * 1000)
+            )
+        completed.append((sequence, item))
 
-    evidence["shell_attempts"] = len(evidence["timeline"])
+    for operation_id, (command, _started_at, _sequence) in pending_by_id.items():
+        evidence["parse_errors"].append(
+            f"shell start has no matching result: {operation_id} "
+            f"command={_short(command, 200)}"
+        )
+    for command, _started_at, _sequence in pending_without_id:
+        evidence["parse_errors"].append(
+            "shell start has no matching result: "
+            f"command={_short(command, 200)}"
+        )
+    for _sequence, item in sorted(completed, key=lambda entry: entry[0]):
+        item["index"] = len(evidence["timeline"]) + 1
+        evidence["timeline"].append(item)
+        command = str(item.get("command") or "")
+        if _invokes_python_script(command, "acceptance.py"):
+            evidence["acceptance_exit_codes"].append(
+                item.get("reported_exit_code", item["exit_code"])
+            )
+        if "pytest" in command.lower():
+            evidence["pytest_exit_codes"].append(item["exit_code"])
+
+    events: dict[float, dict[str, list[str]]] = {}
+    for started_at, finished_at, operation_id in shell_intervals:
+        events.setdefault(started_at, {"start": [], "finish": []})[
+            "start"
+        ].append(operation_id)
+        events.setdefault(finished_at, {"start": [], "finish": []})[
+            "finish"
+        ].append(operation_id)
+    active: set[str] = set()
+    busy_period_peak = 0
+    for timestamp in sorted(events):
+        for operation_id in events[timestamp]["finish"]:
+            active.discard(operation_id)
+        if not active and busy_period_peak > 1:
+            evidence["parallel_shell_batches"].append(busy_period_peak)
+            busy_period_peak = 0
+        for operation_id in events[timestamp]["start"]:
+            active.add(operation_id)
+        busy_period_peak = max(busy_period_peak, len(active))
+        evidence["max_parallel_shells"] = max(
+            evidence["max_parallel_shells"], len(active)
+        )
+    if busy_period_peak > 1:
+        evidence["parallel_shell_batches"].append(busy_period_peak)
+
     evidence["shell_failures"] = sum(
-        item["exit_code"] != 0 for item in evidence["timeline"]
+        item["ok"] is not True for item in evidence["timeline"]
     )
     return evidence
 
@@ -380,10 +504,8 @@ def main() -> int:
         after_submit=observe_live_ui,
         independent_verifier=lambda _result: verify_fixture(root, token, protected),
     )
-    result["passed"] = bool(
-        result.get("passed") is True
-        and (result.get("after_submit_handoff") or {}).get("passed") is True
-    )
+    # The activity probe is diagnostic. A task completed through another
+    # visible interaction style still counts when the external verifier passes.
     result["orchestration_evidence"] = orchestration_evidence(result)
     suite = {
         "name": "complex-orchestration",

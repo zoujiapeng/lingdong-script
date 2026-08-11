@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -435,34 +436,39 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "exact submitted-image pixels" in actor_contract
     assert "Chat and act naturally" in actor_contract
     assert "runtime does not classify or route" in actor_contract
-    assert "finish done" in actor_contract
-    assert "finish blocked" in actor_contract
+    assert "visibly complete, call claim_obligation_done" in actor_contract
+    assert "no action can advance, call blocked" in actor_contract
     assert "When pointer_held is true" in actor_contract
     assert actor_request["tool_choice"] == "auto"
     assert "parallel_tool_calls" not in actor_request
     assert "n" not in actor_request
     assert "max_tokens" not in actor_request
     assert actor_request["max_completion_tokens"] == 4096
-    assert len(actor_request["tools"]) == 3
+    assert len(actor_request["tools"]) == 8
     assert {
         tool["function"]["name"] for tool in actor_request["tools"]
     } == {
-        "pointer",
-        "keyboard",
-        "finish",
+        "click",
+        "double_click",
+        "drag",
+        "scroll",
+        "type_text",
+        "press_key",
+        "claim_obligation_done",
+        "blocked",
     }
     descriptions = {
         tool["function"]["name"]: tool["function"]["description"]
         for tool in actor_request["tools"]
     }
-    assert descriptions == {
-        "pointer": "Mouse: click, double-click, scroll, or drag on the image.",
-        "keyboard": "Keyboard: type text or press a key/chord.",
-        "finish": "End as done or blocked.",
-    }
-    assert actor_request["tools"][0]["function"]["parameters"]["properties"][
-        "action"
-    ]["enum"] == ["click", "double_click", "drag", "scroll"]
+    assert "once" in descriptions["click"]
+    assert "Double-click" in descriptions["double_click"]
+    assert "ordered intermediate image_points" in descriptions["drag"]
+    assert "amount < 0 scrolls down" in descriptions["scroll"]
+    assert "selected text is replaced" in descriptions["type_text"]
+    assert "one key or one ordered key chord" in descriptions["press_key"]
+    assert "without further mutation" in descriptions["claim_obligation_done"]
+    assert "no supplied action can advance" in descriptions["blocked"]
     assert "response_format" not in actor_request
     strict_schemas = [
         tool["function"]["parameters"]
@@ -551,6 +557,7 @@ def test_initial_actor_turn_replies_with_native_history_and_short_system_contrac
     assert "live screen" in initial_contract
     assert "interleave both freely" in initial_contract
     assert "respond naturally while you work" in initial_contract
+    assert "Tool calls in one response run concurrently" in initial_contract
     # The initial contract must not teach keyword routing: no verb list is
     # mapped to observe_desktop.
     assert "Call observe_desktop for any request" not in initial_contract
@@ -1246,10 +1253,8 @@ def test_actor_permissions_are_the_exact_broker_projected_subset() -> None:
         "image_y": 300,
     }
     tools = clients[0].requests[0]["tools"]
-    assert [tool["function"]["name"] for tool in tools] == ["pointer"]
-    assert tools[0]["function"]["parameters"]["properties"]["action"][
-        "enum"
-    ] == ["click"]
+    assert [tool["function"]["name"] for tool in tools] == ["click"]
+    assert "keep_holding" not in tools[0]["function"]["parameters"]["properties"]
     assert len(clients[0].requests) == 1
 
 
@@ -1296,11 +1301,11 @@ def test_actor_preserves_an_ordered_optional_runtime_drag_path() -> None:
     actor_schema = clients[0].requests[0]["tools"][0]["function"][
         "parameters"
     ]
-    assert "path" not in actor_schema["required"]
-    assert "hold" not in actor_schema["required"]
-    assert actor_schema["properties"]["path"]["default"] == []
-    assert actor_schema["properties"]["hold"]["default"] is False
-    assert actor_schema["properties"]["path"]["maxItems"] == 32
+    assert "image_points" not in actor_schema["required"]
+    assert "keep_holding" not in actor_schema["required"]
+    assert actor_schema["properties"]["image_points"]["default"] == []
+    assert actor_schema["properties"]["keep_holding"]["default"] is False
+    assert actor_schema["properties"]["image_points"]["maxItems"] == 32
     assert len(clients[0].requests) == 1
 
 
@@ -1413,90 +1418,6 @@ def test_actor_maps_only_the_two_approved_runtime_outcomes(
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
     ).proposal) == expected
-
-
-@pytest.mark.parametrize(
-    "name, arguments, expected_action, expected_args",
-    [
-        (
-            "pointer",
-            {
-                "action": "double_click",
-                "x": "320",
-                "y": "240",
-                "local_intent": "open the visible item",
-            },
-            "double_click",
-            {"image_x": 320, "image_y": 240},
-        ),
-        (
-            "pointer",
-            {
-                "action": "scroll",
-                "x": "500",
-                "y": "300",
-                "amount": "-480.0",
-                "local_intent": "see the next visible section",
-            },
-            "scroll",
-            {"image_x": 500, "image_y": 300, "amount": -480},
-        ),
-        (
-            "pointer",
-            {
-                "action": "drag",
-                "x": "10.5",
-                "y": "20",
-                "x2": "300",
-                "y2": "400.25",
-                "path": [["100", "120.5"], [200, "250"]],
-                "hold": True,
-                "local_intent": "continue through the visible path",
-            },
-            "drag",
-            {
-                "image_x1": 10.5,
-                "image_y1": 20,
-                "image_x2": 300,
-                "image_y2": 400.25,
-                "image_points": [[100, 120.5], [200, 250]],
-                "keep_holding": True,
-            },
-        ),
-        (
-            "keyboard",
-            {
-                "action": "press",
-                "keys": "CTRL+A",
-                "local_intent": "select the current text",
-            },
-            "hotkey",
-            {"keys": ["CTRL", "A"]},
-        ),
-    ],
-)
-def test_grouped_model_tools_translate_to_the_existing_physical_actions(
-    name: str,
-    arguments: dict[str, Any],
-    expected_action: str,
-    expected_args: dict[str, Any],
-) -> None:
-    _, clients = _build_clients(_tool_response(name, arguments))
-    actor = LiveVisualActor(
-        client=clients[0],
-        model="vision-model",
-        runtime=ModelCallRuntime(),
-    )
-
-    decision = actor.propose(
-        _actor_turn(),
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
-    assert decision.proposal["action"] == expected_action
-    assert decision.proposal["args"] == expected_args
 
 
 def test_actor_uses_call_once_transport_policy() -> None:
@@ -2191,7 +2112,94 @@ def test_initial_turn_can_run_shell_before_observe() -> None:
     ]
     assert len(shell_result_messages) == 1
     tool_result = json.loads(shell_result_messages[0]["content"])
-    assert tool_result["stdout"] == "notepad running"
+    assert tool_result["output"] == "notepad running"
+    assert "stdout" not in tool_result
+    assert "stderr" not in tool_result
+
+
+def test_initial_turn_compacts_only_identical_repeated_tool_results() -> None:
+    responses = [
+        _tool_response(
+            name="run_shell",
+            arguments={"command": "Get-Content pipeline.py"},
+            call_id=f"shell-call-{index}",
+        )
+        for index in range(3)
+    ]
+    responses.append(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "inspection complete",
+                        "tool_calls": [],
+                    }
+                }
+            ]
+        }
+    )
+    _, clients = _build_clients(responses)
+
+    class ChangingShellRunner(_RecordingShellRunner):
+        def run(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            output = "same file contents" if len(self.calls) < 3 else "changed"
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": output,
+                "stderr": "",
+            }
+
+    runner = ChangingShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    admission = actor.begin_turn("Inspect the implementation")
+
+    assert admission.reply == "inspection complete"
+    assert len(runner.calls) == 3
+    tool_results = [
+        json.loads(message["content"])
+        for message in clients[0].requests[-1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert tool_results[0]["output"] == "same file contents"
+    assert tool_results[1] == {
+        "exit_code": 0,
+        "message": (
+            "The tool ran again and returned exactly the same result as the "
+            "referenced earlier tool call."
+        ),
+        "ok": True,
+        "repeat_count": 1,
+        "result_unchanged": True,
+        "same_as_tool_call_id": "shell-call-0-0",
+    }
+    assert tool_results[2]["output"] == "changed"
+
+
+def test_repeated_error_result_stays_explicitly_failed() -> None:
+    from winpilot.vnext.model_roles.visual_actor import _repeated_tool_result
+
+    compact = _repeated_tool_result(
+        {
+            "error": "provider unavailable",
+            "next_step": "choose another tool",
+        },
+        same_as_tool_call_id="failed-call-1",
+        repeat_count=2,
+    )
+
+    assert compact["ok"] is False
+    assert compact["next_step"] == "choose another tool"
+    assert compact["same_as_tool_call_id"] == "failed-call-1"
+    assert "error" not in compact
 
 
 def test_actor_streams_public_narration_commands_results_and_task_state() -> None:
@@ -2329,6 +2337,7 @@ def test_failed_shell_result_stays_in_band_with_an_actionable_next_step() -> Non
     runner.result = {
         "ok": False,
         "exit_code": 1,
+        "output": "",
         "stdout": "",
         "stderr": "command was not found",
     }
@@ -2353,7 +2362,8 @@ def test_failed_shell_result_stays_in_band_with_an_actionable_next_step() -> Non
         if message.get("role") == "tool"
     ]
     result = json.loads(tool_messages[-1]["content"])
-    assert result["stderr"] == "command was not found"
+    assert result["output"] == "command was not found"
+    assert "stderr" not in result
     assert result["next_step"] == (
         "use the output to correct the command or choose another tool"
     )
@@ -2485,10 +2495,10 @@ def test_visual_turn_shell_calls_share_the_task_level_budget() -> None:
         for tool in clients[0].requests[5]["tools"]
     ]
     assert "run_shell" in names
-    assert "keyboard" in names
+    assert "type_text" in names
 
 
-def test_initial_turn_executes_all_model_selected_shell_calls() -> None:
+def test_initial_turn_executes_model_selected_shell_batch_in_parallel() -> None:
     _, clients = _build_clients(
         [
             {
@@ -2539,7 +2549,30 @@ def test_initial_turn_executes_all_model_selected_shell_calls() -> None:
             },
         ]
     )
-    runner = _RecordingShellRunner()
+    class ParallelShellRunner:
+        def __init__(self) -> None:
+            self.barrier = threading.Barrier(5)
+            self.lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def run(self, **kwargs: Any) -> dict[str, Any]:
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                self.barrier.wait(timeout=1)
+                return {
+                    "ok": True,
+                    "exit_code": 0,
+                    "stdout": kwargs["command"],
+                    "stderr": "",
+                }
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    runner = ParallelShellRunner()
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
@@ -2550,13 +2583,109 @@ def test_initial_turn_executes_all_model_selected_shell_calls() -> None:
     admission = actor.begin_turn("Check running processes")
 
     assert admission.kind == "desktop"
-    assert len(runner.calls) == 5
+    assert runner.max_active == 5
     assert len(clients[0].requests) == 2
+    tool_results = [
+        json.loads(message["content"])["output"]
+        for message in clients[0].requests[1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert tool_results == [f"tasklist {index}" for index in range(5)]
     names = [
         tool["function"]["name"]
         for tool in clients[0].requests[1]["tools"]
     ]
     assert "run_shell" in names
+
+
+def test_initial_batch_preflights_then_reissues_without_partial_execution() -> None:
+    invalid_batch = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "would-have-run",
+                            "type": "function",
+                            "function": {
+                                "name": "run_shell",
+                                "arguments": json.dumps(
+                                    {"command": "Write-Output changed"}
+                                ),
+                            },
+                        },
+                        {
+                            "id": "bad-observe",
+                            "type": "function",
+                            "function": {
+                                "name": "observe_desktop",
+                                "arguments": '{"unexpected":true}',
+                            },
+                        },
+                    ],
+                }
+            }
+        ]
+    }
+    valid_batch = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "reissued-shell",
+                            "type": "function",
+                            "function": {
+                                "name": "run_shell",
+                                "arguments": json.dumps(
+                                    {"command": "Write-Output changed"}
+                                ),
+                            },
+                        },
+                        {
+                            "id": "reissued-observe",
+                            "type": "function",
+                            "function": {
+                                "name": "observe_desktop",
+                                "arguments": "{}",
+                            },
+                        },
+                    ],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients([invalid_batch, valid_batch])
+    runner = _RecordingShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    admission = actor.begin_turn("Inspect only after the command")
+
+    assert admission.kind == "desktop"
+    assert [call["command"] for call in runner.calls] == [
+        "Write-Output changed"
+    ]
+    assert len(clients[0].requests) == 2
+    repair_messages = clients[0].requests[1]["messages"]
+    feedback = json.loads(repair_messages[-1]["content"])
+    assert repair_messages[-2]["role"] == "assistant"
+    assert repair_messages[-1]["role"] == "user"
+    assert feedback["tools_executed"] == 0
+    assert feedback["tool_format_error"] == (
+        "observe_desktop does not accept arguments"
+    )
+    assert "run_shell" in {
+        tool["function"]["name"] for tool in clients[0].requests[1]["tools"]
+    }
 
 
 def test_propose_injects_rejection_feedback_into_native_context() -> None:
