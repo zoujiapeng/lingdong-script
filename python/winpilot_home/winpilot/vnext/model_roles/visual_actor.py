@@ -1,8 +1,10 @@
-"""Restricted one-turn Visual Actor backed by the shared model call Runtime."""
+"""One semantic Visual Actor backed by the shared model call Runtime."""
 from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import threading
 from copy import deepcopy
 from collections.abc import Mapping, Sequence
@@ -47,14 +49,13 @@ from .common import (
 
 VISUAL_ACTOR_MODEL_ROLE = "vnext_visual_actor"
 VISUAL_ACTOR_SYSTEM_CONTRACT = """\
-Use original_goal, the current authoritative JPEG, task_state, previous action,
-and supplied tools to choose exactly one tool call. Each turn, write one short
-sentence saying what you are doing or what blocked you; it streams to the
-user. Use coordinates in the exact submitted-image pixels. original_goal may
-mix chat and task: do the task, leave chat answers for the final claim. If the
-goal is visibly complete, call claim_obligation_done; when an action cannot
-advance the goal, call blocked instead of repeating it. When pointer_held is
-true, continue or finish that drag. Budget facts pace long goals."""
+Use original_goal, current JPEG, task_state, previous action, and supplied
+tools. Choose exactly one tool. Briefly tell the user what you are doing or
+what blocked you. Coordinates are exact submitted-image pixels. Chat and act
+naturally. Choose and revise any approach in task_state; runtime does not
+classify or route. If visibly complete, finish done. If no action can advance,
+finish blocked. When pointer_held is true, continue or finish that drag. Use
+budget facts to pace long goals."""
 
 INITIAL_ACTOR_SYSTEM_CONTRACT = """\
 You are a Windows desktop agent on the user's real computer. Answer chat
@@ -62,41 +63,14 @@ questions directly in the user's language. The observe_desktop tool grants
 access to the live screen; use it when you need to look at or operate the
 desktop. You may chat, act, or interleave both freely: narrate what you are
 doing, why, and anything you find or cannot do, in your own words, at any
-time. If a message mixes chat and a task, do the task and put the short
-answer into the final claim. Never invent results; verify by looking at the
-screen."""
+time. Choose or revise your approach as you learn. For mixed requests, respond
+naturally while you work and summarize at the end. Never invent results;
+verify by looking at the screen."""
 
-_TOOL_DESCRIPTIONS = {
-    "click": "Click one point once in the current image.",
-    "double_click": "Double-click one point once in the current image.",
-    "drag": (
-        "Drag once from one image point to another, optionally following "
-        "ordered intermediate image_points; use [] for a straight path. "
-        "keep_holding preserves the same press for a later visual turn."
-    ),
-    "scroll": (
-        "Scroll at one point; amount < 0 scrolls down and amount > 0 scrolls up."
-    ),
-    "type_text": (
-        "Enter the requested literal characters into the focused editable "
-        "control; selected text is replaced."
-    ),
-    "hotkey": (
-        "Press one key or one ordered key chord; this never enters literal "
-        "text."
-    ),
-    "launch_application": (
-        "Start one installed application or file/URL association by display "
-        "name, alias, or path. This is a generic launch, not a click."
-    ),
-    "claim_obligation_done": (
-        "Finish without further mutation when the current image shows the "
-        "requested result."
-    ),
-    "blocked": (
-        "Report a visible blocker only when no supplied action can advance the goal."
-    ),
-}
+_POINTER_TOOL = "pointer"
+_KEYBOARD_TOOL = "keyboard"
+_FINISH_TOOL = "finish"
+_POINTER_ACTIONS = frozenset({"click", "double_click", "drag", "scroll"})
 
 _MODEL_TOOL_NAMES = {
     "hotkey": "press_key",
@@ -133,12 +107,10 @@ _LOCALLY_ENFORCED_SCHEMA_KEYS = frozenset({"not", "uniqueItems"})
 _THREAD_HISTORY_MESSAGES = 12
 _THREAD_HISTORY_CHARS = 16_384
 _VISUAL_HISTORY_DEPTH = 4
-_CONNECTOR_TOOL_CALL_LIMIT = 4
 _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
 _CONNECTOR_TOOLS = frozenset({_CONNECTOR_SEARCH_TOOL, _CONNECTOR_CALL_TOOL})
 _FLOW_FRAGMENT_TOOL = "propose_flow_fragment"
-_STATUS_TOOL_CALL_LIMIT = 2
 _STATUS_AGENT_TOOL = "get_agent_status"
 _STATUS_MEMORY_TOOL = "get_memory_status"
 _STATUS_CAPABILITIES_TOOL = "get_capabilities"
@@ -150,18 +122,14 @@ _STATUS_TOOLS = frozenset(
     }
 )
 _SHELL_TOOL = "run_shell"
-_SHELL_TOOL_CALL_LIMIT = 4
-_SHELL_MAX_COMMAND_CHARS = 4096
+_SHELL_MAX_COMMAND_CHARS = 16_384
 _SHELL_MAX_OUTPUT_CHARS = 6000
 _WINDOW_TEXT_TOOL = "read_window_text"
-_WINDOW_TEXT_RESERVATION = 2
 _WINDOW_TEXT_MAX_CHARS = 6000
 _CAPTURE_SCREEN_TOOL = "capture_screen"
-_CAPTURE_SCREEN_RESERVATION = 2
 _LIST_WINDOWS_TOOL = "list_windows"
-_LIST_WINDOWS_RESERVATION = 1
 _PASTE_IMAGE_TOOL = "paste_image_file"
-_PASTE_IMAGE_RESERVATION = 2
+_MODEL_CALL_RESERVATION = 120
 _CAPTURE_OUTPUT_MAX_CHARS = 6000
 # Optional tool-schema fields and their JSON defaults.  The model may omit
 # them; the runtime fills the default so the tool schema and the validator
@@ -191,6 +159,7 @@ class VisualActorTurnAdmission:
 
     kind: str
     reply: str = ""
+    narration: str = ""
 
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
@@ -200,6 +169,73 @@ def _canonical_json(value: Mapping[str, Any]) -> str:
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
+    )
+
+
+def _finish_reason(response: Any) -> str:
+    choices = member(response, "choices")
+    if (
+        isinstance(choices, (str, bytes))
+        or not isinstance(choices, Sequence)
+        or len(choices) != 1
+    ):
+        return ""
+    return str(member(choices[0], "finish_reason") or "").casefold()
+
+
+def _truncation_messages(response: Any) -> list[dict[str, Any]]:
+    """Keep native continuity while asking for a smaller next action."""
+
+    message = response_message(response)
+    content = member(message, "content")
+    assistant: dict[str, Any] = {
+        "role": "assistant",
+        "content": content if type(content) is str else "",
+    }
+    reasoning = member(message, "reasoning_content")
+    if type(reasoning) is str:
+        assistant["reasoning_content"] = reasoning
+    return [
+        assistant,
+        {
+            "role": "user",
+            "content": "Output was truncated. Continue with a shorter tool call.",
+        },
+    ]
+
+
+def _actionable_tool_result(
+    name: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep tool failures in-band so the same model can change course."""
+
+    output = dict(result)
+    failed = bool(
+        output.get("ok") is False
+        or output.get("error")
+        or output.get("timeout") is True
+        or output.get("stopped") is True
+    )
+    if not failed or output.get("next_step"):
+        return output
+    if output.get("timeout") is True:
+        next_step = "split the work, adjust the timeout, or choose another tool"
+    elif name == _SHELL_TOOL and output.get("exit_code") not in (None, 0):
+        next_step = "use the output to correct the command or choose another tool"
+    elif output.get("stopped") is True:
+        next_step = "do not retry unless the run continues"
+    else:
+        next_step = "change the arguments, inspect current state, or choose another tool"
+    output["next_step"] = next_step
+    return output
+
+
+def _actionable_tool_error(name: str, exc: Exception) -> dict[str, Any]:
+    detail = str(exc).strip() or type(exc).__name__
+    return _actionable_tool_result(
+        name,
+        {"ok": False, "error": detail[:2000]},
     )
 
 
@@ -370,28 +406,32 @@ def _strict_provider_schema(
     return projected
 
 
-def _actor_parameters(tool: ActorToolView) -> dict[str, Any]:
-    raw = tool.to_dict()["schema"]
+def _actor_parameters_from_schema(
+    name: str,
+    raw: Mapping[str, Any],
+    *,
+    requires_local_intent: bool,
+) -> dict[str, Any]:
     if (
         type(raw) is not dict
         or raw.get("type") != "object"
         or type(raw.get("properties")) is not dict
     ):
         raise LiveModelRoleError(
-            f"Actor tool {tool.name!r} requires an object JSON schema"
+            f"Actor tool {name!r} requires an object JSON schema"
         )
     parameters = dict(raw)
     properties = dict(raw["properties"])
     required = raw.get("required", [])
     if type(required) is not list or any(type(item) is not str for item in required):
         raise LiveModelRoleError(
-            f"Actor tool {tool.name!r} has invalid required fields"
+            f"Actor tool {name!r} has invalid required fields"
         )
     # Runtime keeps image_points and keep_holding optional with defaults, so
     # the model may omit them; a straight drag is exactly [] / false.
     # Older catalogs may still declare them without defaults: project the
     # same defaults here so strict providers accept an omitted field.
-    if tool.name == "drag":
+    if name == "drag":
         optional_defaults = {
             "image_points": [],
             "keep_holding": False,
@@ -406,16 +446,16 @@ def _actor_parameters(tool: ActorToolView) -> dict[str, Any]:
                 properties[name]["default"] = default
     if "task_state_update" in properties or "task_state_update" in required:
         raise LiveModelRoleError(
-            f"Actor tool {tool.name!r} shadows task_state_update"
+            f"Actor tool {name!r} shadows task_state_update"
         )
     properties["task_state_update"] = {
         **TASK_STATE_UPDATE_SCHEMA,
         "default": {"scratchpad": None},
     }
-    if tool.requires_local_intent:
+    if requires_local_intent:
         if "local_intent" in properties or "local_intent" in required:
             raise LiveModelRoleError(
-                f"Actor tool {tool.name!r} shadows local_intent"
+                f"Actor tool {name!r} shadows local_intent"
             )
         properties["local_intent"] = {
             "type": "string",
@@ -427,8 +467,45 @@ def _actor_parameters(tool: ActorToolView) -> dict[str, Any]:
     parameters["additionalProperties"] = False
     return _strict_provider_schema(
         parameters,
-        path=f"Actor tool {tool.name!r}",
+        path=f"Actor tool {name!r}",
     )
+
+
+def _actor_parameters(tool: ActorToolView) -> dict[str, Any]:
+    return _actor_parameters_from_schema(
+        tool.name,
+        tool.to_dict()["schema"],
+        requires_local_intent=tool.requires_local_intent,
+    )
+
+
+def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "anyOf": [dict(schema), {"type": "null"}],
+        "default": None,
+    }
+
+
+def _grouped_tool(
+    name: str,
+    description: str,
+    schema: dict[str, Any],
+    *,
+    requires_local_intent: bool,
+) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": _actor_parameters_from_schema(
+                name,
+                schema,
+                requires_local_intent=requires_local_intent,
+            ),
+            "strict": True,
+        },
+    }
 
 
 def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
@@ -437,18 +514,156 @@ def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
         raise LiveModelRoleError(
             "Visual Actor tools are outside the minimal Runtime surface"
         )
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": _MODEL_TOOL_NAMES.get(tool.name, tool.name),
-                "description": _TOOL_DESCRIPTIONS[tool.name],
-                "parameters": _actor_parameters(tool),
-                "strict": True,
-            },
-        }
-        for tool in turn.tools
+    available = set(names)
+    by_name = {tool.name: tool for tool in turn.tools}
+    # Validate the broker-projected source schemas before regrouping them.
+    # Grouping shrinks the model surface; it must not hide a malformed Runtime
+    # schema or silently widen the actions the broker supplied.
+    for tool in turn.tools:
+        _actor_parameters(tool)
+    definitions: list[dict[str, Any]] = []
+    pointer_actions = [
+        name for name in ("click", "double_click", "drag", "scroll")
+        if name in available
     ]
+    if pointer_actions:
+        definitions.append(
+            _grouped_tool(
+                _POINTER_TOOL,
+                "Mouse: click, double-click, scroll, or drag on the image.",
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "action": {"type": "string", "enum": pointer_actions},
+                        "x": _nullable({"type": "number", "minimum": 0}),
+                        "y": _nullable({"type": "number", "minimum": 0}),
+                        "x2": _nullable({"type": "number", "minimum": 0}),
+                        "y2": _nullable({"type": "number", "minimum": 0}),
+                        "amount": _nullable({
+                            "type": "integer",
+                            "minimum": -1200,
+                            "maximum": 1200,
+                            "not": {"const": 0},
+                        }),
+                        "path": {
+                            "type": "array",
+                            "items": {
+                                "type": "array",
+                                "items": {"type": "number", "minimum": 0},
+                                "minItems": 2,
+                                "maxItems": 2,
+                            },
+                            "maxItems": 32,
+                            "default": [],
+                        },
+                        "hold": {"type": "boolean", "default": False},
+                    },
+                    "required": ["action"],
+                },
+                requires_local_intent=True,
+            )
+        )
+    keyboard_actions = [
+        action for action, runtime_name in (
+            ("type", "type_text"),
+            ("press", "hotkey"),
+        )
+        if runtime_name in available
+    ]
+    if keyboard_actions:
+        definitions.append(
+            _grouped_tool(
+                _KEYBOARD_TOOL,
+                "Keyboard: type text or press a key/chord.",
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "action": {"type": "string", "enum": keyboard_actions},
+                        "text": _nullable(
+                            by_name["type_text"].to_dict()["schema"]
+                            ["properties"]["text"]
+                            if "type_text" in by_name
+                            else {"type": "string", "minLength": 1}
+                        ),
+                        # One compact chord is more reliable across providers
+                        # than an array (for example, "ctrl+a"). The canonical
+                        # boundary still accepts legacy arrays.
+                        "keys": _nullable({
+                            "type": "string",
+                            "minLength": 1,
+                        }),
+                    },
+                    "required": ["action"],
+                },
+                requires_local_intent=True,
+            )
+        )
+    launch = next(
+        (tool for tool in turn.tools if tool.name == "launch_application"),
+        None,
+    )
+    if launch is not None:
+        definitions.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": launch.name,
+                    "description": "Open an application, file, or URL.",
+                    "parameters": _actor_parameters(launch),
+                    "strict": True,
+                },
+            }
+        )
+    finish_states = [
+        state for state, runtime_name in (
+            ("done", "claim_obligation_done"),
+            ("blocked", "blocked"),
+        )
+        if runtime_name in available
+    ]
+    if finish_states:
+        definitions.append(
+            _grouped_tool(
+                _FINISH_TOOL,
+                "End as done or blocked.",
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "status": {"type": "string", "enum": finish_states},
+                        "message": (
+                            by_name["claim_obligation_done"].to_dict()
+                            ["schema"]["properties"]["concise_claim"]
+                            if "claim_obligation_done" in by_name
+                            else {"type": "string", "minLength": 1}
+                        ),
+                        "kind": _nullable(
+                            by_name["blocked"].to_dict()["schema"]
+                            ["properties"]["blocker_kind"]
+                            if "blocked" in by_name
+                            else {"type": "string", "minLength": 1}
+                        ),
+                        "facts": {
+                            **(
+                                by_name["blocked"].to_dict()["schema"]
+                                ["properties"]["observed_facts"]
+                                if "blocked" in by_name
+                                else {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                }
+                            ),
+                            "default": [],
+                        },
+                    },
+                    "required": ["status", "message"],
+                },
+                requires_local_intent=False,
+            )
+        )
+    return definitions
 
 
 def _decode_arguments(raw: Any) -> dict[str, Any]:
@@ -661,9 +876,162 @@ def _flow_fragment_from_response(
     return {"summary": summary.strip(), "nodes": nodes, "edges": edges}
 
 
+_INTEGER_TEXT = re.compile(r"[+-]?\d+")
+_NUMBER_TEXT = re.compile(
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+)
+
+
+def _number_value(value: Any, name: str) -> int | float:
+    """Canonicalize provider-emitted JSON numbers, including numeric text."""
+
+    if type(value) in {int, float}:
+        number = value
+    elif type(value) is str and _NUMBER_TEXT.fullmatch(value.strip()):
+        text = value.strip()
+        number = int(text) if _INTEGER_TEXT.fullmatch(text) else float(text)
+    else:
+        raise InvalidActorProposal(f"{name} must be a number")
+    if type(number) is float and not math.isfinite(number):
+        raise InvalidActorProposal(f"{name} must be a finite number")
+    return number
+
+
+def _required_number(arguments: Mapping[str, Any], name: str) -> int | float:
+    return _number_value(arguments.get(name), name)
+
+
+def _required_integer(arguments: Mapping[str, Any], name: str) -> int:
+    number = _number_value(arguments.get(name), name)
+    if type(number) is float and number.is_integer():
+        return int(number)
+    if type(number) is not int:
+        raise InvalidActorProposal(f"{name} must be an integer")
+    return number
+
+
+def _translate_terminal_call(
+    name: str,
+    arguments: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Translate the small model tool surface to existing runtime actions."""
+
+    if name == _POINTER_TOOL:
+        action = arguments.get("action")
+        if action not in _POINTER_ACTIONS:
+            raise InvalidActorProposal("pointer.action is invalid")
+        x = _required_number(arguments, "x")
+        y = _required_number(arguments, "y")
+        if action in {"click", "double_click"}:
+            return action, {"image_x": x, "image_y": y}
+        if action == "scroll":
+            amount = _required_integer(arguments, "amount")
+            if amount == 0:
+                raise InvalidActorProposal(
+                    "pointer.amount must be a non-zero integer for scroll"
+                )
+            return action, {
+                "image_x": x,
+                "image_y": y,
+                "amount": amount,
+            }
+        x2 = _required_number(arguments, "x2")
+        y2 = _required_number(arguments, "y2")
+        path = arguments.get("path") or []
+        hold = arguments.get("hold", False)
+        if type(path) is not list or type(hold) is not bool:
+            raise InvalidActorProposal(
+                "pointer.path and pointer.hold are invalid"
+            )
+        normalized_path: list[list[int | float]] = []
+        for index, point in enumerate(path):
+            if type(point) is not list or len(point) != 2:
+                raise InvalidActorProposal(
+                    f"pointer.path[{index}] must contain x and y"
+                )
+            normalized_path.append([
+                _number_value(point[0], f"pointer.path[{index}][0]"),
+                _number_value(point[1], f"pointer.path[{index}][1]"),
+            ])
+        return action, {
+            "image_x1": x,
+            "image_y1": y,
+            "image_x2": x2,
+            "image_y2": y2,
+            "image_points": normalized_path,
+            "keep_holding": hold,
+        }
+    if name == _KEYBOARD_TOOL:
+        action = arguments.get("action")
+        if action == "type":
+            text = arguments.get("text")
+            if type(text) is not str or not text:
+                raise InvalidActorProposal(
+                    "keyboard.text is required when action is type"
+                )
+            return "type_text", {"text": text}
+        if action == "press":
+            keys = arguments.get("keys")
+            if type(keys) is str:
+                keys = [
+                    item.strip()
+                    for item in keys.replace(",", "+").split("+")
+                    if item.strip()
+                ]
+            if (
+                type(keys) is not list
+                or not keys
+                or any(type(key) is not str or not key.strip() for key in keys)
+            ):
+                raise InvalidActorProposal(
+                    "keyboard.keys is required when action is press"
+                )
+            return "hotkey", {"keys": [key.strip() for key in keys]}
+        raise InvalidActorProposal("keyboard.action is invalid")
+    if name == _FINISH_TOOL:
+        status = arguments.get("status")
+        message = arguments.get("message")
+        if type(message) is not str or not message.strip():
+            raise InvalidActorProposal("finish.message is required")
+        message = message.strip()
+        if status == "done":
+            return "claim_obligation_done", {"concise_claim": message}
+        if status == "blocked":
+            kind = arguments.get("kind") or "blocked"
+            facts = arguments.get("facts") or [message]
+            return "blocked", {
+                "blocker_kind": kind,
+                "observed_facts": facts,
+            }
+        raise InvalidActorProposal("finish.status is invalid")
+    return _RUNTIME_TOOL_NAMES.get(name, name), arguments
+
+
+def _runtime_name_from_model_call(name: str, raw_arguments: Any) -> str:
+    try:
+        arguments = _decode_arguments(raw_arguments)
+    except LiveModelRoleError:
+        return _RUNTIME_TOOL_NAMES.get(name, name)
+    if name == _POINTER_TOOL:
+        action = arguments.get("action")
+        return action if action in _POINTER_ACTIONS else name
+    if name == _KEYBOARD_TOOL:
+        return {
+            "type": "type_text",
+            "press": "hotkey",
+        }.get(arguments.get("action"), name)
+    if name == _FINISH_TOOL:
+        return {
+            "done": "claim_obligation_done",
+            "blocked": "blocked",
+        }.get(arguments.get("status"), name)
+    return _RUNTIME_TOOL_NAMES.get(name, name)
+
+
 def _proposal_from_response(
     response: Any,
     allowed_names: frozenset[str],
+    available_runtime_names: frozenset[str],
 ) -> ActorTurnDecision:
     message = response_message(response)
     narration = narration_content(message)
@@ -686,7 +1054,6 @@ def _proposal_from_response(
     name = member(function, "name")
     if type(name) is not str or name not in allowed_names:
         raise LiveModelRoleError("Visual Actor returned an unapproved tool")
-    runtime_name = _RUNTIME_TOOL_NAMES.get(name, name)
     arguments = _decode_arguments(member(function, "arguments"))
     try:
         state_update = ActorTaskStateUpdate.from_dict(
@@ -694,8 +1061,11 @@ def _proposal_from_response(
         )
     except ActorTaskStateError as exc:
         raise InvalidActorProposal(str(exc)) from exc
+    local_intent = arguments.pop("local_intent", None)
+    runtime_name, arguments = _translate_terminal_call(name, arguments)
+    if runtime_name not in available_runtime_names:
+        raise LiveModelRoleError("Visual Actor returned an unavailable action")
     if runtime_name in APPROVED_DESKTOP_ACTIONS:
-        local_intent = arguments.pop("local_intent", None)
         raw_proposal = {
             "format": ACTOR_PROPOSAL_FORMAT,
             "kind": "desktop_action",
@@ -766,7 +1136,7 @@ def _history_exchange(
     reasoning = member(message, "reasoning_content")
     if type(reasoning) is str:
         assistant["reasoning_content"] = reasoning
-    return assistant, call_id, _RUNTIME_TOOL_NAMES.get(name, name)
+    return assistant, call_id, _runtime_name_from_model_call(name, arguments)
 
 
 def _tool_format_repair(
@@ -824,7 +1194,7 @@ def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _CONNECTOR_SEARCH_TOOL,
-                "description": "Find tools on connected services.",
+                "description": "Find a connected-service tool.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -841,7 +1211,7 @@ def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _CONNECTOR_CALL_TOOL,
-                "description": "Call one discovered read-only tool by exact reference.",
+                "description": "Call a discovered tool.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -865,10 +1235,7 @@ def _status_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _STATUS_AGENT_TOOL,
-                "description": (
-                    "Read this Agent's own runtime status without touching "
-                    "the desktop."
-                ),
+                "description": "Read agent status.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -882,10 +1249,7 @@ def _status_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _STATUS_MEMORY_TOOL,
-                "description": (
-                    "Read whether long-term experience memory is enabled for "
-                    "this Agent chain."
-                ),
+                "description": "Read memory status.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -899,10 +1263,7 @@ def _status_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _STATUS_CAPABILITIES_TOOL,
-                "description": (
-                    "Read the generic capabilities this Agent can choose "
-                    "right now."
-                ),
+                "description": "Read current capabilities.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -923,21 +1284,15 @@ def _shell_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _SHELL_TOOL,
-                "description": (
-                    "Execute one PowerShell or cmd command on this computer "
-                    "and return its output, exit code, and errors."
-                ),
+                "description": "Run PowerShell or cmd.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": 4096,
-                            "description": (
-                                "Full command line; PowerShell by default. "
-                                "Use ; as the separator."
-                            ),
+                            "maxLength": _SHELL_MAX_COMMAND_CHARS,
+                            "description": "Command line.",
                         },
                         "shell": {
                             "type": "string",
@@ -966,13 +1321,7 @@ def _window_text_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _WINDOW_TEXT_TOOL,
-                "description": (
-                    "Read the visible text of the current target window via "
-                    "UI Automation and return it as ordered name/value lines. "
-                    "Use it to read messages, lists, or forms faster and more "
-                    "exactly than OCR from the screenshot; the text comes from "
-                    "the exact same window the current image shows."
-                ),
+                "description": "Read current window text.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -999,12 +1348,7 @@ def _capture_screen_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _CAPTURE_SCREEN_TOOL,
-                "description": (
-                    "Capture the whole screen or one visible window and save "
-                    "it as a PNG/JPEG file; returns the saved path and size. "
-                    "Use it when a task needs a screenshot saved to disk "
-                    "(send via QQ/chat, attach, or inspect a region)."
-                ),
+                "description": "Save a screen or window image.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1012,17 +1356,12 @@ def _capture_screen_tool_definitions() -> list[dict[str, Any]]:
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 512,
-                            "description": (
-                                "Absolute output path ending in .png or .jpg"
-                            ),
+                            "description": "Absolute .png/.jpg path.",
                         },
                         "window": {
                             "type": "boolean",
                             "default": False,
-                            "description": (
-                                "Capture only the current target window "
-                                "instead of the whole screen"
-                            ),
+                            "description": "Current window only.",
                         },
                     },
                     "required": ["path"],
@@ -1042,11 +1381,7 @@ def _list_windows_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _LIST_WINDOWS_TOOL,
-                "description": (
-                    "List the currently visible desktop windows (title, "
-                    "class, process) so you can tell whether an application "
-                    "is already open before launching a new instance."
-                ),
+                "description": "List visible windows.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -1067,12 +1402,7 @@ def _paste_image_tool_definitions() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _PASTE_IMAGE_TOOL,
-                "description": (
-                    "Put an existing PNG/JPEG image file onto the clipboard "
-                    "and press Ctrl+V in the current target window, which "
-                    "inserts the image into chat/message inputs that accept "
-                    "paste.  Use it after capture_screen to send a screenshot."
-                ),
+                "description": "Paste an image file.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1150,13 +1480,20 @@ def _call_status(
     """Resolve one Actor-owned status query from the injected Runtime facts."""
 
     if provider is None or not callable(getattr(provider, "resolve", None)):
-        raise LiveModelRoleError("Actor status provider is unavailable")
-    result = provider.resolve(name)
-    if not isinstance(result, Mapping):
-        raise LiveModelRoleError(
-            "Actor status provider returned a non-object result"
+        return _actionable_tool_result(
+            name,
+            {"ok": False, "error": "status provider is unavailable"},
         )
-    return dict(result)
+    try:
+        result = provider.resolve(name)
+    except Exception as exc:
+        return _actionable_tool_error(name, exc)
+    if not isinstance(result, Mapping):
+        return _actionable_tool_error(
+            name,
+            TypeError("status provider returned a non-object result"),
+        )
+    return _actionable_tool_result(name, result)
 
 
 def _window_text_exchange(
@@ -1214,18 +1551,20 @@ def _call_window_text(
 ) -> dict[str, Any]:
     """Read the bound target window's visible text through the injected reader."""
     if reader is None or not callable(reader):
-        raise LiveModelRoleError("Actor window-text reader is unavailable")
+        return _actionable_tool_result(
+            _WINDOW_TEXT_TOOL,
+            {"ok": False, "error": "window-text reader is unavailable"},
+        )
     try:
         result = reader(turn)
     except Exception as exc:
-        raise LiveModelRoleError(
-            f"Actor window-text reader failed: {type(exc).__name__}: {exc}"
-        ) from exc
+        return _actionable_tool_error(_WINDOW_TEXT_TOOL, exc)
     if not isinstance(result, Mapping):
-        raise LiveModelRoleError(
-            "Actor window-text reader returned a non-object result"
+        return _actionable_tool_error(
+            _WINDOW_TEXT_TOOL,
+            TypeError("window-text reader returned a non-object result"),
         )
-    return dict(result)
+    return _actionable_tool_result(_WINDOW_TEXT_TOOL, result)
 
 
 def _owned_tool_exchange(
@@ -1311,19 +1650,28 @@ def _call_capture_screen(
 ) -> dict[str, Any]:
     """Save a screen/window capture through the injected runner."""
     if capture_runner is None or not callable(capture_runner):
-        raise LiveModelRoleError("Actor capture runner is unavailable")
-    result = capture_runner(
-        path=str(arguments.get("path") or ""),
-        window=bool(arguments.get("window")),
-    )
+        return _actionable_tool_result(
+            _CAPTURE_SCREEN_TOOL,
+            {"ok": False, "error": "capture runner is unavailable"},
+        )
+    try:
+        result = capture_runner(
+            path=str(arguments.get("path") or ""),
+            window=bool(arguments.get("window")),
+        )
+    except Exception as exc:
+        return _actionable_tool_error(_CAPTURE_SCREEN_TOOL, exc)
     if not isinstance(result, Mapping):
-        raise LiveModelRoleError("Actor capture runner returned a non-object result")
+        return _actionable_tool_error(
+            _CAPTURE_SCREEN_TOOL,
+            TypeError("capture runner returned a non-object result"),
+        )
     output = dict(result)
     for key in ("error", "detail"):
         value = output.get(key)
         if isinstance(value, str) and len(value) > _CAPTURE_OUTPUT_MAX_CHARS:
             output[key] = value[:_CAPTURE_OUTPUT_MAX_CHARS]
-    return output
+    return _actionable_tool_result(_CAPTURE_SCREEN_TOOL, output)
 
 
 def _call_list_windows(
@@ -1331,18 +1679,20 @@ def _call_list_windows(
 ) -> dict[str, Any]:
     """Return the visible window inventory through the injected reader."""
     if windows_reader is None or not callable(windows_reader):
-        raise LiveModelRoleError("Actor window inventory is unavailable")
+        return _actionable_tool_result(
+            _LIST_WINDOWS_TOOL,
+            {"ok": False, "error": "window inventory is unavailable"},
+        )
     try:
         result = windows_reader()
     except Exception as exc:
-        raise LiveModelRoleError(
-            f"Actor window inventory failed: {type(exc).__name__}: {exc}"
-        ) from exc
+        return _actionable_tool_error(_LIST_WINDOWS_TOOL, exc)
     if isinstance(result, Mapping):
-        return dict(result)
+        return _actionable_tool_result(_LIST_WINDOWS_TOOL, result)
     if not isinstance(result, list):
-        raise LiveModelRoleError(
-            "Actor window inventory returned a non-list result"
+        return _actionable_tool_error(
+            _LIST_WINDOWS_TOOL,
+            TypeError("window inventory returned a non-list result"),
         )
     bounded: list[dict[str, Any]] = []
     for item in result[-24:]:
@@ -1362,11 +1712,20 @@ def _call_paste_image(
 ) -> dict[str, Any]:
     """Paste an image file into the current target through the injected runner."""
     if paste_runner is None or not callable(paste_runner):
-        raise LiveModelRoleError("Actor image-paste runner is unavailable")
-    result = paste_runner(path=str(arguments.get("path") or ""))
+        return _actionable_tool_result(
+            _PASTE_IMAGE_TOOL,
+            {"ok": False, "error": "image-paste runner is unavailable"},
+        )
+    try:
+        result = paste_runner(path=str(arguments.get("path") or ""))
+    except Exception as exc:
+        return _actionable_tool_error(_PASTE_IMAGE_TOOL, exc)
     if not isinstance(result, Mapping):
-        raise LiveModelRoleError("Actor image-paste runner returned a non-object result")
-    return dict(result)
+        return _actionable_tool_error(
+            _PASTE_IMAGE_TOOL,
+            TypeError("image-paste runner returned a non-object result"),
+        )
+    return _actionable_tool_result(_PASTE_IMAGE_TOOL, result)
 
 
 def _connector_exchange(
@@ -1437,26 +1796,38 @@ def _call_connector(
     stop_event: Any | None,
 ) -> dict[str, Any]:
     if gateway is None or getattr(gateway, "available", False) is not True:
-        raise LiveModelRoleError("Actor connector gateway is unavailable")
-    if name == _CONNECTOR_SEARCH_TOOL:
-        result = gateway.search(
-            query=arguments["query"],
-            connector=arguments["connector"],
-            timeout_s=timeout_s,
-            stop_event=stop_event,
+        return _actionable_tool_result(
+            name,
+            {"ok": False, "error": "connector gateway is unavailable"},
         )
-    elif name == _CONNECTOR_CALL_TOOL:
-        result = gateway.call(
-            ref=arguments["ref"],
-            arguments_json=arguments["arguments_json"],
-            timeout_s=timeout_s,
-            stop_event=stop_event,
-        )
-    else:  # pragma: no cover - exact connector tool set above
-        raise LiveModelRoleError("Actor returned an unsupported connector tool")
+    try:
+        if name == _CONNECTOR_SEARCH_TOOL:
+            result = gateway.search(
+                query=arguments["query"],
+                connector=arguments["connector"],
+                timeout_s=timeout_s,
+                stop_event=stop_event,
+            )
+        elif name == _CONNECTOR_CALL_TOOL:
+            result = gateway.call(
+                ref=arguments["ref"],
+                arguments_json=arguments["arguments_json"],
+                timeout_s=timeout_s,
+                stop_event=stop_event,
+            )
+        else:  # pragma: no cover - exact connector tool set above
+            return _actionable_tool_result(
+                name,
+                {"ok": False, "error": "unsupported connector tool"},
+            )
+    except Exception as exc:
+        return _actionable_tool_error(name, exc)
     if not isinstance(result, Mapping):
-        raise LiveModelRoleError("connector gateway returned a non-object result")
-    return dict(result)
+        return _actionable_tool_error(
+            name,
+            TypeError("connector gateway returned a non-object result"),
+        )
+    return _actionable_tool_result(name, result)
 
 
 def _shell_exchange(
@@ -1528,21 +1899,30 @@ def _call_shell(
 ) -> dict[str, Any]:
     """Execute one bounded shell command through the injected runner."""
     if runner is None or not callable(getattr(runner, "run", None)):
-        raise LiveModelRoleError("Actor shell runner is unavailable")
-    result = runner.run(
-        command=str(arguments.get("command") or ""),
-        shell=str(arguments.get("shell") or "powershell"),
-        timeout_s=float(arguments.get("timeout_s") or 30),
-        stop_event=stop_event,
-    )
+        return _actionable_tool_result(
+            _SHELL_TOOL,
+            {"ok": False, "error": "shell runner is unavailable"},
+        )
+    try:
+        result = runner.run(
+            command=str(arguments.get("command") or ""),
+            shell=str(arguments.get("shell") or "powershell"),
+            timeout_s=float(arguments.get("timeout_s") or 30),
+            stop_event=stop_event,
+        )
+    except Exception as exc:
+        return _actionable_tool_error(_SHELL_TOOL, exc)
     if not isinstance(result, Mapping):
-        raise LiveModelRoleError("Actor shell runner returned a non-object result")
+        return _actionable_tool_error(
+            _SHELL_TOOL,
+            TypeError("shell runner returned a non-object result"),
+        )
     output = dict(result)
-    for key in ("stdout", "stderr", "error"):
+    for key in ("stdout", "stderr", "output", "error"):
         value = output.get(key)
         if isinstance(value, str) and len(value) > _SHELL_MAX_OUTPUT_CHARS:
-            output[key] = value[:_SHELL_MAX_OUTPUT_CHARS]
-    return output
+            output[key] = value[-_SHELL_MAX_OUTPUT_CHARS:]
+    return _actionable_tool_result(_SHELL_TOOL, output)
 
 
 def _initial_calls_from_response(
@@ -1589,18 +1969,30 @@ def _execute_initial_call(
         # Status tools declare no parameters; surplus fields are tolerated.
         for field in tuple(arguments):
             arguments.pop(field, None)
-        return dict(status_provider.resolve(name))
+        try:
+            result = status_provider.resolve(name)
+        except Exception as exc:
+            return _actionable_tool_error(str(name), exc)
+        if not isinstance(result, Mapping):
+            return _actionable_tool_error(
+                str(name),
+                TypeError("status provider returned a non-object result"),
+            )
+        return _actionable_tool_result(str(name), result)
     if name == _SHELL_TOOL:
         if shell_runner is None or not callable(
             getattr(shell_runner, "run", None)
         ):
             raise LiveModelRoleError("Actor shell runner is unavailable")
-        result = shell_runner.run(
-            command=str(arguments.get("command") or ""),
-            shell=str(arguments.get("shell") or "powershell"),
-            timeout_s=float(arguments.get("timeout_s") or 30),
-            stop_event=stop_event,
-        )
+        try:
+            result = shell_runner.run(
+                command=str(arguments.get("command") or ""),
+                shell=str(arguments.get("shell") or "powershell"),
+                timeout_s=float(arguments.get("timeout_s") or 30),
+                stop_event=stop_event,
+            )
+        except Exception as exc:
+            return _actionable_tool_error(_SHELL_TOOL, exc)
         if not isinstance(result, Mapping):
             raise LiveModelRoleError(
                 "Actor shell runner returned a non-object result"
@@ -1610,24 +2002,30 @@ def _execute_initial_call(
             value = output.get(key)
             if isinstance(value, str) and len(value) > _SHELL_MAX_OUTPUT_CHARS:
                 output[key] = value[:_SHELL_MAX_OUTPUT_CHARS]
-        return output
+        return _actionable_tool_result(_SHELL_TOOL, output)
     if name == _WINDOW_TEXT_TOOL:
         if window_text_reader is None or not callable(window_text_reader):
             raise LiveModelRoleError("Actor window-text reader is unavailable")
-        result = window_text_reader(turn)
+        try:
+            result = window_text_reader(turn)
+        except Exception as exc:
+            return _actionable_tool_error(_WINDOW_TEXT_TOOL, exc)
         if not isinstance(result, Mapping):
             raise LiveModelRoleError(
                 "Actor window-text reader returned a non-object result"
             )
-        return dict(result)
+        return _actionable_tool_result(_WINDOW_TEXT_TOOL, result)
     if name is not None and name in _CONNECTOR_TOOLS:
-        return _call_connector(
-            connector_gateway,
-            name,
-            arguments,
-            timeout_s=timeout_s,
-            stop_event=stop_event,
-        )
+        try:
+            return _call_connector(
+                connector_gateway,
+                name,
+                arguments,
+                timeout_s=timeout_s,
+                stop_event=stop_event,
+            )
+        except Exception as exc:
+            return _actionable_tool_error(str(name), exc)
     raise LiveModelRoleError(
         f"Actor initial turn returned an unapproved tool: {name!r}"
     )
@@ -1687,7 +2085,10 @@ def _initial_admission_from_response(
     if type(reasoning) is str:
         assistant["reasoning_content"] = reasoning
     return (
-        VisualActorTurnAdmission(kind="desktop"),
+        VisualActorTurnAdmission(
+            kind="desktop",
+            narration=(content or "").strip(),
+        ),
         _InitialExchange(
             messages=tuple(deepcopy([*messages, assistant])),
             tool_call_id=call_id,
@@ -1812,7 +2213,7 @@ class LiveVisualActor:
         model: str,
         runtime: ModelCallRuntime,
         total_timeout_s: float = 120.0,
-        max_output_tokens: int = 768,
+        max_output_tokens: int = 4096,
         on_attempt: Callable[[ModelAttempt], None] | None = None,
         on_response: Callable[[Any], None] | None = None,
         connector_gateway: Any | None = None,
@@ -1882,36 +2283,9 @@ class LiveVisualActor:
 
     @property
     def model_call_reservation(self) -> int:
-        # One terminal proposal + one format repair + a shared local-tool
-        # budget (status/shell/connector) that the model spends freely.
-        local_budget = (
-            _STATUS_TOOL_CALL_LIMIT
-            if self._status_provider is not None
-            else 0
-        ) + (
-            _CONNECTOR_TOOL_CALL_LIMIT
-            if self._connector_gateway is not None
-            else 0
-        ) + (
-            _SHELL_TOOL_CALL_LIMIT if self._shell_runner is not None else 0
-        ) + (
-            _WINDOW_TEXT_RESERVATION
-            if self._window_text_reader is not None
-            else 0
-        ) + (
-            _CAPTURE_SCREEN_RESERVATION
-            if self._capture_runner is not None
-            else 0
-        ) + (
-            _LIST_WINDOWS_RESERVATION
-            if self._windows_reader is not None
-            else 0
-        ) + (
-            _PASTE_IMAGE_RESERVATION
-            if self._paste_runner is not None
-            else 0
-        )
-        return 1 + 1 + local_budget
+        # The task-level counter supplies the actual remaining allowance.
+        # No tool family owns a smaller quota inside it.
+        return _MODEL_CALL_RESERVATION
 
     def _record_response(self, response: Any) -> None:
         if self._on_response is None:
@@ -2004,7 +2378,6 @@ class LiveVisualActor:
         exchange: _InitialExchange | None = None
         connector_limit = self._connector_call_limit(_model_call_limit)
         repair_attempted = False
-        shell_calls = 0
         repair_budget = _model_call_limit is None or _model_call_limit >= 2
         for connector_calls in range(connector_limit + (2 if repair_budget else 1)):
             if connector_calls == connector_limit:
@@ -2024,6 +2397,10 @@ class LiveVisualActor:
                 runtime=self._runtime,
             )
             self._record_response(outcome.response)
+            if _finish_reason(outcome.response) == "length":
+                messages.extend(_truncation_messages(outcome.response))
+                provider_request["messages"] = [system_message, *messages]
+                continue
             try:
                 calls = _initial_calls_from_response(outcome.response)
             except LiveModelRoleError as exc:
@@ -2109,41 +2486,6 @@ class LiveVisualActor:
                 if call_name == "observe_desktop":
                     terminal = call
                     continue
-                if (
-                    call_name == _SHELL_TOOL
-                    and shell_calls >= _SHELL_TOOL_CALL_LIMIT
-                ):
-                    # Per-turn shell budget on the initial text round too:
-                    # do not execute another shell command this turn.
-                    call_id = member(call, "id")
-                    if type(call_id) is not str or not call_id:
-                        raise InvalidActorProposal(
-                            "Actor initial tool call requires an id"
-                        )
-                    executed_any = True
-                    pending_tool_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": _canonical_json(
-                                {
-                                    "tool_budget_exhausted": "run_shell",
-                                    "message": (
-                                        "run_shell is limited to "
-                                        f"{_SHELL_TOOL_CALL_LIMIT} calls "
-                                        "per initial turn; reply or observe "
-                                        "the desktop now"
-                                    ),
-                                }
-                            ),
-                        }
-                    )
-                    provider_request["tools"] = [
-                        tool
-                        for tool in provider_request["tools"]
-                        if _tool_function_name(tool) != _SHELL_TOOL
-                    ]
-                    continue
                 try:
                     result = _execute_initial_call(
                         call,
@@ -2158,8 +2500,6 @@ class LiveVisualActor:
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
                 executed_any = True
-                if call_name == _SHELL_TOOL:
-                    shell_calls += 1
                 call_id = member(call, "id")
                 if type(call_id) is not str or not call_id:
                     raise InvalidActorProposal(
@@ -2244,7 +2584,10 @@ class LiveVisualActor:
                     ),
                     tool_call_id=terminal_id,
                 )
-                admission = VisualActorTurnAdmission(kind="desktop")
+                admission = VisualActorTurnAdmission(
+                    kind="desktop",
+                    narration=(content or "").strip(),
+                )
                 break
             if not executed_any:
                 raise InvalidActorProposal(
@@ -2322,6 +2665,16 @@ class LiveVisualActor:
         connector_tools = _connector_tool_definitions(self._connector_gateway)
         context = turn.to_dict()
         context.pop("tools")
+        previous_action = context.get("previous_action")
+        if (
+            isinstance(previous_action, dict)
+            and previous_action.get("input_completed") is False
+            and previous_action.get("error_kind")
+        ):
+            previous_action["next_step"] = (
+                "The physical action did not run. Use the current image and "
+                "error_kind to change arguments or choose another tool."
+            )
         context["submitted_size"] = list(submitted_size)
         user_message = {
             "role": "user",
@@ -2417,7 +2770,6 @@ class LiveVisualActor:
         outcome = None
         decision = None
         repair_attempted = False
-        shell_calls = 0
         connector_limit = self._connector_call_limit(_model_call_limit)
         repair_budget = (
             _model_call_limit is None or _model_call_limit >= 2
@@ -2440,6 +2792,11 @@ class LiveVisualActor:
                 runtime=self._runtime,
             )
             self._record_response(outcome.response)
+            if _finish_reason(outcome.response) == "length":
+                truncation = _truncation_messages(outcome.response)
+                current_exchange.extend(truncation)
+                provider_request["messages"].extend(truncation)
+                continue
             status = None
             if self._status_provider is not None:
                 try:
@@ -2475,41 +2832,9 @@ class LiveVisualActor:
                     raise InvalidActorProposal(str(exc)) from exc
             if shell is not None:
                 assistant, call_id, name, arguments = shell
-                if shell_calls >= _SHELL_TOOL_CALL_LIMIT:
-                    # Per-turn shell budget: do not execute another shell
-                    # command this turn.  Return the reason to the model and
-                    # drop run_shell from the visible tools for the rest of
-                    # the turn so the visual line keeps advancing.
-                    shell_budget_messages = [
-                        assistant,
-                        {
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": _canonical_json(
-                                {
-                                    "tool_budget_exhausted": "run_shell",
-                                    "message": (
-                                        "run_shell is limited to "
-                                        f"{_SHELL_TOOL_CALL_LIMIT} calls "
-                                        "per visual turn; choose a GUI "
-                                        "tool now"
-                                    ),
-                                }
-                            ),
-                        },
-                    ]
-                    current_exchange.extend(shell_budget_messages)
-                    provider_request["messages"].extend(shell_budget_messages)
-                    provider_request["tools"] = [
-                        tool
-                        for tool in provider_request["tools"]
-                        if _tool_function_name(tool) != _SHELL_TOOL
-                    ]
-                    continue
                 if connector_calls >= connector_limit:
                     provider_request["tools"] = terminal_tools
                     continue
-                shell_calls += 1
                 result = _call_shell(
                     self._shell_runner,
                     arguments,
@@ -2643,9 +2968,18 @@ class LiveVisualActor:
                     decision = _proposal_from_response(
                         outcome.response,
                         frozenset(
-                            _MODEL_TOOL_NAMES.get(tool.name, tool.name)
-                            for tool in turn.tools
+                            {
+                                *(
+                                    _tool_function_name(tool)
+                                    for tool in terminal_tools
+                                ),
+                                *(
+                                    _MODEL_TOOL_NAMES.get(tool.name, tool.name)
+                                    for tool in turn.tools
+                                ),
+                            }
                         ),
+                        frozenset(tool.name for tool in turn.tools),
                     )
                     break
                 except InvalidActorProposal as exc:

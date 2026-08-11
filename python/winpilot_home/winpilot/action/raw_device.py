@@ -592,6 +592,7 @@ class RawDeviceExecutor:
         pointer_already_held: bool = False,
         keep_holding: bool = False,
         hold_token: str | None = None,
+        enforce_foreground: bool = True,
     ) -> RawActionReceipt:
         global _held_drag_owner
 
@@ -623,6 +624,7 @@ class RawDeviceExecutor:
             or not callable(final_guard)
             or type(pointer_already_held) is not bool
             or type(keep_holding) is not bool
+            or type(enforce_foreground) is not bool
         ):
             return self._receipt(
                 "drag", MutationOutcome.NOT_STARTED,
@@ -641,7 +643,7 @@ class RawDeviceExecutor:
                 error_kind="invalid_held_drag_args",
             )
         call_kwargs: dict[str, Any] = {
-            "hwnd": context.target_hwnd,
+            "hwnd": context.target_hwnd if enforce_foreground else None,
             "final_guard": final_guard,
         }
         if canonical_points:

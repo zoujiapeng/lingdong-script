@@ -843,6 +843,91 @@ def test_screen_first_click_is_admitted_on_any_visible_window(
     assert authority.current.region == desktop
 
 
+def test_screen_first_held_drag_skips_bound_window_foreground(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desktop = (0, 0, 1920, 1080)
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
+        lambda: Region(*desktop),
+    )
+    authority = FrameAuthority()
+    before = authority.commit(
+        epoch=EPOCH,
+        hwnd=HWND,
+        region=desktop,
+        scope="full_desktop",
+        reason="screen-first",
+        submitted_size=(1120, 630),
+        image_b64=_jpeg(20),
+        captured_at=1.0,
+        expected_previous_frame_id=0,
+    )
+    observer = FrameObserver(
+        authority,
+        capture=lambda _hwnd, **_kwargs: _jpeg(220),
+        virtual_desktop=lambda: Region(*desktop),
+        captured_at=lambda: 2.0,
+    )
+    binding = TargetBinding(
+        binding_id="target-binding",
+        hwnd=HWND,
+        process_id=PROCESS_ID,
+        executable_identity="C:/app.exe",
+        title_snapshot="App",
+        established_by_evidence_ref="evidence-target-bound",
+        epoch=EPOCH,
+    )
+    start = _map_submitted_test_point(
+        50.0, 40.0, region=desktop, submitted_size=(1120, 630)
+    )
+    end = _map_submitted_test_point(
+        80.0, 60.0, region=desktop, submitted_size=(1120, 630)
+    )
+    probe = _Probe(
+        LiveTargetSnapshot(
+            hwnd=HWND,
+            root_hwnd=HWND,
+            process_id=PROCESS_ID,
+            executable_identity=binding.executable_identity,
+            region=REGION,
+            foreground_root_hwnd=HWND + 1,
+        ),
+        expected_hit_point=(start, end),
+        hit_root=HWND + 1,
+    )
+    raw = _RawHarness(True)
+    trace = _Trace(False)
+    adapter = AtomicDesktopAdapter(
+        frame_authority=authority,
+        frame_observer=observer,
+        frozen_target_binding=binding,
+        target_probe=probe,
+        raw_device=raw.executor(),
+        receipt_trace_sink=trace,
+        post_input_settle_delay_s=0.0,
+    )
+    envelope = _replace_action_args(
+        _envelope(before, binding, "drag"),
+        {
+            "image_x1": 50.0,
+            "image_y1": 40.0,
+            "image_x2": 80.0,
+            "image_y2": 60.0,
+            "keep_holding": True,
+        },
+    )
+
+    try:
+        attempt = adapter.execute(envelope)
+        assert attempt.input_completed is True
+        assert raw.calls[0][0] == "drag"
+        assert raw.calls[0][1][5] is None
+        assert trace.records[0][0].outcome is MutationOutcome.APPLIED
+    finally:
+        adapter.close()
+
+
 def test_screen_first_click_rejects_dead_hit_test_but_keeps_desktop_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

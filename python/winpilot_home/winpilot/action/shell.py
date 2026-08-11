@@ -11,6 +11,7 @@ Gated by ``config.agent.shell_enabled``: turning it off forces pure-GUI mode
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import time
 import uuid
 
@@ -20,6 +21,14 @@ from . import safety
 
 _DEFAULT_TIMEOUT_S = 30
 _MAX_OUTPUT_CHARS = 6000  # what we hand back to the LLM (full text still logged)
+
+# Execution/result semantics adapted from Pi's MIT-licensed bash tool at
+# packages/coding-agent/src/core/tools/bash.ts, bash-executor.ts and
+# truncate.ts (upstream commit f8c71c6a0693bc7f71f84e92783315d6a725a721).
+# This is the Python/Windows port used by WinPilot; Pi is not embedded as a
+# second agent runtime.
+_PI_MAX_OUTPUT_LINES = 2000
+_PI_MAX_OUTPUT_BYTES = 50 * 1024
 
 
 def shell_enabled() -> bool:
@@ -33,6 +42,116 @@ def _truncate(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
     head = text[: limit // 2]
     tail = text[-limit // 2:]
     return f"{head}\n...（输出已截断 {len(text) - limit} 字符）...\n{tail}"
+
+
+def _truncate_tail(
+    text: str,
+    *,
+    max_lines: int = _PI_MAX_OUTPUT_LINES,
+    max_bytes: int = _PI_MAX_OUTPUT_BYTES,
+) -> tuple[str, dict]:
+    """Keep Pi-style tail output and describe exactly what was omitted."""
+
+    text = text or ""
+    total_lines = len(text.splitlines())
+    total_bytes = len(text.encode("utf-8"))
+    output = text
+    truncated_by: list[str] = []
+
+    lines = output.splitlines(keepends=True)
+    if len(lines) > max_lines:
+        output = "".join(lines[-max_lines:])
+        truncated_by.append("lines")
+
+    encoded = output.encode("utf-8")
+    if len(encoded) > max_bytes:
+        # Decode with ignore so a byte cut through a multi-byte character
+        # never leaks replacement glyphs into the model context.
+        output = encoded[-max_bytes:].decode("utf-8", errors="ignore")
+        truncated_by.append("bytes")
+
+    return output, {
+        "truncated": bool(truncated_by),
+        "truncated_by": "+".join(truncated_by),
+        "total_lines": total_lines,
+        "total_bytes": total_bytes,
+        "shown_lines": len(output.splitlines()),
+        "shown_bytes": len(output.encode("utf-8")),
+    }
+
+
+def _save_full_output(text: str) -> str | None:
+    """Save truncated output like Pi so the model can inspect it on demand."""
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix="winpilot-pi-shell-",
+            suffix=".log",
+            delete=False,
+        ) as handle:
+            handle.write(text)
+            return handle.name
+    except OSError as exc:
+        logger.debug("failed to save full shell output: %s", exc)
+        return None
+
+
+def _shape_result(
+    *,
+    stdout: str,
+    stderr: str,
+    ok: bool,
+    exit_code: int | None,
+    error: str = "",
+    timeout: bool = False,
+    stopped: bool = False,
+) -> dict:
+    """Return bounded tail output plus an inspectable full-output path."""
+
+    combined = stdout
+    if stderr:
+        combined = f"{combined}\n{stderr}" if combined else stderr
+    output, output_meta = _truncate_tail(combined)
+    stdout_tail, _ = _truncate_tail(stdout)
+    stderr_tail, _ = _truncate_tail(stderr)
+    full_output_path = (
+        _save_full_output(combined) if output_meta["truncated"] else None
+    )
+    result = {
+        "ok": ok,
+        "exit_code": exit_code,
+        "stdout": stdout_tail,
+        "stderr": stderr_tail,
+        "output": output or "(no output)",
+        "output_meta": output_meta,
+        "foreground_window": _foreground_window_fact(),
+    }
+    if full_output_path:
+        result["full_output_path"] = full_output_path
+    if error:
+        result["error"] = error
+    if timeout:
+        result["timeout"] = True
+    if stopped:
+        result["stopped"] = True
+    if not ok:
+        if timeout:
+            result["next_step"] = (
+                "inspect partial output, split the command, or increase timeout"
+            )
+        elif stopped:
+            result["next_step"] = "do not retry unless the run continues"
+        elif exit_code not in (None, 0):
+            result["next_step"] = (
+                "use the output to correct the command or choose another tool"
+            )
+        else:
+            result["next_step"] = (
+                "change the command or choose another tool"
+            )
+    return result
 
 
 # PowerShell 5.1 pipes output in the ANSI codepage (GBK on Chinese systems);
@@ -167,10 +286,14 @@ def run(command: str, shell: str = "powershell",
                         stdout_b, stderr_b = b"", b""
                     BUS.publish("action", action="shell_result", exit_code=None,
                                 ok=False, output_preview="stopped")
-                    return {"ok": False, "error": "command stopped",
-                            "stopped": True,
-                            "stdout": _truncate(_decode(stdout_b or b"", prefer)),
-                            "stderr": _truncate(_decode(stderr_b or b"", prefer))}
+                    return _shape_result(
+                        stdout=_decode(stdout_b or b"", prefer),
+                        stderr=_decode(stderr_b or b"", prefer),
+                        ok=False,
+                        exit_code=None,
+                        error="command stopped",
+                        stopped=True,
+                    )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(argv, timeout_s)
@@ -189,26 +312,36 @@ def run(command: str, shell: str = "powershell",
         logger.warning("shell command timed out (%ss): %s", timeout_s, command[:120])
         BUS.publish("action", action="shell_result", exit_code=None,
                     ok=False, output_preview=f"timeout after {timeout_s}s")
-        return {"ok": False, "error": f"command timed out ({timeout_s}s)",
-                "timeout": True,
-                "stdout": _truncate(_decode(stdout_b or b"", prefer)),
-                "stderr": _truncate(_decode(stderr_b or b"", prefer))}
+        return _shape_result(
+            stdout=_decode(stdout_b or b"", prefer),
+            stderr=_decode(stderr_b or b"", prefer),
+            ok=False,
+            exit_code=None,
+            error=f"command timed out ({timeout_s}s)",
+            timeout=True,
+        )
     except Exception as exc:
         logger.warning("shell execution failed: %s", exc)
-        return {"ok": False, "error": str(exc)}
+        return _shape_result(
+            stdout="",
+            stderr="",
+            ok=False,
+            exit_code=None,
+            error=str(exc),
+        )
 
-    stdout = _truncate(_decode(stdout_b or b"", prefer))
-    stderr = _truncate(_decode(stderr_b or b"", prefer))
+    stdout = _decode(stdout_b or b"", prefer)
+    stderr = _decode(stderr_b or b"", prefer)
     ok = proc.returncode == 0
     BUS.publish("action", action="shell_result", exit_code=proc.returncode,
                 ok=ok, output_preview=(stdout or stderr)[:300])
-    return {
-        "ok": ok,
-        "exit_code": proc.returncode,
-        "stdout": stdout,
-        "stderr": stderr,
-        "foreground_window": _foreground_window_fact(),
-    }
+    return _shape_result(
+        stdout=stdout,
+        stderr=stderr,
+        ok=ok,
+        exit_code=proc.returncode,
+        error=("" if ok else f"command exited with code {proc.returncode}"),
+    )
 
 
 def _foreground_window_fact() -> dict[str, Any]:

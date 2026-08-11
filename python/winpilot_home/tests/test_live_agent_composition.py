@@ -302,13 +302,13 @@ def _config() -> dict[str, Any]:
     }
 
 
-def _observe_desktop_response() -> dict[str, Any]:
+def _observe_desktop_response(content: str = "") -> dict[str, Any]:
     return {
         "choices": [
             {
                 "message": {
                     "role": "assistant",
-                    "content": "",
+                    "content": content,
                     "tool_calls": [
                         {
                             "id": "call-observe-desktop",
@@ -1014,6 +1014,63 @@ def test_native_provider_protocols_cross_deadline_boundary_and_report_usage(
     assert usage_events[0]["model_role"] == "vnext_visual_actor"
 
 
+def test_model_tool_shape_diagnostics_keep_types_but_not_argument_content() -> None:
+    response = {
+        "choices": [{
+            "message": {
+                "tool_calls": [{
+                    "function": {
+                        "name": "keyboard",
+                        "arguments": json.dumps({
+                            "action": "type",
+                            "text": "PRIVATE-TEXT",
+                            "task_state_update": {
+                                "scratchpad": "PRIVATE-STATE",
+                            },
+                        }),
+                    },
+                }],
+            },
+        }],
+    }
+
+    shapes = live_agent._model_tool_shapes(response)
+
+    assert shapes == [{
+        "name": "keyboard",
+        "discriminator": "type",
+        "argument_types": {
+            "action": "string",
+            "task_state_update": "object",
+            "text": "string",
+        },
+    }]
+    assert "PRIVATE" not in json.dumps(shapes)
+
+
+def test_model_response_shape_records_truncation_without_content() -> None:
+    response = {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {
+                "content": "PRIVATE-CONTENT",
+                "tool_calls": [],
+            },
+        }],
+    }
+
+    shape = live_agent._model_response_shape(response)
+
+    assert shape == {
+        "choice_count": 1,
+        "finish_reason": "length",
+        "content_type": "str",
+        "content_chars": 15,
+        "tool_call_count": 0,
+    }
+    assert "PRIVATE" not in json.dumps(shape)
+
+
 def test_vnext_usage_and_cache_tokens_reach_runtime_and_terminal_event(
     tmp_path: Path,
 ) -> None:
@@ -1595,7 +1652,14 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
         {},
         _config(),
         run_manager=manager,
-        _dependencies=_dependencies(session=session),
+        _dependencies=_dependencies(
+            session=session,
+            client_factory=lambda **_kwargs: _RawClient(
+                _observe_desktop_response(
+                    "好的，我先查看当前桌面，再继续完成任务。"
+                )
+            ),
+        ),
     )
     BUS.add_sink(events.append)
     try:
@@ -1617,7 +1681,14 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     starts = [item for item in events if item["type"] == "live_agent_start"]
     done = [item for item in events if item["type"] == "live_agent_done"]
     turns = [item for item in events if item["type"] == "live_agent_turn"]
+    messages = [
+        item for item in events if item["type"] == "live_agent_message"
+    ]
     assert len(starts) == len(done) == 1
+    assert [item["narration"] for item in messages] == [
+        "好的，我先查看当前桌面，再继续完成任务。"
+    ]
+    assert messages[0]["phase"] == "starting"
     assert len(turns) == 4
     assert turns[-2]["status"] == "verification_recorded"
     assert starts[0]["runtime_budget"] == {
@@ -1629,6 +1700,9 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     assert done[0]["status"] == "mission_verified"
     event_types = [item["type"] for item in events]
     assert event_types.index("vnext_model_call") < event_types.index(
+        "live_agent_message"
+    )
+    assert event_types.index("live_agent_message") < event_types.index(
         "desktop_lease_requested"
     )
     assert event_types.index("desktop_lease_requested") < event_types.index(
@@ -3607,13 +3681,8 @@ def test_post_capture_failure_defers_to_fresh_observation_without_replay(
         tool["function"]["name"]: tool["function"]["parameters"]
         for tool in actor_client.requests[0]["tools"]
     }
-    for name in {
-        "click",
-        "double_click",
-        "scroll",
-        "type_text",
-        "press_key",
-    }:
+    assert {"pointer", "keyboard", "finish"} <= set(tools)
+    for name in {"pointer", "keyboard"}:
         local_intent = tools[name]["properties"]["local_intent"]
         assert local_intent["type"] == "string"
         assert local_intent["default"] == ""

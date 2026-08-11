@@ -1328,6 +1328,17 @@ def test_run_projection_tracks_live_actor_narration():
     assert run["narration"] == ""
 
     store.on_event({
+        "type": "live_agent_message",
+        "ts": 1.5,
+        "run_id": run_id,
+        "runtime_version": "vnext",
+        "no_legacy_fallback": True,
+        "phase": "starting",
+        "narration": "好的，我先查看当前桌面。",
+    })
+    assert store.get(run_id)["narration"] == "好的，我先查看当前桌面。"
+
+    store.on_event({
         "type": "live_agent_turn",
         "ts": 2.0,
         "run_id": run_id,

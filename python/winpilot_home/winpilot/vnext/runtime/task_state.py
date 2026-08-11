@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
-_SCRATCHPAD_CHARS = 4096
+_SCRATCHPAD_CHARS = 8192
 
 
 class ActorTaskStateError(ValueError):
@@ -93,6 +93,10 @@ TASK_STATE_UPDATE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "properties": {
         "scratchpad": {
+            "description": (
+                "Your mutable working state: any current phase, stage rules, "
+                "plan, dependencies, facts, or recovery notes you choose."
+            ),
             "anyOf": [
                 {
                     "type": "string",
