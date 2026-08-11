@@ -296,7 +296,7 @@ class RunProjectionStore:
             # Live Actor narration: the model's own running commentary on the
             # real screen.  Each turn replaces the previous narration so the
             # frontend can show current progress, not a history summary.
-            if event_type == "live_agent_turn":
+            if event_type in {"live_agent_turn", "live_agent_message"}:
                 narration = event.get("narration")
                 if type(narration) is str and narration.strip():
                     run["narration"] = narration[:4096]

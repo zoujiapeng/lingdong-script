@@ -431,44 +431,38 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     )
     actor_contract = " ".join(VISUAL_ACTOR_SYSTEM_CONTRACT.split())
     assert len(actor_contract.split()) < 100
-    assert "current authoritative JPEG" in actor_contract
+    assert "current JPEG" in actor_contract
     assert "exact submitted-image pixels" in actor_contract
-    assert "goal is visibly complete, call claim_obligation_done" in actor_contract
-    assert "may mix chat and task" in actor_contract
-    assert "call blocked instead of repeating it" in actor_contract
+    assert "Chat and act naturally" in actor_contract
+    assert "runtime does not classify or route" in actor_contract
+    assert "finish done" in actor_contract
+    assert "finish blocked" in actor_contract
     assert "When pointer_held is true" in actor_contract
     assert actor_request["tool_choice"] == "auto"
     assert "parallel_tool_calls" not in actor_request
     assert "n" not in actor_request
     assert "max_tokens" not in actor_request
-    assert actor_request["max_completion_tokens"] == 768
-    assert len(actor_request["tools"]) == 8
+    assert actor_request["max_completion_tokens"] == 4096
+    assert len(actor_request["tools"]) == 3
     assert {
         tool["function"]["name"] for tool in actor_request["tools"]
     } == {
-        "click",
-        "double_click",
-        "drag",
-        "scroll",
-        "type_text",
-        "press_key",
-        "claim_obligation_done",
-        "blocked",
+        "pointer",
+        "keyboard",
+        "finish",
     }
     descriptions = {
         tool["function"]["name"]: tool["function"]["description"]
         for tool in actor_request["tools"]
     }
-    assert "once" in descriptions["click"]
-    assert "Double-click" in descriptions["double_click"]
-    assert "ordered intermediate image_points" in descriptions["drag"]
-    assert "amount < 0 scrolls down" in descriptions["scroll"]
-    assert "amount > 0 scrolls up" in descriptions["scroll"]
-    assert "selected text is replaced" in descriptions["type_text"]
-    assert "one key or one ordered key chord" in descriptions["press_key"]
-    assert "never enters literal text" in descriptions["press_key"]
-    assert "without further mutation" in descriptions["claim_obligation_done"]
-    assert "no supplied action can advance" in descriptions["blocked"]
+    assert descriptions == {
+        "pointer": "Mouse: click, double-click, scroll, or drag on the image.",
+        "keyboard": "Keyboard: type text or press a key/chord.",
+        "finish": "End as done or blocked.",
+    }
+    assert actor_request["tools"][0]["function"]["parameters"]["properties"][
+        "action"
+    ]["enum"] == ["click", "double_click", "drag", "scroll"]
     assert "response_format" not in actor_request
     strict_schemas = [
         tool["function"]["parameters"]
@@ -480,6 +474,13 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         assert schema["properties"]["task_state_update"]["default"] == {
             "scratchpad": None
         }
+        scratchpad_field = schema["properties"]["task_state_update"][
+            "properties"
+        ]["scratchpad"]
+        scratchpad_schema = scratchpad_field["anyOf"][0]
+        assert scratchpad_schema["maxLength"] == 8192
+        assert "phase" in scratchpad_field["description"]
+        assert "stage rules" in scratchpad_field["description"]
     for schema in strict_schemas:
         assert {
             "allOf",
@@ -548,7 +549,8 @@ def test_initial_actor_turn_replies_with_native_history_and_short_system_contrac
     initial_contract = " ".join(INITIAL_ACTOR_SYSTEM_CONTRACT.split())
     assert len(initial_contract.split()) < 120
     assert "live screen" in initial_contract
-    assert "mixes chat and a task" in initial_contract
+    assert "interleave both freely" in initial_contract
+    assert "respond naturally while you work" in initial_contract
     # The initial contract must not teach keyword routing: no verb list is
     # mapped to observe_desktop.
     assert "Call observe_desktop for any request" not in initial_contract
@@ -617,6 +619,7 @@ def test_initial_observe_with_content_continues_on_the_same_actor() -> None:
 
     assert admission.kind == "desktop"
     assert admission.reply == ""
+    assert admission.narration == "I will inspect the desktop."
     assert isinstance(decision, ActorTurnDecision)
     assert len(clients[0].requests) == 2
     visual_messages = clients[0].requests[1]["messages"]
@@ -690,7 +693,7 @@ def test_initial_actor_lazily_calls_a_read_only_connector_then_replies() -> None
         }
     ]
     assert len(responses) == 3
-    assert actor.model_call_reservation == 6
+    assert actor.model_call_reservation == 120
     assert len(clients[0].requests) == 3
     assert [
         tool["function"]["name"]
@@ -944,6 +947,39 @@ def test_previous_action_is_passed_without_runtime_strategy_hint(
     assert context["previous_action"] == previous_action.to_dict()
     assert "scroll_guard" not in context
     assert "focus_guard" not in context
+
+
+def test_failed_physical_action_gets_one_actionable_model_hint() -> None:
+    _, clients = _build_clients(_tool_response())
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    failed = ActorPreviousActionView(
+        action="click",
+        input_completed=False,
+        visible_effect="",
+        semantic_summary="click",
+        error_kind="physical_attempt_failed",
+    )
+
+    actor.propose(
+        replace(_actor_turn(), previous_action=failed),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    context = json.loads(
+        clients[0].requests[0]["messages"][1]["content"][0]["text"]
+    )
+    assert context["previous_action"]["error_kind"] == (
+        "physical_attempt_failed"
+    )
+    assert "change arguments or choose another tool" in context[
+        "previous_action"
+    ]["next_step"]
 
 
 @pytest.mark.parametrize(
@@ -1209,9 +1245,10 @@ def test_actor_permissions_are_the_exact_broker_projected_subset() -> None:
         "image_x": 400,
         "image_y": 300,
     }
-    assert [
-        tool["function"]["name"]
-        for tool in clients[0].requests[0]["tools"]
+    tools = clients[0].requests[0]["tools"]
+    assert [tool["function"]["name"] for tool in tools] == ["pointer"]
+    assert tools[0]["function"]["parameters"]["properties"]["action"][
+        "enum"
     ] == ["click"]
     assert len(clients[0].requests) == 1
 
@@ -1259,11 +1296,11 @@ def test_actor_preserves_an_ordered_optional_runtime_drag_path() -> None:
     actor_schema = clients[0].requests[0]["tools"][0]["function"][
         "parameters"
     ]
-    assert "image_points" not in actor_schema["required"]
-    assert "keep_holding" not in actor_schema["required"]
-    assert actor_schema["properties"]["image_points"]["default"] == []
-    assert actor_schema["properties"]["keep_holding"]["default"] is False
-    assert actor_schema["properties"]["image_points"]["maxItems"] == 32
+    assert "path" not in actor_schema["required"]
+    assert "hold" not in actor_schema["required"]
+    assert actor_schema["properties"]["path"]["default"] == []
+    assert actor_schema["properties"]["hold"]["default"] is False
+    assert actor_schema["properties"]["path"]["maxItems"] == 32
     assert len(clients[0].requests) == 1
 
 
@@ -1376,6 +1413,90 @@ def test_actor_maps_only_the_two_approved_runtime_outcomes(
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
     ).proposal) == expected
+
+
+@pytest.mark.parametrize(
+    "name, arguments, expected_action, expected_args",
+    [
+        (
+            "pointer",
+            {
+                "action": "double_click",
+                "x": "320",
+                "y": "240",
+                "local_intent": "open the visible item",
+            },
+            "double_click",
+            {"image_x": 320, "image_y": 240},
+        ),
+        (
+            "pointer",
+            {
+                "action": "scroll",
+                "x": "500",
+                "y": "300",
+                "amount": "-480.0",
+                "local_intent": "see the next visible section",
+            },
+            "scroll",
+            {"image_x": 500, "image_y": 300, "amount": -480},
+        ),
+        (
+            "pointer",
+            {
+                "action": "drag",
+                "x": "10.5",
+                "y": "20",
+                "x2": "300",
+                "y2": "400.25",
+                "path": [["100", "120.5"], [200, "250"]],
+                "hold": True,
+                "local_intent": "continue through the visible path",
+            },
+            "drag",
+            {
+                "image_x1": 10.5,
+                "image_y1": 20,
+                "image_x2": 300,
+                "image_y2": 400.25,
+                "image_points": [[100, 120.5], [200, 250]],
+                "keep_holding": True,
+            },
+        ),
+        (
+            "keyboard",
+            {
+                "action": "press",
+                "keys": "CTRL+A",
+                "local_intent": "select the current text",
+            },
+            "hotkey",
+            {"keys": ["CTRL", "A"]},
+        ),
+    ],
+)
+def test_grouped_model_tools_translate_to_the_existing_physical_actions(
+    name: str,
+    arguments: dict[str, Any],
+    expected_action: str,
+    expected_args: dict[str, Any],
+) -> None:
+    _, clients = _build_clients(_tool_response(name, arguments))
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == expected_action
+    assert decision.proposal["args"] == expected_args
 
 
 def test_actor_uses_call_once_transport_policy() -> None:
@@ -1861,7 +1982,7 @@ def test_status_tools_are_never_offered_on_the_last_allowed_model_call() -> None
         tool["function"]["name"]
         for tool in clients[0].requests[0]["tools"]
     ] == ["observe_desktop"]
-    assert actor.model_call_reservation == 4
+    assert actor.model_call_reservation == 120
 
 
 def test_visual_actor_repairs_one_invalid_tool_call_before_physical_input() -> None:
@@ -2112,6 +2233,51 @@ def test_visual_turn_can_run_shell_before_gui_action() -> None:
     assert len(clients[0].requests) == 2
 
 
+def test_failed_shell_result_stays_in_band_with_an_actionable_next_step() -> None:
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="run_shell",
+                arguments={"command": "missing-command"},
+                call_id="failed-shell",
+            ),
+            _tool_response(call_id="gui-call"),
+        ]
+    )
+    runner = _RecordingShellRunner()
+    runner.result = {
+        "ok": False,
+        "exit_code": 1,
+        "stdout": "",
+        "stderr": "command was not found",
+    }
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    tool_messages = [
+        message
+        for message in clients[0].requests[1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    result = json.loads(tool_messages[-1]["content"])
+    assert result["stderr"] == "command was not found"
+    assert result["next_step"] == (
+        "use the output to correct the command or choose another tool"
+    )
+
+
 def test_shell_tool_is_absent_without_runner() -> None:
     _, clients = _build_clients(_tool_response())
     actor = LiveVisualActor(
@@ -2132,7 +2298,57 @@ def test_shell_tool_is_absent_without_runner() -> None:
     assert "run_shell" not in names
 
 
-def test_visual_turn_shell_calls_are_capped_at_per_turn_limit() -> None:
+def test_initial_truncation_continues_with_a_shorter_tool_call() -> None:
+    truncated = {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {
+                "role": "assistant",
+                "content": "partial implementation",
+                "tool_calls": [],
+            },
+        }],
+    }
+    reply = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "finished",
+                "tool_calls": [],
+            },
+        }],
+    }
+    _, clients = _build_clients([
+        truncated,
+        _tool_response(
+            name="run_shell",
+            arguments={"command": "Write-Output ok"},
+            call_id="short-shell",
+        ),
+        reply,
+    ])
+    runner = _RecordingShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    admission = actor.begin_turn("Complete the implementation")
+
+    assert admission.kind == "reply"
+    assert admission.reply == "finished"
+    assert [call["command"] for call in runner.calls] == ["Write-Output ok"]
+    assert any(
+        message.get("content")
+        == "Output was truncated. Continue with a shorter tool call."
+        for message in clients[0].requests[1]["messages"]
+    )
+
+
+def test_visual_turn_shell_calls_share_the_task_level_budget() -> None:
     _, clients = _build_clients(
         [
             *[
@@ -2168,12 +2384,13 @@ def test_visual_turn_shell_calls_are_capped_at_per_turn_limit() -> None:
     )
 
     assert decision.proposal["action"] == "type_text"
-    assert len(runner.calls) == 4
+    assert len(runner.calls) == 5
     assert [call["command"] for call in runner.calls] == [
         "tasklist 0",
         "tasklist 1",
         "tasklist 2",
         "tasklist 3",
+        "tasklist 4",
     ]
     budget_messages = [
         json.loads(m["content"])
@@ -2181,18 +2398,16 @@ def test_visual_turn_shell_calls_are_capped_at_per_turn_limit() -> None:
         if m.get("role") == "tool"
         and "tool_budget_exhausted" in str(m.get("content", ""))
     ]
-    assert budget_messages
-    assert budget_messages[0]["tool_budget_exhausted"] == "run_shell"
-    # run_shell is dropped from the visible tools after the per-turn cap.
+    assert not budget_messages
     names = [
         tool["function"]["name"]
         for tool in clients[0].requests[5]["tools"]
     ]
-    assert "run_shell" not in names
-    assert "type_text" in names
+    assert "run_shell" in names
+    assert "keyboard" in names
 
 
-def test_initial_turn_shell_calls_are_capped_at_per_turn_limit() -> None:
+def test_initial_turn_executes_all_model_selected_shell_calls() -> None:
     _, clients = _build_clients(
         [
             {
@@ -2254,20 +2469,13 @@ def test_initial_turn_shell_calls_are_capped_at_per_turn_limit() -> None:
     admission = actor.begin_turn("Check running processes")
 
     assert admission.kind == "desktop"
-    assert len(runner.calls) == 4
-    initial_feedback = [
-        json.loads(m["content"])
-        for m in clients[0].requests[1]["messages"]
-        if m.get("role") == "tool"
-        and "tool_budget_exhausted" in str(m.get("content", ""))
-    ]
-    assert initial_feedback
-    assert initial_feedback[0]["tool_budget_exhausted"] == "run_shell"
+    assert len(runner.calls) == 5
+    assert len(clients[0].requests) == 2
     names = [
         tool["function"]["name"]
         for tool in clients[0].requests[1]["tools"]
     ]
-    assert "run_shell" not in names
+    assert "run_shell" in names
 
 
 def test_propose_injects_rejection_feedback_into_native_context() -> None:

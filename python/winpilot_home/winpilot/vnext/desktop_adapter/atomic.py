@@ -977,6 +977,13 @@ class AtomicDesktopAdapter:
                     expected_point[1],
                     prepared.end_point[0],
                     prepared.end_point[1],
+                    # A full-desktop frame lets a held segment operate the
+                    # window under the model's point, just like ordinary
+                    # screen-first pointer input. A bound-window foreground
+                    # requirement only belongs to an explicit window crop.
+                    enforce_foreground=(
+                        before_frame.scope == "target_window"
+                    ),
                     **arguments,
                 )
                 return self._update_pointer_after_drag(

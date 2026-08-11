@@ -2136,6 +2136,16 @@ class _ModelCallCounter:
         with self._lock:
             return self._count
 
+    @property
+    def remaining(self) -> int:
+        with self._lock:
+            return max(
+                0,
+                self._maximum
+                - self._count
+                - sum(self._active_reservations.values()),
+            )
+
     def begin(self, model_role: str, *, reserve: int) -> int:
         if type(reserve) is not int or reserve <= 0:
             raise ValueError("model-call reservation must be positive")
@@ -2253,7 +2263,7 @@ class _BudgetedActor:
     def propose(self, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
         admitted = self._counter.begin(
             VISUAL_ACTOR_MODEL_ROLE,
-            reserve=self._role.model_call_reservation,
+            reserve=max(1, self._counter.remaining),
         )
         try:
             kwargs["_model_call_limit"] = admitted
@@ -2268,7 +2278,7 @@ class _BudgetedActor:
     ) -> VisualActorTurnAdmission:
         admitted = self._counter.begin(
             VISUAL_ACTOR_MODEL_ROLE,
-            reserve=self._role.model_call_reservation,
+            reserve=max(1, self._counter.remaining),
         )
         try:
             kwargs["_model_call_limit"] = admitted
@@ -2624,6 +2634,28 @@ def _build_actor_resources(
         usage_profile = model_profile_from_config(model.api)
 
         def record_usage(response: Any) -> None:
+            tool_shapes = _model_tool_shapes(response)
+            response_shape = _model_response_shape(response)
+            if publish_run_telemetry and response_shape:
+                BUS.publish(
+                    "vnext_model_response_shape",
+                    runtime_version=_RUNTIME_VERSION,
+                    no_legacy_fallback=True,
+                    run_id=run_id,
+                    mission_id=mission_id,
+                    model_role=VISUAL_ACTOR_MODEL_ROLE,
+                    **response_shape,
+                )
+            if publish_run_telemetry and tool_shapes:
+                BUS.publish(
+                    "vnext_model_tool_shape",
+                    runtime_version=_RUNTIME_VERSION,
+                    no_legacy_fallback=True,
+                    run_id=run_id,
+                    mission_id=mission_id,
+                    model_role=VISUAL_ACTOR_MODEL_ROLE,
+                    calls=tool_shapes,
+                )
             step_usage = accumulate_usage(
                 usage_total,
                 response,
@@ -2696,6 +2728,91 @@ def _build_actor_resources(
                 [exc, *cleanup_errors],
             ) from exc
         raise
+
+
+def _model_tool_shapes(response: Any) -> list[dict[str, Any]]:
+    """Project model calls to non-content diagnostics at the parse boundary."""
+
+    def value(container: Any, name: str) -> Any:
+        if isinstance(container, Mapping):
+            return container.get(name)
+        return getattr(container, name, None)
+
+    choices = value(response, "choices")
+    if not isinstance(choices, (list, tuple)) or not choices:
+        return []
+    message = value(choices[0], "message")
+    calls = value(message, "tool_calls")
+    if not isinstance(calls, (list, tuple)):
+        return []
+    projected: list[dict[str, Any]] = []
+    for call in calls:
+        function = value(call, "function")
+        name = value(function, "name")
+        raw_arguments = value(function, "arguments")
+        if type(name) is not str:
+            continue
+        arguments: dict[str, Any] = {}
+        if type(raw_arguments) is str:
+            try:
+                decoded = json.loads(raw_arguments)
+            except (TypeError, ValueError):
+                decoded = None
+            if type(decoded) is dict:
+                arguments = decoded
+        argument_types = {
+            key: (
+                "null"
+                if item is None
+                else "bool"
+                if type(item) is bool
+                else "number"
+                if type(item) in {int, float}
+                else "string"
+                if type(item) is str
+                else "array"
+                if type(item) is list
+                else "object"
+                if type(item) is dict
+                else type(item).__name__
+            )
+            for key, item in sorted(arguments.items())
+        }
+        discriminator = arguments.get("action", arguments.get("status"))
+        projected.append({
+            "name": name,
+            "discriminator": (
+                discriminator if type(discriminator) is str else ""
+            ),
+            "argument_types": argument_types,
+        })
+    return projected
+
+
+def _model_response_shape(response: Any) -> dict[str, Any]:
+    """Project finish mechanics without response text or argument values."""
+
+    def value(container: Any, name: str) -> Any:
+        if isinstance(container, Mapping):
+            return container.get(name)
+        return getattr(container, name, None)
+
+    choices = value(response, "choices")
+    if not isinstance(choices, (list, tuple)):
+        return {}
+    if len(choices) != 1:
+        return {"choice_count": len(choices)}
+    choice = choices[0]
+    message = value(choice, "message")
+    content = value(message, "content")
+    calls = value(message, "tool_calls")
+    return {
+        "choice_count": 1,
+        "finish_reason": str(value(choice, "finish_reason") or ""),
+        "content_type": "null" if content is None else type(content).__name__,
+        "content_chars": len(content) if isinstance(content, str) else 0,
+        "tool_call_count": len(calls) if isinstance(calls, (list, tuple)) else 0,
+    }
 
 
 def _target_evidence(
@@ -3647,6 +3764,15 @@ class _PreparedHandler:
                 history=self._history,
                 stop_event=bounded_stop,
             )
+            if admission.narration.strip():
+                BUS.publish(
+                    "live_agent_message",
+                    run_id=run_id,
+                    mission_id=mission_id,
+                    runtime_version=_RUNTIME_VERSION,
+                    narration=admission.narration.strip(),
+                    phase="starting",
+                )
             if admission.kind == "reply":
                 runtime_state["user_result"] = admission.reply
                 model_usage = actor_bundle.usage_total
