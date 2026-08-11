@@ -2194,12 +2194,92 @@ def test_initial_turn_can_run_shell_before_observe() -> None:
     assert tool_result["stdout"] == "notepad running"
 
 
+def test_actor_streams_public_narration_commands_results_and_task_state() -> None:
+    shell_response = _tool_response(
+        name="run_shell",
+        arguments={
+            "command": "python -m pytest -q",
+            "task_state_update": {
+                "scratchpad": "Phase: verify\n- run focused tests\n- revise if needed",
+            },
+        },
+        content="I have implemented the change; now I am checking it.",
+        call_id="visible-shell",
+    )
+    _, clients = _build_clients([
+        shell_response,
+        {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "visible-observe",
+                        "type": "function",
+                        "function": {
+                            "name": "observe_desktop",
+                            "arguments": "{}",
+                        },
+                    }],
+                },
+            }],
+        },
+    ])
+    runner = _RecordingShellRunner()
+    activities: list[dict[str, Any]] = []
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+        on_activity=activities.append,
+    )
+
+    admission = actor.begin_turn("Implement and verify the change")
+
+    assert admission.kind == "desktop"
+    assert [item["kind"] for item in activities] == [
+        "message",
+        "task_state",
+        "tool_start",
+        "tool_result",
+        "tool_start",
+    ]
+    assert activities[0]["message"] == (
+        "I have implemented the change; now I am checking it."
+    )
+    assert activities[1]["task_state"].startswith("Phase: verify")
+    assert activities[2] == {
+        "kind": "tool_start",
+        "tool": "run_shell",
+        "message": "python -m pytest -q",
+        "command": "python -m pytest -q",
+    }
+    assert activities[3]["ok"] is True
+    assert activities[3]["message"] == "notepad running"
+    tools = clients[0].requests[0]["tools"]
+    shell_schema = next(
+        tool["function"]["parameters"]
+        for tool in tools
+        if tool["function"]["name"] == "run_shell"
+    )
+    assert shell_schema["properties"]["task_state_update"]["default"] == {
+        "scratchpad": None,
+    }
+
+
 def test_visual_turn_can_run_shell_before_gui_action() -> None:
     _, clients = _build_clients(
         [
             _tool_response(
                 name="run_shell",
-                arguments={"command": "tasklist", "shell": "cmd"},
+                arguments={
+                    "command": "tasklist",
+                    "shell": "cmd",
+                    "task_state_update": {
+                        "scratchpad": "Phase: inspect processes",
+                    },
+                },
                 call_id="visual-shell",
             ),
             _tool_response(
@@ -2227,6 +2307,7 @@ def test_visual_turn_can_run_shell_before_gui_action() -> None:
     )
 
     assert decision.proposal["action"] == "type_text"
+    assert decision.task_state_update.scratchpad == "Phase: inspect processes"
     assert len(runner.calls) == 1
     assert runner.calls[0]["command"] == "tasklist"
     assert runner.calls[0]["shell"] == "cmd"

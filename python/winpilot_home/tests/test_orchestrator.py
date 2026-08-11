@@ -1380,6 +1380,82 @@ def test_run_projection_tracks_live_actor_narration():
     assert store.get(run_id)["narration"] == "正在输入搜索关键词"
 
 
+def test_run_projection_tracks_interleaved_activity_and_local_replanning():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    run_id = "projection-live-activity"
+    store.on_event({
+        "type": "arp_run_start",
+        "ts": 1.0,
+        "run_id": run_id,
+        "graph_id": "graph",
+        "graph_name": "Implement and verify",
+    })
+    store.on_event({
+        "type": "live_agent_activity",
+        "ts": 2.0,
+        "run_id": run_id,
+        "kind": "message",
+        "content": "I found the failing test and will fix it now.",
+    })
+    narrated = store.get(run_id)
+    assert narrated["task_state"] == (
+        "I found the failing test and will fix it now."
+    )
+    assert narrated["task_state_revision"] == 1
+    store.on_event({
+        "type": "live_agent_activity",
+        "ts": 3.0,
+        "run_id": run_id,
+        "kind": "task_state",
+        "task_state": "Phase: repair\n- fix parser\n- rerun tests",
+        "content": "Phase: repair\n- fix parser\n- rerun tests",
+    })
+    store.on_event({
+        "type": "live_agent_activity",
+        "ts": 4.0,
+        "run_id": run_id,
+        "kind": "tool_start",
+        "tool": "run_shell",
+        "status": "running",
+        "content": "python -m pytest -q",
+    })
+
+    run = store.get(run_id)
+    assert run["narration"] == "I found the failing test and will fix it now."
+    assert run["task_state"] == "Phase: repair\n- fix parser\n- rerun tests"
+    assert run["task_state_revision"] == 2
+    assert run["current_tool"] == "run_shell"
+    assert [item["kind"] for item in run["timeline"][-3:]] == [
+        "message",
+        "task_state",
+        "tool_start",
+    ]
+
+    store.on_event({
+        "type": "live_agent_activity",
+        "ts": 5.0,
+        "run_id": run_id,
+        "kind": "task_state",
+        "task_state": "Phase: verify\n- rerun focused tests",
+        "content": "Phase: verify\n- rerun focused tests",
+    })
+    store.on_event({
+        "type": "live_agent_activity",
+        "ts": 6.0,
+        "run_id": run_id,
+        "kind": "tool_result",
+        "tool": "run_shell",
+        "status": "done",
+        "content": "12 passed",
+    })
+    run = store.get(run_id)
+    assert run["task_state_revision"] == 3
+    assert run["task_state"].startswith("Phase: verify")
+    assert run["current_tool"] is None
+
+
 def test_run_projection_preserves_manual_pause_across_child_events():
     from winpilot.orchestrator.projection import RunProjectionStore
 

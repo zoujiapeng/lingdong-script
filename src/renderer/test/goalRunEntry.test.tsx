@@ -1020,6 +1020,73 @@ describe('primary agent surface', () => {
     expect(screen.getByLabelText('Agent 当前状态')).toBeInTheDocument();
   });
 
+  it('shows model narration, commands, results, and local replanning while work is active', () => {
+    const activeRun = {
+      run_id: 'run-live-activity',
+      kind: 'agent',
+      status: 'running',
+      phase: 'acting',
+      goal: 'Implement the requested change and verify it',
+      started_at: 1,
+      updated_at: 6,
+      current_tool: 'run_shell',
+      narration: 'I found the failing test and will repair it.',
+      task_state: 'Phase: repair\n- fix parser\n- rerun focused tests',
+      task_state_revision: 2,
+      timeline: [
+        {
+          type: 'live_agent_activity',
+          ts: 2,
+          kind: 'message',
+          summary: 'I found the failing test and will repair it.',
+        },
+        {
+          type: 'live_agent_activity',
+          ts: 3,
+          kind: 'task_state',
+          summary: 'Phase: repair\n- fix parser\n- rerun focused tests',
+        },
+        {
+          type: 'live_agent_activity',
+          ts: 4,
+          kind: 'tool_start',
+          tool: 'run_shell',
+          status: 'running',
+          summary: 'python -m pytest -q',
+        },
+        {
+          type: 'live_agent_activity',
+          ts: 5,
+          kind: 'tool_result',
+          tool: 'run_shell',
+          status: 'done',
+          summary: '12 passed',
+        },
+      ],
+      evidence: [],
+      metrics: {},
+    };
+
+    render(
+      <AgentCockpit
+        plane={cockpitPlane(
+          vi.fn(async () => goalRunStart()),
+          activeRun,
+          [activeRun],
+        ) as never}
+      />,
+    );
+
+    const liveActivity = screen.getByLabelText('Agent 实时活动');
+    expect(liveActivity).toBeInTheDocument();
+    expect(screen.getByLabelText('动态任务板')).toHaveTextContent('模型已更新 2 次');
+    expect(screen.getByLabelText('动态任务板')).toHaveTextContent('fix parser');
+    expect(liveActivity).toHaveTextContent('I found the failing test and will repair it.');
+    expect(liveActivity).toHaveTextContent('python -m pytest -q');
+    expect(liveActivity).toHaveTextContent('12 passed');
+    expect(screen.getAllByText('运行命令').length).toBeGreaterThan(0);
+  });
+
   it('collapses a long Agent answer without making it inaccessible', async () => {
     const longResult = Array.from(
       { length: 18 },

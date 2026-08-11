@@ -95,6 +95,9 @@ class RunProjectionStore:
             "error": "",
             "usage": None,
             "narration": "",
+            "task_state": "",
+            "task_state_revision": 0,
+            "task_state_explicit": False,
             "timeline": [],
             "evidence": [],
             # Audit data is kept separately from the lightweight run list.
@@ -159,6 +162,12 @@ class RunProjectionStore:
             return "planning"
         if event_type in {"agent_plan", "agent_step", "agent_decision"}:
             return "deciding"
+        if event_type == "live_agent_activity":
+            return (
+                "acting"
+                if event.get("kind") in {"tool_start", "tool_result"}
+                else "deciding"
+            )
         if event_type in {
             "perception", "perception_prefetch", "screen_watch", "screen_delta",
             "replay_anchor_cache",
@@ -300,6 +309,39 @@ class RunProjectionStore:
                 narration = event.get("narration")
                 if type(narration) is str and narration.strip():
                     run["narration"] = narration[:4096]
+            if event_type == "live_agent_activity":
+                activity_kind = str(event.get("kind") or "")
+                content = event.get("content")
+                if (
+                    activity_kind == "message"
+                    and type(content) is str
+                    and content.strip()
+                ):
+                    run["narration"] = content[:4096]
+                    if not run.get("task_state_explicit"):
+                        narrated_state = content[:4096]
+                        if narrated_state != run.get("task_state", ""):
+                            run["task_state_revision"] = int(
+                                run.get("task_state_revision") or 0
+                            ) + 1
+                        run["task_state"] = narrated_state
+                if activity_kind == "task_state":
+                    task_state = event.get("task_state")
+                    if type(task_state) is str:
+                        task_state = task_state[:8192]
+                        if task_state != run.get("task_state", ""):
+                            run["task_state_revision"] = int(
+                                run.get("task_state_revision") or 0
+                            ) + 1
+                        run["task_state"] = task_state
+                        run["task_state_explicit"] = True
+                if activity_kind == "tool_start" and event.get("tool"):
+                    run["current_tool"] = event.get("tool")
+                elif (
+                    activity_kind == "tool_result"
+                    and event.get("tool") == run.get("current_tool")
+                ):
+                    run["current_tool"] = None
             runtime_snapshot = event.get("runtime_snapshot")
             if isinstance(runtime_snapshot, dict):
                 run["arp_snapshot"] = copy.deepcopy(runtime_snapshot)
@@ -759,6 +801,7 @@ class RunProjectionStore:
             timeline_event = {
                 "type": event_type,
                 "ts": event.get("ts"),
+                "kind": event.get("kind"),
                 "phase": run["phase"],
                 "node_id": event.get("node_id"),
                 "tool": event.get("tool"),
@@ -857,6 +900,7 @@ class RunProjectionStore:
             "contract_evidence",
             "completion_contract",
             "arp_snapshot",
+            "task_state_explicit",
         ):
             data.pop(internal_key, None)
         if not include_details:
@@ -866,6 +910,7 @@ class RunProjectionStore:
             data["timeline"] = []
             data["evidence"] = []
             data["result"] = None
+            data["task_state"] = ""
         metrics = data["metrics"]
         tool_samples = metrics.pop("tool_latency_ms", [])
         perception_samples = metrics.pop("perception_latency_ms", [])

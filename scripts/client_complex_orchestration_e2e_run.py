@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -202,6 +203,53 @@ def verify_fixture(root: Path, token: str, protected: dict[str, str]) -> dict[st
     }
 
 
+def observe_live_ui(
+    driver: client_harness.ElectronClientDriver,
+    _result: dict[str, Any],
+) -> dict[str, Any]:
+    """Read the visible client until one real interleaved work cycle appears."""
+
+    signals = {
+        "model_narration": "模型思路",
+        "task_board": "动态任务板",
+        "tool_start": "开始执行",
+        "tool_result": "执行结果",
+    }
+    required = {"task_board", "tool_start", "tool_result"}
+    observed = {name: False for name in signals}
+    visible_tail: list[str] = []
+    deadline = time.monotonic() + 180.0
+    while time.monotonic() < deadline:
+        try:
+            texts = driver.texts()
+        except Exception:
+            time.sleep(0.35)
+            continue
+        visible_tail = texts[-80:]
+        joined = "\n".join(texts)
+        for name, label in signals.items():
+            observed[name] = observed[name] or label in joined
+        if all(observed[name] for name in required):
+            try:
+                screenshot = driver.capture_window("live-activity.png")
+            except Exception:
+                screenshot = ""
+            return {
+                "source": "visible_electron_uia",
+                "passed": True,
+                "observed": observed,
+                "screenshot": screenshot,
+                "visible_text": visible_tail,
+            }
+        time.sleep(0.35)
+    return {
+        "source": "visible_electron_uia",
+        "passed": False,
+        "observed": observed,
+        "visible_text": visible_tail,
+    }
+
+
 def _short(value: Any, limit: int) -> str:
     text = str(value or "").replace("\r", " ").replace("\n", " ")
     return text if len(text) <= limit else text[:limit] + "..."
@@ -329,7 +377,12 @@ def main() -> int:
         {"task": goal, "timeout": args.timeout, "max_steps": 120, "runtime_version": "vnext"},
         output_root=output_root,
         reset_session=True,
+        after_submit=observe_live_ui,
         independent_verifier=lambda _result: verify_fixture(root, token, protected),
+    )
+    result["passed"] = bool(
+        result.get("passed") is True
+        and (result.get("after_submit_handoff") or {}).get("passed") is True
     )
     result["orchestration_evidence"] = orchestration_evidence(result)
     suite = {

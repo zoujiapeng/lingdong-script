@@ -63,9 +63,9 @@ questions directly in the user's language. The observe_desktop tool grants
 access to the live screen; use it when you need to look at or operate the
 desktop. You may chat, act, or interleave both freely: narrate what you are
 doing, why, and anything you find or cannot do, in your own words, at any
-time. Choose or revise your approach as you learn. For mixed requests, respond
-naturally while you work and summarize at the end. Never invent results;
-verify by looking at the screen."""
+time. Keep any useful phase or plan in task_state_update and revise it as you
+learn. For mixed requests, respond naturally while you work and summarize at
+the end. Never invent results; verify by looking at the screen."""
 
 _POINTER_TOOL = "pointer"
 _KEYBOARD_TOOL = "keyboard"
@@ -506,6 +506,28 @@ def _grouped_tool(
             "strict": True,
         },
     }
+
+
+def _with_task_state(
+    definitions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Let the Actor revise its free-form working state on utility calls."""
+
+    for tool in definitions:
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        parameters = function.get("parameters")
+        if not isinstance(parameters, dict):
+            continue
+        properties = parameters.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        properties["task_state_update"] = {
+            **deepcopy(TASK_STATE_UPDATE_SCHEMA),
+            "default": {"scratchpad": None},
+        }
+    return definitions
 
 
 def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
@@ -1189,7 +1211,7 @@ def _tool_format_repair(
 def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
     if gateway is None or getattr(gateway, "available", False) is not True:
         return []
-    return [
+    return _with_task_state([
         {
             "type": "function",
             "function": {
@@ -1224,13 +1246,13 @@ def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
                 "strict": True,
             },
         },
-    ]
+    ])
 
 
 def _status_tool_definitions() -> list[dict[str, Any]]:
     """Read-only Actor-owned status tools resolved without a desktop lease."""
 
-    return [
+    return _with_task_state([
         {
             "type": "function",
             "function": {
@@ -1273,13 +1295,13 @@ def _status_tool_definitions() -> list[dict[str, Any]]:
                 "strict": True,
             },
         },
-    ]
+    ])
 
 
 def _shell_tool_definitions() -> list[dict[str, Any]]:
     """One generic shell tool for system query / activation, no desktop lease."""
 
-    return [
+    return _with_task_state([
         {
             "type": "function",
             "function": {
@@ -1310,7 +1332,7 @@ def _shell_tool_definitions() -> list[dict[str, Any]]:
                 "strict": True,
             },
         },
-    ]
+    ])
 
 
 def _window_text_tool_definitions() -> list[dict[str, Any]]:
@@ -2216,6 +2238,7 @@ class LiveVisualActor:
         max_output_tokens: int = 4096,
         on_attempt: Callable[[ModelAttempt], None] | None = None,
         on_response: Callable[[Any], None] | None = None,
+        on_activity: Callable[[Mapping[str, Any]], None] | None = None,
         connector_gateway: Any | None = None,
         status_provider: Any | None = None,
         shell_runner: Any | None = None,
@@ -2240,8 +2263,11 @@ class LiveVisualActor:
             raise LiveModelRoleError("on_attempt must be callable or null")
         if on_response is not None and not callable(on_response):
             raise LiveModelRoleError("on_response must be callable or null")
+        if on_activity is not None and not callable(on_activity):
+            raise LiveModelRoleError("on_activity must be callable or null")
         self._on_attempt = on_attempt
         self._on_response = on_response
+        self._on_activity = on_activity
         self._connector_gateway = (
             connector_gateway
             if getattr(connector_gateway, "available", False) is True
@@ -2279,6 +2305,7 @@ class LiveVisualActor:
         self._initial_exchange: _InitialExchange | None = None
         self._initial_turn_started = False
         self._initial_turn_terminal = False
+        self._pending_task_state: str | None = None
         self._state_lock = threading.Lock()
 
     @property
@@ -2288,13 +2315,105 @@ class LiveVisualActor:
         return _MODEL_CALL_RESERVATION
 
     def _record_response(self, response: Any) -> None:
-        if self._on_response is None:
+        if self._on_response is not None:
+            try:
+                self._on_response(response)
+            except Exception:
+                # Usage telemetry is a sidecar and never changes task semantics.
+                pass
+        try:
+            narration = narration_content(response_message(response))
+        except Exception:
+            return
+        if narration:
+            self._emit_activity(kind="message", message=narration)
+
+    def _emit_activity(self, **activity: Any) -> None:
+        if self._on_activity is None:
             return
         try:
-            self._on_response(response)
+            self._on_activity(activity)
         except Exception:
-            # Usage telemetry is a sidecar and never changes task semantics.
+            # User-facing progress is a projection, never an execution owner.
+            pass
+
+    def _record_tool_start(self, call: Any) -> None:
+        function = member(call, "function")
+        name = member(function, "name") if function is not None else None
+        if type(name) is not str or not name:
             return
+        raw_arguments = member(function, "arguments")
+        try:
+            arguments = _decode_arguments(raw_arguments)
+        except LiveModelRoleError:
+            arguments = {}
+        state_update = arguments.pop("task_state_update", None)
+        try:
+            scratchpad = ActorTaskStateUpdate.from_dict(
+                state_update
+            ).scratchpad
+        except ActorTaskStateError:
+            scratchpad = None
+        if scratchpad is not None:
+            self._pending_task_state = scratchpad
+            self._emit_activity(
+                kind="task_state",
+                message=scratchpad[:8192],
+                task_state=scratchpad[:8192],
+            )
+        local_intent = arguments.pop("local_intent", None)
+        runtime_name = _runtime_name_from_model_call(name, raw_arguments)
+        command = arguments.get("command") if name == _SHELL_TOOL else None
+        if type(command) is str and command.strip():
+            message = command.strip()
+        elif type(local_intent) is str and local_intent.strip():
+            message = local_intent.strip()
+        elif arguments:
+            message = _canonical_json(arguments)
+        else:
+            message = runtime_name
+        activity: dict[str, Any] = {
+            "kind": "tool_start",
+            "tool": runtime_name,
+            "message": message[:4096],
+        }
+        if type(command) is str and command.strip():
+            activity["command"] = command.strip()[:16_384]
+        self._emit_activity(**activity)
+
+    def _record_tool_result(
+        self,
+        name: str,
+        result: Mapping[str, Any],
+    ) -> None:
+        failed = bool(
+            result.get("ok") is False
+            or result.get("error")
+            or result.get("timeout") is True
+            or result.get("stopped") is True
+        )
+        detail = (
+            result.get("error")
+            or result.get("output")
+            or result.get("stdout")
+            or result.get("stderr")
+        )
+        if type(detail) is not str or not detail.strip():
+            exit_code = result.get("exit_code")
+            detail = (
+                f"exit code {exit_code}"
+                if exit_code is not None
+                else ("failed" if failed else "completed")
+            )
+        next_step = result.get("next_step")
+        if failed and type(next_step) is str and next_step.strip():
+            detail = f"{detail.strip()}\nNext: {next_step.strip()}"
+        self._emit_activity(
+            kind="tool_result",
+            tool=_RUNTIME_TOOL_NAMES.get(name, name),
+            message=detail.strip()[:4096],
+            ok=not failed,
+        )
 
     def _connector_call_limit(self, model_call_limit: int | None) -> int:
         if model_call_limit is None:
@@ -2486,6 +2605,7 @@ class LiveVisualActor:
                 if call_name == "observe_desktop":
                     terminal = call
                     continue
+                self._record_tool_start(call)
                 try:
                     result = _execute_initial_call(
                         call,
@@ -2499,6 +2619,7 @@ class LiveVisualActor:
                     )
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
+                self._record_tool_result(str(call_name or "tool"), result)
                 executed_any = True
                 call_id = member(call, "id")
                 if type(call_id) is not str or not call_id:
@@ -2588,6 +2709,7 @@ class LiveVisualActor:
                     kind="desktop",
                     narration=(content or "").strip(),
                 )
+                self._record_tool_start(terminal)
                 break
             if not executed_any:
                 raise InvalidActorProposal(
@@ -2808,11 +2930,15 @@ class LiveVisualActor:
                 and connector_calls < connector_limit
             ):
                 assistant, call_id, name, arguments = status
+                self._record_tool_start(
+                    _initial_calls_from_response(outcome.response)[0]
+                )
                 result = _call_status(
                     self._status_provider,
                     name,
                     arguments,
                 )
+                self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
                     {
@@ -2835,12 +2961,16 @@ class LiveVisualActor:
                 if connector_calls >= connector_limit:
                     provider_request["tools"] = terminal_tools
                     continue
+                self._record_tool_start(
+                    _initial_calls_from_response(outcome.response)[0]
+                )
                 result = _call_shell(
                     self._shell_runner,
                     arguments,
                     timeout_s=min(30.0, self._total_timeout_s),
                     stop_event=stop_event,
                 )
+                self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
                     {
@@ -2863,10 +2993,14 @@ class LiveVisualActor:
                 and connector_calls < connector_limit
             ):
                 assistant, call_id, name, arguments = window_text
+                self._record_tool_start(
+                    _initial_calls_from_response(outcome.response)[0]
+                )
                 result = _call_window_text(
                     self._window_text_reader,
                     turn,
                 )
+                self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
                     {
@@ -2893,10 +3027,14 @@ class LiveVisualActor:
                     raise InvalidActorProposal(str(exc)) from exc
             if capture is not None and connector_calls < connector_limit:
                 assistant, call_id, name, arguments = capture
+                self._record_tool_start(
+                    _initial_calls_from_response(outcome.response)[0]
+                )
                 result = _call_capture_screen(
                     self._capture_runner,
                     arguments,
                 )
+                self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
                     {
@@ -2920,7 +3058,11 @@ class LiveVisualActor:
                     raise InvalidActorProposal(str(exc)) from exc
             if windows is not None and connector_calls < connector_limit:
                 assistant, call_id, name, arguments = windows
+                self._record_tool_start(
+                    _initial_calls_from_response(outcome.response)[0]
+                )
                 result = _call_list_windows(self._windows_reader)
+                self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
                     {
@@ -2944,10 +3086,14 @@ class LiveVisualActor:
                     raise InvalidActorProposal(str(exc)) from exc
             if paste is not None and connector_calls < connector_limit:
                 assistant, call_id, name, arguments = paste
+                self._record_tool_start(
+                    _initial_calls_from_response(outcome.response)[0]
+                )
                 result = _call_paste_image(
                     self._paste_runner,
                     arguments,
                 )
+                self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
                     {
@@ -2981,6 +3127,20 @@ class LiveVisualActor:
                         ),
                         frozenset(tool.name for tool in turn.tools),
                     )
+                    self._record_tool_start(
+                        _initial_calls_from_response(outcome.response)[0]
+                    )
+                    if (
+                        decision.task_state_update.scratchpad is None
+                        and self._pending_task_state is not None
+                    ):
+                        decision = ActorTurnDecision(
+                            proposal=decision.proposal,
+                            task_state_update=ActorTaskStateUpdate(
+                                self._pending_task_state
+                            ),
+                            narration=decision.narration,
+                        )
                     break
                 except InvalidActorProposal as exc:
                     if (
@@ -3020,6 +3180,9 @@ class LiveVisualActor:
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
             assistant, call_id, name, arguments = connector
+            self._record_tool_start(
+                _initial_calls_from_response(outcome.response)[0]
+            )
             result = _call_connector(
                 self._connector_gateway,
                 name,
@@ -3027,6 +3190,7 @@ class LiveVisualActor:
                 timeout_s=min(30.0, self._total_timeout_s),
                 stop_event=stop_event,
             )
+            self._record_tool_result(name, result)
             connector_messages = [
                 assistant,
                 {
