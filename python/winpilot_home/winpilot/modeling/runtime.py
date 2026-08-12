@@ -115,6 +115,54 @@ def _notify_attempt(
         return
 
 
+class _ModelResponseAbandoned(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _send_before_deadline(
+    send_once: Callable[[dict[str, Any]], Any],
+    request: dict[str, Any],
+    *,
+    clock: Callable[[], float],
+    deadline: float,
+    stop_event: threading.Event | None,
+) -> Any:
+    """Keep a blocked synchronous transport from owning the run deadline."""
+
+    completed = threading.Event()
+    result: list[tuple[bool, Any]] = []
+
+    def send() -> None:
+        try:
+            value = send_once(request)
+        except BaseException as exc:
+            result.append((False, exc))
+        else:
+            result.append((True, value))
+        finally:
+            completed.set()
+
+    threading.Thread(
+        target=send,
+        name="winpilot-model-transport",
+        daemon=True,
+    ).start()
+    while not completed.is_set():
+        if stop_event is not None and stop_event.is_set():
+            raise _ModelResponseAbandoned("ModelResponseCanceled")
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise _ModelResponseAbandoned("ModelResponseDeadlineExceeded")
+        completed.wait(min(0.05, remaining))
+
+    succeeded, value = result[0]
+    if not succeeded:
+        raise value
+    return value
+
+
 class ModelCallRuntime:
     """Retries only an exact frozen provider request before any consumer acts."""
 
@@ -152,7 +200,35 @@ class ModelCallRuntime:
                 # Decode a fresh copy from the immutable canonical wire value.
                 # Every request retry is therefore byte-identical in meaning,
                 # even if a transport mutates the mapping it receives.
-                response = send_once(envelope.provider_request())
+                response = _send_before_deadline(
+                    send_once,
+                    envelope.provider_request(),
+                    clock=self._clock,
+                    deadline=deadline,
+                    stop_event=stop_event,
+                )
+            except _ModelResponseAbandoned as abandoned:
+                attempt = ModelAttempt(
+                    attempt=attempt_number,
+                    kind=(
+                        RetryKind.INITIAL_REQUEST
+                        if attempt_number == 1
+                        else RetryKind.REQUEST_RETRY
+                    ),
+                    request_fingerprint=envelope.request_fingerprint,
+                    elapsed_ms=max(
+                        0, int((self._clock() - attempt_started) * 1000)
+                    ),
+                    ok=False,
+                    error_kind=abandoned.reason,
+                    retryable=False,
+                )
+                attempts.append(attempt)
+                _notify_attempt(on_attempt, attempt)
+                raise ModelCallError(
+                    "model response abandoned before consumption",
+                    tuple(attempts),
+                ) from None
             except Exception as exc:
                 last_exc = exc
                 retryable = _retryable_transport_error(exc)

@@ -2783,21 +2783,18 @@ def _real_session_with_captures(
     on_click: Any = None,
     capture_regions: list[Region] | None = None,
     on_capture: Any = None,
-    screen_first: bool = False,
+    screen_first: bool = True,
 ) -> tuple[Any, list[str], list[dict[str, Any]]]:
     clock = clock or [10.0]
     capture_values = list(images)
+    if screen_first and capture_regions is None:
+        capture_values = [
+            _jpeg(1120, 630, level=100 + index)
+            for index, _image in enumerate(capture_values)
+        ]
     expected_capture_regions = (
         None if capture_regions is None else list(capture_regions)
     )
-    # Screen-first frames are the default; the window-crop path is the
-    # explicit opt-in these composition tests exercise by default.
-    monkeypatch.setitem(
-        live_agent.CONFIG._data["controller"],
-        "target_window_capture_enabled",
-        not screen_first,
-    )
-
     monkeypatch.setattr(
         live_agent,
         "virtual_screen_region",
@@ -2812,11 +2809,7 @@ def _real_session_with_captures(
     ) -> str:
         assert max_side == live_agent._MAX_SUBMITTED_SIDE
         if expected_capture_regions is None:
-            expected_region = (
-                Region(0, 0, 1920, 1080)
-                if screen_first
-                else Region(*REGION)
-            )
+            expected_region = Region(0, 0, 1920, 1080)
         else:
             expected_region = expected_capture_regions.pop(0)
         assert region == expected_region
@@ -2967,13 +2960,13 @@ def test_fresh_observation_is_auditable_without_pixel_data(
     }
     assert observation["execution_medium"] == "control"
     assert observation["observation_kind"] == (
-        "fresh_authoritative_target_frame"
+        "fresh_authoritative_desktop_frame"
     )
     assert observation["target_binding_id"] == session._binding.binding_id
     assert observation["target_hwnd"] == HWND
     assert observation["frame_id"] == 1
     assert observation["frame_epoch"] == session._binding.epoch
-    assert observation["frame_scope"] == "target_window"
+    assert observation["frame_scope"] == "full_desktop"
     assert observation["authoritative"] is True
     assert observation["fresh"] is True
     assert len(observation["evidence_refs"]) == 1
@@ -3056,12 +3049,12 @@ def test_completed_click_adopts_stable_cross_process_foreground_next_turn(
             session._reducer.projection,
             turn_index=1,
         )
-        replacement = session._reducer.projection.target_binding
-        assert replacement is not None
-        assert replacement.hwnd == next_hwnd
-        assert observed.frame.hwnd == next_hwnd
-        assert observed.target.hwnd == next_hwnd
-        assert session._authority.current.hwnd == next_hwnd
+        anchor = session._reducer.projection.target_binding
+        assert anchor is not None
+        assert anchor.hwnd == HWND
+        assert observed.frame.hwnd == HWND
+        assert observed.target.hwnd == HWND
+        assert session._authority.current.hwnd == HWND
     finally:
         session.close()
         BUS.remove_sink(events.append)
@@ -3072,21 +3065,18 @@ def test_completed_click_adopts_stable_cross_process_foreground_next_turn(
         for item in events
         if item["type"] == "vnext_workspace_target_adopted"
     ]
-    assert len(adoption) == 1
-    assert adoption[0]["target_hwnd"] == next_hwnd
-    assert adoption[0]["causal_action"] == "click"
+    assert adoption == []
 
 
-def test_screen_first_frame_shows_desktop_and_click_rebinds_visible_window(
+def test_screen_first_frame_shows_desktop_without_rebinding_visible_window(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Screen-first frames let the model click any window it can see.
 
     The authoritative frame covers the whole virtual desktop, the pointer
-    guard admits a click whose hit root is a different top-level window, and
-    the causal successor hand-off re-binds the workspace to that window on the
-    next observation after the click raises it.
+    guard admits a click whose hit root is a different top-level window. The
+    compatibility frame anchor stays inert on the following observation.
     """
     next_hwnd = HWND + 50
     foreground = [HWND]
@@ -3151,11 +3141,11 @@ def test_screen_first_frame_shows_desktop_and_click_rebinds_visible_window(
             session._reducer.projection,
             turn_index=1,
         )
-        replacement = session._reducer.projection.target_binding
-        assert replacement is not None
-        assert replacement.hwnd == next_hwnd
-        assert observed.frame.hwnd == next_hwnd
-        assert observed.target.hwnd == next_hwnd
+        anchor = session._reducer.projection.target_binding
+        assert anchor is not None
+        assert anchor.hwnd == HWND
+        assert observed.frame.hwnd == HWND
+        assert observed.target.hwnd == HWND
     finally:
         session.close()
         BUS.remove_sink(events.append)
@@ -3166,9 +3156,7 @@ def test_screen_first_frame_shows_desktop_and_click_rebinds_visible_window(
         for item in events
         if item["type"] == "vnext_workspace_target_adopted"
     ]
-    assert len(adoption) == 1
-    assert adoption[0]["target_hwnd"] == next_hwnd
-    assert adoption[0]["causal_action"] == "click"
+    assert adoption == []
 
 
 def test_screen_first_observation_survives_missing_old_window(
@@ -3224,7 +3212,6 @@ def _launch_responses() -> list[dict[str, Any]]:
                                 "arguments": json.dumps(
                                     {
                                         "app": "Notepad",
-                                        "arguments": "",
                                         "task_state_update": {
                                             "scratchpad": None,
                                         },
@@ -3293,7 +3280,7 @@ def test_real_composition_launches_a_generic_application_and_arms_successor(
     ]
     assert len(receipts) == 1
     assert receipts[0]["input_completed"] is True
-    assert receipts[0]["target_window"]["process"] == "live_agent.exe"
+    assert "target_window" not in receipts[0]
 def test_real_composition_launch_failure_is_recoverable_before_any_input(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3485,19 +3472,11 @@ def test_desktop_shell_launch_adopts_the_launched_window_next_observation(
             session._reducer.projection,
             turn_index=1,
         )
-        replacement = session._reducer.projection.target_binding
-        assert replacement is not None
-        assert replacement.hwnd == launched_hwnd
-        assert observed.frame.hwnd == launched_hwnd
-        assert observed.target.hwnd == launched_hwnd
-        # The desktop-shell flag must retire once a real window is adopted,
-        # so later frames return to the screen-first full-desktop scope
-        # instead of keeping the labelled window crop.
-        assert session._controller._is_desktop_shell is False
-        assert (
-            session._runtime._state._workspace.desktop_shell
-            is False
-        )
+        anchor = session._reducer.projection.target_binding
+        assert anchor is not None
+        assert anchor.hwnd == shell_hwnd
+        assert observed.frame.hwnd == shell_hwnd
+        assert observed.target.hwnd == shell_hwnd
         assert observed.frame.scope == "full_desktop"
     finally:
         if session is not None:
@@ -3509,9 +3488,7 @@ def test_desktop_shell_launch_adopts_the_launched_window_next_observation(
         for item in events
         if item["type"] == "vnext_workspace_target_adopted"
     ]
-    assert len(adoption) == 1
-    assert adoption[0]["target_hwnd"] == launched_hwnd
-    assert adoption[0]["causal_action"] == "launch_application"
+    assert adoption == []
 
 
 def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
@@ -3587,6 +3564,8 @@ def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
         captures.append((hwnd, region))
         if region != desktop:
             return
+        if not authoritative_before_transition:
+            return
         session = session_holder[0]
         before = authoritative_before_transition[0]
         projection_binding = session._reducer.projection.target_binding
@@ -3604,23 +3583,17 @@ def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
     session, raw_calls, _factory_calls = _real_session_with_captures(
         monkeypatch,
         images=[
-            _jpeg(640, 480, level=80),
-            _jpeg(640, 480, level=100),
+            _jpeg(1120, 630, level=80),
+            _jpeg(1120, 630, level=100),
             _jpeg(1120, 630, level=120),
-            _jpeg(640, 480, level=160),
-            _jpeg(640, 480, level=180),
+            _jpeg(1120, 630, level=160),
+            _jpeg(1120, 630, level=180),
         ],
         client=_RawClient(_click_responses() * 2),
         target_reader=reader,
         hit_test_root=lambda _x, _y: foreground[0],
         on_click=after_click,
-        capture_regions=[
-            Region(*REGION),
-            Region(*REGION),
-            desktop,
-            Region(*REGION),
-            Region(*REGION),
-        ],
+        capture_regions=[desktop, desktop, desktop, desktop],
         on_capture=after_capture,
     )
     session_holder.append(session)
@@ -3642,64 +3615,52 @@ def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
             stop_event=threading.Event(),
         )
         assert second.status is RuntimeStatus.ACTION_RECORDED
-        replacement = session._reducer.projection.target_binding
-        assert replacement is not None
-        assert replacement.hwnd == next_hwnd
-        assert session._runtime._state._workspace.binding == replacement
+        anchor = session._reducer.projection.target_binding
+        assert anchor is not None
+        assert anchor.hwnd == HWND
+        assert session._runtime._state._workspace.binding == anchor
         assert session._controller is not None
-        assert session._controller.frozen_target_binding == replacement
+        assert session._controller.frozen_target_binding == anchor
         current = session._authority.current
         assert current is not None
-        assert current.hwnd == next_hwnd
-        assert current.epoch == replacement.epoch
-        assert current.frame_id == before.frame_id + 2
+        assert current.hwnd == HWND
+        assert current.epoch == anchor.epoch
+        assert current.frame_id == before.frame_id + 1
     finally:
         session.close()
         BUS.remove_sink(events.append)
 
     assert raw_calls == ["click", "click"]
-    assert captures[-3:] == [
-        (transient_hwnd, desktop),
-        (next_hwnd, Region(*REGION)),
-        (next_hwnd, Region(*REGION)),
-    ]
+    assert all(hwnd == HWND and region == desktop for hwnd, region in captures)
     adoption = [
         item
         for item in events
         if item["type"] == "vnext_workspace_target_adopted"
     ]
-    assert len(adoption) == 1
-    assert adoption[0]["target_hwnd"] == next_hwnd
-    assert adoption[0]["causal_action"] == "click"
+    assert adoption == []
     observations = [
         item
         for item in events
         if item["type"] == "vnext_gui_observation"
     ]
-    assert [item["target_hwnd"] for item in observations] == [
-        HWND,
-        next_hwnd,
-    ]
+    assert [item["target_hwnd"] for item in observations] == [HWND, HWND]
     target_evidence = [
         item
         for item in session._registry.snapshot()
         if item.kind == "target_binding"
     ]
-    assert len(target_evidence) == 2
-    assert target_evidence[-1].id == adoption[0]["target_binding_id"].replace(
-        "vnext-workspace-",
-        "vnext-workspace-target-",
-    )
+    assert len(target_evidence) == 1
 
 
-def test_initial_capture_dimension_mismatch_stops_before_model_or_raw(
+def test_initial_full_desktop_capture_dimension_mismatch_stops_before_model_or_raw(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     actor_client = _RawClient(_click_responses())
     session, raw_calls, _factory_calls = _real_session_with_captures(
         monkeypatch,
-        images=[_jpeg(639, 480)],
+        images=[_jpeg(1119, 630)],
+        capture_regions=[Region(0, 0, 1920, 1080)],
         client=actor_client,
     )
     try:
@@ -3752,7 +3713,7 @@ def test_observation_retries_one_target_transition_during_capture(
         session._authority.current.image_sha256
         == observed.frame.image_sha256
     )
-    assert snapshot_calls >= 5
+    assert snapshot_calls == 0
     assert raw_calls == []
 
 

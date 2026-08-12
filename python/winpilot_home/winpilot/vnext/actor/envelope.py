@@ -47,6 +47,7 @@ from .proposals import (
     ClaimObligationDone,
     DesktopActionProposal,
     InspectionRequest,
+    InvalidActorProposal,
     ObserveProposal,
     ReplanRequest,
     actor_proposal_to_json,
@@ -169,14 +170,16 @@ def _submitted_coordinate(
     upper_bound: int,
 ) -> float:
     if type(value) not in (int, float):
-        raise ValueError(f"{name} must be a submitted-image number")
+        raise InvalidActorProposal(
+            f"{name} must be a submitted-image number"
+        )
     coordinate = float(value)
     if (
         not math.isfinite(coordinate)
         or coordinate < 0
         or coordinate > upper_bound - 1
     ):
-        raise ValueError(
+        raise InvalidActorProposal(
             f"{name} must stay inside the exact submitted image"
         )
     return coordinate
@@ -188,7 +191,7 @@ def _validate_point_arguments(
 ) -> None:
     present = ("image_x" in arguments, "image_y" in arguments)
     if any(present) and not all(present):
-        raise ValueError(
+        raise InvalidActorProposal(
             "image_x and image_y must be present together"
         )
     if all(present):
@@ -226,7 +229,7 @@ def _validate_image_region(
         x + float(region.width) > submitted_size[0]
         or y + float(region.height) > submitted_size[1]
     ):
-        raise ValueError(
+        raise InvalidActorProposal(
             f"{name} must stay inside the exact submitted image"
         )
 
@@ -638,27 +641,28 @@ def bind_actor_decision(
         pointer = state.pointer
 
         target = mission.target_binding
-        if (
-            target is None
-            or not state.target.live
-            or state.target.binding_id != target.binding_id
-            or state.target.hwnd != target.hwnd
-            or state.target.epoch != target.epoch
-            or projection.target_binding_id != target.binding_id
-        ):
-            raise ValueError("target binding is not current")
         frame = state.frame
         if (
             not frame.authoritative
             or not frame.fresh
             or frame.scope not in {"target_window", "full_desktop"}
             or frame.frame_id is None
-            or frame.hwnd != target.hwnd
-            or frame.epoch != target.epoch
             or projection.frame_id != frame.frame_id
             or projection.frame_scope != frame.scope
         ):
             raise ValueError("submitted frame identity is not current")
+        if target is None:
+            raise ValueError("mission target identity is unavailable")
+        if frame.scope == "target_window" and (
+            not state.target.live
+            or state.target.binding_id != target.binding_id
+            or state.target.hwnd != target.hwnd
+            or state.target.epoch != target.epoch
+            or frame.hwnd != target.hwnd
+            or frame.epoch != target.epoch
+            or projection.target_binding_id != target.binding_id
+        ):
+            raise ValueError("target binding is not current")
         tool_name = proposal_tool_name(canonical_proposal)
         if tool_name not in projection.tool_names:
             raise ValueError("proposal tool is outside BrokerProjection")
@@ -750,7 +754,7 @@ def bind_actor_decision(
             decision_id=_decision_id(material),
             **material,
         )
-    except InvalidActorAdmission:
+    except (InvalidActorAdmission, InvalidActorProposal):
         raise
     except Exception as exc:
         raise InvalidActorAdmission(str(exc)) from exc

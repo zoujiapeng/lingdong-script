@@ -50,13 +50,13 @@ VISUAL_ACTOR_MODEL_ROLE = "vnext_visual_actor"
 VISUAL_ACTOR_SYSTEM_CONTRACT = """\
 Use original_goal, current JPEG, task_state, previous action, and tools. Choose
 one tool, or batch independent non-GUI tools; put dependencies later. Briefly
-say what you are doing or what blocked you. Coordinates are exact submitted-image
-pixels. Chat and act naturally. Revise approaches in task_state; runtime does
-not classify or route. If visibly complete, call claim_obligation_done. If no
-action can advance, call blocked. When pointer_held is true, continue or finish
-that drag. Pace long goals with budget facts. If repeated actions add no new
-visual or tool information, step back to the whole screen and revise the
-approach toward original_goal."""
+narrate. Coordinates are exact submitted-image pixels. Chat and act naturally.
+Revise task_state; runtime does not classify or route. Keep dependent unfinished
+work in remaining_items. If visibly complete, call claim_obligation_done only
+when none remain. If no action can advance, call blocked. When pointer_held is
+true, finish that drag. Pace long goals with budget facts. If actions add no new
+information, step back to the whole screen and revise the approach toward
+original_goal."""
 
 INITIAL_ACTOR_SYSTEM_CONTRACT = """\
 You are a Windows desktop agent on the user's real computer. Answer chat
@@ -65,7 +65,8 @@ access to the live screen; use it when you need to look at or operate the
 desktop. You may chat, act, or interleave both freely: narrate what you are
 doing briefly when useful. Tool calls in one response run concurrently; put
 dependent steps in later responses after reading their results. Keep any
-useful phase or plan in task_state_update and revise it as you learn. For
+useful phase in task_state_update and dependent unfinished work in its
+remaining_items; revise both as you learn. For
 mixed requests, respond naturally while you work and summarize at the end.
 Never invent results; verify by looking at the screen."""
 
@@ -93,7 +94,7 @@ _TOOL_DESCRIPTIONS = {
     ),
     "claim_obligation_done": (
         "Finish without further mutation when the current image shows the "
-        "requested result."
+        "requested result and your remaining_items has no unfinished work."
     ),
     "blocked": (
         "Report a visible blocker only when no supplied action can advance the goal."
@@ -133,7 +134,9 @@ _STRICT_SCHEMA_KEYS = frozenset(
 )
 _LOCALLY_ENFORCED_SCHEMA_KEYS = frozenset({"not", "uniqueItems"})
 _FLOW_FRAGMENT_REQUEST_CHARS = 16_384
-_VISUAL_HISTORY_DEPTH = 1
+_VISUAL_HISTORY_DEPTH = 4
+_VISUAL_UTILITY_HISTORY_DEPTH = 4
+_CONNECTOR_TOOL_CALL_LIMIT = 4
 _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
 _CONNECTOR_TOOLS = frozenset({_CONNECTOR_SEARCH_TOOL, _CONNECTOR_CALL_TOOL})
@@ -148,14 +151,28 @@ _STATUS_TOOLS = frozenset(
         _STATUS_CAPABILITIES_TOOL,
     }
 )
+_STATUS_TOOL_CALL_LIMIT = 2
 _SHELL_TOOL = "run_shell"
+_SHELL_TOOL_CALL_LIMIT = 4
 _SHELL_MAX_COMMAND_CHARS = 16_384
 _WINDOW_TEXT_TOOL = "read_window_text"
+_WINDOW_TEXT_RESERVATION = 2
 _WINDOW_TEXT_MAX_CHARS = 6000
 _CAPTURE_SCREEN_TOOL = "capture_screen"
+_CAPTURE_SCREEN_RESERVATION = 2
 _LIST_WINDOWS_TOOL = "list_windows"
+_LIST_WINDOWS_RESERVATION = 1
 _PASTE_IMAGE_TOOL = "paste_image_file"
-_MODEL_CALL_RESERVATION = 120
+_PASTE_IMAGE_RESERVATION = 2
+_VISUAL_UTILITY_TOOLS = frozenset({
+    *_STATUS_TOOLS,
+    *_CONNECTOR_TOOLS,
+    _SHELL_TOOL,
+    _WINDOW_TEXT_TOOL,
+    _CAPTURE_SCREEN_TOOL,
+    _LIST_WINDOWS_TOOL,
+    _PASTE_IMAGE_TOOL,
+})
 _CAPTURE_OUTPUT_MAX_CHARS = 6000
 # Optional tool-schema fields and their JSON defaults.  The model may omit
 # them; the runtime fills the default so the tool schema and the validator
@@ -959,6 +976,102 @@ def _history_exchange(
         ],
     }
     return assistant, call_id, _runtime_name_from_model_call(name, raw_arguments)
+
+
+def _utility_history_messages(
+    messages: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Keep recent complete provider-native utility exchanges.
+
+    Utility calls run inside one visual decision before its terminal GUI call.
+    Their exact arguments and results can remain necessary on the next screen
+    (for example, a saved screenshot path after launching a chat app).  Keep
+    the provider's assistant/tool structure, but strip private reasoning and
+    task-state patches just like the terminal GUI history.  Whole batches are
+    atomic so no assistant tool call is retained without its result.
+    """
+
+    exchanges: list[tuple[dict[str, Any], ...]] = []
+    index = 0
+    while index < len(messages):
+        raw_assistant = messages[index]
+        index += 1
+        if raw_assistant.get("role") != "assistant":
+            continue
+        raw_calls = raw_assistant.get("tool_calls")
+        if (
+            isinstance(raw_calls, (str, bytes))
+            or not isinstance(raw_calls, Sequence)
+            or not raw_calls
+        ):
+            continue
+        calls: list[dict[str, Any]] = []
+        call_ids: list[str] = []
+        valid = True
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, Mapping):
+                valid = False
+                break
+            call_id = raw_call.get("id")
+            function = raw_call.get("function")
+            name = (
+                function.get("name")
+                if isinstance(function, Mapping)
+                else None
+            )
+            raw_arguments = (
+                function.get("arguments")
+                if isinstance(function, Mapping)
+                else None
+            )
+            if (
+                type(call_id) is not str
+                or not call_id
+                or type(name) is not str
+                or name not in _VISUAL_UTILITY_TOOLS
+                or type(raw_arguments) is not str
+            ):
+                valid = False
+                break
+            try:
+                arguments = _decode_arguments(raw_arguments)
+            except LiveModelRoleError:
+                valid = False
+                break
+            arguments.pop("task_state_update", None)
+            call_ids.append(call_id)
+            calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": _canonical_json(arguments),
+                },
+            })
+        if not valid or len(call_ids) != len(set(call_ids)):
+            continue
+
+        results: list[dict[str, Any]] = []
+        while index < len(messages) and messages[index].get("role") == "tool":
+            results.append(deepcopy(dict(messages[index])))
+            index += 1
+        if [result.get("tool_call_id") for result in results] != call_ids:
+            continue
+        exchanges.append((
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": calls,
+            },
+            *results,
+        ))
+
+    retained = exchanges[-_VISUAL_UTILITY_HISTORY_DEPTH:]
+    return tuple(
+        message
+        for exchange in retained
+        for message in exchange
+    )
 
 
 def _tool_format_repair(
@@ -2209,14 +2322,45 @@ class LiveVisualActor:
         self._initial_exchange: _InitialExchange | None = None
         self._initial_turn_started = False
         self._initial_turn_terminal = False
-        self._pending_task_state: str | None = None
+        self._pending_task_state: ActorTaskStateUpdate | None = None
         self._state_lock = threading.Lock()
 
     @property
     def model_call_reservation(self) -> int:
-        # The task-level counter supplies the actual remaining allowance.
-        # No tool family owns a smaller quota inside it.
-        return _MODEL_CALL_RESERVATION
+        # Bound one visual frame's utility exchange while leaving the model
+        # free to choose which available tools matter. The task-level budget
+        # remains the overall ceiling; this only returns control to a fresh
+        # screen instead of spending the whole task on one stale JPEG.
+        local_budget = (
+            _STATUS_TOOL_CALL_LIMIT
+            if self._status_provider is not None
+            else 0
+        ) + (
+            _CONNECTOR_TOOL_CALL_LIMIT
+            if self._connector_gateway is not None
+            else 0
+        ) + (
+            _SHELL_TOOL_CALL_LIMIT if self._shell_runner is not None else 0
+        ) + (
+            _WINDOW_TEXT_RESERVATION
+            if self._window_text_reader is not None
+            else 0
+        ) + (
+            _CAPTURE_SCREEN_RESERVATION
+            if self._capture_runner is not None
+            else 0
+        ) + (
+            _LIST_WINDOWS_RESERVATION
+            if self._windows_reader is not None
+            else 0
+        ) + (
+            _PASTE_IMAGE_RESERVATION
+            if self._paste_runner is not None
+            else 0
+        )
+        # Three terminal/repair calls preserve the current repeated-format
+        # repair path without reopening an unbounded same-frame loop.
+        return 3 + local_budget
 
     def _record_response(self, response: Any) -> None:
         if self._on_response is not None:
@@ -2253,17 +2397,26 @@ class LiveVisualActor:
             arguments = {}
         state_update = arguments.pop("task_state_update", None)
         try:
-            scratchpad = ActorTaskStateUpdate.from_dict(
-                state_update
-            ).scratchpad
+            patch = ActorTaskStateUpdate.from_dict(state_update)
         except ActorTaskStateError:
-            scratchpad = None
-        if scratchpad is not None:
-            self._pending_task_state = scratchpad
+            patch = ActorTaskStateUpdate()
+        if patch.changes_state:
+            self._pending_task_state = (
+                patch
+                if self._pending_task_state is None
+                else self._pending_task_state.merged_with(patch)
+            )
+            visible_state = (
+                patch.scratchpad
+                if patch.scratchpad is not None
+                else _canonical_json(
+                    {"remaining_items": list(patch.remaining_items or ())}
+                )
+            )
             self._emit_activity(
                 kind="task_state",
-                message=scratchpad[:8192],
-                task_state=scratchpad[:8192],
+                message=visible_state[:8192],
+                task_state=visible_state[:8192],
             )
         local_intent = arguments.pop("local_intent", None)
         runtime_name = _runtime_name_from_model_call(name, raw_arguments)
@@ -2326,10 +2479,6 @@ class LiveVisualActor:
             1 <= model_call_limit <= self.model_call_reservation
         ):
             raise LiveModelRoleError("Actor model-call allowance is invalid")
-        # The global model-call budget is the only hard cap.  Do not reserve
-        # hidden terminal-only calls or silently remove tools near the end;
-        # results expose the remaining allowance so the model can decide how
-        # to use it.
         return model_call_limit
 
     def begin_turn(
@@ -2362,7 +2511,12 @@ class LiveVisualActor:
                     "description": "Observe the desktop.",
                     "parameters": {
                         "type": "object",
-                        "properties": {},
+                        "properties": {
+                            "task_state_update": {
+                                **deepcopy(TASK_STATE_UPDATE_SCHEMA),
+                                "default": {"scratchpad": None},
+                            },
+                        },
                         "required": [],
                         "additionalProperties": False,
                     },
@@ -2484,10 +2638,21 @@ class LiveVisualActor:
                         "Actor initial turn must request at most one "
                         "desktop observation"
                     )
-                if observe_envelopes and observe_envelopes[0][2]:
-                    raise LiveModelRoleError(
-                        "observe_desktop does not accept arguments"
-                    )
+                if observe_envelopes:
+                    observe_arguments = dict(observe_envelopes[0][2])
+                    try:
+                        ActorTaskStateUpdate.from_dict(
+                            observe_arguments.pop(
+                                "task_state_update",
+                                None,
+                            )
+                        )
+                    except ActorTaskStateError as exc:
+                        raise LiveModelRoleError(str(exc)) from exc
+                    if observe_arguments:
+                        raise LiveModelRoleError(
+                            "observe_desktop does not accept arguments"
+                        )
             except LiveModelRoleError as exc:
                 preflight_error = str(exc)
             if preflight_error:
@@ -2842,6 +3007,7 @@ class LiveVisualActor:
         decision = None
         model_call_allowance = self._model_call_allowance(_model_call_limit)
         seen_tool_results: dict[tuple[str, str], tuple[str, int]] = {}
+        shell_calls = 0
         for model_call_index in range(model_call_allowance):
             outcome = invoke_chat_completion(
                 self._client,
@@ -2984,9 +3150,39 @@ class LiveVisualActor:
                     raise InvalidActorProposal(str(exc)) from exc
             if shell is not None:
                 assistant, call_id, name, arguments = shell
+                if shell_calls >= _SHELL_TOOL_CALL_LIMIT:
+                    shell_budget_messages = [
+                        assistant,
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": _canonical_json(
+                                {
+                                    "tool_budget_exhausted": _SHELL_TOOL,
+                                    "message": (
+                                        "run_shell is limited to "
+                                        f"{_SHELL_TOOL_CALL_LIMIT} calls per "
+                                        "visual frame; choose a GUI tool now"
+                                    ),
+                                    "model_calls_remaining": (
+                                        model_calls_remaining
+                                    ),
+                                }
+                            ),
+                        },
+                    ]
+                    current_exchange.extend(shell_budget_messages)
+                    provider_request["messages"].extend(shell_budget_messages)
+                    provider_request["tools"] = [
+                        tool
+                        for tool in provider_request["tools"]
+                        if _tool_function_name(tool) != _SHELL_TOOL
+                    ]
+                    continue
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
                 )
+                shell_calls += 1
                 result = _call_shell(
                     self._shell_runner,
                     arguments,
@@ -3159,17 +3355,13 @@ class LiveVisualActor:
                     self._record_tool_start(
                         _initial_calls_from_response(outcome.response)[0]
                     )
-                    if (
-                        decision.task_state_update.scratchpad is None
-                        and self._pending_task_state is not None
-                    ):
+                    if self._pending_task_state is not None:
                         decision = ActorTurnDecision(
                             proposal=decision.proposal,
-                            task_state_update=ActorTaskStateUpdate(
-                                self._pending_task_state
-                            ),
+                            task_state_update=self._pending_task_state,
                             narration=decision.narration,
                         )
+                    self._pending_task_state = None
                     break
                 except InvalidActorProposal as exc:
                     if model_calls_remaining <= 0:
@@ -3237,6 +3429,9 @@ class LiveVisualActor:
         if exchange is None:
             self._visual_history = []
         else:
+            utility_messages = _utility_history_messages(
+                current_exchange[1:]
+            )
             image_message = {
                 "role": "user",
                 "content": [
@@ -3248,7 +3443,11 @@ class LiveVisualActor:
             self._visual_history.append(
                 _VisualExchange(
                     messages=tuple(
-                        deepcopy([image_message, exchange[0]])
+                        deepcopy([
+                            image_message,
+                            *utility_messages,
+                            exchange[0],
+                        ])
                     ),
                     tool_call_id=exchange[1],
                     runtime_tool_name=exchange[2],

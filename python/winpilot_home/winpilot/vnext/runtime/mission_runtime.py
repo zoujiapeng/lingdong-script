@@ -352,13 +352,12 @@ class MissionRuntime:
             return False
         if snapshot.broker_state.turn_index != turn_index:
             return False
-        if snapshot.target != RuntimeTargetIdentity.from_binding(binding):
+        if snapshot.frame.scope not in {"target_window", "full_desktop"}:
             return False
-        if (
-            snapshot.frame.hwnd != binding.hwnd
+        if snapshot.frame.scope == "target_window" and (
+            snapshot.target != RuntimeTargetIdentity.from_binding(binding)
+            or snapshot.frame.hwnd != binding.hwnd
             or snapshot.frame.epoch != binding.epoch
-            or snapshot.frame.scope
-            not in {"target_window", "full_desktop"}
         ):
             return False
         registry = {ref.id: ref for ref in self._registry.snapshot()}
@@ -693,6 +692,17 @@ class MissionRuntime:
     ) -> MissionRuntimeResult:
         obligation_id = envelope.obligation_id
         proposal_kind = "claim_obligation_done"
+        if self._task_state.remaining_items:
+            return self._result(
+                RuntimeStatus.INVALID_PROPOSAL,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail=(
+                    "claim conflicts with task_state: unfinished items "
+                    "remain; continue them or revise remaining_items"
+                ),
+            )
         if not frozen.frame.evidence_refs:
             return self._result(
                 RuntimeStatus.STATE_REJECTED,
@@ -1261,6 +1271,18 @@ class MissionRuntime:
             # The action failed mechanically, but the Actor's own task notes
             # remain useful input for its next attempt. Authority freshness was
             # checked above, and task state carries no execution authority.
+            self._task_state = pending_task_state
+            return self._result(
+                RuntimeStatus.INVALID_PROPOSAL,
+                route=route,
+                proposal_kind=proposal_kind,
+                detail=str(exc),
+            )
+        except InvalidActorProposal as exc:
+            # A point outside the submitted image is a correctable model
+            # argument error, not a broken Runtime authority boundary. Keep
+            # the Actor's working state and return the exact reason so the
+            # ordinary next-turn redecision can use a fresh frame.
             self._task_state = pending_task_state
             return self._result(
                 RuntimeStatus.INVALID_PROPOSAL,

@@ -911,20 +911,26 @@ def project_actor_turn_input(
         raise RuntimeContractError(
             "MissionCard and BrokerProjection identity disagree"
         )
-    binding = card.target_binding
     if (
-        binding is None
-        or binding.binding_id != projection.target_binding_id
-        or frame_state.frame_id != projection.frame_id
-        or frame_state.hwnd != binding.hwnd
-        or frame_state.epoch != binding.epoch
+        frame_state.frame_id != projection.frame_id
         or frame_state.scope not in {"target_window", "full_desktop"}
         or not frame_state.authoritative
         or not frame_state.fresh
     ):
         raise RuntimeContractError(
-            "Actor projection requires the pre-bound fresh target frame"
+            "Actor projection requires a fresh authoritative frame"
         )
+    if frame_state.scope == "target_window":
+        binding = card.target_binding
+        if (
+            binding is None
+            or binding.binding_id != projection.target_binding_id
+            or frame_state.hwnd != binding.hwnd
+            or frame_state.epoch != binding.epoch
+        ):
+            raise RuntimeContractError(
+                "Target-window projection requires its current binding"
+            )
     obligation = card.active_obligation
     mission = ActorMissionView(
         original_goal=card.original_goal,

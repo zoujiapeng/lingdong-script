@@ -744,8 +744,8 @@ def test_screen_first_click_is_admitted_on_any_visible_window(
     The authoritative frame covers the whole virtual desktop, so the bound
     window does not need to be the hit root at the click point and the
     pre-input foreground activation is skipped: the model points at what it
-    sees and the OS raises the clicked window, which the causal successor
-    hand-off adopts on the next observation.
+    sees and the OS raises the clicked window.  The old binding is neither an
+    admission fact nor a queue key for this default route.
     """
     other_hwnd = HWND + 1
     desktop = (0, 0, 1920, 1080)
@@ -799,18 +799,48 @@ def test_screen_first_click_is_admitted_on_any_visible_window(
         ),
         hit_root=other_hwnd,
     )
+
+    class _Workspace:
+        def __init__(self) -> None:
+            self.binding = binding
+            self.finish_calls: list[dict[str, Any]] = []
+
+        def snapshot(self, hwnd: int) -> LiveTargetSnapshot | None:
+            return probe.snapshot(hwnd)
+
+        def hit_test_root(self, x: int, y: int) -> int | None:
+            return probe.hit_test_root(x, y)
+
+        def finish_action(self, **kwargs: Any) -> None:
+            self.finish_calls.append(dict(kwargs))
+
+    workspace = _Workspace()
     raw = _RawHarness(True)
     trace = _Trace(False)
+    queue_calls: list[dict[str, Any]] = []
+
+    def queue_run(_action, callback, **kwargs):
+        queue_calls.append(dict(kwargs))
+        return callback()
+
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.DESKTOP_ACTION_QUEUE.run",
+        queue_run,
+    )
     adapter = AtomicDesktopAdapter(
         frame_authority=authority,
         frame_observer=observer,
         frozen_target_binding=binding,
         target_probe=probe,
+        desktop_workspace=workspace,
         raw_device=raw.executor(),
         receipt_trace_sink=trace,
         post_input_settle_delay_s=0.0,
     )
-    envelope = _envelope(before, binding, "click")
+    envelope = _replace_envelope(
+        _envelope(before, binding, "click"),
+        target_binding_id="obsolete-target-binding",
+    )
     commit_identity = RuntimeCommitIdentity(
         RuntimeFrameIdentity(
             frame_id=before.frame_id,
@@ -837,10 +867,24 @@ def test_screen_first_click_is_admitted_on_any_visible_window(
         submitted_size=(1120, 630),
     )
     assert raw.calls[0][1][6] is False
+    assert len(queue_calls) == 1
+    assert queue_calls[0]["scope"] == "physical"
+    assert queue_calls[0]["target_hwnd"] is None
+    assert queue_calls[0]["metadata"]["target_binding_id"] is None
+    assert workspace.finish_calls == []
+    assert trace.records[0][1]["target_hwnd"] is None
+    assert trace.records[0][1]["target_binding_id"] is None
     assert authority.current is not None
     assert authority.current.frame_id == 2
     assert authority.current.scope == "full_desktop"
     assert authority.current.region == desktop
+
+    # Removing binding admission must not weaken the authoritative frame CAS.
+    stale = adapter.execute(envelope)
+    assert stale.outcome is ControllerOutcome.REJECTED
+    assert stale.input_completed is False
+    assert len(raw.calls) == 1
+    assert len(queue_calls) == 1
 
 
 def test_screen_first_scroll_does_not_carry_the_old_window(
@@ -1011,6 +1055,14 @@ def test_screen_first_click_ignores_dead_hit_test_and_keeps_desktop_frame(
         "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
         lambda: Region(*desktop),
     )
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetForegroundWindow",
+        lambda: other_hwnd,
+    )
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetAncestor",
+        lambda hwnd, _flag: hwnd,
+    )
     authority = FrameAuthority()
     before = authority.commit(
         epoch=EPOCH,
@@ -1080,11 +1132,86 @@ def test_screen_first_click_ignores_dead_hit_test_and_keeps_desktop_frame(
     assert attempt.input_completed is True
     assert len(raw.calls) == 1
     assert raw.calls[0][0] == "click"
+    assert raw.calls[0][1][5] is None
     assert raw.calls[0][1][6] is False
     assert probe.snapshot_calls == 0
     assert probe.hit_test_calls == 0
     assert authority.current is not None
     assert authority.current.frame_id == 2
+    assert authority.current.scope == "full_desktop"
+
+
+def test_screen_first_pointer_never_falls_back_to_old_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desktop = (0, 0, 1920, 1080)
+    desktop_hwnd = HWND + 400
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
+        lambda: Region(*desktop),
+    )
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetForegroundWindow",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetDesktopWindow",
+        lambda: desktop_hwnd,
+    )
+    authority = FrameAuthority()
+    before = authority.commit(
+        epoch=EPOCH,
+        hwnd=HWND,
+        region=desktop,
+        scope="full_desktop",
+        reason="screen-first",
+        submitted_size=(1120, 630),
+        image_b64=_jpeg(20),
+        captured_at=1.0,
+        expected_previous_frame_id=0,
+    )
+    observer = FrameObserver(
+        authority,
+        capture=lambda _hwnd, **_kwargs: _jpeg(220),
+        virtual_desktop=lambda: Region(*desktop),
+        captured_at=lambda: 2.0,
+    )
+    binding = TargetBinding(
+        binding_id="obsolete-target-binding",
+        hwnd=HWND,
+        process_id=PROCESS_ID,
+        executable_identity="C:/gone.exe",
+        title_snapshot="Gone",
+        established_by_evidence_ref="evidence-target-bound",
+        epoch=EPOCH,
+    )
+
+    class _NoBindingProbe:
+        def snapshot(self, _hwnd: int) -> None:
+            raise AssertionError("screen-first input must not inspect binding")
+
+        def hit_test_root(self, _x: int, _y: int) -> None:
+            raise AssertionError("screen-first input must not use hit-test admission")
+
+    raw = _RawHarness(True)
+    adapter = AtomicDesktopAdapter(
+        frame_authority=authority,
+        frame_observer=observer,
+        frozen_target_binding=binding,
+        target_probe=_NoBindingProbe(),
+        raw_device=raw.executor(),
+        post_input_settle_delay_s=0.0,
+    )
+
+    transition = adapter.execute(_envelope(before, binding, "click"))
+
+    assert transition.outcome is ControllerOutcome.COMPLETED
+    assert transition.input_completed is True
+    # The physical pointer backend receives no HWND.  The desktop HWND only
+    # satisfies RawDevice's typed context; the obsolete binding is unused.
+    assert raw.calls[0][1][5] is None
+    assert HWND not in raw.calls[0][1]
+    assert authority.current is not None
     assert authority.current.scope == "full_desktop"
 
 

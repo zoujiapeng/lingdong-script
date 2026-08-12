@@ -1164,6 +1164,60 @@ def test_mismatched_target_is_not_echoed_and_removes_gui() -> None:
     )
 
 
+def test_full_desktop_frame_does_not_use_window_binding_as_gui_gate() -> None:
+    mission = _mission()
+    catalog = _catalog()
+    state = _state(
+        target=TargetState("foreground-anchor", 999, 4, True),
+        frame=AuthoritativeFrameState(
+            10, 999, 4, True, True, "full_desktop"
+        ),
+    )
+
+    projection = CapabilityBroker(catalog).project(
+        mission,
+        _profile(mission),
+        state,
+    )
+
+    assert projection.execution_route is ExecutionRoute.VISUAL_ACTOR
+    assert "click" in projection.tool_names
+    assert projection.frame_id == 10
+    assert projection.frame_scope == "full_desktop"
+    assert projection.target_binding_id == "target-1"
+
+
+@pytest.mark.parametrize(
+    "frame",
+    (
+        AuthoritativeFrameState(
+            10, 999, 4, False, True, "full_desktop"
+        ),
+        AuthoritativeFrameState(
+            10, 999, 4, True, False, "full_desktop"
+        ),
+    ),
+)
+def test_full_desktop_still_requires_authoritative_fresh_frame(frame) -> None:
+    mission = _mission()
+    catalog = _catalog()
+    projection = CapabilityBroker(catalog).project(
+        mission,
+        _profile(mission),
+        _state(
+            target=TargetState("foreground-anchor", 999, 4, True),
+            frame=frame,
+        ),
+    )
+
+    assert projection.frame_id is None
+    assert projection.frame_scope is None
+    assert all(
+        catalog.get(name).mutation_kind is not MutationKind.GUI
+        for name in projection.tool_names
+    )
+
+
 def test_owned_held_pointer_projects_only_drag_with_the_same_lease() -> None:
     mission = _mission()
     projection = CapabilityBroker(_catalog_with_drag()).project(

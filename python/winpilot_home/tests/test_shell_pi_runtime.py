@@ -94,6 +94,64 @@ def test_selected_result_below_generic_boundary_is_not_truncated() -> None:
     assert "full_output_path" not in result
 
 
+@pytest.mark.parametrize(
+    ("command", "shell_name", "expected"),
+    [
+        (
+            'powershell -Command "$value=7; Write-Output $value"',
+            "powershell",
+            "$value=7; Write-Output $value",
+        ),
+        (
+            'PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-Process"',
+            "powershell",
+            "Get-Process",
+        ),
+        ('cmd /c "echo ready"', "cmd", "echo ready"),
+    ],
+)
+def test_redundant_selected_shell_wrapper_is_unwrapped(
+    command: str,
+    shell_name: str,
+    expected: str,
+) -> None:
+    assert shell._unwrap_redundant_shell_command(command, shell_name) == expected
+
+
+def test_other_shell_wrapper_is_left_to_the_command_body() -> None:
+    command = 'cmd /c "echo from cmd"'
+
+    assert shell._unwrap_redundant_shell_command(command, "powershell") == command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        (
+            "Stop-Process -Name "
+            f"{shell.os.path.splitext(shell.os.path.basename(shell.sys.executable))[0]} "
+            "-Force"
+        ),
+        f"taskkill /F /IM {shell.os.path.basename(shell.sys.executable)}",
+        f"Stop-Process -Id {shell.os.getpid()} -Force",
+    ],
+)
+def test_runtime_host_termination_is_the_one_process_kill_boundary(
+    command: str,
+) -> None:
+    result = shell._runtime_host_termination_guard(command)
+
+    assert result is not None
+    assert result["blocked"] is True
+    assert "intended child PID" in result["error"]
+
+
+def test_targeted_child_process_kill_remains_available() -> None:
+    command = f"Stop-Process -Id {shell.os.getpid() + 100000} -Force"
+
+    assert shell._runtime_host_termination_guard(command) is None
+
+
 def test_result_above_generic_boundary_is_recoverable(monkeypatch) -> None:
     monkeypatch.setattr(
         shell,

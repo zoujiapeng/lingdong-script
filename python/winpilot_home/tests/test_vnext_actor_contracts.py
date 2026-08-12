@@ -898,6 +898,43 @@ def test_runtime_binder_derives_all_authority_and_round_trips() -> None:
     })
 
 
+def test_full_desktop_binder_does_not_admit_by_window_binding() -> None:
+    reducer = _mission_reducer()
+    mission = reducer.projection
+    profile = _profile(mission)
+    state = _state(
+        target=TargetState("foreground-anchor", 999, 4, True),
+        frame=AuthoritativeFrameState(
+            83, 999, 4, True, True, "full_desktop"
+        ),
+    )
+    catalog = _catalog()
+    projection = CapabilityBroker(catalog).project(
+        mission,
+        profile,
+        state,
+    )
+
+    envelope = bind_actor_decision(
+        mission_reducer=reducer,
+        profile=profile,
+        state=state,
+        catalog=catalog,
+        projection=projection,
+        proposal=_action(),
+        frame_region=(-1200, 0, 1200, 800),
+        submitted_image_size=(900, 600),
+        frame_image_sha256="b" * 64,
+        allowed_evidence_scope=("e-target",),
+    )
+
+    assert envelope.frame_id == 83
+    assert envelope.frame_scope == "full_desktop"
+    assert envelope.frame_hwnd == 999
+    assert envelope.target_binding_id == "binding-current"
+    assert projection.target_binding_id == "binding-current"
+
+
 def test_runtime_binder_preserves_one_owned_held_drag_lease() -> None:
     reducer, _mission, profile, state, catalog, projection = _held_runtime()
     envelope = bind_actor_decision(

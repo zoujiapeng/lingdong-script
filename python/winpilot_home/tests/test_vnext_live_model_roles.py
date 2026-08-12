@@ -438,6 +438,7 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "Chat and act naturally" in actor_contract
     assert "runtime does not classify or route" in actor_contract
     assert "visibly complete, call claim_obligation_done" in actor_contract
+    assert "only when none remain" in actor_contract
     assert "no action can advance, call blocked" in actor_contract
     assert "When pointer_held is true" in actor_contract
     assert "step back to the whole screen" in actor_contract
@@ -490,6 +491,12 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         assert scratchpad_schema["maxLength"] == 8192
         assert "phase" in scratchpad_field["description"]
         assert "stage rules" in scratchpad_field["description"]
+        remaining_field = schema["properties"]["task_state_update"][
+            "properties"
+        ]["remaining_items"]
+        assert remaining_field["default"] is None
+        assert remaining_field["anyOf"][0]["maxItems"] == 32
+        assert remaining_field["anyOf"][0]["items"]["maxLength"] == 256
     for schema in strict_schemas:
         assert {
             "allOf",
@@ -508,7 +515,10 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert actor_context_value["mission"]["original_goal"] == (
         "Type the requested greeting"
     )
-    assert actor_context_value["task_state"] == {"scratchpad": ""}
+    assert actor_context_value["task_state"] == {
+        "scratchpad": "",
+        "remaining_items": [],
+    }
     assert actor_context_value["completed_action_summaries"] == [
         "click",
         "double_click",
@@ -580,6 +590,192 @@ def test_initial_actor_turn_replies_with_native_history_and_short_system_contrac
             image_media_type="image/jpeg",
             submitted_size=(640, 480),
         )
+
+
+def test_initial_observe_can_seed_remaining_work_for_first_visual_action() -> None:
+    observe = _tool_response(
+        name="observe_desktop",
+        arguments={
+            "task_state_update": {
+                "scratchpad": "Start with music",
+                "remaining_items": ["send music image", "build game"],
+            },
+        },
+        call_id="observe-with-plan",
+    )
+    first_action = _tool_response(
+        arguments={
+            "text": "hello",
+            "local_intent": "enter text",
+            "task_state_update": {"scratchpad": "Music phase active"},
+        },
+        call_id="first-action",
+    )
+    _, clients = _build_clients([observe, first_action])
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    admission = actor.begin_turn("Complete several dependent steps")
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert admission.kind == "desktop"
+    assert decision.task_state_update.scratchpad == "Music phase active"
+    assert decision.task_state_update.remaining_items == (
+        "send music image",
+        "build game",
+    )
+    observe_schema = clients[0].requests[0]["tools"][0]["function"][
+        "parameters"
+    ]
+    assert "task_state_update" in observe_schema["properties"]
+
+
+def test_pending_plan_is_consumed_after_one_visual_decision() -> None:
+    observe = _tool_response(
+        name="observe_desktop",
+        arguments={
+            "task_state_update": {
+                "scratchpad": "Initial phase",
+                "remaining_items": ["later work"],
+            },
+        },
+        call_id="observe-plan-once",
+    )
+    _, clients = _build_clients(
+        [
+            observe,
+            _tool_response(call_id="first-action"),
+            _tool_response(call_id="second-action"),
+        ]
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    actor.begin_turn("Complete dependent work")
+    first = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    second = actor.propose(
+        replace(
+            _actor_turn(),
+            task_state=ActorTaskState(
+                "Initial phase",
+                ("later work",),
+            ),
+            previous_action=ActorPreviousActionView(
+                action="type_text",
+                input_completed=True,
+                visible_effect="changed",
+            ),
+        ),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert first.task_state_update.remaining_items == ("later work",)
+    assert second.task_state_update == ActorTaskStateUpdate.from_dict(
+        {"scratchpad": None}
+    )
+
+
+def test_initial_utility_plan_survives_observe_and_first_visual_update() -> None:
+    plan = _tool_response(
+        name="run_shell",
+        arguments={
+            "command": "Get-Process",
+            "task_state_update": {
+                "scratchpad": "Inspect before acting",
+                "remaining_items": ["operate app", "send result"],
+            },
+        },
+        call_id="initial-plan",
+    )
+    observe = _tool_response(
+        name="observe_desktop",
+        arguments={},
+        call_id="observe-after-plan",
+    )
+    first_action = _tool_response(
+        arguments={
+            "text": "hello",
+            "local_intent": "begin app work",
+            "task_state_update": {"scratchpad": "Operating the app"},
+        },
+        call_id="action-after-plan",
+    )
+    _, clients = _build_clients([plan, observe, first_action])
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=_RecordingShellRunner(),
+    )
+
+    assert actor.begin_turn("Complete dependent work").kind == "desktop"
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.task_state_update.scratchpad == "Operating the app"
+    assert decision.task_state_update.remaining_items == (
+        "operate app",
+        "send result",
+    )
+
+
+def test_terminal_update_can_clear_an_initial_pending_plan() -> None:
+    observe = _tool_response(
+        name="observe_desktop",
+        arguments={
+            "task_state_update": {
+                "remaining_items": ["inspect the visible result"],
+            },
+        },
+        call_id="observe-before-clear",
+    )
+    claim = _tool_response(
+        name="claim_obligation_done",
+        arguments={
+            "concise_claim": "the whole goal is visibly complete",
+            "task_state_update": {"remaining_items": []},
+        },
+        call_id="claim-after-clear",
+    )
+    _, clients = _build_clients([observe, claim])
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    actor.begin_turn("Inspect then finish")
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["kind"] == "claim_obligation_done"
+    assert decision.task_state_update.remaining_items == ()
 
 
 def test_initial_actor_preserves_the_thread_owners_full_native_prefix() -> None:
@@ -739,7 +935,7 @@ def test_initial_actor_lazily_calls_a_read_only_connector_then_replies() -> None
         }
     ]
     assert len(responses) == 3
-    assert actor.model_call_reservation == 120
+    assert actor.model_call_reservation == 7
     assert len(clients[0].requests) == 3
     assert [
         tool["function"]["name"]
@@ -1129,11 +1325,12 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
     }
     assert "task_state_update" not in prior_arguments
     third_messages = clients[0].requests[2]["messages"]
-    assert len(third_messages) == 5
-    assert "first-0" not in json.dumps(third_messages)
-    assert third_messages[2]["tool_calls"][0]["id"] == "second-0"
-    assert third_messages[3]["tool_call_id"] == "second-0"
-    assert json.loads(third_messages[3]["content"]) == {
+    assert len(third_messages) == 8
+    assert third_messages[2]["tool_calls"][0]["id"] == "first-0"
+    assert third_messages[3]["tool_call_id"] == "first-0"
+    assert third_messages[5]["tool_calls"][0]["id"] == "second-0"
+    assert third_messages[6]["tool_call_id"] == "second-0"
+    assert json.loads(third_messages[6]["content"]) == {
         "previous_action": completed.previous_action.to_dict(),
     }
 
@@ -1144,10 +1341,10 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         submitted_size=(640, 480),
     )
     fourth_messages = clients[0].requests[3]["messages"]
-    assert len(fourth_messages) == 5
-    assert fourth_messages[2]["tool_calls"][0]["id"] == "third-0"
-    assert "first-0" not in json.dumps(fourth_messages)
-    assert "second-0" not in json.dumps(fourth_messages)
+    assert len(fourth_messages) == 11
+    assert fourth_messages[5]["tool_calls"][0]["id"] == "second-0"
+    assert fourth_messages[8]["tool_calls"][0]["id"] == "third-0"
+    assert "first-0" in json.dumps(fourth_messages)
 
     actor.propose(
         completed,
@@ -1156,9 +1353,12 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         submitted_size=(640, 480),
     )
     fifth_messages = clients[0].requests[4]["messages"]
-    assert len(fifth_messages) == 5
-    assert fifth_messages[2]["tool_calls"][0]["id"] == "fourth-0"
-    assert "third-0" not in json.dumps(fifth_messages)
+    assert len(fifth_messages) == 14
+    assert "first-0" in json.dumps(fifth_messages)
+    assert fifth_messages[2]["tool_calls"][0]["id"] == "first-0"
+    assert fifth_messages[5]["tool_calls"][0]["id"] == "second-0"
+    assert fifth_messages[8]["tool_calls"][0]["id"] == "third-0"
+    assert fifth_messages[11]["tool_calls"][0]["id"] == "fourth-0"
 
     actor.propose(
         completed,
@@ -1167,9 +1367,12 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         submitted_size=(640, 480),
     )
     sixth_messages = clients[0].requests[5]["messages"]
-    assert len(sixth_messages) == 5
-    assert sixth_messages[2]["tool_calls"][0]["id"] == "fifth-0"
-    assert "fourth-0" not in json.dumps(sixth_messages)
+    assert len(sixth_messages) == 14
+    assert "first-0" not in json.dumps(sixth_messages)
+    assert sixth_messages[2]["tool_calls"][0]["id"] == "second-0"
+    assert sixth_messages[5]["tool_calls"][0]["id"] == "third-0"
+    assert sixth_messages[8]["tool_calls"][0]["id"] == "fourth-0"
+    assert sixth_messages[11]["tool_calls"][0]["id"] == "fifth-0"
 
 
 @pytest.mark.parametrize(
@@ -1387,7 +1590,7 @@ def test_actor_rejects_malformed_task_state_without_echoing_private_text() -> No
 
     with pytest.raises(
         InvalidActorProposal,
-        match="exactly scratchpad",
+        match="allows only scratchpad",
     ) as caught:
         actor.propose(
             _actor_turn(),
@@ -1967,7 +2170,7 @@ def test_status_tools_remain_available_near_the_model_call_limit() -> None:
         "get_memory_status",
         "get_capabilities",
     ]
-    assert actor.model_call_reservation == 120
+    assert actor.model_call_reservation == 5
 
 
 def test_visual_actor_repairs_one_invalid_tool_call_before_physical_input() -> None:
@@ -2268,14 +2471,14 @@ def test_initial_turn_marks_repeated_results_without_hiding_output() -> None:
         if message.get("role") == "tool"
     ]
     assert tool_results[0]["output"] == "same file contents"
-    assert tool_results[0]["model_calls_remaining"] == 119
+    assert tool_results[0]["model_calls_remaining"] == 6
     assert tool_results[1] == {
         "exit_code": 0,
         "message": (
             "Executed; this tool returned the same output as the referenced "
             "call."
         ),
-        "model_calls_remaining": 118,
+        "model_calls_remaining": 5,
         "new_tool_information": False,
         "ok": True,
         "output": "same file contents",
@@ -2284,7 +2487,7 @@ def test_initial_turn_marks_repeated_results_without_hiding_output() -> None:
         "same_as_tool_call_id": "shell-call-0-0",
     }
     assert tool_results[2]["output"] == "changed"
-    assert tool_results[2]["model_calls_remaining"] == 117
+    assert tool_results[2]["model_calls_remaining"] == 4
 
 
 def test_repeated_error_result_stays_explicitly_failed() -> None:
@@ -2679,7 +2882,7 @@ def test_visual_turn_marks_repeated_tool_output_without_hiding_it() -> None:
     assert tool_results[1]["new_tool_information"] is False
     assert tool_results[1]["same_as_tool_call_id"] == "visual-shell-0-0"
     assert tool_results[1]["output"] == "same output"
-    assert tool_results[1]["model_calls_remaining"] == 118
+    assert tool_results[1]["model_calls_remaining"] == 5
     assert tool_results[2]["output"] == "changed output"
 
 
@@ -2738,7 +2941,7 @@ def test_visual_turn_keeps_repeated_window_text_body() -> None:
     assert tool_results[2]["text"] == "changed text"
 
 
-def test_next_visual_turn_drops_consumed_local_tool_transcript() -> None:
+def test_next_visual_turn_keeps_bounded_local_tool_transcript() -> None:
     shell_call = _tool_response(
         name="run_shell",
         arguments={
@@ -2801,14 +3004,19 @@ def test_next_visual_turn_drops_consumed_local_tool_transcript() -> None:
 
     messages = clients[0].requests[-1]["messages"]
     encoded = json.dumps(messages, ensure_ascii=False)
-    assert "unique-command" not in encoded
-    assert "UNIQUE-DIAGNOSTIC-BODY" not in encoded
-    assert "consumed-shell-0" not in encoded
+    assert "unique-command" in encoded
+    assert "UNIQUE-DIAGNOSTIC-BODY" in encoded
+    assert "consumed-shell-0" in encoded
     assert "old local narration" not in encoded
     assert "private old reasoning" not in encoded
     assert "final-gui-0" in encoded
     assert _JPEG_B64 in encoded
-    history_assistant = messages[2]
+    history_assistant = next(
+        message
+        for message in messages
+        if message.get("role") == "assistant"
+        and message.get("tool_calls", [{}])[0].get("id") == "final-gui-0"
+    )
     history_arguments = json.loads(
         history_assistant["tool_calls"][0]["function"]["arguments"]
     )
@@ -2820,13 +3028,27 @@ def test_next_visual_turn_drops_consumed_local_tool_transcript() -> None:
         "text": "hello",
     }
     assert json.loads(messages[3]["content"]) == {
+        "exit_code": 0,
+        "model_calls_remaining": 6,
+        "ok": True,
+        "output": "UNIQUE-DIAGNOSTIC-BODY",
+    }
+    terminal_result = next(
+        message
+        for message in messages
+        if message.get("tool_call_id") == "final-gui-0"
+    )
+    assert json.loads(terminal_result["content"]) == {
         "previous_action": previous_action.to_dict(),
     }
     current_context = json.loads(messages[-1]["content"][0]["text"])
     assert current_context["mission"]["original_goal"] == (
         turn.mission.original_goal
     )
-    assert current_context["task_state"] == {"scratchpad": "latest state"}
+    assert current_context["task_state"] == {
+        "scratchpad": "latest state",
+        "remaining_items": [],
+    }
 
 
 def test_failed_shell_result_stays_in_band_with_an_actionable_next_step() -> None:
@@ -2946,7 +3168,7 @@ def test_initial_truncation_continues_with_a_shorter_tool_call() -> None:
     )
 
 
-def test_visual_turn_shell_calls_share_the_task_level_budget() -> None:
+def test_visual_turn_shell_calls_are_capped_per_frame() -> None:
     _, clients = _build_clients(
         [
             *[
@@ -2982,13 +3204,12 @@ def test_visual_turn_shell_calls_share_the_task_level_budget() -> None:
     )
 
     assert decision.proposal["action"] == "type_text"
-    assert len(runner.calls) == 5
+    assert len(runner.calls) == 4
     assert [call["command"] for call in runner.calls] == [
         "tasklist 0",
         "tasklist 1",
         "tasklist 2",
         "tasklist 3",
-        "tasklist 4",
     ]
     budget_messages = [
         json.loads(m["content"])
@@ -2996,12 +3217,13 @@ def test_visual_turn_shell_calls_share_the_task_level_budget() -> None:
         if m.get("role") == "tool"
         and "tool_budget_exhausted" in str(m.get("content", ""))
     ]
-    assert not budget_messages
+    assert len(budget_messages) == 1
+    assert budget_messages[0]["tool_budget_exhausted"] == "run_shell"
     names = [
         tool["function"]["name"]
         for tool in clients[0].requests[5]["tools"]
     ]
-    assert "run_shell" in names
+    assert "run_shell" not in names
     assert "type_text" in names
 
 
@@ -3338,6 +3560,116 @@ def test_visual_turn_can_capture_screen_before_gui_action() -> None:
     tool_result = json.loads(capture_result_messages[0]["content"])
     assert tool_result["ok"] is True
     assert tool_result["path"] == r"C:\tmp\shot.png"
+
+
+def test_capture_path_survives_gui_action_into_next_visual_request() -> None:
+    capture_path = r"C:\Users\zou\Desktop\playing.png"
+    _, clients = _build_clients([
+        _tool_response(
+            name="capture_screen",
+            arguments={"path": capture_path, "window": False},
+            call_id="capture-call",
+        ),
+        _tool_response(call_id="first-gui"),
+        _tool_response(call_id="second-gui"),
+    ])
+    runner = _RecordingCaptureRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        capture_runner=runner,
+    )
+    turn = _actor_turn()
+
+    actor.propose(
+        turn,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    actor.propose(
+        replace(
+            turn,
+            previous_action=ActorPreviousActionView(
+                action="type_text",
+                input_completed=True,
+                visible_effect="changed",
+            ),
+        ),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    next_messages = clients[0].requests[2]["messages"]
+    capture_call = next(
+        call
+        for message in next_messages
+        for call in message.get("tool_calls", ())
+        if call["function"]["name"] == "capture_screen"
+    )
+    assert json.loads(capture_call["function"]["arguments"]) == {
+        "path": capture_path,
+        "window": False,
+    }
+    capture_result = next(
+        json.loads(message["content"])
+        for message in next_messages
+        if message.get("tool_call_id") == "capture-call-0"
+    )
+    assert capture_result["ok"] is True
+    assert capture_result["path"] == capture_path
+
+
+def test_visual_utility_history_keeps_only_recent_complete_exchanges() -> None:
+    utility_calls = [
+        _tool_response(
+            name="run_shell",
+            arguments={"command": f"inspect-{index}"},
+            call_id=f"shell-{index}",
+        )
+        for index in range(5)
+    ]
+    _, clients = _build_clients([
+        *utility_calls,
+        _tool_response(call_id="first-gui"),
+        _tool_response(call_id="second-gui"),
+    ])
+    runner = _RecordingShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+    turn = _actor_turn()
+
+    actor.propose(
+        turn,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    actor.propose(
+        replace(
+            turn,
+            previous_action=ActorPreviousActionView(
+                action="type_text",
+                input_completed=True,
+                visible_effect="changed",
+            ),
+        ),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    encoded = json.dumps(clients[0].requests[6]["messages"])
+    assert "inspect-0" not in encoded
+    for index in range(1, 5):
+        assert f"inspect-{index}" in encoded
+        assert f"shell-{index}-0" in encoded
 
 
 def test_visual_turn_can_list_windows_before_gui_action() -> None:

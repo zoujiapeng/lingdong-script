@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -506,6 +507,40 @@ def test_runtime_abandons_response_that_returns_after_total_deadline() -> None:
     assert captured.value.attempts[0].retryable is False
 
 
+def test_runtime_enforces_total_deadline_while_transport_is_blocked() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def send_once(_request):
+        nonlocal calls
+        calls += 1
+        started.set()
+        release.wait(5)
+        return "late-response"
+
+    wall_started = time.monotonic()
+    try:
+        with pytest.raises(ModelCallError) as captured:
+            ModelCallRuntime().execute(
+                _envelope(),
+                send_once,
+                policy=ModelRetryPolicy(
+                    max_attempts=2,
+                    total_timeout_s=0.1,
+                ),
+            )
+    finally:
+        release.set()
+
+    assert started.is_set()
+    assert time.monotonic() - wall_started < 1
+    assert calls == 1
+    assert captured.value.request_retry_count == 0
+    assert captured.value.attempts[0].error_kind == "ModelResponseDeadlineExceeded"
+    assert captured.value.attempts[0].retryable is False
+
+
 def test_runtime_abandons_response_when_stop_arrives_during_transport() -> None:
     stopped = threading.Event()
     sends = []
@@ -524,6 +559,46 @@ def test_runtime_abandons_response_when_stop_arrives_during_transport() -> None:
         )
 
     assert len(sends) == 1
+    assert captured.value.attempts[0].error_kind == "ModelResponseCanceled"
+    assert captured.value.attempts[0].retryable is False
+
+
+def test_runtime_honors_stop_while_transport_is_blocked() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    stopped = threading.Event()
+    calls = 0
+
+    def send_once(_request):
+        nonlocal calls
+        calls += 1
+        started.set()
+        release.wait(5)
+        return "canceled-response"
+
+    def cancel() -> None:
+        started.wait(1)
+        stopped.set()
+
+    threading.Thread(target=cancel, daemon=True).start()
+    wall_started = time.monotonic()
+    try:
+        with pytest.raises(ModelCallError) as captured:
+            ModelCallRuntime().execute(
+                _envelope(),
+                send_once,
+                policy=ModelRetryPolicy(
+                    max_attempts=2,
+                    total_timeout_s=5,
+                ),
+                stop_event=stopped,
+            )
+    finally:
+        release.set()
+
+    assert time.monotonic() - wall_started < 1
+    assert calls == 1
+    assert captured.value.request_retry_count == 0
     assert captured.value.attempts[0].error_kind == "ModelResponseCanceled"
     assert captured.value.attempts[0].retryable is False
 

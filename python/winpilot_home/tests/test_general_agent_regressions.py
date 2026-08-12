@@ -1037,6 +1037,81 @@ def test_activate_existing_by_process_name_finds_window_by_process(
     assert existing["candidate_count"] == 1
 
 
+def test_existing_window_outcome_prefers_visible_over_hidden_helper(
+    monkeypatch,
+) -> None:
+    """A hidden helper must not make one visible main window ambiguous."""
+    from winpilot.perception import apps
+
+    titles = {
+        3501: "QQ main",
+        3502: "QQ hidden helper",
+    }
+    restored: list[int] = []
+    activated: list[int] = []
+    fake_win32gui = SimpleNamespace(
+        GetWindowText=lambda hwnd: titles[hwnd],
+        IsWindowVisible=lambda hwnd: hwnd == 3501,
+        IsIconic=lambda _hwnd: False,
+        ShowWindow=lambda hwnd, _command: restored.append(hwnd) or True,
+    )
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setattr(apps, "_foreground_root_hwnd", lambda: 9000)
+    monkeypatch.setattr(
+        apps,
+        "_activate_window",
+        lambda hwnd: activated.append(hwnd) or hwnd,
+    )
+
+    existing = apps._existing_window_outcome([3501], [3502])
+
+    assert existing["activated_hwnd"] == 3501
+    assert existing["candidate_count"] == 1
+    assert existing["candidates"] == [{
+        "hwnd": 3501,
+        "title": "QQ main",
+        "visible": True,
+        "minimized": False,
+    }]
+    assert activated == [3501]
+    assert restored == []
+
+
+def test_existing_window_outcome_does_not_restore_every_hidden_helper(
+    monkeypatch,
+) -> None:
+    """Only one hidden app window may be restored; peers can be render helpers."""
+    from winpilot.perception import apps
+
+    titles = {3601: "QQ", 3602: "", 3603: ""}
+    restored: list[int] = []
+    activated: list[int] = []
+    fake_win32gui = SimpleNamespace(
+        GetWindowText=lambda hwnd: titles[hwnd],
+        IsWindowVisible=lambda _hwnd: False,
+        IsIconic=lambda _hwnd: False,
+        ShowWindow=lambda hwnd, _command: restored.append(hwnd) or True,
+    )
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "win32gui", fake_win32gui)
+    monkeypatch.setattr(apps, "_foreground_root_hwnd", lambda: 9000)
+    monkeypatch.setattr(
+        apps,
+        "_activate_window",
+        lambda hwnd: activated.append(hwnd) or hwnd,
+    )
+
+    existing = apps._existing_window_outcome([], [3601, 3602, 3603])
+
+    assert existing["activated_hwnd"] == 3601
+    assert existing["candidate_count"] == 3
+    assert restored == [3601]
+    assert activated == [3601]
+
+
 def test_activate_existing_restores_tray_hidden_window_fallback(
     monkeypatch,
 ) -> None:

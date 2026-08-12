@@ -10,7 +10,10 @@ Gated by ``config.agent.shell_enabled``: turning it off forces pure-GUI mode
 """
 from __future__ import annotations
 
+import os
+import re
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -29,6 +32,72 @@ _MAX_OUTPUT_CHARS = 6000  # legacy subprocess result budget
 # second agent runtime.
 _PI_MAX_OUTPUT_LINES = 2000
 _PI_MAX_OUTPUT_BYTES = 50 * 1024
+
+_POWERSHELL_COMMAND_PREFIX = re.compile(
+    r"^\s*powershell(?:\.exe)?\s+"
+    r"(?:(?:-(?:nologo|noprofile|noninteractive|sta|mta))\s+)*"
+    r"(?:(?:-executionpolicy|-windowstyle)\s+\S+\s+)*"
+    r"-(?:command|c)\s+",
+    re.IGNORECASE,
+)
+_CMD_COMMAND_PREFIX = re.compile(
+    r"^\s*cmd(?:\.exe)?\s+/c\s+",
+    re.IGNORECASE,
+)
+
+
+def _unwrap_redundant_shell_command(command: str, shell: str) -> str:
+    """Accept either a command body or the same shell's full command line.
+
+    ``run`` already supplies the PowerShell/``cmd`` process.  Models and human
+    callers nevertheless commonly include ``powershell -Command`` or
+    ``cmd /c``.  Passing that text through unchanged creates a nested shell;
+    in PowerShell, the outer process expands variables before the inner one
+    receives them.  Remove only a wrapper matching the selected shell.
+    """
+
+    matcher = (
+        _CMD_COMMAND_PREFIX
+        if str(shell).lower() == "cmd"
+        else _POWERSHELL_COMMAND_PREFIX
+    )
+    match = matcher.match(command)
+    if match is None:
+        return command
+    body = command[match.end():].strip()
+    if len(body) >= 2 and body[0] == body[-1] and body[0] in {'"', "'"}:
+        body = body[1:-1]
+    return body
+
+
+def _runtime_host_termination_guard(command: str) -> dict | None:
+    """Reject only process kills that would terminate this active runtime."""
+
+    executable = os.path.basename(sys.executable)
+    process_name = os.path.splitext(executable)[0]
+    name = re.escape(process_name)
+    pid = re.escape(str(os.getpid()))
+    patterns = (
+        rf"\bStop-Process\b[^;\r\n]*-Name\s+['\"]?\*?{name}(?:\.exe)?\*?['\"]?(?:\s|,|$)",
+        rf"\bStop-Process\b\s+['\"]?{name}(?:\.exe)?['\"]?(?:\s|,|$)",
+        rf"\bGet-Process\b[^;\r\n]*\b{name}(?:\.exe)?\b[^;\r\n]*\|\s*Stop-Process\b",
+        rf"\btaskkill\b[^;\r\n]*/IM\s+['\"]?{name}(?:\.exe)?['\"]?(?:\s|$)",
+        rf"\bStop-Process\b[^;\r\n]*-Id\s+{pid}(?:\D|$)",
+        rf"\btaskkill\b[^;\r\n]*/PID\s+{pid}(?:\D|$)",
+    )
+    if not any(re.search(pattern, command, re.IGNORECASE) for pattern in patterns):
+        return None
+    return {
+        "ok": False,
+        "blocked": True,
+        "error": (
+            "command would terminate the active task runtime; list matching "
+            "processes and stop only the intended child PID"
+        ),
+        "next_step": (
+            "select the intended process by PID and leave the runtime host running"
+        ),
+    }
 
 
 def shell_enabled() -> bool:
@@ -202,6 +271,13 @@ def _run_legacy_subprocess(command: str, shell: str = "powershell",
         return {"ok": False, "error": "shell 已被禁用（强制 GUI 模式）。请改用界面操作工具。"}
     if not command or not command.strip():
         return {"ok": False, "error": "命令为空"}
+    blocked = _runtime_host_termination_guard(command)
+    if blocked is not None:
+        BUS.publish(
+            "action", action="shell_blocked", command=command[:200],
+            reason=blocked["error"],
+        )
+        return blocked
     blocked = safety.guard(command)
     if blocked is not None:
         BUS.publish("action", action="shell_blocked", command=command[:200],
@@ -255,6 +331,7 @@ def run(command: str, shell: str = "powershell",
         stop_event=None) -> dict:
     """Run a command, capture output, and kill the whole process tree on timeout."""
     operation_id = uuid.uuid4().hex
+    command = _unwrap_redundant_shell_command(command, shell)
     if not shell_enabled():
         BUS.publish(
             "action", action="shell_blocked", command=command[:200],
@@ -267,6 +344,13 @@ def run(command: str, shell: str = "powershell",
             reason="empty command", operation_id=operation_id,
         )
         return {"ok": False, "error": "empty command"}
+    blocked = _runtime_host_termination_guard(command)
+    if blocked is not None:
+        BUS.publish(
+            "action", action="shell_blocked", command=command[:200],
+            reason=blocked["error"], operation_id=operation_id,
+        )
+        return blocked
     blocked = safety.guard(command)
     if blocked is not None:
         BUS.publish("action", action="shell_blocked", command=command[:200],
@@ -460,6 +544,9 @@ def run_detached(script: str, name: str = "task") -> dict:
         return {"ok": False, "error": "shell 已被禁用（强制 GUI 模式）"}
     if not script or not script.strip():
         return {"ok": False, "error": "脚本为空"}
+    blocked = _runtime_host_termination_guard(script)
+    if blocked is not None:
+        return blocked
     blocked = safety.guard(script)
     if blocked is not None:
         return blocked

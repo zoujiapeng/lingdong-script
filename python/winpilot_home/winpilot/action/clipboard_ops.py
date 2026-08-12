@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import ntpath
 import time
+from ctypes import wintypes
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -145,7 +146,7 @@ def list_windows_backend() -> dict[str, Any]:
             return True
         class_buffer = ctypes.create_unicode_buffer(64)
         user32.GetClassNameW(handle, class_buffer, 64)
-        rect = ctypes.wintypes.RECT()
+        rect = wintypes.RECT()
         if not user32.GetWindowRect(handle, ctypes.byref(rect)):
             return True
         width = rect.right - rect.left
