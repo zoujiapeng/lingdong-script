@@ -144,6 +144,56 @@ def windows_shell_desktop_context(
     }
 
 
+def capture_desktop_workspace_context(
+    *,
+    time_provider: Callable[[], float] = time.time,
+    desktop_shell_resolver: Callable[[], dict[str, Any]] = (
+        windows_shell_desktop_context
+    ),
+) -> dict[str, Any]:
+    """Return a neutral full-desktop anchor for the native Visual Actor.
+
+    The anchor only keeps compatibility with the existing runtime identity
+    contract.  It does not nominate the foreground window as task owner; the
+    model sees the whole screen and physical input follows the point it chose.
+    """
+
+    captured_at = int(time_provider() * 1000)
+    try:
+        shell = desktop_shell_resolver()
+    except Exception:
+        shell = {}
+    if not isinstance(shell, dict) or int(shell.get("hwnd") or 0) <= 0:
+        return {
+            "format": "desktop-target/1",
+            "hwnd": 0,
+            "title": "",
+            "process_id": 0,
+            "class_name": "",
+            "rect": [],
+            "captured_at": captured_at,
+            "foreground_verified": False,
+            "usable": False,
+            "failure_type": "target_binding_missing",
+            "reason": "Windows desktop workspace is unavailable",
+            "binding_mode": "desktop_shell",
+        }
+    return {
+        "format": "desktop-target/1",
+        "hwnd": int(shell.get("hwnd") or 0),
+        "title": str(shell.get("title") or ""),
+        "process_id": int(shell.get("process_id") or 0),
+        "class_name": str(shell.get("class_name") or ""),
+        "rect": _normalized_rect(shell.get("rect")),
+        "captured_at": captured_at,
+        "foreground_verified": False,
+        "usable": shell.get("usable") is True,
+        "failure_type": str(shell.get("failure_type") or ""),
+        "reason": "",
+        "binding_mode": "desktop_shell",
+    }
+
+
 def window_process_id(hwnd: int) -> int:
     if not hwnd:
         return 0

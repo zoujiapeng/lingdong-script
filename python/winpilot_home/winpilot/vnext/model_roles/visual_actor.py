@@ -153,6 +153,9 @@ _STATUS_TOOLS = frozenset(
 )
 _STATUS_TOOL_CALL_LIMIT = 2
 _SHELL_TOOL = "run_shell"
+_DETACHED_SHELL_TOOL = "run_detached"
+_WRITE_FILE_TOOL = "write_file"
+_LOCAL_UTILITY_TOOLS = frozenset({_DETACHED_SHELL_TOOL, _WRITE_FILE_TOOL})
 _SHELL_TOOL_CALL_LIMIT = 4
 _SHELL_MAX_COMMAND_CHARS = 16_384
 _WINDOW_TEXT_TOOL = "read_window_text"
@@ -168,6 +171,7 @@ _VISUAL_UTILITY_TOOLS = frozenset({
     *_STATUS_TOOLS,
     *_CONNECTOR_TOOLS,
     _SHELL_TOOL,
+    *_LOCAL_UTILITY_TOOLS,
     _WINDOW_TEXT_TOOL,
     _CAPTURE_SCREEN_TOOL,
     _LIST_WINDOWS_TOOL,
@@ -179,6 +183,7 @@ _CAPTURE_OUTPUT_MAX_CHARS = 6000
 # never disagree.
 _OPTIONAL_TOOL_DEFAULTS = {
     _CAPTURE_SCREEN_TOOL: {"window": False},
+    _DETACHED_SHELL_TOOL: {"name": "task"},
 }
 
 
@@ -1212,10 +1217,10 @@ def _status_tool_definitions() -> list[dict[str, Any]]:
     ])
 
 
-def _shell_tool_definitions() -> list[dict[str, Any]]:
-    """One generic shell tool for system query / activation, no desktop lease."""
+def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
+    """Expose the generic local primitives implemented by the active runner."""
 
-    return _with_task_state([
+    definitions = [
         {
             "type": "function",
             "function": {
@@ -1245,7 +1250,65 @@ def _shell_tool_definitions() -> list[dict[str, Any]]:
                 "strict": True,
             },
         },
-    ])
+    ]
+    if callable(getattr(runner, "run_detached", None)):
+        definitions.append({
+            "type": "function",
+            "function": {
+                "name": _DETACHED_SHELL_TOOL,
+                "description": (
+                    "Start a PowerShell script as an independent background "
+                    "process for GUI apps, servers, or other long-running work."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "script": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": _SHELL_MAX_COMMAND_CHARS,
+                            "description": "Literal PowerShell script body.",
+                        },
+                        "name": {
+                            "type": "string",
+                            "default": "task",
+                            "description": "Short process label.",
+                        },
+                    },
+                    "required": ["script"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        })
+    if callable(getattr(runner, "write_file", None)):
+        definitions.append({
+            "type": "function",
+            "function": {
+                "name": _WRITE_FILE_TOOL,
+                "description": (
+                    "Write literal UTF-8 content to a file without shell escaping."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Absolute or current-directory path.",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Complete literal file content.",
+                        },
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        })
+    return _with_task_state(definitions)
 
 
 def _window_text_tool_definitions() -> list[dict[str, Any]]:
@@ -1877,6 +1940,75 @@ def _call_shell(
     return _actionable_tool_result(_SHELL_TOOL, output)
 
 
+def _local_utility_exchange(
+    response: Any,
+) -> tuple[dict[str, Any], str, str, dict[str, Any]] | None:
+    """Parse one generic detached-process or literal-file call."""
+
+    message = response_message(response)
+    calls = member(message, "tool_calls")
+    if (
+        isinstance(calls, (str, bytes))
+        or not isinstance(calls, Sequence)
+        or len(calls) != 1
+    ):
+        return None
+    function = member(calls[0], "function")
+    name = member(function, "name") if function is not None else None
+    if name == _DETACHED_SHELL_TOOL:
+        return _owned_tool_exchange(
+            response,
+            _DETACHED_SHELL_TOOL,
+            expected_arguments={"script": str, "name": str},
+        )
+    if name == _WRITE_FILE_TOOL:
+        return _owned_tool_exchange(
+            response,
+            _WRITE_FILE_TOOL,
+            expected_arguments={"path": str, "content": str},
+        )
+    return None
+
+
+def _call_local_utility(
+    runner: Any,
+    name: str,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Execute one local primitive through the same injected shell backend."""
+
+    method_name = (
+        "run_detached" if name == _DETACHED_SHELL_TOOL else "write_file"
+    )
+    method = getattr(runner, method_name, None) if runner is not None else None
+    if not callable(method):
+        return _actionable_tool_result(
+            name,
+            {"ok": False, "error": f"{name} runner is unavailable"},
+        )
+    try:
+        if name == _DETACHED_SHELL_TOOL:
+            result = method(
+                script=str(arguments.get("script") or ""),
+                name=str(arguments.get("name") or "task"),
+            )
+        elif name == _WRITE_FILE_TOOL:
+            result = method(
+                path=str(arguments.get("path") or ""),
+                content=str(arguments.get("content") or ""),
+            )
+        else:  # pragma: no cover - exact local utility set above
+            raise LiveModelRoleError(f"unsupported local utility: {name}")
+    except Exception as exc:
+        return _actionable_tool_error(name, exc)
+    if not isinstance(result, Mapping):
+        return _actionable_tool_error(
+            name,
+            TypeError(f"{name} runner returned a non-object result"),
+        )
+    return _actionable_tool_result(name, result)
+
+
 def _initial_calls_from_response(
     response: Any,
 ) -> list[dict[str, Any]]:
@@ -1904,6 +2036,7 @@ def _initial_call_envelope(
     if type(name) is not str or name not in {
         "observe_desktop",
         _SHELL_TOOL,
+        *_LOCAL_UTILITY_TOOLS,
         _WINDOW_TEXT_TOOL,
         *_STATUS_TOOLS,
         *_CONNECTOR_TOOLS,
@@ -1955,6 +2088,8 @@ def _execute_initial_call(
             arguments,
             stop_event=stop_event,
         )
+    if name in _LOCAL_UTILITY_TOOLS:
+        return _call_local_utility(shell_runner, name, arguments)
     if name == _WINDOW_TEXT_TOOL:
         if window_text_reader is None or not callable(window_text_reader):
             return _actionable_tool_result(
@@ -2008,6 +2143,8 @@ def _visual_batch_call(
         exchange = _status_exchange(response)
     elif name == _SHELL_TOOL:
         exchange = _shell_exchange(response)
+    elif name in _LOCAL_UTILITY_TOOLS:
+        exchange = _local_utility_exchange(response)
     elif name == _WINDOW_TEXT_TOOL:
         exchange = _window_text_exchange(response)
     elif name == _CAPTURE_SCREEN_TOOL:
@@ -2055,6 +2192,8 @@ def _execute_visual_batch_call(
             arguments,
             stop_event=stop_event,
         )
+    if name in _LOCAL_UTILITY_TOOLS:
+        return _call_local_utility(shell_runner, name, arguments)
     if name == _WINDOW_TEXT_TOOL:
         return _call_window_text(window_text_reader, turn)
     if name == _CAPTURE_SCREEN_TOOL:
@@ -2530,7 +2669,7 @@ class LiveVisualActor:
             else []
         )
         shell_tools = (
-            _shell_tool_definitions()
+            _shell_tool_definitions(self._shell_runner)
             if self._shell_runner is not None
             else []
         )
@@ -2875,7 +3014,7 @@ class LiveVisualActor:
             else []
         )
         shell_tools = (
-            _shell_tool_definitions()
+            _shell_tool_definitions(self._shell_runner)
             if self._shell_runner is not None
             else []
         )
@@ -3201,6 +3340,36 @@ class LiveVisualActor:
                 ]
                 current_exchange.extend(connector_messages)
                 provider_request["messages"].extend(connector_messages)
+                continue
+            local_utility = None
+            if self._shell_runner is not None:
+                try:
+                    local_utility = _local_utility_exchange(outcome.response)
+                except LiveModelRoleError as exc:
+                    raise InvalidActorProposal(str(exc)) from exc
+            if local_utility is not None:
+                assistant, call_id, name, arguments = local_utility
+                self._record_tool_start(
+                    _initial_calls_from_response(outcome.response)[0]
+                )
+                result = _call_local_utility(
+                    self._shell_runner,
+                    name,
+                    arguments,
+                )
+                self._record_tool_result(name, result)
+                utility_messages = [
+                    assistant,
+                    _projected_tool_message(
+                        seen_tool_results,
+                        name=name,
+                        call_id=call_id,
+                        result=result,
+                        model_calls_remaining=model_calls_remaining,
+                    ),
+                ]
+                current_exchange.extend(utility_messages)
+                provider_request["messages"].extend(utility_messages)
                 continue
             window_text = None
             if self._window_text_reader is not None:

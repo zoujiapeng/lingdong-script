@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import uuid
+from pathlib import Path
 
 from ..config import CONFIG, SCRIPTS_DIR
 from ..utils.log import BUS, logger
@@ -463,6 +464,36 @@ def run(command: str, shell: str = "powershell",
         exit_code=proc.returncode,
         error=("" if ok else f"command exited with code {proc.returncode}"),
     )
+
+
+def write_file(path: str, content: str) -> dict:
+    """Write literal UTF-8 text without routing it through shell quoting."""
+
+    if not path or not str(path).strip():
+        return {"ok": False, "error": "file path is empty"}
+    target = Path(str(path)).expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    try:
+        target = target.resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        encoded = str(content).encode("utf-8")
+        target.write_bytes(encoded)
+    except OSError as exc:
+        logger.warning("write_file failed: %s", exc)
+        return {"ok": False, "error": str(exc), "path": str(target)}
+    BUS.publish(
+        "action",
+        action="write_file",
+        path=str(target),
+        bytes=len(encoded),
+    )
+    return {
+        "ok": True,
+        "path": str(target),
+        "bytes": len(encoded),
+        "output": f"wrote {len(encoded)} UTF-8 bytes to {target}",
+    }
 
 
 def _foreground_window_fact() -> dict[str, Any]:

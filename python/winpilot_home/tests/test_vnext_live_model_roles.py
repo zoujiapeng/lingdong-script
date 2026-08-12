@@ -2418,6 +2418,62 @@ def test_initial_turn_can_run_shell_before_observe() -> None:
     assert "stderr" not in tool_result
 
 
+def test_visual_turn_can_write_file_then_launch_it_detached() -> None:
+    class LocalUtilityRunner(_RecordingShellRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.file_calls: list[dict[str, Any]] = []
+            self.detached_calls: list[dict[str, Any]] = []
+
+        def write_file(self, **kwargs: Any) -> dict[str, Any]:
+            self.file_calls.append(kwargs)
+            return {"ok": True, "path": kwargs["path"], "bytes": 42}
+
+        def run_detached(self, **kwargs: Any) -> dict[str, Any]:
+            self.detached_calls.append(kwargs)
+            return {"ok": True, "pid": 1234}
+
+    source = "import tkinter as tk\nroot = tk.Tk()\nroot.mainloop()\n"
+    _, clients = _build_clients([
+        _tool_response(
+            name="write_file",
+            arguments={"path": "go_game.py", "content": source},
+            call_id="write-game",
+        ),
+        _tool_response(
+            name="run_detached",
+            arguments={"script": "python .\\go_game.py", "name": "go-game"},
+            call_id="launch-game",
+        ),
+        _tool_response(call_id="gui-call"),
+    ])
+    runner = LocalUtilityRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert runner.file_calls == [{"path": "go_game.py", "content": source}]
+    assert runner.detached_calls == [
+        {"script": "python .\\go_game.py", "name": "go-game"}
+    ]
+    names = {
+        tool["function"]["name"]
+        for tool in clients[0].requests[0]["tools"]
+    }
+    assert {"run_shell", "write_file", "run_detached"} <= names
+
+
 def test_initial_turn_marks_repeated_results_without_hiding_output() -> None:
     responses = [
         _tool_response(

@@ -56,6 +56,7 @@ from .contracts import (
     APPROVED_RUNTIME_TOOLS,
     CURRENT_FRAME_EVIDENCE_KIND,
     MAX_COMPLETED_ACTION_HISTORY,
+    MAX_COMPLETED_ACTION_SUMMARY_LENGTH,
     POST_ACTION_FRAME_EVIDENCE_KIND,
     ActorBudgetView,
     ControllerOutcome,
@@ -148,6 +149,7 @@ class MissionRuntime:
         self._verified_completion_result: str | None = None
         self._latest_narration: str = ""
         self._previous_action_local_intent: str | None = None
+        self._completed_action_intents: list[str] = []
         self._task_state = ActorTaskState.initial()
         self._turn_lock = threading.Lock()
         if budget_facts_provider is not None and not callable(
@@ -559,7 +561,7 @@ class MissionRuntime:
         self,
         obligation_id: str,
     ) -> tuple[str, ...]:
-        summaries: list[str] = []
+        actions: list[str] = []
         for event in self._reducer.events:
             if event.kind != "transition_recorded":
                 continue
@@ -575,23 +577,25 @@ class MissionRuntime:
                 and type(summary) is str
                 and is_safe_action_summary(action, summary)
             ):
-                summaries.append(summary)
-        return tuple(summaries[-MAX_COMPLETED_ACTION_HISTORY:])
+                actions.append(summary)
+        actions = actions[-MAX_COMPLETED_ACTION_HISTORY:]
+        if not actions:
+            return ()
+        intents = self._completed_action_intents[-len(actions):]
+        return tuple(
+            self._actor_action_summary(action, intent)
+            for action, intent in zip(actions, intents, strict=True)
+        )
 
-    def _safe_action_summary(
-        self,
-        proposal: DesktopActionProposal,
-    ) -> str:
-        """Project one uniform action-name summary.
-
-        Every action projects to its bare tool name; scroll direction, key
-        names and other per-action detail live in the structured
-        ``previous_action`` view and the fresh screenshot, not in the
-        completed-action history.  Per-action asymmetric enrichment was an
-        arbitrary rule that gave the model different information density
-        depending on which tool it happened to use.
-        """
-        return proposal.action
+    @staticmethod
+    def _actor_action_summary(action: str, local_intent: str) -> str:
+        intent = " ".join(local_intent.split())
+        if not intent:
+            return action
+        prefix = f"{action}: "
+        return prefix + intent[
+            : MAX_COMPLETED_ACTION_SUMMARY_LENGTH - len(prefix)
+        ].rstrip()
 
     def _complete_mission(
         self,
@@ -897,9 +901,7 @@ class MissionRuntime:
                         "obligation_id": obligation_id,
                         "action_id": envelope.decision_id,
                         "action": proposal.action,
-                        "action_summary": self._safe_action_summary(
-                            proposal
-                        ),
+                        "action_summary": proposal.action,
                         "input_completed": True,
                     },
                     base_revision=envelope.mission_revision,
@@ -916,6 +918,7 @@ class MissionRuntime:
                     ),
                 )
             self._previous_action_local_intent = proposal.local_intent
+            self._completed_action_intents.append(proposal.local_intent)
             if self._stopped(stop_event):
                 return self._cancel(
                     prior_event_ids=event_ids,
@@ -1005,9 +1008,7 @@ class MissionRuntime:
                     "obligation_id": obligation_id,
                     "action_id": envelope.decision_id,
                     "action": proposal.action,
-                    "action_summary": self._safe_action_summary(
-                        proposal
-                    ),
+                    "action_summary": proposal.action,
                     "input_completed": True,
                     "visible_effect": transition.visible_effect,
                     "frame_id": transition.post_frame_id,
@@ -1033,6 +1034,7 @@ class MissionRuntime:
                 detail=f"Controller result could not be reconciled: {exc}",
             )
         self._previous_action_local_intent = proposal.local_intent
+        self._completed_action_intents.append(proposal.local_intent)
         if self._stopped(stop_event):
             return self._cancel(
                 prior_event_ids=event_ids,

@@ -63,6 +63,7 @@ APPROVED_OUTCOME_TOOLS = frozenset(
 )
 APPROVED_RUNTIME_TOOLS = APPROVED_DESKTOP_ACTIONS | APPROVED_OUTCOME_TOOLS
 MAX_COMPLETED_ACTION_HISTORY = 64
+MAX_COMPLETED_ACTION_SUMMARY_LENGTH = 256
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}")
 _TOOL = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -120,14 +121,21 @@ def _strings(
 
 
 def _is_safe_action_summary(value: Any) -> bool:
-    return type(value) is str and any(
-        is_safe_action_summary(action, value)
-        for action in APPROVED_DESKTOP_ACTIONS
-    )
+    if type(value) is not str or len(value) > MAX_COMPLETED_ACTION_SUMMARY_LENGTH:
+        return False
+    action, separator, intent = value.partition(": ")
+    if action not in APPROVED_DESKTOP_ACTIONS:
+        return False
+    if not separator:
+        return is_safe_action_summary(action, value)
+    return bool(intent) and " ".join(intent.split()) == intent
 
 
 def _action_summary_matches(action: str, summary: str) -> bool:
-    return is_safe_action_summary(action, summary)
+    if not _is_safe_action_summary(summary):
+        return False
+    summary_action, _, _ = summary.partition(": ")
+    return summary_action == action
 
 
 def _freeze_json(value: Any) -> Any:
@@ -1306,6 +1314,7 @@ __all__ = [
     "APPROVED_OUTCOME_TOOLS",
     "APPROVED_RUNTIME_TOOLS",
     "MAX_COMPLETED_ACTION_HISTORY",
+    "MAX_COMPLETED_ACTION_SUMMARY_LENGTH",
     "RuntimeContractError",
     "RuntimeFrameIdentity",
     "RuntimeTargetIdentity",

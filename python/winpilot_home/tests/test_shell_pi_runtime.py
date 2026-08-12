@@ -214,3 +214,20 @@ def test_empty_command_publishes_the_rejection(monkeypatch) -> None:
         }
     ]
     assert len(events[0]["operation_id"]) == 32
+
+
+def test_write_file_preserves_literal_multiline_utf8(tmp_path) -> None:
+    target = tmp_path / "nested" / "go_game.py"
+    content = "import tkinter as tk\nlabel = '围棋 <黑白> & 原样'\n"
+
+    result = shell.write_file(str(target), content)
+
+    assert result == {
+        "ok": True,
+        "path": str(target),
+        "bytes": len(content.encode("utf-8")),
+        "output": (
+            f"wrote {len(content.encode('utf-8'))} UTF-8 bytes to {target}"
+        ),
+    }
+    assert target.read_text(encoding="utf-8") == content
