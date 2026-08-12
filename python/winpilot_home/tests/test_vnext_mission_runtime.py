@@ -1058,7 +1058,7 @@ def test_runtime_keeps_the_actor_latest_narration() -> None:
     assert harness.runtime.latest_narration == "轮廓画好了，现在补上耳朵和胡须。"
 
 
-def test_stale_or_invalid_actor_decision_does_not_commit_task_state() -> None:
+def test_stale_or_unsupported_actor_decision_does_not_commit_task_state() -> None:
     update = {"scratchpad": "must_not_commit private-item"}
     stale = _harness(_task_decision(_action(), **update))
     stale.actor.on_propose = lambda: stale.reducer.apply(
@@ -1081,6 +1081,26 @@ def test_stale_or_invalid_actor_decision_does_not_commit_task_state() -> None:
 
     assert invalid_result.status is RuntimeStatus.INVALID_PROPOSAL
     assert invalid.runtime.task_state == invalid_initial
+
+
+def test_schema_rejected_action_keeps_task_state_for_actor_repair() -> None:
+    scratchpad = "route right, down, then right"
+    invalid_action = _action("click")
+    invalid_action["args"]["image_x"] = -1
+    harness = _harness(
+        _task_decision(invalid_action, scratchpad=scratchpad),
+        _blocked(),
+    )
+
+    rejected = harness.runtime.run_one_turn(turn_index=0)
+    next_turn = harness.runtime.run_one_turn(turn_index=1)
+
+    assert rejected.status is RuntimeStatus.INVALID_PROPOSAL
+    assert "expected" not in rejected.detail
+    assert next_turn.status is RuntimeStatus.BLOCKED
+    assert harness.controller.calls == 0
+    assert harness.runtime.task_state.scratchpad == scratchpad
+    assert harness.actor.turns[1].task_state.scratchpad == scratchpad
 
 
 def test_pre_action_current_state_failure_is_discarded_before_input() -> None:
@@ -1158,6 +1178,10 @@ def test_rejected_action_replaces_previous_with_proven_not_executed() -> None:
 
     assert completed.status is RuntimeStatus.ACTION_RECORDED
     assert rejected.status is RuntimeStatus.STALE_DISCARDED
+    assert rejected.detail == (
+        "Controller proved input did not execute: "
+        "error_kind=unspecified; no replay occurred"
+    )
     assert blocked.status is RuntimeStatus.BLOCKED
     previous = harness.actor.turns[2].previous_action
     assert previous is not None
@@ -1179,6 +1203,10 @@ def test_rejected_transition_error_kind_reaches_actor_previous_action() -> None:
     blocked = harness.runtime.run_one_turn(turn_index=2)
 
     assert rejected.status is RuntimeStatus.STALE_DISCARDED
+    assert rejected.detail == (
+        "Controller proved input did not execute: "
+        "error_kind=target_window_lost; no replay occurred"
+    )
     assert blocked.status is RuntimeStatus.BLOCKED
     previous = harness.actor.turns[2].previous_action
     assert previous is not None

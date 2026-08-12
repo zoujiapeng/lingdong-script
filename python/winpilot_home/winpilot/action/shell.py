@@ -20,7 +20,7 @@ from ..utils.log import BUS, logger
 from . import safety
 
 _DEFAULT_TIMEOUT_S = 30
-_MAX_OUTPUT_CHARS = 6000  # what we hand back to the LLM (full text still logged)
+_MAX_OUTPUT_CHARS = 6000  # legacy subprocess result budget
 
 # Execution/result semantics adapted from Pi's MIT-licensed bash tool at
 # packages/coding-agent/src/core/tools/bash.ts, bash-executor.ts and
@@ -113,11 +113,14 @@ def _shape_result(
     combined = stdout
     if stderr:
         combined = f"{combined}\n{stderr}" if combined else stderr
-    output, output_meta = _truncate_tail(
-        combined, max_bytes=_MAX_OUTPUT_CHARS
-    )
-    stdout_tail, _ = _truncate_tail(stdout, max_bytes=_MAX_OUTPUT_CHARS)
-    stderr_tail, _ = _truncate_tail(stderr, max_bytes=_MAX_OUTPUT_CHARS)
+    # Keep the generic Pi boundary here.  The command already decides what to
+    # print; shrinking that selected result to the legacy 6000-character UI
+    # budget can remove a match from the middle of an otherwise small source
+    # inspection.  Truly large output remains bounded and gets an inspectable
+    # full-output path below.
+    output, output_meta = _truncate_tail(combined)
+    stdout_tail, _ = _truncate_tail(stdout)
+    stderr_tail, _ = _truncate_tail(stderr)
     full_output_path = (
         _save_full_output(combined) if output_meta["truncated"] else None
     )
@@ -160,7 +163,11 @@ def _shape_result(
 # PowerShell 5.1 pipes output in the ANSI codepage (GBK on Chinese systems);
 # force UTF-8 so Chinese output isn't mojibake (the snake-game run produced
 # "�ļ��Ѵ���" which hid a real failure from the model).
-_PS_UTF8_PREFIX = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+_PS_UTF8_PREFIX = (
+    "$OutputEncoding=[Console]::OutputEncoding="
+    "[System.Text.UTF8Encoding]::new($false); "
+    "$PSDefaultParameterValues['*:Encoding']='utf8'; "
+)
 
 
 def _decode(data: bytes, prefer: tuple[str, ...]) -> str:

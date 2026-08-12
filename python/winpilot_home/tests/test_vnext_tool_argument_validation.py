@@ -154,6 +154,21 @@ def test_schema_constraints_reject_without_coercion(
     assert caught.value.instance_path == path
 
 
+def test_type_mismatch_reports_expected_and_actual_json_shape() -> None:
+    with pytest.raises(ToolArgumentValidationError) as caught:
+        ToolArgumentValidator(_catalog()).validate(
+            "interact",
+            {
+                "mode": "drag",
+                "points": [{"x": 10, "y": 20}],
+            },
+        )
+
+    assert caught.value.expected == "array"
+    assert caught.value.actual == "object"
+    assert "expected=array actual=object" in str(caught.value)
+
+
 def test_composition_keywords_are_supported() -> None:
     validator = ToolArgumentValidator(_catalog({
         "type": "object",

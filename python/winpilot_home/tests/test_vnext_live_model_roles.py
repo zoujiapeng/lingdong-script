@@ -582,6 +582,42 @@ def test_initial_actor_turn_replies_with_native_history_and_short_system_contrac
         )
 
 
+def test_initial_actor_preserves_the_thread_owners_full_native_prefix() -> None:
+    reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "continued",
+                    "tool_calls": [],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients(reply)
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    history = tuple(
+        {
+            "role": "user" if index % 2 == 0 else "assistant",
+            "content": f"native-{index}-" + "x" * 1400,
+        }
+        for index in range(14)
+    )
+
+    admission = actor.begin_turn("continue", history=history)
+
+    assert admission.reply == "continued"
+    assert clients[0].requests[0]["messages"] == [
+        {"role": "system", "content": INITIAL_ACTOR_SYSTEM_CONTRACT},
+        *history,
+        {"role": "user", "content": "continue"},
+    ]
+
+
 def test_initial_observe_with_content_continues_on_the_same_actor() -> None:
     observe = {
         "choices": [
@@ -777,7 +813,7 @@ def test_visual_actor_can_use_a_connector_before_one_gui_action() -> None:
     assert gateway.calls[0]["ref"] == "connector-ref"
 
 
-def test_last_allowed_model_call_does_not_offer_nonterminal_connector_tools() -> None:
+def test_last_allowed_model_call_keeps_available_connector_tools() -> None:
     _, clients = _build_clients(
         {
             "choices": [
@@ -809,7 +845,11 @@ def test_last_allowed_model_call_does_not_offer_nonterminal_connector_tools() ->
     assert [
         tool["function"]["name"]
         for tool in clients[0].requests[0]["tools"]
-    ] == ["observe_desktop"]
+    ] == [
+        "observe_desktop",
+        "search_connector_tools",
+        "call_connector_tool",
+    ]
     assert gateway.searches == []
 
 
@@ -837,7 +877,7 @@ def test_initial_actor_turn_is_call_once_and_accepts_a_long_goal() -> None:
         actor.begin_turn("another turn")
 
 
-def test_initial_actor_turn_drops_oldest_pairs_to_fit_long_history() -> None:
+def test_initial_actor_turn_preserves_long_native_history() -> None:
     reply = {
         "choices": [
             {
@@ -872,7 +912,7 @@ def test_initial_actor_turn_drops_oldest_pairs_to_fit_long_history() -> None:
         "role": "system",
         "content": INITIAL_ACTOR_SYSTEM_CONTRACT,
     }
-    assert messages[1:-1] == list(history[4:])
+    assert messages[1:-1] == list(history)
     assert messages[-1] == {
         "role": "user",
         "content": "recall the latest context",
@@ -1891,7 +1931,7 @@ def test_initial_actor_resolves_own_status_without_a_desktop_lease() -> None:
     assert tool_result["experience_policy"] == "disabled"
 
 
-def test_status_tools_are_never_offered_on_the_last_allowed_model_call() -> None:
+def test_status_tools_remain_available_near_the_model_call_limit() -> None:
     reply = {
         "choices": [
             {
@@ -1921,7 +1961,12 @@ def test_status_tools_are_never_offered_on_the_last_allowed_model_call() -> None
     assert [
         tool["function"]["name"]
         for tool in clients[0].requests[0]["tools"]
-    ] == ["observe_desktop"]
+    ] == [
+        "observe_desktop",
+        "get_agent_status",
+        "get_memory_status",
+        "get_capabilities",
+    ]
     assert actor.model_call_reservation == 120
 
 
@@ -2033,7 +2078,7 @@ def test_initial_observe_with_arguments_is_repaired_once_then_terminates() -> No
     )
 
 
-def test_initial_observe_second_format_failure_is_terminal() -> None:
+def test_initial_observe_can_repair_repeated_format_failures() -> None:
     bad_observe = {
         "choices": [
             {
@@ -2054,18 +2099,47 @@ def test_initial_observe_second_format_failure_is_terminal() -> None:
             }
         ]
     }
-    _, clients = _build_clients([bad_observe, bad_observe])
+    good_observe = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "observe-fixed",
+                            "type": "function",
+                            "function": {
+                                "name": "observe_desktop",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    _, clients = _build_clients([bad_observe, bad_observe, good_observe])
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
     )
 
-    with pytest.raises(
-        LiveModelRoleError,
-        match="observe_desktop does not accept arguments",
-    ):
-        actor.begin_turn("Open notepad and wait")
+    admission = actor.begin_turn(
+        "Open notepad and wait",
+        _model_call_limit=3,
+    )
+
+    assert admission.kind == "desktop"
+    assert len(clients[0].requests) == 3
+    second_feedback = json.loads(
+        clients[0].requests[2]["messages"][-1]["content"]
+    )
+    assert second_feedback["tool_format_error"] == (
+        "observe_desktop does not accept arguments"
+    )
+    assert second_feedback["model_calls_remaining"] == 1
 
 class _RecordingShellRunner:
     def __init__(self) -> None:
@@ -2085,7 +2159,7 @@ class _RecordingShellRunner:
 def test_initial_turn_can_run_shell_before_observe() -> None:
     shell_response = _tool_response(
         name="run_shell",
-        arguments={"command": "Get-Process notepad"},
+        arguments={"command": "Get-Process notepad", "timeout_s": 300},
         call_id="shell-call",
     )
     observe = {
@@ -2117,12 +2191,16 @@ def test_initial_turn_can_run_shell_before_observe() -> None:
         shell_runner=runner,
     )
 
-    admission = actor.begin_turn("Check if notepad is running")
+    admission = actor.begin_turn(
+        "Check if notepad is running",
+        _model_call_limit=2,
+    )
 
     assert admission.kind == "desktop"
     assert len(runner.calls) == 1
     assert runner.calls[0]["command"] == "Get-Process notepad"
     assert runner.calls[0]["shell"] == "powershell"
+    assert runner.calls[0]["timeout_s"] == 300.0
     assert len(clients[0].requests) == 2
     shell_result_messages = [
         m
@@ -2132,11 +2210,12 @@ def test_initial_turn_can_run_shell_before_observe() -> None:
     assert len(shell_result_messages) == 1
     tool_result = json.loads(shell_result_messages[0]["content"])
     assert tool_result["output"] == "notepad running"
+    assert tool_result["model_calls_remaining"] == 1
     assert "stdout" not in tool_result
     assert "stderr" not in tool_result
 
 
-def test_initial_turn_compacts_identical_results_after_every_execution() -> None:
+def test_initial_turn_marks_repeated_results_without_hiding_output() -> None:
     responses = [
         _tool_response(
             name="run_shell",
@@ -2189,25 +2268,29 @@ def test_initial_turn_compacts_identical_results_after_every_execution() -> None
         if message.get("role") == "tool"
     ]
     assert tool_results[0]["output"] == "same file contents"
+    assert tool_results[0]["model_calls_remaining"] == 119
     assert tool_results[1] == {
         "exit_code": 0,
         "message": (
             "Executed; this tool returned the same output as the referenced "
             "call."
         ),
+        "model_calls_remaining": 118,
         "new_tool_information": False,
         "ok": True,
+        "output": "same file contents",
         "repeat_count": 1,
         "result_unchanged": True,
         "same_as_tool_call_id": "shell-call-0-0",
     }
     assert tool_results[2]["output"] == "changed"
+    assert tool_results[2]["model_calls_remaining"] == 117
 
 
 def test_repeated_error_result_stays_explicitly_failed() -> None:
     from winpilot.vnext.model_roles.visual_actor import _repeated_tool_result
 
-    compact = _repeated_tool_result(
+    repeated = _repeated_tool_result(
         {
             "error": "provider unavailable",
             "next_step": "choose another tool",
@@ -2216,11 +2299,11 @@ def test_repeated_error_result_stays_explicitly_failed() -> None:
         repeat_count=2,
     )
 
-    assert compact["ok"] is False
-    assert compact["next_step"] == "choose another tool"
-    assert compact["same_as_tool_call_id"] == "failed-call-1"
-    assert compact["new_tool_information"] is False
-    assert "error" not in compact
+    assert repeated["ok"] is False
+    assert repeated["error"] == "provider unavailable"
+    assert repeated["next_step"] == "choose another tool"
+    assert repeated["same_as_tool_call_id"] == "failed-call-1"
+    assert repeated["new_tool_information"] is False
 
 
 def test_tool_result_identity_ignores_only_full_output_path() -> None:
@@ -2254,6 +2337,8 @@ def test_tool_result_identity_ignores_only_full_output_path() -> None:
     )
     assert compact["result_unchanged"] is True
     assert compact["same_as_tool_call_id"] == "first-call"
+    assert compact["output"] == "same output"
+    assert compact["full_output_path"] == r"C:\tmp\second.log"
     changed_window = _project_tool_result(
         seen,
         name="run_shell",
@@ -2350,6 +2435,7 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
     assert shell_schema["properties"]["task_state_update"]["default"] == {
         "scratchpad": None,
     }
+    assert "maximum" not in shell_schema["properties"]["timeout_s"]
 
 
 def test_visual_turn_can_run_shell_before_gui_action() -> None:
@@ -2538,7 +2624,7 @@ def test_visual_batch_with_gui_uses_existing_single_call_failure_path() -> None:
     assert len(clients[0].requests) == 1
 
 
-def test_visual_turn_compacts_repeated_tool_output_after_every_execution() -> None:
+def test_visual_turn_marks_repeated_tool_output_without_hiding_it() -> None:
     _, clients = _build_clients(
         [
             _tool_response(
@@ -2592,11 +2678,12 @@ def test_visual_turn_compacts_repeated_tool_output_after_every_execution() -> No
     assert tool_results[1]["result_unchanged"] is True
     assert tool_results[1]["new_tool_information"] is False
     assert tool_results[1]["same_as_tool_call_id"] == "visual-shell-0-0"
-    assert "output" not in tool_results[1]
+    assert tool_results[1]["output"] == "same output"
+    assert tool_results[1]["model_calls_remaining"] == 118
     assert tool_results[2]["output"] == "changed output"
 
 
-def test_visual_turn_compacts_repeated_window_text_body() -> None:
+def test_visual_turn_keeps_repeated_window_text_body() -> None:
     _, clients = _build_clients(
         [
             _tool_response(
@@ -2647,7 +2734,7 @@ def test_visual_turn_compacts_repeated_window_text_body() -> None:
     assert tool_results[0]["text"] == "x" * 6000
     assert tool_results[1]["result_unchanged"] is True
     assert tool_results[1]["new_tool_information"] is False
-    assert "text" not in tool_results[1]
+    assert tool_results[1]["text"] == "x" * 6000
     assert tool_results[2]["text"] == "changed text"
 
 

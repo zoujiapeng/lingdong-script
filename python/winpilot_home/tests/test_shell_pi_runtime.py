@@ -1,6 +1,10 @@
 """Focused tests for the Pi-style shell result semantics."""
 from __future__ import annotations
 
+import subprocess
+
+import pytest
+
 from winpilot.action import shell
 
 
@@ -74,7 +78,23 @@ def test_timeout_result_gives_the_model_partial_state() -> None:
     )
 
 
-def test_result_above_actor_budget_is_recoverable(monkeypatch) -> None:
+def test_selected_result_below_generic_boundary_is_not_truncated() -> None:
+    selected = "a" * 12_000 + "MATCH_IN_THE_MIDDLE" + "z" * 12_000
+
+    result = shell._shape_result(
+        stdout=selected,
+        stderr="",
+        ok=True,
+        exit_code=0,
+    )
+
+    assert result["output"] == selected
+    assert "MATCH_IN_THE_MIDDLE" in result["output"]
+    assert result["output_meta"]["truncated"] is False
+    assert "full_output_path" not in result
+
+
+def test_result_above_generic_boundary_is_recoverable(monkeypatch) -> None:
     monkeypatch.setattr(
         shell,
         "_save_full_output",
@@ -82,16 +102,34 @@ def test_result_above_actor_budget_is_recoverable(monkeypatch) -> None:
     )
 
     result = shell._shape_result(
-        stdout="x" * 7000,
+        stdout="x" * (shell._PI_MAX_OUTPUT_BYTES + 1000),
         stderr="",
         ok=True,
         exit_code=0,
     )
 
-    assert len(result["output"].encode("utf-8")) <= 6000
+    assert len(result["output"].encode("utf-8")) <= shell._PI_MAX_OUTPUT_BYTES
     assert result["output_meta"]["truncated"] is True
     assert result["output_meta"]["truncated_by"] == "bytes"
     assert result["full_output_path"] == r"C:\Temp\full-shell.log"
+
+
+@pytest.mark.skipif(
+    not hasattr(subprocess, "CREATE_NO_WINDOW"),
+    reason="Windows PowerShell contract",
+)
+def test_powershell_default_file_writes_are_utf8(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
+    target = tmp_path / "unicode-source.py"
+    escaped = str(target).replace("'", "''")
+
+    result = shell.run(
+        f"Set-Content -LiteralPath '{escaped}' -Value 'label = \"dash — 中文\"'",
+        shell="powershell",
+    )
+
+    assert result["ok"] is True
+    assert target.read_text(encoding="utf-8-sig") == 'label = "dash — 中文"\n'
 
 
 def test_empty_command_publishes_the_rejection(monkeypatch) -> None:

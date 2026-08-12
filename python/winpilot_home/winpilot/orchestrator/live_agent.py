@@ -4136,6 +4136,18 @@ class _PreparedHandler:
                             "shortest useful next step."
                         )
                         continue
+                    if (
+                        result.status is RuntimeStatus.STALE_DISCARDED
+                        and redecision_budget_available
+                    ):
+                        # A stale authority decision or proven-not-executed
+                        # physical attempt already carries the machine's real
+                        # reason. Return it to the same model instead of
+                        # silently starting an indistinguishable next turn.
+                        rejection_feedback = raw_detail[
+                            :_MAX_REJECTION_FEEDBACK_CHARS
+                        ]
+                        continue
                     if terminal_status not in _CONTINUE_STATUSES:
                         break
                 else:
