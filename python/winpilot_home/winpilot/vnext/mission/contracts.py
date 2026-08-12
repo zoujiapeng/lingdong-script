@@ -2017,9 +2017,8 @@ _EVENT_STRING_ARRAY_FIELDS = frozenset(
 def is_safe_action_summary(action: str, summary: str) -> bool:
     """Validate the canonical privacy-safe summary owned by Mission events.
 
-    Every action projects to its bare tool name; per-action detail (scroll
-    direction, key names) lives in the structured previous-action view and
-    the fresh screenshot, not in the completed-action history.
+    Mission events keep the bare physical action only. Model-authored context
+    stays in the live Runtime projection rather than the durable event stream.
     """
 
     if type(action) is not str or type(summary) is not str:

@@ -1227,7 +1227,7 @@ def test_previous_action_view_keeps_one_bounded_completed_intent() -> None:
     previous = harness.actor.turns[1].previous_action
     assert previous is not None
     assert previous.action == "click"
-    assert previous.semantic_summary == "click"
+    assert previous.semantic_summary == "click: perform one click"
     assert previous.local_intent == "perform one click"
     assert previous.input_completed is True
     assert previous.visible_effect == "post-action frame captured"
@@ -1301,7 +1301,7 @@ def test_rejected_transition_error_kind_reaches_actor_previous_action() -> None:
     assert previous.error_kind == "target_window_lost"
 
 
-def test_actor_receives_only_completed_action_order() -> None:
+def test_actor_receives_completed_action_order_with_semantic_intent() -> None:
     harness = _harness(
         _action("click"),
         _action("double_click"),
@@ -1316,17 +1316,19 @@ def test_actor_receives_only_completed_action_order() -> None:
     assert second.status is RuntimeStatus.ACTION_RECORDED
     assert verified.status is RuntimeStatus.MISSION_VERIFIED
     assert harness.actor.turns[0].completed_action_summaries == ()
-    assert harness.actor.turns[1].completed_action_summaries == ("click",)
+    assert harness.actor.turns[1].completed_action_summaries == (
+        "click: perform one click",
+    )
     assert harness.actor.turns[2].completed_action_summaries == (
-        "click",
-        "double_click",
+        "click: perform one click",
+        "double_click: perform one double_click",
     )
     history_wire = json.dumps(
         harness.actor.turns[2].completed_action_summaries
     )
     assert "image_x" not in history_wire
     assert "text" not in history_wire
-    assert "local_intent" not in history_wire
+    assert "perform one click" in history_wire
 
 
 def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
@@ -1347,22 +1349,22 @@ def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
 
     assert verified.status is RuntimeStatus.MISSION_VERIFIED
     expected = (
-        "scroll",
-        "scroll",
-        "hotkey",
-        "type_text",
+        "scroll: perform one scroll",
+        "scroll: perform one scroll",
+        "hotkey: perform one hotkey",
+        "type_text: perform one type_text",
     )
     assert (
         harness.actor.turns[1].previous_action.semantic_summary
-        == "scroll"
+        == "scroll: perform one scroll"
     )
     assert (
         harness.actor.turns[2].previous_action.semantic_summary
-        == "scroll"
+        == "scroll: perform one scroll"
     )
     assert (
         harness.actor.turns[3].previous_action.semantic_summary
-        == "hotkey"
+        == "hotkey: perform one hotkey"
     )
     assert harness.actor.turns[4].completed_action_summaries == expected
     transition_summaries = tuple(
@@ -1370,12 +1372,34 @@ def test_completed_action_summaries_keep_safe_direction_and_chord() -> None:
         for event in harness.reducer.events
         if event.kind == "transition_recorded"
     )
-    assert transition_summaries == expected
+    assert transition_summaries == (
+        "scroll",
+        "scroll",
+        "hotkey",
+        "type_text",
+    )
     history_wire = json.dumps(transition_summaries)
     assert "image_x" not in history_wire
     assert "image_y" not in history_wire
     assert "hello" not in history_wire
-    assert "local_intent" not in history_wire
+    assert "perform one type_text" not in history_wire
+
+
+def test_completed_action_intent_is_bounded_without_copying_action_args() -> None:
+    action = _action("type_text")
+    action["args"]["text"] = "credential-value-that-must-not-enter-history"
+    action["local_intent"] = "记录进度 " + ("阶段" * 300)
+    harness = _harness(action, _claim())
+
+    recorded = harness.runtime.run_one_turn(turn_index=0)
+    verified = harness.runtime.run_one_turn(turn_index=1)
+
+    assert recorded.status is RuntimeStatus.ACTION_RECORDED
+    assert verified.status is RuntimeStatus.MISSION_VERIFIED
+    summary = harness.actor.turns[1].completed_action_summaries[0]
+    assert summary.startswith("type_text: 记录进度 ")
+    assert len(summary) == 256
+    assert "credential-value" not in summary
 
 
 def test_repeated_actions_are_executed_without_task_level_suppression() -> None:

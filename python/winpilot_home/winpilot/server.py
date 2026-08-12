@@ -79,7 +79,6 @@ from .tasking.capability import CapabilityPlanner
 from .tasking.artifacts import ArtifactStore
 from .tasking.compiler import TaskContractCompiler
 from .tasking.contracts import ContractCompileRequest
-from .tasking.execution_context import capture_foreground_window_context
 
 WEBUI_DIR = ROOT_DIR / "webui"
 _RECIPE_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
@@ -825,23 +824,12 @@ def platform_jobs(limit: int = 50) -> dict[str, Any]:
 
 @app.get("/api/v2/desktop-context")
 def desktop_context(exclude_process_id: int = 0) -> dict[str, Any]:
-    """Bind the external foreground window after the native client yields.
-
-    When no usable application window exists, the Windows Shell desktop is
-    bound as a generic launch surface instead of failing with
-    ``target_binding_missing``.
-    """
-    from .tasking.execution_context import (
-        capture_foreground_window_context,
-        windows_shell_desktop_context,
-    )
+    """Give the native Visual Actor a neutral full-desktop workspace."""
+    from .tasking.execution_context import capture_desktop_workspace_context
 
     return {
         "ok": True,
-        "target": capture_foreground_window_context(
-            max(0, int(exclude_process_id or 0)),
-            desktop_shell_resolver=windows_shell_desktop_context,
-        ),
+        "target": capture_desktop_workspace_context(),
     }
 
 

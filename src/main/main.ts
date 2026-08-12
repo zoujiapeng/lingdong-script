@@ -562,6 +562,13 @@ ipcMain.handle('window:toggle-maximize', () => {
 ipcMain.handle('window:close', async () => {
   const window = mainWindow;
   if (!window || window.isDestroyed()) return false;
+  // During a desktop handoff the control surface is only a host for the live
+  // run. Removing it from the model's desktop must not tear down that run.
+  // Explicit File > Exit remains the process-level quit path.
+  if (_desktopHandoffPending) {
+    window.hide();
+    return true;
+  }
   window.close();
   // A renderer beforeunload guard can cancel the close to protect an
   // unsaved Flow draft. The title-bar close button is an explicit quit
@@ -1481,6 +1488,7 @@ if (!gotTheLock) {
     // Another instance was launched — focus the existing window
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!mainWindow.isVisible()) mainWindow.show();
       mainWindow.focus();
     }
   });

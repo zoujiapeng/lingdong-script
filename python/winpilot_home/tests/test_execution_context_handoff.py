@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from winpilot.tasking.execution_context import (
+    capture_desktop_workspace_context,
     capture_foreground_window_context,
     foreground_handoff_conflict,
     normalize_execution_context,
@@ -228,6 +229,53 @@ def test_windows_shell_context_reads_localized_win32_identity(monkeypatch):
 
     assert target["title"] == "桌面窗口"
     assert target["class_name"] == "Progman"
+
+
+def test_native_desktop_workspace_does_not_bind_arbitrary_foreground_window():
+    target = capture_desktop_workspace_context(
+        time_provider=lambda: 1.25,
+        desktop_shell_resolver=lambda: {
+            "format": "desktop-target/1",
+            "hwnd": 65878,
+            "title": "Program Manager",
+            "process_id": 19076,
+            "class_name": "Progman",
+            "rect": [0, 0, 1536, 864],
+            "foreground_verified": False,
+            "usable": True,
+            "failure_type": "",
+            "reason": "windows_shell_desktop_fallback",
+            "binding_mode": "desktop_shell",
+        },
+    )
+
+    assert target == {
+        "format": "desktop-target/1",
+        "hwnd": 65878,
+        "title": "Program Manager",
+        "process_id": 19076,
+        "class_name": "Progman",
+        "rect": [0, 0, 1536, 864],
+        "captured_at": 1250,
+        "foreground_verified": False,
+        "usable": True,
+        "failure_type": "",
+        "reason": "",
+        "binding_mode": "desktop_shell",
+    }
+
+
+def test_native_desktop_workspace_reports_missing_shell_without_foreground_fallback():
+    target = capture_desktop_workspace_context(
+        time_provider=lambda: 2.0,
+        desktop_shell_resolver=lambda: {},
+    )
+
+    assert target["usable"] is False
+    assert target["hwnd"] == 0
+    assert target["captured_at"] == 2000
+    assert target["failure_type"] == "target_binding_missing"
+    assert target["binding_mode"] == "desktop_shell"
 
 
 def test_windows_shell_context_uses_real_class_when_title_is_empty(monkeypatch):

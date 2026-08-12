@@ -600,9 +600,10 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
         assert graph.get("metadata", {}).get("experience_policy") == "disabled", graph
         assert (graph.get("policy") or {}).get("allow_shell") is False
 
-        # Reproduce the native client's handoff/capture/start sequence.  The
-        # opt-in test already yielded focus to its target above, so it captures
-        # that foreground HWND through the same endpoint used by the client.
+        # Reproduce the native client's handoff/capture/start sequence. The
+        # endpoint supplies a neutral desktop anchor; the real full-screen
+        # frame and point-selected physical input remain free to use this
+        # browser or any other window.
         assert _find_window(title, timeout_s=3.0) == browser_hwnd
         desktop_context = _request(
             "GET",
@@ -610,8 +611,9 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
         )
         target_window = desktop_context.get("target") or {}
         assert target_window.get("usable") is True, target_window
-        assert target_window.get("foreground_verified") is True, target_window
-        assert int(target_window.get("hwnd") or 0) == browser_hwnd, target_window
+        assert target_window.get("foreground_verified") is False, target_window
+        assert target_window.get("binding_mode") == "desktop_shell", target_window
+        assert int(target_window.get("hwnd") or 0) > 0, target_window
         submitted_at = int(time.time() * 1000)
         execution_context = {
             "format": "execution-context/1",
@@ -623,8 +625,8 @@ def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> Non
                 "strategy": "foreground_after_control_surface_yield",
                 "yielded": True,
                 "control_surface_pid": 0,
-                "prepared_at": submitted_at,
-                "reason": "real E2E target already owns foreground",
+                "prepared_at": int(target_window.get("captured_at") or submitted_at),
+                "reason": "real E2E control surface already yielded",
             },
             "target_window": target_window,
         }
