@@ -100,6 +100,36 @@ def test_list_windows_keeps_frontmost_24_with_truthful_facts(monkeypatch) -> Non
     assert result["windows"][3]["foreground"] is True
 
 
+def test_list_windows_does_not_depend_on_ctypes_wintypes_side_effect(
+    monkeypatch,
+) -> None:
+    """Enumeration must work before any other module imports ctypes.wintypes."""
+    user32 = _FakeUser32([100], foreground=100)
+    monkeypatch.setattr(
+        clipboard_ops.ctypes,
+        "windll",
+        SimpleNamespace(user32=user32),
+    )
+    monkeypatch.setattr(
+        clipboard_ops.ctypes,
+        "WINFUNCTYPE",
+        lambda *_args: lambda callback: callback,
+    )
+    monkeypatch.delattr(clipboard_ops.ctypes, "wintypes", raising=False)
+    monkeypatch.setattr(
+        clipboard_ops,
+        "_process_name",
+        lambda pid: f"process-{pid}.exe",
+    )
+
+    result = clipboard_ops.list_windows_backend()
+
+    assert result["ok"] is True
+    assert result["count"] == 1
+    assert result["windows"][0]["hwnd"] == 100
+    assert result["windows"][0]["foreground"] is True
+
+
 class _FakeKernel32:
     def __init__(self, *, path: str = "", opens: bool = True) -> None:
         self.path = path

@@ -39,6 +39,7 @@ from winpilot.vnext.runtime import (
     CURRENT_FRAME_EVIDENCE_KIND,
     POST_ACTION_FRAME_EVIDENCE_KIND,
     ActorBudgetView,
+    ActorTaskState,
     ActorTurnInput,
     ActorTaskStateUpdate,
     ActorTurnDecision,
@@ -349,12 +350,14 @@ def _task_decision(
     proposal: Mapping[str, Any],
     *,
     scratchpad: str | None = None,
+    remaining_items: list[str] | None = None,
 ) -> ActorTurnDecision:
+    update: dict[str, Any] = {"scratchpad": scratchpad}
+    if remaining_items is not None:
+        update["remaining_items"] = remaining_items
     return ActorTurnDecision(
         proposal=proposal,
-        task_state_update=ActorTaskStateUpdate.from_dict(
-            {"scratchpad": scratchpad}
-        ),
+        task_state_update=ActorTaskStateUpdate.from_dict(update),
     )
 
 
@@ -875,6 +878,73 @@ def test_actor_can_verify_already_satisfied_goal_without_mutation() -> None:
     )
 
 
+def test_task_state_remaining_items_merge_replace_and_clear() -> None:
+    state = ActorTaskState.initial().apply(
+        ActorTaskStateUpdate.from_dict(
+            {
+                "scratchpad": "Start the first phase",
+                "remaining_items": ["send the image", "finish the game"],
+            }
+        )
+    )
+
+    revised = state.apply(
+        ActorTaskStateUpdate.from_dict(
+            {"scratchpad": "The first phase is done"}
+        )
+    )
+    cleared = revised.apply(
+        ActorTaskStateUpdate.from_dict(
+            {"scratchpad": None, "remaining_items": []}
+        )
+    )
+
+    assert revised.scratchpad == "The first phase is done"
+    assert revised.remaining_items == ("send the image", "finish the game")
+    assert cleared.remaining_items == ()
+
+
+def test_claim_with_actor_declared_remaining_work_soft_rejects_then_recovers() -> None:
+    harness = _harness(
+        _task_decision(
+            _action("click"),
+            scratchpad="Music is playing",
+            remaining_items=["send playback image", "build and play game"],
+        ),
+        _task_decision(_claim()),
+        _task_decision(
+            _claim(),
+            scratchpad="Everything requested is complete",
+            remaining_items=[],
+        ),
+    )
+
+    acted = harness.runtime.run_one_turn(turn_index=0)
+    premature = harness.runtime.run_one_turn(turn_index=1)
+
+    assert acted.status is RuntimeStatus.ACTION_RECORDED
+    assert premature.status is RuntimeStatus.INVALID_PROPOSAL
+    assert "unfinished items remain" in premature.detail
+    assert harness.runtime.task_state.remaining_items == (
+        "send playback image",
+        "build and play game",
+    )
+    assert harness.reducer.projection.status is MissionStatus.RUNNING
+    assert all(
+        event.kind not in {
+            "obligation_claimed",
+            "verification_recorded",
+            "mission_verified",
+        }
+        for event in harness.reducer.events
+    )
+
+    completed = harness.runtime.run_one_turn(turn_index=2)
+
+    assert completed.status is RuntimeStatus.MISSION_VERIFIED
+    assert harness.runtime.task_state.remaining_items == ()
+
+
 def test_claim_fails_closed_without_fresh_observation() -> None:
     harness = _harness(_claim())
     stale_frame = replace(
@@ -1101,6 +1171,22 @@ def test_schema_rejected_action_keeps_task_state_for_actor_repair() -> None:
     assert harness.controller.calls == 0
     assert harness.runtime.task_state.scratchpad == scratchpad
     assert harness.actor.turns[1].task_state.scratchpad == scratchpad
+
+
+def test_out_of_frame_point_soft_rejects_for_actor_repair() -> None:
+    invalid_action = _action("click")
+    invalid_action["args"]["image_x"] = 320
+    harness = _harness(invalid_action, _blocked())
+
+    rejected = harness.runtime.run_one_turn(turn_index=0)
+    next_turn = harness.runtime.run_one_turn(turn_index=1)
+
+    assert rejected.status is RuntimeStatus.INVALID_PROPOSAL
+    assert rejected.detail == (
+        "image_x must stay inside the exact submitted image"
+    )
+    assert next_turn.status is RuntimeStatus.BLOCKED
+    assert harness.controller.calls == 0
 
 
 def test_pre_action_current_state_failure_is_discarded_before_input() -> None:
@@ -1345,6 +1431,73 @@ def test_untrusted_pre_frame_is_rejected_before_actor_or_controller() -> None:
 
     assert result.status is RuntimeStatus.STATE_REJECTED
     assert harness.actor.calls == 0
+    assert harness.controller.calls == 0
+
+
+def test_full_desktop_snapshot_is_not_rejected_by_window_binding() -> None:
+    harness = _harness(_claim())
+    image_b64 = "ZnVsbC1kZXNrdG9wLWZyYW1l"
+    digest = hashlib.sha256(image_b64.encode("ascii")).hexdigest()
+    identity = RuntimeFrameIdentity(
+        frame_id=2,
+        epoch=4,
+        hwnd=999,
+        region=(-1200, 0, 3120, 1080),
+        scope="full_desktop",
+        submitted_size=(320, 240),
+        image_sha256=digest,
+    )
+    evidence = EvidenceRef(
+        id="e-full-desktop-frame",
+        mission_id=MISSION_ID,
+        run_id=RUN_ID,
+        obligation_id=OBLIGATION_ID,
+        kind=CURRENT_FRAME_EVIDENCE_KIND,
+        trust="deterministic",
+        payload_hash=identity.payload_hash,
+        frame_id=identity.frame_id,
+    )
+    harness.registry.append(evidence)
+    frame = RuntimeFrame(
+        frame_id=identity.frame_id,
+        epoch=identity.epoch,
+        hwnd=identity.hwnd,
+        region=identity.region,
+        scope=identity.scope,
+        submitted_size=identity.submitted_size,
+        image_b64=image_b64,
+        image_sha256=digest,
+        evidence_refs=(evidence.id,),
+    )
+    target = RuntimeTargetIdentity(
+        binding_id="foreground-anchor",
+        hwnd=identity.hwnd,
+        process_id=99,
+        executable_identity="foreground-process",
+        epoch=identity.epoch,
+    )
+    harness.state.snapshot = RuntimeSnapshot(
+        broker_state=BrokerRuntimeState(
+            turn_index=0,
+            available_capabilities=("visual.interact",),
+            target=TargetState(
+                target.binding_id,
+                target.hwnd,
+                target.epoch,
+                True,
+            ),
+            frame=frame.broker_frame(),
+            pointer=PointerLeaseState(PointerDisposition.RELEASED),
+            runtime_healthy=True,
+        ),
+        frame=frame,
+        target=target,
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.MISSION_VERIFIED
+    assert harness.actor.calls == 1
     assert harness.controller.calls == 0
 
 

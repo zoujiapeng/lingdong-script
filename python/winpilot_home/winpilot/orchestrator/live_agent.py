@@ -1,8 +1,8 @@
 """Product composition root for the minimal live vNext desktop loop.
 
-Electron supplies the initial target.  A small DesktopWorkspace then owns
-causal window hand-offs between atomic actions; it does not plan application
-workflows or provide a legacy fallback.
+Electron yields the control surface before the run starts.  The Actor then
+sees and operates the whole desktop; the initial HWND is only a stable frame
+anchor for the existing wire contracts, never an input owner.
 """
 from __future__ import annotations
 
@@ -69,7 +69,6 @@ from ..vnext.desktop_adapter import (
     AtomicDesktopAdapter,
     DesktopWorkspace,
     LiveTargetSnapshot,
-    WorkspaceObservation,
     WorkspaceSurface,
 )
 from ..vnext.evidence import EvidenceRegistry
@@ -869,28 +868,21 @@ class _LiveAgentStatusProvider:
 
 
 def _window_text_reader_factory() -> Any:
-    """Read-only UIA text of the exact bound target window (frame hwnd).
-
-    The reader is called inside the Visual Actor's own turn with the
-    projected frame, so the text it returns always describes the same window
-    the current screenshot shows — no UIA-vs-pixels mismatch is possible.
-    """
+    """Read-only UIA text from the window that owns focus when called."""
     _WINDOW_TEXT_FORMAT = "window-text/1"
     _WINDOW_TEXT_MAX_CHARS = 6000
 
     def read(turn: Any) -> dict[str, Any]:
-        frame = getattr(turn, "frame", None)
-        hwnd = getattr(frame, "window_hwnd", None) if frame is not None else None
+        # A full-desktop frame has no owner.  Read the live focus surface
+        # instead of treating the frame's compatibility anchor as authority.
+        hwnd = _read_win32_foreground_root()
         if not hwnd:
             return {
                 "format": _WINDOW_TEXT_FORMAT,
                 "window_hwnd": None,
                 "element_count": 0,
                 "text": "",
-                "error": (
-                    "no bound target window in the current frame; "
-                    "observe the desktop first"
-                ),
+                "error": "no foreground window is currently available",
             }
         try:
             from ..perception.uia import collect as uia_collect
@@ -1449,9 +1441,10 @@ def _tool_catalog() -> ToolCatalog:
                 "arguments": {
                     "type": "string",
                     "maxLength": 4096,
+                    "default": "",
                 },
             },
-            ["app", "arguments"],
+            ["app"],
         ),
         "claim_obligation_done": _object_schema(
             {
@@ -1783,182 +1776,44 @@ class _LiveRuntimeState:
             created_at=state.captured_at,
         )
 
-    def _prepare_workspace_adoption(
-        self,
-        observation: WorkspaceObservation,
-    ) -> tuple[TargetBinding, EvidenceRef] | None:
-        if not observation.replaces_binding:
-            return None
-        previous = self._workspace.binding
-        surface = observation.surface
-        material = {
-            "previous_binding_id": previous.binding_id,
-            "causal_action_id": observation.causal_action_id,
-            "causal_action": observation.causal_action,
-            "generation": observation.generation + 1,
-            "hwnd": surface.hwnd,
-            "root_hwnd": surface.root_hwnd,
-            "process_id": surface.process_id,
-            "executable_identity_sha256": hashlib.sha256(
-                surface.executable_identity.encode("utf-8")
-            ).hexdigest(),
-            "class_name": surface.class_name,
-            "region": list(surface.region),
-        }
-        payload_hash = hashlib.sha256(
-            json.dumps(
-                material,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8")
-        ).hexdigest()
-        evidence = EvidenceRef(
-            id=f"vnext-workspace-target-{payload_hash[:24]}",
-            mission_id=self._registry.mission_id,
-            run_id=self._registry.run_id,
-            obligation_id=_OBLIGATION_ID,
-            kind="target_binding",
-            trust="deterministic",
-            payload_hash=payload_hash,
-        )
-        binding = TargetBinding(
-            binding_id=f"vnext-workspace-{payload_hash[:24]}",
-            hwnd=surface.hwnd,
-            process_id=surface.process_id,
-            executable_identity=surface.executable_identity,
-            title_snapshot=surface.title,
-            established_by_evidence_ref=evidence.id,
-            epoch=previous.epoch + 1,
-        )
-        return binding, evidence
-
     def _capture_current(self) -> FrameState:
-        for attempt in range(2):
-            binding = self._workspace.binding
-            previous = self._authority.current
-            expected_previous = (
-                previous.frame_id if previous is not None else 0
+        binding = self._workspace.binding
+        previous = self._authority.current
+        expected_previous = previous.frame_id if previous is not None else 0
+        capture_region = virtual_screen_region()
+        captured = self._observer.capture(
+            epoch=binding.epoch,
+            hwnd=binding.hwnd,
+            phase="observe",
+            provided_region=capture_region,
+            expected_previous_frame_id=expected_previous,
+            scope_override="full_desktop",
+        )
+        if (
+            captured is None
+            or captured.hwnd != binding.hwnd
+            or captured.epoch != binding.epoch
+            or captured.scope != "full_desktop"
+            or (
+                captured.region.left,
+                captured.region.top,
+                captured.region.width,
+                captured.region.height,
             )
-            desktop_shell = bool(
-                getattr(self._workspace, "desktop_shell", False)
+            != (
+                capture_region.left,
+                capture_region.top,
+                capture_region.width,
+                capture_region.height,
             )
-            crop_enabled = bool(
-                CONFIG.get(
-                    "controller",
-                    "target_window_capture_enabled",
-                    default=False,
-                )
-            )
-            observation = None
-            try:
-                observation = self._workspace.observe()
-            except RuntimeError:
-                if desktop_shell or crop_enabled:
-                    raise
-            prepared = (
-                None
-                if observation is None
-                else self._prepare_workspace_adoption(observation)
-            )
-            replacement = prepared is not None
-            if prepared is not None:
-                binding, target_evidence = prepared
-                first = observation.surface.to_live_snapshot()
-                # A successor is a real foreground window, so an initial
-                # desktop-shell label retires for this screen-first capture.
-                desktop_shell = False
-            else:
-                target_evidence = None
-                first = None
-            screen_first = not desktop_shell and not crop_enabled
-            if not screen_first and first is None:
-                first = self._workspace.snapshot(binding.hwnd)
-                if first is None:
-                    raise RuntimeError(
-                        "workspace target identity is no longer current"
-                    )
-            # Screen-first frames.  The model sees the whole real virtual
-            # desktop by default so it can react to windows it never bound;
-            # a window crop is an explicit opt-in (``target_window_capture_
-            # enabled``) and the desktop shell keeps its labelled window
-            # scope for the full-desktop surface it binds.
-            if desktop_shell or crop_enabled:
-                capture_region = Region(*first.region)
-                expected_scope = "target_window"
-                scope_override = (
-                    "target_window" if desktop_shell else None
-                )
-            else:
-                capture_region = virtual_screen_region()
-                expected_scope = "full_desktop"
-                scope_override = "full_desktop"
-            captured = self._observer.capture(
-                epoch=binding.epoch,
-                hwnd=binding.hwnd,
-                phase="observe",
-                provided_region=capture_region,
-                expected_previous_frame_id=expected_previous,
-                scope_override=scope_override,
-            )
-            if (
-                captured is None
-                or captured.hwnd != binding.hwnd
-                or captured.epoch != binding.epoch
-                or captured.scope != expected_scope
-                or (
-                    captured.region.left,
-                    captured.region.top,
-                    captured.region.width,
-                    captured.region.height,
-                )
-                != (
-                    capture_region.left,
-                    capture_region.top,
-                    capture_region.width,
-                    capture_region.height,
-                )
-                or not _jpeg_is_valid(captured.image_b64)
-                or _jpeg_dimensions(captured.image_b64)
-                != captured.submitted_size
-            ):
-                if replacement:
-                    self._workspace.discard(observation)
-                    if attempt == 0:
-                        continue
-                raise RuntimeError(
-                    "fresh screen-first JPEG capture failed closed"
-                )
-            if screen_first and not replacement:
-                break
-            validated = (
-                self._workspace.validate(observation)
-                if replacement
-                else self._workspace.snapshot(binding.hwnd)
-            )
-            current = (
-                None
-                if validated is None
-                else validated.to_live_snapshot()
-                if replacement
-                else validated
-            )
-            if current == first:
-                break
-            if replacement:
-                self._workspace.discard(observation)
-            if attempt > 0:
-                raise RuntimeError("target changed during frame capture")
+            or not _jpeg_is_valid(captured.image_b64)
+            or _jpeg_dimensions(captured.image_b64)
+            != captured.submitted_size
+        ):
+            raise RuntimeError("fresh full-desktop JPEG capture failed")
         committed = self._observer.commit(captured)
         frame_ref = self._frame_ref(committed)
-        previous_binding = None
-        if replacement:
-            previous_binding = self._workspace.binding
-            self._workspace.adopt(observation, binding)
-            assert target_evidence is not None
-            self._registry.append_many((target_evidence, frame_ref))
-        else:
-            self._registry.append(frame_ref)
+        self._registry.append(frame_ref)
         event = self._reducer.event(
             "target_bound",
             payload={"target_binding": binding.to_dict()},
@@ -1968,21 +1823,6 @@ class _LiveRuntimeState:
             ),
         )
         self._reducer.apply(event)
-        if previous_binding is not None:
-            BUS.publish(
-                "vnext_workspace_target_adopted",
-                runtime_version=_RUNTIME_VERSION,
-                no_legacy_fallback=True,
-                run_id=self._registry.run_id,
-                mission_id=self._registry.mission_id,
-                obligation_id=_OBLIGATION_ID,
-                previous_target_binding_id=previous_binding.binding_id,
-                target_binding_id=binding.binding_id,
-                target_hwnd=binding.hwnd,
-                generation=observation.generation + 1,
-                causal_action=observation.causal_action,
-                parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
-            )
         BUS.publish(
             "vnext_gui_observation",
             runtime_version=_RUNTIME_VERSION,
@@ -1991,7 +1831,7 @@ class _LiveRuntimeState:
             mission_id=self._registry.mission_id,
             obligation_id=_OBLIGATION_ID,
             execution_medium=ExecutionMedium.CONTROL.value,
-            observation_kind="fresh_authoritative_target_frame",
+            observation_kind="fresh_authoritative_desktop_frame",
             target_binding_id=binding.binding_id,
             target_hwnd=binding.hwnd,
             frame_id=committed.frame_id,
@@ -2261,7 +2101,7 @@ class _BudgetedActor:
     def propose(self, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
         admitted = self._counter.begin(
             VISUAL_ACTOR_MODEL_ROLE,
-            reserve=max(1, self._counter.remaining),
+            reserve=self._role.model_call_reservation,
         )
         try:
             kwargs["_model_call_limit"] = admitted
@@ -2276,7 +2116,7 @@ class _BudgetedActor:
     ) -> VisualActorTurnAdmission:
         admitted = self._counter.begin(
             VISUAL_ACTOR_MODEL_ROLE,
-            reserve=max(1, self._counter.remaining),
+            reserve=self._role.model_call_reservation,
         )
         try:
             kwargs["_model_call_limit"] = admitted
@@ -2901,10 +2741,6 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             raise RuntimeError(
                 "pre-bound Electron target expired before vNext execution"
             )
-        if build.target.probe.snapshot(build.target.hwnd) is None:
-            raise RuntimeError(
-                "pre-bound target changed before vNext composition"
-            )
         definition = MissionDefinition(
             mission_id=build.mission_id,
             run_id=build.run_id,
@@ -2935,13 +2771,16 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
                 evidence_refs=(target_evidence.id,),
             )
         )
-        initial_surface = _workspace_surface(
-            build.target.reader(binding.hwnd)
+        initial_surface = WorkspaceSurface(
+            hwnd=binding.hwnd,
+            root_hwnd=build.target.root_hwnd,
+            process_id=binding.process_id,
+            executable_identity=binding.executable_identity,
+            title=binding.title_snapshot,
+            class_name=build.target.class_name,
+            region=build.target.region,
+            foreground_root_hwnd=None,
         )
-        if initial_surface is None:
-            raise RuntimeError(
-                "initial target is unavailable to DesktopWorkspace"
-            )
         workspace = DesktopWorkspace(
             binding=binding,
             surface=initial_surface,

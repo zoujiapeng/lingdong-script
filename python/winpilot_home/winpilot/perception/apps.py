@@ -670,11 +670,11 @@ def _existing_window_outcome(
     visible: list[int],
     hidden: list[int],
 ) -> dict | None:
-    """Choose only when Windows or uniqueness makes the choice unambiguous."""
+    """Activate one existing application window without exposing its helpers."""
     import win32con
     import win32gui
 
-    candidates = list(dict.fromkeys([*visible, *hidden]))
+    candidates = list(dict.fromkeys(visible if visible else hidden))
     if not candidates:
         return None
     candidate_count = len(candidates)
@@ -694,23 +694,10 @@ def _existing_window_outcome(
             })
             return result
 
-    if candidate_count > 1:
-        hidden_candidates = set(hidden)
-        if hidden_candidates:
-            for hwnd in candidates:
-                if hwnd not in hidden_candidates:
-                    continue
-                try:
-                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                except Exception:
-                    pass
-        result["note"] = (
-            f"{candidate_count} existing window candidates; no new instance "
-            "started; hidden candidates were asked to restore; re-observe "
-            "the current screen and choose visually"
-        )
-        return result
-
+    # A process such as QQ may own several hidden top-level compositor/helper
+    # windows. Restoring all of them can expose an internal black render target
+    # that a normal application launch would never show. Pick one application
+    # window; the Actor can see the resulting desktop and choose a visible peer.
     hwnd = candidates[0]
     if not visible:
         try:

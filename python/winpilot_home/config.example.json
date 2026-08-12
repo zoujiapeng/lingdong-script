@@ -73,7 +73,7 @@
   "controller": {
     "physical_anchor_clicks": true,
     "native_visual_thinking": true,
-    "target_window_capture_enabled": true,
+    "target_window_capture_enabled": false,
     "multi_input_cooperation": false,
     "cooperative_cursor_tolerance_px": 12,
     "visual_closed_loop": true,

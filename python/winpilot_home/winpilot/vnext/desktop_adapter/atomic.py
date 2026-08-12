@@ -1,9 +1,10 @@
-"""One atomic bridge from a bound Actor decision to admitted physical input.
+"""One atomic bridge from an Actor decision to admitted physical input.
 
 This module is deliberately the only vNext owner allowed to cross from the
-pure Actor/Runtime contracts into the existing live desktop primitives.  It
-does not discover, select, activate, launch, or recover a target.  The target
-and initial frame must already be bound by their existing authorities.
+pure Actor/Runtime contracts into the existing live desktop primitives.  A
+full-desktop frame is screen-first: its pixel identity, not an old window
+binding, is the action authority.  Explicit target-window crops retain their
+bound-window compatibility checks.
 """
 from __future__ import annotations
 
@@ -201,6 +202,7 @@ class _PinnedExecution:
 class _HeldPointerLease:
     lease_id: str
     cursor: PhysicalPoint
+    input_hwnd: int
     expires_at: float
 
 
@@ -542,7 +544,11 @@ class AtomicDesktopAdapter:
             except Exception:
                 settle_failed = True
         workspace = self._workspace
-        if workspace is not None:
+        if (
+            workspace is not None
+            and pinned.before_frame is not None
+            and pinned.before_frame.scope == "target_window"
+        ):
             try:
                 workspace.finish_action(
                     action_id=envelope.decision_id,
@@ -727,10 +733,16 @@ class AtomicDesktopAdapter:
             )
 
         try:
+            screen_first = before_frame.scope == "full_desktop"
             receipt = DESKTOP_ACTION_QUEUE.run(
                 prepared.action,
                 invoke_raw,
-                target_hwnd=self._binding.hwnd,
+                # Physical input is process-global.  A window-specific queue
+                # key belongs only to an explicit target-window crop; the
+                # default full-screen route must not inherit its old anchor.
+                target_hwnd=(
+                    None if screen_first else self._binding.hwnd
+                ),
                 scope="physical",
                 metadata={
                     "owner": "vnext_atomic_desktop_adapter",
@@ -741,7 +753,11 @@ class AtomicDesktopAdapter:
                     "frame_id": envelope.frame_id,
                     "frame_epoch": envelope.frame_epoch,
                     "frame_hwnd": envelope.frame_hwnd,
-                    "target_binding_id": envelope.target_binding_id,
+                    "target_binding_id": (
+                        None
+                        if screen_first
+                        else envelope.target_binding_id
+                    ),
                 },
                 cancel_event=stop_event,
             )
@@ -822,15 +838,19 @@ class AtomicDesktopAdapter:
         if before_frame.scope != "full_desktop":
             assert initial_target is not None
             self._ensure_target_foreground(initial_target)
-        input_hwnd = self._binding.hwnd
         if before_frame.scope == "full_desktop":
-            foreground_root = self._foreground_root_hwnd()
-            if foreground_root is None and prepared.point is None:
+            input_hwnd = self._screen_input_hwnd(prepared)
+            if input_hwnd is None:
                 return self._not_started(
                     prepared.action,
-                    "foreground_unavailable",
+                    (
+                        "foreground_unavailable"
+                        if prepared.point is None
+                        else "input_surface_unavailable"
+                    ),
                 )
-            input_hwnd = foreground_root or input_hwnd
+        else:
+            input_hwnd = self._binding.hwnd
         context = RawActionContext(
             target_hwnd=input_hwnd,
             current_hwnd=(
@@ -922,6 +942,7 @@ class AtomicDesktopAdapter:
                 return self._update_pointer_after_drag(
                     prepared,
                     receipt,
+                    input_hwnd=input_hwnd,
                 )
             assert prepared.amount is not None
             return self._raw.scroll(
@@ -981,6 +1002,34 @@ class AtomicDesktopAdapter:
             return root if root > 0 else foreground
         except Exception:
             return None
+
+    def _screen_input_hwnd(
+        self,
+        prepared: _PreparedAction,
+    ) -> int | None:
+        """Return mechanical context for global screen-first input.
+
+        RawDevice still carries an HWND-shaped context for typed primitive
+        integrity, even though screen-first pointer backends receive no HWND
+        and act at the model-selected screen coordinate.  Derive that context
+        only from live desktop state.  In particular, never fall back to the
+        adapter's historical target binding.
+        """
+
+        if prepared.started_held:
+            lease = self._held_pointer
+            if lease is not None:
+                return lease.input_hwnd
+        foreground = self._foreground_root_hwnd()
+        if foreground is not None:
+            return foreground
+        if prepared.point is None:
+            return None
+        try:
+            desktop = int(win32gui.GetDesktopWindow() or 0)
+        except Exception:
+            return None
+        return desktop if desktop > 0 else None
 
     def _ensure_target_foreground(
         self,
@@ -1056,7 +1105,7 @@ class AtomicDesktopAdapter:
         envelope: ActorDecisionEnvelope,
         prepared: _PreparedAction,
         before_frame: RuntimeFrame,
-        initial_target: LiveTargetSnapshot,
+        initial_target: LiveTargetSnapshot | None,
         *,
         stop_event: threading.Event | None,
     ) -> RawActionReceipt:
@@ -1155,6 +1204,8 @@ class AtomicDesktopAdapter:
         self,
         prepared: _PreparedAction,
         receipt: RawActionReceipt,
+        *,
+        input_hwnd: int,
     ) -> RawActionReceipt:
         if not prepared.hold_control_present:
             return receipt
@@ -1179,6 +1230,7 @@ class AtomicDesktopAdapter:
                             self._held_pointer = _HeldPointerLease(
                                 lease_id=prepared.pointer_lease_id,
                                 cursor=prepared.end_point or (0, 0),
+                                input_hwnd=input_hwnd,
                                 expires_at=self._clock(),
                             )
                         self._pointer_uncertain = True
@@ -1190,6 +1242,7 @@ class AtomicDesktopAdapter:
                     self._held_pointer = _HeldPointerLease(
                         lease_id=prepared.pointer_lease_id,
                         cursor=prepared.end_point,
+                        input_hwnd=input_hwnd,
                         expires_at=(
                             self._clock() + self._held_pointer_timeout_s
                         ),
@@ -1220,6 +1273,7 @@ class AtomicDesktopAdapter:
                             if prepared.point is not None
                             else (0, 0)
                         ),
+                        input_hwnd=input_hwnd,
                         expires_at=self._clock(),
                     )
                 self._pointer_uncertain = True
@@ -1728,20 +1782,26 @@ class AtomicDesktopAdapter:
         self,
         envelope: ActorDecisionEnvelope,
     ) -> bool:
-        binding = self._binding
         pointer = self.pointer_state()
-        return bool(
-            envelope.target_binding_id == binding.binding_id
-            and (
-                envelope.frame_scope == "full_desktop"
-                or envelope.frame_hwnd == binding.hwnd
-            )
-            and envelope.frame_epoch == binding.epoch
-            and envelope.frame_scope in {"target_window", "full_desktop"}
+        common = bool(
+            envelope.frame_scope in {"target_window", "full_desktop"}
             and envelope.allowed_evidence_scope
             and envelope.pointer_disposition
             == pointer.disposition.value
             and envelope.pointer_lease_id == pointer.lease_id
+        )
+        if not common:
+            return False
+        if envelope.frame_scope == "full_desktop":
+            # FrameAuthority performs the complete pixel-identity CAS.  The
+            # old target binding is neither an admission fact nor an input
+            # destination for the default screen-first route.
+            return True
+        binding = self._binding
+        return bool(
+            envelope.target_binding_id == binding.binding_id
+            and envelope.frame_hwnd == binding.hwnd
+            and envelope.frame_epoch == binding.epoch
         )
 
     def _safe_snapshot(self) -> LiveTargetSnapshot | None:
@@ -2067,8 +2127,13 @@ class AtomicDesktopAdapter:
         *,
         phase: str,
     ) -> Mapping[str, TraceScalar]:
-        binding = self._binding
-        process_name = ntpath.basename(binding.executable_identity)
+        screen_first = envelope.frame_scope == "full_desktop"
+        binding = None if screen_first else self._binding
+        process_name = (
+            ""
+            if binding is None
+            else ntpath.basename(binding.executable_identity)
+        )
         return MappingProxyType(
             {
                 "phase": phase,
@@ -2079,9 +2144,17 @@ class AtomicDesktopAdapter:
                 "obligation_id": envelope.obligation_id,
                 "frame_id": envelope.frame_id,
                 "frame_epoch": envelope.frame_epoch,
-                "target_hwnd": envelope.frame_hwnd,
-                "target_binding_id": envelope.target_binding_id,
-                "target_title": binding.title_snapshot,
+                "target_hwnd": (
+                    None if screen_first else envelope.frame_hwnd
+                ),
+                "target_binding_id": (
+                    None
+                    if screen_first
+                    else envelope.target_binding_id
+                ),
+                "target_title": (
+                    "" if binding is None else binding.title_snapshot
+                ),
                 "target_process": process_name,
             }
         )

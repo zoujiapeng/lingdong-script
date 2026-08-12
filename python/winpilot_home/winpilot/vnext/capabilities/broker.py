@@ -57,17 +57,34 @@ class CapabilityBroker:
 
     @classmethod
     def _frame_valid(cls, mission: MissionProjection, state: BrokerRuntimeState) -> bool:
-        if not cls._target_bound(mission, state):
-            return False
         frame, target = state.frame, state.target
-        return bool(
+        frame_is_current = bool(
             frame.authoritative
             and frame.fresh
             and frame.frame_id is not None
-            and frame.hwnd == target.hwnd
-            and frame.epoch == target.epoch
             and frame.scope in {"target_window", "full_desktop"}
         )
+        if not frame_is_current:
+            return False
+        if frame.scope == "full_desktop":
+            return True
+        return bool(
+            cls._target_bound(mission, state)
+            and frame.hwnd == target.hwnd
+            and frame.epoch == target.epoch
+        )
+
+    @classmethod
+    def _target_prerequisite_met(
+        cls,
+        mission: MissionProjection,
+        state: BrokerRuntimeState,
+    ) -> bool:
+        """Window binding constrains only an explicit target-window crop."""
+
+        if state.frame.scope == "full_desktop":
+            return cls._frame_valid(mission, state)
+        return cls._target_bound(mission, state)
 
     @staticmethod
     def _runtime_writable(state: BrokerRuntimeState) -> bool:
@@ -112,14 +129,13 @@ class CapabilityBroker:
         mission: MissionProjection,
         state: BrokerRuntimeState,
     ) -> bool:
-        bound = cls._target_bound(mission, state)
         frame = cls._frame_valid(mission, state)
         valid_artifacts = cls._valid_artifacts(mission, state)
         live_offers = tuple(
             item for item in state.executor_offers if item.available and item.live
         )
         checks = {
-            "target_bound": bound,
+            "target_bound": cls._target_prerequisite_met(mission, state),
             "authoritative_frame": frame,
             "pointer_released": (
                 state.pointer.disposition is PointerDisposition.RELEASED
@@ -191,7 +207,6 @@ class CapabilityBroker:
             if (
                 mission.status is not MissionStatus.RUNNING
                 or not cls._runtime_writable(state)
-                or not cls._target_bound(mission, state)
                 or not cls._frame_valid(mission, state)
                 or not tool.required_any_capabilities
             ):
@@ -218,6 +233,15 @@ class CapabilityBroker:
         bound = self._target_bound(mission, state)
         valid_frame = self._frame_valid(mission, state)
         target_binding_id = state.target.binding_id if bound else None
+        if (
+            valid_frame
+            and state.frame.scope == "full_desktop"
+            and target_binding_id is None
+            and mission.target_binding is not None
+        ):
+            # Compatibility-only wire anchor. Full-desktop admission does not
+            # use this identity to choose or authorize an input recipient.
+            target_binding_id = mission.target_binding.binding_id
         frame_id = state.frame.frame_id if valid_frame else None
         frame_scope = state.frame.scope if valid_frame else None
         obligation_id = self._active_id(mission)
