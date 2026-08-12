@@ -843,6 +843,79 @@ def test_screen_first_click_is_admitted_on_any_visible_window(
     assert authority.current.region == desktop
 
 
+def test_screen_first_scroll_does_not_carry_the_old_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desktop = (0, 0, 1920, 1080)
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
+        lambda: Region(*desktop),
+    )
+    authority = FrameAuthority()
+    before = authority.commit(
+        epoch=EPOCH,
+        hwnd=HWND,
+        region=desktop,
+        scope="full_desktop",
+        reason="screen-first",
+        submitted_size=(1120, 630),
+        image_b64=_jpeg(20),
+        captured_at=1.0,
+        expected_previous_frame_id=0,
+    )
+    observer = FrameObserver(
+        authority,
+        capture=lambda _hwnd, **_kwargs: _jpeg(220),
+        virtual_desktop=lambda: Region(*desktop),
+        captured_at=lambda: 2.0,
+    )
+    binding = TargetBinding(
+        binding_id="target-binding",
+        hwnd=HWND,
+        process_id=PROCESS_ID,
+        executable_identity="C:/app.exe",
+        title_snapshot="App",
+        established_by_evidence_ref="evidence-target-bound",
+        epoch=EPOCH,
+    )
+    raw = _RawHarness(True)
+    adapter = AtomicDesktopAdapter(
+        frame_authority=authority,
+        frame_observer=observer,
+        frozen_target_binding=binding,
+        target_probe=_Probe(
+            LiveTargetSnapshot(
+                hwnd=HWND,
+                root_hwnd=HWND,
+                process_id=PROCESS_ID,
+                executable_identity=binding.executable_identity,
+                region=REGION,
+                foreground_root_hwnd=HWND + 1,
+            ),
+            hit_root=HWND + 1,
+        ),
+        raw_device=raw.executor(),
+        post_input_settle_delay_s=0.0,
+    )
+
+    attempt = adapter.execute(_envelope(before, binding, "scroll"))
+
+    assert attempt.input_completed is True
+    assert raw.calls == [(
+        "scroll",
+        (
+            *_map_submitted_test_point(
+                50.0,
+                40.0,
+                region=desktop,
+                submitted_size=(1120, 630),
+            ),
+            -240,
+            None,
+        ),
+    )]
+
+
 def test_screen_first_held_drag_skips_bound_window_foreground(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -928,10 +1001,10 @@ def test_screen_first_held_drag_skips_bound_window_foreground(
         adapter.close()
 
 
-def test_screen_first_click_rejects_dead_hit_test_but_keeps_desktop_frame(
+def test_screen_first_click_ignores_dead_hit_test_and_keeps_desktop_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A screen-first click still fails closed when no window sits at the point."""
+    """A model-selected desktop coordinate is the pointer target."""
     other_hwnd = HWND + 1
     desktop = (0, 0, 1920, 1080)
     monkeypatch.setattr(
@@ -1003,8 +1076,180 @@ def test_screen_first_click_rejects_dead_hit_test_but_keeps_desktop_frame(
     attempt = adapter.execute(envelope)
     assert attempt is not None
 
-    assert attempt.outcome is ControllerOutcome.REJECTED
-    assert raw.calls == []
+    assert attempt.outcome is ControllerOutcome.COMPLETED
+    assert attempt.input_completed is True
+    assert len(raw.calls) == 1
+    assert raw.calls[0][0] == "click"
+    assert raw.calls[0][1][6] is False
+    assert probe.snapshot_calls == 0
+    assert probe.hit_test_calls == 0
+    assert authority.current is not None
+    assert authority.current.frame_id == 2
+    assert authority.current.scope == "full_desktop"
+
+
+@pytest.mark.parametrize("action", ("type_text", "hotkey"))
+def test_screen_first_keyboard_uses_live_foreground_not_old_binding(
+    action: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desktop = (0, 0, 1920, 1080)
+    live_foreground = HWND + 91
+    child_foreground = live_foreground + 1
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
+        lambda: Region(*desktop),
+    )
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetForegroundWindow",
+        lambda: child_foreground,
+    )
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetAncestor",
+        lambda hwnd, _flag: live_foreground if hwnd == child_foreground else hwnd,
+    )
+    set_foreground_calls: list[int] = []
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.win32gui.SetForegroundWindow",
+        lambda hwnd: set_foreground_calls.append(hwnd),
+    )
+    authority = FrameAuthority()
+    before = authority.commit(
+        epoch=EPOCH,
+        hwnd=HWND,
+        region=desktop,
+        scope="full_desktop",
+        reason="screen-first",
+        submitted_size=(1120, 630),
+        image_b64=_jpeg(20),
+        captured_at=1.0,
+        expected_previous_frame_id=0,
+    )
+    observer = FrameObserver(
+        authority,
+        capture=lambda _hwnd, **_kwargs: _jpeg(220),
+        virtual_desktop=lambda: Region(*desktop),
+        captured_at=lambda: 2.0,
+    )
+    binding = TargetBinding(
+        binding_id="target-binding",
+        hwnd=HWND,
+        process_id=PROCESS_ID,
+        executable_identity="C:/app.exe",
+        title_snapshot="Old",
+        established_by_evidence_ref="evidence-target-bound",
+        epoch=EPOCH,
+    )
+    probe = _Probe(
+        LiveTargetSnapshot(
+            hwnd=HWND + 5,
+            root_hwnd=HWND + 5,
+            process_id=PROCESS_ID + 5,
+            executable_identity="C:/replacement.exe",
+            region=(50, 50, 640, 480),
+            foreground_root_hwnd=live_foreground,
+        )
+    )
+    raw = _RawHarness(True)
+    adapter = AtomicDesktopAdapter(
+        frame_authority=authority,
+        frame_observer=observer,
+        frozen_target_binding=binding,
+        target_probe=probe,
+        raw_device=raw.executor(),
+        receipt_trace_sink=_Trace(False),
+        post_input_settle_delay_s=0.0,
+    )
+
+    transition = adapter.execute(_envelope(before, binding, action))
+
+    assert transition.outcome is ControllerOutcome.COMPLETED
+    assert transition.input_completed is True
+    assert len(raw.calls) == 1
+    assert raw.calls[0][0] == action
+    assert raw.calls[0][1][-1] == live_foreground
+    assert probe.snapshot_calls == 0
+    assert probe.hit_test_calls == 0
+    assert set_foreground_calls == []
+
+
+def test_screen_first_pointer_and_post_frame_ignore_missing_old_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desktop = (0, 0, 1920, 1080)
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
+        lambda: Region(*desktop),
+    )
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetForegroundWindow",
+        lambda: HWND + 30,
+    )
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetAncestor",
+        lambda hwnd, _flag: hwnd,
+    )
+    set_foreground_calls: list[int] = []
+    monkeypatch.setattr(
+        "winpilot.vnext.desktop_adapter.atomic.win32gui.SetForegroundWindow",
+        lambda hwnd: set_foreground_calls.append(hwnd),
+    )
+    authority = FrameAuthority()
+    before = authority.commit(
+        epoch=EPOCH,
+        hwnd=HWND,
+        region=desktop,
+        scope="full_desktop",
+        reason="screen-first",
+        submitted_size=(1120, 630),
+        image_b64=_jpeg(20),
+        captured_at=1.0,
+        expected_previous_frame_id=0,
+    )
+    observer = FrameObserver(
+        authority,
+        capture=lambda _hwnd, **_kwargs: _jpeg(220),
+        virtual_desktop=lambda: Region(*desktop),
+        captured_at=lambda: 2.0,
+    )
+    binding = TargetBinding(
+        binding_id="target-binding",
+        hwnd=HWND,
+        process_id=PROCESS_ID,
+        executable_identity="C:/gone.exe",
+        title_snapshot="Gone",
+        established_by_evidence_ref="evidence-target-bound",
+        epoch=EPOCH,
+    )
+
+    class _MissingProbe:
+        def snapshot(self, _hwnd: int) -> None:
+            raise AssertionError("full-desktop input must not inspect old binding")
+
+        def hit_test_root(self, _x: int, _y: int) -> None:
+            raise AssertionError("full-desktop input must not hit-test admission")
+
+    raw = _RawHarness(True)
+    adapter = AtomicDesktopAdapter(
+        frame_authority=authority,
+        frame_observer=observer,
+        frozen_target_binding=binding,
+        target_probe=_MissingProbe(),
+        raw_device=raw.executor(),
+        receipt_trace_sink=_Trace(False),
+        post_input_settle_delay_s=0.0,
+    )
+
+    transition = adapter.execute(_envelope(before, binding, "click"))
+
+    assert transition.outcome is ControllerOutcome.COMPLETED
+    assert transition.input_completed is True
+    assert len(raw.calls) == 1
+    assert authority.current is not None
+    assert authority.current.frame_id == 2
+    assert authority.current.scope == "full_desktop"
+    assert authority.current.region == desktop
+    assert set_foreground_calls == []
 
 
 def test_exact_type_text_is_absent_from_ordinary_trace(
@@ -1969,122 +2214,6 @@ def test_completed_click_keeps_old_action_atomic_then_offers_new_foreground() ->
     assert successor.replaces_binding
     assert successor.surface.hwnd == next_hwnd
 
-def _refresh_harness(harness):
-    requests: list[str] = []
-    snapshot_mode: list[str] = ["unavailable"]
-
-    class _WorkspacePort:
-        binding = harness.binding
-
-        def finish_action(self, **kwargs) -> None:
-            pass
-
-        def request_target_refresh(self) -> None:
-            requests.append("refresh")
-
-        def snapshot(self, hwnd: int) -> LiveTargetSnapshot | None:
-            if snapshot_mode[0] == "unavailable":
-                return None
-            return LiveTargetSnapshot(
-                hwnd=HWND,
-                root_hwnd=HWND,
-                process_id=PROCESS_ID,
-                executable_identity=harness.binding.executable_identity,
-                region=REGION,
-                foreground_root_hwnd=HWND,
-            )
-
-        def hit_test_root(self, x: int, y: int) -> int | None:
-            return HWND if snapshot_mode[0] == "valid" else None
-
-    workspace = _WorkspacePort()
-    from winpilot.vnext.desktop_adapter import atomic as atomic_module
-    monkeypatch = pytest.MonkeyPatch()
-
-    def queue_run(_action, callback, **kwargs):
-        return callback()
-
-    monkeypatch.setattr(atomic_module.DESKTOP_ACTION_QUEUE, "run", queue_run)
-    adapter = AtomicDesktopAdapter(
-        frame_authority=harness.authority,
-        frame_observer=harness.observer,
-        frozen_target_binding=harness.binding,
-        target_probe=workspace,
-        desktop_workspace=workspace,
-        raw_device=harness.raw.executor(),
-        receipt_trace_sink=harness.trace,
-        post_input_settle_delay_s=0.12,
-    )
-    harness.adapter = adapter
-
-    def run_one(index: int, *, still_current: bool = True):
-        envelope = _replace_envelope(
-            harness.envelope,
-            turn_index=index,
-        )
-        if not still_current:
-            return _AttemptResult(
-                transition=ControllerTransition(
-                    outcome=ControllerOutcome.REJECTED,
-                    action_id=envelope.decision_id,
-                    action=envelope.proposal.action,
-                    input_completed=False,
-                    error_kind="permit_runtime_state_changed",
-                ),
-                controller_error=None,
-            )
-        return _AttemptResult(
-            transition=adapter.execute(envelope, stop_event=None),
-            controller_error=None,
-        )
-
-    return requests, adapter, workspace, run_one, snapshot_mode, monkeypatch
-
-
-def test_repeated_geometry_rejections_request_target_refresh() -> None:
-    harness = _harness("click")
-    requests, adapter, _workspace, run_one, _mode, monkeypatch = (
-        _refresh_harness(harness)
-    )
-
-    for index in range(1, 4):
-        attempt = run_one(index)
-        assert attempt.transition is not None
-        assert attempt.transition.outcome is ControllerOutcome.REJECTED
-        assert attempt.transition.input_completed is False
-
-    assert len(requests) == 1
-    assert adapter.target_refresh_requested is True
-    assert adapter.consecutive_rejection_kinds[-1] == "target_unavailable"
-    monkeypatch.undo()
-
-
-def test_mixed_rejections_do_not_request_premature_refresh() -> None:
-    harness = _harness("click")
-    requests, adapter, _workspace, run_one, snapshot_mode, monkeypatch = (
-        _refresh_harness(harness)
-    )
-
-    # Two stale-geometry rejections, then a non-geometry binding-mismatch
-    # rejection, then one more geometry rejection: the trailing window is no
-    # longer all geometry, so no refresh may be requested.
-    for index in range(1, 3):
-        run_one(index)
-    snapshot_mode[0] = "valid"
-    mismatch_envelope = _replace_envelope(
-        harness.envelope,
-        target_binding_id="binding-other",
-    )
-    mismatch = adapter.execute(mismatch_envelope, stop_event=None)
-    assert mismatch.outcome is ControllerOutcome.REJECTED
-    assert mismatch.error_kind == "target_binding_mismatch"
-    snapshot_mode[0] = "unavailable"
-    run_one(4)
-
-    assert requests == []
-    assert adapter.target_refresh_requested is False
-    monkeypatch.undo()
-
 def test_launch_visible_effect_surfaces_existing_instance_note() -> None:
     """A launch that reused a running instance must tell the model so."""
     from winpilot.vnext.desktop_adapter.atomic import AtomicDesktopAdapter
@@ -2142,6 +2271,31 @@ def test_launch_visible_effect_surfaces_existing_instance_note() -> None:
         receipt_existing_no_note, "launch_application"
     )
     assert "already-running" in effect_fallback
+
+
+def test_launch_reuses_launcher_feedback_without_claiming_activation() -> None:
+    harness = _harness("launch_application")
+    harness.adapter._launcher = lambda _app, _arguments: {
+        "ok": True,
+        "via": "existing",
+        "target": "C:\\QQ\\QQ.exe",
+        "candidate_count": 2,
+        "note": "already running: found 2 visible candidates",
+    }
+
+    transition = harness.adapter.execute(harness.envelope)
+
+    assert transition.outcome is ControllerOutcome.COMPLETED
+    assert transition.input_completed is True
+    assert transition.visible_effect == (
+        "already running: found 2 visible candidates"
+    )
+    receipt = harness.trace.records[0][0]
+    assert receipt.backend_result is not None
+    facts = dict(receipt.backend_result.facts)
+    assert facts["candidate_count"] == 2
+    assert "activated_hwnd" not in facts
+    assert "activated" not in facts["note"]
 
 def test_hotkey_accepts_string_chord_via_canonical_normalization() -> None:
     harness = _harness("hotkey", action_args={"keys": "ctrl+l"})

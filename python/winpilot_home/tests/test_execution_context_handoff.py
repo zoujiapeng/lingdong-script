@@ -5,6 +5,7 @@ from winpilot.tasking.execution_context import (
     foreground_handoff_conflict,
     normalize_execution_context,
     validated_handoff_target,
+    windows_shell_desktop_context,
 )
 from winpilot.utils.screenshot import Region
 
@@ -203,6 +204,50 @@ def test_foreground_capture_falls_back_to_windows_shell_desktop():
     assert target["binding_mode"] == "desktop_shell"
     assert target["hwnd"] == 65878
     assert target["class_name"] == "Progman"
+
+
+def test_windows_shell_context_reads_localized_win32_identity(monkeypatch):
+    from winpilot.tasking import execution_context
+
+    monkeypatch.setattr(
+        execution_context,
+        "_window_title",
+        lambda _hwnd: "桌面窗口",
+    )
+    monkeypatch.setattr(
+        execution_context,
+        "_window_class_name",
+        lambda _hwnd: "Progman",
+    )
+
+    target = windows_shell_desktop_context(
+        region_provider=lambda: [0, 0, 1536, 864],
+        hwnd_resolver=lambda: 65878,
+        process_id_resolver=lambda _hwnd: 19076,
+    )
+
+    assert target["title"] == "桌面窗口"
+    assert target["class_name"] == "Progman"
+
+
+def test_windows_shell_context_uses_real_class_when_title_is_empty(monkeypatch):
+    from winpilot.tasking import execution_context
+
+    monkeypatch.setattr(execution_context, "_window_title", lambda _hwnd: "")
+    monkeypatch.setattr(
+        execution_context,
+        "_window_class_name",
+        lambda _hwnd: "WorkerW",
+    )
+
+    target = windows_shell_desktop_context(
+        region_provider=lambda: [0, 0, 1536, 864],
+        hwnd_resolver=lambda: 65878,
+        process_id_resolver=lambda _hwnd: 19076,
+    )
+
+    assert target["title"] == "WorkerW"
+    assert target["class_name"] == "WorkerW"
 
 
 def test_foreground_capture_keeps_missing_when_shell_unavailable():

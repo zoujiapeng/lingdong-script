@@ -9,6 +9,7 @@ through legacy owned code.
 from __future__ import annotations
 
 import ctypes
+import ntpath
 import time
 from io import BytesIO
 from pathlib import Path
@@ -21,6 +22,37 @@ WINDOWS_FORMAT = "windows-list/1"
 PASTE_FORMAT = "paste-image/1"
 
 _CAPTURE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+
+def _process_name(pid: int) -> str:
+    """Return the executable basename for one real process id."""
+
+    if int(pid) <= 0:
+        return ""
+    kernel32 = ctypes.windll.kernel32
+    handle = 0
+    try:
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            return ""
+        size = ctypes.c_ulong(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(
+            handle,
+            0,
+            buffer,
+            ctypes.byref(size),
+        ):
+            return ""
+        return ntpath.basename(buffer.value)
+    except Exception:
+        return ""
+    finally:
+        if handle:
+            try:
+                kernel32.CloseHandle(handle)
+            except Exception:
+                pass
 
 
 def capture_screen_backend(*, path: str, window: bool) -> dict[str, Any]:
@@ -85,6 +117,7 @@ def list_windows_backend() -> dict[str, Any]:
     not reach into the legacy perception stack.
     """
     user32 = ctypes.windll.user32
+    foreground_hwnd = int(user32.GetForegroundWindow() or 0)
 
     windows: list[dict[str, Any]] = []
 
@@ -96,7 +129,9 @@ def list_windows_backend() -> dict[str, Any]:
         handle = int(hwnd or 0)
         if not handle:
             return True
-        if not user32.IsWindowVisible(handle) or user32.IsIconic(handle):
+        visible = bool(user32.IsWindowVisible(handle))
+        minimized = bool(user32.IsIconic(handle))
+        if not visible or minimized:
             return True
         title_length = user32.GetWindowTextLengthW(handle)
         title_buffer = ctypes.create_unicode_buffer(max(title_length, 0) + 1)
@@ -125,6 +160,9 @@ def list_windows_backend() -> dict[str, Any]:
             "class_name": class_buffer.value,
             "rect": [rect.left, rect.top, rect.right, rect.bottom],
             "pid": int(pid.value or 0),
+            "foreground": handle == foreground_hwnd,
+            "visible": visible,
+            "minimized": minimized,
         })
         return True
 
@@ -137,12 +175,10 @@ def list_windows_backend() -> dict[str, Any]:
             "error": f"{type(exc).__name__}: {exc}",
         }
     bounded: list[dict[str, Any]] = []
-    for item in windows[-24:]:
-        bounded.append({
-            key: item.get(key)
-            for key in ("hwnd", "title", "class_name", "pid")
-            if key in item
-        })
+    for item in windows[:24]:
+        window = dict(item)
+        window["process_name"] = _process_name(int(window.get("pid") or 0))
+        bounded.append(window)
     return {
         "format": WINDOWS_FORMAT,
         "ok": True,

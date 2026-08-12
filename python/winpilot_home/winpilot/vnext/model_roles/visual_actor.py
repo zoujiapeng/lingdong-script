@@ -48,13 +48,15 @@ from .common import (
 
 VISUAL_ACTOR_MODEL_ROLE = "vnext_visual_actor"
 VISUAL_ACTOR_SYSTEM_CONTRACT = """\
-Use original_goal, current JPEG, task_state, previous action, and supplied
-tools. Choose exactly one tool. Briefly tell the user what you are doing or
-what blocked you. Coordinates are exact submitted-image pixels. Chat and act
-naturally. Choose and revise any approach in task_state; runtime does not
-classify or route. If visibly complete, call claim_obligation_done. If no
+Use original_goal, current JPEG, task_state, previous action, and tools. Choose
+one tool, or batch independent non-GUI tools; put dependencies later. Briefly
+say what you are doing or what blocked you. Coordinates are exact submitted-image
+pixels. Chat and act naturally. Revise approaches in task_state; runtime does
+not classify or route. If visibly complete, call claim_obligation_done. If no
 action can advance, call blocked. When pointer_held is true, continue or finish
-that drag. Use budget facts to pace long goals."""
+that drag. Pace long goals with budget facts. If repeated actions add no new
+visual or tool information, step back to the whole screen and revise the
+approach toward original_goal."""
 
 INITIAL_ACTOR_SYSTEM_CONTRACT = """\
 You are a Windows desktop agent on the user's real computer. Answer chat
@@ -132,7 +134,7 @@ _STRICT_SCHEMA_KEYS = frozenset(
 _LOCALLY_ENFORCED_SCHEMA_KEYS = frozenset({"not", "uniqueItems"})
 _THREAD_HISTORY_MESSAGES = 12
 _THREAD_HISTORY_CHARS = 16_384
-_VISUAL_HISTORY_DEPTH = 4
+_VISUAL_HISTORY_DEPTH = 1
 _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
 _CONNECTOR_TOOLS = frozenset({_CONNECTOR_SEARCH_TOOL, _CONNECTOR_CALL_TOOL})
@@ -207,11 +209,12 @@ def _repeated_tool_result(
     """Reference an earlier identical result without hiding a new execution."""
     compact: dict[str, Any] = {
         "result_unchanged": True,
+        "new_tool_information": False,
         "same_as_tool_call_id": same_as_tool_call_id,
         "repeat_count": repeat_count,
         "message": (
-            "The tool ran again and returned exactly the same result as the "
-            "referenced earlier tool call."
+            "Executed; this tool returned the same output as the referenced "
+            "call."
         ),
     }
     for field in (
@@ -227,6 +230,56 @@ def _repeated_tool_result(
     if result.get("error") and "ok" not in compact:
         compact["ok"] = False
     return compact
+
+
+def _project_tool_result(
+    seen: dict[tuple[str, str], tuple[str, int]],
+    *,
+    name: str,
+    call_id: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep the first full result and compact later identical executions."""
+
+    comparable = dict(result)
+    comparable.pop("full_output_path", None)
+    try:
+        key = (name, _canonical_json(comparable))
+    except (TypeError, ValueError):
+        return dict(result)
+    previous = seen.get(key)
+    if previous is None:
+        seen[key] = (call_id, 0)
+        return dict(result)
+    first_call_id, previous_count = previous
+    repeat_count = previous_count + 1
+    seen[key] = (first_call_id, repeat_count)
+    return _repeated_tool_result(
+        result,
+        same_as_tool_call_id=first_call_id,
+        repeat_count=repeat_count,
+    )
+
+
+def _projected_tool_message(
+    seen: dict[tuple[str, str], tuple[str, int]],
+    *,
+    name: str,
+    call_id: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": _canonical_json(
+            _project_tool_result(
+                seen,
+                name=name,
+                call_id=call_id,
+                result=result,
+            )
+        ),
+    }
 
 
 def _finish_reason(response: Any) -> str:
@@ -277,7 +330,10 @@ def _actionable_tool_result(
     if not failed or output.get("next_step"):
         return output
     if output.get("timeout") is True:
-        next_step = "split the work, adjust the timeout, or choose another tool"
+        next_step = (
+            "this attempt timed out; use any partial output and current state "
+            "to choose the next step"
+        )
     elif name == _SHELL_TOOL and output.get("exit_code") not in (None, 0):
         next_step = "use the output to correct the command or choose another tool"
     elif output.get("stopped") is True:
@@ -863,7 +919,7 @@ def _proposal_from_response(
 def _history_exchange(
     response: Any,
 ) -> tuple[dict[str, Any], str, str] | None:
-    """Keep one provider-native tool call for the next visual turn."""
+    """Keep one compact provider-native GUI call for the next visual turn."""
     message = response_message(response)
     calls = member(message, "tool_calls")
     if (
@@ -876,32 +932,36 @@ def _history_exchange(
     call_id = member(call, "id")
     function = member(call, "function")
     name = member(function, "name") if function is not None else None
-    arguments = member(function, "arguments") if function is not None else None
+    raw_arguments = (
+        member(function, "arguments") if function is not None else None
+    )
     if (
         type(call_id) is not str
         or not call_id
         or type(name) is not str
-        or type(arguments) is not str
+        or type(raw_arguments) is not str
     ):
         return None
+    try:
+        arguments = _decode_arguments(raw_arguments)
+    except LiveModelRoleError:
+        return None
+    arguments.pop("task_state_update", None)
     assistant: dict[str, Any] = {
         "role": "assistant",
-        "content": narration_content(message),
+        "content": "",
         "tool_calls": [
             {
                 "id": call_id,
                 "type": "function",
                 "function": {
                     "name": name,
-                    "arguments": arguments,
+                    "arguments": _canonical_json(arguments),
                 },
             }
         ],
     }
-    reasoning = member(message, "reasoning_content")
-    if type(reasoning) is str:
-        assistant["reasoning_content"] = reasoning
-    return assistant, call_id, _runtime_name_from_model_call(name, arguments)
+    return assistant, call_id, _runtime_name_from_model_call(name, raw_arguments)
 
 
 def _tool_format_repair(
@@ -1460,12 +1520,22 @@ def _call_list_windows(
             TypeError("window inventory returned a non-list result"),
         )
     bounded: list[dict[str, Any]] = []
-    for item in result[-24:]:
+    for item in result[:24]:
         if not isinstance(item, Mapping):
             continue
         bounded.append({
             key: item.get(key)
-            for key in ("hwnd", "title", "class_name", "pid")
+            for key in (
+                "hwnd",
+                "title",
+                "class_name",
+                "pid",
+                "process_name",
+                "rect",
+                "foreground",
+                "visible",
+                "minimized",
+            )
             if key in item
         })
     return {"ok": True, "windows": bounded, "count": len(bounded)}
@@ -1825,6 +1895,90 @@ def _execute_initial_call(
             return _actionable_tool_error(str(name), exc)
     raise LiveModelRoleError(
         f"Actor initial turn returned an unapproved tool: {name!r}"
+    )
+
+
+def _visual_batch_call(
+    call: Mapping[str, Any],
+) -> tuple[str, str, dict[str, Any]]:
+    """Reuse the existing single-tool parsers for one non-GUI batch item."""
+
+    function = member(call, "function")
+    name = member(function, "name") if function is not None else None
+    response = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [deepcopy(call)],
+            },
+        }],
+    }
+    exchange = None
+    if name in _STATUS_TOOLS:
+        exchange = _status_exchange(response)
+    elif name == _SHELL_TOOL:
+        exchange = _shell_exchange(response)
+    elif name == _WINDOW_TEXT_TOOL:
+        exchange = _window_text_exchange(response)
+    elif name == _CAPTURE_SCREEN_TOOL:
+        exchange = _owned_tool_exchange(
+            response,
+            _CAPTURE_SCREEN_TOOL,
+            expected_arguments={"path": str, "window": bool},
+        )
+    elif name == _LIST_WINDOWS_TOOL:
+        exchange = _owned_tool_exchange(
+            response,
+            _LIST_WINDOWS_TOOL,
+            expected_arguments={},
+        )
+    elif name in _CONNECTOR_TOOLS:
+        exchange = _connector_exchange(response)
+    if exchange is None:
+        raise LiveModelRoleError(
+            "Visual tool batches may contain only independent non-GUI tools"
+        )
+    _assistant, call_id, parsed_name, arguments = exchange
+    return call_id, parsed_name, arguments
+
+
+def _execute_visual_batch_call(
+    name: str,
+    arguments: Mapping[str, Any],
+    *,
+    status_provider: Any,
+    shell_runner: Any,
+    connector_gateway: Any,
+    window_text_reader: Any,
+    capture_runner: Any,
+    windows_reader: Any,
+    turn: ActorTurnInput,
+    timeout_s: float,
+    stop_event: Any | None,
+) -> dict[str, Any]:
+    """Execute one model-selected non-GUI batch item."""
+    if name in _STATUS_TOOLS:
+        return _call_status(status_provider, name, arguments)
+    if name == _SHELL_TOOL:
+        return _call_shell(
+            shell_runner,
+            arguments,
+            timeout_s=timeout_s,
+            stop_event=stop_event,
+        )
+    if name == _WINDOW_TEXT_TOOL:
+        return _call_window_text(window_text_reader, turn)
+    if name == _CAPTURE_SCREEN_TOOL:
+        return _call_capture_screen(capture_runner, arguments)
+    if name == _LIST_WINDOWS_TOOL:
+        return _call_list_windows(windows_reader)
+    return _call_connector(
+        connector_gateway,
+        name,
+        arguments,
+        timeout_s=timeout_s,
+        stop_event=stop_event,
     )
 
 
@@ -2271,9 +2425,7 @@ class LiveVisualActor:
         admission: VisualActorTurnAdmission | None = None
         exchange: _InitialExchange | None = None
         connector_limit = self._connector_call_limit(_model_call_limit)
-        seen_tool_results: dict[
-            tuple[str, str], tuple[str, str, int]
-        ] = {}
+        seen_tool_results: dict[tuple[str, str], tuple[str, int]] = {}
         repair_attempted = False
         repair_budget = _model_call_limit is None or _model_call_limit >= 2
         for connector_calls in range(connector_limit + (2 if repair_budget else 1)):
@@ -2504,39 +2656,18 @@ class LiveVisualActor:
                     raise InvalidActorProposal(
                         "Actor initial tool call requires an id"
                     )
-                provider_result: Mapping[str, Any] = result
                 try:
-                    _call_id, canonical_name, canonical_arguments = (
+                    _call_id, canonical_name, _arguments = (
                         _initial_call_envelope(call)
                     )
-                    result_key = (
-                        canonical_name,
-                        _canonical_json(canonical_arguments),
-                    )
-                    canonical_result = _canonical_json(result)
-                except (LiveModelRoleError, TypeError, ValueError):
-                    result_key = None
-                    canonical_result = ""
-                if result_key is not None:
-                    previous = seen_tool_results.get(result_key)
-                    if previous is not None and previous[0] == canonical_result:
-                        repeat_count = previous[2] + 1
-                        seen_tool_results[result_key] = (
-                            canonical_result,
-                            previous[1],
-                            repeat_count,
-                        )
-                        provider_result = _repeated_tool_result(
-                            result,
-                            same_as_tool_call_id=previous[1],
-                            repeat_count=repeat_count,
-                        )
-                    else:
-                        seen_tool_results[result_key] = (
-                            canonical_result,
-                            call_id,
-                            0,
-                        )
+                except LiveModelRoleError:
+                    canonical_name = str(call_name or "tool")
+                provider_result = _project_tool_result(
+                    seen_tool_results,
+                    name=canonical_name,
+                    call_id=call_id,
+                    result=result,
+                )
                 pending_tool_messages.append(
                     {
                         "role": "tool",
@@ -2708,10 +2839,9 @@ class LiveVisualActor:
                 {
                     "role": "user",
                     "content": (
-                        "Your previous tool call was rejected by the "
-                        "runtime: "
-                        f"{rejection_feedback}. Return exactly one valid "
-                        "tool call."
+                        "Runtime feedback from the previous attempt: "
+                        f"{rejection_feedback}. Use the current screen and "
+                        "return one valid tool call or an independent tool batch."
                     ),
                 }
             )
@@ -2737,8 +2867,8 @@ class LiveVisualActor:
                 *connector_tools,
             ],
             # MiMo's documented Chat Completions surface supports only
-            # ``auto``. The role still accepts exactly one function call and
-            # rejects prose, zero calls, and multiple calls without repair.
+            # ``auto``. One GUI/outcome call ends the turn; independent local
+            # queries may share one model-selected batch.
             "tool_choice": "auto",
             "temperature": 0.0,
             "max_completion_tokens": self._max_output_tokens,
@@ -2747,6 +2877,7 @@ class LiveVisualActor:
         decision = None
         repair_attempted = False
         connector_limit = self._connector_call_limit(_model_call_limit)
+        seen_tool_results: dict[tuple[str, str], tuple[str, int]] = {}
         repair_budget = (
             _model_call_limit is None or _model_call_limit >= 2
         )
@@ -2773,6 +2904,87 @@ class LiveVisualActor:
                 current_exchange.extend(truncation)
                 provider_request["messages"].extend(truncation)
                 continue
+            try:
+                visual_calls = _initial_calls_from_response(outcome.response)
+            except LiveModelRoleError as exc:
+                raise InvalidActorProposal(str(exc)) from exc
+            envelopes: list[tuple[str, str, dict[str, Any]]] = []
+            if len(visual_calls) > 1:
+                try:
+                    envelopes = [
+                        _visual_batch_call(call) for call in visual_calls
+                    ]
+                except LiveModelRoleError:
+                    envelopes = []
+            if envelopes:
+                message = response_message(outcome.response)
+                content = member(message, "content")
+                if content is not None and type(content) is not str:
+                    raise InvalidActorProposal(
+                        "Actor visual content must be text or null"
+                    )
+                assistant: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": content or "",
+                    "tool_calls": [
+                        {
+                            "id": member(call, "id"),
+                            "type": "function",
+                            "function": {
+                                "name": member(member(call, "function"), "name"),
+                                "arguments": member(
+                                    member(call, "function"), "arguments"
+                                ),
+                            },
+                        }
+                        for call in visual_calls
+                    ],
+                }
+                reasoning = member(message, "reasoning_content")
+                if type(reasoning) is str:
+                    assistant["reasoning_content"] = reasoning
+                for call in visual_calls:
+                    self._record_tool_start(call)
+
+                def execute_visual(
+                    envelope: tuple[str, str, dict[str, Any]],
+                ) -> dict[str, Any]:
+                    _call_id, name, arguments = envelope
+                    return _execute_visual_batch_call(
+                        name,
+                        arguments,
+                        status_provider=self._status_provider,
+                        shell_runner=self._shell_runner,
+                        connector_gateway=self._connector_gateway,
+                        window_text_reader=self._window_text_reader,
+                        capture_runner=self._capture_runner,
+                        windows_reader=self._windows_reader,
+                        turn=turn,
+                        timeout_s=min(30.0, self._total_timeout_s),
+                        stop_event=stop_event,
+                    )
+
+                with ThreadPoolExecutor(
+                    thread_name_prefix="visual-actor-tool",
+                ) as executor:
+                    results = list(executor.map(execute_visual, envelopes))
+                batch_messages: list[dict[str, Any]] = [assistant]
+                for call, envelope, result in zip(
+                    visual_calls, envelopes, results, strict=True
+                ):
+                    call_id, name, _arguments = envelope
+                    self._record_tool_result(name, result)
+                    batch_messages.append(
+                        _projected_tool_message(
+                            seen_tool_results,
+                            name=name,
+                            call_id=call_id,
+                            result=result,
+                        )
+                    )
+                current_exchange.extend(batch_messages)
+                provider_request["messages"].extend(batch_messages)
+                continue
             status = None
             if self._status_provider is not None:
                 try:
@@ -2795,11 +3007,12 @@ class LiveVisualActor:
                 self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": _canonical_json(result),
-                    },
+                    _projected_tool_message(
+                        seen_tool_results,
+                        name=name,
+                        call_id=call_id,
+                        result=result,
+                    ),
                 ]
                 current_exchange.extend(connector_messages)
                 provider_request["messages"].extend(connector_messages)
@@ -2827,11 +3040,12 @@ class LiveVisualActor:
                 self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": _canonical_json(result),
-                    },
+                    _projected_tool_message(
+                        seen_tool_results,
+                        name=name,
+                        call_id=call_id,
+                        result=result,
+                    ),
                 ]
                 current_exchange.extend(connector_messages)
                 provider_request["messages"].extend(connector_messages)
@@ -2857,11 +3071,12 @@ class LiveVisualActor:
                 self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": _canonical_json(result),
-                    },
+                    _projected_tool_message(
+                        seen_tool_results,
+                        name=name,
+                        call_id=call_id,
+                        result=result,
+                    ),
                 ]
                 current_exchange.extend(connector_messages)
                 provider_request["messages"].extend(connector_messages)
@@ -2891,11 +3106,12 @@ class LiveVisualActor:
                 self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": _canonical_json(result),
-                    },
+                    _projected_tool_message(
+                        seen_tool_results,
+                        name=name,
+                        call_id=call_id,
+                        result=result,
+                    ),
                 ]
                 current_exchange.extend(connector_messages)
                 provider_request["messages"].extend(connector_messages)
@@ -2919,11 +3135,12 @@ class LiveVisualActor:
                 self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": _canonical_json(result),
-                    },
+                    _projected_tool_message(
+                        seen_tool_results,
+                        name=name,
+                        call_id=call_id,
+                        result=result,
+                    ),
                 ]
                 current_exchange.extend(connector_messages)
                 provider_request["messages"].extend(connector_messages)
@@ -2950,11 +3167,12 @@ class LiveVisualActor:
                 self._record_tool_result(name, result)
                 connector_messages = [
                     assistant,
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": _canonical_json(result),
-                    },
+                    _projected_tool_message(
+                        seen_tool_results,
+                        name=name,
+                        call_id=call_id,
+                        result=result,
+                    ),
                 ]
                 current_exchange.extend(connector_messages)
                 provider_request["messages"].extend(connector_messages)
@@ -3047,11 +3265,12 @@ class LiveVisualActor:
             self._record_tool_result(name, result)
             connector_messages = [
                 assistant,
-                {
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": _canonical_json(result),
-                },
+                _projected_tool_message(
+                    seen_tool_results,
+                    name=name,
+                    call_id=call_id,
+                    result=result,
+                ),
             ]
             current_exchange.extend(connector_messages)
             provider_request["messages"].extend(connector_messages)
@@ -3061,10 +3280,18 @@ class LiveVisualActor:
         if exchange is None:
             self._visual_history = []
         else:
+            image_message = {
+                "role": "user",
+                "content": [
+                    deepcopy(item)
+                    for item in user_message["content"]
+                    if item.get("type") == "image_url"
+                ],
+            }
             self._visual_history.append(
                 _VisualExchange(
                     messages=tuple(
-                        deepcopy([*current_exchange, exchange[0]])
+                        deepcopy([image_message, exchange[0]])
                     ),
                     tool_call_id=exchange[1],
                     runtime_tool_name=exchange[2],

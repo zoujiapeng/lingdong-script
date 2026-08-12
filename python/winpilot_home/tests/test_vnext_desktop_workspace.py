@@ -143,17 +143,6 @@ def test_desktop_shell_flag_retires_when_a_real_window_is_adopted() -> None:
     assert workspace.desktop_shell is False
 
 
-def test_desktop_shell_flag_survives_refresh_without_adoption() -> None:
-    topology = _Topology()
-    workspace = _shell_workspace(topology)
-
-    workspace.request_target_refresh()
-
-    observation = workspace.observe()
-    assert not observation.replaces_binding
-    assert workspace.desktop_shell is True
-
-
 def test_unrelated_foreground_is_observed_but_never_adopted() -> None:
     topology = _Topology()
     workspace = _workspace(topology)
@@ -485,59 +474,3 @@ def test_current_window_geometry_can_change_between_actions() -> None:
 
     assert observation.surface.region == (20, 30, 1024, 700)
     assert workspace.snapshot(HWND_A).region == (20, 30, 1024, 700)
-
-
-def test_refresh_request_arms_successor_without_any_input() -> None:
-    topology = _Topology()
-    workspace = _workspace(topology)
-    topology.foreground = HWND_B
-
-    workspace.request_target_refresh()
-
-    observation = workspace.observe()
-    assert observation.replaces_binding
-    assert observation.surface.hwnd == HWND_B
-    assert observation.causal_action_id == "refresh-target"
-    assert observation.causal_action == "refresh_target"
-
-    replacement = _binding(
-        HWND_B,
-        PID_B,
-        "C:/b.exe",
-        binding_id="binding-b",
-        evidence_id="evidence-b",
-        epoch=11,
-    )
-    workspace.adopt(observation, replacement)
-    assert workspace.binding == replacement
-    assert workspace.generation == 1
-
-
-def test_refresh_request_without_foreground_change_keeps_target() -> None:
-    topology = _Topology()
-    workspace = _workspace(topology)
-
-    workspace.request_target_refresh()
-
-    observation = workspace.observe()
-    assert not observation.replaces_binding
-    assert observation.surface.hwnd == HWND_A
-    assert workspace.binding.hwnd == HWND_A
-
-
-def test_refresh_overrides_only_the_latest_pending_transition() -> None:
-    topology = _Topology()
-    workspace = _workspace(topology)
-    workspace.finish_action(
-        action_id="decision-1",
-        action="click",
-        input_completed=True,
-    )
-
-    workspace.request_target_refresh()
-    topology.foreground = HWND_B
-
-    observation = workspace.observe()
-
-    assert observation.replaces_binding
-    assert observation.causal_action_id == "refresh-target"

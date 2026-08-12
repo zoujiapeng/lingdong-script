@@ -964,55 +964,32 @@ def test_activate_resolved_entry_uses_process_name_for_appid_entries(
     monkeypatch.setattr(
         apps,
         "_activate_existing_by_process_name",
-        lambda name: 2426606 if name == "cloudmusic.exe" else None,
+        lambda name: (
+            {
+                "candidate_count": 1,
+                "activated_hwnd": 2426606,
+                "candidates": [],
+            }
+            if name == "cloudmusic.exe"
+            else None
+        ),
     )
-    monkeypatch.setattr(apps, "_activate_existing_by_title", lambda _name: None)
 
-    assert apps._activate_resolved_entry(entry) == 2426606
+    assert apps._activate_resolved_entry(entry)["activated_hwnd"] == 2426606
 
 
-def test_activate_existing_by_title_never_activates_a_browser_window(
+def test_activate_resolved_entry_does_not_reuse_by_localized_window_title(
     monkeypatch,
 ) -> None:
-    """A browser tab titled like an app is a web page, not the app window."""
+    """Display text is not stable application identity."""
     from winpilot.perception import apps
 
-    windows = [
-        (1001, "网易云音乐 - Google Chrome", "chrome.exe"),
-        (1002, "网易云音乐", "cloudmusic.exe"),
-    ]
-    state = {"activated": None}
-
-    def fake_enum_windows(callback, _unused):
-        for hwnd, title, process in windows:
-            callback(hwnd, None)
-        return True
-
-    fake_win32gui = SimpleNamespace(
-        EnumWindows=fake_enum_windows,
-        IsWindowVisible=lambda h: True,
-        IsIconic=lambda h: False,
-        GetWindowText=lambda h: next(
-            title for hwnd2, title, _p in windows if hwnd2 == h
-        ),
-        SetForegroundWindow=lambda h: state.update(activated=h) or True,
-        BringWindowToTop=lambda h: True,
-    )
-    import sys as _sys
-
-    monkeypatch.setitem(_sys.modules, "win32gui", fake_win32gui)
-    monkeypatch.setattr(
-        apps,
-        "_window_process_name",
-        lambda h: next(
-            process for hwnd2, _t, process in windows if hwnd2 == h
-        ),
-    )
-
-    activated = apps._activate_existing_by_title("网易云音乐")
-
-    assert activated == 1002
-    assert state["activated"] == 1002
+    assert apps._activate_resolved_entry({
+        "kind": "appid",
+        "name": "网易云音乐",
+        "target": "package!app",
+    }) is None
+    assert not hasattr(apps, "_activate_existing_by_title")
 
 
 def test_activate_existing_by_process_name_finds_window_by_process(
@@ -1038,6 +1015,8 @@ def test_activate_existing_by_process_name_finds_window_by_process(
         GetWindowText=lambda h: next(
             title for hwnd2, title, _p in windows if hwnd2 == h
         ),
+        GetForegroundWindow=lambda: 3001,
+        GetAncestor=lambda h, _flag: h,
         SetForegroundWindow=lambda h: True,
         BringWindowToTop=lambda h: True,
     )
@@ -1052,9 +1031,10 @@ def test_activate_existing_by_process_name_finds_window_by_process(
         ),
     )
 
-    activated = apps._activate_existing_by_process_name("cloudmusic.exe")
+    existing = apps._activate_existing_by_process_name("cloudmusic.exe")
 
-    assert activated == 3001
+    assert existing["activated_hwnd"] == 3001
+    assert existing["candidate_count"] == 1
 
 
 def test_activate_existing_restores_tray_hidden_window_fallback(
@@ -1087,6 +1067,8 @@ def test_activate_existing_restores_tray_hidden_window_fallback(
         GetWindowText=lambda h: next(
             title for hwnd2, title, _p in windows if hwnd2 == h
         ),
+        GetForegroundWindow=lambda: state["activated"] or 9000,
+        GetAncestor=lambda h, _flag: h,
         ShowWindow=lambda h, cmd: state.update(shown=cmd) or True,
         SetForegroundWindow=lambda h: state.update(activated=h) or True,
         BringWindowToTop=lambda h: True,
@@ -1102,11 +1084,75 @@ def test_activate_existing_restores_tray_hidden_window_fallback(
         ).casefold(),
     )
 
-    activated = apps._activate_existing_by_process_name("QQ.exe")
+    existing = apps._activate_existing_by_process_name("QQ.exe")
 
-    assert activated == 4001
+    assert existing["activated_hwnd"] == 4001
     assert state["shown"] is not None  # SW_RESTORE was called
     assert state["activated"] == 4001
+
+
+def test_launch_application_does_not_choose_or_start_when_process_has_multiple_windows(
+    monkeypatch,
+) -> None:
+    from winpilot.perception import apps
+
+    started: list[str] = []
+    monkeypatch.setattr(apps.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(apps.os, "startfile", lambda target: started.append(target))
+    monkeypatch.setattr(apps, "_activate_resolved_entry", lambda _entry: {
+        "candidate_count": 2,
+        "candidates": [
+            {"hwnd": 7101, "title": "chat A", "visible": True, "minimized": False},
+            {"hwnd": 7102, "title": "chat B", "visible": True, "minimized": False},
+        ],
+        "note": (
+            "2 existing window candidates; no new instance started; choose on "
+            "the current screen"
+        ),
+    })
+
+    result = apps.launch_application(
+        "Chat App",
+        resolver=lambda _name: [{
+            "kind": "exe",
+            "name": "Chat App",
+            "target": r"C:\Apps\chat.exe",
+        }],
+    )
+
+    assert result["ok"] is True
+    assert result["via"] == "existing"
+    assert result["candidate_count"] == 2
+    assert "choose on the current screen" in result["note"]
+    assert "activated_hwnd" not in result
+    assert started == []
+
+
+def test_existing_activation_failure_is_reported_without_starting_duplicate(
+    monkeypatch,
+) -> None:
+    from winpilot.perception import apps
+
+    monkeypatch.setattr(apps.shutil, "which", lambda _name: r"C:\Apps\chat.exe")
+    monkeypatch.setattr(apps, "_activate_existing_instance", lambda _path: {
+        "candidate_count": 1,
+        "candidates": [
+            {"hwnd": 7201, "title": "chat", "visible": True, "minimized": False},
+        ],
+        "note": (
+            "1 existing window found but it did not become foreground; no new "
+            "instance started; re-observe the current screen"
+        ),
+    })
+    started: list[str] = []
+    monkeypatch.setattr(apps.os, "startfile", lambda target: started.append(target))
+
+    result = apps.launch_application("chat")
+
+    assert result["via"] == "existing"
+    assert "did not become foreground" in result["note"]
+    assert "activated_hwnd" not in result
+    assert started == []
 
 
 def test_open_application_stage_rejects_controller_ok_without_verification(monkeypatch) -> None:

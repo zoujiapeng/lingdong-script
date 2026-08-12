@@ -413,13 +413,14 @@ def _facts(
     process_id: int = PID,
     foreground_root_hwnd: int | None = HWND,
     region: tuple[int, int, int, int] = REGION,
+    title: str = "Canary Target",
 ) -> live_agent._TargetFacts:
     return live_agent._TargetFacts(
         hwnd=HWND,
         root_hwnd=HWND,
         process_id=process_id,
         executable_identity=r"c:\apps\live_agent.exe",
-        title="Canary Target",
+        title=title,
         class_name="CanaryWindow",
         region=region,
         foreground_root_hwnd=foreground_root_hwnd,
@@ -1293,7 +1294,6 @@ def test_desktop_lease_target_context_is_exact_and_fresh(
     ("current", "mismatch"),
     (
         (_facts(process_id=PID + 1), "process_id"),
-        (_facts(foreground_root_hwnd=HWND + 1), "foreground_root_hwnd"),
         (_facts(region=(101, 200, 640, 480)), "region"),
     ),
 )
@@ -1328,6 +1328,24 @@ def test_current_target_identity_mismatch_fails_before_session(
             dependencies=deps,
         )
     assert built is False
+
+
+def test_prebound_target_ignores_dynamic_title_and_foreground_changes() -> None:
+    current = _facts(
+        title="Canary Target — updated",
+        foreground_root_hwnd=HWND + 1,
+    )
+
+    target = live_agent._freeze_prebound_target(
+        _graph(),
+        _inputs(),
+        dependencies=_dependencies(reader=lambda _hwnd: current),
+    )
+
+    assert target.hwnd == HWND
+    assert target.process_id == PID
+    assert target.title == "Canary Target"
+    assert target.probe.snapshot(HWND) is not None
 
 
 def test_prebound_target_normalizes_client_rect_to_visible_desktop(
@@ -1906,6 +1924,15 @@ def test_handler_redecides_once_after_actor_transport_error() -> None:
         "kind": "bounded_actor_error_redecision",
         "available": True,
     }
+    assert session.rejection_feedbacks == [
+        None,
+        (
+            "The previous model request timed out or failed. Re-observe the "
+            "current screen and state, account for any completed tool work, "
+            "and choose the shortest useful next step."
+        ),
+    ]
+    assert private_detail not in session.rejection_feedbacks[1]
     assert private_detail not in json.dumps(
         {"snapshot": snapshot, "events": events},
         ensure_ascii=False,
@@ -3113,6 +3140,44 @@ def test_screen_first_frame_shows_desktop_and_click_rebinds_visible_window(
     assert len(adoption) == 1
     assert adoption[0]["target_hwnd"] == next_hwnd
     assert adoption[0]["causal_action"] == "click"
+
+
+def test_screen_first_observation_survives_missing_old_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, raw_calls, _factory_calls = _real_session_with_captures(
+        monkeypatch,
+        images=[_jpeg(1120, 630, level=90)],
+        client=_RawClient(_click_responses()),
+        screen_first=True,
+    )
+    workspace = session._runtime._state._workspace
+    monkeypatch.setattr(
+        workspace,
+        "observe",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError("current workspace surface is unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        workspace,
+        "snapshot",
+        lambda _hwnd: pytest.fail(
+            "screen-first observation consulted the old target"
+        ),
+    )
+
+    try:
+        observed = session._runtime._state.observe(
+            session._reducer.projection,
+            turn_index=0,
+        )
+    finally:
+        session.close()
+
+    assert observed.frame.scope == "full_desktop"
+    assert observed.frame.hwnd == HWND
+    assert raw_calls == []
 
 
 def _launch_responses() -> list[dict[str, Any]]:

@@ -93,21 +93,6 @@ _MAX_LAUNCH_EFFECT_CHARS = 200
 # the emergency lease longer than their combined production timeout; normal
 # release is the next drag segment or session.close(), not this fallback.
 _DEFAULT_HELD_POINTER_TIMEOUT_S = 300.0
-# Stale-target recovery: three consecutive recoverable geometry rejections
-# mean the binding points at a window that moved or was replaced.  The next
-# observation then re-syncs to the current foreground instead of retrying.
-_TARGET_REFRESH_THRESHOLD = 3
-_TARGET_GEOMETRY_REJECTION_KINDS = frozenset(
-    {
-        "frame_changed_after_queue",
-        "hit_test_changed",
-        "hit_test_changed_after_queue",
-        "point_outside_target_after_queue",
-        "target_changed_after_queue",
-        "target_identity_changed",
-        "target_unavailable",
-    }
-)
 
 PhysicalRegion = tuple[int, int, int, int]
 PhysicalPoint = tuple[int, int]
@@ -176,9 +161,6 @@ class DesktopWorkspacePort(DesktopTargetProbe, Protocol):
         action: str,
         input_completed: bool | None,
     ) -> None: ...
-
-    def request_target_refresh(self) -> None: ...
-
 
 class RawReceiptTraceSink(Protocol):
     """Best-effort sink for the complete immutable RawDevice receipt."""
@@ -350,18 +332,6 @@ class AtomicDesktopAdapter:
         self._pointer_uncertain = False
         self._closed = False
         self._effect = DeterministicActionEffectVerifier()
-        # Bounded recovery for stale target geometry: when the same
-        # recoverable rejection repeats, the binding may be pointing at a
-        # window that moved or was replaced.  After a small threshold the
-        # adapter asks the workspace to re-sync to the current foreground
-        # window instead of letting the model retry the same dead target.
-        self._rejection_history: tuple[str, ...] = ()
-        self._target_refresh_requested = False
-
-    @property
-    def target_refresh_requested(self) -> bool:
-        return self._target_refresh_requested
-
     @property
     def _is_desktop_shell(self) -> bool:
         # The desktop-shell flag only describes the initial no-foreground
@@ -373,10 +343,6 @@ class AtomicDesktopAdapter:
                 getattr(self._workspace, "desktop_shell", self._desktop_shell)
             )
         return self._desktop_shell
-
-    @property
-    def consecutive_rejection_kinds(self) -> tuple[str, ...]:
-        return self._rejection_history
 
     @property
     def _binding(self) -> TargetBinding:
@@ -513,7 +479,6 @@ class AtomicDesktopAdapter:
                 envelope,
                 phase="binding",
             )
-            self._record_rejection(receipt.error_kind or "target_binding_mismatch")
             return self._rejected(envelope, action, error_kind=receipt.error_kind)
 
         try:
@@ -693,46 +658,44 @@ class AtomicDesktopAdapter:
                 self._not_started(prepared.action, "invalid_pre_frame"),
             )
 
-        initial = self._safe_snapshot()
-        if initial is None:
-            return _PinnedExecution(
-                before_frame,
-                self._not_started(
-                    prepared.action,
-                    self._frame_geometry_rejection("target_unavailable"),
-                ),
-            )
-        if not self._target_is_current(
-            initial,
-            expected_region=(
-                before_frame.region
-                if before_frame.scope == "target_window"
-                else None
-            ),
-            require_foreground=(
-                not self._is_desktop_shell
-                and before_frame.scope == "target_window"
-            ),
-        ):
-            return _PinnedExecution(
-                before_frame,
-                self._not_started(
-                    prepared.action,
-                    self._frame_geometry_rejection("target_identity_changed"),
-                ),
-            )
-        for point in self._prepared_points(prepared):
-            if not self._point_hits_target(
-                point,
-                frame_scope=before_frame.scope,
+        initial = (
+            self._safe_snapshot()
+            if before_frame.scope == "target_window"
+            else None
+        )
+        if before_frame.scope == "target_window":
+            if initial is None:
+                return _PinnedExecution(
+                    before_frame,
+                    self._not_started(
+                        prepared.action,
+                        "target_unavailable",
+                    ),
+                )
+            if not self._target_is_current(
+                initial,
+                expected_region=before_frame.region,
+                require_foreground=not self._is_desktop_shell,
             ):
                 return _PinnedExecution(
                     before_frame,
                     self._not_started(
                         prepared.action,
-                        self._frame_geometry_rejection("hit_test_changed"),
+                        "target_identity_changed",
                     ),
                 )
+            for point in self._prepared_points(prepared):
+                if not self._point_hits_target(
+                    point,
+                    frame_scope=before_frame.scope,
+                ):
+                    return _PinnedExecution(
+                        before_frame,
+                        self._not_started(
+                            prepared.action,
+                            "hit_test_changed",
+                        ),
+                    )
         if stop_event is not None and stop_event.is_set():
             return _PinnedExecution(
                 before_frame,
@@ -815,78 +778,32 @@ class AtomicDesktopAdapter:
             current,
             before_frame,
         ):
-            return self._frame_geometry_rejection("frame_changed_after_queue")
+            return "frame_changed_after_queue"
+        if before_frame.scope == "full_desktop":
+            return None
         snapshot = self._safe_snapshot()
         if not self._target_is_current(
             snapshot,
-            expected_region=(
-                before_frame.region
-                if before_frame.scope == "target_window"
-                else None
-            ),
-            require_foreground=(
-                not self._is_desktop_shell
-                and before_frame.scope == "target_window"
-            ),
+            expected_region=before_frame.region,
+            require_foreground=not self._is_desktop_shell,
         ):
-            return self._frame_geometry_rejection("target_changed_after_queue")
+            return "target_changed_after_queue"
         for point in self._prepared_points(prepared):
             if not self._inside(point, before_frame.region):
-                return self._frame_geometry_rejection(
-                    "point_outside_target_after_queue"
-                )
+                return "point_outside_target_after_queue"
             if not self._point_hits_target(
                 point,
                 frame_scope=before_frame.scope,
             ):
-                return self._frame_geometry_rejection(
-                    "hit_test_changed_after_queue"
-                )
+                return "hit_test_changed_after_queue"
         return None
-
-    def _frame_geometry_rejection(self, error_kind: str) -> str:
-        """Record one recoverable target-geometry rejection and bound refresh."""
-        return self._record_rejection(error_kind)
-
-    def _record_rejection(self, error_kind: str) -> str:
-        """Record one recoverable rejection and request a bounded refresh.
-
-        Every recoverable rejection enters the sliding window; a target
-        refresh is requested only when the trailing ``_TARGET_REFRESH_THRESHOLD``
-        entries are all stale-geometry kinds.  A permit/runtime rejection
-        breaks the run so transient state changes do not cascade into
-        unnecessary window rebinding.
-        """
-        self._rejection_history = (
-            *self._rejection_history[-(_TARGET_REFRESH_THRESHOLD):],
-            error_kind,
-        )
-        if (
-            not self._target_refresh_requested
-            and len(self._rejection_history)
-            >= _TARGET_REFRESH_THRESHOLD
-            and all(
-                kind in _TARGET_GEOMETRY_REJECTION_KINDS
-                for kind in self._rejection_history[
-                    -_TARGET_REFRESH_THRESHOLD:
-                ]
-            )
-        ):
-            workspace = self._workspace
-            if workspace is not None:
-                try:
-                    workspace.request_target_refresh()
-                    self._target_refresh_requested = True
-                except Exception:
-                    pass
-        return error_kind
 
     def _run_raw(
         self,
         envelope: ActorDecisionEnvelope,
         prepared: _PreparedAction,
         before_frame: RuntimeFrame,
-        initial_target: LiveTargetSnapshot,
+        initial_target: LiveTargetSnapshot | None,
         *,
         stop_event: threading.Event | None,
     ) -> RawActionReceipt:
@@ -903,10 +820,24 @@ class AtomicDesktopAdapter:
         # foreground would fight what the model sees and make the click land
         # on the wrong window.
         if before_frame.scope != "full_desktop":
+            assert initial_target is not None
             self._ensure_target_foreground(initial_target)
+        input_hwnd = self._binding.hwnd
+        if before_frame.scope == "full_desktop":
+            foreground_root = self._foreground_root_hwnd()
+            if foreground_root is None and prepared.point is None:
+                return self._not_started(
+                    prepared.action,
+                    "foreground_unavailable",
+                )
+            input_hwnd = foreground_root or input_hwnd
         context = RawActionContext(
-            target_hwnd=self._binding.hwnd,
-            current_hwnd=initial_target.hwnd,
+            target_hwnd=input_hwnd,
+            current_hwnd=(
+                input_hwnd
+                if before_frame.scope == "full_desktop"
+                else initial_target.hwnd
+            ),
         )
 
         if prepared.point is not None:
@@ -921,6 +852,8 @@ class AtomicDesktopAdapter:
                     return FinalPointerGuardDecision.STOP_REQUESTED
                 if (cursor_x, cursor_y) != expected_point:
                     return FinalPointerGuardDecision.POINTER_POSITION_CHANGED
+                if before_frame.scope == "full_desktop":
+                    return FinalPointerGuardDecision.ADMITTED
                 snapshot = self._safe_snapshot()
                 for guarded_point in guarded_points:
                     decision = self._pointer_target_decision(
@@ -997,11 +930,16 @@ class AtomicDesktopAdapter:
                 expected_point[1],
                 prepared.amount,
                 final_guard=pointer_guard,
+                enforce_foreground=(
+                    before_frame.scope == "target_window"
+                ),
             )
 
         def keyboard_guard() -> FinalKeyboardGuardDecision:
             if stop_event is not None and stop_event.is_set():
                 return FinalKeyboardGuardDecision.STOP_REQUESTED
+            if before_frame.scope == "full_desktop":
+                return FinalKeyboardGuardDecision.ADMITTED
             snapshot = self._safe_snapshot()
             decision = self._keyboard_target_decision(
                 snapshot,
@@ -1028,6 +966,21 @@ class AtomicDesktopAdapter:
             prepared.chord,
             final_guard=keyboard_guard,
         )
+
+    @staticmethod
+    def _foreground_root_hwnd() -> int | None:
+        """Return the window that owns physical keyboard input right now."""
+
+        try:
+            foreground = int(win32gui.GetForegroundWindow() or 0)
+            if foreground <= 0:
+                return None
+            root = int(
+                win32gui.GetAncestor(foreground, win32con.GA_ROOT) or 0
+            )
+            return root if root > 0 else foreground
+        except Exception:
+            return None
 
     def _ensure_target_foreground(
         self,
@@ -1145,14 +1098,23 @@ class AtomicDesktopAdapter:
             except (TypeError, ValueError):
                 pass
         if via == "existing":
-            # Tell the model it reused a running instance instead of starting
-            # a second one: a GUI agent judges "is the app open" by what it
-            # sees, and a covered/minimized window can look "not open".
             facts["existing"] = True
-            facts["note"] = (
-                "already running: activated the existing window; "
-                "no new instance was started"
-            )
+            candidate_count = result.get("candidate_count")
+            if type(candidate_count) is int and candidate_count >= 0:
+                facts["candidate_count"] = candidate_count
+            note = result.get("note")
+            if isinstance(note, str) and note.strip():
+                facts["note"] = note.strip()[:_MAX_LAUNCH_EFFECT_CHARS]
+            elif activated_hwnd:
+                facts["note"] = (
+                    "already running: activated the existing window; "
+                    "no new instance was started"
+                )
+            else:
+                facts["note"] = (
+                    "already running: an existing window was found; "
+                    "no new instance was started"
+                )
         return RawActionReceipt(
             action=prepared.action,
             outcome=MutationOutcome.APPLIED,
@@ -1181,7 +1143,12 @@ class AtomicDesktopAdapter:
             return note[:_MAX_LAUNCH_EFFECT_CHARS]
         via = str(facts.get("via") or "")
         if via == "existing":
-            return "activated an already-running instance; no new one started"
+            if facts.get("activated_hwnd"):
+                return (
+                    "activated an already-running instance; "
+                    "no new one started"
+                )
+            return "found an already-running instance; no new one started"
         return ""
 
     def _update_pointer_after_drag(
@@ -1285,6 +1252,47 @@ class AtomicDesktopAdapter:
         prepared: _PreparedAction,
         before: RuntimeFrame,
     ) -> tuple[RuntimeFrame, EvidenceRef]:
+        if before.scope == "full_desktop":
+            region = virtual_screen_region()
+            region_tuple = (
+                region.left,
+                region.top,
+                region.width,
+                region.height,
+            )
+            captured = self._observer.capture(
+                epoch=before.epoch,
+                hwnd=before.hwnd,
+                phase="post_action",
+                action=prepared.action,
+                provided_region=region,
+                expected_previous_frame_id=before.frame_id,
+            )
+            if captured is None or captured.scope != "full_desktop":
+                raise RuntimeError("post-action frame capture unavailable")
+            self._validate_jpeg(captured.image_b64)
+            current = self._authority.current
+            if current is None or not self._frame_state_matches(current, before):
+                raise RuntimeError("frame changed before post-action commit")
+            committed = self._observer.commit(captured)
+            if (
+                committed.frame_id != before.frame_id + 1
+                or committed.epoch != before.epoch
+                or committed.hwnd != before.hwnd
+                or committed.scope != "full_desktop"
+                or committed.region != region_tuple
+            ):
+                raise RuntimeError("post-action frame commit identity changed")
+            identity = self._runtime_frame_identity(committed)
+            evidence = self._post_frame_evidence(envelope, identity)
+            return (
+                self._runtime_frame(
+                    committed,
+                    evidence_refs=(evidence.id,),
+                ),
+                evidence,
+            )
+
         dynamic_workspace = self._workspace is not None
         first = self._safe_snapshot()
         if not self._target_is_current(
@@ -1304,15 +1312,8 @@ class AtomicDesktopAdapter:
                         "hit test changed before post-action capture"
                     )
 
-        # The post-action evidence frame mirrors the authoritative frame
-        # scope: a screen-first frame is compared against the whole virtual
-        # desktop, a window-crop frame against the bound window rectangle.
-        if before.scope == "full_desktop":
-            region = virtual_screen_region()
-            expected_scope = "full_desktop"
-        else:
-            region = Region(*first.region)
-            expected_scope = "target_window"
+        region = Region(*first.region)
+        expected_scope = "target_window"
         region_tuple = (
             region.left,
             region.top,
@@ -1731,7 +1732,10 @@ class AtomicDesktopAdapter:
         pointer = self.pointer_state()
         return bool(
             envelope.target_binding_id == binding.binding_id
-            and envelope.frame_hwnd == binding.hwnd
+            and (
+                envelope.frame_scope == "full_desktop"
+                or envelope.frame_hwnd == binding.hwnd
+            )
             and envelope.frame_epoch == binding.epoch
             and envelope.frame_scope in {"target_window", "full_desktop"}
             and envelope.allowed_evidence_scope
