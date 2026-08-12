@@ -1082,22 +1082,13 @@ class _BoundTargetProbe:
         *,
         reader: Callable[[int], _TargetFacts | None],
         hit_test_root: Callable[[int, int], int | None],
-        desktop_shell: bool = False,
     ) -> None:
         self._expected = expected
         self._reader = reader
         self._hit_test = hit_test_root
-        self._desktop_shell = desktop_shell
 
     def _matches(self, current: _TargetFacts | None) -> bool:
         expected = self._expected
-        foreground_ok = (
-            current is not None
-            and (
-                self._desktop_shell
-                or current.foreground_root_hwnd == expected.hwnd
-            )
-        )
         return bool(
             type(current) is _TargetFacts
             and current.hwnd == expected.hwnd
@@ -1106,7 +1097,6 @@ class _BoundTargetProbe:
             and current.executable_identity == expected.executable_identity
             and current.class_name == expected.class_name
             and current.region == expected.region
-            and foreground_ok
         )
 
     def snapshot(self, hwnd: int) -> LiveTargetSnapshot | None:
@@ -1318,14 +1308,10 @@ def _freeze_prebound_target(
             mismatches.append("process_id")
         if not current.executable_identity:
             mismatches.append("executable_identity")
-        if current.title != title:
-            mismatches.append("title")
         if current.class_name != class_name:
             mismatches.append("class_name")
         if current.region != expected_region:
             mismatches.append("region")
-        if not desktop_shell and current.foreground_root_hwnd != hwnd:
-            mismatches.append("foreground_root_hwnd")
     if mismatches:
         raise ValueError(
             "current Electron target mismatch: " + ",".join(mismatches)
@@ -1353,7 +1339,6 @@ def _freeze_prebound_target(
         current,
         reader=reader,
         hit_test_root=hit_test,
-        desktop_shell=desktop_shell,
     )
     if probe.snapshot(hwnd) is None:
         raise ValueError("pre-bound target changed during admission")
@@ -1850,20 +1835,7 @@ class _LiveRuntimeState:
 
     def _capture_current(self) -> FrameState:
         for attempt in range(2):
-            observation = self._workspace.observe()
-            prepared = self._prepare_workspace_adoption(observation)
-            replacement = prepared is not None
-            if prepared is None:
-                binding = self._workspace.binding
-                target_evidence = None
-                first = self._workspace.snapshot(binding.hwnd)
-            else:
-                binding, target_evidence = prepared
-                first = observation.surface.to_live_snapshot()
-            if first is None:
-                raise RuntimeError(
-                    "workspace target identity is no longer current"
-                )
+            binding = self._workspace.binding
             previous = self._authority.current
             expected_previous = (
                 previous.frame_id if previous is not None else 0
@@ -1871,13 +1843,6 @@ class _LiveRuntimeState:
             desktop_shell = bool(
                 getattr(self._workspace, "desktop_shell", False)
             )
-            # A successor is always a real foreground window (the workspace
-            # probes exclude the old binding hwnd), so the desktop-shell
-            # crop label must not leak into the adopted window's first
-            # frame.  The workspace flag retires on ``adopt``; this keeps
-            # the capture that *finds* the successor screen-first too.
-            if replacement:
-                desktop_shell = False
             crop_enabled = bool(
                 CONFIG.get(
                     "controller",
@@ -1885,6 +1850,34 @@ class _LiveRuntimeState:
                     default=False,
                 )
             )
+            observation = None
+            try:
+                observation = self._workspace.observe()
+            except RuntimeError:
+                if desktop_shell or crop_enabled:
+                    raise
+            prepared = (
+                None
+                if observation is None
+                else self._prepare_workspace_adoption(observation)
+            )
+            replacement = prepared is not None
+            if prepared is not None:
+                binding, target_evidence = prepared
+                first = observation.surface.to_live_snapshot()
+                # A successor is a real foreground window, so an initial
+                # desktop-shell label retires for this screen-first capture.
+                desktop_shell = False
+            else:
+                target_evidence = None
+                first = None
+            screen_first = not desktop_shell and not crop_enabled
+            if not screen_first and first is None:
+                first = self._workspace.snapshot(binding.hwnd)
+                if first is None:
+                    raise RuntimeError(
+                        "workspace target identity is no longer current"
+                    )
             # Screen-first frames.  The model sees the whole real virtual
             # desktop by default so it can react to windows it never bound;
             # a window crop is an explicit opt-in (``target_window_capture_
@@ -1936,6 +1929,8 @@ class _LiveRuntimeState:
                 raise RuntimeError(
                     "fresh screen-first JPEG capture failed closed"
                 )
+            if screen_first and not replacement:
+                break
             validated = (
                 self._workspace.validate(observation)
                 if replacement
@@ -2049,17 +2044,20 @@ class _LiveRuntimeState:
 
     def _snapshot(self, state: FrameState, *, turn_index: int) -> RuntimeSnapshot:
         binding = self._workspace.binding
-        current_target = self._workspace.snapshot(binding.hwnd)
         if (
-            current_target is None
-            or state.hwnd != current_target.hwnd
-            or state.scope not in {"target_window", "full_desktop"}
-            or (
-                state.scope == "target_window"
-                and state.region != current_target.region
-            )
+            state.scope not in {"target_window", "full_desktop"}
+            or state.hwnd != binding.hwnd
         ):
             raise RuntimeError("current target/frame identity no longer matches")
+        if state.scope == "target_window":
+            current_target = self._workspace.snapshot(binding.hwnd)
+            if (
+                current_target is None
+                or state.region != current_target.region
+            ):
+                raise RuntimeError(
+                    "current target/frame identity no longer matches"
+                )
         frame = self._runtime_frame(state)
         refs_by_id = {
             ref.id: ref for ref in self._registry.snapshot()
@@ -4131,6 +4129,12 @@ class _PreparedHandler:
                         rejection_feedback = raw_detail[:_MAX_REJECTION_FEEDBACK_CHARS]
                         continue
                     if actor_error_recovery_available:
+                        rejection_feedback = (
+                            "The previous model request timed out or failed. "
+                            "Re-observe the current screen and state, account "
+                            "for any completed tool work, and choose the "
+                            "shortest useful next step."
+                        )
                         continue
                     if terminal_status not in _CONTINUE_STATUSES:
                         break

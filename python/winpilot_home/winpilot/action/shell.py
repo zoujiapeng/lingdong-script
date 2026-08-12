@@ -141,7 +141,8 @@ def _shape_result(
     if not ok:
         if timeout:
             result["next_step"] = (
-                "inspect partial output, split the command, or increase timeout"
+                "this attempt timed out; use partial output and current state "
+                "to choose the next step"
             )
         elif stopped:
             result["next_step"] = "do not retry unless the run continues"

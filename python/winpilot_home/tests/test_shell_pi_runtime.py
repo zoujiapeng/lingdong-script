@@ -56,6 +56,24 @@ def test_nonzero_result_is_actionable_and_preserves_full_output_path(
     )
 
 
+def test_timeout_result_gives_the_model_partial_state() -> None:
+    result = shell._shape_result(
+        stdout="partial progress",
+        stderr="",
+        ok=False,
+        exit_code=None,
+        error="command timed out",
+        timeout=True,
+    )
+
+    assert result["timeout"] is True
+    assert result["output"] == "partial progress"
+    assert result["next_step"] == (
+        "this attempt timed out; use partial output and current state "
+        "to choose the next step"
+    )
+
+
 def test_result_above_actor_budget_is_recoverable(monkeypatch) -> None:
     monkeypatch.setattr(
         shell,

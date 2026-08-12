@@ -65,6 +65,31 @@ def normalize_execution_context(inputs: Any) -> dict[str, Any]:
     }
 
 
+def _window_title(hwnd: int) -> str:
+    try:
+        length = int(
+            ctypes.windll.user32.GetWindowTextLengthW(int(hwnd)) or 0
+        )
+        buffer = ctypes.create_unicode_buffer(max(1, length + 1))
+        ctypes.windll.user32.GetWindowTextW(
+            int(hwnd), buffer, len(buffer),
+        )
+        return str(buffer.value or "")
+    except Exception:
+        return ""
+
+
+def _window_class_name(hwnd: int) -> str:
+    try:
+        buffer = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetClassNameW(
+            int(hwnd), buffer, len(buffer),
+        )
+        return str(buffer.value or "")
+    except Exception:
+        return ""
+
+
 def windows_shell_desktop_context(
     *,
     region_provider: Callable[[], list[int]] | None = None,
@@ -97,15 +122,19 @@ def windows_shell_desktop_context(
         process_id = int(process_id_resolver(hwnd) or 0)
     except Exception:
         process_id = 0
+    class_name = _window_class_name(hwnd)
+    if not class_name:
+        return {}
+    title = _window_title(hwnd) or class_name
     rect = _normalized_rect(region_provider() or [])
     if len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
         return {}
     return {
         "format": "desktop-target/1",
         "hwnd": hwnd,
-        "title": "Program Manager",
+        "title": title,
         "process_id": process_id,
-        "class_name": "Progman",
+        "class_name": class_name,
         "rect": rect,
         "foreground_verified": False,
         "usable": True,

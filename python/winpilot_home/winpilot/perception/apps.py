@@ -41,24 +41,6 @@ _LOOKS_LIKE_PATH_OR_ASSOCIATION = re.compile(
     re.IGNORECASE,
 )
 
-# Browsers host arbitrary tab titles; a tab labelled like an application is a
-# web page, never an installed application window.  Title-based activation
-# must never hijack the agent into a browser tab for a native app name.
-_BROWSER_PROCESS_NAMES = frozenset({
-    "chrome.exe",
-    "msedge.exe",
-    "firefox.exe",
-    "iexplore.exe",
-    "brave.exe",
-    "opera.exe",
-    "vivaldi.exe",
-    "chromium.exe",
-    "seamonkey.exe",
-    "waterfox.exe",
-    "tor.exe",
-})
-
-
 def _unique_text(values) -> list[str]:
     """Return non-empty strings once, preserving the strongest-first order."""
 
@@ -503,25 +485,13 @@ def launch_target(entry: dict) -> dict:
         return {"ok": False, "error": str(exc), "target": target}
 
 
-def _activate_existing_instance(exe_path: str) -> int | None:
-    """Find a top-level window owned by ``exe_path`` and activate it.
+def _activate_existing_instance(exe_path: str) -> dict | None:
+    """Find windows owned by ``exe_path`` without guessing among peers.
 
-    Generic process-to-window activation: enumerate top-level windows, match
-    their owning process executable against the resolved path, pick the first
-    usable window, and bring it to the foreground.  Visible non-minimized
-    windows are preferred; when none exists (the app is closed to the system
-    tray / notification area, or minimized), a hidden or minimized window of
-    the same process is restored and activated instead, so "the app is
-    already open" never silently starts a second instance.  Returns the
-    activated hwnd, or None when no matching window exists.  This is window
-    activation, not an application adapter: it works for any application
-    that already runs.
+    A non-``None`` result means an instance exists, even if Windows did not
+    foreground it.  Callers must not start another instance in that case.
     """
-    import ctypes
-
-    import win32con
     import win32gui
-    import win32process
 
     try:
         norm = os.path.normcase(os.path.normpath(exe_path))
@@ -544,17 +514,7 @@ def _activate_existing_instance(exe_path: str) -> int | None:
         )
     except Exception:
         return None
-    hwnd = found_visible[0] if found_visible else None
-    if hwnd is None and found_hidden:
-        # Restore a tray-hidden/minimized window before activating it.
-        hwnd = found_hidden[0]
-        try:
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        except Exception:
-            pass
-    if hwnd is None:
-        return None
-    return _activate_window(hwnd)
+    return _existing_window_outcome(found_visible, found_hidden)
 
 
 def _collect_existing_window(
@@ -653,88 +613,122 @@ def _activate_window(hwnd: int) -> int | None:
             win32gui.SetForegroundWindow(hwnd)
         except Exception:
             pass
-    return int(hwnd)
+    return int(hwnd) if _foreground_root_hwnd() == _root_hwnd(hwnd) else None
 
 
-def _activate_existing_by_title(display_name: str) -> int | None:
-    """Activate a window whose title contains the display name.
+def _root_hwnd(hwnd: int) -> int:
+    """Return the top-level root for one hwnd."""
+    import win32gui
 
-    Generic title-based activation for display names whose executable cannot
-    be matched (Store/UWP apps, shortcuts without a resolvable target).  The
-    match is a plain substring test, so "QQ" activates the open QQ window
-    instead of starting a second instance.  Visible windows are preferred; a
-    tray-hidden/minimized window is restored and activated as a fallback.
-    Browser windows are excluded: a tab title such as "网易云音乐 - Google
-    Chrome" is a web page, not an installed application window, and
-    activating it would hijack the model into the browser instead of the
-    real app.
-    """
-    import ctypes
+    value = int(hwnd or 0)
+    if not value:
+        return 0
+    get_ancestor = getattr(win32gui, "GetAncestor", None)
+    if get_ancestor is None:
+        return value
+    try:
+        return int(get_ancestor(value, 2) or value)  # GA_ROOT
+    except Exception:
+        return value
 
+
+def _foreground_root_hwnd() -> int:
+    import win32gui
+
+    try:
+        return _root_hwnd(int(win32gui.GetForegroundWindow() or 0))
+    except Exception:
+        return 0
+
+
+def _window_candidate_facts(hwnds: list[int]) -> list[dict]:
+    """Return a bounded hint for the model; identity comes from the process."""
+    import win32gui
+
+    facts: list[dict] = []
+    for hwnd in hwnds[:3]:
+        try:
+            title = str(win32gui.GetWindowText(hwnd) or "").strip()[:120]
+        except Exception:
+            title = ""
+        try:
+            visible = bool(win32gui.IsWindowVisible(hwnd))
+            minimized = bool(win32gui.IsIconic(hwnd))
+        except Exception:
+            visible = False
+            minimized = False
+        facts.append({
+            "hwnd": int(hwnd),
+            "title": title,
+            "visible": visible,
+            "minimized": minimized,
+        })
+    return facts
+
+
+def _existing_window_outcome(
+    visible: list[int],
+    hidden: list[int],
+) -> dict | None:
+    """Choose only when Windows or uniqueness makes the choice unambiguous."""
     import win32con
     import win32gui
-    import win32process
 
-    needle = str(display_name or "").strip()
-    if not needle:
+    candidates = list(dict.fromkeys([*visible, *hidden]))
+    if not candidates:
         return None
-    found_visible: list[int] = []
-    found_hidden: list[int] = []
-    try:
-        win32gui.EnumWindows(
-            lambda hwnd, _unused: (
-                _collect_existing_by_title(
-                    hwnd,
-                    needle=needle,
-                    visible=found_visible,
-                    hidden=found_hidden,
-                )
-            )
-            or True,
-            None,
+    candidate_count = len(candidates)
+    result = {
+        "candidate_count": candidate_count,
+        "candidates": _window_candidate_facts(candidates),
+    }
+    foreground_root = _foreground_root_hwnd()
+    for hwnd in candidates:
+        if foreground_root and _root_hwnd(hwnd) == foreground_root:
+            result.update({
+                "activated_hwnd": int(hwnd),
+                "note": (
+                    f"{candidate_count} existing window candidate(s); current "
+                    "foreground is one; no new instance started"
+                ),
+            })
+            return result
+
+    if candidate_count > 1:
+        hidden_candidates = set(hidden)
+        if hidden_candidates:
+            for hwnd in candidates:
+                if hwnd not in hidden_candidates:
+                    continue
+                try:
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                except Exception:
+                    pass
+        result["note"] = (
+            f"{candidate_count} existing window candidates; no new instance "
+            "started; hidden candidates were asked to restore; re-observe "
+            "the current screen and choose visually"
         )
-    except Exception:
-        return None
-    hwnd = found_visible[0] if found_visible else None
-    if hwnd is None and found_hidden:
-        hwnd = found_hidden[0]
+        return result
+
+    hwnd = candidates[0]
+    if not visible:
         try:
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         except Exception:
             pass
-    if hwnd is None:
-        return None
-    return _activate_window(hwnd)
-
-
-def _collect_existing_by_title(
-    hwnd: int,
-    *,
-    needle: str,
-    visible: list[int],
-    hidden: list[int],
-) -> bool:
-    """Bucket one top-level window by visibility for a title match."""
-    import win32gui
-
-    try:
-        is_visible = bool(
-            win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd)
-        )
-    except Exception:
-        return True
-    try:
-        if needle not in win32gui.GetWindowText(hwnd):
-            return True
-        if _window_process_name(hwnd) in _BROWSER_PROCESS_NAMES:
-            return True
-    except Exception:
-        return True
-    if is_visible:
-        visible.append(hwnd)
+    activated = _activate_window(hwnd)
+    if activated:
+        result.update({
+            "activated_hwnd": int(activated),
+            "note": "1 existing window activated; no new instance started",
+        })
     else:
-        hidden.append(hwnd)
-    return True
+        result["note"] = (
+            "1 existing window found but it did not become foreground; no new "
+            "instance started; re-observe the current screen"
+        )
+    return result
 
 
 def _window_process_name(hwnd: int) -> str:
@@ -748,7 +742,7 @@ def _window_process_name(hwnd: int) -> str:
         return ""
 
 
-def _activate_existing_by_process_name(process_name: str) -> int | None:
+def _activate_existing_by_process_name(process_name: str) -> dict | None:
     """Activate a window owned by a running process file name.
 
     Process-name activation is stronger than title matching: it finds the
@@ -757,9 +751,6 @@ def _activate_existing_by_process_name(process_name: str) -> int | None:
     Visible windows are preferred; a tray-hidden/minimized window of the
     same process is restored and activated as a fallback.
     """
-    import ctypes
-
-    import win32con
     import win32gui
 
     needle = str(process_name or "").strip().casefold()
@@ -784,16 +775,7 @@ def _activate_existing_by_process_name(process_name: str) -> int | None:
         )
     except Exception:
         return None
-    hwnd = found_visible[0] if found_visible else None
-    if hwnd is None and found_hidden:
-        hwnd = found_hidden[0]
-        try:
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        except Exception:
-            pass
-    if hwnd is None:
-        return None
-    return _activate_window(hwnd)
+    return _existing_window_outcome(found_visible, found_hidden)
 
 
 def _collect_existing_by_process(
@@ -861,11 +843,10 @@ def _process_exe(pid: int) -> str:
         return ""
 
 
-def _activate_resolved_entry(entry: dict) -> int | None:
-    """Best-effort activation of an already-running resolved application."""
+def _activate_resolved_entry(entry: dict) -> dict | None:
+    """Find an existing instance by executable identity, never window title."""
     kind = str(entry.get("kind") or "")
     target = str(entry.get("target") or "")
-    name = str(entry.get("name") or "")
     candidates: list[str] = []
     if kind == "exe":
         candidates.append(target)
@@ -873,19 +854,45 @@ def _activate_resolved_entry(entry: dict) -> int | None:
         candidates.append(_shortcut_target(target))
     for candidate in candidates:
         if candidate:
-            activated = _activate_existing_instance(candidate)
-            if activated:
-                return activated
+            existing = _activate_existing_instance(candidate)
+            if existing is not None:
+                return existing
     # Store/UWP apps resolve to an AppID whose on-disk exe lives behind a
     # WindowsApps VFS path that the running process may not report.  Match
     # the process file name instead, so a running "cloudmusic" window is
     # activated even though its title is a song name, not the display name.
     process_name = str(entry.get("process_name") or "")
     if process_name:
-        activated = _activate_existing_by_process_name(process_name)
-        if activated:
-            return activated
-    return _activate_existing_by_title(name or target)
+        existing = _activate_existing_by_process_name(process_name)
+        if existing is not None:
+            return existing
+    return None
+
+
+def _existing_launch_result(
+    existing: dict,
+    *,
+    target: str,
+    arguments: list[str],
+    name: str,
+    aliases: list[str],
+) -> dict:
+    """Project concise existing-instance facts into the launch result."""
+    result = {
+        "ok": True,
+        "via": "existing",
+        "target": target,
+        "arguments": arguments,
+        "name": name,
+        "aliases": aliases,
+        "candidate_count": int(existing.get("candidate_count") or 0),
+        "candidates": list(existing.get("candidates") or [])[:3],
+        "note": str(existing.get("note") or "existing instance found"),
+    }
+    activated_hwnd = existing.get("activated_hwnd")
+    if activated_hwnd:
+        result["activated_hwnd"] = int(activated_hwnd)
+    return result
 
 
 def launch_application(
@@ -925,17 +932,15 @@ def launch_application(
     # agent needs "bring the app to the front" semantics for "it is already
     # open", which a bare start cannot provide.
     if path:
-        activated = _activate_existing_instance(path)
-        if activated:
-            return {
-                "ok": True,
-                "via": "existing",
-                "target": path,
-                "arguments": arguments_list,
-                "name": name,
-                "aliases": [],
-                "activated_hwnd": activated,
-            }
+        existing = _activate_existing_instance(path)
+        if existing is not None:
+            return _existing_launch_result(
+                existing,
+                target=path,
+                arguments=arguments_list,
+                name=name,
+                aliases=[],
+            )
     if path:
         try:
             if arguments_list:
@@ -972,17 +977,15 @@ def launch_application(
         # one: a GUI agent needs "the app is already open, bring it to the
         # front" semantics for every display-name launch, not just bare PATH
         # commands.
-        activated = _activate_resolved_entry(entry)
-        if activated:
-            return {
-                "ok": True,
-                "via": "existing",
-                "target": str(entry.get("target") or ""),
-                "arguments": arguments_list,
-                "name": name,
-                "aliases": list(entry.get("aliases") or []),
-                "activated_hwnd": activated,
-            }
+        existing = _activate_resolved_entry(entry)
+        if existing is not None:
+            return _existing_launch_result(
+                existing,
+                target=str(entry.get("target") or ""),
+                arguments=arguments_list,
+                name=name,
+                aliases=list(entry.get("aliases") or []),
+            )
         if arguments_list:
             entry["arguments"] = arguments_list
         return launch_target(entry)

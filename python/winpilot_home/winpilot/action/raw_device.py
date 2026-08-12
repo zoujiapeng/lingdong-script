@@ -500,6 +500,7 @@ class RawDeviceExecutor:
         amount: int,
         *,
         final_guard: FinalPointerGuard | None = None,
+        enforce_foreground: bool = True,
     ) -> RawActionReceipt:
         context_error = self._context_error(context)
         if context_error is not None:
@@ -516,7 +517,9 @@ class RawDeviceExecutor:
                 error_kind="invalid_args",
             )
         backend = self._backends.scroll
-        call_kwargs: dict[str, Any] = {"hwnd": context.target_hwnd}
+        call_kwargs: dict[str, Any] = {
+            "hwnd": context.target_hwnd if enforce_foreground else None,
+        }
         if final_guard is not None:
             if not callable(final_guard):
                 return self._receipt(
@@ -561,7 +564,9 @@ class RawDeviceExecutor:
                 error_kind="invalid_args",
             )
         backend = self._backends.click
-        call_kwargs: dict[str, Any] = {"hwnd": context.target_hwnd}
+        call_kwargs: dict[str, Any] = {
+            "hwnd": context.target_hwnd if enforce_foreground else None,
+        }
         if final_guard is not None:
             if (
                 not callable(final_guard)

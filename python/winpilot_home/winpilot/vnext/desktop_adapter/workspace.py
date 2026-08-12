@@ -414,25 +414,6 @@ class DesktopWorkspace:
                 rejected_identity=None,
             )
 
-    def request_target_refresh(self) -> None:
-        """Arm one uncaused successor probe for a stale target binding.
-
-        Called by the atomic adapter after repeated recoverable geometry
-        rejections (target moved or replaced).  The next observation resolves
-        the current foreground window as the successor; adoption still requires
-        the same stable two-sample hand-off and never rewrites input.
-        """
-        with self._lock:
-            self._pending = _PendingTransition(
-                source_binding_id=self._binding.binding_id,
-                action_id="refresh-target",
-                action="refresh_target",
-                generation=self._generation,
-                observations_left=self._SUCCESSOR_OBSERVATIONS,
-                rejected_identity=None,
-            )
-
-
 __all__ = [
     "DesktopWorkspace",
     "WorkspaceObservation",

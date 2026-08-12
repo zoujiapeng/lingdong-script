@@ -28,6 +28,7 @@ from winpilot.vnext.model_roles import (
     LiveVisualActor,
 )
 from winpilot.vnext.runtime import (
+    ActorTaskState,
     ActorTaskStateUpdate,
     ActorTurnDecision,
     ActorFrameView,
@@ -439,6 +440,8 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "visibly complete, call claim_obligation_done" in actor_contract
     assert "no action can advance, call blocked" in actor_contract
     assert "When pointer_held is true" in actor_contract
+    assert "step back to the whole screen" in actor_contract
+    assert "revise the approach toward original_goal" in actor_contract
     assert actor_request["tool_choice"] == "auto"
     assert "parallel_tool_calls" not in actor_request
     assert "n" not in actor_request
@@ -1065,13 +1068,32 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
     assert "private prior reasoning" not in json.dumps(
         second_messages
     )
+    prior_user = second_messages[1]
+    assert prior_user["content"] == [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{_JPEG_B64}",
+            },
+        }
+    ]
+    prior_assistant = second_messages[2]
+    assert prior_assistant["content"] == ""
+    assert "reasoning_content" not in prior_assistant
+    prior_arguments = json.loads(
+        prior_assistant["tool_calls"][0]["function"]["arguments"]
+    )
+    assert prior_arguments == {
+        "local_intent": "enter the requested greeting once",
+        "text": "hello",
+    }
+    assert "task_state_update" not in prior_arguments
     third_messages = clients[0].requests[2]["messages"]
-    assert len(third_messages) == 8
-    assert third_messages[2]["tool_calls"][0]["id"] == "first-0"
-    assert third_messages[3]["tool_call_id"] == "first-0"
-    assert third_messages[5]["tool_calls"][0]["id"] == "second-0"
-    assert third_messages[6]["tool_call_id"] == "second-0"
-    assert json.loads(third_messages[6]["content"]) == {
+    assert len(third_messages) == 5
+    assert "first-0" not in json.dumps(third_messages)
+    assert third_messages[2]["tool_calls"][0]["id"] == "second-0"
+    assert third_messages[3]["tool_call_id"] == "second-0"
+    assert json.loads(third_messages[3]["content"]) == {
         "previous_action": completed.previous_action.to_dict(),
     }
 
@@ -1082,10 +1104,10 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         submitted_size=(640, 480),
     )
     fourth_messages = clients[0].requests[3]["messages"]
-    assert len(fourth_messages) == 11
-    assert fourth_messages[5]["tool_calls"][0]["id"] == "second-0"
-    assert fourth_messages[8]["tool_calls"][0]["id"] == "third-0"
-    assert "first-0" in json.dumps(fourth_messages)
+    assert len(fourth_messages) == 5
+    assert fourth_messages[2]["tool_calls"][0]["id"] == "third-0"
+    assert "first-0" not in json.dumps(fourth_messages)
+    assert "second-0" not in json.dumps(fourth_messages)
 
     actor.propose(
         completed,
@@ -1094,12 +1116,9 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         submitted_size=(640, 480),
     )
     fifth_messages = clients[0].requests[4]["messages"]
-    assert len(fifth_messages) == 14
-    assert "first-0" in json.dumps(fifth_messages)
-    assert fifth_messages[2]["tool_calls"][0]["id"] == "first-0"
-    assert fifth_messages[5]["tool_calls"][0]["id"] == "second-0"
-    assert fifth_messages[8]["tool_calls"][0]["id"] == "third-0"
-    assert fifth_messages[11]["tool_calls"][0]["id"] == "fourth-0"
+    assert len(fifth_messages) == 5
+    assert fifth_messages[2]["tool_calls"][0]["id"] == "fourth-0"
+    assert "third-0" not in json.dumps(fifth_messages)
 
     actor.propose(
         completed,
@@ -1108,12 +1127,9 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         submitted_size=(640, 480),
     )
     sixth_messages = clients[0].requests[5]["messages"]
-    assert len(sixth_messages) == 14
-    assert "first-0" not in json.dumps(sixth_messages)
-    assert sixth_messages[2]["tool_calls"][0]["id"] == "second-0"
-    assert sixth_messages[5]["tool_calls"][0]["id"] == "third-0"
-    assert sixth_messages[8]["tool_calls"][0]["id"] == "fourth-0"
-    assert sixth_messages[11]["tool_calls"][0]["id"] == "fifth-0"
+    assert len(sixth_messages) == 5
+    assert sixth_messages[2]["tool_calls"][0]["id"] == "fifth-0"
+    assert "fourth-0" not in json.dumps(sixth_messages)
 
 
 @pytest.mark.parametrize(
@@ -1133,7 +1149,10 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
             },
             "exactly one tool call",
         ),
-        (_tool_response(count=2), "exactly one tool call"),
+        (
+            _tool_response(count=2),
+            "exactly one tool call",
+        ),
         (_tool_response(name="observe"), "unapproved tool"),
         (_tool_response(arguments="{bad json"), "not valid JSON"),
         (
@@ -2117,11 +2136,11 @@ def test_initial_turn_can_run_shell_before_observe() -> None:
     assert "stderr" not in tool_result
 
 
-def test_initial_turn_compacts_only_identical_repeated_tool_results() -> None:
+def test_initial_turn_compacts_identical_results_after_every_execution() -> None:
     responses = [
         _tool_response(
             name="run_shell",
-            arguments={"command": "Get-Content pipeline.py"},
+            arguments={"command": f"Get-Content pipeline.py | Select-{index}"},
             call_id=f"shell-call-{index}",
         )
         for index in range(3)
@@ -2173,9 +2192,10 @@ def test_initial_turn_compacts_only_identical_repeated_tool_results() -> None:
     assert tool_results[1] == {
         "exit_code": 0,
         "message": (
-            "The tool ran again and returned exactly the same result as the "
-            "referenced earlier tool call."
+            "Executed; this tool returned the same output as the referenced "
+            "call."
         ),
+        "new_tool_information": False,
         "ok": True,
         "repeat_count": 1,
         "result_unchanged": True,
@@ -2199,7 +2219,63 @@ def test_repeated_error_result_stays_explicitly_failed() -> None:
     assert compact["ok"] is False
     assert compact["next_step"] == "choose another tool"
     assert compact["same_as_tool_call_id"] == "failed-call-1"
+    assert compact["new_tool_information"] is False
     assert "error" not in compact
+
+
+def test_tool_result_identity_ignores_only_full_output_path() -> None:
+    from winpilot.vnext.model_roles.visual_actor import _project_tool_result
+
+    seen: dict[tuple[str, str], tuple[str, int]] = {}
+    first = {
+        "ok": True,
+        "exit_code": 0,
+        "output": "same output",
+        "output_meta": {"total_lines": 4},
+        "foreground_window": {"hwnd": 100},
+        "full_output_path": r"C:\tmp\first.log",
+    }
+    second = {
+        **first,
+        "full_output_path": r"C:\tmp\second.log",
+    }
+
+    assert _project_tool_result(
+        seen,
+        name="run_shell",
+        call_id="first-call",
+        result=first,
+    ) == first
+    compact = _project_tool_result(
+        seen,
+        name="run_shell",
+        call_id="second-call",
+        result=second,
+    )
+    assert compact["result_unchanged"] is True
+    assert compact["same_as_tool_call_id"] == "first-call"
+    changed_window = _project_tool_result(
+        seen,
+        name="run_shell",
+        call_id="third-call",
+        result={
+            **second,
+            "foreground_window": {"hwnd": 200},
+        },
+    )
+    assert changed_window["foreground_window"] == {"hwnd": 200}
+    assert "result_unchanged" not in changed_window
+    changed_meta = _project_tool_result(
+        seen,
+        name="run_shell",
+        call_id="fourth-call",
+        result={
+            **second,
+            "output_meta": {"total_lines": 5},
+        },
+    )
+    assert changed_meta["output_meta"] == {"total_lines": 5}
+    assert "result_unchanged" not in changed_meta
 
 
 def test_actor_streams_public_narration_commands_results_and_task_state() -> None:
@@ -2320,6 +2396,350 @@ def test_visual_turn_can_run_shell_before_gui_action() -> None:
     assert runner.calls[0]["command"] == "tasklist"
     assert runner.calls[0]["shell"] == "cmd"
     assert len(clients[0].requests) == 2
+
+
+def test_visual_turn_executes_independent_query_batch_in_parallel_and_order() -> None:
+    batch = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": f"visual-shell-{index}",
+                        "type": "function",
+                        "function": {
+                            "name": "run_shell",
+                            "arguments": json.dumps(
+                                {"command": f"inspect {index}"},
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                    for index in range(4)
+                ],
+            },
+        }],
+    }
+    _, clients = _build_clients([batch, _tool_response(call_id="gui-call")])
+
+    class ParallelShellRunner:
+        def __init__(self) -> None:
+            self.barrier = threading.Barrier(4)
+            self.lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def run(self, **kwargs: Any) -> dict[str, Any]:
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                self.barrier.wait(timeout=1)
+                return {
+                    "ok": True,
+                    "exit_code": 0,
+                    "stdout": kwargs["command"],
+                    "stderr": "",
+                }
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    runner = ParallelShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert runner.max_active == 4
+    assert len(clients[0].requests) == 2
+    messages = clients[0].requests[1]["messages"]
+    batch_assistant = next(
+        message
+        for message in messages
+        if len(message.get("tool_calls", ())) == 4
+    )
+    assert [
+        call["id"] for call in batch_assistant["tool_calls"]
+    ] == [f"visual-shell-{index}" for index in range(4)]
+    batch_results = [
+        message
+        for message in messages
+        if message.get("role") == "tool"
+        and str(message.get("tool_call_id", "")).startswith("visual-shell-")
+    ]
+    assert [message["tool_call_id"] for message in batch_results] == [
+        f"visual-shell-{index}" for index in range(4)
+    ]
+    assert [json.loads(message["content"])["output"] for message in batch_results] == [
+        f"inspect {index}" for index in range(4)
+    ]
+
+
+def test_visual_batch_with_gui_uses_existing_single_call_failure_path() -> None:
+    invalid_batch = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "would-have-run",
+                        "type": "function",
+                        "function": {
+                            "name": "run_shell",
+                            "arguments": '{"command":"Write-Output changed"}',
+                        },
+                    },
+                    {
+                        "id": "gui-mixed-in",
+                        "type": "function",
+                        "function": {
+                            "name": "type_text",
+                            "arguments": json.dumps({
+                                "text": "hello",
+                                "local_intent": "enter the greeting",
+                            }),
+                        },
+                    },
+                ],
+            },
+        }],
+    }
+    _, clients = _build_clients(invalid_batch)
+    runner = _RecordingShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    with pytest.raises(InvalidActorProposal, match="exactly one tool call"):
+        actor.propose(
+            _actor_turn(),
+            image_b64=_JPEG_B64,
+            image_media_type="image/jpeg",
+            submitted_size=(640, 480),
+        )
+
+    assert runner.calls == []
+    assert len(clients[0].requests) == 1
+
+
+def test_visual_turn_compacts_repeated_tool_output_after_every_execution() -> None:
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="run_shell",
+                arguments={"command": f"inspect-{index}"},
+                call_id=f"visual-shell-{index}",
+            )
+            for index in range(3)
+        ]
+        + [_tool_response(call_id="gui-call")]
+    )
+
+    class ChangingShellRunner(_RecordingShellRunner):
+        def run(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            output = "same output" if len(self.calls) < 3 else "changed output"
+            return {
+                "ok": True,
+                "exit_code": 0,
+                "stdout": output,
+                "stderr": "",
+            }
+
+    runner = ChangingShellRunner()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["action"] == "type_text"
+    assert [call["command"] for call in runner.calls] == [
+        "inspect-0",
+        "inspect-1",
+        "inspect-2",
+    ]
+    tool_results = [
+        json.loads(message["content"])
+        for message in clients[0].requests[-1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert tool_results[0]["output"] == "same output"
+    assert tool_results[1]["result_unchanged"] is True
+    assert tool_results[1]["new_tool_information"] is False
+    assert tool_results[1]["same_as_tool_call_id"] == "visual-shell-0-0"
+    assert "output" not in tool_results[1]
+    assert tool_results[2]["output"] == "changed output"
+
+
+def test_visual_turn_compacts_repeated_window_text_body() -> None:
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="read_window_text",
+                arguments={},
+                call_id=f"window-text-{index}",
+            )
+            for index in range(3)
+        ]
+        + [_tool_response(call_id="gui-call")]
+    )
+
+    class ChangingWindowTextReader:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, _turn: ActorTurnInput) -> dict[str, Any]:
+            self.calls += 1
+            text = "x" * 6000 if self.calls < 3 else "changed text"
+            return {
+                "format": "window-text/1",
+                "window_hwnd": 1,
+                "element_count": 1,
+                "text": text,
+            }
+
+    reader = ChangingWindowTextReader()
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        window_text_reader=reader,
+    )
+
+    actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert reader.calls == 3
+    tool_results = [
+        json.loads(message["content"])
+        for message in clients[0].requests[-1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert tool_results[0]["text"] == "x" * 6000
+    assert tool_results[1]["result_unchanged"] is True
+    assert tool_results[1]["new_tool_information"] is False
+    assert "text" not in tool_results[1]
+    assert tool_results[2]["text"] == "changed text"
+
+
+def test_next_visual_turn_drops_consumed_local_tool_transcript() -> None:
+    shell_call = _tool_response(
+        name="run_shell",
+        arguments={
+            "command": "unique-command",
+            "task_state_update": {"scratchpad": "inspect once"},
+        },
+        call_id="consumed-shell",
+    )
+    gui_call = _tool_response(
+        arguments={
+            "text": "hello",
+            "local_intent": "enter the greeting once",
+            "task_state_update": {"scratchpad": "latest state"},
+        },
+        content="old local narration",
+        call_id="final-gui",
+    )
+    gui_call["choices"][0]["message"]["reasoning_content"] = (
+        "private old reasoning"
+    )
+    _, clients = _build_clients(
+        [shell_call, gui_call, _tool_response(call_id="second-gui")]
+    )
+    runner = _RecordingShellRunner()
+    runner.result = {
+        "ok": True,
+        "exit_code": 0,
+        "stdout": "UNIQUE-DIAGNOSTIC-BODY",
+        "stderr": "",
+    }
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        shell_runner=runner,
+    )
+    turn = _actor_turn()
+
+    actor.propose(
+        turn,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+    previous_action = ActorPreviousActionView(
+        action="type_text",
+        input_completed=True,
+        visible_effect="changed",
+    )
+    actor.propose(
+        replace(
+            turn,
+            task_state=ActorTaskState("latest state"),
+            previous_action=previous_action,
+        ),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    messages = clients[0].requests[-1]["messages"]
+    encoded = json.dumps(messages, ensure_ascii=False)
+    assert "unique-command" not in encoded
+    assert "UNIQUE-DIAGNOSTIC-BODY" not in encoded
+    assert "consumed-shell-0" not in encoded
+    assert "old local narration" not in encoded
+    assert "private old reasoning" not in encoded
+    assert "final-gui-0" in encoded
+    assert _JPEG_B64 in encoded
+    history_assistant = messages[2]
+    history_arguments = json.loads(
+        history_assistant["tool_calls"][0]["function"]["arguments"]
+    )
+    assert history_assistant["content"] == ""
+    assert "reasoning_content" not in history_assistant
+    assert "task_state_update" not in history_arguments
+    assert history_arguments == {
+        "local_intent": "enter the greeting once",
+        "text": "hello",
+    }
+    assert json.loads(messages[3]["content"]) == {
+        "previous_action": previous_action.to_dict(),
+    }
+    current_context = json.loads(messages[-1]["content"][0]["text"])
+    assert current_context["mission"]["original_goal"] == (
+        turn.mission.original_goal
+    )
+    assert current_context["task_state"] == {"scratchpad": "latest state"}
 
 
 def test_failed_shell_result_stays_in_band_with_an_actionable_next_step() -> None:
@@ -2715,7 +3135,11 @@ def test_propose_injects_rejection_feedback_into_native_context() -> None:
     )
     assert any(
         m.get("role") == "user"
-        and "Return exactly one valid tool call" in str(m.get("content", ""))
+        and "Runtime feedback from the previous attempt" in str(
+            m.get("content", "")
+        )
+        and "return one valid tool call or an independent tool batch"
+        in str(m.get("content", ""))
         for m in messages
     )
 
@@ -2747,7 +3171,17 @@ class _RecordingWindowsReader:
             "format": "windows-list/1",
             "ok": True,
             "windows": [
-                {"hwnd": 100, "title": "QQ", "class_name": "QQMainWnd", "pid": 1},
+                {
+                    "hwnd": 100,
+                    "title": "QQ",
+                    "class_name": "QQMainWnd",
+                    "pid": 1,
+                    "process_name": "QQ.exe",
+                    "rect": [0, 0, 800, 600],
+                    "foreground": True,
+                    "visible": True,
+                    "minimized": False,
+                },
                 {"hwnd": 200, "title": "网易云音乐", "class_name": "OrpheusBrowserHost", "pid": 2},
             ],
             "count": 2,
@@ -2862,6 +3296,9 @@ def test_visual_turn_can_list_windows_before_gui_action() -> None:
     tool_result = json.loads(result_messages[0]["content"])
     assert tool_result["count"] == 2
     assert tool_result["windows"][0]["title"] == "QQ"
+    assert tool_result["windows"][0]["process_name"] == "QQ.exe"
+    assert tool_result["windows"][0]["rect"] == [0, 0, 800, 600]
+    assert tool_result["windows"][0]["foreground"] is True
 
 
 def test_visual_turn_can_paste_image_before_gui_action() -> None:

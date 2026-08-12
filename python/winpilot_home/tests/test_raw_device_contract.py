@@ -538,6 +538,14 @@ def test_final_guard_uses_only_explicit_admitted_backend() -> None:
     assert len(admitted_calls) == 1
     assert normal_calls == []
 
+    raw.click(
+        _context(), 10, 20, MouseButton.LEFT, ClickCount.SINGLE,
+        ClickMechanism.PHYSICAL,
+        final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+        enforce_foreground=False,
+    )
+    assert admitted_calls[-1][2]["hwnd"] is None
+
     unavailable = RawDeviceExecutor(RawDeviceBackends()).click(
         _context(), 10, 20, MouseButton.LEFT, ClickCount.SINGLE,
         ClickMechanism.PHYSICAL,
