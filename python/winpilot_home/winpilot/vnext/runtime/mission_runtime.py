@@ -950,7 +950,9 @@ class MissionRuntime:
                 decision_id=envelope.decision_id,
                 event_ids=(),
                 detail=(
-                    "Controller proved input did not execute; no replay occurred"
+                    "Controller proved input did not execute: error_kind="
+                    f"{transition.error_kind or 'unspecified'}; "
+                    "no replay occurred"
                     + (
                         "; rejection diagnostic evidence was unavailable: "
                         f"{rejection_evidence_error}"
@@ -1248,12 +1250,18 @@ class MissionRuntime:
         except ToolArgumentValidationError as exc:
             logger.warning(
                 "vNext tool arguments rejected: tool=%s code=%s "
-                "keyword=%s path=%s",
+                "keyword=%s path=%s expected=%s actual=%s",
                 exc.tool_name,
                 exc.code,
                 exc.keyword or "",
                 exc.instance_path,
+                exc.expected or "",
+                exc.actual or "",
             )
+            # The action failed mechanically, but the Actor's own task notes
+            # remain useful input for its next attempt. Authority freshness was
+            # checked above, and task state carries no execution authority.
+            self._task_state = pending_task_state
             return self._result(
                 RuntimeStatus.INVALID_PROPOSAL,
                 route=route,

@@ -132,8 +132,7 @@ _STRICT_SCHEMA_KEYS = frozenset(
     }
 )
 _LOCALLY_ENFORCED_SCHEMA_KEYS = frozenset({"not", "uniqueItems"})
-_THREAD_HISTORY_MESSAGES = 12
-_THREAD_HISTORY_CHARS = 16_384
+_FLOW_FRAGMENT_REQUEST_CHARS = 16_384
 _VISUAL_HISTORY_DEPTH = 1
 _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
@@ -151,7 +150,6 @@ _STATUS_TOOLS = frozenset(
 )
 _SHELL_TOOL = "run_shell"
 _SHELL_MAX_COMMAND_CHARS = 16_384
-_SHELL_MAX_OUTPUT_CHARS = 6000
 _WINDOW_TEXT_TOOL = "read_window_text"
 _WINDOW_TEXT_MAX_CHARS = 6000
 _CAPTURE_SCREEN_TOOL = "capture_screen"
@@ -206,8 +204,10 @@ def _repeated_tool_result(
     same_as_tool_call_id: str,
     repeat_count: int,
 ) -> dict[str, Any]:
-    """Reference an earlier identical result without hiding a new execution."""
-    compact: dict[str, Any] = {
+    """Mark an identical result while keeping the latest feedback usable."""
+
+    repeated = dict(result)
+    repeated.update({
         "result_unchanged": True,
         "new_tool_information": False,
         "same_as_tool_call_id": same_as_tool_call_id,
@@ -216,20 +216,10 @@ def _repeated_tool_result(
             "Executed; this tool returned the same output as the referenced "
             "call."
         ),
-    }
-    for field in (
-        "ok",
-        "exit_code",
-        "timeout",
-        "stopped",
-        "error_kind",
-        "next_step",
-    ):
-        if field in result:
-            compact[field] = result[field]
-    if result.get("error") and "ok" not in compact:
-        compact["ok"] = False
-    return compact
+    })
+    if result.get("error") and "ok" not in repeated:
+        repeated["ok"] = False
+    return repeated
 
 
 def _project_tool_result(
@@ -238,27 +228,37 @@ def _project_tool_result(
     name: str,
     call_id: str,
     result: Mapping[str, Any],
+    model_calls_remaining: int | None = None,
 ) -> dict[str, Any]:
-    """Keep the first full result and compact later identical executions."""
+    """Annotate repeated execution without choosing the model's context."""
 
     comparable = dict(result)
     comparable.pop("full_output_path", None)
     try:
         key = (name, _canonical_json(comparable))
     except (TypeError, ValueError):
-        return dict(result)
+        projected = dict(result)
+        if model_calls_remaining is not None:
+            projected["model_calls_remaining"] = model_calls_remaining
+        return projected
     previous = seen.get(key)
     if previous is None:
         seen[key] = (call_id, 0)
-        return dict(result)
+        projected = dict(result)
+        if model_calls_remaining is not None:
+            projected["model_calls_remaining"] = model_calls_remaining
+        return projected
     first_call_id, previous_count = previous
     repeat_count = previous_count + 1
     seen[key] = (first_call_id, repeat_count)
-    return _repeated_tool_result(
+    projected = _repeated_tool_result(
         result,
         same_as_tool_call_id=first_call_id,
         repeat_count=repeat_count,
     )
+    if model_calls_remaining is not None:
+        projected["model_calls_remaining"] = model_calls_remaining
+    return projected
 
 
 def _projected_tool_message(
@@ -267,6 +267,7 @@ def _projected_tool_message(
     name: str,
     call_id: str,
     result: Mapping[str, Any],
+    model_calls_remaining: int | None = None,
 ) -> dict[str, Any]:
     return {
         "role": "tool",
@@ -277,6 +278,7 @@ def _projected_tool_message(
                 name=name,
                 call_id=call_id,
                 result=result,
+                model_calls_remaining=model_calls_remaining,
             )
         ),
     }
@@ -378,14 +380,12 @@ def _initial_decision_id(
     return f"visual-actor-initial-{digest.hexdigest()[:24]}"
 
 
-def _bounded_thread_messages(
+def _thread_messages(
     history: Sequence[Mapping[str, Any]],
     goal: str,
 ) -> list[dict[str, str]]:
     if isinstance(history, (str, bytes)) or not isinstance(history, Sequence):
         raise LiveModelRoleError("Actor thread history must be a sequence")
-    if len(history) > _THREAD_HISTORY_MESSAGES:
-        raise LiveModelRoleError("Actor thread history exceeds the bounded window")
     messages: list[dict[str, str]] = []
     for raw in history:
         if not isinstance(raw, Mapping) or set(raw) != {"role", "content"}:
@@ -401,12 +401,9 @@ def _bounded_thread_messages(
         if not content.strip():
             raise LiveModelRoleError("Actor thread history content must not be empty")
         messages.append({"role": role, "content": content})
-    while (
-        messages
-        and len(goal) + sum(len(item["content"]) for item in messages)
-        > _THREAD_HISTORY_CHARS
-    ):
-        del messages[:2]
+    # Preserve the native prefix supplied by the Thread owner.  The Actor
+    # validates its shape but does not choose which successful turns the model
+    # may see or silently rebuild the provider's cache prefix.
     messages.append({"role": "user", "content": goal})
     return messages
 
@@ -971,8 +968,9 @@ def _tool_format_repair(
     """Extract one failed tool call so the same model can repair it.
 
     The structured format error is returned to the same model before any
-    physical input is executed.  A repaired proposal is parsed again and a
-    second failure is terminal: the runtime never replays after input.
+    physical input is executed.  Repaired proposals are parsed again and may
+    receive further exact feedback while the shared model-call budget remains;
+    the runtime never replays after input.
     """
     message = response_message(response)
     calls = member(message, "tool_calls")
@@ -1126,7 +1124,6 @@ def _shell_tool_definitions() -> list[dict[str, Any]]:
                         "timeout_s": {
                             "type": "integer",
                             "minimum": 1,
-                            "maximum": 120,
                         },
                     },
                     "required": ["command"],
@@ -1699,9 +1696,9 @@ def _shell_exchange(
         raise LiveModelRoleError("run_shell shell must be powershell or cmd")
     timeout_s = arguments.get("timeout_s")
     if timeout_s is not None and (
-        type(timeout_s) is not int or not 1 <= timeout_s <= 120
+        type(timeout_s) is not int or timeout_s < 1
     ):
-        raise LiveModelRoleError("run_shell timeout_s must be 1..120")
+        raise LiveModelRoleError("run_shell timeout_s must be a positive integer")
     content = member(message, "content")
     if content is not None and type(content) is not str:
         raise LiveModelRoleError("Actor shell content must be text or null")
@@ -1729,10 +1726,9 @@ def _call_shell(
     runner: Any,
     arguments: Mapping[str, Any],
     *,
-    timeout_s: float,
     stop_event: Any | None,
 ) -> dict[str, Any]:
-    """Execute one bounded shell command through the injected runner."""
+    """Execute one shell command through the injected runner."""
     if runner is None or not callable(getattr(runner, "run", None)):
         return _actionable_tool_result(
             _SHELL_TOOL,
@@ -1763,27 +1759,8 @@ def _call_shell(
         ]
         output["output"] = "\n".join(parts) or "(no output)"
     # stdout/stderr duplicate the combined output from the native runner.
-    # Keep one bounded stream so long tool loops spend context on new facts.
-    for key in ("output", "error"):
-        value = output.get(key)
-        if isinstance(value, str) and len(value) > _SHELL_MAX_OUTPUT_CHARS:
-            output[key] = value[-_SHELL_MAX_OUTPUT_CHARS:]
-            if key == "output":
-                meta = dict(output.get("output_meta") or {})
-                truncated_by = str(meta.get("truncated_by") or "")
-                meta.update(
-                    {
-                        "truncated": True,
-                        "truncated_by": "+".join(
-                            part
-                            for part in (truncated_by, "actor_chars")
-                            if part
-                        ),
-                        "total_chars": len(value),
-                        "shown_chars": len(output[key]),
-                    }
-                )
-                output["output_meta"] = meta
+    # The runner owns the one generic output boundary and supplies a full path
+    # when it truncates; do not discard another slice here.
     return _actionable_tool_result(_SHELL_TOOL, output)
 
 
@@ -1863,7 +1840,6 @@ def _execute_initial_call(
         return _call_shell(
             shell_runner,
             arguments,
-            timeout_s=timeout_s,
             stop_event=stop_event,
         )
     if name == _WINDOW_TEXT_TOOL:
@@ -1964,7 +1940,6 @@ def _execute_visual_batch_call(
         return _call_shell(
             shell_runner,
             arguments,
-            timeout_s=timeout_s,
             stop_event=stop_event,
         )
     if name == _WINDOW_TEXT_TOOL:
@@ -2099,7 +2074,7 @@ class FlowFragmentProposer:
         if not isinstance(request, Mapping):
             raise LiveModelRoleError("flow fragment request must be an object")
         canonical_request = _canonical_json(request)
-        if len(canonical_request) > _THREAD_HISTORY_CHARS:
+        if len(canonical_request) > _FLOW_FRAGMENT_REQUEST_CHARS:
             raise LiveModelRoleError("flow fragment request exceeds the bounded context")
         ports = {
             key: tuple(value)
@@ -2344,19 +2319,18 @@ class LiveVisualActor:
             ok=not failed,
         )
 
-    def _connector_call_limit(self, model_call_limit: int | None) -> int:
+    def _model_call_allowance(self, model_call_limit: int | None) -> int:
         if model_call_limit is None:
             model_call_limit = self.model_call_reservation
         if type(model_call_limit) is not int or not (
             1 <= model_call_limit <= self.model_call_reservation
         ):
             raise LiveModelRoleError("Actor model-call allowance is invalid")
-        # One shared local-tool budget across status/shell/connector: the
-        # model decides how many system queries it needs (shell may need many
-        # turns to investigate), and the global model-call budget is the only
-        # hard cap.  A per-family limit would silently remove tools the model
-        # is still actively using.
-        return max(0, model_call_limit - 2)
+        # The global model-call budget is the only hard cap.  Do not reserve
+        # hidden terminal-only calls or silently remove tools near the end;
+        # results expose the remaining allowance so the model can decide how
+        # to use it.
+        return model_call_limit
 
     def begin_turn(
         self,
@@ -2371,8 +2345,6 @@ class LiveVisualActor:
         if type(goal) is not str or not goal.strip():
             raise LiveModelRoleError("goal must not be empty")
         goal = goal.strip()
-        if len(goal) > _THREAD_HISTORY_CHARS:
-            raise LiveModelRoleError("goal exceeds the Actor turn character budget")
         with self._state_lock:
             if self._initial_turn_started:
                 raise LiveModelRoleError("Actor initial turn is call-once")
@@ -2381,7 +2353,7 @@ class LiveVisualActor:
             "role": "system",
             "content": INITIAL_ACTOR_SYSTEM_CONTRACT,
         }
-        messages = _bounded_thread_messages(history, goal)
+        messages = _thread_messages(history, goal)
         terminal_tools = [
             {
                 "type": "function",
@@ -2424,13 +2396,9 @@ class LiveVisualActor:
         }
         admission: VisualActorTurnAdmission | None = None
         exchange: _InitialExchange | None = None
-        connector_limit = self._connector_call_limit(_model_call_limit)
+        model_call_allowance = self._model_call_allowance(_model_call_limit)
         seen_tool_results: dict[tuple[str, str], tuple[str, int]] = {}
-        repair_attempted = False
-        repair_budget = _model_call_limit is None or _model_call_limit >= 2
-        for connector_calls in range(connector_limit + (2 if repair_budget else 1)):
-            if connector_calls == connector_limit:
-                provider_request["tools"] = terminal_tools
+        for model_call_index in range(model_call_allowance):
             outcome = invoke_chat_completion(
                 self._client,
                 decision_id=_initial_decision_id(goal, history),
@@ -2446,6 +2414,7 @@ class LiveVisualActor:
                 runtime=self._runtime,
             )
             self._record_response(outcome.response)
+            model_calls_remaining = model_call_allowance - model_call_index - 1
             if _finish_reason(outcome.response) == "length":
                 messages.extend(_truncation_messages(outcome.response))
                 provider_request["messages"] = [system_message, *messages]
@@ -2466,13 +2435,8 @@ class LiveVisualActor:
                     )
                     break
                 except LiveModelRoleError as exc:
-                    if (
-                        repair_attempted
-                        or not repair_budget
-                        or connector_calls >= connector_limit + 1
-                    ):
+                    if model_calls_remaining <= 0:
                         raise InvalidActorProposal(str(exc)) from exc
-                    repair_attempted = True
                     repair = _tool_format_repair(outcome.response, str(exc))
                     if repair is None:
                         raise InvalidActorProposal(str(exc)) from exc
@@ -2486,6 +2450,9 @@ class LiveVisualActor:
                                 "content": _canonical_json(
                                     {
                                         "tool_format_error": str(exc),
+                                        "model_calls_remaining": (
+                                            model_calls_remaining
+                                        ),
                                         "action": (
                                             "return exactly one valid tool call "
                                             "with the required fields"
@@ -2496,7 +2463,6 @@ class LiveVisualActor:
                         )
                     )
                     provider_request["messages"] = [system_message, *messages]
-                    provider_request["tools"] = terminal_tools
                     continue
             preflight_error = ""
             try:
@@ -2525,13 +2491,8 @@ class LiveVisualActor:
             except LiveModelRoleError as exc:
                 preflight_error = str(exc)
             if preflight_error:
-                if (
-                    repair_attempted
-                    or not repair_budget
-                    or connector_calls >= connector_limit + 1
-                ):
+                if model_calls_remaining <= 0:
                     raise LiveModelRoleError(preflight_error)
-                repair_attempted = True
                 repair = _tool_format_repair(
                     outcome.response,
                     preflight_error,
@@ -2539,6 +2500,7 @@ class LiveVisualActor:
                 feedback = {
                     "tool_format_error": preflight_error,
                     "tools_executed": 0,
+                    "model_calls_remaining": model_calls_remaining,
                     "action": (
                         "return a valid tool batch; independent calls may "
                         "remain together"
@@ -2667,6 +2629,7 @@ class LiveVisualActor:
                     name=canonical_name,
                     call_id=call_id,
                     result=result,
+                    model_calls_remaining=model_calls_remaining,
                 )
                 pending_tool_messages.append(
                     {
@@ -2703,7 +2666,9 @@ class LiveVisualActor:
             messages.extend((assistant, *pending_tool_messages))
             provider_request["messages"] = [system_message, *messages]
         if admission is None:
-            raise LiveModelRoleError("Actor initial turn did not terminate")
+            raise LiveModelRoleError(
+                "Actor initial turn exhausted its model-call allowance"
+            )
         self._initial_exchange = deepcopy(exchange)
         self._initial_turn_terminal = admission.kind == "reply"
         return admission
@@ -2875,15 +2840,9 @@ class LiveVisualActor:
         }
         outcome = None
         decision = None
-        repair_attempted = False
-        connector_limit = self._connector_call_limit(_model_call_limit)
+        model_call_allowance = self._model_call_allowance(_model_call_limit)
         seen_tool_results: dict[tuple[str, str], tuple[str, int]] = {}
-        repair_budget = (
-            _model_call_limit is None or _model_call_limit >= 2
-        )
-        for connector_calls in range(connector_limit + (2 if repair_budget else 1)):
-            if connector_calls == connector_limit:
-                provider_request["tools"] = terminal_tools
+        for model_call_index in range(model_call_allowance):
             outcome = invoke_chat_completion(
                 self._client,
                 decision_id=_decision_id(turn, image_b64),
@@ -2899,6 +2858,7 @@ class LiveVisualActor:
                 runtime=self._runtime,
             )
             self._record_response(outcome.response)
+            model_calls_remaining = model_call_allowance - model_call_index - 1
             if _finish_reason(outcome.response) == "length":
                 truncation = _truncation_messages(outcome.response)
                 current_exchange.extend(truncation)
@@ -2980,6 +2940,7 @@ class LiveVisualActor:
                             name=name,
                             call_id=call_id,
                             result=result,
+                            model_calls_remaining=model_calls_remaining,
                         )
                     )
                 current_exchange.extend(batch_messages)
@@ -2991,10 +2952,7 @@ class LiveVisualActor:
                     status = _status_exchange(outcome.response)
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
-            if (
-                status is not None
-                and connector_calls < connector_limit
-            ):
+            if status is not None:
                 assistant, call_id, name, arguments = status
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
@@ -3012,6 +2970,7 @@ class LiveVisualActor:
                         name=name,
                         call_id=call_id,
                         result=result,
+                        model_calls_remaining=model_calls_remaining,
                     ),
                 ]
                 current_exchange.extend(connector_messages)
@@ -3025,16 +2984,12 @@ class LiveVisualActor:
                     raise InvalidActorProposal(str(exc)) from exc
             if shell is not None:
                 assistant, call_id, name, arguments = shell
-                if connector_calls >= connector_limit:
-                    provider_request["tools"] = terminal_tools
-                    continue
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
                 )
                 result = _call_shell(
                     self._shell_runner,
                     arguments,
-                    timeout_s=min(30.0, self._total_timeout_s),
                     stop_event=stop_event,
                 )
                 self._record_tool_result(name, result)
@@ -3045,6 +3000,7 @@ class LiveVisualActor:
                         name=name,
                         call_id=call_id,
                         result=result,
+                        model_calls_remaining=model_calls_remaining,
                     ),
                 ]
                 current_exchange.extend(connector_messages)
@@ -3056,10 +3012,7 @@ class LiveVisualActor:
                     window_text = _window_text_exchange(outcome.response)
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
-            if (
-                window_text is not None
-                and connector_calls < connector_limit
-            ):
+            if window_text is not None:
                 assistant, call_id, name, arguments = window_text
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
@@ -3076,6 +3029,7 @@ class LiveVisualActor:
                         name=name,
                         call_id=call_id,
                         result=result,
+                        model_calls_remaining=model_calls_remaining,
                     ),
                 ]
                 current_exchange.extend(connector_messages)
@@ -3094,7 +3048,7 @@ class LiveVisualActor:
                     )
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
-            if capture is not None and connector_calls < connector_limit:
+            if capture is not None:
                 assistant, call_id, name, arguments = capture
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
@@ -3111,6 +3065,7 @@ class LiveVisualActor:
                         name=name,
                         call_id=call_id,
                         result=result,
+                        model_calls_remaining=model_calls_remaining,
                     ),
                 ]
                 current_exchange.extend(connector_messages)
@@ -3126,7 +3081,7 @@ class LiveVisualActor:
                     )
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
-            if windows is not None and connector_calls < connector_limit:
+            if windows is not None:
                 assistant, call_id, name, arguments = windows
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
@@ -3140,6 +3095,7 @@ class LiveVisualActor:
                         name=name,
                         call_id=call_id,
                         result=result,
+                        model_calls_remaining=model_calls_remaining,
                     ),
                 ]
                 current_exchange.extend(connector_messages)
@@ -3155,7 +3111,7 @@ class LiveVisualActor:
                     )
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
-            if paste is not None and connector_calls < connector_limit:
+            if paste is not None:
                 assistant, call_id, name, arguments = paste
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
@@ -3172,6 +3128,7 @@ class LiveVisualActor:
                         name=name,
                         call_id=call_id,
                         result=result,
+                        model_calls_remaining=model_calls_remaining,
                     ),
                 ]
                 current_exchange.extend(connector_messages)
@@ -3181,7 +3138,7 @@ class LiveVisualActor:
                 connector = _connector_exchange(outcome.response)
             except LiveModelRoleError as exc:
                 raise InvalidActorProposal(str(exc)) from exc
-            if connector is None or connector_calls >= connector_limit:
+            if connector is None:
                 try:
                     decision = _proposal_from_response(
                         outcome.response,
@@ -3215,13 +3172,8 @@ class LiveVisualActor:
                         )
                     break
                 except InvalidActorProposal as exc:
-                    if (
-                        repair_attempted
-                        or not repair_budget
-                        or connector_calls >= connector_limit + 1
-                    ):
+                    if model_calls_remaining <= 0:
                         raise
-                    repair_attempted = True
                     repair = _tool_format_repair(
                         outcome.response,
                         str(exc),
@@ -3237,6 +3189,9 @@ class LiveVisualActor:
                             "content": _canonical_json(
                                 {
                                     "tool_format_error": str(exc),
+                                    "model_calls_remaining": (
+                                        model_calls_remaining
+                                    ),
                                     "action": (
                                         "return exactly one valid tool call "
                                         "with the required fields"
@@ -3247,7 +3202,6 @@ class LiveVisualActor:
                     ]
                     current_exchange.extend(repair_messages)
                     provider_request["messages"].extend(repair_messages)
-                    provider_request["tools"] = terminal_tools
                     continue
                 except LiveModelRoleError as exc:
                     raise InvalidActorProposal(str(exc)) from exc
@@ -3270,12 +3224,15 @@ class LiveVisualActor:
                     name=name,
                     call_id=call_id,
                     result=result,
+                    model_calls_remaining=model_calls_remaining,
                 ),
             ]
             current_exchange.extend(connector_messages)
             provider_request["messages"].extend(connector_messages)
         if outcome is None or decision is None:
-            raise LiveModelRoleError("Actor visual turn did not terminate")
+            raise LiveModelRoleError(
+                "Actor visual turn exhausted its model-call allowance"
+            )
         exchange = _history_exchange(outcome.response)
         if exchange is None:
             self._visual_history = []

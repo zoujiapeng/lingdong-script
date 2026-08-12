@@ -1862,6 +1862,35 @@ def test_invalid_proposal_rejection_detail_is_fed_to_the_next_turn() -> None:
     ]
 
 
+def test_physical_rejection_detail_is_fed_to_the_next_turn() -> None:
+    detail = (
+        "Controller proved input did not execute: "
+        "error_kind=invalid_args; no replay occurred"
+    )
+    session = _FakeSession(
+        [
+            MissionRuntimeResult(
+                RuntimeStatus.STALE_DISCARDED,
+                detail=detail,
+            ),
+            MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED),
+        ]
+    )
+    manager = ArpRunManager()
+    execution = _prepare(
+        _graph(),
+        {},
+        _config(),
+        run_manager=manager,
+        _dependencies=_dependencies(session=session),
+    )
+
+    snapshot = _run_prepared(manager, execution)
+
+    assert snapshot["result"]["status"] == "mission_verified"
+    assert session.rejection_feedbacks == [None, detail]
+
+
 def test_successful_turn_resets_invalid_proposal_recovery_streak() -> None:
     session = _FakeSession(
         [

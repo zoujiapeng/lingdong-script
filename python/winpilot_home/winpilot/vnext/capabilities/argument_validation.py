@@ -37,17 +37,26 @@ class ToolArgumentValidationError(CapabilityContractError):
         keyword: str | None = None,
         instance_path: tuple[str | int, ...] = (),
         schema_path: tuple[str | int, ...] = (),
+        expected: str | None = None,
+        actual: str | None = None,
     ) -> None:
         self.tool_name = tool_name
         self.code = code
         self.keyword = keyword
         self.instance_path = instance_path
         self.schema_path = schema_path
+        self.expected = expected
+        self.actual = actual
         location = _display_path(instance_path)
         detail = f" ({keyword})" if keyword else ""
+        shape = ""
+        if expected is not None:
+            shape += f" expected={expected}"
+        if actual is not None:
+            shape += f" actual={actual}"
         super().__init__(
             f"tool {tool_name!r} arguments rejected: "
-            f"{code}{detail} at {location}"
+            f"{code}{detail} at {location}{shape}"
         )
 
 
@@ -56,6 +65,24 @@ def _display_path(path: tuple[str | int, ...]) -> str:
     for item in path:
         result += f"[{item}]" if type(item) is int else f".{item}"
     return result
+
+
+def _json_type_name(value: object) -> str:
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "boolean"
+    if type(value) is dict:
+        return "object"
+    if type(value) is list:
+        return "array"
+    if type(value) is str:
+        return "string"
+    if type(value) is int:
+        return "integer"
+    if type(value) is float:
+        return "number"
+    return type(value).__name__
 
 
 def _error_sort_key(error: Any) -> tuple[Any, ...]:
@@ -189,12 +216,23 @@ class ToolArgumentValidator:
             ) from exc
         if errors:
             error = errors[0]
+            expected = None
+            actual = None
+            if error.validator == "type":
+                required_types = error.validator_value
+                if type(required_types) is str:
+                    expected = required_types
+                elif type(required_types) in (list, tuple):
+                    expected = "|".join(str(item) for item in required_types)
+                actual = _json_type_name(error.instance)
             raise ToolArgumentValidationError(
                 tool_name=tool_name,
                 code="schema_mismatch",
                 keyword=str(error.validator or "unknown"),
                 instance_path=tuple(error.absolute_path),
                 schema_path=tuple(error.absolute_schema_path),
+                expected=expected,
+                actual=actual,
             )
         return value
 
