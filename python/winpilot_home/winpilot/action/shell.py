@@ -240,6 +240,39 @@ _PS_UTF8_PREFIX = (
 )
 
 
+def _powershell_command(command: str) -> str:
+    """Preserve the final PowerShell statement's native process exit code.
+
+    Windows PowerShell otherwise collapses a non-zero native process status
+    to ``1`` when invoked through ``-Command``. Capture ``$?`` immediately
+    after the model's command so a later successful statement still behaves
+    like a normal shell sequence, while a failing final native command keeps
+    its actionable exit code.
+    """
+
+    return (
+        f"{_PS_UTF8_PREFIX}\n"
+        "$global:LASTEXITCODE=$null\n"
+        "$global:__winpilot_success=$true\n"
+        "$global:__winpilot_native_exit=$null\n"
+        "& {\n"
+        f"{command}\n"
+        "  $global:__winpilot_success=$?\n"
+        "  $global:__winpilot_native_exit=$global:LASTEXITCODE\n"
+        "} | Out-Default\n"
+        "$__winpilot_pipeline_success=$?\n"
+        "if (-not $global:__winpilot_success) {\n"
+        "  if ($null -ne $global:__winpilot_native_exit -and "
+        "$global:__winpilot_native_exit -ne 0) {\n"
+        "    exit $global:__winpilot_native_exit\n"
+        "  }\n"
+        "  exit 1\n"
+        "}\n"
+        "if (-not $__winpilot_pipeline_success) { exit 1 }\n"
+        "exit 0\n"
+    )
+
+
 def _decode(data: bytes, prefer: tuple[str, ...]) -> str:
     """Try encodings in order, strict first; last resort replaces."""
     for enc in prefer:
@@ -293,7 +326,7 @@ def _run_legacy_subprocess(command: str, shell: str = "powershell",
         # so ad-hoc scripts run without per-machine policy friction.
         argv = ["powershell", "-NoProfile", "-NonInteractive",
                 "-ExecutionPolicy", "Bypass", "-Command",
-                _PS_UTF8_PREFIX + command]
+                _powershell_command(command)]
         prefer = ("utf-8", "gbk")
 
     BUS.publish("action", action="shell", shell=shell, command=command[:400])
@@ -365,7 +398,7 @@ def run(command: str, shell: str = "powershell",
     else:
         argv = ["powershell", "-NoProfile", "-NonInteractive",
                 "-ExecutionPolicy", "Bypass", "-Command",
-                _PS_UTF8_PREFIX + command]
+                _powershell_command(command)]
         prefer = ("utf-8", "gbk")
 
     BUS.publish(

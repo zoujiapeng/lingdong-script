@@ -65,28 +65,19 @@ def _actor_turn() -> ActorTurnInput:
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "image_x1": {"type": "number", "minimum": 0},
-                "image_y1": {"type": "number", "minimum": 0},
-                "image_x2": {"type": "number", "minimum": 0},
-                "image_y2": {"type": "number", "minimum": 0},
-                "image_points": {
+                "image_path": {
                     "type": "array",
                     "items": {
                         "type": "array",
                         "items": {"type": "number", "minimum": 0},
                         "minItems": 2,
                         "maxItems": 2,
-                    },
-                    "maxItems": 32,
                 },
+                "minItems": 1,
+            },
                 "keep_holding": {"type": "boolean"},
             },
-            "required": [
-                "image_x1",
-                "image_y1",
-                "image_x2",
-                "image_y2",
-            ],
+            "required": ["image_path", "keep_holding"],
         },
         "scroll": {
             "type": "object",
@@ -467,7 +458,7 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     }
     assert "once" in descriptions["click"]
     assert "Double-click" in descriptions["double_click"]
-    assert "ordered intermediate image_points" in descriptions["drag"]
+    assert "`x1,y1 x2,y2 ...`" in descriptions["drag"]
     assert "amount < 0 scrolls down" in descriptions["scroll"]
     assert "selected text is replaced" in descriptions["type_text"]
     assert "one key or one ordered key chord" in descriptions["press_key"]
@@ -1520,16 +1511,12 @@ def test_actor_permissions_are_the_exact_broker_projected_subset() -> None:
     assert len(clients[0].requests) == 1
 
 
-def test_actor_preserves_an_ordered_optional_runtime_drag_path() -> None:
+def test_actor_projects_held_drag_as_one_segment_from_physical_cursor() -> None:
     _, clients = _build_clients(
         _tool_response(
             name="drag",
             arguments={
-                "image_x1": 40,
-                "image_y1": 50,
-                "image_x2": 500,
-                "image_y2": 400,
-                "image_points": [[120, 60], [250, 220], [420, 260]],
+                "image_path": "120,60 250,220 500,400",
                 "keep_holding": True,
                 "local_intent": (
                     "drag around the visible obstacle through the opening"
@@ -1553,21 +1540,17 @@ def test_actor_preserves_an_ordered_optional_runtime_drag_path() -> None:
     )
 
     assert decision.proposal["args"] == {
-        "image_x1": 40,
-        "image_y1": 50,
-        "image_x2": 500,
-        "image_y2": 400,
-        "image_points": [[120, 60], [250, 220], [420, 260]],
+        "image_path": [[120, 60], [250, 220], [500, 400]],
         "keep_holding": True,
     }
     actor_schema = clients[0].requests[0]["tools"][0]["function"][
         "parameters"
     ]
-    assert "image_points" not in actor_schema["required"]
-    assert "keep_holding" not in actor_schema["required"]
-    assert actor_schema["properties"]["image_points"]["default"] == []
-    assert actor_schema["properties"]["keep_holding"]["default"] is False
-    assert actor_schema["properties"]["image_points"]["maxItems"] == 32
+    assert actor_schema["required"] == ["image_path", "keep_holding"]
+    assert actor_schema["properties"]["image_path"] == {
+        "type": "string",
+        "minLength": 1,
+    }
     assert len(clients[0].requests) == 1
 
 
@@ -2357,6 +2340,41 @@ class _RecordingShellRunner:
     def run(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         return dict(self.result)
+
+
+def test_failed_tool_activity_keeps_error_and_actionable_output() -> None:
+    _, clients = _build_clients([])
+    activities: list[dict[str, Any]] = []
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+        on_activity=activities.append,
+    )
+
+    actor._record_tool_result(
+        "run_shell",
+        {
+            "ok": False,
+            "exit_code": 23,
+            "error": "command exited with code 23",
+            "output": "ACCEPTANCE_CHANGE: reload manifest and retry",
+            "next_step": "use the output to choose the next step",
+        },
+    )
+
+    assert activities == [
+        {
+            "kind": "tool_result",
+            "tool": "run_shell",
+            "message": (
+                "command exited with code 23\n"
+                "ACCEPTANCE_CHANGE: reload manifest and retry\n"
+                "Next: use the output to choose the next step"
+            ),
+            "ok": False,
+        }
+    ]
 
 
 def test_initial_turn_can_run_shell_before_observe() -> None:
@@ -3217,6 +3235,10 @@ def test_initial_truncation_continues_with_a_shorter_tool_call() -> None:
     assert admission.kind == "reply"
     assert admission.reply == "finished"
     assert [call["command"] for call in runner.calls] == ["Write-Output ok"]
+    assert all(
+        message.get("content") != "partial implementation"
+        for message in clients[0].requests[1]["messages"]
+    )
     assert any(
         message.get("content")
         == "Output was truncated. Continue with a shorter tool call."

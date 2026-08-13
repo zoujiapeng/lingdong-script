@@ -1374,11 +1374,7 @@ def _tool_catalog() -> ToolCatalog:
         "double_click": point,
         "drag": _object_schema(
             {
-                "image_x1": {"type": "number", "minimum": 0},
-                "image_y1": {"type": "number", "minimum": 0},
-                "image_x2": {"type": "number", "minimum": 0},
-                "image_y2": {"type": "number", "minimum": 0},
-                "image_points": {
+                "image_path": {
                     "type": "array",
                     "items": {
                         "type": "array",
@@ -1386,12 +1382,11 @@ def _tool_catalog() -> ToolCatalog:
                         "minItems": 2,
                         "maxItems": 2,
                     },
-                    "maxItems": 32,
-                    "default": [],
+                    "minItems": 1,
                 },
-                "keep_holding": {"type": "boolean", "default": False},
+                "keep_holding": {"type": "boolean"},
             },
-            ["image_x1", "image_y1", "image_x2", "image_y2"],
+            ["image_path", "keep_holding"],
         ),
         "scroll": _object_schema(
             {
@@ -1984,8 +1979,8 @@ class _ModelCallCounter:
                 - sum(self._active_reservations.values()),
             )
 
-    def begin(self, model_role: str, *, reserve: int) -> int:
-        if type(reserve) is not int or reserve <= 0:
+    def begin(self, model_role: str, *, reserve: int | None) -> int:
+        if reserve is not None and (type(reserve) is not int or reserve <= 0):
             raise ValueError("model-call reservation must be positive")
         with self._lock:
             if model_role in self._active_reservations:
@@ -1994,7 +1989,7 @@ class _ModelCallCounter:
             available = self._maximum - self._count - reserved
             if available <= 0:
                 raise RuntimeError("vNext model-call budget exhausted")
-            admitted = min(reserve, available)
+            admitted = available if reserve is None else min(reserve, available)
             self._active_reservations[model_role] = admitted
             self._active_fingerprints[model_role] = set()
             return admitted
@@ -2116,7 +2111,11 @@ class _BudgetedActor:
     ) -> VisualActorTurnAdmission:
         admitted = self._counter.begin(
             VISUAL_ACTOR_MODEL_ROLE,
-            reserve=self._role.model_call_reservation,
+            # Before a screen is needed, local/connector work can legitimately
+            # contain a long dependent chain.  Let the task-level counter and
+            # deadline remain the only budget instead of imposing a second,
+            # smaller per-turn ceiling on that work.
+            reserve=None,
         )
         try:
             kwargs["_model_call_limit"] = admitted

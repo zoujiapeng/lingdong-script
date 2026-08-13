@@ -39,6 +39,28 @@ def _dynamic_event(event_type: str, *, inside_goal: bool = True) -> dict:
     }
 
 
+def _corridor_event(**detail_overrides: object) -> dict:
+    details = {
+        "succeeded": True,
+        "started_at_origin": True,
+        "path_valid": True,
+        "min_clearance": 0,
+        "path_points": [[1, 1], [2, 2], [3, 3], [4, 4]],
+    }
+    details.update(detail_overrides)
+    return {
+        "case_id": "corridor-case",
+        "scenario": "corridor_drag",
+        "seed": 17,
+        "type": "scenario_success",
+        "trusted": True,
+        "succeeded": True,
+        "move_count": 8,
+        "received_at": 123.0,
+        "details": details,
+    }
+
+
 def _quiz_answers(seed: int) -> dict[str, str]:
     return {
         str(question["id"]): str(question["_answer"])
@@ -145,6 +167,25 @@ def test_quiz_success_requires_trusted_server_verified_submit_event():
     assert server._accepted_success_event([
         _quiz_event(evaluation, trusted=False),
     ], 0) is False
+
+
+def test_corridor_success_requires_a_real_origin_to_goal_route():
+    accepted = _corridor_event()
+
+    assert server._accepted_success_event([accepted], 0) is True
+    assert server._accepted_success_event([
+        _corridor_event(started_at_origin=False),
+    ], 0) is False
+    assert server._accepted_success_event([
+        _corridor_event(path_valid=False),
+    ], 0) is False
+    assert server._accepted_success_event([
+        _corridor_event(min_clearance=-1),
+    ], 0) is False
+
+    too_short = _corridor_event()
+    too_short["move_count"] = 2
+    assert server._accepted_success_event([too_short], 0) is False
 
 
 def test_case_scoped_state_accepts_only_verified_quiz_completion():

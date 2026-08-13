@@ -18,13 +18,8 @@ from ..visual_runtime.keyboard_contracts import (
 from .replay_policy import MutationOutcome
 
 
-MAX_DRAG_INTERMEDIATE_POINTS = 32
-
-
 def _canonical_drag_points(value: Any) -> tuple[tuple[int, int], ...] | None:
     if not isinstance(value, (list, tuple)):
-        return None
-    if len(value) > MAX_DRAG_INTERMEDIATE_POINTS:
         return None
     points: list[tuple[int, int]] = []
     for point in value:
@@ -608,9 +603,8 @@ class RawDeviceExecutor:
                 error_kind=context_error,
             )
         canonical_points = _canonical_drag_points(points)
-        stationary_finish = bool(
+        stationary_held = bool(
             pointer_already_held is True
-            and keep_holding is False
             and not canonical_points
             and (x1, y1) == (x2, y2)
         )
@@ -622,7 +616,7 @@ class RawDeviceExecutor:
             any(type(value) is not int for value in (x1, y1, x2, y2))
             or (
                 (x1, y1) == (x2, y2)
-                and not stationary_finish
+                and not stationary_held
                 and not closed_path
             )
             or canonical_points is None
@@ -916,7 +910,6 @@ __all__ = [
     "ClickCount", "ClickMechanism",
     "FinalKeyboardGuard", "FinalKeyboardGuardDecision", "FinalPointerGuard",
     "FinalPointerGuardDecision", "HotkeyChord", "MAX_TYPE_TEXT_CODEPOINTS",
-    "MAX_DRAG_INTERMEDIATE_POINTS",
     "MouseButton",
     "RawActionContext", "RawActionReceipt", "RawBackendResult",
     "RawDeviceBackends", "RawDeviceExecutor",

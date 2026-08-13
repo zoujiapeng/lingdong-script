@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -74,9 +75,10 @@ _TOOL_DESCRIPTIONS = {
     "click": "Click one point once in the current image.",
     "double_click": "Double-click one point once in the current image.",
     "drag": (
-        "Drag once from one image point to another, optionally following "
-        "ordered intermediate image_points; use [] for a straight path. "
-        "keep_holding preserves the same press for a later visual turn."
+        "Drag through image_path written as `x1,y1 x2,y2 ...` in exact order. "
+        "When the pointer is released, the first pair is where to press and "
+        "later pairs are the route. "
+        "keep_holding preserves the same press for the next visual turn."
     ),
     "scroll": (
         "Scroll at one point; amount < 0 scrolls down and amount > 0 scrolls up."
@@ -318,19 +320,10 @@ def _finish_reason(response: Any) -> str:
 
 
 def _truncation_messages(response: Any) -> list[dict[str, Any]]:
-    """Keep native continuity while asking for a smaller next action."""
+    """Retry without feeding an incomplete tool payload back to the model."""
 
-    message = response_message(response)
-    content = member(message, "content")
-    assistant: dict[str, Any] = {
-        "role": "assistant",
-        "content": content if type(content) is str else "",
-    }
-    reasoning = member(message, "reasoning_content")
-    if type(reasoning) is str:
-        assistant["reasoning_content"] = reasoning
+    del response
     return [
-        assistant,
         {
             "role": "user",
             "content": "Output was truncated. Continue with a shorter tool call.",
@@ -559,23 +552,7 @@ def _actor_parameters_from_schema(
         raise LiveModelRoleError(
             f"Actor tool {name!r} has invalid required fields"
         )
-    # Runtime keeps image_points and keep_holding optional with defaults, so
-    # the model may omit them; a straight drag is exactly [] / false.
-    # Older catalogs may still declare them without defaults: project the
-    # same defaults here so strict providers accept an omitted field.
-    if name == "drag":
-        optional_defaults = {
-            "image_points": [],
-            "keep_holding": False,
-        }
-        for name, default in optional_defaults.items():
-            if (
-                name in properties
-                and name not in required
-                and "default" not in properties[name]
-            ):
-                properties[name] = dict(properties[name])
-                properties[name]["default"] = default
+    required = list(required)
     if "task_state_update" in properties or "task_state_update" in required:
         raise LiveModelRoleError(
             f"Actor tool {name!r} shadows task_state_update"
@@ -603,10 +580,37 @@ def _actor_parameters_from_schema(
     )
 
 
-def _actor_parameters(tool: ActorToolView) -> dict[str, Any]:
+def _actor_parameters(
+    tool: ActorToolView,
+    *,
+    pointer_held: bool,
+) -> dict[str, Any]:
+    raw = tool.to_dict()["schema"]
+    if tool.name == "drag":
+        properties = dict(raw["properties"])
+        required = list(raw.get("required", []))
+        if "image_path" not in required:
+            required.append("image_path")
+        if "keep_holding" not in required:
+            required.append("keep_holding")
+        # Array-shaped paths caused a real provider to serialize one coordinate
+        # pair thousands of times until the response was truncated, both for
+        # nested and flat arrays. Keep the model-facing shape as one ordinary
+        # string and pair it once at the semantic boundary.
+        # The canonical Runtime and physical device still receive an ordered
+        # list of points, with no arbitrary path-length limit.
+        properties["image_path"] = {
+            "type": "string",
+            "minLength": 1,
+        }
+        raw = {
+            **raw,
+            "properties": properties,
+            "required": required,
+        }
     return _actor_parameters_from_schema(
         tool.name,
-        tool.to_dict()["schema"],
+        raw,
         requires_local_intent=tool.requires_local_intent,
     )
 
@@ -644,8 +648,18 @@ def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _MODEL_TOOL_NAMES.get(tool.name, tool.name),
-                "description": _TOOL_DESCRIPTIONS[tool.name],
-                "parameters": _actor_parameters(tool),
+                "description": (
+                    "Continue the currently held drag through image_path "
+                    "written as `x1,y1 x2,y2 ...`; the physical "
+                    "cursor is already the start. keep_holding decides whether "
+                    "to remain pressed."
+                    if tool.name == "drag" and turn.pointer_held
+                    else _TOOL_DESCRIPTIONS[tool.name]
+                ),
+                "parameters": _actor_parameters(
+                    tool,
+                    pointer_held=turn.pointer_held,
+                ),
                 "strict": True,
             },
         }
@@ -655,6 +669,46 @@ def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
 
 def _decode_arguments(raw: Any) -> dict[str, Any]:
     return strict_json_object(raw, "Actor tool arguments")
+
+
+def _canonical_drag_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Pair the model-facing path string for the canonical Runtime contract."""
+
+    raw_path = arguments.get("image_path")
+    if isinstance(raw_path, str):
+        values = re.findall(
+            r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?",
+            raw_path,
+        )
+        if not values or len(values) % 2:
+            raise InvalidActorProposal(
+                "drag image_path must contain complete x,y coordinate pairs"
+            )
+        canonical_path = [
+            [float(values[index]), float(values[index + 1])]
+            for index in range(0, len(values), 2)
+        ]
+    elif not isinstance(raw_path, (list, tuple)) or not raw_path:
+        raise InvalidActorProposal(
+            "drag image_path must be `x1,y1 x2,y2 ...`"
+        )
+    # Accept prior array representations as forgiving compatibility paths; the
+    # provider is shown only the simpler string schema.
+    elif all(
+        isinstance(point, (list, tuple)) and len(point) == 2
+        for point in raw_path
+    ):
+        canonical_path = [list(point) for point in raw_path]
+    else:
+        if len(raw_path) % 2:
+            raise InvalidActorProposal(
+                "drag image_path must contain complete x,y coordinate pairs"
+            )
+        canonical_path = [
+            [raw_path[index], raw_path[index + 1]]
+            for index in range(0, len(raw_path), 2)
+        ]
+    return {**arguments, "image_path": canonical_path}
 
 
 def _flow_fragment_tool_definition(
@@ -905,6 +959,8 @@ def _proposal_from_response(
     runtime_name = _RUNTIME_TOOL_NAMES.get(name, name)
     if runtime_name not in available_runtime_names:
         raise LiveModelRoleError("Visual Actor returned an unavailable action")
+    if runtime_name == "drag":
+        arguments = _canonical_drag_arguments(arguments)
     if runtime_name in APPROVED_DESKTOP_ACTIONS:
         raw_proposal = {
             "format": ACTOR_PROPOSAL_FORMAT,
@@ -2588,13 +2644,21 @@ class LiveVisualActor:
             or result.get("timeout") is True
             or result.get("stopped") is True
         )
-        detail = (
-            result.get("error")
-            or result.get("output")
+        error = result.get("error")
+        output = (
+            result.get("output")
             or result.get("stdout")
             or result.get("stderr")
         )
-        if type(detail) is not str or not detail.strip():
+        details: list[str] = []
+        for candidate in (error, output):
+            if type(candidate) is not str or not candidate.strip():
+                continue
+            candidate = candidate.strip()
+            if candidate not in details:
+                details.append(candidate)
+        detail = "\n".join(details)
+        if not detail:
             exit_code = result.get("exit_code")
             detail = (
                 f"exit code {exit_code}"
@@ -2603,7 +2667,7 @@ class LiveVisualActor:
             )
         next_step = result.get("next_step")
         if failed and type(next_step) is str and next_step.strip():
-            detail = f"{detail.strip()}\nNext: {next_step.strip()}"
+            detail = f"{detail}\nNext: {next_step.strip()}"
         self._emit_activity(
             kind="tool_result",
             tool=_RUNTIME_TOOL_NAMES.get(name, name),
@@ -2614,9 +2678,7 @@ class LiveVisualActor:
     def _model_call_allowance(self, model_call_limit: int | None) -> int:
         if model_call_limit is None:
             model_call_limit = self.model_call_reservation
-        if type(model_call_limit) is not int or not (
-            1 <= model_call_limit <= self.model_call_reservation
-        ):
+        if type(model_call_limit) is not int or model_call_limit < 1:
             raise LiveModelRoleError("Actor model-call allowance is invalid")
         return model_call_limit
 

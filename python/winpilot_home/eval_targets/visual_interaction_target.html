@@ -269,9 +269,11 @@
       for(const cls of ['corridor-edge','corridor-path']){const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('class',cls);path.setAttribute('d',d);svg.append(path);}arena.append(svg);
       const goal=document.createElement('div');goal.className='corridor-goal';goal.textContent='GOAL';place(goal,ex-55,ey-55,110,110);
       const token=document.createElement('div');token.className='token';token.textContent='MOVE';place(token,sx-22,sy-22,44,44);arena.append(goal,token);
-      let pointer=null,ox=0,oy=0,pathValid=true,minClearance=999;
+      let pointer=null,ox=0,oy=0,pathValid=true,minClearance=999,startedAtOrigin=false;
       token.addEventListener('pointerdown',event=>{if(!event.isTrusted||pointer!==null)return;pointer=event.pointerId;const r=token.getBoundingClientRect();
-        ox=event.clientX-r.left;oy=event.clientY-r.top;moveCount=0;pathValid=true;minClearance=999;token.setPointerCapture(pointer);report('pointerdown',event);event.preventDefault();});
+        const a=arena.getBoundingClientRect(),startCenter={x:(r.left+r.right)/2-a.left,y:(r.top+r.bottom)/2-a.top};
+        startedAtOrigin=Math.hypot(startCenter.x-sx,startCenter.y-sy)<=2;
+        ox=event.clientX-r.left;oy=event.clientY-r.top;moveCount=0;pathValid=true;minClearance=999;token.setPointerCapture(pointer);report('pointerdown',event,{started_at_origin:startedAtOrigin});event.preventDefault();});
       token.addEventListener('pointermove',event=>{if(event.pointerId!==pointer||!event.isTrusted)return;const a=arena.getBoundingClientRect();
         const x=Math.max(0,Math.min(W-token.offsetWidth,event.clientX-a.left-ox));const y=Math.max(0,Math.min(H-token.offsetHeight,event.clientY-a.top-oy));
         token.style.left=`${x}px`;token.style.top=`${y}px`;const center={x:x+22,y:y+22};let dist=Infinity;
@@ -279,10 +281,13 @@
         minClearance=Math.min(minClearance,62-dist-22);if(dist>38)pathValid=false;moveCount++;if(moveCount===1||moveCount%5===0)report('pointermove',event,{path_valid:pathValid});});
       token.addEventListener('pointerup',event=>{if(event.pointerId!==pointer)return;token.releasePointerCapture(pointer);pointer=null;
         const r=token.getBoundingClientRect(),cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2,g=goal.getBoundingClientRect();
-        const succeeded=event.isTrusted&&moveCount>=3&&pathValid&&Math.hypot(cx-(g.left+g.right)/2,cy-(g.top+g.bottom)/2)<=30;
-        const details={succeeded,path_valid:pathValid,min_clearance:Math.round(minClearance),token:box(token),goal:box(goal),path_points:points};
-        if(succeeded)markSuccess('CORRIDOR_SUCCEEDED',event,details);else markFailure(pathValid?'GOAL_MISSED':'LEFT_CORRIDOR',event,details);});
-      readyDetails={token:box(token),goal:box(goal),path_points:points,variant};
+        const succeeded=event.isTrusted&&moveCount>=3&&startedAtOrigin&&pathValid&&Math.hypot(cx-(g.left+g.right)/2,cy-(g.top+g.bottom)/2)<=30;
+        const details={succeeded,started_at_origin:startedAtOrigin,path_valid:pathValid,min_clearance:Math.round(minClearance),token:box(token),goal:box(goal),path_points:points};
+        if(succeeded){markSuccess('CORRIDOR_SUCCEEDED',event,details);}else{
+          markFailure(!startedAtOrigin?'INVALID_START':pathValid?'GOAL_MISSED':'LEFT_CORRIDOR',event,details);
+          place(token,sx-22,sy-22,44,44);
+        }});
+      readyDetails={token:box(token),goal:box(goal),path_points:points,variant,reset_on_failure:true};
     }
 
     function setupDynamicHold() {
