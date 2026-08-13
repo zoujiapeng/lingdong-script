@@ -2494,6 +2494,21 @@ def test_sequence_failure_releases_only_inputs_owned_by_that_sequence(
     assert executor.agent_holds_mouse_button("right") is False
 
 
+def test_admitted_hotkey_repeats_inside_one_backend_call(monkeypatch) -> None:
+    executor, sent = _keyboard_executor_mocks(monkeypatch)
+
+    result = executor.ADMITTED_PHYSICAL_HOTKEY_BACKEND(
+        HotkeyChord(("s",)),
+        hwnd=41,
+        repeat=3,
+    )
+
+    assert result.input_completed is True
+    assert len(sent) == 6
+    assert result.facts["requested_repetitions"] == 3
+    assert result.facts["completed_repetitions"] == 3
+
+
 def test_sequence_accepts_repeated_down_and_standalone_up_as_device_events(
     monkeypatch,
 ) -> None:

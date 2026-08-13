@@ -189,6 +189,17 @@ def test_baseline_accepts_the_empty_center_and_rejects_an_occupied_cell():
     assert "expected legal cell is not visibly empty" in occupied["errors"]
 
 
+def test_baseline_rejects_a_large_dark_mark_without_a_grid():
+    harness = _load_paint_harness()
+    not_a_board = np.full((360, 360, 3), 255, dtype=np.uint8)
+    cv2.circle(not_a_board, (60, 60), 48, (0, 0, 0), -1)
+
+    result = harness.baseline_contract(not_a_board, 4)
+
+    assert result["passed"] is False
+    assert "baseline board does not contain a visible 3x3 grid" in result["errors"]
+
+
 def test_transient_mouse_pointer_does_not_fail_empty_cell_or_retention():
     harness = _load_paint_harness()
     board = _board()
@@ -262,7 +273,21 @@ def test_one_red_diagonal_is_not_a_complete_x():
     )
 
 
-def test_wrong_cell_red_ink_is_a_sticky_failure():
+def test_thin_wrong_cell_x_is_preserved_as_wrong_red_evidence():
+    harness = _load_paint_harness()
+    board = _board()
+    wrong = board.copy()
+    cv2.line(wrong, (15, 135), (85, 205), (237, 28, 36), 1)
+    cv2.line(wrong, (85, 135), (15, 205), (237, 28, 36), 1)
+
+    verdict, mask = harness.evaluate_board_frame(board, wrong, 4)
+
+    assert int(cv2.countNonZero(mask)) >= 100
+    assert verdict["wrong_red"] is True
+    assert verdict["red_pixels_outside_expected_cell"] >= 100
+
+
+def test_corrected_current_board_can_pass_after_a_wrong_intermediate_frame():
     harness = _load_paint_harness()
     board = _board()
     oracle = harness.BoardOracle(board, 4, stable_frames=2)
@@ -272,11 +297,10 @@ def test_wrong_cell_red_ink_is_a_sticky_failure():
     corrected_again, _mask = oracle.observe(_draw_red_x(board, 4))
 
     assert wrong["wrong_red"] is True
-    assert wrong["sticky_wrong_red_seen"] is True
     assert corrected["candidate_passed"] is True
-    assert corrected["sticky_wrong_red_seen"] is True
-    assert corrected_again["passed"] is False
-    assert corrected_again["stable_frame_count"] == 0
+    assert corrected["stable_frame_count"] == 1
+    assert corrected_again["passed"] is True
+    assert corrected_again["stable_frame_count"] == 2
 
 
 def test_erasing_black_board_structure_fails_retention():

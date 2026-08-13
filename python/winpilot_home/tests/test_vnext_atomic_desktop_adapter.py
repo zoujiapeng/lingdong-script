@@ -151,6 +151,7 @@ class _Trace:
         self.records: list[
             tuple[RawActionReceipt, dict[str, Any]]
         ] = []
+        self.pointer_records: list[dict[str, Any]] = []
 
     def record(
         self,
@@ -161,6 +162,16 @@ class _Trace:
         self.records.append((receipt, dict(metadata)))
         if self.fail:
             raise RuntimeError("trace unavailable")
+
+    def record_pointer_debug(self, **metadata) -> dict[str, Any]:
+        self.pointer_records.append(dict(metadata))
+        if self.fail:
+            raise RuntimeError("pointer trace unavailable")
+        return {
+            "screenshot": f"{metadata['run_id']}/pointer_001.jpg",
+            "coordinate_space": "submitted_image_pixels",
+            "colors": {"click": "#FF3158"},
+        }
 
 
 @dataclass
@@ -374,10 +385,11 @@ class _RawHarness:
         chord,
         *,
         hwnd,
+        repeat=1,
         final_guard=None,
         stop_event=None,
     ) -> RawBackendResult:
-        self.calls.append(("hotkey", (chord, hwnd)))
+        self.calls.append(("hotkey", (chord, repeat, hwnd)))
         self._run_before_guard()
         if final_guard is not None:
             decision = final_guard()
@@ -391,6 +403,8 @@ class _RawHarness:
             {
                 "via": "physical_sendinput",
                 "key_count": len(chord.keys),
+                "requested_repetitions": repeat,
+                "completed_repetitions": repeat,
             },
         )
 
@@ -726,6 +740,8 @@ def _harness(
         target_probe=probe,
         raw_device=raw.executor(),
         receipt_trace_sink=trace,
+        pointer_debug_sink=trace,
+        cursor_reader=lambda: (17, 19),
         post_input_settle_delay_s=post_input_settle_delay_s,
         wait=settle_wait,
     )
@@ -1989,6 +2005,24 @@ def test_drag_traces_every_image_path_point_in_physical_order() -> None:
         "started_held": False,
         "keep_holding": False,
     }
+    assert dispatch["cursor_before"] == [17, 19]
+    assert dispatch["pointer_debug"] == {
+        "screenshot": "run-atomic/pointer_001.jpg",
+        "coordinate_space": "submitted_image_pixels",
+        "colors": {"click": "#FF3158"},
+    }
+    assert harness.trace.pointer_records == [{
+        "run_id": RUN_ID,
+        "decision_id": harness.envelope.decision_id,
+        "action": "drag",
+        "frame_image_b64": harness.before_image_b64,
+        "frame_id": harness.envelope.frame_id,
+        "frame_region": REGION,
+        "submitted_image_size": (100, 80),
+        "image_coordinates": submitted,
+        "physical_arguments": dispatch["physical_arguments"],
+        "cursor_before": (17, 19),
+    }]
 
 
 def test_drag_passes_generic_held_keys_to_the_same_physical_action() -> None:
@@ -2494,8 +2528,9 @@ def test_hotkey_accepts_string_chord_via_canonical_normalization() -> None:
     assert attempt.transition.outcome is ControllerOutcome.COMPLETED
     (kind, payload) = harness.raw.calls[-1]
     assert kind == "hotkey"
-    chord, _hwnd = payload
+    chord, repeat, _hwnd = payload
     assert tuple(chord.keys) == ("ctrl", "l")
+    assert repeat == 1
 
 
 def test_hotkey_folds_aliases_and_orders_chord_modifiers() -> None:
@@ -2509,8 +2544,30 @@ def test_hotkey_folds_aliases_and_orders_chord_modifiers() -> None:
     assert attempt.transition.outcome is ControllerOutcome.COMPLETED
     (kind, payload) = harness.raw.calls[-1]
     assert kind == "hotkey"
-    chord, _hwnd = payload
+    chord, repeat, _hwnd = payload
     assert tuple(chord.keys) == ("shift", "win", "s")
+    assert repeat == 1
+
+
+def test_hotkey_repeat_stays_one_raw_device_action() -> None:
+    harness = _harness(
+        "hotkey",
+        action_args={"keys": ["volumeup"], "repeat": 3},
+    )
+    attempt = harness.run()
+    assert attempt.controller_error is None
+    assert attempt.transition is not None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert len([call for call in harness.raw.calls if call[0] == "hotkey"]) == 1
+    kind, payload = harness.raw.calls[-1]
+    assert kind == "hotkey"
+    chord, repeat, _hwnd = payload
+    assert chord.keys == ("volumeup",)
+    assert repeat == 3
+    assert attempt.transition.visible_effect == (
+        "physical keyboard receipt: pressed volumeup 3 time(s); inspect the "
+        "current screen to judge the resulting state"
+    )
 
 
 def test_extra_action_arguments_are_tolerated_not_rejected() -> None:

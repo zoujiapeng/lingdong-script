@@ -22,7 +22,7 @@ CANONICAL_HOTKEY_KEYS = frozenset({
     *tuple("abcdefghijklmnopqrstuvwxyz0123456789"),
 })
 
-_MODIFIER_ALIASES = {
+_KEY_ALIASES = {
     "control": "ctrl",
     "ctl": "ctrl",
     "control_l": "ctrl",
@@ -42,6 +42,16 @@ _MODIFIER_ALIASES = {
     "win_r": "win",
     "shift_l": "shift",
     "shift_r": "shift",
+    # Keep the physical key catalog compact while accepting the names models
+    # and people naturally use for standard Windows keys.
+    "page_up": "pageup",
+    "page_down": "pagedown",
+    "print_screen": "printscreen",
+    "volume_up": "volumeup",
+    "volume_down": "volumedown",
+    "volume_mute": "volumemute",
+    "browser_back": "browserback",
+    "browser_forward": "browserforward",
 }
 
 
@@ -99,7 +109,7 @@ def canonical_hotkey_args(keys: list[str]) -> list[str]:
     keeps the submitted order.
     """
     folded = [
-        _MODIFIER_ALIASES.get(key.casefold(), key.casefold())
+        _KEY_ALIASES.get(key.casefold(), key.casefold())
         for key in keys
     ]
     modifiers = sorted(

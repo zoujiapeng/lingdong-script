@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import random
 import shutil
@@ -58,12 +57,13 @@ from pathlib import Path
 from typing import Any
 
 import ctypes
+import numpy as np
 import psutil
 import win32api
 import win32con
 import win32gui
 import win32process
-from PIL import Image, ImageGrab, ImageOps
+from PIL import Image, ImageDraw, ImageGrab, ImageOps
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -806,75 +806,98 @@ def _run_krita_cat_qq_case(
     }
 
 
-def _drag_line(start: tuple[int, int], end: tuple[int, int], steps: int = 28) -> None:
-    win32api.SetCursorPos(start)
-    time.sleep(0.06)
-    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    for index in range(1, steps + 1):
-        x = start[0] + (end[0] - start[0]) * index // steps
-        y = start[1] + (end[1] - start[1]) * index // steps
-        win32api.SetCursorPos((int(x), int(y)))
-        time.sleep(0.012)
-    time.sleep(0.06)
-    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-    time.sleep(0.08)
+_BOARD_BACKGROUND = (255, 250, 220)
 
 
-def _drag_ellipse(
-    center: tuple[int, int], radius_x: int, radius_y: int, segments: int = 40
-) -> None:
-    start_x = int(center[0] + radius_x)
-    win32api.SetCursorPos((start_x, int(center[1])))
-    time.sleep(0.06)
-    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    for index in range(1, segments + 1):
-        angle = 2 * math.pi * index / segments
-        x = int(center[0] + radius_x * math.cos(angle))
-        y = int(center[1] + radius_y * math.sin(angle))
-        win32api.SetCursorPos((x, y))
-        time.sleep(0.01)
-    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-    time.sleep(0.08)
+def _write_paint_game_fixture(case_dir: Path) -> Path:
+    """Create the private board precondition; the Agent still sees only Paint."""
+
+    size = 300
+    image = Image.new("RGB", (size, size), _BOARD_BACKGROUND)
+    draw = ImageDraw.Draw(image)
+    for offset in (size // 3, size * 2 // 3):
+        draw.line((offset, 0, offset, size), fill="black", width=5)
+        draw.line((0, offset, size, offset), fill="black", width=5)
+    # Two black marks form an immediate diagonal threat, so the empty center
+    # is the natural red blocking move without exposing that fact to the Agent.
+    for center in ((size // 6, size // 6), (size * 5 // 6, size * 5 // 6)):
+        radius = size // 11
+        draw.ellipse(
+            (
+                center[0] - radius,
+                center[1] - radius,
+                center[0] + radius,
+                center[1] + radius,
+            ),
+            outline="black",
+            width=6,
+        )
+    path = case_dir / "tic-tac-toe-board.png"
+    image.save(path)
+    return path
 
 
-def _draw_tic_tac_toe_board(
-    paint_hwnd: int, board_bbox: tuple[int, int, int, int]
-) -> dict[str, Any]:
-    """Draw grid + black circle O (cell 0) freehand with the default brush."""
-    rect = win32gui.GetWindowRect(paint_hwnd)
+def _find_paint_document(stem: str, *, timeout: float = 30.0) -> int:
+    deadline = time.monotonic() + timeout
+    wanted = stem.casefold()
+    while time.monotonic() < deadline:
+        matches: list[int] = []
+
+        def visit(hwnd: int, _unused: Any) -> bool:
+            if not win32gui.IsWindowVisible(hwnd):
+                return True
+            try:
+                _, process_id = win32process.GetWindowThreadProcessId(hwnd)
+                if psutil.Process(process_id).name().casefold() != PAINT.casefold():
+                    return True
+            except (psutil.Error, OSError):
+                return True
+            if wanted in win32gui.GetWindowText(hwnd).casefold():
+                matches.append(int(hwnd))
+            return True
+
+        win32gui.EnumWindows(visit, None)
+        if matches:
+            foreground = int(win32gui.GetForegroundWindow() or 0)
+            return foreground if foreground in matches else matches[0]
+        time.sleep(0.2)
+    raise RuntimeError(f"Paint did not open fixture document {stem!r}")
+
+
+def _locate_fixture_board(
+    paint_hwnd: int,
+) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    """Locate the distinctive fixture background in the real Paint pixels."""
+
+    rect = tuple(int(value) for value in win32gui.GetWindowRect(paint_hwnd))
+    image = np.asarray(
+        ImageGrab.grab(bbox=rect, all_screens=True).convert("RGB"),
+        dtype=np.int16,
+    )
+    target = np.asarray(_BOARD_BACKGROUND, dtype=np.int16)
+    mask = np.all(np.abs(image - target) <= 5, axis=2)
+    useful_columns = np.flatnonzero(mask.sum(axis=0) >= 20)
+    useful_rows = np.flatnonzero(mask.sum(axis=1) >= 20)
+    if not useful_columns.size or not useful_rows.size:
+        raise RuntimeError("fixture board background is not visible in Paint")
+    left = int(useful_columns[0])
+    top = int(useful_rows[0])
+    right = int(useful_columns[-1]) + 1
+    bottom = int(useful_rows[-1]) + 1
+    width, height = right - left, bottom - top
+    if min(width, height) < 180 or not 0.8 <= width / max(1, height) <= 1.25:
+        raise RuntimeError(
+            f"fixture board bounds are implausible: {(left, top, right, bottom)}"
+        )
     dpi = paint_harness._window_dpi(paint_hwnd)  # noqa: SLF001
-    scale = dpi / 96.0
-    logical = tuple(int(value * scale) for value in board_bbox)
-    left, top, right, bottom = logical
-    origin_x, origin_y = int(rect[0]), int(rect[1])
-    x1 = origin_x + left
-    y1 = origin_y + top
-    x2 = origin_x + right
-    y2 = origin_y + bottom
-    width = x2 - x1
-    height = y2 - y1
-    _focus_window(paint_hwnd)
-    win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-    win32api.keybd_event(ord("A"), 0, 0, 0)
-    win32api.keybd_event(ord("A"), 0, win32con.KEYEVENTF_KEYUP, 0)
-    win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-    win32api.keybd_event(win32con.VK_DELETE, 0, 0, 0)
-    win32api.keybd_event(win32con.VK_DELETE, 0, win32con.KEYEVENTF_KEYUP, 0)
-    time.sleep(0.4)
-    for third in (1, 2):
-        _drag_line((x1, y1 + height * third // 3), (x2, y1 + height * third // 3))
-        _drag_line((x1 + width * third // 3, y1), (x1 + width * third // 3, y2))
-    cell_0_center = (
-        x1 + width // 6,
-        y1 + height // 6,
+    logical = tuple(round(value * 96 / dpi) for value in (left, top, right, bottom))
+    screen = (
+        rect[0] + left,
+        rect[1] + top,
+        rect[0] + right,
+        rect[1] + bottom,
     )
-    _drag_ellipse(
-        cell_0_center,
-        max(2, width // 12),
-        max(2, height // 12),
-    )
-    time.sleep(0.3)
-    return {"board_screen_bbox": (x1, y1, x2, y2)}
+    return logical, screen
 
 
 def _normalize_canvas_lightness(image: Image.Image) -> Image.Image:
@@ -910,75 +933,23 @@ def _verify_paint_board(
 
 
 def _prepare_paint_game(case_dir: Path) -> dict[str, Any]:
-    """Reuse an open Paint window or launch one (with relaunch retry).
+    """Open a deterministic board inside the real Paint application."""
 
-    Paint on Windows 11 is a packaged Store app: force-killing it puts the
-    app host into a cooldown where immediate relaunches fail silently, so we
-    reuse an existing window when possible and only kill+relaunch as a
-    bounded last resort.
-    """
-    try:
-        hwnd = _find_process_window("mspaint", ("画图", "Paint"), timeout=3.0)
-    except RuntimeError:
-        hwnd = 0
-    if not hwnd:
-        os.startfile("mspaint.exe")
-        for _attempt in range(3):
-            for _ in range(20):
-                time.sleep(2)
-                try:
-                    hwnd = _find_process_window(
-                        "mspaint", ("画图", "Paint"), timeout=0.3
-                    )
-                    break
-                except RuntimeError:
-                    hwnd = 0
-            if hwnd:
-                break
-            os.startfile("mspaint.exe")
-    if not hwnd:
-        raise RuntimeError("Paint window did not appear after relaunch retries")
+    fixture = _write_paint_game_fixture(case_dir)
+    _launch_app([PAINT, str(fixture)])
+    hwnd = _find_paint_document(fixture.stem)
     _focus_window(hwnd)
-    rect = win32gui.GetWindowRect(hwnd)
-    dpi = paint_harness._window_dpi(hwnd)  # noqa: SLF001
-    rect = win32gui.GetWindowRect(hwnd)
-    dpi = paint_harness._window_dpi(hwnd)  # noqa: SLF001
-    logical_width = round((rect[2] - rect[0]) * 96 / dpi)
-    logical_height = round((rect[3] - rect[1]) * 96 / dpi)
-    board_bbox = (
-        max(24, round(logical_width * 0.05)),
-        max(60, round(logical_height * 0.26)),
-        round(logical_width * 0.95),
-        max(round(logical_height * 0.92), round(logical_height * 0.26) + 60),
-    )
-    drawn = _draw_tic_tac_toe_board(hwnd, board_bbox)
-    check = _verify_paint_board(hwnd, drawn["board_screen_bbox"])
+    time.sleep(1.0)
+    board_bbox, board_screen_bbox = _locate_fixture_board(hwnd)
+    check = _verify_paint_board(hwnd, board_screen_bbox)
     if check.get("passed") is not True:
-        # One retry after clearing the canvas, then interactive fallback.
-        drawn = _draw_tic_tac_toe_board(hwnd, board_bbox)
-        check = _verify_paint_board(hwnd, drawn["board_screen_bbox"])
-    if check.get("passed") is not True:
-        print(
-            "画板棋盘自动绘制未通过基线校验，请在画板中手动画出井字格和"
-            "左上角黑色圆圈（中间格留空），完成后按回车继续，输入 skip 跳过本任务：",
-            flush=True,
-        )
-        try:
-            choice = input()
-        except EOFError:
-            choice = "skip"
-        if choice.strip().casefold() == "skip":
-            raise RuntimeError(f"paint board baseline failed: {check.get('errors')}")
-        check = _verify_paint_board(hwnd, drawn["board_screen_bbox"])
-        if check.get("passed") is not True:
-            raise RuntimeError(
-                f"paint board baseline still failed: {check.get('errors')}"
-            )
+        raise RuntimeError(f"paint board baseline failed: {check.get('errors')}")
     return {
         "paint_hwnd": hwnd,
         "board_bbox": board_bbox,
-        "board_screen_bbox": drawn["board_screen_bbox"],
+        "board_screen_bbox": board_screen_bbox,
         "baseline_check": check,
+        "fixture": str(fixture),
     }
 
 
@@ -1009,6 +980,7 @@ def _run_paint_game_case(
             "paint_hwnd": prepared["paint_hwnd"],
             "board_bbox": prepared["board_bbox"],
             "baseline_check": prepared["baseline_check"],
+            "fixture": prepared["fixture"],
         },
         "paint_report": str(report.get("report") or ""),
     }

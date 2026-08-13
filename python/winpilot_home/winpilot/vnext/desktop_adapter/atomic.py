@@ -162,6 +162,25 @@ class RawReceiptTraceSink(Protocol):
     ) -> None: ...
 
 
+class PointerDebugTraceSink(Protocol):
+    """Best-effort renderer for the exact frame and physical pointer plan."""
+
+    def record_pointer_debug(
+        self,
+        *,
+        run_id: str,
+        decision_id: str,
+        action: str,
+        frame_image_b64: str,
+        frame_id: int,
+        frame_region: PhysicalRegion,
+        submitted_image_size: tuple[int, int],
+        image_coordinates: Mapping[str, Any],
+        physical_arguments: Mapping[str, Any],
+        cursor_before: PhysicalPoint | None,
+    ) -> Mapping[str, Any] | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedAction:
     action: str
@@ -180,6 +199,7 @@ class _PreparedAction:
     amount: int | None = None
     text: str | None = None
     chord: HotkeyChord | None = None
+    repeat: int = 1
     launch_app: str | None = None
     launch_arguments: str | None = None
 
@@ -213,6 +233,8 @@ class AtomicDesktopAdapter:
         desktop_workspace: DesktopWorkspacePort | None = None,
         raw_device: RawDeviceExecutor,
         receipt_trace_sink: RawReceiptTraceSink | None = None,
+        pointer_debug_sink: PointerDebugTraceSink | None = None,
+        cursor_reader: Callable[[], PhysicalPoint | None] | None = None,
         launcher: Callable[[str, str], Mapping[str, Any]] | None = None,
         post_input_settle_delay_s: float = 0.12,
         wait: Callable[[float], Any] = time.sleep,
@@ -264,6 +286,14 @@ class AtomicDesktopAdapter:
             getattr(receipt_trace_sink, "record", None)
         ):
             raise TypeError("receipt_trace_sink must provide record()")
+        if pointer_debug_sink is not None and not callable(
+            getattr(pointer_debug_sink, "record_pointer_debug", None)
+        ):
+            raise TypeError(
+                "pointer_debug_sink must provide record_pointer_debug()"
+            )
+        if cursor_reader is not None and not callable(cursor_reader):
+            raise TypeError("cursor_reader must be callable or null")
         if (
             isinstance(post_input_settle_delay_s, bool)
             or not isinstance(post_input_settle_delay_s, (int, float))
@@ -303,6 +333,8 @@ class AtomicDesktopAdapter:
         self._launcher = launcher
         self._desktop_shell = desktop_shell
         self._trace = receipt_trace_sink
+        self._pointer_debug = pointer_debug_sink
+        self._cursor_reader = cursor_reader
         self._post_input_settle_delay_s = settle_delay
         self._wait = wait
         self._clock = clock
@@ -561,7 +593,9 @@ class AtomicDesktopAdapter:
                     action_id=envelope.decision_id,
                     action=action,
                     input_completed=True,
-                    visible_effect=self._launch_visible_effect(receipt, action),
+                    visible_effect=self._completed_input_effect(
+                        receipt, prepared,
+                    ),
                 )
             return self._unknown_transition(
                 envelope,
@@ -584,7 +618,9 @@ class AtomicDesktopAdapter:
                     action_id=envelope.decision_id,
                     action=action,
                     input_completed=True,
-                    visible_effect=self._launch_visible_effect(receipt, action),
+                    visible_effect=self._completed_input_effect(
+                        receipt, prepared,
+                    ),
                 )
             return self._unknown_transition(
                 envelope,
@@ -606,7 +642,7 @@ class AtomicDesktopAdapter:
             action_id=envelope.decision_id,
             action=action,
             input_completed=True,
-            visible_effect=self._launch_visible_effect(receipt, action),
+            visible_effect=self._completed_input_effect(receipt, prepared),
             post_frame_evidence=(post_evidence,),
             post_frame_id=post_frame.frame_id,
         )
@@ -657,7 +693,13 @@ class AtomicDesktopAdapter:
                     prepared.action,
                     "stop_requested_after_queue",
                 )
-            self._publish_pointer_dispatch(envelope, prepared, before_frame)
+            cursor_before = self._read_cursor_before(prepared.action)
+            self._publish_pointer_dispatch(
+                envelope,
+                prepared,
+                before_frame,
+                cursor_before=cursor_before,
+            )
             raw_started = True
             return self._run_raw(
                 envelope,
@@ -830,6 +872,7 @@ class AtomicDesktopAdapter:
         return self._raw.hotkey(
             context,
             prepared.chord,
+            repeat=prepared.repeat,
             enforce_foreground=False,
             stop_event=stop_event,
         )
@@ -932,6 +975,29 @@ class AtomicDesktopAdapter:
                     "no new one started"
                 )
             return "found an already-running instance; no new one started"
+        return ""
+
+    @classmethod
+    def _completed_input_effect(
+        cls,
+        receipt: RawActionReceipt,
+        prepared: _PreparedAction,
+    ) -> str:
+        """Describe only the completed mechanical input, never its outcome."""
+
+        if prepared.action == "launch_application":
+            return cls._launch_visible_effect(receipt, prepared.action)
+        if (
+            prepared.action == "hotkey"
+            and receipt.input_completed is True
+            and prepared.chord is not None
+        ):
+            keys = "+".join(prepared.chord.keys)
+            return (
+                "physical keyboard receipt: pressed "
+                f"{keys} {prepared.repeat} time(s); inspect the current "
+                "screen to judge the resulting state"
+            )
         return ""
 
     def _update_pointer_after_drag(
@@ -1354,9 +1420,13 @@ class AtomicDesktopAdapter:
             keys = canonical_hotkey_args(normalize_hotkey_args(args["keys"]))
             if not keys:
                 raise ValueError("hotkey keys must be an array")
+            repeat = args.get("repeat", 1)
+            if type(repeat) is not int or not 1 <= repeat <= 100:
+                raise ValueError("hotkey repeat must be in 1..100")
             return _PreparedAction(
                 action=action,
                 chord=HotkeyChord(tuple(keys)),
+                repeat=repeat,
             )
         if action == "launch_application":
             if "app" not in args:
@@ -1515,18 +1585,40 @@ class AtomicDesktopAdapter:
             }
         assert prepared.action == "hotkey"
         assert prepared.chord is not None
-        return {
+        arguments = {
             "kind": "hotkey",
             "modifiers": list(prepared.chord.keys[:-1]),
             "key": prepared.chord.keys[-1],
         }
+        if prepared.repeat != 1:
+            arguments["repeat"] = prepared.repeat
+        return arguments
 
-    @classmethod
+    def _read_cursor_before(self, action: str) -> PhysicalPoint | None:
+        if action not in {
+            "move_mouse", "click", "double_click", "drag", "scroll",
+            "input_sequence",
+        } or self._cursor_reader is None:
+            return None
+        try:
+            point = self._cursor_reader()
+            if (
+                isinstance(point, tuple)
+                and len(point) == 2
+                and all(type(value) is int for value in point)
+            ):
+                return point
+        except Exception:
+            pass
+        return None
+
     def _publish_pointer_dispatch(
-        cls,
+        self,
         envelope: ActorDecisionEnvelope,
         prepared: _PreparedAction,
         frame: RuntimeFrame,
+        *,
+        cursor_before: PhysicalPoint | None,
     ) -> None:
         """Trace image-to-screen pointer mapping without affecting input."""
 
@@ -1563,23 +1655,50 @@ class AtomicDesktopAdapter:
             ]
         if isinstance(source.get("held_keys"), (list, tuple)):
             source["held_keys"] = list(source["held_keys"])
+        physical_arguments = self._physical_attempt_arguments(prepared)
+        pointer_debug: Mapping[str, Any] | None = None
         try:
+            if self._pointer_debug is not None:
+                pointer_debug = self._pointer_debug.record_pointer_debug(
+                    run_id=envelope.run_id,
+                    decision_id=envelope.decision_id,
+                    action=prepared.action,
+                    frame_image_b64=frame.image_b64,
+                    frame_id=frame.frame_id,
+                    frame_region=tuple(envelope.frame_region),
+                    submitted_image_size=tuple(envelope.submitted_image_size),
+                    image_coordinates=source,
+                    physical_arguments=physical_arguments,
+                    cursor_before=cursor_before,
+                )
+        except Exception:
+            # A diagnostic artifact is never allowed to reject input.
+            pointer_debug = None
+        try:
+            fields: dict[str, Any] = {
+                "runtime_version": "vnext",
+                "no_legacy_fallback": True,
+                "run_id": envelope.run_id,
+                "mission_id": envelope.mission_id,
+                "decision_id": envelope.decision_id,
+                "action": prepared.action,
+                "frame_id": frame.frame_id,
+                "frame_epoch": frame.epoch,
+                "frame_scope": frame.scope,
+                "submitted_image_size": list(envelope.submitted_image_size),
+                "frame_region": list(envelope.frame_region),
+                "image_coordinates": source,
+                "physical_arguments": physical_arguments,
+                "cursor_before": (
+                    list(cursor_before) if cursor_before is not None else None
+                ),
+                "parameter_visibility": "pointer_coordinates",
+            }
+            if isinstance(pointer_debug, Mapping):
+                fields["pointer_debug"] = dict(pointer_debug)
             BUS.publish(
                 "vnext_pointer_dispatch",
-                runtime_version="vnext",
-                no_legacy_fallback=True,
-                run_id=envelope.run_id,
-                mission_id=envelope.mission_id,
-                decision_id=envelope.decision_id,
-                action=prepared.action,
-                frame_id=frame.frame_id,
-                frame_epoch=frame.epoch,
-                frame_scope=frame.scope,
-                submitted_image_size=list(envelope.submitted_image_size),
-                frame_region=list(envelope.frame_region),
-                image_coordinates=source,
-                physical_arguments=cls._physical_attempt_arguments(prepared),
-                parameter_visibility="pointer_coordinates",
+                **fields,
             )
         except Exception:
             # Diagnostics must never reject or replay physical input.

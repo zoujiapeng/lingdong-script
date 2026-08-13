@@ -469,6 +469,9 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "120 is one ordinary notch" in descriptions["scroll"]
     assert "selected text is replaced" in descriptions["type_text"]
     assert "one key or one ordered key chord" in descriptions["press_key"]
+    assert "repeat" in descriptions["press_key"]
+    assert "volumedown" in descriptions["press_key"]
+    assert "relative to the current system level" in descriptions["press_key"]
     assert "without further mutation" in descriptions["claim_obligation_done"]
     assert "no supplied action can advance" in descriptions["blocked"]
     assert "response_format" not in actor_request
@@ -691,22 +694,16 @@ def test_pending_plan_is_consumed_after_one_visual_decision() -> None:
     )
 
 
-def test_initial_utility_plan_survives_observe_and_first_visual_update() -> None:
-    plan = _tool_response(
-        name="run_shell",
+def test_initial_observe_plan_survives_first_visual_update() -> None:
+    observe = _tool_response(
+        name="observe_desktop",
         arguments={
-            "command": "Get-Process",
             "task_state_update": {
                 "scratchpad": "Inspect before acting",
                 "remaining_items": ["operate app", "send result"],
             },
         },
-        call_id="initial-plan",
-    )
-    observe = _tool_response(
-        name="observe_desktop",
-        arguments={},
-        call_id="observe-after-plan",
+        call_id="observe-with-plan",
     )
     first_action = _tool_response(
         arguments={
@@ -716,7 +713,7 @@ def test_initial_utility_plan_survives_observe_and_first_visual_update() -> None
         },
         call_id="action-after-plan",
     )
-    _, clients = _build_clients([plan, observe, first_action])
+    _, clients = _build_clients([observe, first_action])
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
@@ -2392,7 +2389,7 @@ def test_failed_tool_activity_keeps_error_and_actionable_output() -> None:
     ]
 
 
-def test_initial_turn_can_run_shell_before_observe() -> None:
+def test_initial_turn_rejects_unoffered_shell_without_execution() -> None:
     shell_response = _tool_response(
         name="run_shell",
         arguments={"command": "Get-Process notepad", "timeout_s": 300},
@@ -2433,22 +2430,14 @@ def test_initial_turn_can_run_shell_before_observe() -> None:
     )
 
     assert admission.kind == "desktop"
-    assert len(runner.calls) == 1
-    assert runner.calls[0]["command"] == "Get-Process notepad"
-    assert runner.calls[0]["shell"] == "powershell"
-    assert runner.calls[0]["timeout_s"] == 300.0
+    assert runner.calls == []
     assert len(clients[0].requests) == 2
-    shell_result_messages = [
-        m
-        for m in clients[0].requests[1]["messages"]
-        if m.get("role") == "tool"
-    ]
-    assert len(shell_result_messages) == 1
-    tool_result = json.loads(shell_result_messages[0]["content"])
-    assert tool_result["output"] == "notepad running"
-    assert tool_result["model_calls_remaining"] == 1
-    assert "stdout" not in tool_result
-    assert "stderr" not in tool_result
+    assert "run_shell" not in {
+        tool["function"]["name"]
+        for tool in clients[0].requests[0]["tools"]
+    }
+    repair = json.loads(clients[0].requests[1]["messages"][-1]["content"])
+    assert "unapproved tool" in repair["tool_format_error"]
 
 
 def test_visual_turn_can_write_file_then_launch_it_detached() -> None:
@@ -2507,7 +2496,7 @@ def test_visual_turn_can_write_file_then_launch_it_detached() -> None:
     assert {"run_shell", "write_file", "run_detached"} <= names
 
 
-def test_initial_turn_marks_repeated_results_without_hiding_output() -> None:
+def test_visual_turn_marks_repeated_results_without_hiding_output() -> None:
     responses = [
         _tool_response(
             name="run_shell",
@@ -2516,19 +2505,7 @@ def test_initial_turn_marks_repeated_results_without_hiding_output() -> None:
         )
         for index in range(3)
     ]
-    responses.append(
-        {
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": "inspection complete",
-                        "tool_calls": [],
-                    }
-                }
-            ]
-        }
-    )
+    responses.append(_tool_response(call_id="gui-after-inspection"))
     _, clients = _build_clients(responses)
 
     class ChangingShellRunner(_RecordingShellRunner):
@@ -2550,9 +2527,14 @@ def test_initial_turn_marks_repeated_results_without_hiding_output() -> None:
         shell_runner=runner,
     )
 
-    admission = actor.begin_turn("Inspect the implementation")
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
 
-    assert admission.reply == "inspection complete"
+    assert decision.proposal["action"] == "type_text"
     assert len(runner.calls) == 3
     tool_results = [
         json.loads(message["content"])
@@ -2563,6 +2545,8 @@ def test_initial_turn_marks_repeated_results_without_hiding_output() -> None:
     assert tool_results[0]["model_calls_remaining"] == 6
     assert tool_results[1] == {
         "exit_code": 0,
+        "completion_scope": "child_process_exit_only",
+        "physical_input_receipt": False,
         "message": (
             "Executed; this tool returned the same output as the referenced "
             "call."
@@ -2669,22 +2653,7 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
     )
     _, clients = _build_clients([
         shell_response,
-        {
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": "visible-observe",
-                        "type": "function",
-                        "function": {
-                            "name": "observe_desktop",
-                            "arguments": "{}",
-                        },
-                    }],
-                },
-            }],
-        },
+        _tool_response(call_id="visible-gui"),
     ])
     runner = _RecordingShellRunner()
     activities: list[dict[str, Any]] = []
@@ -2696,9 +2665,14 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
         on_activity=activities.append,
     )
 
-    admission = actor.begin_turn("Implement and verify the change")
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
 
-    assert admission.kind == "desktop"
+    assert decision.proposal["action"] == "type_text"
     assert [item["kind"] for item in activities] == [
         "message",
         "task_state",
@@ -2728,6 +2702,14 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
         "scratchpad": None,
     }
     assert "maximum" not in shell_schema["properties"]["timeout_s"]
+    shell_description = next(
+        tool["function"]["description"]
+        for tool in tools
+        if tool["function"]["name"] == "run_shell"
+    )
+    assert "never provide a physical mouse or keyboard receipt" in (
+        shell_description
+    )
 
 
 def test_visual_turn_can_run_shell_before_gui_action() -> None:
@@ -3117,10 +3099,12 @@ def test_next_visual_turn_keeps_bounded_local_tool_transcript() -> None:
         "text": "hello",
     }
     assert json.loads(messages[3]["content"]) == {
+        "completion_scope": "child_process_exit_only",
         "exit_code": 0,
         "model_calls_remaining": 6,
         "ok": True,
         "output": "UNIQUE-DIAGNOSTIC-BODY",
+        "physical_input_receipt": False,
     }
     terminal_result = next(
         message
@@ -3207,7 +3191,7 @@ def test_shell_tool_is_absent_without_runner() -> None:
     assert "run_shell" not in names
 
 
-def test_initial_truncation_continues_with_a_shorter_tool_call() -> None:
+def test_initial_truncation_continues_with_a_shorter_status_call() -> None:
     truncated = {
         "choices": [{
             "finish_reason": "length",
@@ -3230,26 +3214,22 @@ def test_initial_truncation_continues_with_a_shorter_tool_call() -> None:
     }
     _, clients = _build_clients([
         truncated,
-        _tool_response(
-            name="run_shell",
-            arguments={"command": "Write-Output ok"},
-            call_id="short-shell",
-        ),
+        _status_response("get_agent_status", call_id="short-status"),
         reply,
     ])
-    runner = _RecordingShellRunner()
+    provider = _RecordingStatusProvider()
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
-        shell_runner=runner,
+        status_provider=provider,
     )
 
     admission = actor.begin_turn("Complete the implementation")
 
     assert admission.kind == "reply"
     assert admission.reply == "finished"
-    assert [call["command"] for call in runner.calls] == ["Write-Output ok"]
+    assert provider.calls == ["get_agent_status"]
     assert all(
         message.get("content") != "partial implementation"
         for message in clients[0].requests[1]["messages"]
@@ -3320,7 +3300,7 @@ def test_visual_turn_shell_calls_are_capped_per_frame() -> None:
     assert "type_text" in names
 
 
-def test_initial_turn_executes_model_selected_shell_batch_in_parallel() -> None:
+def test_visual_turn_executes_model_selected_shell_batch_in_parallel() -> None:
     _, clients = _build_clients(
         [
             {
@@ -3349,26 +3329,7 @@ def test_initial_turn_executes_model_selected_shell_batch_in_parallel() -> None:
                     }
                 ]
             },
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": "observe-call",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "observe_desktop",
-                                        "arguments": "{}",
-                                    },
-                                }
-                            ],
-                        }
-                    }
-                ]
-            },
+            _tool_response(call_id="gui-after-batch"),
         ]
     )
     class ParallelShellRunner:
@@ -3402,9 +3363,14 @@ def test_initial_turn_executes_model_selected_shell_batch_in_parallel() -> None:
         shell_runner=runner,
     )
 
-    admission = actor.begin_turn("Check running processes")
+    decision = actor.propose(
+        _actor_turn(),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
 
-    assert admission.kind == "desktop"
+    assert decision.proposal["action"] == "type_text"
     assert runner.max_active == 5
     assert len(clients[0].requests) == 2
     tool_results = [
@@ -3429,12 +3395,12 @@ def test_initial_batch_preflights_then_reissues_without_partial_execution() -> N
                     "content": None,
                     "tool_calls": [
                         {
-                            "id": "would-have-run",
+                            "id": "would-have-searched",
                             "type": "function",
                             "function": {
-                                "name": "run_shell",
+                                "name": "search_connector_tools",
                                 "arguments": json.dumps(
-                                    {"command": "Write-Output changed"}
+                                    {"query": "paint", "connector": "github"}
                                 ),
                             },
                         },
@@ -3459,12 +3425,12 @@ def test_initial_batch_preflights_then_reissues_without_partial_execution() -> N
                     "content": None,
                     "tool_calls": [
                         {
-                            "id": "reissued-shell",
+                            "id": "reissued-search",
                             "type": "function",
                             "function": {
-                                "name": "run_shell",
+                                "name": "search_connector_tools",
                                 "arguments": json.dumps(
-                                    {"command": "Write-Output changed"}
+                                    {"query": "paint", "connector": "github"}
                                 ),
                             },
                         },
@@ -3482,20 +3448,18 @@ def test_initial_batch_preflights_then_reissues_without_partial_execution() -> N
         ]
     }
     _, clients = _build_clients([invalid_batch, valid_batch])
-    runner = _RecordingShellRunner()
+    gateway = _RecordingConnectorGateway()
     actor = LiveVisualActor(
         client=clients[0],
         model="vision-model",
         runtime=ModelCallRuntime(),
-        shell_runner=runner,
+        connector_gateway=gateway,
     )
 
     admission = actor.begin_turn("Inspect only after the command")
 
     assert admission.kind == "desktop"
-    assert [call["command"] for call in runner.calls] == [
-        "Write-Output changed"
-    ]
+    assert gateway.searches == [{"query": "paint", "connector": "github"}]
     assert len(clients[0].requests) == 2
     repair_messages = clients[0].requests[1]["messages"]
     feedback = json.loads(repair_messages[-1]["content"])
@@ -3505,7 +3469,7 @@ def test_initial_batch_preflights_then_reissues_without_partial_execution() -> N
     assert feedback["tool_format_error"] == (
         "observe_desktop does not accept arguments"
     )
-    assert "run_shell" in {
+    assert "search_connector_tools" in {
         tool["function"]["name"] for tool in clients[0].requests[1]["tools"]
     }
 

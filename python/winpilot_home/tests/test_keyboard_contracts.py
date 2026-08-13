@@ -50,6 +50,15 @@ def test_canonical_folds_left_right_modifier_variants() -> None:
     assert canonical_hotkey_args(["win_r", "l"]) == ["win", "l"]
 
 
+def test_canonical_folds_natural_named_system_keys() -> None:
+    assert canonical_hotkey_args(["volume_down"]) == ["volumedown"]
+    assert canonical_hotkey_args(["volume_up"]) == ["volumeup"]
+    assert canonical_hotkey_args(["volume_mute"]) == ["volumemute"]
+    assert canonical_hotkey_args(["page_down"]) == ["pagedown"]
+    assert canonical_hotkey_args(["print_screen"]) == ["printscreen"]
+    assert canonical_hotkey_args(["browser_back"]) == ["browserback"]
+
+
 def test_canonicalized_left_right_chord_passes_hotkey_contract() -> None:
     chord = HotkeyChord(tuple(canonical_hotkey_args(normalize_hotkey_args(["shift_r", "ctrl_l", "x"]))))
     assert chord.keys == ("ctrl", "shift", "x")
