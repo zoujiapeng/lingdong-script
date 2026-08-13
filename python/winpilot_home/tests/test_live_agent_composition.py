@@ -1264,97 +1264,58 @@ def test_exact_graph_rejects_every_expansion(mutate: Any) -> None:
         )
 
 
-@pytest.mark.parametrize(
-    ("change", "match"),
-    (
-        (
-            lambda inputs: inputs.update({"runtime_version": "vnext"}),
-            "inputs fields mismatch",
-        ),
-        (
-            lambda inputs: inputs["execution_context"].update(
-                {"entrypoint": "web_workbench"}
-            ),
-            "native Electron",
-        ),
-        (
-            lambda inputs: (
-                inputs["execution_context"].update(
-                    {"submitted_at": NOW_MS - 62_000}
-                ),
-                inputs["execution_context"]["desktop_handoff"].update(
-                    {"prepared_at": NOW_MS - 61_500}
-                ),
-                inputs["execution_context"]["target_window"].update(
-                    {"captured_at": NOW_MS - 61_000}
-                ),
-            ),
-            "stale",
-        ),
-        (
-            lambda inputs: inputs["execution_context"]["desktop_handoff"].update(
-                {"yielded": False}
-            ),
-            "handoff",
-        ),
-    ),
-)
-def test_desktop_lease_target_context_is_exact_and_fresh(
-    change: Any,
-    match: str,
-) -> None:
+def test_desktop_context_telemetry_is_advisory() -> None:
     inputs = _inputs()
-    change(inputs)
+    inputs["runtime_version"] = "future"
+    inputs["execution_context"]["entrypoint"] = "another_surface"
+    inputs["execution_context"]["submitted_at"] = NOW_MS - 600_000
+    inputs["execution_context"]["desktop_handoff"]["yielded"] = False
+    inputs["execution_context"]["target_window"].update({
+        "captured_at": NOW_MS - 500_000,
+        "foreground_verified": False,
+        "usable": False,
+        "failure_type": "frontend_guess",
+        "reason": "advisory only",
+    })
 
-    with pytest.raises(ValueError, match=match):
+    target = live_agent._freeze_prebound_target(
+        _graph(),
+        inputs,
+        dependencies=_dependencies(),
+    )
+
+    assert target.hwnd == HWND
+    assert target.captured_at_ms == NOW_MS - 500_000
+
+
+def test_desktop_context_must_belong_to_requested_task() -> None:
+    inputs = _inputs()
+    inputs["execution_context"]["task_id"] = "another-task"
+
+    with pytest.raises(ValueError, match="requested task"):
         live_agent._freeze_prebound_target(
-            _graph(),
-            inputs,
-            dependencies=_dependencies(),
+            _graph(), inputs, dependencies=_dependencies()
         )
 
 
-@pytest.mark.parametrize(
-    ("current", "mismatch"),
-    (
-        (_facts(process_id=PID + 1), "process_id"),
-        (_facts(region=(101, 200, 640, 480)), "region"),
-    ),
-)
-def test_current_target_identity_mismatch_fails_before_session(
-    current: Any,
-    mismatch: str,
-) -> None:
-    built = False
-
-    def builder(_build: Any) -> _FakeSession:
-        nonlocal built
-        built = True
-        return _FakeSession(
-            [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
-        )
-
+def test_current_window_facts_are_advisory_anchor_updates() -> None:
+    current = _facts(process_id=PID + 1, region=(101, 200, 640, 480))
     deps = live_agent._CompositionDependencies(
         wall_clock=lambda: NOW_MS / 1000.0,
         monotonic=lambda: 10.0,
         target_reader=lambda _hwnd: current,
         hit_test_root=lambda _x, _y: HWND,
-        session_builder=builder,
     )
 
-    with pytest.raises(
-        ValueError,
-        match=rf"current Electron target mismatch: {mismatch}",
-    ):
-        live_agent._freeze_prebound_target(
-            _graph(),
-            _inputs(),
-            dependencies=deps,
-        )
-    assert built is False
+    target = live_agent._freeze_prebound_target(
+        _graph(), _inputs(), dependencies=deps
+    )
+
+    assert target.process_id == PID + 1
+    assert target.region == (101, 200, 640, 480)
 
 
-def test_prebound_target_ignores_dynamic_title_and_foreground_changes() -> None:
+def test_prebound_target_uses_live_title_and_ignores_foreground_as_gate() -> None:
     current = _facts(
         title="Canary Target — updated",
         foreground_root_hwnd=HWND + 1,
@@ -1368,7 +1329,7 @@ def test_prebound_target_ignores_dynamic_title_and_foreground_changes() -> None:
 
     assert target.hwnd == HWND
     assert target.process_id == PID
-    assert target.title == "Canary Target"
+    assert target.title == current.title
     assert target.probe.snapshot(HWND) is not None
 
 
@@ -1441,7 +1402,7 @@ def test_desktop_shell_binding_relaxes_foreground_and_keeps_identity(
     assert target.probe.snapshot(65878) is not None
 
 
-def test_desktop_shell_binding_rejects_when_shell_identity_changes(
+def test_desktop_shell_binding_adopts_live_identity_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     inputs = _inputs()
@@ -1469,17 +1430,17 @@ def test_desktop_shell_binding_rejects_when_shell_identity_changes(
         foreground_root_hwnd=None,
     )
 
-    with pytest.raises(ValueError, match="process_id"):
-        live_agent._freeze_prebound_target(
-            _graph(),
-            inputs,
-            dependencies=_dependencies(
-                reader=lambda _hwnd: changed,
-            ),
-        )
+    target = live_agent._freeze_prebound_target(
+        _graph(),
+        inputs,
+        dependencies=_dependencies(reader=lambda _hwnd: changed),
+    )
+
+    assert target.process_id == 9999
+    assert target.desktop_shell is True
 
 
-def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> None:
+def test_tool_catalog_exposes_generic_mouse_keyboard_mechanics() -> None:
     catalog = live_agent._tool_catalog()
     schemas = {
         tool.name: tool.schema
@@ -1496,17 +1457,22 @@ def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> No
     assert hotkey["maxItems"] == len(CANONICAL_HOTKEY_MODIFIERS) + 1 == 5
     assert hotkey["uniqueItems"] is True
     drag = schemas["drag"]
-    assert tuple(drag["required"]) == ("image_path", "keep_holding")
+    assert tuple(drag["required"]) == ("image_path",)
     path = drag["properties"]["image_path"]
     assert path["minItems"] == 1
     assert "maxItems" not in path
     assert path["items"]["minItems"] == 2
     assert path["items"]["maxItems"] == 2
-    assert drag["properties"]["keep_holding"] == {"type": "boolean"}
+    assert drag["properties"]["keep_holding"] == {
+        "type": "boolean",
+        "default": False,
+    }
+    held_keys = drag["properties"]["held_keys"]
+    assert set(held_keys["items"]["enum"]) == set(CANONICAL_HOTKEY_KEYS)
+    assert held_keys["uniqueItems"] is True
     validator = ToolArgumentValidator(catalog)
     straight = {
         "image_path": [[10, 20], [300, 200]],
-        "keep_holding": False,
     }
     assert validator.validate("drag", straight) == straight
     held_segment = {
@@ -1610,7 +1576,13 @@ def test_exact_capture_rejects_clamping_and_decoded_dimension_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[int, int, Region]] = []
-    returned = [_jpeg(1120, 280), _jpeg(1119, 280)]
+    expected_width, expected_height = live_agent._submitted_size(
+        Region(100, 120, 2240, 560)
+    )
+    returned = [
+        _jpeg(expected_width, expected_height),
+        _jpeg(expected_width - 1, expected_height),
+    ]
     monkeypatch.setattr(
         live_agent,
         "virtual_screen_region",
@@ -1634,11 +1606,14 @@ def test_exact_capture_rejects_clamping_and_decoded_dimension_mismatch(
     visible = Region(100, 120, 2240, 560)
     good = live_agent._capture_exact_target_jpeg(HWND, region=visible)
     assert good
-    assert live_agent._jpeg_dimensions(good) == (1120, 280)
-    assert calls == [(HWND, 1120, visible)]
+    assert live_agent._jpeg_dimensions(good) == (
+        expected_width,
+        expected_height,
+    )
+    assert calls == [(HWND, live_agent._MAX_SUBMITTED_SIDE, visible)]
 
     assert live_agent._capture_exact_target_jpeg(HWND, region=visible) == ""
-    assert calls[-1] == (HWND, 1120, visible)
+    assert calls[-1] == (HWND, live_agent._MAX_SUBMITTED_SIDE, visible)
     assert (
         live_agent._capture_exact_target_jpeg(
             HWND,
@@ -2311,9 +2286,10 @@ def test_raw_receipt_trace_projects_fixed_safe_summary(
         "frame_id",
         "frame_epoch",
         "input_completed",
-        "error_kind",
-        "parameter_visibility",
-    }
+            "error_kind",
+            "phase",
+            "parameter_visibility",
+        }
     assert event["input_completed"] is True
     assert event["error_kind"] is None
     assert (
@@ -2380,18 +2356,22 @@ def test_public_runtime_evidence_summary_requires_exact_explicit_scope(
 
 
 @pytest.mark.parametrize(
-    "mutate",
+    ("mutate", "rejected"),
     (
-        lambda snapshot: snapshot.update({"run_id": "other-run"}),
-        lambda snapshot: snapshot.update({"target_hwnd": HWND + 1}),
-        lambda snapshot: snapshot.update({"frame_id": 10}),
-        lambda snapshot: snapshot["verified_evidence_bindings"][0].update(
-            {"run_id": "other-run"}
+        (lambda snapshot: snapshot.update({"run_id": "other-run"}), True),
+        (lambda snapshot: snapshot.update({"target_hwnd": HWND + 1}), False),
+        (lambda snapshot: snapshot.update({"frame_id": 10}), False),
+        (
+            lambda snapshot: snapshot["verified_evidence_bindings"][0].update(
+                {"run_id": "other-run"}
+            ),
+            False,
         ),
     ),
 )
-def test_invalid_completion_binding_is_non_success_before_done_event(
+def test_completion_only_requires_same_runtime_run(
     mutate: Any,
+    rejected: bool,
 ) -> None:
     class InvalidBindingSession(_FakeSession):
         def completion_snapshot(self) -> dict[str, Any]:
@@ -2417,18 +2397,24 @@ def test_invalid_completion_binding_is_non_success_before_done_event(
     finally:
         BUS.remove_sink(events.append)
 
-    assert result["status"] == ArpRunStatus.FAILED.value
-    assert result["evidence"] == []
+    assert result["status"] == (
+        ArpRunStatus.FAILED.value if rejected else ArpRunStatus.DONE.value
+    )
     done = [
         event for event in events
         if event["type"] == "live_agent_done"
     ]
     assert len(done) == 1
-    assert done[0]["status"] == RuntimeStatus.STATE_REJECTED.value
-    assert "run-bound verified mission evidence" in result["error"]
+    assert done[0]["status"] == (
+        RuntimeStatus.STATE_REJECTED.value
+        if rejected
+        else RuntimeStatus.MISSION_VERIFIED.value
+    )
+    if rejected:
+        assert "did not belong to this run" in result["error"]
 
 
-def test_pause_invalidates_actor_frame_but_not_atomic_post_reconcile_frame() -> None:
+def test_pause_state_is_independent_of_frame_evidence_kind() -> None:
     mission_id = "vnext-mission-pause-test"
     run_id = "arp-pause-test"
     definition = MissionDefinition(
@@ -2550,7 +2536,7 @@ def test_pause_invalidates_actor_frame_but_not_atomic_post_reconcile_frame() -> 
         )
     )
 
-    assert state.current(reducer.projection, turn_index=0).broker_state.paused is False
+    assert state.current(reducer.projection, turn_index=0).broker_state.paused is True
 
 
 def test_goal_admission_audit_is_validated_without_runtime_policy() -> None:
@@ -2738,8 +2724,9 @@ def _install_safe_backends(
         hwnd: int,
         final_guard: Any,
         enforce_foreground: bool = True,
+        stop_event: Any = None,
     ) -> RawBackendResult:
-        del button, count, mechanism, hwnd, enforce_foreground
+        del button, count, mechanism, hwnd, enforce_foreground, stop_event
         assert final_guard(x, y).value == "admitted"
         if on_click is not None:
             on_click()
@@ -2792,8 +2779,11 @@ def _real_session_with_captures(
     clock = clock or [10.0]
     capture_values = list(images)
     if screen_first and capture_regions is None:
+        submitted_width, submitted_height = live_agent._submitted_size(
+            Region(0, 0, 1920, 1080)
+        )
         capture_values = [
-            _jpeg(1120, 630, level=100 + index)
+            _jpeg(submitted_width, submitted_height, level=100 + index)
             for index, _image in enumerate(capture_values)
         ]
     expected_capture_regions = (
@@ -3597,7 +3587,7 @@ def test_full_desktop_successor_is_discarded_before_stable_atomic_adoption(
         target_reader=reader,
         hit_test_root=lambda _x, _y: foreground[0],
         on_click=after_click,
-        capture_regions=[desktop, desktop, desktop, desktop],
+        capture_regions=None,
         on_capture=after_capture,
     )
     session_holder.append(session)
@@ -3824,31 +3814,14 @@ def test_each_model_call_is_clamped_to_one_second_remaining_deadline(
 
 
 
-def test_run_bound_lease_rejects_target_changed_after_actor_request(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_run_bound_lease_accepts_current_window_after_actor_request() -> None:
     current_target = [_facts()]
-    raw_constructions: list[bool] = []
-    client_calls: list[dict[str, Any]] = []
-    clients: list[_RawClient] = []
-
-    def forbidden_raw(*_args: Any, **_kwargs: Any) -> Any:
-        raw_constructions.append(True)
-        raise AssertionError("RawDevice must not be constructed")
-
-    def client_factory(**kwargs: Any) -> Any:
-        client_calls.append(kwargs)
-        client = _RawClient(_observe_desktop_response())
-        clients.append(client)
-        return client
-
-    dependencies = live_agent._CompositionDependencies(
-        wall_clock=lambda: NOW_MS / 1000.0,
-        monotonic=lambda: 10.0,
-        target_reader=lambda _hwnd: current_target[0],
-        hit_test_root=lambda _x, _y: HWND,
-        client_factory=client_factory,
+    session = _FakeSession(
+        [MissionRuntimeResult(RuntimeStatus.MISSION_VERIFIED)]
+    )
+    dependencies = _dependencies(
+        session=session,
+        reader=lambda _hwnd: current_target[0],
     )
     graph = _graph()
     execution = _prepare(
@@ -3863,7 +3836,6 @@ def test_run_bound_lease_rejects_target_changed_after_actor_request(
     lease = execution.runtime_state["_desktop_lease"]
     results: list[Any] = []
     events: list[dict[str, Any]] = []
-    monkeypatch.setattr(live_agent, "RawDeviceExecutor", forbidden_raw)
 
     def invoke_handler() -> None:
         results.append(
@@ -3885,19 +3857,10 @@ def test_run_bound_lease_rejects_target_changed_after_actor_request(
             threading.Event().wait(0.001)
         else:
             pytest.fail("Actor did not request the desktop lease")
-        with pytest.raises(
-            live_agent.DesktopLeaseError,
-            match="process_id",
-        ):
-            lease.bind(
-                run_id=run_id,
-                lease_id=lease_snapshot["lease_id"],
-                inputs=_inputs(),
-            )
-        lease.fail(
+        target = lease.bind(
             run_id=run_id,
             lease_id=lease_snapshot["lease_id"],
-            reason="target changed before desktop lease binding",
+            inputs=_inputs(),
         )
         worker.join(timeout=2.0)
     finally:
@@ -3906,15 +3869,10 @@ def test_run_bound_lease_rejects_target_changed_after_actor_request(
     assert not worker.is_alive()
     assert len(results) == 1
     result = results[0]
-    assert result.ok is False
-    assert result.branch == "fail"
-    assert result.output is not None
-    assert result.output["failure_stage"] == "target_binding"
-    assert "target changed before desktop lease binding" in result.error
-    assert raw_constructions == []
-    assert len(client_calls) == len(clients) == 1
-    assert len(clients[0].requests) == 1
-    assert clients[0].closed is True
+    assert target.process_id == PID + 1
+    assert result.ok is True
+    assert result.branch == "next"
+    assert session.closed is True
     event_types = [event["type"] for event in events]
     assert [
         event_type
@@ -3922,10 +3880,8 @@ def test_run_bound_lease_rejects_target_changed_after_actor_request(
         if event_type.startswith("desktop_lease_")
     ] == [
         "desktop_lease_requested",
-        "desktop_lease_rejected",
-        "desktop_lease_failed",
+        "desktop_lease_bound",
     ]
-    assert "runtime_evidence_sealed" not in event_types
 
 
 

@@ -324,7 +324,7 @@ def test_typed_click_uses_one_outer_queue_event(monkeypatch):
         executor,
         "_raw_click",
         lambda x, y, button, count, hwnd, prepositioned=False,
-        allow_target_focus=True, enforce_foreground=False: (
+        allow_target_focus=True, enforce_foreground=False, **_kwargs: (
             calls.append((
                 x, y, button, count, hwnd, prepositioned, allow_target_focus,
                 enforce_foreground,
@@ -447,7 +447,12 @@ def test_raw_prepositioned_click_does_not_refocus_or_repeat_slow_move(monkeypatc
         "_raw_move_mouse",
         lambda x, y: calls.append(("move", x, y)),
     )
-    monkeypatch.setattr(executor, "_mouse_input", lambda flag: flag)
+    monkeypatch.setattr(
+        executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
+    )
+    monkeypatch.setattr(executor, "_mouse_button_input", lambda flag, _data: flag)
     monkeypatch.setattr(
         executor,
         "_send_inputs",
@@ -464,10 +469,14 @@ def test_raw_prepositioned_click_does_not_refocus_or_repeat_slow_move(monkeypatc
     assert result.input_completed is True
     assert all(call[0] not in {"focus", "move"} for call in calls)
     assert [call[0] for call in calls] == ["send", "send"]
-    assert sleeps == [0.008]
+    assert calls[0] == (
+        "send",
+        (("absolute", 30, 40), executor.win32con.MOUSEEVENTF_LEFTDOWN),
+    )
+    assert sleeps == [0.035]
 
 
-def test_legacy_raw_click_refocuses_without_adding_a_foreground_gate(monkeypatch):
+def test_public_raw_click_does_not_refocus_or_add_a_foreground_gate(monkeypatch):
     calls = []
     monkeypatch.setattr(
         executor,
@@ -486,7 +495,12 @@ def test_legacy_raw_click_refocuses_without_adding_a_foreground_gate(monkeypatch
         "_raw_move_mouse",
         lambda x, y: calls.append(("move", x, y)),
     )
-    monkeypatch.setattr(executor, "_mouse_input", lambda flag: flag)
+    monkeypatch.setattr(
+        executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
+    )
+    monkeypatch.setattr(executor, "_mouse_button_input", lambda flag, _data: flag)
     monkeypatch.setattr(
         executor,
         "_send_inputs",
@@ -500,7 +514,11 @@ def test_legacy_raw_click_refocuses_without_adding_a_foreground_gate(monkeypatch
     )
 
     assert result.input_completed is True
-    assert [call[0] for call in calls] == ["focus", "move", "send", "send"]
+    assert [call[0] for call in calls] == ["send", "send"]
+    assert calls[0] == (
+        "send",
+        (("absolute", 30, 40), executor.win32con.MOUSEEVENTF_LEFTDOWN),
+    )
 
 
 def test_raw_focus_continues_when_set_foreground_raises(monkeypatch):
@@ -590,7 +608,7 @@ def test_public_scroll_uses_one_outer_queue_event(monkeypatch):
         BUS.remove_sink(events.append)
 
     assert out["ok"] is True
-    assert calls == [("move", 10, 20), ("send", 1)]
+    assert calls == [("send", 2)]
     queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
     assert [(event["state"], event["action"]) for event in queue_events] == [
         ("start", "scroll"),
@@ -619,10 +637,7 @@ def test_public_drag_uses_one_outer_queue_event(monkeypatch):
         BUS.remove_sink(events.append)
 
     assert out["ok"] is True
-    assert calls == [
-        ("focus", 123),
-        ("stroke", [(1, 2), (3, 4), (5, 6)], 0.4),
-    ]
+    assert calls == [("stroke", [(1, 2), (3, 4), (5, 6)], 0.4)]
     queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
     assert [(event["state"], event["action"]) for event in queue_events] == [
         ("start", "drag"),
@@ -651,10 +666,7 @@ def test_public_draw_strokes_uses_one_outer_queue_event(monkeypatch):
         BUS.remove_sink(events.append)
 
     assert out == {"ok": True, "strokes_drawn": 1}
-    assert calls == [
-        ("focus", 123),
-        ("stroke", [(1, 2), (3, 4)], 0.4),
-    ]
+    assert calls == [("stroke", [(1, 2), (3, 4)], 0.4)]
     queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
     assert [(event["state"], event["action"]) for event in queue_events] == [
         ("start", "draw_strokes"),
@@ -662,7 +674,7 @@ def test_public_draw_strokes_uses_one_outer_queue_event(monkeypatch):
     ]
 
 
-def test_long_pointer_path_releases_button_when_target_window_is_lost(monkeypatch):
+def test_long_pointer_path_ignores_window_changes_and_releases_button(monkeypatch):
     target_checks = iter((True, True, False))
     sent = []
 
@@ -671,13 +683,17 @@ def test_long_pointer_path_releases_button_when_target_window_is_lost(monkeypatc
         "_target_window_still_foreground",
         lambda _hwnd: next(target_checks, False),
     )
-    monkeypatch.setattr(executor, "_abs_mouse_move", lambda *_args: None)
+    monkeypatch.setattr(
+        executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
+    )
     monkeypatch.setattr(executor, "_emit_move", lambda *_args: None)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         executor,
-        "_mouse_input",
-        lambda flags, **_kwargs: int(flags),
+        "_mouse_button_input",
+        lambda flags, _data: int(flags),
     )
     monkeypatch.setattr(
         executor,
@@ -687,14 +703,15 @@ def test_long_pointer_path_releases_button_when_target_window_is_lost(monkeypatc
 
     completed = executor._stroke_path([(10, 10), (40, 40)], 0.1, hwnd=123)
 
-    assert completed is False
+    assert completed is True
     assert sent == [
+        ("absolute", 10, 10),
         executor.win32con.MOUSEEVENTF_LEFTDOWN,
         executor.win32con.MOUSEEVENTF_LEFTUP,
     ]
 
 
-def test_target_window_guard_accepts_same_root_and_rejects_other_app(monkeypatch):
+def test_target_window_metadata_never_rejects_global_physical_input(monkeypatch):
     foreground = {"hwnd": 456}
     roots = {123: 10, 456: 10, 789: 20}
     monkeypatch.setattr(
@@ -710,7 +727,7 @@ def test_target_window_guard_accepts_same_root_and_rejects_other_app(monkeypatch
 
     assert executor._target_window_still_foreground(123) is True
     foreground["hwnd"] = 789
-    assert executor._target_window_still_foreground(123) is False
+    assert executor._target_window_still_foreground(123) is True
 
 
 def test_type_text_newline_uses_raw_enter_without_nested_queue(monkeypatch):
@@ -719,6 +736,11 @@ def test_type_text_newline_uses_raw_enter_without_nested_queue(monkeypatch):
     events = []
     monkeypatch.setattr(executor, "_dry_run", lambda: False)
     monkeypatch.setattr(executor, "_should_type_via_vk", lambda _text: False)
+    monkeypatch.setattr(
+        executor,
+        "_english_layout_switch",
+        lambda _hwnd: (None, True),
+    )
     monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent_batches.append(len(inputs)))
     monkeypatch.setattr(executor.time, "sleep", sleeps.append)
 
@@ -730,7 +752,7 @@ def test_type_text_newline_uses_raw_enter_without_nested_queue(monkeypatch):
 
     assert out == {"ok": True, "typed": 3}
     assert sent_batches == [2, 1, 1, 2]
-    assert sleeps == [0, 0.03, 0]
+    assert sleeps == [0.03, 0.03, 0.03]
     queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
     assert [(event["state"], event["action"]) for event in queue_events] == [
         ("start", "type_text"),

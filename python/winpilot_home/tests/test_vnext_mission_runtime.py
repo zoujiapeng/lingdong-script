@@ -66,7 +66,6 @@ EPOCH = 7
 GUI_GATES = (
     "target_bound",
     "authoritative_frame",
-    "pointer_released",
     "runtime_healthy",
 )
 DRAG_GATES = (
@@ -157,6 +156,21 @@ def _hotkey_schema() -> dict[str, Any]:
     }
 
 
+def _move_schema() -> dict[str, Any]:
+    return _point_schema()
+
+
+def _sequence_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "sequence": {"type": "string", "minLength": 1},
+        },
+        "required": ["sequence"],
+    }
+
+
 def _tool(
     name: str,
     *,
@@ -194,10 +208,12 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
     schemas = {
         "click": _point_schema(),
         "double_click": _point_schema(),
+        "move_mouse": _move_schema(),
         "drag": _drag_schema(),
         "scroll": _scroll_schema(),
         "type_text": _text_schema(),
         "hotkey": _hotkey_schema(),
+        "input_sequence": _sequence_schema(),
         "launch_application": {
             "type": "object",
             "additionalProperties": False,
@@ -226,10 +242,12 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
             (
                 "click",
                 "double_click",
+                "move_mouse",
                 "drag",
                 "scroll",
                 "type_text",
                 "hotkey",
+                "input_sequence",
                 "launch_application",
             ),
             start=1,
@@ -303,6 +321,8 @@ def _action(
     args: dict[str, Any]
     if action in {"click", "double_click"}:
         args = {"image_x": 10, "image_y": 20}
+    elif action == "move_mouse":
+        args = {"image_x": 10, "image_y": 20}
     elif action == "drag":
         args = {
             "image_x1": 10,
@@ -318,6 +338,8 @@ def _action(
         args = {"text": "hello"}
     elif action == "hotkey":
         args = {"keys": ["ctrl", "a"]}
+    elif action == "input_sequence":
+        args = {"sequence": "move 10,20; click left"}
     else:
         args = {}
     return {
@@ -764,7 +786,10 @@ def _harness(
 
 @pytest.mark.parametrize(
     "action",
-    ("click", "double_click", "drag", "scroll", "type_text", "hotkey"),
+    (
+        "click", "double_click", "move_mouse", "drag", "scroll",
+        "type_text", "hotkey", "input_sequence",
+    ),
 )
 def test_minimal_runtime_executes_each_approved_action_once(action: str) -> None:
     harness = _harness(_action(action))
@@ -810,17 +835,19 @@ def test_cross_frame_held_drag_preserves_then_releases_one_lease() -> None:
     assert harness.actor.turns[0].pointer_held is False
     assert harness.actor.turns[1].pointer_held is True
     assert harness.actor.turns[2].pointer_held is True
-    # While the held pointer lease is owned, the model may continue the drag
-    # or finish with a non-pointer action (claim/blocked); pointer gestures
-    # that would conflict with the held press stay excluded.
+    # A held button remains ordinary physical input state. It must not hide
+    # mouse, wheel, or keyboard actions that a human can combine with it.
     held_tool_names = tuple(
         tool.name for tool in harness.actor.turns[1].tools
     )
     assert "drag" in held_tool_names
+    assert "click" in held_tool_names
+    assert "double_click" in held_tool_names
+    assert "scroll" in held_tool_names
+    assert "hotkey" in held_tool_names
+    assert "input_sequence" in held_tool_names
     assert "claim_obligation_done" in held_tool_names
     assert "blocked" in held_tool_names
-    assert "click" not in held_tool_names
-    assert "double_click" not in held_tool_names
     assert [
         envelope.pointer_disposition
         for envelope in harness.controller.envelopes
@@ -835,7 +862,7 @@ def test_cross_frame_held_drag_preserves_then_releases_one_lease() -> None:
     ]
 
 
-def test_keep_holding_blocks_when_controller_returns_released_pointer() -> None:
+def test_runtime_does_not_second_guess_controller_pointer_state() -> None:
     harness = _harness(_action("drag", keep_holding=True))
     harness.controller.pointer_after_override = PointerLeaseState(
         PointerDisposition.RELEASED
@@ -843,8 +870,7 @@ def test_keep_holding_blocks_when_controller_returns_released_pointer() -> None:
 
     result = harness.runtime.run_one_turn(turn_index=0)
 
-    assert result.status is RuntimeStatus.BLOCKED
-    assert "could not be reconciled" in result.detail
+    assert result.status is RuntimeStatus.ACTION_RECORDED
     assert harness.controller.calls == 1
 
 
@@ -865,14 +891,9 @@ def test_actor_can_verify_already_satisfied_goal_without_mutation() -> None:
     assert harness.actor.turns[0].frame.fresh is True
     assert [event.kind for event in harness.reducer.events] == [
         "target_bound",
-        "obligation_claimed",
-        "verification_recorded",
-        "mission_verified",
+        "actor_completed",
     ]
-    claim, verification = harness.reducer.events[1:3]
-    assert claim.evidence_refs == ("e-frame-1",)
-    assert verification.evidence_refs == ("e-frame-1",)
-    assert verification.payload["verifier_kind"] == "actor_claim"
+    assert harness.reducer.events[-1].evidence_refs == ()
     assert "the requested state is visibly present" not in json.dumps(
         [event.to_dict() for event in harness.reducer.events]
     )
@@ -904,7 +925,7 @@ def test_task_state_remaining_items_merge_replace_and_clear() -> None:
     assert cleared.remaining_items == ()
 
 
-def test_claim_with_actor_declared_remaining_work_soft_rejects_then_recovers() -> None:
+def test_visible_claim_supersedes_stale_actor_remaining_items() -> None:
     harness = _harness(
         _task_decision(
             _action("click"),
@@ -912,37 +933,19 @@ def test_claim_with_actor_declared_remaining_work_soft_rejects_then_recovers() -
             remaining_items=["send playback image", "build and play game"],
         ),
         _task_decision(_claim()),
-        _task_decision(
-            _claim(),
-            scratchpad="Everything requested is complete",
-            remaining_items=[],
-        ),
     )
 
     acted = harness.runtime.run_one_turn(turn_index=0)
     premature = harness.runtime.run_one_turn(turn_index=1)
 
     assert acted.status is RuntimeStatus.ACTION_RECORDED
-    assert premature.status is RuntimeStatus.INVALID_PROPOSAL
-    assert "unfinished items remain" in premature.detail
+    assert premature.status is RuntimeStatus.MISSION_VERIFIED
     assert harness.runtime.task_state.remaining_items == (
         "send playback image",
         "build and play game",
     )
-    assert harness.reducer.projection.status is MissionStatus.RUNNING
-    assert all(
-        event.kind not in {
-            "obligation_claimed",
-            "verification_recorded",
-            "mission_verified",
-        }
-        for event in harness.reducer.events
-    )
-
-    completed = harness.runtime.run_one_turn(turn_index=2)
-
-    assert completed.status is RuntimeStatus.MISSION_VERIFIED
-    assert harness.runtime.task_state.remaining_items == ()
+    assert harness.reducer.projection.status is MissionStatus.VERIFIED
+    assert harness.reducer.events[-1].kind == "actor_completed"
 
 
 def test_claim_fails_closed_without_fresh_observation() -> None:
@@ -1175,28 +1178,41 @@ def test_schema_rejected_action_keeps_task_state_for_actor_repair() -> None:
 
 def test_out_of_frame_point_soft_rejects_for_actor_repair() -> None:
     invalid_action = _action("click")
-    invalid_action["args"]["image_x"] = 320
+    invalid_action["args"]["image_x"] = 321
     harness = _harness(invalid_action, _blocked())
 
     rejected = harness.runtime.run_one_turn(turn_index=0)
     next_turn = harness.runtime.run_one_turn(turn_index=1)
 
-    assert rejected.status is RuntimeStatus.INVALID_PROPOSAL
+    assert rejected.status is RuntimeStatus.STATE_REJECTED
     assert rejected.detail == (
-        "image_x must stay inside the exact submitted image"
+        "image_x must stay inside or on the submitted image edge"
     )
     assert next_turn.status is RuntimeStatus.BLOCKED
     assert harness.controller.calls == 0
 
 
-def test_pre_action_current_state_failure_is_discarded_before_input() -> None:
+def test_extent_style_edge_coordinate_is_admitted_for_nearest_pixel_mapping() -> None:
+    edge_action = _action("click")
+    edge_action["args"]["image_x"] = 320
+    edge_action["args"]["image_y"] = 240
+    harness = _harness(edge_action)
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 1
+
+
+def test_duplicate_current_state_probe_is_not_an_input_gate() -> None:
     harness = _harness(_action())
     harness.state.raise_current_on = 1
 
     result = harness.runtime.run_one_turn(turn_index=0)
 
-    assert result.status is RuntimeStatus.STALE_DISCARDED
-    assert harness.controller.calls == 0
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 1
+    assert harness.state.current_calls == 0
 
 
 def test_run_one_turn_forwards_rejection_feedback_to_the_actor() -> None:
@@ -1439,7 +1455,7 @@ def test_actor_result_is_discarded_when_mission_revision_changes() -> None:
     assert harness.controller.calls == 0
 
 
-def test_untrusted_pre_frame_is_rejected_before_actor_or_controller() -> None:
+def test_frame_evidence_labels_are_advisory_to_visual_execution() -> None:
     harness = _harness(_action())
     bad_frame = replace(
         harness.state.snapshot.frame,
@@ -1453,9 +1469,9 @@ def test_untrusted_pre_frame_is_rejected_before_actor_or_controller() -> None:
 
     result = harness.runtime.run_one_turn(turn_index=0)
 
-    assert result.status is RuntimeStatus.STATE_REJECTED
-    assert harness.actor.calls == 0
-    assert harness.controller.calls == 0
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.actor.calls == 1
+    assert harness.controller.calls == 1
 
 
 def test_full_desktop_snapshot_is_not_rejected_by_window_binding() -> None:
@@ -1597,16 +1613,17 @@ def test_rejected_controller_proves_no_input_and_is_not_replayed() -> None:
     ]
 
 
-def test_post_action_state_failure_is_blocked_after_one_input_attempt() -> None:
+def test_duplicate_post_action_state_probe_is_not_an_input_gate() -> None:
     harness = _harness(_action(), _action())
     harness.state.raise_current_on = 3
 
     first = harness.runtime.run_one_turn(turn_index=0)
     second = harness.runtime.run_one_turn(turn_index=1)
 
-    assert first.status is RuntimeStatus.BLOCKED
-    assert second.status is RuntimeStatus.BLOCKED
-    assert harness.controller.calls == 1
+    assert first.status is RuntimeStatus.ACTION_RECORDED
+    assert second.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 2
+    assert harness.state.current_calls == 0
     assert any(
         ref.kind == POST_ACTION_FRAME_EVIDENCE_KIND
         for ref in harness.registry.snapshot()
@@ -1622,29 +1639,17 @@ def test_claim_binds_current_frame_and_completes_deterministically() -> None:
     assert harness.controller.calls == 0
     assert [event.kind for event in harness.reducer.events] == [
         "target_bound",
-        "obligation_claimed",
-        "verification_recorded",
-        "mission_verified",
+        "actor_completed",
     ]
-    claim, verification, completion = harness.reducer.events[1:]
-    assert claim.evidence_refs == ("e-frame-1",)
-    assert verification.evidence_refs == ("e-frame-1",)
-    assert verification.payload["verified"] is True
-    assert verification.payload["verifier_kind"] == "actor_claim"
-    assert completion.evidence_refs[0] == "e-frame-1"
-    aggregate = next(
-        ref
-        for ref in harness.registry.snapshot()
-        if ref.id == completion.evidence_refs[-1]
-    )
-    assert aggregate.trust == "deterministic"
-    assert aggregate.obligation_id is None
+    completion = harness.reducer.events[-1]
+    assert completion.evidence_refs == ()
     obligation = harness.reducer.projection.obligation_state(OBLIGATION_ID)
-    assert obligation.verified_evidence_refs == ("e-frame-1",)
+    assert obligation.verified_evidence_refs == ()
+    assert obligation.verification_id.startswith("actor-completion-")
     assert harness.reducer.projection.status is MissionStatus.VERIFIED
 
 
-def test_claim_preserves_required_current_frame_evidence_kind() -> None:
+def test_evidence_policy_does_not_override_actor_completion() -> None:
     definition = MissionDefinition(
         mission_id=MISSION_ID,
         run_id=RUN_ID,
@@ -1666,10 +1671,9 @@ def test_claim_preserves_required_current_frame_evidence_kind() -> None:
     result = harness.runtime.run_one_turn(turn_index=0)
 
     assert result.status is RuntimeStatus.MISSION_VERIFIED
-    verification = harness.reducer.events[-2]
-    assert verification.kind == "verification_recorded"
-    assert "e-frame-1" in verification.evidence_refs
-    assert verification.payload["verifier_kind"] == "actor_claim"
+    completion = harness.reducer.events[-1]
+    assert completion.kind == "actor_completed"
+    assert completion.evidence_refs == ()
 
 
 def test_pre_turn_and_post_action_cancellation_are_explicit() -> None:

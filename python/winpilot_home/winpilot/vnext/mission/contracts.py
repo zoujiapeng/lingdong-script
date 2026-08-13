@@ -45,11 +45,13 @@ _MISSING_PAYLOAD = object()
 _SAFE_ACTION_SUMMARY_BY_ACTION = {
     "click": frozenset({"click"}),
     "double_click": frozenset({"double_click"}),
+    "move_mouse": frozenset({"move_mouse"}),
     "drag": frozenset({"drag"}),
     "scroll": frozenset({"scroll"}),
     "type_text": frozenset({"type_text"}),
     "launch_application": frozenset({"launch_application"}),
     "hotkey": frozenset({"hotkey"}),
+    "input_sequence": frozenset({"input_sequence"}),
 }
 
 
@@ -494,8 +496,6 @@ class ObligationSpec:
             )
         if not self.acceptance_criteria:
             object.__setattr__(self, "acceptance_criteria", (self.desired_state,))
-        if not self.required_capabilities:
-            object.__setattr__(self, "required_capabilities", ("visual.interact",))
         policy = self.evidence_policy
         if type(policy) is dict:
             policy = EvidencePolicy.from_dict(policy)
@@ -568,10 +568,6 @@ class ObligationSpec:
         if not acceptance_criteria:
             raise InvalidMissionDefinition(
                 "acceptance_criteria must contain at least one string"
-            )
-        if not required_capabilities:
-            raise InvalidMissionDefinition(
-                "required_capabilities must contain at least one string"
             )
         raw_span = value["source_span"]
         if raw_span is not None and (
@@ -1706,7 +1702,6 @@ class MissionDefinition:
                     id="obligation-1",
                     desired_state=self.original_goal,
                     acceptance_criteria=(self.original_goal,),
-                    required_capabilities=("visual.interact",),
                 ),
             )
         _validate_contract_wire(
@@ -1773,7 +1768,7 @@ class MissionDefinition:
         *,
         mission_id: str,
         run_id: str,
-        required_capabilities: Iterable[str] = ("visual.interact",),
+        required_capabilities: Iterable[str] = (),
         experience_policy: str = "allow",
     ) -> "MissionDefinition":
         capabilities = _contract_string_tuple(
@@ -1921,6 +1916,10 @@ _EVENT_PAYLOAD_FIELDS = {
                 "error_kind",
             }
         ),
+    ),
+    "actor_completed": (
+        frozenset({"obligation_id"}),
+        frozenset(),
     ),
     "obligation_claimed": (
         frozenset({"obligation_id"}),

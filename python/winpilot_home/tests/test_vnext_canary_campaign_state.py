@@ -1042,7 +1042,7 @@ def _physical_arguments(
             "x": 10,
             "y": 20,
             "signed_wheel_amount": arguments["amount"],
-            "event_wheel_delta": arguments["amount"] * 120,
+            "event_wheel_delta": arguments["amount"],
         }
     if action == "type_text":
         return {"kind": "type_text", "text": arguments["text"]}

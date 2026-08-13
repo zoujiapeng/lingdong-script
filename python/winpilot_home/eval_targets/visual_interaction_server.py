@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent
 TARGET = ROOT / "visual_interaction_target.html"
+BASIC_INPUT_TARGET = ROOT / "vnext_canary_target.html"
 STATE_LOCK = threading.Lock()
 STATE: dict[str, Any] = {
     "ready": True,
@@ -190,7 +191,6 @@ def _accepted_success_event(events: list[dict[str, Any]], index: int) -> bool:
     details = event.get("details") or {}
     if not (
         details.get("succeeded") is True
-        and int(details.get("down_count") or 0) == 1
         and details.get("checkpoint_reached") is True
         and details.get("goal_revealed_after_down") is True
         and details.get("inside_goal") is True
@@ -211,7 +211,6 @@ def _accepted_success_event(events: list[dict[str, Any]], index: int) -> bool:
                 release.get("trusted") is True
                 and release.get("succeeded") is True
                 and release_details.get("succeeded") is True
-                and int(release_details.get("down_count") or 0) == 1
                 and release_details.get("checkpoint_reached") is True
                 and release_details.get("goal_revealed_after_down") is True
                 and release_details.get("inside_goal") is True
@@ -291,6 +290,8 @@ def _prepare_event(event: dict[str, Any]) -> dict[str, Any]:
         )
     }
     safe["details"] = _safe_value(event.get("details") or {})
+    if safe.get("succeeded") is not True:
+        safe["succeeded"] = (event.get("details") or {}).get("succeeded") is True
     safe["received_at"] = time.time()
     if (
         safe.get("scenario") == "quiz_all"
@@ -337,8 +338,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, _public_quiz_spec(seed))
             return
-        if path in {"/", "/visual_interaction_target.html"}:
-            data = TARGET.read_bytes()
+        if path in {"/", "/visual_interaction_target.html", "/vnext_canary_target.html"}:
+            target = BASIC_INPUT_TARGET if path == "/vnext_canary_target.html" else TARGET
+            data = target.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))

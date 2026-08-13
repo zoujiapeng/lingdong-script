@@ -6,7 +6,7 @@ import {
   normalizeBaseUrl,
   resolveControlPlaneConnection,
   resolveControlPlaneUrl,
-  runtimeCompatibilityError,
+  runtimeCompatibilityNotice,
   websocketUrl,
 } from '../platform/client';
 import { edgeBranch, flowToArpGraph, RUNNABLE_FLOW_NODE_TYPES } from '../platform/flowToArpGraph';
@@ -61,7 +61,7 @@ function scriptFixture(): FlowScript {
 }
 
 describe('control plane client contracts', () => {
-  it('fails closed for missing, stale, or mismatched controller identity', () => {
+  it('reports controller identity differences as diagnostics', () => {
     const current = {
       api_version: '2',
       product: 'WinPilot',
@@ -77,10 +77,10 @@ describe('control plane client contracts', () => {
       contracts: {},
     };
 
-    expect(runtimeCompatibilityError(null)).toContain('尚未加载');
-    expect(runtimeCompatibilityError({ ...current, status: {} })).toContain('不兼容');
-    expect(runtimeCompatibilityError(current)).toBe('');
-    expect(runtimeCompatibilityError({
+    expect(runtimeCompatibilityNotice(null)).toBe('');
+    expect(runtimeCompatibilityNotice({ ...current, status: {} })).toBe('');
+    expect(runtimeCompatibilityNotice(current)).toBe('');
+    expect(runtimeCompatibilityNotice({
       ...current,
       status: {
         runtime: {
@@ -89,7 +89,7 @@ describe('control plane client contracts', () => {
         },
       },
     })).toContain('启动后发生了变化');
-    expect(runtimeCompatibilityError({
+    expect(runtimeCompatibilityNotice({
       ...current,
       status: {
         runtime: {

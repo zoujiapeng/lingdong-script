@@ -699,7 +699,6 @@ def test_product_goal_admission_owns_exact_graph_and_vnext_runtime(
         {"role": "user", "content": "Remember marker A"},
         {"role": "assistant", "content": "I will remember marker A"},
     )
-    monkeypatch.setattr(server, "runtime_source_drifted", lambda: False)
     monkeypatch.setattr(server.CONFIG, "snapshot", lambda: frozen)
     monkeypatch.setattr(
         server.AGENT_THREADS,
@@ -814,7 +813,6 @@ def test_product_goal_admission_fails_closed_without_legacy_fallback(
 ):
     from winpilot import server
 
-    monkeypatch.setattr(server, "runtime_source_drifted", lambda: False)
     monkeypatch.setattr(
         server.CONFIG,
         "snapshot",
@@ -846,7 +844,7 @@ def test_product_goal_admission_fails_closed_without_legacy_fallback(
     )
 
 
-def test_goal_desktop_lease_bind_requires_exact_ids_and_valid_target_once(
+def test_goal_desktop_lease_bind_requires_exact_ids_but_telemetry_is_advisory(
     client,
     monkeypatch,
 ):
@@ -886,25 +884,11 @@ def test_goal_desktop_lease_bind_requires_exact_ids_and_valid_target_once(
 
     invalid_context = _client_execution_context()
     invalid_context["target_window"]["usable"] = False
-    invalid_target = client.post(
-        f"/api/v2/goals/runs/{run_id}/desktop-lease",
-        json={
-            "lease_id": lease.lease_id,
-            "execution_context": invalid_context,
-        },
-    )
-    assert invalid_target.status_code == 409
-    assert invalid_target.json()["detail"] == (
-        "Electron target descriptor is not an exact usable target"
-    )
-    assert lease.snapshot()["status"] == "waiting"
-    assert execution.inputs == {}
-
     bound = client.post(
         f"/api/v2/goals/runs/{run_id}/desktop-lease",
         json={
             "lease_id": lease.lease_id,
-            "execution_context": context,
+            "execution_context": invalid_context,
         },
     )
     assert bound.status_code == 200
@@ -915,7 +899,7 @@ def test_goal_desktop_lease_bind_requires_exact_ids_and_valid_target_once(
     assert payload["lease"]["status"] == "delivered"
     assert payload["target"]["hwnd"] == 800
     assert execution.inputs["execution_context"] == {
-        **context,
+        **invalid_context,
         "task_id": execution.graph.id,
     }
 
@@ -1666,17 +1650,26 @@ def test_historical_arp_detail_and_artifact_survive_runtime_restart(client, tmp_
     assert downloaded.text == "persisted proof"
 
 
-def test_frontend_run_fails_closed_when_loaded_python_is_stale(client, monkeypatch):
-    from winpilot import server
+def test_source_drift_diagnostic_does_not_block_frontend_run(client, monkeypatch):
+    from winpilot import runtime_info, server
 
-    monkeypatch.setattr(server, "runtime_source_drifted", lambda: True)
+    monkeypatch.setattr(runtime_info, "runtime_source_drifted", lambda: True)
+    monkeypatch.setattr(
+        server,
+        "_start_arp_execution",
+        lambda graph, _inputs, **_kwargs: SimpleNamespace(
+            run_id="run-drift-advisory",
+            graph=graph,
+            to_dict=lambda: {"status": "queued"},
+        ),
+    )
     response = client.post(
         "/api/v2/arp/runs",
         json={"graph": _graph_payload(), "inputs": {}},
     )
 
-    assert response.status_code == 409
-    assert "Restart the runtime" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "run-drift-advisory"
 
 
 def test_common_mimo_pro_alias_is_canonicalized():
@@ -1760,7 +1753,6 @@ def test_flow_fragment_job_waits_for_interactive_resource_and_is_cancelable(
         stop_event.wait(2)
         return {"ok": False, "error": "canceled"}
 
-    monkeypatch.setattr(server, "runtime_source_drifted", lambda: False)
     monkeypatch.setattr(live_agent, "propose_live_flow_fragment", fake_proposal)
     blocker = server.RUNTIME_JOBS.submit(
         "test_interactive_blocker",

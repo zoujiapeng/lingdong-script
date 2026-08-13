@@ -12,6 +12,8 @@ from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
     AdmittedPhysicalDragBackend,
     AdmittedPhysicalHotkeyBackend,
+    AdmittedPhysicalMoveBackend,
+    AdmittedPhysicalSequenceBackend,
     AdmittedPhysicalScrollBackend,
     AdmittedPhysicalTypeTextBackend,
     CANONICAL_HOTKEY_KEYS,
@@ -20,8 +22,10 @@ from winpilot.action.raw_device import (
     FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
     HotkeyChord,
+    InputEventKind,
     MAX_TYPE_TEXT_CODEPOINTS,
     MouseButton,
+    PhysicalInputEvent,
     RawActionContext,
     RawActionReceipt,
     RawBackendResult,
@@ -78,8 +82,6 @@ def test_raw_device_requires_an_explicit_typed_backend() -> None:
     ("context", "args", "error"),
     [
         (object(), (1, 2, -1), "invalid_context"),
-        (RawActionContext(0, 0), (1, 2, -1), "invalid_context"),
-        (_context(target=41, current=42), (1, 2, -1), "target_mismatch"),
         (_context(), (True, 2, -1), "invalid_args"),
         (_context(), (1.5, 2, -1), "invalid_args"),
         (_context(), (1, "2", -1), "invalid_args"),
@@ -97,6 +99,20 @@ def test_scroll_rejects_invalid_typed_input_before_backend(
     assert receipt.input_completed is False
     assert receipt.error_kind == error
     assert calls == []
+
+
+def test_window_context_change_is_advisory_for_physical_input() -> None:
+    calls: list = []
+
+    receipt = _executor(calls).scroll(
+        _context(target=41, current=42),
+        1,
+        2,
+        -1,
+    )
+
+    assert receipt.outcome is MutationOutcome.APPLIED
+    assert calls == [(1, 2, -1, 41)]
 
 
 @pytest.mark.parametrize(
@@ -245,7 +261,7 @@ def test_scroll_property_preserves_signed_coordinates_and_single_call() -> None:
     assert calls == expected
 
 
-def test_guarded_scroll_uses_only_explicit_admitted_backend() -> None:
+def test_scroll_uses_only_explicit_admitted_backend_and_ignores_legacy_guard() -> None:
     normal_calls, admitted_calls = [], []
 
     def admitted(x, y, amount, *, hwnd=None, final_guard):
@@ -274,9 +290,8 @@ def test_guarded_scroll_uses_only_explicit_admitted_backend() -> None:
     assert unavailable.error_kind == "backend_unavailable"
 
     invalid_guard = raw.scroll(_context(), 10, 20, -3, final_guard=object())
-    assert invalid_guard.outcome is MutationOutcome.NOT_STARTED
-    assert invalid_guard.error_kind == "invalid_final_guard"
-    assert admitted_calls == [(10, 20, -3, 41)]
+    assert invalid_guard.outcome is MutationOutcome.APPLIED
+    assert admitted_calls == [(10, 20, -3, 41), (10, 20, -3, 41)]
 
 
 def test_click_uses_typed_single_mechanism_backend() -> None:
@@ -309,8 +324,6 @@ def test_click_uses_typed_single_mechanism_backend() -> None:
     [
         (object(), 1, 2, MouseButton.LEFT, ClickCount.SINGLE,
          ClickMechanism.PHYSICAL, "invalid_context"),
-        (_context(target=41, current=42), 1, 2, MouseButton.LEFT,
-         ClickCount.SINGLE, ClickMechanism.PHYSICAL, "target_mismatch"),
         (_context(), True, 2, MouseButton.LEFT, ClickCount.SINGLE,
          ClickMechanism.PHYSICAL, "invalid_args"),
         (_context(), 1, 2, "left", ClickCount.SINGLE,
@@ -391,7 +404,6 @@ def test_hotkey_chord_accepts_canonical_modifier_prefix_and_one_primary() -> Non
 @pytest.mark.parametrize("action,argument", _KEYBOARD_INPUTS)
 @pytest.mark.parametrize("context,error", [
     (object(), "invalid_context"),
-    (_context(target=41, current=42), "target_mismatch"),
 ])
 def test_keyboard_context_rejection_has_zero_backend_calls(
     action, argument, context, error,
@@ -410,10 +422,8 @@ def test_keyboard_context_rejection_has_zero_backend_calls(
     ("type_text", "", None),
     ("type_text", "x" * (MAX_TYPE_TEXT_CODEPOINTS + 1), None),
     ("type_text", True, None),
-    ("type_text", "a", object()),
     ("hotkey", ("ctrl", "s"), None),
     ("hotkey", "ctrl+s", None),
-    ("hotkey", HotkeyChord(("ctrl", "s")), object()),
 ])
 def test_keyboard_argument_rejection_has_zero_backend_calls(
     action, argument, guard,
@@ -424,6 +434,21 @@ def test_keyboard_argument_rejection_has_zero_backend_calls(
     assert (receipt.outcome, receipt.error_kind, calls) == (
         MutationOutcome.NOT_STARTED, "invalid_args", [],
     )
+
+
+@pytest.mark.parametrize("action,argument", _KEYBOARD_INPUTS)
+def test_keyboard_legacy_guard_is_advisory(action, argument) -> None:
+    calls: list = []
+
+    def backend(value, *, hwnd, final_guard):
+        calls.append((value, hwnd, final_guard()))
+        return RawBackendResult(True, {})
+
+    receipt = getattr(_keyboard_raw(action, backend), action)(
+        _context(), argument, final_guard=object(),
+    )
+    assert receipt.outcome is MutationOutcome.APPLIED
+    assert calls == [(argument, 41, FinalKeyboardGuardDecision.ADMITTED)]
 
 
 @pytest.mark.parametrize("action,argument", _KEYBOARD_INPUTS)
@@ -776,13 +801,15 @@ def _held_drag_raw(calls, *, fail_segment: bool = False):
         scroll=side_backend,
         click=side_backend,
         admitted_physical_drag=AdmittedPhysicalDragBackend(admitted),
+        admitted_physical_move=AdmittedPhysicalMoveBackend(side_backend),
+        admitted_physical_sequence=AdmittedPhysicalSequenceBackend(side_backend),
         admitted_physical_type_text=AdmittedPhysicalTypeTextBackend(side_backend),
         admitted_physical_hotkey=AdmittedPhysicalHotkeyBackend(side_backend),
     ))
     return raw, side_calls
 
 
-def test_held_drag_token_owns_all_raw_input_until_finish() -> None:
+def test_held_drag_state_keeps_compatible_mouse_keyboard_input_available() -> None:
     calls = []
     raw, side_calls = _held_drag_raw(calls)
     token = "held-drag-contract-1"
@@ -805,82 +832,66 @@ def test_held_drag_token_owns_all_raw_input_until_finish() -> None:
                 or RawBackendResult(True, {})
             ),
         ))
-        blocked = [
+        mixed = [
             other.scroll(_context(), 1, 2, -1),
             raw.click(
-                _context(), 1, 2, MouseButton.LEFT, ClickCount.SINGLE,
+                _context(), 1, 2, MouseButton.RIGHT, ClickCount.SINGLE,
                 ClickMechanism.PHYSICAL,
             ),
-            raw.type_text(
-                _context(), "x",
-                final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+            raw.move_mouse(_context(), 22, 32, duration_ms=15),
+            raw.input_sequence(
+                _context(),
+                (
+                    PhysicalInputEvent(InputEventKind.KEY_DOWN, key="shift"),
+                    PhysicalInputEvent(InputEventKind.KEY_UP, key="shift"),
+                ),
             ),
-            raw.hotkey(
-                _context(), HotkeyChord(("ctrl", "s")),
-                final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
-            ),
-            raw.drag(_context(), 1, 2, 3, 4, final_guard=guard),
         ]
-        assert all(
-            item.outcome is MutationOutcome.NOT_STARTED
-            and item.error_kind == "held_drag_active"
-            for item in blocked
-        )
-        assert side_calls == []
-        assert other_calls == []
+        assert all(item.outcome is MutationOutcome.APPLIED for item in mixed)
+        assert len(side_calls) == 3
+        assert len(other_calls) == 1
 
-        wrong_token = raw.drag(
-            _context(), 20, 30, 30, 40,
+        typed = raw.type_text(
+            _context(), "x",
+            final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+        )
+        chord = raw.hotkey(
+            _context(), HotkeyChord(("ctrl", "s")),
+            final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+        )
+        assert typed.outcome is MutationOutcome.APPLIED
+        assert chord.outcome is MutationOutcome.APPLIED
+        assert len(side_calls) == 5
+
+        # Token, remembered start point and hwnd are cleanup hints; serialized
+        # physical button ownership is the continuation authority.
+        continued = raw.drag(
+            _context(target=99, current=100), 21, 31, 30, 40,
             final_guard=guard,
             pointer_already_held=True,
             keep_holding=True,
             hold_token="not-the-owner",
         )
-        wrong_start = raw.drag(
-            _context(), 21, 30, 30, 40,
-            final_guard=guard,
-            pointer_already_held=True,
-            keep_holding=True,
-            hold_token=token,
-        )
-        assert (wrong_token.outcome, wrong_token.error_kind) == (
-            MutationOutcome.NOT_STARTED,
-            "held_drag_token_mismatch",
-        )
-        assert (wrong_start.outcome, wrong_start.error_kind) == (
-            MutationOutcome.NOT_STARTED,
-            "held_drag_start_mismatch",
-        )
-        assert len(calls) == 1
-
-        continued = raw.drag(
-            _context(), 20, 30, 30, 40,
-            points=((25, 31),),
-            final_guard=guard,
-            pointer_already_held=True,
-            keep_holding=True,
-            hold_token=token,
-        )
         finished = raw.drag(
             _context(), 30, 40, 30, 40,
             final_guard=guard,
             pointer_already_held=True,
-            hold_token=token,
+            hold_token="another-advisory-token",
         )
         assert continued.outcome is MutationOutcome.APPLIED
         assert finished.outcome is MutationOutcome.APPLIED
         assert [item[0] for item in calls] == ["begin", "continue", "finish"]
-        assert calls[1][4] == ((25, 31),)
+        assert calls[1][1:4] == ((21, 31), (30, 40), 99)
 
         assert other.scroll(_context(), 1, 2, -1).outcome is (
             MutationOutcome.APPLIED
         )
-        assert len(other_calls) == 1
+        assert len(other_calls) == 2
     finally:
         raw.release_held_drag(token)
 
 
-def test_failed_held_drag_keeps_owner_until_idempotent_cleanup() -> None:
+def test_failed_held_drag_reports_uncertainty_without_a_global_input_gate() -> None:
     calls = []
     raw, side_calls = _held_drag_raw(calls, fail_segment=True)
     token = "held-drag-contract-uncertain"
@@ -895,17 +906,10 @@ def test_failed_held_drag_keeps_owner_until_idempotent_cleanup() -> None:
         MutationOutcome.OUTCOME_UNKNOWN,
         "backend_exception",
     )
-    assert raw.scroll(_context(), 1, 2, -1).error_kind == "held_drag_active"
-    assert side_calls == []
+    assert raw.scroll(_context(), 1, 2, -1).outcome is MutationOutcome.APPLIED
+    assert len(side_calls) == 1
 
-    mismatched = raw.release_held_drag("different-owner")
-    assert (mismatched.outcome, mismatched.error_kind) == (
-        MutationOutcome.NOT_STARTED,
-        "held_drag_token_mismatch",
-    )
-    assert [item[0] for item in calls] == ["begin"]
-
-    cleanup = raw.release_held_drag(token)
+    cleanup = raw.release_held_drag("different-advisory-token")
     second_cleanup = raw.release_held_drag(token)
     assert cleanup.outcome is MutationOutcome.APPLIED
     assert cleanup.backend_result.facts["held_after"] is False
@@ -913,6 +917,35 @@ def test_failed_held_drag_keeps_owner_until_idempotent_cleanup() -> None:
     assert second_cleanup.backend_result.facts["cleanup_noop"] is True
     assert [item[0] for item in calls] == ["begin", "cleanup"]
     assert raw.scroll(_context(), 1, 2, -1).outcome is MutationOutcome.APPLIED
+
+
+def test_input_sequence_can_explicitly_release_a_cross_turn_drag() -> None:
+    calls = []
+    raw, _side_calls = _held_drag_raw(calls)
+    token = "held-drag-sequence-release"
+
+    try:
+        begin = raw.drag(
+            _context(), 10, 20, 20, 30,
+            keep_holding=True,
+            hold_token=token,
+        )
+        released = raw.input_sequence(
+            _context(),
+            (PhysicalInputEvent(
+                InputEventKind.MOUSE_UP,
+                button=MouseButton.LEFT,
+            ),),
+        )
+        cleanup = raw.release_held_drag(token)
+
+        assert begin.outcome is MutationOutcome.APPLIED
+        assert released.outcome is MutationOutcome.APPLIED
+        assert cleanup.outcome is MutationOutcome.APPLIED
+        assert cleanup.backend_result.facts["cleanup_noop"] is True
+        assert [item[0] for item in calls] == ["begin"]
+    finally:
+        raw.release_held_drag(token)
 
 
 def _physical_executor_mocks(monkeypatch, events):
@@ -923,23 +956,60 @@ def _physical_executor_mocks(monkeypatch, events):
     monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: events.append(("move", x, y)))
     monkeypatch.setattr(executor, "_cursor_pos", lambda: (10, 20))
     monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
-    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: events.append(("input", inputs[0])))
+    monkeypatch.setattr(
+        executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_send_inputs",
+        lambda inputs: events.append(("input", tuple(inputs))),
+    )
     monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
     return executor
+
+
+def test_absolute_mouse_input_maps_real_virtual_desktop_pixels(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    metrics = {
+        76: -1920,
+        77: -1080,
+        78: 3840,
+        79: 2160,
+    }
+    monkeypatch.setattr(
+        executor.user32,
+        "GetSystemMetrics",
+        lambda index: metrics[index],
+    )
+
+    top_left = executor._absolute_mouse_input(-1920, -1080).union.mi
+    bottom_right = executor._absolute_mouse_input(1919, 1079).union.mi
+    center = executor._absolute_mouse_input(0, 0).union.mi
+
+    assert (top_left.dx, top_left.dy) == (0, 0)
+    assert (bottom_right.dx, bottom_right.dy) == (65535, 65535)
+    assert center.dx == int(1920 * 65535 / 3839)
+    assert center.dy == int(1080 * 65535 / 2159)
+    required_flags = (
+        executor.win32con.MOUSEEVENTF_MOVE
+        | executor.win32con.MOUSEEVENTF_ABSOLUTE
+        | 0x2000
+        | 0x4000
+    )
+    assert top_left.dwFlags == required_flags
+    assert bottom_right.dwFlags == required_flags
 
 
 def test_admitted_drag_executes_one_held_polyline_in_order(monkeypatch) -> None:
     events = []
     executor = _physical_executor_mocks(monkeypatch, events)
     captured = []
-    monkeypatch.setattr(
-        executor,
-        "_restore_cursor_after_agent_input",
-        lambda saved, expected, hwnd: (
-            captured.append(("restore", saved, expected, hwnd)) or True
-        ),
-    )
 
     def stroke(path, duration_s, *, hwnd, before_press, progress):
         assert before_press() is True
@@ -972,8 +1042,121 @@ def test_admitted_drag_executes_one_held_polyline_in_order(monkeypatch) -> None:
             0.4,
             41,
         ),
-        ("restore", (10, 20), (50, 60), 41),
     ]
+    assert result.facts["cursor_restored"] is False
+
+
+def test_modifier_drag_holds_keys_before_mouse_and_releases_mouse_first(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    sent: list[tuple] = []
+    with executor._held_mouse_lock:
+        executor._held_mouse_buttons.discard("left")
+        executor._held_mouse_key_vks.pop("left", None)
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(
+        executor,
+        "_hardware_key_input",
+        lambda vk, key_up=False: ("key_up" if key_up else "key_down", vk),
+    )
+    monkeypatch.setattr(executor, "_vk_of", {"shift": 0x10, "w": 0x57}.__getitem__)
+    monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
+    monkeypatch.setattr(
+        executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
+    )
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.append(tuple(inputs)))
+    monkeypatch.setattr(
+        executor,
+        "_move_path_while_pressed",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    result = executor.execute_admitted_physical_drag(
+        10,
+        20,
+        30,
+        40,
+        held_keys=("shift", "w"),
+    )
+
+    assert result.input_completed is True
+    assert sent == [
+        (
+            ("key_down", 0x10),
+            ("key_down", 0x57),
+            ("absolute", 10, 20),
+            executor.win32con.MOUSEEVENTF_LEFTDOWN,
+        ),
+        (executor.win32con.MOUSEEVENTF_LEFTUP,),
+        (("key_up", 0x57),),
+        (("key_up", 0x10),),
+    ]
+    assert executor.agent_holds_mouse_button("left") is False
+    with executor._held_mouse_lock:
+        assert "left" not in executor._held_mouse_key_vks
+
+
+def test_held_modifier_drag_keeps_keys_across_turns_and_cleanup_releases_them(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    sent: list[tuple] = []
+    with executor._held_mouse_lock:
+        executor._held_mouse_buttons.discard("left")
+        executor._held_mouse_key_vks.pop("left", None)
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_cursor_pos", lambda: (20, 30))
+    monkeypatch.setattr(
+        executor,
+        "_hardware_key_input",
+        lambda vk, key_up=False: ("key_up" if key_up else "key_down", vk),
+    )
+    monkeypatch.setattr(executor, "_vk_of", {"shift": 0x10}.__getitem__)
+    monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
+    monkeypatch.setattr(
+        executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
+    )
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.append(tuple(inputs)))
+    monkeypatch.setattr(
+        executor,
+        "_move_path_while_pressed",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    begin = executor.execute_admitted_physical_drag(
+        10, 20, 20, 30,
+        held_keys=("shift",),
+        keep_holding=True,
+        hold_token="held-modifier",
+    )
+    finish = executor.execute_admitted_physical_drag(
+        20, 30, 30, 40,
+        held_keys=("shift",),
+        pointer_already_held=True,
+        hold_token="held-modifier",
+    )
+
+    assert begin.input_completed is True
+    assert finish.input_completed is True
+    assert sent[0] == (
+        ("key_down", 0x10),
+        ("absolute", 10, 20),
+        executor.win32con.MOUSEEVENTF_LEFTDOWN,
+    )
+    assert sent[-2:] == [
+        (executor.win32con.MOUSEEVENTF_LEFTUP,),
+        (("key_up", 0x10),),
+    ]
+    assert executor.agent_holds_mouse_button("left") is False
 
 
 def test_admitted_drag_begin_continue_finish_preserve_one_physical_hold(
@@ -993,8 +1176,13 @@ def test_admitted_drag_begin_continue_finish_preserve_one_physical_hold(
     monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
     monkeypatch.setattr(
         executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
+    )
+    monkeypatch.setattr(
+        executor,
         "_send_inputs",
-        lambda inputs: events.append(("input", inputs[0])),
+        lambda inputs: events.append(("input", tuple(inputs))),
     )
     monkeypatch.setattr(
         executor,
@@ -1030,6 +1218,7 @@ def test_admitted_drag_begin_continue_finish_preserve_one_physical_hold(
             keep_holding=True,
             hold_token="physical-held-contract",
         )
+        cursor["point"] = (24, 34)
         continued = executor.execute_admitted_physical_drag(
             20, 30, 30, 40,
             hwnd=41,
@@ -1056,17 +1245,22 @@ def test_admitted_drag_begin_continue_finish_preserve_one_physical_hold(
         result.facts["segment_phase"]
         for result in (begin, continued, finished)
     ] == ["begin", "continue", "finish"]
-    assert guards == [(10, 20), (20, 30), (30, 40)]
+    assert guards == []
     assert [
         event for event in events if event[0] == "input"
     ] == [
-        ("input", executor.win32con.MOUSEEVENTF_LEFTDOWN),
-        ("input", executor.win32con.MOUSEEVENTF_LEFTUP),
+        (
+            "input",
+            (("absolute", 10, 20), executor.win32con.MOUSEEVENTF_LEFTDOWN),
+        ),
+        ("input", (executor.win32con.MOUSEEVENTF_LEFTUP,)),
     ]
-    assert [event for event in events if event[0] == "preposition"] == [
-        ("preposition", 10, 20),
-    ]
+    assert [event for event in events if event[0] == "preposition"] == []
     assert [event[0] for event in events].count("stroke") == 3
+    assert [event[1] for event in events if event[0] == "stroke"][1] == (
+        (24, 34),
+        (30, 40),
+    )
     assert [event[1] for event in events if event[0] == "stroke"][-1] == (
         (30, 40),
     )
@@ -1083,7 +1277,12 @@ def test_failed_held_segment_releases_without_cursor_restore(monkeypatch) -> Non
     monkeypatch.setattr(executor, "_cursor_pos", lambda: (10, 20))
     monkeypatch.setattr(executor, "_abs_mouse_move", lambda _x, _y: None)
     monkeypatch.setattr(executor, "_mouse_input", lambda flags, **_kwargs: flags)
-    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.append(inputs[0]))
+    monkeypatch.setattr(
+        executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
+    )
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.append(tuple(inputs)))
     monkeypatch.setattr(
         executor,
         "_move_path_while_pressed",
@@ -1106,8 +1305,8 @@ def test_failed_held_segment_releases_without_cursor_restore(monkeypatch) -> Non
         )
         assert result.input_completed is None
         assert sent == [
-            executor.win32con.MOUSEEVENTF_LEFTDOWN,
-            executor.win32con.MOUSEEVENTF_LEFTUP,
+            (("absolute", 10, 20), executor.win32con.MOUSEEVENTF_LEFTDOWN),
+            (executor.win32con.MOUSEEVENTF_LEFTUP,),
         ]
         assert result.facts["release_cleanup_completed"] is True
         assert executor.agent_holds_mouse_button("left") is False
@@ -1116,7 +1315,9 @@ def test_failed_held_segment_releases_without_cursor_restore(monkeypatch) -> Non
             executor._held_mouse_buttons.discard("left")
 
 
-def test_admitted_backend_guards_immediately_before_down_without_queue(monkeypatch):
+def test_admitted_backend_places_and_presses_in_one_batch_without_window_guard(
+    monkeypatch,
+):
     events = []
     executor = _physical_executor_mocks(monkeypatch, events)
     from winpilot.action import desktop_queue
@@ -1138,10 +1339,12 @@ def test_admitted_backend_guards_immediately_before_down_without_queue(monkeypat
     )
 
     assert result.input_completed is True
-    assert events[-3:] == [
-        ("guard",),
-        ("input", executor.win32con.MOUSEEVENTF_LEFTDOWN),
-        ("input", executor.win32con.MOUSEEVENTF_LEFTUP),
+    assert events[-2:] == [
+        (
+            "input",
+            (("absolute", 10, 20), executor.win32con.MOUSEEVENTF_LEFTDOWN),
+        ),
+        ("input", (executor.win32con.MOUSEEVENTF_LEFTUP,)),
     ]
     assert executor.ADMITTED_PHYSICAL_CLICK_BACKEND.execute is (
         executor.execute_admitted_physical_click
@@ -1153,7 +1356,7 @@ def test_admitted_backend_guards_immediately_before_down_without_queue(monkeypat
 
 
 @pytest.mark.parametrize("amount", (-12, -1, 1, 12))
-def test_admitted_scroll_is_single_mechanism_unqueued_and_guarded(
+def test_admitted_scroll_is_single_mechanism_unqueued_and_unguarded(
     monkeypatch, amount,
 ):
     from winpilot.action import desktop_queue
@@ -1165,6 +1368,11 @@ def test_admitted_scroll_is_single_mechanism_unqueued_and_guarded(
         executor,
         "_mouse_input",
         lambda flags, **kwargs: (flags, kwargs.get("data")),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
     )
     monkeypatch.setattr(
         executor,
@@ -1194,10 +1402,17 @@ def test_admitted_scroll_is_single_mechanism_unqueued_and_guarded(
     )
 
     assert result.input_completed is True
-    assert [event[0] for event in events] == ["move", "guard", "input", "restore"]
-    assert events[2] == (
+    assert [event[0] for event in events] == ["input"]
+    assert result.facts["cursor_restored"] is False
+    assert events[0] == (
         "input",
-        (executor.win32con.MOUSEEVENTF_WHEEL, (amount * 120) & 0xFFFFFFFF),
+        (
+            ("absolute", 10, 20),
+            (
+                executor.win32con.MOUSEEVENTF_WHEEL,
+                amount & 0xFFFFFFFF,
+            ),
+        ),
     )
     assert outer.status()["submitted"] == 1
     assert executor.ADMITTED_PHYSICAL_SCROLL_BACKEND.execute is (
@@ -1209,7 +1424,7 @@ def test_admitted_scroll_is_single_mechanism_unqueued_and_guarded(
         AdmittedPhysicalScrollBackend(executor.execute_scroll_input)
 
 
-def test_admitted_scroll_guard_rejects_before_wheel(monkeypatch):
+def test_admitted_scroll_ignores_window_guard_verdict(monkeypatch):
     events = []
     executor = _physical_executor_mocks(monkeypatch, events)
     monkeypatch.setattr(
@@ -1223,10 +1438,9 @@ def test_admitted_scroll_guard_rejects_before_wheel(monkeypatch):
         final_guard=lambda _x, _y: FinalPointerGuardDecision.HIT_TEST_CHANGED,
     )
 
-    assert result.input_completed is False
-    assert result.facts["via"] == "final_target_guard"
-    assert "hit_test_changed" in result.facts["error"]
-    assert not [event for event in events if event[0] == "input"]
+    assert result.input_completed is True
+    assert result.facts["via"] == "physical_sendinput"
+    assert len([event for event in events if event[0] == "input"]) == 1
 
 
 @pytest.mark.parametrize("amount", (0, True, 1.5, "-3"))
@@ -1271,7 +1485,7 @@ def test_admitted_scroll_send_exception_is_unknown_without_fallback(monkeypatch)
     assert receipt.input_completed is None
     assert receipt.backend_result.facts["error"] == "scroll wheel outcome unknown"
     assert [event for event in events if event[0] == "input_attempt"] == [
-        ("input_attempt", 1),
+        ("input_attempt", 2),
     ]
 
 
@@ -1300,7 +1514,7 @@ def test_admitted_scroll_telemetry_failure_cannot_change_completion(monkeypatch)
     assert len([event for event in events if event[0] == "input"]) == 1
 
 
-def test_final_guard_failure_is_certain_before_first_down_and_unknown_after_partial(
+def test_window_guard_cannot_interrupt_clicks_before_or_during_input(
     monkeypatch,
 ):
     events = []
@@ -1316,25 +1530,32 @@ def test_final_guard_failure_is_certain_before_first_down_and_unknown_after_part
         final_guard=lambda _x, _y: next(decisions),
     )
 
-    assert result.input_completed is None
-    assert result.facts["completed_clicks"] == 1
-    assert result.facts["via"] == "final_target_guard"
+    assert result.input_completed is True
+    assert result.facts["completed_clicks"] == 2
     assert [event for event in events if event[0] == "input"] == [
-        ("input", executor.win32con.MOUSEEVENTF_LEFTDOWN),
-        ("input", executor.win32con.MOUSEEVENTF_LEFTUP),
+        (
+            "input",
+            (("absolute", 10, 20), executor.win32con.MOUSEEVENTF_LEFTDOWN),
+        ),
+        ("input", (executor.win32con.MOUSEEVENTF_LEFTUP,)),
+        (
+            "input",
+            (("absolute", 10, 20), executor.win32con.MOUSEEVENTF_LEFTDOWN),
+        ),
+        ("input", (executor.win32con.MOUSEEVENTF_LEFTUP,)),
     ]
 
     events.clear()
-    rejected = executor.ADMITTED_PHYSICAL_CLICK_BACKEND(
+    admitted = executor.ADMITTED_PHYSICAL_CLICK_BACKEND(
         10, 20, button=MouseButton.LEFT, count=ClickCount.SINGLE,
         mechanism=ClickMechanism.PHYSICAL, hwnd=41,
         final_guard=lambda _x, _y: FinalPointerGuardDecision.TARGET_ROOT_CHANGED,
     )
-    assert rejected.input_completed is False
-    assert not [event for event in events if event[0] == "input"]
+    assert admitted.input_completed is True
+    assert len([event for event in events if event[0] == "input"]) == 2
 
 
-def test_admitted_backend_rejects_pointer_motion_during_final_guard(monkeypatch):
+def test_admitted_backend_does_not_resample_pointer_after_guard(monkeypatch):
     events = []
     executor = _physical_executor_mocks(monkeypatch, events)
     positions = iter(((10, 20), (11, 20)))
@@ -1346,10 +1567,9 @@ def test_admitted_backend_rejects_pointer_motion_during_final_guard(monkeypatch)
         final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
     )
 
-    assert result.input_completed is False
-    assert result.facts["via"] == "final_target_guard"
-    assert "pointer_position_changed" in result.facts["error"]
-    assert not [event for event in events if event[0] == "input"]
+    assert result.input_completed is True
+    assert not hasattr(result.facts, "error")
+    assert [event for event in events if event[0] == "input"]
 
 
 def _keyboard_executor_mocks(monkeypatch):
@@ -1373,6 +1593,17 @@ def _keyboard_executor_mocks(monkeypatch):
         "_key_input",
         lambda **kwargs: ("key", tuple(sorted(kwargs.items()))),
     )
+    scan_codes = {
+        0x11: 0x1D,
+        0x10: 0x2A,
+        0x5B: 0x5B,
+        0x53: 0x1F,
+    }
+    monkeypatch.setattr(
+        executor.user32,
+        "MapVirtualKeyW",
+        lambda vk, _mode: scan_codes.get(vk, 0),
+    )
     monkeypatch.setattr(
         executor,
         "_send_inputs",
@@ -1391,7 +1622,7 @@ def _keyboard_executor_mocks(monkeypatch):
     return executor, sent
 
 
-def test_admitted_type_text_guards_each_character_and_never_queues(monkeypatch):
+def test_admitted_type_text_never_queues_or_calls_window_guard(monkeypatch):
     from winpilot.action import desktop_queue
 
     executor, sent = _keyboard_executor_mocks(monkeypatch)
@@ -1410,9 +1641,7 @@ def test_admitted_type_text_guards_each_character_and_never_queues(monkeypatch):
     )
 
     assert result.input_completed is True
-    assert guards[0] == 0
-    assert guards.count(1) >= 1
-    assert guards[-1] == 2
+    assert guards == []
     assert len(sent) == 2
     assert "ab" not in json.dumps(dict(result.facts), sort_keys=True)
     assert executor.ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND.execute is (
@@ -1451,6 +1680,41 @@ def test_admitted_ascii_text_uses_distinct_vk_transitions(
     assert len(sent) == len("CANARY-DELTA-43")
     assert executor._should_strict_type_via_vk("CANARY-DELTA-43") is True
     assert executor._should_strict_type_via_vk("中文") is False
+
+
+def test_ascii_oem_punctuation_uses_active_layout_mapping_and_scan_code(
+    monkeypatch,
+) -> None:
+    import winpilot.action.executor as ex
+
+    english = 0x04090409
+    mapped: list[tuple[str, int]] = []
+    hardware: list[tuple[int, bool]] = []
+    monkeypatch.setattr(
+        ex.user32,
+        "LoadKeyboardLayoutW",
+        lambda name, flags: english if (name, flags) == ("00000409", 0) else 0,
+    )
+
+    def fake_scan(char, layout):
+        mapped.append((char.value, layout))
+        return 0xBD  # VK_OEM_MINUS, no modifier
+
+    monkeypatch.setattr(ex.user32, "VkKeyScanExW", fake_scan)
+    monkeypatch.setattr(
+        ex,
+        "_hardware_key_input",
+        lambda vk, key_up=False: (
+            hardware.append((vk, key_up)) or ("scan", vk, key_up)
+        ),
+    )
+
+    assert ex._vk_character_inputs("-") == (
+        [("scan", 0xBD, False)],
+        [("scan", 0xBD, True)],
+    )
+    assert mapped == [("-", english)]
+    assert hardware == [(0xBD, False), (0xBD, True)]
 
 
 def test_ascii_text_switches_english_layout_away_from_ime(
@@ -1513,8 +1777,8 @@ def test_ascii_text_skips_layout_switch_on_english_layout(
 
     # English layout with no open IME: nothing to do, VK is safe.
     assert ex._english_layout_switch(41) == (None, True)
-    # Unavailable target: VK cannot be made safe, caller falls back to UNICODE.
-    assert ex._english_layout_switch(0) == (None, False)
+    # A bound-window hint is optional: text follows the actual focused window.
+    assert ex._english_layout_switch(0) == (None, True)
 
 
 def test_english_layout_with_open_ime_still_closes_ime_for_vk(
@@ -1613,7 +1877,7 @@ def test_physical_type_text_restores_layout_switch_tuple_after_input(
     ("ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND", "secret"),
     ("ADMITTED_PHYSICAL_HOTKEY_BACKEND", HotkeyChord(("ctrl", "s"))),
 ])
-def test_admitted_keyboard_guard_rejects_before_any_input(
+def test_admitted_keyboard_ignores_window_guard_verdict(
     monkeypatch, backend_name, argument,
 ) -> None:
     executor, sent = _keyboard_executor_mocks(monkeypatch)
@@ -1621,12 +1885,12 @@ def test_admitted_keyboard_guard_rejects_before_any_input(
         argument, hwnd=41,
         final_guard=lambda: FinalKeyboardGuardDecision.FOREGROUND_CHANGED,
     )
-    assert result.input_completed is False
-    assert sent == []
+    assert result.input_completed is True
+    assert sent
     assert "secret" not in json.dumps(dict(result.facts), sort_keys=True)
 
 
-def test_admitted_type_text_guard_rejection_after_partial_input_is_unknown(
+def test_admitted_type_text_window_guard_cannot_interrupt_input(
     monkeypatch,
 ) -> None:
     executor, sent = _keyboard_executor_mocks(monkeypatch)
@@ -1639,9 +1903,9 @@ def test_admitted_type_text_guard_rejection_after_partial_input_is_unknown(
         "ab", hwnd=41, final_guard=lambda: next(decisions),
     )
 
-    assert result.input_completed is None
-    assert len(sent) == 1
-    assert result.facts["completed_codepoints"] == 1
+    assert result.input_completed is True
+    assert len(sent) == 2
+    assert result.facts["completed_codepoints"] == 2
 
 
 @pytest.mark.parametrize("fail_at", [1, 2])
@@ -1687,13 +1951,16 @@ def test_admitted_hotkey_sends_one_chord_and_always_releases_in_reverse(
     )
 
     assert result.input_completed is True
-    assert len(guard_calls) == 3  # before down, after down, after cleanup
+    assert guard_calls == []
     assert len(sent) == 4
     downs, *up_batches = sent
     ups = tuple(batch[0] for batch in up_batches)
-    assert [dict(token[1])["vk"] for token in downs] == [0x11, 0x10, 0x53]
-    assert [dict(token[1])["vk"] for token in ups] == [0x53, 0x10, 0x11]
-    assert all(dict(token[1]).get("flags", 0) == 0 for token in downs)
+    assert [dict(token[1])["scan"] for token in downs] == [0x1D, 0x2A, 0x1F]
+    assert [dict(token[1])["scan"] for token in ups] == [0x1F, 0x2A, 0x1D]
+    assert all(
+        dict(token[1]).get("flags", 0) & executor._KEYEVENTF_SCANCODE
+        for token in downs
+    )
     assert all(
         dict(token[1]).get("flags", 0) & executor._KEYEVENTF_KEYUP
         for token in ups
@@ -1721,9 +1988,7 @@ def test_admitted_hotkey_foreground_change_after_complete_chord_is_applied(
 
     assert result.input_completed is True
     assert len(sent) == 2
-    assert result.facts["guard_decision"] == (
-        FinalKeyboardGuardDecision.FOREGROUND_CHANGED.value
-    )
+    assert "guard_decision" not in result.facts
     assert result.facts["release_cleanup_completed"] is True
 
 
@@ -1744,9 +2009,20 @@ def test_admitted_hotkey_send_failure_is_unknown_and_continues_reverse_cleanup(
         final_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
     )
 
-    assert result.input_completed is None
-    assert len(sent) == 3
-    assert [dict(batch[0][1])["vk"] for batch in sent[1:]] == [0x53, 0x11]
+    assert len(sent) >= 3
+    release_scans = [
+        dict(batch[0][1])["scan"]
+        for batch in sent[1:]
+    ]
+    assert release_scans[0] == 0x1F
+    assert release_scans[-1] == 0x1D
+    assert set(release_scans) == {0x1F, 0x1D}
+    if fail_at == 1:
+        assert result.input_completed is None
+    else:
+        # A failed UP is retried idempotently; once it succeeds, the complete
+        # chord is mechanically known to have been pressed and released.
+        assert result.input_completed is True
 
 
 def test_legacy_keyboard_public_entries_delegate_to_shared_unqueued_owners(
@@ -1833,7 +2109,7 @@ def test_legacy_keyboard_bus_action_payloads_remain_byte_for_byte_compatible(
     finally:
         executor.BUS.remove_sink(events.append)
 
-    assert focused == [41]
+    assert focused == []
     action_payloads = [
         {key: value for key, value in event.items() if key not in {"type", "ts"}}
         for event in events
@@ -1900,6 +2176,11 @@ def test_physical_click_partial_failure_is_unknown_and_releases(
 
     monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: None)
     monkeypatch.setattr(executor, "_mouse_input", lambda flag: flag)
+    monkeypatch.setattr(
+        executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
+    )
     monkeypatch.setattr(executor, "_send_inputs", send_inputs)
     monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
@@ -1908,11 +2189,19 @@ def test_physical_click_partial_failure_is_unknown_and_releases(
         10, 20, MouseButton.LEFT, ClickCount.DOUBLE, None,
     )
 
-    assert result.input_completed is None
-    assert result.facts["completed_clicks"] == completed_clicks
-    assert result.facts["release_cleanup_attempted"] is True
-    assert result.facts["release_cleanup_completed"] is True
-    assert len(calls) == fail_at + 1
+    # UP is retried in-place.  A transient first-UP failure is recovered and
+    # the double click continues; DOWN failures remain outcome-unknown because
+    # Windows may have accepted the input before reporting the error.
+    if fail_at == 2:
+        assert result.input_completed is True
+        assert result.facts["completed_clicks"] == 2
+        assert len(calls) == 5
+    else:
+        assert result.input_completed is None
+        assert result.facts["completed_clicks"] == completed_clicks
+        assert result.facts["release_cleanup_attempted"] is True
+        assert result.facts["release_cleanup_completed"] is True
+        assert len(calls) == fail_at + 1
 
 
 def test_physical_click_uses_final_root_ownership_not_focus_helper_result(
@@ -1925,6 +2214,11 @@ def test_physical_click_uses_final_root_ownership_not_focus_helper_result(
     monkeypatch.setattr(executor, "_target_window_still_foreground", lambda hwnd: True)
     monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: None)
     monkeypatch.setattr(executor, "_mouse_input", lambda flag: flag)
+    monkeypatch.setattr(
+        executor,
+        "_absolute_mouse_input",
+        lambda x, y: ("absolute", x, y),
+    )
     monkeypatch.setattr(executor, "_send_inputs", sent.append)
     monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
@@ -1938,7 +2232,9 @@ def test_physical_click_uses_final_root_ownership_not_focus_helper_result(
     assert len(sent) == 2
 
 
-def test_physical_click_rechecks_target_after_cursor_move(monkeypatch) -> None:
+def test_physical_click_ignores_window_metadata_change_after_cursor_move(
+    monkeypatch,
+) -> None:
     from winpilot.action import executor
 
     ownership = iter((True, False))
@@ -1956,9 +2252,9 @@ def test_physical_click_rechecks_target_after_cursor_move(monkeypatch) -> None:
         enforce_foreground=True,
     )
 
-    assert result.input_completed is False
-    assert result.facts["completed_clicks"] == 0
-    assert sent == []
+    assert result.input_completed is True
+    assert result.facts["completed_clicks"] == 1
+    assert len(sent) == 2
 
 
 def test_strict_background_click_never_switches_mechanism(monkeypatch) -> None:
@@ -2052,3 +2348,198 @@ def test_legacy_public_scroll_delegates_typed_single_queue_owner(monkeypatch) ->
 
     assert executor.scroll(1, 2, -3, hwnd=41) == {"ok": True, "via": "typed"}
     assert calls == [(1, 2, -3, 41)]
+
+
+def test_admitted_move_uses_real_absolute_path_and_leaves_cursor_at_endpoint(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    cursor = {"point": (10, 20)}
+    emitted: list[tuple[int, int]] = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_cursor_pos", lambda: cursor["point"])
+    monkeypatch.setattr(executor, "_target_window_still_foreground", lambda _hwnd: True)
+    monkeypatch.setattr(
+        executor,
+        "_emit_move",
+        lambda x, y: (
+            emitted.append((x, y)),
+            cursor.__setitem__("point", (x, y)),
+        ),
+    )
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    result = executor.execute_admitted_physical_move(
+        42,
+        52,
+        duration_ms=80,
+        final_guard=lambda x, y: (
+            FinalPointerGuardDecision.ADMITTED
+            if (x, y) == (42, 52)
+            else FinalPointerGuardDecision.POINTER_POSITION_CHANGED
+        ),
+    )
+
+    assert result.input_completed is True
+    assert emitted[-1] == (42, 52)
+    assert cursor["point"] == (42, 52)
+    assert result.facts["cursor_restored"] is False
+
+
+def test_atomic_sequence_interleaves_shift_and_right_drag_then_releases(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    sent: list[tuple[str, int, int]] = []
+    cursor = {"point": (5, 5)}
+    with executor._held_mouse_lock:
+        executor._held_mouse_buttons.clear()
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_cursor_pos", lambda: cursor["point"])
+    monkeypatch.setattr(executor, "_target_window_still_foreground", lambda _hwnd: True)
+    monkeypatch.setattr(
+        executor,
+        "_move_pointer_path",
+        lambda _start, end, _duration, **_kwargs: (
+            cursor.__setitem__("point", end) or True
+        ),
+    )
+    monkeypatch.setattr(executor, "_vk_of", lambda key: {"shift": 0x10}[key])
+    monkeypatch.setattr(
+        executor.user32,
+        "MapVirtualKeyW",
+        lambda vk, _mode: 0x2A if vk == 0x10 else 0,
+    )
+    monkeypatch.setattr(executor, "_key_input", lambda vk=0, scan=0, flags=0: ("key", vk, flags))
+    monkeypatch.setattr(executor, "_mouse_input", lambda flags, data=0, **_kwargs: ("mouse", flags, data))
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.extend(inputs))
+
+    events = (
+        PhysicalInputEvent(InputEventKind.KEY_DOWN, key="shift"),
+        PhysicalInputEvent(InputEventKind.MOVE, x=20, y=30, duration_ms=20),
+        PhysicalInputEvent(InputEventKind.MOUSE_DOWN, button=MouseButton.RIGHT),
+        PhysicalInputEvent(InputEventKind.MOVE, x=80, y=90, duration_ms=50),
+        PhysicalInputEvent(InputEventKind.MOUSE_UP, button=MouseButton.RIGHT),
+        PhysicalInputEvent(InputEventKind.KEY_UP, key="shift"),
+    )
+    result = executor.execute_admitted_physical_sequence(
+        events,
+        final_keyboard_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+    )
+
+    assert result.input_completed is True
+    assert result.facts["completed_events"] == len(events)
+    assert cursor["point"] == (80, 90)
+    assert sent == [
+        ("key", 0, executor._KEYEVENTF_SCANCODE),
+        ("mouse", 57345, 0),
+        ("mouse", executor.win32con.MOUSEEVENTF_RIGHTDOWN, 0),
+        ("mouse", executor.win32con.MOUSEEVENTF_RIGHTUP, 0),
+        (
+            "key",
+            0,
+            executor._KEYEVENTF_SCANCODE | executor._KEYEVENTF_KEYUP,
+        ),
+    ]
+    assert executor.agent_holds_mouse_button("right") is False
+
+
+def test_sequence_failure_releases_only_inputs_owned_by_that_sequence(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    sent: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_cursor_pos", lambda: (1, 1))
+    monkeypatch.setattr(executor, "_target_window_still_foreground", lambda _hwnd: True)
+    monkeypatch.setattr(executor, "_vk_of", lambda key: {"shift": 0x10}[key])
+    monkeypatch.setattr(
+        executor.user32,
+        "MapVirtualKeyW",
+        lambda vk, _mode: 0x2A if vk == 0x10 else 0,
+    )
+    monkeypatch.setattr(executor, "_key_input", lambda vk=0, scan=0, flags=0: ("key", vk, flags))
+    monkeypatch.setattr(executor, "_mouse_input", lambda flags, data=0, **_kwargs: ("mouse", flags, data))
+
+    def send(inputs):
+        sent.extend(inputs)
+        if inputs[0] == ("mouse", executor.win32con.MOUSEEVENTF_RIGHTDOWN, 0):
+            raise OSError("injected down uncertainty")
+
+    monkeypatch.setattr(executor, "_send_inputs", send)
+    with executor._held_mouse_lock:
+        executor._held_mouse_buttons.clear()
+    result = executor.execute_admitted_physical_sequence(
+        (
+            PhysicalInputEvent(InputEventKind.KEY_DOWN, key="shift"),
+            PhysicalInputEvent(InputEventKind.MOUSE_DOWN, button=MouseButton.RIGHT),
+            PhysicalInputEvent(InputEventKind.MOUSE_UP, button=MouseButton.RIGHT),
+            PhysicalInputEvent(InputEventKind.KEY_UP, key="shift"),
+        ),
+        final_keyboard_guard=lambda: FinalKeyboardGuardDecision.ADMITTED,
+    )
+
+    assert result.input_completed is None
+    assert result.facts["release_cleanup_attempted"] is True
+    assert result.facts["release_cleanup_completed"] is True
+    assert ("mouse", executor.win32con.MOUSEEVENTF_RIGHTUP, 0) in sent
+    assert (
+        "key",
+        0,
+        executor._KEYEVENTF_SCANCODE | executor._KEYEVENTF_KEYUP,
+    ) in sent
+    assert executor.agent_holds_mouse_button("right") is False
+
+
+def test_sequence_accepts_repeated_down_and_standalone_up_as_device_events(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    sent: list[tuple[str, int, int]] = []
+    with executor._held_mouse_lock:
+        executor._held_mouse_buttons.clear()
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_vk_of", lambda key: {"shift": 0x10}[key])
+    monkeypatch.setattr(
+        executor,
+        "_hardware_key_input",
+        lambda vk, key_up=False: ("key", vk, int(key_up)),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_mouse_button_input",
+        lambda flags, data: ("mouse", flags, data),
+    )
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent.extend(inputs))
+
+    events = (
+        PhysicalInputEvent(InputEventKind.MOUSE_UP, button=MouseButton.LEFT),
+        PhysicalInputEvent(InputEventKind.MOUSE_DOWN, button=MouseButton.LEFT),
+        PhysicalInputEvent(InputEventKind.MOUSE_DOWN, button=MouseButton.LEFT),
+        PhysicalInputEvent(InputEventKind.MOUSE_UP, button=MouseButton.LEFT),
+        PhysicalInputEvent(InputEventKind.KEY_UP, key="shift"),
+        PhysicalInputEvent(InputEventKind.KEY_DOWN, key="shift"),
+        PhysicalInputEvent(InputEventKind.KEY_DOWN, key="shift"),
+        PhysicalInputEvent(InputEventKind.KEY_UP, key="shift"),
+    )
+
+    result = executor.execute_admitted_physical_sequence(events)
+
+    assert result.input_completed is True
+    assert result.facts["completed_events"] == len(events)
+    assert sent == [
+        ("mouse", executor.win32con.MOUSEEVENTF_LEFTUP, 0),
+        ("mouse", executor.win32con.MOUSEEVENTF_LEFTDOWN, 0),
+        ("mouse", executor.win32con.MOUSEEVENTF_LEFTDOWN, 0),
+        ("mouse", executor.win32con.MOUSEEVENTF_LEFTUP, 0),
+        ("key", 0x10, 1),
+        ("key", 0x10, 0),
+        ("key", 0x10, 0),
+        ("key", 0x10, 1),
+    ]
+    assert result.facts.get("release_cleanup_attempted", False) is False
+    assert executor.agent_holds_mouse_button("left") is False

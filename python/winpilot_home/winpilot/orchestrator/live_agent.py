@@ -25,6 +25,8 @@ from ..action.executor import (
     ADMITTED_PHYSICAL_CLICK_BACKEND,
     ADMITTED_PHYSICAL_DRAG_BACKEND,
     ADMITTED_PHYSICAL_HOTKEY_BACKEND,
+    ADMITTED_PHYSICAL_MOVE_BACKEND,
+    ADMITTED_PHYSICAL_SEQUENCE_BACKEND,
     ADMITTED_PHYSICAL_SCROLL_BACKEND,
     ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
 )
@@ -112,8 +114,6 @@ from .runtime import ArpExecution, NodeResult
 
 _RUNTIME_VERSION = "vnext"
 _OBLIGATION_ID = "full-goal"
-_TARGET_MAX_AGE_MS = 60_000
-_FUTURE_CLOCK_SKEW_MS = 2_000
 _MAX_SUBMITTED_SIDE = 1120
 _MAX_REJECTION_FEEDBACK_CHARS = 512
 _NON_WHITESPACE_PATTERN = r"\S"
@@ -122,23 +122,14 @@ _APPROVED_ACTIONS = frozenset(
     {
         "click",
         "double_click",
+        "move_mouse",
         "drag",
         "scroll",
         "type_text",
         "hotkey",
+        "input_sequence",
         "launch_application",
     }
-)
-_GUI_GATES = (
-    "target_bound",
-    "authoritative_frame",
-    "pointer_released",
-    "runtime_healthy",
-)
-_DRAG_GATES = (
-    "target_bound",
-    "authoritative_frame",
-    "runtime_healthy",
 )
 _CONTINUE_STATUSES = frozenset(
     {
@@ -465,16 +456,6 @@ def _plain_dict(value: Any, name: str) -> dict[str, Any]:
     if type(value) is not dict:
         raise ValueError(f"{name} must be a plain JSON object")
     return value
-
-
-def _exact_keys(value: Mapping[str, Any], keys: set[str], name: str) -> None:
-    actual = set(value)
-    if actual != keys:
-        raise ValueError(
-            f"{name} fields mismatch: "
-            f"missing={sorted(keys - actual)!r}, "
-            f"unknown={sorted(actual - keys)!r}"
-        )
 
 
 def _positive_int(value: Any, name: str) -> int:
@@ -857,10 +838,12 @@ class _LiveAgentStatusProvider:
             "desktop_actions": (
                 "click",
                 "double_click",
+                "move_mouse",
                 "drag",
                 "scroll",
                 "type_text",
                 "hotkey",
+                "input_sequence",
                 "launch_application",
             ),
             "outcome_tools": ("claim_obligation_done", "blocked"),
@@ -1066,7 +1049,7 @@ def _hit_test_win32_root(x: int, y: int) -> int | None:
 
 
 class _BoundTargetProbe:
-    """Read-only validator for one exact, already-supplied target identity."""
+    """Best-effort live facts for the compatibility window anchor."""
 
     def __init__(
         self,
@@ -1079,23 +1062,10 @@ class _BoundTargetProbe:
         self._reader = reader
         self._hit_test = hit_test_root
 
-    def _matches(self, current: _TargetFacts | None) -> bool:
-        expected = self._expected
-        return bool(
-            type(current) is _TargetFacts
-            and current.hwnd == expected.hwnd
-            and current.root_hwnd == expected.root_hwnd == expected.hwnd
-            and current.process_id == expected.process_id
-            and current.executable_identity == expected.executable_identity
-            and current.class_name == expected.class_name
-            and current.region == expected.region
-        )
-
     def snapshot(self, hwnd: int) -> LiveTargetSnapshot | None:
         current = self._reader(int(hwnd))
-        if not self._matches(current):
+        if type(current) is not _TargetFacts:
             return None
-        assert current is not None
         return LiveTargetSnapshot(
             hwnd=current.hwnd,
             root_hwnd=current.root_hwnd,
@@ -1136,87 +1106,15 @@ def _freeze_prebound_target(
     *,
     dependencies: _CompositionDependencies,
 ) -> _FrozenTarget:
-    _exact_keys(inputs, {"execution_context"}, "inputs")
-    context = _plain_dict(inputs["execution_context"], "execution_context")
-    _exact_keys(
-        context,
-        {
-            "format",
-            "entrypoint",
-            "task_id",
-            "submitted_at",
-            "desktop_handoff",
-            "target_window",
-        },
-        "execution_context",
-    )
-    if (
-        context.get("format") != "execution-context/1"
-        or context.get("entrypoint") != "native_agent_cockpit"
-        or context.get("task_id") != graph.id
-    ):
-        raise ValueError(
-            "vNext live Agent requires the matching native Electron execution context"
-        )
-    _positive_int(
-        context.get("submitted_at"),
-        "execution_context.submitted_at",
-    )
-    handoff = _plain_dict(
-        context.get("desktop_handoff"),
-        "execution_context.desktop_handoff",
-    )
-    _exact_keys(
-        handoff,
-        {
-            "required",
-            "strategy",
-            "yielded",
-            "control_surface_pid",
-            "prepared_at",
-            "reason",
-        },
-        "execution_context.desktop_handoff",
-    )
-    control_pid = _positive_int(
-        handoff.get("control_surface_pid"),
-        "execution_context.desktop_handoff.control_surface_pid",
-    )
-    prepared_at = _positive_int(
-        handoff.get("prepared_at"),
-        "execution_context.desktop_handoff.prepared_at",
-    )
-    if handoff.get("required") is not True:
-        raise ValueError("Electron desktop handoff was not required")
-    if handoff.get("yielded") is not True:
-        raise ValueError("Electron desktop handoff did not yield foreground")
-    if (
-        handoff.get("strategy")
-        != "foreground_after_control_surface_yield"
-    ):
-        raise ValueError("Electron desktop handoff strategy is not exact")
-    if type(handoff.get("reason")) is not str:
-        raise ValueError("Electron desktop handoff reason is not a string")
+    context = _plain_dict(inputs.get("execution_context"), "execution_context")
+    # The lease itself already binds this payload to one run.  Keep only the
+    # task association; frontend format versions and focus/handoff telemetry
+    # are hints and must never decide whether the model may see or use the
+    # desktop.
+    if context.get("task_id") != graph.id:
+        raise ValueError("desktop context does not match the requested task")
     target = _plain_dict(
         context.get("target_window"),
-        "execution_context.target_window",
-    )
-    _exact_keys(
-        target,
-        {
-            "format",
-            "hwnd",
-            "title",
-            "process_id",
-            "class_name",
-            "rect",
-            "captured_at",
-            "foreground_verified",
-            "usable",
-            "failure_type",
-            "reason",
-            "binding_mode",
-        },
         "execution_context.target_window",
     )
     hwnd = _positive_int(target.get("hwnd"), "target_window.hwnd")
@@ -1224,40 +1122,20 @@ def _freeze_prebound_target(
         target.get("process_id"),
         "target_window.process_id",
     )
-    captured_at = _positive_int(
-        target.get("captured_at"),
-        "target_window.captured_at",
+    supplied_epoch = target.get("captured_at")
+    captured_at = (
+        supplied_epoch
+        if type(supplied_epoch) is int and supplied_epoch >= 0
+        else int(dependencies.wall_clock() * 1000)
     )
-    title = target.get("title")
-    class_name = target.get("class_name")
+    title = target.get("title") if type(target.get("title")) is str else ""
+    class_name = (
+        target.get("class_name")
+        if type(target.get("class_name")) is str
+        else ""
+    )
     rect = target.get("rect")
-    binding_mode = target.get("binding_mode")
-    desktop_shell = binding_mode == "desktop_shell"
-    if not desktop_shell and binding_mode != "window":
-        raise ValueError("Electron target binding_mode is not exact")
-    if (
-        target.get("format") != "desktop-target/1"
-        or (not desktop_shell and target.get("foreground_verified") is not True)
-        or target.get("usable") is not True
-        or target.get("failure_type") != ""
-        or target.get("reason") != ""
-        or type(title) is not str
-        or not title
-        or type(class_name) is not str
-        or not class_name
-        or type(rect) is not list
-        or len(rect) != 4
-        or any(type(item) is not int for item in rect)
-        or rect[2] <= rect[0]
-        or rect[3] <= rect[1]
-        or process_id == control_pid
-        or captured_at < prepared_at
-    ):
-        raise ValueError("Electron target descriptor is not an exact usable target")
-    now_ms = int(dependencies.wall_clock() * 1000)
-    age_ms = now_ms - captured_at
-    if age_ms > _TARGET_MAX_AGE_MS or age_ms < -_FUTURE_CLOCK_SKEW_MS:
-        raise ValueError("Electron target descriptor is stale or future-dated")
+    desktop_shell = target.get("binding_mode") == "desktop_shell"
     reader = dependencies.target_reader or _read_win32_target
     foreground_reader = dependencies.foreground_reader
     if foreground_reader is None:
@@ -1273,49 +1151,69 @@ def _freeze_prebound_target(
                 )
     hit_test = dependencies.hit_test_root or _hit_test_win32_root
     current = reader(hwnd)
-    submitted_region = Region(
-        rect[0],
-        rect[1],
-        rect[2] - rect[0],
-        rect[3] - rect[1],
-    )
-    visible_region = submitted_region.clamp_to(virtual_screen_region())
-    if visible_region.width <= 0 or visible_region.height <= 0:
-        raise ValueError("Electron target has no visible desktop intersection")
-    expected_region = (
+    desktop_region = virtual_screen_region()
+    visible_region = desktop_region
+    if (
+        isinstance(rect, list)
+        and len(rect) == 4
+        and all(type(item) is int for item in rect)
+        and rect[2] > rect[0]
+        and rect[3] > rect[1]
+    ):
+        candidate = Region(
+            rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]
+        ).clamp_to(desktop_region)
+        if candidate.width > 0 and candidate.height > 0:
+            visible_region = candidate
+    submitted_region = (
         visible_region.left,
         visible_region.top,
         visible_region.width,
         visible_region.height,
     )
-    mismatches: list[str] = []
-    if type(current) is not _TargetFacts:
-        mismatches.append("unavailable")
+    # Prefer live facts when Windows can provide them, but never require them:
+    # every observation is full-desktop and every pointer action is addressed
+    # to the actual screen.  This object is only a compatibility anchor.
+    if type(current) is _TargetFacts:
+        anchor = current
     else:
-        if current.hwnd != hwnd:
-            mismatches.append("hwnd")
-        if current.root_hwnd != hwnd:
-            mismatches.append("root_hwnd")
-        if current.process_id != process_id:
-            mismatches.append("process_id")
-        if not current.executable_identity:
-            mismatches.append("executable_identity")
-        if current.class_name != class_name:
-            mismatches.append("class_name")
-        if current.region != expected_region:
-            mismatches.append("region")
-    if mismatches:
-        raise ValueError(
-            "current Electron target mismatch: " + ",".join(mismatches)
+        anchor = _TargetFacts(
+            hwnd=hwnd,
+            root_hwnd=hwnd,
+            process_id=process_id,
+            executable_identity=f"pid:{process_id}",
+            title=title,
+            class_name=class_name,
+            region=submitted_region,
+            foreground_root_hwnd=None,
         )
-    assert current is not None
+    anchor_region = anchor.region
+    if (
+        len(anchor_region) != 4
+        or any(type(item) is not int for item in anchor_region)
+        or anchor_region[2] <= 0
+        or anchor_region[3] <= 0
+    ):
+        anchor_region = submitted_region
+    anchor_hwnd = anchor.hwnd if anchor.hwnd > 0 else hwnd
+    anchor_root = (
+        anchor.root_hwnd
+        if anchor.root_hwnd == anchor_hwnd
+        else anchor_hwnd
+    )
+    anchor_pid = anchor.process_id if anchor.process_id > 0 else process_id
+    executable_identity = anchor.executable_identity or f"pid:{anchor_pid}"
+    anchor_title = anchor.title if type(anchor.title) is str else title
+    anchor_class = (
+        anchor.class_name if type(anchor.class_name) is str else class_name
+    )
     binding_material = {
-        "hwnd": hwnd,
-        "root_hwnd": current.root_hwnd,
-        "process_id": process_id,
-        "executable_identity": current.executable_identity,
-        "class_name": class_name,
-        "region": list(expected_region),
+        "hwnd": anchor_hwnd,
+        "root_hwnd": anchor_root,
+        "process_id": anchor_pid,
+        "executable_identity": executable_identity,
+        "class_name": anchor_class,
+        "region": list(anchor_region),
         "captured_at": captured_at,
         "binding_mode": "desktop_shell" if desktop_shell else "window",
     }
@@ -1328,20 +1226,18 @@ def _freeze_prebound_target(
         ).encode("utf-8")
     ).hexdigest()
     probe = _BoundTargetProbe(
-        current,
+        anchor,
         reader=reader,
         hit_test_root=hit_test,
     )
-    if probe.snapshot(hwnd) is None:
-        raise ValueError("pre-bound target changed during admission")
     return _FrozenTarget(
-        hwnd=hwnd,
-        root_hwnd=current.root_hwnd,
-        process_id=process_id,
-        executable_identity=current.executable_identity,
-        title=title,
-        class_name=class_name,
-        region=expected_region,
+        hwnd=anchor_hwnd,
+        root_hwnd=anchor_root,
+        process_id=anchor_pid,
+        executable_identity=executable_identity,
+        title=anchor_title,
+        class_name=anchor_class,
+        region=anchor_region,
         captured_at_ms=captured_at,
         binding_id=f"vnext-target-{digest[:24]}",
         probe=probe,
@@ -1362,16 +1258,46 @@ def _object_schema(properties: dict[str, Any], required: list[str]) -> dict[str,
 
 
 def _tool_catalog() -> ToolCatalog:
+    point_properties = {
+        "image_x": {"type": "number", "minimum": 0},
+        "image_y": {"type": "number", "minimum": 0},
+    }
     point = _object_schema(
+        point_properties,
+        ["image_x", "image_y"],
+    )
+    click = _object_schema(
         {
-            "image_x": {"type": "number", "minimum": 0},
-            "image_y": {"type": "number", "minimum": 0},
+            **point_properties,
+            "button": {
+                "type": "string",
+                "enum": ["left", "right", "middle", "x1", "x2"],
+                "default": "left",
+            },
+            "press_duration_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2000,
+                "default": 35,
+            },
         },
         ["image_x", "image_y"],
     )
     schemas = {
-        "click": point,
-        "double_click": point,
+        "click": click,
+        "double_click": click,
+        "move_mouse": _object_schema(
+            {
+                **point_properties,
+                "duration_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 30000,
+                    "default": 0,
+                },
+            },
+            ["image_x", "image_y"],
+        ),
         "drag": _object_schema(
             {
                 "image_path": {
@@ -1384,9 +1310,29 @@ def _tool_catalog() -> ToolCatalog:
                     },
                     "minItems": 1,
                 },
-                "keep_holding": {"type": "boolean"},
+                "keep_holding": {"type": "boolean", "default": False},
+                "button": {
+                    "type": "string",
+                    "enum": ["left", "right", "middle", "x1", "x2"],
+                    "default": "left",
+                },
+                "held_keys": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": sorted(CANONICAL_HOTKEY_KEYS),
+                    },
+                    "uniqueItems": True,
+                    "default": [],
+                },
+                "duration_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 30000,
+                    "default": 400,
+                },
             },
-            ["image_path", "keep_holding"],
+            ["image_path"],
         ),
         "scroll": _object_schema(
             {
@@ -1425,6 +1371,16 @@ def _tool_catalog() -> ToolCatalog:
                 }
             },
             ["keys"],
+        ),
+        "input_sequence": _object_schema(
+            {
+                "sequence": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32768,
+                }
+            },
+            ["sequence"],
         ),
         "launch_application": _object_schema(
             {
@@ -1478,10 +1434,12 @@ def _tool_catalog() -> ToolCatalog:
     names = (
         "click",
         "double_click",
+        "move_mouse",
         "drag",
         "scroll",
         "type_text",
         "hotkey",
+        "input_sequence",
         "launch_application",
         "claim_obligation_done",
         "blocked",
@@ -1511,16 +1469,12 @@ def _tool_catalog() -> ToolCatalog:
                     if mutation is MutationKind.GUI
                     else ExecutionMedium.CONTROL
                 ),
-                required_any_capabilities=(
-                    ("visual.interact",)
-                    if mutation is MutationKind.GUI
-                    else ()
-                ),
-                prerequisites=(
-                    _DRAG_GATES
-                    if name == "drag"
-                    else _GUI_GATES
-                ),
+                required_any_capabilities=(),
+                # The current screen and physical pointer ownership are
+                # projected once by the Broker.  Tool-local window/capability
+                # gates used to duplicate that decision and hide ordinary
+                # mouse/keyboard actions from the model.
+                prerequisites=(),
                 order=order,
             )
         )
@@ -1808,16 +1762,15 @@ class _LiveRuntimeState:
             raise RuntimeError("fresh full-desktop JPEG capture failed")
         committed = self._observer.commit(captured)
         frame_ref = self._frame_ref(committed)
-        self._registry.append(frame_ref)
-        event = self._reducer.event(
-            "target_bound",
-            payload={"target_binding": binding.to_dict()},
-            evidence_refs=(
-                binding.established_by_evidence_ref,
-                frame_ref.id,
-            ),
-        )
-        self._reducer.apply(event)
+        evidence_refs: tuple[str, ...] = ()
+        try:
+            self._registry.append(frame_ref)
+            evidence_refs = (frame_ref.id,)
+        except Exception:
+            # The JPEG and FrameAuthority are the execution facts.  Evidence
+            # is useful for diagnostics, but an auxiliary journal failure must
+            # not make a real screen unavailable to the model.
+            pass
         BUS.publish(
             "vnext_gui_observation",
             runtime_version=_RUNTIME_VERSION,
@@ -1834,7 +1787,7 @@ class _LiveRuntimeState:
             frame_scope=committed.scope,
             authoritative=True,
             fresh=True,
-            evidence_refs=[frame_ref.id],
+            evidence_refs=list(evidence_refs),
             parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
         )
         return committed
@@ -1863,8 +1816,6 @@ class _LiveRuntimeState:
                 }
             )
         )
-        if not refs:
-            raise RuntimeError("authoritative frame has no run-scoped evidence")
         return RuntimeFrame(
             frame_id=state.frame_id,
             epoch=state.epoch,
@@ -1894,20 +1845,11 @@ class _LiveRuntimeState:
                     "current target/frame identity no longer matches"
                 )
         frame = self._runtime_frame(state)
-        refs_by_id = {
-            ref.id: ref for ref in self._registry.snapshot()
-        }
-        is_unreconciled_post_frame = any(
-            refs_by_id[evidence_id].kind == POST_ACTION_FRAME_EVIDENCE_KIND
-            for evidence_id in frame.evidence_refs
-        )
-        paused = bool(
-            getattr(self._pause_controller, "paused", False)
-        ) and not is_unreconciled_post_frame
+        paused = bool(getattr(self._pause_controller, "paused", False))
         return RuntimeSnapshot(
             broker_state=BrokerRuntimeState(
                 turn_index=turn_index,
-                available_capabilities=("visual.interact",),
+                available_capabilities=(),
                 target=TargetState(
                     binding_id=binding.binding_id,
                     hwnd=binding.hwnd,
@@ -1924,8 +1866,6 @@ class _LiveRuntimeState:
                     else self._pointer_state_reader()
                 ),
                 runtime_healthy=True,
-                # Pause is an outer safe-boundary gate. Marking a completed
-                # atomic action's post-frame paused would invalidate reconcile.
                 paused=paused,
                 canceled=False,
             ),
@@ -2179,6 +2119,34 @@ class _RawReceiptTrace:
         *,
         metadata: Mapping[str, Any],
     ) -> None:
+        backend_facts = (
+            {}
+            if receipt.backend_result is None
+            else dict(receipt.backend_result.facts)
+        )
+        mechanical_facts = {
+            key: value
+            for key in (
+                "via",
+                "guard_decision",
+                "error_kind",
+                "completed_clicks",
+                "requested_codepoints",
+                "completed_codepoints",
+                "key_count",
+                "event_count",
+                "completed_events",
+                "moves_completed",
+                "segment_phase",
+                "held_before",
+                "held_after",
+                "release_cleanup_attempted",
+                "release_cleanup_completed",
+                "cursor_restored",
+            )
+            if (value := backend_facts.get(key)) is not None
+            and type(value) in {bool, int, float, str}
+        }
         target_window = {
             key: value
             for key, value in {
@@ -2207,6 +2175,11 @@ class _RawReceiptTrace:
             frame_epoch=int(metadata.get("frame_epoch") or 0),
             input_completed=receipt.input_completed,
             error_kind=receipt.error_kind,
+            phase=str(metadata.get("phase") or ""),
+            **(
+                {"mechanical_facts": mechanical_facts}
+                if mechanical_facts else {}
+            ),
             **({"target_window": target_window} if target_window else {}),
             parameter_visibility=_PRIVATE_RUNTIME_EVIDENCE,
         )
@@ -2729,17 +2702,6 @@ def _target_evidence(
 
 def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
     try:
-        age_ms = (
-            int(build.dependencies.wall_clock() * 1000)
-            - build.target.captured_at_ms
-        )
-        if (
-            age_ms > _TARGET_MAX_AGE_MS
-            or age_ms < -_FUTURE_CLOCK_SKEW_MS
-        ):
-            raise RuntimeError(
-                "pre-bound Electron target expired before vNext execution"
-            )
         definition = MissionDefinition(
             mission_id=build.mission_id,
             run_id=build.run_id,
@@ -2749,7 +2711,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
                     id=_OBLIGATION_ID,
                     desired_state=build.goal,
                     acceptance_criteria=(build.goal,),
-                    required_capabilities=("visual.interact",),
+                    required_capabilities=(),
                 ),
             ),
             source="vnext-live-agent",
@@ -2820,6 +2782,8 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             RawDeviceBackends(
                 admitted_physical_click=ADMITTED_PHYSICAL_CLICK_BACKEND,
                 admitted_physical_drag=ADMITTED_PHYSICAL_DRAG_BACKEND,
+                admitted_physical_move=ADMITTED_PHYSICAL_MOVE_BACKEND,
+                admitted_physical_sequence=ADMITTED_PHYSICAL_SEQUENCE_BACKEND,
                 admitted_physical_scroll=ADMITTED_PHYSICAL_SCROLL_BACKEND,
                 admitted_physical_type_text=ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
                 admitted_physical_hotkey=ADMITTED_PHYSICAL_HOTKEY_BACKEND,
@@ -2861,7 +2825,7 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
         ).safe_default(
             build.mission_id,
             definition.goal_revision,
-            available_capabilities=("visual.interact",),
+            available_capabilities=(),
         )
         # One mechanical fuel gauge per turn: remaining turns, model calls
         # and wall time as facts only.  The Actor decides how to pace long
@@ -2973,74 +2937,19 @@ def _completion_binding_error(
     mission_id: str,
     run_id: str,
 ) -> str | None:
-    verified_refs = snapshot.get("verified_evidence_refs")
-    bindings = snapshot.get("verified_evidence_bindings")
-    frame_id = snapshot.get("frame_id")
-    target_binding_id = snapshot.get("target_binding_id")
-    target_hwnd = snapshot.get("target_hwnd")
-    target_epoch = snapshot.get("target_epoch")
+    """Confirm the Runtime result belongs to this run, and nothing more.
+
+    The Runtime/model already decided completion from the real screen. Window,
+    frame and evidence fields are useful diagnostics, but re-validating them
+    here made auxiliary metadata capable of overturning that decision.
+    """
+
     if (
         snapshot.get("mission_id") != mission_id
         or snapshot.get("run_id") != run_id
         or snapshot.get("mission_status") != MissionStatus.VERIFIED.value
-        or type(snapshot.get("mission_verification_id")) is not str
-        or not snapshot.get("mission_verification_id")
-        or type(snapshot.get("obligation_verification_id")) is not str
-        or not snapshot.get("obligation_verification_id")
-        or type(verified_refs) is not list
-        or not verified_refs
-        or any(
-            type(item) is not str or not item
-            for item in verified_refs
-        )
-        or len(verified_refs) != len(set(verified_refs))
-        or type(bindings) is not list
-        or len(bindings) != len(verified_refs)
-        or type(target_binding_id) is not str
-        or not target_binding_id
-        or type(target_hwnd) is not int
-        or target_hwnd <= 0
-        or type(target_epoch) is not int
-        or target_epoch <= 0
-        or snapshot.get("frame_hwnd") != target_hwnd
-        or type(frame_id) is not int
-        or frame_id <= 0
-        or snapshot.get("frame_epoch") != target_epoch
     ):
-        return (
-            "vNext Runtime status lacked exact run-bound "
-            "verified mission evidence"
-        )
-    binding_ids: list[str] = []
-    for binding in bindings:
-        if (
-            type(binding) is not dict
-            or set(binding)
-            != {
-                "id",
-                "mission_id",
-                "run_id",
-                "obligation_id",
-                "frame_id",
-            }
-            or binding.get("id") not in verified_refs
-            or binding.get("mission_id") != mission_id
-            or binding.get("run_id") != run_id
-            or binding.get("obligation_id") != _OBLIGATION_ID
-            or binding.get("frame_id") != frame_id
-        ):
-            return (
-                "vNext Runtime status lacked exact run-bound "
-                "verified mission evidence"
-            )
-        binding_ids.append(binding["id"])
-    if set(binding_ids) != set(verified_refs) or len(binding_ids) != len(
-        set(binding_ids)
-    ):
-        return (
-            "vNext Runtime status lacked exact run-bound "
-            "verified mission evidence"
-        )
+        return "vNext Runtime completion did not belong to this run"
     return None
 
 

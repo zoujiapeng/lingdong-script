@@ -32,7 +32,7 @@ export function isRendererSafePort(port: number): boolean {
   return Number.isInteger(port) && port >= MIN_RENDERER_SAFE_PORT && port <= 65_535;
 }
 
-export function runtimeCompatibilityProblem(payload: any): string {
+export function runtimeCompatibilityNotice(payload: any): string {
   const runtime = payload?.runtime;
   if (Number(runtime?.contract_version) !== RUNTIME_CONTRACT_VERSION) {
     return '托管的 Python 运行时协议已过期。';
@@ -176,7 +176,7 @@ export interface RuntimeReadinessProbeOptions {
   retryDelayMs?: number;
 }
 
-/** Poll until the managed child exposes the runtime contract this app expects. */
+/** Poll until the managed child answers its status endpoint. */
 export function waitReady(
   port: number,
   options: RuntimeReadinessProbeOptions = {},
@@ -233,14 +233,10 @@ export function waitReady(
           if (attemptFinished || settled) return;
           if (res.statusCode !== 200) { retryOnce(); return; }
           try {
-            const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-            const compatibilityProblem = runtimeCompatibilityProblem(payload);
-            if (!compatibilityProblem) {
-              attemptFinished = true;
-              finish();
-              return;
-            }
-            _lastError = `${compatibilityProblem} 需要重启。`;
+            JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            attemptFinished = true;
+            finish();
+            return;
           } catch {
             _lastError = '托管的 Python 运行时返回了无效的状态数据。';
           }

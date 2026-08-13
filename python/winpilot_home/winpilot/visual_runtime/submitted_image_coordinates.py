@@ -89,14 +89,20 @@ class SubmittedImageCoordinateMapper:
         if not (
             math.isfinite(image_x)
             and math.isfinite(image_y)
-            and 0.0 <= image_x <= max(0, image_width - 1)
-            and 0.0 <= image_y <= max(0, image_height - 1)
+            and 0.0 <= image_x <= image_width
+            and 0.0 <= image_y <= image_height
         ):
             raise ValueError(
                 f"{image_x_key}/{image_y_key} must stay inside the exact submitted "
-                f"image bounds 0..{max(0, image_width - 1)} by "
-                f"0..{max(0, image_height - 1)}"
+                f"image bounds 0..{image_width} by 0..{image_height}"
             )
+
+        # Visual models commonly point at the right/bottom edge using the
+        # image extent (width,height), while pixel indices end at extent-1.
+        # Accept that one harmless convention difference and map it to the
+        # nearest real pixel; larger overshoots still surface as model errors.
+        image_x = min(image_x, float(max(0, image_width - 1)))
+        image_y = min(image_y, float(max(0, image_height - 1)))
 
         mapped.pop(image_x_key)
         mapped.pop(image_y_key)

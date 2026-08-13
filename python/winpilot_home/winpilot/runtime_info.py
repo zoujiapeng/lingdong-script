@@ -16,10 +16,9 @@ from .config import ROOT_DIR
 
 RUNTIME_CONTRACT_VERSION = 3
 
-# Source drift is a compatibility/safety signal, so keep its cache deliberately
-# short. Git metadata is diagnostic only and can tolerate a slightly longer
-# window. Keeping the caches independent also means an action safety check does
-# not pay for any git subprocesses.
+# Source drift and Git identity are diagnostics only. Keep source refreshes
+# short enough that the status page remains useful without putting either fact
+# on the task execution path.
 _SOURCE_STAMP_TTL_S = 0.25
 _GIT_STATE_TTL_S = 1.0
 _monotonic = time.monotonic

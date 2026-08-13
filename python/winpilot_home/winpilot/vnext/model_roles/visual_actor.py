@@ -55,7 +55,8 @@ narrate. Coordinates are exact submitted-image pixels. Chat and act naturally.
 Revise task_state; runtime does not classify or route. Keep dependent unfinished
 work in remaining_items. If visibly complete, call claim_obligation_done only
 when none remain. If no action can advance, call blocked. When pointer_held is
-true, finish that drag. Pace long goals with budget facts. If actions add no new
+true, it persists across actions; continue or release deliberately. Pace long
+goals with budget facts. If actions add no new
 information, step back to the whole screen and revise the approach toward
 original_goal."""
 
@@ -72,16 +73,32 @@ mixed requests, respond naturally while you work and summarize at the end.
 Never invent results; verify by looking at the screen."""
 
 _TOOL_DESCRIPTIONS = {
-    "click": "Click one point once in the current image.",
-    "double_click": "Double-click one point once in the current image.",
+    "move_mouse": (
+        "Move the real pointer to one point in the current image and leave it "
+        "there. Set duration_ms for smooth hover or game movement."
+    ),
+    "click": (
+        "Click one point once in the current image with any mouse button. "
+        "press_duration_ms controls how long the button stays down."
+    ),
+    "double_click": (
+        "Double-click one point in the current image with any mouse button."
+    ),
     "drag": (
         "Drag through image_path written as `x1,y1 x2,y2 ...` in exact order. "
-        "When the pointer is released, the first pair is where to press and "
+        "The runtime draws one straight segment between every adjacent pair: "
+        "put a point at each visible turn and keep constrained routes near the "
+        "center of their permitted path. The first pair is where to press and "
         "later pairs are the route. "
-        "keep_holding preserves the same press for the next visual turn."
+        "held_keys presses those keyboard keys before the mouse and releases "
+        "them after the mouse, so modified drags and game gestures stay one "
+        "physical action. keep_holding preserves the same mouse and held-key "
+        "presses for the next visual turn."
     ),
     "scroll": (
-        "Scroll at one point; amount < 0 scrolls down and amount > 0 scrolls up."
+        "Scroll at one point using a native wheel delta: amount < 0 scrolls "
+        "down, amount > 0 scrolls up, and 120 is one ordinary notch. Typical "
+        "page movement is 360 to 720 in magnitude."
     ),
     "type_text": (
         "Enter the requested literal characters into the focused editable "
@@ -89,6 +106,18 @@ _TOOL_DESCRIPTIONS = {
     ),
     "hotkey": (
         "Press one key or one ordered key chord; this never enters literal text."
+    ),
+    "input_sequence": (
+        "Run one atomic human-like mouse/keyboard timeline. Separate commands "
+        "with semicolons: `move x,y duration_ms`; `mouse_down button`; "
+        "`mouse_up button`; `key_down key`; `key_up key`; `click button`; "
+        "`press key`; `wheel amount`; `hwheel amount`; `wait duration_ms`. "
+        "Wheel amounts are native deltas (120 is one ordinary notch). "
+        "Use `move_by dx,dy duration_ms` for relative raw/game movement. "
+        "Absolute coordinates and relative deltas are from the current image. "
+        "Use this when a modifier or mouse button must stay down while the "
+        "other device moves. "
+        "Keys/buttons still held at the end are released automatically."
     ),
     "launch_application": (
         "Start one installed application or file/URL association by display "
@@ -591,8 +620,6 @@ def _actor_parameters(
         required = list(raw.get("required", []))
         if "image_path" not in required:
             required.append("image_path")
-        if "keep_holding" not in required:
-            required.append("keep_holding")
         # Array-shaped paths caused a real provider to serialize one coordinate
         # pair thousands of times until the response was truncated, both for
         # nested and flat arrays. Keep the model-facing shape as one ordinary
@@ -603,6 +630,14 @@ def _actor_parameters(
             "type": "string",
             "minLength": 1,
         }
+        # Keep the model-facing gesture compact.  The canonical boundary also
+        # accepts arrays, comma-separated text and ``shift+w``; the model only
+        # needs to name the keys, not reason about the internal key catalog.
+        if "held_keys" in properties:
+            properties["held_keys"] = {
+                "type": "string",
+                "default": "",
+            }
         raw = {
             **raw,
             "properties": properties,
@@ -708,7 +743,27 @@ def _canonical_drag_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
             [raw_path[index], raw_path[index + 1]]
             for index in range(0, len(raw_path), 2)
         ]
-    return {**arguments, "image_path": canonical_path}
+    canonical = {**arguments, "image_path": canonical_path}
+    canonical.setdefault("button", "left")
+    # Keep the Actor semantic: it forwards the model's compact key spelling.
+    # The desktop adapter already owns forgiving physical-key normalization.
+    if not canonical.get("held_keys"):
+        canonical.pop("held_keys", None)
+    canonical.setdefault("duration_ms", 400)
+    return canonical
+
+
+def _canonical_desktop_arguments(
+    name: str,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    canonical = dict(arguments)
+    if name in {"click", "double_click"}:
+        canonical.setdefault("button", "left")
+        canonical.setdefault("press_duration_ms", 35)
+    elif name == "move_mouse":
+        canonical.setdefault("duration_ms", 0)
+    return canonical
 
 
 def _flow_fragment_tool_definition(
@@ -961,6 +1016,8 @@ def _proposal_from_response(
         raise LiveModelRoleError("Visual Actor returned an unavailable action")
     if runtime_name == "drag":
         arguments = _canonical_drag_arguments(arguments)
+    elif runtime_name in {"click", "double_click", "move_mouse"}:
+        arguments = _canonical_desktop_arguments(runtime_name, arguments)
     if runtime_name in APPROVED_DESKTOP_ACTIONS:
         raw_proposal = {
             "format": ACTOR_PROPOSAL_FORMAT,

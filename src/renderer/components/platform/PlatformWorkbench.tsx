@@ -1232,7 +1232,6 @@ export function AgentCockpit({
   const active = Boolean(run && isActiveRunStatus(run.status));
   const runtimeBusy = Boolean(plane.currentRun && isActiveRunStatus(plane.currentRun.status));
   const manuallyPaused = Boolean(arp?.manual_paused);
-  const runtimeIssue = plane.runtimeIssue;
   const modelProfile = plane.overview?.status.model_profile;
   const showComposer = !hasConversation;
   const showFollowupComposer = hasConversation;
@@ -1365,10 +1364,6 @@ export function AgentCockpit({
     if (!goal.trim() || submitting) return;
     if (runtimeBusy) {
       setActionError('当前任务仍在运行；可以先写好下一条消息，完成后再发送。');
-      return;
-    }
-    if (runtimeIssue) {
-      setActionError(`${runtimeIssue} 任务未启动。`);
       return;
     }
     setSubmitting(true);
@@ -1555,7 +1550,7 @@ export function AgentCockpit({
           type="button"
           aria-label="发送消息"
           onClick={() => void execute()}
-          disabled={!goal.trim() || submitting || runtimeBusy || Boolean(runtimeIssue)}
+          disabled={!goal.trim() || submitting || runtimeBusy}
         >
           {submitting ? <Loader2 size={17} className="arp-spin" /> : <ArrowUp size={18} />}
         </button>
@@ -1586,12 +1581,12 @@ export function AgentCockpit({
               <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenCommand}><Command size={14} /><span><strong>命令面板</strong><small>直接搜索任何隐藏功能</small></span><ChevronRight size={14} /></button>
             </div>
           )}
-          {(actionError || runtimeIssue || plane.error || (modelProfile?.model && modelProfile.supports_vision === false)) && (
+          {(actionError || plane.error || (modelProfile?.model && modelProfile.supports_vision === false)) && (
             <div className="ld-composer-notices">
-              {(actionError || runtimeIssue || plane.error) && (
+              {(actionError || plane.error) && (
                 <div className="ld-composer-notice" role="alert">
                   <XCircle size={13} />
-                  <span>{actionError || runtimeIssue || plane.error}</span>
+                  <span>{actionError || plane.error}</span>
                 </div>
               )}
               {modelProfile?.model && modelProfile.supports_vision === false && (
@@ -1682,8 +1677,8 @@ export function AgentCockpit({
               </article>
             )}
 
-            {(actionError || runtimeIssue) && (
-              <div className="ld-inline-alert" role="alert"><XCircle size={14} /><span>{actionError || runtimeIssue}</span></div>
+            {actionError && (
+              <div className="ld-inline-alert" role="alert"><XCircle size={14} /><span>{actionError}</span></div>
             )}
           </div>
         </div>
@@ -1771,7 +1766,7 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
   }, [automation]);
   const compilation = graph.metadata.compilation as { native_nodes?: number; legacy_nodes?: number; legacy_types?: string[] } | undefined;
   const activeRun = Boolean(plane.currentRun && isActiveRunStatus(plane.currentRun.status));
-  const runtimeReady = plane.connection === 'online' && !plane.runtimeIssue;
+  const runtimeReady = Boolean(plane.baseUrl);
 
   useEffect(() => {
     setUI({ panels_visible: true, show_node_library: true, show_property_panel: true });
@@ -1840,7 +1835,7 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
       setValidationSource('local');
       setValidation(local);
       if (!local.valid) return;
-      if (!runtimeReady) throw new Error(plane.runtimeIssue || '本机运行时尚未连接；当前流程仍可离线编辑和保存。');
+      if (!runtimeReady) throw new Error('本机运行时尚未连接；当前流程仍可离线编辑和保存。');
       const result = await plane.validateAutomation(automation);
       assertCurrentDocument();
       setValidationSource('runtime');
@@ -1902,14 +1897,14 @@ function Studio({ plane, onOpenAutomation }: { plane: Plane; onOpenAutomation?: 
         <FlowFragmentComposer
           propose={plane.proposeFlowFragment}
           disabled={busy || activeRun || !runtimeReady}
-          disabledReason={activeRun ? '当前任务结束后才能生成流程片段' : (plane.runtimeIssue || '本机运行时尚未连接')}
+          disabledReason={activeRun ? '当前任务结束后才能生成流程片段' : '本机运行时尚未连接'}
         />
         <button className="arp-button arp-studio-command" title="保存工作流" aria-label="保存工作流" onClick={() => void save()} disabled={busy}><Save size={14} /><span>保存</span></button>
         <button className="arp-button arp-studio-command" title="验证工作流" aria-label="验证工作流" onClick={validate} disabled={busy}><ShieldCheck size={14} /><span>验证</span></button>
         {activeRun ? (
           <button className="arp-button arp-button-danger arp-studio-command" title="停止当前运行" aria-label="停止当前运行" onClick={() => void stop()} disabled={busy}>{busy ? <Loader2 size={14} className="arp-spin" /> : <CircleStop size={14} />}<span>停止</span></button>
         ) : (
-          <button className="arp-button arp-button-primary arp-studio-command" title={runtimeReady ? '运行工作流' : (plane.runtimeIssue || '本机运行时尚未连接')} aria-label="运行工作流" onClick={run} disabled={busy || !runtimeReady}>{busy ? <Loader2 size={14} className="arp-spin" /> : <Play size={14} fill="currentColor" />}<span>运行工作流</span></button>
+          <button className="arp-button arp-button-primary arp-studio-command" title={runtimeReady ? '运行工作流' : '本机运行时尚未连接'} aria-label="运行工作流" onClick={run} disabled={busy || !runtimeReady}>{busy ? <Loader2 size={14} className="arp-spin" /> : <Play size={14} fill="currentColor" />}<span>运行工作流</span></button>
         )}
       </header>
       {(error || notice) && (
@@ -2277,7 +2272,6 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
       ) {
         await plane.startAutomation(asset as AutomationIR);
       } else {
-        if (plane.runtimeIssue) throw new Error(`${plane.runtimeIssue} 重放未启动。`);
         const started = await client.replay(file) as { replay_id?: string; job?: Omit<ReplayJobView, 'kind'> };
         if (!started.replay_id || !started.job) throw new Error('本机运行时没有返回重放任务。');
         setReplayJob({ ...started.job, kind: 'replay' });
@@ -2708,7 +2702,7 @@ function SystemView({ plane }: { plane: Plane }) {
             <div><dt>加载提交</dt><dd>{runtime?.git.loaded_commit || '-'}</dd></div>
             <div><dt>工作提交</dt><dd>{runtime?.git.current_commit || '-'}</dd></div>
             <div><dt>运行时协议</dt><dd>{runtime?.contract_version ?? '-'}</dd></div>
-            <div><dt>源码状态</dt><dd>{plane.runtimeIssue || '加载版本与当前版本一致'}</dd></div>
+            <div><dt>源码状态</dt><dd>{plane.runtimeNotice || '加载版本与当前版本一致'}</dd></div>
             <div><dt>主模型视觉能力</dt><dd>{platformStatus?.model_profile ? (platformStatus.model_profile.supports_vision ? '支持' : '不支持') : '-'}</dd></div>
             <div><dt>世界模型</dt><dd>{config ? (config.agent?.world_model !== false ? '启用' : '停用') : '-'}</dd></div>
             <div><dt>视觉模型状态</dt><dd>{platformStatus ? (platformStatus.vlm_configured ? '已配置' : platformStatus.vlm_reason || '未配置') : '-'}</dd></div>

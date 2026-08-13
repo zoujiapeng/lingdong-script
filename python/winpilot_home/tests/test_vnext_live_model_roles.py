@@ -75,9 +75,15 @@ def _actor_turn() -> ActorTurnInput:
                 },
                 "minItems": 1,
             },
-                "keep_holding": {"type": "boolean"},
+                "keep_holding": {"type": "boolean", "default": False},
+                "held_keys": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "uniqueItems": True,
+                    "default": [],
+                },
             },
-            "required": ["image_path", "keep_holding"],
+            "required": ["image_path"],
         },
         "scroll": {
             "type": "object",
@@ -459,7 +465,8 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "once" in descriptions["click"]
     assert "Double-click" in descriptions["double_click"]
     assert "`x1,y1 x2,y2 ...`" in descriptions["drag"]
-    assert "amount < 0 scrolls down" in descriptions["scroll"]
+    assert "amount < 0 scrolls" in descriptions["scroll"]
+    assert "120 is one ordinary notch" in descriptions["scroll"]
     assert "selected text is replaced" in descriptions["type_text"]
     assert "one key or one ordered key chord" in descriptions["press_key"]
     assert "without further mutation" in descriptions["claim_obligation_done"]
@@ -1504,6 +1511,8 @@ def test_actor_permissions_are_the_exact_broker_projected_subset() -> None:
     assert decision.proposal["args"] == {
         "image_x": 400,
         "image_y": 300,
+        "button": "left",
+        "press_duration_ms": 35,
     }
     tools = clients[0].requests[0]["tools"]
     assert [tool["function"]["name"] for tool in tools] == ["click"]
@@ -1542,14 +1551,20 @@ def test_actor_projects_held_drag_as_one_segment_from_physical_cursor() -> None:
     assert decision.proposal["args"] == {
         "image_path": [[120, 60], [250, 220], [500, 400]],
         "keep_holding": True,
+        "button": "left",
+        "duration_ms": 400,
     }
     actor_schema = clients[0].requests[0]["tools"][0]["function"][
         "parameters"
     ]
-    assert actor_schema["required"] == ["image_path", "keep_holding"]
+    assert actor_schema["required"] == ["image_path"]
     assert actor_schema["properties"]["image_path"] == {
         "type": "string",
         "minLength": 1,
+    }
+    assert actor_schema["properties"]["held_keys"] == {
+        "type": "string",
+        "default": "",
     }
     assert len(clients[0].requests) == 1
 

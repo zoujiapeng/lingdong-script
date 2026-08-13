@@ -25,10 +25,6 @@ from .state import (
     _broker_projection_id,
 )
 
-# Pointer gestures that move/click the physical cursor; excluded while a held
-# pointer lease is active because they would conflict with the held press.
-_POINTER_ACTIONS = frozenset({"click", "double_click", "drag"})
-
 @dataclass(frozen=True, slots=True)
 class CapabilityBroker:
     """Project one bounded tool surface from immutable accepted facts."""
@@ -137,13 +133,6 @@ class CapabilityBroker:
         checks = {
             "target_bound": cls._target_prerequisite_met(mission, state),
             "authoritative_frame": frame,
-            "pointer_released": (
-                state.pointer.disposition is PointerDisposition.RELEASED
-            ),
-            "pointer_held": (
-                state.pointer.disposition is PointerDisposition.HELD
-                and state.pointer.physically_owned
-            ),
             "current_run_artifact": bool(valid_artifacts),
             "recipient_bound": "recipient.bound" in state.authorization_scopes,
             "adapter_live": any(
@@ -178,22 +167,16 @@ class CapabilityBroker:
             return False
         if not cls._frame_valid(mission, state):
             return False
-        pointer_held = cls._pointer_is_owned_held(state)
         if state.pointer.disposition is PointerDisposition.UNKNOWN:
             return False
-        if state.pointer.disposition is PointerDisposition.HELD:
-            # A physically held pointer lease is still owned: the model may
-            # continue/finish the drag, or choose a non-pointer action (hotkey,
-            # type_text, launch, claim, blocked) — those are mechanically safe
-            # while the button is held.  Pointer actions (click, double_click,
-            # a new drag) would conflict with the held press and stay excluded.
-            if pointer_held:
-                if tool.name in _POINTER_ACTIONS and tool.name != "drag":
-                    return False
-            else:
-                # Held but no longer owned (lease lost): nothing pointer-based
-                # is safe; the model must resolve the state first.
-                return False
+        if (
+            state.pointer.disposition is PointerDisposition.HELD
+            and not cls._pointer_is_owned_held(state)
+        ):
+            # Only an actually uncertain physical button state pauses input.
+            # A healthy held button remains a normal human input state and does
+            # not hide mouse, wheel, or mixed keyboard tools from the model.
+            return False
         if tool.required_any_capabilities and not (
             set(tool.required_any_capabilities) & capabilities
         ):
@@ -208,7 +191,6 @@ class CapabilityBroker:
                 mission.status is not MissionStatus.RUNNING
                 or not cls._runtime_writable(state)
                 or not cls._frame_valid(mission, state)
-                or not tool.required_any_capabilities
             ):
                 return False
         elif tool.mutation_kind is not MutationKind.NONE:
