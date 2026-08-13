@@ -438,6 +438,8 @@ def external_verdict(
     elif scenario == "corridor_drag":
         if move_count < 3:
             errors.append("corridor gesture did not produce enough pointer moves")
+        if details.get("started_at_origin") is not True:
+            errors.append("corridor gesture did not start from the original token")
         if details.get("path_valid") is not True:
             errors.append("gesture left the visible corridor")
         clearance_value = details.get("min_clearance")

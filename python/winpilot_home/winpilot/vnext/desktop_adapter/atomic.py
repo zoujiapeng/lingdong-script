@@ -42,6 +42,7 @@ from ...action.raw_device import (
     RawDeviceExecutor,
 )
 from ...action.replay_policy import MutationOutcome
+from ...utils.log import BUS
 from ...utils.screenshot import Region, virtual_screen_region
 from ...visual_runtime.frame_authority import FrameAuthority, FrameState
 from ...visual_runtime.frame_observer import FrameObserver
@@ -88,7 +89,6 @@ _ACTIONS = frozenset(
 _POST_FRAME_KIND = "post_action_frame"
 _JPEG_MEDIA_TYPE = "image/jpeg"
 _MAX_SCROLL_AMOUNT = 1200
-_MAX_DRAG_INTERMEDIATE_POINTS = 32
 _MAX_LAUNCH_EFFECT_CHARS = 200
 # One spatial turn can make an Actor call followed by a Grounder call.  Keep
 # the emergency lease longer than their combined production timeout; normal
@@ -723,6 +723,7 @@ class AtomicDesktopAdapter:
                     prepared.action,
                     revalidation_error,
                 )
+            self._publish_pointer_dispatch(envelope, prepared, before_frame)
             raw_started = True
             return self._run_raw(
                 envelope,
@@ -916,7 +917,7 @@ class AtomicDesktopAdapter:
                 arguments: dict[str, Any] = {
                     "final_guard": pointer_guard,
                 }
-                if prepared.points is not None:
+                if prepared.points:
                     arguments["points"] = list(prepared.points)
                 if prepared.hold_control_present:
                     arguments.update(
@@ -1480,44 +1481,38 @@ class AtomicDesktopAdapter:
                 amount=amount,
             )
         if action == "drag":
-            endpoint_keys = {
-                "image_x1",
-                "image_y1",
-                "image_x2",
-                "image_y2",
-            }
-            optional_keys = {"image_points", "keep_holding"}
-            if not endpoint_keys <= set(args):
+            if not {"image_path", "keep_holding"} <= set(args):
                 raise ValueError(
                     "atomic action arguments are missing required fields"
                 )
-            hold_control_present = "keep_holding" in args
-            keep_holding = args.get("keep_holding", False)
+            hold_control_present = True
+            keep_holding = args["keep_holding"]
             if type(keep_holding) is not bool:
                 raise ValueError("keep_holding must be boolean")
             started_held = envelope.pointer_disposition == "held"
-            if started_held and not hold_control_present:
+            raw_path = args["image_path"]
+            minimum = 1 if started_held else 2
+            if (
+                not isinstance(raw_path, (list, tuple))
+                or len(raw_path) < minimum
+            ):
                 raise ValueError(
-                    "held drag continuation requires keep_holding"
+                    f"image_path must contain at least {minimum} point"
+                    f"{'s' if minimum != 1 else ''}"
                 )
-            self._require_image_point(
-                args,
-                keys=("image_x1", "image_y1"),
-            )
-            self._require_image_point(
-                args,
-                keys=("image_x2", "image_y2"),
-            )
-            start = self._map_point(
-                envelope,
-                args,
-                image_keys=("image_x1", "image_y1"),
-            )
-            end = self._map_point(
-                envelope,
-                args,
-                image_keys=("image_x2", "image_y2"),
-            )
+            mapped_path: list[PhysicalPoint] = []
+            for index, raw_point in enumerate(raw_path):
+                if (
+                    not isinstance(raw_point, (list, tuple))
+                    or len(raw_point) != 2
+                ):
+                    raise ValueError(f"image_path[{index}] must be [x,y]")
+                point_args = {
+                    "image_x": raw_point[0],
+                    "image_y": raw_point[1],
+                }
+                self._require_image_point(point_args)
+                mapped_path.append(self._map_point(envelope, point_args))
             pointer_lease_id: str | None = None
             if started_held:
                 with self._pointer_lock:
@@ -1532,7 +1527,13 @@ class AtomicDesktopAdapter:
                         )
                     start = lease.cursor
                     pointer_lease_id = lease.lease_id
-            elif keep_holding:
+                movement = mapped_path
+            else:
+                start = mapped_path[0]
+                movement = mapped_path[1:]
+            end = movement[-1]
+            points = tuple(movement[:-1])
+            if not started_held and keep_holding:
                 digest = hashlib.sha256(
                     (
                         f"{envelope.mission_id}|{envelope.run_id}|"
@@ -1540,50 +1541,6 @@ class AtomicDesktopAdapter:
                     ).encode("utf-8")
                 ).hexdigest()
                 pointer_lease_id = f"pointer-lease-{digest[:24]}"
-            points: tuple[PhysicalPoint, ...] | None = None
-            if "image_points" in args:
-                raw_points = args["image_points"]
-                if (
-                    not isinstance(raw_points, (list, tuple))
-                    or len(raw_points) > _MAX_DRAG_INTERMEDIATE_POINTS
-                ):
-                    raise ValueError(
-                        "image_points must be an array with at most 32 points"
-                    )
-                mapped_points: list[PhysicalPoint] = []
-                for index, raw_point in enumerate(raw_points):
-                    if (
-                        not isinstance(raw_point, (list, tuple))
-                        or len(raw_point) != 2
-                    ):
-                        raise ValueError(
-                            f"image_points[{index}] must be [x,y]"
-                        )
-                    point_args = {
-                        "image_x": raw_point[0],
-                        "image_y": raw_point[1],
-                    }
-                    self._require_image_point(point_args)
-                    mapped_points.append(
-                        self._map_point(envelope, point_args)
-                    )
-                points = tuple(mapped_points)
-            stationary_release = bool(
-                started_held
-                and not keep_holding
-                and not points
-            )
-            if start == end and not stationary_release:
-                # A held continuation that stays in place is a no-op hold;
-                # keep it as a distinct-endpoint press so the physical
-                # layer never sees a stationary drag.
-                if started_held:
-                    end = start
-                # A closed path (start == end with intermediate points) is a
-                # legitimate curve-drawing gesture: the model outlines a shape
-                # and returns to its start.  Keep it a drag with its full path;
-                # never silently rewrite the action into a click, because the
-                # decision was already recorded as drag.
             return _PreparedAction(
                 action=action,
                 point=start,
@@ -1674,7 +1631,7 @@ class AtomicDesktopAdapter:
                 "y2": prepared.end_point[1],
                 "button": "left",
             }
-            if prepared.points is not None:
+            if prepared.points:
                 arguments["points"] = [
                     [point[0], point[1]]
                     for point in prepared.points
@@ -1705,6 +1662,61 @@ class AtomicDesktopAdapter:
             "modifiers": list(prepared.chord.keys[:-1]),
             "key": prepared.chord.keys[-1],
         }
+
+    @classmethod
+    def _publish_pointer_dispatch(
+        cls,
+        envelope: ActorDecisionEnvelope,
+        prepared: _PreparedAction,
+        frame: RuntimeFrame,
+    ) -> None:
+        """Trace image-to-screen pointer mapping without affecting input."""
+
+        if prepared.action not in {"click", "double_click", "drag", "scroll"}:
+            return
+        source = {
+            key: value
+            for key, value in envelope.proposal.args.items()
+            if key in {
+                "image_x",
+                "image_y",
+                "image_x1",
+                "image_y1",
+                "image_x2",
+                "image_y2",
+                "image_path",
+                "amount",
+                "keep_holding",
+            }
+        }
+        if isinstance(source.get("image_path"), (list, tuple)):
+            source["image_path"] = [
+                list(point)
+                if isinstance(point, (list, tuple))
+                else point
+                for point in source["image_path"]
+            ]
+        try:
+            BUS.publish(
+                "vnext_pointer_dispatch",
+                runtime_version="vnext",
+                no_legacy_fallback=True,
+                run_id=envelope.run_id,
+                mission_id=envelope.mission_id,
+                decision_id=envelope.decision_id,
+                action=prepared.action,
+                frame_id=frame.frame_id,
+                frame_epoch=frame.epoch,
+                frame_scope=frame.scope,
+                submitted_image_size=list(envelope.submitted_image_size),
+                frame_region=list(envelope.frame_region),
+                image_coordinates=source,
+                physical_arguments=cls._physical_attempt_arguments(prepared),
+                parameter_visibility="pointer_coordinates",
+            )
+        except Exception:
+            # Diagnostics must never reject or replay physical input.
+            pass
 
     @staticmethod
     def _raw_device_route(action: str) -> str:

@@ -324,6 +324,7 @@ def test_external_verdict_checks_slider_band_and_corridor_path():
     corridor = _state(
         "corridor_drag",
         {
+            "started_at_origin": True,
             "path_valid": True,
             "min_clearance": 7,
             "path_points": [[1, 1], [2, 2], [3, 3], [4, 4]],
@@ -353,12 +354,25 @@ def test_external_verdict_checks_slider_band_and_corridor_path():
     assert failed["passed"] is False
     assert "gesture left the visible corridor" in failed["errors"]
 
+    corridor["success_event"]["details"]["path_valid"] = True
+    corridor["success_event"]["details"]["started_at_origin"] = False
+    failed_start = harness.external_verdict(
+        corridor,
+        case_id="case-1",
+        scenario="corridor_drag",
+        seed=17,
+        expected_variant=2,
+    )
+    assert failed_start["passed"] is False
+    assert "corridor gesture did not start from the original token" in failed_start["errors"]
+
 
 def test_corridor_variant_zero_and_zero_clearance_are_valid():
     harness = _load_harness()
     corridor = _state(
         "corridor_drag",
         {
+            "started_at_origin": True,
             "path_valid": True,
             "min_clearance": 0,
             "path_points": [[1, 1], [2, 2], [3, 3], [4, 4]],

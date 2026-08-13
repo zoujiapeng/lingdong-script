@@ -190,6 +190,59 @@ def test_powershell_default_file_writes_are_utf8(tmp_path, monkeypatch) -> None:
     assert target.read_text(encoding="utf-8-sig") == 'label = "dash — 中文"\n'
 
 
+@pytest.mark.skipif(
+    not hasattr(subprocess, "CREATE_NO_WINDOW"),
+    reason="Windows PowerShell contract",
+)
+def test_powershell_preserves_native_exit_code_and_stderr(monkeypatch) -> None:
+    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
+
+    result = shell.run(
+        'cmd /c "echo ACTIONABLE 1>&2 & exit /b 23"',
+        shell="powershell",
+    )
+
+    assert result["ok"] is False
+    assert result["exit_code"] == 23
+    assert result["error"] == "command exited with code 23"
+    assert "ACTIONABLE" in result["output"]
+
+
+@pytest.mark.skipif(
+    not hasattr(subprocess, "CREATE_NO_WINDOW"),
+    reason="Windows PowerShell contract",
+)
+def test_powershell_uses_final_statement_status(monkeypatch) -> None:
+    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
+
+    result = shell.run(
+        "cmd /c exit 23; Write-Output recovered",
+        shell="powershell",
+    )
+
+    assert result["ok"] is True
+    assert result["exit_code"] == 0
+    assert result["output"].strip() == "recovered"
+
+
+@pytest.mark.skipif(
+    not hasattr(subprocess, "CREATE_NO_WINDOW"),
+    reason="Windows PowerShell contract",
+)
+def test_powershell_preserves_formatted_object_output(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
+    escaped = str(tmp_path).replace("'", "''")
+
+    result = shell.run(
+        f"Get-Item -LiteralPath '{escaped}' | Select-Object Name, FullName",
+        shell="powershell",
+    )
+
+    assert result["ok"] is True
+    assert "FullName" in result["output"]
+    assert tmp_path.name in result["output"]
+
+
 def test_empty_command_publishes_the_rejection(monkeypatch) -> None:
     events = []
     monkeypatch.setattr(shell, "shell_enabled", lambda: True)

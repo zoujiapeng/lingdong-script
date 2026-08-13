@@ -1172,10 +1172,13 @@ def execute_admitted_physical_drag(
 
     canonical_points = _canonical_drag_points(points)
     held_mode = pointer_already_held or keep_holding
-    stationary_finish = bool(
+    stationary_held = bool(
         pointer_already_held is True
-        and keep_holding is False
         and not canonical_points
+        and (x1, y1) == (x2, y2)
+    )
+    closed_path = bool(
+        canonical_points
         and (x1, y1) == (x2, y2)
     )
     valid_hold_token = (
@@ -1202,7 +1205,8 @@ def execute_admitted_physical_drag(
                 any(type(value) is not int for value in (x1, y1, x2, y2))
                 or (
                     (x1, y1) == (x2, y2)
-                    and not stationary_finish
+                    and not stationary_held
+                    and not closed_path
                 )
                 or not callable(final_guard)
                 or (held_mode and not valid_hold_token)
@@ -1255,7 +1259,7 @@ def execute_admitted_physical_drag(
     end = (x2, y2)
     path = (
         [start]
-        if stationary_finish
+        if stationary_held
         else [start, *canonical_points, end]
     )
     if held_mode:

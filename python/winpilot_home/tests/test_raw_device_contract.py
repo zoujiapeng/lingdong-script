@@ -618,6 +618,36 @@ def test_drag_preserves_ordered_intermediate_points_in_one_backend_call() -> Non
     ]
 
 
+def test_pressed_pointer_interpolation_reaches_each_bend_without_corner_cutting(
+    monkeypatch,
+) -> None:
+    from winpilot.action import executor
+
+    emitted: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        executor,
+        "_target_window_still_foreground",
+        lambda _hwnd: True,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_emit_move",
+        lambda x, y: emitted.append((x, y)),
+    )
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    completed = executor._move_path_while_pressed(
+        [(10, 20), (34, 20), (34, 44)],
+        0.4,
+    )
+
+    assert completed is True
+    bend = emitted.index((34, 20))
+    assert all(y == 20 for _x, y in emitted[: bend + 1])
+    assert all(x == 34 for x, _y in emitted[bend:])
+    assert emitted[-1] == (34, 44)
+
+
 def test_drag_accepts_closed_path_that_returns_to_start() -> None:
     """A closed loop (start == end with a path) is a legal drawing gesture."""
 
@@ -666,7 +696,6 @@ def test_drag_accepts_closed_path_that_returns_to_start() -> None:
         [(1, 2, 3)],
         [(True, 2)],
         [(1.5, 2)],
-        [(1, 2)] * 33,
     ),
 )
 def test_drag_rejects_invalid_intermediate_points_before_backend(points) -> None:

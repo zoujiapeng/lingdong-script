@@ -492,6 +492,30 @@ class _FakeSession:
         self.closed = True
 
 
+def test_budgeted_actor_uses_task_budget_before_desktop_and_local_budget_after() -> None:
+    limits: list[int] = []
+
+    class Role:
+        model_call_reservation = 3
+
+        def begin_turn(self, *_args: Any, **kwargs: Any) -> str:
+            limits.append(kwargs["_model_call_limit"])
+            return "initial"
+
+        def propose(self, *_args: Any, **kwargs: Any) -> str:
+            limits.append(kwargs["_model_call_limit"])
+            return "visual"
+
+    actor = live_agent._BudgetedActor(
+        Role(),
+        live_agent._ModelCallCounter(12),
+    )
+
+    assert actor.begin_turn("goal") == "initial"
+    assert actor.propose("turn") == "visual"
+    assert limits == [12, 3]
+
+
 class _StubActorBundle:
     def __init__(self) -> None:
         self.actor = SimpleNamespace(
@@ -1472,46 +1496,26 @@ def test_tool_catalog_is_exact_and_keeps_hotkey_order_as_downstream_gate() -> No
     assert hotkey["maxItems"] == len(CANONICAL_HOTKEY_MODIFIERS) + 1 == 5
     assert hotkey["uniqueItems"] is True
     drag = schemas["drag"]
-    assert tuple(drag["required"]) == (
-        "image_x1",
-        "image_y1",
-        "image_x2",
-        "image_y2",
-    )
-    assert drag["properties"]["image_points"]["maxItems"] == 32
-    assert drag["properties"]["image_points"]["items"]["minItems"] == 2
-    assert drag["properties"]["image_points"]["items"]["maxItems"] == 2
-    assert tuple(drag["properties"]["image_points"]["default"]) == ()
-    assert drag["properties"]["keep_holding"] == {
-        "type": "boolean", "default": False,
-    }
+    assert tuple(drag["required"]) == ("image_path", "keep_holding")
+    path = drag["properties"]["image_path"]
+    assert path["minItems"] == 1
+    assert "maxItems" not in path
+    assert path["items"]["minItems"] == 2
+    assert path["items"]["maxItems"] == 2
+    assert drag["properties"]["keep_holding"] == {"type": "boolean"}
     validator = ToolArgumentValidator(catalog)
     straight = {
-        "image_x1": 10,
-        "image_y1": 20,
-        "image_x2": 300,
-        "image_y2": 200,
-    }
-    assert validator.validate("drag", straight) == straight
-    curved = {
-        **straight,
-        "image_points": [[80, 40], [160, 120]],
+        "image_path": [[10, 20], [300, 200]],
         "keep_holding": False,
     }
-    assert validator.validate("drag", curved) == curved
+    assert validator.validate("drag", straight) == straight
+    held_segment = {
+        "image_path": [[160, 120]],
+        "keep_holding": True,
+    }
+    assert validator.validate("drag", held_segment) == held_segment
     with pytest.raises(ToolArgumentValidationError):
-        validator.validate(
-            "drag",
-            {**straight, "image_points": [[1, 2, 3]]},
-        )
-    with pytest.raises(ToolArgumentValidationError):
-        validator.validate(
-            "drag",
-            {
-                **straight,
-                "image_points": [[index, index] for index in range(33)],
-            },
-        )
+        validator.validate("drag", {**straight, "image_path": [[1, 2, 3]]})
     blocker = schemas["blocked"]["properties"]["blocker_kind"]
     assert blocker["maxLength"] == 64
     assert blocker["pattern"] == r"^[a-z][a-z0-9_]{0,63}$"

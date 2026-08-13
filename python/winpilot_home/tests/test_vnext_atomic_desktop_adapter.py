@@ -422,10 +422,8 @@ def _proposal(action: str) -> dict[str, Any]:
         "click": {"image_x": 50.0, "image_y": 40.0},
         "double_click": {"image_x": 50.0, "image_y": 40.0},
         "drag": {
-            "image_x1": 50.0,
-            "image_y1": 40.0,
-            "image_x2": 80.0,
-            "image_y2": 60.0,
+            "image_path": [[50.0, 40.0], [80.0, 60.0]],
+            "keep_holding": False,
         },
         "scroll": {
             "image_x": 50.0,
@@ -607,17 +605,11 @@ def _harness(
     drag_guard_points: tuple[tuple[int, int], ...] | None = None
     if action == "drag":
         drag_arguments = action_args or _proposal("drag")["args"]
-        drag_guard_points = (
-            expected_hit_point,
-            *(
-                _map_submitted_test_point(point[0], point[1])
-                for point in drag_arguments.get("image_points", [])
-            ),
-            _map_submitted_test_point(
-                drag_arguments["image_x2"],
-                drag_arguments["image_y2"],
-            ),
+        mapped_path = tuple(
+            _map_submitted_test_point(point[0], point[1])
+            for point in drag_arguments["image_path"]
         )
+        drag_guard_points = (expected_hit_point, *mapped_path[1:])
     probe = _Probe(
         LiveTargetSnapshot(
             hwnd=HWND,
@@ -1027,10 +1019,7 @@ def test_screen_first_held_drag_skips_bound_window_foreground(
     envelope = _replace_action_args(
         _envelope(before, binding, "drag"),
         {
-            "image_x1": 50.0,
-            "image_y1": 40.0,
-            "image_x2": 80.0,
-            "image_y2": 60.0,
+            "image_path": [[50.0, 40.0], [80.0, 60.0]],
             "keep_holding": True,
         },
     )
@@ -1921,54 +1910,48 @@ def test_partial_double_click_guard_failure_is_unknown_and_not_replayed() -> Non
 
 
 
-def test_closed_path_drag_executes_full_curve_and_records_evidence(
-    tmp_path: Path,
-) -> None:
-    """A closed loop (start == end with a path) stays a drag with its path.
-
-    Drawing a cat outline returns to its start point; the adapter must not
-    rewrite it into a click (this was the 11x evidence_attempt_rejected bug).
-    """
+def test_drag_traces_every_image_path_point_in_physical_order() -> None:
     submitted = {
-        "image_x1": 50.0,
-        "image_y1": 40.0,
-        "image_x2": 50.0,
-        "image_y2": 40.0,
-        "image_points": [[80.0, 60.0], [50.0, 40.0]],
+        "image_path": [[50.0, 40.0], [80.0, 40.0], [80.0, 60.0]],
+        "keep_holding": False,
     }
-    harness = _harness(
-        "drag",
-        action_args=submitted,
-        expected_hit_point=(60, 60),
-    )
-    result = harness.run()
+    harness = _harness("drag", action_args=submitted)
+    events: list[dict[str, Any]] = []
+    from winpilot.utils.log import BUS
+
+    BUS.add_sink(events.append)
+    try:
+        result = harness.run()
+    finally:
+        BUS.remove_sink(events.append)
+
     assert result.controller_error is None
     assert result.transition is not None
     assert result.transition.outcome is ControllerOutcome.COMPLETED
-    assert result.transition.action == "drag"
-    assert harness.raw.calls == [
-        (
-            "drag",
-            (
-                60,
-                60,
-                60,
-                60,
-                ((90, 80), (60, 60)),
-                HWND,
-            ),
-        )
-    ]
-    assert harness.trace.records[0][0].action == "drag"
-    assert harness.trace.records[0][0].outcome is MutationOutcome.APPLIED
+    dispatch = next(
+        event
+        for event in events
+        if event.get("type") == "vnext_pointer_dispatch"
+    )
+    assert dispatch["image_coordinates"] == submitted
+    assert dispatch["submitted_image_size"] == [100, 80]
+    assert dispatch["frame_region"] == [10, 20, 100, 80]
+    assert dispatch["physical_arguments"] == {
+        "kind": "pointer_drag",
+        "x1": 60,
+        "y1": 60,
+        "x2": 90,
+        "y2": 80,
+        "button": "left",
+        "points": [[90, 60]],
+        "started_held": False,
+        "keep_holding": False,
+    }
 
 
 def test_held_drag_releases_at_current_point_without_an_extra_move() -> None:
     begin_args = {
-        "image_x1": 50.0,
-        "image_y1": 40.0,
-        "image_x2": 80.0,
-        "image_y2": 60.0,
+        "image_path": [[50.0, 40.0], [80.0, 60.0]],
         "keep_holding": True,
     }
     harness = _harness("drag", action_args=begin_args)
@@ -2002,10 +1985,7 @@ def test_held_drag_releases_at_current_point_without_an_extra_move() -> None:
         current = harness.authority.current
         assert current is not None
         finish_args = {
-            "image_x1": 80.0,
-            "image_y1": 60.0,
-            "image_x2": 80.0,
-            "image_y2": 60.0,
+            "image_path": [[80.0, 60.0]],
             "keep_holding": False,
         }
         finish_envelope = _replace_action_args(
@@ -2059,10 +2039,7 @@ def test_adapter_close_retries_then_releases_an_unfinished_held_drag(
     harness = _harness(
         "drag",
         action_args={
-            "image_x1": 50.0,
-            "image_y1": 40.0,
-            "image_x2": 80.0,
-            "image_y2": 60.0,
+            "image_path": [[50.0, 40.0], [80.0, 60.0]],
             "keep_holding": True,
         },
     )

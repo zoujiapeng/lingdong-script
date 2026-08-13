@@ -24,6 +24,7 @@ export type ConnectionState = 'connecting' | 'online' | 'degraded' | 'offline';
 
 export const CONTROL_PLANE_FALLBACK_REFRESH_MS = 5_000;
 export const CONTROL_PLANE_EVENT_REFRESH_MS = 80;
+export const CONTROL_PLANE_RECONNECT_MS = 500;
 
 type DesktopLeaseClient = Pick<
   ControlPlaneClient,
@@ -231,20 +232,22 @@ export function useControlPlane() {
               throw new Error(restarted?.error || '控制器重启后未返回连接信息。');
             }
             window.location.reload();
-            return;
+            return false;
           } catch (restartError) {
             runtimeRestarting.current = false;
             setError(restartError instanceof Error ? restartError.message : String(restartError));
           }
         }
-        return;
+        return false;
       }
       runtimeRestarting.current = false;
       setError('');
       setConnection((state) => state === 'online' ? state : 'degraded');
+      return true;
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
       setConnection('offline');
+      return false;
     }
   }, []);
 
@@ -266,15 +269,31 @@ export function useControlPlane() {
     let disposed = false;
     let disconnect: (() => void) | undefined;
     let interval: ReturnType<typeof setInterval> | undefined;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let connecting = false;
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        void connect();
+      }, CONTROL_PLANE_RECONNECT_MS);
+    };
     const connect = async () => {
+      if (disposed || connecting) return;
+      connecting = true;
       try {
         const connection = await resolveControlPlaneConnection();
         if (disposed) return;
         const client = new ControlPlaneClient(connection.url, connection.token);
         clientRef.current = client;
         setBaseUrl(connection.url);
-        await refresh();
+        const refreshed = await refresh();
         if (disposed) return;
+        if (!refreshed) {
+          clientRef.current = null;
+          scheduleReconnect();
+          return;
+        }
         disconnect = client.connectEvents((event) => {
           if (event.type === 'desktop_lease_requested') {
             void handleDesktopLease(
@@ -340,19 +359,32 @@ export function useControlPlane() {
             CONTROL_PLANE_EVENT_REFRESH_MS,
           );
         }, (connected) => setConnection(connected ? 'online' : 'degraded'));
-        interval = setInterval(refresh, CONTROL_PLANE_FALLBACK_REFRESH_MS);
+        interval = setInterval(async () => {
+          if (await refresh()) return;
+          disconnect?.();
+          disconnect = undefined;
+          if (interval) clearInterval(interval);
+          interval = undefined;
+          clientRef.current = null;
+          scheduleReconnect();
+        }, CONTROL_PLANE_FALLBACK_REFRESH_MS);
       } catch (connectError) {
         if (!disposed) {
           setError(connectError instanceof Error ? connectError.message : String(connectError));
           setConnection('offline');
+          clientRef.current = null;
+          scheduleReconnect();
         }
+      } finally {
+        connecting = false;
       }
     };
-    connect();
+    void connect();
     return () => {
       disposed = true;
       disconnect?.();
       if (interval) clearInterval(interval);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
     };
   }, [handleDesktopLease, refresh, refreshLiveRun]);

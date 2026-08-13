@@ -172,6 +172,18 @@ def _accepted_success_event(events: list[dict[str, Any]], index: int) -> bool:
         and event.get("succeeded") is True
     ):
         return False
+    if event.get("scenario") == "corridor_drag":
+        details = event.get("details") or {}
+        clearance = details.get("min_clearance")
+        return bool(
+            details.get("succeeded") is True
+            and details.get("started_at_origin") is True
+            and details.get("path_valid") is True
+            and clearance is not None
+            and int(clearance) >= 0
+            and int(event.get("move_count") or 0) >= 3
+            and len(details.get("path_points") or []) >= 3
+        )
     if event.get("scenario") != "dynamic_hold":
         return True
 

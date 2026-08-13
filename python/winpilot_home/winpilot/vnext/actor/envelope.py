@@ -205,6 +205,25 @@ def _validate_point_arguments(
             name="image_y",
             upper_bound=submitted_size[1],
         )
+    image_path = arguments.get("image_path")
+    if image_path is not None:
+        if not isinstance(image_path, (list, tuple)):
+            raise InvalidActorProposal("image_path must be an array of [x,y]")
+        for index, point in enumerate(image_path):
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                raise InvalidActorProposal(
+                    f"image_path[{index}] must be [x,y]"
+                )
+            _submitted_coordinate(
+                point[0],
+                name=f"image_path[{index}][0]",
+                upper_bound=submitted_size[0],
+            )
+            _submitted_coordinate(
+                point[1],
+                name=f"image_path[{index}][1]",
+                upper_bound=submitted_size[1],
+            )
 
 
 def _validate_image_region(
@@ -754,8 +773,10 @@ def bind_actor_decision(
             decision_id=_decision_id(material),
             **material,
         )
-    except (InvalidActorAdmission, InvalidActorProposal):
+    except InvalidActorAdmission:
         raise
+    except InvalidActorProposal as exc:
+        raise InvalidActorAdmission(str(exc)) from exc
     except Exception as exc:
         raise InvalidActorAdmission(str(exc)) from exc
 
