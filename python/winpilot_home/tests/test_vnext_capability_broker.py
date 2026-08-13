@@ -62,7 +62,6 @@ ALL_CAPABILITIES = tuple(sorted(DEFAULT_CAPABILITY_CATALOG))
 GUI_GATES = (
     "target_bound",
     "authoritative_frame",
-    "pointer_released",
     "runtime_healthy",
 )
 DRAG_GATES = (
@@ -863,44 +862,24 @@ def test_tool_route_cannot_create_a_second_gui_writer(
         )
 
 
-def test_gui_tools_require_capability_and_all_standard_gates() -> None:
-    with pytest.raises(CapabilityContractError, match="require target"):
-        _tool(
-            "unsafe_click",
-            ToolRoute.VISUAL_ACTOR,
-            MutationKind.GUI,
-            capabilities=("visual.interact",),
-            order=1,
-        )
-    with pytest.raises(CapabilityContractError, match="accepted capability"):
-        _tool(
-            "unsafe_click",
-            ToolRoute.VISUAL_ACTOR,
-            MutationKind.GUI,
-            prerequisites=GUI_GATES,
-            order=1,
-        )
+def test_gui_tools_do_not_require_policy_gates_or_capability_tokens() -> None:
+    click = _tool(
+        "click",
+        ToolRoute.VISUAL_ACTOR,
+        MutationKind.GUI,
+        order=1,
+    )
+    assert click.prerequisites == ()
+    assert click.required_any_capabilities == ()
+
     drag = _tool(
         "drag",
         ToolRoute.VISUAL_ACTOR,
         MutationKind.GUI,
-        capabilities=("visual.interact",),
-        prerequisites=DRAG_GATES,
         order=1,
     )
-    assert "pointer_released" not in drag.prerequisites
-    with pytest.raises(CapabilityContractError, match="require target"):
-        _tool(
-            "drag",
-            ToolRoute.VISUAL_ACTOR,
-            MutationKind.GUI,
-            capabilities=("visual.interact",),
-            prerequisites=(
-                "target_bound",
-                "authoritative_frame",
-            ),
-            order=1,
-        )
+    assert drag.prerequisites == ()
+    assert drag.required_any_capabilities == ()
 
 
 @pytest.mark.parametrize(
@@ -1218,7 +1197,7 @@ def test_full_desktop_still_requires_authoritative_fresh_frame(frame) -> None:
     )
 
 
-def test_owned_held_pointer_projects_only_drag_with_the_same_lease() -> None:
+def test_owned_held_pointer_keeps_visual_mouse_keyboard_tools_available() -> None:
     mission = _mission()
     projection = CapabilityBroker(_catalog_with_drag()).project(
         mission,
@@ -1232,12 +1211,12 @@ def test_owned_held_pointer_projects_only_drag_with_the_same_lease() -> None:
         ),
     )
     assert projection.execution_route is ExecutionRoute.VISUAL_ACTOR
-    # Owned held pointer: the model may continue the drag or finish with a
-    # non-pointer action; pointer gestures that conflict with the held press
-    # (click/double_click) stay excluded.
+    # A healthy held button is a normal human input state, not a capability
+    # gate. The backend still reports impossible same-button transitions.
     assert "drag" in projection.tool_names
-    assert "click" not in projection.tool_names
-    assert "double_click" not in projection.tool_names
+    assert "click" in projection.tool_names
+    assert "scroll" in projection.tool_names
+    assert "type_text" in projection.tool_names
     assert projection.pointer_lease_id == "pointer-lease-1"
 
 

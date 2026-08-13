@@ -12,9 +12,13 @@ CANONICAL_HOTKEY_KEYS = frozenset({
     *CANONICAL_HOTKEY_MODIFIERS,
     "enter", "esc", "tab", "space", "backspace", "delete", "insert",
     "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
-    "capslock", "numlock", "printscreen", "menu",
+    "capslock", "numlock", "scrolllock", "pause", "printscreen", "menu",
+    "volumeup", "volumedown", "volumemute",
+    "browserback", "browserforward",
+    *(f"numpad{index}" for index in range(10)),
+    "multiply", "add", "subtract", "decimal", "divide",
     "plus", "minus", "comma", "period", "slash",
-    *(f"f{index}" for index in range(1, 13)),
+    *(f"f{index}" for index in range(1, 25)),
     *tuple("abcdefghijklmnopqrstuvwxyz0123456789"),
 })
 

@@ -7,7 +7,7 @@ from enum import Enum
 import math
 import threading
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 
 from ..visual_runtime.keyboard_contracts import (
     CANONICAL_HOTKEY_KEYS,
@@ -33,10 +33,120 @@ def _canonical_drag_points(value: Any) -> tuple[tuple[int, int], ...] | None:
     return tuple(points)
 
 
+def _canonical_held_keys(value: Any) -> tuple[str, ...] | None:
+    if type(value) is not tuple:
+        return None
+    if (
+        len(value) != len(set(value))
+        or any(
+            type(key) is not str or key not in CANONICAL_HOTKEY_KEYS
+            for key in value
+        )
+    ):
+        return None
+    return value
+
+
 class MouseButton(str, Enum):
     LEFT = "left"
     RIGHT = "right"
     MIDDLE = "middle"
+    X1 = "x1"
+    X2 = "x2"
+
+
+class InputEventKind(str, Enum):
+    MOVE = "move"
+    MOVE_RELATIVE = "move_relative"
+    MOUSE_DOWN = "mouse_down"
+    MOUSE_UP = "mouse_up"
+    KEY_DOWN = "key_down"
+    KEY_UP = "key_up"
+    WHEEL = "wheel"
+    HWHEEL = "hwheel"
+    WAIT = "wait"
+
+
+MAX_POINTER_DURATION_MS = 30_000
+MAX_INPUT_SEQUENCE_EVENTS = 512
+
+
+class StopSignal(Protocol):
+    """The only cancellation operation a physical input loop needs."""
+
+    def is_set(self) -> bool: ...
+
+
+def _valid_stop_signal(value: object) -> bool:
+    return value is None or callable(getattr(value, "is_set", None))
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalInputEvent:
+    """One canonical physical event inside an admitted atomic sequence."""
+
+    kind: InputEventKind
+    x: int | None = None
+    y: int | None = None
+    duration_ms: int = 0
+    button: MouseButton | None = None
+    key: str | None = None
+    amount: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, InputEventKind):
+            raise TypeError("input event kind must be InputEventKind")
+        if (
+            type(self.duration_ms) is not int
+            or not 0 <= self.duration_ms <= MAX_POINTER_DURATION_MS
+        ):
+            raise ValueError("input event duration_ms is outside the supported range")
+        if self.kind in {InputEventKind.MOVE, InputEventKind.MOVE_RELATIVE}:
+            if any(type(value) is not int for value in (self.x, self.y)):
+                raise ValueError("move event requires integer x and y")
+            if self.kind is InputEventKind.MOVE_RELATIVE and self.x == self.y == 0:
+                raise ValueError("relative move requires a non-zero delta")
+            if any(value is not None for value in (self.button, self.key, self.amount)):
+                raise ValueError("move event has incompatible fields")
+            return
+        if self.kind in {InputEventKind.MOUSE_DOWN, InputEventKind.MOUSE_UP}:
+            if not isinstance(self.button, MouseButton):
+                raise ValueError("mouse event requires MouseButton")
+            if any(value is not None for value in (self.x, self.y, self.key, self.amount)):
+                raise ValueError("mouse event has incompatible fields")
+            if self.duration_ms:
+                raise ValueError("mouse down/up event cannot carry duration")
+            return
+        if self.kind in {InputEventKind.KEY_DOWN, InputEventKind.KEY_UP}:
+            if type(self.key) is not str or self.key not in CANONICAL_HOTKEY_KEYS:
+                raise ValueError("key event requires one canonical key")
+            if any(value is not None for value in (self.x, self.y, self.button, self.amount)):
+                raise ValueError("key event has incompatible fields")
+            if self.duration_ms:
+                raise ValueError("key down/up event cannot carry duration")
+            return
+        if self.kind in {InputEventKind.WHEEL, InputEventKind.HWHEEL}:
+            if (
+                type(self.amount) is not int
+                or self.amount == 0
+                or abs(self.amount) > 1200
+            ):
+                raise ValueError(
+                    "wheel event requires a non-zero native delta in -1200..1200"
+                )
+            if any(value is not None for value in (self.x, self.y, self.button, self.key)):
+                raise ValueError("wheel event has incompatible fields")
+            if self.duration_ms:
+                raise ValueError("wheel event cannot carry duration")
+            return
+        if self.kind is InputEventKind.WAIT:
+            if any(
+                value is not None
+                for value in (self.x, self.y, self.button, self.key, self.amount)
+            ):
+                raise ValueError("wait event has incompatible fields")
+            return
+        raise ValueError("unsupported physical input event")
 
 
 class ClickCount(int, Enum):
@@ -93,10 +203,10 @@ def _scalar_facts(facts: Mapping[str, Any]) -> Mapping[str, Any]:
 
 @dataclass(frozen=True, slots=True)
 class RawActionContext:
-    """Target identity already selected by the Controller."""
+    """Compatibility metadata; it never selects an input recipient."""
 
-    target_hwnd: int
-    current_hwnd: int
+    target_hwnd: int | None = None
+    current_hwnd: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,11 +241,13 @@ class RawActionReceipt:
 
     def __post_init__(self) -> None:
         if self.action not in {
+            "move_mouse",
             "scroll",
             "click",
             "drag",
             "type_text",
             "hotkey",
+            "input_sequence",
             "launch_application",
         }:
             raise ValueError("unknown raw receipt action")
@@ -193,6 +305,18 @@ FinalPointerGuard = Callable[[int, int], FinalPointerGuardDecision]
 FinalKeyboardGuard = Callable[[], FinalKeyboardGuardDecision]
 
 
+def _always_admit_pointer(_x: int, _y: int) -> FinalPointerGuardDecision:
+    """Compatibility callback for older physical backend call signatures."""
+
+    return FinalPointerGuardDecision.ADMITTED
+
+
+def _always_admit_keyboard() -> FinalKeyboardGuardDecision:
+    """Compatibility callback for older physical backend call signatures."""
+
+    return FinalKeyboardGuardDecision.ADMITTED
+
+
 @dataclass(frozen=True, slots=True)
 class AdmittedPhysicalClickBackend:
     """Explicitly marks a backend which never acquires DesktopActionQueue."""
@@ -242,6 +366,38 @@ class AdmittedPhysicalDragBackend:
 
 
 @dataclass(frozen=True, slots=True)
+class AdmittedPhysicalMoveBackend:
+    """Marks an unqueued physical pointer-move backend."""
+
+    execute: RawBackend
+
+    def __post_init__(self) -> None:
+        if not callable(self.execute):
+            raise TypeError("admitted physical move backend must be callable")
+        if hasattr(self.execute, "__wrapped__"):
+            raise TypeError("admitted physical move backend cannot wrap a decorated entry")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+        return self.execute(*args, **kwargs)
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedPhysicalSequenceBackend:
+    """Marks an unqueued mixed mouse/keyboard sequence backend."""
+
+    execute: RawBackend
+
+    def __post_init__(self) -> None:
+        if not callable(self.execute):
+            raise TypeError("admitted physical sequence backend must be callable")
+        if hasattr(self.execute, "__wrapped__"):
+            raise TypeError("admitted physical sequence backend cannot wrap a decorated entry")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> RawBackendResult:
+        return self.execute(*args, **kwargs)
+
+
+@dataclass(frozen=True, slots=True)
 class AdmittedPhysicalTypeTextBackend:
     """Marks an unqueued, single-mechanism physical text backend."""
 
@@ -279,6 +435,8 @@ class RawDeviceBackends:
     click: RawBackend | None = None
     admitted_physical_click: AdmittedPhysicalClickBackend | None = None
     admitted_physical_drag: AdmittedPhysicalDragBackend | None = None
+    admitted_physical_move: AdmittedPhysicalMoveBackend | None = None
+    admitted_physical_sequence: AdmittedPhysicalSequenceBackend | None = None
     admitted_physical_scroll: AdmittedPhysicalScrollBackend | None = None
     admitted_physical_type_text: AdmittedPhysicalTypeTextBackend | None = None
     admitted_physical_hotkey: AdmittedPhysicalHotkeyBackend | None = None
@@ -306,6 +464,19 @@ class RawDeviceBackends:
             raise TypeError(
                 "admitted_physical_drag must be AdmittedPhysicalDragBackend or null"
             )
+        if self.admitted_physical_move is not None and not isinstance(
+            self.admitted_physical_move, AdmittedPhysicalMoveBackend
+        ):
+            raise TypeError(
+                "admitted_physical_move must be AdmittedPhysicalMoveBackend or null"
+            )
+        if self.admitted_physical_sequence is not None and not isinstance(
+            self.admitted_physical_sequence, AdmittedPhysicalSequenceBackend
+        ):
+            raise TypeError(
+                "admitted_physical_sequence must be "
+                "AdmittedPhysicalSequenceBackend or null"
+            )
         if self.admitted_physical_type_text is not None and not isinstance(
             self.admitted_physical_type_text, AdmittedPhysicalTypeTextBackend
         ):
@@ -324,8 +495,10 @@ class RawDeviceBackends:
 @dataclass(slots=True)
 class _HeldDragOwner:
     token: str
-    hwnd: int
+    hwnd: int | None
     point: tuple[int, int]
+    button: MouseButton
+    held_keys: tuple[str, ...]
     backend: AdmittedPhysicalDragBackend
 
 
@@ -352,11 +525,13 @@ class RawDeviceExecutor:
         """
 
         pairs = (
+            ("move_mouse", self._backends.admitted_physical_move),
             ("click", self._backends.admitted_physical_click),
             ("drag", self._backends.admitted_physical_drag),
             ("scroll", self._backends.admitted_physical_scroll),
             ("type_text", self._backends.admitted_physical_type_text),
             ("hotkey", self._backends.admitted_physical_hotkey),
+            ("input_sequence", self._backends.admitted_physical_sequence),
         )
         return tuple(sorted(name for name, backend in pairs if backend is not None))
 
@@ -372,13 +547,8 @@ class RawDeviceExecutor:
 
     @staticmethod
     def _context_error(context: RawActionContext) -> str | None:
-        valid_hwnd = lambda value: type(value) is int and value > 0
-        if not isinstance(context, RawActionContext) or not all(
-            map(valid_hwnd, (context.target_hwnd, context.current_hwnd))
-        ):
+        if not isinstance(context, RawActionContext):
             return "invalid_context"
-        if context.target_hwnd != context.current_hwnd:
-            return "target_mismatch"
         return None
 
     @classmethod
@@ -388,7 +558,7 @@ class RawDeviceExecutor:
                 action, MutationOutcome.OUTCOME_UNKNOWN,
                 error_kind="backend_result_uncertain",
             )
-        if action in {"type_text", "hotkey"}:
+        if action in {"type_text", "hotkey", "input_sequence"}:
             result = cls._sanitize_keyboard_result(action, result)
         completed = result.input_completed
         outcome = (
@@ -398,7 +568,13 @@ class RawDeviceExecutor:
         )
         return cls._receipt(
             action, outcome, backend_result=result,
-            error_kind="backend_result_uncertain" if completed is None else None,
+            error_kind=(
+                str(result.facts.get("error_kind"))
+                if completed is None and result.facts.get("error_kind")
+                else "backend_result_uncertain"
+                if completed is None
+                else None
+            ),
         )
 
     @staticmethod
@@ -423,15 +599,29 @@ class RawDeviceExecutor:
             item.value for item in FinalKeyboardGuardDecision
         }:
             safe["guard_decision"] = decision
+        error_kind = source.get("error_kind")
+        if (
+            type(error_kind) is str
+            and 0 < len(error_kind) <= 64
+            and all(char.islower() or char.isdigit() or char == "_" for char in error_kind)
+        ):
+            safe["error_kind"] = error_kind
         if action == "type_text":
             for key in ("requested_codepoints", "completed_codepoints"):
                 value = source.get(key)
                 if type(value) is int and 0 <= value <= MAX_TYPE_TEXT_CODEPOINTS:
                     safe[key] = value
-        else:
+        elif action == "hotkey":
             value = source.get("key_count")
             if type(value) is int and 0 <= value <= 6:
                 safe["key_count"] = value
+        else:
+            for key in ("event_count", "completed_events", "moves_completed"):
+                value = source.get(key)
+                if type(value) is int and value >= 0:
+                    safe[key] = value
+            if type(source.get("cursor_restored")) is bool:
+                safe["cursor_restored"] = source["cursor_restored"]
         return RawBackendResult(result.input_completed, safe)
 
     @classmethod
@@ -452,18 +642,6 @@ class RawDeviceExecutor:
                 error_kind="backend_exception",
             )
         return cls._from_backend(action, result)
-
-    @classmethod
-    def _held_drag_blocked(cls, action: str) -> RawActionReceipt | None:
-        with _held_drag_state_lock:
-            active = _held_drag_owner is not None
-        if not active:
-            return None
-        return cls._receipt(
-            action,
-            MutationOutcome.NOT_STARTED,
-            error_kind="held_drag_active",
-        )
 
     @classmethod
     def _held_drag_unknown(
@@ -496,17 +674,20 @@ class RawDeviceExecutor:
         *,
         final_guard: FinalPointerGuard | None = None,
         enforce_foreground: bool = True,
+        stop_event: StopSignal | None = None,
     ) -> RawActionReceipt:
+        del final_guard
         context_error = self._context_error(context)
         if context_error is not None:
             return self._receipt(
                 "scroll", MutationOutcome.NOT_STARTED,
                 error_kind=context_error,
             )
-        held_block = self._held_drag_blocked("scroll")
-        if held_block is not None:
-            return held_block
-        if any(type(value) is not int for value in (x, y, amount)) or amount == 0:
+        if (
+            any(type(value) is not int for value in (x, y, amount))
+            or amount == 0
+            or not _valid_stop_signal(stop_event)
+        ):
             return self._receipt(
                 "scroll", MutationOutcome.NOT_STARTED,
                 error_kind="invalid_args",
@@ -515,16 +696,55 @@ class RawDeviceExecutor:
         call_kwargs: dict[str, Any] = {
             "hwnd": context.target_hwnd if enforce_foreground else None,
         }
-        if final_guard is not None:
-            if not callable(final_guard):
-                return self._receipt(
-                    "scroll", MutationOutcome.NOT_STARTED,
-                    error_kind="invalid_final_guard",
-                )
+        if self._backends.admitted_physical_scroll is not None:
             backend = self._backends.admitted_physical_scroll
-            call_kwargs["final_guard"] = final_guard
+            call_kwargs["final_guard"] = _always_admit_pointer
+            if stop_event is not None:
+                call_kwargs["stop_event"] = stop_event
         return self._call(
             "scroll", backend, x, y, amount, **call_kwargs,
+        )
+
+    def move_mouse(
+        self,
+        context: RawActionContext,
+        x: int,
+        y: int,
+        *,
+        duration_ms: int = 0,
+        final_guard: FinalPointerGuard | None = None,
+        enforce_foreground: bool = True,
+        stop_event: StopSignal | None = None,
+    ) -> RawActionReceipt:
+        del final_guard
+        context_error = self._context_error(context)
+        if context_error is not None:
+            return self._receipt(
+                "move_mouse", MutationOutcome.NOT_STARTED,
+                error_kind=context_error,
+            )
+        if (
+            any(type(value) is not int for value in (x, y, duration_ms))
+            or not 0 <= duration_ms <= MAX_POINTER_DURATION_MS
+            or not _valid_stop_signal(stop_event)
+        ):
+            return self._receipt(
+                "move_mouse", MutationOutcome.NOT_STARTED,
+                error_kind="invalid_args",
+            )
+        call_kwargs: dict[str, Any] = {
+            "duration_ms": duration_ms,
+            "hwnd": context.target_hwnd if enforce_foreground else None,
+            "final_guard": _always_admit_pointer,
+        }
+        if stop_event is not None:
+            call_kwargs["stop_event"] = stop_event
+        return self._call(
+            "move_mouse",
+            self._backends.admitted_physical_move,
+            x,
+            y,
+            **call_kwargs,
         )
 
     def click(
@@ -536,23 +756,26 @@ class RawDeviceExecutor:
         count: ClickCount,
         mechanism: ClickMechanism,
         *,
+        press_duration_ms: int = 35,
         final_guard: FinalPointerGuard | None = None,
         enforce_foreground: bool = True,
+        stop_event: StopSignal | None = None,
     ) -> RawActionReceipt:
+        del final_guard
         context_error = self._context_error(context)
         if context_error is not None:
             return self._receipt(
                 "click", MutationOutcome.NOT_STARTED,
                 error_kind=context_error,
             )
-        held_block = self._held_drag_blocked("click")
-        if held_block is not None:
-            return held_block
         if not (
             type(x) is int and type(y) is int
             and isinstance(button, MouseButton)
             and isinstance(count, ClickCount)
             and isinstance(mechanism, ClickMechanism)
+            and type(press_duration_ms) is int
+            and 0 <= press_duration_ms <= 2_000
+            and _valid_stop_signal(stop_event)
         ):
             return self._receipt(
                 "click", MutationOutcome.NOT_STARTED,
@@ -562,18 +785,17 @@ class RawDeviceExecutor:
         call_kwargs: dict[str, Any] = {
             "hwnd": context.target_hwnd if enforce_foreground else None,
         }
-        if final_guard is not None:
-            if (
-                not callable(final_guard)
-                or mechanism is ClickMechanism.BACKGROUND_MESSAGE
-            ):
-                return self._receipt(
-                    "click", MutationOutcome.NOT_STARTED,
-                    error_kind="invalid_final_guard",
-                )
+        if (
+            mechanism is not ClickMechanism.BACKGROUND_MESSAGE
+            and self._backends.admitted_physical_click is not None
+        ):
             backend = self._backends.admitted_physical_click
-            call_kwargs["final_guard"] = final_guard
             call_kwargs["enforce_foreground"] = enforce_foreground
+            call_kwargs["final_guard"] = _always_admit_pointer
+            if press_duration_ms != 35:
+                call_kwargs["press_duration_ms"] = press_duration_ms
+            if stop_event is not None:
+                call_kwargs["stop_event"] = stop_event
         return self._call(
             "click", backend, x, y, button=button, count=count,
             mechanism=mechanism, **call_kwargs,
@@ -588,13 +810,18 @@ class RawDeviceExecutor:
         y2: int,
         *,
         points: list[tuple[int, int]] | tuple[tuple[int, int], ...] = (),
-        final_guard: FinalPointerGuard,
+        button: MouseButton = MouseButton.LEFT,
+        held_keys: tuple[str, ...] = (),
+        duration_ms: int = 400,
+        final_guard: FinalPointerGuard | None = None,
         pointer_already_held: bool = False,
         keep_holding: bool = False,
         hold_token: str | None = None,
         enforce_foreground: bool = True,
+        stop_event: StopSignal | None = None,
     ) -> RawActionReceipt:
         global _held_drag_owner
+        del final_guard
 
         context_error = self._context_error(context)
         if context_error is not None:
@@ -603,6 +830,7 @@ class RawDeviceExecutor:
                 error_kind=context_error,
             )
         canonical_points = _canonical_drag_points(points)
+        canonical_held_keys = _canonical_held_keys(held_keys)
         stationary_held = bool(
             pointer_already_held is True
             and not canonical_points
@@ -620,10 +848,14 @@ class RawDeviceExecutor:
                 and not closed_path
             )
             or canonical_points is None
-            or not callable(final_guard)
+            or canonical_held_keys is None
+            or not isinstance(button, MouseButton)
+            or type(duration_ms) is not int
+            or not 0 <= duration_ms <= MAX_POINTER_DURATION_MS
             or type(pointer_already_held) is not bool
             or type(keep_holding) is not bool
             or type(enforce_foreground) is not bool
+            or not _valid_stop_signal(stop_event)
         ):
             return self._receipt(
                 "drag", MutationOutcome.NOT_STARTED,
@@ -643,14 +875,19 @@ class RawDeviceExecutor:
             )
         call_kwargs: dict[str, Any] = {
             "hwnd": context.target_hwnd if enforce_foreground else None,
-            "final_guard": final_guard,
+            "final_guard": _always_admit_pointer,
         }
+        if button is not MouseButton.LEFT:
+            call_kwargs["button"] = button
+        if duration_ms != 400:
+            call_kwargs["duration_ms"] = duration_ms
         if canonical_points:
             call_kwargs["points"] = canonical_points
+        if canonical_held_keys:
+            call_kwargs["held_keys"] = canonical_held_keys
+        if stop_event is not None:
+            call_kwargs["stop_event"] = stop_event
         if not is_held_segment:
-            held_block = self._held_drag_blocked("drag")
-            if held_block is not None:
-                return held_block
             return self._call(
                 "drag",
                 self._backends.admitted_physical_drag,
@@ -683,6 +920,8 @@ class RawDeviceExecutor:
                         token=hold_token,
                         hwnd=context.target_hwnd,
                         point=(x1, y1),
+                        button=button,
+                        held_keys=canonical_held_keys,
                         backend=backend,
                     )
                 else:
@@ -692,27 +931,25 @@ class RawDeviceExecutor:
                             MutationOutcome.NOT_STARTED,
                             error_kind="held_drag_not_active",
                         )
-                    if owner.token != hold_token:
-                        return self._receipt(
-                            "drag",
-                            MutationOutcome.NOT_STARTED,
-                            error_kind="held_drag_token_mismatch",
-                        )
-                    if (
-                        owner.hwnd != context.target_hwnd
-                        or owner.backend is not backend
-                    ):
-                        return self._receipt(
-                            "drag",
-                            MutationOutcome.NOT_STARTED,
-                            error_kind="held_drag_owner_mismatch",
-                        )
-                    if owner.point != (x1, y1):
-                        return self._receipt(
-                            "drag",
-                            MutationOutcome.NOT_STARTED,
-                            error_kind="held_drag_start_mismatch",
-                        )
+                    # The token, old cursor and window are advisory bookkeeping.
+                    # The process has one serialized physical input stream, so
+                    # the button actually held by that stream is authoritative.
+                    # This lets a model move/scroll/type between drag segments
+                    # without a stale predicted cursor rejecting continuation.
+                    backend = owner.backend
+                    button = owner.button
+                    canonical_held_keys = owner.held_keys
+                    call_kwargs["hwnd"] = (
+                        context.target_hwnd if enforce_foreground else None
+                    )
+                    if button is not MouseButton.LEFT:
+                        call_kwargs["button"] = button
+                    else:
+                        call_kwargs.pop("button", None)
+                    if canonical_held_keys:
+                        call_kwargs["held_keys"] = canonical_held_keys
+                    else:
+                        call_kwargs.pop("held_keys", None)
 
             call_kwargs.update(
                 pointer_already_held=pointer_already_held,
@@ -747,10 +984,9 @@ class RawDeviceExecutor:
             )
             with _held_drag_state_lock:
                 owner = _held_drag_owner
-                if owner is not None and owner.token == hold_token:
-                    # The no-op failure path deliberately retains the owner:
-                    # DOWN, MOVE, or UP may have been injected, so only an
-                    # explicit cleanup may reopen the process-wide gate.
+                if owner is not None:
+                    # Failure retains enough state for an explicit best-effort
+                    # UP; it does not hide otherwise usable input primitives.
                     if completed_consistently and keep_holding:
                         owner.point = (x2, y2)
                     elif completed_consistently:
@@ -763,17 +999,6 @@ class RawDeviceExecutor:
         """Best-effort, idempotent release for an interrupted held drag."""
 
         global _held_drag_owner
-
-        if (
-            type(hold_token) is not str
-            or not hold_token
-            or len(hold_token) > 256
-        ):
-            return self._receipt(
-                "drag",
-                MutationOutcome.NOT_STARTED,
-                error_kind="invalid_held_drag_args",
-            )
 
         with _held_drag_operation_lock:
             with _held_drag_state_lock:
@@ -788,14 +1013,9 @@ class RawDeviceExecutor:
                             "segment_phase": "cleanup",
                         }),
                     )
-                if owner.token != hold_token:
-                    return self._receipt(
-                        "drag",
-                        MutationOutcome.NOT_STARTED,
-                        error_kind="held_drag_token_mismatch",
-                    )
                 point = owner.point
                 hwnd = owner.hwnd
+                button = owner.button
                 backend = owner.backend
 
             receipt = self._call(
@@ -806,11 +1026,17 @@ class RawDeviceExecutor:
                 point[0],
                 point[1],
                 hwnd=hwnd,
-                final_guard=lambda _x, _y: FinalPointerGuardDecision.ADMITTED,
+                final_guard=_always_admit_pointer,
                 pointer_already_held=True,
                 keep_holding=False,
                 hold_token=hold_token,
                 cleanup_only=True,
+                **(
+                    {"button": button}
+                    if button is not MouseButton.LEFT
+                    else {}
+                ),
+                **({"held_keys": owner.held_keys} if owner.held_keys else {}),
             )
             reported_held_after = (
                 None
@@ -829,7 +1055,7 @@ class RawDeviceExecutor:
             )
             with _held_drag_state_lock:
                 owner = _held_drag_owner
-                if owner is not None and owner.token == hold_token:
+                if owner is not None:
                     if cleanup_completed:
                         _held_drag_owner = None
             if cleanup_completed:
@@ -844,32 +1070,37 @@ class RawDeviceExecutor:
         context: RawActionContext,
         text: str,
         *,
-        final_guard: FinalKeyboardGuard,
+        final_guard: FinalKeyboardGuard | None = None,
+        enforce_foreground: bool = True,
+        stop_event: StopSignal | None = None,
     ) -> RawActionReceipt:
+        del final_guard
         context_error = self._context_error(context)
         if context_error is not None:
             return self._receipt(
                 "type_text", MutationOutcome.NOT_STARTED,
                 error_kind=context_error,
             )
-        held_block = self._held_drag_blocked("type_text")
-        if held_block is not None:
-            return held_block
         if (
             type(text) is not str
             or not 1 <= len(text) <= MAX_TYPE_TEXT_CODEPOINTS
-            or not callable(final_guard)
+            or not _valid_stop_signal(stop_event)
         ):
             return self._receipt(
                 "type_text", MutationOutcome.NOT_STARTED,
                 error_kind="invalid_args",
             )
+        call_kwargs: dict[str, Any] = {
+            "hwnd": context.target_hwnd if enforce_foreground else None,
+            "final_guard": _always_admit_keyboard,
+        }
+        if stop_event is not None:
+            call_kwargs["stop_event"] = stop_event
         return self._call(
             "type_text",
             self._backends.admitted_physical_type_text,
             text,
-            hwnd=context.target_hwnd,
-            final_guard=final_guard,
+            **call_kwargs,
         )
 
     def hotkey(
@@ -877,40 +1108,101 @@ class RawDeviceExecutor:
         context: RawActionContext,
         chord: HotkeyChord,
         *,
-        final_guard: FinalKeyboardGuard,
+        final_guard: FinalKeyboardGuard | None = None,
+        enforce_foreground: bool = True,
+        stop_event: StopSignal | None = None,
     ) -> RawActionReceipt:
+        del final_guard
         context_error = self._context_error(context)
         if context_error is not None:
             return self._receipt(
                 "hotkey", MutationOutcome.NOT_STARTED,
                 error_kind=context_error,
             )
-        held_block = self._held_drag_blocked("hotkey")
-        if held_block is not None:
-            return held_block
-        if not isinstance(chord, HotkeyChord) or not callable(final_guard):
+        if (
+            not isinstance(chord, HotkeyChord)
+            or not _valid_stop_signal(stop_event)
+        ):
             return self._receipt(
                 "hotkey", MutationOutcome.NOT_STARTED,
                 error_kind="invalid_args",
             )
+        call_kwargs: dict[str, Any] = {
+            "hwnd": context.target_hwnd if enforce_foreground else None,
+            "final_guard": _always_admit_keyboard,
+        }
+        if stop_event is not None:
+            call_kwargs["stop_event"] = stop_event
         return self._call(
             "hotkey",
             self._backends.admitted_physical_hotkey,
             chord,
-            hwnd=context.target_hwnd,
-            final_guard=final_guard,
+            **call_kwargs,
         )
+
+    def input_sequence(
+        self,
+        context: RawActionContext,
+        events: tuple[PhysicalInputEvent, ...],
+        *,
+        final_keyboard_guard: FinalKeyboardGuard | None = None,
+        enforce_foreground: bool = True,
+        stop_event: StopSignal | None = None,
+    ) -> RawActionReceipt:
+        global _held_drag_owner
+        del final_keyboard_guard
+        context_error = self._context_error(context)
+        if context_error is not None:
+            return self._receipt(
+                "input_sequence", MutationOutcome.NOT_STARTED,
+                error_kind=context_error,
+            )
+        if (
+            type(events) is not tuple
+            or not 1 <= len(events) <= MAX_INPUT_SEQUENCE_EVENTS
+            or any(not isinstance(event, PhysicalInputEvent) for event in events)
+            or not _valid_stop_signal(stop_event)
+        ):
+            return self._receipt(
+                "input_sequence", MutationOutcome.NOT_STARTED,
+                error_kind="invalid_args",
+            )
+        call_kwargs: dict[str, Any] = {
+            "hwnd": context.target_hwnd if enforce_foreground else None,
+            "final_keyboard_guard": _always_admit_keyboard,
+        }
+        if stop_event is not None:
+            call_kwargs["stop_event"] = stop_event
+        receipt = self._call(
+            "input_sequence",
+            self._backends.admitted_physical_sequence,
+            events,
+            **call_kwargs,
+        )
+        if receipt.input_completed is True:
+            released_buttons = {
+                event.button
+                for event in events
+                if event.kind is InputEventKind.MOUSE_UP
+            }
+            with _held_drag_state_lock:
+                owner = _held_drag_owner
+                if owner is not None and owner.button in released_buttons:
+                    _held_drag_owner = None
+        return receipt
 
 
 __all__ = [
     "AdmittedPhysicalClickBackend", "AdmittedPhysicalDragBackend",
     "AdmittedPhysicalHotkeyBackend",
+    "AdmittedPhysicalMoveBackend", "AdmittedPhysicalSequenceBackend",
     "AdmittedPhysicalScrollBackend", "AdmittedPhysicalTypeTextBackend",
     "CANONICAL_HOTKEY_KEYS", "CANONICAL_HOTKEY_MODIFIERS",
     "ClickCount", "ClickMechanism",
     "FinalKeyboardGuard", "FinalKeyboardGuardDecision", "FinalPointerGuard",
-    "FinalPointerGuardDecision", "HotkeyChord", "MAX_TYPE_TEXT_CODEPOINTS",
-    "MouseButton",
+    "FinalPointerGuardDecision", "HotkeyChord", "InputEventKind",
+    "MAX_INPUT_SEQUENCE_EVENTS", "MAX_POINTER_DURATION_MS",
+    "MAX_TYPE_TEXT_CODEPOINTS", "MouseButton", "PhysicalInputEvent",
     "RawActionContext", "RawActionReceipt", "RawBackendResult",
-    "RawDeviceBackends", "RawDeviceExecutor",
+    "RawDeviceBackends", "RawDeviceExecutor", "StopSignal",
 ]

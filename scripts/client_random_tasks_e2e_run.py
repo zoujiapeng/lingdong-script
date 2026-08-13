@@ -112,20 +112,31 @@ def _taskkill(name: str) -> None:
         pass
 
 
-def _find_window(title: str, *, timeout: float = 25.0) -> int:
+def _find_window(
+    title: str | tuple[str, ...],
+    *,
+    timeout: float = 25.0,
+) -> int:
+    titles = (title,) if isinstance(title, str) else title
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         matches: list[int] = []
 
         def visit(hwnd: int, _unused: Any) -> None:
-            if win32gui.IsWindowVisible(hwnd) and title in win32gui.GetWindowText(hwnd):
+            window_title = win32gui.GetWindowText(hwnd)
+            if (
+                win32gui.IsWindowVisible(hwnd)
+                and any(candidate in window_title for candidate in titles)
+            ):
                 matches.append(int(hwnd))
 
         win32gui.EnumWindows(visit, None)
         if matches:
             return matches[-1]
         time.sleep(0.2)
-    raise RuntimeError(f"visible target window was not found: {title}")
+    raise RuntimeError(
+        "visible target window was not found: " + " / ".join(titles)
+    )
 
 
 def _focus_window(hwnd: int) -> dict[str, Any]:
@@ -171,7 +182,7 @@ def _capture_window(hwnd: int, path: Path) -> str:
 def _uia_visible_texts(hwnd: int) -> list[str]:
     """Best-effort UIA text read of one real window (locate/read only)."""
     try:
-        window = pywinauto_desktop.Desktop(backend="uia").window(handle=hwnd)
+        window = pywinauto_desktop(backend="uia").window(handle=hwnd)
         values: list[str] = []
         for control in window.descendants():
             try:
@@ -309,7 +320,7 @@ def prepare_case(case: dict[str, Any]) -> dict[str, Any]:
     elif family == "calculator-arithmetic":
         _taskkill(CALCULATOR)
         _launch_app(["calc.exe"])
-        hwnd = _find_window("计算器", timeout=20)
+        hwnd = _find_window(("计算器", "Calculator"), timeout=20)
         evidence["calculator_hwnd"] = hwnd
     elif family == "chat-then-task":
         _taskkill(NOTEPAD)
@@ -324,7 +335,7 @@ def prepare_case(case: dict[str, Any]) -> dict[str, Any]:
     elif family == "paint-stroke":
         _taskkill(PAINT)
         _launch_app(["mspaint.exe"])
-        hwnd = _find_window("画图", timeout=20)
+        hwnd = _find_window(("画图", "Paint"), timeout=20)
         evidence["paint_hwnd"] = hwnd
     return evidence
 
@@ -338,6 +349,29 @@ def _target_hwnd_for(case: dict[str, Any], evidence: dict[str, Any]) -> int:
     if family in {"notepad-edit-save", "chat-then-task"}:
         return int(evidence["notepad_hwnd"])
     return 0
+
+
+def _current_target_hwnd(case: dict[str, Any], fallback: int) -> int:
+    """Find the live top-level window after client handoff.
+
+    Packaged Windows apps can replace their launch-time HWND while starting.
+    The remembered handle is therefore only a hint; the visible window at the
+    moment of handoff is what the desktop agent should receive.
+    """
+    family = case["family"]
+    if family == "calculator-arithmetic":
+        hwnd = _find_window(("计算器", "Calculator"), timeout=15)
+        case["calculator_hwnd"] = hwnd
+        return hwnd
+    if family == "paint-stroke":
+        hwnd = _find_window(("画图", "Paint"), timeout=15)
+        case["paint_hwnd"] = hwnd
+        return hwnd
+    if family in {"notepad-edit-save", "chat-then-task"}:
+        hwnd = _find_window(("记事本", "Notepad"), timeout=15)
+        case["notepad_hwnd"] = hwnd
+        return hwnd
+    return fallback if fallback and win32gui.IsWindow(fallback) else 0
 
 
 def _read_claim_texts(run_id: str) -> list[str]:
@@ -401,10 +435,21 @@ def _external_verifier(
                 errors.append(f"run did not end with success status: {status_label}")
         elif family == "calculator-arithmetic":
             expected = case["expected"]["display"]
-            texts = _uia_visible_texts(case["calculator_hwnd"])
+            hwnd = _current_target_hwnd(
+                case,
+                int(case.get("calculator_hwnd") or 0),
+            )
+            texts = _uia_visible_texts(hwnd)
             evidence["uia_texts"] = texts[-40:]
             evidence["expected"] = expected
-            if expected not in texts:
+            numeric_token = re.compile(
+                rf"(?<!\d){re.escape(expected)}(?!\d)"
+            )
+            display_matches = [
+                text for text in texts if numeric_token.search(text)
+            ]
+            evidence["display_matches"] = display_matches
+            if not display_matches:
                 errors.append(f"calculator display does not contain {expected}")
             if status_label not in {"done", "completed", "success", "reply"}:
                 errors.append(f"run did not end with success status: {status_label}")
@@ -559,11 +604,12 @@ def run_random_case(
             driver: client_harness.ElectronClientDriver,
             _client_result: dict[str, Any],
         ) -> dict[str, Any]:
-            if not target_hwnd:
+            live_hwnd = _current_target_hwnd(case, target_hwnd)
+            if not live_hwnd:
                 return {"focused": False}
-            focused = _focus_window(target_hwnd)
+            focused = _focus_window(live_hwnd)
             focused["screenshot"] = _capture_window(
-                target_hwnd,
+                live_hwnd,
                 driver.output_dir / "target-after-submit.png",
             )
             return focused

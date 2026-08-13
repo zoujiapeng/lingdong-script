@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ControlPlaneClient,
   resolveControlPlaneConnection,
-  runtimeCompatibilityError,
+  runtimeCompatibilityNotice,
 } from './client';
 import { buildClientExecutionContext } from './executionContext';
 import type {
@@ -68,25 +68,15 @@ export async function fulfillDesktopLease(
     await releaseDesktopHandoffBestEffort();
     throw error;
   }
+  // Local window restoration bookkeeping is advisory. If it is unavailable,
+  // reveal the cockpit again and still deliver the real desktop to the model.
   try {
     const bound = await window.electronAPI?.bindDesktopHandoff?.(
       canonicalRunId,
     );
-    if (bound === false) {
-      throw new Error('Electron rejected the desktop handoff binding.');
-    }
-  } catch (error) {
-    try {
-      await client.failDesktopLease(
-        canonicalRunId,
-        canonicalLeaseId,
-        error instanceof Error ? error.message : String(error),
-      );
-    } catch {
-      // No server bind was attempted, so local release remains safe.
-    }
+    if (bound === false) await releaseDesktopHandoffBestEffort();
+  } catch {
     await releaseDesktopHandoffBestEffort();
-    throw error;
   }
   try {
     await client.bindDesktopLease(
@@ -160,8 +150,6 @@ export function useControlPlane() {
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const taskbarRunState = useRef<TaskbarRunState | null>(null);
   const liveStartedRuns = useRef(new Set<string>());
-  const overviewRef = useRef<PlatformOverview | null>(null);
-  const runtimeRestarting = useRef(false);
   const desktopLeaseHandled = useRef(new Set<string>());
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [baseUrl, setBaseUrl] = useState('');
@@ -172,7 +160,7 @@ export function useControlPlane() {
   const [runs, setRuns] = useState<RunProjection[]>([]);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [error, setError] = useState('');
-  const [runtimeIssue, setRuntimeIssue] = useState('控制器运行时身份尚未加载。');
+  const [runtimeNotice, setRuntimeNotice] = useState('');
 
   const handleDesktopLease = useCallback(
     async (runId: string, leaseId: string) => {
@@ -210,37 +198,12 @@ export function useControlPlane() {
         client.currentRun(),
         client.runs(40),
       ]);
-      overviewRef.current = platform;
       setOverview(platform);
       setCapabilities(platform.capabilities || []);
       setCurrentRun(current.run);
       setArpSnapshot(current.arp);
       setRuns(recent);
-      const compatibilityIssue = runtimeCompatibilityError(platform);
-      setRuntimeIssue(compatibilityIssue);
-      if (compatibilityIssue) {
-        setError(compatibilityIssue);
-        setConnection('degraded');
-        const currentStatus = String(current.run?.status || '').toLowerCase();
-        const active = ['queued', 'running', 'paused'].includes(currentStatus);
-        const restart = window.electronAPI?.restartWinpilot;
-        if (!active && restart && !runtimeRestarting.current) {
-          runtimeRestarting.current = true;
-          try {
-            const restarted = await restart();
-            if (!restarted?.url || restarted.error) {
-              throw new Error(restarted?.error || '控制器重启后未返回连接信息。');
-            }
-            window.location.reload();
-            return false;
-          } catch (restartError) {
-            runtimeRestarting.current = false;
-            setError(restartError instanceof Error ? restartError.message : String(restartError));
-          }
-        }
-        return false;
-      }
-      runtimeRestarting.current = false;
+      setRuntimeNotice(runtimeCompatibilityNotice(platform));
       setError('');
       setConnection((state) => state === 'online' ? state : 'degraded');
       return true;
@@ -286,14 +249,15 @@ export function useControlPlane() {
         if (disposed) return;
         const client = new ControlPlaneClient(connection.url, connection.token);
         clientRef.current = client;
-        setBaseUrl(connection.url);
         const refreshed = await refresh();
         if (disposed) return;
         if (!refreshed) {
           clientRef.current = null;
+          setBaseUrl('');
           scheduleReconnect();
           return;
         }
+        setBaseUrl(connection.url);
         disconnect = client.connectEvents((event) => {
           if (event.type === 'desktop_lease_requested') {
             void handleDesktopLease(
@@ -366,6 +330,7 @@ export function useControlPlane() {
           if (interval) clearInterval(interval);
           interval = undefined;
           clientRef.current = null;
+          setBaseUrl('');
           scheduleReconnect();
         }, CONTROL_PLANE_FALLBACK_REFRESH_MS);
       } catch (connectError) {
@@ -373,6 +338,7 @@ export function useControlPlane() {
           setError(connectError instanceof Error ? connectError.message : String(connectError));
           setConnection('offline');
           clientRef.current = null;
+          setBaseUrl('');
           scheduleReconnect();
         }
       } finally {
@@ -434,19 +400,11 @@ export function useControlPlane() {
     return clientRef.current;
   };
 
-  const requireCompatibleClient = () => {
-    const compatibilityIssue = runtimeCompatibilityError(overviewRef.current);
-    if (compatibilityIssue) {
-      throw new Error(`${compatibilityIssue} 任务未启动。`);
-    }
-    return requireClient();
-  };
-
   const startGoal = useCallback(async (
     goal: string,
     threadId = '',
   ): Promise<GoalRunStart> => {
-    const client = requireCompatibleClient();
+    const client = requireClient();
     const started = await client.startGoalRun(
       goal,
       threadId,
@@ -459,7 +417,7 @@ export function useControlPlane() {
     automation: AutomationIR,
     inputs: Record<string, unknown> = {},
   ) => {
-    const run = await requireCompatibleClient().startAutomation(automation, inputs);
+    const run = await requireClient().startAutomation(automation, inputs);
     await refresh();
     return run;
   }, [refresh]);
@@ -468,7 +426,7 @@ export function useControlPlane() {
     goal: string,
     context: FlowFragmentRequestContext,
     signal?: AbortSignal,
-  ) => requireCompatibleClient().proposeFlowFragment(goal, context, signal), []);
+  ) => requireClient().proposeFlowFragment(goal, context, signal), []);
 
   const validateAutomation = useCallback(
     (automation: AutomationIR): Promise<GraphValidation> => (
@@ -542,7 +500,7 @@ export function useControlPlane() {
     runs,
     events,
     error,
-    runtimeIssue,
+    runtimeNotice,
     refresh,
     startGoal,
     startAutomation,

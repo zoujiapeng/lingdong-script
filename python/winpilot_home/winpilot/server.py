@@ -47,7 +47,7 @@ from .perception import ocr, search, vlm
 from .recorder import human as human_mod
 from .recorder import apprentice as apprentice_mod
 from .recorder import trace as trace_mod
-from .runtime_info import runtime_fingerprint, runtime_source_drifted
+from .runtime_info import runtime_fingerprint
 from .runtime_jobs import RUNTIME_JOBS, RuntimeJob
 from .utils.log import BUS, logger
 from .orchestrator.catalog import capability_catalog
@@ -1440,13 +1440,6 @@ def _start_arp_execution(
 @app.post("/api/v2/flow-fragments/proposals")
 def propose_flow_fragment(req: FlowFragmentProposalRequest) -> dict[str, Any]:
     """Return an inert proposal; the renderer remains the only document owner."""
-
-    if runtime_source_drifted():
-        raise HTTPException(
-            409,
-            "WinPilot Python sources changed after this service started. "
-            "Restart the runtime before generating a flow fragment.",
-        )
     frozen_config = CONFIG.snapshot()
 
     def worker(stop_event: threading.Event) -> dict[str, Any]:
@@ -1477,13 +1470,6 @@ def propose_flow_fragment(req: FlowFragmentProposalRequest) -> dict[str, Any]:
 @app.post("/api/v2/goals/runs")
 def start_goal_run(req: GoalRunRequest) -> dict[str, Any]:
     """Admit one product goal without accepting a client-owned graph/runtime."""
-
-    if runtime_source_drifted():
-        raise HTTPException(
-            409,
-            "WinPilot Python sources changed after this service started. "
-            "Restart the runtime before starting another frontend task.",
-        )
     turn_id = ""
     try:
         frozen_config = CONFIG.snapshot()
@@ -1627,12 +1613,6 @@ def fail_goal_desktop_lease(
 
 @app.post("/api/v2/arp/runs")
 def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
-    if runtime_source_drifted():
-        raise HTTPException(
-            409,
-            "WinPilot Python sources changed after this service started. "
-            "Restart the runtime before starting another frontend task.",
-        )
     try:
         graph = req.graph
         runtime_version = req.runtime_version
@@ -2347,9 +2327,6 @@ def memory_retire(recipe_id: str) -> dict[str, Any]:
 @app.post("/api/memory/{recipe_id}/verification-runs")
 def memory_verification_start(recipe_id: str) -> dict[str, Any]:
     from .memory import experience
-
-    if runtime_source_drifted():
-        raise HTTPException(409, "runtime sources changed; restart before verification")
     if not _RECIPE_ID_RE.fullmatch(recipe_id):
         raise HTTPException(404, "memory not found")
     if any(

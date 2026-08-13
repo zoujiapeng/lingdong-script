@@ -627,6 +627,41 @@ def _apply_event(
         )
         return _merge_evidence(updated, refs)
 
+    if event_type == "actor_completed":
+        obligation_id = _payload_text(payload, "obligation_id")
+        _definition_for(projection, obligation_id)
+        if projection.active_obligation_id != obligation_id:
+            raise IllegalTransitionError(
+                "only the active obligation may be completed"
+            )
+        previous = states[obligation_id]
+        if previous.status not in {
+            ObligationStatus.ACTIVE,
+            ObligationStatus.CLAIMED,
+        }:
+            raise IllegalTransitionError("obligation is not completable")
+        completion_id = f"actor-completion-{event.event_id}"
+        states[obligation_id] = replace(
+            previous,
+            status=ObligationStatus.VERIFIED,
+            verification_id=completion_id,
+            verified_claim_fingerprint=(
+                previous.claim_fingerprint or completion_id
+            ),
+            no_progress_streak=0,
+            last_reason="actor_completed",
+        )
+        return replace(
+            projection,
+            obligation_states=tuple(
+                states[item.id] for item in projection.definition.obligations
+            ),
+            active_obligation_id=None,
+            status=MissionStatus.VERIFIED,
+            mission_verification_id=completion_id,
+            failure_summary=None,
+        )
+
     if event_type == "obligation_claimed":
         obligation_id = _payload_text(payload, "obligation_id")
         _definition_for(projection, obligation_id)

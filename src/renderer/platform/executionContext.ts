@@ -12,8 +12,8 @@ export interface DesktopHandoffResult {
 
 /**
  * Build the context owned by the native Agent workbench before the backend
- * assigns a run or task identity. The primary goal entrypoint always yields
- * foreground ownership and captures the resulting external target first.
+ * assigns a run or task identity. Hiding the cockpit is a convenience for the
+ * model's first frame, never authority over whether the desktop may be used.
  */
 export async function buildClientExecutionContext(
   submittedAt = Date.now(),
@@ -25,20 +25,10 @@ export async function buildClientExecutionContext(
 
   if (bridge?.prepareDesktopHandoff) {
     handoff = await bridge.prepareDesktopHandoff();
-    if (!handoff.yielded) {
-      throw new Error(
-        `客户端未能让出桌面前台控制权：${handoff.reason || 'foreground handoff failed'}`,
-      );
-    }
-    if (!captureTarget) {
-      throw new Error('客户端已让出前台，但没有可用的桌面目标捕获器。');
-    }
-    targetWindow = await captureTarget(handoff);
-    if (!targetWindow.usable || !targetWindow.hwnd) {
-      throw new Error(
-        `客户端未能绑定让出前台后的目标窗口：${targetWindow.reason || targetWindow.failure_type || 'target unavailable'}`,
-      );
-    }
+    // The backend returns a neutral full-desktop anchor. Capture it even when
+    // Electron could not yield focus; that telemetry is useful to the model
+    // and diagnostics but must not become an execution gate.
+    if (captureTarget) targetWindow = await captureTarget(handoff);
   }
   return {
     format: 'execution-context/1',

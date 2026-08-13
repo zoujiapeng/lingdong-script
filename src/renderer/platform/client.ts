@@ -20,10 +20,11 @@ const ELECTRON_SERVER_READY_TIMEOUT_MS = 35_000;
 const ELECTRON_SERVER_POLL_MS = 200;
 export const EXPECTED_RUNTIME_CONTRACT_VERSION = 3;
 
-export function runtimeCompatibilityError(overview: PlatformOverview | null | undefined): string {
-  if (!overview) return '控制器运行时身份尚未加载。';
+export function runtimeCompatibilityNotice(overview: PlatformOverview | null | undefined): string {
+  if (!overview) return '';
   const runtime = overview.status?.runtime;
-  if (!runtime || Number(runtime.contract_version) !== EXPECTED_RUNTIME_CONTRACT_VERSION) {
+  if (!runtime) return '';
+  if (Number(runtime.contract_version) !== EXPECTED_RUNTIME_CONTRACT_VERSION) {
     return '托管的 Python 控制器使用了不兼容的运行时协议。';
   }
   const source = runtime.source;
@@ -37,7 +38,7 @@ export function runtimeCompatibilityError(overview: PlatformOverview | null | un
     || !Object.prototype.hasOwnProperty.call(git, 'loaded_commit')
     || !Object.prototype.hasOwnProperty.call(git, 'current_commit')
   ) {
-    return '托管的 Python 控制器缺少运行时身份字段。';
+    return '托管的 Python 控制器未提供完整的诊断身份。';
   }
   const loadedStamp = String(source.loaded_stamp || '');
   const currentStamp = String(source.current_stamp || '');

@@ -116,6 +116,7 @@
     const status = document.getElementById('status');
     let readyDetails = {};
     let moveCount = 0;
+    let reportTail = Promise.resolve();
 
     function rngFactory(value) {
       let a = value || 0x6d2b79f5;
@@ -136,9 +137,10 @@
         screen_x: event && Math.round(event.screenX) || 0,
         screen_y: event && Math.round(event.screenY) || 0,
         move_count: moveCount, succeeded: Boolean(details.succeeded), details };
-      return fetch('/event', {method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload), cache:'no-store'})
+      reportTail=reportTail.then(()=>fetch('/event', {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload), cache:'no-store'}))
         .then(response=>response.ok?response.json():null).catch(() => null);
+      return reportTail;
     }
     function revealStatus() {
       status.scrollIntoView({block:'nearest', inline:'nearest'});
@@ -271,8 +273,11 @@
       const token=document.createElement('div');token.className='token';token.textContent='MOVE';place(token,sx-22,sy-22,44,44);arena.append(goal,token);
       let pointer=null,ox=0,oy=0,pathValid=true,minClearance=999,startedAtOrigin=false;
       token.addEventListener('pointerdown',event=>{if(!event.isTrusted||pointer!==null)return;pointer=event.pointerId;const r=token.getBoundingClientRect();
-        const a=arena.getBoundingClientRect(),startCenter={x:(r.left+r.right)/2-a.left,y:(r.top+r.bottom)/2-a.top};
-        startedAtOrigin=Math.hypot(startCenter.x-sx,startCenter.y-sy)<=2;
+        // The token's CSS position and sx/sy share the arena's local
+        // coordinate space. Mixing viewport rectangles with the arena's
+        // bordered client box can reject a click on the untouched token.
+        const tokenLeft=Number.parseFloat(token.style.left),tokenTop=Number.parseFloat(token.style.top);
+        startedAtOrigin=Math.hypot(tokenLeft-(sx-22),tokenTop-(sy-22))<=1;
         ox=event.clientX-r.left;oy=event.clientY-r.top;moveCount=0;pathValid=true;minClearance=999;token.setPointerCapture(pointer);report('pointerdown',event,{started_at_origin:startedAtOrigin});event.preventDefault();});
       token.addEventListener('pointermove',event=>{if(event.pointerId!==pointer||!event.isTrusted)return;const a=arena.getBoundingClientRect();
         const x=Math.max(0,Math.min(W-token.offsetWidth,event.clientX-a.left-ox));const y=Math.max(0,Math.min(H-token.offsetHeight,event.clientY-a.top-oy));
@@ -327,7 +332,7 @@
         const r=token.getBoundingClientRect(),g=goal.getBoundingClientRect();
         const cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2;
         const inside=cx>=g.left&&cx<=g.right&&cy>=g.top&&cy<=g.bottom;
-        const succeeded=event.isTrusted&&downCount===1&&checkpointReached&&goalRevealedAfterDown&&moveCount>=2&&inside;
+        const succeeded=event.isTrusted&&checkpointReached&&goalRevealedAfterDown&&moveCount>=2&&inside;
         const details={succeeded,down_count:downCount,checkpoint_reached:checkpointReached,
           goal_revealed_after_down:goalRevealedAfterDown,token:box(token),checkpoint:box(checkpointEl),goal:box(goal),
           inside_goal:inside,completion_event:'pointerup'};
@@ -339,6 +344,74 @@
         else markFailure('DYNAMIC_HOLD_RELEASED_TOO_EARLY_OR_OUTSIDE_GOAL',event,details);
       });
       readyDetails={token:box(token),checkpoint:box(checkpointEl),goal_initially_hidden:true};
+    }
+
+    function setupHeldDeviceChord() {
+      heading.textContent='Cross-Turn Held Mouse + Keyboard + Wheel';
+      instruction.textContent='Press and KEEP HOLDING the blue disk. Drag it into the yellow CHECKPOINT. While still holding the mouse, press SPACE and scroll the wheel once. The green GOAL then appears; continue dragging into it and release.';
+      const W=arena.clientWidth,H=arena.clientHeight,size=58;
+      const start={x:72,y:Math.round(between(82,H-82))};
+      const checkpoint={x:Math.round(W*.43),y:Math.round(between(90,H-90))};
+      const goalPoint={x:W-92,y:checkpoint.y < H/2 ? H-92 : 92};
+      const checkpointEl=document.createElement('div');checkpointEl.className='checkpoint';checkpointEl.textContent='CHECKPOINT';
+      const goal=document.createElement('div');goal.className='target dynamic-goal concealed';goal.textContent='GOAL';
+      const token=document.createElement('div');token.className='token';token.textContent='HOLD';
+      place(checkpointEl,checkpoint.x-60,checkpoint.y-60,120,120);
+      place(goal,goalPoint.x-66,goalPoint.y-66,132,132);
+      place(token,start.x-size/2,start.y-size/2,size,size);
+      arena.append(checkpointEl,goal,token);
+      let pointer=null,ox=0,oy=0,downCount=0,checkpointReached=false;
+      let keyDuringHold=false,wheelDuringHold=false,goalRevealed=false,postCoordinationMoves=0;
+      function maybeReveal(event){
+        if(!goalRevealed&&checkpointReached&&keyDuringHold&&wheelDuringHold){
+          goalRevealed=true;goal.classList.remove('concealed');checkpointEl.classList.add('success');
+          status.className='status';status.textContent='SPACE + WHEEL RECEIVED WHILE HELD — CONTINUE TO GOAL AND RELEASE';
+          report('coordination_ready',event,{checkpoint_reached:true,key_during_hold:true,wheel_during_hold:true});
+        }
+      }
+      function reset(message){
+        pointer=null;checkpointReached=false;keyDuringHold=false;wheelDuringHold=false;goalRevealed=false;postCoordinationMoves=0;
+        goal.classList.add('concealed');checkpointEl.classList.remove('success');token.classList.remove('dragging');
+        place(token,start.x-size/2,start.y-size/2,size,size);status.className='status';status.textContent=message;
+      }
+      token.addEventListener('pointerdown',event=>{if(!event.isTrusted||pointer!==null)return;
+        pointer=event.pointerId;downCount++;moveCount=0;checkpointReached=false;keyDuringHold=false;wheelDuringHold=false;goalRevealed=false;postCoordinationMoves=0;
+        const r=token.getBoundingClientRect();ox=event.clientX-r.left;oy=event.clientY-r.top;
+        token.classList.add('dragging');token.setPointerCapture(pointer);
+        report('pointerdown',event,{down_count:downCount,buttons:event.buttons});event.preventDefault();});
+      token.addEventListener('pointermove',event=>{if(event.pointerId!==pointer||!event.isTrusted)return;
+        const a=arena.getBoundingClientRect();const x=Math.max(0,Math.min(W-size,event.clientX-a.left-ox));
+        const y=Math.max(0,Math.min(H-size,event.clientY-a.top-oy));token.style.left=`${x}px`;token.style.top=`${y}px`;moveCount++;
+        const center={x:x+size/2,y:y+size/2};
+        if(!checkpointReached&&Math.hypot(center.x-checkpoint.x,center.y-checkpoint.y)<=36){
+          checkpointReached=true;status.className='status';status.textContent='CHECKPOINT REACHED — KEEP HOLDING, PRESS SPACE, AND SCROLL';
+          report('checkpoint_reached',event,{checkpoint_reached:true,down_count:downCount,buttons:event.buttons});
+        }
+        if(goalRevealed){postCoordinationMoves++;if(postCoordinationMoves===1)report('post_coordination_move',event,{post_coordination_moves:postCoordinationMoves,buttons:event.buttons});}
+        else if(moveCount===1||moveCount%4===0)report('pointermove',event,{checkpoint_reached:checkpointReached,buttons:event.buttons});
+      });
+      window.addEventListener('keydown',event=>{if(event.code!=='Space'||!event.isTrusted||event.repeat)return;
+        if(pointer!==null&&checkpointReached){keyDuringHold=true;event.preventDefault();
+          report('keydown',event,{key:event.key,code:event.code,key_during_hold:true,pointer_held:true});maybeReveal(event);}
+      });
+      window.addEventListener('wheel',event=>{if(!event.isTrusted||!event.deltaY)return;
+        if(pointer!==null&&checkpointReached){wheelDuringHold=true;event.preventDefault();
+          report('wheel',event,{delta_y:Math.round(event.deltaY),wheel_during_hold:true,pointer_held:true});maybeReveal(event);}
+      },{passive:false});
+      token.addEventListener('pointerup',async event=>{if(event.pointerId!==pointer)return;
+        if(token.hasPointerCapture(pointer))token.releasePointerCapture(pointer);pointer=null;token.classList.remove('dragging');
+        const r=token.getBoundingClientRect(),g=goal.getBoundingClientRect();
+        const cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2,inside=cx>=g.left&&cx<=g.right&&cy>=g.top&&cy<=g.bottom;
+        const succeeded=Boolean(event.isTrusted&&checkpointReached&&keyDuringHold&&wheelDuringHold&&goalRevealed&&postCoordinationMoves>=1&&inside);
+        const details={succeeded,down_count:downCount,checkpoint_reached:checkpointReached,key_during_hold:keyDuringHold,
+          wheel_during_hold:wheelDuringHold,goal_revealed_after_coordination:goalRevealed,
+          post_coordination_moves:postCoordinationMoves,inside_goal:inside,completion_event:'pointerup',
+          token:box(token),checkpoint:box(checkpointEl),goal:box(goal)};
+        await report('pointerup',event,details);
+        if(succeeded){goal.classList.add('success');markSuccess('HELD_DEVICE_CHORD_SUCCEEDED',event,details);}
+        else reset('TRY AGAIN — KEEP THE SAME MOUSE PRESS THROUGH CHECKPOINT, SPACE, WHEEL, AND GOAL');
+      });
+      readyDetails={token:box(token),checkpoint:box(checkpointEl),goal_initially_hidden:true,required_key:'Space',required_wheel:true};
     }
 
     function setupSharedTurn() {
@@ -358,15 +431,66 @@
       canvas.addEventListener('pointerdown',event=>{if(!event.isTrusted||pointer!==null)return;pointer=event.pointerId;moveCount=0;current=[local(event)];
         canvas.setPointerCapture(pointer);ctx.strokeStyle='#d5222a';ctx.lineWidth=8;ctx.beginPath();ctx.moveTo(current[0].x,current[0].y);report('pointerdown',event);event.preventDefault();});
       canvas.addEventListener('pointermove',event=>{if(event.pointerId!==pointer||!event.isTrusted)return;const p=local(event);current.push(p);ctx.lineTo(p.x,p.y);ctx.stroke();moveCount++;if(moveCount===1||moveCount%5===0)report('pointermove',event);});
-      canvas.addEventListener('pointerup',event=>{if(event.pointerId!==pointer)return;canvas.releasePointerCapture(pointer);pointer=null;const first=current[0],last=current[current.length-1];
+      canvas.addEventListener('pointerup',async event=>{if(event.pointerId!==pointer)return;canvas.releasePointerCapture(pointer);pointer=null;const first=current[0],last=current[current.length-1];
         const cells=current.map(p=>Math.max(0,Math.min(2,Math.floor(p.x/cell)))+3*Math.max(0,Math.min(2,Math.floor(p.y/cell))));
         const same=cells.every(v=>v===cells[0]),dx=last.x-first.x,dy=last.y-first.y,valid=same&&cells[0]!==userCell&&Math.abs(dx)>=cell*.38&&Math.abs(dy)>=cell*.38;
         if(valid)strokes.push({cell:cells[0],sign:Math.sign(dx*dy),mid:{x:(first.x+last.x)/2,y:(first.y+last.y)/2}});
         let selected=-1;for(let i=0;i<strokes.length;i++)for(let j=i+1;j<strokes.length;j++){const a=strokes[i],b=strokes[j];
           if(a.cell===b.cell&&a.sign!==b.sign&&Math.hypot(a.mid.x-b.mid.x,a.mid.y-b.mid.y)<cell*.34)selected=a.cell;}
         const succeeded=event.isTrusted&&selected>=0;const details={succeeded,user_cell:userCell,selected_cell:selected,valid_stroke_count:strokes.length,board:box(canvas)};
-        if(succeeded)markSuccess('TURN_SUCCEEDED',event,details);else report('pointerup',event,details);current=[];});
+        await report('pointerup',event,details);if(succeeded)markSuccess('TURN_SUCCEEDED',event,details);current=[];});
       readyDetails={board:box(canvas),user_cell:userCell,cell_size:cell,legend:box(legend)};
+    }
+
+    function setupModifierDrag() {
+      heading.textContent='Keyboard + Pointer Coordination';
+      instruction.textContent='Hold SHIFT while dragging the blue MOVE WITH SHIFT circle completely inside the green target. Release the mouse first, then release SHIFT.';
+      const W=arena.clientWidth,H=arena.clientHeight,size=86,targetW=210,targetH=165;
+      const token=document.createElement('div');token.className='token';token.textContent='MOVE WITH SHIFT';
+      const target=document.createElement('div');target.className='target';target.textContent='SHIFT DROP';
+      arena.append(target,token);
+      const startLeft=Math.round(between(45,125)),startTop=Math.round(between(70,H-size-70));
+      place(token,startLeft,startTop,size,size);
+      place(target,W-targetW-Math.round(between(48,88)),Math.round(between(50,H-targetH-50)),targetW,targetH);
+      let pointer=null,ox=0,oy=0,shiftHeld=false,shiftAtDown=false,shiftStayed=true;
+      let dropped=false,pendingDetails=null,shiftDownCount=0,shiftUpCount=0;
+      function resetToken(message){place(token,startLeft,startTop,size,size);token.classList.remove('dragging');
+        status.className='status';status.textContent=message;}
+      window.addEventListener('keydown',event=>{if(event.key!=='Shift'||!event.isTrusted)return;
+        if(!event.repeat){shiftHeld=true;shiftDownCount++;}
+        report('keydown',event,{key:event.key,code:event.code,shift_key:event.shiftKey,
+          repeat:event.repeat,shift_down_count:shiftDownCount});});
+      window.addEventListener('keyup',async event=>{if(event.key!=='Shift'||!event.isTrusted)return;
+        shiftHeld=false;shiftUpCount++;
+        const details={...(pendingDetails||{}),succeeded:Boolean(dropped),key:event.key,code:event.code,
+          shift_key:event.shiftKey,shift_down_count:shiftDownCount,shift_up_count:shiftUpCount,
+          mouse_released_before_shift:pointer===null};
+        await report('keyup',event,details);
+        if(dropped){target.classList.add('success');markSuccess('MODIFIER_DRAG_SUCCEEDED',event,details);}
+      });
+      token.addEventListener('pointerdown',event=>{if(!event.isTrusted||pointer!==null)return;
+        pointer=event.pointerId;const r=token.getBoundingClientRect();ox=event.clientX-r.left;oy=event.clientY-r.top;
+        moveCount=0;shiftAtDown=event.shiftKey&&shiftHeld;shiftStayed=shiftAtDown;dropped=false;pendingDetails=null;
+        token.classList.add('dragging');token.setPointerCapture(pointer);
+        report('pointerdown',event,{shift_key:event.shiftKey,shift_held:shiftHeld});event.preventDefault();});
+      token.addEventListener('pointermove',event=>{if(event.pointerId!==pointer||!event.isTrusted)return;
+        shiftStayed=shiftStayed&&event.shiftKey&&shiftHeld;
+        const a=arena.getBoundingClientRect();const x=Math.max(0,Math.min(arena.clientWidth-token.offsetWidth,event.clientX-a.left-ox));
+        const y=Math.max(0,Math.min(arena.clientHeight-token.offsetHeight,event.clientY-a.top-oy));
+        token.style.left=`${x}px`;token.style.top=`${y}px`;moveCount++;
+        if(moveCount===1||moveCount%5===0)report('pointermove',event,{shift_key:event.shiftKey,shift_held:shiftHeld});});
+      token.addEventListener('pointerup',event=>{if(event.pointerId!==pointer)return;
+        if(token.hasPointerCapture(pointer))token.releasePointerCapture(pointer);pointer=null;token.classList.remove('dragging');
+        const r=token.getBoundingClientRect(),g=target.getBoundingClientRect();
+        const inside=r.left>=g.left&&r.top>=g.top&&r.right<=g.right&&r.bottom<=g.bottom;
+        dropped=Boolean(event.isTrusted&&shiftAtDown&&shiftStayed&&event.shiftKey&&shiftHeld&&moveCount>=2&&inside);
+        pendingDetails={shift_at_pointerdown:shiftAtDown,shift_during_drag:shiftStayed,
+          shift_at_pointerup:event.shiftKey&&shiftHeld,inside_target:inside,token:box(token),target:box(target)};
+        report('pointerup',event,{...pendingDetails,succeeded:false});
+        if(dropped){status.className='status';status.textContent='DROP COMPLETE — RELEASE SHIFT';}
+        else resetToken('TRY AGAIN — KEEP SHIFT HELD UNTIL AFTER THE MOUSE RELEASE');
+      });
+      readyDetails={token:box(token),target:box(target),required_modifier:'Shift'};
     }
 
     function setupCalibrationGrid() {
@@ -505,15 +629,20 @@
       };
     }
 
-    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn,quiz_all:setupQuizAll,calibration_grid:setupCalibrationGrid,calibration_feedback:setupCalibrationFeedback};
-    Promise.resolve((setups[scenario]||setupDragFit)()).then(()=>
-      requestAnimationFrame(()=>requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
-        viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails})))
-    ).catch(error=>{
-      status.className='status failure';status.textContent='PAGE_SETUP_FAILED';
-      revealStatus();
-      report('page_error',null,{succeeded:false,error:String(error)});
-    });
+    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,held_device_chord:setupHeldDeviceChord,shared_turn:setupSharedTurn,modifier_drag:setupModifierDrag,quiz_all:setupQuizAll,calibration_grid:setupCalibrationGrid,calibration_feedback:setupCalibrationFeedback};
+    // Chromium app windows can resize between document creation and their
+    // first painted frame. Build the randomized geometry after two layout
+    // frames so the scene, pointer coordinates, and ready facts stay aligned.
+    requestAnimationFrame(()=>requestAnimationFrame(()=>
+      Promise.resolve((setups[scenario]||setupDragFit)()).then(()=>
+        requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
+          viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails}))
+      ).catch(error=>{
+        status.className='status failure';status.textContent='PAGE_SETUP_FAILED';
+        revealStatus();
+        report('page_error',null,{succeeded:false,error:String(error)});
+      })
+    ));
   </script>
 </body>
 </html>

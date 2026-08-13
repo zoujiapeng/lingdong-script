@@ -653,6 +653,42 @@ def test_window_lifecycle_state_is_captured_without_restoring(monkeypatch):
     }
 
 
+def test_window_evidence_capture_falls_back_to_desktop_for_minimized_rect(
+    monkeypatch,
+    tmp_path,
+):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver.output_dir = tmp_path
+    driver.window = SimpleNamespace(
+        BoundingRectangle=SimpleNamespace(
+            left=-32000,
+            top=-32000,
+            right=-32000,
+            bottom=-32000,
+        )
+    )
+    calls = []
+
+    class Image:
+        def save(self, path):
+            calls.append(("save", path))
+
+    def grab(**kwargs):
+        calls.append(("grab", kwargs))
+        return Image()
+
+    monkeypatch.setattr(harness.ImageGrab, "grab", grab)
+
+    captured = driver.capture_window("handoff.png")
+
+    assert captured == str(tmp_path / "handoff.png")
+    assert calls == [
+        ("grab", {"all_screens": True}),
+        ("save", tmp_path / "handoff.png"),
+    ]
+
+
 def test_optional_handoff_without_admitted_run_id_does_not_bind_literal_none():
     harness = _load_harness()
 
@@ -1201,6 +1237,17 @@ def test_gui_execution_trace_accepts_only_vnext_os_input_receipts(
                     "outcome": "applied",
                     "input_completed": True,
                 },
+                {
+                    "type": "vnext_raw_receipt",
+                    "run_id": "arp-gui",
+                    "mission_id": "mission-gui",
+                    "task_id": "graph-gui",
+                    "runtime_version": "vnext",
+                    "no_legacy_fallback": True,
+                    "controller_action": "input_sequence",
+                    "outcome": "applied",
+                    "input_completed": True,
+                },
             )
         )
         + "\n",
@@ -1214,7 +1261,7 @@ def test_gui_execution_trace_accepts_only_vnext_os_input_receipts(
     )
 
     assert evidence["passed"] is True
-    assert evidence["applied_gui_actions"] == ["click"]
+    assert evidence["applied_gui_actions"] == ["click", "input_sequence"]
     assert evidence["bound_mission_ids"] == ["mission-gui"]
     assert evidence["bound_task_ids"] == ["graph-gui"]
     trace.write_text(

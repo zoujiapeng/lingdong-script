@@ -18,12 +18,17 @@ from winpilot.action.raw_device import (
     AdmittedPhysicalClickBackend,
     AdmittedPhysicalDragBackend,
     AdmittedPhysicalHotkeyBackend,
+    AdmittedPhysicalMoveBackend,
+    AdmittedPhysicalSequenceBackend,
     AdmittedPhysicalScrollBackend,
     AdmittedPhysicalTypeTextBackend,
     ClickCount,
     ClickMechanism,
     FinalKeyboardGuardDecision,
     FinalPointerGuardDecision,
+    InputEventKind,
+    MouseButton,
+    PhysicalInputEvent,
     RawActionReceipt,
     RawBackendResult,
     RawDeviceBackends,
@@ -176,8 +181,9 @@ class _RawHarness:
         count,
         mechanism,
         hwnd,
-        final_guard,
+        final_guard=None,
         enforce_foreground: bool = True,
+        stop_event=None,
     ) -> RawBackendResult:
         self.calls.append(
             (
@@ -186,33 +192,58 @@ class _RawHarness:
             )
         )
         if count is ClickCount.DOUBLE and self.between_double_guards:
-            first = final_guard(x, y)
-            if first is not FinalPointerGuardDecision.ADMITTED:
-                return RawBackendResult(
-                    False,
-                    {"guard_decision": first.value},
-                )
+            if final_guard is not None:
+                first = final_guard(x, y)
+                if first is not FinalPointerGuardDecision.ADMITTED:
+                    return RawBackendResult(
+                        False,
+                        {"guard_decision": first.value},
+                    )
             hook = self.between_double_guards
             self.between_double_guards = None
             hook()
-            second = final_guard(x, y)
-            if second is not FinalPointerGuardDecision.ADMITTED:
-                return RawBackendResult(
-                    None,
-                    {"guard_decision": second.value},
-                )
+            if final_guard is not None:
+                second = final_guard(x, y)
+                if second is not FinalPointerGuardDecision.ADMITTED:
+                    return RawBackendResult(
+                        None,
+                        {"guard_decision": second.value},
+                    )
             return RawBackendResult(
                 self.result,
                 {"via": "physical_sendinput"},
             )
         self._run_before_guard()
-        decision = final_guard(x, y)
-        if decision is not FinalPointerGuardDecision.ADMITTED:
-            return RawBackendResult(
-                False,
-                {"guard_decision": decision.value},
-            )
+        if final_guard is not None:
+            decision = final_guard(x, y)
+            if decision is not FinalPointerGuardDecision.ADMITTED:
+                return RawBackendResult(
+                    False,
+                    {"guard_decision": decision.value},
+                )
         return RawBackendResult(self.result, {"via": "physical_sendinput"})
+
+    def move_mouse(
+        self,
+        x,
+        y,
+        *,
+        duration_ms,
+        hwnd,
+        final_guard=None,
+        stop_event=None,
+        enforce_foreground: bool = True,
+    ) -> RawBackendResult:
+        self.calls.append(("move_mouse", (x, y, duration_ms, hwnd)))
+        self._run_before_guard()
+        if final_guard is not None:
+            decision = final_guard(x, y)
+            if decision is not FinalPointerGuardDecision.ADMITTED:
+                return RawBackendResult(False, {"guard_decision": decision.value})
+        return RawBackendResult(
+            self.result,
+            {"via": "physical_sendinput", "moves_completed": 1},
+        )
 
     def scroll(
         self,
@@ -221,16 +252,18 @@ class _RawHarness:
         amount,
         *,
         hwnd,
-        final_guard,
+        final_guard=None,
+        stop_event=None,
     ) -> RawBackendResult:
         self.calls.append(("scroll", (x, y, amount, hwnd)))
         self._run_before_guard()
-        decision = final_guard(x, y)
-        if decision is not FinalPointerGuardDecision.ADMITTED:
-            return RawBackendResult(
-                False,
-                {"guard_decision": decision.value},
-            )
+        if final_guard is not None:
+            decision = final_guard(x, y)
+            if decision is not FinalPointerGuardDecision.ADMITTED:
+                return RawBackendResult(
+                    False,
+                    {"guard_decision": decision.value},
+                )
         return RawBackendResult(self.result, {"via": "physical_sendinput"})
 
     def drag(
@@ -242,11 +275,16 @@ class _RawHarness:
         *,
         hwnd,
         points=(),
-        final_guard,
+        final_guard=None,
         pointer_already_held=False,
         keep_holding=False,
         hold_token=None,
         cleanup_only=False,
+        button=MouseButton.LEFT,
+        held_keys=(),
+        duration_ms=400,
+        stop_event=None,
+        enforce_foreground: bool = True,
     ) -> RawBackendResult:
         if cleanup_only:
             self.calls.append(("drag_cleanup", (hold_token, hwnd)))
@@ -259,8 +297,8 @@ class _RawHarness:
                     "held_after": False,
                 },
             )
-        arguments = (
-            (
+        if pointer_already_held or keep_holding:
+            arguments = (
                 x1,
                 y1,
                 x2,
@@ -271,21 +309,25 @@ class _RawHarness:
                 keep_holding,
                 hold_token,
             )
-            if pointer_already_held or keep_holding
-            else (
-                (x1, y1, x2, y2, tuple(points), hwnd)
+            if held_keys:
+                arguments = (*arguments, tuple(held_keys))
+        else:
+            arguments = (
+                (x1, y1, x2, y2, tuple(points), hwnd, tuple(held_keys))
+                if held_keys
+                else (x1, y1, x2, y2, tuple(points), hwnd)
                 if points
                 else (x1, y1, x2, y2, hwnd)
             )
-        )
         self.calls.append(("drag", arguments))
         self._run_before_guard()
-        decision = final_guard(x1, y1)
-        if decision is not FinalPointerGuardDecision.ADMITTED:
-            return RawBackendResult(
-                False,
-                {"guard_decision": decision.value},
-            )
+        if final_guard is not None:
+            decision = final_guard(x1, y1)
+            if decision is not FinalPointerGuardDecision.ADMITTED:
+                return RawBackendResult(
+                    False,
+                    {"guard_decision": decision.value},
+                )
         facts: dict[str, Any] = {"via": "physical_sendinput"}
         if pointer_already_held or keep_holding:
             facts.update(
@@ -306,16 +348,18 @@ class _RawHarness:
         text,
         *,
         hwnd,
-        final_guard,
+        final_guard=None,
+        stop_event=None,
     ) -> RawBackendResult:
         self.calls.append(("type_text", (text, hwnd)))
         self._run_before_guard()
-        decision = final_guard()
-        if decision is not FinalKeyboardGuardDecision.ADMITTED:
-            return RawBackendResult(
-                False,
-                {"guard_decision": decision.value},
-            )
+        if final_guard is not None:
+            decision = final_guard()
+            if decision is not FinalKeyboardGuardDecision.ADMITTED:
+                return RawBackendResult(
+                    False,
+                    {"guard_decision": decision.value},
+                )
         return RawBackendResult(
             self.result,
             {
@@ -330,16 +374,18 @@ class _RawHarness:
         chord,
         *,
         hwnd,
-        final_guard,
+        final_guard=None,
+        stop_event=None,
     ) -> RawBackendResult:
         self.calls.append(("hotkey", (chord, hwnd)))
         self._run_before_guard()
-        decision = final_guard()
-        if decision is not FinalKeyboardGuardDecision.ADMITTED:
-            return RawBackendResult(
-                False,
-                {"guard_decision": decision.value},
-            )
+        if final_guard is not None:
+            decision = final_guard()
+            if decision is not FinalKeyboardGuardDecision.ADMITTED:
+                return RawBackendResult(
+                    False,
+                    {"guard_decision": decision.value},
+                )
         return RawBackendResult(
             self.result,
             {
@@ -348,9 +394,39 @@ class _RawHarness:
             },
         )
 
+    def input_sequence(
+        self,
+        events,
+        *,
+        hwnd,
+        final_keyboard_guard=None,
+        stop_event=None,
+    ) -> RawBackendResult:
+        self.calls.append(("input_sequence", (tuple(events), hwnd, stop_event)))
+        self._run_before_guard()
+        if final_keyboard_guard is not None:
+            decision = final_keyboard_guard()
+            if decision is not FinalKeyboardGuardDecision.ADMITTED:
+                return RawBackendResult(False, {"guard_decision": decision.value})
+        return RawBackendResult(
+            self.result,
+            {
+                "via": "physical_sendinput",
+                "event_count": len(events),
+                "completed_events": len(events),
+                "moves_completed": sum(
+                    event.kind is InputEventKind.MOVE for event in events
+                ),
+                "cursor_restored": False,
+            },
+        )
+
     def executor(self) -> RawDeviceExecutor:
         return RawDeviceExecutor(
             RawDeviceBackends(
+                admitted_physical_move=AdmittedPhysicalMoveBackend(
+                    self.move_mouse
+                ),
                 admitted_physical_click=AdmittedPhysicalClickBackend(
                     self.click
                 ),
@@ -365,6 +441,9 @@ class _RawHarness:
                 ),
                 admitted_physical_hotkey=AdmittedPhysicalHotkeyBackend(
                     self.hotkey
+                ),
+                admitted_physical_sequence=AdmittedPhysicalSequenceBackend(
+                    self.input_sequence
                 ),
             )
         )
@@ -421,9 +500,13 @@ def _proposal(action: str) -> dict[str, Any]:
     args = {
         "click": {"image_x": 50.0, "image_y": 40.0},
         "double_click": {"image_x": 50.0, "image_y": 40.0},
+        "move_mouse": {
+            "image_x": 50.0,
+            "image_y": 40.0,
+            "duration_ms": 180,
+        },
         "drag": {
             "image_path": [[50.0, 40.0], [80.0, 60.0]],
-            "keep_holding": False,
         },
         "scroll": {
             "image_x": 50.0,
@@ -432,6 +515,12 @@ def _proposal(action: str) -> dict[str, Any]:
         },
         "type_text": {"text": "hello"},
         "hotkey": {"keys": ["ctrl", "l"]},
+        "input_sequence": {
+            "sequence": (
+                "key_down shift; move 20,10 50; mouse_down right; "
+                "move 80,60 100; mouse_up right; key_up shift"
+            ),
+        },
         "launch_application": {"app": "notepad", "arguments": ""},
     }[action]
     return {
@@ -676,13 +765,15 @@ def _harness(
     (
         ("click", "click"),
         ("double_click", "click"),
+        ("move_mouse", "move_mouse"),
         ("drag", "drag"),
         ("scroll", "scroll"),
         ("type_text", "type_text"),
         ("hotkey", "hotkey"),
+        ("input_sequence", "input_sequence"),
     ),
 )
-def test_exact_atomic_surface_completes_once_with_effect(
+def test_exact_atomic_surface_completes_once_with_model_visible_post_frame(
     action: str,
     raw_name: str,
 ) -> None:
@@ -699,11 +790,8 @@ def test_exact_atomic_surface_completes_once_with_effect(
     assert transition.input_completed is True
     assert transition.post_frame_id == 2
     assert len(transition.post_frame_evidence) == 1
-    assert transition.action_effect is not None
-    assert transition.action_effect_evidence is not None
-    assert transition.action_effect.after_frame_evidence_ref == (
-        transition.post_frame_evidence[0].id
-    )
+    assert transition.action_effect is None
+    assert transition.action_effect_evidence is None
     assert len(harness.raw.calls) == 1
     assert harness.wait_calls == [0.12]
     assert harness.raw.calls[0][0] == raw_name
@@ -724,8 +812,28 @@ def test_exact_atomic_surface_completes_once_with_effect(
             else ClickCount.SINGLE
         )
         assert values[4] is ClickMechanism.PHYSICAL
+    elif action == "move_mouse":
+        assert harness.raw.calls[0][1] == (*POINT, 180, None)
     elif action == "scroll":
-        assert harness.raw.calls[0][1] == (*POINT, -240, HWND)
+        assert harness.raw.calls[0][1] == (*POINT, -240, None)
+    elif action == "input_sequence":
+        events, hwnd, stop_event = harness.raw.calls[0][1]
+        assert hwnd is None
+        assert stop_event is None
+        assert events == (
+            PhysicalInputEvent(InputEventKind.KEY_DOWN, key="shift"),
+            PhysicalInputEvent(InputEventKind.MOVE, x=30, y=30, duration_ms=50),
+            PhysicalInputEvent(
+                InputEventKind.MOUSE_DOWN,
+                button=MouseButton.RIGHT,
+            ),
+            PhysicalInputEvent(InputEventKind.MOVE, x=90, y=80, duration_ms=100),
+            PhysicalInputEvent(
+                InputEventKind.MOUSE_UP,
+                button=MouseButton.RIGHT,
+            ),
+            PhysicalInputEvent(InputEventKind.KEY_UP, key="shift"),
+        )
 
 
 def test_screen_first_click_is_admitted_on_any_visible_window(
@@ -1044,14 +1152,6 @@ def test_screen_first_click_ignores_dead_hit_test_and_keeps_desktop_frame(
         "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
         lambda: Region(*desktop),
     )
-    monkeypatch.setattr(
-        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetForegroundWindow",
-        lambda: other_hwnd,
-    )
-    monkeypatch.setattr(
-        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetAncestor",
-        lambda hwnd, _flag: hwnd,
-    )
     authority = FrameAuthority()
     before = authority.commit(
         epoch=EPOCH,
@@ -1134,18 +1234,9 @@ def test_screen_first_pointer_never_falls_back_to_old_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     desktop = (0, 0, 1920, 1080)
-    desktop_hwnd = HWND + 400
     monkeypatch.setattr(
         "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
         lambda: Region(*desktop),
-    )
-    monkeypatch.setattr(
-        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetForegroundWindow",
-        lambda: 0,
-    )
-    monkeypatch.setattr(
-        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetDesktopWindow",
-        lambda: desktop_hwnd,
     )
     authority = FrameAuthority()
     before = authority.commit(
@@ -1210,24 +1301,9 @@ def test_screen_first_keyboard_uses_live_foreground_not_old_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     desktop = (0, 0, 1920, 1080)
-    live_foreground = HWND + 91
-    child_foreground = live_foreground + 1
     monkeypatch.setattr(
         "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
         lambda: Region(*desktop),
-    )
-    monkeypatch.setattr(
-        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetForegroundWindow",
-        lambda: child_foreground,
-    )
-    monkeypatch.setattr(
-        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetAncestor",
-        lambda hwnd, _flag: live_foreground if hwnd == child_foreground else hwnd,
-    )
-    set_foreground_calls: list[int] = []
-    monkeypatch.setattr(
-        "winpilot.vnext.desktop_adapter.atomic.win32gui.SetForegroundWindow",
-        lambda hwnd: set_foreground_calls.append(hwnd),
     )
     authority = FrameAuthority()
     before = authority.commit(
@@ -1263,7 +1339,7 @@ def test_screen_first_keyboard_uses_live_foreground_not_old_binding(
             process_id=PROCESS_ID + 5,
             executable_identity="C:/replacement.exe",
             region=(50, 50, 640, 480),
-            foreground_root_hwnd=live_foreground,
+            foreground_root_hwnd=HWND + 91,
         )
     )
     raw = _RawHarness(True)
@@ -1283,10 +1359,9 @@ def test_screen_first_keyboard_uses_live_foreground_not_old_binding(
     assert transition.input_completed is True
     assert len(raw.calls) == 1
     assert raw.calls[0][0] == action
-    assert raw.calls[0][1][-1] == live_foreground
+    assert raw.calls[0][1][-1] is None
     assert probe.snapshot_calls == 0
     assert probe.hit_test_calls == 0
-    assert set_foreground_calls == []
 
 
 def test_screen_first_pointer_and_post_frame_ignore_missing_old_binding(
@@ -1296,19 +1371,6 @@ def test_screen_first_pointer_and_post_frame_ignore_missing_old_binding(
     monkeypatch.setattr(
         "winpilot.vnext.desktop_adapter.atomic.virtual_screen_region",
         lambda: Region(*desktop),
-    )
-    monkeypatch.setattr(
-        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetForegroundWindow",
-        lambda: HWND + 30,
-    )
-    monkeypatch.setattr(
-        "winpilot.vnext.desktop_adapter.atomic.win32gui.GetAncestor",
-        lambda hwnd, _flag: hwnd,
-    )
-    set_foreground_calls: list[int] = []
-    monkeypatch.setattr(
-        "winpilot.vnext.desktop_adapter.atomic.win32gui.SetForegroundWindow",
-        lambda hwnd: set_foreground_calls.append(hwnd),
     )
     authority = FrameAuthority()
     before = authority.commit(
@@ -1365,7 +1427,6 @@ def test_screen_first_pointer_and_post_frame_ignore_missing_old_binding(
     assert authority.current.frame_id == 2
     assert authority.current.scope == "full_desktop"
     assert authority.current.region == desktop
-    assert set_foreground_calls == []
 
 
 def test_exact_type_text_is_absent_from_ordinary_trace(
@@ -1416,34 +1477,16 @@ def test_exact_type_text_is_absent_from_ordinary_trace(
 
 
 
-def test_action_effect_snapshot_rejects_nested_extra_fields() -> None:
+def test_completed_transition_uses_post_frame_without_separate_effect_verifier() -> None:
     harness = _harness("click")
     attempt = harness.run()
     transition = attempt.transition
     assert transition is not None
     wire = transition.to_dict()
-    assert wire["action_effect"] is not None
-    assert "reasoning" not in wire["action_effect"]
-    assert set(wire["action_effect"]) <= {
-        "format",
-        "comparator_version",
-        "action_id",
-        "input_completed",
-        "before_frame_id",
-        "after_frame_id",
-        "before_frame_evidence_ref",
-        "after_frame_evidence_ref",
-        "before_frame_payload_hash",
-        "after_frame_payload_hash",
-        "payload_hash",
-        "target_binding_valid",
-        "frame_comparable",
-        "local_visual_change",
-        "change_ratio",
-        "reason",
-        "semantic_completion",
-        "evidence_ref",
-    }
+    assert wire["action_effect"] is None
+    assert wire["action_effect_evidence"] is None
+    assert wire["post_frame_id"] == 2
+    assert len(wire["post_frame_evidence"]) == 1
 
 
 def test_applied_order_is_raw_then_wait_then_capture(monkeypatch) -> None:
@@ -1519,7 +1562,7 @@ def test_non_completed_raw_receipt_does_not_wait(
     assert len(harness.raw.calls) == 1
 
 
-def test_wait_exception_after_completed_input_is_unknown_without_replay() -> None:
+def test_wait_exception_cannot_downgrade_completed_input() -> None:
     def fail_wait(_delay: float) -> None:
         raise RuntimeError("settle clock failed")
 
@@ -1529,7 +1572,7 @@ def test_wait_exception_after_completed_input_is_unknown_without_replay() -> Non
 
     assert attempt.controller_error is None
     assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.UNKNOWN
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
     assert attempt.transition.input_completed is True
     assert attempt.transition.post_frame_id == 2
     assert len(attempt.transition.post_frame_evidence) == 1
@@ -1580,7 +1623,7 @@ def test_noncallable_wait_is_rejected_even_for_zero_delay(wait: Any) -> None:
         )
 
 
-def test_queue_acquisition_race_revalidates_before_raw(
+def test_queue_acquisition_window_metadata_change_does_not_veto_raw(
     monkeypatch,
 ) -> None:
     harness = _harness("click")
@@ -1605,15 +1648,11 @@ def test_queue_acquisition_race_revalidates_before_raw(
 
     assert attempt.controller_error is None
     assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.REJECTED
-    assert attempt.transition.input_completed is False
-    assert harness.raw.calls == []
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert attempt.transition.input_completed is True
+    assert len(harness.raw.calls) == 1
     assert len(harness.trace.records) == 1
-    assert harness.trace.records[0][0].outcome is MutationOutcome.NOT_STARTED
-    assert (
-        harness.trace.records[0][0].error_kind
-        == "target_changed_after_queue"
-    )
+    assert harness.trace.records[0][0].outcome is MutationOutcome.APPLIED
 
 
 def test_queue_receives_exact_run_and_frame_metadata(monkeypatch) -> None:
@@ -1764,7 +1803,7 @@ def test_stale_authoritative_frame_rejects_without_raw() -> None:
         {"foreground_root_hwnd": HWND + 1},
     ),
 )
-def test_complete_live_target_identity_is_required_before_queue(
+def test_window_metadata_is_advisory_before_keyboard_input(
     changes: dict[str, Any],
 ) -> None:
     from dataclasses import replace
@@ -1776,12 +1815,16 @@ def test_complete_live_target_identity_is_required_before_queue(
 
     assert attempt.controller_error is None
     assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.REJECTED
-    assert harness.raw.calls == []
-    assert harness.trace.records[0][0].outcome is MutationOutcome.NOT_STARTED
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert harness.raw.calls[0][0] == "type_text"
+    assert harness.raw.calls[0][1][0] == "hello"
+    # The HWND is a layout/input-thread hint only; none of the varied window
+    # identity facts above can prevent the physical keyboard call.
+    assert harness.raw.calls[0][1][1] is None
+    assert harness.trace.records[0][0].outcome is MutationOutcome.APPLIED
 
 
-def test_pointer_hit_test_is_required_before_queue() -> None:
+def test_pointer_hit_test_metadata_does_not_veto_visible_point() -> None:
     harness = _harness("scroll")
     harness.probe.hit_root = HWND + 1
 
@@ -1789,12 +1832,12 @@ def test_pointer_hit_test_is_required_before_queue() -> None:
 
     assert attempt.controller_error is None
     assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.REJECTED
-    assert harness.raw.calls == []
-    assert harness.trace.records[0][0].error_kind == "hit_test_changed"
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert harness.raw.calls == [("scroll", (*POINT, -240, None))]
+    assert harness.probe.hit_test_calls == 0
 
 
-def test_pointer_hit_test_rejects_an_incorrect_mapped_point() -> None:
+def test_submitted_point_mapping_is_sent_without_local_target_snapping() -> None:
     submitted_arguments = {
         "image_x": 37.0,
         "image_y": 29.0,
@@ -1816,9 +1859,9 @@ def test_pointer_hit_test_rejects_an_incorrect_mapped_point() -> None:
 
     assert attempt.controller_error is None
     assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.REJECTED
-    assert harness.raw.calls == []
-    assert harness.trace.records[0][0].error_kind == "hit_test_changed"
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert harness.raw.calls == [("scroll", (*mapped_point, -713, None))]
+    assert harness.probe.hit_test_calls == 0
 
 
 def test_pre_set_stop_rejects_before_raw() -> None:
@@ -1856,7 +1899,7 @@ def test_queue_cancellation_rejects_without_raw(monkeypatch) -> None:
     )
 
 
-def test_final_pointer_guard_rechecks_target_without_replay() -> None:
+def test_final_pointer_guard_ignores_window_classification_changes() -> None:
     from dataclasses import replace
 
     harness = _harness("click")
@@ -1873,13 +1916,13 @@ def test_final_pointer_guard_rechecks_target_without_replay() -> None:
 
     assert attempt.controller_error is None
     assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.REJECTED
-    assert attempt.transition.input_completed is False
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert attempt.transition.input_completed is True
     assert len(harness.raw.calls) == 1
-    assert harness.trace.records[0][0].outcome is MutationOutcome.NOT_APPLIED
+    assert harness.trace.records[0][0].outcome is MutationOutcome.APPLIED
 
 
-def test_partial_double_click_guard_failure_is_unknown_and_not_replayed() -> None:
+def test_double_click_is_not_interrupted_by_hit_test_metadata_changes() -> None:
     harness = _harness("double_click")
     harness.raw.between_double_guards = lambda: setattr(
         harness.probe,
@@ -1891,12 +1934,12 @@ def test_partial_double_click_guard_failure_is_unknown_and_not_replayed() -> Non
 
     assert attempt.controller_error is None
     assert attempt.transition is not None
-    assert attempt.transition.outcome is ControllerOutcome.UNKNOWN
-    assert attempt.transition.input_completed is None
+    assert attempt.transition.outcome is ControllerOutcome.COMPLETED
+    assert attempt.transition.input_completed is True
     assert len(harness.raw.calls) == 1
     assert (
         harness.trace.records[0][0].outcome
-        is MutationOutcome.OUTCOME_UNKNOWN
+        is MutationOutcome.APPLIED
     )
 
 
@@ -1913,7 +1956,6 @@ def test_partial_double_click_guard_failure_is_unknown_and_not_replayed() -> Non
 def test_drag_traces_every_image_path_point_in_physical_order() -> None:
     submitted = {
         "image_path": [[50.0, 40.0], [80.0, 40.0], [80.0, 60.0]],
-        "keep_holding": False,
     }
     harness = _harness("drag", action_args=submitted)
     events: list[dict[str, Any]] = []
@@ -1949,6 +1991,36 @@ def test_drag_traces_every_image_path_point_in_physical_order() -> None:
     }
 
 
+def test_drag_passes_generic_held_keys_to_the_same_physical_action() -> None:
+    submitted = {
+        "image_path": [[50.0, 40.0], [80.0, 60.0]],
+        "held_keys": ["shift", "w"],
+    }
+    harness = _harness("drag", action_args=submitted)
+    events: list[dict[str, Any]] = []
+    from winpilot.utils.log import BUS
+
+    BUS.add_sink(events.append)
+    try:
+        result = harness.run()
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert result.controller_error is None
+    assert result.transition is not None
+    assert result.transition.outcome is ControllerOutcome.COMPLETED
+    assert harness.raw.calls == [
+        ("drag", (60, 60, 90, 80, (), None, ("shift", "w"))),
+    ]
+    dispatch = next(
+        event
+        for event in events
+        if event.get("type") == "vnext_pointer_dispatch"
+    )
+    assert dispatch["image_coordinates"]["held_keys"] == ["shift", "w"]
+    assert dispatch["physical_arguments"]["held_keys"] == ["shift", "w"]
+
+
 def test_held_drag_releases_at_current_point_without_an_extra_move() -> None:
     begin_args = {
         "image_path": [[50.0, 40.0], [80.0, 60.0]],
@@ -1974,7 +2046,7 @@ def test_held_drag_releases_at_current_point_without_an_extra_move() -> None:
                     90,
                     80,
                     (),
-                    HWND,
+                    None,
                     False,
                     True,
                     held.lease_id,
@@ -2023,7 +2095,7 @@ def test_held_drag_releases_at_current_point_without_an_extra_move() -> None:
                 90,
                 80,
                 (),
-                HWND,
+                None,
                 True,
                 False,
                 held.lease_id,
@@ -2203,10 +2275,9 @@ def test_execute_revalidates_a_forged_envelope_instance() -> None:
         {"frame_region": [11, 20, 100, 80]},
         {"submitted_image_size": [99, 80]},
         {"frame_image_sha256": "f" * 64},
-        {"target_binding_id": "different-binding"},
     ),
 )
-def test_every_mutable_frame_or_binding_identity_field_fails_closed(
+def test_every_mutable_frame_identity_field_fails_closed(
     changes: dict[str, Any],
 ) -> None:
     harness = _harness("click")
@@ -2217,6 +2288,20 @@ def test_every_mutable_frame_or_binding_identity_field_fails_closed(
     assert transition.outcome is ControllerOutcome.REJECTED
     assert transition.input_completed is False
     assert harness.raw.calls == []
+
+
+def test_binding_label_is_not_input_authority() -> None:
+    harness = _harness("click")
+    harness.envelope = _replace_envelope(
+        harness.envelope,
+        target_binding_id="different-binding",
+    )
+
+    transition = harness.adapter.execute(harness.envelope)
+
+    assert transition.outcome is ControllerOutcome.COMPLETED
+    assert transition.input_completed is True
+    assert len(harness.raw.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -2249,7 +2334,7 @@ def test_scroll_uses_fixed_standard_bounds(
     )
 
 
-def test_completed_click_keeps_old_action_atomic_then_offers_new_foreground() -> None:
+def test_completed_click_does_not_mutate_optional_workspace() -> None:
     harness = _harness("click")
     foreground = [HWND]
     next_hwnd = HWND + 100
@@ -2315,8 +2400,8 @@ def test_completed_click_keeps_old_action_atomic_then_offers_new_foreground() ->
     assert transition.input_completed is True
     assert workspace.binding == harness.binding
     successor = workspace.observe()
-    assert successor.replaces_binding
-    assert successor.surface.hwnd == next_hwnd
+    assert successor.replaces_binding is False
+    assert successor.surface.hwnd == HWND
 
 def test_launch_visible_effect_surfaces_existing_instance_note() -> None:
     """A launch that reused a running instance must tell the model so."""

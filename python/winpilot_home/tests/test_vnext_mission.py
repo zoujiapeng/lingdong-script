@@ -344,7 +344,7 @@ def test_definition_falls_back_to_one_lossless_obligation() -> None:
     )
     assert len(definition.obligations) == 1
     assert definition.obligations[0].desired_state == "未知的 GUI 目标"
-    assert definition.obligations[0].required_capabilities == ("visual.interact",)
+    assert definition.obligations[0].required_capabilities == ()
 
 
 def test_definition_and_event_canonical_wire_are_deterministic() -> None:

@@ -51,7 +51,7 @@ function createPlane(options: {
     runs: [],
     events: [],
     error: '',
-    runtimeIssue: '',
+    runtimeNotice: '',
     refresh: vi.fn(async () => undefined),
     startGoal: vi.fn(),
     startAutomation: vi.fn(),

@@ -834,10 +834,16 @@ class ElectronClientDriver:
     def capture_window(self, name: str) -> str:
         path = self.output_dir / name
         rect = self.window.BoundingRectangle
-        ImageGrab.grab(
-            bbox=(rect.left, rect.top, rect.right, rect.bottom),
-            all_screens=True,
-        ).save(path)
+        bbox = (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
+        try:
+            if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                raise ValueError("Electron window has no capturable rectangle")
+            ImageGrab.grab(bbox=bbox, all_screens=True).save(path)
+        except (OSError, SystemError, ValueError):
+            # During desktop handoff Electron can be minimized between the
+            # UIA rectangle read and ImageGrab.  This screenshot is diagnostic
+            # only, so preserve the run and capture the real desktop instead.
+            ImageGrab.grab(all_screens=True).save(path)
         return str(path)
 
     def capture_desktop(self, name: str) -> str:
@@ -1706,8 +1712,8 @@ def _gui_execution_trace_evidence(
 
     outer_run_id = str(outer_run_id or "").strip()
     gui_actions = {
-        "click", "double_click", "drag", "scroll", "type_text", "hotkey",
-        "launch_application",
+        "move_mouse", "click", "double_click", "drag", "scroll",
+        "type_text", "hotkey", "input_sequence", "launch_application",
     }
     inspected: list[str] = []
     applied_actions: list[str] = []

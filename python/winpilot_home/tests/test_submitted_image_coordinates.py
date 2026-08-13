@@ -63,7 +63,7 @@ def test_point_mapping_is_pure_and_preserves_exact_provenance() -> None:
         ({"image_x": math.nan, "image_y": 2}, "exact submitted image bounds"),
         ({"image_x": math.inf, "image_y": 2}, "exact submitted image bounds"),
         ({"image_x": -1, "image_y": 2}, "exact submitted image bounds"),
-        ({"image_x": 10, "image_y": 10}, "exact submitted image bounds"),
+        ({"image_x": 10.001, "image_y": 10}, "exact submitted image bounds"),
     ],
 )
 def test_point_mapping_rejects_ambiguous_or_invalid_values_atomically(
@@ -80,6 +80,20 @@ def test_point_mapping_rejects_ambiguous_or_invalid_values_atomically(
         _map_point(mapper, payload)
 
     assert payload == original
+
+
+def test_extent_style_right_bottom_edge_clamps_to_last_real_pixel() -> None:
+    from winpilot.visual_runtime.submitted_image_coordinates import (
+        SubmittedImageCoordinateMapper,
+    )
+
+    mapped, source = _map_point(
+        SubmittedImageCoordinateMapper((10, 8)),
+        {"image_x": 10, "image_y": 8},
+    )
+
+    assert mapped == {"frame_x": 1000.0, "frame_y": 1000.0}
+    assert source == {"image_x": 9.0, "image_y": 7.0}
 
 
 def test_point_mapping_is_monotonic_for_random_sizes() -> None:

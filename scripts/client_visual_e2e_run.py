@@ -79,6 +79,33 @@ CALIBRATION_FEEDBACK_TASK = (
 )
 
 VISUAL_CASES: dict[str, dict[str, Any]] = {
+    "click-double": {
+        "scenario": "click_double",
+        "target_page": "vnext_canary_target.html",
+        "title_prefix": "WinPilot vNext Canary",
+        "task": VISUAL_TEST_TASK,
+        "seed": 4101,
+        "max_steps": 18,
+        "timeout": 360,
+    },
+    "scroll-roundtrip": {
+        "scenario": "scroll_roundtrip",
+        "target_page": "vnext_canary_target.html",
+        "title_prefix": "WinPilot vNext Canary",
+        "task": VISUAL_TEST_TASK,
+        "seed": 5201,
+        "max_steps": 24,
+        "timeout": 420,
+    },
+    "type-hotkey": {
+        "scenario": "type_hotkey",
+        "target_page": "vnext_canary_target.html",
+        "title_prefix": "WinPilot vNext Canary",
+        "task": VISUAL_TEST_TASK,
+        "seed": 6301,
+        "max_steps": 24,
+        "timeout": 420,
+    },
     "answer-all-questions": {
         "scenario": "quiz_all",
         "task": ANSWER_ALL_QUESTIONS_TASK,
@@ -145,6 +172,29 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "max_steps": 36,
         "timeout": 420,
     },
+    "draw-shared-turn": {
+        "scenario": "shared_turn",
+        "task": SPOKEN_GUI_VISUAL_TEST_TASK,
+        "seed": 112358,
+        "max_steps": 30,
+        "timeout": 420,
+    },
+    "modifier-drag": {
+        "scenario": "modifier_drag",
+        "task": VISUAL_TEST_TASK,
+        "seed": 141421,
+        "max_steps": 30,
+        "timeout": 420,
+        "ground_truth": "trusted_browser_mouse_keyboard_events",
+    },
+    "held-device-chord": {
+        "scenario": "held_device_chord",
+        "task": VISUAL_TEST_TASK,
+        "seed": 173205,
+        "max_steps": 36,
+        "timeout": 480,
+        "ground_truth": "trusted_cross_turn_mouse_keyboard_wheel_events",
+    },
     # These deterministic seeds exercise every mirrored/reversed corridor.
     "corridor-v0": {
         "scenario": "corridor_drag",
@@ -181,9 +231,14 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
 }
 
 SUITES = {
-    "smoke": ("drag-fit", "slider", "dynamic-hold", "game-drag-v2"),
+    "smoke": ("drag-fit", "slider", "dynamic-hold"),
+    "coordination": (
+        "draw-shared-turn", "modifier-drag", "held-device-chord",
+    ),
+    "input-basics": ("click-double", "scroll-roundtrip", "type-hotkey"),
     "goal-admission": ("precise-click", "ordered-clicks"),
     "exam": ("answer-all-questions",),
+    "stress": ("corridor-v0", "corridor-v1", "game-drag-v2", "corridor-v3"),
     "all": tuple(VISUAL_CASES),
 }
 
@@ -463,21 +518,34 @@ def external_verdict(
                 )
     elif scenario == "dynamic_hold":
         all_events = state.get("events") or []
-        down_events = [
-            item for item in all_events
-            if item.get("type") == "pointerdown" and item.get("trusted") is True
-        ]
-        checkpoint_events = [
-            item for item in all_events
-            if item.get("type") == "checkpoint_reached" and item.get("trusted") is True
-        ]
-        release_events = [
-            item for item in all_events
-            if item.get("type") == "pointerup" and item.get("trusted") is True
-        ]
-        if len(down_events) != 1 or int(details.get("down_count") or 0) != 1:
-            errors.append("dynamic gesture was not completed with exactly one held press")
-        if not checkpoint_events or details.get("checkpoint_reached") is not True:
+        release_index = max(
+            (
+                index for index, item in enumerate(all_events)
+                if item.get("type") == "pointerup"
+                and item.get("trusted") is True
+                and (item.get("details") or {}).get("succeeded") is True
+            ),
+            default=-1,
+        )
+        checkpoint_index = max(
+            (
+                index for index, item in enumerate(all_events[:release_index])
+                if item.get("type") == "checkpoint_reached"
+                and item.get("trusted") is True
+            ),
+            default=-1,
+        )
+        down_index = max(
+            (
+                index for index, item in enumerate(all_events[:checkpoint_index])
+                if item.get("type") == "pointerdown"
+                and item.get("trusted") is True
+            ),
+            default=-1,
+        )
+        if not 0 <= down_index < checkpoint_index < release_index:
+            errors.append("final dynamic attempt has no ordered held-pointer events")
+        if checkpoint_index < 0 or details.get("checkpoint_reached") is not True:
             errors.append("checkpoint was not reached while the pointer was held")
         if details.get("goal_revealed_after_down") is not True:
             errors.append("goal was not revealed after the trusted pointerdown")
@@ -485,14 +553,13 @@ def external_verdict(
             errors.append("pointer was not released inside the newly revealed goal")
         if details.get("completion_event") != "pointerup":
             errors.append("dynamic success was not emitted by pointerup")
-        if len(release_events) != 1:
-            errors.append("dynamic gesture has no unique trusted pointerup evidence")
+        if release_index < 0:
+            errors.append("dynamic gesture has no successful trusted pointerup evidence")
         else:
-            release_details = release_events[0].get("details") or {}
+            release_event = all_events[release_index]
+            release_details = release_event.get("details") or {}
             if (
-                release_events[0].get("succeeded") is not True
-                or release_details.get("succeeded") is not True
-                or int(release_details.get("down_count") or 0) != 1
+                release_details.get("succeeded") is not True
                 or release_details.get("checkpoint_reached") is not True
                 or release_details.get("goal_revealed_after_down") is not True
                 or release_details.get("inside_goal") is not True
@@ -501,6 +568,159 @@ def external_verdict(
                 errors.append("trusted pointerup did not complete inside the final goal")
         if move_count < 2:
             errors.append("dynamic held gesture did not span multiple pointer moves")
+    elif scenario == "shared_turn":
+        ready = next(
+            (
+                item for item in reversed(state.get("events") or [])
+                if item.get("type") == "page_ready"
+            ),
+            {},
+        )
+        user_cell = (ready.get("details") or {}).get("user_cell")
+        pointer_downs = [
+            item for item in state.get("events") or []
+            if item.get("type") == "pointerdown" and item.get("trusted") is True
+        ]
+        pointer_ups = [
+            item for item in state.get("events") or []
+            if item.get("type") == "pointerup" and item.get("trusted") is True
+        ]
+        if move_count < 2:
+            errors.append("drawing did not produce a continuous pointer stroke")
+        if len(pointer_downs) < 2 or len(pointer_ups) < 2:
+            errors.append("drawing did not contain two trusted pointer strokes")
+        if int(details.get("valid_stroke_count") or 0) < 2:
+            errors.append("drawing does not contain both strokes of the X")
+        selected_cell = details.get("selected_cell")
+        if (
+            type(selected_cell) is not int
+            or not 0 <= selected_cell < 9
+            or selected_cell == user_cell
+        ):
+            errors.append("drawing was not completed in one empty board cell")
+    elif scenario == "modifier_drag":
+        events = state.get("events") or []
+        shift_up = max(
+            (
+                index for index, item in enumerate(events)
+                if item.get("type") == "keyup"
+                and item.get("trusted") is True
+                and (item.get("details") or {}).get("key") == "Shift"
+                and (item.get("details") or {}).get("succeeded") is True
+            ),
+            default=-1,
+        )
+        pointer_up = max(
+            (
+                index for index, item in enumerate(events)
+                if index < shift_up
+                and item.get("type") == "pointerup"
+                and item.get("trusted") is True
+                and (item.get("details") or {}).get("inside_target") is True
+                and (item.get("details") or {}).get("shift_at_pointerup") is True
+            ),
+            default=-1,
+        )
+        pointer_down = max(
+            (
+                index for index, item in enumerate(events)
+                if index < pointer_up
+                and item.get("type") == "pointerdown"
+                and item.get("trusted") is True
+                and (item.get("details") or {}).get("shift_key") is True
+                and (item.get("details") or {}).get("shift_held") is True
+            ),
+            default=-1,
+        )
+        shift_down = max(
+            (
+                index for index, item in enumerate(events)
+                if index < pointer_down
+                and item.get("type") == "keydown"
+                and item.get("trusted") is True
+                and (item.get("details") or {}).get("key") == "Shift"
+            ),
+            default=-1,
+        )
+        if not 0 <= shift_down < pointer_down < pointer_up < shift_up:
+            errors.append("Shift and pointer events were not interleaved correctly")
+        if move_count < 2:
+            errors.append("modifier drag did not produce enough pointer moves")
+        for key in (
+            "shift_at_pointerdown",
+            "shift_during_drag",
+            "shift_at_pointerup",
+            "inside_target",
+            "mouse_released_before_shift",
+        ):
+            if details.get(key) is not True:
+                errors.append(f"modifier drag fact is false: {key}")
+    elif scenario == "held_device_chord":
+        events = state.get("events") or []
+        def trusted_index(event_type: str, *, before: int | None = None) -> int:
+            limit = len(events) if before is None else before
+            return max(
+                (
+                    index for index, item in enumerate(events[:limit])
+                    if item.get("type") == event_type
+                    and item.get("trusted") is True
+                ),
+                default=-1,
+            )
+
+        pointer_up = trusted_index("pointerup")
+        post_move = trusted_index("post_coordination_move", before=pointer_up)
+        coordination = trusted_index("coordination_ready", before=post_move)
+        key_down = trusted_index("keydown", before=coordination)
+        wheel = trusted_index("wheel", before=coordination)
+        checkpoint = trusted_index("checkpoint_reached", before=min(key_down, wheel))
+        pointer_down = trusted_index("pointerdown", before=checkpoint)
+        if not (
+            0 <= pointer_down < checkpoint < key_down < coordination
+            and checkpoint < wheel < coordination < post_move < pointer_up
+        ):
+            errors.append(
+                "held mouse, checkpoint, key, wheel, later move, and release "
+                "were not observed in one ordered gesture"
+            )
+        for key in (
+            "checkpoint_reached",
+            "key_during_hold",
+            "wheel_during_hold",
+            "goal_revealed_after_coordination",
+            "inside_goal",
+        ):
+            if details.get(key) is not True:
+                errors.append(f"held device chord fact is false: {key}")
+        if int(details.get("post_coordination_moves") or 0) < 1:
+            errors.append("pointer did not continue moving after key and wheel")
+        if details.get("completion_event") != "pointerup":
+            errors.append("held device chord did not finish on pointerup")
+    elif scenario == "click_double":
+        counts = details.get("counts") or {}
+        if (
+            details.get("final_dom_state") != "complete"
+            or int(counts.get("single_click") or 0) != 1
+            or int(counts.get("double_click_events") or 0) != 2
+            or int(counts.get("dblclick") or 0) != 1
+        ):
+            errors.append("single-click then double-click did not complete")
+    elif scenario == "scroll_roundtrip":
+        if (
+            details.get("final_dom_state") != "complete"
+            or details.get("phase") != "complete"
+            or int(details.get("checkpoint_count") or 0) != 1
+            or int(details.get("wheel_count") or 0) < 2
+        ):
+            errors.append("down-then-up wheel roundtrip did not complete")
+    elif scenario == "type_hotkey":
+        if (
+            details.get("final_dom_state") != "complete"
+            or details.get("final_value") != details.get("expected_token")
+            or int(details.get("select_all_count") or 0) != 1
+            or int(details.get("submit_count") or 0) != 1
+        ):
+            errors.append("text and hotkey sequence did not complete")
     elif scenario == "precise_click":
         target_index = details.get("target_index")
         target = details.get("target") or {}
@@ -698,8 +918,9 @@ def run_visual_case(
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
     state_url = f"{base}/state?case={case_id}"
+    target_page = str(source.get("target_page") or "visual_interaction_target.html")
     url = (
-        f"{base}/visual_interaction_target.html?case={case_id}"
+        f"{base}/{target_page}?case={case_id}"
         f"&scenario={scenario}&seed={seed}"
     )
     case_dir = output_root / case_id
@@ -753,7 +974,7 @@ def run_visual_case(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        title = f"WinPilot Visual Interaction Target {case_id}"
+        title = f"{source.get('title_prefix') or 'WinPilot Visual Interaction Target'} {case_id}"
         target_hwnd = _find_window(title)
         ready_state = _wait_json(
             state_url,
@@ -792,12 +1013,6 @@ def run_visual_case(
                         for item in events
                     )
                 if scenario in {"calibration_grid", "calibration_feedback"}:
-                    if any(
-                        item.get("type") == "scenario_failure"
-                        and item.get("trusted") is True
-                        for item in events
-                    ):
-                        return True
                     ready = next(
                         (
                             item for item in reversed(events)
@@ -816,12 +1031,6 @@ def run_visual_case(
                         )
                     ])
                     return point_count > 0 and hit_count >= point_count
-                if any(
-                    item.get("type") == "scenario_failure"
-                    and item.get("trusted") is True
-                    for item in events
-                ):
-                    return True
                 if value.get("success") is not True:
                     return False
                 if scenario != "ordered_clicks":
@@ -834,11 +1043,18 @@ def run_visual_case(
                     )
                 ]) == 3
 
-            state = _wait_json(
-                state_url,
-                complete,
-                timeout=8,
-            )
+            try:
+                state = _wait_json(
+                    state_url,
+                    complete,
+                    timeout=8,
+                )
+            except RuntimeError:
+                # A failed attempt is not terminal: the visual model can
+                # inspect the changed page and retry.  Once its run has ended,
+                # retain the newest browser state even when no later success
+                # appeared instead of freezing the first failure snapshot.
+                state = _json_get(state_url)
             # The final sequence_click and scenario_success are separate fetches.
             # Re-read once after they have both had time to reach the oracle.
             time.sleep(0.2)

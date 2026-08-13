@@ -1234,9 +1234,13 @@ def test_normalized_frame_coordinates_map_inside_exact_window_bounds(monkeypatch
     )
     assert image_drag["points"] == [[400, 300]]
     assert image_drag["source_image_coordinates"]["image_points"] == [[500.0, 250.0]]
+    edge_click = runner._map_normalized_frame_coordinates(
+        "click", {"image_x": 500, "image_y": 501},
+    )
+    assert (edge_click["x"], edge_click["y"]) == (400, 550)
     with pytest.raises(ValueError, match="exact submitted image bounds"):
         runner._map_normalized_frame_coordinates(
-            "click", {"image_x": 500, "image_y": 501},
+            "click", {"image_x": 500, "image_y": 501.01},
         )
     with pytest.raises(NativeFrameCoordinateError) as outside:
         runner._map_normalized_frame_coordinates("click", {

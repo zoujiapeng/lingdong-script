@@ -293,7 +293,7 @@ describe('primary goal-run transport', () => {
     expect(releaseDesktopHandoff).not.toHaveBeenCalled();
   });
 
-  it('fails the matching lease and releases the handoff when local binding degrades', async () => {
+  it('keeps local handoff binding advisory and still delivers the desktop', async () => {
     const prepareDesktopHandoff = vi.fn(async () => ({
       yielded: true,
       control_surface_pid: 7712,
@@ -321,14 +321,10 @@ describe('primary goal-run transport', () => {
       } as never,
       'run-goal-test',
       'lease-goal-test',
-    )).rejects.toThrow('ipc unavailable');
+    )).resolves.toBeUndefined();
 
-    expect(bindDesktopLease).not.toHaveBeenCalled();
-    expect(failDesktopLease).toHaveBeenCalledWith(
-      'run-goal-test',
-      'lease-goal-test',
-      'ipc unavailable',
-    );
+    expect(bindDesktopLease).toHaveBeenCalledOnce();
+    expect(failDesktopLease).not.toHaveBeenCalled();
     expect(releaseDesktopHandoff).toHaveBeenCalledOnce();
   });
 
@@ -343,7 +339,7 @@ describe('primary agent surface', () => {
     return {
       currentRun,
       arpSnapshot: null,
-      runtimeIssue: '',
+      runtimeNotice: '',
       overview: undefined,
       events: [],
       runs,

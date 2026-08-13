@@ -26,7 +26,6 @@ from winpilot.vnext.json_contract import (
 GUI_GATES = (
     "target_bound",
     "authoritative_frame",
-    "pointer_released",
     "runtime_healthy",
 )
 

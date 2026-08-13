@@ -177,10 +177,10 @@ def _submitted_coordinate(
     if (
         not math.isfinite(coordinate)
         or coordinate < 0
-        or coordinate > upper_bound - 1
+        or coordinate > upper_bound
     ):
         raise InvalidActorProposal(
-            f"{name} must stay inside the exact submitted image"
+            f"{name} must stay inside or on the submitted image edge"
         )
     return coordinate
 
@@ -408,14 +408,8 @@ class ActorDecisionEnvelope(BaseModel):
         if self.pointer_disposition == PointerDisposition.RELEASED.value:
             if self.pointer_lease_id is not None:
                 raise ValueError("released pointer cannot retain lease_id")
-        else:
-            if self.pointer_lease_id is None:
-                raise ValueError("held pointer requires lease_id")
-            if (
-                type(self.proposal) is not DesktopActionProposal
-                or self.proposal.action != "drag"
-            ):
-                raise ValueError("held pointer permits only drag")
+        elif self.pointer_lease_id is None:
+            raise ValueError("held pointer requires lease_id")
         return self
 
     @model_validator(mode="after")

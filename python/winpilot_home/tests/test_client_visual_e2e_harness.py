@@ -43,12 +43,21 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
     harness = _load_harness()
 
     assert harness.SUITES["smoke"] == (
-        "drag-fit", "slider", "dynamic-hold", "game-drag-v2",
+        "drag-fit", "slider", "dynamic-hold",
+    )
+    assert harness.SUITES["coordination"] == (
+        "draw-shared-turn", "modifier-drag", "held-device-chord",
+    )
+    assert harness.SUITES["input-basics"] == (
+        "click-double", "scroll-roundtrip", "type-hotkey",
     )
     assert harness.SUITES["goal-admission"] == (
         "precise-click", "ordered-clicks",
     )
     assert harness.SUITES["exam"] == ("answer-all-questions",)
+    assert harness.SUITES["stress"] == (
+        "corridor-v0", "corridor-v1", "game-drag-v2", "corridor-v3",
+    )
     assert {
         item["scenario"] for item in harness.VISUAL_CASES.values()
     } == {
@@ -58,6 +67,12 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
         "slider",
         "corridor_drag",
         "dynamic_hold",
+        "shared_turn",
+        "modifier_drag",
+        "held_device_chord",
+        "click_double",
+        "scroll_roundtrip",
+        "type_hotkey",
         "quiz_all",
         "calibration_grid",
         "calibration_feedback",
@@ -395,12 +410,12 @@ def test_corridor_variant_zero_and_zero_clearance_are_valid():
     assert verdict["passed"] is True
 
 
-def test_external_verdict_requires_one_cross_frame_held_pointer_gesture():
+def test_external_verdict_accepts_a_complete_held_pointer_retry():
     harness = _load_harness()
     dynamic = _state(
         "dynamic_hold",
         {
-            "down_count": 1,
+            "down_count": 7,
             "checkpoint_reached": True,
             "goal_revealed_after_down": True,
             "inside_goal": True,
@@ -411,7 +426,7 @@ def test_external_verdict_requires_one_cross_frame_held_pointer_gesture():
     dynamic["events"].insert(0, {
         "type": "pointerdown",
         "trusted": True,
-        "details": {"down_count": 1},
+        "details": {"down_count": 7},
     })
     dynamic["events"].insert(1, {
         "type": "checkpoint_reached",
@@ -424,7 +439,7 @@ def test_external_verdict_requires_one_cross_frame_held_pointer_gesture():
         "succeeded": True,
         "details": {
             "succeeded": True,
-            "down_count": 1,
+            "down_count": 7,
             "checkpoint_reached": True,
             "goal_revealed_after_down": True,
             "inside_goal": True,
@@ -440,19 +455,130 @@ def test_external_verdict_requires_one_cross_frame_held_pointer_gesture():
     )
 
     assert verdict["passed"] is True
-    dynamic["events"].insert(0, {
+    dynamic["events"][:0] = [{
         "type": "pointerdown",
         "trusted": True,
-        "details": {"down_count": 2},
-    })
-    failed = harness.external_verdict(
+        "details": {"down_count": 6},
+    }, {
+        "type": "pointerup",
+        "trusted": True,
+        "succeeded": False,
+        "details": {"succeeded": False, "down_count": 6},
+    }]
+    retried = harness.external_verdict(
         dynamic,
         case_id="case-1",
         scenario="dynamic_hold",
         seed=17,
     )
+    assert retried["passed"] is True
+
+
+def test_external_verdict_accepts_two_stroke_pointer_drawing():
+    harness = _load_harness()
+    state = _state(
+        "shared_turn",
+        {"user_cell": 1, "selected_cell": 4, "valid_stroke_count": 2},
+        moves=11,
+    )
+    state["events"][:0] = [
+        {"type": "page_ready", "details": {"user_cell": 1}},
+        {"type": "pointerdown", "trusted": True},
+        {"type": "pointerup", "trusted": True},
+        {"type": "pointerdown", "trusted": True},
+        {"type": "pointerup", "trusted": True},
+    ]
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="shared_turn", seed=17,
+    )
+
+    assert verdict["passed"] is True
+
+
+def test_external_verdict_accepts_keyboard_mouse_interleaving():
+    harness = _load_harness()
+    state = _state(
+        "modifier_drag",
+        {
+            "shift_at_pointerdown": True,
+            "shift_during_drag": True,
+            "shift_at_pointerup": True,
+            "inside_target": True,
+            "mouse_released_before_shift": True,
+        },
+        moves=9,
+    )
+    state["events"][:0] = [
+        {"type": "pointerdown", "trusted": True, "details": {"shift_key": False}},
+        {"type": "pointerup", "trusted": True, "details": {"inside_target": True}},
+        {"type": "keydown", "trusted": True, "details": {"key": "Shift"}},
+        {"type": "keyup", "trusted": True, "details": {"key": "Shift"}},
+        {"type": "keydown", "trusted": True, "details": {"key": "Shift"}},
+        {
+            "type": "pointerdown",
+            "trusted": True,
+            "details": {"shift_key": True, "shift_held": True},
+        },
+        {
+            "type": "pointerup",
+            "trusted": True,
+            "details": {"inside_target": True, "shift_at_pointerup": True},
+        },
+        {
+            "type": "keyup",
+            "trusted": True,
+            "details": {"key": "Shift", "succeeded": True},
+        },
+    ]
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="modifier_drag", seed=17,
+    )
+
+    assert verdict["passed"] is True
+
+
+def test_external_verdict_requires_one_held_mouse_keyboard_wheel_timeline():
+    harness = _load_harness()
+    state = _state(
+        "held_device_chord",
+        {
+            "down_count": 7,
+            "checkpoint_reached": True,
+            "key_during_hold": True,
+            "wheel_during_hold": True,
+            "goal_revealed_after_coordination": True,
+            "post_coordination_moves": 2,
+            "inside_goal": True,
+            "completion_event": "pointerup",
+        },
+        moves=12,
+    )
+    timeline = [
+        {"type": "pointerdown", "trusted": True},
+        {"type": "checkpoint_reached", "trusted": True},
+        {"type": "keydown", "trusted": True},
+        {"type": "wheel", "trusted": True},
+        {"type": "coordination_ready", "trusted": True},
+        {"type": "post_coordination_move", "trusted": True},
+        {"type": "pointerup", "trusted": True},
+    ]
+    state["events"][:0] = timeline
+
+    verdict = harness.external_verdict(
+        state, case_id="case-1", scenario="held_device_chord", seed=17,
+    )
+    assert verdict["passed"] is True
+
+    state["events"] = [
+        item for item in state["events"] if item.get("type") != "wheel"
+    ]
+    failed = harness.external_verdict(
+        state, case_id="case-1", scenario="held_device_chord", seed=17,
+    )
     assert failed["passed"] is False
-    assert "dynamic gesture was not completed with exactly one held press" in failed["errors"]
+    assert any("one ordered gesture" in item for item in failed["errors"])
 
 
 def test_external_verdict_rejects_goal_entry_without_trusted_pointerup():
@@ -485,7 +611,7 @@ def test_external_verdict_rejects_goal_entry_without_trusted_pointerup():
     )
 
     assert verdict["passed"] is False
-    assert "dynamic gesture has no unique trusted pointerup evidence" in verdict["errors"]
+    assert "dynamic gesture has no successful trusted pointerup evidence" in verdict["errors"]
 
 
 def test_dynamic_target_persists_pointerup_before_success():
@@ -499,6 +625,48 @@ def test_dynamic_target_persists_pointerup_before_success():
     assert dynamic_setup.index("await report('pointerup',event,details)") < dynamic_setup.index(
         "markSuccess('DYNAMIC_HOLD_SUCCEEDED'",
     )
+
+
+def test_dynamic_server_accepts_a_complete_retry_with_cumulative_press_count():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "eval_targets"
+        / "visual_interaction_server.py"
+    )
+    spec = importlib.util.spec_from_file_location("visual_interaction_server", path)
+    assert spec is not None and spec.loader is not None
+    server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(server)
+    details = {
+        "succeeded": True,
+        "down_count": 7,
+        "checkpoint_reached": True,
+        "goal_revealed_after_down": True,
+        "inside_goal": True,
+        "completion_event": "pointerup",
+    }
+    events = [
+        {
+            "case_id": "case-1",
+            "scenario": "dynamic_hold",
+            "seed": 17,
+            "type": "pointerup",
+            "trusted": True,
+            "succeeded": True,
+            "details": dict(details),
+        },
+        {
+            "case_id": "case-1",
+            "scenario": "dynamic_hold",
+            "seed": 17,
+            "type": "scenario_success",
+            "trusted": True,
+            "succeeded": True,
+            "details": dict(details),
+        },
+    ]
+
+    assert server._accepted_success_event(events, 1) is True
 
 
 def test_calibration_hits_mutate_the_shared_point_object():
@@ -546,6 +714,46 @@ def test_calibration_clicks_are_judged_in_arena_coordinates():
         )
         assert "event.clientX-arenaRect.left" in pointer_branch
         assert "event.clientY-arenaRect.top" in pointer_branch
+
+
+def test_visual_target_builds_geometry_after_browser_layout_stabilizes():
+    target = (
+        Path(__file__).resolve().parents[1]
+        / "eval_targets"
+        / "visual_interaction_target.html"
+    ).read_text(encoding="utf-8")
+
+    setup_call = "Promise.resolve((setups[scenario]||setupDragFit)())"
+    assert target.index("requestAnimationFrame(()=>requestAnimationFrame(()=>") < target.index(setup_call)
+    assert target.index(setup_call) < target.index("report('page_ready'")
+
+
+def test_basic_scroll_target_allows_a_normal_focus_click():
+    target = (
+        Path(__file__).resolve().parents[1]
+        / "eval_targets"
+        / "vnext_canary_target.html"
+    ).read_text(encoding="utf-8")
+
+    assert "click_forbidden_in_scroll_case" not in target
+    assert "keyboard_forbidden_in_scroll_case" not in target
+
+
+def test_corridor_origin_check_stays_in_arena_local_coordinates():
+    target = (
+        Path(__file__).resolve().parents[1]
+        / "eval_targets"
+        / "visual_interaction_target.html"
+    ).read_text(encoding="utf-8")
+    corridor = target[
+        target.index("function setupCorridor()") :
+        target.index("function setupDynamicHold()")
+    ]
+
+    assert "Number.parseFloat(token.style.left)" in corridor
+    assert "Number.parseFloat(token.style.top)" in corridor
+    assert "tokenLeft-(sx-22)" in corridor
+    assert "tokenTop-(sy-22)" in corridor
 
 
 def test_external_verdict_rejects_agent_claim_without_trusted_pointer_event():

@@ -47,7 +47,6 @@ LIVE_COMPOSITION_VNEXT_BINDINGS = (
     ("winpilot.vnext.desktop_adapter", "AtomicDesktopAdapter", None),
     ("winpilot.vnext.desktop_adapter", "DesktopWorkspace", None),
     ("winpilot.vnext.desktop_adapter", "LiveTargetSnapshot", None),
-    ("winpilot.vnext.desktop_adapter", "WorkspaceObservation", None),
     ("winpilot.vnext.desktop_adapter", "WorkspaceSurface", None),
     ("winpilot.vnext.desktop_ops", "capture_screen", None),
     ("winpilot.vnext.desktop_ops", "list_windows", None),
@@ -113,7 +112,6 @@ RUNTIME_FILES = (
     "contracts.py",
     "mission_runtime.py",
     "ports.py",
-    "post_action_reconcile.py",
     "task_state.py",
 )
 
@@ -158,6 +156,7 @@ ATOMIC_DESKTOP_IMPORTS = (
     "winpilot.utils.screenshot",
     "winpilot.visual_runtime.frame_authority",
     "winpilot.visual_runtime.frame_observer",
+    "winpilot.visual_runtime.input_sequence",
     "winpilot.visual_runtime.keyboard_contracts",
     "winpilot.visual_runtime.normalized_frame_coordinates",
     "winpilot.visual_runtime.submitted_image_coordinates",
@@ -802,10 +801,12 @@ def test_minimal_runtime_tool_surface_cannot_expand_silently() -> None:
     assert APPROVED_DESKTOP_ACTIONS == {
         "click",
         "double_click",
+        "move_mouse",
         "drag",
         "scroll",
         "type_text",
         "hotkey",
+        "input_sequence",
         "launch_application",
     }
     assert APPROVED_OUTCOME_TOOLS == {

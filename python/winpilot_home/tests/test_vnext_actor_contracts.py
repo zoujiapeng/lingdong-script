@@ -77,7 +77,6 @@ ALL_CAPABILITIES = tuple(sorted(DEFAULT_CAPABILITY_CATALOG))
 GUI_GATES = (
     "target_bound",
     "authoritative_frame",
-    "pointer_released",
     "runtime_healthy",
 )
 DRAG_GATES = (
@@ -955,7 +954,7 @@ def test_runtime_binder_preserves_one_owned_held_drag_lease() -> None:
     assert ActorDecisionEnvelope.from_dict(envelope.to_dict()) == envelope
 
 
-def test_held_envelope_rejects_missing_lease_and_non_drag_proposals() -> None:
+def test_held_envelope_accepts_mouse_keyboard_actions_and_tracks_lease() -> None:
     reducer, _mission, profile, state, catalog, projection = _held_runtime()
     common = {
         "mission_reducer": reducer,
@@ -968,11 +967,16 @@ def test_held_envelope_rejects_missing_lease_and_non_drag_proposals() -> None:
         "frame_image_sha256": "b" * 64,
         "allowed_evidence_scope": ("e-target",),
     }
-    with pytest.raises(
-        InvalidActorAdmission,
-        match="proposal tool is outside BrokerProjection",
+    for proposal in (
+        _action(),
+        _action(action="scroll", args={}),
+        _action(action="hotkey", args={}),
+        _held_drag(),
     ):
-        bind_actor_decision(**common, proposal=_action())
+        envelope = bind_actor_decision(**common, proposal=proposal)
+        assert envelope.pointer_disposition == "held"
+        assert envelope.pointer_lease_id == "pointer-lease-current"
+        assert envelope.proposal.action == proposal.action
 
     raw = bind_actor_decision(
         **common,
@@ -1583,7 +1587,7 @@ def test_binder_validates_desktop_args_against_exact_tool_schema(
         _bind(proposal=_action(args=args))
 
 
-def test_binder_enforces_exact_submitted_image_bounds() -> None:
+def test_binder_accepts_extent_edge_and_rejects_real_overshoot() -> None:
     accepted = _bind(proposal=_action(args={
         "image_x": 899,
         "image_y": 599,
@@ -1593,9 +1597,15 @@ def test_binder_enforces_exact_submitted_image_bounds() -> None:
         {"image_x": 900, "image_y": 599},
         {"image_x": 899, "image_y": 600},
     ):
+        edge = _bind(proposal=_action(args=args))
+        assert edge.proposal.args == args
+    for args in (
+        {"image_x": 901, "image_y": 599},
+        {"image_x": 899, "image_y": 601},
+    ):
         with pytest.raises(
             InvalidActorAdmission,
-            match="exact submitted image",
+            match="submitted image edge",
         ):
             _bind(proposal=_action(args=args))
 

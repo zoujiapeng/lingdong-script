@@ -3,13 +3,12 @@
 This module is deliberately the only vNext owner allowed to cross from the
 pure Actor/Runtime contracts into the existing live desktop primitives.  A
 full-desktop frame is screen-first: its pixel identity, not an old window
-binding, is the action authority.  Explicit target-window crops retain their
-bound-window compatibility checks.
+binding, is the action authority.  A target-window crop is only an observation
+choice; it never redirects, focuses, or vetoes the model's physical input.
 """
 from __future__ import annotations
 
 import base64
-import ctypes
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import hashlib
@@ -21,9 +20,6 @@ import time
 from types import MappingProxyType
 from typing import Any, Protocol
 
-import win32con
-import win32gui
-
 from ...action.desktop_queue import (
     DESKTOP_ACTION_QUEUE,
     DesktopActionCanceled,
@@ -31,11 +27,13 @@ from ...action.desktop_queue import (
 from ...action.raw_device import (
     ClickCount,
     ClickMechanism,
-    FinalKeyboardGuardDecision,
-    FinalPointerGuardDecision,
     HotkeyChord,
+    InputEventKind,
+    MAX_INPUT_SEQUENCE_EVENTS,
+    MAX_POINTER_DURATION_MS,
     MAX_TYPE_TEXT_CODEPOINTS,
     MouseButton,
+    PhysicalInputEvent,
     RawActionContext,
     RawActionReceipt,
     RawBackendResult,
@@ -46,7 +44,9 @@ from ...utils.log import BUS
 from ...utils.screenshot import Region, virtual_screen_region
 from ...visual_runtime.frame_authority import FrameAuthority, FrameState
 from ...visual_runtime.frame_observer import FrameObserver
+from ...visual_runtime.input_sequence import parse_input_sequence
 from ...visual_runtime.keyboard_contracts import (
+    CANONICAL_HOTKEY_KEYS,
     canonical_hotkey_args,
     normalize_hotkey_args,
 )
@@ -69,20 +69,18 @@ from ..runtime import (
     RuntimeFrameIdentity,
     RuntimeTargetIdentity,
 )
-from ..verification import (
-    ActionEffectVerificationRequest,
-    DeterministicActionEffectVerifier,
-)
 
 
 _ACTIONS = frozenset(
     {
         "click",
         "double_click",
+        "move_mouse",
         "drag",
         "scroll",
         "type_text",
         "hotkey",
+        "input_sequence",
         "launch_application",
     }
 )
@@ -146,22 +144,12 @@ class DesktopTargetProbe(Protocol):
 
     def snapshot(self, hwnd: int) -> LiveTargetSnapshot | None: ...
 
-    def hit_test_root(self, x: int, y: int) -> int | None: ...
-
 
 class DesktopWorkspacePort(DesktopTargetProbe, Protocol):
-    """Mutable target owner; adoption is allowed only between actions."""
+    """Optional observation workspace; never an input authority."""
 
     @property
     def binding(self) -> TargetBinding: ...
-
-    def finish_action(
-        self,
-        *,
-        action_id: str,
-        action: str,
-        input_completed: bool | None,
-    ) -> None: ...
 
 class RawReceiptTraceSink(Protocol):
     """Best-effort sink for the complete immutable RawDevice receipt."""
@@ -180,6 +168,11 @@ class _PreparedAction:
     point: PhysicalPoint | None = None
     end_point: PhysicalPoint | None = None
     points: tuple[PhysicalPoint, ...] | None = None
+    button: MouseButton = MouseButton.LEFT
+    held_keys: tuple[str, ...] = ()
+    duration_ms: int = 0
+    press_duration_ms: int = 35
+    events: tuple[PhysicalInputEvent, ...] | None = None
     keep_holding: bool = False
     hold_control_present: bool = False
     started_held: bool = False
@@ -202,7 +195,8 @@ class _PinnedExecution:
 class _HeldPointerLease:
     lease_id: str
     cursor: PhysicalPoint
-    input_hwnd: int
+    input_hwnd: int | None
+    button: MouseButton
     expires_at: float
 
 
@@ -248,8 +242,6 @@ class AtomicDesktopAdapter:
         )
         if not callable(getattr(probe, "snapshot", None)):
             raise TypeError("target_probe must provide snapshot()")
-        if not callable(getattr(probe, "hit_test_root", None)):
-            raise TypeError("target_probe must provide hit_test_root()")
         if desktop_workspace is not None:
             workspace_binding = getattr(
                 desktop_workspace,
@@ -258,26 +250,12 @@ class AtomicDesktopAdapter:
             )
             if (
                 type(workspace_binding) is not TargetBinding
-                or workspace_binding != frozen_target_binding
-                or not callable(
-                    getattr(desktop_workspace, "finish_action", None)
-                )
             ):
                 raise TypeError(
-                    "desktop_workspace must own the initial target binding"
+                    "desktop_workspace must expose a target binding"
                 )
         if type(raw_device) is not RawDeviceExecutor:
             raise TypeError("raw_device must be RawDeviceExecutor")
-        if set(raw_device.admitted_action_names) != {
-            "click",
-            "drag",
-            "scroll",
-            "type_text",
-            "hotkey",
-        }:
-            raise ValueError(
-                "RawDevice must expose exactly the five admitted physical primitives"
-            )
         if launcher is not None and not callable(launcher):
             raise TypeError("launcher must be callable or null")
         if type(desktop_shell) is not bool:
@@ -333,7 +311,7 @@ class AtomicDesktopAdapter:
         self._held_pointer: _HeldPointerLease | None = None
         self._pointer_uncertain = False
         self._closed = False
-        self._effect = DeterministicActionEffectVerifier()
+
     @property
     def _is_desktop_shell(self) -> bool:
         # The desktop-shell flag only describes the initial no-foreground
@@ -418,6 +396,7 @@ class AtomicDesktopAdapter:
         stop_event: threading.Event | None,
     ) -> ControllerTransition:
         transition: ControllerTransition | None = None
+        held_before = self._held_pointer is not None
         try:
             transition = self._execute_once(
                 envelope,
@@ -429,9 +408,18 @@ class AtomicDesktopAdapter:
         preserves_hold = bool(
             transition.outcome is ControllerOutcome.COMPLETED
             and transition.input_completed
-            and type(envelope.proposal) is DesktopActionProposal
-            and envelope.proposal.action == "drag"
-            and envelope.proposal.args.get("keep_holding") is True
+            and self._held_pointer is not None
+            and (
+                (
+                    type(envelope.proposal) is DesktopActionProposal
+                    and envelope.proposal.action == "drag"
+                    and envelope.proposal.args.get("keep_holding") is True
+                )
+                or (
+                    held_before
+                    and not self._proposal_releases_held_pointer(envelope)
+                )
+            )
         )
         if not preserves_hold and not self._release_held_pointer():
             return self._unknown_transition(
@@ -440,6 +428,33 @@ class AtomicDesktopAdapter:
                 input_completed=transition.input_completed,
             )
         return transition
+
+    def _proposal_releases_held_pointer(
+        self,
+        envelope: ActorDecisionEnvelope,
+    ) -> bool:
+        """Recognize only an explicit model-requested release.
+
+        Healthy held input persists across ordinary mouse, wheel, keyboard and
+        mixed-sequence actions.  State is otherwise used only for cleanup.
+        """
+
+        proposal = envelope.proposal
+        if type(proposal) is not DesktopActionProposal:
+            return False
+        if proposal.action == "drag":
+            return proposal.args.get("keep_holding") is not True
+        if proposal.action != "input_sequence" or self._held_pointer is None:
+            return False
+        try:
+            steps = parse_input_sequence(proposal.args.get("sequence"))
+        except Exception:
+            return False
+        button = self._held_pointer.button.value
+        return any(
+            step.kind == InputEventKind.MOUSE_UP.value and step.button == button
+            for step in steps
+        )
 
     def _execute_once(
         self,
@@ -472,16 +487,11 @@ class AtomicDesktopAdapter:
                 envelope,
                 phase="prepare",
             )
-            return self._rejected(envelope, action)
-
-        if not self._envelope_matches_frozen_target(envelope):
-            receipt = self._not_started(action, "target_binding_mismatch")
-            self._record_receipt(
-                receipt,
+            return self._rejected(
                 envelope,
-                phase="binding",
+                action,
+                error_kind=receipt.error_kind,
             )
-            return self._rejected(envelope, action, error_kind=receipt.error_kind)
 
         try:
             matched, pinned = self._authority.run_if_current(
@@ -534,7 +544,6 @@ class AtomicDesktopAdapter:
                 action,
                 error_kind=self._receipt_error_kind(receipt),
             )
-        settle_failed = False
         if (
             receipt.input_completed is True
             and self._post_input_settle_delay_s > 0.0
@@ -542,25 +551,18 @@ class AtomicDesktopAdapter:
             try:
                 self._wait(self._post_input_settle_delay_s)
             except Exception:
-                settle_failed = True
-        workspace = self._workspace
-        if (
-            workspace is not None
-            and pinned.before_frame is not None
-            and pinned.before_frame.scope == "target_window"
-        ):
-            try:
-                workspace.finish_action(
-                    action_id=envelope.decision_id,
-                    action=action,
-                    input_completed=receipt.input_completed,
-                )
-            except Exception:
-                # Input has already reached the OS.  Workspace discovery is
-                # recovery metadata for the next observation, not authority
-                # to rewrite the completed receipt or replay the action.
+                # Settling only improves the model's next picture.  It cannot
+                # rewrite input the physical backend already completed.
                 pass
         if pinned.before_frame is None:
+            if receipt.input_completed is True:
+                return ControllerTransition(
+                    outcome=ControllerOutcome.COMPLETED,
+                    action_id=envelope.decision_id,
+                    action=action,
+                    input_completed=True,
+                    visible_effect=self._launch_visible_effect(receipt, action),
+                )
             return self._unknown_transition(
                 envelope,
                 action,
@@ -576,54 +578,25 @@ class AtomicDesktopAdapter:
                 pinned.before_frame,
             )
         except Exception:
+            if receipt.input_completed is True:
+                return ControllerTransition(
+                    outcome=ControllerOutcome.COMPLETED,
+                    action_id=envelope.decision_id,
+                    action=action,
+                    input_completed=True,
+                    visible_effect=self._launch_visible_effect(receipt, action),
+                )
             return self._unknown_transition(
                 envelope,
                 action,
                 input_completed=receipt.input_completed,
             )
 
-        if settle_failed:
-            return self._unknown_transition(
-                envelope,
-                action,
-                input_completed=receipt.input_completed,
-                post_frame=post_frame,
-                post_evidence=post_evidence,
-            )
         if receipt.input_completed is None:
             return self._unknown_transition(
                 envelope,
                 action,
                 input_completed=None,
-                post_frame=post_frame,
-                post_evidence=post_evidence,
-            )
-
-        try:
-            before_ref = pinned.before_frame.evidence_refs[0]
-            effect_result = self._effect.verify(
-                ActionEffectVerificationRequest(
-                    mission_id=envelope.mission_id,
-                    run_id=envelope.run_id,
-                    obligation_id=envelope.obligation_id,
-                    action_id=envelope.decision_id,
-                    input_completed=True,
-                    before_frame=pinned.before_frame,
-                    after_frame=post_frame,
-                    before_frame_evidence_ref=before_ref,
-                    after_frame_evidence_ref=post_evidence.id,
-                    before_frame_payload_hash=(
-                        pinned.before_frame.identity.payload_hash
-                    ),
-                    after_frame_payload_hash=post_frame.identity.payload_hash,
-                    target_binding_valid=True,
-                )
-            )
-        except Exception:
-            return self._unknown_transition(
-                envelope,
-                action,
-                input_completed=True,
                 post_frame=post_frame,
                 post_evidence=post_evidence,
             )
@@ -636,8 +609,6 @@ class AtomicDesktopAdapter:
             visible_effect=self._launch_visible_effect(receipt, action),
             post_frame_evidence=(post_evidence,),
             post_frame_id=post_frame.frame_id,
-            action_effect=effect_result.summary,
-            action_effect_evidence=effect_result.evidence,
         )
 
     def _execute_pinned(
@@ -664,44 +635,13 @@ class AtomicDesktopAdapter:
                 self._not_started(prepared.action, "invalid_pre_frame"),
             )
 
+        # The submitted frame is the model's authority.  A window snapshot is
+        # only useful as launch/capture metadata; it cannot veto physical input.
         initial = (
             self._safe_snapshot()
             if before_frame.scope == "target_window"
             else None
         )
-        if before_frame.scope == "target_window":
-            if initial is None:
-                return _PinnedExecution(
-                    before_frame,
-                    self._not_started(
-                        prepared.action,
-                        "target_unavailable",
-                    ),
-                )
-            if not self._target_is_current(
-                initial,
-                expected_region=before_frame.region,
-                require_foreground=not self._is_desktop_shell,
-            ):
-                return _PinnedExecution(
-                    before_frame,
-                    self._not_started(
-                        prepared.action,
-                        "target_identity_changed",
-                    ),
-                )
-            for point in self._prepared_points(prepared):
-                if not self._point_hits_target(
-                    point,
-                    frame_scope=before_frame.scope,
-                ):
-                    return _PinnedExecution(
-                        before_frame,
-                        self._not_started(
-                            prepared.action,
-                            "hit_test_changed",
-                        ),
-                    )
         if stop_event is not None and stop_event.is_set():
             return _PinnedExecution(
                 before_frame,
@@ -712,16 +652,10 @@ class AtomicDesktopAdapter:
 
         def invoke_raw() -> RawActionReceipt:
             nonlocal raw_started
-            revalidation_error = self._queued_admission_error(
-                envelope,
-                prepared,
-                before_frame,
-                stop_event=stop_event,
-            )
-            if revalidation_error is not None:
+            if stop_event is not None and stop_event.is_set():
                 return self._not_started(
                     prepared.action,
-                    revalidation_error,
+                    "stop_requested_after_queue",
                 )
             self._publish_pointer_dispatch(envelope, prepared, before_frame)
             raw_started = True
@@ -778,43 +712,6 @@ class AtomicDesktopAdapter:
             )
         return _PinnedExecution(before_frame, receipt, raw_started)
 
-    def _queued_admission_error(
-        self,
-        envelope: ActorDecisionEnvelope,
-        prepared: _PreparedAction,
-        before_frame: RuntimeFrame,
-        *,
-        stop_event: threading.Event | None,
-    ) -> str | None:
-        """Recheck all commit facts after the global queue grants ownership."""
-
-        if stop_event is not None and stop_event.is_set():
-            return "stop_requested_after_queue"
-        current = self._authority.current
-        if current is None or not self._frame_state_matches(
-            current,
-            before_frame,
-        ):
-            return "frame_changed_after_queue"
-        if before_frame.scope == "full_desktop":
-            return None
-        snapshot = self._safe_snapshot()
-        if not self._target_is_current(
-            snapshot,
-            expected_region=before_frame.region,
-            require_foreground=not self._is_desktop_shell,
-        ):
-            return "target_changed_after_queue"
-        for point in self._prepared_points(prepared):
-            if not self._inside(point, before_frame.region):
-                return "point_outside_target_after_queue"
-            if not self._point_hits_target(
-                point,
-                frame_scope=before_frame.scope,
-            ):
-                return "hit_test_changed_after_queue"
-        return None
-
     def _run_raw(
         self,
         envelope: ActorDecisionEnvelope,
@@ -832,91 +729,58 @@ class AtomicDesktopAdapter:
                 initial_target,
                 stop_event=stop_event,
             )
-        # Screen-first frames show the real desktop; the window under the
-        # pointer is the operation surface, so forcing the old binding to the
-        # foreground would fight what the model sees and make the click land
-        # on the wrong window.
-        if before_frame.scope != "full_desktop":
-            assert initial_target is not None
-            self._ensure_target_foreground(initial_target)
-        if before_frame.scope == "full_desktop":
-            input_hwnd = self._screen_input_hwnd(prepared)
-            if input_hwnd is None:
-                return self._not_started(
-                    prepared.action,
-                    (
-                        "foreground_unavailable"
-                        if prepared.point is None
-                        else "input_surface_unavailable"
-                    ),
-                )
-        else:
-            input_hwnd = self._binding.hwnd
+        input_hwnd = (
+            None
+            if before_frame.scope == "full_desktop"
+            else initial_target.hwnd
+            if initial_target is not None
+            else self._binding.hwnd
+        )
         context = RawActionContext(
             target_hwnd=input_hwnd,
-            current_hwnd=(
-                input_hwnd
-                if before_frame.scope == "full_desktop"
-                else initial_target.hwnd
-            ),
+            current_hwnd=input_hwnd,
         )
+
+        if prepared.action == "input_sequence":
+            assert prepared.events is not None
+            return self._raw.input_sequence(
+                context,
+                prepared.events,
+                enforce_foreground=False,
+                stop_event=stop_event,
+            )
 
         if prepared.point is not None:
             expected_point = prepared.point
-            guarded_points = self._prepared_points(prepared)
-
-            def pointer_guard(
-                cursor_x: int,
-                cursor_y: int,
-            ) -> FinalPointerGuardDecision:
-                if stop_event is not None and stop_event.is_set():
-                    return FinalPointerGuardDecision.STOP_REQUESTED
-                if (cursor_x, cursor_y) != expected_point:
-                    return FinalPointerGuardDecision.POINTER_POSITION_CHANGED
-                if before_frame.scope == "full_desktop":
-                    return FinalPointerGuardDecision.ADMITTED
-                snapshot = self._safe_snapshot()
-                for guarded_point in guarded_points:
-                    decision = self._pointer_target_decision(
-                        snapshot,
-                        expected_region=(
-                            before_frame.region
-                            if before_frame.scope == "target_window"
-                            else None
-                        ),
-                        point=guarded_point,
-                        frame_scope=before_frame.scope,
-                    )
-                    if decision is not FinalPointerGuardDecision.ADMITTED:
-                        return decision
-                return FinalPointerGuardDecision.ADMITTED
 
             if prepared.action in {"click", "double_click"}:
                 return self._raw.click(
                     context,
                     expected_point[0],
                     expected_point[1],
-                    MouseButton.LEFT,
+                    prepared.button,
                     (
                         ClickCount.DOUBLE
                         if prepared.action == "double_click"
                         else ClickCount.SINGLE
                     ),
                     ClickMechanism.PHYSICAL,
-                    final_guard=pointer_guard,
-                    # Screen-first frames: the pointer may operate any window
-                    # the model can see, so the raw click must not demand that
-                    # the old binding window own the foreground; the click
-                    # itself raises the window under the cursor.
-                    enforce_foreground=(
-                        before_frame.scope == "target_window"
-                    ),
+                    press_duration_ms=prepared.press_duration_ms,
+                    enforce_foreground=False,
+                    stop_event=stop_event,
+                )
+            if prepared.action == "move_mouse":
+                return self._raw.move_mouse(
+                    context,
+                    expected_point[0],
+                    expected_point[1],
+                    duration_ms=prepared.duration_ms,
+                    enforce_foreground=False,
+                    stop_event=stop_event,
                 )
             if prepared.action == "drag":
                 assert prepared.end_point is not None
-                arguments: dict[str, Any] = {
-                    "final_guard": pointer_guard,
-                }
+                arguments: dict[str, Any] = {}
                 if prepared.points:
                     arguments["points"] = list(prepared.points)
                 if prepared.hold_control_present:
@@ -925,19 +789,18 @@ class AtomicDesktopAdapter:
                         keep_holding=prepared.keep_holding,
                         hold_token=prepared.pointer_lease_id,
                     )
+                if prepared.held_keys:
+                    arguments["held_keys"] = prepared.held_keys
                 receipt = self._raw.drag(
                     context,
                     expected_point[0],
                     expected_point[1],
                     prepared.end_point[0],
                     prepared.end_point[1],
-                    # A full-desktop frame lets a held segment operate the
-                    # window under the model's point, just like ordinary
-                    # screen-first pointer input. A bound-window foreground
-                    # requirement only belongs to an explicit window crop.
-                    enforce_foreground=(
-                        before_frame.scope == "target_window"
-                    ),
+                    button=prepared.button,
+                    duration_ms=prepared.duration_ms,
+                    enforce_foreground=False,
+                    stop_event=stop_event,
                     **arguments,
                 )
                 return self._update_pointer_after_drag(
@@ -945,161 +808,31 @@ class AtomicDesktopAdapter:
                     receipt,
                     input_hwnd=input_hwnd,
                 )
-            assert prepared.amount is not None
+            assert prepared.action == "scroll" and prepared.amount is not None
             return self._raw.scroll(
                 context,
                 expected_point[0],
                 expected_point[1],
                 prepared.amount,
-                final_guard=pointer_guard,
-                enforce_foreground=(
-                    before_frame.scope == "target_window"
-                ),
+                enforce_foreground=False,
+                stop_event=stop_event,
             )
-
-        def keyboard_guard() -> FinalKeyboardGuardDecision:
-            if stop_event is not None and stop_event.is_set():
-                return FinalKeyboardGuardDecision.STOP_REQUESTED
-            if before_frame.scope == "full_desktop":
-                return FinalKeyboardGuardDecision.ADMITTED
-            snapshot = self._safe_snapshot()
-            decision = self._keyboard_target_decision(
-                snapshot,
-                expected_region=(
-                    before_frame.region
-                    if before_frame.scope == "target_window"
-                    else None
-                ),
-            )
-            if decision is not FinalKeyboardGuardDecision.ADMITTED:
-                return decision
-            return FinalKeyboardGuardDecision.ADMITTED
 
         if prepared.action == "type_text":
             assert prepared.text is not None
             return self._raw.type_text(
                 context,
                 prepared.text,
-                final_guard=keyboard_guard,
+                enforce_foreground=False,
+                stop_event=stop_event,
             )
-        assert prepared.chord is not None
+        assert prepared.action == "hotkey" and prepared.chord is not None
         return self._raw.hotkey(
             context,
             prepared.chord,
-            final_guard=keyboard_guard,
+            enforce_foreground=False,
+            stop_event=stop_event,
         )
-
-    @staticmethod
-    def _foreground_root_hwnd() -> int | None:
-        """Return the window that owns physical keyboard input right now."""
-
-        try:
-            foreground = int(win32gui.GetForegroundWindow() or 0)
-            if foreground <= 0:
-                return None
-            root = int(
-                win32gui.GetAncestor(foreground, win32con.GA_ROOT) or 0
-            )
-            return root if root > 0 else foreground
-        except Exception:
-            return None
-
-    def _screen_input_hwnd(
-        self,
-        prepared: _PreparedAction,
-    ) -> int | None:
-        """Return mechanical context for global screen-first input.
-
-        RawDevice still carries an HWND-shaped context for typed primitive
-        integrity, even though screen-first pointer backends receive no HWND
-        and act at the model-selected screen coordinate.  Derive that context
-        only from live desktop state.  In particular, never fall back to the
-        adapter's historical target binding.
-        """
-
-        if prepared.started_held:
-            lease = self._held_pointer
-            if lease is not None:
-                return lease.input_hwnd
-        foreground = self._foreground_root_hwnd()
-        if foreground is not None:
-            return foreground
-        if prepared.point is None:
-            return None
-        try:
-            desktop = int(win32gui.GetDesktopWindow() or 0)
-        except Exception:
-            return None
-        return desktop if desktop > 0 else None
-
-    def _ensure_target_foreground(
-        self,
-        initial_target: LiveTargetSnapshot,
-    ) -> None:
-        """Bring the bound target window to the foreground before physical input.
-
-        A launched application or a window adopted through the causal successor
-        can still be covered by another top-level window (for example the
-        terminal that launched it).  Without this, every physical click hits
-        the covering window and the agent can never make progress.  This is the
-        same activation the legacy executor performs; it is mechanical input
-        preparation, never a semantic shortcut.
-        """
-        if self._is_desktop_shell:
-            return
-        binding = self._binding
-        hwnd = int(binding.hwnd)
-        if hwnd <= 0 or not win32gui.IsWindow(hwnd):
-            return
-        try:
-            foreground = int(win32gui.GetForegroundWindow() or 0)
-            if foreground == hwnd or win32gui.GetAncestor(foreground, 2) == hwnd:
-                return
-        except Exception:
-            return
-        try:
-            win32gui.SetForegroundWindow(hwnd)
-            win32gui.BringWindowToTop(hwnd)
-        except Exception:
-            pass
-        try:
-            if int(win32gui.GetForegroundWindow() or 0) == hwnd:
-                return
-            current_thread = int(
-                ctypes.windll.kernel32.GetCurrentThreadId() or 0
-            )
-            target_thread = int(
-                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, None)
-                or 0
-            )
-            foreground_thread = int(
-                ctypes.windll.user32.GetWindowThreadProcessId(
-                    int(win32gui.GetForegroundWindow() or 0),
-                    None,
-                )
-                or 0
-            )
-            attached: list[int] = []
-            for thread_id in {target_thread, foreground_thread}:
-                if not thread_id or thread_id == current_thread:
-                    continue
-                if bool(
-                    ctypes.windll.user32.AttachThreadInput(
-                        current_thread, thread_id, True
-                    )
-                ):
-                    attached.append(thread_id)
-            try:
-                win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
-                win32gui.BringWindowToTop(hwnd)
-                win32gui.SetForegroundWindow(hwnd)
-            finally:
-                for thread_id in attached:
-                    ctypes.windll.user32.AttachThreadInput(
-                        current_thread, thread_id, False
-                    )
-        except Exception:
-            pass
 
     def _run_launch(
         self,
@@ -1232,6 +965,7 @@ class AtomicDesktopAdapter:
                                 lease_id=prepared.pointer_lease_id,
                                 cursor=prepared.end_point or (0, 0),
                                 input_hwnd=input_hwnd,
+                                button=prepared.button,
                                 expires_at=self._clock(),
                             )
                         self._pointer_uncertain = True
@@ -1244,6 +978,7 @@ class AtomicDesktopAdapter:
                         lease_id=prepared.pointer_lease_id,
                         cursor=prepared.end_point,
                         input_hwnd=input_hwnd,
+                        button=prepared.button,
                         expires_at=(
                             self._clock() + self._held_pointer_timeout_s
                         ),
@@ -1275,6 +1010,7 @@ class AtomicDesktopAdapter:
                             else (0, 0)
                         ),
                         input_hwnd=input_hwnd,
+                        button=prepared.button,
                         expires_at=self._clock(),
                     )
                 self._pointer_uncertain = True
@@ -1348,26 +1084,11 @@ class AtomicDesktopAdapter:
                 evidence,
             )
 
-        dynamic_workspace = self._workspace is not None
         first = self._safe_snapshot()
-        if not self._target_is_current(
-            first,
-            expected_region=None,
-            require_foreground=not dynamic_workspace,
-        ):
-            raise RuntimeError("target changed before post-action capture")
-        assert first is not None
-        if not dynamic_workspace:
-            for point in self._prepared_points(prepared):
-                if not self._point_hits_target(
-                    point,
-                    frame_scope=before.scope,
-                ):
-                    raise RuntimeError(
-                        "hit test changed before post-action capture"
-                    )
-
-        region = Region(*first.region)
+        # A crop is an observation hint, not action authority.  Prefer fresh
+        # window geometry when it exists and fall back to the exact region the
+        # model saw when the window disappears or changes during the action.
+        region = Region(*(first.region if first is not None else before.region))
         expected_scope = "target_window"
         region_tuple = (
             region.left,
@@ -1390,22 +1111,6 @@ class AtomicDesktopAdapter:
             raise RuntimeError("post-action frame capture unavailable")
         self._validate_jpeg(captured.image_b64)
 
-        second = self._safe_snapshot()
-        if not self._target_is_current(
-            second,
-            expected_region=first.region,
-            require_foreground=not dynamic_workspace,
-        ):
-            raise RuntimeError("target changed before post-action commit")
-        if not dynamic_workspace:
-            for point in self._prepared_points(prepared):
-                if not self._point_hits_target(
-                    point,
-                    frame_scope=before.scope,
-                ):
-                    raise RuntimeError(
-                        "hit test changed before post-action commit"
-                    )
         current = self._authority.current
         if current is None or not self._frame_state_matches(current, before):
             raise RuntimeError("frame changed before post-action commit")
@@ -1419,25 +1124,6 @@ class AtomicDesktopAdapter:
             or committed.region != region_tuple
         ):
             raise RuntimeError("post-action frame commit identity changed")
-
-        final_target = self._safe_snapshot()
-        if not self._target_is_current(
-            final_target,
-            expected_region=(
-                first.region if committed.scope == "target_window" else None
-            ),
-            require_foreground=not dynamic_workspace,
-        ):
-            raise RuntimeError("target changed after post-action commit")
-        if not dynamic_workspace:
-            for point in self._prepared_points(prepared):
-                if not self._point_hits_target(
-                    point,
-                    frame_scope=committed.scope,
-                ):
-                    raise RuntimeError(
-                        "hit test changed after post-action commit"
-                    )
 
         identity = self._runtime_frame_identity(committed)
         evidence = self._post_frame_evidence(envelope, identity)
@@ -1458,9 +1144,35 @@ class AtomicDesktopAdapter:
             self._require_keys(args, {"image_x", "image_y"})
             self._require_image_point(args)
             point = self._map_point(envelope, args)
+            try:
+                button = MouseButton(str(args.get("button", "left")).casefold())
+            except Exception as exc:
+                raise ValueError("click button is invalid") from exc
+            press_duration_ms = args.get("press_duration_ms", 35)
+            if (
+                type(press_duration_ms) is not int
+                or not 0 <= press_duration_ms <= 2_000
+            ):
+                raise ValueError("click press_duration_ms must be in 0..2000")
             return _PreparedAction(
                 action=action,
                 point=point,
+                button=button,
+                press_duration_ms=press_duration_ms,
+            )
+        if action == "move_mouse":
+            self._require_keys(args, {"image_x", "image_y"})
+            self._require_image_point(args)
+            duration_ms = args.get("duration_ms", 0)
+            if (
+                type(duration_ms) is not int
+                or not 0 <= duration_ms <= MAX_POINTER_DURATION_MS
+            ):
+                raise ValueError("move_mouse duration_ms must be in 0..30000")
+            return _PreparedAction(
+                action=action,
+                point=self._map_point(envelope, args),
+                duration_ms=duration_ms,
             )
         if action == "scroll":
             self._require_keys(args, {"image_x", "image_y", "amount"})
@@ -1481,15 +1193,33 @@ class AtomicDesktopAdapter:
                 amount=amount,
             )
         if action == "drag":
-            if not {"image_path", "keep_holding"} <= set(args):
+            if "image_path" not in args:
                 raise ValueError(
                     "atomic action arguments are missing required fields"
                 )
             hold_control_present = True
-            keep_holding = args["keep_holding"]
+            keep_holding = args.get("keep_holding", False)
             if type(keep_holding) is not bool:
                 raise ValueError("keep_holding must be boolean")
             started_held = envelope.pointer_disposition == "held"
+            try:
+                button = MouseButton(str(args.get("button", "left")).casefold())
+            except Exception as exc:
+                raise ValueError("drag button is invalid") from exc
+            held_keys = tuple(canonical_hotkey_args(
+                normalize_hotkey_args(args.get("held_keys", ()))
+            ))
+            if (
+                len(held_keys) != len(set(held_keys))
+                or any(key not in CANONICAL_HOTKEY_KEYS for key in held_keys)
+            ):
+                raise ValueError("drag held_keys contains an invalid key")
+            duration_ms = args.get("duration_ms", 400)
+            if (
+                type(duration_ms) is not int
+                or not 0 <= duration_ms <= MAX_POINTER_DURATION_MS
+            ):
+                raise ValueError("drag duration_ms must be in 0..30000")
             raw_path = args["image_path"]
             minimum = 1 if started_held else 2
             if (
@@ -1517,16 +1247,13 @@ class AtomicDesktopAdapter:
             if started_held:
                 with self._pointer_lock:
                     lease = self._held_pointer
-                    if (
-                        lease is None
-                        or self._pointer_uncertain
-                        or envelope.pointer_lease_id != lease.lease_id
-                    ):
+                    if lease is None or self._pointer_uncertain:
                         raise ValueError(
-                            "held drag continuation lease is not current"
+                            "held drag continuation has no known physical press"
                         )
                     start = lease.cursor
                     pointer_lease_id = lease.lease_id
+                    button = lease.button
                 movement = mapped_path
             else:
                 start = mapped_path[0]
@@ -1546,10 +1273,69 @@ class AtomicDesktopAdapter:
                 point=start,
                 end_point=end,
                 points=points,
+                button=button,
+                held_keys=held_keys,
+                duration_ms=duration_ms,
                 keep_holding=keep_holding,
                 hold_control_present=hold_control_present,
                 started_held=started_held,
                 pointer_lease_id=pointer_lease_id,
+            )
+        if action == "input_sequence":
+            self._require_keys(args, {"sequence"})
+            steps = parse_input_sequence(args["sequence"])
+            if len(steps) > MAX_INPUT_SEQUENCE_EVENTS:
+                raise ValueError("input sequence is too long")
+            physical_events: list[PhysicalInputEvent] = []
+            mapped_points: list[PhysicalPoint] = []
+            for step in steps:
+                kind = InputEventKind(step.kind)
+                if kind is InputEventKind.MOVE:
+                    point_args = {
+                        "image_x": step.image_x,
+                        "image_y": step.image_y,
+                    }
+                    self._require_image_point(point_args)
+                    x, y = self._map_point(envelope, point_args)
+                    mapped_points.append((x, y))
+                    physical_events.append(PhysicalInputEvent(
+                        kind,
+                        x=x,
+                        y=y,
+                        duration_ms=step.duration_ms,
+                    ))
+                elif kind is InputEventKind.MOVE_RELATIVE:
+                    assert step.image_x is not None and step.image_y is not None
+                    dx, dy = self._map_relative_delta(
+                        envelope,
+                        step.image_x,
+                        step.image_y,
+                    )
+                    physical_events.append(PhysicalInputEvent(
+                        kind,
+                        x=dx,
+                        y=dy,
+                        duration_ms=step.duration_ms,
+                    ))
+                elif kind in {InputEventKind.MOUSE_DOWN, InputEventKind.MOUSE_UP}:
+                    physical_events.append(PhysicalInputEvent(
+                        kind,
+                        button=MouseButton(step.button),
+                    ))
+                elif kind in {InputEventKind.KEY_DOWN, InputEventKind.KEY_UP}:
+                    physical_events.append(PhysicalInputEvent(kind, key=step.key))
+                elif kind in {InputEventKind.WHEEL, InputEventKind.HWHEEL}:
+                    physical_events.append(PhysicalInputEvent(kind, amount=step.amount))
+                else:
+                    physical_events.append(PhysicalInputEvent(
+                        kind,
+                        duration_ms=step.duration_ms,
+                    ))
+            return _PreparedAction(
+                action=action,
+                point=mapped_points[0] if mapped_points else None,
+                points=tuple(mapped_points[1:]),
+                events=tuple(physical_events),
             )
         if action == "type_text":
             self._require_keys(args, {"text"})
@@ -1601,15 +1387,28 @@ class AtomicDesktopAdapter:
 
         if prepared.action in {"click", "double_click"}:
             assert prepared.point is not None
-            return {
+            arguments = {
                 "kind": "pointer_click",
                 "x": prepared.point[0],
                 "y": prepared.point[1],
-                "button": "left",
+                "button": prepared.button.value,
                 "click_count": (
                     2 if prepared.action == "double_click" else 1
                 ),
             }
+            if prepared.press_duration_ms != 35:
+                arguments["press_duration_ms"] = prepared.press_duration_ms
+            return arguments
+        if prepared.action == "move_mouse":
+            assert prepared.point is not None
+            arguments = {
+                "kind": "pointer_move",
+                "x": prepared.point[0],
+                "y": prepared.point[1],
+            }
+            if prepared.duration_ms:
+                arguments["duration_ms"] = prepared.duration_ms
+            return arguments
         if prepared.action == "scroll":
             assert prepared.point is not None
             assert prepared.amount is not None
@@ -1618,7 +1417,7 @@ class AtomicDesktopAdapter:
                 "x": prepared.point[0],
                 "y": prepared.point[1],
                 "signed_wheel_amount": prepared.amount,
-                "event_wheel_delta": prepared.amount * 120,
+                "event_wheel_delta": prepared.amount,
             }
         if prepared.action == "drag":
             assert prepared.point is not None
@@ -1629,8 +1428,12 @@ class AtomicDesktopAdapter:
                 "y1": prepared.point[1],
                 "x2": prepared.end_point[0],
                 "y2": prepared.end_point[1],
-                "button": "left",
+                "button": prepared.button.value,
             }
+            if prepared.held_keys:
+                arguments["held_keys"] = list(prepared.held_keys)
+            if prepared.duration_ms != 400:
+                arguments["duration_ms"] = prepared.duration_ms
             if prepared.points:
                 arguments["points"] = [
                     [point[0], point[1]]
@@ -1642,11 +1445,66 @@ class AtomicDesktopAdapter:
                     keep_holding=prepared.keep_holding,
                 )
             return arguments
+        if prepared.action == "input_sequence":
+            assert prepared.events is not None
+            arguments: dict[str, Any] = {
+                "kind": "input_sequence",
+                "event_count": len(prepared.events),
+                "pointer_event_count": sum(
+                    event.kind in {
+                        InputEventKind.MOVE,
+                        InputEventKind.MOVE_RELATIVE,
+                        InputEventKind.MOUSE_DOWN,
+                        InputEventKind.MOUSE_UP,
+                        InputEventKind.WHEEL,
+                        InputEventKind.HWHEEL,
+                    }
+                    for event in prepared.events
+                ),
+                "keyboard_event_count": sum(
+                    event.kind in {
+                        InputEventKind.KEY_DOWN,
+                        InputEventKind.KEY_UP,
+                    }
+                    for event in prepared.events
+                ),
+            }
+            pointer_events: list[dict[str, int | str | None]] = []
+            for index, event in enumerate(prepared.events):
+                if event.kind in {
+                    InputEventKind.MOVE,
+                    InputEventKind.MOVE_RELATIVE,
+                }:
+                    pointer_events.append({
+                        "index": index,
+                        "kind": event.kind.value,
+                        "x": event.x,
+                        "y": event.y,
+                        "duration_ms": event.duration_ms,
+                    })
+                elif event.kind in {
+                    InputEventKind.MOUSE_DOWN,
+                    InputEventKind.MOUSE_UP,
+                }:
+                    assert event.button is not None
+                    pointer_events.append({
+                        "index": index,
+                        "kind": event.kind.value,
+                        "button": event.button.value,
+                    })
+                elif event.kind in {InputEventKind.WHEEL, InputEventKind.HWHEEL}:
+                    pointer_events.append({
+                        "index": index,
+                        "kind": event.kind.value,
+                        "amount": event.amount,
+                    })
+            arguments["pointer_events"] = pointer_events
+            return arguments
         if prepared.action == "type_text":
             assert prepared.text is not None
             return {
                 "kind": "type_text",
-                "text": prepared.text,
+                "codepoint_count": len(prepared.text),
             }
         if prepared.action == "launch_application":
             assert prepared.launch_app is not None
@@ -1672,7 +1530,10 @@ class AtomicDesktopAdapter:
     ) -> None:
         """Trace image-to-screen pointer mapping without affecting input."""
 
-        if prepared.action not in {"click", "double_click", "drag", "scroll"}:
+        if prepared.action not in {
+            "move_mouse", "click", "double_click", "drag", "scroll",
+            "input_sequence",
+        }:
             return
         source = {
             key: value
@@ -1687,6 +1548,10 @@ class AtomicDesktopAdapter:
                 "image_path",
                 "amount",
                 "keep_holding",
+                "button",
+                "held_keys",
+                "duration_ms",
+                "press_duration_ms",
             }
         }
         if isinstance(source.get("image_path"), (list, tuple)):
@@ -1696,6 +1561,8 @@ class AtomicDesktopAdapter:
                 else point
                 for point in source["image_path"]
             ]
+        if isinstance(source.get("held_keys"), (list, tuple)):
+            source["held_keys"] = list(source["held_keys"])
         try:
             BUS.publish(
                 "vnext_pointer_dispatch",
@@ -1721,12 +1588,14 @@ class AtomicDesktopAdapter:
     @staticmethod
     def _raw_device_route(action: str) -> str:
         return {
+            "move_mouse": "raw_device.admitted_physical_move/0",
             "click": "raw_device.admitted_physical_click/0",
             "double_click": "raw_device.admitted_physical_click/0",
             "drag": "raw_device.admitted_physical_drag/0",
             "scroll": "raw_device.admitted_physical_scroll/0",
             "type_text": "raw_device.admitted_physical_type_text/0",
             "hotkey": "raw_device.admitted_physical_hotkey/0",
+            "input_sequence": "raw_device.admitted_physical_sequence/0",
             "launch_application": "desktop_launcher.generic/0",
         }[action]
 
@@ -1776,45 +1645,35 @@ class AtomicDesktopAdapter:
         ).map_point(mapped["frame_x"], mapped["frame_y"])
 
     @staticmethod
-    def _prepared_points(
-        prepared: _PreparedAction,
-    ) -> tuple[PhysicalPoint, ...]:
-        path = prepared.points or ()
-        return tuple(
-            point
-            for point in (
-                prepared.point,
-                *path,
-                prepared.end_point,
-            )
-            if point is not None
-        )
-
-    def _envelope_matches_frozen_target(
-        self,
+    def _map_relative_delta(
         envelope: ActorDecisionEnvelope,
-    ) -> bool:
-        pointer = self.pointer_state()
-        common = bool(
-            envelope.frame_scope in {"target_window", "full_desktop"}
-            and envelope.allowed_evidence_scope
-            and envelope.pointer_disposition
-            == pointer.disposition.value
-            and envelope.pointer_lease_id == pointer.lease_id
+        image_dx: float,
+        image_dy: float,
+    ) -> PhysicalPoint:
+        """Scale a submitted-image delta into virtual-desktop pixel units."""
+
+        submitted_width, submitted_height = envelope.submitted_image_size
+        _left, _top, frame_width, frame_height = envelope.frame_region
+
+        def scale(value: float, image_extent: int, frame_extent: int) -> int:
+            if not math.isfinite(value):
+                raise ValueError("relative pointer delta must be finite")
+            mapped = round(
+                value * max(1, frame_extent - 1) / max(1, image_extent - 1)
+            )
+            # Preserve deliberate sub-pixel intent instead of silently
+            # turning a non-zero model gesture into a mechanical no-op.
+            if mapped == 0 and value != 0:
+                return 1 if value > 0 else -1
+            return mapped
+
+        delta = (
+            scale(image_dx, submitted_width, frame_width),
+            scale(image_dy, submitted_height, frame_height),
         )
-        if not common:
-            return False
-        if envelope.frame_scope == "full_desktop":
-            # FrameAuthority performs the complete pixel-identity CAS.  The
-            # old target binding is neither an admission fact nor an input
-            # destination for the default screen-first route.
-            return True
-        binding = self._binding
-        return bool(
-            envelope.target_binding_id == binding.binding_id
-            and envelope.frame_hwnd == binding.hwnd
-            and envelope.frame_epoch == binding.epoch
-        )
+        if delta == (0, 0):
+            raise ValueError("relative pointer move cannot be zero")
+        return delta
 
     def _safe_snapshot(self) -> LiveTargetSnapshot | None:
         try:
@@ -1822,123 +1681,6 @@ class AtomicDesktopAdapter:
         except Exception:
             return None
         return snapshot if type(snapshot) is LiveTargetSnapshot else None
-
-    def _target_is_current(
-        self,
-        snapshot: LiveTargetSnapshot | None,
-        *,
-        expected_region: PhysicalRegion | None,
-        require_foreground: bool,
-    ) -> bool:
-        binding = self._binding
-        return bool(
-            snapshot is not None
-            and snapshot.hwnd == binding.hwnd
-            and snapshot.root_hwnd == binding.hwnd
-            and snapshot.process_id == binding.process_id
-            and snapshot.executable_identity
-            == binding.executable_identity
-            and (
-                expected_region is None
-                or snapshot.region == expected_region
-            )
-            and (
-                not require_foreground
-                or snapshot.foreground_root_hwnd == binding.hwnd
-            )
-        )
-
-    def _pointer_target_decision(
-        self,
-        snapshot: LiveTargetSnapshot | None,
-        *,
-        expected_region: PhysicalRegion | None,
-        point: PhysicalPoint,
-        frame_scope: str,
-    ) -> FinalPointerGuardDecision:
-        binding = self._binding
-        if snapshot is None:
-            return FinalPointerGuardDecision.TARGET_UNAVAILABLE
-        if snapshot.hwnd != binding.hwnd or snapshot.root_hwnd != binding.hwnd:
-            return FinalPointerGuardDecision.TARGET_ROOT_CHANGED
-        if (
-            snapshot.process_id != binding.process_id
-            or snapshot.executable_identity != binding.executable_identity
-        ):
-            return FinalPointerGuardDecision.TARGET_PROCESS_CHANGED
-        if expected_region is not None and snapshot.region != expected_region:
-            return FinalPointerGuardDecision.TARGET_GEOMETRY_CHANGED
-        if frame_scope == "full_desktop":
-            # Screen-first frame: the pointer may operate any window the
-            # model can see.  The window under the point is the surface;
-            # the causal successor hand-off re-binds to it on the next
-            # observation after the click raises it.
-            try:
-                hit = self._probe.hit_test_root(*point)
-            except Exception:
-                return FinalPointerGuardDecision.HIT_TEST_UNAVAILABLE
-            if type(hit) is not int or hit <= 0:
-                return FinalPointerGuardDecision.HIT_TEST_UNAVAILABLE
-            return FinalPointerGuardDecision.ADMITTED
-        if snapshot.foreground_root_hwnd != binding.hwnd:
-            return FinalPointerGuardDecision.TARGET_UNAVAILABLE
-        if not self._inside(point, expected_region):
-            return FinalPointerGuardDecision.POINT_OUTSIDE_TARGET
-        try:
-            hit = self._probe.hit_test_root(*point)
-        except Exception:
-            return FinalPointerGuardDecision.HIT_TEST_UNAVAILABLE
-        if hit is None:
-            return FinalPointerGuardDecision.HIT_TEST_UNAVAILABLE
-        if type(hit) is not int or hit != binding.hwnd:
-            return FinalPointerGuardDecision.HIT_TEST_CHANGED
-        return FinalPointerGuardDecision.ADMITTED
-
-    def _keyboard_target_decision(
-        self,
-        snapshot: LiveTargetSnapshot | None,
-        *,
-        expected_region: PhysicalRegion | None,
-    ) -> FinalKeyboardGuardDecision:
-        binding = self._binding
-        if snapshot is None:
-            return FinalKeyboardGuardDecision.TARGET_UNAVAILABLE
-        if snapshot.hwnd != binding.hwnd or snapshot.root_hwnd != binding.hwnd:
-            return FinalKeyboardGuardDecision.TARGET_ROOT_CHANGED
-        if (
-            snapshot.process_id != binding.process_id
-            or snapshot.executable_identity != binding.executable_identity
-        ):
-            return FinalKeyboardGuardDecision.TARGET_PROCESS_CHANGED
-        if expected_region is not None and snapshot.region != expected_region:
-            return FinalKeyboardGuardDecision.TARGET_GEOMETRY_CHANGED
-        if snapshot.foreground_root_hwnd is None:
-            return FinalKeyboardGuardDecision.FOREGROUND_UNAVAILABLE
-        if snapshot.foreground_root_hwnd != binding.hwnd:
-            return FinalKeyboardGuardDecision.FOREGROUND_CHANGED
-        return FinalKeyboardGuardDecision.ADMITTED
-
-    def _point_hits_target(
-        self,
-        point: PhysicalPoint,
-        *,
-        frame_scope: str,
-    ) -> bool:
-        try:
-            hit = self._probe.hit_test_root(*point)
-        except Exception:
-            return False
-        if type(hit) is not int or hit <= 0:
-            return False
-        if frame_scope == "full_desktop":
-            return True
-        return hit == self._binding.hwnd
-
-    @staticmethod
-    def _inside(point: PhysicalPoint, region: PhysicalRegion) -> bool:
-        x, y = point
-        left, top, width, height = region
-        return left <= x < left + width and top <= y < top + height
 
     @staticmethod
     def _frame_state_matches(
@@ -2091,6 +1833,9 @@ class AtomicDesktopAdapter:
         kind = facts.get("error_kind")
         if type(kind) is str and kind and len(kind) <= 64:
             return kind
+        guard = facts.get("guard_decision")
+        if type(guard) is str and guard and len(guard) <= 48:
+            return f"final_guard_{guard}"
         return None
 
     @staticmethod

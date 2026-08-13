@@ -83,7 +83,21 @@ describe('client-owned execution context', () => {
     });
   });
 
-  it('fails before submission when the native surface keeps foreground', async () => {
+  it('keeps foreground handoff failure advisory and still captures the desktop', async () => {
+    const captureTarget = vi.fn(async () => ({
+      format: 'desktop-target/1' as const,
+      hwnd: 65878,
+      title: 'Program Manager',
+      process_id: 19076,
+      class_name: 'Progman',
+      rect: [0, 0, 1536, 864],
+      captured_at: 850,
+      foreground_verified: false,
+      usable: true,
+      failure_type: '',
+      reason: '',
+      binding_mode: 'desktop_shell' as const,
+    }));
     (window as any).electronAPI = {
       prepareDesktopHandoff: vi.fn(async () => ({
         yielded: false,
@@ -93,9 +107,12 @@ describe('client-owned execution context', () => {
       })),
     };
 
-    await expect(buildClientExecutionContext(900)).rejects.toThrow(
-      'control_surface_still_focused',
-    );
+    const context = await buildClientExecutionContext(900, captureTarget);
+
+    expect(captureTarget).toHaveBeenCalledOnce();
+    expect(context.desktop_handoff.yielded).toBe(false);
+    expect(context.desktop_handoff.reason).toBe('control_surface_still_focused');
+    expect(context.target_window?.hwnd).toBe(65878);
   });
 
   it('accepts a desktop-shell binding when no application window exists', async () => {

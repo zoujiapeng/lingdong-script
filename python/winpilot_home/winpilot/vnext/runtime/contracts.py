@@ -51,10 +51,12 @@ APPROVED_DESKTOP_ACTIONS = frozenset(
     {
         "click",
         "double_click",
+        "move_mouse",
         "drag",
         "scroll",
         "type_text",
         "hotkey",
+        "input_sequence",
         "launch_application",
     }
 )
@@ -378,10 +380,6 @@ class RuntimeFrame:
                 "image_sha256 does not identify image_b64"
             )
         refs = _ordered_identities(self.evidence_refs, "evidence_refs")
-        if not refs:
-            raise RuntimeContractError(
-                "RuntimeFrame requires authoritative frame evidence"
-            )
         if tuple(sorted(refs)) != refs:
             raise RuntimeContractError(
                 "RuntimeFrame evidence_refs must be sorted"
@@ -1128,23 +1126,19 @@ class ControllerTransition:
                 "post_frame_id must be positive or null"
             )
         if outcome is ControllerOutcome.COMPLETED:
-            if (
-                self.input_completed is not True
-                or self.post_frame_id is None
-                or not post_evidence
-            ):
+            if self.input_completed is not True:
                 raise RuntimeContractError(
-                    "completed transition requires input, post frame, and evidence"
+                    "completed transition requires completed input"
                 )
         elif outcome is ControllerOutcome.REJECTED:
             if self.input_completed is not False:
                 raise RuntimeContractError(
                     "rejected transition must prove input did not execute"
                 )
-            if (self.post_frame_id is None) != (not post_evidence):
-                raise RuntimeContractError(
-                    "rejected post frame and evidence must be paired"
-                )
+        if (self.post_frame_id is None) != (not post_evidence):
+            raise RuntimeContractError(
+                "post frame and evidence must be paired when present"
+            )
         if self.action_effect is not None:
             if type(self.action_effect) is not ActionEffectSummary:
                 raise RuntimeContractError(

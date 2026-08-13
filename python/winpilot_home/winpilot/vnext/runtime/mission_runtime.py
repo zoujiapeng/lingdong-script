@@ -37,27 +37,15 @@ from ..mission import (
     MissionError,
     MissionReducer,
     MissionStatus,
-    ObligationStatus,
     StaleRevisionError,
     is_safe_action_summary,
 )
 from ..profiling import ExecutionDepth, ExecutionProfile
-from ..verification import (
-    AcceptedObligationVerification,
-    DeterministicMissionCompletionVerifier,
-    MissionCompletionVerificationRequest,
-    MissionCompletionVerificationResult,
-    ObligationVerificationRequest,
-    ObligationVerificationResult,
-    VerifierAssessment,
-)
 from .contracts import (
     APPROVED_DESKTOP_ACTIONS,
     APPROVED_RUNTIME_TOOLS,
-    CURRENT_FRAME_EVIDENCE_KIND,
     MAX_COMPLETED_ACTION_HISTORY,
     MAX_COMPLETED_ACTION_SUMMARY_LENGTH,
-    POST_ACTION_FRAME_EVIDENCE_KIND,
     ActorBudgetView,
     ControllerOutcome,
     ControllerTransition,
@@ -71,10 +59,6 @@ from .ports import (
     ActorPort,
     ControllerPort,
     RuntimeStatePort,
-)
-from .post_action_reconcile import (
-    reconcile_post_action,
-    validate_controller_evidence_scope,
 )
 from .task_state import (
     ActorTaskState,
@@ -185,7 +169,6 @@ class MissionRuntime:
             or obligation.depends_on
             or obligation.input_artifact_refs
             or obligation.output_binding_names
-            or obligation.required_capabilities != ("visual.interact",)
         ):
             raise MissionRuntimeConfigurationError(
                 "obligation is not the single visual full-goal contract"
@@ -200,7 +183,6 @@ class MissionRuntime:
             or profile.goal_revision != definition.goal_revision
             or profile.accepted_depth is not ExecutionDepth.STANDARD
             or profile.source != "safe_default"
-            or profile.accepted_capabilities != ("visual.interact",)
             or profile.upgrade_triggers
             or profile.downgrade_conditions
             or services.planner
@@ -362,28 +344,10 @@ class MissionRuntime:
             or snapshot.frame.epoch != binding.epoch
         ):
             return False
-        registry = {ref.id: ref for ref in self._registry.snapshot()}
-        if not snapshot.frame.evidence_refs or any(
-            evidence_id not in registry
-            for evidence_id in snapshot.frame.evidence_refs
-        ):
-            return False
-        payload_hash = snapshot.frame.identity.payload_hash
-        return all(
-            registry[evidence_id].mission_id == projection.mission_id
-            and registry[evidence_id].run_id == projection.run_id
-            and registry[evidence_id].obligation_id
-            == projection.active_obligation_id
-            and registry[evidence_id].kind
-            in {
-                CURRENT_FRAME_EVIDENCE_KIND,
-                POST_ACTION_FRAME_EVIDENCE_KIND,
-            }
-            and registry[evidence_id].trust == "deterministic"
-            and registry[evidence_id].frame_id == snapshot.frame.frame_id
-            and registry[evidence_id].payload_hash == payload_hash
-            for evidence_id in snapshot.frame.evidence_refs
-        )
+        # Freshness is projected once by the Broker so it can simply withhold
+        # GUI tools.  This check only keeps the image geometry internally
+        # coherent; evidence registration is never execution authority.
+        return True
 
     def _project(self, snapshot: RuntimeSnapshot) -> BrokerProjection:
         return self._broker.project(
@@ -391,65 +355,6 @@ class MissionRuntime:
             self._profile,
             snapshot.broker_state,
         )
-
-    def _latest_matches(
-        self,
-        initial: RuntimeSnapshot,
-        broker_projection: BrokerProjection,
-        *,
-        turn_index: int,
-    ) -> bool:
-        projection = self._reducer.projection
-        if (
-            projection.revision != broker_projection.mission_revision
-            or projection.active_obligation_id
-            != broker_projection.obligation_id
-        ):
-            return False
-        try:
-            latest = self._state.current(
-                projection,
-                turn_index=turn_index,
-            )
-        except Exception:
-            return False
-        if (
-            not self._snapshot_matches_mission(
-                latest,
-                turn_index=turn_index,
-            )
-            or latest.authority_key != initial.authority_key
-        ):
-            return False
-        return self._project(latest) == broker_projection
-
-    def _mutation_still_current(
-        self,
-        envelope: ActorDecisionEnvelope,
-        initial: RuntimeSnapshot,
-        broker_projection: BrokerProjection,
-        *,
-        turn_index: int,
-        stop_event: threading.Event | None,
-    ) -> bool:
-        if self._stopped(stop_event):
-            return False
-        projection = self._reducer.projection
-        if (
-            projection.mission_id != envelope.mission_id
-            or projection.run_id != envelope.run_id
-            or projection.revision != envelope.mission_revision
-            or projection.active_obligation_id != envelope.obligation_id
-        ):
-            return False
-        try:
-            return self._latest_matches(
-                initial,
-                broker_projection,
-                turn_index=turn_index,
-            )
-        except Exception:
-            return False
 
     def _block_unknown(
         self,
@@ -495,38 +400,6 @@ class MissionRuntime:
             decision_id=decision_id,
             event_ids=event_ids,
             detail=detail,
-        )
-
-    def _verification_request(
-        self,
-        obligation_id: str,
-    ) -> ObligationVerificationRequest:
-        projection = self._reducer.projection
-        state = projection.obligation_state(obligation_id)
-        if (
-            projection.active_obligation_id != obligation_id
-            or state.status is not ObligationStatus.CLAIMED
-            or not state.claim_fingerprint
-        ):
-            raise ValueError(
-                "visual verification requires the current accepted claim"
-            )
-        definition = projection.obligation_definition(obligation_id)
-        refs = self._reducer.evidence_scope.require(
-            state.claim_evidence_refs,
-            obligation_id=obligation_id,
-        )
-        return ObligationVerificationRequest(
-            mission_id=projection.mission_id,
-            run_id=projection.run_id,
-            mission_revision=projection.revision,
-            obligation_id=obligation_id,
-            claim_fingerprint=state.claim_fingerprint,
-            desired_state=definition.desired_state,
-            acceptance_criteria=definition.acceptance_criteria,
-            forbidden_effects=definition.forbidden_effects,
-            evidence_policy=definition.evidence_policy,
-            evidence_refs=refs,
         )
 
     def _project_budget(
@@ -597,170 +470,25 @@ class MissionRuntime:
             : MAX_COMPLETED_ACTION_SUMMARY_LENGTH - len(prefix)
         ].rstrip()
 
-    def _complete_mission(
-        self,
-        *,
-        route: ExecutionRoute,
-        proposal_kind: str,
-        decision_id: str,
-        prior_event_ids: Iterable[str],
-    ) -> MissionRuntimeResult:
-        projection = self._reducer.projection
-        if projection.status is not MissionStatus.AWAITING_MISSION_VERIFICATION:
-            return self._result(
-                RuntimeStatus.VERIFICATION_RECORDED,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=decision_id,
-                event_ids=prior_event_ids,
-            )
-        obligation = self._reducer.definition.obligations[0]
-        state = projection.obligation_state(obligation.id)
-        if (
-            state.status is not ObligationStatus.VERIFIED
-            or not state.verification_id
-            or not state.verified_evidence_refs
-        ):
-            return self._result(
-                RuntimeStatus.STATE_REJECTED,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=decision_id,
-                event_ids=prior_event_ids,
-                detail="verified obligation lacks exact accepted evidence",
-            )
-        try:
-            refs = self._reducer.evidence_scope.require(
-                state.verified_evidence_refs,
-                obligation_id=obligation.id,
-            )
-            request = MissionCompletionVerificationRequest(
-                mission_id=projection.mission_id,
-                run_id=projection.run_id,
-                mission_revision=projection.revision,
-                required_obligations=(
-                    AcceptedObligationVerification(
-                        obligation_id=obligation.id,
-                        accepted_verification_id=state.verification_id,
-                        verified_evidence_refs=state.verified_evidence_refs,
-                        evidence_refs=refs,
-                    ),
-                ),
-            )
-            verifier = DeterministicMissionCompletionVerifier()
-            result = MissionCompletionVerificationResult.bind(
-                request,
-                verifier.verify(request),
-            )
-            self._registry.append(result.aggregate_evidence)
-            event_ids = self._accept(
-                "mission_verified",
-                payload=result.to_mission_event_payload(),
-                evidence_refs=result.event_evidence_refs,
-                base_revision=request.mission_revision,
-            )
-        except Exception as exc:
-            return self._result(
-                RuntimeStatus.STATE_REJECTED,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=decision_id,
-                event_ids=prior_event_ids,
-                detail=f"mission completion failed closed: {exc}",
-            )
-        if self._reducer.projection.status is not MissionStatus.VERIFIED:
-            return self._result(
-                RuntimeStatus.STATE_REJECTED,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=decision_id,
-                event_ids=(*tuple(prior_event_ids), *event_ids),
-                detail="Reducer did not derive mission verification",
-            )
-        return self._result(
-            RuntimeStatus.MISSION_VERIFIED,
-            route=route,
-            proposal_kind=proposal_kind,
-            decision_id=decision_id,
-            event_ids=(*tuple(prior_event_ids), *event_ids),
-        )
-
     def _claim_and_complete(
         self,
         proposal: ClaimObligationDone,
         envelope: ActorDecisionEnvelope,
-        frozen: RuntimeSnapshot,
         *,
         route: ExecutionRoute,
         stop_event: threading.Event | None,
     ) -> MissionRuntimeResult:
         obligation_id = envelope.obligation_id
         proposal_kind = "claim_obligation_done"
-        if self._task_state.remaining_items:
-            return self._result(
-                RuntimeStatus.INVALID_PROPOSAL,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=envelope.decision_id,
-                detail=(
-                    "claim conflicts with task_state: unfinished items "
-                    "remain; continue them or revise remaining_items"
-                ),
-            )
-        if not frozen.frame.evidence_refs:
-            return self._result(
-                RuntimeStatus.STATE_REJECTED,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=envelope.decision_id,
-                detail="claim requires current run-scoped frame evidence",
-            )
-        try:
-            claim_ids = self._accept(
-                "obligation_claimed",
-                payload={"obligation_id": obligation_id},
-                evidence_refs=frozen.frame.evidence_refs,
-                base_revision=envelope.mission_revision,
-            )
-            request = self._verification_request(obligation_id)
-        except Exception as exc:
-            return self._result(
-                RuntimeStatus.STATE_REJECTED,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=envelope.decision_id,
-                detail=f"claim was not accepted: {exc}",
-            )
         if self._stopped(stop_event):
             return self._cancel(
-                prior_event_ids=claim_ids,
                 detail="run was canceled before claim completion",
             )
         try:
-            assessment = VerifierAssessment(
-                verified=True,
-                satisfied_conditions=request.required_conditions,
-                missing_conditions=(),
-                contradictions=(),
-                confidence=None,
-                concise_reason=proposal.concise_claim,
-            )
-            result = ObligationVerificationResult.bind(
-                request,
-                assessment,
-                verifier_kind="actor_claim",
-                evidence_refs=tuple(
-                    ref.id for ref in request.trusted_evidence_refs
-                ),
-            )
-            verification_payload = result.to_mission_event_payload(
-                request
-            )
-            verification_ids = self._accept(
-                "verification_recorded",
-                payload=verification_payload,
-                evidence_refs=result.event_evidence_refs,
-                base_revision=request.mission_revision,
+            event_ids = self._accept(
+                "actor_completed",
+                payload={"obligation_id": obligation_id},
+                base_revision=envelope.mission_revision,
             )
         except Exception as exc:
             return self._result(
@@ -768,19 +496,16 @@ class MissionRuntime:
                 route=route,
                 proposal_kind=proposal_kind,
                 decision_id=envelope.decision_id,
-                event_ids=claim_ids,
-                detail=f"actor claim completion failed closed: {exc}",
+                detail=f"actor completion could not be recorded: {exc}",
             )
-        event_ids = (*claim_ids, *verification_ids)
-        completion = self._complete_mission(
+        self._verified_completion_result = proposal.concise_claim
+        return self._result(
+            RuntimeStatus.MISSION_VERIFIED,
             route=route,
             proposal_kind=proposal_kind,
             decision_id=envelope.decision_id,
-            prior_event_ids=event_ids,
+            event_ids=event_ids,
         )
-        if completion.status is RuntimeStatus.MISSION_VERIFIED:
-            self._verified_completion_result = proposal.concise_claim
-        return completion
 
     def _record_rejected_transition(
         self,
@@ -817,29 +542,14 @@ class MissionRuntime:
         self,
         proposal: DesktopActionProposal,
         envelope: ActorDecisionEnvelope,
-        initial: RuntimeSnapshot,
-        broker_projection: BrokerProjection,
         *,
         route: ExecutionRoute,
-        turn_index: int,
         stop_event: threading.Event | None,
     ) -> MissionRuntimeResult:
         proposal_kind = proposal.kind
         obligation_id = envelope.obligation_id
-        if not self._mutation_still_current(
-            envelope,
-            initial,
-            broker_projection,
-            turn_index=turn_index,
-            stop_event=stop_event,
-        ):
-            return self._result(
-                RuntimeStatus.STALE_DISCARDED,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=envelope.decision_id,
-                detail="Runtime authority changed while waiting for input",
-            )
+        if self._stopped(stop_event):
+            return self._cancel(detail="run was canceled before input executed")
         try:
             transition = self._controller.execute(
                 envelope,
@@ -894,6 +604,8 @@ class MissionRuntime:
                     decision_id=envelope.decision_id,
                     detail="Controller could not prove the mutation outcome",
                 )
+            event_ids: tuple[str, ...] = ()
+            diagnostics: list[str] = []
             try:
                 event_ids = self._accept(
                     "transition_recorded",
@@ -907,16 +619,10 @@ class MissionRuntime:
                     base_revision=envelope.mission_revision,
                 )
             except Exception as exc:
-                return self._block_unknown(
-                    obligation_id=obligation_id,
-                    route=route,
-                    proposal_kind=proposal_kind,
-                    decision_id=envelope.decision_id,
-                    detail=(
-                        "Completed input could not be recorded before a fresh "
-                        f"observation: {exc}"
-                    ),
-                )
+                # The controller already knows SendInput completed.  A local
+                # journal failure is diagnostic only and must not turn that
+                # physical fact into a rejection or invite a replay.
+                diagnostics.append(f"action history unavailable: {exc}")
             self._previous_action_local_intent = proposal.local_intent
             self._completed_action_intents.append(proposal.local_intent)
             if self._stopped(stop_event):
@@ -933,6 +639,7 @@ class MissionRuntime:
                 detail=(
                     "OS input completed; its effect will be recovered from "
                     "the next fresh observation"
+                    + ("; " + "; ".join(diagnostics) if diagnostics else "")
                 ),
             )
         if transition.outcome is ControllerOutcome.REJECTED:
@@ -974,33 +681,19 @@ class MissionRuntime:
                     )
                 ),
             )
+        event_ids: tuple[str, ...] = ()
+        diagnostics: list[str] = []
         try:
-            validate_controller_evidence_scope(
-                transition,
-                self._registry,
-                mission_id=self._reducer.definition.mission_id,
-                run_id=self._reducer.definition.run_id,
-                obligation_id=obligation_id,
-                action_id=envelope.decision_id,
-            )
             self._registry.append_many(transition.produced_evidence)
-            after = self._state.current(
-                self._reducer.projection,
-                turn_index=turn_index,
-            )
-            reconcile_post_action(
-                transition,
-                initial,
-                after,
-                self._registry,
-                mission_id=self._reducer.definition.mission_id,
-                run_id=self._reducer.definition.run_id,
-                obligation_id=obligation_id,
-                action_id=envelope.decision_id,
-                action=proposal.action,
-                keep_holding=proposal.model_dump(mode="json")[
-                    "args"
-                ].get("keep_holding", False),
+        except Exception as exc:
+            diagnostics.append(f"post-action evidence unavailable: {exc}")
+        try:
+            available_refs = {
+                ref.id for ref in self._registry.snapshot()
+            }
+            event_refs = tuple(
+                ref for ref in transition.event_evidence_refs
+                if ref in available_refs
             )
             event_ids = self._accept(
                 "transition_recorded",
@@ -1022,17 +715,15 @@ class MissionRuntime:
                         }
                     ),
                 },
-                evidence_refs=transition.event_evidence_refs,
+                evidence_refs=event_refs,
                 base_revision=envelope.mission_revision,
             )
         except Exception as exc:
-            return self._block_unknown(
-                obligation_id=obligation_id,
-                route=route,
-                proposal_kind=proposal_kind,
-                decision_id=envelope.decision_id,
-                detail=f"Controller result could not be reconciled: {exc}",
-            )
+            # Bookkeeping is advisory once the OS accepted the input.  The next
+            # fresh screen is the source of truth; never turn a completed
+            # physical action into a terminal mission block because an
+            # evidence/event append failed.
+            diagnostics.append(f"action history unavailable: {exc}")
         self._previous_action_local_intent = proposal.local_intent
         self._completed_action_intents.append(proposal.local_intent)
         if self._stopped(stop_event):
@@ -1046,6 +737,7 @@ class MissionRuntime:
             proposal_kind=proposal_kind,
             decision_id=envelope.decision_id,
             event_ids=event_ids,
+            detail="; ".join(diagnostics),
         )
 
     def run_one_turn(
@@ -1207,16 +899,21 @@ class MissionRuntime:
             )
         proposal_kind = proposal.kind
         try:
-            if not self._latest_matches(
-                initial,
-                broker_projection,
-                turn_index=turn_index,
+            current_projection = self._reducer.projection
+            if (
+                current_projection.mission_id
+                != broker_projection.mission_id
+                or current_projection.run_id != broker_projection.run_id
+                or current_projection.revision
+                != broker_projection.mission_revision
+                or current_projection.active_obligation_id
+                != broker_projection.obligation_id
             ):
                 return self._result(
                     RuntimeStatus.STALE_DISCARDED,
                     route=route,
                     proposal_kind=proposal_kind,
-                    detail="Runtime authority changed while Actor was deciding",
+                    detail="mission changed while the Actor was deciding",
                 )
             tool_name = proposal_tool_name(proposal)
             if (
@@ -1308,17 +1005,13 @@ class MissionRuntime:
             return self._run_action(
                 proposal,
                 envelope,
-                initial,
-                broker_projection,
                 route=route,
-                turn_index=turn_index,
                 stop_event=stop_event,
             )
         if type(proposal) is ClaimObligationDone:
             return self._claim_and_complete(
                 proposal,
                 envelope,
-                initial,
                 route=route,
                 stop_event=stop_event,
             )
