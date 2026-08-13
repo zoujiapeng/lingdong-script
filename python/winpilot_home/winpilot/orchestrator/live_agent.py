@@ -29,6 +29,7 @@ from ..action.executor import (
     ADMITTED_PHYSICAL_SEQUENCE_BACKEND,
     ADMITTED_PHYSICAL_SCROLL_BACKEND,
     ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
+    cursor_position,
 )
 from ..action.raw_device import (
     CANONICAL_HOTKEY_KEYS,
@@ -231,6 +232,25 @@ class _CompositionDependencies:
     provider_transport_factory: Callable[[], Any] | None = None
     config_snapshot: Callable[[], dict[str, Any]] | None = None
     shell_factory: Callable[[], Any] | None = None
+    pointer_debug_sink: Any = None
+    cursor_reader: Callable[[], tuple[int, int] | None] | None = None
+
+
+def _read_cursor_point() -> tuple[int, int] | None:
+    """Read the real cursor only for best-effort pointer diagnostics."""
+
+    try:
+        current = cursor_position()
+        if (
+            isinstance(current, Mapping)
+            and current.get("ok") is True
+            and type(current.get("x")) is int
+            and type(current.get("y")) is int
+        ):
+            return int(current["x"]), int(current["y"])
+    except Exception:
+        pass
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1368,7 +1388,13 @@ def _tool_catalog() -> ToolCatalog:
                     "minItems": 1,
                     "maxItems": len(CANONICAL_HOTKEY_MODIFIERS) + 1,
                     "uniqueItems": True,
-                }
+                },
+                "repeat": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 1,
+                },
             },
             ["keys"],
         ),
@@ -2051,10 +2077,10 @@ class _BudgetedActor:
     ) -> VisualActorTurnAdmission:
         admitted = self._counter.begin(
             VISUAL_ACTOR_MODEL_ROLE,
-            # Before a screen is needed, local/connector work can legitimately
-            # contain a long dependent chain.  Let the task-level counter and
-            # deadline remain the only budget instead of imposing a second,
-            # smaller per-turn ceiling on that work.
+            # Text replies, status reads, and connector work can legitimately
+            # contain a dependent chain before a screen is needed.  Local
+            # computer tools intentionally start only after the Actor has the
+            # real desktop frame.
             reserve=None,
         )
         try:
@@ -2134,6 +2160,8 @@ class _RawReceiptTrace:
                 "requested_codepoints",
                 "completed_codepoints",
                 "key_count",
+                "requested_repetitions",
+                "completed_repetitions",
                 "event_count",
                 "completed_events",
                 "moves_completed",
@@ -2797,6 +2825,8 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             desktop_workspace=workspace,
             raw_device=raw,
             receipt_trace_sink=_RawReceiptTrace(),
+            pointer_debug_sink=build.dependencies.pointer_debug_sink,
+            cursor_reader=build.dependencies.cursor_reader,
             launcher=_launch_application_primitive,
             desktop_shell=build.target.desktop_shell,
         )
@@ -4125,6 +4155,7 @@ def prepare_live_vnext_execution(
     thread_id: str,
     turn_id: str,
     history: tuple[dict[str, str], ...],
+    pointer_debug_sink: Any = None,
     _dependencies: _CompositionDependencies | None = None,
 ) -> ArpExecution:
     """Validate and register one default-unreachable live vNext execution."""
@@ -4133,6 +4164,8 @@ def prepare_live_vnext_execution(
         connector_factory=ConnectorGateway,
         config_snapshot=CONFIG.snapshot,
         shell_factory=_shell_runner_factory,
+        pointer_debug_sink=pointer_debug_sink,
+        cursor_reader=_read_cursor_point,
     )
     if type(config_snapshot) is not dict:
         raise ValueError("vNext live Agent config snapshot must be a dict")

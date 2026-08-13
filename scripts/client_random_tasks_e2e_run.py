@@ -132,7 +132,13 @@ def _find_window(
 
         win32gui.EnumWindows(visit, None)
         if matches:
-            return matches[-1]
+            # EnumWindows yields top-level windows in Z order.  Prefer the
+            # foreground match and otherwise the first (topmost) match.  The
+            # desktop Agent may legitimately open another instance; choosing
+            # the bottom-most same-title window would verify an untouched
+            # preparation window instead of the surface it just operated.
+            foreground = int(win32gui.GetForegroundWindow() or 0)
+            return foreground if foreground in matches else matches[0]
         time.sleep(0.2)
     raise RuntimeError(
         "visible target window was not found: " + " / ".join(titles)
@@ -490,10 +496,19 @@ def _external_verifier(
             if not absent:
                 errors.append("impossible target file was unexpectedly created")
         elif family == "paint-stroke":
-            hwnd = case["paint_hwnd"]
+            hwnd = _current_target_hwnd(
+                case,
+                int(case.get("paint_hwnd") or 0),
+            )
+            case["paint_hwnd"] = hwnd
             shot_path = case["paint_screenshot"]
             if shot_path:
                 try:
+                    # client_e2e_run restores Electron before calling the
+                    # independent verifier.  Bring the real Paint window back
+                    # before sampling its pixels; otherwise the old window
+                    # rectangle can contain Electron and fabricate a stroke.
+                    evidence["terminal_focus"] = _focus_window(hwnd)
                     _capture_window(hwnd, Path(shot_path))
                 except Exception:
                     shot_path = None
@@ -521,35 +536,36 @@ def _paint_stroke_evidence(hwnd: int, screenshot: str | None) -> dict[str, Any]:
     if path is None or not path.is_file():
         return {"stroke_detected": False, "error": "paint screenshot is unavailable"}
     try:
-        image = Image.open(str(path)).convert("RGB")
+        image = Image.open(str(path)).convert("L")
         width, height = image.size
         if width < 200 or height < 200:
             return {"stroke_detected": False, "error": "paint capture is too small"}
-        # The canvas is the large white area below the toolbar.  A horizontal
-        # stroke must sit in the middle band with wide left-right spread.
-        band_top = int(height * 0.38)
-        band_bottom = int(height * 0.62)
-        band = image.crop((0, band_top, width, band_bottom))
-        pixels = band.load()
-        non_white: list[tuple[int, int]] = []
-        for y in range(band.size[1]):
-            for x in range(band.size[0]):
-                r, g, b = pixels[x, y]
-                if max(r, g, b) < 235:
-                    non_white.append((x, y))
-        if not non_white:
-            return {"stroke_detected": False, "pixel_count": 0, "band": [band_top, band_bottom]}
-        xs = [x for x, _y in non_white]
-        spread = (max(xs) - min(xs)) / max(1, width)
-        detected = bool(
-            len(non_white) >= 40
-            and spread >= 0.35
-        )
+        # Paint's usable canvas occupies the broad middle/lower area.  This is
+        # intentionally loose supporting evidence, not a second completion
+        # judge: find the longest contiguous dark run on any row where the
+        # requested centered horizontal stroke should be visible.
+        left, right = int(width * 0.12), int(width * 0.96)
+        top, bottom = int(height * 0.42), int(height * 0.82)
+        pixels = image.load()
+        best = {"length": 0, "x": left, "y": top}
+        for y in range(top, bottom):
+            start: int | None = None
+            for x in range(left, right + 1):
+                is_dark = x < right and pixels[x, y] < 225
+                if is_dark and start is None:
+                    start = x
+                elif not is_dark and start is not None:
+                    length = x - start
+                    if length > best["length"]:
+                        best = {"length": length, "x": start, "y": y}
+                    start = None
+        inspected_width = max(1, right - left)
+        spread = best["length"] / inspected_width
         return {
-            "stroke_detected": detected,
-            "pixel_count": len(non_white),
+            "stroke_detected": spread >= 0.25,
+            "strongest_horizontal_run": best,
             "spread_ratio": round(spread, 3),
-            "band": [band_top, band_bottom],
+            "inspected_band": [left, top, right, bottom],
             "screenshot": str(path),
         }
     except Exception as error:

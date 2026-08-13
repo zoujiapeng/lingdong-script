@@ -615,6 +615,10 @@ class RawDeviceExecutor:
             value = source.get("key_count")
             if type(value) is int and 0 <= value <= 6:
                 safe["key_count"] = value
+            for key in ("requested_repetitions", "completed_repetitions"):
+                value = source.get(key)
+                if type(value) is int and 0 <= value <= 100:
+                    safe[key] = value
         else:
             for key in ("event_count", "completed_events", "moves_completed"):
                 value = source.get(key)
@@ -1108,6 +1112,7 @@ class RawDeviceExecutor:
         context: RawActionContext,
         chord: HotkeyChord,
         *,
+        repeat: int = 1,
         final_guard: FinalKeyboardGuard | None = None,
         enforce_foreground: bool = True,
         stop_event: StopSignal | None = None,
@@ -1121,6 +1126,8 @@ class RawDeviceExecutor:
             )
         if (
             not isinstance(chord, HotkeyChord)
+            or type(repeat) is not int
+            or not 1 <= repeat <= 100
             or not _valid_stop_signal(stop_event)
         ):
             return self._receipt(
@@ -1133,6 +1140,8 @@ class RawDeviceExecutor:
         }
         if stop_event is not None:
             call_kwargs["stop_event"] = stop_event
+        if repeat != 1:
+            call_kwargs["repeat"] = repeat
         return self._call(
             "hotkey",
             self._backends.admitted_physical_hotkey,

@@ -2291,6 +2291,7 @@ def execute_admitted_physical_hotkey(
     chord: HotkeyChord,
     hwnd: int | None = None,
     *,
+    repeat: int = 1,
     final_guard: FinalKeyboardGuard | None = None,
     stop_event: StopSignal | None = None,
 ) -> RawBackendResult:
@@ -2298,6 +2299,8 @@ def execute_admitted_physical_hotkey(
 
     if (
         not isinstance(chord, HotkeyChord)
+        or type(repeat) is not int
+        or not 1 <= repeat <= 100
         or not _valid_stop_signal(stop_event)
     ):
         return _keyboard_result(
@@ -2317,19 +2320,37 @@ def execute_admitted_physical_hotkey(
             error="invalid admitted hotkey",
             error_kind="invalid_key",
         )
-    result = _execute_physical_hotkey_vks(
-        vks,
-        final_guard=final_guard,
-        stop_event=stop_event,
+    completed = 0
+    result: RawBackendResult | None = None
+    for _index in range(repeat):
+        result = _execute_physical_hotkey_vks(
+            vks,
+            final_guard=final_guard,
+            stop_event=stop_event,
+        )
+        if result.input_completed is not True:
+            break
+        completed += 1
+        if completed < repeat:
+            time.sleep(0.03)
+    assert result is not None
+    facts = dict(result.facts)
+    facts.update(
+        requested_repetitions=repeat,
+        completed_repetitions=completed,
     )
-    if result.input_completed is True:
+    completed_result = RawBackendResult(
+        True if completed == repeat else None if completed else result.input_completed,
+        facts,
+    )
+    if completed_result.input_completed is True:
         _publish_admitted_action_summary(
             action="hotkey",
             input_completed=True,
             via="physical_sendinput",
             key_count=len(chord.keys),
         )
-    return result
+    return completed_result
 
 
 ADMITTED_PHYSICAL_HOTKEY_BACKEND = AdmittedPhysicalHotkeyBackend(

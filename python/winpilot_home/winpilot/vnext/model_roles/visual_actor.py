@@ -105,7 +105,12 @@ _TOOL_DESCRIPTIONS = {
         "control; selected text is replaced."
     ),
     "hotkey": (
-        "Press one key or one ordered key chord; this never enters literal text."
+        "Press one key or one ordered key chord through the physical keyboard; "
+        "this never enters literal text. Set repeat for repeated presses in one "
+        "mechanically reported action. Standard named keys include volumeup, "
+        "volumedown, volumemute, arrows, function keys, and browser keys. "
+        "Volume keys move relative to the current system level; inspect the "
+        "next screen to judge the resulting level."
     ),
     "input_sequence": (
         "Run one atomic human-like mouse/keyboard timeline. Separate commands "
@@ -1338,7 +1343,12 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": _SHELL_TOOL,
-                "description": "Run PowerShell or cmd.",
+                "description": (
+                    "Run PowerShell or cmd for code, files, processes, and "
+                    "command output. ok and exit_code describe only the child "
+                    "process; they never provide a physical mouse or keyboard "
+                    "receipt. Use the desktop input tools for real input."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -2038,6 +2048,11 @@ def _call_shell(
             TypeError("shell runner returned a non-object result"),
         )
     output = dict(result)
+    # A child process exiting cleanly says nothing about any synthetic desktop
+    # input it may have attempted.  Keep that mechanical distinction explicit
+    # instead of letting exit code 0 impersonate a RawDevice receipt.
+    output["completion_scope"] = "child_process_exit_only"
+    output["physical_input_receipt"] = False
     stdout = output.pop("stdout", "")
     stderr = output.pop("stderr", "")
     if not isinstance(output.get("output"), str) or not output.get("output"):
@@ -2148,9 +2163,6 @@ def _initial_call_envelope(
     name = member(function, "name") if function is not None else None
     if type(name) is not str or name not in {
         "observe_desktop",
-        _SHELL_TOOL,
-        *_LOCAL_UTILITY_TOOLS,
-        _WINDOW_TEXT_TOOL,
         *_STATUS_TOOLS,
         *_CONNECTOR_TOOLS,
     }:
@@ -2165,10 +2177,7 @@ def _execute_initial_call(
     call: Mapping[str, Any],
     *,
     status_provider: Any,
-    shell_runner: Any,
     connector_gateway: Any,
-    window_text_reader: Any,
-    turn: Any,
     timeout_s: float,
     stop_event: Any | None,
 ) -> dict[str, Any]:
@@ -2195,30 +2204,6 @@ def _execute_initial_call(
                 TypeError("status provider returned a non-object result"),
             )
         return _actionable_tool_result(str(name), result)
-    if name == _SHELL_TOOL:
-        return _call_shell(
-            shell_runner,
-            arguments,
-            stop_event=stop_event,
-        )
-    if name in _LOCAL_UTILITY_TOOLS:
-        return _call_local_utility(shell_runner, name, arguments)
-    if name == _WINDOW_TEXT_TOOL:
-        if window_text_reader is None or not callable(window_text_reader):
-            return _actionable_tool_result(
-                _WINDOW_TEXT_TOOL,
-                {"ok": False, "error": "window-text reader is unavailable"},
-            )
-        try:
-            result = window_text_reader(turn)
-        except Exception as exc:
-            return _actionable_tool_error(_WINDOW_TEXT_TOOL, exc)
-        if not isinstance(result, Mapping):
-            return _actionable_tool_error(
-                _WINDOW_TEXT_TOOL,
-                TypeError("window-text reader returned a non-object result"),
-            )
-        return _actionable_tool_result(_WINDOW_TEXT_TOOL, result)
     if name is not None and name in _CONNECTOR_TOOLS:
         try:
             return _call_connector(
@@ -2787,11 +2772,6 @@ class LiveVisualActor:
             if self._status_provider is not None
             else []
         )
-        shell_tools = (
-            _shell_tool_definitions(self._shell_runner)
-            if self._shell_runner is not None
-            else []
-        )
         connector_tools = _connector_tool_definitions(self._connector_gateway)
         provider_request = {
             "model": self._model,
@@ -2799,7 +2779,6 @@ class LiveVisualActor:
             "tools": [
                 *terminal_tools,
                 *status_tools,
-                *shell_tools,
                 *connector_tools,
             ],
             "tool_choice": "auto",
@@ -3005,10 +2984,7 @@ class LiveVisualActor:
                 return _execute_initial_call(
                     call,
                     status_provider=self._status_provider,
-                    shell_runner=self._shell_runner,
                     connector_gateway=self._connector_gateway,
-                    window_text_reader=self._window_text_reader,
-                    turn=None,
                     timeout_s=min(30.0, self._total_timeout_s),
                     stop_event=stop_event,
                 )

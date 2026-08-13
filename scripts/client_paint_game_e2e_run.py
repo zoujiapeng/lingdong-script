@@ -94,11 +94,9 @@ def _red_mask(image: np.ndarray) -> np.ndarray:
         & (red - green >= 42)
         & (red - blue >= 32)
     ).astype(np.uint8) * 255
-    mask = cv2.morphologyEx(
-        mask,
-        cv2.MORPH_OPEN,
-        np.ones((2, 2), dtype=np.uint8),
-    )
+    # Do not open/erode this mask. Paint's pencil can create legitimate
+    # one-pixel red strokes; the old 2x2 opening erased them and turned a
+    # visible wrong-cell X into misleading "no red X" evidence.
     return cv2.morphologyEx(
         mask,
         cv2.MORPH_CLOSE,
@@ -165,11 +163,41 @@ def baseline_contract(
     red_count = int(cv2.countNonZero(red))
     dark_count = int(dark.sum())
     interior_dark_ratio = float(interior.mean()) if interior.size else 1.0
+
+    def line_support(axis: str, fraction: float) -> float:
+        if axis == "vertical":
+            center = round(image.shape[1] * fraction)
+            radius = max(2, round(image.shape[1] * 0.018))
+            band = dark[
+                round(image.shape[0] * 0.04) : round(image.shape[0] * 0.96),
+                max(0, center - radius) : min(image.shape[1], center + radius + 1),
+            ]
+            return float(band.mean(axis=0).max()) if band.size else 0.0
+        center = round(image.shape[0] * fraction)
+        radius = max(2, round(image.shape[0] * 0.018))
+        band = dark[
+            max(0, center - radius) : min(image.shape[0], center + radius + 1),
+            round(image.shape[1] * 0.04) : round(image.shape[1] * 0.96),
+        ]
+        return float(band.mean(axis=1).max()) if band.size else 0.0
+
+    grid_support = {
+        "vertical": [
+            line_support("vertical", 1 / 3),
+            line_support("vertical", 2 / 3),
+        ],
+        "horizontal": [
+            line_support("horizontal", 1 / 3),
+            line_support("horizontal", 2 / 3),
+        ],
+    }
     errors: list[str] = []
     if red_count > max(18, round(area * 0.0008)):
         errors.append("baseline board already contains red ink")
     if dark_count < max(90, round(area * 0.0015)):
         errors.append("baseline board has insufficient persistent dark structure")
+    if min((*grid_support["vertical"], *grid_support["horizontal"])) < 0.55:
+        errors.append("baseline board does not contain a visible 3x3 grid")
     if interior_dark_ratio > 0.035:
         errors.append("expected legal cell is not visibly empty")
     return {
@@ -179,6 +207,10 @@ def baseline_contract(
         "expected_cell_bounds": list(cell_bounds(image.shape, expected_cell)),
         "baseline_red_pixels": red_count,
         "baseline_dark_pixels": dark_count,
+        "grid_line_support": {
+            axis: [round(value, 6) for value in values]
+            for axis, values in grid_support.items()
+        },
         "expected_cell_dark_ratio": round(interior_dark_ratio, 6),
         "image_size": [int(image.shape[1]), int(image.shape[0])],
     }
@@ -307,7 +339,7 @@ def evaluate_board_frame(
 
 
 class BoardOracle:
-    """Stateful stability/sticky-failure layer over the pure pixel evaluator."""
+    """Small current-screen stability layer over the pure pixel evaluator."""
 
     def __init__(
         self,
@@ -332,7 +364,6 @@ class BoardOracle:
             )
         self.valid_streak = 0
         self.sample_count = 0
-        self.wrong_red_seen = False
         self.last_verdict: dict[str, Any] = {}
 
     def observe(
@@ -345,12 +376,7 @@ class BoardOracle:
             self.expected_cell,
         )
         self.sample_count += 1
-        self.wrong_red_seen = bool(
-            self.wrong_red_seen or evaluation["wrong_red"]
-        )
-        candidate = bool(
-            evaluation["candidate_passed"] and not self.wrong_red_seen
-        )
+        candidate = bool(evaluation["candidate_passed"])
         self.valid_streak = self.valid_streak + 1 if candidate else 0
         passed = self.valid_streak >= self.stable_frames
         verdict = {
@@ -360,7 +386,6 @@ class BoardOracle:
             "sample_count": self.sample_count,
             "stable_frame_count": self.valid_streak,
             "required_stable_frames": self.stable_frames,
-            "sticky_wrong_red_seen": self.wrong_red_seen,
             **evaluation,
         }
         # The stateful gate owns the final verdict, not the one-frame candidate.
@@ -680,7 +705,6 @@ class PaintWindowOracle:
             while (
                 verdict.get("candidate_passed") is True
                 and verdict.get("passed") is not True
-                and not verdict.get("sticky_wrong_red_seen")
             ):
                 time.sleep(self.sample_interval_s)
                 image = self._capture()

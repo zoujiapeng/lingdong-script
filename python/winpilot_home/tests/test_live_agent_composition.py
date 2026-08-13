@@ -1456,6 +1456,12 @@ def test_tool_catalog_exposes_generic_mouse_keyboard_mechanics() -> None:
     assert set(hotkey["items"]["enum"]) == set(CANONICAL_HOTKEY_KEYS)
     assert hotkey["maxItems"] == len(CANONICAL_HOTKEY_MODIFIERS) + 1 == 5
     assert hotkey["uniqueItems"] is True
+    assert schemas["hotkey"]["properties"]["repeat"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100,
+        "default": 1,
+    }
     drag = schemas["drag"]
     assert tuple(drag["required"]) == ("image_path",)
     path = drag["properties"]["image_path"]
@@ -2305,6 +2311,47 @@ def test_raw_receipt_trace_projects_fixed_safe_summary(
     _assert_private_runtime_evidence_absent(
         {"bus": event, "trace": records}
     )
+
+
+def test_raw_receipt_trace_keeps_repeated_hotkey_completion_counts() -> None:
+    events: list[dict[str, Any]] = []
+    BUS.add_sink(events.append)
+    try:
+        live_agent._RawReceiptTrace().record(
+            RawActionReceipt(
+                action="hotkey",
+                outcome=MutationOutcome.APPLIED,
+                backend_result=RawBackendResult(
+                    input_completed=True,
+                    facts={
+                        "via": "physical_sendinput",
+                        "key_count": 1,
+                        "requested_repetitions": 19,
+                        "completed_repetitions": 19,
+                    },
+                ),
+            ),
+            metadata={
+                "run_id": "run-repeated-hotkey",
+                "mission_id": "mission-repeated-hotkey",
+                "decision_id": "decision-repeated-hotkey",
+                "controller_action": "hotkey",
+                "frame_id": 5,
+                "frame_epoch": 4,
+            },
+        )
+    finally:
+        BUS.remove_sink(events.append)
+
+    event = next(
+        item for item in events if item["type"] == "vnext_raw_receipt"
+    )
+    assert event["mechanical_facts"] == {
+        "via": "physical_sendinput",
+        "key_count": 1,
+        "requested_repetitions": 19,
+        "completed_repetitions": 19,
+    }
 
 
 @pytest.mark.parametrize(

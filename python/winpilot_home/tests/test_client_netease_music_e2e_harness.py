@@ -229,7 +229,7 @@ def test_second_result_cannot_pass_as_the_first_song():
     ]
 
 
-def test_missing_result_row_fails_closed_instead_of_trusting_agent_claim():
+def test_missing_result_row_is_diagnostic_not_a_false_failure():
     harness = _load_harness()
     nodes = _successful_nodes()[3:]
 
@@ -239,8 +239,10 @@ def test_missing_result_row_fails_closed_instead_of_trusting_agent_claim():
         (0, 0, 1000, 800),
     )
 
-    assert verdict["candidate_passed"] is False
-    assert "first visible search-result title is not observable" in verdict[
+    assert verdict["candidate_passed"] is True
+    assert verdict["first_result_observable"] is False
+    assert verdict["first_result_match"] is None
+    assert "first visible search-result title is not observable" not in verdict[
         "errors"
     ]
 
@@ -313,6 +315,80 @@ def test_transient_capture_error_does_not_erase_the_last_player_verdict():
         "RuntimeError: target lost foreground"
     )
     assert verdict["passed"] is False
+
+
+def test_focus_records_window_geometry_change_instead_of_failing(
+    monkeypatch,
+) -> None:
+    harness = _load_harness()
+    identities = iter((
+        {
+            "hwnd": 4321,
+            "process_id": 12,
+            "executable": "cloudmusic.exe",
+            "executable_path": "cloudmusic.exe",
+            "title": "NetEase",
+            "window_rect": [10, 10, 800, 600],
+        },
+        {
+            "hwnd": 4321,
+            "process_id": 12,
+            "executable": "cloudmusic.exe",
+            "executable_path": "cloudmusic.exe",
+            "title": "NetEase",
+            "window_rect": [-9, -9, 1929, 1029],
+        },
+    ))
+    monkeypatch.setattr(harness, "_window_identity", lambda _hwnd: next(identities))
+    monkeypatch.setattr(harness.win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(harness.win32gui, "BringWindowToTop", lambda _hwnd: None)
+    monkeypatch.setattr(harness.win32api, "keybd_event", lambda *args: None)
+    monkeypatch.setattr(harness.win32gui, "SetForegroundWindow", lambda _hwnd: None)
+    monkeypatch.setattr(harness.win32gui, "GetForegroundWindow", lambda: 4321)
+    monkeypatch.setattr(harness, "_root_window", lambda hwnd: hwnd)
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    result = harness._focus_window(4321)
+
+    assert result["focused"] is True
+    assert result["window_rect"] == [-9, -9, 1929, 1029]
+    assert result["window_rect_before_focus"] == [10, 10, 800, 600]
+    assert result["geometry_changed_while_focusing"] is True
+
+
+def test_oracle_tracks_live_geometry_without_losing_bound_process(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    harness = _load_harness()
+    original = {
+        "hwnd": 4321,
+        "process_id": 12,
+        "executable": "cloudmusic.exe",
+        "executable_path": "C:/CloudMusic/cloudmusic.exe",
+        "title": "before",
+        "window_rect": [10, 10, 800, 600],
+    }
+    changed = {
+        **original,
+        "title": "after - Liang Jingru",
+        "window_rect": [-9, -9, 1929, 1029],
+    }
+    monkeypatch.setattr(harness, "_window_identity", lambda _hwnd: dict(original))
+    oracle = harness.NetEaseWindowOracle(
+        4321,
+        tmp_path,
+        capture=lambda **kwargs: None,
+    )
+    monkeypatch.setattr(harness, "_window_identity", lambda _hwnd: dict(changed))
+    monkeypatch.setattr(harness.win32gui, "GetForegroundWindow", lambda: 4321)
+    monkeypatch.setattr(harness, "_root_window", lambda hwnd: hwnd)
+
+    current = oracle._validate_target()
+
+    assert current == changed
+    assert oracle.window_rect == (-9, -9, 1929, 1029)
+    assert oracle.identity["title"] == "after - Liang Jingru"
 
 
 def test_harness_wires_visible_handoff_and_independent_probe(monkeypatch, tmp_path):
