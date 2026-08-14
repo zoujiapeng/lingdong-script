@@ -135,6 +135,7 @@ _APPROVED_ACTIONS = frozenset(
 _CONTINUE_STATUSES = frozenset(
     {
         RuntimeStatus.ACTION_RECORDED,
+        RuntimeStatus.OBSERVATION_REQUESTED,
         RuntimeStatus.STALE_DISCARDED,
         RuntimeStatus.VERIFICATION_RECORDED,
     }
@@ -855,6 +856,7 @@ class _LiveAgentStatusProvider:
                 else "unavailable"
             ),
             "observe_desktop": True,
+            "observation_tools": ("refresh_desktop",),
             "desktop_actions": (
                 "click",
                 "double_click",
@@ -1423,6 +1425,17 @@ def _tool_catalog() -> ToolCatalog:
             },
             ["app"],
         ),
+        "observe": _object_schema(
+            {
+                "question": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16384,
+                    "pattern": _NON_WHITESPACE_PATTERN,
+                },
+            },
+            ["question"],
+        ),
         "claim_obligation_done": _object_schema(
             {
                 "concise_claim": {
@@ -1467,6 +1480,7 @@ def _tool_catalog() -> ToolCatalog:
         "hotkey",
         "input_sequence",
         "launch_application",
+        "observe",
         "claim_obligation_done",
         "blocked",
     )
@@ -2062,7 +2076,11 @@ class _BudgetedActor:
     def propose(self, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
         admitted = self._counter.begin(
             VISUAL_ACTOR_MODEL_ROLE,
-            reserve=self._role.model_call_reservation,
+            # The one semantic Actor owns its dependent utility chain. The
+            # frozen task budget is the only model-call ceiling; a second
+            # per-frame reservation used to force unrelated GUI actions just
+            # to obtain another allowance.
+            reserve=None,
         )
         try:
             kwargs["_model_call_limit"] = admitted

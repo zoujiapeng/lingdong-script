@@ -279,19 +279,24 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 
 - `click`
 - `double_click`
+- `move_mouse`
 - `drag`（可带折线路径和跨帧 `keep_holding`）
 - `scroll`
 - `type_text`
 - `hotkey`（模型侧名称 `press_key`）
+- `input_sequence`（一条原子鼠标/键盘时间线）
 - `launch_application`（按显示名/别名/PATH 裸命令/路径通用启动，成功后经 workspace
   因果后继机制重绑定到新窗口）
+- `observe`（模型侧名称 `refresh_desktop`；不产生物理输入或完成判决，只把控制权交回
+  下一张全桌面帧）
 - `claim_obligation_done`
 - `blocked`
 
 显式只读 connector 的两个通用入口、三个状态工具、`run_shell` 与视觉线内的
 `read_window_text` 在文本/视觉回合仍可见；它们没有变成 GUI 动作、应用 adapter 或
-第二执行线。本地工具（status/shell/connector/window_text）合用一个共享本地工具预算，
-没有每工具族上限；全局 `max_model_calls` 是唯一硬顶。
+第二执行线。生产 Actor 的依赖工具链不再有按工具族或按视觉帧的强制截断；全局
+`max_model_calls` 是唯一硬顶。若当前局部工具结果开始重复，模型可自行调用
+`refresh_desktop` 换取新整屏，而不是被 runtime 强迫执行一笔无关 GUI 动作。
 
 不要为启动软件、答题、绘画、保存、发 QQ、播放音乐、调音量、棋局或某个网站新增
 宏工具。已有工具结构上不能表达的新通用能力，必须先由至少两个不同任务族的真实

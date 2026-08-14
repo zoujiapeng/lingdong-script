@@ -256,6 +256,23 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
     tools.extend(
         (
             _tool(
+                "observe",
+                mutation=MutationKind.NONE,
+                schema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 16384,
+                        },
+                    },
+                    "required": ["question"],
+                },
+                order=10,
+            ),
+            _tool(
                 "claim_obligation_done",
                 mutation=MutationKind.NONE,
                 schema={
@@ -304,7 +321,7 @@ def _catalog(*, include_extra: bool = False) -> ToolCatalog:
     if include_extra:
         tools.append(
             _tool(
-                "observe",
+                "request_capability",
                 mutation=MutationKind.NONE,
                 schema=_empty_schema(),
                 order=22,
@@ -356,6 +373,16 @@ def _claim() -> dict[str, Any]:
         "format": ACTOR_PROPOSAL_FORMAT,
         "kind": "claim_obligation_done",
         "concise_claim": "the requested state is visibly present",
+    }
+
+
+def _observe() -> dict[str, Any]:
+    return {
+        "format": ACTOR_PROPOSAL_FORMAT,
+        "kind": "observe",
+        "observation_kind": "full",
+        "image_region": None,
+        "question": "Refresh the whole desktop before choosing the next step",
     }
 
 
@@ -803,6 +830,19 @@ def test_minimal_runtime_executes_each_approved_action_once(action: str) -> None
         "transition_recorded",
     ]
     assert harness.reducer.card.last_transition.action == action
+
+
+def test_observe_requests_a_fresh_turn_without_physical_input() -> None:
+    harness = _harness(_observe())
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.OBSERVATION_REQUESTED
+    assert result.proposal_kind == "observe"
+    assert result.detail == _observe()["question"]
+    assert harness.state.observe_calls == 1
+    assert harness.controller.calls == 0
+    assert [event.kind for event in harness.reducer.events] == ["target_bound"]
 
 
 def test_cross_frame_held_drag_preserves_then_releases_one_lease() -> None:

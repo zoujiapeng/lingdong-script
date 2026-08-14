@@ -9,7 +9,7 @@
 1. 一个原始 goal：产品入口只接收 `goal` 和可选 `thread_id`；客户端不能替用户提交图、runtime、stage 或执行媒介。
 2. 一个语义 Actor：同一个 `LiveVisualActor` 决定直接回复、只读 connector 或桌面观察；进入桌面后仍是它选择下一笔动作。
 3. 一条视觉执行线：每个空间 mutation 前必须绑定当前目标和当前权威帧；一笔动作后重新观察。
-4. 小而通用的工具面：当前 Runtime 只有 `click`、`double_click`、`drag`、`scroll`、`type_text`、`hotkey`、`claim_obligation_done`、`blocked`。
+4. 小而通用的工具面：当前 Runtime 只有 `click`、`double_click`、`move_mouse`、`drag`、`scroll`、`type_text`、`hotkey`、`input_sequence`、`launch_application`、`observe`、`claim_obligation_done`、`blocked`。
 5. 物理层无应用语义：Broker、坐标映射、队列、RawDevice 和 evidence 只验证身份、新鲜度、权限、调用一次与回执，不知道“保存”“答题”“播放”等任务。
 6. 完成不等于像素变化：生产 Runtime 接受 Actor 对当前帧的 claim 并建立一致性事件；真实测试仍必须由外部 oracle 独立判定用户目标。
 7. 无静默 Legacy fallback：`vnext.live_agent_enabled` 未开启或主链不可用时失败；不会退回 `/api/chat`、AgentRunner、FlowScript 或旧 planner。
@@ -221,9 +221,9 @@ obligations = [
 - 只有一个 obligation；
 - 固定 STANDARD / `safe_default` profile；
 - planner、obligation verifier、mission verifier、visual inspector、deep reasoning 均关闭；
-- ToolCatalog 恰好等于八个批准工具；
+- ToolCatalog 恰好等于十二个批准工具；
 - 每个工具都由 Visual Actor route 拥有；
-- GUI mutation 与 outcome/control 工具类型严格对应；
+- GUI mutation、无输入 observation 与 outcome/control 工具类型严格对应；
 - 目标必须预先绑定；
 - Runtime、Reducer、Registry、Broker、Catalog、permit 和 evidence plane 的 mission/run 身份一致。
 
@@ -243,7 +243,11 @@ obligations = [
 
 ### 7.2 视觉轮
 
-每个视觉轮的 system contract 很短：使用原始 goal、当前权威 JPEG、task state、上一动作和供应工具；恰好调用一个工具、不输出 prose、坐标使用 submitted-image pixels；可见完成时 claim，pointer held 时继续或结束 drag。
+每个视觉轮的 system contract 很短：使用原始 goal、当前权威 JPEG、task state、上一动作和供应工具；局部只读/开发工具链之后最终产生一个 GUI、observation 或 outcome proposal，坐标使用 submitted-image pixels；可见完成时 claim，pointer held 时继续或结束 drag。
+
+局部 shell/status/connector 依赖链可以由同一 Actor 连续完成，不再每帧强迫它切到 GUI。
+当结果开始重复或模型需要重新看真实环境时，它可调用模型侧 `refresh_desktop`（Runtime
+中的 `observe`）：该选择不产生物理输入或验证事件，只让外层在下一轮提供新的全桌面帧。
 
 Actor 只保留：
 

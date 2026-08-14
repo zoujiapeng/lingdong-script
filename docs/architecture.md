@@ -55,9 +55,9 @@ full-goal GUI mission；connector 结果也只回到同一个 Actor 继续决定
 看见界面前被 compiler 拆成一串应用专属微步骤，也不能因任务名称切换到另一套
 Agent、工具或提示词。Task Contract 只属于 Studio/兼容链。
 
-原生客户端当前使用一个小而固定的本地 GUI 操作面：点击、双击、输入、快捷键、滚动、
-拖拽/折线路径/跨帧按住，以及 claim/blocked；显式配置时，两个 generic connector
-工具与它同轮可见。复合目标由模型在“新帧 → 一个决定
+原生客户端当前使用一个小而固定的本地操作面：点击、双击、移动、输入、快捷键、滚动、
+拖拽/折线路径/跨帧按住、原子输入序列、通用启动、整屏刷新，以及 claim/blocked；
+显式配置时，两个 generic connector 工具与它同轮可见。复合目标由模型在“新帧 → 一个决定
 → 一笔动作 → 新证据”的循环中完成，不靠公开宏工具承载写死流程。运行时可以拒绝
 过期坐标、失去所有权的窗口或非法输入事务，但不能因为模型改变了语义判断而把它
 拉回旧策略。
@@ -209,10 +209,11 @@ typed transaction；动作后重新捕获权威帧，下一回合追加新视觉
 已经回退。Runtime 不根据任务词、失败类型或当前 benchmark 自动切换推理模式；未来
 更换模型时用同一外部-oracle 矩阵 A/B，不随模型升级添加补偿规则。
 
-当前 live vNext 最小工具目录不向模型暴露 Legacy
-`observe(image_region=...)`。Legacy crop、UIA、OCR、CV 和 watcher 仍是兼容债务，
-不是 vNext 失败后的自动 fallback。若未来证明当前观察结构上不足，新增观察原语也
-必须先在不同任务族通过 E2E，不能为 corridor、棋盘或某个应用单独加入。
+当前 live vNext 不向模型暴露 Legacy `observe(image_region=...)`。它只提供通用
+`refresh_desktop`：模型主动结束当前局部工具链，Runtime 不做物理输入、不作完成判决，
+外层在下一普通回合重新捕获整张桌面。Legacy crop、UIA、OCR、CV 和 watcher 仍是兼容
+债务，不是 vNext 失败后的自动 fallback。若未来证明当前观察结构上不足，新增观察原语
+也必须先在不同任务族通过 E2E，不能为 corridor、棋盘或某个应用单独加入。
 
 当前默认配置关闭 UIA、OCR 与 predictive OCR，`native_vision_direct=true`。这使默认路径先看图；结构化 provider 仍是可显式选择的兼容/提速能力，不是被删除的能力。
 

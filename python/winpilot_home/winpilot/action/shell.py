@@ -577,11 +577,13 @@ def _foreground_window_fact() -> dict[str, Any]:
         return {"hwnd": 0, "available": False}
 
 
-def _sweep_old(directory, max_age_s: int = 7 * 24 * 3600, keep: int = 200) -> None:
-    """Drop detached .ps1 files older than max_age (and cap total count) so the
-    directory can't grow unbounded. Best-effort; never raises."""
+def _sweep_old(directory, max_age_s: int = 7 * 24 * 3600, keep: int = 1000) -> None:
+    """Drop stale detached-job artifacts and cap their total count."""
     try:
-        files = sorted(directory.glob("*.ps1"), key=lambda p: p.stat().st_mtime)
+        files = sorted(
+            (path for path in directory.iterdir() if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+        )
         now = time.time()
         stale = [p for p in files if now - p.stat().st_mtime > max_age_s]
         excess = files[:-keep] if len(files) > keep else []
@@ -599,10 +601,9 @@ def run_detached(script: str, name: str = "task") -> dict:
     moment the command returns, taking Start-Job with it).
 
     The script is written to a real ``.ps1`` file and launched via ``-File``,
-    which sidesteps the quoting/EncodedCommand hell that broke every hand-rolled
-    attempt. The child is started with DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    so it outlives the WinPilot server. Returns the PID so the agent can verify
-    the schedule actually took (Get-Process / find_app).
+    which sidesteps quoting/EncodedCommand failures. A detached monitor owns
+    the child and writes a status JSON plus stdout/stderr logs, so callers can
+    distinguish process creation from the eventual child exit.
     """
     if not shell_enabled():
         return {"ok": False, "error": "shell 已被禁用（强制 GUI 模式）"}
@@ -619,10 +620,71 @@ def run_detached(script: str, name: str = "task") -> dict:
     detached_dir = SCRIPTS_DIR / "detached"
     try:
         detached_dir.mkdir(parents=True, exist_ok=True)
-        _sweep_old(detached_dir)  # bound accumulation: drop stale .ps1 files
-        path = detached_dir / f"{safe}-{int(time.time())}-{uuid.uuid4().hex[:6]}.ps1"
+        _sweep_old(detached_dir)  # bound accumulated payload/status/log files
+        stem = f"{safe}-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        path = detached_dir / f"{stem}.payload.ps1"
+        monitor_path = detached_dir / f"{stem}.monitor.ps1"
+        stdout_path = detached_dir / f"{stem}.stdout.log"
+        stderr_path = detached_dir / f"{stem}.stderr.log"
+        status_path = detached_dir / f"{stem}.status.json"
         # UTF-8 BOM so PowerShell 5.1 -File reads non-ASCII (Chinese) correctly.
         path.write_text(script, encoding="utf-8-sig")
+
+        def _ps_literal(value: Path) -> str:
+            return "'" + str(value).replace("'", "''") + "'"
+
+        monitor_script = f"""\
+$ErrorActionPreference = 'Stop'
+$payloadPath = {_ps_literal(path)}
+$stdoutPath = {_ps_literal(stdout_path)}
+$stderrPath = {_ps_literal(stderr_path)}
+$statusPath = {_ps_literal(status_path)}
+$startedAt = [DateTime]::UtcNow.ToString('o')
+$exitCode = 1
+$childPid = $null
+try {{
+  $child = Start-Process powershell -WindowStyle Hidden -PassThru `
+    -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$payloadPath) `
+    -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+  $childPid = [int]$child.Id
+  [ordered]@{{
+    state = 'running'
+    monitor_pid = [int]$PID
+    child_pid = $childPid
+    started_at = $startedAt
+  }} | ConvertTo-Json -Compress | Set-Content -LiteralPath $statusPath -Encoding UTF8
+  # PowerShell 5.1 can drop ExitCode after redirected processes exit unless
+  # the Process handle is materialized before WaitForExit.
+  $null = $child.Handle
+  $child.WaitForExit()
+  $child.Refresh()
+  $exitCode = [int]$child.ExitCode
+  $state = if ($exitCode -eq 0) {{ 'succeeded' }} else {{ 'failed' }}
+  [ordered]@{{
+    state = $state
+    monitor_pid = [int]$PID
+    child_pid = $childPid
+    exit_code = $exitCode
+    started_at = $startedAt
+    finished_at = [DateTime]::UtcNow.ToString('o')
+  }} | ConvertTo-Json -Compress | Set-Content -LiteralPath $statusPath -Encoding UTF8
+}} catch {{
+  $message = $_.Exception.Message
+  Add-Content -LiteralPath $stderrPath -Value $message -Encoding UTF8
+  [ordered]@{{
+    state = 'failed'
+    monitor_pid = [int]$PID
+    child_pid = $childPid
+    exit_code = 1
+    error = $message
+    started_at = $startedAt
+    finished_at = [DateTime]::UtcNow.ToString('o')
+  }} | ConvertTo-Json -Compress | Set-Content -LiteralPath $statusPath -Encoding UTF8
+  $exitCode = 1
+}}
+exit $exitCode
+"""
+        monitor_path.write_text(monitor_script, encoding="utf-8-sig")
     except OSError as exc:
         logger.warning("run_detached 写脚本失败: %s", exc)
         return {"ok": False, "error": f"写入脚本失败: {exc}"}
@@ -634,7 +696,7 @@ def run_detached(script: str, name: str = "task") -> dict:
     # child instantly — Start-Process is the reliable detach primitive here.)
     # Pass the path via a $-variable with '' single-quote escaping so an install
     # path containing a quote can't break out of the argument string.
-    safe_path = str(path).replace("'", "''")
+    safe_path = str(monitor_path).replace("'", "''")
     launcher = (
         f"$f = '{safe_path}'; "
         f"$p = Start-Process powershell -WindowStyle Hidden -PassThru "
@@ -650,6 +712,24 @@ def run_detached(script: str, name: str = "task") -> dict:
     pid_text = (result.get("stdout") or "").strip().splitlines()
     pid = int(pid_text[-1]) if pid_text and pid_text[-1].strip().isdigit() else None
     logger.info("已启动分离进程 PID=%s 脚本=%s", pid, path.name)
-    return {"ok": True, "pid": pid, "script_path": str(path),
-            "note": "已作为独立后台进程启动，不随 WinPilot 退出而结束。"
-                    "可用 find_app('powershell') 或 Get-Process 验证 PID 存活。"}
+    output = (
+        f"Detached process started (pid={pid}); this is a launch receipt, "
+        f"not completion. Poll {status_path} and inspect {stdout_path} / "
+        f"{stderr_path}."
+    )
+    return {
+        "ok": True,
+        "state": "started",
+        "pid": pid,
+        "script_path": str(path),
+        "monitor_path": str(monitor_path),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "status_path": str(status_path),
+        "completion_scope": "detached_process_started_only",
+        "output": output,
+        "next_step": (
+            "read status_path until state is succeeded or failed, then use "
+            "its exit_code and the log files as the command result"
+        ),
+    }

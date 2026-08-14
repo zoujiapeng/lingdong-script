@@ -794,6 +794,7 @@ def test_minimal_runtime_is_exact_default_unreachable_and_sdk_free() -> None:
 def test_minimal_runtime_tool_surface_cannot_expand_silently() -> None:
     from winpilot.vnext.runtime.contracts import (
         APPROVED_DESKTOP_ACTIONS,
+        APPROVED_OBSERVATION_TOOLS,
         APPROVED_OUTCOME_TOOLS,
         APPROVED_RUNTIME_TOOLS,
     )
@@ -813,8 +814,11 @@ def test_minimal_runtime_tool_surface_cannot_expand_silently() -> None:
         "claim_obligation_done",
         "blocked",
     }
+    assert APPROVED_OBSERVATION_TOOLS == {"observe"}
     assert APPROVED_RUNTIME_TOOLS == (
-        APPROVED_DESKTOP_ACTIONS | APPROVED_OUTCOME_TOOLS
+        APPROVED_DESKTOP_ACTIONS
+        | APPROVED_OBSERVATION_TOOLS
+        | APPROVED_OUTCOME_TOOLS
     )
 
 

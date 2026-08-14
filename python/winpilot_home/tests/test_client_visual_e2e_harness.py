@@ -687,6 +687,7 @@ def test_calibration_hits_mutate_the_shared_point_object():
         assert "best=p;" in setup, f"{setup_name} must reference the point"
         hit_branch = setup[setup.index("if(best){") :]
         assert "best.hit=true;" in hit_branch
+        assert "best.el.classList.add('hit')" in hit_branch
         assert "points.every(p=>p.hit)" in hit_branch
         assert "markSuccess('CALIBRATION_SUCCEEDED'" in hit_branch
 
@@ -708,12 +709,33 @@ def test_calibration_clicks_are_judged_in_arena_coordinates():
             "function setup", target.index(f"function {setup_name}()") + 1
         )
         setup = setup[:next_setup]
-        pointer_branch = setup[setup.index("addEventListener('pointerdown'") :]
+        pointer_branch = setup[setup.index("arena.addEventListener('pointerdown'") :]
+        assert "el.addEventListener('pointerdown'" not in setup
         assert "getBoundingClientRect" in pointer_branch, (
             f"{setup_name} must convert viewport to arena coordinates"
         )
         assert "event.clientX-arenaRect.left" in pointer_branch
         assert "event.clientY-arenaRect.top" in pointer_branch
+
+
+def test_calibration_acceptance_area_is_not_clipped_to_the_visible_square():
+    target = (
+        Path(__file__).resolve().parents[1]
+        / "eval_targets"
+        / "visual_interaction_target.html"
+    ).read_text(encoding="utf-8")
+
+    grid = target[target.index("function setupCalibrationGrid()") :]
+    grid = grid[: grid.index("function setupCalibrationFeedback()")]
+    assert "size=28,tolerance=20" in grid
+    assert "arena.addEventListener('pointerdown'" in grid
+    assert "Math.abs(dx)<=tolerance" in grid
+    assert "tolerance_px:tolerance" in grid
+
+    feedback = target[target.index("function setupCalibrationFeedback()") :]
+    feedback = feedback[: feedback.index("function setupQuizAll()")]
+    assert "arena.addEventListener('pointerdown'" in feedback
+    assert "Math.abs(dx)<=tolerance" in feedback
 
 
 def test_visual_target_builds_geometry_after_browser_layout_stabilizes():

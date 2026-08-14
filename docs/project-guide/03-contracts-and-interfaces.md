@@ -208,12 +208,12 @@ Lease bind请求：
 - `previous_action` 只描述最近一笔已接受输入及效果；
 - provider 原生上一交换只有在 `input_completed=true` 且动作名一致时才保留。
 
-## 7. 当前八个工具的精确参数
+## 7. 当前十二个工具的精确参数
 
-每个模型工具还会被注入：
+每个模型工具还可携带：
 
-- `task_state_update`：必填；
-- GUI mutation 工具的 `local_intent`：1..16384 字符必填；
+- `task_state_update`：可选的有界工作状态更新；
+- GUI mutation 工具的 `local_intent`：可选的局部意图；
 - `additionalProperties=false`。
 
 下表只列各工具自己的参数：
@@ -222,14 +222,18 @@ Lease bind请求：
 | --- | --- | --- | --- |
 | `click` | `click` | `image_x`, `image_y` | 数值且 `>=0`；本地补验必须落在 `0..width-1` / `0..height-1` |
 | `double_click` | `double_click` | `image_x`, `image_y` | 同上 |
-| `drag` | `drag` | `image_x1/y1`, `image_x2/y2`, `image_points`, `keep_holding` | 所有点须在 submitted bounds；中间点最多 32，每点恰两数；provider 面要求显式 `[]/false`；映射后端点须不同，held pointer 的 stationary release 是唯一例外 |
+| `move_mouse` | `move_mouse` | `image_x`, `image_y`, `duration_ms` | 点须在 submitted bounds；duration 为 `0..30000` |
+| `drag` | `drag` | `image_path`, `keep_holding`, `button`, `held_keys`, `duration_ms` | Runtime 接收有序点列；模型面用 `x1,y1 x2,y2 ...` 字符串；所有点须在 submitted bounds |
 | `scroll` | `scroll` | `image_x`, `image_y`, `amount` | 点须在 submitted bounds；amount 为整数、`-1200..1200` 且非零 |
 | `type_text` | `type_text` | `text` | 1..4096 个 Unicode code points |
-| `hotkey` | `press_key` | `keys` | 唯一 canonical key；单独 modifier 合法；多键必须按 `ctrl/alt/shift/win` 顺序后接恰好一个 primary |
+| `hotkey` | `press_key` | `keys`, `repeat` | 唯一 canonical key；单独 modifier 合法；多键必须按 `ctrl/alt/shift/win` 顺序后接恰好一个 primary；repeat 为 `1..100` |
+| `input_sequence` | `input_sequence` | `sequence` | 1..32768 字符的一条原子鼠标/键盘时间线 |
+| `launch_application` | `launch_application` | `app`, `arguments` | app 为 1..512 字符；arguments 最多 4096 字符 |
+| `observe` | `refresh_desktop` | `question` | 1..16384 且非空白；只请求下一张全桌面帧，不产生物理输入 |
 | `claim_obligation_done` | 同名 | `concise_claim` | 1..16384，至少一个非空白字符 |
 | `blocked` | 同名 | `blocker_kind`, `observed_facts` | kind为小写规范标识、最多64字符；facts最多64条且唯一 |
 
-`drag` 的 `image_points` 与 `keep_holding` 在内部旧合同中可选，但严格 provider schema 要求所有对象属性，因此模型面必须明确发送；直线是 `image_points=[]`。Provider schema 的非负约束不是完整边界：本地 `SubmittedImageCoordinateMapper` 还会按本轮精确 `submitted_size` 拒绝越过右边/下边界的点。
+`drag` 的可选字段由 provider 默认值补齐；直线只需两个点。Provider schema 的非负约束不是完整边界：本地 `SubmittedImageCoordinateMapper` 还会按本轮精确 `submitted_size` 拒绝越过右边/下边界的点。
 
 ## 8. Actor Decision Envelope
 
