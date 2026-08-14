@@ -36,8 +36,6 @@ import win32con
 import win32gui
 from PIL import Image, ImageGrab
 
-from pywinauto import Desktop as pywinauto_desktop
-
 # The console on Chinese Windows uses GBK; UTF-8 reports must not crash the
 # runner just because a model reply contains an emoji.
 try:
@@ -188,6 +186,11 @@ def _capture_window(hwnd: int, path: Path) -> str:
 def _uia_visible_texts(hwnd: int) -> list[str]:
     """Best-effort UIA text read of one real window (locate/read only)."""
     try:
+        # Unit-only harness checks import this runner on lean CI machines.
+        # Keep the real-desktop-only dependency at its actual use site so
+        # geometry/oracle tests do not require an unrelated UIA package.
+        from pywinauto import Desktop as pywinauto_desktop
+
         window = pywinauto_desktop(backend="uia").window(handle=hwnd)
         values: list[str] = []
         for control in window.descendants():
