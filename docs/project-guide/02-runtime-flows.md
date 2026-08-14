@@ -496,7 +496,7 @@ Actor提交规范 `blocker_kind` 与去重的 `observed_facts`，Runtime写 `obl
 
 ### 15.3 预算耗尽
 
-默认 `max_turns=30`、`max_runtime_s=300`、`max_model_calls=60`；配置上限分别为 100、3600 和 `2 × max_turns`。预算在 run 开始冻结。耗尽返回 fail-closed `STATE_REJECTED`，不能伪装成完成。
+默认 `max_turns=100`、`max_runtime_s=3600`、`max_model_calls=200`；这也分别是当前配置上限 100、3600 和 `2 × max_turns`。预算在 run 开始冻结。耗尽返回 fail-closed `STATE_REJECTED`，不能伪装成完成。
 
 ## 16. Pause、resume、cancel
 

@@ -133,6 +133,10 @@ const EVENT_LABELS: Record<string, string> = {
   interaction_wait_external_change: '等待外部变化', interaction_external_change: '检测到外部变化',
   surface_binding: '交互区域绑定',
   live_agent_activity: 'Agent 实时活动',
+  vnext_model_reasoning: '模型原始思考',
+  vnext_model_pointer_arguments: '模型原始指针参数',
+  vnext_model_tool_shape: '模型工具参数形状',
+  vnext_pointer_dispatch: '指针坐标映射',
 };
 const TOOL_LABELS: Record<string, string> = {
   click: '点击', draw_strokes: '连续绘制', type_text: '输入文字', hotkey: '快捷键', scroll: '滚动',
@@ -700,6 +704,7 @@ function RunTimeline({ run, events, compact = false }: { run: RunProjection | nu
       node_id: event.node_id as string | undefined,
       tool: event.tool as string | undefined,
       status: event.status as string | undefined,
+      response_index: event.response_index as number | undefined,
       summary: event.reason || event.content || event.action || event.type,
     }));
   }, [run, events, compact]);
@@ -712,8 +717,13 @@ function RunTimeline({ run, events, compact = false }: { run: RunProjection | nu
           <div className={`arp-event-mark arp-event-${entry.type.includes('error') || entry.status === 'failed' ? 'danger' : entry.type.includes('done') ? 'success' : 'default'}`} />
           <time>{formatTime(entry.ts)}</time>
           <div className="arp-event-copy">
-            <div><strong>{EVENT_LABELS[entry.type] || entry.type.replace(/^agent_|^arp_/, '').replaceAll('_', ' ')}</strong>{entry.node_id && <code>{entry.node_id}</code>}{entry.tool && <code>{TOOL_LABELS[entry.tool] || entry.tool}</code>}</div>
-            <span>{displayValue(entry.summary)}</span>
+            <div><strong>{EVENT_LABELS[entry.type] || entry.type.replace(/^agent_|^arp_/, '').replaceAll('_', ' ')}</strong>{entry.response_index != null && <code>响应 {entry.response_index}</code>}{entry.node_id && <code>{entry.node_id}</code>}{entry.tool && <code>{TOOL_LABELS[entry.tool] || entry.tool}</code>}</div>
+            {['vnext_model_reasoning', 'vnext_model_pointer_arguments', 'vnext_pointer_dispatch'].includes(entry.type) ? (
+              <details className="arp-reasoning-detail">
+                <summary>{entry.type === 'vnext_model_reasoning' ? '展开原始思考' : '展开完整坐标'}</summary>
+                <pre>{displayValue(entry.summary)}</pre>
+              </details>
+            ) : <span>{displayValue(entry.summary)}</span>}
           </div>
         </div>
       ))}

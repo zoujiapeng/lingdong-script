@@ -119,6 +119,7 @@ export interface RunTimelineEvent {
   node_id?: string | null;
   tool?: string | null;
   status?: string | null;
+  response_index?: number | null;
   summary?: unknown;
 }
 

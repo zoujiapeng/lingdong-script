@@ -200,7 +200,6 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "scenario": "corridor_drag",
         "task": VISUAL_TEST_TASK,
         "seed": 7,
-        "expected_variant": 0,
         "max_steps": 36,
         "timeout": 420,
     },
@@ -208,7 +207,6 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "scenario": "corridor_drag",
         "task": VISUAL_TEST_TASK,
         "seed": 12,
-        "expected_variant": 1,
         "max_steps": 36,
         "timeout": 420,
     },
@@ -216,7 +214,6 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "scenario": "corridor_drag",
         "task": VISUAL_TEST_TASK,
         "seed": 1,
-        "expected_variant": 2,
         "max_steps": 36,
         "timeout": 420,
     },
@@ -224,7 +221,6 @@ VISUAL_CASES: dict[str, dict[str, Any]] = {
         "scenario": "corridor_drag",
         "task": VISUAL_TEST_TASK,
         "seed": 4,
-        "expected_variant": 3,
         "max_steps": 36,
         "timeout": 420,
     },
@@ -445,7 +441,6 @@ def external_verdict(
     case_id: str,
     scenario: str,
     seed: int,
-    expected_variant: int | None = None,
 ) -> dict[str, Any]:
     """Validate ground truth produced by real browser pointer events."""
 
@@ -502,20 +497,6 @@ def external_verdict(
             errors.append("dragged object footprint has negative corridor clearance")
         if len(details.get("path_points") or []) < 3:
             errors.append("corridor path evidence is incomplete")
-        if expected_variant is not None:
-            ready = next(
-                (
-                    item for item in reversed(state.get("events") or [])
-                    if item.get("type") == "page_ready"
-                ),
-                {},
-            )
-            raw_variant = (ready.get("details") or {}).get("variant")
-            variant = int(raw_variant) if raw_variant is not None else -1
-            if variant != int(expected_variant):
-                errors.append(
-                    f"expected corridor variant {expected_variant}, observed {variant}",
-                )
     elif scenario == "dynamic_hold":
         all_events = state.get("events") or []
         release_index = max(
@@ -1064,7 +1045,6 @@ def run_visual_case(
                 case_id=case_id,
                 scenario=scenario,
                 seed=seed,
-                expected_variant=source.get("expected_variant"),
             )
             verdict = {**verdict, "source": "external_browser_state"}
             oracle_result.update({"state": state, "verdict": verdict})

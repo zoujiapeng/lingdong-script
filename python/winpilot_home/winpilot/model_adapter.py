@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 
-_THINKING_DISABLED_BY_DEFAULT = {"mimo", "reasonix"}
+_THINKING_DISABLED_BY_DEFAULT = {"reasonix"}
 _VISION_MODEL_MARKERS = ("omni", "-vl", "vision", "gpt-4o")
 _NATIVE_PROTOCOL_ALIASES = {
     "openai_responses": "openai_responses",
@@ -186,25 +186,46 @@ def model_profile_from_config(api: dict[str, Any] | Any) -> ModelProfile:
     )
 
 
-def request_extra_body(api: dict[str, Any], profile: ModelProfile) -> dict[str, Any]:
-    """Provider-specific Chat Completions extras.
+def request_extra_body(api: dict[str, Any]) -> dict[str, Any]:
+    """Return only provider extras the operator supplied explicitly.
 
-    MiMo/Reasonix-style reasoning endpoints can spend the whole response budget
-    on hidden thinking. By default WinPilot disables that provider-side
-    thinking for tool decisions; users can opt in with ``api.thinking=true`` or
-    pass an explicit ``api.thinking`` object.
+    The adapter used to turn a missing or false boolean into a provider-specific
+    ``thinking=disabled`` request.  That silently removed the model's native
+    reasoning from vNext visual turns.  ``False`` now leaves the provider at
+    its native default, ``True`` explicitly enables reasoning, and an explicit
+    object still passes through unchanged.
     """
     body: dict[str, Any] = {}
     thinking = api.get("thinking", None)
-    if isinstance(thinking, dict):
+    if thinking is True:
+        body["thinking"] = {"type": "enabled"}
+    elif isinstance(thinking, dict):
         body["thinking"] = thinking
-    elif profile.disables_thinking_by_default and thinking is not True:
-        body["thinking"] = {"type": "disabled"}
 
     extra = api.get("extra_body")
     if isinstance(extra, dict):
         body.update(extra)
     return body
+
+
+def _contains_visual_input(messages: Any) -> bool:
+    """Whether one Chat Completions request contains an actual image."""
+
+    if not isinstance(messages, (list, tuple)):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, (list, tuple)):
+            continue
+        for item in content:
+            if (
+                isinstance(item, dict)
+                and item.get("type") in {"image_url", "input_image"}
+            ):
+                return True
+    return False
 
 
 class _CompletionsFacade:
@@ -228,7 +249,16 @@ class OpenAICompatibleAdapter:
         """Build the exact provider request before Runtime freezes it."""
         params = dict(kwargs)
         params.setdefault("model", self.profile.model)
-        extra = request_extra_body(self.api, self.profile)
+        extra = request_extra_body(self.api)
+        if (
+            "thinking" not in extra
+            and self.profile.disables_thinking_by_default
+            and _contains_visual_input(params.get("messages"))
+        ):
+            # These providers default to a fast non-reasoning path.  A visual
+            # Actor request must not silently lose the model's native spatial
+            # reasoning merely because config.api.thinking is false/missing.
+            extra["thinking"] = {"type": "enabled"}
         if extra:
             existing = params.get("extra_body")
             params["extra_body"] = {

@@ -151,7 +151,6 @@ class _Trace:
         self.records: list[
             tuple[RawActionReceipt, dict[str, Any]]
         ] = []
-        self.pointer_records: list[dict[str, Any]] = []
 
     def record(
         self,
@@ -162,17 +161,6 @@ class _Trace:
         self.records.append((receipt, dict(metadata)))
         if self.fail:
             raise RuntimeError("trace unavailable")
-
-    def record_pointer_debug(self, **metadata) -> dict[str, Any]:
-        self.pointer_records.append(dict(metadata))
-        if self.fail:
-            raise RuntimeError("pointer trace unavailable")
-        return {
-            "screenshot": f"{metadata['run_id']}/pointer_001.jpg",
-            "coordinate_space": "submitted_image_pixels",
-            "colors": {"click": "#FF3158"},
-        }
-
 
 @dataclass
 class _RawHarness:
@@ -740,8 +728,6 @@ def _harness(
         target_probe=probe,
         raw_device=raw.executor(),
         receipt_trace_sink=trace,
-        pointer_debug_sink=trace,
-        cursor_reader=lambda: (17, 19),
         post_input_settle_delay_s=post_input_settle_delay_s,
         wait=settle_wait,
     )
@@ -1969,7 +1955,7 @@ def test_double_click_is_not_interrupted_by_hit_test_metadata_changes() -> None:
 
 
 
-def test_drag_traces_every_image_path_point_in_physical_order() -> None:
+def test_drag_publishes_every_image_path_point_in_physical_order() -> None:
     submitted = {
         "image_path": [[50.0, 40.0], [80.0, 40.0], [80.0, 60.0]],
     }
@@ -2005,24 +1991,8 @@ def test_drag_traces_every_image_path_point_in_physical_order() -> None:
         "started_held": False,
         "keep_holding": False,
     }
-    assert dispatch["cursor_before"] == [17, 19]
-    assert dispatch["pointer_debug"] == {
-        "screenshot": "run-atomic/pointer_001.jpg",
-        "coordinate_space": "submitted_image_pixels",
-        "colors": {"click": "#FF3158"},
-    }
-    assert harness.trace.pointer_records == [{
-        "run_id": RUN_ID,
-        "decision_id": harness.envelope.decision_id,
-        "action": "drag",
-        "frame_image_b64": harness.before_image_b64,
-        "frame_id": harness.envelope.frame_id,
-        "frame_region": REGION,
-        "submitted_image_size": (100, 80),
-        "image_coordinates": submitted,
-        "physical_arguments": dispatch["physical_arguments"],
-        "cursor_before": (17, 19),
-    }]
+    assert "cursor_before" not in dispatch
+    assert "pointer_debug" not in dispatch
 
 
 def test_drag_passes_generic_held_keys_to_the_same_physical_action() -> None:

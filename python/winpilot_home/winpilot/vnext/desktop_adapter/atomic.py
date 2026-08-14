@@ -50,12 +50,6 @@ from ...visual_runtime.keyboard_contracts import (
     canonical_hotkey_args,
     normalize_hotkey_args,
 )
-from ...visual_runtime.normalized_frame_coordinates import (
-    NormalizedFrameCoordinateMapper,
-)
-from ...visual_runtime.submitted_image_coordinates import (
-    SubmittedImageCoordinateMapper,
-)
 from ..actor import ActorDecisionEnvelope, DesktopActionProposal
 from ..capabilities import (
     PointerDisposition,
@@ -162,25 +156,6 @@ class RawReceiptTraceSink(Protocol):
     ) -> None: ...
 
 
-class PointerDebugTraceSink(Protocol):
-    """Best-effort renderer for the exact frame and physical pointer plan."""
-
-    def record_pointer_debug(
-        self,
-        *,
-        run_id: str,
-        decision_id: str,
-        action: str,
-        frame_image_b64: str,
-        frame_id: int,
-        frame_region: PhysicalRegion,
-        submitted_image_size: tuple[int, int],
-        image_coordinates: Mapping[str, Any],
-        physical_arguments: Mapping[str, Any],
-        cursor_before: PhysicalPoint | None,
-    ) -> Mapping[str, Any] | None: ...
-
-
 @dataclass(frozen=True, slots=True)
 class _PreparedAction:
     action: str
@@ -233,8 +208,6 @@ class AtomicDesktopAdapter:
         desktop_workspace: DesktopWorkspacePort | None = None,
         raw_device: RawDeviceExecutor,
         receipt_trace_sink: RawReceiptTraceSink | None = None,
-        pointer_debug_sink: PointerDebugTraceSink | None = None,
-        cursor_reader: Callable[[], PhysicalPoint | None] | None = None,
         launcher: Callable[[str, str], Mapping[str, Any]] | None = None,
         post_input_settle_delay_s: float = 0.12,
         wait: Callable[[float], Any] = time.sleep,
@@ -286,14 +259,6 @@ class AtomicDesktopAdapter:
             getattr(receipt_trace_sink, "record", None)
         ):
             raise TypeError("receipt_trace_sink must provide record()")
-        if pointer_debug_sink is not None and not callable(
-            getattr(pointer_debug_sink, "record_pointer_debug", None)
-        ):
-            raise TypeError(
-                "pointer_debug_sink must provide record_pointer_debug()"
-            )
-        if cursor_reader is not None and not callable(cursor_reader):
-            raise TypeError("cursor_reader must be callable or null")
         if (
             isinstance(post_input_settle_delay_s, bool)
             or not isinstance(post_input_settle_delay_s, (int, float))
@@ -333,8 +298,6 @@ class AtomicDesktopAdapter:
         self._launcher = launcher
         self._desktop_shell = desktop_shell
         self._trace = receipt_trace_sink
-        self._pointer_debug = pointer_debug_sink
-        self._cursor_reader = cursor_reader
         self._post_input_settle_delay_s = settle_delay
         self._wait = wait
         self._clock = clock
@@ -693,12 +656,10 @@ class AtomicDesktopAdapter:
                     prepared.action,
                     "stop_requested_after_queue",
                 )
-            cursor_before = self._read_cursor_before(prepared.action)
             self._publish_pointer_dispatch(
                 envelope,
                 prepared,
                 before_frame,
-                cursor_before=cursor_before,
             )
             raw_started = True
             return self._run_raw(
@@ -1594,33 +1555,13 @@ class AtomicDesktopAdapter:
             arguments["repeat"] = prepared.repeat
         return arguments
 
-    def _read_cursor_before(self, action: str) -> PhysicalPoint | None:
-        if action not in {
-            "move_mouse", "click", "double_click", "drag", "scroll",
-            "input_sequence",
-        } or self._cursor_reader is None:
-            return None
-        try:
-            point = self._cursor_reader()
-            if (
-                isinstance(point, tuple)
-                and len(point) == 2
-                and all(type(value) is int for value in point)
-            ):
-                return point
-        except Exception:
-            pass
-        return None
-
     def _publish_pointer_dispatch(
         self,
         envelope: ActorDecisionEnvelope,
         prepared: _PreparedAction,
         frame: RuntimeFrame,
-        *,
-        cursor_before: PhysicalPoint | None,
     ) -> None:
-        """Trace image-to-screen pointer mapping without affecting input."""
+        """Publish the exact model and physical pointer arguments."""
 
         if prepared.action not in {
             "move_mouse", "click", "double_click", "drag", "scroll",
@@ -1656,49 +1597,23 @@ class AtomicDesktopAdapter:
         if isinstance(source.get("held_keys"), (list, tuple)):
             source["held_keys"] = list(source["held_keys"])
         physical_arguments = self._physical_attempt_arguments(prepared)
-        pointer_debug: Mapping[str, Any] | None = None
         try:
-            if self._pointer_debug is not None:
-                pointer_debug = self._pointer_debug.record_pointer_debug(
-                    run_id=envelope.run_id,
-                    decision_id=envelope.decision_id,
-                    action=prepared.action,
-                    frame_image_b64=frame.image_b64,
-                    frame_id=frame.frame_id,
-                    frame_region=tuple(envelope.frame_region),
-                    submitted_image_size=tuple(envelope.submitted_image_size),
-                    image_coordinates=source,
-                    physical_arguments=physical_arguments,
-                    cursor_before=cursor_before,
-                )
-        except Exception:
-            # A diagnostic artifact is never allowed to reject input.
-            pointer_debug = None
-        try:
-            fields: dict[str, Any] = {
-                "runtime_version": "vnext",
-                "no_legacy_fallback": True,
-                "run_id": envelope.run_id,
-                "mission_id": envelope.mission_id,
-                "decision_id": envelope.decision_id,
-                "action": prepared.action,
-                "frame_id": frame.frame_id,
-                "frame_epoch": frame.epoch,
-                "frame_scope": frame.scope,
-                "submitted_image_size": list(envelope.submitted_image_size),
-                "frame_region": list(envelope.frame_region),
-                "image_coordinates": source,
-                "physical_arguments": physical_arguments,
-                "cursor_before": (
-                    list(cursor_before) if cursor_before is not None else None
-                ),
-                "parameter_visibility": "pointer_coordinates",
-            }
-            if isinstance(pointer_debug, Mapping):
-                fields["pointer_debug"] = dict(pointer_debug)
             BUS.publish(
                 "vnext_pointer_dispatch",
-                **fields,
+                runtime_version="vnext",
+                no_legacy_fallback=True,
+                run_id=envelope.run_id,
+                mission_id=envelope.mission_id,
+                decision_id=envelope.decision_id,
+                action=prepared.action,
+                frame_id=frame.frame_id,
+                frame_epoch=frame.epoch,
+                frame_scope=frame.scope,
+                submitted_image_size=list(envelope.submitted_image_size),
+                frame_region=list(envelope.frame_region),
+                image_coordinates=source,
+                physical_arguments=physical_arguments,
+                parameter_visibility="pointer_coordinates",
             )
         except Exception:
             # Diagnostics must never reject or replay physical input.
@@ -1751,17 +1666,39 @@ class AtomicDesktopAdapter:
         *,
         image_keys: tuple[str, str] = ("image_x", "image_y"),
     ) -> PhysicalPoint:
-        mapped, _ = SubmittedImageCoordinateMapper(
-            envelope.submitted_image_size
-        ).map_point_pair(
-            args,
-            image_keys=image_keys,
-            frame_keys=("frame_x", "frame_y"),
-            context=envelope.proposal.action,
+        """Map one submitted-image point directly to its captured screen pixel."""
+
+        image_width, image_height = envelope.submitted_image_size
+        left, top, frame_width, frame_height = envelope.frame_region
+        raw_x, raw_y = (args[image_keys[0]], args[image_keys[1]])
+        if type(raw_x) not in {int, float} or type(raw_y) not in {int, float}:
+            raise ValueError("image coordinates must be exact JSON numbers")
+        image_x, image_y = float(raw_x), float(raw_y)
+        if not (
+            math.isfinite(image_x)
+            and math.isfinite(image_y)
+            and 0.0 <= image_x <= image_width
+            and 0.0 <= image_y <= image_height
+        ):
+            raise ValueError(
+                "image coordinates must stay inside the submitted image"
+            )
+        # Width/height itself is a common model convention for the final edge;
+        # clamp only that harmless one-pixel convention before the sole scale.
+        image_x = min(image_x, float(max(0, image_width - 1)))
+        image_y = min(image_y, float(max(0, image_height - 1)))
+        return (
+            round(
+                left
+                + image_x * max(0, frame_width - 1)
+                / max(1, image_width - 1)
+            ),
+            round(
+                top
+                + image_y * max(0, frame_height - 1)
+                / max(1, image_height - 1)
+            ),
         )
-        return NormalizedFrameCoordinateMapper(
-            envelope.frame_region
-        ).map_point(mapped["frame_x"], mapped["frame_y"])
 
     @staticmethod
     def _map_relative_delta(

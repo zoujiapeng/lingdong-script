@@ -51,15 +51,13 @@ from .common import (
 VISUAL_ACTOR_MODEL_ROLE = "vnext_visual_actor"
 VISUAL_ACTOR_SYSTEM_CONTRACT = """\
 Use original_goal, current JPEG, task_state, previous action, and tools. Choose
-one tool, or batch independent non-GUI tools; put dependencies later. Briefly
-narrate. Coordinates are exact submitted-image pixels. Chat and act naturally.
-Revise task_state; runtime does not classify or route. Keep dependent unfinished
-work in remaining_items. If visibly complete, call claim_obligation_done only
-when none remain. If no action can advance, call blocked. When pointer_held is
-true, it persists across actions; continue or release deliberately. Pace long
-goals with budget facts. If actions add no new
-information, step back to the whole screen and revise the approach toward
-original_goal."""
+one tool, or batch independent non-GUI tools. Briefly narrate. Coordinates are
+exact submitted-image pixels. Chat and act naturally; runtime does not classify
+or route. If the current
+screen shows the goal complete with none remaining, call claim_obligation_done.
+If an external condition no tool can change blocks progress, call blocked.
+pointer_held persists until deliberately released. The current JPEG is the
+only authoritative visual state."""
 
 INITIAL_ACTOR_SYSTEM_CONTRACT = """\
 You are a Windows desktop agent on the user's real computer. Answer chat
@@ -86,15 +84,11 @@ _TOOL_DESCRIPTIONS = {
         "Double-click one point in the current image with any mouse button."
     ),
     "drag": (
-        "Drag through image_path written as `x1,y1 x2,y2 ...` in exact order. "
-        "The runtime draws one straight segment between every adjacent pair: "
-        "put a point at each visible turn and keep constrained routes near the "
-        "center of their permitted path. The first pair is where to press and "
-        "later pairs are the route. "
-        "held_keys presses those keyboard keys before the mouse and releases "
-        "them after the mouse, so modified drags and game gestures stay one "
-        "physical action. keep_holding preserves the same mouse and held-key "
-        "presses for the next visual turn."
+        "Drag once through ordered points text written as "
+        "`x1,y1 x2,y2 ...`. The first pair is the press point and the final "
+        "pair is the release point; all pairs are submitted-image pixels. "
+        "held_keys are pressed for the same physical gesture; keep_holding "
+        "keeps the pointer pressed for a later turn."
     ),
     "scroll": (
         "Scroll at one point using a native wheel delta: amount < 0 scrolls "
@@ -121,8 +115,6 @@ _TOOL_DESCRIPTIONS = {
         "Wheel amounts are native deltas (120 is one ordinary notch). "
         "Use `move_by dx,dy duration_ms` for relative raw/game movement. "
         "Absolute coordinates and relative deltas are from the current image. "
-        "Use this when a modifier or mouse button must stay down while the "
-        "other device moves. "
         "Keys/buttons still held at the end are released automatically."
     ),
     "launch_application": (
@@ -139,7 +131,7 @@ _TOOL_DESCRIPTIONS = {
         "requested result and your remaining_items has no unfinished work."
     ),
     "blocked": (
-        "Report a visible blocker only when no supplied action can advance the goal."
+        "Report an external blocker only when no supplied action can advance."
     ),
 }
 
@@ -177,8 +169,6 @@ _STRICT_SCHEMA_KEYS = frozenset(
 )
 _LOCALLY_ENFORCED_SCHEMA_KEYS = frozenset({"not", "uniqueItems"})
 _FLOW_FRAGMENT_REQUEST_CHARS = 16_384
-_VISUAL_HISTORY_DEPTH = 4
-_VISUAL_UTILITY_HISTORY_DEPTH = 4
 _STANDALONE_CONNECTOR_CALL_ALLOWANCE = 4
 _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
@@ -210,16 +200,6 @@ _LIST_WINDOWS_TOOL = "list_windows"
 _STANDALONE_LIST_WINDOWS_ALLOWANCE = 1
 _PASTE_IMAGE_TOOL = "paste_image_file"
 _STANDALONE_PASTE_IMAGE_ALLOWANCE = 2
-_VISUAL_UTILITY_TOOLS = frozenset({
-    *_STATUS_TOOLS,
-    *_CONNECTOR_TOOLS,
-    _SHELL_TOOL,
-    *_LOCAL_UTILITY_TOOLS,
-    _WINDOW_TEXT_TOOL,
-    _CAPTURE_SCREEN_TOOL,
-    _LIST_WINDOWS_TOOL,
-    _PASTE_IMAGE_TOOL,
-})
 _CAPTURE_OUTPUT_MAX_CHARS = 6000
 # Optional tool-schema fields and their JSON defaults.  The model may omit
 # them; the runtime fills the default so the tool schema and the validator
@@ -238,6 +218,8 @@ class _InitialExchange:
 
 @dataclass(slots=True)
 class _VisualExchange:
+    """One immediately preceding provider-native visual action."""
+
     messages: tuple[dict[str, Any], ...]
     tool_call_id: str
     runtime_tool_name: str
@@ -578,6 +560,7 @@ def _actor_parameters_from_schema(
     *,
     requires_local_intent: bool,
 ) -> dict[str, Any]:
+    del requires_local_intent
     if (
         type(raw) is not dict
         or raw.get("type") != "object"
@@ -598,20 +581,18 @@ def _actor_parameters_from_schema(
         raise LiveModelRoleError(
             f"Actor tool {name!r} shadows task_state_update"
         )
+    if "local_intent" in properties or "local_intent" in required:
+        raise LiveModelRoleError(
+            f"Actor tool {name!r} shadows Actor-owned metadata"
+        )
+    # Only one native visual exchange is retained between calls.  Keep the
+    # model-owned scratchpad channel available on every semantic action so a
+    # fact read correctly on an earlier screen is not forced back through OCR
+    # on every later screen.  This is context, not a runtime plan or verifier.
     properties["task_state_update"] = {
-        **TASK_STATE_UPDATE_SCHEMA,
+        **deepcopy(TASK_STATE_UPDATE_SCHEMA),
         "default": {"scratchpad": None},
     }
-    if requires_local_intent:
-        if "local_intent" in properties or "local_intent" in required:
-            raise LiveModelRoleError(
-                f"Actor tool {name!r} shadows local_intent"
-            )
-        properties["local_intent"] = {
-            "type": "string",
-            "default": "",
-            "maxLength": 16384,
-        }
     parameters["properties"] = properties
     parameters["required"] = required
     parameters["additionalProperties"] = False
@@ -628,60 +609,33 @@ def _actor_parameters(
 ) -> dict[str, Any]:
     raw = tool.to_dict()["schema"]
     if tool.name == "drag":
-        properties = dict(raw["properties"])
-        required = list(raw.get("required", []))
-        if "image_path" not in required:
-            required.append("image_path")
-        # Array-shaped paths caused a real provider to serialize one coordinate
-        # pair thousands of times until the response was truncated, both for
-        # nested and flat arrays. Keep the model-facing shape as one ordinary
-        # string and pair it once at the semantic boundary.
-        # The canonical Runtime and physical device still receive an ordered
-        # list of points, with no arbitrary path-length limit.
-        properties["image_path"] = {
-            "type": "string",
-            "minLength": 1,
-        }
-        # Keep the model-facing gesture compact.  The canonical boundary also
-        # accepts arrays, comma-separated text and ``shift+w``; the model only
-        # needs to name the keys, not reason about the internal key catalog.
-        if "held_keys" in properties:
-            properties["held_keys"] = {
+        raw_properties = dict(raw["properties"])
+        properties = {
+            "points": {
                 "type": "string",
-                "default": "",
-            }
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": (
+                    "Ordered submitted-image coordinate pairs written as "
+                    "x1,y1 x2,y2 ..."
+                ),
+            },
+            **{
+                name: raw_properties[name]
+                for name in ("keep_holding", "button", "held_keys")
+                if name in raw_properties
+            },
+        }
         raw = {
             **raw,
             "properties": properties,
-            "required": required,
+            "required": ["points"],
         }
     return _actor_parameters_from_schema(
         tool.name,
         raw,
         requires_local_intent=tool.requires_local_intent,
     )
-
-
-def _with_task_state(
-    definitions: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Let the Actor revise its free-form working state on utility calls."""
-
-    for tool in definitions:
-        function = tool.get("function")
-        if not isinstance(function, dict):
-            continue
-        parameters = function.get("parameters")
-        if not isinstance(parameters, dict):
-            continue
-        properties = parameters.get("properties")
-        if not isinstance(properties, dict):
-            continue
-        properties["task_state_update"] = {
-            **deepcopy(TASK_STATE_UPDATE_SCHEMA),
-            "default": {"scratchpad": None},
-        }
-    return definitions
 
 
 def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
@@ -696,10 +650,10 @@ def _tool_definitions(turn: ActorTurnInput) -> list[dict[str, Any]]:
             "function": {
                 "name": _MODEL_TOOL_NAMES.get(tool.name, tool.name),
                 "description": (
-                    "Continue the currently held drag through image_path "
-                    "written as `x1,y1 x2,y2 ...`; the physical "
-                    "cursor is already the start. keep_holding decides whether "
-                    "to remain pressed."
+                    "Continue the held drag through ordered points text "
+                    "written as `x1,y1 x2,y2 ...`; the current physical cursor "
+                    "is already the start. keep_holding decides whether to "
+                    "remain pressed."
                     if tool.name == "drag" and turn.pointer_held
                     else _TOOL_DESCRIPTIONS[tool.name]
                 ),
@@ -718,44 +672,44 @@ def _decode_arguments(raw: Any) -> dict[str, Any]:
     return strict_json_object(raw, "Actor tool arguments")
 
 
-def _canonical_drag_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Pair the model-facing path string for the canonical Runtime contract."""
+def _canonical_drag_arguments(
+    arguments: Mapping[str, Any],
+    *,
+    pointer_held: bool,
+) -> dict[str, Any]:
+    """Parse one provider-stable path value into the canonical point list."""
 
-    raw_path = arguments.get("image_path")
-    if isinstance(raw_path, str):
-        values = re.findall(
-            r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?",
-            raw_path,
-        )
-        if not values or len(values) % 2:
-            raise InvalidActorProposal(
-                "drag image_path must contain complete x,y coordinate pairs"
-            )
-        canonical_path = [
-            [float(values[index]), float(values[index + 1])]
-            for index in range(0, len(values), 2)
-        ]
-    elif not isinstance(raw_path, (list, tuple)) or not raw_path:
+    raw_path = arguments.get("points")
+    number = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    path_pattern = rf"\s*{number}\s*,\s*{number}(?:\s+{number}\s*,\s*{number})*\s*"
+    if type(raw_path) is not str or re.fullmatch(path_pattern, raw_path) is None:
         raise InvalidActorProposal(
-            "drag image_path must be `x1,y1 x2,y2 ...`"
+            "drag points must be `x1,y1 x2,y2 ...`"
         )
-    # Accept prior array representations as forgiving compatibility paths; the
-    # provider is shown only the simpler string schema.
-    elif all(
-        isinstance(point, (list, tuple)) and len(point) == 2
-        for point in raw_path
-    ):
-        canonical_path = [list(point) for point in raw_path]
-    else:
-        if len(raw_path) % 2:
-            raise InvalidActorProposal(
-                "drag image_path must contain complete x,y coordinate pairs"
-            )
-        canonical_path = [
-            [raw_path[index], raw_path[index + 1]]
-            for index in range(0, len(raw_path), 2)
+    values = [float(value) for value in re.findall(number, raw_path)]
+    canonical_path = [
+        [
+            int(values[index]) if values[index].is_integer() else values[index],
+            (
+                int(values[index + 1])
+                if values[index + 1].is_integer()
+                else values[index + 1]
+            ),
         ]
-    canonical = {**arguments, "image_path": canonical_path}
+        for index in range(0, len(values), 2)
+    ]
+    minimum = 1 if pointer_held else 2
+    if len(canonical_path) < minimum:
+        raise InvalidActorProposal(
+            f"drag points requires at least {minimum} coordinate pair"
+            f"{'s' if minimum != 1 else ''}"
+        )
+    canonical = {
+        key: value
+        for key, value in arguments.items()
+        if key != "points"
+    }
+    canonical["image_path"] = canonical_path
     canonical.setdefault("button", "left")
     # Keep the Actor semantic: it forwards the model's compact key spelling.
     # The desktop adapter already owns forgiving physical-key normalization.
@@ -993,6 +947,8 @@ def _proposal_from_response(
     response: Any,
     allowed_names: frozenset[str],
     available_runtime_names: frozenset[str],
+    *,
+    pointer_held: bool,
 ) -> ActorTurnDecision:
     message = response_message(response)
     narration = narration_content(message)
@@ -1027,7 +983,10 @@ def _proposal_from_response(
     if runtime_name not in available_runtime_names:
         raise LiveModelRoleError("Visual Actor returned an unavailable action")
     if runtime_name == "drag":
-        arguments = _canonical_drag_arguments(arguments)
+        arguments = _canonical_drag_arguments(
+            arguments,
+            pointer_held=pointer_held,
+        )
     elif runtime_name in {"click", "double_click", "move_mouse"}:
         arguments = _canonical_desktop_arguments(runtime_name, arguments)
     if runtime_name in APPROVED_DESKTOP_ACTIONS:
@@ -1071,7 +1030,8 @@ def _proposal_from_response(
 def _history_exchange(
     response: Any,
 ) -> tuple[dict[str, Any], str, str] | None:
-    """Keep one compact provider-native GUI call for the next visual turn."""
+    """Project one valid model call into compact next-turn context."""
+
     message = response_message(response)
     calls = member(message, "tool_calls")
     if (
@@ -1099,6 +1059,7 @@ def _history_exchange(
     except LiveModelRoleError:
         return None
     arguments.pop("task_state_update", None)
+    arguments.pop("local_intent", None)
     assistant: dict[str, Any] = {
         "role": "assistant",
         "content": "",
@@ -1113,102 +1074,8 @@ def _history_exchange(
             }
         ],
     }
-    return assistant, call_id, _runtime_name_from_model_call(name, raw_arguments)
-
-
-def _utility_history_messages(
-    messages: Sequence[Mapping[str, Any]],
-) -> tuple[dict[str, Any], ...]:
-    """Keep recent complete provider-native utility exchanges.
-
-    Utility calls run inside one visual decision before its terminal GUI call.
-    Their exact arguments and results can remain necessary on the next screen
-    (for example, a saved screenshot path after launching a chat app).  Keep
-    the provider's assistant/tool structure, but strip private reasoning and
-    task-state patches just like the terminal GUI history.  Whole batches are
-    atomic so no assistant tool call is retained without its result.
-    """
-
-    exchanges: list[tuple[dict[str, Any], ...]] = []
-    index = 0
-    while index < len(messages):
-        raw_assistant = messages[index]
-        index += 1
-        if raw_assistant.get("role") != "assistant":
-            continue
-        raw_calls = raw_assistant.get("tool_calls")
-        if (
-            isinstance(raw_calls, (str, bytes))
-            or not isinstance(raw_calls, Sequence)
-            or not raw_calls
-        ):
-            continue
-        calls: list[dict[str, Any]] = []
-        call_ids: list[str] = []
-        valid = True
-        for raw_call in raw_calls:
-            if not isinstance(raw_call, Mapping):
-                valid = False
-                break
-            call_id = raw_call.get("id")
-            function = raw_call.get("function")
-            name = (
-                function.get("name")
-                if isinstance(function, Mapping)
-                else None
-            )
-            raw_arguments = (
-                function.get("arguments")
-                if isinstance(function, Mapping)
-                else None
-            )
-            if (
-                type(call_id) is not str
-                or not call_id
-                or type(name) is not str
-                or name not in _VISUAL_UTILITY_TOOLS
-                or type(raw_arguments) is not str
-            ):
-                valid = False
-                break
-            try:
-                arguments = _decode_arguments(raw_arguments)
-            except LiveModelRoleError:
-                valid = False
-                break
-            arguments.pop("task_state_update", None)
-            call_ids.append(call_id)
-            calls.append({
-                "id": call_id,
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "arguments": _canonical_json(arguments),
-                },
-            })
-        if not valid or len(call_ids) != len(set(call_ids)):
-            continue
-
-        results: list[dict[str, Any]] = []
-        while index < len(messages) and messages[index].get("role") == "tool":
-            results.append(deepcopy(dict(messages[index])))
-            index += 1
-        if [result.get("tool_call_id") for result in results] != call_ids:
-            continue
-        exchanges.append((
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": calls,
-            },
-            *results,
-        ))
-
-    retained = exchanges[-_VISUAL_UTILITY_HISTORY_DEPTH:]
-    return tuple(
-        message
-        for exchange in retained
-        for message in exchange
+    return assistant, call_id, _runtime_name_from_model_call(
+        name, raw_arguments
     )
 
 
@@ -1263,7 +1130,7 @@ def _tool_format_repair(
 def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
     if gateway is None or getattr(gateway, "available", False) is not True:
         return []
-    return _with_task_state([
+    return [
         {
             "type": "function",
             "function": {
@@ -1298,13 +1165,13 @@ def _connector_tool_definitions(gateway: Any) -> list[dict[str, Any]]:
                 "strict": True,
             },
         },
-    ])
+    ]
 
 
 def _status_tool_definitions() -> list[dict[str, Any]]:
     """Read-only Actor-owned status tools resolved without a desktop lease."""
 
-    return _with_task_state([
+    return [
         {
             "type": "function",
             "function": {
@@ -1347,7 +1214,7 @@ def _status_tool_definitions() -> list[dict[str, Any]]:
                 "strict": True,
             },
         },
-    ])
+    ]
 
 
 def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
@@ -1456,7 +1323,7 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
                 "strict": True,
             },
         })
-    return _with_task_state(definitions)
+    return definitions
 
 
 def _window_text_tool_definitions() -> list[dict[str, Any]]:
@@ -2595,7 +2462,7 @@ class LiveVisualActor:
         ):
             raise LiveModelRoleError("max_attempts must be in [1, 5]")
         self._max_attempts = max_attempts
-        self._visual_history: list[_VisualExchange] = []
+        self._previous_visual_exchange: _VisualExchange | None = None
         self._initial_exchange: _InitialExchange | None = None
         self._initial_turn_started = False
         self._initial_turn_terminal = False
@@ -3175,8 +3042,15 @@ class LiveVisualActor:
             else []
         )
         connector_tools = _connector_tool_definitions(self._connector_gateway)
-        context = turn.to_dict()
-        context.pop("tools")
+        turn_context = turn.to_dict()
+        turn_context.pop("tools")
+        # Give the coordinate extent the same explicit name used by the
+        # runtime envelope.  A generic ``submitted_size`` was easy to confuse
+        # with a window or file size in an otherwise dense JSON object.
+        context = {
+            "submitted_image_size": list(submitted_size),
+            **turn_context,
+        }
         previous_action = context.get("previous_action")
         if (
             isinstance(previous_action, dict)
@@ -3187,14 +3061,9 @@ class LiveVisualActor:
                 "The physical action did not run. Use the current image and "
                 "error_kind to change arguments or choose another tool."
             )
-        context["submitted_size"] = list(submitted_size)
         user_message = {
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": _canonical_json(context),
-                },
                 {
                     "type": "image_url",
                     "image_url": {
@@ -3203,6 +3072,10 @@ class LiveVisualActor:
                             f"{image_b64}"
                         )
                     },
+                },
+                {
+                    "type": "text",
+                    "text": _canonical_json(context),
                 },
             ],
         }
@@ -3219,26 +3092,32 @@ class LiveVisualActor:
                     ),
                 }
             )
-        previous = self._visual_history[-1] if self._visual_history else None
-        if (
-            previous is not None
+        previous_exchange = self._previous_visual_exchange
+        if rejection_feedback:
+            # The latest proposal was not admitted/executed.  Never attach its
+            # raw call to an older same-named physical action.
+            self._previous_visual_exchange = None
+        elif (
+            previous_exchange is not None
             and turn.previous_action is not None
-            and turn.previous_action.action == previous.runtime_tool_name
+            and turn.previous_action.action
+            == previous_exchange.runtime_tool_name
         ):
-            previous.result_content = {
+            previous_exchange.result_content = {
                 "previous_action": turn.previous_action.to_dict()
             }
-        else:
-            self._visual_history = []
-        for exchange in self._visual_history:
-            native_context.extend(deepcopy(exchange.messages))
+            native_context.extend(deepcopy(previous_exchange.messages))
             native_context.append(
                 {
                     "role": "tool",
-                    "tool_call_id": exchange.tool_call_id,
-                    "content": _canonical_json(exchange.result_content),
+                    "tool_call_id": previous_exchange.tool_call_id,
+                    "content": _canonical_json(
+                        previous_exchange.result_content
+                    ),
                 }
             )
+        else:
+            self._previous_visual_exchange = None
         if rejection_feedback:
             native_context.append(
                 {
@@ -3625,6 +3504,7 @@ class LiveVisualActor:
                             }
                         ),
                         frozenset(tool.name for tool in turn.tools),
+                        pointer_held=turn.pointer_held,
                     )
                     self._record_tool_start(
                         _initial_calls_from_response(outcome.response)[0]
@@ -3701,11 +3581,8 @@ class LiveVisualActor:
             )
         exchange = _history_exchange(outcome.response)
         if exchange is None:
-            self._visual_history = []
+            self._previous_visual_exchange = None
         else:
-            utility_messages = _utility_history_messages(
-                current_exchange[1:]
-            )
             image_message = {
                 "role": "user",
                 "content": [
@@ -3714,20 +3591,11 @@ class LiveVisualActor:
                     if item.get("type") == "image_url"
                 ],
             }
-            self._visual_history.append(
-                _VisualExchange(
-                    messages=tuple(
-                        deepcopy([
-                            image_message,
-                            *utility_messages,
-                            exchange[0],
-                        ])
-                    ),
-                    tool_call_id=exchange[1],
-                    runtime_tool_name=exchange[2],
-                )
+            self._previous_visual_exchange = _VisualExchange(
+                messages=tuple(deepcopy([image_message, exchange[0]])),
+                tool_call_id=exchange[1],
+                runtime_tool_name=exchange[2],
             )
-            del self._visual_history[:-_VISUAL_HISTORY_DEPTH]
         self._initial_exchange = None
         return decision
 

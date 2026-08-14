@@ -82,9 +82,14 @@ def test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes():
         for name in harness.SUITES["goal-admission"]
     )
     assert {
-        harness.VISUAL_CASES[name]["expected_variant"]
+        name: harness.VISUAL_CASES[name]["seed"]
         for name in ("corridor-v0", "corridor-v1", "game-drag-v2", "corridor-v3")
-    } == {0, 1, 2, 3}
+    } == {
+        "corridor-v0": 7,
+        "corridor-v1": 12,
+        "game-drag-v2": 1,
+        "corridor-v3": 4,
+    }
     assert {
         item["task"] for item in harness.VISUAL_CASES.values()
     } == {
@@ -346,16 +351,11 @@ def test_external_verdict_checks_slider_band_and_corridor_path():
         },
         moves=8,
     )
-    corridor["events"].insert(0, {
-        "type": "page_ready",
-        "details": {"variant": 2},
-    })
     assert harness.external_verdict(
         corridor,
         case_id="case-1",
         scenario="corridor_drag",
         seed=17,
-        expected_variant=2,
     )["passed"] is True
 
     corridor["success_event"]["details"]["path_valid"] = False
@@ -364,7 +364,6 @@ def test_external_verdict_checks_slider_band_and_corridor_path():
         case_id="case-1",
         scenario="corridor_drag",
         seed=17,
-        expected_variant=2,
     )
     assert failed["passed"] is False
     assert "gesture left the visible corridor" in failed["errors"]
@@ -376,13 +375,12 @@ def test_external_verdict_checks_slider_band_and_corridor_path():
         case_id="case-1",
         scenario="corridor_drag",
         seed=17,
-        expected_variant=2,
     )
     assert failed_start["passed"] is False
     assert "corridor gesture did not start from the original token" in failed_start["errors"]
 
 
-def test_corridor_variant_zero_and_zero_clearance_are_valid():
+def test_corridor_zero_clearance_is_valid():
     harness = _load_harness()
     corridor = _state(
         "corridor_drag",
@@ -394,17 +392,11 @@ def test_corridor_variant_zero_and_zero_clearance_are_valid():
         },
         moves=8,
     )
-    corridor["events"].insert(0, {
-        "type": "page_ready",
-        "details": {"variant": 0},
-    })
-
     verdict = harness.external_verdict(
         corridor,
         case_id="case-1",
         scenario="corridor_drag",
         seed=17,
-        expected_variant=0,
     )
 
     assert verdict["passed"] is True

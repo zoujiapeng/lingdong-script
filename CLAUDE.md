@@ -294,27 +294,26 @@ manifest/evidence 一致。另一次框选真实覆盖任务栏所在的 work-ar
 
 显式只读 connector 的两个通用入口、三个状态工具、`run_shell` 与视觉线内的
 `read_window_text` 在文本/视觉回合仍可见；它们没有变成 GUI 动作、应用 adapter 或
-第二执行线。生产 Actor 的依赖工具链不再有按工具族或按视觉帧的强制截断；全局
-`max_model_calls` 是唯一硬顶。若当前局部工具结果开始重复，模型可自行调用
+第二执行线。生产 Actor 的依赖工具链不再有按工具族或按视觉帧的强制截断；只保留
+`max_turns`、`max_runtime_s`、`max_model_calls` 三项机械预算。若当前局部工具结果开始重复，模型可自行调用
 `refresh_desktop` 换取新整屏，而不是被 runtime 强迫执行一笔无关 GUI 动作。
 
 不要为启动软件、答题、绘画、保存、发 QQ、播放音乐、调音量、棋局或某个网站新增
 宏工具。已有工具结构上不能表达的新通用能力，必须先由至少两个不同任务族的真实
 E2E 证明。
 
-工具协议保持宽松：`task_state_update` 与 `local_intent` 都是可选字段（分别带默认
-`{"scratchpad": null}` 与 `""`），模型省略时运行时各自保留当前 scratchpad / 置空
-intent，不触发格式修复；`_DeadlineModelAdapter` 不再向 local_intent 注入
-非空白 pattern 强制。连续 INVALID_PROPOSAL/ACTOR_ERROR 不再硬停：只有
+工具协议保持宽松：每个语义 GUI 工具都有可选 `task_state_update`（默认
+`{"scratchpad": null}`），模型省略时保留当前 scratchpad；`local_intent` 已从模型可见
+schema 删除，不再要求模型为机械动作另写一份意图。连续 INVALID_PROPOSAL/ACTOR_ERROR 不再硬停：只有
 `max_turns`/`max_model_calls` 预算作为机械停止，模型可以在预算内持续自我纠正。
 
-视觉系统提示词保持 77 个英文单词（含聊天/任务混合目标与 `blocked` 停止判断）；
+视觉系统提示词保持短小（含聊天/任务混合目标与 `blocked` 停止判断）；
 初始文本轮只带上述短角色合同（68 词），不增加应用或界面教学。Thread
 只保留最多 12 条、16 KiB 的成功用户/模型原生消息；失败 Turn 不进入历史。现有
 `AgentThreadStore` 还把最多 100 个 Thread 的这个有界成功投影原子写入私有 checkpoint，
 服务重启后恢复同一 `thread_id`、可见成功结果与原生消息；它不保存 trace 正文、失败 Turn、
-视觉帧或长期摘要。视觉线只保留最近三笔 provider 原生
-`user image -> assistant tool call -> tool result`，下一回合加入新 JPEG 后丢弃最旧交换；
+视觉帧或长期摘要。视觉线只保留紧邻的一笔 provider 原生
+`user image -> assistant tool call -> tool result`，每次新动作替换上一笔；
 不保存无界聊天历史，不把长期 memory 当硬能力，也不在 prompt 中教学。
 Actor 上下文目前还保留最多 64 项安全动作摘要；删除 A/B 未获准，因此暂留，但它
 仍是模型上下文压力债务，不应继续扩张。
@@ -1255,3 +1254,97 @@ renderer `318 passed`、TypeScript typecheck 通过。`CON` 未触碰。
 页面判定 bug 都要在归因模型前先排除。`CON` 未触碰。
 
 `CON` 未触碰。
+
+## 2026-08-14：拖拽机械层删减、MiMo 原生思考与逐层坐标审计（当前分支未提交）
+
+本轮按 `模型原始参数 -> canonical 参数 -> physical_attempt -> 浏览器 trusted
+事件` 逐层复核。结论不是全局坐标偏移：当前 full-desktop 帧为 `1120x630`，
+物理区域为 `1920x1080`，有效 trace 中每个提交点都只经过一次同比缩放；SendInput
+坐标与浏览器收到的 screen 坐标逐点一致。corridor 首次分歧发生在模型原始参数：
+模型先把实际约 `x=500` 的竖直通道估成 `x=450/460`，随后改为 `x=490` 即通过。
+
+历史“一次过”也重新核实：2026-07-18 的确有只有一次 pointerdown 的真实成功，
+但当时默认是 target-window crop、`0..1000` 坐标和本地分割/A*；模型原始折点仍
+偏离安全中心，`authoritative_route_mask_astar_max_clearance` 在执行前改写成另一条
+曲线。该结果不能证明旧映射更准，更不能恢复 A*、snap、offset 或 route mask。
+
+本轮删减/修复：
+
+- `drag` 模型接口改为一条 `x1,y1 x2,y2 ...` 的 `points` 字符串，解析后仍进入
+  唯一 canonical `image_path`；删除容易被当成文件名的模型侧 `image_path` 和嵌套
+  坐标数组负担。
+- 图片在 MiMo 多模态 user content 中置于文本之前；工具 schema 不再给每个动作
+  重复注入 `task_state_update` / `local_intent`。解析器仍兼容旧字段。
+- 删除合成光标反馈图、pointer-debug 证据链、本地路线修正和二次 submitted->screen
+  mapper；AtomicDesktopAdapter 只保留提交图像素到真实区域的一次映射，RawDevice
+  只做 SendInput、插值取整和按键/指针释放清理。
+- `api.thinking=false` 对 MiMo 不再强行发送 `thinking: disabled`；只有显式 `true`
+  才强制 enabled，字典配置原样下传。当前 MiMo 文档把 thinking 作为默认模式，且
+  thinking 模式会把 temperature/top_p 固定为 `1.0/0.95`，所以代码里的
+  `temperature=0.0` 不能消除该模式的采样波动。
+- 每个 provider 响应现在带连续 `response_index`，trace/运行详情记录供应商原始
+  `reasoning_content`（缺失也明确记录）、原始鼠标参数，以及 canonical 图像坐标
+  到物理参数的完整派发。它们只供审计，执行端不读取这些事件。
+
+同图“只报拐点、不拖动”的 3 次对照也不稳定：三次坐标彼此冲突，其中一次明确
+自行改用 `0..1000`。因此目前证据不支持把生产接口整体改回归一化坐标；继续保持
+明确的 submitted-image pixels，并以 trace 定位每次首个分歧。
+
+重启后的真实 Electron 外部判定：corridor-v0 通过（本次 4 次 drag，最后
+`min_clearance=21`）；基础 smoke `drag-fit/slider/dynamic-hold = 3/3`，前两项各
+一次 drag，动态目标两次 drag；`modifier-drag` 一次 `input_sequence` 通过，浏览器
+确认 Shift 在 pointerdown、drag、pointerup 时均保持，且 mouse-up 早于 Shift-up。
+改动范围 Python 回归 `494 passed`，renderer `320 passed`，TypeScript typecheck
+通过，`git diff --check` 通过。全量 `pytest -q` 在本机 10 分钟上限内未完成，随后
+`--collect-only` 也停在收集阶段；没有把超时记作通过。`CON` 与三个既有未跟踪文件
+均未触碰。
+
+## 2026-08-15：视觉上下文收口与人类结果验收（当前分支未提交）
+
+继续按 `模型参数 -> canonical 参数 -> physical_attempt -> 外部状态` 审计后，
+确认长按不是根因并保留：`dynamic-hold` 通过；对 drag schema 是否同时暴露 click
+做 9 次受控 A/B，模型均未凭空加入 `press_duration_ms`。坐标链也没有二次换算，
+`1120x630 -> 1920x1080` 的 trace 与实际屏幕逐点一致；拐点失败首次分歧仍在模型
+原始几何判断。
+
+本轮只保留实测证明必要的删减/修复：
+
+- 视觉上下文由多笔历史收口为紧邻一笔 provider 原生
+  `user image -> assistant tool call -> tool result`；拒绝的 proposal 不进历史，
+  避免旧屏幕和旧动作误导当前帧。
+- 每个语义 GUI 工具恢复可选 `task_state_update`（默认 `{"scratchpad": null}`），
+  `local_intent` 不再出现在模型 schema。长表单 answer-all 因此由遗漏上下文恢复为
+  `6/6` 正确；scratchpad 仍由同一个 Visual Actor 自持，不是 runtime 计划器。
+- 删除系统提示里的依赖排序短句和 `input_sequence` 的限定性教学，保留通用原子
+  时间线本身；没有新增应用 recipe、分类器、坐标 offset、snap 或第二验证角色。
+- `type_text` 上限从 4096 放宽到 16384。真实记事本任务第一次生成的完整 45+ 行
+  文本被旧 schema 拒绝，底层 SendInput 本来就能处理，因此这是机械容量修复。
+- 默认 vNext 预算改为 `100 turns / 3600s / 200 model calls`。真实长任务的人类需求
+  到第 75 回合、约 889 秒才完成，旧默认 60 回合会在完成前截断。
+- AtomicDesktopAdapter 已内联为唯一一次提交图像素到屏幕像素映射；静态边界测试
+  同步删除对两个旧 mapper 导入的过时期望，没有把冗余映射层加回来。
+
+全量视觉矩阵的严格报告为 `17/18`；唯一 strict fail 是 calibration-feedback 曾有
+三次 miss 后自行纠正，最终三点全部绿色且外部 `scenario_success=true`。按用户实际
+需求（最终点绿）计为 `18/18`。井字棋按人类可见结果已足够，不因像素级美观阈值
+反判失败。报告：
+`output/playwright/client-visual-e2e/20260814-235958-suite/suite-report.json`。
+
+超长真实软件验收使用 Windows 记事本完成 81 行报告、全文替换、UTF-8 另存、关闭、
+从磁盘重开并查找两个标记。磁盘独立核验：73 非空行、七个标题各一次、22 条编号、
+`PENDING_REVIEW=0`、`HUMAN_VALIDATED=9`、精确末行一次、严格 UTF-8，SHA-256
+`CE7FE58DF4947394E41A504C1C29B29965F1DB3A229850A96F228698B93661E2`。产物：
+`output/real-software-e2e/notepad-visual-acceptance-report.txt`。run 在第 100 回合以预算
+耗尽记为 failed，但 trace 显示第 73 回合已找到精确 `END-OF-REPORT`、第 75 回合已
+回到顶部完成可见核验；随后模型把屏幕上的短横误看为空格并重复打开替换框。
+98 次物理动作全部成功，磁盘文件未被后续误操作改写，所以人类交付结论是成功，
+内部 terminal 状态只说明停止判断仍是当前模型瓶颈。
+
+其他真实软件探针没有粉饰：Blender 建模和 Calculator 多阶段任务都因当前 MiMo 的
+菜单识别/长期状态重复在 60/100 回合耗尽，物理队列仍为零失败；临时切换的
+`gpt-5.6-luna` 端点连续返回 HTTP 503，不能作为有效模型 A/B。
+
+回归：受影响主链 `441 passed`；全量 Python 首次扫描 `3593 passed, 13 skipped,
+1 warning`，唯一失败是上述旧 mapper 静态期望，修正后边界文件 `53/53 passed`；
+renderer `320/320 passed`，四套 TypeScript typecheck 通过，`git diff --check`
+无空白错误。`CON` 未触碰。

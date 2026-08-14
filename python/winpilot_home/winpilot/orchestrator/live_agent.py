@@ -29,7 +29,6 @@ from ..action.executor import (
     ADMITTED_PHYSICAL_SEQUENCE_BACKEND,
     ADMITTED_PHYSICAL_SCROLL_BACKEND,
     ADMITTED_PHYSICAL_TYPE_TEXT_BACKEND,
-    cursor_position,
 )
 from ..action.raw_device import (
     CANONICAL_HOTKEY_KEYS,
@@ -233,25 +232,6 @@ class _CompositionDependencies:
     provider_transport_factory: Callable[[], Any] | None = None
     config_snapshot: Callable[[], dict[str, Any]] | None = None
     shell_factory: Callable[[], Any] | None = None
-    pointer_debug_sink: Any = None
-    cursor_reader: Callable[[], tuple[int, int] | None] | None = None
-
-
-def _read_cursor_point() -> tuple[int, int] | None:
-    """Read the real cursor only for best-effort pointer diagnostics."""
-
-    try:
-        current = cursor_position()
-        if (
-            isinstance(current, Mapping)
-            and current.get("ok") is True
-            and type(current.get("x")) is int
-            and type(current.get("y")) is int
-        ):
-            return int(current["x"]), int(current["y"])
-    except Exception:
-        pass
-    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2488,8 +2468,11 @@ def _build_actor_resources(
         )
         usage_total = empty_usage_total()
         usage_profile = model_profile_from_config(model.api)
+        response_index = 0
 
         def record_usage(response: Any) -> None:
+            nonlocal response_index
+            response_index += 1
             tool_shapes = _model_tool_shapes(response)
             response_shape = _model_response_shape(response)
             if publish_run_telemetry and response_shape:
@@ -2500,6 +2483,7 @@ def _build_actor_resources(
                     run_id=run_id,
                     mission_id=mission_id,
                     model_role=VISUAL_ACTOR_MODEL_ROLE,
+                    response_index=response_index,
                     **response_shape,
                 )
             if publish_run_telemetry and tool_shapes:
@@ -2510,7 +2494,36 @@ def _build_actor_resources(
                     run_id=run_id,
                     mission_id=mission_id,
                     model_role=VISUAL_ACTOR_MODEL_ROLE,
+                    response_index=response_index,
                     calls=tool_shapes,
+                )
+            pointer_arguments = _model_pointer_arguments(response)
+            if publish_run_telemetry and pointer_arguments:
+                BUS.publish(
+                    "vnext_model_pointer_arguments",
+                    runtime_version=_RUNTIME_VERSION,
+                    no_legacy_fallback=True,
+                    run_id=run_id,
+                    mission_id=mission_id,
+                    model_role=VISUAL_ACTOR_MODEL_ROLE,
+                    response_index=response_index,
+                    calls=pointer_arguments,
+                    parameter_visibility="pointer_coordinates",
+                )
+            reasoning_content = _model_reasoning_content(response)
+            if publish_run_telemetry:
+                BUS.publish(
+                    "vnext_model_reasoning",
+                    runtime_version=_RUNTIME_VERSION,
+                    no_legacy_fallback=True,
+                    run_id=run_id,
+                    mission_id=mission_id,
+                    model_role=VISUAL_ACTOR_MODEL_ROLE,
+                    response_index=response_index,
+                    available=bool(reasoning_content),
+                    content=reasoning_content,
+                    content_chars=len(reasoning_content),
+                    parameter_visibility="private_runtime_evidence",
                 )
             step_usage = accumulate_usage(
                 usage_total,
@@ -2681,6 +2694,87 @@ def _model_tool_shapes(response: Any) -> list[dict[str, Any]]:
     return projected
 
 
+_POINTER_ARGUMENT_FIELDS: dict[str, frozenset[str]] = {
+    "move_mouse": frozenset({"image_x", "image_y", "duration_ms"}),
+    "click": frozenset(
+        {"image_x", "image_y", "button", "press_duration_ms"}
+    ),
+    "double_click": frozenset({"image_x", "image_y", "button"}),
+    "drag": frozenset(
+        {
+            "points",
+            "image_path",
+            "image_points",
+            "image_x1",
+            "image_y1",
+            "image_x2",
+            "image_y2",
+            "button",
+            "duration_ms",
+            "keep_holding",
+            "held_keys",
+        }
+    ),
+    "scroll": frozenset({"image_x", "image_y", "amount"}),
+}
+
+
+def _bounded_pointer_value(value: Any) -> Any:
+    """Keep coordinate diagnostics bounded and free of typed text/credentials."""
+
+    if value is None or type(value) in {bool, int, float}:
+        return value
+    if type(value) is str:
+        return value[:4096]
+    if type(value) is list:
+        return [_bounded_pointer_value(item) for item in value[:128]]
+    return None
+
+
+def _model_pointer_arguments(response: Any) -> list[dict[str, Any]]:
+    """Return raw model pointer values before canonical parsing or mapping."""
+
+    def value(container: Any, name: str) -> Any:
+        if isinstance(container, Mapping):
+            return container.get(name)
+        return getattr(container, name, None)
+
+    choices = value(response, "choices")
+    if not isinstance(choices, (list, tuple)) or not choices:
+        return []
+    message = value(choices[0], "message")
+    calls = value(message, "tool_calls")
+    if not isinstance(calls, (list, tuple)):
+        return []
+    projected: list[dict[str, Any]] = []
+    for call in calls[:16]:
+        function = value(call, "function")
+        name = value(function, "name")
+        if type(name) is not str:
+            continue
+        allowed = _POINTER_ARGUMENT_FIELDS.get(name)
+        if allowed is None:
+            continue
+        raw_arguments = value(function, "arguments")
+        if type(raw_arguments) is str:
+            try:
+                arguments = json.loads(raw_arguments)
+            except (TypeError, ValueError):
+                continue
+        elif isinstance(raw_arguments, Mapping):
+            arguments = dict(raw_arguments)
+        else:
+            continue
+        if type(arguments) is not dict:
+            continue
+        safe_arguments = {
+            key: _bounded_pointer_value(arguments[key])
+            for key in sorted(allowed & arguments.keys())
+        }
+        projected.append({"name": name, "arguments": safe_arguments})
+    return projected
+
+
 def _model_response_shape(response: Any) -> dict[str, Any]:
     """Project finish mechanics without response text or argument values."""
 
@@ -2705,6 +2799,22 @@ def _model_response_shape(response: Any) -> dict[str, Any]:
         "content_chars": len(content) if isinstance(content, str) else 0,
         "tool_call_count": len(calls) if isinstance(calls, (list, tuple)) else 0,
     }
+
+
+def _model_reasoning_content(response: Any) -> str:
+    """Return provider reasoning text for opt-in local run diagnostics."""
+
+    def value(container: Any, name: str) -> Any:
+        if isinstance(container, Mapping):
+            return container.get(name)
+        return getattr(container, name, None)
+
+    choices = value(response, "choices")
+    if not isinstance(choices, (list, tuple)) or len(choices) != 1:
+        return ""
+    message = value(choices[0], "message")
+    reasoning = value(message, "reasoning_content")
+    return reasoning if type(reasoning) is str else ""
 
 
 def _target_evidence(
@@ -2843,8 +2953,6 @@ def _build_live_session(build: _SessionBuild) -> _LiveAgentSession:
             desktop_workspace=workspace,
             raw_device=raw,
             receipt_trace_sink=_RawReceiptTrace(),
-            pointer_debug_sink=build.dependencies.pointer_debug_sink,
-            cursor_reader=build.dependencies.cursor_reader,
             launcher=_launch_application_primitive,
             desktop_shell=build.target.desktop_shell,
         )
@@ -4173,7 +4281,6 @@ def prepare_live_vnext_execution(
     thread_id: str,
     turn_id: str,
     history: tuple[dict[str, str], ...],
-    pointer_debug_sink: Any = None,
     _dependencies: _CompositionDependencies | None = None,
 ) -> ArpExecution:
     """Validate and register one default-unreachable live vNext execution."""
@@ -4182,8 +4289,6 @@ def prepare_live_vnext_execution(
         connector_factory=ConnectorGateway,
         config_snapshot=CONFIG.snapshot,
         shell_factory=_shell_runner_factory,
-        pointer_debug_sink=pointer_debug_sink,
-        cursor_reader=_read_cursor_point,
     )
     if type(config_snapshot) is not dict:
         raise ValueError("vNext live Agent config snapshot must be a dict")
