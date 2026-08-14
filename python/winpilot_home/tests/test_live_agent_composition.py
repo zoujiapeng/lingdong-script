@@ -3767,14 +3767,19 @@ def test_post_capture_failure_defers_to_fresh_observation_without_replay(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    screen_region = Region(0, 0, 1920, 1080)
+    submitted_width, submitted_height = live_agent._submitted_size(
+        screen_region
+    )
     actor_client = _RawClient(_click_responses())
     session, raw_calls, _factory_calls = _real_session_with_captures(
         monkeypatch,
         images=[
-            _jpeg(640, 480),
-            _jpeg(639, 480),
+            _jpeg(submitted_width, submitted_height),
+            _jpeg(submitted_width - 1, submitted_height),
         ],
         client=actor_client,
+        capture_regions=[screen_region, screen_region],
     )
     try:
         first = session.run_one_turn(
