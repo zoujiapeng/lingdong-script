@@ -496,38 +496,35 @@
     function setupCalibrationGrid() {
       heading.textContent='Pixel Calibration Grid';
       instruction.textContent='Click the exact center of every purple square. All 12 squares must be hit.';
-      const W=arena.clientWidth,H=arena.clientHeight,cols=4,rows=3,size=28;
+      const W=arena.clientWidth,H=arena.clientHeight,cols=4,rows=3,size=28,tolerance=20;
       const points=[];
       for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
         const x=Math.round((col+0.5)*W/cols-size/2), y=Math.round((row+0.5)*H/rows-size/2);
         const el=document.createElement('div');el.className='calib-point';place(el,x,y,size,size);
-        const point={index:points.length,center:{x:x+size/2,y:y+size/2},hit:false};
+        const point={index:points.length,center:{x:x+size/2,y:y+size/2},hit:false,el};
         points.push(point);
-        el.addEventListener('pointerdown',event=>{if(!event.isTrusted)return;moveCount=0;
-          // event.clientX/Y are viewport coordinates; the points use arena
-          // coordinates.  Subtract the arena's own offset so a click that
-          // lands on a square is judged against that square (and a miss is
-          // reported for the actual offset), never against a shifted point.
-          const arenaRect=arena.getBoundingClientRect();
-          const cx=Math.round(event.clientX-arenaRect.left),cy=Math.round(event.clientY-arenaRect.top);
-          let best=null;
-          for(const p of points){if(p.hit)continue;
-            const dx=cx-p.center.x,dy=cy-p.center.y;
-            if(Math.abs(dx)<=20&&Math.abs(dy)<=20){
-              if(!best||Math.hypot(dx,dy)<Math.hypot(best.dx,best.dy))best=p;
-            }
-          }
-          if(best){
-            const actual={actual_x:cx,actual_y:cy,dx:cx-best.center.x,dy:cy-best.center.y};
-            best.hit=true;el.classList.add('hit');
-            report('calibration_hit',event,{index:best.index,intended_x:best.center.x,intended_y:best.center.y,...actual});
-            if(points.every(p=>p.hit))markSuccess('CALIBRATION_SUCCEEDED',event,{succeeded:true,
-              points:points.map(p=>({index:p.index,intended_x:p.center.x,intended_y:p.center.y}))});
-          }else markFailure('CALIBRATION_MISS',event,{succeeded:false,actual_x:cx,actual_y:cy});
-        });
         arena.append(el);
       }
-      readyDetails={point_count:points.length,
+      // Listen on the arena, not only on each 28px square. The declared
+      // +/-20px acceptance area is wider than a square's +/-14px DOM hit box;
+      // attaching to the square silently rejected otherwise valid clicks.
+      arena.addEventListener('pointerdown',event=>{if(!event.isTrusted)return;moveCount=0;
+        const arenaRect=arena.getBoundingClientRect();
+        const cx=Math.round(event.clientX-arenaRect.left),cy=Math.round(event.clientY-arenaRect.top);
+        let best=null,bestDistance=Infinity;
+        for(const p of points){if(p.hit)continue;
+          const dx=cx-p.center.x,dy=cy-p.center.y,distance=Math.hypot(dx,dy);
+          if(Math.abs(dx)<=tolerance&&Math.abs(dy)<=tolerance&&distance<bestDistance){best=p;bestDistance=distance;}
+        }
+        if(best){
+          const actual={actual_x:cx,actual_y:cy,dx:cx-best.center.x,dy:cy-best.center.y};
+          best.hit=true;best.el.classList.add('hit');
+          report('calibration_hit',event,{index:best.index,intended_x:best.center.x,intended_y:best.center.y,...actual});
+          if(points.every(p=>p.hit))markSuccess('CALIBRATION_SUCCEEDED',event,{succeeded:true,
+            points:points.map(p=>({index:p.index,intended_x:p.center.x,intended_y:p.center.y}))});
+        }else markFailure('CALIBRATION_MISS',event,{succeeded:false,actual_x:cx,actual_y:cy});
+      });
+      readyDetails={point_count:points.length,tolerance_px:tolerance,
         points:points.map(p=>({index:p.index,intended_x:p.center.x,intended_y:p.center.y}))};
     }
 
@@ -541,39 +538,36 @@
       for(let row=0;row<rows;row++)for(let col=0;col<cols;col++){
         const x=Math.round((col+0.5)*W/cols-size/2), y=Math.round((row+0.5)*H/rows-size/2);
         const el=document.createElement('div');el.className='calib-point';place(el,x,y,size,size);
-        const point={index:points.length,center:{x:x+size/2,y:y+size/2},hit:false};
+        const point={index:points.length,center:{x:x+size/2,y:y+size/2},hit:false,el};
         points.push(point);
-        el.addEventListener('pointerdown',event=>{if(!event.isTrusted)return;moveCount=0;
-          // Viewport -> arena coordinates (see setupCalibrationGrid).
-          const arenaRect=arena.getBoundingClientRect();
-          const cx=Math.round(event.clientX-arenaRect.left),cy=Math.round(event.clientY-arenaRect.top);
-          let best=null;
-          for(const p of points){if(p.hit)continue;
-            const dx=cx-p.center.x,dy=cy-p.center.y;
-            if(Math.abs(dx)<=tolerance&&Math.abs(dy)<=tolerance){
-              if(!best||Math.hypot(dx,dy)<Math.hypot(best.dx,best.dy))best=p;
-            }
-          }
-          if(best){
-            const actual={actual_x:cx,actual_y:cy,dx:cx-best.center.x,dy:cy-best.center.y};
-            best.hit=true;el.classList.add('hit');
-            feedback.textContent=`命中 点${best.index+1} 偏差 ${actual.dx>=0?'右':'左'}${Math.abs(actual.dx)}px ${actual.dy>=0?'下':'上'}${Math.abs(actual.dy)}px`;
-            report('calibration_hit',event,{index:best.index,intended_x:best.center.x,intended_y:best.center.y,...actual});
-            if(points.every(p=>p.hit))markSuccess('CALIBRATION_SUCCEEDED',event,{succeeded:true,
-              points:points.map(p=>({index:p.index,intended_x:p.center.x,intended_y:p.center.y}))});
-          }else{
-            let nearest=null;
-            for(const p of points){if(p.hit)continue;
-              const dx=cx-p.center.x,dy=cy-p.center.y;
-              if(!nearest||Math.hypot(dx,dy)<Math.hypot(nearest.dx,nearest.dy))nearest={...p,dx,dy};
-            }
-            const dx=nearest?nearest.dx:0,dy=nearest?nearest.dy:0;
-            feedback.textContent=`上次点击偏差: ${dx>=0?'右':''}${Math.abs(dx)}px ${dy>=0?'下':''}${Math.abs(dy)}px${dx<0?'左 '+(-dx)+'px':''}${dy<0?'上 '+(-dy)+'px':''}`;
-            report('calibration_miss',event,{actual_x:cx,actual_y:cy,nearest_index:nearest?nearest.index:-1,dx,dy});
-          }
-        });
         arena.append(el);
       }
+      arena.addEventListener('pointerdown',event=>{if(!event.isTrusted)return;moveCount=0;
+        const arenaRect=arena.getBoundingClientRect();
+        const cx=Math.round(event.clientX-arenaRect.left),cy=Math.round(event.clientY-arenaRect.top);
+        let best=null,bestDistance=Infinity;
+        for(const p of points){if(p.hit)continue;
+          const dx=cx-p.center.x,dy=cy-p.center.y,distance=Math.hypot(dx,dy);
+          if(Math.abs(dx)<=tolerance&&Math.abs(dy)<=tolerance&&distance<bestDistance){best=p;bestDistance=distance;}
+        }
+        if(best){
+          const actual={actual_x:cx,actual_y:cy,dx:cx-best.center.x,dy:cy-best.center.y};
+          best.hit=true;best.el.classList.add('hit');
+          feedback.textContent=`命中 点${best.index+1} 偏差 ${actual.dx>=0?'右':'左'}${Math.abs(actual.dx)}px ${actual.dy>=0?'下':'上'}${Math.abs(actual.dy)}px`;
+          report('calibration_hit',event,{index:best.index,intended_x:best.center.x,intended_y:best.center.y,...actual});
+          if(points.every(p=>p.hit))markSuccess('CALIBRATION_SUCCEEDED',event,{succeeded:true,
+            points:points.map(p=>({index:p.index,intended_x:p.center.x,intended_y:p.center.y}))});
+        }else{
+          let nearest=null;
+          for(const p of points){if(p.hit)continue;
+            const dx=cx-p.center.x,dy=cy-p.center.y;
+            if(!nearest||Math.hypot(dx,dy)<Math.hypot(nearest.dx,nearest.dy))nearest={...p,dx,dy};
+          }
+          const dx=nearest?nearest.dx:0,dy=nearest?nearest.dy:0;
+          feedback.textContent=`上次点击偏差: ${dx>=0?'右':''}${Math.abs(dx)}px ${dy>=0?'下':''}${Math.abs(dy)}px${dx<0?'左 '+(-dx)+'px':''}${dy<0?'上 '+(-dy)+'px':''}`;
+          report('calibration_miss',event,{actual_x:cx,actual_y:cy,nearest_index:nearest?nearest.index:-1,dx,dy});
+        }
+      });
       readyDetails={point_count:points.length,tolerance_px:tolerance,
         points:points.map(p=>({index:p.index,intended_x:p.center.x,intended_y:p.center.y}))};
     }

@@ -17,6 +17,7 @@ from ..actor import (
     ClaimObligationDone,
     DesktopActionProposal,
     InvalidActorProposal,
+    ObserveProposal,
     bind_actor_decision,
     parse_actor_proposal,
     proposal_tool_name,
@@ -1007,6 +1008,17 @@ class MissionRuntime:
                 envelope,
                 route=route,
                 stop_event=stop_event,
+            )
+        if type(proposal) is ObserveProposal:
+            # Observation is a model-owned yield point, not physical input or
+            # a verification verdict. The outer live loop captures a fresh
+            # whole-screen frame on its next ordinary turn.
+            return self._result(
+                RuntimeStatus.OBSERVATION_REQUESTED,
+                route=route,
+                proposal_kind=proposal_kind,
+                decision_id=envelope.decision_id,
+                detail=proposal.question,
             )
         if type(proposal) is ClaimObligationDone:
             return self._claim_and_complete(

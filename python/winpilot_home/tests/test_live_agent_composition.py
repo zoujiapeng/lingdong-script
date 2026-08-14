@@ -492,12 +492,10 @@ class _FakeSession:
         self.closed = True
 
 
-def test_budgeted_actor_uses_task_budget_before_desktop_and_local_budget_after() -> None:
+def test_budgeted_actor_uses_remaining_task_budget_before_and_after_desktop() -> None:
     limits: list[int] = []
 
     class Role:
-        model_call_reservation = 3
-
         def begin_turn(self, *_args: Any, **kwargs: Any) -> str:
             limits.append(kwargs["_model_call_limit"])
             return "initial"
@@ -513,7 +511,7 @@ def test_budgeted_actor_uses_task_budget_before_desktop_and_local_budget_after()
 
     assert actor.begin_turn("goal") == "initial"
     assert actor.propose("turn") == "visual"
-    assert limits == [12, 3]
+    assert limits == [12, 12]
 
 
 class _StubActorBundle:
@@ -1513,6 +1511,8 @@ def test_tool_catalog_exposes_generic_mouse_keyboard_mechanics() -> None:
     } == {ExecutionMedium.GUI}
     assert media["claim_obligation_done"] is ExecutionMedium.CONTROL
     assert media["blocked"] is ExecutionMedium.CONTROL
+    assert media["observe"] is ExecutionMedium.CONTROL
+    assert tuple(schemas["observe"]["required"]) == ("question",)
 
     with pytest.raises(ValueError, match="ordered modifiers"):
         HotkeyChord(("shift", "ctrl", "a"))
@@ -1637,6 +1637,10 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
                 RuntimeStatus.ACTION_RECORDED,
                 accepted_event_ids=("event-action",),
             ),
+            MissionRuntimeResult(
+                RuntimeStatus.OBSERVATION_REQUESTED,
+                detail="refresh the whole desktop",
+            ),
             MissionRuntimeResult(RuntimeStatus.STALE_DISCARDED),
             MissionRuntimeResult(
                 RuntimeStatus.VERIFICATION_RECORDED,
@@ -1673,11 +1677,11 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
     assert snapshot["status"] == ArpRunStatus.DONE.value
     assert snapshot["runtime_version"] == "vnext"
     assert snapshot["result"]["status"] == "mission_verified"
-    assert snapshot["result"]["turns_used"] == 4
-    assert snapshot["result"]["model_calls"] == 5
+    assert snapshot["result"]["turns_used"] == 5
+    assert snapshot["result"]["model_calls"] == 6
     assert snapshot["result"]["no_legacy_fallback"] is True
-    assert session.calls == 4
-    assert session.model_calls == 5
+    assert session.calls == 5
+    assert session.model_calls == 6
     assert session.closed is True
     assert len(snapshot["evidence"]) == 1
     assert snapshot["evidence"][0]["verified"] is True
@@ -1703,7 +1707,8 @@ def test_handler_runs_bounded_redecisions_to_verified_evidence_and_closes() -> N
         "好的，我先查看当前桌面，再继续完成任务。"
     )
     assert activities[1]["tool"] == "observe_desktop"
-    assert len(turns) == 4
+    assert len(turns) == 5
+    assert turns[1]["status"] == "observation_requested"
     assert turns[-2]["status"] == "verification_recorded"
     assert starts[0]["runtime_budget"] == {
         "max_turns": 30,

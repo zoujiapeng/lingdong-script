@@ -1,7 +1,10 @@
 """Focused tests for the Pi-style shell result semantics."""
 from __future__ import annotations
 
+import json
 import subprocess
+import time
+from pathlib import Path
 
 import pytest
 
@@ -284,3 +287,82 @@ def test_write_file_preserves_literal_multiline_utf8(tmp_path) -> None:
         ),
     }
     assert target.read_text(encoding="utf-8") == content
+
+
+def test_run_detached_returns_started_receipt_and_pollable_artifacts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(shell, "SCRIPTS_DIR", tmp_path)
+    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
+    monkeypatch.setattr(shell.safety, "guard", lambda _script: None)
+    monkeypatch.setattr(
+        shell,
+        "run",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "exit_code": 0,
+            "stdout": "4321\n",
+            "stderr": "",
+        },
+    )
+
+    result = shell.run_detached("Write-Output ready", name="checks")
+
+    assert result["ok"] is True
+    assert result["state"] == "started"
+    assert result["pid"] == 4321
+    assert result["completion_scope"] == "detached_process_started_only"
+    assert "not completion" in result["output"]
+    assert "exit_code" in result["next_step"]
+    assert result["script_path"].endswith(".payload.ps1")
+    assert result["monitor_path"].endswith(".monitor.ps1")
+    assert result["stdout_path"].endswith(".stdout.log")
+    assert result["stderr_path"].endswith(".stderr.log")
+    assert result["status_path"].endswith(".status.json")
+    monitor = Path(result["monitor_path"]).read_text(encoding="utf-8-sig")
+    assert "state = 'running'" in monitor
+    assert "$null = $child.Handle" in monitor
+    assert "$child.WaitForExit()" in monitor
+    assert "exit_code = $exitCode" in monitor
+
+
+@pytest.mark.skipif(
+    not hasattr(subprocess, "CREATE_NO_WINDOW"),
+    reason="Windows PowerShell contract",
+)
+def test_run_detached_status_and_logs_follow_real_child_exit(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(shell, "SCRIPTS_DIR", tmp_path)
+    monkeypatch.setattr(shell, "shell_enabled", lambda: True)
+
+    result = shell.run_detached(
+        "Write-Output 'DETACHED_OK'; "
+        "[Console]::Error.WriteLine('DETACHED_ERR'); exit 7",
+        name="exit-proof",
+    )
+
+    assert result["ok"] is True
+    status_path = Path(result["status_path"])
+    deadline = time.monotonic() + 10
+    status = {}
+    while time.monotonic() < deadline:
+        if status_path.exists():
+            try:
+                status = json.loads(status_path.read_text(encoding="utf-8-sig"))
+            except (json.JSONDecodeError, OSError):
+                status = {}
+            if status.get("state") in {"succeeded", "failed"}:
+                break
+        time.sleep(0.05)
+
+    assert status["state"] == "failed"
+    assert status["exit_code"] == 7
+    assert "DETACHED_OK" in Path(result["stdout_path"]).read_text(
+        encoding="utf-8-sig",
+    )
+    assert "DETACHED_ERR" in Path(result["stderr_path"]).read_text(
+        encoding="utf-8-sig",
+    )

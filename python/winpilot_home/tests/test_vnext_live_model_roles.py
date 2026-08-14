@@ -5,6 +5,7 @@ import base64
 import json
 import threading
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -529,6 +530,101 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     )
 
 
+def test_visual_actor_can_request_a_fresh_desktop_without_input() -> None:
+    _, clients = _build_clients(
+        [
+            _tool_response(
+                name="refresh_desktop",
+                arguments={"question": "Reconsider after repeated local results"},
+            ),
+            _tool_response(call_id="after-refresh"),
+        ]
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    turn = _actor_turn()
+    observe = ActorToolView(
+        name="observe",
+        schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "question": {"type": "string", "minLength": 1},
+            },
+            "required": ["question"],
+        },
+        requires_local_intent=False,
+    )
+
+    decision = actor.propose(
+        replace(turn, tools=(*turn.tools, observe)),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert dict(decision.proposal) == {
+        "format": "actor-proposal/0",
+        "kind": "observe",
+        "observation_kind": "full",
+        "image_region": None,
+        "question": "Reconsider after repeated local results",
+    }
+    assert clients[0].requests[0]["tools"][-1]["function"]["name"] == (
+        "refresh_desktop"
+    )
+
+    next_decision = actor.propose(
+        replace(turn, tools=(*turn.tools, observe)),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert next_decision.proposal["action"] == "type_text"
+    next_messages = json.dumps(
+        clients[0].requests[1]["messages"],
+        ensure_ascii=False,
+    )
+    assert "Reconsider after repeated local results" not in next_messages
+    assert "call-1-0" not in next_messages
+
+
+def test_visual_actor_reports_a_canonical_error_for_missing_refresh_question() -> None:
+    _, clients = _build_clients(
+        _tool_response(name="refresh_desktop", arguments={})
+    )
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    turn = _actor_turn()
+    observe = ActorToolView(
+        name="observe",
+        schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "question": {"type": "string", "minLength": 1},
+            },
+            "required": ["question"],
+        },
+        requires_local_intent=False,
+    )
+
+    with pytest.raises(InvalidActorProposal, match="question"):
+        actor.propose(
+            replace(turn, tools=(*turn.tools, observe)),
+            image_b64=_JPEG_B64,
+            image_media_type="image/jpeg",
+            submitted_size=(640, 480),
+        )
+
+
 def test_initial_actor_turn_replies_with_native_history_and_short_system_contract() -> None:
     reply = {
         "choices": [
@@ -930,7 +1026,6 @@ def test_initial_actor_lazily_calls_a_read_only_connector_then_replies() -> None
         }
     ]
     assert len(responses) == 3
-    assert actor.model_call_reservation == 7
     assert len(clients[0].requests) == 3
     assert [
         tool["function"]["name"]
@@ -2165,9 +2260,6 @@ def test_status_tools_remain_available_near_the_model_call_limit() -> None:
         "get_memory_status",
         "get_capabilities",
     ]
-    assert actor.model_call_reservation == 5
-
-
 def test_visual_actor_repairs_one_invalid_tool_call_before_physical_input() -> None:
     repaired = _tool_response(
         "type_text",
@@ -2542,10 +2634,12 @@ def test_visual_turn_marks_repeated_results_without_hiding_output() -> None:
         if message.get("role") == "tool"
     ]
     assert tool_results[0]["output"] == "same file contents"
+    assert tool_results[0]["cwd"] == str(Path.cwd())
     assert tool_results[0]["model_calls_remaining"] == 6
     assert tool_results[1] == {
         "exit_code": 0,
         "completion_scope": "child_process_exit_only",
+        "cwd": str(Path.cwd()),
         "physical_input_receipt": False,
         "message": (
             "Executed; this tool returned the same output as the referenced "
@@ -2701,6 +2795,7 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
     assert shell_schema["properties"]["task_state_update"]["default"] == {
         "scratchpad": None,
     }
+    assert shell_schema["properties"]["cwd"]["minLength"] == 1
     assert "maximum" not in shell_schema["properties"]["timeout_s"]
     shell_description = next(
         tool["function"]["description"]
@@ -2710,6 +2805,7 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
     assert "never provide a physical mouse or keyboard receipt" in (
         shell_description
     )
+    assert "directory changes never persist" in shell_description
 
 
 def test_visual_turn_can_run_shell_before_gui_action() -> None:
@@ -2720,6 +2816,7 @@ def test_visual_turn_can_run_shell_before_gui_action() -> None:
                 arguments={
                     "command": "tasklist",
                     "shell": "cmd",
+                    "cwd": str(Path.cwd()),
                     "task_state_update": {
                         "scratchpad": "Phase: inspect processes",
                     },
@@ -2755,6 +2852,7 @@ def test_visual_turn_can_run_shell_before_gui_action() -> None:
     assert len(runner.calls) == 1
     assert runner.calls[0]["command"] == "tasklist"
     assert runner.calls[0]["shell"] == "cmd"
+    assert runner.calls[0]["cwd"] == str(Path.cwd())
     assert len(clients[0].requests) == 2
 
 
@@ -3100,6 +3198,7 @@ def test_next_visual_turn_keeps_bounded_local_tool_transcript() -> None:
     }
     assert json.loads(messages[3]["content"]) == {
         "completion_scope": "child_process_exit_only",
+        "cwd": str(Path.cwd()),
         "exit_code": 0,
         "model_calls_remaining": 6,
         "ok": True,
@@ -3241,7 +3340,7 @@ def test_initial_truncation_continues_with_a_shorter_status_call() -> None:
     )
 
 
-def test_visual_turn_shell_calls_are_capped_per_frame() -> None:
+def test_visual_turn_keeps_model_selected_dependent_shell_chain() -> None:
     _, clients = _build_clients(
         [
             *[
@@ -3277,26 +3376,19 @@ def test_visual_turn_shell_calls_are_capped_per_frame() -> None:
     )
 
     assert decision.proposal["action"] == "type_text"
-    assert len(runner.calls) == 4
+    assert len(runner.calls) == 5
     assert [call["command"] for call in runner.calls] == [
         "tasklist 0",
         "tasklist 1",
         "tasklist 2",
         "tasklist 3",
+        "tasklist 4",
     ]
-    budget_messages = [
-        json.loads(m["content"])
-        for m in clients[0].requests[5]["messages"]
-        if m.get("role") == "tool"
-        and "tool_budget_exhausted" in str(m.get("content", ""))
-    ]
-    assert len(budget_messages) == 1
-    assert budget_messages[0]["tool_budget_exhausted"] == "run_shell"
     names = [
         tool["function"]["name"]
         for tool in clients[0].requests[5]["tools"]
     ]
-    assert "run_shell" not in names
+    assert "run_shell" in names
     assert "type_text" in names
 
 

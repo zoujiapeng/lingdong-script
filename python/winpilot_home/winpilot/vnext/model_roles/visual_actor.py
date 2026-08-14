@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from ...modeling import (
@@ -128,6 +129,11 @@ _TOOL_DESCRIPTIONS = {
         "Start one installed application or file/URL association by display "
         "name, alias, or path. This is a generic launch, not a click."
     ),
+    "observe": (
+        "Request a fresh whole-desktop frame without physical input. Use this "
+        "to leave a repetitive local-tool chain, refresh visual context, and "
+        "reconsider the next step."
+    ),
     "claim_obligation_done": (
         "Finish without further mutation when the current image shows the "
         "requested result and your remaining_items has no unfinished work."
@@ -139,6 +145,7 @@ _TOOL_DESCRIPTIONS = {
 
 _MODEL_TOOL_NAMES = {
     "hotkey": "press_key",
+    "observe": "refresh_desktop",
 }
 _RUNTIME_TOOL_NAMES = {
     model_name: runtime_name
@@ -172,7 +179,7 @@ _LOCALLY_ENFORCED_SCHEMA_KEYS = frozenset({"not", "uniqueItems"})
 _FLOW_FRAGMENT_REQUEST_CHARS = 16_384
 _VISUAL_HISTORY_DEPTH = 4
 _VISUAL_UTILITY_HISTORY_DEPTH = 4
-_CONNECTOR_TOOL_CALL_LIMIT = 4
+_STANDALONE_CONNECTOR_CALL_ALLOWANCE = 4
 _CONNECTOR_SEARCH_TOOL = "search_connector_tools"
 _CONNECTOR_CALL_TOOL = "call_connector_tool"
 _CONNECTOR_TOOLS = frozenset({_CONNECTOR_SEARCH_TOOL, _CONNECTOR_CALL_TOOL})
@@ -187,22 +194,22 @@ _STATUS_TOOLS = frozenset(
         _STATUS_CAPABILITIES_TOOL,
     }
 )
-_STATUS_TOOL_CALL_LIMIT = 2
+_STANDALONE_STATUS_CALL_ALLOWANCE = 2
 _SHELL_TOOL = "run_shell"
 _DETACHED_SHELL_TOOL = "run_detached"
 _WRITE_FILE_TOOL = "write_file"
 _LOCAL_UTILITY_TOOLS = frozenset({_DETACHED_SHELL_TOOL, _WRITE_FILE_TOOL})
-_SHELL_TOOL_CALL_LIMIT = 4
+_STANDALONE_SHELL_CALL_ALLOWANCE = 4
 _SHELL_MAX_COMMAND_CHARS = 16_384
 _WINDOW_TEXT_TOOL = "read_window_text"
-_WINDOW_TEXT_RESERVATION = 2
+_STANDALONE_WINDOW_TEXT_ALLOWANCE = 2
 _WINDOW_TEXT_MAX_CHARS = 6000
 _CAPTURE_SCREEN_TOOL = "capture_screen"
-_CAPTURE_SCREEN_RESERVATION = 2
+_STANDALONE_CAPTURE_ALLOWANCE = 2
 _LIST_WINDOWS_TOOL = "list_windows"
-_LIST_WINDOWS_RESERVATION = 1
+_STANDALONE_LIST_WINDOWS_ALLOWANCE = 1
 _PASTE_IMAGE_TOOL = "paste_image_file"
-_PASTE_IMAGE_RESERVATION = 2
+_STANDALONE_PASTE_IMAGE_ALLOWANCE = 2
 _VISUAL_UTILITY_TOOLS = frozenset({
     *_STATUS_TOOLS,
     *_CONNECTOR_TOOLS,
@@ -1031,6 +1038,14 @@ def _proposal_from_response(
             "args": arguments,
             "local_intent": local_intent or "",
         }
+    elif runtime_name == "observe":
+        raw_proposal = {
+            "format": ACTOR_PROPOSAL_FORMAT,
+            "kind": "observe",
+            "observation_kind": "full",
+            "image_region": None,
+            "question": arguments.get("question"),
+        }
     elif runtime_name == "claim_obligation_done":
         raw_proposal = {
             "format": ACTOR_PROPOSAL_FORMAT,
@@ -1345,9 +1360,12 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
                 "name": _SHELL_TOOL,
                 "description": (
                     "Run PowerShell or cmd for code, files, processes, and "
-                    "command output. ok and exit_code describe only the child "
-                    "process; they never provide a physical mouse or keyboard "
-                    "receipt. Use the desktop input tools for real input."
+                    "command output. Every call starts a fresh shell process, "
+                    "so directory changes never persist between calls; pass "
+                    "cwd for project-local commands. ok and exit_code describe "
+                    "only the child process; they never provide a physical "
+                    "mouse or keyboard receipt. Use the desktop input tools "
+                    "for real input."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1366,6 +1384,11 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
                             "type": "integer",
                             "minimum": 1,
                         },
+                        "cwd": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Working directory for this one command.",
+                        },
                     },
                     "required": ["command"],
                     "additionalProperties": False,
@@ -1381,7 +1404,9 @@ def _shell_tool_definitions(runner: Any) -> list[dict[str, Any]]:
                 "name": _DETACHED_SHELL_TOOL,
                 "description": (
                     "Start a PowerShell script as an independent background "
-                    "process for GUI apps, servers, or other long-running work."
+                    "process for GUI apps, servers, or other long-running work. "
+                    "Returns immediately with a launch receipt and pollable "
+                    "log/status paths; it never claims the script completed."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1998,6 +2023,9 @@ def _shell_exchange(
         type(timeout_s) is not int or timeout_s < 1
     ):
         raise LiveModelRoleError("run_shell timeout_s must be a positive integer")
+    cwd = arguments.get("cwd")
+    if cwd is not None and (type(cwd) is not str or not cwd.strip()):
+        raise LiveModelRoleError("run_shell cwd must be a non-empty string")
     content = member(message, "content")
     if content is not None and type(content) is not str:
         raise LiveModelRoleError("Actor shell content must be text or null")
@@ -2033,11 +2061,18 @@ def _call_shell(
             _SHELL_TOOL,
             {"ok": False, "error": "shell runner is unavailable"},
         )
+    requested_cwd = arguments.get("cwd")
+    cwd = (
+        str(requested_cwd).strip()
+        if type(requested_cwd) is str and requested_cwd.strip()
+        else None
+    )
     try:
         result = runner.run(
             command=str(arguments.get("command") or ""),
             shell=str(arguments.get("shell") or "powershell"),
             timeout_s=float(arguments.get("timeout_s") or 30),
+            cwd=cwd,
             stop_event=stop_event,
         )
     except Exception as exc:
@@ -2048,6 +2083,11 @@ def _call_shell(
             TypeError("shell runner returned a non-object result"),
         )
     output = dict(result)
+    output["cwd"] = (
+        str(Path(cwd).expanduser().resolve())
+        if cwd is not None
+        else str(Path.cwd())
+    )
     # A child process exiting cleanly says nothing about any synthetic desktop
     # input it may have attempted.  Keep that mechanical distinction explicit
     # instead of letting exit code 0 impersonate a RawDevice receipt.
@@ -2563,41 +2603,39 @@ class LiveVisualActor:
         self._state_lock = threading.Lock()
 
     @property
-    def model_call_reservation(self) -> int:
-        # Bound one visual frame's utility exchange while leaving the model
-        # free to choose which available tools matter. The task-level budget
-        # remains the overall ceiling; this only returns control to a fresh
-        # screen instead of spending the whole task on one stale JPEG.
-        local_budget = (
-            _STATUS_TOOL_CALL_LIMIT
+    def standalone_model_call_allowance(self) -> int:
+        """Finite fallback for direct role users outside the live Runtime."""
+
+        local_allowance = (
+            _STANDALONE_STATUS_CALL_ALLOWANCE
             if self._status_provider is not None
             else 0
         ) + (
-            _CONNECTOR_TOOL_CALL_LIMIT
+            _STANDALONE_CONNECTOR_CALL_ALLOWANCE
             if self._connector_gateway is not None
             else 0
         ) + (
-            _SHELL_TOOL_CALL_LIMIT if self._shell_runner is not None else 0
+            _STANDALONE_SHELL_CALL_ALLOWANCE
+            if self._shell_runner is not None
+            else 0
         ) + (
-            _WINDOW_TEXT_RESERVATION
+            _STANDALONE_WINDOW_TEXT_ALLOWANCE
             if self._window_text_reader is not None
             else 0
         ) + (
-            _CAPTURE_SCREEN_RESERVATION
+            _STANDALONE_CAPTURE_ALLOWANCE
             if self._capture_runner is not None
             else 0
         ) + (
-            _LIST_WINDOWS_RESERVATION
+            _STANDALONE_LIST_WINDOWS_ALLOWANCE
             if self._windows_reader is not None
             else 0
         ) + (
-            _PASTE_IMAGE_RESERVATION
+            _STANDALONE_PASTE_IMAGE_ALLOWANCE
             if self._paste_runner is not None
             else 0
         )
-        # Three terminal/repair calls preserve the current repeated-format
-        # repair path without reopening an unbounded same-frame loop.
-        return 3 + local_budget
+        return 3 + local_allowance
 
     def _record_response(self, response: Any) -> None:
         if self._on_response is not None:
@@ -2718,8 +2756,11 @@ class LiveVisualActor:
         )
 
     def _model_call_allowance(self, model_call_limit: int | None) -> int:
+        # The production Runtime always supplies the task's remaining model
+        # budget. Direct role users retain a finite fallback for malformed or
+        # endlessly repeated provider output.
         if model_call_limit is None:
-            model_call_limit = self.model_call_reservation
+            model_call_limit = self.standalone_model_call_allowance
         if type(model_call_limit) is not int or model_call_limit < 1:
             raise LiveModelRoleError("Actor model-call allowance is invalid")
         return model_call_limit
@@ -3241,7 +3282,6 @@ class LiveVisualActor:
         decision = None
         model_call_allowance = self._model_call_allowance(_model_call_limit)
         seen_tool_results: dict[tuple[str, str], tuple[str, int]] = {}
-        shell_calls = 0
         for model_call_index in range(model_call_allowance):
             outcome = invoke_chat_completion(
                 self._client,
@@ -3384,39 +3424,9 @@ class LiveVisualActor:
                     raise InvalidActorProposal(str(exc)) from exc
             if shell is not None:
                 assistant, call_id, name, arguments = shell
-                if shell_calls >= _SHELL_TOOL_CALL_LIMIT:
-                    shell_budget_messages = [
-                        assistant,
-                        {
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": _canonical_json(
-                                {
-                                    "tool_budget_exhausted": _SHELL_TOOL,
-                                    "message": (
-                                        "run_shell is limited to "
-                                        f"{_SHELL_TOOL_CALL_LIMIT} calls per "
-                                        "visual frame; choose a GUI tool now"
-                                    ),
-                                    "model_calls_remaining": (
-                                        model_calls_remaining
-                                    ),
-                                }
-                            ),
-                        },
-                    ]
-                    current_exchange.extend(shell_budget_messages)
-                    provider_request["messages"].extend(shell_budget_messages)
-                    provider_request["tools"] = [
-                        tool
-                        for tool in provider_request["tools"]
-                        if _tool_function_name(tool) != _SHELL_TOOL
-                    ]
-                    continue
                 self._record_tool_start(
                     _initial_calls_from_response(outcome.response)[0]
                 )
-                shell_calls += 1
                 result = _call_shell(
                     self._shell_runner,
                     arguments,
