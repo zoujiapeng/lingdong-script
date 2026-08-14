@@ -994,8 +994,8 @@ def test_absolute_mouse_input_maps_real_virtual_desktop_pixels(
 
     assert (top_left.dx, top_left.dy) == (0, 0)
     assert (bottom_right.dx, bottom_right.dy) == (65535, 65535)
-    assert center.dx == int(1920 * 65535 / 3839)
-    assert center.dy == int(1080 * 65535 / 2159)
+    assert center.dx == round(1920 * 65535 / 3839)
+    assert center.dy == round(1080 * 65535 / 2159)
     required_flags = (
         executor.win32con.MOUSEEVENTF_MOVE
         | executor.win32con.MOUSEEVENTF_ABSOLUTE

@@ -1035,6 +1035,15 @@ def test_native_provider_protocols_cross_deadline_boundary_and_report_usage(
     assert len(usage_events) == 1
     assert usage_events[0]["total"]["prompt_tokens"] == 10
     assert usage_events[0]["model_role"] == "vnext_visual_actor"
+    reasoning_events = [
+        event
+        for event in events
+        if event["type"] == "vnext_model_reasoning"
+    ]
+    assert len(reasoning_events) == 1
+    assert reasoning_events[0]["response_index"] == 1
+    assert reasoning_events[0]["available"] is False
+    assert reasoning_events[0]["content"] == ""
 
 
 def test_model_tool_shape_diagnostics_keep_types_but_not_argument_content() -> None:
@@ -1092,6 +1101,58 @@ def test_model_response_shape_records_truncation_without_content() -> None:
         "tool_call_count": 0,
     }
     assert "PRIVATE" not in json.dumps(shape)
+
+
+def test_model_reasoning_content_is_available_for_local_trace_diagnostics() -> None:
+    response = {
+        "choices": [{
+            "message": {
+                "reasoning_content": "measure the current visual geometry",
+            },
+        }],
+    }
+
+    assert live_agent._model_reasoning_content(response) == (
+        "measure the current visual geometry"
+    )
+    assert live_agent._model_reasoning_content({"choices": []}) == ""
+
+
+def test_model_pointer_arguments_preserve_only_raw_coordinate_fields() -> None:
+    response = {
+        "choices": [{
+            "message": {
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "drag",
+                            "arguments": json.dumps({
+                                "points": "10,20 30,40",
+                                "button": "left",
+                                "local_intent": "PRIVATE",
+                                "task_state_update": {"scratchpad": "PRIVATE"},
+                            }),
+                        }
+                    },
+                    {
+                        "function": {
+                            "name": "type_text",
+                            "arguments": json.dumps({"text": "SECRET"}),
+                        }
+                    },
+                ]
+            },
+        }],
+    }
+
+    projected = live_agent._model_pointer_arguments(response)
+
+    assert projected == [{
+        "name": "drag",
+        "arguments": {"button": "left", "points": "10,20 30,40"},
+    }]
+    assert "PRIVATE" not in json.dumps(projected)
+    assert "SECRET" not in json.dumps(projected)
 
 
 def test_vnext_usage_and_cache_tokens_reach_runtime_and_terminal_event(
@@ -1448,7 +1509,7 @@ def test_tool_catalog_exposes_generic_mouse_keyboard_mechanics() -> None:
     assert (
         schemas["type_text"]["properties"]["text"]["maxLength"]
         == MAX_TYPE_TEXT_CODEPOINTS
-        == 4096
+        == 16_384
     )
     hotkey = schemas["hotkey"]["properties"]["keys"]
     assert set(hotkey["items"]["enum"]) == set(CANONICAL_HOTKEY_KEYS)
@@ -3505,7 +3566,7 @@ def test_desktop_shell_launch_adopts_the_launched_window_next_observation(
         # The mechanical fuel gauge is wired end-to-end: the visual turn's
         # user context carries consumed/max turns, calls, and wall seconds.
         visual_request = client.requests[0]
-        turn_text = visual_request["messages"][-1]["content"][0]["text"]
+        turn_text = visual_request["messages"][-1]["content"][1]["text"]
         turn_payload = json.loads(turn_text)
         assert turn_payload["budget"]["max_turns"] == budget.max_turns
         assert turn_payload["budget"]["max_model_calls"] == budget.max_model_calls
@@ -3819,10 +3880,10 @@ def test_post_capture_failure_defers_to_fresh_observation_without_replay(
         "type_text",
         "press_key",
     }:
-        local_intent = tools[name]["properties"]["local_intent"]
-        assert local_intent["type"] == "string"
-        assert local_intent["default"] == ""
-        assert "pattern" not in local_intent
+        assert "local_intent" not in tools[name]["properties"]
+        assert tools[name]["properties"]["task_state_update"]["default"] == {
+            "scratchpad": None,
+        }
 
 
 def test_each_model_call_is_clamped_to_one_second_remaining_deadline(

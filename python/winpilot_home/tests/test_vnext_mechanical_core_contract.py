@@ -42,8 +42,6 @@ MECHANICAL_CORE_MODULES = (
     "winpilot.visual_runtime.frame_authority",
     "winpilot.visual_runtime.frame_observer",
     "winpilot.visual_runtime.keyboard_contracts",
-    "winpilot.visual_runtime.normalized_frame_coordinates",
-    "winpilot.visual_runtime.submitted_image_coordinates",
     "winpilot.perception.apps",
     "winpilot.perception.model",
     "winpilot.perception.uia",

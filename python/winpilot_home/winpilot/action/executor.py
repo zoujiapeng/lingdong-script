@@ -928,8 +928,8 @@ def _absolute_mouse_input(x: int, y: int) -> _Input:
     vy = user32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
     vw = user32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
     vh = user32.GetSystemMetrics(79)   # SM_CYVIRTUALSCREEN
-    nx = max(0, min(65535, int((int(x) - vx) * 65535 / max(1, vw - 1))))
-    ny = max(0, min(65535, int((int(y) - vy) * 65535 / max(1, vh - 1))))
+    nx = max(0, min(65535, round((int(x) - vx) * 65535 / max(1, vw - 1))))
+    ny = max(0, min(65535, round((int(y) - vy) * 65535 / max(1, vh - 1))))
     flags = (
         win32con.MOUSEEVENTF_MOVE
         | win32con.MOUSEEVENTF_ABSOLUTE
@@ -1082,8 +1082,8 @@ def _move_path_while_pressed(
             if _stop_requested(stop_event):
                 return False
             expected_cursor = (
-                int(a[0] + (b[0] - a[0]) * i / steps),
-                int(a[1] + (b[1] - a[1]) * i / steps),
+                round(a[0] + (b[0] - a[0]) * i / steps),
+                round(a[1] + (b[1] - a[1]) * i / steps),
             )
             _emit_move(*expected_cursor)
             if progress is not None:

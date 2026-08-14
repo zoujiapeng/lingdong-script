@@ -1309,7 +1309,6 @@ def _start_arp_execution(
                 thread_id=thread_id,
                 turn_id=turn_id,
                 history=thread_history,
-                pointer_debug_sink=trace_mod.RECORDER,
             )
         except Exception as exc:
             AGENT_THREADS.fail_turn(turn_id, str(exc))

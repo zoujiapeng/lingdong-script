@@ -1212,6 +1212,63 @@ def test_run_projection_unifies_agent_metrics_and_done_evidence():
     assert run["evidence"][0]["reason"] == "target visible"
 
 
+def test_run_projection_keeps_correlated_reasoning_and_pointer_coordinates():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    run_id = "projection-model-pointer-audit"
+    store.on_event({
+        "type": "arp_run_start",
+        "ts": 1.0,
+        "run_id": run_id,
+        "runtime_version": "vnext",
+        "graph_name": "Drag target",
+    })
+    store.on_event({
+        "type": "vnext_model_reasoning",
+        "ts": 2.0,
+        "run_id": run_id,
+        "response_index": 3,
+        "available": False,
+        "content": "",
+    })
+    store.on_event({
+        "type": "vnext_model_pointer_arguments",
+        "ts": 3.0,
+        "run_id": run_id,
+        "response_index": 3,
+        "calls": [{
+            "name": "drag",
+            "arguments": {"points": "10,20 30,40"},
+        }],
+    })
+    store.on_event({
+        "type": "vnext_pointer_dispatch",
+        "ts": 4.0,
+        "run_id": run_id,
+        "action": "drag",
+        "submitted_image_size": [1120, 630],
+        "frame_region": [0, 0, 1920, 1080],
+        "image_coordinates": {"image_path": [[10, 20], [30, 40]]},
+        "physical_arguments": {
+            "x1": 17,
+            "y1": 34,
+            "x2": 51,
+            "y2": 69,
+        },
+    })
+
+    run = store.get(run_id)
+
+    assert run is not None
+    reasoning, raw_points, dispatch = run["timeline"][-3:]
+    assert reasoning["response_index"] == 3
+    assert reasoning["summary"] == "供应商未返回独立 reasoning_content"
+    assert "'points': '10,20 30,40'" in raw_points["summary"]
+    assert "'submitted_image_size': [1120, 630]" in dispatch["summary"]
+    assert "'physical_arguments': {'x1': 17" in dispatch["summary"]
+
+
 def test_run_projection_freezes_vnext_identity_and_records_mismatch():
     from winpilot.orchestrator.projection import RunProjectionStore
 

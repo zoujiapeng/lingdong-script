@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-MAX_TYPE_TEXT_CODEPOINTS = 4096
+MAX_TYPE_TEXT_CODEPOINTS = 16_384
 CANONICAL_HOTKEY_MODIFIERS = ("ctrl", "alt", "shift", "win")
 CANONICAL_HOTKEY_KEYS = frozenset({
     *CANONICAL_HOTKEY_MODIFIERS,

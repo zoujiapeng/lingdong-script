@@ -158,8 +158,6 @@ ATOMIC_DESKTOP_IMPORTS = (
     "winpilot.visual_runtime.frame_observer",
     "winpilot.visual_runtime.input_sequence",
     "winpilot.visual_runtime.keyboard_contracts",
-    "winpilot.visual_runtime.normalized_frame_coordinates",
-    "winpilot.visual_runtime.submitted_image_coordinates",
 )
 
 MODEL_ROLE_FILES = (

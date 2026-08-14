@@ -192,28 +192,84 @@ def test_normalize_usage_accepts_anthropic_style_cache_read_fields():
     assert usage.cache_miss_tokens == 20
 
 
-def test_adapter_disables_provider_thinking_for_mimo_and_reasonix_only():
+def test_adapter_leaves_provider_thinking_at_native_default():
     raw = MagicMock()
     adapter = build_model_adapter(raw, {
         "base_url": "https://api.xiaomimimo.com/v1",
         "model": "mimo-v2.5-pro",
+        "thinking": False,
+    })
+
+    adapter.chat.completions.create(model="mimo-v2.5-pro", messages=[])
+
+    kwargs = raw.chat.completions.create.call_args.kwargs
+    assert "extra_body" not in kwargs
+
+    raw = MagicMock()
+    adapter = build_model_adapter(raw, {
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "model": "mimo-v2.5-pro",
+        "thinking": False,
+    })
+
+    adapter.chat.completions.create(
+        model="mimo-v2.5-pro",
+        messages=[{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": {"url": "data:image/jpeg;base64,AA=="},
+            }],
+        }],
+    )
+
+    kwargs = raw.chat.completions.create.call_args.kwargs
+    assert "extra_body" not in kwargs
+
+    raw = MagicMock()
+    adapter = build_model_adapter(raw, {
+        "base_url": "https://api.reasonix.ai/v1",
+        "model": "reasonix-vision",
+        "thinking": False,
+    })
+
+    adapter.chat.completions.create(
+        model="reasonix-vision",
+        messages=[{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": {"url": "data:image/jpeg;base64,AA=="},
+            }],
+        }],
+    )
+
+    kwargs = raw.chat.completions.create.call_args.kwargs
+    assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+
+    raw = MagicMock()
+    adapter = build_model_adapter(raw, {
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "model": "mimo-v2.5-pro",
+        "thinking": True,
+    })
+
+    adapter.chat.completions.create(model="mimo-v2.5-pro", messages=[])
+
+    kwargs = raw.chat.completions.create.call_args.kwargs
+    assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+
+    raw = MagicMock()
+    adapter = build_model_adapter(raw, {
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "model": "mimo-v2.5-pro",
+        "thinking": {"type": "disabled"},
     })
 
     adapter.chat.completions.create(model="mimo-v2.5-pro", messages=[])
 
     kwargs = raw.chat.completions.create.call_args.kwargs
     assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
-
-    raw = MagicMock()
-    adapter = build_model_adapter(raw, {
-        "base_url": "https://api.deepseek.com",
-        "model": "deepseek-v4-flash",
-    })
-
-    adapter.chat.completions.create(model="deepseek-v4-flash", messages=[])
-
-    kwargs = raw.chat.completions.create.call_args.kwargs
-    assert "extra_body" not in kwargs
 
 
 def test_main_agent_adapter_keeps_configured_thinking_until_request_routing(monkeypatch):
@@ -250,7 +306,7 @@ def test_main_agent_adapter_keeps_configured_thinking_until_request_routing(monk
     assert loop._main_agent_api_settings()["thinking"] is False
 
 
-def test_native_visual_request_enables_provider_thinking_at_request_boundary(monkeypatch):
+def test_native_visual_request_keeps_mimo_provider_thinking_default(monkeypatch):
     from winpilot.agent import loop
 
     api = {
@@ -290,11 +346,12 @@ def test_native_visual_request_enables_provider_thinking_at_request_boundary(mon
     )
 
     assert runner._chat(client, []) is not None
-    assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
-    assert captured["max_completion_tokens"] == 4096
-    assert "max_tokens" not in captured
-    assert "temperature" not in captured
-    assert runner._last_llm_thinking_enabled is True
+    assert "extra_body" not in captured
+    assert captured["max_tokens"] == 4096
+    assert captured["temperature"] == 0.3
+    assert "max_completion_tokens" not in captured
+    assert runner._last_thinking_policy == "provider_default"
+    assert runner._last_llm_thinking_enabled is False
 
 
 def test_native_visual_request_skips_text_only_escalation_model(monkeypatch):

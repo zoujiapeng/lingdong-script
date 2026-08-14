@@ -435,12 +435,11 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "exact submitted-image pixels" in actor_contract
     assert "Chat and act naturally" in actor_contract
     assert "runtime does not classify or route" in actor_contract
-    assert "visibly complete, call claim_obligation_done" in actor_contract
-    assert "only when none remain" in actor_contract
-    assert "no action can advance, call blocked" in actor_contract
-    assert "When pointer_held is true" in actor_contract
-    assert "step back to the whole screen" in actor_contract
-    assert "revise the approach toward original_goal" in actor_contract
+    assert "goal complete with none remaining" in actor_contract
+    assert "call claim_obligation_done" in actor_contract
+    assert "external condition no tool can change" in actor_contract
+    assert "pointer_held persists" in actor_contract
+    assert "only authoritative visual state" in actor_contract
     assert actor_request["tool_choice"] == "auto"
     assert "parallel_tool_calls" not in actor_request
     assert "n" not in actor_request
@@ -465,7 +464,7 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     }
     assert "once" in descriptions["click"]
     assert "Double-click" in descriptions["double_click"]
-    assert "`x1,y1 x2,y2 ...`" in descriptions["drag"]
+    assert "through ordered points text" in descriptions["drag"]
     assert "amount < 0 scrolls" in descriptions["scroll"]
     assert "120 is one ordinary notch" in descriptions["scroll"]
     assert "selected text is replaced" in descriptions["type_text"]
@@ -474,31 +473,18 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
     assert "volumedown" in descriptions["press_key"]
     assert "relative to the current system level" in descriptions["press_key"]
     assert "without further mutation" in descriptions["claim_obligation_done"]
-    assert "no supplied action can advance" in descriptions["blocked"]
+    assert "external blocker" in descriptions["blocked"]
     assert "response_format" not in actor_request
     strict_schemas = [
         tool["function"]["parameters"]
         for tool in actor_request["tools"]
     ]
     for schema in strict_schemas:
-        assert "task_state_update" in schema["properties"]
-        assert "task_state_update" not in schema["required"]
-        assert schema["properties"]["task_state_update"]["default"] == {
-            "scratchpad": None
-        }
-        scratchpad_field = schema["properties"]["task_state_update"][
-            "properties"
-        ]["scratchpad"]
-        scratchpad_schema = scratchpad_field["anyOf"][0]
-        assert scratchpad_schema["maxLength"] == 8192
-        assert "phase" in scratchpad_field["description"]
-        assert "stage rules" in scratchpad_field["description"]
-        remaining_field = schema["properties"]["task_state_update"][
-            "properties"
-        ]["remaining_items"]
-        assert remaining_field["default"] is None
-        assert remaining_field["anyOf"][0]["maxItems"] == 32
-        assert remaining_field["anyOf"][0]["items"]["maxLength"] == 256
+        state = schema["properties"]["task_state_update"]
+        assert state["default"] == {"scratchpad": None}
+        assert state["properties"]["scratchpad"]["default"] is None
+        assert state["properties"]["remaining_items"]["default"] is None
+        assert "local_intent" not in schema["properties"]
     for schema in strict_schemas:
         assert {
             "allOf",
@@ -511,8 +497,11 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
             "uniqueItems",
         }.isdisjoint(_schema_keywords(schema))
 
-    actor_context = actor_request["messages"][1]["content"][0]["text"]
+    assert actor_request["messages"][1]["content"][0]["type"] == "image_url"
+    actor_context = actor_request["messages"][1]["content"][1]["text"]
     actor_context_value = json.loads(actor_context)
+    assert actor_context_value["submitted_image_size"] == [640, 480]
+    assert "submitted_size" not in actor_context_value
     assert "tools" not in actor_context_value
     assert actor_context_value["mission"]["original_goal"] == (
         "Type the requested greeting"
@@ -526,7 +515,7 @@ def test_actor_uses_zero_retry_client_and_strict_visual_context() -> None:
         "double_click",
     ]
     assert "data:image/jpeg;base64," in (
-        actor_request["messages"][1]["content"][1]["image_url"]["url"]
+        actor_request["messages"][1]["content"][0]["image_url"]["url"]
     )
 
 
@@ -971,7 +960,8 @@ def test_initial_observe_with_content_continues_on_the_same_actor() -> None:
         "tool_call_id": "observe-call",
         "content": '{"desktop_observation":"available"}',
     }
-    assert visual_messages[6]["content"][1]["type"] == "image_url"
+    assert visual_messages[6]["content"][0]["type"] == "image_url"
+    assert visual_messages[6]["content"][1]["type"] == "text"
 
 
 def test_initial_actor_lazily_calls_a_read_only_connector_then_replies() -> None:
@@ -1278,7 +1268,7 @@ def test_previous_action_is_passed_without_runtime_strategy_hint(
     )
 
     context = json.loads(
-        clients[0].requests[0]["messages"][1]["content"][0]["text"]
+        clients[0].requests[0]["messages"][1]["content"][1]["text"]
     )
     assert context["previous_action"] == previous_action.to_dict()
     assert "scroll_guard" not in context
@@ -1308,7 +1298,7 @@ def test_failed_physical_action_gets_one_actionable_model_hint() -> None:
     )
 
     context = json.loads(
-        clients[0].requests[0]["messages"][1]["content"][0]["text"]
+        clients[0].requests[0]["messages"][1]["content"][1]["text"]
     )
     assert context["previous_action"]["error_kind"] == (
         "physical_attempt_failed"
@@ -1332,7 +1322,7 @@ def test_actor_turn_contract_rejects_arbitrary_action_summaries(
         )
 
 
-def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None:
+def test_consecutive_visual_calls_keep_only_the_previous_native_action() -> None:
     _, clients = _build_clients([
         _tool_response(call_id="first"),
         _tool_response(call_id="second"),
@@ -1340,6 +1330,10 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         _tool_response(call_id="fourth"),
         _tool_response(call_id="fifth"),
         _tool_response(call_id="sixth"),
+        _tool_response(call_id="seventh"),
+        _tool_response(call_id="eighth"),
+        _tool_response(call_id="ninth"),
+        _tool_response(call_id="tenth"),
     ])
     actor = LiveVisualActor(
         client=clients[0],
@@ -1353,9 +1347,6 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         image_b64=_JPEG_B64,
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
-    )
-    clients[0].requests[0]["messages"].append(
-        {"role": "assistant", "content": "private prior reasoning"}
     )
     completed = replace(
         turn,
@@ -1371,98 +1362,161 @@ def test_consecutive_calls_keep_a_bounded_native_tool_exchange_history() -> None
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
     )
-    actor.propose(
-        completed,
-        image_b64=_JPEG_B64,
-        image_media_type="image/jpeg",
-        submitted_size=(640, 480),
-    )
-
     second_messages = clients[0].requests[1]["messages"]
     assert [message["role"] for message in second_messages] == [
-        "system",
-        "user",
-        "assistant",
-        "tool",
-        "user",
+        "system", "user", "assistant", "tool", "user",
     ]
-    assert second_messages[2]["tool_calls"][0]["id"] == "first-0"
-    assert second_messages[3]["tool_call_id"] == "first-0"
-    assert json.loads(second_messages[3]["content"]) == {
-        "previous_action": completed.previous_action.to_dict(),
-    }
-    assert "private prior reasoning" not in json.dumps(
-        second_messages
-    )
-    prior_user = second_messages[1]
-    assert prior_user["content"] == [
+    assert second_messages[1]["content"] == [
         {
             "type": "image_url",
             "image_url": {
-                "url": f"data:image/jpeg;base64,{_JPEG_B64}",
+                "url": f"data:image/jpeg;base64,{_JPEG_B64}"
             },
         }
     ]
-    prior_assistant = second_messages[2]
-    assert prior_assistant["content"] == ""
-    assert "reasoning_content" not in prior_assistant
-    prior_arguments = json.loads(
-        prior_assistant["tool_calls"][0]["function"]["arguments"]
+    assert second_messages[2]["tool_calls"][0]["id"] == "first-0"
+    assert json.loads(
+        second_messages[3]["content"]
+    )["previous_action"] == completed.previous_action.to_dict()
+    context = json.loads(second_messages[4]["content"][1]["text"])
+    assert context["previous_action"] == completed.previous_action.to_dict()
+    assert second_messages[4]["content"][0]["image_url"]["url"] == (
+        f"data:image/jpeg;base64,{_JPEG_B64}"
     )
-    assert prior_arguments == {
-        "local_intent": "enter the requested greeting once",
-        "text": "hello",
-    }
-    assert "task_state_update" not in prior_arguments
+
+    actor.propose(
+        completed,
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
     third_messages = clients[0].requests[2]["messages"]
-    assert len(third_messages) == 8
-    assert third_messages[2]["tool_calls"][0]["id"] == "first-0"
-    assert third_messages[3]["tool_call_id"] == "first-0"
-    assert third_messages[5]["tool_calls"][0]["id"] == "second-0"
-    assert third_messages[6]["tool_call_id"] == "second-0"
-    assert json.loads(third_messages[6]["content"]) == {
-        "previous_action": completed.previous_action.to_dict(),
+    encoded = json.dumps(third_messages)
+    assert "second-0" in encoded
+    assert "first-0" not in encoded
+
+
+def test_drag_retry_keeps_one_native_action_and_the_current_jpeg() -> None:
+    drag_arguments = {
+        "points": "20,100 100,100 100,20 180,20",
+        "local_intent": "follow the visible route",
     }
+    _, clients = _build_clients([
+        _tool_response(name="drag", arguments=drag_arguments, call_id="first"),
+        _tool_response(name="drag", arguments=drag_arguments, call_id="second"),
+    ])
+    turn = _actor_turn()
+    drag = next(tool for tool in turn.tools if tool.name == "drag")
+    observe = ActorToolView(
+        name="observe",
+        schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "question": {"type": "string", "minLength": 1},
+            },
+            "required": ["question"],
+        },
+        requires_local_intent=False,
+    )
+    tools = (drag, observe)
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
 
     actor.propose(
-        completed,
+        replace(turn, tools=tools),
         image_b64=_JPEG_B64,
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
     )
-    fourth_messages = clients[0].requests[3]["messages"]
-    assert len(fourth_messages) == 11
-    assert fourth_messages[5]["tool_calls"][0]["id"] == "second-0"
-    assert fourth_messages[8]["tool_calls"][0]["id"] == "third-0"
-    assert "first-0" in json.dumps(fourth_messages)
-
+    after_drag = replace(
+        turn,
+        tools=tools,
+        previous_action=ActorPreviousActionView(
+            action="drag",
+            input_completed=True,
+            visible_effect="changed",
+        ),
+    )
     actor.propose(
-        completed,
+        after_drag,
         image_b64=_JPEG_B64,
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
     )
-    fifth_messages = clients[0].requests[4]["messages"]
-    assert len(fifth_messages) == 14
-    assert "first-0" in json.dumps(fifth_messages)
-    assert fifth_messages[2]["tool_calls"][0]["id"] == "first-0"
-    assert fifth_messages[5]["tool_calls"][0]["id"] == "second-0"
-    assert fifth_messages[8]["tool_calls"][0]["id"] == "third-0"
-    assert fifth_messages[11]["tool_calls"][0]["id"] == "fourth-0"
+
+    messages = clients[0].requests[1]["messages"]
+    assert [message["role"] for message in messages] == [
+        "system", "user", "assistant", "tool", "user",
+    ]
+    assert messages[1]["content"] == [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{_JPEG_B64}"
+            },
+        }
+    ]
+    assert messages[2]["tool_calls"][0]["function"] == {
+        "name": "drag",
+        "arguments": json.dumps(
+            {"points": drag_arguments["points"]},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    assert json.loads(messages[3]["content"])["previous_action"] == (
+        after_drag.previous_action.to_dict()
+    )
+    assert messages[4]["content"][0]["image_url"]["url"] == (
+        f"data:image/jpeg;base64,{_JPEG_B64}"
+    )
+
+
+def test_rejection_feedback_discards_the_unexecuted_native_action() -> None:
+    _, clients = _build_clients([
+        _tool_response(call_id="rejected"),
+        _tool_response(call_id="replacement"),
+    ])
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+    turn = _actor_turn()
 
     actor.propose(
-        completed,
+        turn,
         image_b64=_JPEG_B64,
         image_media_type="image/jpeg",
         submitted_size=(640, 480),
     )
-    sixth_messages = clients[0].requests[5]["messages"]
-    assert len(sixth_messages) == 14
-    assert "first-0" not in json.dumps(sixth_messages)
-    assert sixth_messages[2]["tool_calls"][0]["id"] == "second-0"
-    assert sixth_messages[5]["tool_calls"][0]["id"] == "third-0"
-    assert sixth_messages[8]["tool_calls"][0]["id"] == "fourth-0"
-    assert sixth_messages[11]["tool_calls"][0]["id"] == "fifth-0"
+    actor.propose(
+        replace(
+            turn,
+            previous_action=ActorPreviousActionView(
+                action="type_text",
+                input_completed=True,
+                visible_effect="changed",
+            ),
+        ),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+        rejection_feedback=(
+            "tool 'type_text' arguments rejected: schema_mismatch"
+        ),
+    )
+
+    messages = clients[0].requests[1]["messages"]
+    assert [message["role"] for message in messages] == [
+        "system", "user", "user",
+    ]
+    assert "rejected-0" not in json.dumps(messages)
+    assert "schema_mismatch" in messages[1]["content"]
 
 
 @pytest.mark.parametrize(
@@ -1617,7 +1671,7 @@ def test_actor_projects_held_drag_as_one_segment_from_physical_cursor() -> None:
         _tool_response(
             name="drag",
             arguments={
-                "image_path": "120,60 250,220 500,400",
+                "points": "250,220 500,400",
                 "keep_holding": True,
                 "local_intent": (
                     "drag around the visible obstacle through the opening"
@@ -1641,7 +1695,7 @@ def test_actor_projects_held_drag_as_one_segment_from_physical_cursor() -> None:
     )
 
     assert decision.proposal["args"] == {
-        "image_path": [[120, 60], [250, 220], [500, 400]],
+        "image_path": [[250, 220], [500, 400]],
         "keep_holding": True,
         "button": "left",
         "duration_ms": 400,
@@ -1649,16 +1703,71 @@ def test_actor_projects_held_drag_as_one_segment_from_physical_cursor() -> None:
     actor_schema = clients[0].requests[0]["tools"][0]["function"][
         "parameters"
     ]
-    assert actor_schema["required"] == ["image_path"]
-    assert actor_schema["properties"]["image_path"] == {
+    assert actor_schema["required"] == ["points"]
+    assert actor_schema["properties"]["points"] == {
         "type": "string",
         "minLength": 1,
+        "maxLength": 4096,
+        "description": (
+            "Ordered submitted-image coordinate pairs written as "
+            "x1,y1 x2,y2 ..."
+        ),
     }
-    assert actor_schema["properties"]["held_keys"] == {
-        "type": "string",
-        "default": "",
-    }
+    assert "button" not in actor_schema["properties"]
+    assert actor_schema["properties"]["held_keys"]["default"] == []
+    assert "duration_ms" not in actor_schema["properties"]
+    assert actor_schema["properties"]["keep_holding"]["default"] is False
     assert len(clients[0].requests) == 1
+
+
+def test_actor_projects_unheld_drag_path_text_as_ordered_points() -> None:
+    _, clients = _build_clients(
+        _tool_response(
+            name="drag",
+            arguments={
+                "points": "120,60 250,60 250,220 500,220 500,400",
+                "local_intent": "follow the visible corridor turns",
+            },
+        )
+    )
+    turn = _actor_turn()
+    drag = next(tool for tool in turn.tools if tool.name == "drag")
+    actor = LiveVisualActor(
+        client=clients[0],
+        model="vision-model",
+        runtime=ModelCallRuntime(),
+    )
+
+    decision = actor.propose(
+        replace(turn, tools=(drag,), pointer_held=False),
+        image_b64=_JPEG_B64,
+        image_media_type="image/jpeg",
+        submitted_size=(640, 480),
+    )
+
+    assert decision.proposal["args"] == {
+        "image_path": [
+            [120, 60], [250, 60], [250, 220], [500, 220], [500, 400],
+        ],
+        "button": "left",
+        "duration_ms": 400,
+    }
+    actor_schema = clients[0].requests[0]["tools"][0]["function"][
+        "parameters"
+    ]
+    assert actor_schema["required"] == ["points"]
+    assert actor_schema["properties"]["points"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": (
+            "Ordered submitted-image coordinate pairs written as "
+            "x1,y1 x2,y2 ..."
+        ),
+    }
+    assert "button" not in actor_schema["properties"]
+    assert actor_schema["properties"]["held_keys"]["default"] == []
+    assert "duration_ms" not in actor_schema["properties"]
 
 
 def test_actor_rejects_malformed_task_state_without_echoing_private_text() -> None:
@@ -2792,9 +2901,7 @@ def test_actor_streams_public_narration_commands_results_and_task_state() -> Non
         for tool in tools
         if tool["function"]["name"] == "run_shell"
     )
-    assert shell_schema["properties"]["task_state_update"]["default"] == {
-        "scratchpad": None,
-    }
+    assert "task_state_update" not in shell_schema["properties"]
     assert shell_schema["properties"]["cwd"]["minLength"] == 1
     assert "maximum" not in shell_schema["properties"]["timeout_s"]
     shell_description = next(
@@ -3110,7 +3217,7 @@ def test_visual_turn_keeps_repeated_window_text_body() -> None:
     assert tool_results[2]["text"] == "changed text"
 
 
-def test_next_visual_turn_keeps_bounded_local_tool_transcript() -> None:
+def test_next_visual_turn_keeps_gui_action_but_drops_local_tool_transcript() -> None:
     shell_call = _tool_response(
         name="run_shell",
         arguments={
@@ -3173,47 +3280,20 @@ def test_next_visual_turn_keeps_bounded_local_tool_transcript() -> None:
 
     messages = clients[0].requests[-1]["messages"]
     encoded = json.dumps(messages, ensure_ascii=False)
-    assert "unique-command" in encoded
-    assert "UNIQUE-DIAGNOSTIC-BODY" in encoded
-    assert "consumed-shell-0" in encoded
+    assert [message["role"] for message in messages] == [
+        "system", "user", "assistant", "tool", "user",
+    ]
+    assert "unique-command" not in encoded
+    assert "UNIQUE-DIAGNOSTIC-BODY" not in encoded
+    assert "consumed-shell-0" not in encoded
     assert "old local narration" not in encoded
     assert "private old reasoning" not in encoded
     assert "final-gui-0" in encoded
+    assert json.loads(
+        messages[2]["tool_calls"][0]["function"]["arguments"]
+    ) == {"text": "hello"}
     assert _JPEG_B64 in encoded
-    history_assistant = next(
-        message
-        for message in messages
-        if message.get("role") == "assistant"
-        and message.get("tool_calls", [{}])[0].get("id") == "final-gui-0"
-    )
-    history_arguments = json.loads(
-        history_assistant["tool_calls"][0]["function"]["arguments"]
-    )
-    assert history_assistant["content"] == ""
-    assert "reasoning_content" not in history_assistant
-    assert "task_state_update" not in history_arguments
-    assert history_arguments == {
-        "local_intent": "enter the greeting once",
-        "text": "hello",
-    }
-    assert json.loads(messages[3]["content"]) == {
-        "completion_scope": "child_process_exit_only",
-        "cwd": str(Path.cwd()),
-        "exit_code": 0,
-        "model_calls_remaining": 6,
-        "ok": True,
-        "output": "UNIQUE-DIAGNOSTIC-BODY",
-        "physical_input_receipt": False,
-    }
-    terminal_result = next(
-        message
-        for message in messages
-        if message.get("tool_call_id") == "final-gui-0"
-    )
-    assert json.loads(terminal_result["content"]) == {
-        "previous_action": previous_action.to_dict(),
-    }
-    current_context = json.loads(messages[-1]["content"][0]["text"])
+    current_context = json.loads(messages[4]["content"][1]["text"])
     assert current_context["mission"]["original_goal"] == (
         turn.mission.original_goal
     )
@@ -3221,6 +3301,7 @@ def test_next_visual_turn_keeps_bounded_local_tool_transcript() -> None:
         "scratchpad": "latest state",
         "remaining_items": [],
     }
+    assert current_context["previous_action"] == previous_action.to_dict()
 
 
 def test_failed_shell_result_stays_in_band_with_an_actionable_next_step() -> None:
@@ -3711,7 +3792,7 @@ def test_visual_turn_can_capture_screen_before_gui_action() -> None:
     assert tool_result["path"] == r"C:\tmp\shot.png"
 
 
-def test_capture_path_survives_gui_action_into_next_visual_request() -> None:
+def test_capture_result_is_not_replayed_after_gui_action() -> None:
     capture_path = r"C:\Users\zou\Desktop\playing.png"
     _, clients = _build_clients([
         _tool_response(
@@ -3752,26 +3833,13 @@ def test_capture_path_survives_gui_action_into_next_visual_request() -> None:
     )
 
     next_messages = clients[0].requests[2]["messages"]
-    capture_call = next(
-        call
-        for message in next_messages
-        for call in message.get("tool_calls", ())
-        if call["function"]["name"] == "capture_screen"
-    )
-    assert json.loads(capture_call["function"]["arguments"]) == {
-        "path": capture_path,
-        "window": False,
-    }
-    capture_result = next(
-        json.loads(message["content"])
-        for message in next_messages
-        if message.get("tool_call_id") == "capture-call-0"
-    )
-    assert capture_result["ok"] is True
-    assert capture_result["path"] == capture_path
+    assert [message["role"] for message in next_messages] == [
+        "system", "user", "assistant", "tool", "user",
+    ]
+    assert capture_path not in json.dumps(next_messages)
 
 
-def test_visual_utility_history_keeps_only_recent_complete_exchanges() -> None:
+def test_visual_utility_history_is_not_replayed_across_frames() -> None:
     utility_calls = [
         _tool_response(
             name="run_shell",
@@ -3815,10 +3883,9 @@ def test_visual_utility_history_keeps_only_recent_complete_exchanges() -> None:
     )
 
     encoded = json.dumps(clients[0].requests[6]["messages"])
-    assert "inspect-0" not in encoded
-    for index in range(1, 5):
-        assert f"inspect-{index}" in encoded
-        assert f"shell-{index}-0" in encoded
+    for index in range(5):
+        assert f"inspect-{index}" not in encoded
+        assert f"shell-{index}-0" not in encoded
 
 
 def test_visual_turn_can_list_windows_before_gui_action() -> None:

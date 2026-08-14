@@ -182,4 +182,52 @@ describe('RunsView historical runtime detail', () => {
     expect(screen.getAllByText('CaptureArtifact · stage-capture')).toHaveLength(2);
     expect(screen.getByText('persisted completion evidence')).toBeInTheDocument();
   });
+
+  it('exposes correlated model reasoning and pointer-coordinate audit details', async () => {
+    const run = historicalRun();
+    run.timeline = [
+      {
+        type: 'vnext_model_reasoning',
+        ts: 1_700_000_001,
+        response_index: 2,
+        summary: 'turn at x=490 before moving right',
+      },
+      {
+        type: 'vnext_model_pointer_arguments',
+        ts: 1_700_000_002,
+        response_index: 2,
+        summary: "[{'name': 'drag', 'arguments': {'points': '10,20 30,40'}}]",
+      },
+      {
+        type: 'vnext_pointer_dispatch',
+        ts: 1_700_000_003,
+        summary: "{'submitted_image_size': [1120, 630], 'physical_arguments': {'x1': 17, 'y1': 34}}",
+      },
+    ];
+    const arp: ArpExecutionSnapshot = {
+      run_id: run.run_id,
+      graph_id: 'graph-pointer-audit',
+      graph_name: run.goal,
+      status: 'done',
+      artifacts: { run_id: run.run_id, count: 0, artifacts: [] },
+      contract_evidence: { run_id: run.run_id, count: 0, records: [] },
+      stage_trace: [],
+    };
+    const client = {
+      run: vi.fn(async () => ({ ok: true, run, arp } satisfies CurrentRunResponse)),
+      artifactUrl: vi.fn(),
+    };
+    const plane = {
+      runs: [run], baseUrl: 'http://runtime/', currentRun: null, arpSnapshot: null,
+      events: [], refresh: vi.fn(async () => undefined), getClient: () => client,
+    };
+
+    render(<RunsView plane={plane as never} />);
+
+    expect(await screen.findByText('模型原始思考')).toBeInTheDocument();
+    expect(screen.getAllByText('响应 2')).toHaveLength(2);
+    expect(screen.getByText('展开原始思考')).toBeInTheDocument();
+    expect(screen.getAllByText('展开完整坐标')).toHaveLength(2);
+    expect(screen.getByText('turn at x=490 before moving right')).toBeInTheDocument();
+  });
 });

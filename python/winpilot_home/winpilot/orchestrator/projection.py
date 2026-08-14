@@ -798,6 +798,31 @@ class RunProjectionStore:
             else:
                 run["status"] = "running" if run["phase"] != "awaiting_human" else "paused"
 
+            if event_type == "vnext_pointer_dispatch":
+                summary_value = {
+                    "submitted_image_size": event.get(
+                        "submitted_image_size"
+                    ),
+                    "frame_region": event.get("frame_region"),
+                    "image_coordinates": event.get("image_coordinates"),
+                    "physical_arguments": event.get("physical_arguments"),
+                }
+            elif (
+                event_type == "vnext_model_reasoning"
+                and not event.get("content")
+            ):
+                summary_value = "供应商未返回独立 reasoning_content"
+            else:
+                summary_value = (
+                    event.get("content")
+                    or event.get("reason")
+                    or event.get("error")
+                    or event.get("result_preview")
+                    or event.get("node_name")
+                    or event.get("calls")
+                    or event.get("action")
+                    or event_type
+                )
             timeline_event = {
                 "type": event_type,
                 "ts": event.get("ts"),
@@ -806,14 +831,18 @@ class RunProjectionStore:
                 "node_id": event.get("node_id"),
                 "tool": event.get("tool"),
                 "status": event.get("status"),
+                "response_index": event.get("response_index"),
                 "summary": _compact(
-                    event.get("content")
-                    or event.get("reason")
-                    or event.get("error")
-                    or event.get("result_preview")
-                    or event.get("node_name")
-                    or event.get("action")
-                    or event_type
+                    summary_value,
+                    limit=(
+                        16_384
+                        if event_type in {
+                            "vnext_model_reasoning",
+                            "vnext_model_pointer_arguments",
+                            "vnext_pointer_dispatch",
+                        }
+                        else 600
+                    ),
                 ),
                 "child_run_id": source_run_id if is_child_event else event.get("child_run_id"),
             }
