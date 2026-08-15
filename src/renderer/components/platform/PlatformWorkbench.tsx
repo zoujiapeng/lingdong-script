@@ -25,6 +25,7 @@ import {
   Layers3,
   ListChecks,
   Loader2,
+  MessageSquare,
   Maximize2,
   Minimize2,
   Minus,
@@ -64,10 +65,12 @@ import type {
   ArpGraph,
   ChatGPTDesktopIntegration,
   CurrentRunResponse,
+  AgentThreadSnapshot,
   GraphValidation,
   InteractionActionState,
   InteractionRuntimeState,
   RunProjection,
+  RunTimelineEvent,
   RuntimeEvent,
   RuntimeJobSnapshot,
   StageRuntimeTrace,
@@ -915,11 +918,14 @@ function TaskContractRuntimeSection({
 interface AgentCockpitProps {
   plane: Plane;
   onOpenResources?: () => void;
+  onOpenRunDetails?: () => void;
   onOpenSystem?: () => void;
   onOpenWorkbench?: () => void;
   onLoadConversationFlow?: (automation: AutomationIR) => void;
   onOpenCommand?: () => void;
   onCompact?: () => void;
+  threadState?: AgentThreadState;
+  onThreadStateChange?: (state: AgentThreadState) => void;
 }
 
 function visualRunTone(run: RunProjection | null): string {
@@ -953,6 +959,24 @@ function runVisualProgress(run: RunProjection | null): number {
   const index = PHASES.indexOf(run.phase);
   if (index < 0) return run.phase === 'awaiting_human' ? 72 : 12;
   return Math.round(((index + 1) / (PHASES.length + 1)) * 100);
+}
+
+function liveActivityEntries(run: RunProjection | null): RunTimelineEvent[] {
+  return (run?.timeline || [])
+    .filter((entry) => entry.type === 'live_agent_activity')
+    .slice(-12);
+}
+
+function latestRunActivitySummary(run: RunProjection | null): string {
+  const latest = [...liveActivityEntries(run)].reverse().find((entry) => (
+    displayValue(entry.summary).trim()
+  ));
+  const summary = displayValue(latest?.summary).trim();
+  if (summary) return summary;
+  const narration = String(run?.narration || '').trim();
+  if (narration) return narration;
+  const tool = TOOL_LABELS[run?.current_tool || ''] || run?.current_tool;
+  return tool ? `当前工具：${tool}` : runActivityLabel(run);
 }
 
 const AGENT_THREAD_STORAGE_KEY = 'arp-agent-thread-run-ids';
@@ -1022,6 +1046,32 @@ function CollapsibleAgentText({ text }: { text: string }) {
   );
 }
 
+function LiveActivityRow({ entry }: { entry: RunTimelineEvent }) {
+  const kind = String(entry.kind || 'activity');
+  const failed = entry.status === 'failed';
+  const Icon = kind === 'message'
+    ? Bot
+    : kind === 'task_state'
+      ? ListChecks
+      : kind === 'tool_result'
+        ? failed ? XCircle : CheckCircle2
+        : TerminalSquare;
+  const summary = displayValue(entry.summary).trim();
+  return (
+    <div className={`ld-live-activity ${kind} ${failed ? 'failed' : ''}`}>
+      <Icon size={13} />
+      <div>
+        <span>
+          {LIVE_ACTIVITY_LABELS[kind] || '活动'}
+          {entry.tool && <code>{TOOL_LABELS[entry.tool] || entry.tool}</code>}
+        </span>
+        {summary && (kind === 'tool_start' ? <pre>{summary}</pre> : <p>{summary}</p>)}
+      </div>
+      <time>{formatTime(entry.ts)}</time>
+    </div>
+  );
+}
+
 function AgentConversationTurn({
   run,
   isLatest,
@@ -1043,10 +1093,16 @@ function AgentConversationTurn({
   const unsuccessful = terminal && taskOutcome !== 'success';
   const directReply = run.status === 'reply';
   const currentTool = TOOL_LABELS[run.current_tool || ''] || run.current_tool || '尚未选择工具';
-  const liveEntries = (run.timeline || [])
-    .filter((entry) => entry.type === 'live_agent_activity')
-    .slice(-12);
-  const taskState = String(run.task_state || '').trim();
+  const liveEntries = liveActivityEntries(run);
+  const toolEntries = liveEntries.filter((entry) => (
+    entry.kind === 'tool_start' || entry.kind === 'tool_result'
+  ));
+  const visibleEntries = liveEntries.filter((entry) => (
+    entry.kind !== 'tool_start' && entry.kind !== 'tool_result' && entry.kind !== 'task_state'
+  ));
+  const toolCallCount = toolEntries.filter((entry) => entry.kind === 'tool_start').length
+    || Math.ceil(toolEntries.length / 2);
+  const hasLiveWork = visibleEntries.length > 0 || toolEntries.length > 0;
   const resultText = displayValue(run.result).trim();
   const rawFailureText = displayValue(run.error || run.result).trim();
   // The model's own words are the honest explanation when it could not
@@ -1077,57 +1133,40 @@ function AgentConversationTurn({
         </article>
       )}
 
-      {active && (liveEntries.length > 0 || taskState) && (
+      {hasLiveWork && (
         <article className="ld-live-work" aria-label="Agent 实时活动" role="status">
           <header className="ld-live-work-header">
-            <div><Radio size={14} /><strong>实时活动</strong></div>
+            <div><Radio size={14} /><strong>{active ? '实时活动' : '任务过程'}</strong></div>
             <small>{formatTime(run.updated_at)}</small>
           </header>
-          {liveEntries.length > 0 && (
+          {visibleEntries.length > 0 && (
             <div className="ld-live-activity-list" aria-live="polite">
-              {liveEntries.map((entry, index) => {
-                const kind = String(entry.kind || 'activity');
-                const failed = entry.status === 'failed';
-                const Icon = kind === 'message'
-                  ? Bot
-                  : kind === 'task_state'
-                    ? ListChecks
-                    : kind === 'tool_result'
-                      ? failed ? XCircle : CheckCircle2
-                      : TerminalSquare;
-                const summary = displayValue(entry.summary).trim();
-                return (
-                  <div className={`ld-live-activity ${kind} ${failed ? 'failed' : ''}`} key={`${entry.ts || 0}-${kind}-${index}`}>
-                    <Icon size={13} />
-                    <div>
-                      <span>
-                        {LIVE_ACTIVITY_LABELS[kind] || '活动'}
-                        {entry.tool && <code>{TOOL_LABELS[entry.tool] || entry.tool}</code>}
-                      </span>
-                      {summary && (kind === 'tool_start'
-                        ? <pre>{summary}</pre>
-                        : <p>{summary}</p>)}
-                    </div>
-                    <time>{formatTime(entry.ts)}</time>
-                  </div>
-                );
-              })}
+              {visibleEntries.map((entry, index) => (
+                <LiveActivityRow entry={entry} key={`${entry.ts || 0}-${entry.kind || 'activity'}-${index}`} />
+              ))}
             </div>
           )}
-          {taskState && (
-            <section className="ld-task-board" aria-label="动态任务板">
-              <div>
-                <ListChecks size={14} />
-                <strong>动态任务板</strong>
-                <small>模型已更新 {run.task_state_revision || 1} 次</small>
+          {toolEntries.length > 0 && (
+            <details className="ld-tool-call-group">
+              <summary>
+                <TerminalSquare size={14} />
+                <span>
+                  <strong>工具调用</strong>
+                  <small>{toolCallCount} 次 · 默认折叠</small>
+                </span>
+                <ChevronRight size={13} />
+              </summary>
+              <div className="ld-tool-call-list">
+                {toolEntries.map((entry, index) => (
+                  <LiveActivityRow entry={entry} key={`${entry.ts || 0}-${entry.kind || 'tool'}-${index}`} />
+                ))}
               </div>
-              <pre>{taskState}</pre>
-            </section>
+            </details>
           )}
         </article>
       )}
 
-      {active && liveEntries.length === 0 && !taskState && run.narration && (
+      {active && !hasLiveWork && run.narration && (
         <article className="ld-agent-response" aria-label="Agent 进度汇报" role="status">
           <div className="ld-agent-response-icon"><Bot size={16} /></div>
           <div className="ld-agent-response-body">
@@ -1201,11 +1240,14 @@ function AgentConversationTurn({
 export function AgentCockpit({
   plane,
   onOpenResources,
+  onOpenRunDetails,
   onOpenSystem,
   onOpenWorkbench,
   onLoadConversationFlow,
   onOpenCommand,
   onCompact,
+  threadState: controlledThreadState,
+  onThreadStateChange,
 }: AgentCockpitProps) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
   const [submitting, setSubmitting] = useState(false);
@@ -1215,11 +1257,13 @@ export function AgentCockpit({
   const [composerFocused, setComposerFocused] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
-  const [threadState, setThreadState] = useState<AgentThreadState>(readAgentThreadState);
+  const [localThreadState, setLocalThreadState] = useState<AgentThreadState>(readAgentThreadState);
+  const threadState = controlledThreadState || localThreadState;
   const [runDetails, setRunDetails] = useState<Record<string, RunProjection>>({});
   const taskScrollRef = useRef<HTMLDivElement | null>(null);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const followConversationTail = useRef(true);
+  const selectedThreadRef = useRef(threadState.threadId);
   const threadRunKey = threadState.runIds.join('|');
   const runLookup = useMemo(() => {
     const lookup = new Map<string, RunProjection>();
@@ -1253,6 +1297,20 @@ export function AgentCockpit({
       : plane.connection === 'offline'
         ? '运行时离线'
         : '正在连接运行时';
+
+  const commitThreadState = useCallback((next: AgentThreadState) => {
+    if (onThreadStateChange) onThreadStateChange(next);
+    else setLocalThreadState(next);
+  }, [onThreadStateChange]);
+
+  useEffect(() => {
+    if (selectedThreadRef.current === threadState.threadId) return;
+    selectedThreadRef.current = threadState.threadId;
+    setGoal('');
+    setActionError('');
+    setActivityOpen(false);
+    followConversationTail.current = true;
+  }, [threadState.threadId]);
 
   useEffect(() => {
     if (!modelMenuOpen) return;
@@ -1306,7 +1364,7 @@ export function AgentCockpit({
     if (threadState.persisted || !current?.run_id) return;
     const next = [current.run_id];
     persistAgentThread(threadState.threadId, next);
-    setThreadState({
+    commitThreadState({
       persisted: true,
       threadId: threadState.threadId,
       runIds: next,
@@ -1386,21 +1444,21 @@ export function AgentCockpit({
       );
       if (started?.run_id) {
         localStorage.removeItem('arp-last-goal');
-        setThreadState((previous) => {
-          const existing = previous.runIds.length
-            ? previous.runIds
+        {
+          const existing = threadState.runIds.length
+            ? threadState.runIds
             : (run?.run_id ? [run.run_id] : []);
           const next = [
             ...existing.filter((runId) => runId !== started.run_id),
             started.run_id,
           ].slice(-AGENT_THREAD_LIMIT);
           persistAgentThread(started.thread_id, next);
-          return {
+          commitThreadState({
             persisted: true,
             threadId: started.thread_id,
             runIds: next,
-          };
-        });
+          });
+        }
       }
       setGoal('');
     } catch (error) {
@@ -1415,7 +1473,7 @@ export function AgentCockpit({
   const startNewConversation = () => {
     persistAgentThread('', []);
     localStorage.removeItem('arp-last-goal');
-    setThreadState({ persisted: true, threadId: '', runIds: [] });
+    commitThreadState({ persisted: true, threadId: '', runIds: [] });
     setRunDetails({});
     setGoal('');
     setActionError('');
@@ -1576,18 +1634,18 @@ export function AgentCockpit({
             className="ld-corner-entry"
             type="button"
             onClick={onOpenResources}
-            aria-label="打开资料"
-            title="运行记录、技能与设置"
+            aria-label="打开对话列表"
+            title="对话列表"
           >
-            <Layers3 size={14} />
+            <MessageSquare size={14} />
           </button>
           <span className="ld-drag-hint" aria-hidden="true" />
           {renderComposerField()}
           {composerFocused && !goal.trim() && (
             <div className="ld-starter-popover" aria-label="快速入口">
               <span>所有能力默认收起，需要时再打开</span>
-              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenResources}><History size={14} /><span><strong>运行与资料</strong><small>历史、技能、记忆和设置</small></span><ChevronRight size={14} /></button>
-              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenWorkbench}><Activity size={14} /><span><strong>执行工作台</strong><small>步骤、画面、证据和运行审计</small></span><ChevronRight size={14} /></button>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenResources}><MessageSquare size={14} /><span><strong>历史对话</strong><small>打开已有对话并继续聊天</small></span><ChevronRight size={14} /></button>
+              <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenWorkbench}><Activity size={14} /><span><strong>工作台</strong><small>执行、资料、流程与设置</small></span><ChevronRight size={14} /></button>
               <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={onOpenCommand}><Command size={14} /><span><strong>命令面板</strong><small>直接搜索任何隐藏功能</small></span><ChevronRight size={14} /></button>
             </div>
           )}
@@ -1614,7 +1672,9 @@ export function AgentCockpit({
 
   const tone = visualRunTone(run);
   const progress = runVisualProgress(run);
-  const currentTool = TOOL_LABELS[run?.current_tool || ''] || run?.current_tool || '尚未选择工具';
+  const latestActivitySummary = latestRunActivitySummary(run);
+  const taskState = String(run?.task_state || '').trim();
+  const taskBoardSummary = taskState.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || latestActivitySummary;
   const visibleConversationRuns = conversationRuns.length
     ? conversationRuns
     : (run ? [run] : []);
@@ -1624,7 +1684,7 @@ export function AgentCockpit({
     <div className="ld-agent-stage ld-agent-stage-run">
       <article className={`ld-task-window ld-floating-window status-${tone} ${showFollowupComposer ? 'has-followup-composer' : ''}`}>
         <header className="ld-task-window-header">
-          <button className="ld-task-identity" type="button" onClick={onOpenResources} aria-label="打开资料" title="打开运行记录和资料">
+          <button className="ld-task-identity" type="button" onClick={onOpenResources} aria-label="打开对话列表" title="打开对话列表">
             <span className={`ld-window-signal ${tone}`} />
             <span>
               <strong>{visibleConversationRuns[0]?.goal || '当前对话'}</strong>
@@ -1667,7 +1727,7 @@ export function AgentCockpit({
                 key={item.run_id}
                 run={item}
                 isLatest={index === visibleConversationRuns.length - 1}
-                onOpenDetails={onOpenResources}
+                onOpenDetails={onOpenRunDetails || onOpenWorkbench}
                 editDisabled={submitting}
                 onEditGoal={(value) => {
                   setGoal(value);
@@ -1704,19 +1764,19 @@ export function AgentCockpit({
                   <div><StatusPill status={run?.status} /><strong>{run?.goal}</strong></div>
                   <span>{formatElapsed(run?.started_at, run?.finished_at)}</span>
                 </div>
-                <PhaseRail run={run} />
-                <dl className="ld-runtime-facts">
-                  <div><dt>当前节点</dt><dd>{run?.current_node_id || '-'}</dd></div>
-                  <div><dt>当前工具</dt><dd>{currentTool}</dd></div>
-                  <div><dt>事件</dt><dd>{run?.timeline.length || plane.events.length}</dd></div>
-                  <div><dt>证据</dt><dd>{run?.evidence.length || 0}</dd></div>
-                </dl>
+                <section className="ld-task-board ld-capsule-task-board" aria-label="动态任务板">
+                  <div>
+                    <ListChecks size={14} />
+                    <strong>动态任务板</strong>
+                    <small>{run?.task_state_revision ? `模型已更新 ${run.task_state_revision} 次` : '等待模型更新'}</small>
+                  </div>
+                  <pre>{taskState || '模型尚未发布任务板。'}</pre>
+                </section>
                 <div className="ld-runtime-controls">
                   {active && run?.phase !== 'awaiting_human' && <button type="button" onClick={() => void togglePause()} disabled={controlling}>{manuallyPaused ? <Play size={13} /> : <Pause size={13} />}{manuallyPaused ? '继续' : '暂停'}</button>}
                   {active && <button type="button" onClick={() => void stop()} disabled={controlling}>{controlling ? <Loader2 size={13} className="arp-spin" /> : <CircleStop size={13} />}停止</button>}
                   <button type="button" onClick={onOpenWorkbench}><Maximize2 size={13} />打开完整执行</button>
                 </div>
-                <RunTimeline run={run} events={plane.events} compact />
               </div>
             </div>
             <button
@@ -1726,7 +1786,7 @@ export function AgentCockpit({
               onClick={() => setActivityOpen((value) => !value)}
             >
               <span className="ld-progress-ring" style={{ '--ld-progress': `${progress}%` } as React.CSSProperties}><i /></span>
-              <span><strong>{runActivityLabel(run)}</strong><small>{currentTool}</small></span>
+              <span><strong>{runActivityLabel(run)}</strong><small>{taskBoardSummary}</small></span>
               <small>{formatElapsed(run?.started_at, run?.finished_at)}</small>
             </button>
           </section>
@@ -2798,8 +2858,7 @@ function SystemView({ plane }: { plane: Plane }) {
   );
 }
 
-type ResourceView = 'runs' | 'assets' | 'system';
-type WorkbenchView = 'activity' | 'context' | 'flow';
+type WorkbenchView = 'activity' | 'context' | 'runs' | 'assets' | 'system' | 'flow';
 
 function MiniRunWindow({
   plane,
@@ -2812,9 +2871,9 @@ function MiniRunWindow({
 }) {
   const run = plane.currentRun;
   const tone = visualRunTone(run);
-  const progress = runVisualProgress(run);
 
   if (!run) return null;
+  const progress = runVisualProgress(run);
 
   return (
     <div className="ld-mini-stage" aria-label="迷你任务悬浮窗">
@@ -2832,36 +2891,102 @@ function MiniRunWindow({
   );
 }
 
-function ResourceDrawer({
+function ConversationDrawer({
   plane,
-  view,
-  onView,
+  currentThreadId,
+  runtimeBusy,
+  onSelect,
+  onNew,
   onClose,
-  onOpenFlow,
 }: {
   plane: Plane;
-  view: ResourceView;
-  onView: (view: ResourceView) => void;
+  currentThreadId: string;
+  runtimeBusy: boolean;
+  onSelect: (thread: AgentThreadSnapshot) => void;
+  onNew: () => void;
   onClose: () => void;
-  onOpenFlow: () => void;
 }) {
+  const [threads, setThreads] = useState<AgentThreadSnapshot[]>([]);
+  const [query, setQuery] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const reloadKey = `${plane.currentRun?.run_id || ''}:${plane.currentRun?.status || ''}`;
+
+  useEffect(() => {
+    if (!plane.baseUrl) {
+      setLoading(false);
+      return;
+    }
+    let disposed = false;
+    setLoading(true);
+    setError('');
+    plane.getClient().listAgentThreads()
+      .then((items) => {
+        if (!disposed) setThreads(items);
+      })
+      .catch((loadError) => {
+        if (!disposed) setError(loadError instanceof Error ? loadError.message : String(loadError));
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false);
+      });
+    return () => { disposed = true; };
+  }, [plane.baseUrl, reloadKey]);
+
+  const needle = query.trim().toLocaleLowerCase();
+  const visibleThreads = threads.filter((thread) => {
+    if (!needle) return true;
+    return thread.turns.some((turn) => (
+      `${turn.goal} ${turn.result}`.toLocaleLowerCase().includes(needle)
+    ));
+  });
+
   return (
     <>
-      <button className="ld-layer-scrim" type="button" aria-label="关闭资料浮层" onClick={onClose} />
-      <aside className="ld-resource-drawer ld-floating-window" aria-label="资料">
+      <button className="ld-layer-scrim" type="button" aria-label="关闭对话列表" onClick={onClose} />
+      <aside className="ld-resource-drawer ld-floating-window" aria-label="对话列表">
         <header className="ld-layer-header">
-          <div><span>灵动脚本</span><strong>资料</strong></div>
-          <button type="button" onClick={onClose} aria-label="关闭资料"><X size={17} /></button>
+          <div><span>灵动脚本</span><strong>对话</strong></div>
+          <div className="ld-conversation-header-actions">
+            <button type="button" onClick={onNew} disabled={runtimeBusy} aria-label="新建对话"><Plus size={15} /></button>
+            <button type="button" onClick={onClose} aria-label="关闭对话列表"><X size={17} /></button>
+          </div>
         </header>
-        <nav className="ld-layer-tabs" aria-label="资料区域">
-          <button type="button" className={view === 'runs' ? 'active' : ''} onClick={() => onView('runs')}><History size={14} /><span>运行记录</span></button>
-          <button type="button" className={view === 'assets' ? 'active' : ''} onClick={() => onView('assets')}><Library size={14} /><span>技能与记忆</span></button>
-          <button type="button" className={view === 'system' ? 'active' : ''} onClick={() => onView('system')}><Settings size={14} /><span>设置</span></button>
-        </nav>
-        <div className="ld-resource-body">
-          {view === 'runs' && <RunsView plane={plane} />}
-          {view === 'assets' && <AssetsView plane={plane} openStudio={onOpenFlow} />}
-          {view === 'system' && <SystemView plane={plane} />}
+        <label className="ld-conversation-search">
+          <Search size={14} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话" />
+        </label>
+        <div className="ld-resource-body ld-conversation-list">
+          {loading && <EmptyState icon={Loader2} title="正在加载对话" />}
+          {!loading && error && <div className="ld-inline-alert" role="alert"><XCircle size={13} />{error}</div>}
+          {!loading && !error && visibleThreads.map((thread) => {
+            const firstTurn = thread.turns[0];
+            const latestTurn = thread.turns[thread.turns.length - 1];
+            const title = firstTurn?.goal || '新对话';
+            const preview = latestTurn?.result || latestTurn?.goal || '尚无消息';
+            const selected = thread.thread_id === currentThreadId;
+            return (
+              <button
+                className={`ld-conversation-item ${selected ? 'active' : ''}`}
+                type="button"
+                key={thread.thread_id}
+                aria-label={`继续对话：${title}`}
+                disabled={runtimeBusy && !selected}
+                onClick={() => onSelect(thread)}
+              >
+                <MessageSquare size={15} />
+                <span>
+                  <strong>{title}</strong>
+                  <small>{preview}</small>
+                  <time>{thread.turns.length} 轮 · {new Date(thread.updated_at * 1000).toLocaleString()}</time>
+                </span>
+                {selected ? <Check size={14} /> : <ChevronRight size={14} />}
+              </button>
+            );
+          })}
+          {!loading && !error && visibleThreads.length === 0 && (
+            <EmptyState icon={MessageSquare} title={needle ? '没有匹配的对话' : '还没有对话'} detail={needle ? '换一个关键词试试。' : '发送第一条消息后会出现在这里。'} />
+          )}
         </div>
       </aside>
     </>
@@ -2921,9 +3046,12 @@ function RuntimeWorkbench({
           <div><span>灵动脚本</span><strong>工作台</strong></div>
           <button type="button" onClick={onClose} aria-label="关闭工作台"><X size={17} /></button>
         </header>
-        <nav className="ld-layer-tabs" aria-label="工作台区域">
+        <nav className="ld-layer-tabs ld-workbench-tabs" aria-label="工作台区域">
           <button type="button" className={view === 'activity' ? 'active' : ''} onClick={() => onView('activity')}><Activity size={14} /><span>执行</span></button>
           <button type="button" className={view === 'context' ? 'active' : ''} onClick={() => onView('context')}><Layers3 size={14} /><span>上下文与证据</span></button>
+          <button type="button" className={view === 'runs' ? 'active' : ''} onClick={() => onView('runs')}><History size={14} /><span>运行记录</span></button>
+          <button type="button" className={view === 'assets' ? 'active' : ''} onClick={() => onView('assets')}><Library size={14} /><span>技能与记忆</span></button>
+          <button type="button" className={view === 'system' ? 'active' : ''} onClick={() => onView('system')}><Settings size={14} /><span>设置</span></button>
           <button type="button" className={view === 'flow' ? 'active' : ''} onClick={() => onView('flow')}><GitBranch size={14} /><span>流程</span></button>
         </nav>
         <div className="ld-workbench-body">
@@ -3003,6 +3131,12 @@ function RuntimeWorkbench({
               ) : <div className="arp-detail-note"><Archive size={14} />运行合同、工件和完成证据会在任务启动后出现。</div>}
             </section>
           )}
+
+          {view === 'runs' && <RunsView plane={plane} />}
+
+          {view === 'assets' && <AssetsView plane={plane} openStudio={onOpenFlow} />}
+
+          {view === 'system' && <SystemView plane={plane} />}
 
           {view === 'flow' && (
             <section className="ld-workbench-section ld-flow-preview-section">
@@ -3090,10 +3224,11 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
   const setViewMode = useStore((state) => state.setViewMode);
   const initialView = viewFromStore(storeMode);
   const [windowMode, setWindowMode] = useState<'expanded' | 'compact'>('expanded');
-  const [resourceView, setResourceView] = useState<ResourceView | null>(
+  const [threadState, setThreadState] = useState<AgentThreadState>(readAgentThreadState);
+  const [conversationOpen, setConversationOpen] = useState(false);
+  const [workbenchView, setWorkbenchView] = useState<WorkbenchView | null>(
     initialView === 'runs' || initialView === 'assets' || initialView === 'system' ? initialView : null,
   );
-  const [workbenchView, setWorkbenchView] = useState<WorkbenchView | null>(null);
   const [flowOpen, setFlowOpen] = useState(initialView === 'studio');
   const [commandOpen, setCommandOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
@@ -3109,29 +3244,30 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
   const openAgent = useCallback(() => {
     setViewMode('agent');
     setWindowMode('expanded');
-    setResourceView(null);
+    setConversationOpen(false);
     setWorkbenchView(null);
     setFlowOpen(false);
   }, [setViewMode]);
 
-  const openResources = useCallback((view: ResourceView = 'runs') => {
-    setViewMode(view);
-    setResourceView(view);
+  const openConversations = useCallback(() => {
+    setViewMode('agent');
+    setWindowMode('expanded');
+    setConversationOpen(true);
     setWorkbenchView(null);
     setFlowOpen(false);
   }, [setViewMode]);
 
   const openWorkbench = useCallback((view: WorkbenchView = 'activity') => {
-    setViewMode('agent');
+    setViewMode(view === 'runs' || view === 'assets' || view === 'system' ? view : 'agent');
     setWorkbenchView(view);
-    setResourceView(null);
+    setConversationOpen(false);
     setFlowOpen(false);
   }, [setViewMode]);
 
   const openFlow = useCallback(() => {
     setViewMode('studio');
     setFlowOpen(true);
-    setResourceView(null);
+    setConversationOpen(false);
     setWorkbenchView(null);
   }, [setViewMode]);
 
@@ -3160,37 +3296,72 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
         setCommandQuery('');
       } else if (flowOpen) {
         closeFlow();
-      } else if (resourceView) {
-        setResourceView(null);
-        setViewMode('agent');
+      } else if (conversationOpen) {
+        setConversationOpen(false);
       } else if (workbenchView) {
         setWorkbenchView(null);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [closeFlow, commandOpen, flowOpen, resourceView, setViewMode, workbenchView]);
+  }, [closeFlow, commandOpen, conversationOpen, flowOpen, workbenchView]);
 
   const closeCommand = () => {
     setCommandOpen(false);
     setCommandQuery('');
   };
 
+  const updateThreadState = useCallback((next: AgentThreadState) => {
+    persistAgentThread(next.threadId, next.runIds);
+    setThreadState(next);
+  }, []);
+
+  const selectConversation = useCallback((thread: AgentThreadSnapshot) => {
+    const runtimeBusy = Boolean(plane.currentRun && isActiveRunStatus(plane.currentRun.status));
+    if (runtimeBusy && thread.thread_id !== threadState.threadId) return;
+    updateThreadState({
+      persisted: true,
+      threadId: thread.thread_id,
+      runIds: thread.turns.map((turn) => turn.run_id).filter(Boolean).slice(-AGENT_THREAD_LIMIT),
+    });
+    setConversationOpen(false);
+    setWorkbenchView(null);
+    setFlowOpen(false);
+    setWindowMode('expanded');
+    setViewMode('agent');
+  }, [plane.currentRun, setViewMode, threadState.threadId, updateThreadState]);
+
+  const startNewConversation = useCallback(() => {
+    if (plane.currentRun && isActiveRunStatus(plane.currentRun.status)) return;
+    try {
+      localStorage.removeItem('arp-last-goal');
+    } catch {
+      // Local drafts are advisory; starting a fresh conversation is not.
+    }
+    updateThreadState({ persisted: true, threadId: '', runIds: [] });
+    setConversationOpen(false);
+    setWorkbenchView(null);
+    setFlowOpen(false);
+    setWindowMode('expanded');
+    setViewMode('agent');
+  }, [plane.currentRun, setViewMode, updateThreadState]);
+
   const commands: FloatingCommand[] = [
     { id: 'agent', label: '智能代理', detail: '新建任务或返回当前任务', icon: Bot, action: openAgent },
-    { id: 'activity', label: '当前执行', detail: '阶段、事件、控制和性能统计', icon: Activity, action: () => openWorkbench('activity') },
-    { id: 'context', label: '上下文与证据', detail: '当前画面、证据、工件与完成合同', icon: Layers3, action: () => openWorkbench('context') },
-    { id: 'runs', label: '运行记录', detail: '搜索历史任务并查看完整运行详情', icon: History, action: () => openResources('runs') },
-    { id: 'assets', label: '技能与记忆', detail: '已验证技能、轨迹和经验记忆', icon: Library, action: () => openResources('assets') },
+    { id: 'conversations', label: '对话列表', detail: '打开已有对话并继续聊天', icon: MessageSquare, action: openConversations },
+    { id: 'activity', label: '当前执行', detail: '查看当前任务状态和控制', icon: Activity, action: () => openWorkbench('activity') },
+    { id: 'context', label: '上下文与证据', detail: '当前画面、证据与工件', icon: Layers3, action: () => openWorkbench('context') },
+    { id: 'runs', label: '运行记录', detail: '在工作台查看历史运行', icon: History, action: () => openWorkbench('runs') },
+    { id: 'assets', label: '技能与记忆', detail: '在工作台管理技能与记忆', icon: Library, action: () => openWorkbench('assets') },
     { id: 'flow', label: '流程工作台', detail: '打开完整可编辑流程图', icon: GitBranch, action: openFlow },
-    { id: 'system', label: '系统设置', detail: '模型、运行时、计划、连接与能力注册表', icon: Settings, action: () => openResources('system') },
+    { id: 'system', label: '系统设置', detail: '在工作台调整模型与运行时', icon: Settings, action: () => openWorkbench('system') },
   ];
 
   return (
     <div className="arp-app ld-floating-app">
       <div className="ld-native-titlebar" aria-label="灵动脚本窗口标题栏">
         <button type="button" className="ld-title-brand" onClick={openAgent} aria-label="返回智能代理"><Bot size={13} /><strong>灵动脚本</strong></button>
-        <button type="button" className="ld-title-status" onClick={() => openResources('system')} aria-label="查看运行时状态" title={plane.baseUrl || '运行时正在启动'}>
+        <button type="button" className="ld-title-status" onClick={() => openWorkbench('system')} aria-label="查看运行时状态" title={plane.baseUrl || '运行时正在启动'}>
           <span className={`ld-status-dot ${plane.connection}`} />
           <span>{plane.connection === 'online' ? '在线' : plane.connection === 'degraded' ? '降级' : plane.connection === 'offline' ? '离线' : '连接中'}</span>
         </button>
@@ -3214,8 +3385,11 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
         ) : (
           <AgentCockpit
             plane={plane}
-            onOpenResources={() => openResources('runs')}
-            onOpenSystem={() => openResources('system')}
+            threadState={threadState}
+            onThreadStateChange={updateThreadState}
+            onOpenResources={openConversations}
+            onOpenRunDetails={() => openWorkbench('runs')}
+            onOpenSystem={() => openWorkbench('system')}
             onOpenWorkbench={() => openWorkbench(plane.currentRun ? 'activity' : 'flow')}
             onLoadConversationFlow={loadConversationFlow}
             onOpenCommand={() => { setCommandOpen(true); setCommandQuery(''); }}
@@ -3224,13 +3398,14 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
         )}
       </main>
 
-      {resourceView && (
-        <ResourceDrawer
+      {conversationOpen && (
+        <ConversationDrawer
           plane={plane}
-          view={resourceView}
-          onView={(view) => { setResourceView(view); setViewMode(view); }}
-          onClose={() => { setResourceView(null); setViewMode('agent'); }}
-          onOpenFlow={openFlow}
+          currentThreadId={threadState.threadId}
+          runtimeBusy={Boolean(plane.currentRun && isActiveRunStatus(plane.currentRun.status))}
+          onSelect={selectConversation}
+          onNew={startNewConversation}
+          onClose={() => setConversationOpen(false)}
         />
       )}
 
@@ -3266,7 +3441,16 @@ export function PlatformWorkbench({ onOpenAutomation }: { onOpenAutomation?: () 
         />
       )}
 
-      <button className="ld-command-orb" type="button" onClick={() => { setCommandOpen(true); setCommandQuery(''); }} aria-label="打开命令面板" title="Ctrl+K">
+      <button
+        className="ld-command-orb"
+        type="button"
+        onClick={() => {
+          setCommandOpen(true);
+          setCommandQuery('');
+        }}
+        aria-label="打开命令面板"
+        title="Ctrl+K"
+      >
         <Command size={14} />
       </button>
     </div>

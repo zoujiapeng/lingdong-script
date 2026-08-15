@@ -31,6 +31,24 @@ export interface GoalRunStart {
   run: ArpExecutionSnapshot;
 }
 
+export interface AgentThreadTurn {
+  turn_id: string;
+  goal: string;
+  status: string;
+  result: string;
+  run_id: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AgentThreadSnapshot {
+  format: 'agent-thread/1';
+  thread_id: string;
+  created_at: number;
+  updated_at: number;
+  turns: AgentThreadTurn[];
+}
+
 export type ArpNodeKind =
   | 'start'
   | 'end'

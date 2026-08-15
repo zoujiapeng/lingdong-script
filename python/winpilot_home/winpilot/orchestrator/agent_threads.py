@@ -191,24 +191,40 @@ class AgentThreadStore:
             thread = self._threads.get(thread_id)
             if thread is None:
                 raise AgentThreadError("thread not found")
-            return {
-                "format": "agent-thread/1",
-                "thread_id": thread.thread_id,
-                "created_at": thread.created_at,
-                "updated_at": thread.updated_at,
-                "turns": [
-                    {
-                        "turn_id": turn.turn_id,
-                        "goal": turn.goal,
-                        "status": turn.status,
-                        "result": turn.result,
-                        "run_id": turn.run_id,
-                        "created_at": turn.created_at,
-                        "updated_at": turn.updated_at,
-                    }
-                    for turn in thread.turns
-                ],
-            }
+            return self._snapshot(thread)
+
+    def snapshots(self, limit: int = _MAX_THREADS) -> list[dict[str, Any]]:
+        """Return bounded Thread snapshots, newest activity first."""
+
+        bounded_limit = max(1, min(int(limit), _MAX_THREADS))
+        with self._lock:
+            threads = sorted(
+                self._threads.values(),
+                key=lambda item: item.updated_at,
+                reverse=True,
+            )[:bounded_limit]
+            return [self._snapshot(thread) for thread in threads]
+
+    @staticmethod
+    def _snapshot(thread: _Thread) -> dict[str, Any]:
+        return {
+            "format": "agent-thread/1",
+            "thread_id": thread.thread_id,
+            "created_at": thread.created_at,
+            "updated_at": thread.updated_at,
+            "turns": [
+                {
+                    "turn_id": turn.turn_id,
+                    "goal": turn.goal,
+                    "status": turn.status,
+                    "result": turn.result,
+                    "run_id": turn.run_id,
+                    "created_at": turn.created_at,
+                    "updated_at": turn.updated_at,
+                }
+                for turn in thread.turns
+            ],
+        }
 
     @staticmethod
     def _continuation_turns(thread: _Thread) -> list[_Turn]:

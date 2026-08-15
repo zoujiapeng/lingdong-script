@@ -78,6 +78,60 @@ def test_thread_capacity_never_evicts_an_active_turn(monkeypatch):
         BUS.remove_sink(store.on_event)
 
 
+def test_thread_snapshots_are_sorted_by_latest_activity_and_keep_turn_content(
+    monkeypatch,
+):
+    from winpilot.orchestrator import agent_threads
+    from winpilot.utils.log import BUS
+
+    now = [10.0]
+    monkeypatch.setattr(agent_threads.time, "time", lambda: now[0])
+    store = agent_threads.AgentThreadStore()
+    try:
+        first_thread, first_turn, _ = store.begin_turn("first goal")
+        store.bind_run(
+            thread_id=first_thread,
+            turn_id=first_turn,
+            run_id="run-first",
+        )
+        store.on_event({
+            "type": "arp_run_done",
+            "run_id": "run-first",
+            "status": "reply",
+            "user_result": "first result",
+        })
+
+        now[0] = 30.0
+        second_thread, second_turn, _ = store.begin_turn("second goal")
+        second_created_at = store.snapshot(second_thread)["turns"][0]["created_at"]
+        now[0] = 40.0
+        store.bind_run(
+            thread_id=second_thread,
+            turn_id=second_turn,
+            run_id="run-second",
+        )
+
+        snapshots = store.snapshots()
+
+        assert [item["thread_id"] for item in snapshots] == [
+            second_thread,
+            first_thread,
+        ]
+        assert snapshots[0]["turns"] == [{
+            "turn_id": second_turn,
+            "goal": "second goal",
+            "status": "queued",
+            "result": "",
+            "run_id": "run-second",
+            "created_at": second_created_at,
+            "updated_at": 40.0,
+        }]
+        assert snapshots[1]["turns"][0]["result"] == "first result"
+        assert store.snapshots(limit=1) == [snapshots[0]]
+    finally:
+        BUS.remove_sink(store.on_event)
+
+
 def test_thread_continuation_checkpoint_round_trips_exact_history(tmp_path):
     from winpilot.orchestrator.agent_threads import AgentThreadStore
     from winpilot.utils.log import BUS

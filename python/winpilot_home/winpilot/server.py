@@ -1537,6 +1537,14 @@ def get_agent_thread(thread_id: str) -> dict[str, Any]:
     return {"ok": True, "thread": thread}
 
 
+@app.get("/api/v2/threads")
+def list_agent_threads(limit: int = 100) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "threads": AGENT_THREADS.snapshots(max(1, min(limit, 100))),
+    }
+
+
 @app.post("/api/v2/goals/runs/{run_id}/desktop-lease")
 def bind_goal_desktop_lease(
     run_id: str,

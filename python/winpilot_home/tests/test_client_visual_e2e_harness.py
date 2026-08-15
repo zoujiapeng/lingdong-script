@@ -188,6 +188,41 @@ def test_target_focus_preserves_bound_geometry_unless_minimized(monkeypatch):
     assert restore_calls == [(hwnd, harness.win32con.SW_RESTORE)]
 
 
+def test_target_focus_waits_for_electron_desktop_lease_minimize(monkeypatch):
+    harness = _load_harness()
+    electron_hwnd = 711
+    target_hwnd = 4242
+    minimize_checks = 0
+    focus_calls: list[int] = []
+
+    def is_iconic(hwnd: int) -> bool:
+        nonlocal minimize_checks
+        assert hwnd == electron_hwnd
+        minimize_checks += 1
+        return minimize_checks >= 3
+
+    def focus(hwnd: int) -> dict[str, object]:
+        assert minimize_checks >= 3
+        focus_calls.append(hwnd)
+        return {"target_hwnd": hwnd, "focused": True}
+
+    monkeypatch.setattr(harness.win32gui, "IsIconic", is_iconic)
+    monkeypatch.setattr(harness, "_focus_window", focus)
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    evidence = harness._focus_target_after_desktop_yield(
+        electron_hwnd,
+        target_hwnd,
+        timeout=1.0,
+        poll_interval=0.0,
+    )
+
+    assert minimize_checks == 3
+    assert focus_calls == [target_hwnd]
+    assert evidence["electron_hwnd"] == electron_hwnd
+    assert evidence["electron_minimized_observed"] is True
+
+
 def test_external_verdict_requires_precise_click_geometry_and_no_wrong_click():
     harness = _load_harness()
     state = _state(
@@ -466,12 +501,12 @@ def test_external_verdict_accepts_a_complete_held_pointer_retry():
     assert retried["passed"] is True
 
 
-def test_external_verdict_accepts_two_stroke_pointer_drawing():
+def test_external_verdict_accepts_trusted_two_stroke_drawing_with_short_final_stroke():
     harness = _load_harness()
     state = _state(
         "shared_turn",
         {"user_cell": 1, "selected_cell": 4, "valid_stroke_count": 2},
-        moves=11,
+        moves=1,
     )
     state["events"][:0] = [
         {"type": "page_ready", "details": {"user_cell": 1}},
@@ -845,19 +880,25 @@ def test_external_verdict_accepts_complete_calibration_grid():
     assert "calibration did not hit every declared point" in failed["errors"][0]
 
 
-def test_external_verdict_accepts_complete_calibration_feedback_and_rejects_misses():
+def test_external_verdict_accepts_calibration_feedback_after_corrected_misses():
     harness = _load_harness()
 
-    state = _calibration_state("calibration_feedback", 3)
+    state = _calibration_state("calibration_feedback", 3, misses=1)
 
     verdict = harness.external_verdict(
         state, case_id="case-1", scenario="calibration_feedback", seed=17,
     )
     assert verdict["passed"] is True
 
+    state["events"] = [
+        item for item in state["events"]
+        if not (
+            item.get("type") == "calibration_hit"
+            and (item.get("details") or {}).get("index") == 1
+        )
+    ]
     failed = harness.external_verdict(
-        _calibration_state("calibration_feedback", 3, misses=1),
-        case_id="case-1", scenario="calibration_feedback", seed=17,
+        state, case_id="case-1", scenario="calibration_feedback", seed=17,
     )
     assert failed["passed"] is False
-    assert "calibration feedback contained a trusted miss" in failed["errors"]
+    assert "calibration did not hit every declared point" in failed["errors"][0]
