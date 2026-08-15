@@ -274,7 +274,7 @@
 .ld-floating-window {
   border: 1px solid var(--ld-border);
   background: var(--ld-surface);
-  box-shadow: var(--ld-shadow-md), var(--ld-shadow-inset);
+  box-shadow: var(--ld-shadow-inset);
   backdrop-filter: blur(32px) saturate(0.92);
   -webkit-backdrop-filter: blur(32px) saturate(0.92);
 }
@@ -286,14 +286,14 @@
   padding: 27px 34px 65px;
   border-radius: 34px;
   background: var(--ld-surface-blue);
-  transition: transform 420ms var(--ld-ease-out), box-shadow 240ms, background 240ms;
+  box-shadow: none;
+  transition: transform 420ms var(--ld-ease-out), background 240ms;
   animation: ld-window-in 420ms var(--ld-ease-out);
 }
 
 .ld-composer-window:hover,
 .ld-composer-window:focus-within {
   background: var(--ld-surface-blue-hover);
-  box-shadow: var(--ld-shadow-lg), var(--ld-shadow-inset);
 }
 
 .ld-corner-entry {
@@ -1730,6 +1730,7 @@
   border: 0;
   background: rgba(63, 64, 61, 0.12);
   backdrop-filter: blur(7px);
+  clip-path: inset(0 0 0 0 round 0 0 34px 34px);
   animation: ld-fade-in 140ms ease-out;
 }
 
@@ -2663,6 +2664,7 @@
   padding-top: min(18vh, 140px);
   background: rgba(44, 46, 44, 0.13);
   backdrop-filter: blur(8px);
+  clip-path: inset(0 0 0 0 round 0 0 34px 34px);
   animation: ld-fade-in 140ms ease-out;
 }
 

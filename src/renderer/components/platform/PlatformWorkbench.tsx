@@ -1612,7 +1612,7 @@ export function AgentCockpit({
           <span className="ld-composer-context-separator">·</span>
           <span className="ld-composer-runtime"><i className={`ld-status-dot ${plane.connection || 'connecting'}`} />{connectionLabel}</span>
         </div>
-        <span className="ld-send-hint" hidden={!goal.trim()}>Enter 发送 · Shift + Enter 换行</span>
+        <span className="ld-send-hint" style={{ visibility: goal.trim() ? 'visible' : 'hidden' }}>Enter 发送 · Shift + Enter 换行</span>
         <button
           className={`ld-round-control ld-send-control ${goal.trim() ? 'ready' : ''}`}
           type="button"
