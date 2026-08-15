@@ -269,9 +269,9 @@ Electron 本地保存 `_desktopHandoffRunId`；`releaseDesktopHandoff(run_id)` �
 - 目标物理 region；
 - capture timestamp；
 - 基于这些事实生成的 binding ID；
-- 后续重新读取目标和 hit-test 的 probe。
+- 后续观察窗口生命周期所需的通用 probe。
 
-冻结并不表示窗口永远不变；它表示任何动作前都能拿当前事实与这份绑定比较。若目标变化，动作不应继续。
+冻结并不表示窗口永远不变。默认 full-desktop 帧允许模型点击屏幕上的任意可见窗口；binding 只帮助下一帧观察和通用窗口生命周期，不是前台或 hit-test veto。
 
 ## 8. 构造 live session
 
@@ -290,14 +290,10 @@ flowchart TD
   State --> Runtime
   Broker --> Runtime
   Adapter["AtomicDesktopAdapter"] --> Runtime
-  Permits["MutationPermitAuthority"] --> Adapter
-  Permits --> Runtime
   Registry["EvidenceRegistry"] --> Runtime
-  Plane["RuntimeEvidencePlane + journal"] --> Adapter
-  Plane --> Runtime
 ```
 
-组合时会验证这些 owner 共享同一个 mission ID、run ID、catalog、registry、permit 与 evidence plane，防止两个相似对象分别写状态。
+组合时只核对一次 Runtime、Reducer、Broker、Catalog 与 Registry 的共享 owner；binder 不在每轮 proposal 上重放整套 Mission/Broker 组合校验。
 
 ## 9. 每个视觉 Turn 的完整算法
 
@@ -307,11 +303,9 @@ flowchart TD
 run_one_turn(turn_index):
   若另一个 turn 持锁 -> BUSY
   若 Mission 已 VERIFIED/CANCELED/BLOCKED/FAILED -> 返回对应终态
-  若 mutation permit authority 已关闭 -> BLOCKED
   若收到 cancel -> 写 mission_canceled
 
   initial = state.observe(current projection, turn_index)
-  校验 initial 的 target、frame、epoch、scope、evidence 全部属于当前 mission/run
   broker_projection = broker.project(projection, initial.broker_state)
   若 route != VISUAL_ACTOR -> UNAVAILABLE
 
@@ -329,40 +323,35 @@ run_one_turn(turn_index):
     若选择 connector -> Gateway 执行只读调用并把 tool result 交回同一 Actor
     在剩余 model-call budget 内最多 4 次 connector call
     最后一轮移除 connector tools，强制返回一笔 action / claim / blocked
-  应用有界 task_state_update（它不是权威 Mission 状态）
-  parse exactly one approved proposal
+  尝试应用有界 task_state_update（它不是权威 Mission 状态；格式错误只忽略该更新）
+  在 MissionRuntime 入口把 raw proposal 做唯一一次 typed parse
 
   再取 current snapshot：
     若 frame/target/broker projection 在模型思考期间变化 -> STALE_DISCARDED
 
-  验证工具确实在当前 Broker projection
-  验证 canonical JSON schema
   bind ActorDecisionEnvelope 到：
     mission/run/revision/obligation
     frame/target/submitted image
     allowed evidence scope
     broker projection
 
-  如果是 desktop action -> 执行一笔 call-once transaction
+  如果是 desktop action -> 执行一笔机械调用
   如果是 claim -> 记录并完成 Mission
   如果是 blocked -> 写 obligation_blocked
 ```
 
-Actor 每次都收到原始 goal，而不是仅收到局部计划。Connector 不只存在于初始分流：每个视觉 Turn 的 `propose` 也可在当前 JPEG 和 Broker 工具旁进行最多 4 次有界 connector 往返，但仍由同一个 Actor 在同一 Turn 最终提交恰好一笔 Runtime action、claim 或 blocked。`task_state` 和 `local_intent` 只是帮助短期连续性的模型笔记；Mission reducer、FrameAuthority 和 evidence 不信任它们。
+Actor 每次都收到原始 goal，而不是仅收到局部计划。Connector 不只存在于初始分流：每个视觉 Turn 的 `propose` 也可在当前 JPEG 和 Broker 工具旁进行最多 4 次有界 connector 往返，但仍由同一个 Actor 在同一 Turn 最终提交恰好一笔 Runtime action、claim 或 blocked。`task_state` 与紧邻一笔 provider 原生 exchange 只帮助短期连续性；它们不是 Runtime 计划或完成判据。
 
-## 10. 模型响应的严格解析
+## 10. 模型响应的单次边界解析
 
-视觉轮必须满足：
+视觉轮由 `LiveVisualActor` 解码 provider 返回的一笔 function call，确认工具名、JSON object
+与该动作必需的 provider 形状，并输出 raw proposal。`MissionRuntime` 入口随后只调用一次
+`parse_actor_proposal()` 得到 typed proposal；Envelope binder 和 `AtomicDesktopAdapter` 不再
+各跑一次完整工具 schema。模型附带的无关提示字段不会让一笔本可执行的桌面动作假失败；
+格式错误的辅助 `task_state_update` 只被忽略，物理 adapter 只读取动作真正需要的字段。
 
-- 恰好一个 function tool call；
-- 无普通 prose；
-- tool name 在当前 Broker surface；
-- arguments 是严格 JSON object；
-- provider schema 要求所有属性并禁止额外字段；
-- Runtime 再用完整 canonical schema 验证，包括 provider strict schema 无法表达而本地补验的 `not` 与 `uniqueItems`；
-- GUI 动作额外要求非空 `local_intent`；每个工具都要求显式 `task_state_update`。
-
-模型输出 malformed、零调用、多调用、未批准工具或非法参数时是 `INVALID_PROPOSAL`。外层 handler 最多允许一次有预算的重新决策；连续第二次仍非法则终止。普通 Actor 异常采用相同的最多一次 bounded redecision。这里不是按应用重试，也不会修改参数。
+malformed、零调用、多调用或未知工具仍作为可纠正的 `INVALID_PROPOSAL` 回到同一个模型；
+这只是格式恢复，不修改模型坐标，不按应用套配方，也不在物理动作后重放。
 
 ## 11. 坐标映射
 
@@ -375,14 +364,9 @@ submitted image point (sx, sy)
   得到 virtual desktop physical point (px, py)
 ```
 
-映射后还要检查：
-
-- 点位在 submitted image 和 frame region 内；
-- 当前窗口 identity/region 未变；
-- 当前前台 root HWND 符合目标；
-- hit-test root 仍落在目标；
-- 帧 identity 与 envelope 一致；
-- queue 等待后重新检查相同条件。
+Envelope 不按 submitted image 的宽高拒绝模型坐标。Adapter只要求数值有限，按同一线性关系
+映射一次；RawDevice 在最终 SendInput 边界处理操作系统可表示范围。默认 full-desktop 路径
+不强制目标窗口置前，也不以 foreground 或 hit-test 推断否决模型指向的屏幕位置。
 
 Runtime 不做最近按钮吸附、DPI 猜测 offset、OCR重瞄或按应用校正。若 raw point、canonical point 与 physical point 的确定性映射一致，错误目标属于模型选择层。
 
@@ -391,45 +375,37 @@ Runtime 不做最近按钮吸附、DPI 猜测 offset、OCR重瞄或按应用校�
 ```mermaid
 sequenceDiagram
   participant MR as MissionRuntime
-  participant MP as MutationPermitAuthority
   participant AD as AtomicDesktopAdapter
   participant FA as FrameAuthority
   participant Q as DesktopActionQueue
   participant RD as RawDevice
-  participant EP as EvidencePlane
   participant FO as FrameObserver
 
-  MR->>EP: record_actor_decision(envelope/schema/projection)
-  MR->>MP: call_once_with_permit
-  MP->>AD: execute(envelope)
-  AD->>AD: prepare canonical→physical arguments
+  MR->>AD: execute(bound envelope)
   AD->>FA: run_if_current(frame identity)
   FA-->>AD: pinned before frame
-  AD->>AD: target/foreground/hit-test/cancel recheck
-  AD->>MP: begin_admission(commit identity)
-  AD->>EP: before artifact + admission
+  AD->>AD: finite numbers + one canonical→physical mapping
   AD->>Q: queue one physical action
   Q->>AD: invoke callback at queue head
-  AD->>AD: revalidate after queue wait
-  AD->>EP: reserve physical_attempt
   AD->>RD: click/drag/scroll/type/hotkey once
   RD-->>AD: RawActionReceipt
-  AD->>EP: record receipt
+  alt release cleanup incomplete
+    AD->>AD: 同一 queue lease 内最多两轮 pointer/key UP cleanup
+  end
   AD->>FO: capture post-action frame
-  FO-->>AD: frame + evidence
-  AD->>AD: deterministic action-effect compare
+  FO-->>AD: next authoritative screen
   AD-->>MR: ControllerTransition
-  MR->>MR: reconcile evidence + append mission event
+  MR->>MR: append mission event; trace observes alongside
 ```
 
 ### 12.1 Controller outcome 语义
 
 | Outcome | `input_completed` | Runtime 行为 |
 | --- | --- | --- |
-| `COMPLETED` | `true` | 校验 post-frame/effect/evidence，写 transition event，下一 Turn 观察新帧 |
+| `COMPLETED` | `true` | 写 transition event，下一 Turn 让同一个 Actor 观察新屏幕 |
 | `REJECTED` | `false` | 若是明确可恢复的陈旧/目标变化原因，返回 `STALE_DISCARDED`；绝不自动重放 |
-| `UNKNOWN` | `true` | 身份、permit、evidence 链有效时写 `transition_recorded`，返回 `ACTION_RECORDED`；下一帧恢复效果，不重复输入 |
-| `UNKNOWN` | `false` 或 `null` | 无法证明已完成输入，关闭 mutation authority 并 fail closed |
+| `UNKNOWN` | `true` | 写 `transition_recorded`、返回 `ACTION_RECORDED`；下一帧恢复，不重复输入 |
+| `UNKNOWN` | `false` 或 `null` | identity 一致且释放清理完成时返回 `STALE_DISCARDED`，在新屏幕上交给 Actor 恢复；不重放 |
 | 异常 | 未知 | 视为 mutation 后不确定，fail closed，禁止重复调用 |
 
 任何路径都不能把同一个 proposal 执行两次。
@@ -460,18 +436,18 @@ sequenceDiagram
 
 当 drag 设 `keep_holding=true` 且物理输入完成，Adapter保留一个 run-owned lease。下一帧 Broker只提供 drag；新 drag 可以继续移动并再次保持，或释放。超时、异常、取消、close 都会做有界 `mouse_up` 清理。
 
-## 14. post-action reconcile
+### 13.7 launch 与 capture
 
-完成输入后不是看到“画面有变化”就宣称成功。Runtime检查：
+`launch_application` 发现已运行进程时稳定合并可见/隐藏候选，优先普通窗而不是
+`WS_EX_TOOLWINDOW`，只恢复排序后的一个候选；没有应用 recipe。`capture_screen` 不在
+vNext重复验证绝对路径、扩展名或文件存在性，相对 path由物理 backend按 Runtime cwd处理。
 
-1. ControllerTransition 的 action ID/name 与 Actor envelope 一致；
-2. evidence 全部属于同 mission/run/obligation/action；
-3. post frame 身份、target 和 current state 可以对齐；
-4. physical attempt 与 receipt 已建立绑定；
-5. reducer 接受 transition event；
-6. previous action local intent 和安全摘要只在接受后更新。
+## 14. 动作后的新屏幕
 
-然后外层 `_PreparedHandler` 继续下一 Turn。允许继续的状态主要是：`ACTION_RECORDED`、`STALE_DISCARDED`、`VERIFICATION_RECORDED`。
+完成一笔输入后，Runtime只确认 ControllerTransition 回指同一 action，并把 receipt 与下一张
+权威屏幕交给同一个 Actor。trace 可以旁路记录 model arguments、physical attempt 和 receipt
+以定位首分歧，但不再有独立 reconcile/verification 层据此判 task pass。外层
+`_PreparedHandler` 在 `ACTION_RECORDED` 或 `STALE_DISCARDED` 后继续下一 Turn。
 
 ## 15. claim、blocked 与终止
 
@@ -480,15 +456,16 @@ sequenceDiagram
 ```text
 Actor: claim_obligation_done(concise_claim)
 Runtime:
-  要求当前 frame evidence 非空且属于当前 run
-  写 obligation_claimed
-  用 Actor claim 建立 obligation verification
-  用 deterministic verifier 核对所有 required obligation 已接受
-  写 mission_verified
-  仅当 projection.status == VERIFIED 时保存 concise_claim 为 user_result
+  接受同一个 Actor 基于当前真实屏幕作出的完成判断
+  在任何辅助 history/snapshot 之前缓存 claim 与最终 narration
+  将 claim 投影为 Mission 完成状态
+  保存 concise_claim 为 user_result
 ```
 
-这里没有第二个视觉模型。deterministic verifier 只核对合同闭合，不判断屏幕语义。因此 E2E 仍必须检查外部状态。
+这里没有第二个视觉模型、deterministic pass verifier、trace gate 或 memory gate。辅助
+Mission history、completion snapshot 或诊断投影失败不能推翻已缓存的 claim，也不能丢失
+`user_result`。E2E harness仍可观察真实应用终态来衡量产品完成率，但不会把测试判定反馈
+进生产执行线。
 
 ### 15.2 blocked
 
@@ -496,7 +473,7 @@ Actor提交规范 `blocker_kind` 与去重的 `observed_facts`，Runtime写 `obl
 
 ### 15.3 预算耗尽
 
-默认 `max_turns=100`、`max_runtime_s=3600`、`max_model_calls=200`；这也分别是当前配置上限 100、3600 和 `2 × max_turns`。预算在 run 开始冻结。耗尽返回 fail-closed `STATE_REJECTED`，不能伪装成完成。
+默认 `max_turns=200`、`max_runtime_s=7200`、`max_model_calls=400`。配置只要求三项都是正整数，不再用派生上限拒绝更长任务；预算仍在 run 开始冻结，耗尽返回 `STATE_REJECTED`。
 
 ## 16. Pause、resume、cancel
 
@@ -505,7 +482,7 @@ Actor提交规范 `blocker_kind` 与去重的 `observed_facts`，Runtime写 `obl
 - cancel 设置 run stop event；Actor、connector、lease wait、queue 和外层 deadline 都观察它；
 - 若输入尚未开始，明确 canceled/rejected；
 - 若输入已开始或结果未知，先记录真实 receipt，再进入保守终态；
-- close 时无论任务结果如何都必须清理 held pointer、模型资源和 evidence journal。
+- close 时无论任务结果如何都必须清理 held pointer 与模型资源。
 
 ## 17. Runtime 状态循环
 
@@ -519,7 +496,7 @@ stateDiagram-v2
   LeaseWaiting --> Failed: timeout/fail/cancel
   VisualTurn --> VisualTurn: action recorded
   VisualTurn --> VisualTurn: stale discarded
-  VisualTurn --> VisualTurn: one bounded malformed/error recovery
+  VisualTurn --> VisualTurn: malformed/error redecision within remaining budget
   VisualTurn --> Verified: claim accepted
   VisualTurn --> Blocked: blocked report
   VisualTurn --> Failed: state rejected/budget/error

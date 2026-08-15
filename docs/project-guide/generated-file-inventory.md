@@ -6,10 +6,10 @@
 
 ## 覆盖摘要
 
-- 被索引文件：**739**
-- 代码/测试/配置口径：**689**
-- 文本文件总行数：**349,796**
-- 总字节数：**13,985,888**
+- 被索引文件：**745**
+- 代码/测试/配置口径：**695**
+- 文本文件总行数：**353,417**
+- 总字节数：**14,146,866**
 - 生成文件自身被排除，避免自引用 hash；生成脚本自身被纳入代码覆盖。
 
 ### 分类
@@ -18,15 +18,15 @@
 | --- | ---: |
 | `asset-or-binary` | 7 |
 | `configuration` | 19 |
-| `developer-script` | 21 |
+| `developer-script` | 28 |
 | `documentation` | 34 |
 | `e2e-or-harness` | 11 |
 | `electron-or-typescript-product` | 102 |
 | `fixture-or-template` | 12 |
 | `project-asset` | 7 |
-| `supporting-code` | 125 |
-| `test` | 194 |
-| `winpilot-product` | 207 |
+| `supporting-code` | 126 |
+| `test` | 197 |
+| `winpilot-product` | 202 |
 
 ### 代码与配置语言
 
@@ -44,7 +44,7 @@
 | JavaScript | 2 |
 | PowerShell | 3 |
 | Pytest configuration | 1 |
-| Python | 503 |
+| Python | 509 |
 | Python requirements | 1 |
 | React TypeScript | 49 |
 | TypeScript | 81 |
@@ -91,8 +91,8 @@
 [打开文件](<../../.gitignore>)
 
 - 分类/语言：`project-asset` / Binary or extensionless project file
-- 规模：111 行，2,162 bytes
-- SHA-256：`a02eccf9690e36311d80e457566050ee15b849b4afc2da5d7127bf2905053904`
+- 规模：114 行，2,263 bytes
+- SHA-256：`efa22061a27276c4627a3c863ec93276e5ee0b0d42e2a4589236ce318a47a0fb`
 - 源码事实摘要：node_modules/
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -136,8 +136,8 @@
 [打开文件](<../../AGENTS.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：29 行，1,606 bytes
-- SHA-256：`ea0bc6df9756b4a5a06c336c6e10f4e55781214065e1e4c8618f4bbc005d01c6`
+- 规模：65 行，3,833 bytes
+- SHA-256：`8f3bc5a6cb86f4428cd958b41684ed1d71ca09153606d1ed1aad1b4de1d82142`
 - 源码事实摘要：Repository agent instructions
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -166,8 +166,8 @@
 [打开文件](<../../CLAUDE.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：785 行，57,309 bytes
-- SHA-256：`d1792cd4d17e4df05bf1a0d849bdfc9598f9578f9ae3d8fbf3ea0adc2d256cd7`
+- 规模：1373 行，99,346 bytes
+- SHA-256：`c44365ff8465801411d016a624e8ca9db56f2bd62215fac402ab3257f6c20922`
 - 源码事实摘要：AI / Codex / 开发者接手入口
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -196,8 +196,8 @@
 [打开文件](<../../README.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：225 行，17,261 bytes
-- SHA-256：`62c820934c3e3ea7d60bd98e19b96b8c196e13b817071bc3bcc69a42939754d0`
+- 规模：225 行，17,161 bytes
+- SHA-256：`68dbeb336c672c0b7399fb47787715b2e3422171d927591660c771cebe98f57c`
 - 源码事实摘要：灵动脚本 / Lingdong Script
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -325,8 +325,8 @@
 [打开文件](<../../docs/architecture.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：449 行，28,917 bytes
-- SHA-256：`b1f65f7852a41fd8f13c58c18bef113f9f558cb51a49aef6c340fa783c310d32`
+- 规模：450 行，28,891 bytes
+- SHA-256：`5e9103b0d00797bfab0e0fe2c602ea0d43cf66feb6d7017a2cc465dcd7d1fffb`
 - 源码事实摘要：GUI Agent 架构与运行原理
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -390,8 +390,8 @@
 [打开文件](<../../docs/model-providers.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：207 行，12,000 bytes
-- SHA-256：`822839930e00aaf66f13c8f529ee059f22396edf35d36566dc6e98b991e204a6`
+- 规模：207 行，11,854 bytes
+- SHA-256：`fad3ee5ada396283d69bf417a73541de56ceb2c3594fc8502e0cd281247e4646`
 - 源码事实摘要：模型 Provider、视觉路由、Thinking、缓存与成本
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -416,8 +416,8 @@
 [打开文件](<../../docs/project-guide/01-system-architecture.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：389 行，20,681 bytes
-- SHA-256：`66acfb2b0aa6a16e06344f3710e849bcafd7cc2408e7f073ffbb4101055c76ea`
+- 规模：390 行，21,480 bytes
+- SHA-256：`2cf4418f5d2591badacac28aadf6093857187e6268f06b60165358b04d7b76d2`
 - 源码事实摘要：01. 系统架构：进程、层次与唯一 owner
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -429,8 +429,8 @@
 [打开文件](<../../docs/project-guide/02-runtime-flows.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：645 行，28,733 bytes
-- SHA-256：`6836c6c294c92bb5710c82bd781f7540cb9b19c2223d0d5dc355fb2e33683aca`
+- 规模：622 行，28,471 bytes
+- SHA-256：`f88d366b938f4b561e80a655dbf862e5d43b9c22b19e755b46549d781bf665d1`
 - 源码事实摘要：02. 运行时全流程：从点击发送到外部结果
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -442,8 +442,8 @@
 [打开文件](<../../docs/project-guide/03-contracts-and-interfaces.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：575 行，27,144 bytes
-- SHA-256：`8cf529100588006f244a61140348e08a99e50a3c2a28be7a8837ccdae75ab2b4`
+- 规模：597 行，29,063 bytes
+- SHA-256：`9b909d4f83081844b4fffb04ad61c266f1edf97a439406d24d5d0543e5bb004a`
 - 源码事实摘要：03. 合同、状态与接口参考
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -455,8 +455,8 @@
 [打开文件](<../../docs/project-guide/04-testing-and-debugging.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：452 行，19,032 bytes
-- SHA-256：`85242adf3643c8bf3bda5bf0e4fd28df2ab7a011c13b997bbbb7cae85e602c98`
+- 规模：453 行，19,191 bytes
+- SHA-256：`f97a38a5b54041075bbc8f0952703b76924620b6b2c8deec476cc9367d06c6a9`
 - 源码事实摘要：04. 测试、真实 E2E 与故障定位
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -481,8 +481,8 @@
 [打开文件](<../../docs/project-guide/06-file-reference-winpilot-python.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：1183 行，90,940 bytes
-- SHA-256：`a9711caed3bb00573e8353d738292572b55807b19c8ad48377206520be60b651`
+- 规模：1147 行，87,803 bytes
+- SHA-256：`ce6a18fdfc08691cf0a525ef0d11581edb11c9ba32c152552f9e269f9d91d6ee`
 - 源码事实摘要：06. WinPilot Python 核心逐文件精确讲解
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -494,8 +494,8 @@
 [打开文件](<../../docs/project-guide/07-file-reference-support-tests.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：709 行，76,314 bytes
-- SHA-256：`1526394a398fa9f160a7406589f40515768a7964b82319e6825d7742cea38e3d`
+- 规模：707 行，75,938 bytes
+- SHA-256：`59dedb72928afdd153bb159de17f26e561bb1afdda5be46b6802e42ed60e8388`
 - 源码事实摘要：07. 支撑代码、测试、脚本与配置逐文件精确讲解
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -507,8 +507,8 @@
 [打开文件](<../../docs/project-guide/README.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：180 行，13,814 bytes
-- SHA-256：`23e77734355e10c313dfd4dab6fe8a3e505f7c0eff48e7ae1027d3db7c7acf8b`
+- 规模：180 行，13,961 bytes
+- SHA-256：`44667251ae67335b720953b8268f02c0e60756633fef2749b8a26608f63326e6`
 - 源码事实摘要：灵动脚本全项目精确讲解
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -546,8 +546,8 @@
 [打开文件](<../../docs/visual-runtime-principles.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：96 行，4,318 bytes
-- SHA-256：`932e138c08cdcf84d2651482c189ad4122b110b9e86ee0d19e251ffc7a6ffb5c`
+- 规模：97 行，4,318 bytes
+- SHA-256：`f8750c4a85579ca1586ecaaa100e5866bf3ee9edf2cd6860d434c9aadaaab51c`
 - 源码事实摘要：Visual runtime principles
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -559,8 +559,8 @@
 [打开文件](<../../docs/vnext-migration.md>)
 
 - 分类/语言：`documentation` / Markdown
-- 规模：340 行，22,291 bytes
-- SHA-256：`2987c096779bfbe2b7ba9fb3f967aaf7f204de38c504afedc0a410aac1c674cc`
+- 规模：401 行，26,129 bytes
+- SHA-256：`aee6a3d4a17febce110b9b5704b75a6f175cd94a93c8273bafaf57997b7058b3`
 - 源码事实摘要：vNext 迁移
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -2323,7 +2323,7 @@
 
 - 分类/语言：`configuration` / JSON
 - 规模：116 行，3,148 bytes
-- SHA-256：`64da154a39c7534d26f50fd279221d9ee1508f0b669b64698f74736879318e68`
+- SHA-256：`d5b0ea23e089ed4fded31f51451a4f43514754cb8f3f9b5f50738ee9c84097d7`
 - 源码事实摘要：配置 config.example 对应的构建、运行、依赖或测试行为。
 - 顶层符号/结构：`key:api`, `key:vlm`, `key:perception`, `key:fusion`, `key:agent`, `key:controller`, `key:ocr`, `key:search`, `key:coding`, `key:integrations`, `key:vnext`, `key:server`
 - 直接静态依赖：—
@@ -2400,10 +2400,10 @@
 [打开文件](<../../python/winpilot_home/eval_targets/visual_interaction_server.py>)
 
 - 分类/语言：`e2e-or-harness` / Python
-- 规模：377 行，13,731 bytes
-- SHA-256：`e40a07ed25b14884b2e5e30ceb718f25aea7f951556772be04927e8915b4e246`
+- 规模：391 行，14,403 bytes
+- SHA-256：`1fae21f0e2376a51719f21cb40cc694bbd10b8d3d8b8930fbc248efe0758c566`
 - 源码事实摘要：Local-only ground-truth server for real visual-interaction E2E tests.
-- 顶层符号/结构：`_quiz_questions`, `_public_quiz_spec`, `_normalize_quiz_answer`, `_evaluate_quiz_submission`, `_accepted_success_event`, `_state_snapshot`, `_safe_value`, `_prepare_event`, `Handler`, `main`, `const:ROOT`, `const:TARGET`, `const:STATE_LOCK`, `const:STATE`
+- 顶层符号/结构：`_quiz_questions`, `_public_quiz_spec`, `_normalize_quiz_answer`, `_evaluate_quiz_submission`, `_accepted_success_event`, `_state_snapshot`, `_safe_value`, `_prepare_event`, `Handler`, `main`, `const:ROOT`, `const:TARGET`, `const:BASIC_INPUT_TARGET`, `const:STATE_LOCK`，另有 1 项
 - 直接静态依赖：`__future__`, `json`, `random`, `sys`, `threading`, `time`, `unicodedata`, `http.server`, `pathlib`, `typing`, `urllib.parse`
 - API/IPC 入口：—
 
@@ -2413,8 +2413,8 @@
 [打开文件](<../../python/winpilot_home/eval_targets/visual_interaction_target.html>)
 
 - 分类/语言：`e2e-or-harness` / HTML
-- 规模：423 行，32,960 bytes
-- SHA-256：`b375a2645ec784a2f6269b2635a90d6bc4e3ac71e62b25ed49b86740f6296687`
+- 规模：642 行，49,850 bytes
+- SHA-256：`b804659793e0b1a4994b7ae479feba43d6d08944494ddf7d327c0523f1aee9b4`
 - 源码事实摘要：WinPilot Visual Interaction Target
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -2439,11 +2439,24 @@
 [打开文件](<../../python/winpilot_home/eval_targets/vnext_canary_target.html>)
 
 - 分类/语言：`e2e-or-harness` / HTML
-- 规模：565 行，23,627 bytes
-- SHA-256：`3f24350bacd80d7df5f49e397b08d4433fad30a765791ae9a196de90705e4a35`
+- 规模：559 行，23,561 bytes
+- SHA-256：`4de9c4a8b475651bd022a7481c9fdfc7f171d7745ac9de996d058ee4e18266b3`
 - 源码事实摘要：WinPilot vNext Canary
 - 顶层符号/结构：—
 - 直接静态依赖：—
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: python/winpilot_home/go_game.py -->
+### `python/winpilot_home/go_game.py`
+
+[打开文件](<../../python/winpilot_home/go_game.py>)
+
+- 分类/语言：`supporting-code` / Python
+- 规模：118 行，3,639 bytes
+- SHA-256：`f1b60a6cfaa16fa087293dda34a81d6e7e586b643df9f9a8f86b66aea2e738c8`
+- 源码事实摘要：实现或支撑 go game 模块；精确公开面见下列静态符号与依赖。
+- 顶层符号/结构：`GoGame`
+- 直接静态依赖：`random`, `tkinter`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/playbooks/coding-project.json -->
@@ -2530,8 +2543,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_admitted_public_action_telemetry.py>)
 
 - 分类/语言：`test` / Python
-- 规模：601 行，17,662 bytes
-- SHA-256：`17a389fdf650636923b911beaa326b7b2fc0fb544b6c62f0912103f5b0874176`
+- 规模：600 行，17,576 bytes
+- SHA-256：`2d16ed1577ecca2df5a1dc6128d63cffb9d5fb00a6716b69c0d320451820f473`
 - 源码事实摘要：验证 test admitted public action telemetry 对应的行为、回归或合同。
 - 顶层符号/结构：`_nested_keys`, `_nested_values`, `_assert_private_parameters_absent`, `_assert_public_action_event`, `_action_events`, `_next_action_event`, `strict_backend_environment`, `_run_scroll`, `_run_drag`, `_run_type_text`, `_run_hotkey`, `_run_click`, `test_admitted_action_summary_rejects_invalid_field_combinations`, `test_admitted_action_summary_rejects_unknown_keyword`，另有 16 项
 - 直接静态依赖：`__future__`, `hashlib`, `inspect`, `json`, `queue`, `threading`, `collections.abc`, `typing`, `pytest`, `winpilot.action.raw_device`, `winpilot.action.replay_policy`, `winpilot.utils.log`
@@ -2569,11 +2582,11 @@
 [打开文件](<../../python/winpilot_home/tests/test_app_resolution.py>)
 
 - 分类/语言：`test` / Python
-- 规模：303 行，9,998 bytes
-- SHA-256：`21d24d26a030ffd99b0f4c9c4b5df42226a4ac7260e7399eede14c857f588dda`
+- 规模：428 行，13,650 bytes
+- SHA-256：`dc9a4f9db405d9f7407a7656a38ea14797b866fb4938b33eaa1cb203be85d7d7`
 - 源码事实摘要：验证 test app resolution 对应的行为、回归或合同。
-- 顶层符号/结构：`test_app_alias_expansion_returns_only_the_normalized_literal`, `test_app_index_uses_only_generic_discovery_sources`, `test_resolve_fictional_app_by_discovered_display_name`, `test_resolve_fictional_app_by_discovered_shortcut_alias`, `test_launch_discovered_exe_passes_generic_arguments`, `test_resolve_refreshes_a_cached_multisource_index_once_on_miss`, `test_index_keeps_same_kind_entries_with_distinct_launch_targets`, `test_start_app_record_adds_only_catalog_proven_runtime_identity`, `test_start_app_record_does_not_invent_a_process_from_display_or_app_id`, `test_start_apps_json_parser_preserves_executable_and_package_identity`, `test_start_apps_discovery_uses_system_catalog_metadata_once`, `test_index_merges_structured_identity_for_the_same_app_id`, `test_resolve_can_match_a_discovered_runtime_process_alias`, `test_resolve_falls_back_to_structured_executable_search`
-- 直接静态依赖：`__future__`, `json`, `types`
+- 顶层符号/结构：`test_app_alias_expansion_returns_only_the_normalized_literal`, `test_app_index_uses_only_generic_discovery_sources`, `test_resolve_fictional_app_by_discovered_display_name`, `test_resolve_fictional_app_by_discovered_shortcut_alias`, `test_resolve_keeps_display_typos_but_rejects_fuzzy_path_aliases`, `test_launch_discovered_exe_passes_generic_arguments`, `test_resolve_refreshes_a_cached_multisource_index_once_on_miss`, `test_index_keeps_same_kind_entries_with_distinct_launch_targets`, `test_start_app_record_adds_only_catalog_proven_runtime_identity`, `test_start_app_record_does_not_invent_a_process_from_display_or_app_id`, `test_start_apps_json_parser_preserves_executable_and_package_identity`, `test_start_apps_discovery_uses_system_catalog_metadata_once`, `test_app_paths_ignores_stale_executable_targets`, `test_index_merges_structured_identity_for_the_same_app_id`，另有 3 项
+- 直接静态依赖：`__future__`, `json`, `sys`, `types`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_application_launch_intent.py -->
@@ -2634,11 +2647,24 @@
 [打开文件](<../../python/winpilot_home/tests/test_chatgpt_mcp.py>)
 
 - 分类/语言：`test` / Python
-- 规模：798 行，28,192 bytes
-- SHA-256：`4cbbdf4e3502f5b7b961c45ee8d2c06ea873670f2532cbc3de26f57543c00ace`
+- 规模：795 行，28,682 bytes
+- SHA-256：`716bfedd0e3c2da3ea3d37d16d17538ed8115b104ccbd5853677b72e2a7cb5a1`
 - 源码事实摘要：验证 test chatgpt mcp 对应的行为、回归或合同。
 - 顶层符号/结构：`test_runtime_python_cwd_does_not_shadow_official_mcp_sdk`, `_hooks`, `_graph`, `test_mcp_catalog_exposes_controller_first_tools_and_annotations`, `test_chatgpt_graph_rejects_nested_api_agent_but_accepts_controller_batch`, `test_mutation_guard_blocks_controller_calls_while_runtime_is_busy`, `test_unbound_task_change_atomically_rebuilds_all_semantic_session_state`, `test_failed_unbound_session_preparation_leaves_previous_snapshot_atomic`, `test_bound_task_remains_contract_authority_for_later_subgoal_labels`, `test_visual_fallback_returns_raw_image_bytes_without_leaking_base64`, `test_mcp_frame_coordinates_are_bound_and_mapped_from_exact_capture`, `test_mcp_balanced_pointer_path_is_one_frame_bound_local_gesture`, `_jpeg`, `_jpeg_with_block`，另有 14 项
 - 直接静态依赖：`asyncio`, `base64`, `hashlib`, `io`, `json`, `pathlib`, `subprocess`, `sys`, `types`, `PIL`, `pytest`, `winpilot.agent.tool_result`, `winpilot.integrations.chatgpt_mcp`, `winpilot.orchestrator.projection`
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: python/winpilot_home/tests/test_client_complex_orchestration_e2e_harness.py -->
+### `python/winpilot_home/tests/test_client_complex_orchestration_e2e_harness.py`
+
+[打开文件](<../../python/winpilot_home/tests/test_client_complex_orchestration_e2e_harness.py>)
+
+- 分类/语言：`test` / Python
+- 规模：273 行，8,328 bytes
+- SHA-256：`a3090e1eaf0dd1ece147415b513fd2610062f9175eaf12dad08eff93edbddb84`
+- 源码事实摘要：验证 test client complex orchestration e2e harness 对应的行为、回归或合同。
+- 顶层符号/结构：`_load_harness`, `test_orchestration_evidence_reports_real_parallelism_and_recovery`, `test_orchestration_evidence_keeps_legacy_pairing_and_flags_unmatched`, `test_ui_activity_probe_does_not_override_task_completion`, `test_live_ui_probe_requires_interleaved_activity_and_task_board`, `test_live_ui_probe_accepts_task_board_as_the_models_progress_signal`
+- 直接静态依赖：`__future__`, `importlib.util`, `json`, `sys`, `pathlib`, `types`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_client_e2e_harness.py -->
@@ -2647,10 +2673,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_client_e2e_harness.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1426 行，44,759 bytes
-- SHA-256：`b5efd376f6426dcdee4158488311e1f834f7327c6a92302798b1eb0a45e00a79`
+- 规模：1719 行，53,581 bytes
+- SHA-256：`01f2a783e80d2e30878df3ce8f966e69aab879922cc1d1f3be7039586d3d2e72`
 - 源码事实摘要：验证 test client e2e harness 对应的行为、回归或合同。
-- 顶层符号/结构：`_load_harness`, `test_harness_keeps_the_exact_eleven_and_one_combined_long_goal`, `test_harness_has_no_execution_policy_selector_argument`, `test_control_value_uses_complete_text_when_value_pattern_is_truncated`, `test_document_text_can_verify_a_long_goal_when_edit_value_is_truncated`, `test_visible_client_is_verified_foreground_before_goal_submission`, `test_named_button_lookup_short_circuits_a_large_accessibility_tree`, `test_partial_name_lookup_short_circuits_the_goal_editor`, `test_goal_entry_uses_native_keyboard_input_without_value_pattern`, `test_session_reset_reuses_the_count_control_instead_of_rewalking_cards`, `test_navigation_reasserts_the_client_foreground_before_click`, `test_trace_snapshot_tracks_outer_arp_jsonl_files_not_artifact_directories`, `test_runtime_status_retries_a_transient_managed_endpoint_timeout`, `test_runtime_status_rejects_a_wrong_control_token_without_retrying`，另有 24 项
+- 顶层符号/结构：`_load_harness`, `test_harness_keeps_the_exact_eleven_and_one_combined_long_goal`, `test_harness_has_no_execution_policy_selector_argument`, `test_control_value_uses_complete_text_when_value_pattern_is_truncated`, `test_document_text_can_verify_a_long_goal_when_edit_value_is_truncated`, `test_named_button_lookup_short_circuits_a_large_accessibility_tree`, `test_partial_name_lookup_short_circuits_the_goal_editor`, `test_goal_entry_uses_native_keyboard_input_without_value_pattern`, `test_session_reset_reuses_the_count_control_instead_of_rewalking_cards`, `test_navigation_reasserts_the_client_foreground_before_click`, `test_trace_snapshot_tracks_outer_arp_jsonl_files_not_artifact_directories`, `test_runtime_status_retries_a_transient_managed_endpoint_timeout`, `test_runtime_status_rejects_a_wrong_control_token_without_retrying`, `test_cold_start_runtime_probe_uses_one_long_request_budget`，另有 31 项
 - 直接静态依赖：`__future__`, `importlib.util`, `json`, `pathlib`, `types`
 - API/IPC 入口：—
 
@@ -2660,10 +2686,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_client_netease_music_e2e_harness.py>)
 
 - 分类/语言：`test` / Python
-- 规模：405 行，11,612 bytes
-- SHA-256：`0dcfae805cf990654176d74a02ed4f7bb2276cedf9009203b8ac7f66128334e8`
+- 规模：481 行，14,375 bytes
+- SHA-256：`32f75b62d70c75453f827acc574e11ff448797cb46aad799d5a788616d14eed2`
 - 源码事实摘要：验证 test client netease music e2e harness 对应的行为、回归或合同。
-- 顶层符号/结构：`_load_harness`, `_node`, `_successful_nodes`, `test_client_gets_only_original_natural_language_goal`, `test_readonly_coreaudio_reader_uses_only_getters`, `test_visible_playback_first_result_and_five_percent_pass_candidate`, `test_pause_artist_and_track_must_be_in_bottom_player_region`, `test_generic_play_pause_label_is_not_proof_of_active_playback`, `test_muted_or_wrong_volume_fails_even_when_player_is_correct`, `test_second_result_cannot_pass_as_the_first_song`, `test_missing_result_row_fails_closed_instead_of_trusting_agent_claim`, `test_admission_binding_accepts_only_a_new_vnext_arp_job`, `test_current_run_fallback_must_match_the_submitted_goal`, `test_transient_capture_error_does_not_erase_the_last_player_verdict`，另有 1 项
+- 顶层符号/结构：`_load_harness`, `_node`, `_successful_nodes`, `test_client_gets_only_original_natural_language_goal`, `test_readonly_coreaudio_reader_uses_only_getters`, `test_visible_playback_first_result_and_five_percent_pass_candidate`, `test_pause_artist_and_track_must_be_in_bottom_player_region`, `test_generic_play_pause_label_is_not_proof_of_active_playback`, `test_muted_or_wrong_volume_fails_even_when_player_is_correct`, `test_second_result_cannot_pass_as_the_first_song`, `test_missing_result_row_is_diagnostic_not_a_false_failure`, `test_admission_binding_accepts_only_a_new_vnext_arp_job`, `test_current_run_fallback_must_match_the_submitted_goal`, `test_transient_capture_error_does_not_erase_the_last_player_verdict`，另有 3 项
 - 直接静态依赖：`__future__`, `importlib.util`, `inspect`, `sys`, `pathlib`
 - API/IPC 入口：—
 
@@ -2673,10 +2699,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_client_paint_game_e2e_harness.py>)
 
 - 分类/语言：`test` / Python
-- 规模：397 行，11,501 bytes
-- SHA-256：`bac7334788a5b865e1dfa8a90c9c0316b2840a1aba68baf8e1160bd2cb253c26`
+- 规模：421 行，12,336 bytes
+- SHA-256：`8cd6c171d90d97f6cb87b5d57bc8d8815540dcf129de760503c86ade718b532b`
 - 源码事实摘要：验证 test client paint game e2e harness 对应的行为、回归或合同。
-- 顶层符号/结构：`_load_script`, `_load_paint_harness`, `_board`, `_draw_red_x`, `test_client_receives_only_the_unchanged_natural_language_goal`, `test_logical_board_bbox_scales_with_the_target_window_dpi`, `test_paint_capture_adds_scaled_relative_bbox_to_physical_window_origin`, `test_baseline_accepts_the_empty_center_and_rejects_an_occupied_cell`, `test_transient_mouse_pointer_does_not_fail_empty_cell_or_retention`, `test_complete_red_x_in_the_expected_cell_passes_one_frame_evaluation`, `test_one_red_diagonal_is_not_a_complete_x`, `test_wrong_cell_red_ink_is_a_sticky_failure`, `test_erasing_black_board_structure_fails_retention`, `test_red_x_must_remain_stable_for_the_configured_frame_count`，另有 3 项
+- 顶层符号/结构：`_load_script`, `_load_paint_harness`, `_board`, `_draw_red_x`, `test_client_receives_only_the_unchanged_natural_language_goal`, `test_logical_board_bbox_scales_with_the_target_window_dpi`, `test_paint_capture_adds_scaled_relative_bbox_to_physical_window_origin`, `test_baseline_accepts_the_empty_center_and_rejects_an_occupied_cell`, `test_baseline_rejects_a_large_dark_mark_without_a_grid`, `test_transient_mouse_pointer_does_not_fail_empty_cell_or_retention`, `test_complete_red_x_in_the_expected_cell_passes_one_frame_evaluation`, `test_one_red_diagonal_is_not_a_complete_x`, `test_thin_wrong_cell_x_is_preserved_as_wrong_red_evidence`, `test_corrected_current_board_can_pass_after_a_wrong_intermediate_frame`，另有 5 项
 - 直接静态依赖：`__future__`, `importlib.util`, `sys`, `pathlib`, `cv2`, `numpy`
 - API/IPC 入口：—
 
@@ -2686,11 +2712,24 @@
 [打开文件](<../../python/winpilot_home/tests/test_client_qq_groups_e2e_harness.py>)
 
 - 分类/语言：`test` / Python
-- 规模：322 行，9,945 bytes
-- SHA-256：`fcfe68213445e5fff8338b095e0b80fec1218226cffc79104faa27fc2292b8ff`
+- 规模：695 行，21,513 bytes
+- SHA-256：`61d2bbf1c103ba5c675aaf497053965403f9c27228a433335234e28f4cf26bfd`
 - 源码事实摘要：验证 test client qq groups e2e harness 对应的行为、回归或合同。
-- 顶层符号/结构：`_load_harness`, `_node`, `_qq_state`, `test_client_receives_only_the_original_natural_language_goal`, `test_visible_state_finds_group_list_rows_and_active_group`, `test_browsing_requires_multiple_groups_switch_scroll_and_list_end`, `test_client_delivery_requires_nonempty_summary_for_every_group`, `test_trace_privacy_audit_fails_closed_on_claim_or_private_value`, `test_current_architecture_audit_accepts_verified_delivery_projection`, `test_harness_wires_handoff_probe_and_redacts_base_stdout`
-- 直接静态依赖：`__future__`, `importlib.util`, `json`, `sys`, `pathlib`
+- 顶层符号/结构：`_load_harness`, `_node`, `_ocr_element`, `_fake_ocr`, `_qq_window_image`, `_ocr_qq_state`, `harness_ocr_analysis`, `test_ocr_state_detects_rows_and_active_group_from_pixels`, `test_ocr_rows_filter_times_counts_and_preview_lines`, `test_ocr_mode_browse_complete_needs_switches_not_scroll_or_end`, `test_ocr_mode_never_completes_without_switches`, `test_ocr_mode_requires_visiting_every_discovered_row`, `test_oracle_falls_back_to_ocr_when_qq_uia_is_black_box`, `test_uia_rich_mode_merges_ocr_selection_when_selection_state_missing`，另有 9 项
+- 直接静态依赖：`__future__`, `importlib.util`, `json`, `sys`, `pathlib`, `types`, `PIL`
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: python/winpilot_home/tests/test_client_random_tasks_e2e_harness.py -->
+### `python/winpilot_home/tests/test_client_random_tasks_e2e_harness.py`
+
+[打开文件](<../../python/winpilot_home/tests/test_client_random_tasks_e2e_harness.py>)
+
+- 分类/语言：`test` / Python
+- 规模：187 行，5,609 bytes
+- SHA-256：`4074e5ebbf5f0594fb3eca6bdd10a2f59543da287cbac9b8d05353424d8882ed`
+- 源码事实摘要：验证 test client random tasks e2e harness 对应的行为、回归或合同。
+- 顶层符号/结构：`_load_harness`, `_paint_frame`, `test_find_window_prefers_foreground_then_topmost_z_order`, `test_chat_then_task_phrasings_match_exact_file_oracle`, `test_claim_texts_are_bound_to_the_exact_run`, `test_uia_text_reader_uses_declared_uiautomation_dependency`, `test_paint_oracle_accepts_a_horizontal_canvas_stroke`, `test_paint_verifier_focuses_live_window_before_terminal_capture`
+- 直接静态依赖：`__future__`, `importlib.util`, `json`, `sys`, `pathlib`, `PIL`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_client_thread_connector_e2e_harness.py -->
@@ -2712,11 +2751,24 @@
 [打开文件](<../../python/winpilot_home/tests/test_client_visual_e2e_harness.py>)
 
 - 分类/语言：`test` / Python
-- 规模：487 行，15,286 bytes
-- SHA-256：`f135892152db5330de3e11e6de590983261a8d5c72aadbdb95954799053c7695`
+- 规模：869 行，29,386 bytes
+- SHA-256：`a47b1c7d6d116eeade5cd304599e38576fec4799eb7d876080114e2fa5378c4a`
 - 源码事实摘要：验证 test client visual e2e harness 对应的行为、回归或合同。
-- 顶层符号/结构：`_load_harness`, `_state`, `test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes`, `test_client_case_specs_preserve_spoken_gui_requirements`, `test_target_focus_preserves_bound_geometry_unless_minimized`, `test_external_verdict_requires_precise_click_geometry_and_no_wrong_click`, `test_external_verdict_requires_complete_trusted_ordered_click_progression`, `test_external_verdict_requires_server_verified_mixed_scroll_quiz`, `test_external_verdict_requires_complete_object_placement`, `test_external_verdict_checks_slider_band_and_corridor_path`, `test_corridor_variant_zero_and_zero_clearance_are_valid`, `test_external_verdict_requires_one_cross_frame_held_pointer_gesture`, `test_external_verdict_rejects_goal_entry_without_trusted_pointerup`, `test_dynamic_target_persists_pointerup_before_success`，另有 1 项
+- 顶层符号/结构：`_load_harness`, `_state`, `test_real_client_visual_matrix_is_generic_and_covers_gesture_shapes`, `test_client_case_specs_preserve_spoken_gui_requirements`, `test_target_focus_preserves_bound_geometry_unless_minimized`, `test_external_verdict_requires_precise_click_geometry_and_no_wrong_click`, `test_external_verdict_requires_complete_trusted_ordered_click_progression`, `test_external_verdict_requires_server_verified_mixed_scroll_quiz`, `test_external_verdict_requires_complete_object_placement`, `test_external_verdict_checks_slider_band_and_corridor_path`, `test_corridor_zero_clearance_is_valid`, `test_external_verdict_accepts_a_complete_held_pointer_retry`, `test_external_verdict_accepts_trusted_two_stroke_drawing_with_short_final_stroke`, `test_external_verdict_accepts_keyboard_mouse_interleaving`，另有 14 项
 - 直接静态依赖：`__future__`, `importlib.util`, `inspect`, `sys`, `pathlib`
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: python/winpilot_home/tests/test_clipboard_ops.py -->
+### `python/winpilot_home/tests/test_clipboard_ops.py`
+
+[打开文件](<../../python/winpilot_home/tests/test_clipboard_ops.py>)
+
+- 分类/语言：`test` / Python
+- 规模：246 行，7,156 bytes
+- SHA-256：`dfff24d273b9dc8d2f4381469f396dcce25bf467d84f05ec36285c479b158081`
+- 源码事实摘要：验证 test clipboard ops 对应的行为、回归或合同。
+- 顶层符号/结构：`_FakeUser32`, `_MixedVisibilityUser32`, `test_capture_screen_delegates_relative_path_to_backend`, `test_list_windows_keeps_frontmost_24_with_truthful_facts`, `test_list_windows_does_not_depend_on_ctypes_wintypes_side_effect`, `test_list_windows_reports_deduped_background_applications`, `_FakeKernel32`, `test_process_name_uses_pid_path_basename_and_fails_empty`
+- 直接静态依赖：`__future__`, `types`, `winpilot.action`, `winpilot.vnext`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_coding_reuse_exclusion.py -->
@@ -2764,10 +2816,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_comms_done_gate.py>)
 
 - 分类/语言：`test` / Python
-- 规模：580 行，22,456 bytes
-- SHA-256：`18e41fd96ea5deed438d7fdea0a4c714522ee3d499d70789a533ce8477f4ee93`
+- 规模：528 行，20,385 bytes
+- SHA-256：`b13d409808c363d31e8de54c5ef2127971ab2674fb97f756df6bb2f80779c793`
 - 源码事实摘要：Tests for communication task done-gate fixes.
-- 顶层符号/结构：`mocked_visual_judge_capability`, `test_communication_mode_honors_draft_only_instruction`, `test_draft_communication_accepts_grounded_typed_payload_without_readback`, `test_draft_communication_rejects_any_successful_send_action`, `test_draft_goal_does_not_install_a_task_keyword_action_interceptor`, `_make_runner`, `test_comms_done_gate_no_payload_requires_read_text`, `test_comms_done_gate_no_payload_rejects_read_text_without_send_action`, `test_image_send_done_gate_accepts_current_attachment_delivery_evidence`, `test_legacy_image_send_gate_reuses_structured_recipient_intent`, `test_image_send_done_gate_rejects_paste_without_send_action`, `test_communication_send_requires_bare_enter_or_return`, `test_communication_send_accepts_successful_bare_enter_or_return`, `test_unconsumed_press_enter_fields_do_not_count_as_send_actions`，另有 15 项
+- 顶层符号/结构：`mocked_visual_judge_capability`, `test_communication_mode_honors_draft_only_instruction`, `test_draft_communication_accepts_grounded_typed_payload_without_readback`, `test_draft_communication_rejects_any_successful_send_action`, `test_draft_goal_does_not_install_a_task_keyword_action_interceptor`, `_make_runner`, `test_comms_done_gate_no_payload_requires_read_text`, `test_comms_done_gate_no_payload_rejects_read_text_without_send_action`, `test_communication_send_requires_bare_enter_or_return`, `test_communication_send_accepts_successful_bare_enter_or_return`, `test_unconsumed_press_enter_fields_do_not_count_as_send_actions`, `test_one_enter_proves_only_the_latest_typed_turn_without_deciding_completion`, `test_batch_communication_requires_literal_success_for_each_nested_action`, `test_execute_subgoal_counts_only_successful_executed_send_child`，另有 12 项
 - 直接静态依赖：`json`, `threading`, `unittest.mock`, `pytest`
 - API/IPC 入口：—
 
@@ -2816,8 +2868,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_desktop_action_queue.py>)
 
 - 分类/语言：`test` / Python
-- 规模：913 行，29,723 bytes
-- SHA-256：`8f83e3b37b7f4c11e91df9e538c1aa2157bea784555b0da9a8ae03fcd12d4154`
+- 规模：923 行，28,801 bytes
+- SHA-256：`1512bdc3a50e7f17477eee01c5535fa0906b9cf7b9d76822a41255182b08fa49`
 - 源码事实摘要：验证 test desktop action queue 对应的行为、回归或合同。
 - 顶层符号/结构：`test_desktop_action_queue_serializes_parallel_jobs`, `test_desktop_action_queue_allows_reentrant_nested_jobs`, `_run_competing_jobs`, `test_window_scoped_actions_parallelize_only_across_different_hwnds`, `test_physical_actions_remain_globally_serialized_across_hwnds`, `test_physical_action_conflicts_with_same_window_but_not_other_window`, `test_unknown_physical_target_blocks_every_window_resource`, `test_clipboard_resource_is_independent_but_single_writer`, `test_nested_action_cannot_escalate_its_resource_lease`, `test_desktop_action_queue_marks_controller_lease_for_nested_coalescing`, `test_desktop_action_queue_emits_bus_events_and_errors`, `test_public_click_uses_one_outer_queue_event`, `test_typed_click_uses_one_outer_queue_event`, `test_window_scoped_decorator_binds_positional_hwnd`，另有 18 项
 - 直接静态依赖：`threading`, `time`, `pytest`, `winpilot.action`, `winpilot.action.desktop_queue`, `winpilot.action.raw_device`, `winpilot.utils.log`
@@ -2829,10 +2881,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_desktop_file_tools.py>)
 
 - 分类/语言：`test` / Python
-- 规模：263 行，9,878 bytes
-- SHA-256：`8da7ff3a84458ad3081895a54a7d76aad646160fba447a7adc6f5e7d5c83a05f`
+- 规模：218 行，8,471 bytes
+- SHA-256：`b5ff733e978bf2bb037d18a812e7eb515daa27334f3d83f3e2773510a1cd911c`
 - 源码事实摘要：验证 test desktop file tools 对应的行为、回归或合同。
-- 顶层符号/结构：`test_screenshot_saves_target_window_without_shell`, `test_flow_managed_screenshot_uses_run_artifact_store`, `test_flow_managed_region_screenshot_preserves_physical_coordinates`, `test_explicit_artifact_regions_fail_closed_before_capture`, `test_managed_artifact_bridges_preserve_invalid_region_for_owner_validation`, `test_artifact_capture_rejects_frame_dimension_drift`, `test_model_screenshot_without_managed_mode_keeps_base64_path`, `test_paste_image_file_uses_clipboard_dib_and_focused_target`, `test_paste_image_file_rejects_missing_image`
+- 顶层符号/结构：`test_screenshot_saves_target_window_without_shell`, `test_flow_managed_screenshot_uses_run_artifact_store`, `test_flow_managed_region_screenshot_preserves_physical_coordinates`, `test_explicit_artifact_regions_fail_closed_before_capture`, `test_managed_artifact_bridges_preserve_invalid_region_for_owner_validation`, `test_artifact_capture_rejects_frame_dimension_drift`, `test_model_screenshot_without_managed_mode_keeps_base64_path`
 - 直接静态依赖：`json`, `sys`, `numpy`, `PIL`, `pytest`
 - API/IPC 入口：—
 
@@ -2907,10 +2959,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_execution_context_handoff.py>)
 
 - 分类/语言：`test` / Python
-- 规模：251 行，7,872 bytes
-- SHA-256：`8696bea117e769406d24088c0305cb6a7d5c1b34acf9f200053000c418dfceaf`
+- 规模：344 行，10,741 bytes
+- SHA-256：`3963db96060c9cc7e81bc005dfad8ead9979124c9c6f5b752ae7b2acbcae7480`
 - 源码事实摘要：验证 test execution context handoff 对应的行为、回归或合同。
-- 顶层符号/结构：`_inputs`, `test_execution_context_normalization_keeps_only_runtime_contract_fields`, `test_native_run_fails_before_model_when_control_surface_did_not_yield`, `test_native_run_rejects_control_surface_as_active_target_after_handoff`, `test_native_run_accepts_a_different_foreground_application`, `test_api_run_without_native_handoff_context_keeps_existing_semantics`, `test_foreground_capture_records_external_window_after_client_yields`, `test_foreground_inventory_uses_visible_dwm_bounds_for_maximized_window`, `test_foreground_capture_rejects_the_native_client_process`, `test_foreground_capture_classifies_unavailable_window_inventory`, `test_foreground_capture_falls_back_to_windows_shell_desktop`, `test_foreground_capture_keeps_missing_when_shell_unavailable`, `test_handoff_target_must_be_live_and_recent`
+- 顶层符号/结构：`_inputs`, `test_execution_context_normalization_keeps_only_runtime_contract_fields`, `test_native_run_fails_before_model_when_control_surface_did_not_yield`, `test_native_run_rejects_control_surface_as_active_target_after_handoff`, `test_native_run_accepts_a_different_foreground_application`, `test_api_run_without_native_handoff_context_keeps_existing_semantics`, `test_foreground_capture_records_external_window_after_client_yields`, `test_foreground_inventory_uses_visible_dwm_bounds_for_maximized_window`, `test_foreground_capture_rejects_the_native_client_process`, `test_foreground_capture_classifies_unavailable_window_inventory`, `test_foreground_capture_falls_back_to_windows_shell_desktop`, `test_windows_shell_context_reads_localized_win32_identity`, `test_native_desktop_workspace_does_not_bind_arbitrary_foreground_window`, `test_native_desktop_workspace_reports_missing_shell_without_foreground_fallback`，另有 3 项
 - 直接静态依赖：`__future__`, `winpilot.tasking.execution_context`, `winpilot.utils.screenshot`
 - API/IPC 入口：—
 
@@ -2946,10 +2998,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_false_success_guards.py>)
 
 - 分类/语言：`test` / Python
-- 规模：3578 行，127,572 bytes
-- SHA-256：`b167cdba3556fa46ffe5efbd610d0753b31164f5c9d7c1f9f3f7d8609cb2f9d6`
+- 规模：3518 行，125,328 bytes
+- SHA-256：`060a4a0a46865a27a08a642018fdd519bb9d3ce91ef37ec4bff02739e5958554`
 - 源码事实摘要：验证 test false success guards 对应的行为、回归或合同。
-- 顶层符号/结构：`coordinate_semantic_snap_enabled`, `mocked_visual_judge_capability`, `test_visual_done_without_declared_vision_judge_fails_closed`, `test_track_verification_requires_literal_boolean_true`, `test_track_verification_accepts_literal_boolean_true`, `test_xlsx_artifact_verifier_checks_cells_formulas_results_and_bold_rows`, `test_visible_state_done_accepts_fresh_screen_ocr_spacing`, `test_visible_state_targets_extract_historical_list`, `test_visible_state_targets_ignore_descriptive_ui_nouns`, `test_visible_state_targets_ignore_english_articles_before_visual_descriptions`, `test_done_defers_missing_visible_payload_to_fresh_native_judge`, `test_done_allows_present_distinctive_literals_to_reach_judge`, `test_visible_evidence_ledger_ignores_negative_query_hits`, `test_visible_evidence_ignores_reducer_why_and_trace_path_metadata`，另有 99 项
+- 顶层符号/结构：`coordinate_semantic_snap_enabled`, `mocked_visual_judge_capability`, `test_visual_done_without_declared_vision_judge_fails_closed`, `test_track_verification_requires_literal_boolean_true`, `test_track_verification_accepts_literal_boolean_true`, `test_xlsx_artifact_verifier_checks_cells_formulas_results_and_bold_rows`, `test_visible_state_done_accepts_fresh_screen_ocr_spacing`, `test_visible_state_targets_extract_historical_list`, `test_visible_state_targets_ignore_descriptive_ui_nouns`, `test_visible_state_targets_ignore_english_articles_before_visual_descriptions`, `test_done_defers_missing_visible_payload_to_fresh_native_judge`, `test_done_allows_present_distinctive_literals_to_reach_judge`, `test_visible_evidence_ledger_ignores_negative_query_hits`, `test_visible_evidence_ignores_reducer_why_and_trace_path_metadata`，另有 97 项
 - 直接静态依赖：`json`, `types`, `pytest`
 - API/IPC 入口：—
 
@@ -2959,10 +3011,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_fast_controller.py>)
 
 - 分类/语言：`test` / Python
-- 规模：8207 行，293,964 bytes
-- SHA-256：`1fb016b4bf262582da3573ec2a3f4b420d5a415df1a0270848ca81cf11836d1f`
+- 规模：8202 行，293,729 bytes
+- SHA-256：`3e59a6a8de8d2a5db58f7ca31d0e2e99130622e8336d4159348efb54cf9ee2ee`
 - 源码事实摘要：验证 test fast controller 对应的行为、回归或合同。
-- 顶层符号/结构：`test_batch_observe_actions_are_allowed_or_internal`, `test_batch_contract_exposes_real_continuous_input_primitives`, `test_batch_contract_rejects_unbalanced_or_unbounded_continuous_input`, `test_batch_contract_accepts_explicit_cross_frame_pointer_transitions`, `test_controller_preserves_only_an_explicit_cross_frame_pointer_session`, `test_batch_pointer_continuation_preserves_one_absolute_lease`, `test_failed_batch_does_not_silently_forget_a_held_pointer`, `test_controller_releases_held_pointer_when_transaction_aborts`, `test_controller_executes_continuous_input_sequence_in_one_batch`, `test_changed_regions_are_screen_space`, `test_element_cache_locates_visual_anchor_in_region`, `test_element_cache_primary_exact_label_beats_exact_fallback`, `test_batch_mutation_invalidates_pre_action_observe_cache_before_read_text`, `test_element_cache_row_header_rejects_name_box_substring`，另有 223 项
+- 顶层符号/结构：`test_batch_observe_actions_are_allowed_or_internal`, `test_batch_contract_exposes_real_continuous_input_primitives`, `test_batch_contract_rejects_unbalanced_or_unbounded_continuous_input`, `test_batch_contract_accepts_explicit_cross_frame_pointer_transitions`, `test_controller_preserves_only_an_explicit_cross_frame_pointer_session`, `test_batch_pointer_continuation_preserves_one_absolute_lease`, `test_failed_batch_does_not_silently_forget_a_held_pointer`, `test_controller_releases_held_pointer_when_transaction_aborts`, `test_controller_executes_continuous_input_sequence_in_one_batch`, `test_changed_regions_are_screen_space`, `test_element_cache_locates_visual_anchor_in_region`, `test_element_cache_primary_exact_label_beats_exact_fallback`, `test_batch_mutation_invalidates_pre_action_observe_cache_before_read_text`, `test_element_cache_row_header_rejects_name_box_substring`，另有 222 项
 - 直接静态依赖：`json`, `types`, `numpy`
 - API/IPC 入口：—
 
@@ -2985,8 +3037,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_frame_observer.py>)
 
 - 分类/语言：`test` / Python
-- 规模：258 行，8,554 bytes
-- SHA-256：`8a01d25d128038886af0375ae76c0aa93af8359b56a08f33eedaaad3b8b89adc`
+- 规模：258 行，8,552 bytes
+- SHA-256：`92efe9d432c27f6aaf42f69588e60c7cdb4fcda3e4f1c1f63d006a71c5e327a1`
 - 源码事实摘要：验证 test frame observer 对应的行为、回归或合同。
 - 顶层符号/结构：`_observer`, `test_provided_region_and_image_are_committed_as_one_immutable_observation`, `test_matching_cached_capture_reuses_exact_image_region_pair`, `test_scope_selection_and_capture_are_injected_without_task_semantics`, `test_initial_prebind_uses_injected_settled_capture`, `test_tiny_region_and_empty_capture_fail_without_committing`, `test_commit_rejects_authority_change_after_capture`, `test_legacy_visual_frame_delegates_capture_and_commit_to_shared_owner`
 - 直接静态依赖：`dataclasses`, `pytest`, `winpilot.visual_runtime.frame_authority`, `winpilot.utils.image_capture`, `winpilot.utils.screenshot`
@@ -3011,10 +3063,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_general_agent_regressions.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1172 行，42,560 bytes
-- SHA-256：`cbdeb041d756f92dad9d427fed258b00a26d9b30c873fcd195f492996dea1f36`
+- 规模：1567 行，56,588 bytes
+- SHA-256：`8cd7dc6b5f672c0b7c137b109383fc6b2e78aeb2618b143b5171d1eafa017b20`
 - 源码事实摘要：验证 test general agent regressions 对应的行为、回归或合同。
-- 顶层符号/结构：`test_composite_desktop_requests_keep_the_whole_goal`, `test_explicit_drawing_application_is_not_replaced_by_paint`, `test_unnamed_surface_output_uses_the_same_general_stage_from_each_entrypoint`, `test_gui_entrypoint_reaches_the_live_frame_without_compile_time_clarification`, `test_same_board_different_user_intent_does_not_switch_runtime_mode`, `test_execute_desktop_stage_passes_its_model_tools_to_runtime_profile`, `test_desktop_answer_can_finish_without_inventing_a_gui_mutation`, `test_unseen_slider_drag_uses_generic_visual_interaction_contract`, `test_hold_and_path_phrasing_uses_generic_visual_interaction`, `test_deictic_live_surface_is_not_parsed_as_an_application`, `test_named_application_before_hold_remains_an_application_constraint`, `test_explanation_about_holding_and_dragging_is_not_a_live_gui_command`, `test_visual_surface_noun_does_not_turn_drag_into_drawing`, `test_unknown_gameplay_keeps_full_goal_and_all_spatial_primitives`，另有 25 项
+- 顶层符号/结构：`test_composite_desktop_requests_keep_the_whole_goal`, `test_explicit_drawing_application_is_not_replaced_by_paint`, `test_unnamed_surface_output_uses_the_same_general_stage_from_each_entrypoint`, `test_gui_entrypoint_reaches_the_live_frame_without_compile_time_clarification`, `test_same_board_different_user_intent_does_not_switch_runtime_mode`, `test_execute_desktop_stage_passes_its_model_tools_to_runtime_profile`, `test_desktop_answer_can_finish_without_inventing_a_gui_mutation`, `test_unseen_slider_drag_uses_generic_visual_interaction_contract`, `test_hold_and_path_phrasing_uses_generic_visual_interaction`, `test_deictic_live_surface_is_not_parsed_as_an_application`, `test_named_application_before_hold_remains_an_application_constraint`, `test_explanation_about_holding_and_dragging_is_not_a_live_gui_command`, `test_visual_surface_noun_does_not_turn_drag_into_drawing`, `test_unknown_gameplay_keeps_full_goal_and_all_spatial_primitives`，另有 36 项
 - 直接静态依赖：`__future__`, `json`, `threading`, `time`, `types`, `pytest`
 - API/IPC 入口：—
 
@@ -3070,6 +3122,19 @@
 - 直接静态依赖：`cv2`, `numpy`
 - API/IPC 入口：—
 
+<!-- PROJECT-FILE: python/winpilot_home/tests/test_input_sequence.py -->
+### `python/winpilot_home/tests/test_input_sequence.py`
+
+[打开文件](<../../python/winpilot_home/tests/test_input_sequence.py>)
+
+- 分类/语言：`test` / Python
+- 规模：119 行，3,229 bytes
+- SHA-256：`4399d4c23323a57b375e4e10c161fbd483482fc6226589956c5fd4eb8ca63be7`
+- 源码事实摘要：验证 test input sequence 对应的行为、回归或合同。
+- 顶层符号/结构：`test_parser_accepts_human_friendly_mixed_device_timeline`, `test_pointer_buttons_accept_inline_coordinates_and_default_left`, `test_parser_leaves_device_validation_to_the_physical_event_contract`, `test_parser_accepts_observed_click_and_two_word_variants`, `test_parser_rejects_only_text_that_cannot_form_an_event`
+- 直接静态依赖：`__future__`, `pytest`, `winpilot.visual_runtime.input_sequence`
+- API/IPC 入口：—
+
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_interaction_action_grounding.py -->
 ### `python/winpilot_home/tests/test_interaction_action_grounding.py`
 
@@ -3089,10 +3154,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_interaction_runtime_components.py>)
 
 - 分类/语言：`test` / Python
-- 规模：3998 行，144,895 bytes
-- SHA-256：`37ca18e75d8beac6dd7c2954f628e0089a76c8ffab6dd13346460b645abab774`
+- 规模：3944 行，142,740 bytes
+- SHA-256：`7848c1d0b399b92547781e2ba77412c8ddee78590321af76dd02f30b4dbb95c8`
 - 源码事实摘要：Focused component tests for generic typed visual interaction runtime.
-- 顶层符号/结构：`_decision`, `_stage_output`, `_legacy_interaction_contract`, `_legacy_interaction_graph`, `_legacy_stage`, `test_persistent_stage_graph_accepts_post_action_reobserve_but_not_idle_loop`, `test_compiler_routes_visual_interaction_to_one_model_owned_desktop_stage`, `test_frozen_legacy_contract_preserves_serialized_budgets`, `test_model_and_semantic_turn_budgets_fail_with_precise_dimensions`, `test_frozen_legacy_graph_routes_recovery_through_fresh_observe`, `test_frozen_persistent_contract_keeps_wait_nonterminal`, `test_persistent_first_turn_end_requires_exact_terminal_evidence`, `test_interaction_complete_branch_reaches_later_typed_stages`, `test_role_and_turn_ownership_cannot_authorize_the_other_actor_action`，另有 60 项
+- 顶层符号/结构：`_decision`, `_stage_output`, `_legacy_interaction_contract`, `_legacy_interaction_graph`, `_legacy_stage`, `test_persistent_stage_graph_accepts_post_action_reobserve_but_not_idle_loop`, `test_compiler_routes_visual_interaction_to_one_model_owned_desktop_stage`, `test_frozen_legacy_contract_preserves_serialized_budgets`, `test_model_and_semantic_turn_budgets_fail_with_precise_dimensions`, `test_frozen_legacy_graph_routes_recovery_through_fresh_observe`, `test_frozen_persistent_contract_keeps_wait_nonterminal`, `test_interaction_complete_branch_reaches_later_typed_stages`, `test_role_and_turn_ownership_cannot_authorize_the_other_actor_action`, `test_visual_planner_derives_external_watch_from_typed_continuation`，另有 59 项
 - 直接静态依赖：`__future__`, `threading`, `time`, `pytest`
 - API/IPC 入口：—
 
@@ -3107,6 +3172,19 @@
 - 源码事实摘要：验证 test interactive task contract 对应的行为、回归或合同。
 - 顶层符号/结构：`_assert_single_visual_model_stage`, `test_short_visual_commands_reach_bounded_typed_interaction`, `test_equivalent_direct_manipulation_rewrites_have_the_same_contract_shape`, `test_action_words_in_descriptive_text_do_not_route_to_visual_interaction`, `test_non_visual_action_homonyms_do_not_become_gui_sessions`, `test_high_confidence_semantic_extractor_can_veto_structural_candidate`, `test_shared_visual_interaction_uses_one_visual_model_stage`, `test_minimal_shared_turn_handoff_observes_scene_before_acting`, `test_turn_like_prose_without_complete_shared_session_does_not_activate`, `test_actor_assignments_keep_role_ownership_instead_of_flattening_values`, `test_interaction_routing_requires_a_live_relation_or_pointer_plus_visual_target`, `test_interaction_detection_generalizes_across_apps_languages_and_actions`, `test_semantic_extractor_can_supply_interaction_frame_without_keyword_routing`, `test_new_interaction_contract_does_not_precompute_ephemeral_protocol_state`，另有 8 项
 - 直接静态依赖：`__future__`, `pytest`
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: python/winpilot_home/tests/test_keyboard_contracts.py -->
+### `python/winpilot_home/tests/test_keyboard_contracts.py`
+
+[打开文件](<../../python/winpilot_home/tests/test_keyboard_contracts.py>)
+
+- 分类/语言：`test` / Python
+- 规模：77 行，2,859 bytes
+- SHA-256：`f2356fd72eb274eaaad414be988756969822c9d8446df60d44ddbf101178cbee`
+- 源码事实摘要：Unit tests for hotkey argument normalization in the keyboard contracts.
+- 顶层符号/结构：`test_normalize_accepts_array`, `test_normalize_accepts_plus_separated_string`, `test_normalize_accepts_comma_separated_string`, `test_normalize_accepts_json_array_string`, `test_normalize_accepts_bracketed_snippet_with_extra_text`, `test_normalize_none_returns_empty`, `test_normalize_passthrough_unknown_names`, `test_canonical_folds_aliases`, `test_canonical_folds_left_right_modifier_variants`, `test_canonical_folds_natural_named_system_keys`, `test_canonicalized_left_right_chord_passes_hotkey_contract`, `test_canonical_orders_modifiers_first_in_canonical_order`, `test_canonical_keeps_modifierless_order`, `test_canonicalized_chord_passes_hotkey_contract`
+- 直接静态依赖：`__future__`, `winpilot.visual_runtime.keyboard_contracts`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_launch_verification.py -->
@@ -3128,11 +3206,11 @@
 [打开文件](<../../python/winpilot_home/tests/test_live_agent_composition.py>)
 
 - 分类/语言：`test` / Python
-- 规模：5247 行，168,701 bytes
-- SHA-256：`e6fae33327b23bfc0d28dd17099ba3e1f2c0bb665e75d879d570b30e5ce9046f`
+- 规模：4286 行，136,736 bytes
+- SHA-256：`b16108106f37581c80e871be95aa5cb07c4dcd2782e3d697db0f8bab222c4072`
 - 源码事实摘要：验证 test live agent composition 对应的行为、回归或合同。
-- 顶层符号/结构：`_nested_keys`, `_nested_values`, `_assert_private_runtime_evidence_absent`, `_jpeg`, `_graph_dict`, `_graph`, `_inputs`, `_config`, `_observe_desktop_response`, `_direct_reply_response`, `_prepare`, `_run_with_desktop_lease`, `_run_prepared`, `_facts`，另有 93 项
-- 直接静态依赖：`__future__`, `base64`, `copy`, `dataclasses`, `hashlib`, `itertools`, `json`, `pathlib`, `types`, `threading`, `typing`, `cv2`, `numpy`, `pytest`，另有 15 项
+- 顶层符号/结构：`_nested_keys`, `_nested_values`, `_assert_private_runtime_evidence_absent`, `_jpeg`, `_graph_dict`, `_graph`, `_inputs`, `_config`, `test_budget_freezes_configured_long_task_limits_without_derived_caps`, `_observe_desktop_response`, `_direct_reply_response`, `_prepare`, `_run_with_desktop_lease`, `_run_prepared`，另有 89 项
+- 直接静态依赖：`__future__`, `base64`, `copy`, `dataclasses`, `hashlib`, `itertools`, `json`, `pathlib`, `types`, `threading`, `typing`, `cv2`, `numpy`, `pytest`，另有 14 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_local_search.py -->
@@ -3232,10 +3310,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_model_adapter.py>)
 
 - 分类/语言：`test` / Python
-- 规模：414 行，12,896 bytes
-- SHA-256：`b9526a7f1cf3941f36f58e0172c987d09baba83e52c1e5abb435229d8075fb94`
+- 规模：471 行，14,502 bytes
+- SHA-256：`92053384dcf052fc59b3eb462a2e12b094a8a586c139176b84471dd142d59f2c`
 - 源码事实摘要：验证 test model adapter 对应的行为、回归或合同。
-- 顶层符号/结构：`_usage`, `test_profile_infers_provider_and_vision_capability`, `test_native_provider_vision_capability_is_explicit_or_conservative`, `test_native_protocol_selection_is_explicit_and_aggregator_safe`, `test_native_protocol_rejects_unknown_explicit_protocol`, `test_normalize_usage_accepts_deepseek_cache_fields`, `test_normalize_usage_accepts_chat_and_responses_cached_token_details`, `test_normalize_usage_accepts_openai_cache_write_token_details`, `test_normalize_usage_accepts_anthropic_style_cache_read_fields`, `test_adapter_disables_provider_thinking_for_mimo_and_reasonix_only`, `test_main_agent_adapter_keeps_configured_thinking_until_request_routing`, `test_native_visual_request_enables_provider_thinking_at_request_boundary`, `test_native_visual_request_skips_text_only_escalation_model`, `test_thinking_tool_history_can_preserve_complete_reasoning_content`，另有 1 项
+- 顶层符号/结构：`_usage`, `test_profile_infers_provider_and_vision_capability`, `test_native_provider_vision_capability_is_explicit_or_conservative`, `test_native_protocol_selection_is_explicit_and_aggregator_safe`, `test_native_protocol_rejects_unknown_explicit_protocol`, `test_normalize_usage_accepts_deepseek_cache_fields`, `test_normalize_usage_accepts_chat_and_responses_cached_token_details`, `test_normalize_usage_accepts_openai_cache_write_token_details`, `test_normalize_usage_accepts_anthropic_style_cache_read_fields`, `test_adapter_leaves_provider_thinking_at_native_default`, `test_main_agent_adapter_keeps_configured_thinking_until_request_routing`, `test_native_visual_request_keeps_mimo_provider_thinking_default`, `test_native_visual_request_skips_text_only_escalation_model`, `test_thinking_tool_history_can_preserve_complete_reasoning_content`，另有 1 项
 - 直接静态依赖：`types`, `unittest.mock`, `pytest`, `winpilot.model_adapter`
 - API/IPC 入口：—
 
@@ -3245,11 +3323,11 @@
 [打开文件](<../../python/winpilot_home/tests/test_model_call_runtime.py>)
 
 - 分类/语言：`test` / Python
-- 规模：593 行，18,860 bytes
-- SHA-256：`f4fb7b31e9d64215d42b8cbf059235165a48df8c460f3b34c607ff7716d23b67`
+- 规模：668 行，20,978 bytes
+- SHA-256：`7335bedd40fde930d34ad0b4515f2d9fdbf1fdc3b3b8662a00409da2bcd39f48`
 - 源码事实摘要：Unified model-request retry and mutation replay contracts.
-- 顶层符号/结构：`_request`, `_envelope`, `test_envelope_freezes_request_without_aliasing_mutable_containers`, `test_envelope_fingerprint_is_key_order_stable_and_value_sensitive`, `test_envelope_rejects_non_json_values`, `test_envelope_rejects_cyclic_request_as_a_controlled_contract_error`, `test_runtime_retries_only_the_exact_frozen_request`, `test_runtime_retries_transient_http_statuses`, `test_runtime_preserves_rate_limit_specific_backoff`, `test_runtime_clamps_extreme_finite_backoff_without_overflow`, `test_runtime_does_not_retry_non_transient_http_statuses`, `test_runtime_retries_exact_structured_multimodal_decoder_400`, `test_runtime_does_not_retry_spoofed_or_other_multimodal_400s`, `test_runtime_honors_cancellation_before_first_send`，另有 14 项
-- 直接静态依赖：`__future__`, `threading`, `pytest`, `winpilot.action.replay_policy`, `winpilot.modeling`
+- 顶层符号/结构：`_request`, `_envelope`, `test_envelope_freezes_request_without_aliasing_mutable_containers`, `test_envelope_fingerprint_is_key_order_stable_and_value_sensitive`, `test_envelope_rejects_non_json_values`, `test_envelope_rejects_cyclic_request_as_a_controlled_contract_error`, `test_runtime_retries_only_the_exact_frozen_request`, `test_runtime_retries_transient_http_statuses`, `test_runtime_preserves_rate_limit_specific_backoff`, `test_runtime_clamps_extreme_finite_backoff_without_overflow`, `test_runtime_does_not_retry_non_transient_http_statuses`, `test_runtime_retries_exact_structured_multimodal_decoder_400`, `test_runtime_does_not_retry_spoofed_or_other_multimodal_400s`, `test_runtime_honors_cancellation_before_first_send`，另有 16 项
+- 直接静态依赖：`__future__`, `threading`, `time`, `pytest`, `winpilot.action.replay_policy`, `winpilot.modeling`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_model_timing_audit.py -->
@@ -3276,19 +3354,6 @@
 - 源码事实摘要：Prevent new model transports from bypassing the Runtime retry contract.
 - 顶层符号/结构：`_attribute_chain`, `_TransportVisitor`, `test_chat_completion_transport_has_a_small_explicit_owner_set`, `test_product_package_has_no_unowned_responses_transport`, `const:PRODUCT_ROOT`, `const:ALLOWED_TRANSPORT_CALLS`
 - 直接静态依赖：`__future__`, `ast`, `pathlib`
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/tests/test_multi_input_cooperation.py -->
-### `python/winpilot_home/tests/test_multi_input_cooperation.py`
-
-[打开文件](<../../python/winpilot_home/tests/test_multi_input_cooperation.py>)
-
-- 分类/语言：`test` / Python
-- 规模：1217 行，43,085 bytes
-- SHA-256：`df1b05f211fdd8479e97bf19d7b986ef7807d7217f02ee1c1e82806a82a0bde6`
-- 源码事实摘要：验证 test multi input cooperation 对应的行为、回归或合同。
-- 顶层符号/结构：`test_multi_input_cooperation_is_explicitly_opt_in`, `test_multi_input_mode_implies_no_mouse_steal`, `test_cooperative_keyboard_guard_requires_bound_foreground`, `test_cooperative_click_never_falls_back_to_physical_on_other_foreground`, `test_cooperative_targetless_click_cannot_post_to_arbitrary_window`, `test_cooperative_cursor_restore_does_not_overwrite_human_move`, `test_cooperative_cursor_restore_restores_when_agent_still_owns_cursor`, `test_cooperative_typing_stops_if_user_changes_foreground`, `test_cooperative_hotkey_is_not_sent_to_unrelated_foreground`, `test_cooperative_mode_disables_physical_visual_servo`, `test_scope_guard_never_focuses_or_adopts_user_window_in_cooperative_mode`, `test_scope_guard_allows_background_safe_click_without_focus`, `test_type_text_does_not_refocus_after_user_takes_window`, `test_replay_anchor_lookup_never_steals_focus_in_cooperative_mode`，另有 28 项
-- 直接静态依赖：`__future__`, `json`, `winpilot.action.raw_device`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_native_double_click.py -->
@@ -3375,10 +3440,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_orchestrator.py>)
 
 - 分类/语言：`test` / Python
-- 规模：2011 行，74,569 bytes
-- SHA-256：`d87c77d0e77efbaaf32021734af1b40d8a76a80c162f7943238a3cd64468c2c5`
+- 规模：2241 行，82,520 bytes
+- SHA-256：`e68c0bf9c17ad77c9fbe2ea904bc84a7b01c6d0d8a1f7c5f657af0eb112cec22`
 - 源码事实摘要：验证 test orchestrator 对应的行为、回归或合同。
-- 顶层符号/结构：`test_runtime_preview_preserves_replay_evidence_structure`, `test_interaction_snapshot_never_drops_causal_action_or_verification_fields`, `test_stage_trace_preserves_model_capture_and_contract_budget_metrics`, `_graph`, `test_graph_validation_rejects_missing_route_target`, `test_graph_validation_enforces_evidence_policy_shape`, `test_graph_validation_rejects_empty_evidence_gate_and_retired_legacy_node`, `test_supported_historical_legacy_node_is_readable_but_has_no_execution_owner`, `test_graph_validation_uses_exact_wps_contract_for_replay_steps`, `test_graph_validation_requires_focus_on_every_path_before_spatial_batches`, `test_replay_steps_share_one_session_and_mix_with_native_arp`, `test_replay_clipboard_get_updates_arp_variables_for_conditions`, `test_managed_screenshot_action_batch_surfaces_run_artifact`, `test_action_batches_share_target_session_until_run_cleanup`，另有 40 项
+- 顶层符号/结构：`test_runtime_preview_preserves_replay_evidence_structure`, `test_interaction_snapshot_never_drops_causal_action_or_verification_fields`, `test_stage_trace_preserves_model_capture_and_contract_budget_metrics`, `_graph`, `test_graph_validation_rejects_missing_route_target`, `test_graph_validation_enforces_evidence_policy_shape`, `test_graph_validation_rejects_empty_evidence_gate_and_retired_legacy_node`, `test_supported_historical_legacy_node_is_readable_but_has_no_execution_owner`, `test_graph_validation_uses_exact_wps_contract_for_replay_steps`, `test_graph_validation_requires_focus_on_every_path_before_spatial_batches`, `test_replay_steps_share_one_session_and_mix_with_native_arp`, `test_replay_clipboard_get_updates_arp_variables_for_conditions`, `test_managed_screenshot_action_batch_surfaces_run_artifact`, `test_action_batches_share_target_session_until_run_cleanup`，另有 43 项
 - 直接静态依赖：`threading`, `time`
 - API/IPC 入口：—
 
@@ -3388,8 +3453,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_orchestrator_api.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1812 行，60,728 bytes
-- SHA-256：`026a258445e46a135ee7bcd32b1a03fa9de7032f0bf69e45daef93c44d1e4578`
+- 规模：1804 行，60,280 bytes
+- SHA-256：`e06cca80298064eb034b2d8e85c2c7fdec709f8eac771bff0cb6ca0af6a161d7`
 - 源码事实摘要：验证 test orchestrator api 对应的行为、回归或合同。
 - 顶层符号/结构：`test_server_import_does_not_load_legacy_agent_composition`, `client`, `_graph_payload`, `_client_execution_context`, `_waiting_desktop_lease`, `test_platform_overview_exposes_contracts_and_capabilities`, `test_product_and_example_config_default_to_vnext`, `test_config_migrates_retired_live_agent_key_at_input_boundary`, `test_config_rejects_conflicting_live_agent_keys_without_mutation`, `test_config_api_reports_conflicting_live_agent_keys`, `test_platform_overview_exposes_fail_closed_vnext_live_agent_budget`, `test_public_trace_routes_reject_private_runtime_evidence_paths`, `test_public_trace_routes_preserve_safe_historical_trace_and_image`, `test_public_trace_detail_is_bounded_and_reports_read_integrity`，另有 30 项
 - 直接静态依赖：`json`, `os`, `pathlib`, `subprocess`, `sys`, `threading`, `time`, `types`, `pytest`
@@ -3414,11 +3479,11 @@
 [打开文件](<../../python/winpilot_home/tests/test_perception_daemon.py>)
 
 - 分类/语言：`test` / Python
-- 规模：486 行，16,804 bytes
-- SHA-256：`33f58e2d89fdbc18ad6b280e2babcaf62d1f4aaa08c6b6ba3aff8b31cb0a8b99`
+- 规模：511 行，17,655 bytes
+- SHA-256：`927e49ccdca16c90453f3f01cd485d5bf3bbb7969128fcf0d490808a4193a283`
 - 源码事实摘要：验证 test perception daemon 对应的行为、回归或合同。
-- 顶层符号/结构：`test_perception_daemon_reuses_watcher_and_cache_per_hwnd`, `test_perception_daemon_does_not_analyze_released_window_changes`, `test_perception_daemon_discards_inflight_result_after_final_release`, `test_perception_daemon_reacquire_clears_prior_history_and_anchor_cache`, `_EmittingWatcher`, `_wait_until`, `_snapshot_for_change`, `test_perception_daemon_coalesces_normal_churn_and_reuses_latest_roi`, `test_perception_daemon_preserves_action_delta_before_normal_update`, `test_perception_daemon_supersedes_stale_normal_evidence_in_same_roi`, `test_perception_daemon_skips_caret_noise_and_large_video_churn`, `test_perception_daemon_default_analyzer_uses_only_roi_ocr_and_win32`, `test_perception_daemon_prune_detaches_listener_and_stops_worker`
-- 直接静态依赖：`__future__`, `time`, `numpy`
+- 顶层符号/结构：`_pin_daemon_config`, `test_perception_daemon_reuses_watcher_and_cache_per_hwnd`, `test_perception_daemon_does_not_analyze_released_window_changes`, `test_perception_daemon_discards_inflight_result_after_final_release`, `test_perception_daemon_reacquire_clears_prior_history_and_anchor_cache`, `_EmittingWatcher`, `_wait_until`, `_snapshot_for_change`, `test_perception_daemon_coalesces_normal_churn_and_reuses_latest_roi`, `test_perception_daemon_preserves_action_delta_before_normal_update`, `test_perception_daemon_supersedes_stale_normal_evidence_in_same_roi`, `test_perception_daemon_skips_caret_noise_and_large_video_churn`, `test_perception_daemon_default_analyzer_uses_only_roi_ocr_and_win32`, `test_perception_daemon_prune_detaches_listener_and_stops_worker`
+- 直接静态依赖：`__future__`, `time`, `numpy`, `pytest`, `winpilot.config`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_perception_reducer.py -->
@@ -3492,10 +3557,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_raw_device_contract.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1941 行，69,025 bytes
-- SHA-256：`eca9008892fad2fad8dc560211aa6dac2ed68bccddc493e4c83a844997fa47ee`
+- 规模：3013 行，103,178 bytes
+- SHA-256：`77b5de22fd4514c389c06d56b331f70e8097c90c6d7fd0b6794fe9739278195b`
 - 源码事实摘要：验证 test raw device contract 对应的行为、回归或合同。
-- 顶层符号/结构：`_context`, `_executor`, `test_fast_controller_names_reflective_session_adapter_as_legacy`, `test_raw_device_requires_an_explicit_typed_backend`, `test_scroll_rejects_invalid_typed_input_before_backend`, `test_scroll_uses_explicit_backend_completion_fact`, `test_generic_ok_mapping_cannot_claim_input_completion`, `test_backend_exception_after_possible_input_is_unknown_and_not_replayed`, `test_invalid_post_call_fact_is_unknown_instead_of_escaping`, `test_backend_facts_are_scalar_finite_and_immutable`, `test_receipt_rejects_contradictory_completion_identity`, `test_raw_device_has_no_session_or_second_action_parser`, `test_scroll_property_preserves_signed_coordinates_and_single_call`, `test_guarded_scroll_uses_only_explicit_admitted_backend`，另有 58 项
+- 顶层符号/结构：`_context`, `_executor`, `test_fast_controller_names_reflective_session_adapter_as_legacy`, `test_raw_device_requires_an_explicit_typed_backend`, `test_scroll_rejects_invalid_typed_input_before_backend`, `test_window_context_change_is_advisory_for_physical_input`, `test_scroll_uses_explicit_backend_completion_fact`, `test_generic_ok_mapping_cannot_claim_input_completion`, `test_backend_exception_after_possible_input_is_unknown_and_not_replayed`, `test_invalid_post_call_fact_is_unknown_instead_of_escaping`, `test_backend_facts_are_scalar_finite_and_immutable`, `test_receipt_rejects_contradictory_completion_identity`, `test_raw_device_has_no_session_or_second_action_parser`, `test_scroll_property_preserves_signed_coordinates_and_single_call`，另有 84 项
 - 直接静态依赖：`__future__`, `ast`, `json`, `math`, `pathlib`, `random`, `pytest`, `winpilot.action.raw_device`, `winpilot.action.replay_policy`, `winpilot.fast.legacy_session_actions`
 - API/IPC 入口：—
 
@@ -3661,11 +3726,24 @@
 [打开文件](<../../python/winpilot_home/tests/test_script_validation.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1630 行，56,822 bytes
-- SHA-256：`b6cd731f361155b79874ffcccb8de62b1e4035a0d23642b56cdc38316df84775`
+- 规模：1101 行，40,502 bytes
+- SHA-256：`bdce67de436967778f6494cb30a577103ed13ea97094889ea1c61101e5c436ac`
 - 源码事实摘要：validate_script (pure) + GET/PUT /api/script HTTP round-trip.
-- 顶层符号/结构：`test_structured_evidence_validation_rejects_unknown_fields`, `test_invalid_canonical_script_does_not_hide_valid_wps_fallback`, `test_valid_v1_script`, `test_valid_v2_nested_script`, `test_valid_agent_replay_only_tools`, `test_reject_bad_format`, `test_reject_non_dict`, `test_reject_steps_not_list`, `test_reject_unknown_tool`, `test_reject_unknown_tool_nested_in_branch`, `test_reject_if_without_cond`, `test_allow_if_with_explicit_always_cond`, `test_reject_script_without_any_executable_leaf`, `test_reject_missing_required_leaf_fields`，另有 60 项
+- 顶层符号/结构：`test_structured_evidence_validation_rejects_unknown_fields`, `test_invalid_canonical_script_does_not_hide_valid_wps_fallback`, `test_valid_v1_script`, `test_valid_v2_nested_script`, `test_valid_agent_replay_only_tools`, `test_reject_bad_format`, `test_reject_non_dict`, `test_reject_steps_not_list`, `test_reject_unknown_tool`, `test_reject_unknown_tool_nested_in_branch`, `test_reject_if_without_cond`, `test_allow_if_with_explicit_always_cond`, `test_reject_script_without_any_executable_leaf`, `test_reject_missing_required_leaf_fields`，另有 44 项
 - 直接静态依赖：`json`, `pytest`, `winpilot.recorder`
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: python/winpilot_home/tests/test_shell_pi_runtime.py -->
+### `python/winpilot_home/tests/test_shell_pi_runtime.py`
+
+[打开文件](<../../python/winpilot_home/tests/test_shell_pi_runtime.py>)
+
+- 分类/语言：`test` / Python
+- 规模：368 行，11,286 bytes
+- SHA-256：`65a46840f958a30925facc9d2269b61ec9b57c67b1de18e8810828a8e6bcfd3a`
+- 源码事实摘要：Focused tests for the Pi-style shell result semantics.
+- 顶层符号/结构：`test_tail_truncation_keeps_the_latest_lines`, `test_tail_truncation_never_breaks_a_utf8_character`, `test_nonzero_result_is_actionable_and_preserves_full_output_path`, `test_timeout_result_gives_the_model_partial_state`, `test_selected_result_below_generic_boundary_is_not_truncated`, `test_redundant_selected_shell_wrapper_is_unwrapped`, `test_other_shell_wrapper_is_left_to_the_command_body`, `test_runtime_host_termination_is_the_one_process_kill_boundary`, `test_targeted_child_process_kill_remains_available`, `test_result_above_generic_boundary_is_recoverable`, `test_powershell_default_file_writes_are_utf8`, `test_powershell_preserves_native_exit_code_and_stderr`, `test_powershell_uses_final_statement_status`, `test_powershell_preserves_formatted_object_output`，另有 4 项
+- 直接静态依赖：`__future__`, `json`, `subprocess`, `time`, `pathlib`, `pytest`, `winpilot.action`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_stop_responsiveness.py -->
@@ -3687,10 +3765,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_submitted_image_coordinates.py>)
 
 - 分类/语言：`test` / Python
-- 规模：468 行，16,428 bytes
-- SHA-256：`7eb8fea44db8b5d502eb9e53a9fccd8ce3bb578851f47382b80557d8cb8562dc`
+- 规模：482 行，16,868 bytes
+- SHA-256：`8479b17a251b700fe445b655f055fa12c2684e74af5cb61d31e0654b45bfbed5`
 - 源码事实摘要：验证 test submitted image coordinates 对应的行为、回归或合同。
-- 顶层符号/结构：`_map_point`, `_map_drag`, `_map_strokes`, `test_point_mapping_is_pure_and_preserves_exact_provenance`, `test_point_mapping_rejects_ambiguous_or_invalid_values_atomically`, `test_point_mapping_is_monotonic_for_random_sizes`, `test_invalid_dimensions_are_ignored_when_no_image_coordinate_is_consumed`, `test_constraint_mapping_is_pure_and_preserves_both_coordinate_layers`, `test_constraint_mapping_rejects_invalid_values_without_mutating_input`, `test_drag_mapping_preserves_path_order_adjacent_dedup_and_input`, `test_drag_maps_each_endpoint_and_meaningful_path_point_once`, `test_drag_mapping_fail_closed_without_mutating_input`, `test_stroke_mapping_preserves_stroke_point_order_count_and_input`, `test_stroke_mapping_fail_closed_without_mutating_input`，另有 3 项
+- 顶层符号/结构：`_map_point`, `_map_drag`, `_map_strokes`, `test_point_mapping_is_pure_and_preserves_exact_provenance`, `test_point_mapping_rejects_ambiguous_or_invalid_values_atomically`, `test_extent_style_right_bottom_edge_clamps_to_last_real_pixel`, `test_point_mapping_is_monotonic_for_random_sizes`, `test_invalid_dimensions_are_ignored_when_no_image_coordinate_is_consumed`, `test_constraint_mapping_is_pure_and_preserves_both_coordinate_layers`, `test_constraint_mapping_rejects_invalid_values_without_mutating_input`, `test_drag_mapping_preserves_path_order_adjacent_dedup_and_input`, `test_drag_maps_each_endpoint_and_meaningful_path_point_once`, `test_drag_mapping_fail_closed_without_mutating_input`, `test_stroke_mapping_preserves_stroke_point_order_count_and_input`，另有 4 项
 - 直接静态依赖：`__future__`, `copy`, `math`, `random`, `pytest`
 - API/IPC 入口：—
 
@@ -3752,10 +3830,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_task_contract_runtime.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1627 行，65,607 bytes
-- SHA-256：`c968f89130294336498a2018243e04dc4a64f858ab8637ace9e0b471fc9baaec`
+- 规模：1557 行，62,904 bytes
+- SHA-256：`b498598d5f52cb5a567a35c7230f20c79a7d767e4dfa85bc72404ed3d63cb7ad`
 - 源码事实摘要：验证 test task contract runtime 对应的行为、回归或合同。
-- 顶层符号/结构：`_contract_test_provider_type`, `_compile`, `test_structured_intent_treats_send_synonyms_equally`, `test_structured_intent_extracts_open_ended_destination_relation`, `test_structured_intent_owns_chat_execution_mode`, `test_text_send_compiles_payload_and_typed_stages`, `test_text_send_never_compiles_an_empty_unowned_payload`, `test_non_gui_tasks_compile_to_capability_typed_runtimes`, `test_message_authorization_fails_closed_for_empty_or_missing_context`, `test_message_stage_runtime_passes_one_current_run_body_to_adapter`, `test_send_text_never_calls_adapter_without_current_task_authorization`, `test_cross_application_artifact_tasks_keep_one_lossless_desktop_goal`, `test_compiled_frontend_graph_has_no_whole_task_agent_goal`, `test_runtime_snapshot_keeps_every_evidence_and_artifact_item_typed`，另有 42 项
+- 顶层符号/结构：`_contract_test_provider_type`, `_compile`, `test_structured_intent_treats_send_synonyms_equally`, `test_structured_intent_extracts_open_ended_destination_relation`, `test_structured_intent_owns_chat_execution_mode`, `test_text_send_compiles_payload_and_typed_stages`, `test_text_send_never_compiles_an_empty_unowned_payload`, `test_non_gui_tasks_compile_to_capability_typed_runtimes`, `test_message_authorization_fails_closed_for_empty_or_missing_context`, `test_message_stage_runtime_passes_one_current_run_body_to_adapter`, `test_send_text_never_calls_adapter_without_current_task_authorization`, `test_cross_application_artifact_tasks_keep_one_lossless_desktop_goal`, `test_compiled_frontend_graph_has_no_whole_task_agent_goal`, `test_runtime_snapshot_keeps_every_evidence_and_artifact_item_typed`，另有 40 项
 - 直接静态依赖：`__future__`, `pathlib`, `time`, `pytest`
 - API/IPC 入口：—
 
@@ -3791,8 +3869,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_trace_evidence.py>)
 
 - 分类/语言：`test` / Python
-- 规模：179 行，6,100 bytes
-- SHA-256：`569e2da7caa52617d8b5cddf10c3e4c224fe3c808cb87734f4aa673259ad5be6`
+- 规模：179 行，6,095 bytes
+- SHA-256：`54dfad753c87107d6183457c56b433729f3ec1edfa178b1da9afe4bee1b3667c`
 - 源码事实摘要：验证 test trace evidence 对应的行为、回归或合同。
 - 顶层符号/结构：`test_llm_trace_redacts_frame_without_mutating_api_request`, `test_jsonl_trace_event_redacts_inline_frame_in_worker`, `test_trace_stop_waits_for_an_accepted_callback_before_integrity`, `test_trace_recorder_persists_exact_evidence_frame`
 - 直接静态依赖：`numpy`
@@ -3856,8 +3934,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_visual_capture_scope.py>)
 
 - 分类/语言：`test` / Python
-- 规模：536 行，22,256 bytes
-- SHA-256：`3cc48355ba7098c5a3be2eb07e600e136881d11d5d225df1ccbe8b98f9708c3b`
+- 规模：536 行，22,259 bytes
+- SHA-256：`d2e3b056cc99c9c6e4aa086d9ce72130b7601fab5ef2335a9036abc2783d9df6`
 - 源码事实摘要：验证 test visual capture scope 对应的行为、回归或合同。
 - 顶层符号/结构：`test_credible_work_surface_bounds_use_authoritative_frame_coordinates`, `test_work_surface_is_clipped_to_window_client_authority`, `test_region_frame_bounds_maps_physical_client_into_window_frame`, `test_credible_work_surface_bounds_preserve_ambiguous_failure`, `test_capture_scope_toggle_off_forces_full_desktop`, `test_capture_scope_auto_crops_only_verified_foreground_target`, `test_capture_scope_auto_falls_back_when_foreground_is_ambiguous`, `test_capture_scope_uses_runtime_window_state_not_global_task_words`, `test_capture_scope_does_not_classify_cross_application_word_orders`, `test_capture_scope_does_not_classify_comparison_or_side_by_side_words`, `test_capture_scope_does_not_expand_single_window_move_or_paste_tasks`, `test_vlm_describe_toggle_off_uses_full_desktop_and_returns_scope`, `test_vlm_verify_enabled_uses_only_verified_foreground_target`, `test_vlm_verify_ambiguous_foreground_falls_back_to_full_desktop`，另有 3 项
 - 直接静态依赖：`__future__`
@@ -3869,8 +3947,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_visual_closed_loop.py>)
 
 - 分类/语言：`test` / Python
-- 规模：4062 行，153,184 bytes
-- SHA-256：`db2b36a4281bdfd234a458b1cc0b3738df0f104f96d2414e244f1b9b6337bd91`
+- 规模：4066 行，153,359 bytes
+- SHA-256：`bf61e03f3d4d1c971ed070c4164a7155e3e432e3c0127200ef7b4d75e5267676`
 - 源码事实摘要：验证 test visual closed loop 对应的行为、回归或合同。
 - 顶层符号/结构：`semantic_grounding_enabled`, `authoritative_native_vision`, `_tool_call`, `test_native_point_scope_guard_blocks_taskbar_hit`, `test_native_point_scope_guard_does_not_reinterpret_full_desktop_selection`, `test_native_point_scope_guard_requires_fresh_crop_after_target_rebound`, `test_native_visual_observe_skips_lossy_structured_stack`, `test_visual_frame_marks_current_screen_epoch`, `test_every_native_spatial_action_gets_same_frame_magnified_detail`, `test_visual_frame_rebinds_verified_application_successor_before_binding`, `test_preflight_rebound_target_crop_returns_fresh_authoritative_frame`, `test_preflight_rebound_target_identity_blocks_full_desktop_keyboard_action`, `test_full_desktop_frame_stays_grounded_when_crop_becomes_available`, `test_initial_prebind_frame_settle_requires_a_bounded_quiet_period`，另有 89 项
 - 直接静态依赖：`__future__`, `json`, `types`, `pytest`
@@ -3908,10 +3986,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_visual_interaction_server.py>)
 
 - 分类/语言：`test` / Python
-- 规模：252 行，8,104 bytes
-- SHA-256：`69177d00424050bca17bb6af5cf4a186a3c0a0fd5ed584e0285f13951a4cccc2`
+- 规模：293 行，9,300 bytes
+- SHA-256：`7aa70cd79f681d111122279e0ea6f08351869b2526f02c7682b81df6dbf08b16`
 - 源码事实摘要：验证 test visual interaction server 对应的行为、回归或合同。
-- 顶层符号/结构：`_event`, `_dynamic_event`, `_quiz_answers`, `_quiz_event`, `test_quiz_spec_is_seeded_mixed_and_does_not_publish_answer_key`, `test_quiz_evaluation_is_server_owned_and_omits_submitted_answers`, `test_browser_quiz_claim_is_replaced_by_server_evaluation`, `test_quiz_success_requires_trusted_server_verified_submit_event`, `test_case_scoped_state_accepts_only_verified_quiz_completion`, `test_case_scoped_state_cannot_inherit_another_cases_success`, `test_case_scoped_state_reports_only_its_own_trusted_success`, `test_dynamic_success_requires_preceding_trusted_in_goal_pointerup`
+- 顶层符号/结构：`_event`, `_dynamic_event`, `_corridor_event`, `_quiz_answers`, `_quiz_event`, `test_quiz_spec_is_seeded_mixed_and_does_not_publish_answer_key`, `test_quiz_evaluation_is_server_owned_and_omits_submitted_answers`, `test_browser_quiz_claim_is_replaced_by_server_evaluation`, `test_quiz_success_requires_trusted_server_verified_submit_event`, `test_corridor_success_requires_a_real_origin_to_goal_route`, `test_case_scoped_state_accepts_only_verified_quiz_completion`, `test_case_scoped_state_cannot_inherit_another_cases_success`, `test_case_scoped_state_reports_only_its_own_trusted_success`, `test_dynamic_success_requires_preceding_trusted_in_goal_pointerup`
 - 直接静态依赖：`__future__`, `copy`, `eval_targets`
 - API/IPC 入口：—
 
@@ -3999,11 +4077,11 @@
 [打开文件](<../../python/winpilot_home/tests/test_vnext_actor_contracts.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1844 行，57,264 bytes
-- SHA-256：`ebb15379a2ace9bed9d05f318fb05d91455c34688597e0b0d6a11cd00aeabdaf`
+- 规模：1694 行，52,576 bytes
+- SHA-256：`dd3fce15594642fa1504999a44b0fb3f6c3707e6d2ce6a805b46801e175b874d`
 - 源码事实摘要：Identity-free Actor proposal and Runtime-owned envelope tests.
-- 顶层符号/结构：`_module_name`, `_imports`, `_matches_prefix`, `_nested_json`, `_schema`, `_point_schema`, `_drag_schema`, `_tool`, `_catalog`, `_catalog_with_drag`, `_mission_reducer`, `_mission`, `_profile`, `_state`，另有 47 项
-- 直接静态依赖：`__future__`, `ast`, `dataclasses`, `json`, `math`, `pathlib`, `random`, `types`, `pytest`, `pydantic`, `winpilot.visual_runtime.frame_authority`, `winpilot.vnext.actor`, `winpilot.vnext.capabilities`, `winpilot.vnext.capabilities.state`，另有 3 项
+- 顶层符号/结构：`_module_name`, `_imports`, `_matches_prefix`, `_nested_json`, `_schema`, `_point_schema`, `_drag_schema`, `_tool`, `_catalog`, `_catalog_with_drag`, `_mission_reducer`, `_mission`, `_profile`, `_state`，另有 45 项
+- 直接静态依赖：`__future__`, `ast`, `dataclasses`, `json`, `math`, `pathlib`, `random`, `types`, `pytest`, `pydantic`, `winpilot.visual_runtime.frame_authority`, `winpilot.vnext.actor`, `winpilot.vnext.capabilities`, `winpilot.vnext.json_contract`，另有 2 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_vnext_atomic_desktop_adapter.py -->
@@ -4012,11 +4090,11 @@
 [打开文件](<../../python/winpilot_home/tests/test_vnext_atomic_desktop_adapter.py>)
 
 - 分类/语言：`test` / Python
-- 规模：2549 行，81,323 bytes
-- SHA-256：`a5654d745aca89be941ad315a6808e2782bd67b241e09778be40f2d71d53a2a9`
+- 规模：3008 行，97,564 bytes
+- SHA-256：`492afa2157d2b299a0ad8b4f4f324e2ed8afdfdc95c7d0827e4533068040473b`
 - 源码事实摘要：Focused fake-port tests for the default-unreachable atomic vNext bridge.
-- 顶层符号/结构：`_jpeg`, `_map_submitted_test_point`, `_Probe`, `_Trace`, `_RawHarness`, `_Harness`, `_proposal`, `_projection_id`, `_envelope`, `_replace_envelope`, `_replace_action_args`, `_broker_projection`, `_harness`, `_record_controller_transition`，另有 54 项
-- 直接静态依赖：`__future__`, `ast`, `base64`, `dataclasses`, `hashlib`, `json`, `pathlib`, `threading`, `typing`, `cv2`, `numpy`, `pytest`, `winpilot.action.raw_device`, `winpilot.action.desktop_queue`，另有 11 项
+- 顶层符号/结构：`_jpeg`, `_map_submitted_test_point`, `_Probe`, `_Trace`, `_RawHarness`, `_Harness`, `_AttemptResult`, `_proposal`, `_projection_id`, `_envelope`, `_replace_envelope`, `_replace_action_args`, `_broker_projection`, `_harness`，另有 67 项
+- 直接静态依赖：`__future__`, `ast`, `base64`, `dataclasses`, `hashlib`, `json`, `pathlib`, `threading`, `typing`, `cv2`, `numpy`, `pytest`, `winpilot.action.raw_device`, `winpilot.action.desktop_queue`，另有 9 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_vnext_canary_campaign_state.py -->
@@ -4025,8 +4103,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_vnext_canary_campaign_state.py>)
 
 - 分类/语言：`test` / Python
-- 规模：3018 行，99,113 bytes
-- SHA-256：`1fd1f36f986cd0b15fa6d16546089473e87b06bef66be8af872109dcd3d85508`
+- 规模：3018 行，99,106 bytes
+- SHA-256：`3fd6ad89320a848abc2a1ffd66968233bb47e8aa433737d30824a9361f9b90a8`
 - 源码事实摘要：验证 test vnext canary campaign state 对应的行为、回归或合同。
 - 顶层符号/结构：`_load_campaign_module`, `_matrix`, `_manifest_kwargs`, `manifest_kwargs`, `manifest`, `sealed_campaign`, `_invalid_data`, `_failed_data`, `_break_stack`, `_break_source`, `_break_build`, `_break_model`, `_break_c2_binding`, `test_manifest_is_canonical_self_hashed_exclusive_and_round_trips`，另有 79 项
 - 直接静态依赖：`__future__`, `copy`, `hashlib`, `importlib.util`, `json`, `sys`, `pathlib`, `typing`, `pytest`
@@ -4038,10 +4116,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_vnext_capability_broker.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1907 行，61,055 bytes
-- SHA-256：`9b784139228467774ff68f94b31b77e9d85fbf316a595a4dafa1e456ec31b801`
+- 规模：1939 行，61,784 bytes
+- SHA-256：`ef8d6abb570c37523adcc6f9d36a84a9c493f873a3c2ea374668f97c60b19cd8`
 - 源码事实摘要：Pure ToolCatalog, grant, state, and Capability Broker tests.
-- 顶层符号/结构：`_schema`, `_tool`, `_catalog`, `_catalog_with_drag`, `_mission`, `_mission_with_artifact_binding`, `_profile`, `_state`, `_provider_offer`, `_wire_samples`, `test_every_capability_wire_entry_requires_plain_exact_complete_objects`, `test_wire_array_fields_require_literal_lists`, `test_wire_scalars_never_coerce_or_normalize`, `_bounded_tool_wire_cases`，另有 41 项
+- 顶层符号/结构：`_schema`, `_tool`, `_catalog`, `_catalog_with_drag`, `_mission`, `_mission_with_artifact_binding`, `_profile`, `_state`, `_provider_offer`, `_wire_samples`, `test_every_capability_wire_entry_requires_plain_exact_complete_objects`, `test_wire_array_fields_require_literal_lists`, `test_wire_scalars_never_coerce_or_normalize`, `_bounded_tool_wire_cases`，另有 43 项
 - 直接静态依赖：`__future__`, `ast`, `dataclasses`, `pathlib`, `random`, `types`, `pytest`, `vnext_import_boundary_ast`, `winpilot.vnext.capabilities`, `winpilot.vnext.capabilities.state`, `winpilot.vnext.json_contract`, `winpilot.vnext.mission`, `winpilot.vnext.profiling`
 - API/IPC 入口：—
 
@@ -4051,10 +4129,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_vnext_desktop_workspace.py>)
 
 - 分类/语言：`test` / Python
-- 规模：492 行，13,933 bytes
-- SHA-256：`27720b2e3e7f1f450e07b449d66df69f8a85be76cd81333dfe06c41af79d931e`
+- 规模：476 行，13,606 bytes
+- SHA-256：`624b762e1edb3f8f10d80d11b74af8043f037eef6f16e9b85c3c62bde4f1f4b8`
 - 源码事实摘要：验证 test vnext desktop workspace 对应的行为、回归或合同。
-- 顶层符号/结构：`_surface`, `_binding`, `_Topology`, `_workspace`, `test_unrelated_foreground_is_observed_but_never_adopted`, `test_completed_click_adopts_stable_foreground_on_next_observation`, `test_discarded_full_desktop_successor_is_never_adopted`, `test_two_discarded_successors_exhaust_bounded_handoff`, `test_successor_that_loses_foreground_fails_validation`, `test_not_started_input_never_creates_causal_transition`, `test_any_completed_action_adopts_only_a_real_foreground_change`, `test_disappearing_pending_candidate_is_discarded`, `test_source_can_disappear_before_successor_is_observed`, `test_missing_source_keeps_bounded_handoff_for_delayed_successor`，另有 12 项
+- 顶层符号/结构：`_surface`, `_binding`, `_Topology`, `_workspace`, `_shell_workspace`, `test_desktop_shell_flag_retires_when_a_real_window_is_adopted`, `test_unrelated_foreground_is_observed_but_never_adopted`, `test_completed_click_adopts_stable_foreground_on_next_observation`, `test_discarded_full_desktop_successor_is_never_adopted`, `test_two_discarded_successors_exhaust_bounded_handoff`, `test_successor_that_loses_foreground_fails_validation`, `test_not_started_input_never_creates_causal_transition`, `test_any_completed_action_adopts_only_a_real_foreground_change`, `test_disappearing_pending_candidate_is_discarded`，另有 11 项
 - 直接静态依赖：`__future__`, `dataclasses`, `pytest`, `winpilot.vnext.desktop_adapter`, `winpilot.vnext.mission`
 - API/IPC 入口：—
 
@@ -4090,10 +4168,10 @@
 [打开文件](<../../python/winpilot_home/tests/test_vnext_kernel_boundaries.py>)
 
 - 分类/语言：`test` / Python
-- 规模：923 行，29,356 bytes
-- SHA-256：`87eb91404bb1d69e986515acf010f555618879dfd6e74cd1a1934aef2ac23215`
+- 规模：886 行，28,252 bytes
+- SHA-256：`1a3c86f085f3f6d05a4987e1f108f3aed3ea9c3f1a039a27ef53e22913e9ed47`
 - 源码事实摘要：Static boundaries for the pure, default-unreachable vNext kernel.
-- 顶层符号/结构：`_source_files`, `_module_name`, `_imports`, `_matches_prefix`, `_analyze_path`, `_sorted_root_bindings`, `_root_static_imports_are_exact`, `_dynamic_boundary_calls`, `test_kernel_imports_only_stdlib_or_its_own_pure_packages`, `test_vnext_root_has_no_eager_or_lazy_imports`, `test_runtime_evidence_plane_is_exact_pure_and_default_unreachable`, `test_only_one_composition_root_can_reach_live_vnext_by_import`, `test_live_composition_dependency_closure_cannot_reach_legacy_agent`, `test_retired_electron_agent_subprocess_cannot_return`，另有 16 项
+- 顶层符号/结构：`_source_files`, `_module_name`, `_imports`, `_matches_prefix`, `_analyze_path`, `_sorted_root_bindings`, `_root_static_imports_are_exact`, `_dynamic_boundary_calls`, `test_kernel_imports_only_stdlib_or_its_own_pure_packages`, `test_vnext_root_has_no_eager_or_lazy_imports`, `test_only_one_composition_root_can_reach_live_vnext_by_import`, `test_live_composition_dependency_closure_cannot_reach_legacy_agent`, `test_retired_electron_agent_subprocess_cannot_return`, `test_ast_import_analyzer_rejects_dynamic_vnext_bypasses`，另有 15 项
 - 直接静态依赖：`__future__`, `ast`, `re`, `pathlib`, `pytest`, `vnext_import_boundary_ast`
 - API/IPC 入口：—
 
@@ -4103,11 +4181,11 @@
 [打开文件](<../../python/winpilot_home/tests/test_vnext_live_canary_e2e_harness.py>)
 
 - 分类/语言：`test` / Python
-- 规模：3780 行，123,995 bytes
-- SHA-256：`a8cdc55bd028beb68e6767681adfddbfd3abbf3632c4f4d04a73b5ca9e843ed6`
+- 规模：3206 行，100,663 bytes
+- SHA-256：`2563bafca74d71420c902caa3d44ac6f5beb8dddc0b8ee29f0c9b79b0efe7320`
 - 源码事实摘要：验证 test vnext live canary e2e harness 对应的行为、回归或合同。
-- 顶层符号/结构：`_assert_exact_json_value`, `_complete_campaign_config`, `_write_config_fixture`, `_config_contract_sha256`, `_load`, `_client_harness`, `_canary_harness`, `test_target_handoff_watcher_waits_for_electron_minimize`, `_oracle`, `_input_hook`, `_stack`, `_model_config`, `_manifest`, `test_visible_client_selector_is_exact_and_read_back`，另有 57 项
-- 直接静态依赖：`__future__`, `copy`, `hashlib`, `importlib.util`, `inspect`, `json`, `sys`, `time`, `types`, `uuid`, `pathlib`, `typing`, `pytest`, `winpilot.vnext.actor`，另有 2 项
+- 顶层符号/结构：`_assert_exact_json_value`, `_complete_campaign_config`, `_write_config_fixture`, `_config_contract_sha256`, `_load`, `_client_harness`, `_canary_harness`, `test_target_handoff_watcher_waits_for_electron_minimize`, `_oracle`, `_input_hook`, `_stack`, `_model_config`, `_manifest`, `test_visible_client_selector_is_exact_and_read_back`，另有 49 项
+- 直接静态依赖：`__future__`, `copy`, `hashlib`, `importlib.util`, `inspect`, `json`, `sys`, `time`, `types`, `uuid`, `pathlib`, `typing`, `pytest`, `winpilot.vnext.actor`，另有 1 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_vnext_live_model_roles.py -->
@@ -4116,11 +4194,24 @@
 [打开文件](<../../python/winpilot_home/tests/test_vnext_live_model_roles.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1955 行，60,972 bytes
-- SHA-256：`0ef09774b019476b7442e2dbcd513f43d7865f4f067c77c2a26d0aa940922d16`
+- 规模：4171 行，131,144 bytes
+- SHA-256：`244fa3878ae14a4d917876f7acb4243fbc4d4b807c77ca4adac784b28e4c3288`
 - 源码事实摘要：Focused fake-provider tests for the vNext live visual actor.
-- 顶层符号/结构：`_point_schema`, `_actor_turn`, `_tool_response`, `_connector_response`, `_actor_shape_response`, `_schema_keywords`, `_RecordingClient`, `_RecordingConnectorGateway`, `_build_clients`, `test_actor_uses_zero_retry_client_and_strict_visual_context`, `test_initial_actor_turn_replies_with_native_history_and_short_system_contract`, `test_initial_observe_with_content_continues_on_the_same_actor`, `test_initial_actor_lazily_calls_a_read_only_connector_then_replies`, `test_visual_actor_can_use_a_connector_before_one_gui_action`，另有 33 项
-- 直接静态依赖：`__future__`, `base64`, `json`, `dataclasses`, `types`, `typing`, `pytest`, `winpilot.modeling`, `winpilot.vnext.actor`, `winpilot.vnext.model_roles`, `winpilot.vnext.runtime`
+- 顶层符号/结构：`_point_schema`, `_actor_turn`, `_tool_response`, `_connector_response`, `_actor_shape_response`, `_schema_keywords`, `_RecordingClient`, `_RecordingConnectorGateway`, `_build_clients`, `test_actor_uses_zero_retry_client_and_strict_visual_context`, `test_visual_actor_can_request_a_fresh_desktop_without_input`, `test_visual_actor_defers_refresh_shape_to_the_single_runtime_parse`, `test_initial_actor_turn_replies_with_native_history_and_short_system_contract`, `test_initial_observe_can_seed_remaining_work_for_first_visual_action`，另有 78 项
+- 直接静态依赖：`__future__`, `base64`, `json`, `threading`, `dataclasses`, `pathlib`, `types`, `typing`, `pytest`, `winpilot.modeling`, `winpilot.vnext.actor`, `winpilot.vnext.model_roles`, `winpilot.vnext.runtime`
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: python/winpilot_home/tests/test_vnext_mechanical_core_contract.py -->
+### `python/winpilot_home/tests/test_vnext_mechanical_core_contract.py`
+
+[打开文件](<../../python/winpilot_home/tests/test_vnext_mechanical_core_contract.py>)
+
+- 分类/语言：`test` / Python
+- 规模：226 行，7,663 bytes
+- SHA-256：`adeff863dcc0862e1a167fba9cb6ff6e6bc4154f7e3d7138e870cc3a40a0a1f4`
+- 源码事实摘要：Ownership contract for the shared mechanical core the vNext line runs on.
+- 顶层符号/结构：`_module_name`, `_module_paths`, `_imports`, `_matches_prefix`, `_reachable_from_product_line`, `test_mechanical_core_modules_exist`, `test_every_mechanical_core_module_is_reachable_from_the_product_line`, `test_mechanical_core_modules_never_import_legacy_or_planning_layers`, `test_mechanical_core_perception_leaks_are_pinned_shrink_only`, `test_product_line_legacy_verification_reach_is_pinned_shrink_only`, `const:PACKAGE_ROOT`, `const:LIVE_COMPOSITION_MODULE`, `const:MECHANICAL_CORE_MODULES`, `const:CORE_FORBIDDEN_IMPORT_PREFIXES`，另有 4 项
+- 直接静态依赖：`__future__`, `ast`, `pathlib`, `vnext_import_boundary_ast`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_vnext_mission.py -->
@@ -4129,8 +4220,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_vnext_mission.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1908 行，71,627 bytes
-- SHA-256：`23092596971f27c625f9c38fc54ed9b075cd0168426379720d76810b0e7e6cb0`
+- 规模：1908 行，71,608 bytes
+- SHA-256：`6fe80d9fa5e119cf26fce2a5b240fc91603929c038d65a79ba0998f34178a971`
 - 源码事实摘要：P0/P1 sidecar tests; none of these tests start a model or touch a desktop.
 - 顶层符号/结构：`_action_effect_material`, `_transition_with_effect`, `_evidence`, `_mission_evidence`, `_definition`, `_verify_event`, `_required_verification_identity`, `_mission_verification_payload`, `_mission_verify_event`, `_raw_event`, `_verified_two_obligation_reducer`, `test_definition_falls_back_to_one_lossless_obligation`, `test_definition_and_event_canonical_wire_are_deterministic`, `test_contracts_are_strict_versioned_json_and_canonical_on_wire`，另有 51 项
 - 直接静态依赖：`__future__`, `hashlib`, `random`, `dataclasses`, `pytest`, `winpilot.vnext.mission`
@@ -4155,50 +4246,11 @@
 [打开文件](<../../python/winpilot_home/tests/test_vnext_mission_runtime.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1863 行，62,604 bytes
-- SHA-256：`5539e67caba29bb254ecc1b6689f51a0337ec171913e65e3fee4c10786988434`
+- 规模：1922 行，63,547 bytes
+- SHA-256：`0f7a9e89fd73145653415c1ec4724b0eb28b6a6c21154781f3185150132cc716`
 - 源码事实摘要：验证 test vnext mission runtime 对应的行为、回归或合同。
-- 顶层符号/结构：`_empty_schema`, `_point_schema`, `_drag_schema`, `_scroll_schema`, `_text_schema`, `_hotkey_schema`, `_tool`, `_catalog`, `_action`, `_claim`, `_blocked`, `_task_decision`, `FakeActor`, `FakeState`，另有 48 项
-- 直接静态依赖：`__future__`, `dataclasses`, `hashlib`, `json`, `threading`, `typing`, `pytest`, `winpilot.vnext.actor`, `winpilot.vnext.capabilities`, `winpilot.vnext.evidence`, `winpilot.vnext.evidence_plane`, `winpilot.vnext.mission`, `winpilot.vnext.profiling`, `winpilot.vnext.runtime`
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/tests/test_vnext_runtime_evidence_persistence.py -->
-### `python/winpilot_home/tests/test_vnext_runtime_evidence_persistence.py`
-
-[打开文件](<../../python/winpilot_home/tests/test_vnext_runtime_evidence_persistence.py>)
-
-- 分类/语言：`test` / Python
-- 规模：508 行，14,944 bytes
-- SHA-256：`43456b4748a424d441a1a3bc41049a213ea9f863641d9e2828cb195ceb5474b2`
-- 源码事实摘要：Focused synthetic tests for durable vNext Runtime evidence.
-- 顶层符号/结构：`_canonical_json`, `_journal_path`, `_journal_lines`, `_write_journal_lines`, `_rehash`, `_create_journal`, `_encoded_jpeg`, `_frame_identity`, `_artifact_target`, `_write_frame`, `_read_frame`, `test_journal_round_trip_is_canonical_utf8_jsonl`, `test_journal_rejects_duplicate_event_line`, `test_journal_rejects_duplicate_json_key`，另有 19 项
-- 直接静态依赖：`__future__`, `base64`, `hashlib`, `json`, `pathlib`, `typing`, `pytest`, `winpilot.vnext.evidence_plane.artifacts`, `winpilot.vnext.evidence_plane.journal`
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/tests/test_vnext_runtime_evidence_plane.py -->
-### `python/winpilot_home/tests/test_vnext_runtime_evidence_plane.py`
-
-[打开文件](<../../python/winpilot_home/tests/test_vnext_runtime_evidence_plane.py>)
-
-- 分类/语言：`test` / Python
-- 规模：2256 行，69,587 bytes
-- SHA-256：`55900f9f5027bb7bf1c58e0b1fdd39d24dd87dd373000870f50d96ca47878742`
-- 源码事实摘要：验证 test vnext runtime evidence plane 对应的行为、回归或合同。
-- 顶层符号/结构：`_runtime_image_sha256`, `_frame_identity`, `_target_identity`, `_receipt`, `_transition`, `_default_arguments`, `_projection_id`, `_actor_envelope`, `_tool_schema`, `_broker_projection`, `_nested_keys`, `_plane`, `_record_decision`, `_decision_envelope_sha256`，另有 67 项
-- 直接静态依赖：`__future__`, `base64`, `copy`, `hashlib`, `itertools`, `json`, `pathlib`, `threading`, `typing`, `pytest`, `winpilot.action.raw_device`, `winpilot.action.replay_policy`, `winpilot.vnext.evidence_plane`, `winpilot.vnext.mission`，另有 1 项
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/tests/test_vnext_tool_argument_validation.py -->
-### `python/winpilot_home/tests/test_vnext_tool_argument_validation.py`
-
-[打开文件](<../../python/winpilot_home/tests/test_vnext_tool_argument_validation.py>)
-
-- 分类/语言：`test` / Python
-- 规模：407 行，12,279 bytes
-- SHA-256：`e08a3a89c35cc5ad9cd55a8235d73b9562db85777d75dc044c9ff6988f2ce8cf`
-- 源码事实摘要：Strict deterministic tests for the vNext tool-argument validation seam.
-- 顶层符号/结构：`_catalog`, `test_valid_arguments_return_a_detached_json_copy`, `test_schema_constraints_reject_without_coercion`, `test_composition_keywords_are_supported`, `test_local_fragment_references_are_supported_and_fail_closed`, `test_nonlocal_references_are_rejected_without_network`, `test_invalid_or_unsupported_schema_fails_closed`, `test_unknown_tool_and_non_object_arguments_fail_closed`, `test_mapping_subclasses_are_rejected_before_iteration`, `test_non_json_or_unbounded_values_fail_before_schema`, `test_finite_float_and_signed_64_integer_endpoints_are_literal_json`, `test_cycles_depth_nodes_and_non_string_keys_fail_closed`, `test_error_selection_is_stable_under_property_order`, `test_catalog_content_identity_is_revalidated_before_compilation`，另有 1 项
-- 直接静态依赖：`__future__`, `types`, `pytest`, `winpilot.vnext.capabilities`, `winpilot.vnext.json_contract`
+- 顶层符号/结构：`_empty_schema`, `_point_schema`, `_drag_schema`, `_scroll_schema`, `_text_schema`, `_hotkey_schema`, `_move_schema`, `_sequence_schema`, `_tool`, `_catalog`, `_action`, `_claim`, `_observe`, `_blocked`，另有 61 项
+- 直接静态依赖：`__future__`, `dataclasses`, `hashlib`, `json`, `threading`, `typing`, `pytest`, `winpilot.vnext.actor`, `winpilot.vnext.capabilities`, `winpilot.vnext.evidence`, `winpilot.vnext.mission`, `winpilot.vnext.profiling`, `winpilot.vnext.runtime`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/tests/test_vnext_verification_contracts.py -->
@@ -4285,8 +4337,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_windows_visual_interaction_e2e.py>)
 
 - 分类/语言：`test` / Python
-- 规模：753 行，32,637 bytes
-- SHA-256：`94cb4019d2d65fe0080d1203aa613e23e1603c8fd0e2a3227a9bac2472e2d062`
+- 规模：755 行，32,770 bytes
+- SHA-256：`0e7ba899efe134e15edd9ac252d32ec4e17ce1b2c2cc55f8385e189d9ef78f1f`
 - 源码事实摘要：Opt-in real-client Windows E2E matrix for general visual interactions.
 - 顶层符号/结构：`_headers`, `_request`, `_free_port`, `_wait_json`, `_browser_executable`, `_find_window`, `_close_window`, `_poll_run`, `_assert_runtime_is_current`, `_trace_action_types`, `_assert_model_owned_visual_evidence`, `_assert_external_scenario`, `test_real_frontend_api_visual_scenario`, `const:ROOT`，另有 5 项
 - 直接静态依赖：`__future__`, `ctypes`, `json`, `os`, `shutil`, `socket`, `subprocess`, `sys`, `tempfile`, `time`, `uuid`, `pathlib`, `typing`, `urllib.error`，另有 2 项
@@ -4311,8 +4363,8 @@
 [打开文件](<../../python/winpilot_home/tests/test_wps_v2_compat.py>)
 
 - 分类/语言：`test` / Python
-- 规模：1121 行，39,428 bytes
-- SHA-256：`5dfcd2d3a965899874373cc235025a35091367e44953df268993e7d719deb294`
+- 规模：1122 行，39,499 bytes
+- SHA-256：`e6d2232022c7ab777d56e300f324a5de60d732bebd768b4a80df60f6496c2637`
 - 源码事实摘要：wps/2 Replayer integration + v1 backward-compatibility.
 - 顶层符号/结构：`SpyReplayer`, `_write`, `_stub_window_inventory`, `test_v1_flat_script_runs_each_leaf_in_order`, `test_v1_leaf_failure_stops_and_reports`, `test_v1_no_vars_means_no_interpolation`, `test_v2_if_true_runs_then_with_interpolation`, `test_v2_loop_count_paths_indices`, `test_v2_ext_delay_records_result`, `test_v2_ext_delay_cancellation_is_prompt_and_not_success`, `test_v2_var_set_then_used_by_later_leaf`, `test_v2_unknown_ext_step_fails_gracefully`, `test_replayer_runs_draw_strokes_leaf`, `test_replayer_runs_detached_leaf`，另有 36 项
 - 直接静态依赖：`json`, `types`, `numpy`, `winpilot.recorder`
@@ -4337,10 +4389,10 @@
 [打开文件](<../../python/winpilot_home/webui/app.js>)
 
 - 分类/语言：`supporting-code` / JavaScript
-- 规模：815 行，34,816 bytes
-- SHA-256：`f8055853dd845d07cedaf5f5a71fe3d3893b590028946b2b07006eb524ca8831`
+- 规模：710 行，30,313 bytes
+- SHA-256：`7d642bac8ca9cd70fb6f54741a5cdf9d3b39ca2c56c916f477d04df39a96429e`
 - 源码事实摘要：WinPilot front-end: WebSocket event stream + chat + settings panel. */
-- 顶层符号/结构：`$`, `chatList`, `logList`, `config`, `running`, `runMetrics`, `metricsTimer`, `el`, `fmtTs`, `api`, `patchConfig`, `usageCostText`, `resetRunMetrics`, `finishRunMetrics`，另有 29 项
+- 顶层符号/结构：`$`, `chatList`, `logList`, `config`, `running`, `runMetrics`, `metricsTimer`, `el`, `fmtTs`, `api`, `patchConfig`, `usageCostText`, `resetRunMetrics`, `finishRunMetrics`，另有 26 项
 - 直接静态依赖：—
 - API/IPC 入口：—
 
@@ -4350,8 +4402,8 @@
 [打开文件](<../../python/winpilot_home/webui/index.html>)
 
 - 分类/语言：`supporting-code` / HTML
-- 规模：178 行，8,644 bytes
-- SHA-256：`fdd021183df8aa60acce69aa4ce572d6e10603cd68a0b1ddde5bda056a2d771f`
+- 规模：164 行，8,052 bytes
+- SHA-256：`40620fe29c37f8f8f1b6a6905480d351f68d72fa557144edacb1a56d4951ce57`
 - 源码事实摘要：WinPilot 电脑操控 Agent
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -4396,6 +4448,19 @@
 - 直接静态依赖：—
 - API/IPC 入口：—
 
+<!-- PROJECT-FILE: python/winpilot_home/winpilot/action/clipboard_ops.py -->
+### `python/winpilot_home/winpilot/action/clipboard_ops.py`
+
+[打开文件](<../../python/winpilot_home/winpilot/action/clipboard_ops.py>)
+
+- 分类/语言：`winpilot-product` / Python
+- 规模：300 行，10,170 bytes
+- SHA-256：`8f273339d30c0a26625af2c3e0de589ccaa147f41bd221ad29ebfd481b8cbce3`
+- 源码事实摘要：vNext-owned physical capture / window / clipboard backends.
+- 顶层符号/结构：`_process_name`, `capture_screen_backend`, `list_windows_backend`, `_image_file_to_dib`, `set_clipboard_dib`, `paste_image_backend`, `const:CAPTURE_FORMAT`, `const:WINDOWS_FORMAT`, `const:PASTE_FORMAT`, `const:_CAPTURE_EXTENSIONS`
+- 直接静态依赖：`__future__`, `ctypes`, `ntpath`, `time`, `io`, `pathlib`, `typing`, `..utils.log`
+- API/IPC 入口：—
+
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/action/desktop_queue.py -->
 ### `python/winpilot_home/winpilot/action/desktop_queue.py`
 
@@ -4415,11 +4480,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/action/executor.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：3243 行，117,352 bytes
-- SHA-256：`31417292ddc5c1e4d0ed537d09793f2f510481ad66c869dcfba15d3bd7d6bc8a`
+- 规模：3574 行，124,934 bytes
+- SHA-256：`dc4c49f0857f720031ff5a6d28beed70ec5c3af95b4e2aff4c5b17728168a8e8`
 - 源码事实摘要：Action executor: SendInput-based mouse/keyboard plus window management.
-- 顶层符号/结构：`install_press_probe`, `restore_press_probe`, `_sample_pressed_state`, `_settle_after_release`, `_KeyBdInput`, `_MouseInput`, `_InputUnion`, `_Input`, `_send_inputs`, `_key_input`, `_mouse_input`, `_vk_of`, `_press_char_vk`, `_press_vk_code`，另有 88 项
-- 直接静态依赖：`__future__`, `base64`, `ctypes`, `inspect`, `math`, `os`, `re`, `string`, `subprocess`, `threading`, `time`, `io`, `pathlib`, `typing`，另有 7 项
+- 顶层符号/结构：`_valid_stop_signal`, `_stop_requested`, `install_press_probe`, `restore_press_probe`, `_sample_pressed_state`, `_settle_after_release`, `_KeyBdInput`, `_MouseInput`, `_InputUnion`, `_Input`, `_send_inputs`, `_key_input`, `_hardware_key_input`, `_mouse_input`，另有 97 项
+- 直接静态依赖：`__future__`, `base64`, `ctypes`, `inspect`, `math`, `os`, `re`, `string`, `subprocess`, `threading`, `time`, `io`, `pathlib`, `typing`，另有 8 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/action/raw_device.py -->
@@ -4428,10 +4493,10 @@
 [打开文件](<../../python/winpilot_home/winpilot/action/raw_device.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：909 行，33,972 bytes
-- SHA-256：`d646124734711fa8703727f026969d2d1fde3b95e3b0975ca2c38788a8c65fb0`
+- 规模：1228 行，46,544 bytes
+- SHA-256：`d6c36d27832c03837cc64e21273419e25c9878c888871b3714ac1a3fa5704e3a`
 - 源码事实摘要：Typed execution of already-admitted physical input.
-- 顶层符号/结构：`_canonical_drag_points`, `MouseButton`, `ClickCount`, `ClickMechanism`, `FinalPointerGuardDecision`, `FinalKeyboardGuardDecision`, `_scalar_facts`, `RawActionContext`, `RawBackendResult`, `RawActionReceipt`, `AdmittedPhysicalClickBackend`, `AdmittedPhysicalScrollBackend`, `AdmittedPhysicalDragBackend`, `AdmittedPhysicalTypeTextBackend`，另有 5 项
+- 顶层符号/结构：`_canonical_drag_points`, `_canonical_held_keys`, `MouseButton`, `InputEventKind`, `StopSignal`, `_valid_stop_signal`, `PhysicalInputEvent`, `ClickCount`, `ClickMechanism`, `FinalPointerGuardDecision`, `FinalKeyboardGuardDecision`, `_scalar_facts`, `RawActionContext`, `RawBackendResult`，另有 16 项
 - 直接静态依赖：`__future__`, `collections.abc`, `dataclasses`, `enum`, `math`, `threading`, `types`, `typing`, `..visual_runtime.keyboard_contracts`, `.replay_policy`
 - API/IPC 入口：—
 
@@ -4454,11 +4519,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/action/safety.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：100 行，5,069 bytes
-- SHA-256：`c4e572ec96272e4dcfe94add02dd649d1732028721f973ace99edb079c1b7e01`
-- 源码事实摘要：Safety layer: classify shell commands by destructiveness and gate them.
-- 顶层符号/结构：`approve_mode`, `evaluate`, `guard`, `const:_CATASTROPHIC`, `const:_DANGEROUS`
-- 直接静态依赖：`__future__`, `re`, `..config`, `..utils.log`
+- 规模：59 行，2,923 bytes
+- SHA-256：`c6c18e0a1adea0dc06205c0660dd83dc872587f179511c4b91d174a09820c95c`
+- 源码事实摘要：Irreversible-command guard for shell execution.
+- 顶层符号/结构：`evaluate`, `guard`, `const:_CATASTROPHIC`
+- 直接静态依赖：`__future__`, `re`, `..utils.log`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/action/shell.py -->
@@ -4467,11 +4532,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/action/shell.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：285 行，12,620 bytes
-- SHA-256：`3b1382f2fcbe0094bf4f4aaea914bee7657e0ed5d08ed8e0f0e4382032f4bff6`
+- 规模：735 行，27,903 bytes
+- SHA-256：`6229b8fbc198a39836b5423c2b94f246f20398c6d259cc5a152fed9589f997ea`
 - 源码事实摘要：Shell execution: run cmd/PowerShell commands and capture their output.
-- 顶层符号/结构：`shell_enabled`, `_truncate`, `_decode`, `_kill_process_tree`, `_run_legacy_subprocess`, `run`, `_sweep_old`, `run_detached`, `const:_DEFAULT_TIMEOUT_S`, `const:_MAX_OUTPUT_CHARS`, `const:_PS_UTF8_PREFIX`
-- 直接静态依赖：`__future__`, `subprocess`, `time`, `uuid`, `..config`, `..utils.log`, `.`
+- 顶层符号/结构：`_unwrap_redundant_shell_command`, `_runtime_host_termination_guard`, `shell_enabled`, `_truncate`, `_truncate_tail`, `_save_full_output`, `_shape_result`, `_powershell_command`, `_decode`, `_kill_process_tree`, `_run_legacy_subprocess`, `run`, `write_file`, `_foreground_window_fact`，另有 9 项
+- 直接静态依赖：`__future__`, `os`, `re`, `subprocess`, `sys`, `tempfile`, `time`, `uuid`, `pathlib`, `..config`, `..utils.log`, `.`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/action/verify.py -->
@@ -4545,8 +4610,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/agent/desktop_tools.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1314 行，60,138 bytes
-- SHA-256：`6d2ca1c978a1df86e53c0a92e67a82daf395f955e894d651cbd1289b4e7df8a0`
+- 规模：1275 行，58,163 bytes
+- SHA-256：`019bfc78f13ae5943667860be31f5c3681bcdae12629d1c2e8671d67ac73f2bb`
 - 源码事实摘要：General desktop utility tool handlers for ToolSession.
 - 顶层符号/结构：`DesktopToolMixin`
 - 直接静态依赖：`__future__`, `base64`, `ctypes`, `threading`, `io`, `pathlib`, `..action`, `..action.verify`, `..config`, `..perception`, `..utils.log`, `..utils.screenshot`, `.interaction_tools`, `.tool_result`
@@ -4558,8 +4623,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/agent/done_verifier.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：2320 行，109,855 bytes
-- SHA-256：`ace3b3c0588890e986ccd52f903c00adabc661a6d4783fa6729eb70553d2526d`
+- 规模：2331 行，110,341 bytes
+- SHA-256：`1b5535287cc3b19a22e67987750edf9101ce490ea238aee0a7f3e79ab37c6add`
 - 源码事实摘要：Done-gate verification helpers for AgentRunner.
 - 顶层符号/结构：`_word_attr`, `_docx_document_evidence`, `_docx_task_format_errors`, `_xlsx_column_number`, `_xlsx_column_label`, `_xlsx_workbook_evidence`, `_xlsx_task_errors`, `_loop_attr`, `_config`, `_configured_vision_judge_model`, `_explicit_saved_paths`, `DoneVerifierMixin`, `const:_JUDGE_MAX_TOKENS`, `const:_NATIVE_JUDGE_NONVISUAL_TOOLS`，另有 6 项
 - 直接静态依赖：`__future__`, `hashlib`, `json`, `re`, `sys`, `time`, `datetime`, `pathlib`, `xml.etree`, `zipfile`, `..config`, `..model_adapter`, `..modeling`, `..perception`，另有 3 项
@@ -4649,10 +4714,10 @@
 [打开文件](<../../python/winpilot_home/winpilot/agent/interaction_tools.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1656 行，73,674 bytes
-- SHA-256：`2daae0bad9070c294acc08b5b41a8a24ebf51cfb9c1b1d3d23d96f35d8b775c2`
+- 规模：1594 行，71,167 bytes
+- SHA-256：`9f5dad0415b4e286608e48e55170e9476f3c7ceedbf3856dc644fe74fbe91d67`
 - 源码事实摘要：Input and visible-action tool handlers for ToolSession.
-- 顶层符号/结构：`_call_with_optional_hwnd`, `_clipboard_sequence_number`, `_looks_like_input_element`, `_actionable_semantic_hit`, `_prefer_physical_text_input`, `_normalize_draw_strokes`, `_validate_normalized_draw_strokes`, `_tools_attr`, `_expect_timeout`, `_printable_text_sequence`, `normalize_key_sequence`, `canonical_hotkey_order`, `InteractionToolMixin`, `const:_INPUT_ROLES`，另有 1 项
+- 顶层符号/结构：`_call_with_optional_hwnd`, `_clipboard_sequence_number`, `_looks_like_input_element`, `_actionable_semantic_hit`, `_prefer_physical_text_input`, `_normalize_draw_strokes`, `_validate_normalized_draw_strokes`, `_tools_attr`, `_expect_timeout`, `_printable_text_sequence`, `InteractionToolMixin`, `const:_INPUT_ROLES`, `const:_ACTIONABLE_HIT_ROLES`
 - 直接静态依赖：`__future__`, `json`, `hashlib`, `inspect`, `math`, `sys`, `time`, `typing`, `win32gui`, `..action`, `..config`, `..perception`, `..utils.log`, `..utils.screenshot`，另有 1 项
 - API/IPC 入口：—
 
@@ -4662,8 +4727,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/agent/loop.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：7336 行，339,566 bytes
-- SHA-256：`7dece832105a66d20b958b22b6d3f0bc57de94d1e66920d1fa8457c36036ea93`
+- 规模：7336 行，339,526 bytes
+- SHA-256：`d60f8bc6c551da91406d0161316caf4dcaf94c3f5b32710886b65e220105f51d`
 - 源码事实摘要：Unified WinPilot Agent loop.
 - 顶层符号/结构：`NativeFrameCoordinateError`, `_normalize_stringified_frame_strokes`, `_normalize_frame_stroke_list_structure`, `_result_explicitly_blocked_before_execution`, `_unexecuted_constraint_category`, `_client`, `_main_model_has_vision`, `_main_agent_api_settings`, `_sanitize_assistant`, `AgentRunner`, `const:_KEEP_FULL_OBSERVATIONS`, `const:_API_RETRIES`, `const:_RATE_LIMIT_BACKOFF_S`, `const:_GUI_TOOL_RECOVERY_MAX_TOKENS`，另有 4 项
 - 直接静态依赖：`__future__`, `copy`, `hashlib`, `json`, `re`, `threading`, `time`, `uuid`, `typing`, `win32gui`, `..config`, `..memory`, `..model_adapter`, `..modeling`，另有 24 项
@@ -4831,8 +4896,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/agent/scope_guard.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：482 行，18,576 bytes
-- SHA-256：`a659cfb2e289452927fb68dae7cc3f280ae5ef8f519806a71314dc5e6f13d1ef`
+- 规模：480 行，18,506 bytes
+- SHA-256：`cb2913f5166e3e7c137a1dd2c1de13050d71557a8f73962a400fef11ed1a63c2`
 - 源码事实摘要：Generic foreground/target-window guard for GUI mutations.
 - 顶层符号/结构：`_batch_establishes_target_before_spatial`, `_requires_live_target`, `_missing_target_result`, `_title`, `_class_name`, `_window_alive`, `_same_or_related`, `_screen_point`, `_point_hits_target`, `_record_focus_transition`, `_context`, `take_scope_recovery`, `ensure_scope`, `const:GUI_SCOPE_MUTATIONS`，另有 2 项
 - 直接静态依赖：`__future__`, `json`, `typing`, `win32gui`, `..action`, `..config`, `..fast.action_contract`, `..perception`, `.tool_result`
@@ -4896,8 +4961,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/agent/tool_schemas.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1823 行，88,377 bytes
-- SHA-256：`a462a5ccc74aee23d11b348356eddfa9184f0c8d9ff5e6610297ec20a6f80d81`
+- 规模：1812 行，87,773 bytes
+- SHA-256：`164cf3cc941f59a2cef32bb8aa54b20ad4c104c6f2249870671dd00513554c3d`
 - 源码事实摘要：OpenAI function-calling schemas for the unified WinPilot Agent.
 - 顶层符号/结构：`_batch_region_schema`, `_batch_frame_region_schema`, `_frame_constraint_bounds_schema`, `_image_constraint_bounds_schema`, `_batch_image_region_schema`, `_batch_action_schema`, `_tool`, `_prop`, `_expectable`, `_tool_name`, `_promote_tools`, `_strip_nested_descriptions`, `_compact_tool_descriptions`, `_apply_tool_profile`，另有 9 项
 - 直接静态依赖：`__future__`, `copy`, `..action`, `..fast.action_contract`, `..memory`, `..perception`
@@ -4909,8 +4974,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/agent/tools.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1240 行，56,289 bytes
-- SHA-256：`ec02d244cdabcbd0b49f574217d50f24594cb7d5fb339790fdbff207ea4a90a5`
+- 规模：1237 行，56,149 bytes
+- SHA-256：`dbaa396d2ae1e02337aa41bbf5e8394bd08d4c3dde8f62a027cb7c942a2c715c`
 - 源码事实摘要：Agent tool dispatcher and per-run execution state.
 - 顶层符号/结构：`ToolSession`, `const:_GA_ROOT`, `const:_MUTATING_TOOLS`, `const:_ACTION_SCREEN_DELTA_TOOLS`, `const:_CONTROLLER_COMPOSITE_TOOLS`
 - 直接静态依赖：`__future__`, `json`, `threading`, `time`, `typing`, `win32gui`, `win32process`, `..action`, `..config`, `..fast.vision`, `..perception`, `..perception.model`, `..perception.app_aliases`, `..utils.log`，另有 17 项
@@ -4988,8 +5053,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/config.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：280 行，11,471 bytes
-- SHA-256：`9fe590ea87f3c308df8142def365b8e5deb7320b629c5b8eda51b5ea8e70b64b`
+- 规模：272 行，11,044 bytes
+- SHA-256：`3b144ffa147755fc308cb0827a7b17f6a572badda07246cb59ef4d29e1e9bf2f`
 - 源码事实摘要：WinPilot configuration: load/save config.json + runtime toggle state.
 - 顶层符号/结构：`_merge`, `_canonicalize_live_agent_config`, `Config`, `const:ROOT_DIR`, `const:PROJECT_ROOT`, `const:CONFIG_PATH`, `const:TRACES_DIR`, `const:SCRIPTS_DIR`, `const:TEMPLATES_IMG_DIR`, `const:BIN_DIR`, `const:MEMORY_PATH`
 - 直接静态依赖：`__future__`, `json`, `threading`, `copy`, `pathlib`, `typing`
@@ -5092,8 +5157,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/fast/action_contract.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：541 行，19,473 bytes
-- SHA-256：`bf15f66650e73845f7430c089a2aaf669ab96789124008cc06f456f9f9dedf8f`
+- 规模：540 行，19,450 bytes
+- SHA-256：`b967ba67cfe84fda9712c75c94aaed6da2b85fabea2887a907d8a3b1c0bfcfad`
 - 源码事实摘要：Shared contract for actions accepted by the low-latency controller.
 - 顶层符号/结构：`ActionTarget`, `ActionPolicy`, `ActionEnvelope`, `AtomicAction`, `_region_dict`, `action_reference_system`, `action_source_reference_system`, `build_action_envelope`, `supported_actions`, `_action_name`, `parse_atomic_action`, `canonicalize_batch_actions`, `iter_atomic_actions`, `batch_action_name`，另有 8 项
 - 直接静态依赖：`__future__`, `dataclasses`, `typing`
@@ -5261,11 +5326,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/integrations/chatgpt_mcp.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1667 行，71,970 bytes
-- SHA-256：`7ab42f6bc8cc1c493c3a5278de76dbd1913d36f3736a6169d112be916c76bc9f`
+- 规模：1667 行，73,101 bytes
+- SHA-256：`fc0ec7899112bdc48095a22a55b441f5b47ba8c0faab015dffcb1c5a4a3384b9`
 - 源码事实摘要：MCP bridge that lets a logged-in ChatGPT/Codex client drive WinPilot.
-- 顶层符号/结构：`_region_payload`, `_region_contains`, `ChatGPTBridgeHooks`, `_json_object`, `_compact_element`, `_compact_screen_delta`, `_compact_controller_item`, `_compact_controller_payload`, `ChatGPTDesktopBridge`, `build_chatgpt_mcp`, `const:_FRAME_INVALIDATING_PREFIX_ACTIONS`
-- 直接静态依赖：`__future__`, `base64`, `hashlib`, `json`, `threading`, `time`, `uuid`, `collections.abc`, `dataclasses`, `typing`, `win32gui`, `..action`, `..config`, `..fast.action_contract`，另有 6 项
+- 顶层符号/结构：`_frame_invalidating_actions`, `_region_payload`, `_region_contains`, `ChatGPTBridgeHooks`, `_json_object`, `_compact_element`, `_compact_screen_delta`, `_compact_controller_item`, `_compact_controller_payload`, `ChatGPTDesktopBridge`, `build_chatgpt_mcp`
+- 直接静态依赖：`__future__`, `base64`, `hashlib`, `json`, `threading`, `time`, `uuid`, `collections.abc`, `dataclasses`, `typing`, `win32gui`, `..action`, `..config`, `..orchestrator.contracts`，另有 5 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/integrations/connector_gateway.py -->
@@ -5469,10 +5534,10 @@
 [打开文件](<../../python/winpilot_home/winpilot/model_adapter.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：492 行，16,952 bytes
-- SHA-256：`bb477ef381a1739c8c3603fb534a4fdcde46573da146daeea3062d414e7f9784`
+- 规模：522 行，18,017 bytes
+- SHA-256：`45ed6cef16e510a15be7f2ee6c01d95ba9f23d97dd628d984f7be94c0c9aa143`
 - 源码事实摘要：Thin model/provider adapter for WinPilot's OpenAI-compatible chat path.
-- 顶层符号/结构：`_lower`, `_get`, `_nested`, `_to_int`, `_to_float`, `_first_int`, `_api_dict`, `infer_provider`, `native_provider_protocol`, `model_supports_vision`, `ModelProfile`, `model_profile_from_config`, `request_extra_body`, `_CompletionsFacade`，另有 15 项
+- 顶层符号/结构：`_lower`, `_get`, `_nested`, `_to_int`, `_to_float`, `_first_int`, `_api_dict`, `infer_provider`, `native_provider_protocol`, `model_supports_vision`, `ModelProfile`, `model_profile_from_config`, `request_extra_body`, `_contains_visual_input`，另有 16 项
 - 直接静态依赖：`__future__`, `re`, `dataclasses`, `types`, `typing`
 - API/IPC 入口：—
 
@@ -5521,11 +5586,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/modeling/openai_transport.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：66 行，2,290 bytes
-- SHA-256：`0a6010b64c2550d7c191d8fabe587739c22d0935f53eb0533a4a08fd66d38219`
+- 规模：91 行，3,143 bytes
+- SHA-256：`9ee5f0f9d21e9dfe2d0ce9c353d5fbc7a69ca77c72909229acd24c454b45a625`
 - 源码事实摘要：OpenAI-compatible transport construction with SDK retries disabled.
-- 顶层符号/结构：`_proxy_env`, `create_openai_client`, `const:_DEFAULT_USER_AGENT`
-- 直接静态依赖：`__future__`, `os`, `typing`
+- 顶层符号/结构：`_proxy_env`, `_proxy_from_config`, `create_openai_client`, `const:_DEFAULT_USER_AGENT`
+- 直接静态依赖：`__future__`, `os`, `typing`, `logging`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/modeling/provider_protocols.py -->
@@ -5547,10 +5612,10 @@
 [打开文件](<../../python/winpilot_home/winpilot/modeling/runtime.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：249 行，9,681 bytes
-- SHA-256：`7b675011237679b9fbe781f5bc176f3087f5871b9b800990504059938c4e6ac3`
+- 规模：325 行，12,144 bytes
+- SHA-256：`5a2f9f296bf3de622cf2b38434da6d331ca9def7958e83fa016b0740d960f331`
 - 源码事实摘要：The sole transport retry loop for model requests.
-- 顶层符号/结构：`ModelCallOutcome`, `ModelCallError`, `_status_code`, `_is_transient_multimodal_rejection`, `_retryable_transport_error`, `_notify_attempt`, `ModelCallRuntime`, `const:_TRANSIENT_MULTIMODAL_REJECTION_MESSAGES`
+- 顶层符号/结构：`ModelCallOutcome`, `ModelCallError`, `_status_code`, `_is_transient_multimodal_rejection`, `_retryable_transport_error`, `_notify_attempt`, `_ModelResponseAbandoned`, `_send_before_deadline`, `ModelCallRuntime`, `const:_TRANSIENT_MULTIMODAL_REJECTION_MESSAGES`
 - 直接静态依赖：`__future__`, `math`, `threading`, `time`, `collections.abc`, `dataclasses`, `typing`, `.contracts`
 - API/IPC 入口：—
 
@@ -5599,8 +5664,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/orchestrator/catalog.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：147 行，5,705 bytes
-- SHA-256：`42c2c69ed3c9a816e83e82cf077514b7799c1cc89503f8592c39b7df71ae3530`
+- 规模：135 行，5,217 bytes
+- SHA-256：`e43d9a2969078edcefe2cf77e373268c54820b5eeca53d0313833077b4280c7a`
 - 源码事实摘要：Capability catalog exposed to ARP Studio and external clients.
 - 顶层符号/结构：`capability_catalog`
 - 直接静态依赖：`__future__`, `.contracts`
@@ -5612,11 +5677,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/orchestrator/contracts.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：382 行，15,137 bytes
-- SHA-256：`b80f2126c2b3234714f9d3d4325080c72e546b6b84dea5d13d9df02b7cf23342`
+- 规模：383 行，15,200 bytes
+- SHA-256：`e4f698c134e540b61a656a21fc31c8d7171224d325d2dae9dc746db5ac0eb690`
 - 源码事实摘要：Versioned contracts shared by the Agent, ARP runtime, and cockpit UI.
 - 顶层符号/结构：`ArpNodeKind`, `ArpRunStatus`, `ArpRuntimeVersion`, `ArpRetryPolicy`, `ArpNode`, `ArpEdge`, `ArpPolicy`, `ArpGraph`, `GraphValidation`, `CapabilitySpec`, `EvidenceRecord`, `EvidenceRequirement`, `ArpRunRequest`, `_validate_node_config`，另有 5 项
-- 直接静态依赖：`__future__`, `enum`, `time`, `typing`, `uuid`, `pydantic`, `..fast.action_contract`
+- 直接静态依赖：`__future__`, `enum`, `time`, `typing`, `uuid`, `pydantic`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/orchestrator/evidence.py -->
@@ -5664,11 +5729,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/orchestrator/live_agent.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：4552 行，161,579 bytes
-- SHA-256：`f81cae3b8df49df11b217d58178b25177eba169b21c5c34baa9f5d875c606e3c`
+- 规模：4379 行，155,785 bytes
+- SHA-256：`c969e20534dcfdf166b761648ec6f78a4f4eff51bebb5f4526722f6ffcf9125d`
 - 源码事实摘要：Product composition root for the minimal live vNext desktop loop.
-- 顶层符号/结构：`_Budget`, `_ModelConfig`, `_TargetFacts`, `_SessionPort`, `_CompositionDependencies`, `_FrozenTarget`, `DesktopLeaseError`, `DesktopLeaseSlot`, `_SessionBuild`, `_plain_dict`, `_exact_keys`, `_positive_int`, `_positive_number`, `_fnv1a_utf16`，另有 67 项
-- 直接静态依赖：`__future__`, `base64`, `collections.abc`, `ctypes`, `dataclasses`, `copy`, `hashlib`, `json`, `os`, `pathlib`, `threading`, `time`, `typing`, `uuid`，另有 24 项
+- 顶层符号/结构：`_Budget`, `_ModelConfig`, `_TargetFacts`, `_SessionPort`, `_CompositionDependencies`, `_FrozenTarget`, `DesktopLeaseError`, `DesktopLeaseSlot`, `_SessionBuild`, `_plain_dict`, `_positive_int`, `_positive_number`, `_fnv1a_utf16`, `build_exact_live_vnext_graph`，另有 69 项
+- 直接静态依赖：`__future__`, `base64`, `collections.abc`, `ctypes`, `dataclasses`, `copy`, `hashlib`, `json`, `os`, `pathlib`, `threading`, `time`, `typing`, `uuid`，另有 23 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/orchestrator/projection.py -->
@@ -5677,8 +5742,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/orchestrator/projection.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1016 行，51,819 bytes
-- SHA-256：`6251759193f379c895fa31b88b579d517bd4dd4154b7faa9ea0375088c3c9cc1`
+- 规模：1097 行，55,661 bytes
+- SHA-256：`df734aa56939cc6e9838315386e4e053cb624af417b718f782354b201f442774`
 - 源码事实摘要：Read-optimized projections of Agent, controller, replay, and ARP events.
 - 顶层符号/结构：`_compact`, `_nonnegative_latency_ms`, `_percentile`, `RunProjectionStore`, `const:_TERMINAL`, `const:RUN_PROJECTIONS`
 - 直接静态依赖：`__future__`, `copy`, `json`, `math`, `threading`, `time`, `collections`, `pathlib`, `typing`, `..utils.log`
@@ -5690,8 +5755,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/orchestrator/runtime.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1229 行，52,448 bytes
-- SHA-256：`c538838f0006b07aefb1e09ffa876bd3abe01f0bcf0fa71526dde11a6824bcb7`
+- 规模：1059 行，44,632 bytes
+- SHA-256：`1aa0365b2826f40ec29ccb1cdb9be8af411ebe5223c9663a2189013b5710c209`
 - 源码事实摘要：Executable ARP graph runtime with retries, cancellation, and human gates.
 - 顶层符号/结构：`NodeResult`, `PauseController`, `_CombinedStopEvent`, `_json_preview`, `_interaction_state_preview`, `_typed_snapshot_list`, `ArpExecution`, `ArpRunManager`, `const:ARP_RUNS`
 - 直接静态依赖：`__future__`, `json`, `threading`, `time`, `uuid`, `dataclasses`, `typing`, `..utils.log`, `.contracts`, `.evidence`
@@ -5729,10 +5794,10 @@
 [打开文件](<../../python/winpilot_home/winpilot/perception/apps.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：665 行，24,282 bytes
-- SHA-256：`4d4380acd127356aa2bd3f026b2daa8b2a7a133fb0284c279e6df6fcf0130a74`
+- 规模：1024 行，36,292 bytes
+- SHA-256：`80b3d27c7a08180b698946e8164713aabc8ca9d6b6b007a058347bcc1c348beb`
 - 源码事实摘要：Resolve installed application display names to discovered launch targets.
-- 顶层符号/结构：`_unique_text`, `_start_app_entry`, `_parse_start_apps_output`, `_merge_entry_metadata`, `_start_menu_entries`, `_uwp_entries`, `_app_paths_entries`, `_index`, `_normalized`, `_score`, `_entry_terms`, `_score_entry`, `resolve`, `launch_target`，另有 7 项
+- 顶层符号/结构：`_unique_text`, `_start_app_entry`, `_parse_start_apps_output`, `_merge_entry_metadata`, `_start_menu_entries`, `_uwp_entries`, `_app_paths_entries`, `_index`, `_normalized`, `_score`, `_entry_terms`, `_score_entry`, `resolve`, `launch_target`，另有 19 项
 - 直接静态依赖：`__future__`, `json`, `os`, `re`, `shutil`, `subprocess`, `threading`, `time`, `unicodedata`, `difflib`, `pathlib`, `..utils.log`
 - API/IPC 入口：—
 
@@ -5898,11 +5963,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/perception/vision_cv.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：663 行，27,299 bytes
-- SHA-256：`884ddf9a2799ba571064def4b2424050e2de66f6426866f5ffb63df0aa1a0fdd`
+- 规模：806 行，33,496 bytes
+- SHA-256：`ba97bf55f03bc3beabb71decdcf58b3bc6d94b4bbbfc0eddf69bcfb222236277`
 - 源码事实摘要：OpenCV dimension: what OCR cannot see.
-- 顶层符号/结构：`_detect_control_candidates_from_image`, `detect_control_candidates`, `detect_icon_candidates`, `list_templates`, `save_template`, `save_template_image`, `match_template`, `color_probe`, `region_mean_color`, `diff_ratio`, `wait_screen_stable`, `is_animating`, `image_ink_stats_from_array`, `image_ink_stats`，另有 7 项
-- 直接静态依赖：`__future__`, `time`, `pathlib`, `cv2`, `numpy`, `..config`, `..utils.log`, `..utils.screenshot`, `.model`
+- 顶层符号/结构：`_detect_control_candidates_from_image`, `detect_control_candidates`, `detect_icon_candidates`, `list_templates`, `save_template`, `save_template_image`, `match_template`, `color_probe`, `region_mean_color`, `diff_ratio`, `wait_screen_stable`, `is_animating`, `image_ink_stats_from_array`, `image_ink_stats`，另有 9 项
+- 直接静态依赖：`__future__`, `base64`, `time`, `pathlib`, `cv2`, `numpy`, `..config`, `..utils.log`, `..utils.screenshot`, `.model`, `.surface_binding`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/perception/vlm.py -->
@@ -6015,11 +6080,24 @@
 [打开文件](<../../python/winpilot_home/winpilot/recorder/trace.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：3965 行，166,015 bytes
-- SHA-256：`ea2d483240c5633d3b28213eef9b7c8096dc3d35d15a769bffa203344d614edc`
+- 规模：3780 行，157,874 bytes
+- SHA-256：`e3b169e4f188d695a1df86980d68877c33cabf2cfd59f59a76e9ac84aee704c9`
 - 源码事实摘要：Trace recording, script export, and offline (0-token) replay.
-- 顶层符号/结构：`clean_selector_text`, `TraceRecorder`, `list_traces`, `_read_trace_records`, `read_trace`, `_distill_steps`, `_semantic_step_key`, `_step_semantic_text`, `_event_target_window`, `_extract_replay_steps`, `_legacy_event_requires_replay`, `_stable_target_window_hint`, `_target_window_from_result_meta`, `_target_window_from_args`，另有 50 项
-- 直接静态依赖：`__future__`, `hashlib`, `json`, `inspect`, `os`, `queue`, `re`, `threading`, `time`, `collections.abc`, `pathlib`, `typing`, `cv2`, `..action`，另有 10 项
+- 顶层符号/结构：`clean_selector_text`, `TraceRecorder`, `list_traces`, `_read_trace_records`, `read_trace`, `_distill_steps`, `_semantic_step_key`, `_step_semantic_text`, `_event_target_window`, `_extract_replay_steps`, `_legacy_event_requires_replay`, `_stable_target_window_hint`, `_target_window_from_result_meta`, `_target_window_from_args`，另有 39 项
+- 直接静态依赖：`__future__`, `base64`, `hashlib`, `json`, `inspect`, `os`, `queue`, `re`, `threading`, `time`, `collections.abc`, `pathlib`, `typing`, `cv2`，另有 12 项
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: python/winpilot_home/winpilot/recorder/wps_validate.py -->
+### `python/winpilot_home/winpilot/recorder/wps_validate.py`
+
+[打开文件](<../../python/winpilot_home/winpilot/recorder/wps_validate.py>)
+
+- 分类/语言：`winpilot-product` / Python
+- 规模：228 行，9,211 bytes
+- SHA-256：`16c0f8a89f330a0f1ed853502c8b4aa407322a078f89b37eae519ac941d5163f`
+- 源码事实摘要：Structural validation for the ``.wps.json`` offline replay script format.
+- 顶层符号/结构：`_nonempty_str`, `_is_number`, `_is_point`, `_target_window_hint_from`, `_target_window_hint`, `_target_window_spec_present`, `_has_click_target`, `_valid_strokes`, `_validate_leaf_step`, `_validate_steps`, `validate_script`, `const:LEAF_TOOLS`, `const:CTRL_TOOLS`, `const:EXT_TOOLS`，另有 1 项
+- 直接静态依赖：`__future__`, `typing`, `.replay_control`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/runtime_info.py -->
@@ -6028,8 +6106,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/runtime_info.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：200 行，6,821 bytes
-- SHA-256：`ea89095adbd6c64a99eccb3af12eeb3503b79b39d39548d62b781660c6524b6b`
+- 规模：203 行，6,969 bytes
+- SHA-256：`db3f43b57b894c82168aa804c5aaaeb7355008cfc48976435c4e0638cc42c7fe`
 - 源码事实摘要：Runtime fingerprint helpers for debugging the live WinPilot service.
 - 顶层符号/结构：`repo_root`, `_git`, `_git_dirty`, `_has_module`, `_source_stamp`, `_cached_source_state`, `_read_git_state`, `_cached_git_state`, `_reset_runtime_caches_for_tests`, `runtime_source_drifted`, `runtime_fingerprint`, `const:RUNTIME_CONTRACT_VERSION`, `const:_SOURCE_STAMP_TTL_S`, `const:_GIT_STATE_TTL_S`，另有 5 项
 - 直接静态依赖：`__future__`, `importlib.util`, `hashlib`, `os`, `subprocess`, `sys`, `threading`, `time`, `pathlib`, `typing`, `.config`
@@ -6067,12 +6145,12 @@
 [打开文件](<../../python/winpilot_home/winpilot/server.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：2743 行，99,284 bytes
-- SHA-256：`fae9e1163298623e6e1df748a8e581a92d3feb3884cdcfca5af7e1a92744aedc`
+- 规模：2607 行，94,242 bytes
+- SHA-256：`81ddca5fb7787de7069f4df5f4b35d8791f611f9a5a30ff5cff2ded4dfd17fbb`
 - 源码事实摘要：FastAPI server: REST control surface + WebSocket event stream + static UI.
-- 顶层符号/结构：`_legacy_build_runner`, `_legacy_session`, `FlowFragmentProposalRequest`, `_started_by_direct_uvicorn`, `_warm_perception_dimensions`, `_lifespan`, `_request_token`, `require_control_token`, `api_ping`, `_ensure_inside`, `_public_trace_leaf`, `_public_trace_run_id`, `_is_admin`, `_RunState`，另有 122 项
-- 直接静态依赖：`__future__`, `asyncio`, `ctypes`, `json`, `os`, `queue`, `re`, `secrets`, `sys`, `threading`, `time`, `uuid`, `contextlib`, `pathlib`，另有 30 项
-- API/IPC 入口：`GET /api/ping`, `POST /api/chat`, `POST /api/stop`, `POST /api/interject`, `GET /api/status`, `GET /api/v2/platform`, `GET /api/v2/capabilities`, `GET /api/v2/runs`, `GET /api/v2/jobs`, `GET /api/v2/desktop-context`, `GET /api/v2/jobs/{job_id}`, `POST /api/v2/jobs/{job_id}/cancel`, `GET /api/v2/runs/current`, `GET /api/v2/runs/{run_id}`，另有 63 项
+- 顶层符号/结构：`_legacy_build_runner`, `_legacy_session`, `FlowFragmentProposalRequest`, `_started_by_direct_uvicorn`, `_warm_perception_dimensions`, `_lifespan`, `_request_token`, `require_control_token`, `api_ping`, `_ensure_inside`, `_public_trace_leaf`, `_public_trace_run_id`, `_is_admin`, `_RunState`，另有 112 项
+- 直接静态依赖：`__future__`, `asyncio`, `ctypes`, `json`, `os`, `queue`, `re`, `secrets`, `sys`, `threading`, `time`, `uuid`, `contextlib`, `pathlib`，另有 28 项
+- API/IPC 入口：`GET /api/ping`, `POST /api/chat`, `POST /api/stop`, `GET /api/status`, `GET /api/v2/platform`, `GET /api/v2/runs`, `GET /api/v2/jobs`, `GET /api/v2/desktop-context`, `GET /api/v2/jobs/{job_id}`, `POST /api/v2/jobs/{job_id}/cancel`, `GET /api/v2/runs/current`, `GET /api/v2/runs/{run_id}`, `POST /api/v2/runs/{run_id}/cancel`, `POST /api/v2/runs/{run_id}/pause`，另有 55 项
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/tasking/__init__.py -->
 ### `python/winpilot_home/winpilot/tasking/__init__.py`
@@ -6119,8 +6197,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/tasking/capability.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：662 行，29,938 bytes
-- SHA-256：`6c97291a4aa3224b0ab657edad8343666f19b695d9200ec81e3bb671a0ae1a62`
+- 规模：661 行，29,872 bytes
+- SHA-256：`7362531c9d3783e364390e7a6e7eb79ae7c2d75875a12ccf5a3b08219e914cd8`
 - 源码事实摘要：Capability selection and preflight satisfiability for typed task stages.
 - 顶层符号/结构：`CapabilityUnsatisfiedError`, `ComponentChoice`, `CapabilityPlanner`, `tools_for_capabilities`, `const:CAPABILITY_TO_TOOLS`, `const:_EXECUTE_DESKTOP_MODEL_TOOLS`, `const:_COMPONENT_CAPABILITIES`, `const:_COMMUNICATION_ADAPTER_CAPABILITIES`, `const:_STAGE_BASE`
 - 直接静态依赖：`__future__`, `dataclasses`, `os`, `typing`, `.contracts`
@@ -6197,10 +6275,10 @@
 [打开文件](<../../python/winpilot_home/winpilot/tasking/execution_context.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：289 行，11,237 bytes
-- SHA-256：`ef0d296db896e20f82c33efd98809417302805df2dbab3d3d8dbb78e010b5f58`
+- 规模：368 行，13,845 bytes
+- SHA-256：`535686990960f68bec8125b70d20f2d951c9538e358fdb198e6815e39dd89780`
 - 源码事实摘要：Validated client-to-runtime context for desktop foreground handoff.
-- 顶层符号/结构：`_normalized_rect`, `normalize_execution_context`, `windows_shell_desktop_context`, `window_process_id`, `capture_foreground_window_context`, `validated_handoff_target`, `foreground_handoff_conflict`
+- 顶层符号/结构：`_normalized_rect`, `normalize_execution_context`, `_window_title`, `_window_class_name`, `windows_shell_desktop_context`, `capture_desktop_workspace_context`, `window_process_id`, `capture_foreground_window_context`, `validated_handoff_target`, `foreground_handoff_conflict`
 - 直接静态依赖：`__future__`, `ctypes`, `time`, `typing`
 - API/IPC 入口：—
 
@@ -6249,8 +6327,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/tasking/interaction_stage_runtime.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：3941 行，180,573 bytes
-- SHA-256：`0ec8cbda41038288614b29a6d628c86794227ba17fbcc0777e4edfc58b77f917`
+- 规模：3941 行，180,576 bytes
+- SHA-256：`9345b1aec36892ab161ac9f459571d856887caa61248493c849de5b5f6cb7e10`
 - 源码事实摘要：Deterministic runtime for typed visual-interaction stages.
 - 顶层符号/结构：`_pointer_session_key`, `_registered_pointer_session`, `_register_pointer_session`, `_discard_registered_pointer_session`, `_local_causal_change_ratio`, `_controller_visual_no_effect`, `_local_resolution_requirement_proofs`, `_mutation_signature`, `_failed_visible_mutation`, `_failed_no_effect_evidence`, `_failed_no_effect_repeats_frame`, `_prove_artifact_frame_lineage`, `_json`, `_failure`，另有 20 项
 - 直接静态依赖：`__future__`, `base64`, `ctypes`, `hashlib`, `json`, `pathlib`, `threading`, `time`, `typing`, `cv2`, `numpy`, `..agent.runtime_profile`, `..agent.tools`, `..fast.watcher`，另有 14 项
@@ -6288,8 +6366,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/tasking/stage_runtime.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1295 行，57,971 bytes
-- SHA-256：`527aba386a77732c16dbf06b9efb1a2b4183c206f9b23d421bcdbb7ed973d6c0`
+- 规模：1296 行，57,924 bytes
+- SHA-256：`b769a13b698ca151134cfef09bf04962caba5305105795eeb53d117656219a9a`
 - 源码事实摘要：Deterministic state machine for one typed task stage.
 - 顶层符号/结构：`_json`, `_raise_stage_failure`, `StageRuntime`, `task_stage_handler`, `const:SEMANTIC_EXECUTION_STAGE_TYPES`, `const:STAGE_RUNTIME`
 - 直接静态依赖：`__future__`, `ctypes`, `json`, `time`, `typing`, `..agent.router`, `..agent.runtime_profile`, `..agent.tools`, `..orchestrator.contracts`, `..orchestrator.runtime`, `..perception`, `..perception.app_aliases`, `..utils.log`, `.adapters`，另有 10 项
@@ -6301,11 +6379,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/tasking/visual_appearance.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：283 行，9,982 bytes
-- SHA-256：`3e779d5e058102bd946c53fce7fe8436b53937c4cf51526eda4a13f0cc0b7b8d`
+- 规模：283 行，9,979 bytes
+- SHA-256：`991ca98cc1f794bc9ed77ff45ade28447adb6e746330149cefe6ab738abe7f0a`
 - 源码事实摘要：Deterministic current-frame appearance evidence for semantic planning.
 - 顶层符号/结构：`_colour_family`, `_pixel_box`, `_frame_bounds`, `_component_topology`, `_components`, `inventory_frame_appearance`, `match_role_colours`, `const:_ROLE_COLOUR_TERMS`
-- 直接静态依赖：`__future__`, `base64`, `json`, `pathlib`, `typing`, `cv2`, `numpy`, `..utils`
+- 直接静态依赖：`__future__`, `base64`, `json`, `pathlib`, `typing`, `cv2`, `numpy`, `..perception`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/tasking/visual_effects.py -->
@@ -6392,11 +6470,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/utils/image_capture.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：585 行，24,269 bytes
-- SHA-256：`4d77b0254468755031f90240425067746c0d0d5d362af03d948695416b1d2e3b`
+- 规模：443 行，18,069 bytes
+- SHA-256：`0ba3671388376179cb0f229a87dfa734737fb2f4eb62bb61047b0d0b322b08bf`
 - 源码事实摘要：Small image capture helpers shared by agent tools and the loop.
-- 顶层符号/结构：`VisualCaptureScope`, `window_client_region`, `region_frame_bounds`, `select_visual_capture_scope`, `capture_window_jpeg_b64`, `normalized_detail_crop_jpeg_b64`, `credible_work_surface_frame_bounds`, `jpeg_diff_ratio`, `jpeg_diff_ratio_in_normalized_roi`, `jpeg_color_activation_in_normalized_roi`, `jpeg_diff_ratios_in_normalized_rois`, `const:_CONTINUOUS_INPUT_EDGE_INSET_FRAME_UNITS`
-- 直接静态依赖：`__future__`, `base64`, `dataclasses`, `typing`, `cv2`, `numpy`, `win32gui`, `..config`, `..perception.surface_binding`, `.`
+- 顶层符号/结构：`VisualCaptureScope`, `window_client_region`, `region_frame_bounds`, `select_visual_capture_scope`, `capture_window_jpeg_b64`, `normalized_detail_crop_jpeg_b64`, `jpeg_diff_ratio`, `jpeg_diff_ratio_in_normalized_roi`, `jpeg_color_activation_in_normalized_roi`, `jpeg_diff_ratios_in_normalized_rois`
+- 直接静态依赖：`__future__`, `base64`, `dataclasses`, `typing`, `cv2`, `numpy`, `win32gui`, `..config`, `.`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/utils/log.py -->
@@ -6470,11 +6548,24 @@
 [打开文件](<../../python/winpilot_home/winpilot/visual_runtime/frame_observer.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：189 行，6,817 bytes
-- SHA-256：`86379851503fdec7903f10a6c4dacca009cc23f3f46c51061642f936c5da8e06`
+- 规模：189 行，6,816 bytes
+- SHA-256：`56bfd369bd3fbbef04a46370a100c49e871309871665bbe8e771b68ddf352797`
 - 源码事实摘要：Capture and publish the single frame allowed to ground GUI actions.
 - 顶层符号/结构：`FrameCapture`, `FrameObserver`
 - 直接静态依赖：`__future__`, `collections.abc`, `dataclasses`, `time`, `typing`, `.frame_authority`, `..utils.image_capture`, `..utils.screenshot`
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: python/winpilot_home/winpilot/visual_runtime/input_sequence.py -->
+### `python/winpilot_home/winpilot/visual_runtime/input_sequence.py`
+
+[打开文件](<../../python/winpilot_home/winpilot/visual_runtime/input_sequence.py>)
+
+- 分类/语言：`winpilot-product` / Python
+- 规模：125 行，5,130 bytes
+- SHA-256：`055f97fe1dc9f1d52511da1353858266e36806dc3aabaa6bd976a7ac84093c2a`
+- 源码事实摘要：Minimal model-facing grammar for a physical input timeline.
+- 顶层符号/结构：`InputSequenceStep`, `_fields`, `_milliseconds`, `_point`, `_pointer`, `parse_input_sequence`
+- 直接静态依赖：`__future__`, `dataclasses`, `re`, `.keyboard_contracts`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/visual_runtime/keyboard_contracts.py -->
@@ -6483,11 +6574,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/visual_runtime/keyboard_contracts.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：65 行，2,266 bytes
-- SHA-256：`72eb9ed7e5f6860d9be299e63d130fced0c348f8bcbd40134e5843fc6e90f3ea`
+- 规模：168 行，5,854 bytes
+- SHA-256：`496f81f05c38aebac869101141c02bff8f416d33edf7fd81fa5ecc833f3b04e4`
 - 源码事实摘要：Pure, owner-neutral contracts shared by keyboard schema and execution.
-- 顶层符号/结构：`HotkeyChord`, `const:MAX_TYPE_TEXT_CODEPOINTS`, `const:CANONICAL_HOTKEY_MODIFIERS`, `const:CANONICAL_HOTKEY_KEYS`
-- 直接静态依赖：`__future__`, `dataclasses`
+- 顶层符号/结构：`normalize_hotkey_args`, `canonical_hotkey_args`, `HotkeyChord`, `const:MAX_TYPE_TEXT_CODEPOINTS`, `const:CANONICAL_HOTKEY_MODIFIERS`, `const:CANONICAL_HOTKEY_KEYS`, `const:_KEY_ALIASES`
+- 直接静态依赖：`__future__`, `json`, `dataclasses`, `typing`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/visual_runtime/normalized_frame_coordinates.py -->
@@ -6509,8 +6600,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/visual_runtime/submitted_image_coordinates.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：267 行，10,974 bytes
-- SHA-256：`915c2b89f0c86d373de618cf5099bc1ee220e7d31cb956a56adc15fc109ea886`
+- 规模：273 行，11,326 bytes
+- SHA-256：`37d67db43bce8d0e177f4cb61ff33db60b6784965f3028a269c4b61ca901093b`
 - 源码事实摘要：Shared pure submitted-image to normalized-frame coordinate mapping.
 - 顶层符号/结构：`SubmittedImageCoordinateMapper`
 - 直接静态依赖：`__future__`, `dataclasses`, `math`, `typing`
@@ -6548,11 +6639,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/actor/envelope.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：766 行，25,990 bytes
-- SHA-256：`be3f4567f9591f58950196f113100f246c100c063b9131b8d7b2206bb265b139`
+- 规模：652 行，22,009 bytes
+- SHA-256：`d43b320f23c12b9d840219ec7d0ad9e411038bdf3994c4d529eafdc5c8e65aa2`
 - 源码事实摘要：Runtime-owned identity envelope for one admitted Actor proposal.
-- 顶层符号/结构：`InvalidActorEnvelope`, `InvalidActorAdmission`, `_identity`, `_identities`, `_ordered_identities`, `_sha256`, `_bounded_integer`, `_frame_region`, `_submitted_size`, `_submitted_coordinate`, `_validate_point_arguments`, `_validate_image_region`, `_canonical_proposal`, `proposal_tool_name`，另有 11 项
-- 直接静态依赖：`__future__`, `hashlib`, `json`, `math`, `re`, `typing`, `pydantic`, `..capabilities.argument_validation`, `..capabilities`, `..mission`, `..json_contract`, `..profiling`, `.proposals`
+- 顶层符号/结构：`InvalidActorEnvelope`, `InvalidActorAdmission`, `_identity`, `_identities`, `_ordered_identities`, `_sha256`, `_bounded_integer`, `_frame_region`, `_submitted_size`, `_submitted_coordinate`, `_validate_image_region`, `proposal_tool_name`, `_decision_id`, `_mission_projection_sha256`，另有 9 项
+- 直接静态依赖：`__future__`, `hashlib`, `json`, `math`, `re`, `typing`, `pydantic`, `..capabilities`, `..mission`, `..json_contract`, `..profiling`, `.proposals`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/actor/proposals.py -->
@@ -6561,10 +6652,10 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/actor/proposals.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：543 行，18,318 bytes
-- SHA-256：`7afe311780112bb0fcb79d714ca53b7f0fcd9d9424be1b51e8d337450a81dcff`
+- 规模：337 行，10,455 bytes
+- SHA-256：`edc436d2a8c3314ea4bef5af77442990e50f169ac57e8f2699e951e99da407e5`
 - 源码事实摘要：Strict, identity-free P4a Visual Actor proposal contracts.
-- 顶层符号/结构：`ActorContractError`, `InvalidActorProposal`, `_text`, `_unique_text`, `_freeze`, `_thaw`, `_canonical_key`, `_reject_overreach`, `_ActorModel`, `ImageRegion`, `DesktopActionProposal`, `ObserveProposal`, `CapabilityRequest`, `InspectionRequest`，另有 17 项
+- 顶层符号/结构：`ActorContractError`, `InvalidActorProposal`, `_text`, `_unique_text`, `_freeze`, `_thaw`, `_ActorModel`, `ImageRegion`, `DesktopActionProposal`, `ObserveProposal`, `CapabilityRequest`, `InspectionRequest`, `ClaimObligationDone`, `BlockedReport`，另有 9 项
 - 直接静态依赖：`__future__`, `json`, `math`, `re`, `types`, `typing`, `pydantic`, `..capability_names`, `..json_contract`
 - API/IPC 入口：—
 
@@ -6574,24 +6665,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/capabilities/__init__.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：16 行，493 bytes
-- SHA-256：`8be598d5262589f26d3e9178663b17adf49408763fe79b4564e5ef9944a2028a`
+- 规模：13 行，342 bytes
+- SHA-256：`f83ad7b72578b2277f5cae016621a61c77014175672a80bd97eaa9faaac9fccc`
 - 源码事实摘要：Pure capability contracts and deterministic Broker projection.
 - 顶层符号/结构：—
-- 直接静态依赖：`.contracts`, `.argument_validation`, `.state`, `.broker`
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/capabilities/argument_validation.py -->
-### `python/winpilot_home/winpilot/vnext/capabilities/argument_validation.py`
-
-[打开文件](<../../python/winpilot_home/winpilot/vnext/capabilities/argument_validation.py>)
-
-- 分类/语言：`winpilot-product` / Python
-- 规模：207 行，7,192 bytes
-- SHA-256：`39cbca634131b411f281be76a5b45e73a0783369b0f6104f43cdafa8a98dbd4e`
-- 源码事实摘要：Deterministic, fail-closed validation for vNext tool arguments.
-- 顶层符号/结构：`ToolSchemaValidationError`, `ToolArgumentValidationError`, `_display_path`, `_error_sort_key`, `_reject_nonlocal_references`, `ToolArgumentValidator`, `const:JSON_SCHEMA_DIALECT`, `const:_REFERENCE_KEYWORDS`
-- 直接静态依赖：`__future__`, `types`, `typing`, `..json_contract`, `.contracts`
+- 直接静态依赖：`.contracts`, `.state`, `.broker`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/capabilities/broker.py -->
@@ -6600,8 +6678,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/capabilities/broker.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：537 行，19,282 bytes
-- SHA-256：`731fd1272a3a367f84256278d93f0e3f5fe04ebfc05cec4ff54db79753e05020`
+- 规模：555 行，19,944 bytes
+- SHA-256：`0ebbd9178f8eda12ab568f774b274eba458a23bf97164e4a308a79d522982907`
 - 源码事实摘要：Pure deterministic Capability Broker; it never inspects GUI semantics.
 - 顶层符号/结构：`CapabilityBroker`
 - 直接静态依赖：`__future__`, `dataclasses`, `typing`, `..capability_names`, `..mission`, `..profiling`, `.contracts`, `.state`
@@ -6613,8 +6691,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/capabilities/contracts.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：575 行，21,487 bytes
-- SHA-256：`7c033341ab3bc63cf8ab0ae19a8bc2acb3badb20c8ea18cf9226c13649fbc82f`
+- 规模：546 行，20,498 bytes
+- SHA-256：`d625b9ecae50cccd037963b647d3c592206d4b7717a6fe394ddbb9998f8a463e`
 - 源码事实摘要：Strict P3 contracts for catalog, grants, runtime state, and projection.
 - 顶层符号/结构：`CapabilityContractError`, `ToolRoute`, `ExecutionRoute`, `ExecutionMedium`, `MutationKind`, `PointerDisposition`, `_text`, `_identity`, `_strings`, `_capability`, `_capabilities`, `_enum_value`, `_wire_array`, `_thaw_frozen_json`，另有 13 项
 - 直接静态依赖：`__future__`, `hashlib`, `json`, `re`, `dataclasses`, `enum`, `types`, `typing`, `..capability_names`, `..json_contract`
@@ -6665,11 +6743,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/desktop_adapter/atomic.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：2225 行，82,994 bytes
-- SHA-256：`9dc3506b8b80f02c5d4a71e9daa52f5bda558d70957296b1b78688f560a742fc`
-- 源码事实摘要：One atomic bridge from a bound Actor decision to admitted physical input.
-- 顶层符号/结构：`LiveTargetSnapshot`, `DesktopTargetProbe`, `DesktopWorkspacePort`, `RawReceiptTraceSink`, `_PreparedAction`, `_PinnedExecution`, `_HeldPointerLease`, `AtomicDesktopAdapter`, `const:_ACTIONS`, `const:_POST_FRAME_KIND`, `const:_JPEG_MEDIA_TYPE`, `const:_MAX_SCROLL_AMOUNT`, `const:_MAX_DRAG_INTERMEDIATE_POINTS`, `const:_DEFAULT_HELD_POINTER_TIMEOUT_S`，另有 2 项
-- 直接静态依赖：`__future__`, `base64`, `ctypes`, `collections.abc`, `dataclasses`, `hashlib`, `json`, `math`, `ntpath`, `threading`, `time`, `types`, `typing`, `win32con`，另有 15 项
+- 规模：2026 行，75,813 bytes
+- SHA-256：`15404aff9c47e1cb6927124cbde9c3c80677cdcc88e6aae8fe2ae257b94ae552`
+- 源码事实摘要：One atomic bridge from an Actor decision to admitted physical input.
+- 顶层符号/结构：`LiveTargetSnapshot`, `DesktopTargetProbe`, `DesktopWorkspacePort`, `RawReceiptTraceSink`, `_PreparedAction`, `_PinnedExecution`, `_HeldPointerLease`, `AtomicDesktopAdapter`, `const:_ACTIONS`, `const:_POST_FRAME_KIND`, `const:_JPEG_MEDIA_TYPE`, `const:_MAX_SCROLL_AMOUNT`, `const:_MAX_LAUNCH_EFFECT_CHARS`, `const:_DEFAULT_HELD_POINTER_TIMEOUT_S`
+- 直接静态依赖：`__future__`, `base64`, `collections.abc`, `dataclasses`, `hashlib`, `json`, `math`, `ntpath`, `threading`, `time`, `types`, `typing`, `...action.desktop_queue`, `...action.raw_device`，另有 11 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/desktop_adapter/workspace.py -->
@@ -6678,11 +6756,24 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/desktop_adapter/workspace.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：433 行，15,920 bytes
-- SHA-256：`52c75f1f7f2645f3ec215d4e04ac2154f8da5596a719cafefc3bdaa7a7edd486`
+- 规模：421 行，15,636 bytes
+- SHA-256：`559a2b86592da43ab067fc04c9f1d561e20a255a4677f9306380cb6bc3d7b91b`
 - 源码事实摘要：One mutable desktop workspace above per-action atomic input.
 - 顶层符号/结构：`WorkspaceSurface`, `WorkspaceObservation`, `_PendingTransition`, `DesktopWorkspace`
 - 直接静态依赖：`__future__`, `collections.abc`, `dataclasses`, `threading`, `time`, `..mission`, `.atomic`
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/desktop_ops.py -->
+### `python/winpilot_home/winpilot/vnext/desktop_ops.py`
+
+[打开文件](<../../python/winpilot_home/winpilot/vnext/desktop_ops.py>)
+
+- 分类/语言：`winpilot-product` / Python
+- 规模：116 行，3,522 bytes
+- SHA-256：`e1b8bb559707c498afbb51267bb85939a5cacc3f895979e5a6d0b8f3e26e2e4d`
+- 源码事实摘要：vNext-owned capture / window-inventory / image-paste operation contracts.
+- 顶层符号/结构：`_bounded_text`, `capture_screen`, `list_windows`, `paste_image`, `const:CAPTURE_FORMAT`, `const:WINDOWS_FORMAT`, `const:PASTE_FORMAT`, `const:_CAPTURE_OUTPUT_MAX_CHARS`
+- 直接静态依赖：`__future__`, `typing`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/evidence/__init__.py -->
@@ -6709,71 +6800,6 @@
 - 源码事实摘要：Canonical run-scoped storage for already-constructed vNext evidence.
 - 顶层符号/结构：`EvidenceRegistryError`, `EvidenceRegistryClosed`, `EvidenceRegistry`
 - 直接静态依赖：`__future__`, `collections.abc`, `threading`, `..mission.contracts`
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/evidence_plane/__init__.py -->
-### `python/winpilot_home/winpilot/vnext/evidence_plane/__init__.py`
-
-[打开文件](<../../python/winpilot_home/winpilot/vnext/evidence_plane/__init__.py>)
-
-- 分类/语言：`winpilot-product` / Python
-- 规模：17 行，483 bytes
-- SHA-256：`692c600a08698ee622e0c79ce222fd0519f3dfb59f4dc9f73f5e04e17f2671a1`
-- 源码事实摘要：Canonical execution evidence for the minimal vNext Runtime.
-- 顶层符号/结构：—
-- 直接静态依赖：`.contracts`, `.artifacts`, `.journal`, `.plane`
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/evidence_plane/artifacts.py -->
-### `python/winpilot_home/winpilot/vnext/evidence_plane/artifacts.py`
-
-[打开文件](<../../python/winpilot_home/winpilot/vnext/evidence_plane/artifacts.py>)
-
-- 分类/语言：`winpilot-product` / Python
-- 规模：714 行，23,787 bytes
-- SHA-256：`38dc0d9f940a3a78aee7ab1ba4b4323ec85ef5b4c56984fb8f785d9a359ce7ea`
-- 源码事实摘要：Durable frame artifacts for the vNext Runtime evidence plane.
-- 顶层符号/结构：`FrameArtifactError`, `FrameArtifactValidationError`, `FrameArtifactExistsError`, `FrameArtifactMissingError`, `FrameArtifactCorruptedError`, `ArtifactWriteResult`, `FrameArtifactWriter`, `_existing_run_directory`, `_validate_artifact_directory`, `_identity`, `_sha256`, `_timestamp_ns`, `_positive_integer`, `_role`，另有 15 项
-- 直接静态依赖：`__future__`, `base64`, `binascii`, `dataclasses`, `hashlib`, `json`, `os`, `pathlib`, `re`, `stat`, `threading`, `typing`
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/evidence_plane/contracts.py -->
-### `python/winpilot_home/winpilot/vnext/evidence_plane/contracts.py`
-
-[打开文件](<../../python/winpilot_home/winpilot/vnext/evidence_plane/contracts.py>)
-
-- 分类/语言：`winpilot-product` / Python
-- 规模：2290 行，88,721 bytes
-- SHA-256：`b75266c231a56aa9a808e879bac7fd146f7430924cad4fd5fedf931b0768f245`
-- 源码事实摘要：Canonical, reasoning-free records for the vNext Runtime evidence plane.
-- 顶层符号/结构：`RuntimeEvidenceContractError`, `FrameArtifactRole`, `RuntimeEvidenceReportStatus`, `_identity`, `_action`, `_sha256`, `_timestamp_ns`, `_positive_integer`, `_nonnegative_integer`, `_optional_boolean`, `_strict_mapping`, `_frozen_object`, `_thaw`, `_reject_non_execution_fields`，另有 30 项
-- 直接静态依赖：`__future__`, `dataclasses`, `enum`, `hashlib`, `json`, `math`, `pathlib`, `re`, `types`, `typing`, `..capability_names`, `..json_contract`, `..mission`
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/evidence_plane/journal.py -->
-### `python/winpilot_home/winpilot/vnext/evidence_plane/journal.py`
-
-[打开文件](<../../python/winpilot_home/winpilot/vnext/evidence_plane/journal.py>)
-
-- 分类/语言：`winpilot-product` / Python
-- 规模：645 行，20,673 bytes
-- SHA-256：`69f02683cd6a46b36fe287dbcb8dce969c09252b8683602219fefdbb6536a4a4`
-- 源码事实摘要：Durable, canonical journal for one vNext Runtime evidence scope.
-- 顶层符号/结构：`RuntimeEvidenceJournalError`, `RuntimeEvidenceJournalValidationError`, `RuntimeEvidenceJournalPoisoned`, `_identity`, `_optional_identity`, `_sha256`, `_thaw`, `_bounded_object`, `_canonical_bytes`, `_event_sha256`, `_reject_constant`, `_strict_object`, `_decode_json_line`, `RuntimeEvidenceJournalEvent`，另有 12 项
-- 直接静态依赖：`__future__`, `dataclasses`, `hashlib`, `json`, `os`, `pathlib`, `re`, `threading`, `types`, `typing`, `..json_contract`
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/evidence_plane/plane.py -->
-### `python/winpilot_home/winpilot/vnext/evidence_plane/plane.py`
-
-[打开文件](<../../python/winpilot_home/winpilot/vnext/evidence_plane/plane.py>)
-
-- 分类/语言：`winpilot-product` / Python
-- 规模：1527 行，60,421 bytes
-- SHA-256：`93f5fd2c24ca2133b3fd05a9439563555a3bd1e6613f520116295d16ac7fbb74`
-- 源码事实摘要：Run-scoped canonical binding of vNext Runtime execution evidence.
-- 顶层符号/结构：`RuntimeEvidencePlaneError`, `_DecisionState`, `_RawReceiptState`, `_TransitionState`, `_required_text`, `_plain_mapping`, `_thaw_json`, `_sha256`, `_canonical_receipt`, `_canonical_transition`, `_actor_frame_identity`, `_is_pre_admission_rejection`, `RuntimeEvidencePlane`, `const:_SHA256`
-- 直接静态依赖：`__future__`, `base64`, `collections.abc`, `dataclasses`, `hashlib`, `os`, `pathlib`, `re`, `threading`, `time`, `typing`, `.artifacts`, `.contracts`, `.journal`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/json_contract.py -->
@@ -6808,8 +6834,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/mission/contracts.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：2925 行，103,511 bytes
-- SHA-256：`92235317b6eb7dd7c34bc1bf330ae26bdb4dbaa78949f1a43c0b145297f311dc`
+- 规模：2923 行，103,228 bytes
+- SHA-256：`4afc814aee40354072a20b3b156298976328d2e20b8cee2dbaad1e5830c10857`
 - 源码事实摘要：Pure, versioned state contracts for the vNext mission shadow.
 - 顶层符号/结构：`thaw`, `_mapping`, `_json_mapping`, `MissionError`, `InvalidMissionDefinition`, `InvalidMissionEvent`, `StaleRevisionError`, `DuplicateEventError`, `EvidenceScopeError`, `IllegalTransitionError`, `_contract_text`, `_contract_bool`, `_contract_int`, `_contract_float`，另有 37 项
 - 直接静态依赖：`__future__`, `hashlib`, `json`, `math`, `re`, `dataclasses`, `enum`, `types`, `typing`, `..json_contract`
@@ -6821,8 +6847,8 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/mission/reducer.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1184 行，49,302 bytes
-- SHA-256：`84ba75a7ef0cf0c947dda0ea2fb24fc033f8e96decf3ed017e3e1477d781dbe8`
+- 规模：1219 行，50,641 bytes
+- SHA-256：`308e108d0f78308cb9c85e66f5823d22201f0bc79b878f859fe3079b75287e9f`
 - 源码事实摘要：Pure MissionReducer and deterministic event replay.
 - 顶层符号/结构：`_payload_text`, `_payload_string_tuple`, `_payload_items`, `_initial_projection`, `_definition_for`, `_state_map`, `_dependencies_verified`, `_ready`, `_first_ready`, `_required_verified`, `_recompute`, `_evidence_refs`, `_merge_evidence`, `_parse_artifact`，另有 19 项
 - 直接静态依赖：`__future__`, `hashlib`, `json`, `dataclasses`, `typing`, `.contracts`
@@ -6847,10 +6873,10 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/model_roles/common.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：171 行，5,557 bytes
-- SHA-256：`380717a28d4ca7b5b9715c898fe9a0ea3c5050abe82a973854854b0335b8edea`
+- 规模：190 行，6,205 bytes
+- SHA-256：`eea6f12ac49e853273f3614b9fc72a24f15f9a91feec646d2975b0dc2961f447`
 - 源码事实摘要：Shared fail-closed helpers for the two isolated live model roles.
-- 顶层符号/结构：`LiveModelRoleError`, `require_text`, `require_positive_int`, `require_positive_timeout`, `require_jpeg`, `member`, `strict_json_object`, `response_message`, `require_empty_content`, `const:MAX_LIVE_MODEL_TOTAL_TIMEOUT_S`, `const:MAX_LIVE_MODEL_OUTPUT_TOKENS`, `const:MAX_LIVE_MODEL_JSON_RESPONSE_CHARS`, `const:MAX_LIVE_MODEL_NAME_CHARS`
+- 顶层符号/结构：`LiveModelRoleError`, `require_text`, `require_positive_int`, `require_positive_timeout`, `require_jpeg`, `member`, `strict_json_object`, `response_message`, `require_empty_content`, `narration_content`, `const:MAX_LIVE_MODEL_TOTAL_TIMEOUT_S`, `const:MAX_LIVE_MODEL_OUTPUT_TOKENS`, `const:MAX_LIVE_MODEL_JSON_RESPONSE_CHARS`, `const:MAX_LIVE_MODEL_NAME_CHARS`，另有 1 项
 - 直接静态依赖：`__future__`, `base64`, `json`, `math`, `collections.abc`, `typing`
 - API/IPC 入口：—
 
@@ -6860,11 +6886,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/model_roles/visual_actor.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1911 行，72,798 bytes
-- SHA-256：`88d5c748b3c2edce8c42f38deaa4205487edea5197737398f01db0b79ab09a49`
-- 源码事实摘要：Restricted one-turn Visual Actor backed by the shared model call Runtime.
-- 顶层符号/结构：`_InitialExchange`, `_VisualExchange`, `VisualActorTurnAdmission`, `_canonical_json`, `_decision_id`, `_initial_decision_id`, `_bounded_thread_messages`, `_strict_provider_schema`, `_actor_parameters`, `_tool_definitions`, `_decode_arguments`, `_flow_fragment_tool_definition`, `_flow_fragment_from_response`, `_proposal_from_response`，另有 22 项
-- 直接静态依赖：`__future__`, `hashlib`, `json`, `threading`, `copy`, `collections.abc`, `dataclasses`, `typing`, `...modeling`, `..actor`, `..runtime.contracts`, `.common`
+- 规模：3641 行，141,074 bytes
+- SHA-256：`d8c23217358189a4dc1b66a6691a9f546598f85c9ff1a28af5b37d230a57f3cc`
+- 源码事实摘要：One semantic Visual Actor backed by the shared model call Runtime.
+- 顶层符号/结构：`_InitialExchange`, `_VisualExchange`, `VisualActorTurnAdmission`, `_canonical_json`, `_repeated_tool_result`, `_project_tool_result`, `_projected_tool_message`, `_finish_reason`, `_truncation_messages`, `_actionable_tool_result`, `_actionable_tool_error`, `_tool_function_name`, `_decision_id`, `_initial_decision_id`，另有 51 项
+- 直接静态依赖：`__future__`, `hashlib`, `json`, `re`, `threading`, `concurrent.futures`, `copy`, `collections.abc`, `dataclasses`, `pathlib`, `typing`, `...modeling`, `..actor`, `..runtime.contracts`，另有 1 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/profiling/__init__.py -->
@@ -6912,11 +6938,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/runtime/__init__.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：23 行，739 bytes
-- SHA-256：`1b6985ad4812c2c3beffcc91a13964fe3259f13ee65153bc48b20c62f6037f18`
+- 规模：14 行，374 bytes
+- SHA-256：`2e61992a804023e43f2c50bcf1c572f6137939ec2f1b25e3407bec5b23dd2473`
 - 源码事实摘要：Default-unreachable minimal vNext Mission Runtime.
 - 顶层符号/结构：—
-- 直接静态依赖：`.contracts`, `.mission_runtime`, `.mutation_attempt`, `.mutation_permits`, `.ports`, `.post_action_reconcile`
+- 直接静态依赖：`.contracts`, `.mission_runtime`, `.ports`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/runtime/contracts.py -->
@@ -6925,10 +6951,10 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/runtime/contracts.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1247 行，43,688 bytes
-- SHA-256：`6d3239dceb406ceb26cfa38a5228537d70e3a7cb247a28076b7de6b81c85a4ff`
+- 规模：1343 行，47,554 bytes
+- SHA-256：`9fd732b75f7c4f5e783155c3b50215c883d53ced05034d8434bb6db71bcde6d8`
 - 源码事实摘要：Typed, default-unreachable contracts for the minimal vNext live Runtime.
-- 顶层符号/结构：`RuntimeContractError`, `_identity`, `_text`, `_ordered_identities`, `_strings`, `_is_safe_action_summary`, `_action_summary_matches`, `_freeze_json`, `_thaw_json`, `_bounded_mapping`, `_canonical_json`, `RuntimeFrameIdentity`, `RuntimeTargetIdentity`, `RuntimeCommitIdentity`，另有 22 项
+- 顶层符号/结构：`RuntimeContractError`, `_identity`, `_text`, `_ordered_identities`, `_strings`, `_is_safe_action_summary`, `_action_summary_matches`, `_freeze_json`, `_thaw_json`, `_bounded_mapping`, `_canonical_json`, `RuntimeFrameIdentity`, `RuntimeTargetIdentity`, `RuntimeCommitIdentity`，另有 23 项
 - 直接静态依赖：`__future__`, `dataclasses`, `enum`, `hashlib`, `json`, `re`, `types`, `typing`, `..capabilities`, `..json_contract`, `..mission`, `.task_state`
 - API/IPC 入口：—
 
@@ -6938,37 +6964,11 @@
 [打开文件](<../../python/winpilot_home/winpilot/vnext/runtime/mission_runtime.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：1483 行，56,197 bytes
-- SHA-256：`1ea40d72981eab6fe6d4d1d7ebe1dcbaf7e51db1fe0d669d28210a1a9c69ceb6`
+- 规模：1049 行，40,211 bytes
+- SHA-256：`c14ba14a17a053c4347604cdb66c02e7bfc498ab55e5f296cca6b4f88cc55e9f`
 - 源码事实摘要：One-turn, event-sourced minimal Mission Runtime.
-- 顶层符号/结构：`MissionRuntimeConfigurationError`, `MissionRuntime`
-- 直接静态依赖：`__future__`, `hashlib`, `json`, `threading`, `typing`, `...utils.log`, `..actor`, `..capabilities`, `..evidence`, `..evidence_plane`, `..mission`, `..profiling`, `..verification`, `.contracts`，另有 5 项
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/runtime/mutation_attempt.py -->
-### `python/winpilot_home/winpilot/vnext/runtime/mutation_attempt.py`
-
-[打开文件](<../../python/winpilot_home/winpilot/vnext/runtime/mutation_attempt.py>)
-
-- 分类/语言：`winpilot-product` / Python
-- 规模：86 行，2,931 bytes
-- SHA-256：`da295e308a9112191e5c34ec871a41271a8e2514527385d59926b14164511347`
-- 源码事实摘要：Mechanical call-once shell around one Runtime mutation permit.
-- 顶层符号/结构：`PermitAttemptResult`, `call_once_with_permit`
-- 直接静态依赖：`__future__`, `collections.abc`, `dataclasses`, `typing`, `..actor`, `.contracts`, `.mutation_permits`
-- API/IPC 入口：—
-
-<!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/runtime/mutation_permits.py -->
-### `python/winpilot_home/winpilot/vnext/runtime/mutation_permits.py`
-
-[打开文件](<../../python/winpilot_home/winpilot/vnext/runtime/mutation_permits.py>)
-
-- 分类/语言：`winpilot-product` / Python
-- 规模：422 行，14,846 bytes
-- SHA-256：`dafa64e8b690ab5034a18a142628fec32a15a4ab81941ffc549de1cd1db275ac`
-- 源码事实摘要：Run-scoped, single-use permits for one exact Actor desktop mutation.
-- 顶层符号/结构：`MutationPermitError`, `MutationPermitReason`, `RuntimeMutationPermit`, `_PendingPermit`, `MutationPermitAuthority`
-- 直接静态依赖：`__future__`, `collections`, `collections.abc`, `dataclasses`, `enum`, `hashlib`, `threading`, `..actor`, `.contracts`
+- 顶层符号/结构：`MissionRuntimeConfigurationError`, `MissionRuntime`, `const:_MAX_NARRATION_CHARS`
+- 直接静态依赖：`__future__`, `json`, `threading`, `typing`, `...utils.log`, `..actor`, `..capabilities`, `..evidence`, `..mission`, `..profiling`, `.contracts`, `.ports`, `.task_state`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/runtime/ports.py -->
@@ -6984,29 +6984,16 @@
 - 直接静态依赖：`__future__`, `threading`, `typing`, `..actor`, `..mission`, `.contracts`, `.task_state`
 - API/IPC 入口：—
 
-<!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/runtime/post_action_reconcile.py -->
-### `python/winpilot_home/winpilot/vnext/runtime/post_action_reconcile.py`
-
-[打开文件](<../../python/winpilot_home/winpilot/vnext/runtime/post_action_reconcile.py>)
-
-- 分类/语言：`winpilot-product` / Python
-- 规模：307 行，11,664 bytes
-- SHA-256：`12474e9103990a3d679b35123ed8c87e5d7726a3e23c490ac8ad605806ca467a`
-- 源码事实摘要：Stateless reconciliation of one completed Controller transition.
-- 顶层符号/结构：`PostActionReconciliationError`, `PostActionReconciliation`, `validate_controller_evidence_scope`, `_registry_refs`, `reconcile_post_action`
-- 直接静态依赖：`__future__`, `dataclasses`, `..capabilities`, `..evidence`, `..mission`, `.contracts`
-- API/IPC 入口：—
-
 <!-- PROJECT-FILE: python/winpilot_home/winpilot/vnext/runtime/task_state.py -->
 ### `python/winpilot_home/winpilot/vnext/runtime/task_state.py`
 
 [打开文件](<../../python/winpilot_home/winpilot/vnext/runtime/task_state.py>)
 
 - 分类/语言：`winpilot-product` / Python
-- 规模：106 行，3,196 bytes
-- SHA-256：`ae500fc08d3a4316fb938cebe9824853532e3aa01cf5783f5d7022965a394abe`
-- 源码事实摘要：Small in-memory scratchpad for the single Visual Actor loop.
-- 顶层符号/结构：`ActorTaskStateError`, `_scratchpad`, `ActorTaskStateUpdate`, `ActorTaskState`, `ActorTurnDecision`, `const:_SCRATCHPAD_CHARS`, `const:TASK_STATE_UPDATE_SCHEMA`
+- 规模：212 行，6,729 bytes
+- SHA-256：`7516a7a891cc9481869c61b75f0a83acfc9f50c4d87daf815b9ad2c04c78483c`
+- 源码事实摘要：Small in-memory working state for the single Visual Actor loop.
+- 顶层符号/结构：`ActorTaskStateError`, `_scratchpad`, `_remaining_items`, `ActorTaskStateUpdate`, `ActorTaskState`, `ActorTurnDecision`, `const:_SCRATCHPAD_CHARS`, `const:_MAX_REMAINING_ITEMS`, `const:_REMAINING_ITEM_CHARS`, `const:TASK_STATE_UPDATE_SCHEMA`
 - 直接静态依赖：`__future__`, `dataclasses`, `types`, `typing`
 - API/IPC 入口：—
 
@@ -7096,8 +7083,8 @@
 [打开文件](<../../requirements.txt>)
 
 - 分类/语言：`configuration` / Python requirements
-- 规模：45 行，1,638 bytes
-- SHA-256：`ffb123bb496a537495188770fd1674fb15d4b99f0d829c360fefb5b2c73d657e`
+- 规模：43 行，1,565 bytes
+- SHA-256：`8c38e8033aac5c516f11722f56f0976308bdee7c9f3a2ca428a2b65ee32f3fff`
 - 源码事实摘要：-*- coding: utf-8 -*-
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -7133,17 +7120,69 @@
 - 直接静态依赖：`node:fs`, `node:path`
 - API/IPC 入口：—
 
+<!-- PROJECT-FILE: scripts/client_architecture_e2e_run.py -->
+### `scripts/client_architecture_e2e_run.py`
+
+[打开文件](<../../scripts/client_architecture_e2e_run.py>)
+
+- 分类/语言：`developer-script` / Python
+- 规模：154 行，4,406 bytes
+- SHA-256：`216320134107cf0842ce7ef99a92a73f87bb1de936e3db51a92f81a0dcf7e75d`
+- 源码事实摘要：Visible Electron E2E for the 2026-08-03 architecture gaps.
+- 顶层符号/结构：`notepad_window_oracle`, `notepad_process_oracle`, `run_ad_hoc`, `main`, `const:WORKSPACE`, `const:SCRIPT_DIR`, `const:OUTPUT_ROOT`, `const:NOTEPAD_EXECUTABLES`, `const:NOTEPAD_CLASSES`
+- 直接静态依赖：`__future__`, `ctypes`, `json`, `os`, `subprocess`, `sys`, `time`, `datetime`, `pathlib`, `psutil`, `win32gui`, `client_e2e_run`
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: scripts/client_cat_qq_3turn_e2e_run.py -->
+### `scripts/client_cat_qq_3turn_e2e_run.py`
+
+[打开文件](<../../scripts/client_cat_qq_3turn_e2e_run.py>)
+
+- 分类/语言：`developer-script` / Python
+- 规模：609 行，22,309 bytes
+- SHA-256：`d088a6feaa3beebe9b43bd3ebde5c0d8a3c13219af957cf5ff30ceb3318755e3`
+- 源码事实摘要：Run the exact user-requested 3-turn desktop sequence through the visible client.
+- 顶层符号/结构：`_json_safe`, `_write_json`, `_scan_new_images`, `_qq_process_alive`, `_read_claim_texts`, `_read_run_user_result`, `_analyze_trace`, `_count_model_calls`, `_copy_bound_traces`, `run_three_turn_sequence`, `main`, `const:WORKSPACE`, `const:SCRIPT_DIR`, `const:WINPILOT_HOME`，另有 5 项
+- 直接静态依赖：`__future__`, `json`, `os`, `shutil`, `sys`, `time`, `collections`, `datetime`, `pathlib`, `typing`, `winpilot.utils.dpi`, `psutil`, `win32gui`, `win32process`，另有 1 项
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: scripts/client_complex_orchestration_e2e_run.py -->
+### `scripts/client_complex_orchestration_e2e_run.py`
+
+[打开文件](<../../scripts/client_complex_orchestration_e2e_run.py>)
+
+- 分类/语言：`developer-script` / Python
+- 规模：523 行，27,053 bytes
+- SHA-256：`5e4436f9797c5a2ff43bf0a0967e6c8c378fd8c3c5801bb692d7f99149a7b58f`
+- 源码事实摘要：Run one real long task that forces exploration, recovery, and replanning.
+- 顶层符号/结构：`_write`, `_json`, `_jsonl`, `_sha256`, `prepare_fixture`, `verify_fixture`, `observe_live_ui`, `_short`, `_invokes_python_script`, `orchestration_evidence`, `parse_args`, `main`, `const:WORKSPACE`, `const:SCRIPT_DIR`，另有 2 项
+- 直接静态依赖：`__future__`, `argparse`, `hashlib`, `json`, `os`, `re`, `shutil`, `subprocess`, `sys`, `time`, `datetime`, `pathlib`, `typing`, `client_e2e_run`
+- API/IPC 入口：—
+
 <!-- PROJECT-FILE: scripts/client_e2e_run.py -->
 ### `scripts/client_e2e_run.py`
 
 [打开文件](<../../scripts/client_e2e_run.py>)
 
 - 分类/语言：`developer-script` / Python
-- 规模：2235 行，87,192 bytes
-- SHA-256：`ab8dfa9e4ae94fb1d11fa5f89ea568011238ca4d45ec558d94a3bf487ad8d344`
+- 规模：2370 行，92,970 bytes
+- SHA-256：`2855274e105e5bb630571d030d855af38846408dbd9587f2cd386ff6873de4e9`
 - 源码事实摘要：Drive the real Electron client with native mouse and keyboard input.
-- 顶层符号/结构：`ClientIdentity`, `_client_identity_audit`, `_slug`, `_visible_descendants`, `_first_visible_descendant`, `_control_value`, `_document_contains_text`, `_type_control_text`, `_toggle_state`, `_toggle`, `_runtime_version_from_label`, `_selected_combobox_label`, `_select_runtime_version`, `_admitted_run_id`，另有 25 项
-- 直接静态依赖：`__future__`, `argparse`, `json`, `os`, `re`, `sys`, `time`, `urllib.error`, `urllib.request`, `dataclasses`, `datetime`, `pathlib`, `typing`, `psutil`，另有 5 项
+- 顶层符号/结构：`ClientIdentity`, `_client_identity_audit`, `_slug`, `_visible_descendants`, `_first_visible_descendant`, `_control_value`, `_document_contains_text`, `_type_control_text`, `_toggle_state`, `_toggle`, `_runtime_version_from_label`, `_selected_combobox_label`, `_select_runtime_version`, `_admitted_run_id`，另有 27 项
+- 直接静态依赖：`__future__`, `argparse`, `json`, `os`, `re`, `sys`, `time`, `urllib.error`, `urllib.parse`, `urllib.request`, `dataclasses`, `datetime`, `pathlib`, `typing`，另有 6 项
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: scripts/client_hard_tasks_e2e_run.py -->
+### `scripts/client_hard_tasks_e2e_run.py`
+
+[打开文件](<../../scripts/client_hard_tasks_e2e_run.py>)
+
+- 分类/语言：`developer-script` / Python
+- 规模：1858 行，71,259 bytes
+- SHA-256：`bac20c71f432828d5a4569ec8433c0ce8e46a789c2121f0589f9a17db1c6fe32`
+- 源码事实摘要：Run the six high-difficulty real desktop tasks through the visible client.
+- 顶层符号/结构：`_taskkill`, `_find_window`, `_find_process_window`, `_focus_window`, `_capture_window`, `_capture_rect`, `_launch_app`, `_read_claim_texts`, `_copy_bound_traces`, `_scan_new_images`, `_claim_contains`, `_prepare_quiz`, `_analyze_trace`, `_strategy_hint`，另有 32 项
+- 直接静态依赖：`__future__`, `argparse`, `json`, `os`, `random`, `shutil`, `subprocess`, `sys`, `time`, `collections`, `datetime`, `pathlib`, `typing`, `ctypes`，另有 11 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: scripts/client_netease_music_e2e_run.py -->
@@ -7152,8 +7191,8 @@
 [打开文件](<../../scripts/client_netease_music_e2e_run.py>)
 
 - 分类/语言：`developer-script` / Python
-- 规模：1124 行，37,765 bytes
-- SHA-256：`3fa3473fbc43d804ea2074290fef4a65b141cec78d1dd9c2abaf95c501cce7cb`
+- 规模：1143 行，38,716 bytes
+- SHA-256：`7de53b69c65179d801d68e95ac673b30f6f73ede8f4126123b82883ce3577e99`
 - 源码事实摘要：Run one real NetEase Cloud Music task through the visible Electron client.
 - 顶层符号/结构：`_json_safe`, `_write_json`, `_normal`, `_root_window`, `_window_identity`, `_focus_window`, `_start_target_handoff_watcher`, `_finish_target_handoff_watcher`, `_new_admitted_run`, `_hold_target_until_admitted`, `IMMDevice`, `IMMDeviceEnumerator`, `IAudioEndpointVolume`, `_default_audio_endpoint`，另有 24 项
 - 直接静态依赖：`__future__`, `argparse`, `hashlib`, `json`, `math`, `re`, `shutil`, `sys`, `threading`, `time`, `ctypes`, `ctypes.wintypes`, `datetime`, `pathlib`，另有 10 项
@@ -7165,8 +7204,8 @@
 [打开文件](<../../scripts/client_paint_game_e2e_run.py>)
 
 - 分类/语言：`developer-script` / Python
-- 规模：866 行，31,546 bytes
-- SHA-256：`b5ef9cbf29f44a274e6dc3655ef0e1b84b9c8f38f8e8cb18a38167273299cbd8`
+- 规模：892 行，32,799 bytes
+- SHA-256：`6a66a4f2dad4f2ec5e12e1837f0fc0d5e490f37a464be4b6e739b9b8620dbee1`
 - 源码事实摘要：Run one native Microsoft Paint tic-tac-toe turn through the visible client.
 - 顶层符号/结构：`_json_safe`, `_write_json`, `_rgb_array`, `_red_mask`, `_neutral_dark_mask`, `cell_bounds`, `_inset`, `baseline_contract`, `evaluate_board_frame`, `BoardOracle`, `_root_window`, `_window_dpi`, `_scale_logical_pixel`, `logical_relative_bbox_to_physical`，另有 16 项
 - 直接静态依赖：`__future__`, `argparse`, `ctypes`, `ctypes.wintypes`, `hashlib`, `json`, `shutil`, `sys`, `time`, `datetime`, `pathlib`, `typing`, `winpilot.utils.dpi`, `cv2`，另有 8 项
@@ -7178,11 +7217,24 @@
 [打开文件](<../../scripts/client_qq_groups_e2e_run.py>)
 
 - 分类/语言：`developer-script` / Python
-- 规模：1215 行，42,047 bytes
-- SHA-256：`7ead7da5b6d791ec9876def0cb4e5cdadf7d2e3b7f47ad0d63df84c45cbcbfc6`
+- 规模：1630 行，58,007 bytes
+- SHA-256：`5e082dff3a79efcb671d80677bd19fe6bc2de93b5c9df234c24eec89ce655a5f`
 - 源码事实摘要：Run the real QQ group-summary goal through the visible Electron client.
-- 顶层符号/结构：`_json_safe`, `_write_json`, `_normal`, `_clean_label`, `_opaque`, `_root_window`, `_window_identity`, `_focus_window`, `_new_admitted_run`, `_hold_target_until_admitted`, `_rect_list`, `_selection_state`, `_scroll_state`, `snapshot_accessible_state`，另有 21 项
+- 顶层符号/结构：`_json_safe`, `_write_json`, `_normal`, `_clean_label`, `_opaque`, `_root_window`, `_window_identity`, `_focus_window`, `_new_admitted_run`, `_hold_target_until_admitted`, `_rect_list`, `_selection_state`, `_scroll_state`, `snapshot_accessible_state`，另有 30 项
 - 直接静态依赖：`__future__`, `argparse`, `contextlib`, `hashlib`, `hmac`, `io`, `json`, `re`, `secrets`, `sys`, `time`, `datetime`, `pathlib`, `typing`，另有 8 项
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: scripts/client_random_tasks_e2e_run.py -->
+### `scripts/client_random_tasks_e2e_run.py`
+
+[打开文件](<../../scripts/client_random_tasks_e2e_run.py>)
+
+- 分类/语言：`developer-script` / Python
+- 规模：776 行，29,403 bytes
+- SHA-256：`0ca3ff70abcef61858dcc58d217719817c10494f9f499677d0d67404c450db6a`
+- 源码事实摘要：Run random real desktop tasks through the visible Electron client.
+- 顶层符号/结构：`_taskkill`, `_find_window`, `_focus_window`, `_capture_window`, `_uia_visible_texts`, `_launch_app`, `_notepad_file_case`, `_calculator_case`, `_chat_then_task_case`, `_impossible_case`, `_paint_case`, `generate_case`, `prepare_case`, `_target_hwnd_for`，另有 17 项
+- 直接静态依赖：`__future__`, `argparse`, `json`, `os`, `random`, `re`, `shutil`, `subprocess`, `sys`, `time`, `winreg`, `datetime`, `pathlib`, `typing`，另有 6 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: scripts/client_thread_connector_e2e_run.py -->
@@ -7204,10 +7256,10 @@
 [打开文件](<../../scripts/client_visual_e2e_run.py>)
 
 - 分类/语言：`developer-script` / Python
-- 规模：786 行，30,293 bytes
-- SHA-256：`b6bca6e69bb650d0a8354c8f30f17db2cfe29b393be9d05b88643d20b800c3f5`
+- 规模：1136 行，45,416 bytes
+- SHA-256：`51b89d65ea2e609bcfa4992f95a46390cf24d129f40ca19f1db15bf2699a5fa6`
 - 源码事实摘要：Run generic visual gestures through the visible Electron client.
-- 顶层符号/结构：`_free_port`, `_json_get`, `_wait_json`, `_browser_executable`, `_find_window`, `_focus_window`, `_capture_window`, `_terminate_tree`, `external_verdict`, `_client_case_spec`, `run_visual_case`, `parse_args`, `main`, `const:WORKSPACE`，另有 7 项
+- 顶层符号/结构：`_free_port`, `_json_get`, `_wait_json`, `_browser_executable`, `_find_window`, `_focus_window`, `_capture_window`, `_terminate_tree`, `_calibration_summary`, `external_verdict`, `_client_case_spec`, `run_visual_case`, `parse_args`, `main`，另有 8 项
 - 直接静态依赖：`__future__`, `argparse`, `ctypes`, `json`, `os`, `shutil`, `socket`, `subprocess`, `sys`, `tempfile`, `time`, `urllib.request`, `uuid`, `datetime`，另有 8 项
 - API/IPC 入口：—
 
@@ -7217,11 +7269,11 @@
 [打开文件](<../../scripts/client_vnext_canary_e2e_run.py>)
 
 - 分类/语言：`developer-script` / Python
-- 规模：4514 行，169,922 bytes
-- SHA-256：`c20c8db1a169f241a90ca259ee37c9fc4e8d56e33165b20ed1b242529465e0a7`
+- 规模：4421 行，166,625 bytes
+- SHA-256：`f807a61caf771ff0129c8b7dd5542ea69cb9279292675c16e03d276c4262f904`
 - 源码事实摘要：Run the immutable paired legacy/vNext canary through the visible Electron UI.
-- 顶层符号/结构：`DesktopSuiteMutex`, `_utc_now`, `_run_text`, `_run_bytes`, `_git`, `_gh_json`, `_repo_slug`, `_remote_ref`, `_pr_identity`, `_c4_pr_identity`, `_workspace_electron_processes`, `_write_config_bytes`, `_fixed_config`, `_restore_config_bytes`，另有 77 项
-- 直接静态依赖：`__future__`, `argparse`, `copy`, `ctypes`, `hashlib`, `json`, `math`, `os`, `re`, `shutil`, `socket`, `subprocess`, `sys`, `tempfile`，另有 17 项
+- 顶层符号/结构：`DesktopSuiteMutex`, `_utc_now`, `_run_text`, `_run_bytes`, `_git`, `_gh_json`, `_repo_slug`, `_remote_ref`, `_pr_identity`, `_c4_pr_identity`, `_workspace_electron_processes`, `_write_config_bytes`, `_fixed_config`, `_restore_config_bytes`，另有 76 项
+- 直接静态依赖：`__future__`, `argparse`, `copy`, `ctypes`, `hashlib`, `json`, `math`, `os`, `re`, `shutil`, `socket`, `subprocess`, `sys`, `tempfile`，另有 16 项
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: scripts/connector_e2e_fixture.py -->
@@ -7263,16 +7315,29 @@
 - 直接静态依赖：`__future__`, `argparse`, `json`, `sys`, `pathlib`, `typing`, `winpilot.eval`
 - API/IPC 入口：—
 
+<!-- PROJECT-FILE: scripts/export_run_log.py -->
+### `scripts/export_run_log.py`
+
+[打开文件](<../../scripts/export_run_log.py>)
+
+- 分类/语言：`developer-script` / Python
+- 规模：354 行，13,185 bytes
+- SHA-256：`2eeb4aba9250204f3ab8cb005dabfc7cc03d09e4a3744fb13ee0039effff2ce3`
+- 源码事实摘要：Export one Agent run trace as a readable troubleshooting report.
+- 顶层符号/结构：`_load_trace`, `_fmt_ts`, `_find_runs`, `_safe_text`, `render_report`, `export_e2e_suite`, `main`, `const:WORKSPACE`, `const:TRACE_ROOT`, `const:DEFAULT_OUTPUT`, `const:E2E_ROOT`
+- 直接静态依赖：`__future__`, `argparse`, `glob`, `json`, `os`, `shutil`, `datetime`, `pathlib`, `typing`
+- API/IPC 入口：—
+
 <!-- PROJECT-FILE: scripts/generate_project_guide.py -->
 ### `scripts/generate_project_guide.py`
 
 [打开文件](<../../scripts/generate_project_guide.py>)
 
 - 分类/语言：`developer-script` / Python
-- 规模：583 行，20,589 bytes
-- SHA-256：`cb5a7037dbd2ea855c9fae812b1e2435c97b9e4cc567001be30c097a08ba004a`
+- 规模：555 行，19,596 bytes
+- SHA-256：`6e8b9e5f72bfff5b95229137cbf1d8bf25f4f949342298974ab53407329b2ca3`
 - 源码事实摘要：Generate and verify the exhaustive, source-backed project file inventory.
-- 顶层符号/结构：`FileFacts`, `_git_paths`, `_is_code_or_config`, `_category`, `_language`, `_decode_text`, `_first_nonempty_line`, `_python_facts`, `_render_python_route`, `_json_facts`, `_ts_facts`, `_png_dimensions`, `_fallback_summary`, `_facts`，另有 13 项
+- 顶层符号/结构：`FileFacts`, `_git_paths`, `_is_code_or_config`, `_category`, `_language`, `_decode_text`, `_first_nonempty_line`, `_python_facts`, `_render_python_route`, `_json_facts`, `_ts_facts`, `_png_dimensions`, `_fallback_summary`, `_facts`，另有 12 项
 - 直接静态依赖：`__future__`, `argparse`, `ast`, `collections`, `dataclasses`, `hashlib`, `json`, `pathlib`, `re`, `struct`, `subprocess`, `sys`, `typing`
 - API/IPC 入口：—
 
@@ -7287,6 +7352,19 @@
 - 源码事实摘要：Run one real WinPilot GUI task and write a compact evidence report.
 - 顶层符号/结构：`_pick`, `_endpoint_fingerprint`, `_canonical_model_name`, `_model_identity`, `_model_metadata`, `_git_metadata`, `_display_metadata`, `_collect_provenance`, `_latest_target_hwnd`, `_explicit_region`, `_resolve_visual_region`, `_report_file_path`, `_capture_visual_judge_frame`, `_visual_judge_settings`，另有 35 项
 - 直接静态依赖：`__future__`, `argparse`, `base64`, `ctypes`, `hashlib`, `json`, `math`, `os`, `platform`, `re`, `subprocess`, `sys`, `time`, `urllib.error`，另有 4 项
+- API/IPC 入口：—
+
+<!-- PROJECT-FILE: scripts/probe_runtime.py -->
+### `scripts/probe_runtime.py`
+
+[打开文件](<../../scripts/probe_runtime.py>)
+
+- 分类/语言：`developer-script` / Python
+- 规模：31 行，844 bytes
+- SHA-256：`8295e39bcccfabefaa1d400e39cdd0902c5613307407c5ce99a2ada18ec73fc9`
+- 源码事实摘要：Probe the running Electron client and managed runtime state.
+- 顶层符号/结构：`main`, `const:WORKSPACE`, `const:SCRIPT_DIR`
+- 直接静态依赖：`__future__`, `json`, `sys`, `pathlib`, `winpilot.utils.dpi`, `client_e2e_run`
 - API/IPC 入口：—
 
 <!-- PROJECT-FILE: scripts/setup-claude-code.js -->
@@ -7648,8 +7726,8 @@
 [打开文件](<../../src/main/main.ts>)
 
 - 分类/语言：`electron-or-typescript-product` / TypeScript
-- 规模：1593 行，60,748 bytes
-- SHA-256：`a3ce1e523238162a1a5a7f3167900e3b59bbc4272905d4e7ffb20c3008eb27f1`
+- 规模：1611 行，61,489 bytes
+- SHA-256：`af24bd3c9930504692ca6d18d6b8a258f6e6aaff124ac7c4247fbb54243f8376`
 - 源码事实摘要：﻿import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu, Notification } from 'electron';
 - 顶层符号/结构：`fsp`, `_cachedRendererState`, `apiServer`, `LOCAL_CONTROL_TOKEN`, `_taskbarNotifiedRuns`, `_desktopHandoffPending`, `_desktopHandoffRunId`, `_floatingWindowNormalBounds`, `_screenRegionSelectionActive`, `TaskbarNotificationKind`, `releaseDesktopHandoff`, `notifyTaskbarAttention`, `getTemplatesDir`, `loadTemplateContent`，另有 39 项
 - 直接静态依赖：`electron`, `path`, `fs`, `os`, `crypto`, `child_process`, `http`, `https`, `./schedulerBridge`, `./engine`, `./env`, `./api`, `./macroPaths`, `./featureCallBridge`，另有 2 项
@@ -7674,12 +7752,12 @@
 [打开文件](<../../src/main/preload.ts>)
 
 - 分类/语言：`electron-or-typescript-product` / TypeScript
-- 规模：160 行，6,708 bytes
-- SHA-256：`21da1693070c709d6f88f09b65983a15d73c99dacc390c56b8749ff105293c37`
+- 规模：168 行，7,071 bytes
+- SHA-256：`b2bff06bf5cf56ebe5ecddc8f45f6f3bb98fe81b4b4599e0efdd8c9373a73945`
 - 源码事实摘要：实现或支撑 preload 模块；精确公开面见下列静态符号与依赖。
 - 顶层符号/结构：—
 - 直接静态依赖：`electron`
-- API/IPC 入口：`IPC dialog:openFile`, `IPC dialog:saveFile`, `IPC file:read`, `IPC file:write`, `IPC engine:start`, `IPC engine:stop`, `IPC engine:pause`, `IPC engine:resume`, `IPC engine:status`, `IPC engine-message`, `IPC engine-log`, `IPC winpilot:url`, `IPC winpilot:connection`, `IPC winpilot:ensure`，另有 37 项
+- API/IPC 入口：`IPC dialog:openFile`, `IPC dialog:saveFile`, `IPC file:read`, `IPC file:write`, `IPC engine:start`, `IPC engine:stop`, `IPC engine:pause`, `IPC engine:resume`, `IPC engine:status`, `IPC engine-message`, `IPC engine-log`, `IPC winpilot:url`, `IPC winpilot:connection`, `IPC winpilot:ensure`，另有 38 项
 
 <!-- PROJECT-FILE: src/main/schedulerBridge.ts -->
 ### `src/main/schedulerBridge.ts`
@@ -7713,10 +7791,10 @@
 [打开文件](<../../src/main/winpilotServer.ts>)
 
 - 分类/语言：`electron-or-typescript-product` / TypeScript
-- 规模：358 行，12,977 bytes
-- SHA-256：`9860e813d1b5eda136e4d6c05e6dde0597e921ab0a05258c5a054ccd58184342`
+- 规模：354 行，12,720 bytes
+- SHA-256：`ec70a0451eba650e8ab2a784ead4ae951618ef10a11db99ab99aa91e017c5c20`
 - 源码事实摘要：WinPilot server lifecycle — spawns the WinPilot FastAPI/uvicorn server as a
-- 顶层符号/结构：`_proc`, `_port`, `_starting`, `_lastError`, `_lifecycleGeneration`, `_stderrTail`, `HOST`, `RUNTIME_CONTRACT_VERSION`, `MIN_RENDERER_SAFE_PORT`, `CONTROL_TOKEN`, `isRendererSafePort`, `runtimeCompatibilityProblem`, `pushStderr`, `requestPort`，另有 12 项
+- 顶层符号/结构：`_proc`, `_port`, `_starting`, `_lastError`, `_lifecycleGeneration`, `_stderrTail`, `HOST`, `RUNTIME_CONTRACT_VERSION`, `MIN_RENDERER_SAFE_PORT`, `CONTROL_TOKEN`, `isRendererSafePort`, `runtimeCompatibilityNotice`, `pushStderr`, `requestPort`，另有 12 项
 - 直接静态依赖：`path`, `http`, `net`, `crypto`, `child_process`, `./engine`, `./env`
 - API/IPC 入口：—
 
@@ -8194,10 +8272,10 @@
 [打开文件](<../../src/renderer/components/platform/PlatformWorkbench.tsx>)
 
 - 分类/语言：`electron-or-typescript-product` / React TypeScript
-- 规模：3192 行，162,640 bytes
-- SHA-256：`77e992276c507a3c22c5798ea12998194d36989cd05d6517a442c3c765959163`
+- 规模：3274 行，167,080 bytes
+- SHA-256：`3ec734f2cdc03e9c5f783ba65e3f6982c894e3ac61cb024b3647798b21458a85`
 - 源码事实摘要：实现或支撑 PlatformWorkbench 模块；精确公开面见下列静态符号与依赖。
-- 顶层符号/结构：`PlatformView`, `Plane`, `isActiveRunStatus`, `UNSUCCESSFUL_STATUSES`, `PHASES`, `PHASE_LABELS`, `STATUS_LABELS`, `RUN_KIND_LABELS`, `EVENT_LABELS`, `TOOL_LABELS`, `viewFromStore`, `formatTime`, `formatDuration`, `formatElapsed`，另有 62 项
+- 顶层符号/结构：`PlatformView`, `Plane`, `isActiveRunStatus`, `UNSUCCESSFUL_STATUSES`, `PHASES`, `PHASE_LABELS`, `STATUS_LABELS`, `RUN_KIND_LABELS`, `EVENT_LABELS`, `TOOL_LABELS`, `LIVE_ACTIVITY_LABELS`, `viewFromStore`, `formatTime`, `formatDuration`，另有 63 项
 - 直接静态依赖：`react`, `lucide-react`, `../Canvas/FlowCanvas`, `../NodeLibrary/NodeLibrary`, `../PropertyPanel/PropertyPanel`, `../FlowFragment/FlowFragmentComposer`, `../../store`, `../../types`, `../../platform/useControlPlane`, `../../platform/contracts`, `../../utils/wpsToFlowScript`, `../../utils/automationIR`, `../../utils/flowFragmentProposal`, `../../../shared/taskOutcome`，另有 1 项
 - API/IPC 入口：—
 
@@ -8247,10 +8325,10 @@
 [打开文件](<../../src/renderer/platform/client.ts>)
 
 - 分类/语言：`electron-or-typescript-product` / TypeScript
-- 规模：584 行，19,887 bytes
-- SHA-256：`91d485a633f6bf3ac5ced6967259baaad947e8088af2b27d983b0ce1b6867108`
+- 规模：560 行，18,992 bytes
+- SHA-256：`52661b7b6da2c6a21628b7872534f1fa7a4b97fadaa1b035ca3bab6a7a740f3a`
 - 源码事实摘要：实现或支撑 client 模块；精确公开面见下列静态符号与依赖。
-- 顶层符号/结构：`FALLBACK_URL`, `ELECTRON_SERVER_READY_TIMEOUT_MS`, `ELECTRON_SERVER_POLL_MS`, `EXPECTED_RUNTIME_CONTRACT_VERSION`, `runtimeCompatibilityError`, `normalizeBaseUrl`, `ControlPlaneConnection`, `websocketUrl`, `resolveControlPlaneConnection`, `resolveControlPlaneUrl`, `readJson`, `ControlPlaneClient`
+- 顶层符号/结构：`FALLBACK_URL`, `ELECTRON_SERVER_READY_TIMEOUT_MS`, `ELECTRON_SERVER_POLL_MS`, `EXPECTED_RUNTIME_CONTRACT_VERSION`, `runtimeCompatibilityNotice`, `normalizeBaseUrl`, `ControlPlaneConnection`, `websocketUrl`, `resolveControlPlaneConnection`, `resolveControlPlaneUrl`, `readJson`, `ControlPlaneClient`
 - 直接静态依赖：`./contracts`, `../utils/flowFragmentProposal`, `../utils/automationIR`
 - API/IPC 入口：—
 
@@ -8260,10 +8338,10 @@
 [打开文件](<../../src/renderer/platform/contracts.ts>)
 
 - 分类/语言：`electron-or-typescript-product` / TypeScript
-- 规模：831 行，21,786 bytes
-- SHA-256：`cc0735dcd8832a54f0f4d2ba89fb1a413812870321f2954a1695b0e82e048d73`
+- 规模：829 行，21,766 bytes
+- SHA-256：`f7c4e5a35cc778b01d27bb3b4ac1974553835d1ac4205400dccbc5d21067c704`
 - 源码事实摘要：实现或支撑 contracts 模块；精确公开面见下列静态符号与依赖。
-- 顶层符号/结构：`ARP_FORMAT`, `RuntimeVersion`, `GoalAdmissionAudit`, `DesktopLeaseSnapshot`, `GoalRunStart`, `ArpNodeKind`, `ArpRetryPolicy`, `ArpNode`, `ArpEdge`, `ArpGraph`, `GraphValidation`, `CapabilitySpec`, `RunTimelineEvent`, `RunMetrics`，另有 49 项
+- 顶层符号/结构：`ARP_FORMAT`, `RuntimeVersion`, `GoalAdmissionAudit`, `DesktopLeaseSnapshot`, `GoalRunStart`, `ArpNodeKind`, `ArpRetryPolicy`, `ArpNode`, `ArpEdge`, `ArpGraph`, `GraphValidation`, `CapabilitySpec`, `RunTimelineEvent`, `RunMetrics`，另有 48 项
 - 直接静态依赖：—
 - API/IPC 入口：—
 
@@ -8273,8 +8351,8 @@
 [打开文件](<../../src/renderer/platform/executionContext.ts>)
 
 - 分类/语言：`electron-or-typescript-product` / TypeScript
-- 规模：57 行，2,058 bytes
-- SHA-256：`11cefa77387ade1df761c40fc13da6d0ddbc255a91d0938297797d4f5386100b`
+- 规模：47 行，1,750 bytes
+- SHA-256：`6b3b493c969d7cc942e8e3db4c9d9d9aa7676120d02284e6a1f84b94d981480d`
 - 源码事实摘要：实现或支撑 executionContext 模块；精确公开面见下列静态符号与依赖。
 - 顶层符号/结构：`DesktopHandoffResult`, `buildClientExecutionContext`
 - 直接静态依赖：`./contracts`
@@ -8325,10 +8403,10 @@
 [打开文件](<../../src/renderer/platform/useControlPlane.ts>)
 
 - 分类/语言：`electron-or-typescript-product` / TypeScript
-- 规模：495 行，16,594 bytes
-- SHA-256：`546f880e7db27b20a744f02a663f5169b89562c05e1004c36496e2e0b2acd68c`
+- 规模：514 行，16,563 bytes
+- SHA-256：`c253b7eb655d30900438f3985740b227f61b621d6f8babddcadc89eaf8c632e3`
 - 源码事实摘要：实现或支撑 useControlPlane 模块；精确公开面见下列静态符号与依赖。
-- 顶层符号/结构：`ConnectionState`, `CONTROL_PLANE_FALLBACK_REFRESH_MS`, `CONTROL_PLANE_EVENT_REFRESH_MS`, `DesktopLeaseClient`, `releaseDesktopHandoffBestEffort`, `fulfillDesktopLease`, `useControlPlane`
+- 顶层符号/结构：`ConnectionState`, `CONTROL_PLANE_FALLBACK_REFRESH_MS`, `CONTROL_PLANE_EVENT_REFRESH_MS`, `CONTROL_PLANE_RECONNECT_MS`, `DesktopLeaseClient`, `releaseDesktopHandoffBestEffort`, `fulfillDesktopLease`, `useControlPlane`
 - 直接静态依赖：`react`, `./client`, `./executionContext`, `./contracts`, `../utils/automationIR`, `../utils/flowFragmentProposal`, `./taskbarNotification`
 - API/IPC 入口：—
 
@@ -8390,8 +8468,8 @@
 [打开文件](<../../src/renderer/styles/floating.css>)
 
 - 分类/语言：`electron-or-typescript-product` / CSS
-- 规模：2962 行，67,991 bytes
-- SHA-256：`0f0bc4244aed40223a910f71f007daf99a532132fcea98490b604c9f6c1662d3`
+- 规模：3117 行，71,114 bytes
+- SHA-256：`532f9805e3c98eccb2298e24443ddb6a01aac00777aa598d6f181135431d4bc4`
 - 源码事实摘要：:root {
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -8416,8 +8494,8 @@
 [打开文件](<../../src/renderer/styles/platform.css>)
 
 - 分类/语言：`electron-or-typescript-product` / CSS
-- 规模：715 行，52,950 bytes
-- SHA-256：`9fe035fe76d9f184f07865a46aed5c4313915c4542540c50050ab766092a2b28`
+- 规模：718 行，53,408 bytes
+- SHA-256：`fb905f44c8ce35eb2b000ac0f64a5831d81a768d8becfda9f6059d1284a8f8a7`
 - 源码事实摘要：:root {
 - 顶层符号/结构：—
 - 直接静态依赖：—
@@ -8455,8 +8533,8 @@
 [打开文件](<../../src/renderer/test/apprenticeUx.test.tsx>)
 
 - 分类/语言：`test` / React TypeScript
-- 规模：233 行，9,975 bytes
-- SHA-256：`8766734493abe46eea13ab03846453cda9433aad87a6a9099b518ebefc7336d2`
+- 规模：233 行，9,976 bytes
+- SHA-256：`23b0f7cdf78270b9ead576630d6d36c3152ae19d90b41731ec343319d649b435`
 - 源码事实摘要：验证 apprenticeUx.test 对应的行为、回归或合同。
 - 顶层符号/结构：`controlPlane`, `createPlane`
 - 直接静态依赖：`@testing-library/react`, `@testing-library/user-event`, `vitest`, `../components/platform/PlatformWorkbench`, `../store`, `../styles/platform.css?raw`
@@ -8507,8 +8585,8 @@
 [打开文件](<../../src/renderer/test/executionContext.test.ts>)
 
 - 分类/语言：`test` / TypeScript
-- 规模：130 行，4,146 bytes
-- SHA-256：`9d7403eee7debc313c73faac369d5aac4a21f2be9c4a2069745ce271a16880db`
+- 规模：147 行，4,749 bytes
+- SHA-256：`705cbbcb8489f7c237536cb9fb78824ef5bfd4ca35fc9f3d3e698417be3c9860`
 - 源码事实摘要：验证 executionContext.test 对应的行为、回归或合同。
 - 顶层符号/结构：—
 - 直接静态依赖：`vitest`, `../platform/executionContext`
@@ -8572,8 +8650,8 @@
 [打开文件](<../../src/renderer/test/goalRunEntry.test.tsx>)
 
 - 分类/语言：`test` / React TypeScript
-- 规模：1094 行，36,809 bytes
-- SHA-256：`8380e0d13e3241cea03b93ca1aa788dc032946c314fbfeec7cf8d2908fa0cae4`
+- 规模：1157 行，39,879 bytes
+- SHA-256：`2df4fd4329e88f6e396adb87c971ad7ccf1106760769282d27c6d874430a8baa`
 - 源码事实摘要：验证 goalRunEntry.test 对应的行为、回归或合同。
 - 顶层符号/结构：`target`, `snapshot`, `goalRunStart`
 - 直接静态依赖：`@testing-library/react`, `@testing-library/user-event`, `vitest`, `../components/platform/PlatformWorkbench`, `../platform/client`, `../platform/contracts`, `../platform/useControlPlane`
@@ -8650,8 +8728,8 @@
 [打开文件](<../../src/renderer/test/platformContracts.test.ts>)
 
 - 分类/语言：`test` / TypeScript
-- 规模：712 行，32,293 bytes
-- SHA-256：`a2516b7cad85f1b085c2d334c37650dd44edfdea022081d29e1608cf81680ca3`
+- 规模：712 行，32,250 bytes
+- SHA-256：`7c24072977877001f02374d13b36a27866a0748d09bf831b07c8c4459ccb4cfc`
 - 源码事实摘要：验证 platformContracts.test 对应的行为、回归或合同。
 - 顶层符号/结构：`scriptFixture`
 - 直接静态依赖：`vitest`, `../types`, `../platform/client`, `../platform/flowToArpGraph`, `../utils/automationIR`, `../utils/nodeDefinitions`, `../store/defaults`
@@ -8689,8 +8767,8 @@
 [打开文件](<../../src/renderer/test/runsView.test.tsx>)
 
 - 分类/语言：`test` / React TypeScript
-- 规模：185 行，6,565 bytes
-- SHA-256：`76263f864c7a61f1fb866022a61d425b1a6d86f0486631592a36c0850ed81705`
+- 规模：233 行，8,352 bytes
+- SHA-256：`c31daf148529a5f75f9dc64245b8cdc07021f9f4f04181cd3b22958e2dd63fef`
 - 源码事实摘要：验证 runsView.test 对应的行为、回归或合同。
 - 顶层符号/结构：`historicalRun`, `historicalContract`
 - 直接静态依赖：`@testing-library/react`, `vitest`, `../components/platform/PlatformWorkbench`, `../platform/contracts`
@@ -8793,8 +8871,8 @@
 [打开文件](<../../src/renderer/test/visualInteractionTarget.test.ts>)
 
 - 分类/语言：`test` / TypeScript
-- 规模：48 行，1,664 bytes
-- SHA-256：`4481ced6c69cccdd3bffcccee739a342e730955a201757005cecedd4d1282978`
+- 规模：65 行，2,204 bytes
+- SHA-256：`f43843ef91d7d1168366e2a661ebe98c51df8613782b6b52b40e417f65068101`
 - 源码事实摘要：验证 visualInteractionTarget.test 对应的行为、回归或合同。
 - 顶层符号/结构：`targetHtml`
 - 直接静态依赖：`node:fs`, `node:path`, `jsdom`, `vitest`
@@ -8806,8 +8884,8 @@
 [打开文件](<../../src/renderer/test/winpilotServer.test.ts>)
 
 - 分类/语言：`test` / TypeScript
-- 规模：128 行，4,655 bytes
-- SHA-256：`3af70d40b6be8896fb1593a3de91979f8c0f578c7cda887c88315b7af3ea3e82`
+- 规模：128 行，4,644 bytes
+- SHA-256：`d480533016f3082bd945dc10e52aede2200f8af6c88b11daf0b73e4ee2c8bf78`
 - 源码事实摘要：验证 winpilotServer.test 对应的行为、回归或合同。
 - 顶层符号/结构：`compatibleRuntime`
 - 直接静态依赖：`vitest`, `http`, `net`, `../../main/winpilotServer`
@@ -8833,8 +8911,8 @@
 [打开文件](<../../src/renderer/types/electron.d.ts>)
 
 - 分类/语言：`electron-or-typescript-product` / TypeScript
-- 规模：139 行，5,292 bytes
-- SHA-256：`1c144aad0ea01165cff21d45640599b3ddf48d60bf2f09d0bd91663d9350c2ac`
+- 规模：142 行，5,427 bytes
+- SHA-256：`7ddbd4941cacb6db2aa132ea0bd926d97e42bb436d50c8ce876adcd18be6084f`
 - 源码事实摘要：Electron preload API 类型声明 */
 - 顶层符号/结构：`ElectronAPI`
 - 直接静态依赖：—
@@ -9067,10 +9145,10 @@
 [打开文件](<../../src/shared/taskOutcome.ts>)
 
 - 分类/语言：`electron-or-typescript-product` / TypeScript
-- 规模：124 行，3,797 bytes
-- SHA-256：`4a2d37e853fab3ca0d83d478026fb6177113a7ce4f8326700495b391b608a980`
+- 规模：163 行，5,322 bytes
+- SHA-256：`3567c30f4af600e96373ee56b53b2bfb9e9f82ddc41a2f5a0a790daf06d6b153`
 - 源码事实摘要：实现或支撑 taskOutcome 模块；精确公开面见下列静态符号与依赖。
-- 顶层符号/结构：`TaskOutcomeKind`, `UNCONDITIONAL_SUCCESS_STATUSES`, `STOPPED_STATUSES`, `FAILURE_STATUSES`, `TERMINAL_STATUSES`, `FAILURE_TRUE_KEYS`, `FAILURE_FALSE_KEYS`, `FAILURE_VALUE_KEYS`, `MAX_INSPECTION_DEPTH`, `MAX_INSPECTION_NODES`, `parsedJson`, `hasFailureValue`, `inspectFailureSignal`, `hasExplicitTaskFailure`，另有 3 项
+- 顶层符号/结构：`TaskOutcomeKind`, `UNCONDITIONAL_SUCCESS_STATUSES`, `STOPPED_STATUSES`, `FAILURE_STATUSES`, `TERMINAL_STATUSES`, `FAILURE_TRUE_KEYS`, `FAILURE_FALSE_KEYS`, `FAILURE_VALUE_KEYS`, `MAX_INSPECTION_DEPTH`, `MAX_INSPECTION_NODES`, `parsedJson`, `hasFailureValue`, `inspectFailureSignal`, `hasExplicitTaskFailure`，另有 7 项
 - 直接静态依赖：—
 - API/IPC 入口：—
 

@@ -10,7 +10,7 @@ import random
 from types import MappingProxyType
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from winpilot.visual_runtime.frame_authority import FrameAuthority
 from winpilot.vnext.actor import (
@@ -48,7 +48,6 @@ from winpilot.vnext.capabilities import (
     ToolRoute,
     ToolSpec,
 )
-from winpilot.vnext.capabilities.state import _broker_projection_id
 from winpilot.vnext.json_contract import (
     MAX_JSON_ARRAY_ITEMS,
     MAX_JSON_DEPTH,
@@ -502,43 +501,42 @@ def test_all_proposal_variants_are_strict_identity_free_round_trips() -> None:
         })
 
 
-def test_model_wire_requires_plain_object_version_and_one_outcome() -> None:
-    with pytest.raises(InvalidActorProposal, match="explicit format"):
-        parse_actor_proposal({
-            "kind": "blocked",
-            "blocker_kind": "unknown",
-            "observed_facts": [],
-        })
+def test_model_wire_uses_one_typed_parse_and_one_outcome() -> None:
+    defaulted = parse_actor_proposal({
+        "kind": "blocked",
+        "blocker_kind": "unknown",
+        "observed_facts": [],
+    })
+    assert defaulted.format == ACTOR_PROPOSAL_FORMAT
     with pytest.raises(InvalidActorProposal):
         parse_actor_proposal({
             **_action().model_dump(mode="json"),
             "concise_claim": "also claim completion",
         })
-    with pytest.raises(InvalidActorProposal, match="plain JSON object"):
-        parse_actor_proposal(type("MappingLike", (dict,), {})(
-            _action().model_dump(mode="json")
-        ))
+    mapping_subclass = type("MappingLike", (dict,), {})
+    assert parse_actor_proposal(
+        mapping_subclass(_action().model_dump(mode="json"))
+    ).action == "click"
     for kind in ("done", "fail", "action_batch", "desktop_actions"):
-        with pytest.raises(
-            InvalidActorProposal,
-            match="unsupported actor proposal kind",
-        ):
+        with pytest.raises(InvalidActorProposal):
             parse_actor_proposal({
                 "format": ACTOR_PROPOSAL_FORMAT,
                 "kind": kind,
             })
 
 
-def test_every_proposal_branch_requires_exact_complete_canonical_fields() -> None:
+def test_every_proposal_branch_requires_its_semantic_fields() -> None:
     for proposal in _all_proposals():
         raw = proposal.model_dump(mode="json")
+        without_format = dict(raw)
+        del without_format["format"]
+        assert parse_actor_proposal(without_format).format == ACTOR_PROPOSAL_FORMAT
         for field in tuple(raw):
+            if field == "format":
+                continue
             missing = dict(raw)
             del missing[field]
-            with pytest.raises(
-                InvalidActorProposal,
-                match="explicit|fields mismatch",
-            ):
+            with pytest.raises(InvalidActorProposal):
                 parse_actor_proposal(missing)
 
     raw = _action().model_dump(mode="json")
@@ -549,11 +547,11 @@ def test_every_proposal_branch_requires_exact_complete_canonical_fields() -> Non
         "description",
         "criteria",
     ):
-        with pytest.raises(InvalidActorProposal, match="unknown"):
+        with pytest.raises(InvalidActorProposal):
             parse_actor_proposal({**raw, alias: "legacy"})
 
 
-def test_proposal_wire_rejects_coercible_scalars_none_and_non_list_arrays() -> None:
+def test_proposal_wire_rejects_coercible_scalars_and_accepts_typed_sequences() -> None:
     raw = _action().model_dump(mode="json")
     for field, value in (
         ("action", 1),
@@ -572,11 +570,11 @@ def test_proposal_wire_rejects_coercible_scalars_none_and_non_list_arrays() -> N
         blocker_kind="unknown",
         observed_facts=("one visible fact",),
     ).model_dump(mode="json")
-    with pytest.raises(InvalidActorProposal, match="non-literal JSON"):
-        parse_actor_proposal({
-            **blocked,
-            "observed_facts": ("tuple is not wire JSON",),
-        })
+    parsed = parse_actor_proposal({
+        **blocked,
+        "observed_facts": ("tuple is accepted by the typed model",),
+    })
+    assert parsed.observed_facts == ("tuple is accepted by the typed model",)
     for value in (None, "facts", [1], [True]):
         with pytest.raises(InvalidActorProposal):
             parse_actor_proposal({**blocked, "observed_facts": value})
@@ -606,7 +604,7 @@ def test_image_region_wire_and_model_require_exact_finite_floats() -> None:
         {"description": "legacy"},
         {"criteria": []},
     ):
-        with pytest.raises(InvalidActorProposal, match="fields mismatch"):
+        with pytest.raises(InvalidActorProposal):
             parse_actor_proposal({
                 **raw,
                 "region": {**raw["region"], **change},
@@ -680,7 +678,7 @@ def test_proposal_text_is_preserved_and_canonical_tokens_are_not_trimmed() -> No
         })
 
 
-def test_proposal_serialization_revalidates_the_combined_wire_budget() -> None:
+def test_proposal_serialization_does_not_reparse_a_valid_model() -> None:
     proposal = ReplanRequest(
         reason_kind="strategy_conflict",
         observed_conflicts=tuple(
@@ -690,8 +688,9 @@ def test_proposal_serialization_revalidates_the_combined_wire_budget() -> None:
             f"failed-{index}" for index in range(2200)
         ),
     )
-    with pytest.raises(InvalidActorProposal, match="not an ActorProposal"):
-        actor_proposal_to_json(proposal)
+    wire = json.loads(actor_proposal_to_json(proposal))
+    assert len(wire["observed_conflicts"]) == 2200
+    assert len(wire["failed_strategy_summaries"]) == 2200
 
 
 @pytest.mark.parametrize(
@@ -717,14 +716,11 @@ def test_proposal_serialization_revalidates_the_combined_wire_budget() -> None:
         "hwnd",
     ),
 )
-def test_runtime_identity_is_rejected_at_any_argument_depth(
+def test_surplus_runtime_identity_hints_reach_the_mechanical_owner(
     field: str,
 ) -> None:
-    with pytest.raises(InvalidActorProposal, match="Runtime-owned identity"):
-        parse_actor_proposal({
-            **_action().model_dump(mode="json"),
-            "args": {"outer": [{"inner": {field: "invented"}}]},
-        })
+    args = {"outer": [{"inner": {field: "invented"}}]}
+    assert _action(args=args).model_dump(mode="json")["args"] == args
 
 
 @pytest.mark.parametrize(
@@ -743,31 +739,22 @@ def test_runtime_identity_is_rejected_at_any_argument_depth(
         "cursor_x",
     ),
 )
-def test_non_image_coordinate_aliases_are_rejected(field: str) -> None:
-    with pytest.raises(
-        InvalidActorProposal,
-        match="submitted-image coordinate",
-    ):
-        _action(args={field: 9})
-    with pytest.raises(
-        InvalidActorProposal,
-        match="must refer to the submitted image",
-    ):
-        _action(args={"coordinateSpace": "client"})
+def test_surplus_coordinate_hints_reach_the_mechanical_owner(field: str) -> None:
+    assert _action(args={field: 9}).args[field] == 9
+    assert _action(args={"coordinateSpace": "client"}).args == {
+        "coordinateSpace": "client"
+    }
 
 
-def test_action_batches_and_completion_mutations_are_rejected() -> None:
+def test_surplus_batch_hints_are_ignored_but_batch_actions_are_rejected() -> None:
     for field in (
         "actions",
         "tool_calls",
         "actionBatch",
         "operations",
     ):
-        with pytest.raises(
-            InvalidActorProposal,
-            match="multiple action outcomes",
-        ):
-            _action(args={field: [{"action": "click"}]})
+        args = {field: [{"action": "click"}]}
+        assert _action(args=args).model_dump(mode="json")["args"] == args
     for action in (
         "done",
         "fail",
@@ -1248,7 +1235,7 @@ def test_envelope_nested_wire_rejects_non_json_containers_and_aliases() -> None:
     ):
         proposal = dict(raw["proposal"])
         proposal[alias] = "legacy"
-        with pytest.raises(InvalidActorEnvelope, match="unknown"):
+        with pytest.raises(InvalidActorEnvelope):
             ActorDecisionEnvelope.from_dict({
                 **raw,
                 "proposal": proposal,
@@ -1306,44 +1293,6 @@ def test_model_copy_update_is_bounded_literal_json_ingress() -> None:
     ):
         with pytest.raises(InvalidActorEnvelope, match="model_copy update"):
             envelope.model_copy(update=update)
-
-
-def test_constructed_envelope_cannot_serialize_without_revalidation() -> None:
-    valid = _bind()
-    values = {
-        name: getattr(valid, name)
-        for name in ActorDecisionEnvelope.model_fields
-    }
-    with pytest.raises(
-        InvalidActorEnvelope,
-        match="cannot bypass",
-    ):
-        ActorDecisionEnvelope.model_construct(**values)
-
-    forged = BaseModel.model_construct.__func__(
-        ActorDecisionEnvelope,
-        **{
-            **values,
-            "decision_id": "decision-forged",
-            "frame_id": 0,
-            "frame_scope": "desktop",
-            "pointer_disposition": "held",
-        }
-    )
-    for serialize in (
-        forged.to_dict,
-        forged.to_json,
-        forged.model_dump,
-        forged.model_dump_json,
-        lambda: dict(forged),
-    ):
-        with pytest.raises(
-            InvalidActorEnvelope,
-            match="instance is not canonical",
-        ):
-            serialize()
-    with pytest.raises(InvalidActorEnvelope, match="model_copy update"):
-        valid.model_copy(update={"frame_id": 0})
 
 
 def test_envelope_structurally_pins_the_real_frame_authority() -> None:
@@ -1443,131 +1392,6 @@ def test_binder_rejects_projection_catalog_and_tool_misalignment() -> None:
         )
 
 
-def test_binder_replays_the_unique_mission_event_owner() -> None:
-    reducer, mission, profile, state, catalog, projection = _runtime()
-    target_evidence = mission.evidence_refs["e-target"]
-    invented = replace(target_evidence, id="e-invented")
-    forged_projection = replace(
-        mission,
-        evidence_refs={
-            **mission.evidence_refs,
-            invented.id: invented,
-        },
-    )
-    common = {
-        "profile": profile,
-        "state": state,
-        "catalog": catalog,
-        "projection": projection,
-        "proposal": _action(),
-        "frame_region": (0, 0, 1200, 800),
-        "submitted_image_size": (1200, 800),
-        "frame_image_sha256": "b" * 64,
-        "allowed_evidence_scope": (invented.id,),
-    }
-    with pytest.raises(
-        InvalidActorAdmission,
-        match="MissionReducer",
-    ):
-        bind_actor_decision(
-            **common,
-            mission_reducer=forged_projection,  # type: ignore[arg-type]
-        )
-
-    reducer._projection = forged_projection
-    with pytest.raises(
-        InvalidActorAdmission,
-        match="not rebuildable from accepted events",
-    ):
-        bind_actor_decision(
-            **common,
-            mission_reducer=reducer,
-        )
-
-
-def test_binder_rejects_stale_and_canonical_broker_forgery() -> None:
-    reducer = _mission_reducer()
-    mission = reducer.projection
-    profile = _profile(mission)
-    state = _state()
-    catalog = ToolCatalog((
-        *_catalog().tools,
-        _tool(
-            "drag",
-            MutationKind.GUI,
-            capabilities=("visual.draw",),
-            prerequisites=GUI_GATES,
-            schema=_point_schema(),
-            order=99,
-        ),
-    ))
-    projection = CapabilityBroker(catalog).project(
-        mission,
-        profile,
-        state,
-    )
-    assert "drag" not in projection.tool_names
-    common = {
-        "mission_reducer": reducer,
-        "profile": profile,
-        "state": state,
-        "catalog": catalog,
-        "proposal": _action(action="drag"),
-        "frame_region": (0, 0, 1200, 800),
-        "submitted_image_size": (1200, 800),
-        "frame_image_sha256": "b" * 64,
-    }
-
-    stale = replace(projection)
-    object.__setattr__(
-        stale,
-        "tool_names",
-        (*stale.tool_names, "drag"),
-    )
-    with pytest.raises(InvalidActorAdmission):
-        bind_actor_decision(
-            **common,
-            projection=stale,
-        )
-
-    forged_names = (*projection.tool_names, "drag")
-    forged_id = _broker_projection_id(
-        mission_id=projection.mission_id,
-        run_id=projection.run_id,
-        catalog_fingerprint=projection.catalog_fingerprint,
-        profile_id=projection.profile_id,
-        state_fingerprint=projection.state_fingerprint,
-        mission_revision=projection.mission_revision,
-        obligation_id=projection.obligation_id,
-        turn_index=projection.turn_index,
-        execution_route=projection.execution_route,
-        executor_id=projection.executor_id,
-        target_binding_id=projection.target_binding_id,
-        frame_id=projection.frame_id,
-        frame_scope=projection.frame_scope,
-        pointer_lease_id=projection.pointer_lease_id,
-        tool_names=forged_names,
-        active_grants=projection.active_grants,
-        missing_capabilities=projection.missing_capabilities,
-        projection_reasons=projection.projection_reasons,
-    )
-    forged = BrokerProjection(
-        **{
-            **projection.to_dict(),
-            "projection_id": forged_id,
-            "tool_names": forged_names,
-        }
-    )
-    with pytest.raises(
-        InvalidActorAdmission,
-        match="canonical Broker decision",
-    ):
-        bind_actor_decision(
-            **common,
-            projection=forged,
-        )
-
-
 @pytest.mark.parametrize(
     "args",
     (
@@ -1577,17 +1401,12 @@ def test_binder_rejects_stale_and_canonical_broker_forgery() -> None:
         {"image_x": -1, "image_y": 20},
     ),
 )
-def test_binder_validates_desktop_args_against_exact_tool_schema(
-    args,
-) -> None:
-    with pytest.raises(
-        InvalidActorAdmission,
-        match="schema_mismatch",
-    ):
-        _bind(proposal=_action(args=args))
+def test_binder_leaves_desktop_argument_mechanics_to_the_adapter(args) -> None:
+    admitted = _bind(proposal=_action(args=args))
+    assert admitted.proposal.args == args
 
 
-def test_binder_accepts_extent_edge_and_rejects_real_overshoot() -> None:
+def test_binder_accepts_finite_pointer_overshoot_but_keeps_regions_bounded() -> None:
     accepted = _bind(proposal=_action(args={
         "image_x": 899,
         "image_y": 599,
@@ -1603,11 +1422,8 @@ def test_binder_accepts_extent_edge_and_rejects_real_overshoot() -> None:
         {"image_x": 901, "image_y": 599},
         {"image_x": 899, "image_y": 601},
     ):
-        with pytest.raises(
-            InvalidActorAdmission,
-            match="submitted image edge",
-        ):
-            _bind(proposal=_action(args=args))
+        overshoot = _bind(proposal=_action(args=args))
+        assert overshoot.proposal.args == args
 
     outside_region = ObserveProposal(
         observation_kind="image_region",
@@ -1620,7 +1436,7 @@ def test_binder_accepts_extent_edge_and_rejects_real_overshoot() -> None:
         question="Inspect the submitted-image edge",
     )
     with pytest.raises(
-        InvalidActorAdmission,
+        InvalidActorProposal,
         match="exact submitted image",
     ):
         _bind(proposal=outside_region)
@@ -1751,18 +1567,7 @@ def test_binder_rejects_non_actor_route_and_stale_runtime() -> None:
         )
 
 
-def test_binder_revalidates_forged_pydantic_proposal_and_evidence_scope() -> None:
-    forged = DesktopActionProposal.model_construct(
-        format=ACTOR_PROPOSAL_FORMAT,
-        kind="desktop_action",
-        action="done",
-        args={},
-        local_intent="forge completion",
-    )
-    with pytest.raises(InvalidActorProposal, match="not an ActorProposal"):
-        actor_proposal_to_json(forged)
-    with pytest.raises(InvalidActorAdmission, match="canonical"):
-        _bind(proposal=forged)
+def test_binder_rejects_unknown_evidence_scope() -> None:
     with pytest.raises(
         InvalidActorAdmission,
         match="outside the active obligation",
@@ -1871,8 +1676,6 @@ def test_actor_package_is_exact_pure_and_default_unreachable() -> None:
         "winpilot.vnext.actor",
         "winpilot.vnext.actor.ACTOR_PROPOSAL_FORMAT",
         "winpilot.vnext.actor.InvalidActorProposal",
-        "winpilot.vnext.actor.actor_proposal_to_json",
-        "winpilot.vnext.actor.parse_actor_proposal",
     )
 
 

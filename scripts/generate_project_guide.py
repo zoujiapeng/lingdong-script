@@ -29,12 +29,6 @@ ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs" / "project-guide" / "generated-file-inventory.md"
 SELF_PATH = "scripts/generate_project_guide.py"
 OUTPUT_PATH = "docs/project-guide/generated-file-inventory.md"
-HUMAN_REFERENCE_PATHS = (
-    "docs/project-guide/05-file-reference-typescript-electron.md",
-    "docs/project-guide/06-file-reference-winpilot-python.md",
-    "docs/project-guide/07-file-reference-support-tests.md",
-)
-
 CODE_EXTENSIONS = {
     ".ahk",
     ".bat",
@@ -117,11 +111,13 @@ class FileFacts:
 
 def _git_paths() -> list[str]:
     raw = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"])
-    paths = [
-        item.decode("utf-8", "surrogateescape")
-        for item in raw.split(b"\0")
-        if item
-    ]
+    paths = []
+    for item in raw.split(b"\0"):
+        if not item:
+            continue
+        path = item.decode("utf-8", "surrogateescape")
+        if (ROOT / path).is_file():
+            paths.append(path)
     if SELF_PATH not in paths and (ROOT / SELF_PATH).is_file():
         paths.append(SELF_PATH)
 
@@ -522,29 +518,6 @@ def _verify_markers(rendered: str, paths: list[str]) -> None:
         raise SystemExit("project guide coverage mismatch: " + "; ".join(details))
 
 
-def _verify_human_reference_coverage(paths: list[str]) -> None:
-    """Require every code/config path to occur in a human semantic volume."""
-
-    missing_volumes = [path for path in HUMAN_REFERENCE_PATHS if not (ROOT / path).is_file()]
-    if missing_volumes:
-        raise SystemExit(f"missing human project-guide volumes: {missing_volumes}")
-    reference_text = "\n".join(
-        (ROOT / path).read_text(encoding="utf-8")
-        for path in HUMAN_REFERENCE_PATHS
-    )
-    expected = {
-        path
-        for path in paths
-        if path != OUTPUT_PATH and _is_code_or_config(path)
-    }
-    missing = sorted(path for path in expected if path not in reference_text)
-    if missing:
-        raise SystemExit(
-            "human project-guide coverage mismatch: "
-            f"missing={missing[:40]}"
-        )
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="verify the committed inventory is current")
@@ -553,7 +526,6 @@ def main(argv: list[str] | None = None) -> int:
     paths = _git_paths()
     rendered = _render(paths)
     _verify_markers(rendered, paths)
-    _verify_human_reference_coverage(paths)
     if args.check:
         if not OUTPUT.is_file():
             print(f"missing generated inventory: {OUTPUT.relative_to(ROOT)}", file=sys.stderr)

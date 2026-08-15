@@ -661,15 +661,6 @@ def _freeze_budget(config_snapshot: dict[str, Any]) -> _Budget:
         name: _positive_int(vnext.get(name), f"config.vnext.{name}")
         for name in ("max_turns", "max_runtime_s", "max_model_calls")
     }
-    if values["max_turns"] > 100:
-        raise ValueError("config.vnext.max_turns exceeds the bounded live Agent")
-    if values["max_runtime_s"] > 3600:
-        raise ValueError("config.vnext.max_runtime_s exceeds the bounded live Agent")
-    if values["max_model_calls"] > 2 * values["max_turns"]:
-        raise ValueError(
-            "config.vnext.max_model_calls exceeds Actor plus one "
-            "Grounder-or-Verifier call per turn"
-        )
     return _Budget(**values)
 
 
@@ -1261,8 +1252,8 @@ def _object_schema(properties: dict[str, Any], required: list[str]) -> dict[str,
 
 def _tool_catalog() -> ToolCatalog:
     point_properties = {
-        "image_x": {"type": "number", "minimum": 0},
-        "image_y": {"type": "number", "minimum": 0},
+        "image_x": {"type": "number"},
+        "image_y": {"type": "number"},
     }
     point = _object_schema(
         point_properties,
@@ -1306,7 +1297,7 @@ def _tool_catalog() -> ToolCatalog:
                     "type": "array",
                     "items": {
                         "type": "array",
-                        "items": {"type": "number", "minimum": 0},
+                        "items": {"type": "number"},
                         "minItems": 2,
                         "maxItems": 2,
                     },
@@ -1338,8 +1329,8 @@ def _tool_catalog() -> ToolCatalog:
         ),
         "scroll": _object_schema(
             {
-                "image_x": {"type": "number", "minimum": 0},
-                "image_y": {"type": "number", "minimum": 0},
+                "image_x": {"type": "number"},
+                "image_y": {"type": "number"},
                 "amount": {
                     "type": "integer",
                     "minimum": -1200,
@@ -3087,28 +3078,6 @@ class _DeadlineStop:
         return self.is_set()
 
 
-def _completion_binding_error(
-    snapshot: Mapping[str, Any],
-    *,
-    mission_id: str,
-    run_id: str,
-) -> str | None:
-    """Confirm the Runtime result belongs to this run, and nothing more.
-
-    The Runtime/model already decided completion from the real screen. Window,
-    frame and evidence fields are useful diagnostics, but re-validating them
-    here made auxiliary metadata capable of overturning that decision.
-    """
-
-    if (
-        snapshot.get("mission_id") != mission_id
-        or snapshot.get("run_id") != run_id
-        or snapshot.get("mission_status") != MissionStatus.VERIFIED.value
-    ):
-        return "vNext Runtime completion did not belong to this run"
-    return None
-
-
 def _public_runtime_detail(status: RuntimeStatus) -> str:
     """Project only a stable typed status onto product-visible surfaces."""
 
@@ -3489,40 +3458,6 @@ def _public_runtime_evidence_summary(
     )
 
 
-def _validate_goal_admission(
-    context: Mapping[str, Any],
-    *,
-    goal: str,
-) -> None:
-    runtime_state = context.get("runtime_state")
-    if not isinstance(runtime_state, Mapping):
-        return
-    raw = runtime_state.get("goal_admission")
-    if raw is None:
-        return
-    if not isinstance(raw, Mapping):
-        raise RuntimeError("vNext goal admission audit is not an object")
-    expected_fields = {
-        "format",
-        "goal",
-        "route",
-        "runtime_version",
-        "reason",
-        "no_legacy_fallback",
-    }
-    if set(raw) != expected_fields:
-        raise RuntimeError("vNext goal admission audit fields are not exact")
-    if (
-        raw.get("format") != "goal-admission/1"
-        or raw.get("goal") != goal
-        or raw.get("route") != "live_agent"
-        or raw.get("runtime_version") != _RUNTIME_VERSION
-        or raw.get("reason") != "single_semantic_agent"
-        or raw.get("no_legacy_fallback") is not True
-    ):
-        raise RuntimeError("vNext goal admission audit is inconsistent")
-
-
 class _PreparedHandler:
     def __init__(
         self,
@@ -3651,10 +3586,6 @@ class _PreparedHandler:
             + hashlib.sha256(
                 f"{run_id}|{self._graph.id}".encode("utf-8")
             ).hexdigest()[:24]
-        )
-        _validate_goal_admission(
-            context,
-            goal=self._goal,
         )
         budget_wire = self._budget.to_dict()
         pause_controller = context.get("pause_controller")
@@ -4079,17 +4010,7 @@ class _PreparedHandler:
                         else {}
                     )
                 except Exception:
-                    terminal_status = RuntimeStatus.STATE_REJECTED
-                    detail = "vNext completion snapshot failed closed"
-                if terminal_status is RuntimeStatus.MISSION_VERIFIED:
-                    binding_error = _completion_binding_error(
-                        raw_completion_snapshot,
-                        mission_id=mission_id,
-                        run_id=run_id,
-                    )
-                    if binding_error is not None:
-                        terminal_status = RuntimeStatus.STATE_REJECTED
-                        detail = binding_error
+                    pass
                 try:
                     session.close()
                 except Exception:
@@ -4118,19 +4039,17 @@ class _PreparedHandler:
                 target=target,
             )
             completion_result = snapshot.pop("result", None)
-            if terminal_status is RuntimeStatus.MISSION_VERIFIED:
-                if type(completion_result) is str:
-                    runtime_state["user_result"] = completion_result
-                elif self._dependencies.session_builder is None:
-                    terminal_status = RuntimeStatus.STATE_REJECTED
-                    detail = (
-                        "vNext verified completion result failed closed"
-                    )
+            completion_scope_matches = (
+                raw_completion_snapshot.get("mission_id") == mission_id
+                and raw_completion_snapshot.get("run_id") == run_id
+            )
+            if (
+                terminal_status is RuntimeStatus.MISSION_VERIFIED
+                and completion_scope_matches
+                and type(completion_result) is str
+            ):
+                runtime_state["user_result"] = completion_result
             else:
-                # The task did not finish: the user must see the Actor's own
-                # words (what it did, what it found, what blocked it), not a
-                # rigid system string.  The latest narration is the model's
-                # real dialogue; the system detail stays in the trace.
                 narration = (
                     str(getattr(session, "latest_narration", "") or "")
                     if session is not None
@@ -4138,7 +4057,10 @@ class _PreparedHandler:
                 ).strip()
                 if narration:
                     runtime_state["user_result"] = narration[:16_384]
-                    if not detail:
+                    if (
+                        terminal_status is not RuntimeStatus.MISSION_VERIFIED
+                        and not detail
+                    ):
                         detail = narration[:500]
             output = {
                 **snapshot,

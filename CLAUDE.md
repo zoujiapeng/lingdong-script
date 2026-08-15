@@ -1,6 +1,6 @@
 # AI / Codex / 开发者接手入口
 
-> 最后核对：2026-08-04。当前唯一产品分支是 `master`。本文件不再把某个提交写成
+> 最后核对：2026-08-15。当前唯一产品分支是 `master`。本文件不再把某个提交写成
 > “当前 HEAD”；接手时必须现场运行 `git rev-parse HEAD`、`git rev-parse origin/master`
 > 并查询该精确 SHA 的 Actions。13.20–13.28 已进入或正在进入主线；不要用更早的提交说明覆盖
 > Thread/Turn、按需桌面租约、通用 connector、history-depth 证据或 provisional
@@ -45,6 +45,31 @@
   到前台，不得因"另一个窗口才应该拥有点击"而拒绝点击。
 - 只保留模型自身无法守住的机械边界：物理输入单写入者、按键/指针释放清理、
   凭据不泄漏、不可逆外部动作的同意。
+
+### 2026-08-15 当前视觉执行线
+
+- 同一个 `LiveVisualActor` 看当前真实屏幕、执行并在当前屏幕上自验；它的完成 claim
+  是生产任务完成的语义来源。trace、运行详情和 memory 只帮助诊断首个分歧，不参与
+  task pass，也不能把模型已完成的任务反判失败。
+- `LiveVisualActor` 只把 provider function call 解码成 raw proposal；typed proposal 只在
+  `MissionRuntime` 入口解析一次。`bind_actor_decision` 只附加当前 mission/frame/Broker
+  身份，不重放整套 Mission/Broker 校验；Envelope 序列化和 `AtomicDesktopAdapter`
+  不再重复跑 schema 或 submitted-image 边界验证。格式错误的辅助 `task_state_update`
+  只被忽略，不能否决同一响应中可执行的动作。
+- `AtomicDesktopAdapter` 只接受有限数值、做一次 submitted-image → 物理屏幕线性映射，
+  然后经单 writer 队列调用 RawDevice。超出图片宽高的模型坐标不在 Envelope 被提前
+  拒绝；物理层只处理操作系统最终可表示范围和释放清理。若一次 raw 输入报告释放
+  清理不完整，有界 pointer/key 清理在原动作的同一 physical queue lease 内完成，期间
+  不能插入下一条物理输入；只有两轮清理仍无法确认时才保留机械失败。
+- Actor 的完成 claim 在辅助 Mission history/diagnostic snapshot 之前缓存为最终文案；
+  这些旁路记录失败不能把已完成任务改写成失败，也不能丢失 `user_result`。
+- 默认是 screen-first 全桌面帧。鼠标去模型指向的可见位置，不因绑定窗口、前台窗口或
+  hit-test 推断不同而 veto；窗口裁剪仍只是显式 opt-in。
+- `launch_application` 复用已运行实例时只做通用窗口排序：普通主窗优先于
+  `WS_EX_TOOLWINDOW` 辅助窗，再按可见、隐藏与 hidden-topmost 排序；只恢复排序选中的
+  候选窗，不增加 QQ、Krita 或其他应用配方。
+- `capture_screen` 的相对路径原样交给物理 backend，由 backend 按运行时 cwd 和输出格式
+  处理；vNext 不再用另一套绝对路径、扩展名或存在性检查制造假失败。
 
 ## 2026-08-04 安全系统解耦：备份存档与最终设计（历史记录）
 
@@ -96,15 +121,13 @@ P1（默认关闭不拦截，从配置面删除选项，随后删除机制分支
 
 P2（只记录不拦截，删除候选）：
 
-- `MutationPermitAuthority` 每动作许可握手（`vnext/runtime/mutation_permits.py`
-  及 `call_once_with_permit`、adapter 的 permit 校验链）。
 - evidence 记录链（每动作 `actor_decision -> admission -> physical_attempt ->
   raw_receipt -> controller_transition` 五类事件全记录 + 帧工件 + 哈希链）；
   独立结果证据装置属另一项目，本仓库只保留机械层测试。
 - 文档中的安全/隐私描述与 `SECURITY.md` 同步清理。
 
 验收标准：上述关键词（`approve_mode`、`no_mouse_steal`、
-`multi_input_cooperation`、`decide_gate`、`scope_guard`、`permit`、
+`multi_input_cooperation`、`decide_gate`、`scope_guard`、
 `cooperative_`）在生产代码中搜索为零；全量测试通过后按
 `docs/visual-runtime-principles.md` 的机械边界清单复核，只保留物理输入
 单写入者、按键/指针释放清理、凭据不泄漏。
@@ -667,9 +690,9 @@ git log -8 --oneline --decorate
 
 下一轮最高价值方向（按优先级）：
 
-1. 执行"安全设计清理计划"（见上文 2026-08-04 计划章节）：P0 审批门/审批选项/
-   legacy scope_guard -> P1 输入仲裁选项与分支 -> P2 permit 与 evidence 记录链，
-   验收标准为安全关键词在生产代码中搜索为零。
+1. 用覆盖连续混合任务的真实 E2E 继续提高完成率；trace只定位
+   `model arguments → canonical arguments → physical_attempt → external state` 的首个分歧，
+   不恢复已删除的重复解析、证据链或完成 verifier。
 2. 模型能力评估与切换始终以真实任务完成为准；当前模型为 `mimo-v2.5`（视觉
    可用、temperature 0.3、thinking 关闭），eoeo 中转（gpt-5.6-luna）已切回备份。
    如需换模型，用相同 goal/截图/schema/turn budget 做对照，保留真实完成率更高者，
@@ -720,7 +743,7 @@ python scripts/export_run_log.py --latest-e2e   # 最近一次视觉 E2E 套件�
    因果后继机制重绑定到新窗口。
 3. **一次工具格式修复**：视觉轮模型工具调用不符合 schema 时，把结构化
    `tool_format_error` 回喂同一模型修复一次；第二次失败即终止。修复发生在任何
-   物理输入之前；物理动作后仍绝不自动重放（call-once + permit 不变）。
+   物理输入之前；物理动作后仍绝不自动重放。
 4. **记忆语义统一**：`get_memory_status` 与运行面板/记忆页明确显示
    “长期经验记忆未启用（冷启动）”；Studio 长期记忆页加注 vNext 主链不读写。
 5. **错误阶段分类**：`live_agent_done` 与运行输出新增 `failure_stage`：
@@ -819,7 +842,7 @@ E2E 暴露并修复的问题：
    窗口内最近 3 次可恢复拒绝，若全部属于目标几何族（hit_test/target/region/
    point 类），调用新增的 `workspace.request_target_refresh()` 重新探测当前前台
    窗口；`DesktopWorkspace` 新增该 uncaused successor 机制（复用既有两采样
-   adopt，仍不直接改写输入）。非几何拒绝（如 permit）会打断该序列，避免误刷新。
+   adopt，仍不直接改写输入）。非几何拒绝会打断该序列，避免误刷新。
 
 配套测试：被拒动作进入事件流并含 error_kind、rejected previous_action 替换旧的
 completed intent、初始轮一次修复/二次终止、workspace refresh 成功/无前台变化不
@@ -911,7 +934,7 @@ raw_device 的强制前台检查用绑定窗口（终端）判定点击合法性
 3. **解除 raw_device 强制前台检查**：`enforce_foreground` 参数全链透传
    （`RawDeviceExecutor.click -> execute_admitted_physical_click -> _raw_click`），
    vNext 在 full_desktop 帧下传 `False`；legacy 路径默认不变。
-4. **scope 校验统一放宽**：envelope / Broker / MissionRuntime / 证据平面里所有
+4. **scope 校验统一放宽**：envelope / Broker / MissionRuntime 里所有
    硬编码 `frame_scope == "target_window"` 改为接受
    `{target_window, full_desktop}`。
 5. **legacy done_verifier**：仅当验证过的窗口裁剪被选中时才附加原生图，全屏帧
@@ -1319,7 +1342,7 @@ renderer `318 passed`、TypeScript typecheck 通过。`CON` 未触碰。
   时间线本身；没有新增应用 recipe、分类器、坐标 offset、snap 或第二验证角色。
 - `type_text` 上限从 4096 放宽到 16384。真实记事本任务第一次生成的完整 45+ 行
   文本被旧 schema 拒绝，底层 SendInput 本来就能处理，因此这是机械容量修复。
-- 默认 vNext 预算改为 `100 turns / 3600s / 200 model calls`。真实长任务的人类需求
+- 默认 vNext 预算改为 `200 turns / 7200s / 400 model calls`。真实长任务的人类需求
   到第 75 回合、约 889 秒才完成，旧默认 60 回合会在完成前截断。
 - AtomicDesktopAdapter 已内联为唯一一次提交图像素到屏幕像素映射；静态边界测试
   同步删除对两个旧 mapper 导入的过时期望，没有把冗余映射层加回来。
@@ -1334,7 +1357,7 @@ renderer `318 passed`、TypeScript typecheck 通过。`CON` 未触碰。
 从磁盘重开并查找两个标记。磁盘独立核验：73 非空行、七个标题各一次、22 条编号、
 `PENDING_REVIEW=0`、`HUMAN_VALIDATED=9`、精确末行一次、严格 UTF-8，SHA-256
 `CE7FE58DF4947394E41A504C1C29B29965F1DB3A229850A96F228698B93661E2`。产物：
-`output/real-software-e2e/notepad-visual-acceptance-report.txt`。run 在第 100 回合以预算
+`output/real-software-e2e/notepad-visual-acceptance-report.txt`。当时的 run 在第 100 回合以预算
 耗尽记为 failed，但 trace 显示第 73 回合已找到精确 `END-OF-REPORT`、第 75 回合已
 回到顶部完成可见核验；随后模型把屏幕上的短横误看为空格并重复打开替换框。
 98 次物理动作全部成功，磁盘文件未被后续误操作改写，所以人类交付结论是成功，

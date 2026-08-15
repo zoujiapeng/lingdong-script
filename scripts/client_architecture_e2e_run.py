@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Visible Electron E2E for the 2026-08-03 architecture gaps.
 
-Task 1: "记忆系统有没有开？" must terminate as a direct reply without a
-        desktop lease, observation, connector, or GUI action.
-Task 2: "打开记事本" must complete and an independent Win32 oracle must find
-        a visible Notepad window afterwards.
+Task 1: "记忆系统有没有开？" must terminate as a direct reply.
+Task 2: "打开记事本" must complete and leave a visible Notepad window.
 
 Both tasks are submitted through the real visible Electron client (UIA
 input + native mouse), never through a backend shortcut.
@@ -105,15 +103,11 @@ def main() -> int:
     )
     result = dict(status)
     terminal = result.get("result") or {}
-    trace_ids = list(result.get("bound_trace_ids") or [])
-    events = harness._bound_trace_evidence(trace_ids, str(result.get("task") or ""), "vnext")
     result["status_query"] = {
         "outcome": terminal.get("outcome"),
         "result_text": terminal.get("result"),
         "model_calls": terminal.get("model_calls"),
         "status": terminal.get("status"),
-        "bound_trace_ids": trace_ids,
-        "trace_events": events,
     }
     results.append(result)
 
@@ -131,14 +125,21 @@ def main() -> int:
         "window": notepad_window_oracle(),
         "process": notepad_process_oracle(),
     }
+    result["passed"] = bool(
+        notepad.get("passed") is True
+        and result["notepad_oracle"]["window"]["passed"] is True
+        and result["notepad_oracle"]["process"]["passed"] is True
+    )
     results.append(result)
 
+    passed = all(item.get("passed") is True for item in results)
     report = {
         "entrypoint": "electron_client_windows_uia",
         "runtime_version": "vnext",
         "started_at": datetime.now().astimezone().isoformat(),
         "case_count": len(results),
         "results": results,
+        "passed": passed,
     }
     report_path = output_root / "suite-report.json"
     report_path.write_text(
@@ -146,7 +147,7 @@ def main() -> int:
         encoding="utf-8",
     )
     print(json.dumps({"event": "architecture_e2e_finished", "report": str(report_path)}, ensure_ascii=False), flush=True)
-    return 0
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

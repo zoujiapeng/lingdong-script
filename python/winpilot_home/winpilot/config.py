@@ -149,9 +149,9 @@ _DEFAULTS: dict[str, Any] = {
         # Generous real-task budgets: slow visual providers and multi-step
         # ordinary desktop tasks must not be cut off by a tight wall clock or
         # turn cap.  Completion quality beats bounded-run accounting.
-        "max_turns": 100,
-        "max_runtime_s": 3600,
-        "max_model_calls": 200,
+        "max_turns": 200,
+        "max_runtime_s": 7200,
+        "max_model_calls": 400,
     },
     "server": {"host": "127.0.0.1", "port": 8765},
 }

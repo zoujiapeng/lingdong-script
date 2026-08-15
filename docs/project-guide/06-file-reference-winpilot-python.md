@@ -1,7 +1,8 @@
 # 06. WinPilot Python 核心逐文件精确讲解
 
-> 审计快照：`master` / `e54d0a97f6cf332daf012c98bf3b8947f8ed9714`，2026-08-02。
-> 本文只描述这个提交中真实存在的代码，不把路线图、历史实验或模型声明写成已实现能力。
+> 主链说明最后同步：2026-08-15。文件数量、SHA 与完整符号仍以
+> [`generated-file-inventory.md`](generated-file-inventory.md) 为机械索引；本章描述当前工作树的
+> owner 和调用关系，不把已删除文件继续写成产品组件。
 
 ## 1. 范围、计数和阅读约定
 
@@ -11,14 +12,13 @@
 $files = git ls-files -z -- 'python/winpilot_home/winpilot/**' |
   ForEach-Object { $_ -split "`0" } |
   Where-Object { $_ }
-$files.Count # 209 = 206 Python + baseline JSON + 2 bundled Everything files
+$files.Count # 现场读取；不要继承旧快照计数
 git ls-files -- 'python/winpilot_home/serve.py' # 1
 ```
 
-因此正文逐一解释 **206 个 `winpilot/**.py` 文件**，并额外解释评测历史快照、Bundled
-Everything CLI/许可证，以及唯一受支持的 Python 启动器 `serve.py`，合计 **210 个文件**
-（其中 207 个 Python 文件）。`CON` 不在 Git 中，也没有被读取或
-触碰。逐文件的行数、字节数、SHA-256、完整 AST 顶层符号和机械静态 import 另见
+正文解释 `winpilot/**` 的当前 owner，并额外解释评测历史快照、Bundled
+Everything CLI/许可证，以及唯一受支持的 Python 启动器 `serve.py`。`CON` 不在 Git 中，
+也没有被读取或触碰。逐文件的行数、字节数、SHA-256、完整 AST 顶层符号和机械静态 import 另见
 [`generated-file-inventory.md`](generated-file-inventory.md)；本文负责机械索引无法回答的
 职责、调用关系、主链/兼容边界和通俗流程。
 
@@ -50,21 +50,21 @@ flowchart TD
     SESSION --> MR["MissionRuntime<br/>一回合一个决定"]
     MR --> BROKER["CapabilityBroker<br/>只投影机械可用工具"]
     BROKER --> ACTOR["LiveVisualActor.propose<br/>当前 JPEG + 有界状态"]
-    ACTOR --> ENV["bind_actor_decision<br/>canonical envelope"]
-    ENV --> PERMIT["MutationPermitAuthority<br/>单次许可"]
-    PERMIT --> ADA["AtomicDesktopAdapter<br/>唯一坐标映射/新鲜度检查"]
+    ACTOR --> ENV["MissionRuntime单次 typed parse<br/>bind identity envelope"]
+    ENV --> ADA["AtomicDesktopAdapter<br/>唯一坐标映射"]
     ADA --> Q["DesktopActionQueue<br/>全局单 writer"]
     Q --> RAW["RawDeviceExecutor"]
     RAW --> SEND["executor / Win32 SendInput"]
-    SEND --> POST["新权威帧 + receipt + evidence"]
+    SEND --> POST["新权威屏幕 + receipt"]
     POST --> MR
-    ACTOR -->|claim_obligation_done| VERIFY["当前帧绑定的 actor_claim record<br/>再做 schema/scope/revision/evidence 一致性聚合"]
-    VERIFY -->|aggregate closed| DONE["一致的 Runtime 完成候选<br/>外部 E2E 仍判业务结果"]
+    ACTOR -->|claim_obligation_done| DONE["模型在当前真实屏幕自验<br/>Runtime投影完成状态"]
 ```
 
 关键事实：`ArpExecution` 没有替模型规划桌面动作；它只执行三节点规范图并管理状态、暂停、
 取消与 trace。真正的语义决定始终在同一个 `LiveVisualActor`；真正的物理输入始终经过
 `AtomicDesktopAdapter → DesktopActionQueue → RawDeviceExecutor → executor`。
+同一个 Actor 在当前真实屏幕上自验并 claim；trace、运行详情和 memory 只用于定位首个
+分歧，不是 task-pass 门，也不会触发另一轮语义验证。
 
 ### 2.2 一笔视觉动作如何落到物理桌面
 
@@ -79,20 +79,19 @@ sequenceDiagram
     participant D as RawDeviceExecutor
     participant O as Windows / App
     M->>R: raw proposal(image_x/image_y/...)
-    R->>B: project(current target/frame/pointer state)
-    R->>R: schema validation + bind_actor_decision
-    R->>A: call_once_with_permit(envelope)
+    R->>B: project(current screen/pointer state)
+    R->>R: bind_actor_decision(identity only)
+    R->>A: execute(envelope)
     A->>F: run_if_current(envelope)
     A->>A: submitted-image → frame → physical，仅映射一次
-    A->>A: target/process/region/foreground/hit-test 复检
     A->>Q: queued_desktop_action
     Q->>D: typed admitted physical action
     D->>O: 一次 SendInput/已准入 backend
     O-->>D: RawActionReceipt
     D-->>A: completed / not-started / unknown
-    A->>F: 捕获并提交 after frame
-    A-->>R: ControllerTransition + evidence
-    R->>R: reconcile_post_action + MissionEvent
+    A->>F: 捕获并提交下一张全桌面帧
+    A-->>R: ControllerTransition
+    R->>R: MissionEvent；trace旁路诊断
 ```
 
 这里故意没有 OCR snapping、控件中心吸附、全局 offset 或答案修正。模型参数、canonical
@@ -190,43 +189,41 @@ snapshot = state.observe(current_mission, turn_index)
 projection = CapabilityBroker.project(snapshot)
 turn = project_actor_turn_input(goal, current JPEG, bounded state, recent exchange)
 raw = LiveVisualActor.propose(turn)
-proposal = parse_actor_proposal(raw)
+proposal = MissionRuntime入口做唯一一次 typed parse(raw)
 再次确认权威状态没有在模型思考期间变化
-校验 proposal 所选工具在 Broker 投影中且参数满足严格 schema
-envelope = bind_actor_decision(proposal + frame/target/mission identities)
+envelope = bind_actor_decision(proposal + 当前 frame/mission/Broker identities)
 
 if proposal 是 desktop_action:
-    用单次 permit 调 AtomicDesktopAdapter；绝不在这里重放输入
-    校验 Raw receipt，捕获 after frame，写 evidence，归并 MissionEvent
+    调 AtomicDesktopAdapter 一次；绝不在这里重放输入
+    读取 Raw receipt，捕获下一张权威屏幕，归并 MissionEvent
 else if proposal 是 claim_obligation_done:
-    将 claim 绑定当前帧 evidence，直接形成 verifier_kind=actor_claim 的 obligation record
-    再机械聚合 schema、scope、revision 和 evidence 引用；闭合后进入 VERIFIED
+    接受同一个 Actor 基于当前屏幕作出的自验，投影为 Mission 完成
 else if proposal 是 blocked:
     写入明确 blocker 并终止
 else:
     拒绝
 ```
 
-当前最小 Runtime 明确禁止配置独立 obligation/mission verifier；上述聚合不重新判断业务语义，
-语义 owner 仍是 Actor claim。只有外部 E2E oracle 能判断用户任务是否真的完成。
+proposal 的必要结构在 MissionRuntime 入口解析一次；binder 不重放完整 Mission/Broker/schema，
+Atomic也不重复解析。语义 owner 始终是 Actor claim；E2E harness 可观察真实应用终态衡量
+完成率，但不进入生产 pass 路径。
 
 ### 3.4 AtomicDesktopAdapter 的一笔动作
 
 ```text
-严格解析动作参数
 若有图片坐标:
     submitted-image 坐标 -> 当前 frame 坐标 -> 物理屏幕坐标（唯一一次映射）
-确认 envelope 仍绑定同一 target、frame、epoch 和 pointer lease
+    只要求数值有限；不按 submitted width/height 提前拒绝
+确认引用的 frame 仍是当前帧
 在 FrameAuthority 锁定当前帧
-复检 hwnd/process/region/foreground/hit-test
-消费一次 MutationPermit
-先记录 canonical admission 和 physical_attempt
 通过 DesktopActionQueue 调一次 RawDeviceExecutor
-记录不可改写的 raw receipt
-若输入已执行，等待稳定并捕获 after frame
-生成 action-effect evidence；不把像素变化当用户目标完成
-任何“可能已执行但无法证明”的情况返回 UNKNOWN，并关闭继续 mutation 的安全边界
+记录供诊断的 physical_attempt 与 raw receipt
+若输入已执行，捕获下一张全桌面帧
+任何“可能已执行但无法证明”的情况不重放，并让 Actor 在新屏幕上判断现状
 ```
+
+screen-first 路径不强制绑定窗口置前，也不以 foreground/hit-test 推断 veto 模型点击；
+RawDevice 的最终 SendInput 边界处理 OS 可表示范围，取消和异常路径负责按键/指针释放。
 
 ### 3.5 通用 ARP 图执行
 
@@ -308,13 +305,15 @@ finally:
   `fast.controller`、`server` 与 `vnext.desktop_adapter.atomic` 调用。
 - [`action/executor.py`](../../python/winpilot_home/winpilot/action/executor.py) — **主链共享 + Legacy
   公共底座**。Win32 `SendInput`、窗口 focus/launch/close、剪贴板、截图和底层 mouse/key
-  实现；主链只注入 `execute_admitted_physical_click/drag/scroll/type_text/hotkey` 五组 backend，
+  实现，并持有 mouse button、paired drag key、hardware VK 与 Unicode key-up 的进程级释放状态；
+  主链注入 admitted physical backend，
   旧调用面还使用 `click/drag/type_text/press_keys` 等。直接依赖 `desktop_queue`、
   `raw_device`、`config`、`utils.log` 及 `ctypes/pywin32`；主链由 `live_agent` 组合，Legacy
   tools/fast 经 `action` 包调用。
 - [`action/raw_device.py`](../../python/winpilot_home/winpilot/action/raw_device.py) — **主链**。
   定义 `RawActionContext/Receipt`、typed backend protocols 与 `RawDeviceExecutor`；每个
-  `scroll/click/drag/type_text/hotkey` 只执行已准入的物理 payload，并维护 held-drag owner。
+  `scroll/click/drag/type_text/hotkey/input_sequence` 只执行已准入的物理 payload，并维护
+  held-drag owner；明确 `input_completed` 优先于可选 progress facts，避免成功回执被误判。
   直接依赖 `replay_policy`、`visual_runtime.keyboard_contracts`；被 `executor`、
   `live_agent` 和 `AtomicDesktopAdapter` 调用。
 - [`action/replay_policy.py`](../../python/winpilot_home/winpilot/action/replay_policy.py) — **共享合同/待接线策略**。
@@ -429,18 +428,21 @@ finally:
   **主链共享**。不可变 `HotkeyChord` 校验并规范化键名/修饰键；无项目内依赖，由
   `action.raw_device` 与 vNext schema/测试使用。
 - [`visual_runtime/normalized_frame_coordinates.py`](../../python/winpilot_home/winpilot/visual_runtime/normalized_frame_coordinates.py) —
-  **主链共享**。`NormalizedFrameCoordinateMapper.map_point()` 把 frame-local 数值映到物理
-  capture region；无项目内依赖，由 Atomic adapter 和 Legacy Agent 调用。
+  **Legacy共享**。`NormalizedFrameCoordinateMapper.map_point()` 仍供旧路径使用；当前
+  `AtomicDesktopAdapter` 不调用它，避免恢复第二坐标 mapper。
 - [`visual_runtime/submitted_image_coordinates.py`](../../python/winpilot_home/winpilot/visual_runtime/submitted_image_coordinates.py) —
-  **主链共享**。`SubmittedImageCoordinateMapper` 校验 submitted JPEG 尺寸，并把 click、drag、
-  strokes、constraint region 从模型看到的图片坐标映到 frame 坐标；无项目内依赖，由
-  Atomic adapter 和 Legacy Agent 调用。
+  **Legacy共享**。旧路径的 `SubmittedImageCoordinateMapper` 仍服务 Legacy consumers；当前
+  `AtomicDesktopAdapter` 已内联唯一线性映射，不调用这里，也不恢复第二 mapper。
 
-### 4.6 `vnext/`：当前 live 内核（44）
+### 4.6 `vnext/`：当前 live 内核（36）
 
 - [`vnext/__init__.py`](../../python/winpilot_home/winpilot/vnext/__init__.py) — **主链命名空间**。
   只有“pure, product-unwired kernel”说明和空 `__all__`；没有自动组合副作用，真正产品 wiring
   全在 `orchestrator.live_agent`。
+- [`vnext/desktop_ops.py`](../../python/winpilot_home/winpilot/vnext/desktop_ops.py) — **主链通用工具桥**。
+  `capture_screen/list_windows/paste_image` 只调用注入的物理 backend并格式化结果。
+  `capture_screen` 将相对路径原样交给 backend，由 backend按 Runtime cwd与图片格式处理；
+  上层不重复要求绝对路径、扩展名或预先存在。
 
 #### `vnext/actor/`（3）
 
@@ -449,24 +451,20 @@ finally:
   adapter 和测试调用。
 - [`vnext/actor/envelope.py`](../../python/winpilot_home/winpilot/vnext/actor/envelope.py) — **主链**。
   `ActorDecisionEnvelope` 与 `bind_actor_decision()` 把 identity-free proposal 绑定到 mission/run/
-  revision/target/frame/pointer/profile/Broker projection，并 canonicalize 坐标与参数；依赖
+  revision/target/frame/pointer/profile/Broker projection；它不再重复跑工具 schema 或图片范围校验。依赖
   `actor.proposals`、`capabilities`、`mission`、`profiling`、`json_contract`，由 Actor 门面和
   Atomic adapter 使用。
 - [`vnext/actor/proposals.py`](../../python/winpilot_home/winpilot/vnext/actor/proposals.py) — **主链**。
   定义 identity-free `DesktopActionProposal`、`ClaimObligationDone`、`BlockedReport` 以及当前
-  未开放的 observe/capability/inspection/replan 类型；`parse_actor_proposal()` 做 exact wire
-  shape、越权字段和 bounded JSON 校验。依赖 `capability_names/json_contract`，由
+  未开放的 observe/capability/inspection/replan 类型；`parse_actor_proposal()` 是 proposal
+  唯一结构解析边界。依赖 `capability_names/json_contract`，由
   `envelope` 和门面调用。
 
-#### `vnext/capabilities/` 与名称（6）
+#### `vnext/capabilities/` 与名称（5）
 
 - [`vnext/capabilities/__init__.py`](../../python/winpilot_home/winpilot/vnext/capabilities/__init__.py) —
-  **主链门面**。重导出 catalog/grant/state/argument validator 与 `CapabilityBroker`；被
+  **主链门面**。重导出 catalog/grant/state 与 `CapabilityBroker`；被
   live_agent、MissionRuntime、Atomic adapter 和 runtime contracts 使用。
-- [`vnext/capabilities/argument_validation.py`](../../python/winpilot_home/winpilot/vnext/capabilities/argument_validation.py) —
-  **主链**。`ToolArgumentValidator.validate()` 针对 Broker catalog 的 JSON schema 做确定性、
-  fail-closed 参数验证并拒绝非本地引用；依赖 `contracts/json_contract`，由 actor envelope 和
-  capabilities 门面调用，MissionRuntime 经门面使用。
 - [`vnext/capabilities/broker.py`](../../python/winpilot_home/winpilot/vnext/capabilities/broker.py) —
   **主链**。`CapabilityBroker.project()` 只按 catalog、profile、target/frame/pointer/artifact
   机械状态生成 `BrokerProjection` 和 grants；不读取 goal、截图语义或应用名。依赖本包
@@ -474,7 +472,7 @@ finally:
 - [`vnext/capabilities/contracts.py`](../../python/winpilot_home/winpilot/vnext/capabilities/contracts.py) —
   **主链合同**。定义 `ToolSpec/ToolCatalog/CapabilityGrant` 与 `ToolRoute/ExecutionRoute/
   ExecutionMedium/MutationKind/PointerDisposition`，含 canonical fingerprint/serialization；
-  依赖 `capability_names/json_contract`，被 validator、broker、state 和门面调用。
+  依赖 `capability_names/json_contract`，被 broker、state 和门面调用。
 - [`vnext/capabilities/state.py`](../../python/winpilot_home/winpilot/vnext/capabilities/state.py) —
   **主链合同**。不可变 `TargetState/AuthoritativeFrameState/PointerLeaseState/ArtifactState/
   ExecutorOffer/BrokerRuntimeState/BrokerProjection` 及稳定 projection id；依赖 `contracts`，
@@ -489,11 +487,11 @@ finally:
   **主链门面**。重导出 `AtomicDesktopAdapter`、target/workspace protocols 与
   `DesktopWorkspace`；直接依赖 `atomic/workspace`，由 `live_agent` 组合。
 - [`vnext/desktop_adapter/atomic.py`](../../python/winpilot_home/winpilot/vnext/desktop_adapter/atomic.py) —
-  **主链物理桥**。`AtomicDesktopAdapter.execute()` 对一个 bound envelope 做 exact schema、
-  target/frame/pointer 新鲜度、唯一坐标映射、permit admission、queued RawDevice 调用、
-  before/after frame、raw receipt 与 action-effect evidence；异常时释放 held pointer，绝不
-  自动重放输入。直接依赖 `action.desktop_queue/raw_device/replay_policy`、`visual_runtime.*`、
-  `vnext.actor/capabilities/evidence_plane/mission/runtime/verification`；由门面和 workspace 引用，
+  **主链物理桥**。`AtomicDesktopAdapter.execute()` 消费已解析的 bound proposal，只做有限数
+  检查、唯一坐标映射、queued RawDevice 调用、raw receipt 与下一帧捕获；screen-first 下不以
+  foreground/hit-test 推断 veto。raw输入若报告 release cleanup 不完整，会在原 physical lease
+  内做最多两轮 pointer/key cleanup；持久失败保留真实 unknown，绝不自动重放输入。直接依赖
+  `action.desktop_queue/raw_device/replay_policy`、`visual_runtime.*` 与 `vnext.actor/capabilities/mission/runtime`；由门面和 workspace 引用，
   实例由 `live_agent._build_live_session` 创建。
 - [`vnext/desktop_adapter/workspace.py`](../../python/winpilot_home/winpilot/vnext/desktop_adapter/workspace.py) —
   **主链**。`DesktopWorkspace` 在动作间维护同一进程 owner window、modal/popup/消失后回 owner
@@ -505,34 +503,11 @@ finally:
 
 - [`vnext/evidence/__init__.py`](../../python/winpilot_home/winpilot/vnext/evidence/__init__.py) —
   **主链门面**。只重导出 run-scoped `EvidenceRegistry` 及异常；被 live_agent、MissionRuntime
-  和 post-action reconcile 调用。
+  和 MissionReducer 调用。
 - [`vnext/evidence/registry.py`](../../python/winpilot_home/winpilot/vnext/evidence/registry.py) —
   **主链**。线程安全 `EvidenceRegistry.append/append_many/snapshot/close` 只存已经构造并通过
   scope 校验的 `mission.EvidenceRef`，拒绝错 mission/run 和重复 id；依赖 `mission.contracts`，
-  由 evidence 门面消费。
-
-#### `vnext/evidence_plane/`（5）
-
-- [`vnext/evidence_plane/__init__.py`](../../python/winpilot_home/winpilot/vnext/evidence_plane/__init__.py) —
-  **主链门面**。汇总 canonical records、frame artifact、journal 与 plane；被 live_agent、
-  MissionRuntime 和 Atomic adapter 使用。
-- [`vnext/evidence_plane/artifacts.py`](../../python/winpilot_home/winpilot/vnext/evidence_plane/artifacts.py) —
-  **主链证据持久化**。`FrameArtifactWriter` 在一个 run 目录中原子写入/只读重放 JPEG，校验
-  role、frame identity、URI、SHA 和目录安全；只依赖 stdlib filesystem/hash/base64，由
-  evidence plane 与持久化测试调用。
-- [`vnext/evidence_plane/contracts.py`](../../python/winpilot_home/winpilot/vnext/evidence_plane/contracts.py) —
-  **主链证据合同**。定义 `ActorDecisionRecord/AdmissionRecord/PhysicalAttemptRecord/
-  ActionExecutionBinding/FrameArtifactReference/RuntimeEvidenceReport`，并严格 canonicalize raw
-  receipt 与 controller transition、拒绝推理字段；依赖 `capability_names/json_contract/mission`，
-  由 `plane` 和门面调用。
-- [`vnext/evidence_plane/journal.py`](../../python/winpilot_home/winpilot/vnext/evidence_plane/journal.py) —
-  **主链 durable journal**。`RuntimeEvidenceJournal` 用 canonical JSONL 和前一事件 hash 构成
-  append-only hash chain，支持 create/open_read_only/replay/close 并 poison 写失败实例；依赖
-  `json_contract` 与 stdlib fs/hash，供 `plane/live_agent` 使用。
-- [`vnext/evidence_plane/plane.py`](../../python/winpilot_home/winpilot/vnext/evidence_plane/plane.py) —
-  **主链证据状态机**。`RuntimeEvidencePlane` 顺序绑定 actor decision → admission → reserved
-  physical attempt → raw receipt → controller transition → seal/report，强制每个 id/sha/run
-  一致；依赖本包 artifacts/contracts/journal，由门面、live_agent 和 Atomic adapter 调用。
+  由 evidence 门面消费；这些引用服务运行状态与诊断，不是任务 pass 判据。
 
 - [`vnext/json_contract.py`](../../python/winpilot_home/winpilot/vnext/json_contract.py) — **主链共享**。
   `bounded_json_copy/freeze_bounded_json` 对 canonical JSON 做深度、项数、字符串、数值和总预算
@@ -543,14 +518,14 @@ finally:
 
 - [`vnext/mission/__init__.py`](../../python/winpilot_home/winpilot/vnext/mission/__init__.py) —
   **主链门面**。重导出 mission contracts、`MissionReducer/reduce_projection/replay`；被
-  live_agent、broker、runtime、adapter、evidence plane 和 verification 使用。
+  live_agent、broker、runtime、adapter 和 evidence registry 使用。
 - [`vnext/mission/contracts.py`](../../python/winpilot_home/winpilot/vnext/mission/contracts.py) —
   **主链状态合同**。定义 `MissionDefinition/Event/Projection/Card`、obligation/status、
   `EvidenceRef/ArtifactRef/TargetBinding/VerifiedFact/ActionEffectSummary` 及严格事件 payload/
   topological order 规则；依赖 `json_contract`，由 reducer、registry 和门面调用。
 - [`vnext/mission/reducer.py`](../../python/winpilot_home/winpilot/vnext/mission/reducer.py) — **主链**。
-  `reduce_projection()`/`MissionReducer.apply` 是纯 event-sourced reducer，校验 revision、依赖、
-  evidence scope、claim fingerprint、verification 和合法状态转换；只依赖 mission contracts，
+  `reduce_projection()`/`MissionReducer.apply` 是纯 event-sourced reducer，投影 revision、Actor
+  claim 与合法状态转换；它不重新解释屏幕或增加第二 pass verifier。只依赖 mission contracts，
   由门面进 `live_agent/MissionRuntime`。
 
 #### `vnext/model_roles/`（3）
@@ -564,7 +539,8 @@ finally:
 - [`vnext/model_roles/visual_actor.py`](../../python/winpilot_home/winpilot/vnext/model_roles/visual_actor.py) —
   **主链语义 owner**。`LiveVisualActor.begin_turn` 在零系统提示文本首轮处理 reply、显式
   connector search/call 或 `observe_desktop`；`propose` 在视觉轮把当前 JPEG、有界 mission
-  state、最近原生 exchange 送给同一模型并返回严格 proposal。`FlowFragmentProposer` 是隔离、
+  state、紧邻一笔原生 exchange 送给同一模型并解码一笔 raw proposal；无效辅助 task state
+  只被丢弃。`FlowFragmentProposer` 是隔离、
   无桌面/Thread/connector/执行权的单次 Studio 辅助。依赖 `modeling`、`actor`、`common`、
   `runtime.contracts`；由 model_roles 门面进 live_agent。
 
@@ -582,37 +558,26 @@ finally:
   mission identity；依赖 profiling contracts、capability names、json contract。live_agent 用
   它构造仅含 `visual.interact` 的 profile，不按任务分类。
 
-#### `vnext/runtime/`（8）
+#### `vnext/runtime/`（5）
 
 - [`vnext/runtime/__init__.py`](../../python/winpilot_home/winpilot/vnext/runtime/__init__.py) —
-  **主链门面**。汇总 runtime contracts、ports、mutation permits/call-once、reconcile 与
-  `MissionRuntime`；被 live_agent 和 Atomic adapter 使用。
+  **主链门面**。汇总 runtime contracts、ports、task state 与 `MissionRuntime`；被
+  live_agent 和 Atomic adapter 使用。
 - [`vnext/runtime/contracts.py`](../../python/winpilot_home/winpilot/vnext/runtime/contracts.py) —
   **主链合同**。定义 frame/target/commit identity、`RuntimeFrame/Snapshot`、Actor 视图和
   `ActorTurnInput`、`ControllerTransition/Outcome`、`RuntimeStatus/Result`；
   `project_actor_turn_input` 生成给模型的有界视图。依赖 `capabilities/json_contract/mission/
-  task_state`，被 MissionRuntime、ports、model role 和 reconcile 调用。
+  task_state`，被 MissionRuntime、ports 和 model role 调用。
 - [`vnext/runtime/mission_runtime.py`](../../python/winpilot_home/winpilot/vnext/runtime/mission_runtime.py) —
   **主链循环 owner**。`MissionRuntime.run_one_turn()` 顺序执行 observe → Broker → Actor →
-  proposal parse/schema → envelope → action/claim/blocked；`_run_action` 通过 single-use permit
-  call-once 调 controller，按 receipt 做 stale/unknown/completed 处理并写 mission events；
-  不编译任务步骤或纠正模型。直接依赖 actor/capabilities/evidence/evidence_plane/mission/
-  profiling/runtime helpers/verification 和 `utils.log`；由 runtime 门面进 live_agent。
-- [`vnext/runtime/mutation_attempt.py`](../../python/winpilot_home/winpilot/vnext/runtime/mutation_attempt.py) —
-  **主链机械壳**。`call_once_with_permit()` 最多调用一次 controller，并返回调用次数、异常、
-  pending permit 是否撤销、active admission 是否关闭；依赖 actor、runtime contracts、
-  mutation_permits，由 MissionRuntime 调用。
-- [`vnext/runtime/mutation_permits.py`](../../python/winpilot_home/winpilot/vnext/runtime/mutation_permits.py) —
-  **主链**。`MutationPermitAuthority` 按 run/mission/decision/turn/commit identity 发行、开始、
-  重验、完成、撤销单次 permit，并在 unknown outcome 后关闭 mutation authority；依赖 actor
-  envelope 和 runtime contracts，由 MissionRuntime、Atomic adapter、call-once helper 使用。
+  唯一一次 typed proposal parse → identity envelope → action/claim/blocked；`_run_action` 直接调用
+  controller一次，按 receipt 做 stale/unknown/completed 处理并写 mission events。它不重复跑
+  Tool schema，不编译任务步骤或纠正模型；completion claim 在辅助 history/snapshot 前缓存，
+  后者失败仍保留 `MISSION_VERIFIED` 与 `user_result`。直接依赖 actor/capabilities/evidence/mission/
+  profiling/runtime helpers 和 `utils.log`；由 runtime 门面进 live_agent。
 - [`vnext/runtime/ports.py`](../../python/winpilot_home/winpilot/vnext/runtime/ports.py) — **主链接口**。
   Protocol `ActorPort.propose`、`RuntimeStatePort.observe/current`、`ControllerPort.execute`
   定义依赖注入边界；依赖 actor/mission/runtime contracts/task_state，由 MissionRuntime 门面使用。
-- [`vnext/runtime/post_action_reconcile.py`](../../python/winpilot_home/winpilot/vnext/runtime/post_action_reconcile.py) —
-  **主链**。`validate_controller_evidence_scope` 和 `reconcile_post_action` 检查 controller
-  transition 的 mission/run/obligation/action/frame/evidence/pointer-hold 一致性；依赖
-  capabilities/evidence/mission/runtime contracts，由 MissionRuntime 调用。
 - [`vnext/runtime/task_state.py`](../../python/winpilot_home/winpilot/vnext/runtime/task_state.py) —
   **主链**。不可变 `ActorTaskState`、严格 `ActorTaskStateUpdate` 与 `ActorTurnDecision` 提供
   单 Visual Actor 的小型 scratchpad；无项目内依赖，被 runtime contracts/ports/MissionRuntime
@@ -621,27 +586,23 @@ finally:
 #### `vnext/verification/`（6）
 
 - [`vnext/verification/__init__.py`](../../python/winpilot_home/winpilot/vnext/verification/__init__.py) —
-  **主链验证门面**。汇总 action effect、obligation/mission contracts、dispatcher 和 ports；
-  被 MissionRuntime 与 Atomic adapter 使用。
+  **历史 vNext 支撑**。汇总 action effect、obligation/mission contracts、dispatcher 和 ports；
+  当前 `MissionRuntime` 与 Atomic adapter 不导入它，不参与生产 task pass。
 - [`vnext/verification/action_effect.py`](../../python/winpilot_home/winpilot/vnext/verification/action_effect.py) —
-  **主链局部证据**。`DeterministicActionEffectVerifier.verify()` 解码同目标 before/after frame，
-  校验身份后用 OpenCV/Numpy 生成 `ActionEffectSummary` 和 evidence；它只证明局部视觉变化，
-  不证明用户任务完成。依赖 `mission` 与 `cv2/numpy`，由 verification 门面进 Atomic adapter。
+  **历史 vNext 支撑**。`DeterministicActionEffectVerifier.verify()` 可比较 before/after frame；
+  当前视觉执行线不调用它，模型直接看下一张真实屏幕并自验。
 - [`vnext/verification/contracts.py`](../../python/winpilot_home/winpilot/vnext/verification/contracts.py) —
-  **主链合同**。`ObligationVerificationRequest/Result`、`VerifierAssessment` 和 condition coverage/
-  consistency/forbidden-effect 规则；依赖 `json_contract/mission`，由 dispatcher、mission
-  completion、ports 和门面调用。
+  **历史 vNext 支撑**。保留旧 verification 数据类型，供同目录模块与测试引用；不在主链
+  proposal、动作或完成路径上。
 - [`vnext/verification/dispatcher.py`](../../python/winpilot_home/winpilot/vnext/verification/dispatcher.py) —
-  **vNext 支撑，当前无独立模型角色**。`DeterministicFirstVerifier` 注册 read-only
-  `EvidenceEvaluator`，按顺序返回确定结果或明确 missing/inconclusive；只依赖 verification
-  contracts，由门面/测试消费，live composition 没有新增 verifier 模型。
+  **历史 vNext 支撑**。`DeterministicFirstVerifier` 注册旧 evaluator；只依赖 verification
+  contracts，由同目录门面/测试消费，live composition 不调用。
 - [`vnext/verification/mission_completion.py`](../../python/winpilot_home/winpilot/vnext/verification/mission_completion.py) —
-  **主链完成门**。`DeterministicMissionCompletionVerifier` 聚合已接受 obligation verification，
-  `MissionCompletionVerificationResult.bind()` 绑定 mission revision/evidence 并生成事件；依赖
-  `json_contract/mission/verification.contracts`，由门面进 MissionRuntime。
+  **历史 vNext 支撑**。旧 `DeterministicMissionCompletionVerifier` 保留供测试/兼容引用；
+  当前生产完成来自同一个 Actor 的当前屏幕自验，不经过这个聚合器。
 - [`vnext/verification/ports.py`](../../python/winpilot_home/winpilot/vnext/verification/ports.py) —
-  **vNext 接口**。Protocol `ObligationVerifierPort.verify()` 只允许 read-only、可取消的 typed
-  verification；依赖 verification contracts，由门面/测试消费。
+  **历史 vNext 接口**。Protocol `ObligationVerifierPort.verify()` 只被同目录门面/测试消费，
+  不接入当前 `MissionRuntime`。
 
 ### 4.7 `integrations/`：外部控制面与 connector（4）
 
@@ -955,10 +916,12 @@ finally:
 - [`perception/app_aliases.py`](../../python/winpilot_home/winpilot/perception/app_aliases.py) —
   **Legacy discovery helper**。`expand()` 只规范化字面应用名和 alias，不决定应用身份/流程；
   无项目内依赖，被 gui_plan_helpers、ToolSession、StageRuntime 调用。
-- [`perception/apps.py`](../../python/winpilot_home/winpilot/perception/apps.py) — **Legacy 通用发现**。
+- [`perception/apps.py`](../../python/winpilot_home/winpilot/perception/apps.py) — **主链共享的通用发现/启动**。
   `resolve/launch_target` 聚合已运行项、Start Menu、Get-StartApps/UWP、App Paths、快捷方式和
-  executable metadata 后打分；依赖 `utils.log` 与 subprocess/pathlib，由旧 system tools 经
-  perception 包动态调用。
+  executable metadata 后打分；`launch_application` 复用现有进程时稳定合并可见与隐藏窗口，
+  将普通主窗排在 `WS_EX_TOOLWINDOW` 辅助窗之前，再按可见、隐藏和 hidden-topmost
+  排序，只恢复排序选中的候选窗。该排序完全通用，不按 QQ、Krita 或标题写配方。依赖
+  `utils.log` 与 subprocess/pathlib，由当前通用 launch tool 与旧 system tools 调用。
 - [`perception/fusion.py`](../../python/winpilot_home/winpilot/perception/fusion.py) — **Legacy**。
   `Snapshot` 与 `observe/observe_screen` 按配置运行 UIA/OCR，处理 modal、rich UIA skip、空结果
   escalation 并 merge elements；依赖 `config/perception.model/log/screenshot`，由 cache、locator、
@@ -1172,12 +1135,13 @@ Compare-Object $documented $scope
 
 从 Python 真实依赖关系看，仓库并不是“所有高级模块都串在一次桌面任务上”。当前产品链已经
 收敛为：server-owned admission/Thread → 一个 LiveVisualActor → MissionRuntime → Broker →
-AtomicDesktopAdapter → DesktopActionQueue → RawDevice → SendInput，并用 frame/target/permit/
-receipt/evidence 把机械执行绑定起来。其余大体积代码主要属于仍有消费者的 Studio/ARP、旧
+AtomicDesktopAdapter → DesktopActionQueue → RawDevice → SendInput。proposal只在 MissionRuntime
+入口 typed parse 一次，binder只附加当前身份，Adapter只做一次映射；frame/receipt/trace帮助诊断而不作
+task-pass 门。其余大体积代码主要属于仍有消费者的 Studio/ARP、旧
 AgentRunner/Fast/Tasking、感知和 Memory 兼容面。
 
-这也解释了为什么架构看起来很大、简单真实任务仍可能失败：多数行数在维护历史能力、编辑器、
-证据和 fail-closed 边界，既不会也不应该替当前模型做视觉语义、几何定位、自纠错或停止判断。
+这也解释了为什么架构看起来很大、简单真实任务仍可能失败：多数行数在维护历史能力和编辑器，
+它们既不会也不应该替当前模型做视觉语义、几何定位、自纠错或停止判断。
 后续删除必须沿“先迁移/删除消费者，再删除 provider”的顺序；不能把 Legacy 大包重新接到
 live vNext 当 fallback，也不能因为旧 `visual_path`、OCR 或 Fast controller 已存在，就在模型
 失败样本上静默改写其原始参数。

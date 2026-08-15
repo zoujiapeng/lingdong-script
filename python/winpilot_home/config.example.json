@@ -105,9 +105,9 @@
   },
   "vnext": {
     "live_agent_enabled": true,
-    "max_turns": 100,
-    "max_runtime_s": 3600,
-    "max_model_calls": 200
+    "max_turns": 200,
+    "max_runtime_s": 7200,
+    "max_model_calls": 400
   },
   "server": {
     "host": "127.0.0.1",

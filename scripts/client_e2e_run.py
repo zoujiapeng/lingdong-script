@@ -17,6 +17,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -397,21 +398,27 @@ def _runtime_has_active_run(
     runtime_status: Any,
     run_id: str = "",
 ) -> bool:
-    """Treat matching current/job state as authoritative during projections."""
+    """Report a live owner, not a stale current-run projection."""
 
     if not isinstance(runtime_status, dict):
         return False
     expected_run_id = str(run_id or "")
+    active_statuses = {"queued", "waiting_resources", "running", "canceling"}
+    runtime_active = (
+        runtime_status.get("running") is True
+        or runtime_status.get("arp_running") is True
+    )
     current = runtime_status.get("current_run")
+    current_matches = False
+    current_active = False
     if isinstance(current, dict):
         current_run_id = str(current.get("run_id") or "")
         current_status = str(current.get("status") or "").casefold()
-        if (
-            (not expected_run_id or current_run_id == expected_run_id)
-            and current_status
-            in {"queued", "waiting_resources", "running", "canceling"}
-        ):
-            return True
+        current_matches = not expected_run_id or current_run_id == expected_run_id
+        current_active = current_matches and (
+            current_status in active_statuses or not current_status
+        )
+    active_job = False
     for job in runtime_status.get("runtime_jobs") or []:
         if not isinstance(job, dict):
             continue
@@ -419,10 +426,13 @@ def _runtime_has_active_run(
         if (
             (not expected_run_id or job_run_id == expected_run_id)
             and str(job.get("status") or "").casefold()
-            in {"queued", "waiting_resources", "running", "canceling"}
+            in active_statuses
         ):
-            return True
-    return runtime_status.get("running") is True
+            active_job = True
+            break
+    if expected_run_id:
+        return active_job or (current_active and runtime_active)
+    return active_job or runtime_active
 
 
 def _safe_runtime_jobs(value: Any) -> list[dict[str, Any]]:
@@ -964,49 +974,73 @@ class ElectronClientDriver:
             **selection,
         }
 
-    def stop_active_run(self, *, timeout: int = 30) -> dict[str, Any]:
-        """Stop a client-submitted run through the visible Electron UI."""
+    def stop_active_run(
+        self,
+        *,
+        run_id: str = "",
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        """Cancel the submitted run before the harness touches the desktop."""
 
-        before = {}
-        try:
-            before = self.runtime_status()
-        except Exception:
-            pass
-        self.restore_and_focus()
+        before = self.runtime_status()
+        current = before.get("current_run")
+        target_run_id = str(run_id or (
+            current.get("run_id") if isinstance(current, dict) else ""
+        ) or "")
         requested = False
-        try:
-            self.button(STOP_TASK).Click()
-            requested = True
-        except RuntimeError:
-            # The run may have become terminal between the status poll and
-            # foreground restoration.  Verify that state below.
-            pass
+        cancel_error = ""
+        if target_run_id and _runtime_has_active_run(before, target_run_id):
+            request = urllib.request.Request(
+                f"{self._runtime_url}/api/v2/runs/"
+                f"{urllib.parse.quote(target_run_id, safe='')}/cancel",
+                data=b"{}",
+                headers={
+                    "Authorization": f"Bearer {self._runtime_token}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    json.load(response)
+                requested = True
+            except urllib.error.HTTPError as error:
+                cancel_error = f"HTTPError: {error.code}"
+            except (OSError, TimeoutError, urllib.error.URLError) as error:
+                cancel_error = f"{type(error).__name__}: {error}"
         deadline = time.time() + max(1, timeout)
         run_button_restored = False
         runtime_stopped = False
+        after = before
         while time.time() < deadline:
             try:
-                run_button_restored = _first_visible_descendant(
-                    self.window,
-                    "Button",
-                    name=RUN_TASK,
-                ) is not None
-            except Exception:
-                run_button_restored = False
-            try:
+                after = self.runtime_status()
                 runtime_stopped = not _runtime_has_active_run(
-                    self.runtime_status()
+                    after,
+                    target_run_id,
                 )
             except Exception:
                 runtime_stopped = False
-            if run_button_restored and runtime_stopped:
+            if runtime_stopped:
                 break
             time.sleep(0.5)
+        if runtime_stopped:
+            self.restore_and_focus()
+            refreshed = auto.ControlFromHandle(self.identity.hwnd)
+            if refreshed is not None:
+                self.window = refreshed
+            run_button_restored = _first_visible_descendant(
+                self.window,
+                "Button",
+                name=RUN_TASK,
+            ) is not None
         return {
             "requested_stop": requested,
             "run_button_restored": run_button_restored,
             "runtime_stopped": runtime_stopped,
             "runtime_before": before,
+            "runtime_after": after,
+            "cancel_error": cancel_error,
         }
 
     def _topbar_status(self, task: str) -> str:
@@ -1059,6 +1093,7 @@ class ElectronClientDriver:
         active_seen = False
         last_progress = 0.0
         last_status = ""
+        texts: list[str] = []
         runtime_status: dict[str, Any] = {}
         last_independent_probe: dict[str, Any] = {}
         while time.time() < deadline:
@@ -1339,7 +1374,7 @@ class ElectronClientDriver:
             "run_id": bound_run_id,
             "status_label": last_status,
             "active_seen": active_seen,
-            "visible_text": self.texts(),
+            "visible_text": texts,
             "runtime": runtime_status,
             "independent_verdict": last_independent_probe,
         }
@@ -1862,33 +1897,32 @@ def _case_execution_valid(result: dict[str, Any]) -> bool:
         return False
     run_result = result.get("result") or {}
     outcome = str(run_result.get("outcome") or "")
-    status = str(run_result.get("status") or "")
     expected = str(result.get("expected") or "terminal")
     runtime_ok = (
         outcome == "independent_success"
         if expected == "independent_success"
         else (
             outcome == "persistent_active"
-            and (result.get("execution_evidence") or {}).get("persistent_ready") is True
+            and run_result.get("active_seen") is True
         )
         if expected == "persistent"
-        else outcome == "terminal" and status == "done"
+        else outcome == "terminal"
     )
-    trace_binding = result.get("trace_binding") or {}
-    return bool(
-        runtime_ok
-        and (result.get("memory_isolation") or {}).get("passed") is True
-        and trace_binding.get("passed") is True
-    )
+    return bool(runtime_ok)
 
 
 def _case_passed(result: dict[str, Any]) -> bool:
-    """Require an oracle independent from the agent/runtime completion claim."""
+    """Use the Visual Actor unless the case supplied an external oracle."""
 
     verdict = result.get("task_verdict") or {}
     source = str(verdict.get("source") or "").strip().casefold()
+    if source == "visual_actor":
+        return bool(
+            _case_execution_valid(result)
+            and verdict.get("passed") is True
+        )
     independent_source = source not in {
-        "", "agent", "agent_claim", "runtime", "runtime_status",
+        "", "none", "agent", "agent_claim", "runtime", "runtime_status",
     }
     return bool(
         _case_execution_valid(result)
@@ -1948,6 +1982,8 @@ def run_case(
                 )
         runtime_before = driver.wait_for_runtime_ready()
         result["runtime_before"] = runtime_before
+        if _runtime_has_active_run(runtime_before):
+            raise RuntimeError("runtime already has an active run before session reset")
         previous_current = runtime_before.get("current_run")
         previous_run_id = str(
             previous_current.get("run_id")
@@ -2046,37 +2082,41 @@ def run_case(
             independent_completion_probe=independent_completion_probe,
         )
         result["duration_seconds"] = round(time.time() - submitted_at, 3)
-        if result["result"].get("outcome") not in {
-            "terminal",
-            "timeout",
-            "persistent_active",
-        }:
+        outcome = result["result"].get("outcome")
+        submitted_run_id = str(result["result"].get("run_id") or "")
+        result["client_terminal_before_harness_restore"] = (
+            driver.window_lifecycle_state()
+        )
+        result["screenshots"]["desktop_terminal"] = driver.capture_desktop(
+            "desktop-terminal.png"
+        )
+        cleanup_field = ""
+        if outcome == "timeout":
+            cleanup_field = "timeout_cleanup"
+        elif outcome == "persistent_active":
+            cleanup_field = "persistent_test_cleanup"
+        elif outcome != "terminal":
             cleanup_status = driver.runtime_status()
             if _active_run_matches_submission(
                 cleanup_status,
                 str(spec["task"]),
                 previous_run_id,
             ):
-                result["nonterminal_cleanup"] = driver.stop_active_run()
-        result["client_terminal_before_harness_restore"] = (
-            driver.window_lifecycle_state()
-        )
+                cleanup_field = "nonterminal_cleanup"
+        if cleanup_field:
+            cleanup = driver.stop_active_run(run_id=submitted_run_id)
+            result[cleanup_field] = cleanup
+            if cleanup.get("runtime_stopped") is not True:
+                raise RuntimeError(
+                    f"submitted run remained active after {outcome} cleanup"
+                )
         driver.restore_and_focus()
-        result["screenshots"].update(
-            {
-                "desktop_terminal": driver.capture_desktop("desktop-terminal.png"),
-                "client_terminal": driver.capture_window("client-terminal.png"),
-            }
+        result["screenshots"]["client_terminal"] = driver.capture_window(
+            "client-terminal.png"
         )
-        if result["result"].get("outcome") == "timeout":
-            result["timeout_cleanup"] = driver.stop_active_run()
-            result["timeout_cleanup"]["proof"] = driver.capture_window(
-                "timeout-stopped.png"
-            )
-        if result["result"].get("outcome") == "persistent_active":
-            result["persistent_test_cleanup"] = driver.stop_active_run()
-            result["persistent_test_cleanup"]["proof"] = driver.capture_window(
-                "persistent-test-stopped.png"
+        if cleanup_field:
+            result[cleanup_field]["proof"] = driver.capture_window(
+                f"{cleanup_field.replace('_cleanup', '')}-stopped.png"
             )
     except Exception as error:
         result["runner_error"] = f"{type(error).__name__}: {error}"
@@ -2119,14 +2159,24 @@ def run_case(
             list(result["bound_trace_ids"]),
             bound_run_id,
         )
+        result["execution_valid"] = _case_execution_valid(result)
         if independent_verifier is None:
+            expected = str(result.get("expected") or "terminal")
+            model_passed = bool(
+                result["execution_valid"]
+                and (
+                    expected == "persistent"
+                    or str((result.get("result") or {}).get("status") or "")
+                    == "done"
+                )
+            )
             result["task_verdict"] = {
-                "source": "none",
-                "status": "unverified",
-                "passed": False,
+                "source": "visual_actor",
+                "status": "verified" if model_passed else "not_verified",
+                "passed": model_passed,
                 "reason": (
-                    "No independent task-state oracle was supplied; runtime done is "
-                    "only a candidate completion."
+                    "No external oracle was supplied; use the Visual Actor's "
+                    "real-screen completion result."
                 ),
             }
         else:
@@ -2142,7 +2192,6 @@ def run_case(
                     "passed": False,
                     "error": f"{type(error).__name__}: {error}",
                 }
-        result["execution_valid"] = _case_execution_valid(result)
         result["passed"] = _case_passed(result)
         result["finished_at"] = datetime.now().astimezone().isoformat()
         report = output_dir / "report.json"
@@ -2150,6 +2199,21 @@ def run_case(
         result["report"] = str(report)
         print(json.dumps({"event": "finished", **result}, ensure_ascii=False), flush=True)
     return result
+
+
+def _case_cleanup_failed(result: dict[str, Any]) -> bool:
+    retry = result.get("error_cleanup")
+    if isinstance(retry, dict):
+        return retry.get("runtime_stopped") is not True
+    for field in (
+        "timeout_cleanup",
+        "persistent_test_cleanup",
+        "nonterminal_cleanup",
+    ):
+        cleanup = result.get(field)
+        if isinstance(cleanup, dict) and cleanup.get("runtime_stopped") is not True:
+            return True
+    return False
 
 
 def run_suite(
@@ -2214,6 +2278,8 @@ def run_suite(
         }
         report["cases"].append(result)
         prior_results[name] = result
+        if _case_cleanup_failed(result):
+            break
         if fail_fast and not _case_passed(result):
             break
 

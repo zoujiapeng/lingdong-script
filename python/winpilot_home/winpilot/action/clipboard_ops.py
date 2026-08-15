@@ -112,7 +112,7 @@ def capture_screen_backend(*, path: str, window: bool) -> dict[str, Any]:
 
 
 def list_windows_backend() -> dict[str, Any]:
-    """Return the visible top-level window inventory (bounded).
+    """Return bounded visible windows and background applications.
 
     Self-contained EnumWindows implementation so the vNext tool surface does
     not reach into the legacy perception stack.
@@ -121,6 +121,7 @@ def list_windows_backend() -> dict[str, Any]:
     foreground_hwnd = int(user32.GetForegroundWindow() or 0)
 
     windows: list[dict[str, Any]] = []
+    background_windows: list[dict[str, Any]] = []
 
     WNDENUMPROC = ctypes.WINFUNCTYPE(
         ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
@@ -132,8 +133,6 @@ def list_windows_backend() -> dict[str, Any]:
             return True
         visible = bool(user32.IsWindowVisible(handle))
         minimized = bool(user32.IsIconic(handle))
-        if not visible or minimized:
-            return True
         title_length = user32.GetWindowTextLengthW(handle)
         title_buffer = ctypes.create_unicode_buffer(max(title_length, 0) + 1)
         user32.GetWindowTextW(handle, title_buffer, len(title_buffer))
@@ -155,7 +154,7 @@ def list_windows_backend() -> dict[str, Any]:
             return True
         pid = ctypes.c_ulong(0)
         user32.GetWindowThreadProcessId(handle, ctypes.byref(pid))
-        windows.append({
+        item = {
             "hwnd": handle,
             "title": title,
             "class_name": class_buffer.value,
@@ -164,7 +163,11 @@ def list_windows_backend() -> dict[str, Any]:
             "foreground": handle == foreground_hwnd,
             "visible": visible,
             "minimized": minimized,
-        })
+        }
+        if visible and not minimized:
+            windows.append(item)
+        else:
+            background_windows.append(item)
         return True
 
     try:
@@ -180,11 +183,33 @@ def list_windows_backend() -> dict[str, Any]:
         window = dict(item)
         window["process_name"] = _process_name(int(window.get("pid") or 0))
         bounded.append(window)
+    background_applications: list[dict[str, Any]] = []
+    seen_background: set[tuple[str, str]] = set()
+    for item in background_windows:
+        process_name = _process_name(int(item.get("pid") or 0))
+        title = str(item.get("title") or "").strip()
+        identity = (
+            ("process", process_name.casefold())
+            if process_name
+            else ("title", title.casefold())
+        )
+        if identity in seen_background:
+            continue
+        seen_background.add(identity)
+        background_applications.append({
+            "process_name": process_name,
+            "title": title,
+            "state": "minimized" if item.get("minimized") else "background",
+        })
+        if len(background_applications) >= 24:
+            break
     return {
         "format": WINDOWS_FORMAT,
         "ok": True,
         "windows": bounded,
         "count": len(bounded),
+        "background_applications": background_applications,
+        "background_count": len(background_applications),
     }
 
 

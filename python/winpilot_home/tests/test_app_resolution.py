@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 
 
@@ -72,6 +73,45 @@ def test_resolve_fictional_app_by_discovered_shortcut_alias(monkeypatch):
     assert result[0]["name"] == "Aurora Studio"
     assert result[0]["matched_term"].casefold().endswith("aurora-render.exe")
     assert result[0]["match_kind"] == "target_alias"
+
+
+def test_resolve_keeps_display_typos_but_rejects_fuzzy_path_aliases(
+    monkeypatch,
+):
+    from winpilot.perception import apps, search
+
+    access = {
+        "name": "Access",
+        "target": (
+            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Access.lnk"
+        ),
+        "kind": "lnk",
+        "aliases": [r"C:\Program Files\Microsoft Office\MSACCESS.EXE"],
+    }
+    one_drive = {
+        "name": "OneDrive",
+        "target": r"C:\Start\OneDrive.lnk",
+        "kind": "lnk",
+        "aliases": ["Microsoft OneDrive"],
+    }
+    aurora = {
+        "name": "Aurora Render",
+        "target": r"C:\Start\Aurora Render.lnk",
+        "kind": "lnk",
+    }
+    monkeypatch.setattr(apps, "_cache", None)
+    monkeypatch.setattr(apps, "_index", lambda: [access, one_drive, aurora])
+    monkeypatch.setattr(
+        search,
+        "search",
+        lambda *args, **kwargs: {"results": []},
+    )
+
+    assert "Microsoft" not in apps._entry_terms(access)
+    assert apps.resolve("Microsoft Edge") == []
+    fuzzy = apps.resolve("Aurroa Render")
+    assert fuzzy[0]["name"] == "Aurora Render"
+    assert fuzzy[0]["match_kind"] == "fuzzy"
 
 
 def test_launch_discovered_exe_passes_generic_arguments(monkeypatch):
@@ -215,6 +255,57 @@ def test_start_apps_discovery_uses_system_catalog_metadata_once(monkeypatch):
     assert len(calls) == 1
 
 
+def test_app_paths_ignores_stale_executable_targets(monkeypatch, tmp_path):
+    from winpilot.perception import apps
+
+    live = tmp_path / "msedge.exe"
+    live.write_bytes(b"MZ")
+    catalog = {
+        "msedge.exe": str(live),
+        "ghost.exe": str(tmp_path / "missing.exe"),
+    }
+
+    class FakeKey:
+        def __init__(self, *, entries=None, value=""):
+            self.entries = entries or {}
+            self.value = value
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def Close(self):
+            return None
+
+    hklm = object()
+    hkcu = object()
+
+    def open_key(parent, name):
+        if parent is hklm:
+            return FakeKey(entries=catalog)
+        if parent is hkcu:
+            raise OSError("no user App Paths")
+        return FakeKey(value=parent.entries[name])
+
+    fake_winreg = SimpleNamespace(
+        HKEY_LOCAL_MACHINE=hklm,
+        HKEY_CURRENT_USER=hkcu,
+        OpenKey=open_key,
+        QueryInfoKey=lambda key: (len(key.entries), 0, 0),
+        EnumKey=lambda key, index: list(key.entries)[index],
+        QueryValueEx=lambda key, _name: (key.value, 1),
+    )
+    monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
+
+    assert apps._app_paths_entries() == [{
+        "name": "msedge",
+        "target": str(live),
+        "kind": "exe",
+    }]
+
+
 def test_index_merges_structured_identity_for_the_same_app_id(monkeypatch):
     from winpilot.perception import apps
 
@@ -300,4 +391,38 @@ def test_resolve_falls_back_to_structured_executable_search(monkeypatch):
         "target": portable_executable,
         "kind": "exe",
     }]
-    assert calls == [("Nebula Desk", 5, None, "file", ["exe"], "path")]
+    assert calls == [("Nebula Desk", 20, None, "file", ["exe"], "path")]
+
+
+def test_resolve_executable_fallback_keeps_only_exact_stems(monkeypatch):
+    from winpilot.perception import apps, search
+
+    calls = []
+    edge_core = r"C:\Program Files (x86)\Microsoft\EdgeCore\146\msedge.exe"
+    monkeypatch.setattr(apps, "_cache", None)
+    monkeypatch.setattr(apps, "_index", lambda: [])
+
+    def fake_search(query, *, max_results, kind, extensions):
+        calls.append((query, max_results, kind, extensions))
+        if query == "msedge":
+            results = [
+                r"C:\Edge\msedgewebview2.exe",
+                edge_core,
+                r"C:\EdgeWebView\msedge.exe",
+            ]
+        else:
+            results = [r"C:\EdgeUpdate\MicrosoftEdgeUpdate.exe"]
+        return {"results": results}
+
+    monkeypatch.setattr(search, "search", fake_search)
+
+    assert apps.resolve("msedge", max_results=1) == [{
+        "name": "msedge",
+        "target": edge_core,
+        "kind": "exe",
+    }]
+    assert apps.resolve("Microsoft Edge", max_results=1) == []
+    assert calls == [
+        ("msedge", 20, "file", ["exe"]),
+        ("Microsoft Edge", 20, "file", ["exe"]),
+    ]

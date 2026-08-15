@@ -300,6 +300,25 @@ class RawActionReceipt:
         }
 
 
+def confirmed_input_event_prefix(
+    events: tuple[PhysicalInputEvent, ...],
+    receipt: RawActionReceipt,
+) -> tuple[PhysicalInputEvent, ...]:
+    """Return only sequence events the physical backend confirmed completed."""
+
+    if receipt.input_completed is True:
+        return events
+    if receipt.input_completed is False:
+        return ()
+    backend_result = receipt.backend_result
+    if backend_result is None:
+        return ()
+    completed = backend_result.facts.get("completed_events")
+    if type(completed) is not int or not 0 <= completed <= len(events):
+        return ()
+    return events[:completed]
+
+
 RawBackend = Callable[..., RawBackendResult]
 FinalPointerGuard = Callable[[int, int], FinalPointerGuardDecision]
 FinalKeyboardGuard = Callable[[], FinalKeyboardGuardDecision]
@@ -835,22 +854,8 @@ class RawDeviceExecutor:
             )
         canonical_points = _canonical_drag_points(points)
         canonical_held_keys = _canonical_held_keys(held_keys)
-        stationary_held = bool(
-            pointer_already_held is True
-            and not canonical_points
-            and (x1, y1) == (x2, y2)
-        )
-        closed_path = bool(
-            canonical_points
-            and (x1, y1) == (x2, y2)
-        )
         if (
             any(type(value) is not int for value in (x1, y1, x2, y2))
-            or (
-                (x1, y1) == (x2, y2)
-                and not stationary_held
-                and not closed_path
-            )
             or canonical_points is None
             or canonical_held_keys is None
             or not isinstance(button, MouseButton)
@@ -986,6 +991,11 @@ class RawDeviceExecutor:
                     )
                 )
             )
+            if receipt.input_completed is False:
+                if not pointer_already_held:
+                    with _held_drag_state_lock:
+                        _held_drag_owner = None
+                return receipt
             with _held_drag_state_lock:
                 owner = _held_drag_owner
                 if owner is not None:
@@ -1188,12 +1198,12 @@ class RawDeviceExecutor:
             events,
             **call_kwargs,
         )
-        if receipt.input_completed is True:
-            released_buttons = {
-                event.button
-                for event in events
-                if event.kind is InputEventKind.MOUSE_UP
-            }
+        released_buttons = {
+            event.button
+            for event in confirmed_input_event_prefix(events, receipt)
+            if event.kind is InputEventKind.MOUSE_UP
+        }
+        if released_buttons:
             with _held_drag_state_lock:
                 owner = _held_drag_owner
                 if owner is not None and owner.button in released_buttons:
@@ -1214,4 +1224,5 @@ __all__ = [
     "MAX_TYPE_TEXT_CODEPOINTS", "MouseButton", "PhysicalInputEvent",
     "RawActionContext", "RawActionReceipt", "RawBackendResult",
     "RawDeviceBackends", "RawDeviceExecutor", "StopSignal",
+    "confirmed_input_event_prefix",
 ]

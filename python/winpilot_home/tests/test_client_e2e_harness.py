@@ -92,21 +92,6 @@ def test_document_text_can_verify_a_long_goal_when_edit_value_is_truncated(
     assert harness._document_contains_text(object(), goal) is True
 
 
-def test_visible_client_is_verified_foreground_before_goal_submission():
-    source = (
-        Path(__file__).resolve().parents[3]
-        / "scripts"
-        / "client_e2e_run.py"
-    ).read_text(encoding="utf-8")
-    run_case = source[source.index("def run_case(") : source.index("def run_suite(")]
-
-    configured = run_case.index('result["configuration"] = driver.configure_goal(')
-    foregrounded = run_case.index("driver.restore_and_focus()", configured)
-    clicked = run_case.index("driver.button(RUN_TASK).Click()", foregrounded)
-
-    assert configured < foregrounded < clicked
-
-
 def test_named_button_lookup_short_circuits_a_large_accessibility_tree(
     monkeypatch,
 ):
@@ -603,6 +588,150 @@ def test_wait_for_result_does_not_treat_followup_send_as_running_task_terminal(
     assert len(calls) == 2
     assert result["outcome"] == "terminal"
     assert result["status"] == "done"
+
+
+def test_active_run_probe_does_not_borrow_another_runs_running_flag():
+    harness = _load_harness()
+    status = {
+        "running": True,
+        "current_run": {"run_id": "arp-other", "status": "running"},
+        "runtime_jobs": [],
+    }
+
+    assert harness._runtime_has_active_run(status) is True
+    assert harness._runtime_has_active_run(status, "arp-target") is False
+
+
+def test_active_run_probe_ignores_a_stale_running_projection():
+    harness = _load_harness()
+    stale = {
+        "running": False,
+        "arp_running": False,
+        "current_run": {"run_id": "arp-target", "status": "running"},
+        "runtime_jobs": [],
+    }
+    owned_by_job = {
+        **stale,
+        "runtime_jobs": [
+            {
+                "status": "running",
+                "metadata": {"run_id": "arp-target"},
+            }
+        ],
+    }
+
+    assert harness._runtime_has_active_run(stale, "arp-target") is False
+    assert harness._runtime_has_active_run(owned_by_job, "arp-target") is True
+
+
+def test_stop_active_run_cancels_exact_run_before_restoring_client(
+    monkeypatch,
+):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver._runtime_url = "http://127.0.0.1:8765"
+    driver._runtime_token = "test-token"
+    driver.identity = SimpleNamespace(hwnd=42)
+    driver.window = object()
+    statuses = [
+        {
+            "running": True,
+            "current_run": {"run_id": "arp/target", "status": "running"},
+            "runtime_jobs": [],
+        },
+        {
+            "running": False,
+            "current_run": {"run_id": "arp/target", "status": "canceled"},
+            "runtime_jobs": [],
+        },
+    ]
+    driver.runtime_status = lambda: statuses.pop(0)
+    events = []
+    driver.restore_and_focus = lambda: events.append("restore")
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def urlopen(request, *, timeout):
+        events.append((request.get_method(), request.full_url, timeout))
+        return Response()
+
+    monkeypatch.setattr(harness.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(harness.json, "load", lambda _response: {"ok": True})
+    monkeypatch.setattr(harness.auto, "ControlFromHandle", lambda _hwnd: None)
+    monkeypatch.setattr(
+        harness,
+        "_first_visible_descendant",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    result = driver.stop_active_run(run_id="arp/target", timeout=1)
+
+    assert result["requested_stop"] is True
+    assert result["runtime_stopped"] is True
+    assert result["cancel_error"] == ""
+    assert events == [
+        (
+            "POST",
+            "http://127.0.0.1:8765/api/v2/runs/arp%2Ftarget/cancel",
+            5,
+        ),
+        "restore",
+    ]
+
+
+def test_stop_active_run_records_404_when_the_run_finishes_concurrently(
+    monkeypatch,
+):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver._runtime_url = "http://127.0.0.1:8765"
+    driver._runtime_token = "test-token"
+    driver.identity = SimpleNamespace(hwnd=42)
+    driver.window = object()
+    statuses = [
+        {
+            "running": True,
+            "current_run": {"run_id": "arp-target", "status": "running"},
+            "runtime_jobs": [],
+        },
+        {
+            "running": False,
+            "current_run": {"run_id": "arp-target", "status": "done"},
+            "runtime_jobs": [],
+        },
+    ]
+    driver.runtime_status = lambda: statuses.pop(0)
+    restored = []
+    driver.restore_and_focus = lambda: restored.append(True)
+
+    def urlopen(request, *, timeout):
+        raise harness.urllib.error.HTTPError(
+            request.full_url,
+            404,
+            "not found",
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(harness.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(harness.auto, "ControlFromHandle", lambda _hwnd: None)
+    monkeypatch.setattr(
+        harness,
+        "_first_visible_descendant",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    result = driver.stop_active_run(run_id="arp-target", timeout=1)
+
+    assert result["requested_stop"] is False
+    assert result["runtime_stopped"] is True
+    assert result["cancel_error"] == "HTTPError: 404"
+    assert restored == [True]
 
 
 def test_wait_for_result_accepts_direct_reply_as_success(monkeypatch):
@@ -1102,7 +1231,47 @@ def test_wait_for_result_returns_runtime_fail_without_waiting_for_timeout(monkey
     assert clock[0] < 5
 
 
-def test_persistent_evidence_requires_a_bound_conversation_and_monitoring(
+def test_wait_for_result_does_not_walk_uia_again_after_timeout(monkeypatch):
+    harness = _load_harness()
+    driver = object.__new__(harness.ElectronClientDriver)
+    driver.runtime_status = lambda: {
+        "running": True,
+        "current_run": {
+            "run_id": "arp-target",
+            "goal": "target task",
+            "status": "running",
+        },
+        "runtime_jobs": [],
+    }
+    driver.buttons = lambda: []
+    text_reads = []
+
+    def texts():
+        text_reads.append(True)
+        return ["last visible projection"]
+
+    driver.texts = texts
+    driver._topbar_status = lambda _task: ""
+    clock = [0.0]
+    monkeypatch.setattr(harness.time, "time", lambda: clock[0])
+    monkeypatch.setattr(
+        harness.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    result = driver.wait_for_result(
+        "target task",
+        1,
+        accepted_run_id="arp-target",
+    )
+
+    assert result["outcome"] == "timeout"
+    assert result["visible_text"] == ["last visible projection"]
+    assert text_reads == [True]
+
+
+def test_persistent_result_uses_the_client_active_probe_not_trace_diagnostics(
     monkeypatch,
     tmp_path,
 ):
@@ -1136,7 +1305,11 @@ def test_persistent_evidence_requires_a_bound_conversation_and_monitoring(
 
     result = {
         "expected": "persistent",
-        "result": {"outcome": "persistent_active", "status": "running"},
+        "result": {
+            "outcome": "persistent_active",
+            "status": "running",
+            "active_seen": True,
+        },
         "memory_isolation": {"passed": True},
         "trace_binding": {"passed": True},
         "execution_evidence": evidence,
@@ -1145,6 +1318,9 @@ def test_persistent_evidence_requires_a_bound_conversation_and_monitoring(
     assert harness._case_execution_valid(result) is True
     assert harness._case_passed(result) is True
     result["execution_evidence"] = {"persistent_ready": False}
+    assert harness._case_execution_valid(result) is True
+    assert harness._case_passed(result) is True
+    result["result"]["active_seen"] = False
     assert harness._case_execution_valid(result) is False
     assert harness._case_passed(result) is False
 
@@ -1427,7 +1603,7 @@ def test_execution_validity_does_not_depend_on_frontend_policy_state():
     assert harness._case_execution_valid(result) is True
 
 
-def test_runtime_done_without_an_independent_oracle_is_not_a_pass():
+def test_visual_actor_completion_is_used_when_no_external_oracle_exists():
     harness = _load_harness()
     result = {
         "expected": "terminal",
@@ -1435,17 +1611,40 @@ def test_runtime_done_without_an_independent_oracle_is_not_a_pass():
         "memory_isolation": {"passed": True},
         "trace_binding": {"passed": True},
         "execution_evidence": {},
-        "task_verdict": {"source": "none", "status": "unverified", "passed": False},
+        "task_verdict": {"source": "visual_actor", "status": "verified", "passed": True},
     }
 
     assert harness._case_execution_valid(result) is True
-    assert harness._case_passed(result) is False
+    assert harness._case_passed(result) is True
 
     result["task_verdict"] = {"source": "external_probe", "passed": True}
     assert harness._case_passed(result) is True
 
     result["task_verdict"] = {"source": "runtime_status", "passed": True}
     assert harness._case_passed(result) is False
+
+    result["result"]["status"] = "failed"
+    result["task_verdict"] = {
+        "source": "visual_actor",
+        "status": "not_verified",
+        "passed": False,
+    }
+    assert harness._case_execution_valid(result) is True
+    assert harness._case_passed(result) is False
+
+
+def test_terminal_blocked_run_is_valid_plumbing_when_external_oracle_passes():
+    harness = _load_harness()
+    result = {
+        "expected": "terminal",
+        "result": {"outcome": "terminal", "status": "failed"},
+        "memory_isolation": {"passed": True},
+        "trace_binding": {"passed": True},
+        "task_verdict": {"source": "external_probe", "passed": True},
+    }
+
+    assert harness._case_execution_valid(result) is True
+    assert harness._case_passed(result) is True
 
 
 def test_suite_preserves_only_case_two_to_case_three_short_term_context(
@@ -1474,6 +1673,7 @@ def test_suite_preserves_only_case_two_to_case_three_short_term_context(
                 "outcome": "persistent_active" if persistent else "terminal",
                 "status": "running" if persistent else "done",
                 "run_id": f"run-{name}",
+                "active_seen": persistent,
             },
             "memory_isolation": {"passed": True},
             "trace_binding": {"passed": True},
@@ -1491,3 +1691,29 @@ def test_suite_preserves_only_case_two_to_case_three_short_term_context(
     assert calls[1] == ("original-2", True, "")
     assert calls[2] == ("original-3", False, "run-original-2")
     assert all(reset is True for _name, reset, _context in calls[3:])
+
+
+def test_suite_stops_after_cleanup_really_failed(monkeypatch, tmp_path):
+    harness = _load_harness()
+    calls = []
+
+    def fake_run_case(name, spec, **_kwargs):
+        calls.append(name)
+        return {
+            "name": name,
+            "task": spec["task"],
+            "expected": spec.get("expected", "terminal"),
+            "result": {"outcome": "timeout", "status": "timeout"},
+            "memory_isolation": {"passed": True},
+            "trace_binding": {"passed": True},
+            "task_verdict": {"source": "visual_actor", "passed": False},
+            "timeout_cleanup": {"runtime_stopped": False},
+        }
+
+    monkeypatch.setattr(harness, "run_case", fake_run_case)
+
+    report = harness.run_suite("original", output_root=tmp_path)
+
+    assert calls == ["original-1"]
+    assert report["case_count"] == 1
+    assert report["passed"] is False

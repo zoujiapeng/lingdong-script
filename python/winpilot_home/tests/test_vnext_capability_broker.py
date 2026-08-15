@@ -1870,7 +1870,6 @@ def test_broker_is_frozen_and_package_is_pure_default_unreachable() -> None:
     files = tuple(sorted(path.name for path in package.glob("*.py")))
     assert files == (
         "__init__.py",
-        "argument_validation.py",
         "broker.py",
         "contracts.py",
         "state.py",
@@ -1905,17 +1904,12 @@ def test_broker_is_frozen_and_package_is_pure_default_unreachable() -> None:
                         "__future__",
                         "dataclasses",
                         "enum",
-                        "jsonschema",
-                        "jsonschema.exceptions",
-                        "referencing",
-                        "referencing.exceptions",
                         "types",
                         "typing",
                     }
                 else:
                     root = (node.module or "").split(".", 1)[0]
                     assert root in {
-                        "argument_validation",
                         "broker",
                         "capability_names",
                         "contracts",

@@ -40,6 +40,7 @@ from winpilot.vnext.runtime import (
     POST_ACTION_FRAME_EVIDENCE_KIND,
     ActorBudgetView,
     ActorTaskState,
+    ActorTaskStateError,
     ActorTurnInput,
     ActorTaskStateUpdate,
     ActorTurnDecision,
@@ -559,6 +560,7 @@ class FakeController:
                 action_id=envelope.decision_id,
                 action=action,
                 input_completed=None,
+                error_kind=self.rejection_error_kind,
             )
         if self.mode == "unknown_applied":
             return ControllerTransition(
@@ -1128,6 +1130,26 @@ def test_budget_gauge_never_fails_a_turn() -> None:
     assert harness.actor.turns[0].budget is None
 
 
+def test_auxiliary_task_state_failure_does_not_discard_a_valid_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(_task_decision(_action("click"), scratchpad="next"))
+    initial = harness.runtime.task_state
+    monkeypatch.setattr(
+        ActorTaskState,
+        "apply",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ActorTaskStateError("scratchpad unavailable")
+        ),
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 1
+    assert harness.runtime.task_state == initial
+
+
 def test_actor_turn_rejects_an_invalid_budget_view() -> None:
     with pytest.raises(RuntimeContractError):
         ActorBudgetView(
@@ -1196,40 +1218,31 @@ def test_stale_or_unsupported_actor_decision_does_not_commit_task_state() -> Non
     assert invalid.runtime.task_state == invalid_initial
 
 
-def test_schema_rejected_action_keeps_task_state_for_actor_repair() -> None:
+def test_surplus_or_out_of_frame_action_args_reach_the_mechanical_owner() -> None:
     scratchpad = "route right, down, then right"
-    invalid_action = _action("click")
-    invalid_action["args"]["image_x"] = -1
+    action = _action("click")
+    action["args"]["image_x"] = -1
+    action["args"]["surplus_hint"] = "ignored by the mechanical owner"
     harness = _harness(
-        _task_decision(invalid_action, scratchpad=scratchpad),
-        _blocked(),
+        _task_decision(action, scratchpad=scratchpad),
     )
 
-    rejected = harness.runtime.run_one_turn(turn_index=0)
-    next_turn = harness.runtime.run_one_turn(turn_index=1)
+    result = harness.runtime.run_one_turn(turn_index=0)
 
-    assert rejected.status is RuntimeStatus.INVALID_PROPOSAL
-    assert "expected" not in rejected.detail
-    assert next_turn.status is RuntimeStatus.BLOCKED
-    assert harness.controller.calls == 0
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 1
     assert harness.runtime.task_state.scratchpad == scratchpad
-    assert harness.actor.turns[1].task_state.scratchpad == scratchpad
 
 
-def test_out_of_frame_point_soft_rejects_for_actor_repair() -> None:
-    invalid_action = _action("click")
-    invalid_action["args"]["image_x"] = 321
-    harness = _harness(invalid_action, _blocked())
+def test_out_of_frame_point_reaches_the_physical_backend() -> None:
+    action = _action("click")
+    action["args"]["image_x"] = 321
+    harness = _harness(action)
 
-    rejected = harness.runtime.run_one_turn(turn_index=0)
-    next_turn = harness.runtime.run_one_turn(turn_index=1)
+    result = harness.runtime.run_one_turn(turn_index=0)
 
-    assert rejected.status is RuntimeStatus.STATE_REJECTED
-    assert rejected.detail == (
-        "image_x must stay inside or on the submitted image edge"
-    )
-    assert next_turn.status is RuntimeStatus.BLOCKED
-    assert harness.controller.calls == 0
+    assert result.status is RuntimeStatus.ACTION_RECORDED
+    assert harness.controller.calls == 1
 
 
 def test_extent_style_edge_coordinate_is_admitted_for_nearest_pixel_mapping() -> None:
@@ -1585,12 +1598,30 @@ def test_full_desktop_snapshot_is_not_rejected_by_window_binding() -> None:
 
 
 
-@pytest.mark.parametrize("mode", ("unknown", "raise"))
-def test_unknown_controller_outcome_is_blocked_and_never_replayed(
-    mode: str,
-) -> None:
+def test_unknown_controller_outcome_returns_to_actor_without_replay() -> None:
+    harness = _harness(_action(), _blocked())
+    harness.controller.mode = "unknown"
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    second = harness.runtime.run_one_turn(
+        turn_index=1,
+        rejection_feedback=first.detail,
+    )
+
+    assert first.status is RuntimeStatus.STALE_DISCARDED
+    assert second.status is RuntimeStatus.BLOCKED
+    assert harness.controller.calls == 1
+    assert harness.state.observe_calls == 2
+    assert harness.actor.rejection_feedbacks == [None, first.detail]
+    assert "click" in first.detail
+    assert "perform one click" in first.detail
+    assert harness.reducer.projection.status is MissionStatus.BLOCKED
+    assert harness.reducer.events[-1].kind == "obligation_blocked"
+
+
+def test_controller_exception_is_blocked_and_never_replayed() -> None:
     harness = _harness(_action(), _action())
-    harness.controller.mode = mode
+    harness.controller.mode = "raise"
 
     first = harness.runtime.run_one_turn(turn_index=0)
     second = harness.runtime.run_one_turn(turn_index=1)
@@ -1601,6 +1632,21 @@ def test_unknown_controller_outcome_is_blocked_and_never_replayed(
     assert harness.reducer.projection.status is MissionStatus.BLOCKED
     assert harness.reducer.events[-1].kind == "obligation_blocked"
     assert "not replayed" in harness.reducer.events[-1].payload["reason"]
+
+
+def test_release_cleanup_unknown_is_blocked_and_never_replayed() -> None:
+    harness = _harness(_action(), _action())
+    harness.controller.mode = "unknown"
+    harness.controller.rejection_error_kind = "release_cleanup_incomplete"
+
+    first = harness.runtime.run_one_turn(turn_index=0)
+    second = harness.runtime.run_one_turn(turn_index=1)
+
+    assert first.status is RuntimeStatus.BLOCKED
+    assert second.status is RuntimeStatus.BLOCKED
+    assert harness.controller.calls == 1
+    assert harness.reducer.projection.status is MissionStatus.BLOCKED
+    assert harness.reducer.events[-1].kind == "obligation_blocked"
 
 
 def test_applied_input_without_post_frame_continues_with_fresh_observation() -> None:
@@ -1687,6 +1733,31 @@ def test_claim_binds_current_frame_and_completes_deterministically() -> None:
     assert obligation.verified_evidence_refs == ()
     assert obligation.verification_id.startswith("actor-completion-")
     assert harness.reducer.projection.status is MissionStatus.VERIFIED
+
+
+def test_actor_completion_survives_auxiliary_history_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _harness(_claim())
+    monkeypatch.setattr(
+        harness.runtime,
+        "_accept",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("history unavailable")
+        ),
+    )
+
+    result = harness.runtime.run_one_turn(turn_index=0)
+
+    assert result.status is RuntimeStatus.MISSION_VERIFIED
+    assert result.accepted_event_ids == ()
+    assert "completion history unavailable" in result.detail
+    assert harness.runtime.verified_completion_result == (
+        "the requested state is visibly present"
+    )
+    assert harness.runtime.latest_narration == (
+        "the requested state is visibly present"
+    )
 
 
 def test_evidence_policy_does_not_override_actor_completion() -> None:

@@ -46,3 +46,20 @@ test('visual target reveals success and failure feedback after interaction', () 
 
   dom.window.close();
 });
+
+test('calibration feedback stays inside the clipped interaction arena', () => {
+  const dom = new JSDOM(targetHtml);
+  const rules = Array.from(
+    dom.window.document.styleSheets[0]?.cssRules ?? [],
+  ) as CSSRule[];
+  const feedbackRule = rules.find(
+    (rule): rule is CSSStyleRule =>
+      'selectorText' in rule && rule.selectorText === '.feedback-line',
+  );
+
+  expect(feedbackRule?.style.left).toBe('8px');
+  expect(feedbackRule?.style.right).toBe('8px');
+  expect(feedbackRule?.style.bottom).toBe('8px');
+
+  dom.window.close();
+});

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -52,6 +53,73 @@ def test_find_window_prefers_foreground_then_topmost_z_order(monkeypatch):
 
     monkeypatch.setattr(harness.win32gui, "GetForegroundWindow", lambda: 10)
     assert harness._find_window("Paint", timeout=0.01) == 30
+
+
+def test_chat_then_task_phrasings_match_exact_file_oracle():
+    harness = _load_harness()
+
+    assert all(
+        "替换" in phrasing
+        for phrasing in harness.GOAL_PHRASINGS["chat-then-task"]
+    )
+
+
+def test_claim_texts_are_bound_to_the_exact_run(monkeypatch, tmp_path):
+    harness = _load_harness()
+    monkeypatch.setattr(harness.client_harness, "TRACE_ROOT", tmp_path)
+    run_id = "arp-current"
+    (tmp_path / f"{run_id}.jsonl").write_text(
+        "\n".join(
+            json.dumps(event, ensure_ascii=False)
+            for event in (
+                {
+                    "type": "live_agent_activity",
+                    "run_id": "arp-stale",
+                    "kind": "message",
+                    "content": "stale reply",
+                },
+                {
+                    "type": "live_agent_activity",
+                    "run_id": run_id,
+                    "kind": "message",
+                    "content": "current blocked reply",
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    assert harness._read_claim_texts(run_id) == ["current blocked reply"]
+
+
+def test_uia_text_reader_uses_declared_uiautomation_dependency(monkeypatch):
+    harness = _load_harness()
+
+    class Pattern:
+        Value = "70"
+
+    class Control:
+        Name = "Display is 70"
+        IsOffscreen = False
+
+        def GetPattern(self, _pattern_id):
+            return Pattern()
+
+    root = object()
+    monkeypatch.setattr(
+        harness.client_harness.auto,
+        "ControlFromHandle",
+        lambda hwnd: root if hwnd == 55 else None,
+    )
+    monkeypatch.setattr(
+        harness.client_harness.auto,
+        "WalkControl",
+        lambda current, includeTop: [(Control(), 0)]
+        if current is root and includeTop
+        else [],
+    )
+
+    assert harness._uia_visible_texts(55) == ["Display is 70", "70"]
 
 
 def test_paint_oracle_accepts_a_horizontal_canvas_stroke(

@@ -36,11 +36,10 @@ flowchart TD
   Lease --> Target["binding_id + hwnd + pid + executable + epoch"]
   Target --> Frame["frame_id + region + submitted_size + image hash"]
   Frame --> Decision["decision_id / action_id"]
-  Decision --> Permit["mutation_permit_id"]
   Decision --> Attempt["physical_attempt"]
   Attempt --> Receipt["raw action receipt"]
-  Receipt --> PostFrame["post frame + action effect"]
-  PostFrame --> Evidence["evidence_ref / payload hash"]
+  Receipt --> PostFrame["next authoritative screen"]
+  Decision -. "diagnostic correlation" .-> Trace["trace / run detail"]
 ```
 
 这些 ID 不可按“看起来是同一任务”模糊匹配。每层只接受自己声明的上游身份：
@@ -154,20 +153,22 @@ Lease bind请求：
 | `epoch` | 非负，且与 target 相同 |
 | `hwnd` | 正整数，且与 target 相同 |
 | `region` | `[left, top, positive width, positive height]` |
-| `scope` | 当前 live 必须为 `target_window` |
+| `scope` | 默认 `full_desktop`；窗口裁剪只在显式 opt-in 时为 `target_window` |
 | `submitted_size` | 两个正整数；Actor所见 JPEG 尺寸 |
 | `image_sha256` | 小写 64 位 SHA-256；在 RuntimeFrame 中标识 Base64 字符串内容 |
 | `media_type` | 当前只允许 `image/jpeg` |
 
-`RuntimeCommitIdentity` 是 frame identity + target identity；它要求 HWND、epoch、scope 一致，并提供 canonical fingerprint。Mutation permit 和 Adapter admission 都绑定这份 commit identity。
+`RuntimeCommitIdentity` 是 frame + target identity，要求 HWND、epoch、scope 一致；fingerprint
+供 binder 关联当前快照和 trace 诊断。它不触发每动作许可握手，也不让 Envelope/Adapter
+重放整套 Mission/Broker 验证。
 
 ### 5.3 `RuntimeFrame`
 
 除 identity 字段外还含：
 
 - 非空 ASCII `image_b64`；其 SHA 必须等于 `image_sha256`；
-- 至少一个、排序且唯一的 `evidence_refs`；
-- 每个 evidence 必须属于当前 mission/run/obligation、对应 frame 和 payload hash。
+- 至少一个、排序且唯一的 frame 引用，用来关联当前图像与运行诊断；这些引用不参与
+  task pass，也不替模型解释画面。
 
 ## 6. Actor Turn
 
@@ -202,30 +203,31 @@ Lease bind请求：
 
 ### 6.1 Task state 与 action history
 
-- `task_state_update` 每个工具都必须显式给出；Runtime只接受有界更新；
+- `task_state_update` 是可选的有界更新，缺省为 `{"scratchpad": null}`；
 - task state 是 in-memory、非权威提示，不进入 Mission truth；
-- `completed_action_summaries` 最多 64 条，只允许安全的动作类别摘要，不保存文本正文或坐标；
-- `previous_action` 只描述最近一笔已接受输入及效果；
-- provider 原生上一交换只有在 `input_completed=true` 且动作名一致时才保留。
+- 初始 observe、视觉动作或 Runtime apply 遇到格式错误的 task state 时只忽略该更新，
+  不得因此拒绝同一响应里的有效动作或完成 claim；
+- 视觉上下文只保留紧邻一笔 provider 原生 `user image → assistant tool call → tool result`；
+- 被拒 proposal 不进入原生历史，避免旧屏幕和旧动作污染当前帧；
+- task state 只是同一个 Actor 的短期 scratchpad，不是 Runtime planner，也不是完成判据。
 
 ## 7. 当前十二个工具的精确参数
 
-每个模型工具还可携带：
-
-- `task_state_update`：可选的有界工作状态更新；
-- GUI mutation 工具的 `local_intent`：可选的局部意图；
-- `additionalProperties=false`。
+每个语义工具可携带可选 `task_state_update` scratchpad。Provider schema 只帮助模型形成
+简洁调用；Actor 解码 provider call，`MissionRuntime` 入口只做一次 typed proposal parse，
+binder 与 Atomic 不再重复完整 schema。
+与物理动作无关的附加提示不会让该动作假失败，Adapter会忽略它不消费的字段。
 
 下表只列各工具自己的参数：
 
 | Runtime 工具 | 模型名 | 参数 | 关键约束 |
 | --- | --- | --- | --- |
-| `click` | `click` | `image_x`, `image_y` | 数值且 `>=0`；本地补验必须落在 `0..width-1` / `0..height-1` |
-| `double_click` | `double_click` | `image_x`, `image_y` | 同上 |
-| `move_mouse` | `move_mouse` | `image_x`, `image_y`, `duration_ms` | 点须在 submitted bounds；duration 为 `0..30000` |
-| `drag` | `drag` | `image_path`, `keep_holding`, `button`, `held_keys`, `duration_ms` | Runtime 接收有序点列；模型面用 `x1,y1 x2,y2 ...` 字符串；所有点须在 submitted bounds |
-| `scroll` | `scroll` | `image_x`, `image_y`, `amount` | 点须在 submitted bounds；amount 为整数、`-1200..1200` 且非零 |
-| `type_text` | `type_text` | `text` | 1..4096 个 Unicode code points |
+| `click` | `click` | `image_x`, `image_y`, optional button/duration | 坐标须为有限数；不在 Envelope 做 submitted bounds veto |
+| `double_click` | `double_click` | `image_x`, `image_y`, optional button/duration | 同上 |
+| `move_mouse` | `move_mouse` | `image_x`, `image_y`, `duration_ms` | 坐标须为有限数；duration 为 `0..30000` |
+| `drag` | `drag` | `points`, `keep_holding`, `button`, `held_keys`, `duration_ms` | 模型面是 `x1,y1 x2,y2 ...` 字符串；边界只解析一次为有序点列 |
+| `scroll` | `scroll` | `image_x`, `image_y`, `amount` | 坐标须为有限数；amount 为整数、`-1200..1200` 且非零 |
+| `type_text` | `type_text` | `text` | 1..16384 个 Unicode code points |
 | `hotkey` | `press_key` | `keys`, `repeat` | 唯一 canonical key；单独 modifier 合法；多键必须按 `ctrl/alt/shift/win` 顺序后接恰好一个 primary；repeat 为 `1..100` |
 | `input_sequence` | `input_sequence` | `sequence` | 1..32768 字符的一条原子鼠标/键盘时间线 |
 | `launch_application` | `launch_application` | `app`, `arguments` | app 为 1..512 字符；arguments 最多 4096 字符 |
@@ -233,23 +235,32 @@ Lease bind请求：
 | `claim_obligation_done` | 同名 | `concise_claim` | 1..16384，至少一个非空白字符 |
 | `blocked` | 同名 | `blocker_kind`, `observed_facts` | kind为小写规范标识、最多64字符；facts最多64条且唯一 |
 
-`drag` 的可选字段由 provider 默认值补齐；直线只需两个点。Provider schema 的非负约束不是完整边界：本地 `SubmittedImageCoordinateMapper` 还会按本轮精确 `submitted_size` 拒绝越过右边/下边界的点。
+`drag` 的可选字段在这次唯一 typed parse 中补默认值；直线只需两个点。Envelope不再按本轮
+`submitted_size` 重验坐标，Atomic只对有限数做一次线性映射，最终 OS 表示范围由
+RawDevice 的 SendInput 边界处理。
+
+视觉轮还可由同一个 Actor 调用 `capture_screen`、`list_windows` 与
+`paste_image_file` 等通用 owned tool。`capture_screen.path` 可以是相对路径；vNext原样
+交给物理 backend，由 backend按 Runtime cwd 和图片格式处理，不在上层重复做绝对路径、
+扩展名或文件存在性验证。
 
 ## 8. Actor Decision Envelope
 
-模型 proposal 不是直接交给 Controller。`bind_actor_decision` 将它绑定为 envelope，核心内容包括：
+模型 function call 先由 Actor 解码为 raw proposal，再在 `MissionRuntime` 入口完成唯一一次
+typed 结构解析；`bind_actor_decision` 只把结果绑定为 envelope，核心内容包括：
 
 - deterministic `decision_id`；
 - `mission_id`、`run_id`、Mission revision、obligation ID；
 - execution profile 与 Broker projection identity；
-- proposal的 canonical kind/action/args/local intent；
+- proposal的 kind/action/arguments；
 - frame region、submitted image size 与 image SHA；
 - target binding；
-- allowed evidence scope；
 - pointer lease identity；
 - tool catalog/schema identity。
 
-Envelope 自身 canonical JSON 的 SHA 被写入 evidence plane。后续 admission、physical attempt 和 ControllerTransition 都必须回指它，防止参数在层间被静默改写。
+Envelope fingerprint只用于跨层关联和 trace 诊断。binder不重新序列化后跑完整 schema，
+不重复验证 submitted-image bounds，也不在每轮重放 Mission/Broker admission；
+`AtomicDesktopAdapter` 直接消费这笔 bound proposal的必要物理字段。
 
 ## 9. Raw action 与 ControllerTransition
 
@@ -258,10 +269,11 @@ Envelope 自身 canonical JSON 的 SHA 被写入 evidence plane。后续 admissi
 | 列 | 示例 | owner |
 | --- | --- | --- |
 | submitted/model | `image_x=420,image_y=300` | Actor proposal |
-| canonical | 同值、严格类型和字段归一化 | Runtime validator/envelope |
-| physical | 目标窗口物理 region 内的桌面点 | AtomicDesktopAdapter |
+| canonical | MissionRuntime入口唯一一次 typed parse 后的动作参数 | proposal parser / envelope binder |
+| physical | full-desktop region 中一次线性映射后的桌面点 | AtomicDesktopAdapter |
 
-Evidence plane 同时保存 submitted arguments 与 physical arguments；诊断时不允许只看最终鼠标位置猜测上游。
+trace 可以旁路保存 submitted arguments 与 physical arguments；它只帮助定位首分歧，
+不参与 task pass，也不允许用最终鼠标位置反推或改写上游模型参数。
 
 ### 9.2 输入完成三态
 
@@ -269,9 +281,11 @@ Evidence plane 同时保存 submitted arguments 与 physical arguments；诊断�
 
 - `true`：输入确定到达 OS；即使效果未知也不得重放；
 - `false`：确定未开始，可在新帧重新决策；
-- `null`：无法证明，必须保守关闭 mutation authority。
+- `null`：无法证明时绝不重放；identity 一致且释放清理正常则在新屏幕上交回 Actor，释放清理未确认或 identity 错乱才终止。
 
 `outcome` 为 `completed | rejected | unknown`，与三态共同解释，不能只看 outcome 字符串。
+若 raw action 报告释放清理不完整，该动作与 pointer/key UP cleanup 始终占用同一个
+physical queue lease；cleanup 最多执行两轮，期间不能插入下一笔物理输入。
 
 ### 9.3 Action effect
 
@@ -294,20 +308,24 @@ Reducer采用乐观 revision：事件的 `base_revision` 必须等于当前 proj
 
 当前 live的 obligation必须：required、desired state 等于原始 goal、无依赖/输入工件/输出绑定、required capability仅 `visual.interact`，且禁用独立视觉 verifier。
 
+Actor 的 completion claim 会在写入辅助 Mission history、completion snapshot 或诊断投影之前
+缓存为最终 narration 与 `user_result`。这些旁路记录即使失败，也不能撤销
+`MISSION_VERIFIED`，不能丢失已缓存的 `user_result`。
+
 ## 11. Runtime statuses
 
 | 状态 | 含义 | 外层是否继续 |
 | --- | --- | --- |
 | `ACTION_RECORDED` | 输入与对应事件已记录 | 是，新帧下一 Turn |
-| `STALE_DISCARDED` | 明确未执行的陈旧 proposal 被丢弃 | 是 |
+| `STALE_DISCARDED` | 明确未执行，或 identity 一致但结果不明且释放清理正常；均不重放 | 是 |
 | `VERIFICATION_RECORDED` | 中间验证事件已接受 | 是 |
 | `VERIFICATION_REQUIRED` | enum 保留值；当前生产 `MissionRuntime` 没有返回它的路径 | 当前不应观测到 |
-| `MISSION_VERIFIED` | Mission合同闭合 | 终态成功候选 |
-| `INVALID_PROPOSAL` | 模型结构/参数非法 | 最多一次连续恢复 |
-| `ACTOR_ERROR` | 模型调用或角色执行异常 | 最多一次连续恢复 |
+| `MISSION_VERIFIED` | Actor完成 claim 的状态投影 | 终态成功 |
+| `INVALID_PROPOSAL` | 模型结构/参数非法 | 是，在剩余预算内持续重决策 |
+| `ACTOR_ERROR` | 模型调用或角色执行异常 | 是，在剩余预算内持续重决策 |
 | `STATE_REJECTED` | 身份、证据、合同或预算无法证明 | 终态失败 |
 | `UNAVAILABLE` | 当前 route/tool不成立 | 通常失败；pause边界有特殊投影 |
-| `BLOCKED` | Actor/Mission 主动报告不可推进，或 `_block_unknown` 因已执行结果/证据无法安全闭合而 fail closed | 终态 |
+| `BLOCKED` | Actor/Mission 主动报告不可推进，或 controller 异常、identity 错乱、释放清理未确认 | 终态 |
 | `CANCELED` | stop被接受 | 终态 |
 | `BUSY` | 同一 Runtime已有 Turn持锁 | 调用错误/不可并发 |
 
@@ -550,19 +568,19 @@ never infer wire from:
 
 模型 attempt 记录调用角色、purpose、时间、状态、错误和usage；API key、完整敏感正文和connector credential不应进入公开trace。
 
-## 19. Evidence 分层
+## 19. 诊断分层
 
 | 层 | 代表记录 | 能证明 | 不能证明 |
 | --- | --- | --- | --- |
 | 模型 | response/tool call/raw args | 模型实际选择 | 参数已执行 |
-| Canonical | envelope/schema/projection hash | 参数通过严格合同且绑定当前帧 | OS收到输入 |
-| Admission | mutation permit/commit identity | 当前帧目标授权了一次尝试 | backend完成 |
+| Bound proposal | envelope/frame correlation | 这笔已解析 proposal 对应哪张屏幕 | OS收到输入 |
 | Physical | physical args/raw route/receipt | 实际尝试内容及输入完成三态 | 用户目标满足 |
-| Visual effect | before/after frame/effect | 同目标可比画面的机械变化 | 变化语义正确 |
-| Mission | reducer events/verification IDs | 内部状态合同闭合 | 模型claim真实 |
-| External oracle | 文件、目标应用、可信事件、独立像素/UI读取 | 当前测试目标是否成立 | 跨机器泛化率 |
+| Next screen | 新权威屏幕 | 动作后的真实可见状态 | 应该怎样解释该状态 |
+| Mission | reducer events/Actor claim | 模型何时判断完成 | 独立语义复核 |
+| E2E report | 真实应用终态与测试事件 | 当前测试样本结果 | 替代生产 Actor 的完成判断 |
 
-完整诊断必须能从最后一层反向定位到同一 decision，而不是把不同 run 的截图、日志和终态拼在一起。
+这些层只用于从结果反向定位同一 decision 的首个分歧。trace、报告和 memory 都不加入
+生产 pass 路径，也不能把不同 run 的截图、日志和终态拼成一次“成功”。
 
 ## 20. 文件与持久化
 

@@ -263,9 +263,10 @@ def _app_paths_entries() -> list[dict]:
                     sub = winreg.EnumKey(key, i)
                     with winreg.OpenKey(key, sub) as sk:
                         path, _ = winreg.QueryValueEx(sk, None)
-                    if path:
+                    path = os.path.expandvars(str(path or "").strip('"'))
+                    if Path(path).is_file():
                         entries.append({"name": Path(sub).stem,
-                                        "target": str(path).strip('"'),
+                                        "target": path,
                                         "kind": "exe"})
                 except OSError:
                     continue
@@ -350,10 +351,6 @@ def _entry_terms(entry: dict) -> list[str]:
             Path(target).stem,
             Path(target).parent.name,
         ])
-        terms.extend(
-            item for item in re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", target)
-            if len(item) >= 3
-        )
     return list(dict.fromkeys(item for item in terms if item.strip()))
 
 
@@ -365,13 +362,17 @@ def _score_entry(entry: dict, variants: list[str], literal_query: str) -> tuple[
     for term in _entry_terms(entry):
         term_score = max((_score(term, variant) for variant in variants), default=0)
         # Display-name matches remain slightly stronger than executable/path
-        # aliases, but an exact discovered binary alias must still beat an
-        # unrelated fuzzy display name.
+        # aliases. Typo tolerance belongs to the human-facing display name;
+        # executable aliases must match literally, by prefix, or substring.
+        # This keeps shared path/vendor words from naming an unrelated app.
         if term != name and term_score:
-            term_score = max(1, term_score - 3)
+            term_score = max(1, term_score - 3) if term_score >= 70 else 0
         if term_score > best:
             best, matched_term = term_score, term
-        literal = max(literal, _score(term, literal_query))
+        literal_score = _score(term, literal_query)
+        if term != name and literal_score < 70:
+            literal_score = 0
+        literal = max(literal, literal_score)
     return best, literal, matched_term
 
 
@@ -447,13 +448,19 @@ def resolve(
         ).strip()
         hits = search.search(
             executable_query,
-            max_results=max_results,
+            max_results=max(20, max_results),
             kind="file",
             extensions=["exe"],
         )
-        return [{"name": Path(p).stem, "target": p, "kind": "exe"}
-                for p in (hits.get("results") or [])
-                if not any(w in p.lower() for w in _SKIP_WORDS)]
+        exact = [
+            p for p in (hits.get("results") or [])
+            if _normalized(Path(p).stem) == _normalized(executable_query)
+            and not any(w in p.lower() for w in _SKIP_WORDS)
+        ]
+        return [
+            {"name": Path(p).stem, "target": p, "kind": "exe"}
+            for p in exact[:max_results]
+        ]
     except Exception as exc:
         logger.debug("Everything 应用兜底失败: %s", exc)
         return []
@@ -674,32 +681,55 @@ def _existing_window_outcome(
     import win32con
     import win32gui
 
-    candidates = list(dict.fromkeys(visible if visible else hidden))
+    visible_set = set(visible)
+    candidates = list(dict.fromkeys([*visible, *hidden]))
     if not candidates:
         return None
+
+    def rank(hwnd: int) -> tuple[bool, bool, bool]:
+        try:
+            exstyle = int(
+                win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            )
+        except Exception:
+            exstyle = 0
+        auxiliary = bool(
+            exstyle & getattr(win32con, "WS_EX_TOOLWINDOW", 0x80)
+        )
+        is_hidden = hwnd not in visible_set
+        is_topmost = bool(
+            is_hidden
+            and exstyle & getattr(win32con, "WS_EX_TOPMOST", 0x8)
+        )
+        return auxiliary, is_hidden, is_topmost
+
+    # A detached palette can remain visible while its main window is minimized.
+    # Prefer the ordinary top-level window, then visibility; hidden topmost
+    # compositor surfaces remain a last fallback.  Stable sorting preserves
+    # EnumWindows z-order inside each mechanical class.
+    candidates.sort(key=rank)
     candidate_count = len(candidates)
     result = {
         "candidate_count": candidate_count,
         "candidates": _window_candidate_facts(candidates),
     }
+    hwnd = candidates[0]
     foreground_root = _foreground_root_hwnd()
-    for hwnd in candidates:
-        if foreground_root and _root_hwnd(hwnd) == foreground_root:
-            result.update({
-                "activated_hwnd": int(hwnd),
-                "note": (
-                    f"{candidate_count} existing window candidate(s); current "
-                    "foreground is one; no new instance started"
-                ),
-            })
-            return result
+    if foreground_root and _root_hwnd(hwnd) == foreground_root:
+        result.update({
+            "activated_hwnd": int(hwnd),
+            "note": (
+                f"{candidate_count} existing window candidate(s); current "
+                "foreground is the primary one; no new instance started"
+            ),
+        })
+        return result
 
     # A process such as QQ may own several hidden top-level compositor/helper
     # windows. Restoring all of them can expose an internal black render target
     # that a normal application launch would never show. Pick one application
     # window; the Actor can see the resulting desktop and choose a visible peer.
-    hwnd = candidates[0]
-    if not visible:
+    if hwnd not in visible_set:
         try:
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         except Exception:
@@ -708,12 +738,16 @@ def _existing_window_outcome(
     if activated:
         result.update({
             "activated_hwnd": int(activated),
-            "note": "1 existing window activated; no new instance started",
+            "note": (
+                f"{candidate_count} existing window candidate(s); activated "
+                "one; no new instance started"
+            ),
         })
     else:
         result["note"] = (
-            "1 existing window found but it did not become foreground; no new "
-            "instance started; re-observe the current screen"
+            f"{candidate_count} existing window candidate(s) found but none "
+            "became foreground; no new instance started; re-observe the "
+            "current screen"
         )
     return result
 
